@@ -409,6 +409,321 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
   return criteria;
 }
 
+// ── The reviewer RUBRIC (MASTER-PLAN §5 layer 2 — advisory judgment) ────────
+/**
+ * Layer 2 of the three-tier gate stack: a set of deterministic JUDGMENT items the
+ * reviewer runs over a PR's (diff, report). It ADVISES — the GitHub-enforced gate
+ * (layer 1) decides (Standing rule 3B) — so each item is a PURE predicate whose
+ * falsifier is a unit fixture, never an LLM call. The four items are, verbatim
+ * from §5 layer 2:
+ *   1. ONE CONCERN per PR
+ *   2. ALL CALLERS AUDITED (partial-fix drift — a change that fixes one call site
+ *      and orphans the rest)
+ *   3. TEST THEATER (assertions that assert nothing)
+ *   4. REFACTOR-PHASE HONESTY (a "refactor" that changes behavior)
+ * plus the GUARD: no worker-authored `satisfied_by` (a diff that ADDS a
+ * `satisfied_by` line to plan/tasks.yaml FAILS unless the PR is plan-only AND
+ * human-authored — `satisfied_by` is Architect-only; a worker adding it to its own
+ * blocking criterion is editing the criteria to match the diff, Standing rule 15).
+ *
+ * These are COARSE, diff-scoped heuristics by design: they advise, they do not
+ * decide, and they never edit. Each is independently exported so its fixture can
+ * falsify it in isolation.
+ */
+
+/** The stable key of one rubric judgment item (used in verdicts + summaries). */
+export type RubricKey =
+  | "one-concern"
+  | "callers-audited"
+  | "test-theater"
+  | "refactor-honesty"
+  | "satisfied-by-guard";
+
+/** One rubric item's verdict over a (diff, report). */
+export interface RubricItemResult {
+  key: RubricKey;
+  pass: boolean;
+  reason: string;
+}
+
+/** PR-level facts the satisfied_by guard needs (unknowable from the diff alone). */
+export interface RubricPrMeta {
+  /** The PR touches ONLY plan/docs (no product code) — an Architect plan PR. */
+  planOnly?: boolean;
+  /** The PR is authored by a human/Architect, not a worker session. */
+  humanAuthored?: boolean;
+}
+
+/** Everything the rubric judges: the diff, the implement report, and PR-level facts. */
+export interface RubricInput extends RubricPrMeta {
+  diff: string;
+  report?: string;
+}
+
+/** The rolled-up rubric verdict — all items plus the guard. */
+export interface RubricResult {
+  items: RubricItemResult[];
+  failures: RubricItemResult[];
+  pass: boolean;
+}
+
+// One classified line of a unified diff.
+interface DiffLine {
+  file: string;
+  kind: "add" | "del" | "ctx";
+  text: string;
+}
+
+/** Walk a unified diff into classified (file, kind, text) lines. Dependency-free. */
+function walkDiff(diff: string): DiffLine[] {
+  const out: DiffLine[] = [];
+  let file = "";
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("diff --git")) {
+      const m = raw.match(/\sb\/(\S+)\s*$/);
+      file = m ? m[1] : "";
+      continue;
+    }
+    if (raw.startsWith("+++ ")) {
+      file = raw.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
+      continue;
+    }
+    if (raw.startsWith("--- ") || raw.startsWith("@@")) continue;
+    if (raw.startsWith("+")) out.push({ file, kind: "add", text: raw.slice(1) });
+    else if (raw.startsWith("-")) out.push({ file, kind: "del", text: raw.slice(1) });
+    else out.push({ file, kind: "ctx", text: raw.startsWith(" ") ? raw.slice(1) : raw });
+  }
+  return out;
+}
+
+// ── Item 1: ONE CONCERN per PR ─────────────────────────────────────────────
+
+/**
+ * The concern a changed file belongs to, keyed by its source STEM: `src/lib/foo.ts`
+ * and its co-located `test/foo.test.ts` are the SAME concern (`foo`). Non-source
+ * files (docs, plan, config) carry no concern and return null.
+ */
+function concernStem(path: string): string | null {
+  const isSource = /^src\//.test(path) || /(^|\/)test(s)?\//.test(path) || /\.(test|spec)\./.test(path);
+  if (!isSource) return null;
+  const base = path.split("/").pop() ?? path;
+  return base.replace(/\.(test|spec)\.[cm]?[jt]sx?$/, "").replace(/\.[cm]?[jt]sx?$/, "");
+}
+
+/** Distinct files with at least one changed (add/del) line. */
+function changedFiles(lines: DiffLine[]): string[] {
+  const files = new Set<string>();
+  for (const l of lines) {
+    if ((l.kind === "add" || l.kind === "del") && l.file && l.file !== "/dev/null") files.add(l.file);
+  }
+  return [...files];
+}
+
+/**
+ * ONE CONCERN: a PR should cluster around a single source module. Two or more
+ * distinct product/test STEMS is the partial-fix-drift smell of a multi-concern PR.
+ */
+export function checkOneConcern(diff: string): RubricItemResult {
+  const stems = new Set<string>();
+  for (const f of changedFiles(walkDiff(diff))) {
+    const s = concernStem(f);
+    if (s) stems.add(s);
+  }
+  if (stems.size > 1) {
+    return {
+      key: "one-concern",
+      pass: false,
+      reason: `PR spans ${stems.size} concerns (${[...stems].sort().join(", ")}); one concern per PR — split it`,
+    };
+  }
+  return {
+    key: "one-concern",
+    pass: true,
+    reason: stems.size === 1 ? `single concern (${[...stems][0]})` : "no product-source change to concern-check",
+  };
+}
+
+// ── Item 2: ALL CALLERS AUDITED (partial-fix drift) ────────────────────────
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Count top-level (comma-separated) items in an argument/parameter string. */
+function countTopLevel(inner: string): number {
+  const s = inner.trim();
+  if (s === "") return 0;
+  let depth = 0;
+  let count = 1;
+  for (const ch of s) {
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") depth--;
+    else if (ch === "," && depth === 0) count++;
+  }
+  return count;
+}
+
+/** Parse a single-line function/arrow definition into its name + parameter count. */
+function parseDef(line: string): { name: string; params: number } | null {
+  let m = line.match(/(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(([^)]*)\)/);
+  if (m) return { name: m[1], params: countTopLevel(m[2]) };
+  m = line.match(/(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s*)?\(([^)]*)\)\s*=>/);
+  if (m) return { name: m[1], params: countTopLevel(m[2]) };
+  return null;
+}
+
+/** Count the args at the FIRST call `name(...)` on a line, or null if not called. */
+function callArgCount(line: string, name: string): number | null {
+  const m = line.match(new RegExp(`(?<![\\w$])${escapeRegExp(name)}\\s*\\(`));
+  if (m?.index === undefined) return null;
+  const open = m.index + m[0].length - 1;
+  let depth = 0;
+  for (let i = open; i < line.length; i++) {
+    if (line[i] === "(") depth++;
+    else if (line[i] === ")") {
+      depth--;
+      if (depth === 0) return countTopLevel(line.slice(open + 1, i));
+    }
+  }
+  return null; // unterminated call on this line — cannot judge arity
+}
+
+/**
+ * ALL CALLERS AUDITED: when a function's definition GAINS a parameter in the diff,
+ * every call site must be updated too. A call left on an UNCHANGED (context) line
+ * with the old (too-few) arity is an orphaned sibling — partial-fix drift.
+ */
+export function checkCallersAudited(diff: string): RubricItemResult {
+  const lines = walkDiff(diff);
+  const removedDefs = new Map<string, number>();
+  const addedDefs = new Map<string, number>();
+  for (const l of lines) {
+    const d = parseDef(l.text);
+    if (!d) continue;
+    if (l.kind === "del") removedDefs.set(d.name, d.params);
+    else if (l.kind === "add") addedDefs.set(d.name, d.params);
+  }
+  const gained = [...addedDefs].filter(([n, p]) => {
+    const old = removedDefs.get(n);
+    return old !== undefined && p > old;
+  });
+  for (const [name, need] of gained) {
+    for (const l of lines) {
+      if (l.kind !== "ctx") continue; // an unchanged caller = one the diff did not audit
+      if (parseDef(l.text)?.name === name) continue; // the definition line itself is not a call
+      const args = callArgCount(l.text, name);
+      if (args !== null && args < need) {
+        return {
+          key: "callers-audited",
+          pass: false,
+          reason: `partial-fix drift: ${name}() gained a parameter but an unaudited caller still passes ${args} arg(s)`,
+        };
+      }
+    }
+  }
+  return {
+    key: "callers-audited",
+    pass: true,
+    reason: gained.length ? "every call site updated to the new signature" : "no signature change to audit",
+  };
+}
+
+// ── Item 3: TEST THEATER ───────────────────────────────────────────────────
+
+/** TEST THEATER as a rubric item — wraps {@link detectTestTheater}. */
+export function checkTestTheater(diff: string): RubricItemResult {
+  const theater = detectTestTheater(diff);
+  return {
+    key: "test-theater",
+    pass: !theater,
+    reason: theater ? "test theater: added tests assert nothing" : "no test theater detected",
+  };
+}
+
+// ── Item 4: REFACTOR-PHASE HONESTY ─────────────────────────────────────────
+
+// Lines that carry behavior: control flow, returns/throws, comparisons, boolean logic.
+const BEHAVIOR_RE = /\breturn\b|\bif\s*\(|\belse\b|\bthrow\b|\bswitch\b|\bwhile\s*\(|\bfor\s*\(|[!=<>]==?|&&|\|\|/;
+
+function isCommentOrBlank(text: string): boolean {
+  const s = text.trim();
+  return s === "" || s.startsWith("//") || s.startsWith("*") || s.startsWith("/*");
+}
+
+/**
+ * REFACTOR-PHASE HONESTY: if the change is LABELLED a refactor (the report says so)
+ * it must not change behavior. A pure refactor MOVES behavior-bearing lines verbatim
+ * — every ADDED behavior line also appears (trimmed) among the REMOVED ones. A behavior
+ * line that is added with no matching removal is net-new logic: dishonest for a refactor.
+ */
+export function checkRefactorHonesty(diff: string, report?: string): RubricItemResult {
+  const labelled = /\brefactor/i.test(report ?? "");
+  if (!labelled) return { key: "refactor-honesty", pass: true, reason: "change is not labelled a refactor" };
+  const removed = new Set<string>();
+  const added: string[] = [];
+  for (const l of walkDiff(diff)) {
+    if (isTestPath(l.file) || isCommentOrBlank(l.text) || !BEHAVIOR_RE.test(l.text)) continue;
+    if (l.kind === "del") removed.add(l.text.trim());
+    else if (l.kind === "add") added.push(l.text.trim());
+  }
+  const novel = added.find((a) => !removed.has(a));
+  if (novel) {
+    return {
+      key: "refactor-honesty",
+      pass: false,
+      reason: `labelled a refactor but changes behavior (new logic: ${novel.slice(0, 60)})`,
+    };
+  }
+  return { key: "refactor-honesty", pass: true, reason: "labelled a refactor; no behavior-bearing line changed" };
+}
+
+// ── The GUARD: no worker-authored satisfied_by ─────────────────────────────
+
+/**
+ * THE SATISFIED_BY GUARD: `satisfied_by` is Architect-only (plan.ts / Standing rule
+ * 15). A diff that ADDS a `satisfied_by:` line to plan/tasks.yaml FAILS unless the PR
+ * is plan-only AND human-authored — a worker adding it to its own blocking criterion
+ * is "editing the criteria to match the diff", a failed task, not a merge.
+ */
+export function checkSatisfiedByGuard(diff: string, meta: RubricPrMeta = {}): RubricItemResult {
+  const adds = walkDiff(diff).filter(
+    (l) => l.kind === "add" && /(^|\/)plan\/tasks\.yaml$/.test(l.file) && /^\s*satisfied_by\s*:/.test(l.text),
+  );
+  if (adds.length === 0) {
+    return { key: "satisfied-by-guard", pass: true, reason: "no satisfied_by added to plan/tasks.yaml" };
+  }
+  if (meta.planOnly && meta.humanAuthored) {
+    return {
+      key: "satisfied-by-guard",
+      pass: true,
+      reason: "satisfied_by added in a plan-only, human-authored PR (Architect-only — allowed)",
+    };
+  }
+  return {
+    key: "satisfied-by-guard",
+    pass: false,
+    reason:
+      "worker-authored satisfied_by: adding it to plan/tasks.yaml outside a plan-only human PR is editing the criteria to match the diff (Standing rule 15)",
+  };
+}
+
+/**
+ * Run the full rubric — the four §5 layer-2 judgment items plus the satisfied_by
+ * guard — over a (diff, report) and PR-level facts. ADVISORY: `pass` rolls up all
+ * items, but the binding gate is layer 1. `failures` names exactly which items tripped.
+ */
+export function judgeRubric(input: RubricInput): RubricResult {
+  const items: RubricItemResult[] = [
+    checkOneConcern(input.diff),
+    checkCallersAudited(input.diff),
+    checkTestTheater(input.diff),
+    checkRefactorHonesty(input.diff, input.report),
+    checkSatisfiedByGuard(input.diff, { planOnly: input.planOnly, humanAuthored: input.humanAuthored }),
+  ];
+  const failures = items.filter((i) => !i.pass);
+  return { items, failures, pass: failures.length === 0 };
+}
+
 // ── gh poster (runs outside the sandbox; TLS fails under Seatbelt) ──────────
 
 /**
