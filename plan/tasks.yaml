@@ -792,3 +792,155 @@
       proof: "the campaign dry-run output lists each repo with its current-vs-bar gate delta (which tiers/checks it lacks) — paste the plan; no repo is modified until the operator approves"
   status: queued
   attempts: 0
+
+# ── W3 CLIENTS & THE API CONTRACT (§7A / §7 / D-5). The contract is the product boundary: it is GENERATED
+# from the daemon surface and BLOCKS every client, so a breaking change fails CI across all consumers in
+# one PR. Nothing client-side starts before W3-T1. One web app, three shells (browser · Tauri macOS ·
+# Tauri iOS); push is an adapter concern, not an app concern. ─────────────────────────────────────────
+- id: W3-T1
+  title: API contract package — packages/api-client GENERATED from the daemon surface (BLOCKS every client)
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §7A: the API contract is the product boundary and is logically PRIOR to every
+    client (D-5 monorepo exists so a breaking contract change fails CI across ALL consumers atomically).
+    Three clients drifting from a daemon with no compile-time contract is runtime breakage no gate
+    catches. This task gates the entire W3 chain — nothing client-side may start before it lands."
+  design: |
+    Define ONE tailnet service surface (REST + SSE, bearer-scoped) and GENERATE packages/api-client from
+    it (OpenAPI -> typed client, §7A justification). A grep gate forbids hand-rolled fetch to the daemon
+    in any consumer. Wire a consumer package + a CI job so a breaking daemon-surface change fails that
+    consumer's build in the SAME PR. The contract is semver'd; MCP tools are a projection of it.
+  acceptance:
+    - claim: "packages/api-client is GENERATED from the daemon service surface, not hand-written"
+      proof: "the generate step runs in CI from the daemon's OpenAPI/type source and the checked-in client matches (a drift check FAILS if the committed client is stale) — paste the generate + drift-check job"
+    - claim: "a deliberately breaking daemon change FAILS CI in a consumer package in the SAME PR"
+      proof: "a branch that removes/renames a surface field makes a consumer package's typecheck go RED in that same PR — paste the red check, then revert"
+    - claim: "no client contains a hand-rolled fetch to the daemon"
+      proof: "a CI grep gate over apps/** finds zero direct fetch/axios calls to the daemon host (all go through api-client) — paste the grep job output"
+  status: queued
+  attempts: 0
+
+- id: W3-T2
+  title: Dashboard v0 (shell 0) — read-only live board over the api-client
+  repo: remudero
+  depends_on: [W3-T1]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §7 shell 0 (browser, WS-5a). Depends on W3-T1 because a client that predates the
+    contract hand-rolls its own fetch — the exact drift §7A forbids. This is the SAME web build every
+    later shell wraps, so it must consume ONLY the generated api-client."
+  design: |
+    A read-only live board served by the daemon over Tailscale: plan render, task DAG with LIVE states,
+    worker stream tails (stream-json over SSE), DECISIONS feed, escalation inbox, question backlog, cost
+    meter. Transport is daemon file-watch + SSE; git stays the sole writer. UI imports only api-client.
+  acceptance:
+    - claim: "a ledger state flip appears in the UI within 2s of the write"
+      proof: "timestamp diff pasted: the ledger write ts vs. the UI-observed update ts is <2s (WS-5 acceptance bar)"
+    - claim: "the dashboard consumes ONLY the api-client (no hand-rolled fetch)"
+      proof: "grep of apps/dashboard shows all daemon calls go through packages/api-client; the W3-T1 grep gate is green"
+  status: queued
+  attempts: 0
+
+- id: W3-T3
+  title: Tauri macOS shell (shell 1) — wraps the SAME web build, native menu-bar presence
+  repo: remudero
+  depends_on: [W3-T2]
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §7 shell 1. The banked macOS one-liner made real: a small delta over shell 0
+    that wraps the UNMODIFIED web build (same artifact, different shell). Depends on W3-T2 because there
+    is nothing to wrap until the web app exists. Tauri binaries are 3-5MB vs Electron ~150MB [research]."
+  design: |
+    A Tauri v2 macOS shell wrapping the shell-0 web build: menu-bar presence, launch-at-login, native
+    notifications, global hotkey, deep links. Reads the SAME tailnet api-client surface. The web build is
+    the identical artifact shell 0 ships — the shell adds native affordances, never forks the web code.
+  acceptance:
+    - claim: "a signed local build launches, lives in the menu bar, and reads the same tailnet API"
+      proof: "a signed local build runs; screenshot/transcript of the menu-bar app showing live fleet state via the api-client"
+    - claim: "the web build is UNMODIFIED (same artifact, different shell)"
+      proof: "diff proof: the web bundle shipped in the Tauri shell is byte-identical to the shell-0 build (same hash) — paste the hashes"
+  status: queued
+  attempts: 0
+
+- id: W3-T4
+  title: Tauri iOS spike (shell 2) — TIMEBOXED; verify the APNs question and record it
+  repo: remudero
+  depends_on: [W3-T3]
+  type: implement
+  verify: human
+  principles: {tdd: encouraged}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §7 shell 2. TIMEBOXED spike because Tauri's mobile tooling is younger than
+    desktop (its maintainers say mobile is NOT first-class — [research]). verify: human — a device build +
+    App Store path needs human judgment and credentials. Depends on W3-T3 (the desktop shell proves the
+    wrap-the-web-build pattern first). Expo is the documented fallback with a named trigger (§7)."
+  design: |
+    Run the SAME web build on an iOS device via WKWebView (Tauri v2). Spike scope: device launch,
+    biometric unlock, deep links. ★ VERIFY the UNVERIFIED APNs REMOTE-push question and RECORD the answer
+    in LEARNINGS.md (its notification plugin is LOCAL; remote push is a different capability). End with a
+    go/no-go and the Expo-fallback trigger condition named (spike too rough OR App Store rejects WKWebView).
+  acceptance:
+    - claim: "the same web build runs on an iOS device via WKWebView"
+      proof: "device screenshot/recording of the panel running in the Tauri iOS shell over tailnet"
+    - claim: "the APNs remote-push question is VERIFIED and recorded in LEARNINGS.md"
+      proof: "a new provenance-tagged LEARNINGS.md line stating whether Tauri supports APNs remote push (with the primary-source citation), plus a go/no-go decision naming the Expo-fallback trigger"
+  status: queued
+  attempts: 0
+
+- id: W3-T5
+  title: Human-in-the-loop panel actions — answer/approve/Pause-Resume-STOP/quiet-hours
+  repo: remudero
+  depends_on: [W3-T2]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §7 editing tier (human-in-the-loop). The panel is for ACTING, not just watching.
+    Depends on W3-T2 (the board must exist to act on it); writes go through the api-client's WRITE scope so
+    the daemon remains the sole writer and every action is ledgered with the panel's bearer as origin."
+  design: |
+    Add write actions to the panel via the api-client write scope: answer questions (QUESTION contract),
+    approve MANUAL queue items, Pause/Resume (drain-and-hold)/STOP, quiet-hours toggle. Every action is
+    bearer-scoped and ledgered with the panel token as origin — no client-side state mutation.
+  acceptance:
+    - claim: "an escalation answered FROM the panel appears in the ledger with the panel's bearer token as origin"
+      proof: "ledger line for the answered escalation carries origin=<panel bearer token id>; the answer flows to the Architect — paste the ledger entry"
+    - claim: "STOP from the panel halts the fleet within one tick"
+      proof: "ledger shows the panel-originated STOP followed by no further spawns (mirrors the rmd stop contract)"
+  status: queued
+  attempts: 0
+
+# ── WS-12 WEBSITE (repo remudero-site, SEPARATE from core — D-5: docs cadence must not couple to daemon CI).
+- id: W12-T1
+  title: remudero-site repo + Vercel + Astro Starlight — publishes LEARNINGS.md as a public artifact
+  repo: remudero-site
+  depends_on: [W1-T1D]
+  type: implement
+  verify: human
+  principles: {tdd: off}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN WS-12 / D-5: the site is a SEPARATE repo — different cadence and audience; a docs
+    typo must not run mutation testing and a daemon change must not redeploy the site. verify: human
+    because repo creation is MANUAL (credentials are never agent-handled). Publishing the harness's own
+    LEARNINGS.md as a public artifact is the differentiator — nobody else ships the receipts."
+  design: |
+    Create repo remudero-site (MANUAL, guided deep-links), deploy Astro Starlight on Vercel (fleet
+    pattern). Content: landing (the anti-slop thesis) · <5-min quickstart · rendered MASTER-PLAN ·
+    LEARNINGS.md published as a public artifact · an honest-limitations page (security posture, bypass
+    mode, prompt-injection surface) · CONTRIBUTING/GOVERNANCE/TRADEMARK. Post-L2 the site maintenance
+    becomes a harness-run task (dogfood).
+  acceptance:
+    - claim: "the site builds and deploys on Vercel and publishes LEARNINGS.md"
+      proof: "deploy URL is live; the LEARNINGS page renders the harness's LEARNINGS.md — paste the URL + the LEARNINGS route"
+    - claim: "the quickstart takes a clean machine to a first auto-merged PR"
+      proof: "a clean-machine run following ONLY the site quickstart reaches a first auto-merged PR — paste the transcript/recording (the WS-4 acceptance bar)"
+  status: queued
+  attempts: 0
