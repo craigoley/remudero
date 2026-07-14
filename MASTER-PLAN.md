@@ -1,4 +1,4 @@
-# REMUDERO — Master Plan (v2.5 · synced 2026-07-14 · ★ REVIEW GATE LIVE: main requires [ci, remudero-review]; `rmd review <n>` is the manual-PR escape hatch (same judge, by hand) · Standing rules 13 (a doc is not proof) + 14 (splitting orphans the call site) from the PR #12 dead-doc post-mortem · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1); FIELD FINDING 12 self-updater race · NEXT: rmd run-task on the WS-1 queue through the closed gate)
+# REMUDERO — Master Plan (v2.6 · synced 2026-07-14 · ★ QUALITY BAR: §5 expanded into the three-tier gate stack (security / quality / architecture) + fleet-hardened CI mechanics; §5A "the bar is INHERITED, not optional" — `rmd project init` provisions it (W1-T23–T28, W2-T2); remudero runs the strictest profile on itself · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -422,32 +422,127 @@ after the enforced gate W1-T1D); Layer 4 = **W2-T1** (after the reviewer W1-T1D 
 
 ## 5. Principles engine
 
-Three layers, strongest first — instructions shape behavior; gates guarantee it:
+Remudero's CI today is typecheck + tests. That is the FLOOR, not the bar. The operator's fleet
+(SynthWatch, neon-drift, rogue-descent, wild-trails, OleyArcade, ClawApp) paid — sometimes in outages —
+for a gate stack Remudero must both MEET on itself and INHERIT-by-default onto every project it builds
+(§5A). A harness that ships untested, unscanned code at scale is a liability generator; the anti-slop
+thesis of §Mission is only real if the gates are real. Structure: **three ENFORCEMENT layers (how)** over
+**a three-TIER gate stack (what)**.
 
-1. **Deterministic gates** (hooks + CI):
-   - **TDD**: per-worker TDD Guard-style PreToolUse enforcement (blocks implementation edits without a
-     failing test; per-language test reporters) where the target repo's stack supports it; plus
-     REPORT must paste **red→green proof** (failing run output, then passing) for `tdd: strict` tasks;
-     plus CI: tests-changed-with-src-changed gate, **coverage ratchet** (never down, ratchets up),
-     **mutation baseline** where established (SynthWatch pattern, Stryker for TS).
-   - **DRY**: duplication budget via jscpd threshold gate; breach ⇒ CI red + auto-filed refactor task
-     (feeds idle-groom).
-   - **SOLID / architecture**: fitness functions via dependency-cruiser/import-lint rules — the games'
-     purity gates generalized ("src/game imports no Three.js" → declarable layering rules); complexity
-     budgets (eslint complexity, max-lines) as advisory-then-required per profile.
-2. **Reviewer rubric** (judgment): SRP at PR granularity (one-concern already enforces), coupling/
-   cohesion audit, "all callers audited" check (partial-fix drift), test-theater detection
-   (assertions vs. snapshots-of-nothing), refactor-phase honesty. Documented finding from TDD Guard's
-   author: mechanical test-first enforcement alone still yielded tight coupling and duplication —
-   which is exactly why layer 2 exists and layer 3 alone is insufficient.
-3. **Prompt layer**: Promptsmith injects the repo's principles profile into every prompt; weakest layer,
+### Enforcement layers (strongest first — instructions shape behavior; gates guarantee it)
+
+1. **Deterministic gates** (hooks + CI) — the load-bearing layer. Trust/pass-fail is a DETERMINISTIC
+   predicate, never an LLM decision (Standing rule 2). TDD Guard-style PreToolUse enforcement (blocks
+   implementation edits without a failing test) where the stack supports it; `tdd: strict` REPORTs paste
+   **red→green proof**. Everything in the tier stack below is enforced here or by the reviewer.
+2. **Reviewer rubric** (judgment — advises; the GitHub-enforced gate decides, Standing rule 3B). Rubric
+   items, each a checked question: **one concern per PR**; **all callers audited** (partial-fix drift —
+   a change that fixes one call site and orphans the rest); **test theater** (assertions that assert
+   nothing / snapshots-of-nothing / tests that kill no mutants); **refactor-phase honesty** (a "refactor"
+   that changes behavior); coupling/cohesion. TDD Guard's own author documented that mechanical
+   test-first alone still yielded tight coupling + duplication — which is why layer 2 exists.
+3. **Prompt layer**: Promptsmith injects the repo's principles profile into every prompt; weakest,
    never load-bearing.
 
-**Per-repo profile** — `.remudero/principles.yaml`: `tdd: strict|encouraged|off`, `coverage_ratchet`,
-`dup_threshold`, `fitness_rules[]`, `complexity`. OSS users tune; Promptsmith reads; CI enforces;
-reviewer audits. Plan tasks may override per task. **The remudero repo itself runs the strictest
-profile** (tdd strict, ratchet on) — the harness eats first, and every principles feature is proven
-on its own codebase before anyone else's.
+### The gate stack — three tiers
+
+**TIER 1 — SECURITY (must-have, day one).**
+- **CodeQL** via an EXPLICIT workflow — GitHub's *default setup* must be **DISABLED**, or the two
+  conflict and both go unreliable (fleet lesson). [LEARNINGS]
+- **Dependency scanning (Dependabot)** — but **MAJOR bumps are EXCLUDED from auto-merge** and carry
+  Dependabot **ignore-rules** for `version-update:semver-major`: a major bump once caused a **28-minute
+  production outage**. Minors/patches auto-merge behind the full gate; majors open a PR a human triages.
+- **OSV / vulnerability scan** on the dependency tree (catches advisories Dependabot hasn't cut a bump
+  for yet).
+- **Secret scanning + PUSH PROTECTION** — already live on `remudero` (FIELD FINDING 8); required on
+  every provisioned repo.
+- **SECURITY.md** with a private-disclosure path (advisories, not public issues).
+- **Least-privilege `GITHUB_TOKEN`** — every workflow declares minimal `permissions:` (default read-all
+  is a standing over-grant).
+- **Pinned action SHAs, never tags** — `uses: org/action@<40-char-sha>`; a moved tag is a supply-chain
+  vector.
+- **No plaintext secrets in any tree** — a leak-grep runs **in CI on every PR**, not just once in the
+  spike; push protection is the backstop, the grep is the tripwire.
+- **★ AGENT-SPECIFIC (we ship an agent harness, so the diff itself is attack surface):**
+  - **Prompt-injection surface review** — REQUIRED on any diff touching worker **prompts, hooks,
+    settings, or egress** (a poisoned prompt/hook is a code-exec path).
+  - **Containment probe as a REQUIRED check** — on any diff touching **sandbox / deny-floor / env** (WS-0
+    FF10a proved a single typo there SILENTLY drops containment; static validation is not enough — the
+    probe is the empirical guarantee, W1-T2 / W1-T28).
+
+**TIER 2 — QUALITY & TESTING.**
+- **Coverage ratchet** — never down; ratchets up. A coverage-lowering PR is CI-red. Baseline captured at
+  onboarding so the ratchet has a floor.
+- **Mutation-testing baseline** — Stryker for TS (SynthWatch pattern). **Green tests that kill no mutants
+  are theater;** the mutation score is the falsifier that coverage % cannot provide. Baseline recorded,
+  ratcheted like coverage.
+- **Duplication budget** — jscpd threshold; breach ⇒ CI-red + auto-filed refactor task (idle-groom).
+- **Complexity budgets** — eslint `complexity` + `max-lines`/`max-lines-per-function`, advisory-then-
+  required per profile.
+- **TypeScript strict — VERIFIED ACTIVE, not assumed.** A planted probe (the neon-drift `_probe(x)`
+  lesson) must FAIL the gate: *"0 violations" from a fresh strict gate is suspicious until falsified.*
+
+**TIER 3 — ARCHITECTURE / MAINTAINABILITY.**
+- **Fitness functions via dependency-cruiser** — the games' purity gates generalized into declarable
+  layering rules: "src/game imports no Three.js" → for remudero, **"src/lib imports nothing from
+  spike/CLI"** (`src/lib` must not import `src/spike.ts` or `src/run-task.ts`). A violating import is
+  CI-red.
+- **ADR discipline** for IRREVERSIBLE calls (a short Architecture Decision Record accompanies a
+  one-way-door change; reversible PR-shaped changes stay in `DECISIONS.md`/auto-choose).
+- **One-concern-per-PR** — socially enforced today; made a reviewer-rubric item (layer 2) so it is
+  checked, not hoped.
+
+### CI mechanics (fleet-hardened — these are RULES, learned in production)
+
+- **The required-check context is the JOB NAME, not the workflow file name.** Protection keys on the job.
+- **A conditionally-SKIPPED required check DEADLOCKS merge forever** (a `paths:`-filtered or `if:`-gated
+  job that doesn't run is "expected, pending" = never green). ⇒ **use ONE always-runs CI-GATE AGGREGATOR
+  job** that `needs:` every sub-job and succeeds only if all did; make THAT the single required context
+  (W1-T24). Sub-jobs may skip freely; the aggregator always reports.
+- **`GITHUB_TOKEN` suppresses downstream workflow triggers** — a workflow's push/PR events won't fire
+  another workflow when authored by the default token; use an app/PAT where a chained trigger is needed.
+- **Arm `--auto` under protection; never immediate-merge** — an immediate merge RACES the checks
+  (Standing rule 3B: GitHub decides on green, the runner only arms + observes).
+- **Trust is a deterministic predicate, never an LLM decision** (Standing rule 2) — the reviewer/judge
+  ADVISE; only the aggregator + protection ENFORCE.
+
+### Per-repo profile — `.remudero/principles.yaml`
+
+Declares the tier config for a repo: `tdd`, `coverage_ratchet`, `mutation_baseline`, `dup_threshold`,
+`complexity`, `fitness_rules[]`, `security_profile`. OSS users tune; Promptsmith reads; CI enforces;
+reviewer audits; plan tasks may override per task. Profiles by project type (`ts-node` / `ts-web` /
+`python` / `dotnet`) ship sane defaults — the operator tunes but NEVER starts from zero (§5A).
+
+**REMUDERO RUNS THE STRICTEST PROFILE ON ITSELF** — `tdd: strict`, ratchet on, mutation baseline,
+fitness rules, the full security tier. The harness eats first: every gate is proven GREEN (and proven to
+FAIL a planted violation) on Remudero's own codebase before it is inflicted on anyone else's.
+
+## 5A. The fleet bar is inherited, not optional
+
+Meeting the bar on `remudero` is necessary but not the point. The point is that **every project Remudero
+orchestrates INHERITS the bar automatically** — provisioned at onboarding, not asked to adopt it. A
+harness that builds code at fleet scale without installing the gates is a liability generator; opt-in
+quality is quality that silently doesn't happen.
+
+**`rmd project init <repo>`** (W1-T27) is the onboarding primitive. Given a target repo it scaffolds, in
+one PR against that repo:
+- the **workflows** (CodeQL explicit, OSV, leak-grep, coverage/mutation/jscpd/complexity, the CI-gate
+  **aggregator** job) — SHA-pinned, least-privilege;
+- the **configs** (`dependabot.yml` with majors excluded, dependency-cruiser rules, eslint/tsconfig
+  strict, `.remudero/principles.yaml` for the chosen profile);
+- **`SECURITY.md`** + private disclosure;
+- **branch protection** wired to require the single aggregator context (+ secret-scanning/push-protection
+  on);
+- **ratchet BASELINES captured at onboarding** (coverage %, mutation score, dup %, complexity) so every
+  ratchet has a real floor from day one — a repo never onboards "at zero."
+
+**Profiles** (`ts-node`, `ts-web`, `python`, `dotnet`) carry the sane defaults; the operator tunes
+`.remudero/principles.yaml`, never authors the stack from scratch. **A campaign (§3A) raises the bar
+fleet-wide** when a gate improves: the improved gate becomes a per-repo task, instantiated across the
+selector, each with its own baseline capture and green-PR proof.
+
+The invariant: **Remudero runs the strictest profile on itself, and no project it touches runs less than
+its profile's floor.** The harness never ships a gate it hasn't already eaten.
 
 ## 6. Open-source packaging
 
