@@ -1,4 +1,4 @@
-# REMUDERO — Master Plan (v2.8 · synced 2026-07-14 · ★ BUDGET IS A TRIPWIRE, NOT AN ALLOWANCE: budget_usd is a runaway BUG DETECTOR (default $100, an order of magnitude above observed), a soft $25 line WARNS-and-continues, blocked_budget = "looping" — W1-T3 was killed mid-work at $3.57 vs a guessed $4; same bug as maxTurns (PR #8) · THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
+# REMUDERO — Master Plan (v2.9 · synced 2026-07-14 · ★ CLIENTS & CONTRACT: D-5 RESOLVED (monorepo for everything consuming the daemon API — a breaking change fails CI across all consumers atomically; site/commons/pro stay separate); NEW §7A the API contract is the product boundary (`packages/api-client` GENERATED from ONE tailnet surface, no hand-rolled fetch); §7 rewritten as ONE web app / THREE shells (browser · Tauri macOS · Tauri iOS, Expo the documented iOS fallback; push is an adapter, not an app concern); website → WS-12 repo `remudero-site`; clients W3-T1..T5 gate on the contract · BUDGET IS A TRIPWIRE, NOT AN ALLOWANCE: budget_usd is a runaway BUG DETECTOR (default $100, an order of magnitude above observed), a soft $25 line WARNS-and-continues, blocked_budget = "looping" — W1-T3 was killed mid-work at $3.57 vs a guessed $4; same bug as maxTurns (PR #8) · THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -632,45 +632,80 @@ commons ONLY via human-gated PRs · nothing open ever moves behind the paywall �
 their own subscription per Anthropic's terms (one operator, one account, one machine; the harness is
 a tool for your seat, not a seat-multiplier).
 
-## 7. Collaborative plan UI
+## 7A. The API contract is the product boundary
 
-**Vision**: the live plan as the shared workspace — human, external Claude (via remudero-mcp),
-and the Architect co-edit while workers stream progress underneath. **The control panel** (Craig's
-framing): see the plan; work the **human to-do list** (MANUAL queue with check-off); answer the
-**question backlog** in batches (QUESTION contract, §2 — answers flow to the Architect, corrective
-tasks auto-file when a shipped assumption was wrong); submit **feedback** ("improve/expand X") that
-the Architect triages into plan edits or tasks via a grill-lite pass; watch **fleet status** (per-
-worker state, current task, live stream tails); **Pause/Resume** (drain-and-hold) and STOP;
-quiet-hours toggle; cost meter. Question
-store: `plan/questions.ndjson` in the plan repo (durable, diffable), surfaced in clients + daily
-digest count; GitHub-issue mirror optional per product.
+**This is the crux, and it is logically PRIOR to every client below.** Three clients (dashboard,
+desktop, mobile) plus MCP all talk to one daemon; a daemon with no COMPILE-TIME contract lets them drift,
+and three-clients-drifting-from-a-daemon is runtime breakage no gate catches. So the contract comes first.
 
-- **v0 (WS-5a)**: read-only live board. Panes: MASTER-PLAN render, task DAG with live states,
-  worker stream tails (stream-json), DECISIONS feed, escalations inbox, cost meter. Transport:
-  daemon file-watch + SSE. Git stays the sole writer.
-- **v1 (WS-5b)**: human editing in-UI (single-writer, debounced plan-sync commits by the daemon);
-  agents propose edits as plan-repo PRs rendered inline for one-click apply.
-- **v2 (WS-6)**: true multi-writer via CRDT (Yjs) session over the plan doc, checkpointed to git
-  commits by the daemon (git remains truth; CRDT is the live layer). D-3 decides if v2 is worth it
-  after living with v1 — PR-shaped proposals may be enough.
-- **remudero-mcp (WS-6)**: tools `plan.read`, `plan.propose_patch`, `task.add/update`, `runs.status`,
-  `escalations.list/answer`. Exposed over tailnet HTTPS → claude.ai custom connector. Auth: bearer
-  token, read vs. write scopes.
+- The daemon exposes **ONE tailnet service surface** — REST + SSE, single port, **bearer-scoped**
+  (read vs. write). No client gets a private backdoor.
+- **`packages/api-client` is GENERATED from that surface** and is the ONLY way any client talks to the
+  daemon. **Generator choice: OpenAPI → typed client** (over hand-written TS types) — justification: the
+  daemon is the single source of truth, OpenAPI is language-agnostic (a future non-TS client or an
+  external integrator generates the same client), and the spec doubles as public API docs on the site
+  (WS-12); TS-types-only would re-encode the surface by hand, the exact drift this section exists to kill.
+- **Rules (each a CI-enforced or ADR-gated invariant):**
+  - **No client may hand-roll a `fetch`** to the daemon — a grep gate fails the build (W3-T1).
+  - **A breaking contract change must fail CI in EVERY consumer in the SAME PR** — this is the whole
+    reason the clients live in one repo (D-5). Drift cannot ship.
+  - **The contract is semver'd; a breaking change requires an ADR** (§5 Tier 3 discipline).
+  - **MCP tools are a PROJECTION of the same contract, never a parallel API** — `plan.read`,
+    `escalations.answer`, etc. call the api-client, not a second surface.
+- **Rationale:** the plan already calls clients "stateless projections" (§7). This is what makes that
+  true IN CODE rather than in prose — the projection is generated, versioned, and gated, so a client
+  cannot silently diverge from the daemon it renders.
 
-**Mobile (WS-9)** — manage the main agent + plan while remote, over Tailscale:
-- **API-first is the enabling decision**: WS-5a promotes the daemon's HTTP API (REST + SSE) to a
-  first-class contract; dashboard, mobile, and MCP are three clients of ONE tailnet service surface
-  (single port, bearer-scoped read/write). No client gets a private backdoor.
-- **M0 (free at WS-5a)**: the dashboard is responsive; phone + Tailscale = remote board on day one,
-  zero app-store anything.
-- **M1 (free at WS-1, before any UI exists)**: escalations are GitHub issues ⇒ the GitHub mobile
-  app already pushes them and accepts replies ⇒ remote loop-continuation ships with the daemon MVP.
-- **M2 (G-5 RESOLVED: dashboard-first, Expo standalone later)**: dedicated mobile client — live
-  board, escalation answer/approve, STOP button, quiet-hours toggle, cost meter. Expo standalone is
-  the eventual OSS mobile story; ClawApp-tab and PWA rejected as primary (coupling / capability).
-- **Push transport (decide at WS-9)**: imessage-local (default for the Mac+iPhone operator, §1) vs
-  ntfy (OSS-clean; HYPOTHESIS to verify: iOS + self-hosted may need ntfy.sh upstream relay) vs
-  GitHub-mobile-only (M1 posture). BlueBubbles: legacy overlay only.
+## 7. The control panel — ONE web app, three shells
+
+**Every client here is a PROJECTION of the API contract (§7A) — no client talks to the daemon any other
+way.** The panel is the operator's cockpit: see the plan; work the **human to-do list** (MANUAL queue
+with check-off); answer the **question backlog** in batches (QUESTION contract, §2 — answers flow to the
+Architect, corrective tasks auto-file when a shipped assumption was wrong); submit **feedback** the
+Architect triages into plan edits/tasks; watch **fleet status** (per-worker state, current task, live
+stream tails); **Pause/Resume** (drain-and-hold) and **STOP**; quiet-hours toggle; cost meter. Question
+store: `plan/questions.ndjson` (durable, diffable), surfaced in clients + the daily digest count.
+
+**ONE web app, three shells.** The panel is data-dense web (DAG, diffs, live stream tails, cost charts).
+It is built ONCE as a web app; the **same web build is the SAME artifact in every shell**, wrapped three
+ways:
+
+- **SHELL 0 — browser (WS-5a → W3-T2).** The web app served by the daemon over Tailscale. Works on Mac
+  AND phone **today**, zero new tooling. This is mobile posture **M0**.
+- **SHELL 1 — Tauri macOS (W3-T3).** Wraps the same web build in a native shell: menu-bar presence,
+  launch-at-login, native notifications, global hotkey, deep links. A **small delta** over shell 0 (the
+  banked macOS one-liner, made real). Tauri binaries are **3–5 MB vs Electron ~150 MB** [research].
+- **SHELL 2 — Tauri iOS (W3-T4, TIMEBOXED spike).** The same codebase again, rendered in **WKWebView**;
+  App Store distribution; biometric unlock; deep links.
+
+**Why not React Native / Expo for the panel:** the panel is web-native (DAG, diffs, live tails, charts)
+and RNW fights all of it. **Expo is the DOCUMENTED FALLBACK for iOS** — Tauri's maintainers explicitly
+say mobile is NOT a first-class citizen [research], so if the W3-T4 spike proves too rough, the operator's
+deep Expo expertise makes the pivot cheap. **Trigger condition (a real fallback, not a footnote):** the
+spike cannot get the web build running prompt-free on a device, OR App Store review rejects the WKWebView
+shell ⇒ pivot the **iOS shell only** to Expo; shells 0 and 1 are unaffected.
+
+**Push is an ADAPTER concern, not an APP concern.** Escalations already push via **GitHub-mobile (free,
+today)**, ntfy, or iMessage (§8/WS-1). The app is for **ACTING** — answer, approve, STOP, watch — not for
+alerting. This **decouples the app from the UNVERIFIED Tauri-APNs-remote-push question** [research]
+entirely: no shell needs remote push to ship. **M1** (free at WS-1, before any shell exists): escalations
+are GitHub issues ⇒ the GitHub mobile app already pushes them and accepts replies ⇒ remote
+loop-continuation ships with the daemon MVP.
+
+**Editing capability tiers** (orthogonal to the shells; whatever tier ships, all three shells inherit it):
+- **read-only live board (WS-5a → W3-T2):** MASTER-PLAN render, task DAG with live states, worker stream
+  tails (stream-json), DECISIONS feed, escalations inbox, question backlog, cost meter. Transport: daemon
+  file-watch + SSE. Git stays the sole writer.
+- **human-in-the-loop actions (W3-T5):** answer questions, approve MANUAL items, Pause/Resume/STOP,
+  quiet-hours toggle — writes go through the api-client's write scope, ledgered with the panel's bearer.
+- **in-UI plan editing (WS-5b):** single-writer, debounced plan-sync commits by the daemon; agents
+  propose edits as plan-repo PRs rendered inline for one-click apply.
+- **multi-writer (WS-6):** CRDT (Yjs) over the plan doc, checkpointed to git by the daemon (git remains
+  truth). D-3 decides if it is worth it after living with in-UI editing.
+
+**remudero-mcp (WS-6):** tools `plan.read`, `plan.propose_patch`, `task.add/update`, `runs.status`,
+`escalations.list/answer` — a **projection of the same contract (§7A)**, never a parallel API. Exposed
+over tailnet HTTPS → claude.ai custom connector; bearer token, read vs. write scopes.
 
 ## 8. Security posture (consolidated)
 
@@ -889,11 +924,9 @@ and the operator chooses), then EXECUTES as much setup as possible via sub-agent
 through gh (**org-aware; explicitly sets allow_auto_merge, delete_branch_on_merge, and secret
 scanning + push protection — fresh-repo defaults break agent pipelines, FIELD FINDING 8**),
 plan-repo scaffold, CI templates, hooks/settings install, root layout, first golden run; PAT minting stays MANUAL with guided deep-links (credentials are never agent-handled).
-**Project website (Craig req, G-7)**: landing +
-quickstart + rendered MASTER-PLAN + honest-limitations page, on the project `.dev` domain; stack rec
-Astro Starlight (docs-native, fast) deployed on Vercel per fleet pattern; site content maintenance
-becomes a harness-run task post-L2 (the site is dogfood too). Acceptance: clean-machine install to
-first auto-merged PR using only the website quickstart; proof = screen recording or transcript.
+**The project website is now its OWN workstream, WS-12** (repo `remudero-site` — separate cadence and
+audience, D-5): it must not couple to the daemon's CI. Its quickstart is still the WS-4 acceptance bar
+(clean machine → first auto-merged PR).
 
 **WS-5 — UI**: v0 live board (SSE); v1 in-UI editing + agent proposals as PRs. Port audited (18793
 taken on Craig's mini). Acceptance v0: watching a live run shows state flips within 2s of ledger
@@ -928,11 +961,13 @@ golden caught in CI; seeded ledger pattern → exactly one evidence-cited improv
 on rerun); ★ a deliberately-degraded prompt-template PR goes RED on the golden suite before merge;
 one retro produces a net-negative diff somewhere (compression proven); proofs = CI runs + diffs.
 
-**WS-9 — Mobile**: shape per G-5. Baseline regardless of shape: responsive dashboard verified on
-phone over tailnet (M0); push-transport decision executed (ntfy hypothesis verified against primary
-docs first); remote STOP + escalation-answer + quiet-hours toggle. Acceptance: from a phone off the
-home network (tailnet up), answer one escalation and STOP one running loop; proof = ledger entries
-originating from the mobile client's bearer token.
+**WS-9 — Mobile**: RESHAPED — mobile is now **shell 2 of the one-web-app control panel** (§7), delivered
+as the Tauri iOS spike **W3-T4** over the generated api-client (§7A), NOT a separate client. Baseline
+regardless of shell: responsive dashboard verified on phone over tailnet (M0, shell 0); **push is an
+adapter concern, not an app concern** (GitHub-mobile today; no shell needs remote push to ship);
+remote STOP + escalation-answer + quiet-hours toggle land as W3-T5. Expo is the documented iOS fallback
+with a named trigger (§7). Acceptance: from a phone off the home network (tailnet up), answer one
+escalation and STOP one running loop; proof = ledger entries originating from the client's bearer token.
 
 **WS-10 — Campaigns**: campaign spec loader + Architect instantiation; v1 catalog (§3A); baseline
 capture from ledger/CI; standing/scheduled/retro-filed triggers wired to idle-groom + quiet-hours.
@@ -945,10 +980,25 @@ public remudero-commons repo; skills-shaped packaging. Acceptance: a universal l
 from remudero's own retros lands in commons via a reviewed PR and is cited by a worker prompt in a
 second project; proof = provenance chain across two ledgers.
 
+**WS-12 — Website** (repo `remudero-site`, SEPARATE from core — D-5): **Astro Starlight on Vercel**
+(fleet pattern). Content: landing (the **anti-slop thesis**, §Mission) · **<5-min quickstart** · rendered
+MASTER-PLAN · **the harness's own LEARNINGS.md published as a public artifact** (nobody else ships the
+receipts — it IS the differentiator) · an **honest-limitations page** (security posture, bypass mode,
+prompt-injection surface, §8) · CONTRIBUTING / GOVERNANCE / TRADEMARK. Repo creation is MANUAL
+(credentials never agent-handled); post-L2 the site's content maintenance becomes a **harness-run task**
+(the site is dogfood too — W12-T1). Acceptance: the site builds and deploys, and its quickstart takes a
+clean machine to a first auto-merged PR; proof = deploy URL + the quickstart transcript.
+
+**Client workstream (W3 — the API contract + the three shells)**: `packages/api-client` is generated from
+the daemon surface (§7A) and **BLOCKS every client** (W3-T1); the dashboard (shell 0, W3-T2), Tauri macOS
+(shell 1, W3-T3), Tauri iOS spike (shell 2, W3-T4), and human-in-the-loop panel actions (W3-T5) all
+consume ONLY the api-client. Nothing client-side starts before the contract lands.
+
 Dependencies: WS-0 → WS-1 → {WS-2, WS-3} → WS-4 → WS-5 → WS-6; WS-7 threads from WS-1 onward;
-WS-8 seeds at WS-0 (goldens), retro ceremony activates at WS-1, completes after WS-2; WS-9 M1
-lands free with WS-1, M0 with WS-5a, M2 after WS-5; WS-10 after {WS-2, WS-8 baselines};
-WS-11 after WS-4 + a second project on the harness.
+WS-8 seeds at WS-0 (goldens), retro ceremony activates at WS-1, completes after WS-2; **W3 (clients)
+gate on W3-T1 (the api-client contract) → W3-T2 → {W3-T3 → W3-T4, W3-T5}**; WS-9 M1 lands free with
+WS-1, M0 with WS-5a/W3-T2, mobile shell = W3-T4; WS-10 after {WS-2, WS-8 baselines}; WS-11 after WS-4 +
+a second project on the harness; **WS-12 (site) is independent — separate repo, separate cadence**.
 
 ## 11. Open decisions
 
@@ -966,7 +1016,18 @@ WS-11 after WS-4 + a second project on the harness.
   spike PR merges.
 - **D-3 Plan co-editing tech**: CRDT (Yjs) vs PR-proposals-only. Defer until v1 UI is lived-in (rec).
 - **D-4 OSS default permission profile**: `standard` (rec). Craig's instance: `yolo`.
-- **D-5 Repo shape**: monorepo (daemon+UI+MCP+CLI, npm workspaces) (rec) vs multi-repo.
+- **D-5 Repo shape — RESOLVED 2026-07-14: MONOREPO for everything that consumes the daemon API;
+  separate repos for everything that does not.** **Repo shape follows CONTRACT COUPLING — nothing else
+  decides it.** The monorepo `remudero` (npm workspaces) holds: the **daemon** · **CLI** · **MCP** ·
+  **`packages/api-client`** (the generated contract, §7A) · **`apps/dashboard`** (web) ·
+  **`apps/desktop`** (Tauri macOS shell) · **`apps/mobile`** (Tauri iOS shell). THE ARGUMENT: every one
+  of these consumes the SAME daemon API contract; in a monorepo a breaking API change **fails CI across
+  ALL consumers atomically, in one PR**, so drift cannot ship. Split repos make that drift SILENT —
+  discoverable only at runtime, which is exactly the failure three clients-of-a-daemon must never have.
+  **SEPARATE repos, deliberately** (different cadence/audience, no contract coupling): **`remudero-site`**
+  (docs/marketing, WS-12 — a docs typo must not run mutation testing, and a daemon change must not
+  redeploy the site) · **`remudero-commons`** (WS-11) · **`remudero-pro`** (§6A — never mixed with core,
+  ever). See §7A (the contract) and §7 (one web app, three shells).
 - **D-9 CLA vs DCO — RESOLVED: DCO**, one-way door closed knowingly (§6A). Reversal requires a CLA
   from day one; retrofitting is impossible. Revisit ONLY if the project's purpose changes materially.
 - **D-8 Monetization**: open-core per §6 stance (rec); shape/pricing decided post-WS-6 traction,

@@ -56,3 +56,9 @@ paid to discover, tagged with the run/PR that proved it. Rules:
 
 - A limit set NEAR the expected cost of the work is a WORK LIMIT, not a safety limit. Safety limits must sit an ORDER OF MAGNITUDE above the expected value so they only fire on pathology. This error was made TWICE — `maxTurns` (18 vs. ~36 needed) and `budget_usd` ($4 vs. ~$4 needed, W1-T3 killed mid-work). Set safety limits by asking "what number can ONLY mean something is broken?", never "what should this cost?". [W1-T3, PR #8]
 - Calibration data (W1-T5 mounts.yaml) comes from OBSERVED runs, never from a guess in a chat. Observed so far: hello-world $0.41 · reviewer subsystem $2.26 · gate wiring $1.28 · containment probe ~$2.0 · W1-T3 was still working at $3.57 / 36 turns when its guessed $4 cap killed it. [W1-T3, PR #8]
+
+## Clients, contract & repo shape
+
+- Tauri v2 targets 5 platforms from ONE codebase (Linux/macOS/Windows/Android/iOS; iOS renders in WKWebView), is independently security-audited (Radically Open Security), and has official App Store distribution guides; binaries are ~3–5 MB vs Electron ~150 MB. BUT its maintainers explicitly say **mobile is NOT a first-class citizen** — treat desktop as mature and mobile as young. [research 2026-07-14]
+- Tauri's notification plugin is **LOCAL notifications**. Whether it supports **APNs REMOTE push is UNVERIFIED** — never assume remote push from a "notifications" plugin listing; a task must verify it before any design depends on it. (Remudero sidesteps this: push is an adapter concern — GitHub-mobile/ntfy/iMessage — not an app concern.) [research 2026-07-14]
+- **Repo shape follows CONTRACT COUPLING**: everything that consumes the daemon API lives in ONE repo so a breaking change fails CI across all consumers atomically, in one PR; everything else (docs/site, commons, pro) lives OUTSIDE. Contract coupling decides repo shape — nothing else (D-5). [research 2026-07-14]
