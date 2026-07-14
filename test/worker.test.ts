@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { WorkerSettingsError } from "../src/lib/settings.js";
-import { collectWorkerResult, spawnWorker } from "../src/lib/worker.js";
+import { collectWorkerResult, parseDecisionRequest, spawnWorker } from "../src/lib/worker.js";
 
 // ── Synthetic SDK message streams ──────────────────────────────────────────
 // The real SDK yields a `type:"result"` envelope (even for an error subtype)
@@ -112,4 +112,60 @@ test("spawnWorker: an invalid settings file is REJECTED at the spawn boundary be
     WorkerSettingsError,
     "a misplaced sandbox key must be rejected before spawn, never silently dropped",
   );
+});
+
+// ── parseDecisionRequest golden fixtures — DECORATION IS NOT DATA ────────────
+// The auto-choose control plane (MASTER-PLAN §4) resolves a DECISION_REQUEST to
+// its RECOMMENDED option and records the value in DECISIONS.md. A label's chrome
+// (an inline `(RECOMMENDED)` marker, markdown emphasis, backticks, emoji) must
+// never bleed into that value. These two goldens pin the exact malformed payloads
+// that once did bleed.
+
+test("parseDecisionRequest: the WS-0 near-miss — inline (RECOMMENDED) marker does NOT bleed its `)` into options or the choice", () => {
+  // The exact WS-0 spike payload WITHOUT the explicit `RECOMMENDED:` line, so the
+  // parser must fall back to the inline-marked option. The original parser
+  // captured `)` from the `(RECOMMENDED)` marker (FINDINGS #5); it was right only
+  // by accident (the `)` value happened to equal the default).
+  const payload = [
+    "DECISION_REQUEST",
+    "- docs/spike.md",
+    "- docs/spike-hello.md (RECOMMENDED)",
+    "Reversibility: single new file, revert the PR to undo.",
+  ].join("\n");
+
+  const decision = parseDecisionRequest(payload);
+  assert.ok(decision, "the payload announces DECISION_REQUEST so it must parse");
+  // Option list carries the data, not the marker: NO stray `)` anywhere.
+  assert.deepEqual(decision.options, ["docs/spike.md", "docs/spike-hello.md"]);
+  for (const option of decision.options) {
+    assert.ok(!option.includes(")"), `option "${option}" must not carry the marker's ')'`);
+  }
+  // The choice is the clean path, never the bled `)`.
+  assert.equal(decision.recommended, "docs/spike-hello.md");
+});
+
+test("parseDecisionRequest: the T1D decorated string — bold, backticks, emoji, and trailing `****` are STRIPPED to the clean value", () => {
+  // The exact T1D auto-choose near-miss: a fully decorated option label. Same
+  // class as the WS-0 `)` bleed — decoration is not data.
+  const payload = [
+    "DECISION_REQUEST",
+    "**Option A — `docs/review-gate.md` (new doc)** ✅ ****",
+    "**Option B — inline the gate in CONTRIBUTING.md**",
+    "RECOMMENDED: **Option A — `docs/review-gate.md` (new doc)** ✅ ****",
+    "Reversibility: a single new doc; delete the file to undo.",
+  ].join("\n");
+
+  const decision = parseDecisionRequest(payload);
+  assert.ok(decision, "the payload announces DECISION_REQUEST so it must parse");
+  // The recommended value is the clean label: no `**`, no ✅, no trailing `****`,
+  // no backticks.
+  assert.equal(decision.recommended, "Option A — docs/review-gate.md (new doc)");
+  assert.ok(!decision.recommended.includes("*"), "no markdown asterisks survive");
+  assert.ok(!decision.recommended.includes("`"), "no backticks survive");
+  assert.ok(!decision.recommended.includes("✅"), "no emoji survives");
+  // Both options are decoration-stripped too.
+  assert.deepEqual(decision.options, [
+    "Option A — docs/review-gate.md (new doc)",
+    "Option B — inline the gate in CONTRIBUTING.md",
+  ]);
 });
