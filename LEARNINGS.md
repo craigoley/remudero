@@ -102,3 +102,8 @@ paid to discover, tagged with the run/PR that proved it. Rules:
 ## Documentation as a gated artifact
 
 - Docs are a GATED ARTIFACT, split by automatability: GENERATED docs (rmd --help, CLI reference, API ref, CHANGELOG) drift from code unless CI enforces byte-equality (regenerate + diff = RED) — the anti-rot mechanism; AUTHORED docs (concept/architecture/troubleshooting) are reviewer-gated (the docs rubric). ONE command registry feeds rmd --help + the GitHub /docs + the website — never three hand-copies. [research 2026-07-14] [subsystem: docs · files: src/run-task.ts, docs]
+
+## Reviewer floor & stale criteria
+
+- The reviewer's keyword floor was CASING/SEPARATOR-BLIND: `maxTurns` (criterion) vs `max_turns` (code/report YAML) tokenized as a MISS and false-blocked a correct PR (#42, W1-T5). Normalized in review.ts (split camelCase before lowercasing so maxTurns ≡ max_turns ≡ max-turns); the real fix is W1-T3F (observe repo state, don't match report keywords). [PR #42, W1-T5]
+- A criterion can go STALE when a LATER PR relocates a concept: PR #23 moved budget OFF the mount to per-task `budget_usd`, but W1-T5's criterion still named `maxBudgetUsd` as a mount knob. The Architect corrects a stale criterion via a plan PR; a worker never. Honesty test: nothing dropped or weakened — only realigned to the shipped architecture (Rule 15/16). [PR #42, W1-T5]

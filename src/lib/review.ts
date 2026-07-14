@@ -96,10 +96,19 @@ const STOPWORDS = new Set([
   "per",
 ]);
 
+/**
+ * Tokenise for keyword matching, NORMALISING identifier casing + separators so a
+ * criterion and its proof compare case- and separator-insensitively:
+ * `maxTurns` ≡ `max_turns` ≡ `max-turns`. camelCase is split into words BEFORE
+ * lowercasing (otherwise `maxTurns`→`maxturns` never matches `max_turns`→`max`,
+ * `turns`) — a real reviewer weakness that false-blocked PR #42 (W1-T5). This is a
+ * FLOOR hardening; the deeper fix is observing repo state (W1-T3F), not keywords.
+ */
 function tokenize(s: string): string[] {
   return s
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2") // split camelCase: maxTurns → max Turns
     .toLowerCase()
-    .split(/[^a-z0-9]+/)
+    .split(/[^a-z0-9]+/) // splits on _, -, space, punctuation alike
     .filter(Boolean);
 }
 

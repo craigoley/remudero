@@ -356,7 +356,10 @@
   principles: {tdd: strict}
   budget_usd: 100.00
   acceptance:
-    - claim: "mounts table keyed by (task_type x risk x thinking) resolves to real knobs (maxBudgetUsd, effort, maxTurns)"
+    # CORRECTED (Architect, plan PR): PR #23 relocated budget OFF the mount to per-task `budget_usd` (all
+    # 100). `maxBudgetUsd` is no longer a mount knob, and the code uses `max_turns` (YAML), not `maxTurns`.
+    # The criterion is realigned to the SHIPPED architecture — nothing dropped or weakened (Rule 15/16).
+    - claim: "mounts table keyed by (task_type x risk x thinking) resolves to real knobs (model, effort, max_turns, context_budget); budget is per-task budget_usd per PR #23, not a mount knob"
       proof: "resolver test: diagnose steps UP; routine retry does NOT"
     - claim: "Tier Invariant enforced at load (G-17): architect.tier > max(worker.tier)"
       proof: "a violating mounts.yaml is REJECTED with a named error"
