@@ -166,7 +166,6 @@ export async function probeContainment(opts: {
   token?: string;
 }): Promise<{ contained: true; reason: string; evidence: ContainmentEvidence; costUsd: number }> {
   const log = opts.log ?? (() => {});
-  const config = opts.config ?? loadConfig();
 
   // GATE 1 — config: the file must declare an enabled sandbox.
   try {
@@ -178,8 +177,11 @@ export async function probeContainment(opts: {
   }
 
   // GATE 2 — empirical: an outside-cwd write must be OS-denied under the sandbox.
+  // Resolve config lazily and ONLY for the real executor: an injected exec (tests)
+  // must never touch loadConfig (which resolves the claude binary — absent in CI).
   const token = opts.token ?? `${Date.now()}`;
-  const exec = opts.exec ?? defaultExecutor(opts.settingsFile, config, opts.budgetUsd);
+  const exec =
+    opts.exec ?? defaultExecutor(opts.settingsFile, opts.config ?? loadConfig(), opts.budgetUsd);
   const r = await exec(token);
   const evidence: ContainmentEvidence = {
     outsideWriteCreated: r.outsideWriteCreated,
