@@ -1,8 +1,4 @@
-# REMUDERO — Master Plan (v2.12 · synced 2026-07-14 · ★ KNOWLEDGE ARCHITECTURE: §8A memory hierarchy (Tier 0 stable prefix · Tier 1 matched injection · Tier 2 plan RETRIEVED not injected · Tier 3 run-local) + cache-aware STABLE-FIRST/VOLATILE-LAST ordering (measured via cache_read tokens); §8B compaction doctrine (detect+ledger, anchored summarization, write-before-compact); retros now question guards too (harness assumptions go stale); W1-T33–T39 close the five knowledge holes · FIRST RETRO (RETRO-1784058021334): WS-0
-shipped + WS-1 proto-runner LIVE — 9 PRs merged (SHIPPED log added), NET STATE refreshed off reality;
-first observed CALIBRATION row ($1.68/~20 turns mean, 53% merge rate) for mounts.yaml/W1-T5; 8
-non-merges mined into Retro proposals P1–P5; COMPRESSION: deleted the stale "run WS-0 spike v5.1" NEXT
-block + trimmed the WS-0 workstream entry (both superseded by the merges). Prior focus ★ DECOMPOSE BY CONCERN: mis-specified W1-T3 (8 criteria across 4 subsystems) SPLIT into W1-T3/B/C/D/E (+ W1-T3F) — every criterion survives VERBATIM, none dropped/weakened; NEW schema `satisfied_by` (Architect-only) marks a criterion an earlier merge already satisfied; Standing rule 16 (the Architect corrects a mis-specified task, a worker never; no criterion dropped, only redistributed) · CLIENTS & CONTRACT: D-5 RESOLVED (monorepo for everything consuming the daemon API — a breaking change fails CI across all consumers atomically; site/commons/pro stay separate); NEW §7A the API contract is the product boundary (`packages/api-client` GENERATED from ONE tailnet surface, no hand-rolled fetch); §7 rewritten as ONE web app / THREE shells (browser · Tauri macOS · Tauri iOS, Expo the documented iOS fallback; push is an adapter, not an app concern); website → WS-12 repo `remudero-site`; clients W3-T1..T5 gate on the contract · BUDGET IS A TRIPWIRE, NOT AN ALLOWANCE: budget_usd is a runaway BUG DETECTOR (default $100, an order of magnitude above observed), a soft $25 line WARNS-and-continues, blocked_budget = "looping" — W1-T3 was killed mid-work at $3.57 vs a guessed $4; same bug as maxTurns (PR #8) · THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
+# REMUDERO — Master Plan (v2.13 · synced 2026-07-14 · ★ KNOWLEDGE ARCHITECTURE: §8A memory hierarchy (Tier 0 stable prefix · Tier 1 matched injection · Tier 2 plan RETRIEVED not injected · Tier 3 run-local) + cache-aware STABLE-FIRST/VOLATILE-LAST ordering (measured via cache_read tokens); §8B compaction doctrine (detect+ledger, anchored summarization, write-before-compact); retros now question guards too (harness assumptions go stale); W1-T33–T39 close the five knowledge holes · RETROS ×2: R1 (…021334) shipped WS-0 + WS-1 proto-runner (9 PRs), seeded CALIBRATION + proposals P1–P5; R2 (…391543) logs W1-T19/#34 + W1-T3F/#35 (2/2 merged), refreshes NET STATE to 11 PRs / 19 runs, adds this cycle's calibration row, mines 0 new failures, and COMPRESSES the first-retro changelog prose folded here. Prior focus ★ DECOMPOSE BY CONCERN: mis-specified W1-T3 (8 criteria across 4 subsystems) SPLIT into W1-T3/B/C/D/E (+ W1-T3F) — every criterion survives VERBATIM, none dropped/weakened; NEW schema `satisfied_by` (Architect-only) marks a criterion an earlier merge already satisfied; Standing rule 16 (the Architect corrects a mis-specified task, a worker never; no criterion dropped, only redistributed) · CLIENTS & CONTRACT: D-5 RESOLVED (monorepo for everything consuming the daemon API — a breaking change fails CI across all consumers atomically; site/commons/pro stay separate); NEW §7A the API contract is the product boundary (`packages/api-client` GENERATED from ONE tailnet surface, no hand-rolled fetch); §7 rewritten as ONE web app / THREE shells (browser · Tauri macOS · Tauri iOS, Expo the documented iOS fallback; push is an adapter, not an app concern); website → WS-12 repo `remudero-site`; clients W3-T1..T5 gate on the contract · BUDGET IS A TRIPWIRE, NOT AN ALLOWANCE: budget_usd is a runaway BUG DETECTOR (default $100, an order of magnitude above observed), a soft $25 line WARNS-and-continues, blocked_budget = "looping" — W1-T3 was killed mid-work at $3.57 vs a guessed $4; same bug as maxTurns (PR #8) · THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -32,18 +28,25 @@ autonomous-PR tools like Composio AO; plan-lifecycle tools like ivy-tendril; nat
 ## NET STATE
 
 WS-0 spike SHIPPED (7/7 verdicts GREEN, PR #1). WS-1 proto-runner is LIVE and eating its own backlog:
-the reviewer + enforced merge gate (W1-T1C/#11, W1-T1D/#12) and the escalation/notifier/ledger arc
-(W1-T3/B/C/D/E → PR #26–#30) have landed through `rmd run-task`. 9 PRs merged all-time across
-remudero + remudero-sandbox; **$28.56 spent over 17 implement runs — 9 merged, 8 non-merged**
-(blocked_budget×3, blocked_review×2, incomplete×2, blocked_ci×1 — see Calibration + Retro proposals).
-NEXT: continue the WS-1 queue (strike/transient classifier, launchd unit, daemonization last) through
-the closed gate; mount-routing (mounts.yaml, W1-T5) now has its first calibration row below.
+the reviewer + enforced merge gate (W1-T1C/#11, W1-T1D/#12), the escalation/notifier/ledger arc
+(W1-T3/B/C/D/E → PR #26–#30), and the compounding-knowledge pair — Promptsmith LEARNINGS injection
+(W1-T19/#34, the READ side) + reviewer-verifies-against-repo-state (W1-T3F/#35) — have all landed
+through `rmd run-task`. **11 PRs merged all-time** across remudero + remudero-sandbox; **$34.92 spent
+over 19 implement runs — 11 merged, 8 non-merged** (58% merge rate; the 8 non-merges: blocked_budget×3,
+blocked_review×2, incomplete×2, blocked_ci×1 — see Calibration + Retro proposals). §8A/§8B knowledge
+architecture + the five knowledge-hole tasks W1-T33–T39 are now planned (PR #36). NEXT: continue the
+WS-1 queue (strike/transient classifier, launchd unit, daemonization last) and drain W1-T33–T39 through
+the closed gate; mount-routing (mounts.yaml, W1-T5) keys off the calibration rows below.
 
 ## SHIPPED log
 
 Shipped arcs, keyed by Remudero-Task (Standing rule 13: the proof is a MERGED PR, not prose).
 Newest first. Cost/turns from the run ledger.
 
+- **W1-T3F** — reviewer verifies acceptance criteria against REPO STATE, not diff+report alone (rule
+  16 correction of the mis-specified W1-T3) → craigoley/remudero#35 · $2.31 · 21 turns
+- **W1-T19** — Promptsmith injects LEARNINGS into worker prompts — the READ side of the compounding
+  thesis (recon/reviewer/diagnose knowledge feeds forward) → craigoley/remudero#34 · $4.05 · 49 turns
 - **W1-T3E** — escalation/notifier/ledger arc, split 5/5 → craigoley/remudero#30 · $3.73 · 31 turns
 - **W1-T3D** — escalation/notifier/ledger arc, split 4/5 → craigoley/remudero#29 · $1.77 · 21 turns
 - **W1-T3C** — escalation/notifier/ledger arc, split 3/5 → craigoley/remudero#28 · $2.64 · 42 turns
@@ -59,25 +62,39 @@ Newest first. Cost/turns from the run ledger.
 - **WS-0 spike** — 7/7 verdicts GREEN, loop closed unattended; ground truth in FIELD FINDING 10 →
   craigoley/remudero#1 · $0.86
 
-## Calibration (observed — all-time through RETRO-1784058021334, 2026-07-14)
+## Calibration (observed — all-time through RETRO-1784060391543, 2026-07-14)
 
 The empirical baseline mounts.yaml (W1-T5) and Flight-control burn-rate signals (§4B Layer 1) key off.
-First retro; 17 runs in scope, one task_type has data.
+Two retros; only `implement` has data.
+
+**All-time (19 runs):**
 
 | task_type | runs | merged | avg $ | avg turns | total $ |
 |---|---|---|---|---|---|
-| implement | 17 | 9 | $1.680 | 19.824 | $28.561 |
+| implement | 19 | 11 | $1.838 | 21.4 | $34.919 |
 
-Reads: mean implement run ≈ **$1.68 / ~20 turns**; the $100 `budget_usd` tripwire sits ~60× the mean
-run (runaway detector, not an allowance — §4B). Merge rate **53% (9/17)**; the 8 non-merges break down
-in the Retro proposals below. mounts.yaml v0 stays a single-row static table until recon/reviewer/
-diagnose runs accrue their own rows.
+**This cycle (RETRO-1784060391543 — 2 runs, W1-T19 + W1-T3F):**
 
-## Retro proposals (RETRO-1784058021334 — PROPOSALS ONLY; NOT yet in plan/tasks.yaml)
+| task_type | runs | merged | avg $ | avg turns | total $ |
+|---|---|---|---|---|---|
+| implement | 2 | 2 | $3.179 | 35 | $6.358 |
 
-Mined from the 8 non-merges (blocked_budget×3, blocked_review×2, incomplete×2, blocked_ci×1). Candidate
-golden/plan tasks for the Architect to ratify via a tasks.yaml PR — never auto-filed, never worker-edited
-(rule 15).
+Reads: all-time mean ≈ **$1.84 / ~21 turns**, merge rate **58% (11/19)**; the $100 `budget_usd`
+tripwire sits ~50× the mean (runaway detector, not an allowance — §4B). This cycle ran hot ($3.18/35
+turns) — both were harder knowledge-plumbing tasks (LEARNINGS injection, repo-state verification), not
+a regression; the 2/2 merge lifts the all-time rate. mounts.yaml v0 stays a static table until
+recon/reviewer/diagnose runs accrue their own rows.
+
+## Retro proposals (PROPOSALS ONLY; NOT yet in plan/tasks.yaml)
+
+**RETRO-1784060391543 (this cycle) — NO new proposals.** Both runs in scope (W1-T19, W1-T3F) MERGED
+(2/2); zero `blocked_*` or `incomplete` verdicts to mine. P1–P5 below (from RETRO-1784058021334)
+remain **OPEN and unratified** — the Architect should still land them via a tasks.yaml PR; a clean
+cycle does not retire them.
+
+**RETRO-1784058021334** — mined from the 8 all-time non-merges (blocked_budget×3, blocked_review×2,
+incomplete×2, blocked_ci×1). Candidate golden/plan tasks for the Architect to ratify via a tasks.yaml
+PR — never auto-filed, never worker-edited (rule 15).
 
 - **P1 (golden) — blocked_budget ×3 is the largest failure class.** Three runs tripped `budget_usd`
   mid-work: exactly the "caught by a terminal cliff, post-burn" pattern §4B Flight control exists to
