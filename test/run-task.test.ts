@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { workerErrorVerdict } from "../src/run-task.js";
+import { DEFAULT_BUDGET_USD, softBudgetWarning, workerErrorVerdict } from "../src/run-task.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 
 /** Build a minimal WorkerResult for the verdict-mapping tests. */
@@ -36,6 +36,36 @@ test("workerErrorVerdict: error_max_budget_usd → blocked_budget, NOT retried, 
   assert.equal(v.ledger.num_turns, 3);
   assert.equal(v.ledger.cost_usd, 0.011);
   assert.equal(v.ledger.billing_mode, "subscription");
+});
+
+// ── Budget = a RUNAWAY TRIPWIRE, not an allowance (MASTER-PLAN §9) ──────────
+
+test("DEFAULT_BUDGET_USD is the tripwire default (100), an order of magnitude above observed work", () => {
+  // Observed so far: hello-world $0.41 · reviewer $2.26 · gate-wiring $1.28 ·
+  // containment ~$2.0 · W1-T3 still working at $3.57. 100 fires only on pathology.
+  assert.equal(DEFAULT_BUDGET_USD, 100.0);
+});
+
+test("softBudgetWarning: WARNS ONCE at the soft threshold, then CONTINUES (never a kill)", () => {
+  const threshold = 25;
+  // Below the line: no warning.
+  assert.equal(softBudgetWarning(3.57, threshold, false), false);
+  // Crossing the line, not yet warned: warn now.
+  assert.equal(softBudgetWarning(25, threshold, false), true);
+  assert.equal(softBudgetWarning(40, threshold, false), true);
+  // Already warned: never warn again (warn-once), even as cost keeps climbing.
+  assert.equal(softBudgetWarning(40, threshold, true), false);
+  assert.equal(softBudgetWarning(99, threshold, true), false);
+});
+
+test("the SOFT warning is independent of the HARD kill: crossing the soft line does NOT block", () => {
+  // A soft-threshold crossing is only a visibility signal; the ONLY thing that
+  // yields blocked_budget is the worker's error_max_budget_usd envelope (the hard
+  // cap), which the run-loop maps via workerErrorVerdict — proven above. The soft
+  // predicate returns a boolean to LOG, never a verdict.
+  assert.equal(typeof softBudgetWarning(50, 25, false), "boolean");
+  const notABreach = result({ isError: false, subtype: "success", costUsd: 50 });
+  assert.equal(workerErrorVerdict(notABreach, 50, "implement"), null); // expensive ≠ blocked
 });
 
 test("workerErrorVerdict: error_max_turns → failed, still ledgers num_turns AND cost_usd", () => {
