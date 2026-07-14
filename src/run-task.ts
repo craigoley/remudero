@@ -263,15 +263,34 @@ async function runReview(args: {
   // BINDING deterministic verdict; the orchestrator is the authoritative poster.
   const verdict = judgeReview(criteria, { diff, report, semantic });
   postReviewStatus({ owner, repo, sha: headSha, state: verdict.state, description: verdict.summary });
-  const reasons = verdict.criteria.filter((c) => !c.met).map((c) => c.reason);
+  const unmet = verdict.criteria.filter((c) => !c.met);
+  const unmetClaims = unmet.map((c) => c.claim);
+  const reasons = unmet.map((c) => c.reason);
   if (verdict.testTheater) reasons.push("test theater: added tests assert nothing");
+  // The gate TEACHES: the FULL list of unmet criteria goes to the ledger (and the
+  // PR comment below) — the status description names only the first (length-capped).
   log("review.posted", {
     context: REVIEW_CONTEXT,
     state: verdict.state,
     head_sha: headSha,
     test_theater: verdict.testTheater,
+    unmet_criteria: unmetClaims,
     reasons,
   });
+  if (verdict.state !== "success" && (unmetClaims.length > 0 || verdict.testTheater)) {
+    // Post the full unmet list as a PR comment so a blocked PR names its gap in one
+    // place a human (or the next run) reads. Best-effort — never blocks the verdict.
+    const body =
+      `**remudero-review=failure** — the following acceptance ${unmetClaims.length === 1 ? "criterion is" : "criteria are"} unmet:\n\n` +
+      unmetClaims.map((c, i) => `${i + 1}. ${c}\n   - ${unmet[i].reason}`).join("\n") +
+      (verdict.testTheater ? `\n\n_Also: test theater — added tests assert nothing._` : "") +
+      `\n\nAdd the missing work (or escalate). Do NOT edit the acceptance criteria to match the diff.`;
+    try {
+      execFileSync("gh", ["pr", "comment", prUrl, "--body", body], { stdio: "pipe" });
+    } catch {
+      /* comment is best-effort; the status + ledger already carry the verdict */
+    }
+  }
   say(`remudero-review=${verdict.state} posted to ${headSha.slice(0, 7)} — ${verdict.summary}`);
   return { ...verdict, headSha };
 }

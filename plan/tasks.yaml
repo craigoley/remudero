@@ -176,6 +176,10 @@
         a diff that edits one call site but leaves a sibling caller stale -> callers-audited=fail; an
         added test that asserts nothing -> theater=fail; a behavior-changing diff labelled refactor ->
         honesty=fail; a clean single-concern diff -> all four pass"
+    - claim: "a failing remudero-review status NAMES the unmet criterion, not just a count (the gate
+        TEACHES: a gate that says only 'no' costs a human round-trip; one that names the gap feeds the loop)"
+      proof: "on a planted failure, the status description contains the unmet criterion's text; the golden
+        PR #12 fixture asserts the SPECIFIC criterion named, not merely state=failure"
   status: queued
   attempts: 0
 

@@ -1,4 +1,4 @@
-# REMUDERO — Master Plan (v2.6 · synced 2026-07-14 · ★ QUALITY BAR: §5 expanded into the three-tier gate stack (security / quality / architecture) + fleet-hardened CI mechanics; §5A "the bar is INHERITED, not optional" — `rmd project init` provisions it (W1-T23–T28, W2-T2); remudero runs the strictest profile on itself · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
+# REMUDERO — Master Plan (v2.7 · synced 2026-07-14 · ★ THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -1000,6 +1000,10 @@ WS-11 after WS-4 + a second project on the harness.
    as one side's deliverable.** T1C built the reviewer and T1D was to enforce it, but NEITHER owned
    `run-task.ts` CALLING it; the reviewer was fully-tested dead code for two PRs. The wiring is a
    deliverable, not a seam. [PR #12/#13]
+15. **When a worker is blocked by an acceptance gate, it may ADD the missing work or ESCALATE. It may
+   NEVER edit the acceptance criteria to match its diff.** Workers have write access to `plan/tasks.yaml`,
+   so this prohibition is stated in every rendered prompt, not assumed. The gate names the gap; the fix
+   is to close the gap, not to move the goalposts. [session doctrine]
 
 ## 13. Collaboration protocol (this document)
 

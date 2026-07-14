@@ -5,6 +5,7 @@ import {
   REVIEW_CONTEXT,
   buildReviewPrompt,
   detectTestTheater,
+  failSummary,
   judgeReview,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
@@ -265,6 +266,37 @@ test("GOLDEN (PR #12): a CI-green single-doc PR that satisfies zero criteria yie
   // — exactly why a doc that DESCRIBES a mechanism is not proof it EXISTS. Criteria 2 & 3
   // (which demand a planted-probe status and a ledger) are unmet, so the verdict fails.
   assert.ok(v.criteria.some((c) => !c.met), "at least one criterion is unmet");
+  // The gate TEACHES: the status description NAMES the first unmet criterion (criterion 2,
+  // the first one the doc did not substantiate), not merely "N criteria unmet". Assert WHICH.
+  const firstUnmet = v.criteria.find((c) => !c.met)!;
+  assert.equal(firstUnmet.claim, W1T1D_CRITERIA[1].claim, "criterion 2 is the first unmet");
+  assert.ok(
+    v.summary.includes("a PR that is CI-GREEN but FAILS acceptance is NOT merged"),
+    `summary must NAME the unmet criterion, got: ${v.summary}`,
+  );
+  assert.match(v.summary, /\(\+1 more\)/); // criterion 3 is also unmet
+});
+
+test("failure summary NAMES the first unmet criterion (not just a count)", () => {
+  const criteria: AcceptanceCriterion[] = [
+    { claim: "the widget is frobnicated", proof: "grep of src shows frobnicate(widget) called at the boundary" },
+  ];
+  // A report that does not substantiate the proof ⇒ the one criterion is unmet.
+  const v = judgeReview(criteria, { diff: "", report: "did something else entirely" });
+  assert.equal(v.state, "failure");
+  assert.ok(v.summary.includes("the widget is frobnicated"), `got: ${v.summary}`);
+  assert.doesNotMatch(v.summary, /more\)/); // only one unmet ⇒ no "(+N more)"
+});
+
+test("failSummary: names the first unmet, appends (+N more), and truncates a long claim within the limit", () => {
+  const long = "x".repeat(300);
+  const s = failSummary([long, "second", "third"], false, false);
+  assert.ok(s.length <= 140, `status description must fit 140 chars, got ${s.length}`);
+  assert.match(s, /…/); // the long claim is ellipsis-truncated
+  assert.match(s, /\(\+2 more\)/);
+  // empty-criteria and theater-only branches keep their explicit messages.
+  assert.match(failSummary([], false, true), /no acceptance criteria to judge/);
+  assert.match(failSummary([], true, false), /test theater/);
 });
 
 test("buildReviewPrompt: fresh, read-only, gh-only, posts remudero-review, never edits", () => {
