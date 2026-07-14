@@ -584,30 +584,39 @@
   attempts: 0
 
 - id: W1-T19
-  title: Promptsmith template preamble — distrust-the-prompt + autonomy + LEARNINGS provenance
+  title: Promptsmith injects LEARNINGS — the READ side of the compounding thesis (PULLED FORWARD)
   repo: remudero
-  depends_on: [W1-T1, W1-T1B, W1-T1D]
+  depends_on: [W1-T3, W1-T3B, W1-T3C, W1-T3D, W1-T3E]
   type: implement
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  rationale: "The prompt has been WRONG three times against the installed version (allowedDomains nesting,
-    the $loose schema, ZDOTDIR-vs-snapshot). Every rendered prompt must carry the antidote as a fixed
-    preamble, plus the autonomy clause (Standing rule 8) so workers never stall on a human, plus the
-    LEARNINGS.md facts relevant to the task as cited CONTEXT — the knowledge pipeline feeding forward."
+  rationale: "THE COMPOUNDING THESIS IS BROKEN AT THE READ SIDE: LEARNINGS.md is written and never read —
+    every worker starts fresh and re-learns what is written two files away. PULLED FORWARD to run NEXT
+    after the T3 family (was buried behind a dozen tasks) because until this ships, every run pays the
+    re-learning tax. GitHub's repo-scoped agentic memory (Jan 2026) validates provenance-tagged,
+    repo-scoped, JUST-IN-TIME-verified learnings — and the READ side is exactly what we are missing."
   design: |
-    Extend the prompt renderer (renderImplementPrompt) with a PREAMBLE injected into every rendered
-    prompt containing: (a) DISTRUST THE PROMPT OVER THE INSTALLED VERSION — read the installed
-    schema/binary; this prompt has been wrong three times; (b) the autonomy clause — never ask
-    permission to merge a green PR, the gate is the contract (Standing rule 8); (c) the LEARNINGS.md
-    entries matching the task (by tag/keyword) as provenance-tagged CONTEXT claims. Keep provenance
-    linting intact — injected LEARNINGS claims carry their [src].
+    Extend the prompt renderer (renderImplementPrompt) to inject, per task: (a) DISTRUST THE PROMPT OVER
+    THE INSTALLED VERSION; (b) the autonomy clause (Standing rule 8); (c) the LEARNINGS entries MATCHING
+    the task. Matching is DETERMINISTIC, not semantic: give each LEARNINGS entry a `subsystem:` tag and
+    `files:` (globs); inject ONLY entries whose globs match the task's repo/files, each as a
+    provenance-tagged CONTEXT claim `[src: learnings#<id>]`. Enforce a KNOWLEDGE BUDGET — cap the injected
+    chars so a growing LEARNINGS file never becomes an unbounded context tax; over budget, keep the
+    highest-relevance/most-recently-cited entries and drop the rest (logged). Provenance linting stays
+    intact (injected claims carry their [src]).
   acceptance:
     - claim: "every rendered prompt injects the distrust-the-prompt rule, the autonomy clause, and matched LEARNINGS entries"
       proof: "a rendered-prompt fixture test asserts all three are present: the distrust string, the
         autonomy string, and at least one provenance-tagged LEARNINGS line for a task with a matching tag"
     - claim: "injected LEARNINGS context still passes the provenance linter"
       proof: "assertProvenance over a rendered prompt with injected LEARNINGS claims is clean (each carries [src])"
+    - claim: "matching is DETERMINISTIC by subsystem/files, not semantic — only relevant entries inject"
+      proof: "a task touching worker.ts receives the ZDOTDIR/CLAUDE_CODE_SHELL learning and NOT the
+        CI/changelog ones (fixture test over tagged entries)"
+    - claim: "the KNOWLEDGE BUDGET cap is enforced (a growing file is not an unbounded context tax)"
+      proof: "a test with more matching entries than the char budget injects only up to the cap and drops
+        the rest, logging what was dropped; the rendered prompt never exceeds the budget"
   status: queued
   attempts: 0
 
@@ -1055,5 +1064,105 @@
       proof: "deploy URL is live; the LEARNINGS page renders the harness's LEARNINGS.md — paste the URL + the LEARNINGS route"
     - claim: "the quickstart takes a clean machine to a first auto-merged PR"
       proof: "a clean-machine run following ONLY the site quickstart reaches a first auto-merged PR — paste the transcript/recording (the WS-4 acceptance bar)"
+  status: queued
+  attempts: 0
+
+# ── SELF-DOCUMENTATION QUEUE (retro RETRO-1784058021334 + this plan PR). The harness writes knowledge but
+# nothing READS or VERIFIES it; the plan drifts silently from the system. These close the read/verify side. ─
+- id: W1-T29
+  title: PLAN-CLAIMS — plan/claims.yaml + a CI job that fails when the plan LIES about the system
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Docs-as-code fails because it assumes humans notice when documentation falls behind. The
+    missing piece is the AWARENESS LAYER connecting a change to the docs it falsified [research]. Plan
+    prose is unverifiable; a FALSIFIABLE claim with a command that must exit 0 is not. A red claim means
+    THE PLAN IS LYING ABOUT THE SYSTEM — caught in CI, not by a human noticing months later."
+  design: |
+    NEW FILE plan/claims.yaml: a list of {id, claim, plan_section, assertion: a shell command that must
+    exit 0}. A CI job runs every assertion; any non-zero exit fails the job and NAMES the false claim.
+    Seed with claims already checkable: workers get NO MCP config · buildWorkerEnv strips all ANTHROPIC_*
+    · tasks.yaml is never machine-written · DEFAULT_BUDGET_USD is 100 · containment fails closed · the
+    merge gate requires [ci, remudero-review].
+  acceptance:
+    - claim: "plan/claims.yaml exists and a CI job runs every claim's assertion, seeded with the six checkable claims"
+      proof: "the claims CI job runs green on main with all seeded assertions exiting 0 — paste the job output"
+    - claim: "a deliberately-broken claim turns the claims job RED and NAMES the false claim"
+      proof: "reverting one assertion's premise (or breaking its command) makes the job exit non-zero and print the failing claim id/text — paste the red run, then revert"
+  status: queued
+  attempts: 0
+
+- id: W1-T30
+  title: Docs skeleton + the AWARENESS LAYER (a reviewer rubric item ties behavior changes to docs)
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 100.00
+  rationale: "Docs barely exist and WS-12's site is meant to PUBLISH them. Conceptual guides are NOT
+    automatable — they need context absent from the codebase [research] — so this seeds them by hand AND
+    adds the awareness layer: a diff changing user-visible behavior must update the docs it falsified, or
+    state why not. Generation is separated from publication; the gate enforces the connection."
+  design: |
+    Add docs/{architecture,operator-guide,task-lifecycle}.md (hand-written conceptual guides, the
+    non-automatable kind). Add a REVIEWER RUBRIC item (MASTER-PLAN §5 layer 2): a diff changing
+    user-visible behavior (CLI surface, config, gate, verdicts) must update docs OR state why not in the
+    REPORT.
+  acceptance:
+    - claim: "the three conceptual guides exist (architecture, operator-guide, task-lifecycle)"
+      proof: "docs/architecture.md, docs/operator-guide.md, docs/task-lifecycle.md are present and non-trivial — paste the file list + first heading of each"
+    - claim: "the reviewer rubric FLAGS a behavior-changing diff with no doc update"
+      proof: "fixture test: a planted diff that changes a CLI/gate/verdict surface with NO docs/ change and no stated reason -> the awareness rubric item fails; the same diff WITH a doc update or a stated reason -> passes"
+  status: queued
+  attempts: 0
+
+- id: W1-T31
+  title: Conventional Commits + generated CHANGELOG + semver (§6A promised semver; version is 0.0.0-pre-alpha)
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 100.00
+  rationale: "Changelogs and version bumps are STRUCTURED-IN → STRUCTURED-OUT — the automatable kind of
+    docs [research]. §6A promised semver but the version is still 0.0.0-pre-alpha. Conventional Commits
+    give the machine the structure to generate a CHANGELOG and pick the bump; the human/gate approve it."
+  design: |
+    Adopt Conventional Commits (commitlint in CI blocks a malformed message). Generate CHANGELOG.md from
+    commit history; a feat: bumps minor, fix: bumps patch, breaking bumps major. Publication stays gated
+    (the generated CHANGELOG lands via the normal PR gate).
+  acceptance:
+    - claim: "a feat: commit produces a minor-bump CHANGELOG entry"
+      proof: "running the changelog generator over a history containing a feat: commit yields a new minor version section naming that change — paste the generated diff"
+    - claim: "commitlint blocks a malformed commit message in CI"
+      proof: "a PR whose commit violates Conventional Commits goes CI-red on the commitlint job — paste the red check, then fix"
+  status: queued
+  attempts: 0
+
+- id: W1-T32
+  title: DECISIONS.md hygiene — trivial auto-choices are NOISE that buries the real decisions
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Auto-choose appends EVERY DECISION_REQUEST (including trivial filename picks) to DECISIONS.md;
+    at fleet volume that buries the decisions that actually matter under noise. Route by risk: only
+    decisions worth a human's future attention belong in the durable record; the rest are ledger-only."
+  design: |
+    In the auto-choose path (run-task.ts), gate the DECISIONS.md append on risk: a decision lands in
+    DECISIONS.md ONLY if its risk is >= medium OR it carries an explicit reversibility note; everything
+    else is recorded in the ledger only. Deterministic risk read from the decision's own signals.
+  acceptance:
+    - claim: "only decisions with risk >= medium (or an explicit reversibility note) land in DECISIONS.md"
+      proof: "unit test: a trivial filename auto-choice is ledgered but NOT appended to DECISIONS.md; a
+        medium+ (or reversibility-noted) decision IS appended — over recorded decision fixtures"
+    - claim: "the trivial decisions are still recorded (ledger-only), never silently dropped"
+      proof: "the same trivial auto-choice appears as a decision.autochoose ledger line even though it is absent from DECISIONS.md"
   status: queued
   attempts: 0
