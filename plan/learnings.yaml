@@ -131,3 +131,39 @@
     models improve — a retro must question and retire guards, not only add them.
   src: research#scaling-managed-agents
   cited: "2026-07-14"
+
+# ── Agent SDK tools & the feedback front door (§7B) [research 2026-07-14] ──
+- id: sdk-builtin-tools-are-the-boundary
+  subsystem: sdk-tools
+  files: [src/lib/worker.ts, src/run-task.ts]
+  fact: >-
+    The Agent SDK ships built-in tools (Read/Write/Edit/Bash/Glob/Grep/WebSearch/WebFetch/AskUserQuestion/
+    Monitor/Agent); allowedTools is enough to enable them AND doubles as a security boundary — the agent
+    cannot use a tool you do not list.
+  src: research#agent-sdk-tools
+  cited: "2026-07-14"
+- id: askuserquestion-headless-unverified
+  subsystem: feedback
+  files: [src/run-task.ts]
+  fact: >-
+    AskUserQuestion is a built-in tool (the grill mechanism, natively). UNVERIFIED whether it works
+    headlessly or only with a human at the terminal — verify before wiring the grill.
+  src: research#agent-sdk-tools
+  cited: "2026-07-14"
+- id: websearch-serverside-webfetch-unverified
+  subsystem: sdk-tools
+  files: [src/lib/worker.ts, src/run-task.ts]
+  fact: >-
+    WebSearch is SERVER-SIDE (Anthropic's) so it researches without opening the sandbox allowedDomains;
+    whether WebFetch is likewise server-side or a LOCAL fetch is UNVERIFIED and decides if it touches
+    containment.
+  src: research#agent-sdk-tools
+  cited: "2026-07-14"
+- id: webtools-are-injection-surface
+  subsystem: sdk-tools
+  files: [src/lib/worker.ts, settings/worker.json]
+  fact: >-
+    claude-code-action DISABLES WebSearch/WebFetch by default — fetched content is a prompt-injection
+    surface. Grant web tools to the Architect only; implement workers never get them.
+  src: research#claude-code-action
+  cited: "2026-07-14"
