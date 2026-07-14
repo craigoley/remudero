@@ -112,6 +112,21 @@ WS-0 spike; its six verdicts gate everything after it.
        deterministic floor held. The `dontAsk` fallback is implemented but **UNTESTED** (golden task).
     j. Near-miss disclosed by the worker: the DECISION_REQUEST parser captured `")"` from an inline
        `(RECOMMENDED)` marker and was right only by luck ⇒ **auto-choose parser golden task**.
+11. **★ UNATTENDED-RUNS HARDENING (PR #8, W1-T1C dead-run post-mortem — see LEARNINGS.md).** Full list
+    lives in `LEARNINGS.md` at repo root (WS-8 knowledge pipeline); the load-bearing ones:
+    a. **Claude Code's Bash-tool snapshot sources `$HOME/.zshrc` via `os.homedir()` — `ZDOTDIR` is
+       IGNORED.** Shell isolation must set `CLAUDE_CODE_SHELL` (the rc filename follows the shell),
+       never ZDOTDIR alone. Disassembled the installed binary to establish this (Standing rule 7). [PR #8]
+    b. **The current `/bin/bash` isolation works ONLY because `~/.bashrc` is absent on this host** — an
+       accident, not construction; a populated `~/.bashrc` isolates nothing ⇒ **W1-T17 preflight probe
+       (fail-closed) + W1-T18 general mechanism (OSS blocker).** [PR #8]
+    c. **The SDK yields the `type:"result"` envelope (`num_turns`, `total_cost_usd`, `subtype`) and THEN
+       throws** from the iterator on an error subtype — read the envelope before the catch, or a failed
+       run looks free in the ledger (failures are the runs that burn most). [PR #8]
+    d. **`maxBudgetUsd` is checked BETWEEN turns**: a $0.01 budget produced $0.21 of real spend. It is a
+       circuit breaker with up to one turn of overshoot, NOT a hard cap — budgets need headroom. [PR #8]
+    e. Reaffirms 10a (settings fail SILENTLY under `-p`) and the `$loose`-schema catch (W1-T1): validating
+       against the SDK schema alone PASSES a misplaced key — validate shape explicitly. [WS-0 / W1-T1]
 
 ---
 
@@ -789,6 +804,11 @@ WS-11 after WS-4 + a second project on the harness.
 8. The loop never waits on a human unless the plan says so. Idle = groom.
 9. OSS defaults must be defensible on a stranger's machine; yolo is a documented opt-in.
 10. This document is truth. Every session syncs it before acting and after shipping.
+11. **Isolation and containment are PROVEN PER RUN by probe, never assumed from configuration.** A
+   setting that "should" isolate (ZDOTDIR, a sandbox block, a stripped env) is a hypothesis until a
+   preflight probe confirms it on THIS machine, THIS run — config that happens to work by accident of
+   the host (PR #8: isolation held only because `~/.bashrc` was absent) must fail closed the moment the
+   accident ends. See FIELD FINDING 11, W1-T17.
 
 ## 13. Collaboration protocol (this document)
 

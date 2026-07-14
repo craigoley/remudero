@@ -60,8 +60,11 @@
   pr: 3                     # merged PR #3 -> deriveStatus resolves this task as merged
   attempts: 0
 
+# SPLIT (was one W1-T1C carrying four deliverables — violated one-concern-per-PR). Now two tasks:
+#   W1-T1C = "the reviewer can JUDGE" — the review worker posts a verdict (NOT yet required).
+#   W1-T1D = "the gate ENFORCES the reviewer" — protection requires it; verified live both ways.
 - id: W1-T1C
-  title: Acceptance verdict as a REQUIRED status check (closes the green-checks-aren't-evidence gap)
+  title: The reviewer can judge — a fresh-context REVIEW worker posts remudero-review
   repo: remudero
   depends_on: [W1-T1B]
   type: implement
@@ -69,10 +72,10 @@
   principles: {tdd: strict}
   budget_usd: 4.00
   rationale: "Standing rule 4 says green checks are NOT evidence, yet today `merged` means only that CI
-    passed — no one verifies the task's acceptance criteria. The reviewer sits in WS-2, AFTER ~10
-    self-modifying WS-1 PRs. Also: blocked_ci currently leaves auto-merge ARMED, so a runner-rejected PR
-    can still land GitHub-side with no verdict. Both symptoms, one root cause: the merge gate is a
-    runner-side decision that can be raced. Fix: make it a GitHub-enforced contract."
+    passed — no one verifies the task's acceptance criteria. Build the JUDGE first, as a decoupled
+    step that posts a commit status; enforcement is a separate concern (W1-T1D). Splitting lets the
+    falsifier — does the reviewer actually FAIL a test-passing-but-acceptance-ignoring diff? — be proven
+    as a UNIT FIXTURE before any live gate depends on it."
   design: |
     After ci goes green, a REVIEW worker (FRESH context — never the implementer's session; read-only
     tools + gh) reads: the PR diff, the task's acceptance criteria from tasks.yaml, and the implement
@@ -80,28 +83,53 @@
       gh api -X POST repos/{owner}/{repo}/statuses/{sha} -f context=remudero-review -f state=success|failure
     A criterion whose proof is missing, unpasted, or non-responsive = FAILURE. Test theater
     (assertions that assert nothing) = FAILURE. The reviewer may never edit code.
-    Then add `remudero-review` to required_status_checks contexts alongside `ci`.
-    ORDERING (bootstrap, same pattern as T1B): this PR merges under the CURRENT gate (ci only);
-    protection is updated to require remudero-review only AFTER it merges. State that in the REPORT.
-    Auto-merge may then stay armed permanently: GitHub merges only when BOTH checks are green, so the
-    runner's exit verdict becomes advisory telemetry and can no longer diverge from reality.
+    This PR does NOT touch branch protection — remudero-review is posted but NOT required yet (W1-T1D
+    does that). The verdict LOGIC is factored into a pure function so the falsifier is a unit fixture.
   acceptance:
-    - claim: "a REVIEW worker posts remudero-review to the PR head commit after ci is green"
-      proof: "gh api .../statuses/<sha> shows context=remudero-review with a state"
-    - claim: "a PR that is CI-GREEN but FAILS acceptance is NOT merged"
+    - claim: "a REVIEW worker with FRESH context posts remudero-review to the PR head commit after ci is green"
+      proof: "gh api .../statuses/<sha> shows context=remudero-review with a state on a real PR"
+    - claim: "FALSIFIER (unit fixture): a diff that PASSES tests while ignoring a stated acceptance
+        criterion yields state=failure; test theater (assertions that assert nothing) yields failure"
+      proof: "unit test over recorded fixtures: (criterion, diff, report) with an unmet proof -> the
+        verdict function returns failure; a responsive+proven criterion -> success"
+    - claim: "the reviewer never edits code (read-only tools + gh only)"
+      proof: "worker settings/transcript show no write tool used; the PR head sha is unchanged by review"
+  status: queued
+  attempts: 0
+
+- id: W1-T1D
+  title: The gate enforces the reviewer — remudero-review becomes a REQUIRED status check
+  repo: remudero
+  depends_on: [W1-T1C]
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 3.00
+  rationale: "W1-T1C makes a verdict VISIBLE; it does not make it BINDING. Today blocked_ci leaves
+    auto-merge ARMED, so a runner-rejected PR can still land GitHub-side with no acceptance verdict.
+    Root cause: the merge gate is a runner-side decision that can be raced. Fix: make BOTH checks a
+    GitHub-enforced contract (Standing rule 3B) so the runner's exit verdict becomes advisory telemetry
+    that cannot diverge from reality, and auto-merge is safe to leave armed permanently."
+  design: |
+    Add `remudero-review` to required_status_checks.contexts alongside `ci`. ORDERING (bootstrap, same
+    pattern as T1B): this PR merges under the CURRENT gate (ci only); protection is updated to require
+    remudero-review only AFTER it merges — state that in the REPORT. GitHub then merges a PR only when
+    BOTH checks are green.
+  acceptance:
+    - claim: "protection requires exactly [ci, remudero-review]"
+      proof: "gh api repos/craigoley/remudero/branches/main/protection --jq .required_status_checks.contexts"
+    - claim: "a PR that is CI-GREEN but FAILS acceptance is NOT merged (verified LIVE)"
       proof: "planted probe: an implement worker that passes tests but ignores a stated acceptance
         criterion -> remudero-review=failure -> PR stays OPEN -> paste the status + PR state, then close"
-    - claim: "a PR green on BOTH checks auto-merges with no runner-side merge call"
+    - claim: "a PR green on BOTH checks auto-merges with no runner-side merge call (verified LIVE)"
       proof: "ledger shows automerge.armed then pr.merged with no explicit merge command"
-    - claim: "protection now requires exactly [ci, remudero-review]"
-      proof: "gh api repos/craigoley/remudero/branches/main/protection --jq .required_status_checks.contexts"
   status: queued
   attempts: 0
 
 - id: W1-T2
   title: Validate-before-spawn guard + settings schema pin (P0)
   repo: remudero
-  depends_on: [W1-T1, W1-T1B, W1-T1C]
+  depends_on: [W1-T1, W1-T1B, W1-T1D]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -117,7 +145,7 @@
 - id: W1-T3
   title: Contract parsers + golden tasks (auto-choose near-miss, dontAsk fallback)
   repo: remudero
-  depends_on: [W1-T1, W1-T1B, W1-T1C]
+  depends_on: [W1-T1, W1-T1B, W1-T1D]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -137,7 +165,7 @@
 - id: W1-T4
   title: HeadroomTracker v0 — /usage parser
   repo: remudero
-  depends_on: [W1-T1, W1-T1B, W1-T1C]
+  depends_on: [W1-T1, W1-T1B, W1-T1D]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -155,7 +183,7 @@
 - id: W1-T5
   title: mounts.yaml v0 + Tier Invariant validation
   repo: remudero
-  depends_on: [W1-T1, W1-T1B, W1-T1C]
+  depends_on: [W1-T1, W1-T1B, W1-T1D]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -171,7 +199,7 @@
 - id: W1-T6
   title: NDJSON ledger + context telemetry + brain-plane calls
   repo: remudero
-  depends_on: [W1-T1, W1-T1B, W1-T1C]
+  depends_on: [W1-T1, W1-T1B, W1-T1D]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -233,7 +261,7 @@
 - id: W1-T10
   title: Scoped-PAT injection via buildWorkerEnv (FF9 hardening)
   repo: remudero
-  depends_on: [W1-T1, W1-T1B, W1-T1C]
+  depends_on: [W1-T1, W1-T1B, W1-T1D]
   type: implement
   verify: human      # requires Craig to enable fine-grained PATs on the craigoley org first
   principles: {tdd: strict}
@@ -301,7 +329,7 @@
 - id: W1-T14
   title: Make `rmd` a real installable CLI (package.json bin + publishable, no secrets in the tarball)
   repo: remudero
-  depends_on: [W1-T1C]
+  depends_on: [W1-T1D]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -331,7 +359,7 @@
 - id: W1-T15
   title: plan-sync is an in-repo PR flow — never scp again
   repo: remudero
-  depends_on: [W1-T1C]
+  depends_on: [W1-T1D]
   type: implement
   verify: auto
   principles: {tdd: encouraged}
@@ -349,5 +377,91 @@
       proof: "the doc (CONTRIBUTING or docs/plan-sync.md) exists and states: plan edits land via PR, never scp"
     - claim: "MASTER-PLAN §13 references the plan-sync flow"
       proof: "grep §13 of MASTER-PLAN.md shows a link/reference to the plan-sync doc"
+  status: queued
+  attempts: 0
+
+- id: W1-T17
+  title: Isolation preflight probe — fail closed before any task work begins
+  repo: remudero
+  depends_on: [W1-T1, W1-T1B, W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  rationale: "PR #8's shell isolation works ONLY because `~/.bashrc` is absent on this host — an accident
+    of the machine, not construction (LEARNINGS.md; FIELD FINDING 11b). On a machine with a populated
+    `~/.bashrc` it would silently isolate NOTHING. Standing rule 11: isolation is PROVEN PER RUN by
+    probe, never assumed from configuration. The runner must verify containment before it trusts it."
+  design: |
+    Before a run spawns its first task worker, spawn a read-only PREFLIGHT worker (or reuse the recon
+    slot) that runs `alias | wc -l` (and `declare -F | wc -l` for functions). NONZERO ⇒ the worker
+    inherited operator shell state ⇒ isolation is not holding ⇒ FAIL CLOSED: ledger a named error
+    (e.g. isolation_preflight_failed with the observed count) and refuse to start task work. Zero ⇒
+    proceed. The probe is the empirical backstop the config alone cannot provide.
+  acceptance:
+    - claim: "a nonzero alias/function count from the preflight worker aborts the run with a named error before task work"
+      proof: "planted `~/.bashrc` containing an alias makes `rmd run-task` REFUSE to start; ledger shows
+        isolation_preflight_failed with the observed count and NO implement.done line"
+    - claim: "removing the planted ~/.bashrc lets the same run proceed past preflight"
+      proof: "with ~/.bashrc removed, the same task reaches recon/implement; ledger shows preflight passed (count 0)"
+    - claim: "the preflight worker is read-only"
+      proof: "unit/transcript: no write tool used by the preflight worker"
+  status: queued
+  attempts: 0
+
+- id: W1-T18
+  title: General shell-isolation mechanism (OSS blocker — stop relying on an absent ~/.bashrc)
+  repo: remudero
+  depends_on: [W1-T1, W1-T1B, W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  rationale: "CLAUDE_CODE_SHELL=/bin/bash isolates only because THIS machine has no ~/.bashrc; most OSS
+    users have a populated one and would get zero isolation (FIELD FINDING 11b). Remudero cannot ship a
+    fleet whose containment is an accident of the host. Need a mechanism that isolates regardless of the
+    operator's dotfiles."
+  design: |
+    Investigate redirecting the worker's HOME to a scratch dir (e.g. <root>/worker-home) that holds ONLY
+    Remudero-controlled empty rc files, with the things a worker genuinely needs symlinked back
+    (~/.claude for OAuth, ~/.config/gh, ~/.gitconfig). WS-0 FIELD FINDING 11c proved the Keychain OAuth
+    token resolves off USER, NOT HOME — but Claude Code ALSO reads ~/.claude/ under HOME; VERIFY end to
+    end with a probe, do not assume. If HOME-redirection breaks auth or gh, record THAT as ground truth
+    in LEARNINGS.md and state the fallback (e.g. per-run generated rc + CLAUDE_CODE_SHELL, or a wrapper
+    shell). The deliverable is isolation that holds on a stranger's machine, proven by probe.
+  acceptance:
+    - claim: "a worker on a machine WITH a populated ~/.bashrc reports 0 aliases (isolation independent of operator dotfiles)"
+      proof: "planted ~/.bashrc with an alias; live worker `alias | wc -l` = 0 AND the worker still
+        authenticates (subscription OAuth) and can run gh"
+    - claim: "if HOME-redirection breaks auth, that is recorded as ground truth with the working fallback"
+      proof: "LEARNINGS.md gains a provenance-tagged line stating the outcome; the shipped mechanism is proven by probe either way"
+  status: queued
+  attempts: 0
+
+- id: W1-T19
+  title: Promptsmith template preamble — distrust-the-prompt + autonomy + LEARNINGS provenance
+  repo: remudero
+  depends_on: [W1-T1, W1-T1B, W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  rationale: "The prompt has been WRONG three times against the installed version (allowedDomains nesting,
+    the $loose schema, ZDOTDIR-vs-snapshot). Every rendered prompt must carry the antidote as a fixed
+    preamble, plus the autonomy clause (Standing rule 8) so workers never stall on a human, plus the
+    LEARNINGS.md facts relevant to the task as cited CONTEXT — the knowledge pipeline feeding forward."
+  design: |
+    Extend the prompt renderer (renderImplementPrompt) with a PREAMBLE injected into every rendered
+    prompt containing: (a) DISTRUST THE PROMPT OVER THE INSTALLED VERSION — read the installed
+    schema/binary; this prompt has been wrong three times; (b) the autonomy clause — never ask
+    permission to merge a green PR, the gate is the contract (Standing rule 8); (c) the LEARNINGS.md
+    entries matching the task (by tag/keyword) as provenance-tagged CONTEXT claims. Keep provenance
+    linting intact — injected LEARNINGS claims carry their [src].
+  acceptance:
+    - claim: "every rendered prompt injects the distrust-the-prompt rule, the autonomy clause, and matched LEARNINGS entries"
+      proof: "a rendered-prompt fixture test asserts all three are present: the distrust string, the
+        autonomy string, and at least one provenance-tagged LEARNINGS line for a task with a matching tag"
+    - claim: "injected LEARNINGS context still passes the provenance linter"
+      proof: "assertProvenance over a rendered prompt with injected LEARNINGS claims is clean (each carries [src])"
   status: queued
   attempts: 0
