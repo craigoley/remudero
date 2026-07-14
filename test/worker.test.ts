@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { collectWorkerResult } from "../src/lib/worker.js";
+import { WorkerSettingsError } from "../src/lib/settings.js";
+import { collectWorkerResult, spawnWorker } from "../src/lib/worker.js";
 
 // ── Synthetic SDK message streams ──────────────────────────────────────────
 // The real SDK yields a `type:"result"` envelope (even for an error subtype)
@@ -84,5 +88,28 @@ test("collectWorkerResult: a throw with NO result envelope is RE-RAISED (real tr
     () => collectWorkerResult(transportFailureStream(), { childEnvKeys: [] }),
     /spawn ENOENT/,
     "a genuine spawn failure must not be silently swallowed",
+  );
+});
+
+test("spawnWorker: an invalid settings file is REJECTED at the spawn boundary before any worker launches", async () => {
+  // FF10a: the guard must fire structurally, not by caller convention. A settings
+  // file with `allowedDomains` misplaced at the sandbox root (the exact WS-0
+  // silent-drop hazard) must throw BEFORE the SDK is ever invoked.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-worker-guard-"));
+  const badSettings = join(dir, "worker.json");
+  writeFileSync(
+    badSettings,
+    JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowedDomains: ["example.com"] } }),
+  );
+  await assert.rejects(
+    () =>
+      spawnWorker({
+        cwd: dir,
+        permissionMode: "bypassPermissions",
+        settingsFile: badSettings,
+        prompt: "unreachable — the guard throws first",
+      }),
+    WorkerSettingsError,
+    "a misplaced sandbox key must be rejected before spawn, never silently dropped",
   );
 });

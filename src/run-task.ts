@@ -13,6 +13,7 @@ import {
   type Plan,
   type Task,
 } from "./lib/plan.js";
+import { ContainmentError, probeContainment } from "./lib/containment.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
 import {
   REVIEW_CONTEXT,
@@ -281,7 +282,14 @@ export interface RunResult {
   prUrl?: string;
   merged: boolean;
   costUsd: number;
-  verdict: "merged" | "blocked" | "blocked_ci" | "blocked_review" | "blocked_budget" | "failed";
+  verdict:
+    | "merged"
+    | "blocked"
+    | "blocked_ci"
+    | "blocked_review"
+    | "blocked_budget"
+    | "blocked_containment"
+    | "failed";
 }
 
 /** The verdict + ledger payload a worker's ERROR envelope maps to. */
@@ -444,6 +452,34 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
   validateWorkerSettingsFile(settingsFile); // throws WorkerSettingsError if invalid
   log("settings.validated", { settingsFile });
   say("worker settings validated against pinned SandboxSettingsSchema");
+
+  // ── Post-spawn CONTAINMENT PREFLIGHT (W1-T2 #2 / WS-0 verdict 7 / Standing rule
+  // 11). Validation proves the file is WELL-FORMED; it does NOT prove the sandbox
+  // ENGAGED (`-p` silently runs unsandboxed on a file it can't apply — FF10a). Once
+  // per run, empirically confirm an outside-cwd write is OS-DENIED before any task
+  // worker runs. FAIL CLOSED: containment unproven ⇒ the run does not proceed.
+  try {
+    const probe = await probeContainment({
+      settingsFile,
+      config,
+      budgetUsd: task.budget_usd,
+      log: (s, extra) => log(s, extra),
+    });
+    costUsd += probe.costUsd; // meter the probe spawn (notional; the ledger has it)
+    say(`containment preflight PASSED — ${probe.reason}`);
+  } catch (e) {
+    if (e instanceof ContainmentError) {
+      log("verdict", {
+        verdict: "blocked_containment",
+        reason: e.message,
+        cost_usd: costUsd,
+        billing_mode: "subscription",
+      });
+      say(`verdict: blocked_containment — ${e.message}`);
+      return { taskId, runId, merged: false, costUsd, verdict: "blocked_containment" };
+    }
+    throw e;
+  }
 
   // ── Clone + worktree.
   const repoDir = join(config.root, "repos", task.repo);
