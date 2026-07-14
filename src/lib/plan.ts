@@ -30,6 +30,17 @@ const MERGED_STATUSES = new Set<TaskStatus>(["merged", "done"]);
 export interface AcceptanceCriterion {
   claim: string;
   proof: string;
+  /**
+   * ARCHITECT-ONLY. A PR (url or `#N`) that ALREADY satisfied this criterion in an
+   * EARLIER merge. The deterministic judge treats such a criterion as MET, citing
+   * that PR as the proof — the reviewer judges diff+report and never repo state, so
+   * a criterion satisfied by an earlier PR is otherwise permanently unsatisfiable
+   * by a later one. **May ONLY be set by a human/Architect in a plan PR.** A worker
+   * adding `satisfied_by` to its own blocking criterion is "editing the criteria to
+   * match the diff" (Standing rule 15) — a failed task. (W1-T3F makes the reviewer
+   * OBSERVE repo state, which is the real fix; `satisfied_by` is the manual patch.)
+   */
+  satisfied_by?: string;
 }
 
 /** A pre-authored, pre-cited CONTEXT claim (provenance is mandatory — §2). */

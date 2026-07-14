@@ -29,6 +29,15 @@
 #  - Never merge a PR to remudero whose required checks are not green (W1-T1B).
 #  - A blocked worker ADDS the missing work or ESCALATES; it NEVER edits acceptance criteria to match its
 #    diff, and NEVER lowers budget_usd (Standing rules 15 / §9 tripwire doctrine).
+#
+# `satisfied_by: <PR url or #N>` on an acceptance criterion (schema, honored by judgeReview): the
+# deterministic judge treats that criterion as MET, citing the PR as proof — for a criterion an EARLIER
+# merge already satisfied (the reviewer judges diff+report, never repo state, so it is otherwise
+# unsatisfiable by a later PR). ★ BINDING: `satisfied_by` may ONLY be set by a human/Architect in a
+# plan-only PR. A WORKER adding `satisfied_by` to its own blocking criterion IS "editing the criteria to
+# match the diff" (Standing rule 15) — a FAILED task. The reviewer rubric flags any diff that adds
+# `satisfied_by` to this file unless the PR is plan-only and human-authored (W1-T3E). W1-T3F replaces this
+# manual patch with real OBSERVATION (the reviewer runs the proof's test/grep on the PR head).
 
 - id: W1-T1
   title: Extract run-task.ts from the spike lib (the proto-runner)
@@ -153,44 +162,148 @@
   status: queued
   attempts: 0
 
+# ── SPLIT of the mis-specified W1-T3 (plan PR, Architect correction). W1-T3's eight criteria spanned FOUR
+# unrelated subsystems (worker.ts parsers · spike.ts permission modes · review.ts reviewer · the
+# provenance linter) and so COLLIDED with one-concern-per-PR (undeliverable in one PR — PR #22 correctly
+# refused, scoped down, and was blocked). Redistributed by CONCERN into W1-T3/B/C/D/E (+ W1-T3F, a new
+# capability). BINDING: every original criterion survives VERBATIM — none dropped, weakened, or reworded,
+# only moved. The two already-shipped criteria carry `satisfied_by` (Architect-only; see header).
 - id: W1-T3
-  title: Contract parsers + golden tasks (auto-choose near-miss, dontAsk fallback)
+  title: Contract parsers — parseDecisionRequest golden fixtures (WS-0 near-miss + T1D decorated string)
   repo: remudero
   depends_on: [W1-T1, W1-T1B, W1-T1D]
   type: implement
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  rationale: "OWN CONCERN: worker.ts DECISION_REQUEST parser hardening — decoration-is-not-data. Both
+    criteria are parseDecisionRequest goldens over the SAME function; they belong together and touch no
+    other subsystem. This is exactly what PR #22 delivered before the mis-specified bundle blocked it."
   acceptance:
     - claim: "parseDecisionRequest survives the WS-0 near-miss (inline (RECOMMENDED) marker capturing ')')"
       proof: "golden test with the exact WS-0 malformed payload passes; option list has no ')'"
-    - claim: "the dontAsk fallback path (currently UNTESTED code) is exercised"
-      proof: "a forced-fallback run completes with the floor holding"
-    - claim: "QUESTION contract parses and appends to plan/questions.ndjson without blocking"
-      proof: "ledger shows task completed with an open question logged"
-    - claim: "provenance linter is BLOCK-oriented, not line-oriented (W1-T1 open question)"
-      proof: "a claim wrapped across three lines with its [src:] on the last line PASSES; the same claim with no [src:] anywhere BLOCKS"
-    - claim: "GOLDEN (PR #12 dead-doc): the reviewer FAILS PR #12 actual diff — a CI-green, single-file
-        docs/review-gate.md PR that satisfies ZERO acceptance criteria. If the reviewer cannot fail THAT
-        it cannot fail anything (Standing rule 13). This is the canonical reviewer test case."
-      proof: "golden test over PR #12 single-doc diff + its describe-only body vs W1-T1D real acceptance
-        criteria -> judgeReview returns state=failure (criteria 2 and 3 unmet; criterion 1 only
-        keyword-matches the prose, proving a doc DESCRIBES but does not PROVE). Present in test/review.test.ts."
     - claim: "parseDecisionRequest survives the T1D auto-choose near-miss — DECORATION IS NOT DATA: the
         option `**Option A — `docs/review-gate.md` (new doc)** ✅ ****` must parse to a clean value with
         the markdown bold, backticks, emoji, and trailing asterisks STRIPPED (same class as the WS-0 `)` bleed)"
       proof: "golden test: parseDecisionRequest on that exact decorated payload returns a recommended
         value of `Option A — docs/review-gate.md (new doc)` with no `**`, no ✅, and no trailing `****`"
+  status: queued
+  attempts: 0
+
+- id: W1-T3B
+  title: dontAsk permission-mode fallback is exercised (currently UNTESTED code in spike.ts)
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OWN CONCERN: spike.ts PERMISSION MODES. The dontAsk fallback (used if the bypass hook race
+    reproduces) is untested code on a distinct subsystem — permission-mode plumbing, not parsers or the
+    reviewer. Exercising it stands alone."
+  acceptance:
+    - claim: "the dontAsk fallback path (currently UNTESTED code) is exercised"
+      proof: "a forced-fallback run completes with the floor holding"
+  status: queued
+  attempts: 0
+
+- id: W1-T3C
+  title: QUESTION contract — parse and append to plan/questions.ndjson, non-blocking
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OWN CONCERN: the non-blocking QUESTION side-channel (§2) — parse a worker QUESTION, append it
+    to plan/questions.ndjson durably, and NEVER stall the loop. A distinct behavior from parser goldens
+    (it writes a durable store and interacts with the run loop), so it is its own PR."
+  acceptance:
+    - claim: "QUESTION contract parses and appends to plan/questions.ndjson without blocking"
+      proof: "ledger shows task completed with an open question logged"
+  status: queued
+  attempts: 0
+
+- id: W1-T3D
+  title: Provenance linter becomes BLOCK-oriented, not line-oriented (W1-T1 open question)
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OWN CONCERN: the provenance linter (assertProvenance) — a separate module from parsers,
+    permission modes, and the reviewer. Making it BLOCK-oriented (a multi-line claim citing its [src:] on
+    the last line PASSES) is a self-contained change to that one linter."
+  acceptance:
+    - claim: "provenance linter is BLOCK-oriented, not line-oriented (W1-T1 open question)"
+      proof: "a claim wrapped across three lines with its [src:] on the last line PASSES; the same claim with no [src:] anywhere BLOCKS"
+  status: queued
+  attempts: 0
+
+- id: W1-T3E
+  title: Reviewer rubric — the four judgment items (+ the satisfied_by guard); reviewer goldens
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OWN CONCERN: review.ts REVIEWER judgment. The four rubric items and the reviewer goldens are
+    one subsystem (the judge), distinct from parsers/permission-modes/linter. Two criteria here are
+    already shipped on main (the PR #12 golden in #16, status-names-the-criterion in #20) and carry
+    `satisfied_by` — the reviewer judges diff+report, never repo state, so a criterion an EARLIER PR
+    satisfied is otherwise unsatisfiable by a later one (W1-T3F is the real fix). The ACTIVE deliverable
+    here is the rubric (the four items) + the satisfied_by guard."
+  acceptance:
     - claim: "the reviewer rubric (MASTER-PLAN §5 layer 2) checks four judgment items: ONE CONCERN per
         PR, ALL CALLERS AUDITED (partial-fix drift), TEST THEATER, and REFACTOR-PHASE HONESTY"
       proof: "fixture tests over recorded (diff, report) tuples: a two-concern diff -> one-concern=fail;
         a diff that edits one call site but leaves a sibling caller stale -> callers-audited=fail; an
         added test that asserts nothing -> theater=fail; a behavior-changing diff labelled refactor ->
         honesty=fail; a clean single-concern diff -> all four pass"
+    - claim: "the reviewer rubric flags a worker-authored satisfied_by: a diff that ADDS satisfied_by to
+        plan/tasks.yaml FAILS unless the PR is plan-only and human-authored (satisfied_by is Architect-only,
+        Standing rule 15 — a worker adding it to its own blocking criterion is editing the criteria)"
+      proof: "fixture test: a (diff, report) whose diff adds a satisfied_by line to plan/tasks.yaml in a
+        NON-plan-only PR -> the rubric item fails; the same addition in a plan-only human-authored PR -> passes"
+    - claim: "GOLDEN (PR #12 dead-doc): the reviewer FAILS PR #12 actual diff — a CI-green, single-file
+        docs/review-gate.md PR that satisfies ZERO acceptance criteria. If the reviewer cannot fail THAT
+        it cannot fail anything (Standing rule 13). This is the canonical reviewer test case."
+      proof: "golden test over PR #12 single-doc diff + its describe-only body vs W1-T1D real acceptance
+        criteria -> judgeReview returns state=failure (criteria 2 and 3 unmet; criterion 1 only
+        keyword-matches the prose, proving a doc DESCRIBES but does not PROVE). Present in test/review.test.ts."
+      satisfied_by: "#16"
     - claim: "a failing remudero-review status NAMES the unmet criterion, not just a count (the gate
         TEACHES: a gate that says only 'no' costs a human round-trip; one that names the gap feeds the loop)"
       proof: "on a planted failure, the status description contains the unmet criterion's text; the golden
         PR #12 fixture asserts the SPECIFIC criterion named, not merely state=failure"
+      satisfied_by: "#20"
+  status: queued
+  attempts: 0
+
+- id: W1-T3F
+  title: The reviewer verifies a criterion against REPO STATE (run test/grep on PR head), not only diff+report
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OWN CONCERN + the REAL fix for the false-positive class. The reviewer judges diff+report and
+    never repo state, so a criterion satisfied by an EARLIER PR is permanently unsatisfiable by a later one
+    (the failure that forced the `satisfied_by` manual patch). Give the reviewer the ability to OBSERVE:
+    a criterion whose proof is a test name or a grep can be checked by RUNNING it on the PR head.
+    `satisfied_by` is a manual patch; observation is the real fix, so this earns its own task."
+  acceptance:
+    - claim: "a criterion satisfied by an EARLIER PR is judged MET WITHOUT any satisfied_by annotation,
+        because the reviewer OBSERVED it (its named test passes / its grep matches on the PR head)"
+      proof: "over a PR that does NOT itself deliver the criterion's code, the reviewer runs the proof's
+        named test (or grep) against the PR head, sees it pass/match, and marks the criterion MET — with
+        NO satisfied_by present; a criterion whose test FAILS on the head is still marked unmet (fail-closed)"
+    - claim: "observation is bounded and deterministic (only whitelisted proof shapes: a test name or a grep)"
+      proof: "unit test: a proof that names a test or a grep is executed; a free-prose proof falls back to
+        the keyword floor unchanged (no arbitrary code execution from proof text)"
   status: queued
   attempts: 0
 

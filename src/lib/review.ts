@@ -174,6 +174,15 @@ export function judgeCriterion(
   semantic?: boolean,
 ): CriterionVerdict {
   const base = { claim: criterion.claim, proof: criterion.proof };
+
+  // ARCHITECT-ONLY `satisfied_by`: a criterion already satisfied by an EARLIER PR is
+  // MET, cited to that PR. The reviewer judges diff+report, never repo state, so
+  // without this an earlier-PR criterion is permanently unsatisfiable by a later PR.
+  // (Setting this is a human/Architect act in a plan PR — never a worker's own edit.)
+  if (criterion.satisfied_by) {
+    return { ...base, met: true, reason: `satisfied by ${criterion.satisfied_by} (prior merge)` };
+  }
+
   const kws = proofKeywords(criterion.proof);
 
   // Mechanical floor: is the proof responsively pasted into the report?
