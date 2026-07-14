@@ -465,3 +465,131 @@
       proof: "assertProvenance over a rendered prompt with injected LEARNINGS claims is clean (each carries [src])"
   status: queued
   attempts: 0
+
+# ── §4B FLIGHT CONTROL (in-flight supervision → risk gates → specialist panel). ──────────────────
+# Today's only guards are terminal cliffs (budget/turns/strikes) — they catch a worker AFTER the burn,
+# not while it goes wrong (FIELD FINDING 12). These four tasks add deterministic flight signals (L1),
+# an advisory process-judge (L2), risk scoring that makes auto-choose SAFE (L3), and a triggered
+# specialist panel (L4). Doctrine: supervision is deterministic; judgment is advisory (Standing rule 12).
+# Wiring: T20 -> T21 -> T22, all after the enforced gate W1-T1D; W2-T1 after the reviewer + risk scoring.
+- id: W1-T20
+  title: Flight signals (Layer 1) — deterministic per-turn tripwires from stream-json
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  rationale: "MASTER-PLAN §4B Layer 1. In-flight supervision starts with cheap deterministic predicates
+    computed per turn from the worker's stream-json: they FIRE, they never JUDGE (Standing rule 2/12).
+    A trip is what invokes the Layer-2 judge (W1-T21); on its own it decides nothing."
+  design: |
+    Consume the worker stream-json per turn and compute pure predicates over the running transcript:
+    burn-rate vs. the task-type baseline; diff-growth per turn; repeated tool-call hashes; error-signature
+    loops (count only occurrence N>=3 of a fingerprinted error, the analyze-diagnostics discipline);
+    scope drift (files touched vs. the task's declared files); and a stall timeout. Each predicate is
+    deterministic and side-effect-free; the controller ORs their trips into a single tripwire signal.
+    No LLM here. Same input a real run emits, driven from recorded fixtures in tests.
+  acceptance:
+    - claim: "a seeded transcript with 5 identical tool calls trips the repetition predicate"
+      proof: "unit test over a fixture of 5 identical tool-call payloads -> repeated-tool-call predicate returns tripped"
+    - claim: "a 12-turn zero-diff transcript trips the no-progress predicate"
+      proof: "unit test over a 12-turn fixture with an unchanged diff -> stall/no-progress predicate returns tripped"
+    - claim: "a healthy transcript trips NOTHING (no false positive)"
+      proof: "unit test over a productive fixture (growing diff, varied tool calls, no error loop) -> every predicate returns not-tripped"
+  status: queued
+  attempts: 0
+
+- id: W1-T21
+  title: Flight judge (Layer 2) — advisory LLM-as-judge on PROCESS, deterministic controller acts
+  repo: remudero
+  depends_on: [W1-T20]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  rationale: "MASTER-PLAN §4B Layer 2. A Layer-1 tripwire invokes a FRESH-context judge that sees the
+    goal, acceptance criteria, and the last N turns' TOOL CALLS AND RESULTS — never the worker's
+    reasoning (the maker sees its trail; the verifier sees only behavior + rubric). It ADVISES; a
+    deterministic controller ACTS (Standing rule 12). Judge rides a HIGHER tier than the worker (G-17)."
+  design: |
+    On a Layer-1 trip, spawn a fresh-context judge (read-only) with {goal, acceptance criteria, last N
+    turns of tool calls + results}. It returns {state: productive|converging|spiraling|blocked|off_track,
+    evidence[], recommendation: continue|nudge|halt_and_diagnose|escalate, confidence}. A DETERMINISTIC
+    controller maps advice to action: spiraling+high-confidence -> halt + dispatch a DIAGNOSE worker
+    (never a third blind patch, Standing rule 5); off_track -> halt + escalate; converging -> raise the
+    tripped threshold ONCE, log, continue. Capped at K invocations per run; the Kth MUST decide, not
+    defer. The judge NEVER edits code and NEVER merges. Tier invariant (judge.tier > worker.tier)
+    asserted at load, same enforcement shape as mounts.yaml (W1-T5 / G-17).
+  acceptance:
+    - claim: "a PLANTED spiraling transcript (same edit reverted 4x) is classified spiraling and the controller HALTS + dispatches diagnose"
+      proof: "fixture test: the reverted-4x transcript -> judge state=spiraling -> controller emits halt + a diagnose dispatch in the ledger, never a third blind patch"
+    - claim: "a healthy slow transcript is classified converging and is NOT halted"
+      proof: "fixture test: a slow-but-progressing transcript -> judge state=converging -> controller raises the threshold once and continues (no halt line in the ledger)"
+    - claim: "the judge rides a higher tier than the worker, asserted at load"
+      proof: "a config where judge.tier <= worker.tier is REJECTED at load with a named Tier-Invariant error (G-17)"
+    - claim: "the judge is read-only and capped at K invocations per run"
+      proof: "transcript/unit: no write tool used by the judge; a run that would exceed K forces a decision on the Kth call, not another deferral"
+  status: queued
+  attempts: 0
+
+- id: W1-T22
+  title: Risk scoring (Layer 3) — deterministic diff-risk bands that make auto-choose SAFE
+  repo: remudero
+  depends_on: [W1-T21]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  rationale: "MASTER-PLAN §4B Layer 3. Risk scoring is what makes auto-choose SAFE — not a retraction of
+    it. Deterministic from diff + task metadata (Standing rule 2): blast_radius, reversibility, novelty,
+    confidence. low -> auto-choose unchanged (the default); medium -> reviewer PASS; high -> timeboxed
+    QUESTION (unanswered at timeout takes the recommendation and flags it loudly); critical -> HARD STOP
+    + escalate, never auto-chosen. The existing hard-stop list (§4) is the FLOOR."
+  design: |
+    A pure scorer over (diff, task metadata) -> {band: low|medium|high|critical, factors}. blast_radius
+    keys off touched paths: hooks / settings / env / CI / branch protection / credentials / new deps /
+    network egress. reversibility from revert-ability; novelty from first-of-kind; confidence folds the
+    reviewer score + strikes + flight-judge state. Deterministic: the SAME diff yields the SAME band
+    (unit-tested). The band selects the gate, not the outcome — low auto-chooses, critical refuses to
+    auto-choose and escalates. This layer does not merge; it grades.
+  acceptance:
+    - claim: "a diff touching hooks/deny-floor scores critical and REFUSES auto-choose"
+      proof: "unit test: a diff modifying a hook or the deny-floor -> band=critical -> auto-choose refused, escalate emitted"
+    - claim: "a one-line docs diff scores low and auto-chooses"
+      proof: "unit test: a single-line docs-only diff -> band=low -> auto-choose proceeds unchanged"
+    - claim: "the scorer is deterministic (same diff => same score)"
+      proof: "unit test: scoring the same diff twice returns an identical band + factors (no clock/random input)"
+  status: queued
+  attempts: 0
+
+- id: W2-T1
+  title: Specialist panel (Layer 4) — consult-don't-committee, triggered by risk + diff signals
+  repo: remudero
+  depends_on: [W1-T1D, W1-T22]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  rationale: "MASTER-PLAN §4B Layer 4. On-demand specialist review, triggered BY risk + diff signals
+    (W1-T22), never resident on every task (cost + slop). Each specialist has fresh context, read-only
+    tools, a scoped rubric; posts PR review comments and contributes to the reviewer's verdict (W1-T1D).
+    Specialists ADVISE; the GitHub-enforced gate DECIDES (Standing rule 3B/12). Depends on the reviewer
+    it feeds (W1-T1D) and the risk scorer that triggers it (W1-T22)."
+  design: |
+    A deterministic router maps diff + risk signals to zero or more specialists, each spawned fresh and
+    read-only: security <- auth/credentials/egress/new-deps/hooks/settings; testing <- tdd:strict or a
+    negative coverage/mutation delta or new paths without tests; design <- diff crosses layer boundaries
+    (fitness rules) or adds an abstraction; containment <- ANY diff touching sandbox/settings/deny-floor/
+    env (FIELD FINDING 10a: a typo there silently drops containment). Each posts PR review comments and
+    feeds the reviewer verdict. The panel is a CONSULT, not a resident committee — a task that trips no
+    trigger consults no specialist.
+  acceptance:
+    - claim: "a diff adding a network call to a new domain triggers the security specialist and NOT the design specialist"
+      proof: "router unit test: a diff introducing egress to a new domain -> security specialist spawned, design specialist NOT spawned"
+    - claim: "a docs-only diff triggers NO specialist"
+      proof: "router unit test: a docs-only diff -> zero specialists spawned"
+    - claim: "specialists are read-only and only advise (the gate decides)"
+      proof: "transcript/unit: no write tool used by any specialist; verdicts land as PR review comments feeding remudero-review, never as a merge call"
+  status: queued
+  attempts: 0
