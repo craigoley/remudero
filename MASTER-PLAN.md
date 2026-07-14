@@ -1,4 +1,8 @@
-# REMUDERO — Master Plan (v2.10 · synced 2026-07-14 · ★ DECOMPOSE BY CONCERN: mis-specified W1-T3 (8 criteria across 4 subsystems) SPLIT into W1-T3/B/C/D/E (+ W1-T3F) — every criterion survives VERBATIM, none dropped/weakened; NEW schema `satisfied_by` (Architect-only) marks a criterion an earlier merge already satisfied; Standing rule 16 (the Architect corrects a mis-specified task, a worker never; no criterion dropped, only redistributed) · CLIENTS & CONTRACT: D-5 RESOLVED (monorepo for everything consuming the daemon API — a breaking change fails CI across all consumers atomically; site/commons/pro stay separate); NEW §7A the API contract is the product boundary (`packages/api-client` GENERATED from ONE tailnet surface, no hand-rolled fetch); §7 rewritten as ONE web app / THREE shells (browser · Tauri macOS · Tauri iOS, Expo the documented iOS fallback; push is an adapter, not an app concern); website → WS-12 repo `remudero-site`; clients W3-T1..T5 gate on the contract · BUDGET IS A TRIPWIRE, NOT AN ALLOWANCE: budget_usd is a runaway BUG DETECTOR (default $100, an order of magnitude above observed), a soft $25 line WARNS-and-continues, blocked_budget = "looping" — W1-T3 was killed mid-work at $3.57 vs a guessed $4; same bug as maxTurns (PR #8) · THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
+# REMUDERO — Master Plan (v2.11 · synced 2026-07-14 · ★ FIRST RETRO (RETRO-1784058021334): WS-0
+shipped + WS-1 proto-runner LIVE — 9 PRs merged (SHIPPED log added), NET STATE refreshed off reality;
+first observed CALIBRATION row ($1.68/~20 turns mean, 53% merge rate) for mounts.yaml/W1-T5; 8
+non-merges mined into Retro proposals P1–P5; COMPRESSION: deleted the stale "run WS-0 spike v5.1" NEXT
+block + trimmed the WS-0 workstream entry (both superseded by the merges). Prior focus ★ DECOMPOSE BY CONCERN: mis-specified W1-T3 (8 criteria across 4 subsystems) SPLIT into W1-T3/B/C/D/E (+ W1-T3F) — every criterion survives VERBATIM, none dropped/weakened; NEW schema `satisfied_by` (Architect-only) marks a criterion an earlier merge already satisfied; Standing rule 16 (the Architect corrects a mis-specified task, a worker never; no criterion dropped, only redistributed) · CLIENTS & CONTRACT: D-5 RESOLVED (monorepo for everything consuming the daemon API — a breaking change fails CI across all consumers atomically; site/commons/pro stay separate); NEW §7A the API contract is the product boundary (`packages/api-client` GENERATED from ONE tailnet surface, no hand-rolled fetch); §7 rewritten as ONE web app / THREE shells (browser · Tauri macOS · Tauri iOS, Expo the documented iOS fallback; push is an adapter, not an app concern); website → WS-12 repo `remudero-site`; clients W3-T1..T5 gate on the contract · BUDGET IS A TRIPWIRE, NOT AN ALLOWANCE: budget_usd is a runaway BUG DETECTOR (default $100, an order of magnitude above observed), a soft $25 line WARNS-and-continues, blocked_budget = "looping" — W1-T3 was killed mid-work at $3.57 vs a guessed $4; same bug as maxTurns (PR #8) · THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -27,8 +31,72 @@ autonomous-PR tools like Composio AO; plan-lifecycle tools like ivy-tendril; nat
 
 ## NET STATE
 
-Design complete through v0.2. Nothing built. Manual pre-steps + grill answers (G-1..G-3) gate the
-WS-0 spike; its six verdicts gate everything after it.
+WS-0 spike SHIPPED (7/7 verdicts GREEN, PR #1). WS-1 proto-runner is LIVE and eating its own backlog:
+the reviewer + enforced merge gate (W1-T1C/#11, W1-T1D/#12) and the escalation/notifier/ledger arc
+(W1-T3/B/C/D/E → PR #26–#30) have landed through `rmd run-task`. 9 PRs merged all-time across
+remudero + remudero-sandbox; **$28.56 spent over 17 implement runs — 9 merged, 8 non-merged**
+(blocked_budget×3, blocked_review×2, incomplete×2, blocked_ci×1 — see Calibration + Retro proposals).
+NEXT: continue the WS-1 queue (strike/transient classifier, launchd unit, daemonization last) through
+the closed gate; mount-routing (mounts.yaml, W1-T5) now has its first calibration row below.
+
+## SHIPPED log
+
+Shipped arcs, keyed by Remudero-Task (Standing rule 13: the proof is a MERGED PR, not prose).
+Newest first. Cost/turns from the run ledger.
+
+- **W1-T3E** — escalation/notifier/ledger arc, split 5/5 → craigoley/remudero#30 · $3.73 · 31 turns
+- **W1-T3D** — escalation/notifier/ledger arc, split 4/5 → craigoley/remudero#29 · $1.77 · 21 turns
+- **W1-T3C** — escalation/notifier/ledger arc, split 3/5 → craigoley/remudero#28 · $2.64 · 42 turns
+- **W1-T3B** — escalation/notifier/ledger arc, split 2/5 → craigoley/remudero#27 · $2.90 · 31 turns
+- **W1-T3** — escalation issues + notifier + daily digest (decomposed by concern, rule 16) →
+  craigoley/remudero#26 · $2.99 · 37 turns
+- **W1-T1D** — reviewer ENFORCEMENT wired into `run-task` (the merge gate, rule 3B; the call site is a
+  deliverable, rule 14) → craigoley/remudero#12 · $1.28 · 21 turns
+- **W1-T1C** — reviewer worker + rubric (fresh-context acceptance verdict) →
+  craigoley/remudero#11 · $2.26 · 30 turns
+- **CI-GREEN-PROBE** — CI-gate aggregator green-path probe → craigoley/remudero#5 · $0.44 · 0 turns
+- **SB-HELLO** — proto-runner sandbox smoke task → craigoley/remudero-sandbox#2 · $0.41 · 0 turns
+- **WS-0 spike** — 7/7 verdicts GREEN, loop closed unattended; ground truth in FIELD FINDING 10 →
+  craigoley/remudero#1 · $0.86
+
+## Calibration (observed — all-time through RETRO-1784058021334, 2026-07-14)
+
+The empirical baseline mounts.yaml (W1-T5) and Flight-control burn-rate signals (§4B Layer 1) key off.
+First retro; 17 runs in scope, one task_type has data.
+
+| task_type | runs | merged | avg $ | avg turns | total $ |
+|---|---|---|---|---|---|
+| implement | 17 | 9 | $1.680 | 19.824 | $28.561 |
+
+Reads: mean implement run ≈ **$1.68 / ~20 turns**; the $100 `budget_usd` tripwire sits ~60× the mean
+run (runaway detector, not an allowance — §4B). Merge rate **53% (9/17)**; the 8 non-merges break down
+in the Retro proposals below. mounts.yaml v0 stays a single-row static table until recon/reviewer/
+diagnose runs accrue their own rows.
+
+## Retro proposals (RETRO-1784058021334 — PROPOSALS ONLY; NOT yet in plan/tasks.yaml)
+
+Mined from the 8 non-merges (blocked_budget×3, blocked_review×2, incomplete×2, blocked_ci×1). Candidate
+golden/plan tasks for the Architect to ratify via a tasks.yaml PR — never auto-filed, never worker-edited
+(rule 15).
+
+- **P1 (golden) — blocked_budget ×3 is the largest failure class.** Three runs tripped `budget_usd`
+  mid-work: exactly the "caught by a terminal cliff, post-burn" pattern §4B Flight control exists to
+  pre-empt (FIELD FINDING 12 was the first such case). Propose a golden where an engineered-to-spiral
+  task trips a Layer-1 burn-rate predicate and invokes the flight judge BEFORE the budget cliff — proves
+  W1-T20/T21 catch it in-flight, not the backstop. Motivates prioritizing W1-T20.
+- **P2 (plan) — budget headroom review.** 3/17 = 18% budget trips against a $1.68 mean suggests some
+  per-task `budget_usd` defaults sit too near the mean for the tail (FIELD FINDING 11d: the breaker
+  overshoots by up to one turn). Propose recomputing per-task `budget_usd` from the calibration mean +
+  a headroom multiplier, filed as a plan PR.
+- **P3 (golden) — blocked_review ×2.** Two runs blocked at the reviewer gate. Propose a golden asserting
+  a blocked-review run ADDS the missing work or ESCALATES and NEVER edits its own acceptance criteria
+  (rule 15) — the reviewer-block path needs a planted-violation guard like the TDD-skip golden.
+- **P4 (golden) — blocked_ci ×1.** One CI-gate block. Propose folding into the CI-gate aggregator
+  golden: assert a red sub-job holds merge closed with no conditionally-skipped-required-check deadlock
+  (§5 CI mechanics), and that the runner classifies it fixable-vs-strike correctly.
+- **P5 (triage) — incomplete ×2.** Two runs ended incomplete (neither merged nor cleanly blocked).
+  Propose the WS-2 stall/heartbeat check to classify these as hung-and-recycled rather than silent
+  incompletes — needs transcript triage to confirm root cause before minting a golden.
 
 ## FIELD FINDINGS (from the mini, 2026-07-14 — ground truth, not docs)
 
@@ -888,9 +956,8 @@ plan-first — and a harness that provably gets better at its own job.**
 
 ## 10. Workstreams
 
-**WS-0 — Spike — ✅ SHIPPED 2026-07-14** (7/7 verdicts GREEN; loop closed unattended; $0.86;
-PR craigoley/remudero#1 pending Craig's merge = D-2 license veto window). Ground truth folded into
-FIELD FINDINGS 10. `src/lib/` kept spike-free ⇒ WS-1 T1 lifts it directly.
+**WS-0 — Spike — ✅ SHIPPED & MERGED** (PR #1; see SHIPPED log). Ground truth in FIELD FINDING 10;
+`src/lib/` kept spike-free ⇒ WS-1 lifted it directly.
 
 **WS-1 — Proto-runner → daemon (G-2: WS-1 builds THROUGH the proto-runner)**: task 1 extracts
 `run-task.ts` from the spike's lib — one tasks.yaml entry in, recon → provenance-linted prompt →
@@ -1102,9 +1169,7 @@ protection ON, auto-merge + delete-branch-on-merge ON · workspace root + deny-f
 **auth fully cleared** (headless OAuth proven interactively AND under launchd) · plan at repo root.
 Deferred by decision: scoped sandbox PAT → WS-1 (FIELD FINDING 9).
 
-**NEXT — the only open step: run WS-0 spike v5.1** (prompt in chat 2026-07-14; ambient-gh-auth
-variant). Return FINDINGS.md → WS-0 flips SHIPPED → WS-1 tasks.yaml is cut with pre-authored prompts
-→ `run-task.ts` starts eating its own backlog (L1).
+**NEXT: see NET STATE + SHIPPED log** (WS-0 shipped; WS-1 proto-runner live and eating its backlog).
 
 **Craig's standing side-items (outside Remudero):** (1) `ANTHROPIC_API_KEY` is exported from
 `~/.zshrc`, so interactive Claude Code on the mini bills API instead of Max 20x — scope it to the
