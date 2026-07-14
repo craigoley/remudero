@@ -88,9 +88,10 @@ test("rejects verify:human as not auto-runnable", () => {
   assert.throws(() => assertRunnable(plan, selectTask(plan, "H")), PlanError);
 });
 
-test("the real plan/tasks.yaml loads and W1-T1 has no deps", () => {
+test("the real plan/tasks.yaml loads; W1-T1 has no deps; W1-T1B gates the rest", () => {
   const plan = loadPlan(join(process.cwd(), "plan", "tasks.yaml"));
-  const t = selectTask(plan, "W1-T1");
-  assert.deepEqual(t.depends_on, []);
-  assert.equal(selectTask(plan, "SB-HELLO").repo, "remudero-sandbox");
+  assert.deepEqual(selectTask(plan, "W1-T1").depends_on, []);
+  assert.deepEqual(selectTask(plan, "W1-T1B").depends_on, ["W1-T1"]);
+  // Every later task depends on the CI gate (self-hosting safety).
+  assert.ok(selectTask(plan, "W1-T2").depends_on.includes("W1-T1B"));
 });
