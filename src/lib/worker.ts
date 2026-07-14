@@ -42,6 +42,8 @@ export interface SpawnWorkerArgs {
   /** Extra env vars merged into the allowlisted child env (never ANTHROPIC_*). */
   env?: Record<string, string>;
   model?: string;
+  /** Reasoning effort (mount-resolved, §9): 'low'|'medium'|'high'|'xhigh'|'max'. */
+  effort?: string;
   maxTurns?: number;
   maxBudgetUsd?: number;
   config?: Config;
@@ -98,6 +100,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   };
   if (args.resumeSessionId) options.resume = args.resumeSessionId;
   if (args.model) options.model = args.model;
+  if (args.effort) options.effort = args.effort as Options["effort"];
   if (typeof args.maxTurns === "number") options.maxTurns = args.maxTurns;
   if (typeof args.maxBudgetUsd === "number") options.maxBudgetUsd = args.maxBudgetUsd;
 

@@ -40,6 +40,7 @@ import {
   type Plan,
   type Task,
 } from "./lib/plan.js";
+import { loadMounts, mountsPath, resolveMount, type Mount } from "./lib/mounts.js";
 import { ContainmentError, probeContainment } from "./lib/containment.js";
 import {
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
@@ -506,8 +507,26 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
   // anomaly as a WARNING and never kills.
   const budgetUsd = task.budget_usd ?? DEFAULT_BUDGET_USD;
   const softThresholdUsd = softBudgetThreshold(config);
-  log("run.start", { repo: task.repo, type: task.type, budget_usd: budgetUsd, soft_threshold_usd: softThresholdUsd });
-  say(`run ${runId} — target ${owner}/${task.repo}`);
+
+  // ── MOUNT RESOLUTION (§9). The (task_type × risk) routing table OWNS the
+  // model/effort/max_turns a run rides — never a hardcoded literal (the W1-T6
+  // defect: a dead mounts.yaml + a hardcoded 60-turn ceiling, see DIAGNOSIS.md). Resolve
+  // ONCE here and FAIL LOUD on a miss: a missing mount is a config gap, never a
+  // silent fallback to some default number. loadMounts throws on a bad/absent table;
+  // resolveMount throws on an unrouted (type × risk).
+  // The table is a COMMITTED repo artifact (§9, golden-gated), so read it from the
+  // repo checkout (repoRoot), NOT the workspace root (config.root = ~/Remudero, which
+  // holds worktrees/state, not .remudero/mounts.yaml).
+  const mount: Mount = resolveMount(loadMounts(mountsPath(repoRoot)), task.type, task.risk);
+  log("run.start", {
+    repo: task.repo,
+    type: task.type,
+    risk: task.risk,
+    budget_usd: budgetUsd,
+    soft_threshold_usd: softThresholdUsd,
+    mount: { model: mount.model, effort: mount.effort, max_turns: mount.maxTurns, context_budget: mount.contextBudget },
+  });
+  say(`run ${runId} — target ${owner}/${task.repo} · mount ${mount.model}/${mount.effort} · ${mount.maxTurns} turns (${task.type}×${task.risk})`);
 
   let costUsd = 0;
   let budgetWarned = false;
@@ -663,11 +682,13 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
       await spawnWorker({
         cwd: worktreePath,
         permissionMode: "bypassPermissions",
-        // maxTurns is a runaway-LOOP guard now, not a work limit — dollars
-        // (maxBudgetUsd) are the real backstop. WS-1: an 18-turn cap killed a
-        // legitimate ~6-minute implement run. 60 gives real work room; a run
-        // that hits it is genuinely looping.
-        maxTurns: 60,
+        // model/effort/max_turns come from the MOUNT (task_type × risk, §9), never a
+        // hardcoded literal. max_turns is the runaway-LOOP guard; dollars (maxBudgetUsd)
+        // are the real backstop. Recalibrated in mounts.yaml from OBSERVED runs (W1-T6
+        // needed >61 turns — DIAGNOSIS.md), an order of magnitude above expected.
+        model: mount.model,
+        effort: mount.effort,
+        maxTurns: mount.maxTurns,
         maxBudgetUsd: budgetUsd,
         settingsFile,
         config,
@@ -705,7 +726,9 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
           permissionMode: "bypassPermissions",
           settingsFile,
           resumeSessionId: impl.sessionId,
-          maxTurns: 60, // same runaway guard as the initial implement spawn.
+          model: mount.model, // same mount as the initial implement spawn (§9).
+          effort: mount.effort,
+          maxTurns: mount.maxTurns,
           maxBudgetUsd: budgetUsd,
           config,
           prompt:
