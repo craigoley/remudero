@@ -50,10 +50,48 @@
   status: queued
   attempts: 0
 
+- id: W1-T1C
+  title: Acceptance verdict as a REQUIRED status check (closes the green-checks-aren't-evidence gap)
+  repo: remudero
+  depends_on: [W1-T1B]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  rationale: "Standing rule 4 says green checks are NOT evidence, yet today `merged` means only that CI
+    passed — no one verifies the task's acceptance criteria. The reviewer sits in WS-2, AFTER ~10
+    self-modifying WS-1 PRs. Also: blocked_ci currently leaves auto-merge ARMED, so a runner-rejected PR
+    can still land GitHub-side with no verdict. Both symptoms, one root cause: the merge gate is a
+    runner-side decision that can be raced. Fix: make it a GitHub-enforced contract."
+  design: |
+    After ci goes green, a REVIEW worker (FRESH context — never the implementer's session; read-only
+    tools + gh) reads: the PR diff, the task's acceptance criteria from tasks.yaml, and the implement
+    worker's REPORT. It verdicts each criterion against its stated PROOF, then posts a commit status:
+      gh api -X POST repos/{owner}/{repo}/statuses/{sha} -f context=remudero-review -f state=success|failure
+    A criterion whose proof is missing, unpasted, or non-responsive = FAILURE. Test theater
+    (assertions that assert nothing) = FAILURE. The reviewer may never edit code.
+    Then add `remudero-review` to required_status_checks contexts alongside `ci`.
+    ORDERING (bootstrap, same pattern as T1B): this PR merges under the CURRENT gate (ci only);
+    protection is updated to require remudero-review only AFTER it merges. State that in the REPORT.
+    Auto-merge may then stay armed permanently: GitHub merges only when BOTH checks are green, so the
+    runner's exit verdict becomes advisory telemetry and can no longer diverge from reality.
+  acceptance:
+    - claim: "a REVIEW worker posts remudero-review to the PR head commit after ci is green"
+      proof: "gh api .../statuses/<sha> shows context=remudero-review with a state"
+    - claim: "a PR that is CI-GREEN but FAILS acceptance is NOT merged"
+      proof: "planted probe: an implement worker that passes tests but ignores a stated acceptance
+        criterion -> remudero-review=failure -> PR stays OPEN -> paste the status + PR state, then close"
+    - claim: "a PR green on BOTH checks auto-merges with no runner-side merge call"
+      proof: "ledger shows automerge.armed then pr.merged with no explicit merge command"
+    - claim: "protection now requires exactly [ci, remudero-review]"
+      proof: "gh api repos/craigoley/remudero/branches/main/protection --jq .required_status_checks.contexts"
+  status: queued
+  attempts: 0
+
 - id: W1-T2
   title: Validate-before-spawn guard + settings schema pin (P0)
   repo: remudero
-  depends_on: [W1-T1, W1-T1B]
+  depends_on: [W1-T1, W1-T1B, W1-T1C]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -69,7 +107,7 @@
 - id: W1-T3
   title: Contract parsers + golden tasks (auto-choose near-miss, dontAsk fallback)
   repo: remudero
-  depends_on: [W1-T1, W1-T1B]
+  depends_on: [W1-T1, W1-T1B, W1-T1C]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -89,7 +127,7 @@
 - id: W1-T4
   title: HeadroomTracker v0 — /usage parser
   repo: remudero
-  depends_on: [W1-T1, W1-T1B]
+  depends_on: [W1-T1, W1-T1B, W1-T1C]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -107,7 +145,7 @@
 - id: W1-T5
   title: mounts.yaml v0 + Tier Invariant validation
   repo: remudero
-  depends_on: [W1-T1, W1-T1B]
+  depends_on: [W1-T1, W1-T1B, W1-T1C]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -123,7 +161,7 @@
 - id: W1-T6
   title: NDJSON ledger + context telemetry + brain-plane calls
   repo: remudero
-  depends_on: [W1-T1, W1-T1B]
+  depends_on: [W1-T1, W1-T1B, W1-T1C]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -185,7 +223,7 @@
 - id: W1-T10
   title: Scoped-PAT injection via buildWorkerEnv (FF9 hardening)
   repo: remudero
-  depends_on: [W1-T1, W1-T1B]
+  depends_on: [W1-T1, W1-T1B, W1-T1C]
   type: implement
   verify: human      # requires Craig to enable fine-grained PATs on the craigoley org first
   principles: {tdd: strict}

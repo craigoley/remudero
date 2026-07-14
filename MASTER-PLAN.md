@@ -1,4 +1,4 @@
-# REMUDERO — Master Plan (v2.2 · synced 2026-07-14 · §6A open-source governance + commercial boundary added (DCO, extension seam, trademark, no-relicense contract) · billing leak fix for the operator's interactive sessions · NEXT: W1-T1B → T2)
+# REMUDERO — Master Plan (v2.3 · synced 2026-07-14 · ★ CI GATE LIVE (proven red+green under protection) · merge gate becomes a GITHUB-ENFORCED CONTRACT: acceptance verdict = required status check (W1-T1C) · NEXT: rmd run-task W1-T1C — the first self-modification through the loop)
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -772,6 +772,11 @@ WS-11 after WS-4 + a second project on the harness.
 1. PROVENANCE OR IT DOESN'T GO IN A PROMPT.
 2. Trust, scheduling, strikes, budgets = deterministic predicates. Never LLM decisions.
 3. One concern per PR. Branch from latest origin/main. Isolated worktrees.
+3B. **The merge gate is a GitHub-enforced CONTRACT (required status checks), never a runner-side
+   decision that can be raced.** `ci` (typecheck+tests) AND `remudero-review` (acceptance verdict by a
+   fresh-context reviewer) must both be green; GitHub does the merging. The runner ARMS auto-merge and
+   observes — its exit verdict is advisory telemetry, incapable of diverging from reality. Corollary:
+   auto-merge is safe to leave armed, because the contract, not the runner, decides.
 4. Acceptance criteria are proofs, not vibes. Green checks ≠ evidence (the full-shop-flow lesson).
 5. Never a third blind patch: two strikes → diagnose → one evidence-armed retry → escalate.
 6. Zero ask rules in worker settings. Hooks <1s. Workers carry scoped PATs only. No MCP in workers.
