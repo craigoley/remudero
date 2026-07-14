@@ -1,4 +1,4 @@
-# REMUDERO — Master Plan (v2.11 · synced 2026-07-14 · ★ FIRST RETRO (RETRO-1784058021334): WS-0
+# REMUDERO — Master Plan (v2.12 · synced 2026-07-14 · ★ KNOWLEDGE ARCHITECTURE: §8A memory hierarchy (Tier 0 stable prefix · Tier 1 matched injection · Tier 2 plan RETRIEVED not injected · Tier 3 run-local) + cache-aware STABLE-FIRST/VOLATILE-LAST ordering (measured via cache_read tokens); §8B compaction doctrine (detect+ledger, anchored summarization, write-before-compact); retros now question guards too (harness assumptions go stale); W1-T33–T39 close the five knowledge holes · FIRST RETRO (RETRO-1784058021334): WS-0
 shipped + WS-1 proto-runner LIVE — 9 PRs merged (SHIPPED log added), NET STATE refreshed off reality;
 first observed CALIBRATION row ($1.68/~20 turns mean, 53% merge rate) for mounts.yaml/W1-T5; 8
 non-merges mined into Retro proposals P1–P5; COMPRESSION: deleted the stale "run WS-0 spike v5.1" NEXT
@@ -793,6 +793,51 @@ the control plane ONLY into that project's workers, never cross-project. **Terms
 operators run the harness on their own subscription per Anthropic's terms — one operator, one
 account, one machine; the harness is a tool for your seat, not a seat-multiplier.
 
+## 8A. Knowledge architecture & context economy
+
+W1-T19 shipped the READ side of the compounding loop, which makes the knowledge ARCHITECTURE
+load-bearing. The governing principle [research, Anthropic "Effective context engineering"]: **find the
+smallest set of high-signal tokens that maximize the likelihood of the desired outcome** — context is a
+precious, finite resource, not a place to dump everything we know. Knowledge is a MEMORY HIERARCHY, not a
+file:
+
+- **TIER 0 — ALWAYS-ON, STABLE PREFIX.** The Promptsmith preamble + invariant rules (distrust-the-prompt,
+  autonomy clause, the deny-floor facts). **Line-capped (~150)** and it must change RARELY — every edit
+  busts the prompt cache for every worker rendered after it (see the ordering rule).
+- **TIER 1 — MATCHED INJECTION (deterministic, just-in-time).** Learnings matched by `subsystem:`/`files:`
+  tags (`src/lib/learnings.ts`), under the knowledge budget. VOLATILE (the corpus grows every retro) ⇒ it
+  goes **LAST** in the prompt, never early.
+- **TIER 2 — RETRIEVED, NOT INJECTED.** The plan is ~900 lines and growing; it is **NOT shipped to
+  workers**. Inject a **PLAN INDEX** (section headings + one-line summaries + where to grep). Workers have
+  grep/glob — this is Claude Code's OWN hybrid model (CLAUDE.md up front + glob/grep for retrieval), which
+  "bypasses the issues of stale indexing" [research]. W1-T37 builds it.
+- **TIER 3 — RUN-LOCAL, NEVER PERSISTED.** Recon output, transcripts — externalized to the ledger/scratch,
+  never promoted into Tier 0/1.
+
+**ORDERING RULE (cache-aware): STABLE FIRST, VOLATILE LAST.** Caches key on EXACT PREFIX BYTES — any edit
+early in the context invalidates the cache for everything after it, and cache reads price at ~1/10th of
+fresh input [research]. So the stable prefix (Tier 0) leads and the volatile matched-learnings (Tier 1)
+trail. This is now **MEASURABLE, not a matter of opinion**: the result envelope already carries
+`cache_read_input_tokens` + `cache_creation_input_tokens` (WS-0) — ledger them, and **near-zero cache
+reads on the second worker of a run means the ordering is wrong** (W1-T35).
+
+## 8B. Compaction doctrine
+
+Compaction is a **SAFETY NET, never a strategy** — one-concern sessions should END before it matters
+(§8A, §9). But it WILL fire (observed mean 19.8 turns, tasks at 36+), and today we do not even MEASURE
+it, so a silently-degraded worker is indistinguishable from a good one. Compaction's sharp failure mode
+[research]: **a summary that drops a critical fact is worse than no summary, because later steps trust it
+and cannot recover what was lost** — a compacted message is removed from the window and recoverable ONLY
+if it was STORED. Therefore, tuned for RECALL first, then precision:
+
+- **DETECT + LEDGER every compaction event.** A run that compacted is flagged **QUALITY-SUSPECT** and its
+  acceptance proofs are re-verified by the reviewer against REPO STATE (W1-T3F made that possible) — not
+  trusted from a possibly-lossy REPORT (W1-T36).
+- **ANCHORED SUMMARIZATION.** The task goal, acceptance criteria, and hard constraints are re-injected
+  **VERBATIM** after any compaction — never handed to a summarizer, never paraphrased.
+- **WRITE-BEFORE-COMPACT.** Workers externalize durable findings to a worktree scratch file **AS THEY
+  GO**, not only in the final REPORT — a fact discovered at turn 5 must survive a compaction at turn 30.
+
 ## 9. Resource doctrine — mounts, windows & context
 
 **Mounts — model selection is the remudero's core act.** `.remudero/mounts.yaml` is a
@@ -924,6 +969,14 @@ and verdict-calibration data. Outputs are always artifacts, never vibes: LEARNIN
 **CLAUDE.md / agents-file / prompt-template diffs as PRs**, principles-profile tuning proposals,
 new golden tasks minted from real failures, and campaign proposals (§3A) when a finding spans
 repos. Retros must also DELETE — compression is a deliverable, not just accretion.
+
+**HARNESS-COMPRESSION (a required retro item):** *"Which guards are now unnecessary? Which prompts are
+over-prescriptive?"* Harnesses encode assumptions about what Claude cannot do on its own, and **those
+assumptions go stale as models improve** [research] — a guard that was load-bearing at one model version
+can become dead weight (or an active constraint) at the next. So a retro that only ADDS guards is failing
+the same bar as a retro that only ADDS docs: it must also question and retire the harness's own scaffolding,
+not just the plan's prose. Retire behind the golden suite (a removed guard that regresses a planted-violation
+catch goes red before it merges), same RSI-safety rule as any other self-modification.
 
 **Knowledge system (the RSI-safety rule)**: knowledge and prompt changes ARE CODE. Every CLAUDE.md,
 agents-file, prompt-template, and principles edit ships as a PR, git-versioned (rollback = revert),

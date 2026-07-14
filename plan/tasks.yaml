@@ -1166,3 +1166,170 @@
       proof: "the same trivial auto-choice appears as a decision.autochoose ledger line even though it is absent from DECISIONS.md"
   status: queued
   attempts: 0
+
+# ── KNOWLEDGE ARCHITECTURE & CONTEXT ECONOMY (MASTER-PLAN §8A/§8B). W1-T19 shipped the READ side, which
+# makes the knowledge architecture load-bearing; these close its five holes. Context is a finite resource:
+# smallest high-signal set, stable-first/volatile-last, compaction measured not assumed. ───────────────
+- id: W1-T33
+  title: Knowledge SPLIT + INDEX + SUPERSESSION — a lookup, not a scan; superseded entries never inject
+  repo: remudero
+  depends_on: [W1-T19]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §8A Tier 1. One flat learnings file becomes a scan; split it into
+    learnings/{platform,architecture,ci,testing,failures}.md with a GENERATED index (tag → file → entry
+    ids) so injection is a LOOKUP. Entries gain a LIFECYCLE (active | superseded); a SUPERSEDED entry is
+    NEVER injected — it stays for provenance only. Provenance decay is real: a fact can become FALSE."
+  design: |
+    Split the corpus into learnings/{platform,architecture,ci,testing,failures}.md (or the yaml mirror by
+    section) + a generated INDEX mapping tag/subsystem/files -> file -> entry ids, so the Promptsmith does
+    a lookup, not a full scan. Add a `lifecycle: active|superseded` field; the injector filters out
+    superseded entries. Regenerate the index in CI (a stale index fails).
+  acceptance:
+    - claim: "the corpus is split by subsystem with a generated index and injection is a lookup keyed by tag"
+      proof: "learnings/{platform,architecture,ci,testing,failures}.* exist; the generated index maps tag/files -> entry ids; a stale index FAILS CI (regenerate check) — paste the index + the check"
+    - claim: "a SUPERSEDED entry is NEVER injected (live example: the false ZDOTDIR claim)"
+      proof: "the entry claiming 'ZDOTDIR isolates worker shells' is marked lifecycle=superseded; a worker touching env.ts receives ONLY the CLAUDE_CODE_SHELL entry and NEVER the superseded ZDOTDIR one (fixture test over the rendered prompt)"
+  status: queued
+  attempts: 0
+
+- id: W1-T34
+  title: SELF-VERIFYING LEARNINGS — an entry may carry an assertion; a failing one auto-quarantines it
+  repo: remudero
+  depends_on: [W1-T29, W1-T33]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Extends W1-T29 plan-claims to KNOWLEDGE. Provenance decays: a fact pinned to SDK 0.3.209 must
+    not keep being injected after the SDK moves. An entry MAY carry an `assertion:` (a command that must
+    exit 0); CI runs them, and a FAILING assertion auto-QUARANTINES the entry as STALE so it stops being
+    injected until re-verified. A learning that can no longer prove itself is not ground truth."
+  design: |
+    Add an optional `assertion:` (shell command, exit 0 = still true) to a learning entry. A CI job runs
+    every assertion; a non-zero exit sets the entry lifecycle to quarantined/stale and NAMES it. The
+    injector excludes quarantined entries. Re-verification (assertion passes again) restores it.
+  acceptance:
+    - claim: "CI runs each entry's assertion and a FAILING assertion auto-quarantines that entry"
+      proof: "a deliberately-broken assertion turns the learnings-assertion CI job RED and quarantines its entry (lifecycle flips) — paste the red run naming the entry, then revert"
+    - claim: "a quarantined entry is ABSENT from a rendered prompt"
+      proof: "fixture test: an entry whose assertion fails is excluded from the injected learnings for a matching task, even though its files: glob matches"
+  status: queued
+  attempts: 0
+
+- id: W1-T35
+  title: CACHE-AWARE PROMPT ASSEMBLY — stable prefix first, volatile last; ledger cache tokens
+  repo: remudero
+  depends_on: [W1-T19]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §8A ordering rule. Caches key on EXACT PREFIX BYTES: any early edit invalidates
+    the cache for everything after, and cache reads price at ~1/10th of fresh input [research]. Assemble
+    prompts STABLE-FIRST (Tier 0 preamble) / VOLATILE-LAST (matched learnings), and ledger the cache tokens
+    so a wrong ordering is MEASURABLE, not opinion."
+  design: |
+    Order the rendered prompt: stable Tier-0 preamble first, matched Tier-1 learnings last. Ledger
+    cache_read_input_tokens + cache_creation_input_tokens from the result envelope on every worker.
+  acceptance:
+    - claim: "the prompt is assembled stable-first, volatile-last"
+      proof: "a rendered-prompt test asserts the invariant preamble precedes the matched-learnings block; an early edit to the preamble is what would move, not the learnings"
+    - claim: "cache tokens are ledgered and the second worker of a run shows cache reads > 0"
+      proof: "paste the ledger lines before and after the change: cache_read_input_tokens is 0/absent before, > 0 on the second worker after (the stable prefix is being reused)"
+  status: queued
+  attempts: 0
+
+- id: W1-T36
+  title: COMPACTION TELEMETRY + ANCHORING — detect it, flag quality-suspect, re-inject the anchors verbatim
+  repo: remudero
+  depends_on: [W1-T19, W1-T3F]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §8B. Compaction WILL fire (mean 19.8 turns, tasks at 36+) and we do not measure
+    it, so a silently-degraded worker looks like a good one. A dropped critical fact is worse than no
+    summary. Detect + ledger it; ANCHOR the goal/criteria/constraints verbatim across it; re-verify a
+    compacted run's proofs against REPO STATE (W1-T3F), never a possibly-lossy REPORT."
+  design: |
+    Detect a compaction event from the stream and ledger it. A run that compacted is flagged
+    quality-suspect; its acceptance proofs are re-verified by the reviewer against repo state (W1-T3F).
+    Re-inject the task goal + acceptance criteria + hard constraints VERBATIM after any compaction.
+  acceptance:
+    - claim: "a forced long run ledgers a compaction event and is flagged quality-suspect"
+      proof: "a run driven past the compaction threshold produces a compaction ledger line and a quality_suspect=true flag on its verdict — paste the ledger lines"
+    - claim: "the goal, acceptance criteria, and hard constraints are re-injected VERBATIM after compaction"
+      proof: "fixture/transcript: after a compaction event the anchored block reappears byte-identical (not summarized) in the continued prompt"
+  status: queued
+  attempts: 0
+
+- id: W1-T37
+  title: PLAN IS RETRIEVED, NOT INJECTED — ship a plan INDEX to workers, they grep for detail
+  repo: remudero
+  depends_on: [W1-T19]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §8A Tier 2. The plan is ~900 lines and grows; shipping it whole is a context tax
+    workers pay every run. Inject a PLAN INDEX (headings + one-line summaries + where to grep); workers
+    have grep/glob — Claude Code's own hybrid model, which bypasses stale indexing [research]."
+  design: |
+    Generate a plan INDEX (section headings + one-line summaries + grep hints) and inject THAT into recon
+    prompts instead of the plan body. Keep the index generated (a stale index fails CI, same as W1-T33).
+  acceptance:
+    - claim: "the rendered recon prompt contains the plan INDEX and NOT the plan body"
+      proof: "char-count proof before/after: the recon prompt drops from ~plan-body size to ~index size; grep shows the index headings present and the plan body absent"
+    - claim: "a worker needing a specific section can grep for it and succeed"
+      proof: "a task whose work needs §4A detail: the worker greps MASTER-PLAN for the §4A heading (named in the index) and retrieves it — transcript shows the grep + the hit"
+  status: queued
+  attempts: 0
+
+- id: W1-T38
+  title: KNOWLEDGE BUDGET AS A CI RATCHET — total learnings size is capped; over-cap FAILS CI
+  repo: remudero
+  depends_on: [W1-T33]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §8A: makes 'compression is a deliverable' ENFORCED, not aspirational — the same
+    shape as the coverage ratchet. Total learnings corpus size is capped; a PR pushing it past the cap goes
+    RED until a compression pass (or a supersession) brings it back under. Knowledge that only grows is a
+    context tax that compounds against every future run."
+  design: |
+    A CI job sums the active (non-superseded) learnings corpus size against a recorded cap; exceeding it
+    fails and names the overage. Raising the cap is a deliberate, reviewed change (like the coverage floor).
+  acceptance:
+    - claim: "a PR pushing the active learnings corpus past the cap goes RED and names the overage"
+      proof: "a branch adding bulk active learnings over the cap makes the budget-ratchet CI job fail with the measured size vs cap — paste the red run, then revert"
+    - claim: "superseded/quarantined entries do NOT count against the cap (only injectable weight is capped)"
+      proof: "unit test: marking an entry superseded reduces the counted size; the same bytes as an active entry would exceed the cap"
+  status: queued
+  attempts: 0
+
+- id: W1-T39
+  title: docs/ORIENTATION.md — the Architect handoff doc, MAINTAINED BY rmd retro
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 100.00
+  rationale: "A fresh Architect session should orient from ONE small doc, not re-derive state from a
+    900-line plan + a ledger. docs/ORIENTATION.md states: current state, what's next (the next runnable
+    task), and what must NEVER be done (the invariants). It is MAINTAINED BY rmd retro (shipped) so it
+    never goes stale — the retro already computes state; it writes the handoff too."
+  design: |
+    Add docs/ORIENTATION.md (current state · next runnable task · never-do invariants). Extend rmd retro to
+    regenerate it each run from the deterministic gather + plan, so it tracks reality automatically.
+  acceptance:
+    - claim: "a fresh Architect given ONLY ORIENTATION.md + the plan index can name the current state and the next runnable task"
+      proof: "given ORIENTATION.md + the plan index (and nothing else), the named current state and next runnable task match the derived-from-GitHub status projection — paste both"
+    - claim: "rmd retro regenerates ORIENTATION.md (it never goes stale by hand)"
+      proof: "a retro run updates docs/ORIENTATION.md in its plan-only PR; the diff shows the refreshed state/next-task — paste the retro's ORIENTATION diff"
+  status: queued
+  attempts: 0
