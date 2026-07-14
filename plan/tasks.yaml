@@ -2,6 +2,14 @@
 # WS-1: proto-runner → daemon. T1 is the LAST hand-built thing; T2+ land VIA the proto-runner (L1).
 # Prompts are pre-authored (G-2). STATUS IS DERIVED FROM GITHUB — this file is never machine-rewritten.
 #
+# STATUS MODEL (MASTER-PLAN v2.1, implemented in lib/status.ts):
+#  - `status:` is DECORATIVE / initial-state only. The runner NEVER writes it back. Real merge-state is
+#    DERIVED FROM GITHUB by deriveStatus(taskId), in precedence: (a) the ledger `pr.opened` line for the
+#    task -> that PR's state; (b) an explicit `pr:` field here (hand-executed, pre-ledger tasks); (c) a
+#    merged PR whose body carries the trailer `Remudero-Task: <id>`. Projection cached to state/status.json.
+#  - A YAML round-trip would destroy these comments and a machine writer would race the human editor —
+#    conflict classes we simply do not have by never writing status back.
+#
 # BINDING RULES for every task below (injected into every rendered prompt):
 #  - DISTRUST THE PROMPT OVER THE INSTALLED VERSION. Read the installed schema/types. Two tasks running,
 #    two prompt errors caught this way (WS-0: allowedDomains nesting; W1-T1: the SDK schema is $loose and
@@ -27,7 +35,8 @@
       proof: "spike's env unit tests still 4/4 green; git diff shows moves, not rewrites"
     - claim: "worker settings are VALIDATED before spawn (WS-0 FF10a: -p drops invalid settings silently)"
       proof: "a planted schema typo (allowedDomains at sandbox root) FAILS the guard with a named error"
-  status: queued
+  status: queued           # decorative — real merge-state is DERIVED FROM GITHUB (see header + lib/status.ts)
+  pr: 2                     # merged PR #2 -> deriveStatus resolves this task as merged
   attempts: 0
 
 - id: W1-T1B
@@ -47,7 +56,8 @@
       proof: "a deliberately-red PR is left OPEN with verdict=blocked_ci in the ledger, never merged"
     - claim: "workers npm ci in the worktree before typecheck/test (a fresh worktree has no node_modules)"
       proof: "worker transcript shows npm ci, then tests passing IN the worktree"
-  status: queued
+  status: queued           # decorative — real merge-state is DERIVED FROM GITHUB (see header + lib/status.ts)
+  pr: 3                     # merged PR #3 -> deriveStatus resolves this task as merged
   attempts: 0
 
 - id: W1-T1C
@@ -285,5 +295,59 @@
       proof: "`claude -p \"/usage\"` shows no precedence warning and reports subscription"
     - claim: "existing automation is unaffected"
       proof: "one ClawApp/OpenClaw script that needs the key still runs green"
+  status: queued
+  attempts: 0
+
+- id: W1-T14
+  title: Make `rmd` a real installable CLI (package.json bin + publishable, no secrets in the tarball)
+  repo: remudero
+  depends_on: [W1-T1C]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  rationale: "package.json has NO `bin` field, so `npm link` is a no-op and `rmd` never lands on PATH —
+    every invocation today is `./bin/rmd` from inside the repo. And `private: true` blocks the npm
+    publish that WS-4's `npx remudero init` quickstart depends on. Both must change together, and the
+    published tarball must NOT leak local/ , state/, worker credentials, or machine paths."
+  design: |
+    Add `"bin": { "rmd": "bin/rmd" }` to package.json and flip `private` off (or drop it) with an
+    explicit `files` allowlist + `.npmignore`/`publishConfig` so the tarball ships ONLY the runtime
+    surface (bin/, src/, settings/, hooks/, README, LICENSE). Never local/, state/, node_modules, or
+    any *.pat. `bin/rmd` already resolves its own dir, so it works from any cwd once on PATH. Keep the
+    version at a pre-alpha tag; publishability is proven with --dry-run, no actual publish in this PR.
+  acceptance:
+    - claim: "`rmd` is on PATH after install and runs from OUTSIDE the repo dir"
+      proof: "after `npm link` (or a global install of the pack), `which rmd` returns a path and
+        `rmd --help` runs from a DIFFERENT directory (paste both, run from e.g. $HOME)"
+    - claim: "the publish tarball contains ONLY intended files — no local/, no state/, no credentials"
+      proof: "`npm pack --dry-run` output pasted in full; assert no local/, state/, *.pat, node_modules,
+        or absolute machine paths appear in the file list"
+    - claim: "`rmd --help` exits cleanly (a real CLI has a help path, not just `run-task`)"
+      proof: "paste `rmd --help` exit code 0 and its usage text"
+  status: queued
+  attempts: 0
+
+- id: W1-T15
+  title: plan-sync is an in-repo PR flow — never scp again
+  repo: remudero
+  depends_on: [W1-T1C]
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 2.00
+  rationale: "MASTER-PLAN.md and plan/tasks.yaml were once copied into the tree out-of-band (scp), which
+    is how they arrived DIRTY with no provenance. Plan changes must arrive by git like any other change,
+    through a reviewable PR — the plan is the one artifact whose edit history matters most."
+  design: |
+    Document a `rmd plan sync` path (or, if a command is over-scope for this PR, a CONTRIBUTING note that
+    codifies the flow): edit MASTER-PLAN.md / plan/tasks.yaml on a branch, open a PR, land it through the
+    same ci gate as code. No file ever arrives by scp/rsync/manual copy again. Cross-reference it from
+    §13 of MASTER-PLAN so the rule is discoverable from the plan itself.
+  acceptance:
+    - claim: "a documented plan-sync PR flow exists in the repo"
+      proof: "the doc (CONTRIBUTING or docs/plan-sync.md) exists and states: plan edits land via PR, never scp"
+    - claim: "MASTER-PLAN §13 references the plan-sync flow"
+      proof: "grep §13 of MASTER-PLAN.md shows a link/reference to the plan-sync doc"
   status: queued
   attempts: 0

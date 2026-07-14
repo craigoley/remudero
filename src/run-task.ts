@@ -13,6 +13,7 @@ import {
 } from "./lib/plan.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
+import { ghGateway, projectPlan } from "./lib/status.js";
 import {
   ghJson,
   parseDecisionRequest,
@@ -73,6 +74,25 @@ function armAutoMerge(prUrl: string): void {
     // On repos with zero required checks, GitHub may merge immediately on arm and
     // gh can report that as a non-zero "clean status" state. The poll below reads
     // the true PR state, so arming errors are informational, never fatal.
+  }
+}
+
+/**
+ * Ensure a PR body carries the `Remudero-Task: <id>` trailer. This is precedence
+ * source (c) for deriveStatus AND it makes a run's provenance visible on GitHub.
+ * Idempotent and non-fatal: whoever opened the PR (worker or fallback), the
+ * orchestrator guarantees the trailer here.
+ */
+function ensureTaskTrailer(prUrl: string, taskId: string): void {
+  const trailer = `Remudero-Task: ${taskId}`;
+  try {
+    const view = ghJson(["pr", "view", prUrl, "--json", "body"]) as { body?: string };
+    const body = view.body ?? "";
+    if (body.includes(trailer)) return;
+    const newBody = body.trim().length > 0 ? `${body.trimEnd()}\n\n${trailer}\n` : `${trailer}\n`;
+    execFileSync("gh", ["pr", "edit", prUrl, "--body", newBody], { stdio: "pipe" });
+  } catch {
+    // Provenance trailer is best-effort; the ledger (source (a)) still records the PR.
   }
 }
 
@@ -160,6 +180,7 @@ function renderImplementPrompt(task: Task, reconContext: string, runId: string):
     "- Otherwise: stage the changed file(s), commit with a concise message, then run",
     "  `git push origin HEAD` (NOT `-u` — the shared .git/config is outside the sandbox",
     "  write scope, WS-0 FF10f), and open a PR with `gh pr create --fill --base main`.",
+    `- Include this exact trailer as the LAST line of the PR body: Remudero-Task: ${task.id}`,
     "- End with a REPORT whose LAST line is exactly: PR_URL: <the pull request url>",
   ].join("\n");
 }
@@ -172,7 +193,19 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
 
   const plan: Plan = loadPlan(planPath);
   const task = selectTask(plan, taskId);
-  assertRunnable(plan, task); // refuse unmerged deps / blocked / verify:human
+
+  // ── Merge-state is DERIVED FROM GITHUB, never from the yaml `status:` field
+  // (MASTER-PLAN v2.1). Project the whole plan against GitHub, cache it to a
+  // machine-owned status.json, and gate on the derived merged predicate. The
+  // runner NEVER writes tasks.yaml.
+  const statusPath = join(config.root, "state", "status.json");
+  const projection = projectPlan(
+    plan,
+    { ledgerPath: join(config.root, "state", "ledger.ndjson"), github: ghGateway(owner, task.repo) },
+    statusPath,
+  );
+  const isMerged = (t: Task): boolean => projection.get(t.id)?.merged ?? false;
+  assertRunnable(plan, task, isMerged); // refuse unmerged deps / blocked / verify:human
 
   const runId = `${taskId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -324,6 +357,8 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
       log("verdict", { verdict: "failed", reason: "no PR opened", cost_usd: costUsd });
       return { taskId, runId, merged: false, costUsd, verdict: "failed" };
     }
+    // Stamp the provenance trailer (deriveStatus source (c)) before gating.
+    ensureTaskTrailer(prUrl, taskId);
     log("pr.opened", { pr_url: prUrl });
     say(`PR: ${prUrl}`);
 

@@ -45,8 +45,18 @@ export interface Task {
   depends_on: string[];
   type: "recon" | "implement" | "diagnose" | "review" | "manual";
   verify: "auto" | "human";
+  /**
+   * DECORATIVE / initial-state only. Real merge-state is DERIVED FROM GITHUB
+   * (see lib/status.ts deriveStatus) and never written back here. Kept so the
+   * schema is stable and a fresh plan reads sensibly.
+   */
   status: TaskStatus;
   attempts: number;
+  /**
+   * Explicit PR number for a task executed by hand before it had a ledger entry
+   * (precedence source (b) in deriveStatus). Never written by the machine.
+   */
+  pr?: number;
   principles?: Record<string, unknown>;
   budget_usd?: number;
   acceptance?: AcceptanceCriterion[];
@@ -108,6 +118,7 @@ export function loadPlan(path: string): Plan {
       budget_usd: e.budget_usd as number | undefined,
       acceptance: e.acceptance as AcceptanceCriterion[] | undefined,
       hand_built: e.hand_built as boolean | undefined,
+      pr: typeof e.pr === "number" ? e.pr : undefined,
       note: e.note as string | undefined,
       prompt: e.prompt as string | undefined,
       context: e.context as ContextClaim[] | undefined,
@@ -133,25 +144,43 @@ export function selectTask(plan: Plan, id: string): Task {
 }
 
 /**
+ * Predicate for "has this dependency landed?". The default reads the DECORATIVE
+ * yaml `status:` field (used by pure unit tests over fixtures); the runner passes
+ * a GitHub-DERIVED resolver (lib/status.ts) so the real gate never trusts yaml.
+ */
+export type MergedResolver = (task: Task) => boolean;
+
+const yamlStatusMerged: MergedResolver = (t) => MERGED_STATUSES.has(t.status);
+
+/**
  * Refuse to run a task whose dependencies have not merged (§12 rule 3: branch
  * from a landed base). Returns the list of unmet dependency ids; empty = clear.
+ * `isMerged` decides landed-ness — DERIVED FROM GITHUB in the real runner.
  */
-export function unmetDependencies(plan: Plan, task: Task): string[] {
+export function unmetDependencies(
+  plan: Plan,
+  task: Task,
+  isMerged: MergedResolver = yamlStatusMerged,
+): string[] {
   return task.depends_on.filter((dep) => {
     const d = plan.byId.get(dep);
-    return !d || !MERGED_STATUSES.has(d.status);
+    return !d || !isMerged(d);
   });
 }
 
-/** Throw unless every dependency has merged. */
-export function assertRunnable(plan: Plan, task: Task): void {
+/** Throw unless every dependency has merged (per `isMerged`, derived from GitHub). */
+export function assertRunnable(
+  plan: Plan,
+  task: Task,
+  isMerged: MergedResolver = yamlStatusMerged,
+): void {
   if (task.status === "blocked") {
     throw new PlanError(`task ${task.id} is blocked${task.note ? `: ${task.note}` : ""}`);
   }
   if (task.verify === "human") {
     throw new PlanError(`task ${task.id} is verify:human — not auto-runnable by the proto-runner`);
   }
-  const unmet = unmetDependencies(plan, task);
+  const unmet = unmetDependencies(plan, task, isMerged);
   if (unmet.length > 0) {
     throw new PlanError(`task ${task.id} has unmerged dependencies: ${unmet.join(", ")}`);
   }
