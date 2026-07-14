@@ -286,6 +286,13 @@ export interface ReviewPromptInput {
  * and the implement REPORT, verdicts each criterion against its proof, and posts
  * the `remudero-review` commit status. It is told NEVER to edit code — and the
  * runner spawns it with a read-only settings profile, so this is belt-and-braces.
+ *
+ * The reviewer verifies against REPO STATE, not diff+report alone: when a proof
+ * names an EXECUTABLE check (a test to run, a grep/command over the source), the
+ * reviewer CHECKS OUT the PR head and RUNS that check, verdicting on the OBSERVED
+ * result — the report's word that a test passes or a grep matches is not proof it
+ * does. Running tests/greps against the checked-out head is read-only in spirit:
+ * it never edits the PR's code and never changes the head sha it judges.
  */
 export function buildReviewPrompt(input: ReviewPromptInput): string {
   const criteria = (input.task.acceptance ?? [])
@@ -299,7 +306,9 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
     `You are a REVIEW worker with FRESH context — you are NOT the implementer and`,
     `have none of their session. You are READ-ONLY: you may inspect the repo and`,
     `use \`gh\`, but you must NEVER edit, modify, or write any code or file. The PR`,
-    `head sha must be unchanged by your review.`,
+    `head sha must be unchanged by your review. Running the PR's tests or grepping`,
+    `its source to verify a proof is allowed and expected — that is inspection, not`,
+    `editing — as long as you never change the code or the head sha.`,
     ``,
     `TASK UNDER REVIEW: ${input.task.id}`,
     `PR: ${input.prUrl}`,
@@ -307,9 +316,17 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
     `Do this:`,
     `1. Read the PR diff:            gh pr diff ${input.prUrl}`,
     `2. Read the implement REPORT (the PR body / last worker message).`,
-    `3. For EACH acceptance criterion below, verdict its stated PROOF against the`,
-    `   diff and the REPORT. A proof that is missing, unpasted, or non-responsive`,
-    `   = FAILURE. Test theater (assertions that assert nothing) = FAILURE.`,
+    `3. CHECK OUT the PR head so you can verify against REPO STATE, not just take`,
+    `   the report's word. In a THROWAWAY directory (never the runner's cwd), and`,
+    `   without changing the PR head sha (${input.headSha}):`,
+    `     gh pr checkout ${input.prUrl}   # or: git fetch origin ${input.headSha} && git checkout ${input.headSha}`,
+    `4. For EACH acceptance criterion below, verdict its stated PROOF. When the`,
+    `   proof names an EXECUTABLE check — a test (RUN it), a grep/command over the`,
+    `   source — RUN that check against the checked-out PR head and verdict on the`,
+    `   OBSERVED result (repo state), NOT merely on whether the REPORT pasted it. A`,
+    `   proof that is missing, unpasted, or non-responsive = FAILURE; a proof whose`,
+    `   test FAILS, or whose grep/command does not match on the PR head, = FAILURE.`,
+    `   Test theater (assertions that assert nothing) = FAILURE.`,
     ``,
     `ACCEPTANCE CRITERIA:`,
     criteria || "  (none stated — treat as FAILURE: nothing to verify)",

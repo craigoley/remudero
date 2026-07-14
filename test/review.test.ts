@@ -337,6 +337,13 @@ test("buildReviewPrompt: fresh, read-only, gh-only, posts remudero-review, never
   assert.match(prompt, /never (edit|modify)/i);
   // The stated proofs must be carried into the reviewer's prompt.
   assert.match(prompt, /context=remudero-review/);
+  // The reviewer verifies against REPO STATE: check out the PR head and RUN the
+  // proof's test/grep, not verdict on diff+report alone.
+  assert.match(prompt, /repo state/i);
+  assert.match(prompt, /checkout|check out/i);
+  assert.match(prompt, /statuses\/abc123/); // still posts to the head sha
+  // The checkout target is the head sha, and running tests/greps is allowed.
+  assert.match(prompt, /gh pr checkout|git fetch origin abc123/);
 });
 
 // ── The reviewer RUBRIC (§5 layer 2): four judgment items + the satisfied_by guard ──
