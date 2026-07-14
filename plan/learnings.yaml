@@ -214,3 +214,23 @@
     command registry feeds rmd --help + GitHub /docs + the website — never three hand-copies.
   src: research#docs-generation
   cited: "2026-07-14"
+
+# ── Reviewer floor & stale criteria (PR #42, W1-T5) ──
+- id: reviewer-floor-casing-blind
+  subsystem: reviewer
+  files: [src/lib/review.ts]
+  fact: >-
+    The reviewer keyword floor was casing/separator-blind: maxTurns vs max_turns tokenized as a miss and
+    false-blocked a correct PR. Normalized (split camelCase before lowercasing); the real fix is W1-T3F
+    (observe repo state, not report keywords).
+  src: PR#42
+  cited: "2026-07-14"
+- id: criteria-go-stale-on-relocation
+  subsystem: acceptance
+  files: [plan/tasks.yaml, src/lib/review.ts]
+  fact: >-
+    A criterion goes STALE when a later PR relocates a concept (PR #23 moved budget off the mount to
+    per-task budget_usd, but W1-T5 still named maxBudgetUsd as a mount knob). The Architect corrects a
+    stale criterion via a plan PR; a worker never — nothing dropped, only realigned to the architecture.
+  src: PR#42
+  cited: "2026-07-14"

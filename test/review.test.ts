@@ -127,6 +127,22 @@ test("empty acceptance criteria fail closed (nothing to judge is never a pass)",
   assert.equal(v.state, "failure");
 });
 
+test("NORMALIZE: `maxTurns` in a criterion matches `max_turns` in the report (case/separator-insensitive)", () => {
+  // The knob is the SAME (maxTurns ≡ max_turns ≡ max-turns); only spelling differs.
+  // This is the weakness that false-blocked PR #42 (W1-T5).
+  const criteria = [
+    { claim: "the mount resolves maxTurns", proof: "resolver returns maxTurns and context_budget per mount" },
+  ];
+  const met = judgeReview(criteria, {
+    diff: "",
+    report: "the resolver returns max_turns and context-budget per mount", // snake + kebab spellings
+  });
+  assert.equal(met.state, "success", met.summary);
+  // A genuinely-absent term still FAILS — normalization must not manufacture a false PASS.
+  const absent = judgeReview(criteria, { diff: "", report: "an unrelated change to the plan loader" });
+  assert.equal(absent.state, "failure");
+});
+
 test("satisfied_by (Architect-only): a criterion already met by an earlier PR is MET, cited to that PR", () => {
   const criteria: AcceptanceCriterion[] = [
     // A proof the report does NOT substantiate — it would fail on keyword coverage —
