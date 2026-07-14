@@ -1669,3 +1669,36 @@
       proof: "the panel's action buttons are generated from `rmd skill list` via the api-client; adding a skill yaml adds a button with no UI code change — paste the button set + the source"
   status: queued
   attempts: 0
+
+# ── SUCCESSOR to rmd drain v1's stop-on-block. v1 (the drain PR) halts on ANY block because it cannot
+# tell a transient from a real blocker; once the diagnose loop + daemon exist, the daemon REASONS instead.
+- id: W1-T46
+  title: "drain: intelligent block-handling — the daemon REASONS about a block (successor to v1 stop-on-block)"
+  repo: remudero
+  depends_on: [W1-T7, W1-T12]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  origin: feedback#drain
+  plan_refs: ["§3", "§4"]
+  rationale: "SUPERSEDES `rmd drain` v1's blunt STOP-ON-BLOCK (shipped this PR). v1 halts on ANY non-merged
+    verdict because a blocked task's dependents could build on missing work and it has no way to tell a
+    transient from a real blocker. Once the diagnose loop (W1-T7) and the daemon (W1-T12) exist, the daemon
+    can REASON about the block + the plan: transient (retry), a self-contained failure whose dependents are
+    independent (skip that subtree + continue + flag), or a genuine blocker (pause for HITL escalation).
+    Never continue INTO the gap."
+  design: |
+    On a block during a drain/daemon run, classify (reuse W1-T7's transient-vs-strike classifier +
+    diagnose): TRANSIENT -> retry (no strike), continue; INDEPENDENT-FAILURE (the blocked task's dependents
+    do not transitively need it) -> skip ONLY its dependent subtree, continue the rest, flag it; GENUINE
+    BLOCKER (dependents need it) -> pause + escalate for a human (§4). Supersedes the v1 stop-on-block.
+  acceptance:
+    - claim: "a seeded TRANSIENT block auto-retries and the drain continues"
+      proof: "a seeded transient failure (network/5xx/CI-flake, per W1-T7) is retried without a strike and the drain proceeds to the next task — paste the ledger showing retry then continue"
+    - claim: "a seeded HARD blocker PAUSES for HITL and does not continue into the gap"
+      proof: "a seeded genuine blocker (a task its dependents transitively need) halts the drain and files a needs-human escalation; no dependent runs — paste the escalation + the halt"
+    - claim: "a seeded INDEPENDENT failure skips ONLY its own dependent subtree and continues the rest"
+      proof: "a self-contained failure whose dependents do not need it skips exactly its dependent subtree (flagged) while unrelated runnable tasks still run — paste the subtree skipped + the others merged"
+  status: queued
+  attempts: 0

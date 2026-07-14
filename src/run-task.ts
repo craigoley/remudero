@@ -8,8 +8,21 @@ import {
   loadConfig,
   softBudgetThreshold,
   workerModel,
+  workerShell,
+  workerZdotdir,
   type Config,
 } from "./lib/config.js";
+import { buildWorkerEnv } from "./lib/env.js";
+import {
+  DEFAULT_MAX as DRAIN_DEFAULT_MAX,
+  plannedSequence,
+  renderSummary,
+  resumeCommand,
+  runDrain,
+  type DrainOpts,
+  type MergedSet,
+} from "./lib/drain.js";
+import { parseUsage, type UsageSnapshot } from "./lib/headroom.js";
 import {
   assertArchitectAboveWorker,
   buildGather,
@@ -1106,6 +1119,87 @@ function retroPrompt(gatherReport: string, calTable: string, runId: string): str
   ].join("\n");
 }
 
+/** Read current `/usage` headless and parse it; `undefined` on any failure (best-effort). */
+function readUsageSnapshot(config: Config): UsageSnapshot | undefined {
+  try {
+    const env = buildWorkerEnv({}, process.env, {
+      zdotdir: workerZdotdir(config),
+      shell: workerShell(config),
+    });
+    const out = execFileSync(config.claudeBin, ["-p", "/usage"], {
+      encoding: "utf8",
+      env,
+      maxBuffer: 1 << 24,
+    });
+    return parseUsage(out);
+  } catch {
+    return undefined; // unreadable ⇒ the drain continues (max + budget still bound it)
+  }
+}
+
+/**
+ * `rmd drain [--until <id>] [--max <n>] [--dry-run]` — drain the DAG through the
+ * EXISTING run-task path. Thin + deterministic: next-runnable is the plan.ts DAG
+ * logic over GitHub-derived status; it STOPS ON ANY BLOCK (v1); it is headroom-aware
+ * and bounded. See lib/drain.ts for the loop; this only wires the real defaults.
+ */
+async function drainCommand(rest: string[]): Promise<number> {
+  const dryRun = rest.includes("--dry-run");
+  const untilIdx = rest.indexOf("--until");
+  const maxIdx = rest.indexOf("--max");
+  const opts: DrainOpts = {
+    until: untilIdx >= 0 ? rest[untilIdx + 1] : undefined,
+    max: maxIdx >= 0 ? Number(rest[maxIdx + 1]) : DRAIN_DEFAULT_MAX,
+  };
+  const config = loadConfig();
+  const planPath = join(repoRoot, "plan", "tasks.yaml");
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const statusPath = join(config.root, "state", "status.json");
+  const { owner } = resolveOwnerRepo();
+  const plan = loadPlan(planPath);
+
+  // Merged predicate, re-derived from GitHub each call (status.ts). The plan is
+  // stewarded in `remudero`, so the gateway targets it; cross-repo tasks resolve
+  // via the ledger's full pr_url (deriveStatus source (a)) or are verify:human.
+  const refreshMerged: () => MergedSet = () => {
+    const proj = projectPlan(
+      plan,
+      { ledgerPath, github: ghGateway(owner, "remudero") },
+      statusPath,
+    );
+    return (id: string) => proj.get(id)?.merged ?? false;
+  };
+
+  if (dryRun) {
+    const seq = plannedSequence(plan, refreshMerged(), opts);
+    console.log(`### rmd drain --dry-run — ${seq.length} task(s) would run, in order:`);
+    seq.forEach((id, i) => console.log(`  ${i + 1}. ${id}`));
+    if (seq.length === 0) console.log("  (nothing runnable — deps unmet, all merged, or --until already satisfied)");
+    console.log(`\nresume: ${resumeCommand(opts)}`);
+    return 0;
+  }
+
+  const runId = `DRAIN-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "DRAIN", step, ...extra });
+  log("drain.start", { until: opts.until ?? null, max: opts.max });
+
+  const summary = await runDrain(
+    plan,
+    {
+      refreshMerged,
+      runOne: (taskId) => runTask(taskId, { planPath, config }),
+      readUsage: () => readUsageSnapshot(config),
+      log,
+    },
+    opts,
+  );
+  console.log("\n" + renderSummary(summary));
+  // Exit 0 only on a clean drain (target reached / max reached / nothing left);
+  // a block/headroom/error stop is a non-zero exit so an unattended wrapper notices.
+  return summary.stopReason === "blocked" || summary.stopReason === "error" ? 1 : 0;
+}
+
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(): Promise<void> {
   const [, , cmd, ...rest] = process.argv;
@@ -1121,8 +1215,11 @@ async function main(): Promise<void> {
   if (cmd === "retro") {
     process.exit(await retroCommand(rest));
   }
+  if (cmd === "drain") {
+    process.exit(await drainCommand(rest));
+  }
   console.error(
-    "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)",
+    "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task",
   );
   process.exit(2);
 }

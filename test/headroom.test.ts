@@ -2,7 +2,28 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { parseUsage, UsageParseError } from "../src/lib/headroom.js";
+import { headroomExhausted, parseUsage, UsageParseError, type UsageSnapshot } from "../src/lib/headroom.js";
+
+test("headroomExhausted: returns the tightest window ≥ limit, or null when there is headroom", () => {
+  const snap: UsageSnapshot = {
+    billingMode: "subscription",
+    session: { percentUsed: 60, resetsAt: "3pm" },
+    weekly: [
+      { label: "all models", percentUsed: 97, resetsAt: "Mon" },
+      { label: "opus", percentUsed: 99, resetsAt: "Tue" },
+    ],
+  };
+  const over = headroomExhausted(snap); // default 95%
+  assert.equal(over?.window, "weekly (opus)"); // 99% is the tightest
+  assert.equal(over?.resetsAt, "Tue");
+  // Plenty of headroom ⇒ null.
+  assert.equal(
+    headroomExhausted({ billingMode: "subscription", session: { percentUsed: 10, resetsAt: "x" }, weekly: [{ label: "all", percentUsed: 20, resetsAt: "y" }] }),
+    null,
+  );
+  // The session (5h) window is checked too.
+  assert.equal(headroomExhausted({ billingMode: "subscription", session: { percentUsed: 96, resetsAt: "5pm" }, weekly: [{ label: "all", percentUsed: 10, resetsAt: "z" }] })?.window, "session (5h)");
+});
 
 /**
  * WS-0-shaped `/usage` capture (values are illustrative; the real capture is
