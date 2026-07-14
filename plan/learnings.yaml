@@ -167,3 +167,39 @@
     surface. Grant web tools to the Architect only; implement workers never get them.
   src: research#claude-code-action
   cited: "2026-07-14"
+
+# ── Browser automation & the design-review profile (§7C) [research 2026-07-14] ──
+- id: playwright-mcp-accessibility-tree
+  subsystem: design-review
+  files: [settings/worker.json, src/lib/containment.ts]
+  fact: >-
+    Playwright MCP uses accessibility-tree snapshots (2-5KB structured YAML), 10-100x cheaper than
+    screenshots (500KB-2MB images) for structural work. MCP is the sandboxed-client path; the CLI is
+    cheaper still but requires shell access.
+  src: research#playwright
+  cited: "2026-07-14"
+- id: playwright-run-code-unsafe-is-rce
+  subsystem: design-review
+  files: [settings/worker.json]
+  fact: >-
+    Playwright browser_run_code_unsafe runs arbitrary JS in the Playwright server — RCE-equivalent, only
+    for trusted MCP clients. A bypass-mode worker is not that: HARD-DENY it in every worker profile.
+  src: research#playwright
+  cited: "2026-07-14"
+- id: browser-egress-needs-dedicated-profile
+  subsystem: design-review
+  files: [settings/worker.json, src/lib/containment.ts]
+  fact: >-
+    Playwright needs a real browser with network egress, incompatible with the locked worker allowedDomains
+    unless a dedicated design-review profile explicitly allowlists the browser/target domains. Browser
+    egress is a per-skill grant, never global.
+  src: research#playwright
+  cited: "2026-07-14"
+- id: screenshots-are-token-expensive
+  subsystem: design-review
+  files: [src/lib/containment.ts]
+  fact: >-
+    Screenshots blow up token usage (500KB-2MB each) — request only when necessary, for artifacts a human
+    must eyeball; use accessibility-tree snapshots for everything structural.
+  src: research#playwright
+  cited: "2026-07-14"
