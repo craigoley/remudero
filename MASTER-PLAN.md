@@ -1,4 +1,4 @@
-# REMUDERO — Master Plan (v1.9 · synced 2026-07-14 · ★ SETUP COMPLETE: repos live, auth cleared, push protection ON · scoped PAT deferred to WS-1 by decision (FF9) · ONLY OPEN STEP: WS-0 spike v5.1)
+# REMUDERO — Master Plan (v2.0 · synced 2026-07-14 · ★ WS-0 SHIPPED: all 7 verdicts GREEN, loop closed unattended, $0.86 · spike ground truth folded in · NEXT: WS-1 via proto-runner)
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -85,6 +85,33 @@ WS-0 spike; its six verdicts gate everything after it.
    + push protection ON for both public repos** — GitHub now rejects a committed credential
    outright, covering a failure mode PAT-scoping never addressed. Scoped-PAT injection via
    `buildWorkerEnv()` = **WS-1 hardening task**.
+10. **★ SPIKE GROUND TRUTH (WS-0, all seven verdicts GREEN — see FINDINGS.md in-repo).**
+    a. **Worker settings FAIL SILENTLY.** `-p` ignores a settings file that fails schema validation —
+       a typo does not error, it **drops containment**. The installed schema nests `allowedDomains`
+       under `network` (the original prompt put it at the sandbox root ⇒ would have been dropped).
+       ⇒ **validate-before-spawn guard = WS-1 P0**, plus a probe as the empirical backstop.
+    b. **SDK 0.3.209 rejects `settings` + `sandbox` options together** — sandbox config must live
+       INSIDE the settings file. `settingSources: []` keeps `~/.claude/settings.json` out of workers.
+    c. **`USER` is load-bearing for OAuth** — the token lives in the login Keychain (no creds file);
+       without `USER` a headless run returns "Not logged in". Bisected, not guessed. In the allowlist.
+    d. **`total_cost_usd` is NOTIONAL on subscription** (API-equivalent, not billed) ⇒ it is ONLY a
+       runaway-anomaly tripwire + api-mode meter. **Window tracking must parse `/usage`** (§9).
+    e. **`/usage` IS machine-readable headless** (session % + dual weekly windows + reset timestamps);
+       `/status` is NOT ("isn't available in this environment"). Discovery ladder rung 1 = CONFIRMED.
+       The weekly cap is labeled by MODEL NAME — parse the label, never hardcode a model.
+    f. **Linked-worktree `.git` is OUTSIDE the sandbox write scope** ⇒ `git push -u` is OS-denied on
+       the config write (push itself succeeds). WS-1: push without `-u`.
+    g. Real knob names (mounts.yaml is now implementable): `--max-budget-usd`/`maxBudgetUsd` (breach ⇒
+       `error_max_budget_usd`) · `--effort low|medium|high|xhigh|max` · `thinking:{adaptive|enabled+
+       budgetTokens|disabled}` · `maxTurns` · `autoCompactThreshold` · `pathToClaudeCodeExecutable` ·
+       `env` (**replaces** the child env entirely — the billing boundary's enforcement point).
+    h. `~/.claude.json` exposes plan-relevant KEYS locally (`hasAvailableSubscription`,
+       `cachedUsageUtilization`, `modelAccessCache`, `oauthAccount`) ⇒ tier discovery rung 2 works
+       with no network call.
+    i. claude-code#20946 (hook-block-in-bypass async race) **did NOT reproduce on 2.1.209** — the
+       deterministic floor held. The `dontAsk` fallback is implemented but **UNTESTED** (golden task).
+    j. Near-miss disclosed by the worker: the DECISION_REQUEST parser captured `")"` from an inline
+       `(RECOMMENDED)` marker and was right only by luck ⇒ **auto-choose parser golden task**.
 
 ---
 
@@ -452,11 +479,17 @@ passes a task-type's goldens above threshold, and UPGRADES when strike-rate corr
 the harness learns which horse each job actually needs, with pre-merge proof it still clears the
 jumps.
 
-**Windows — the HeadroomTracker.** Models both clocks: the 5-hour rolling window and the weekly
+**Cost semantics (CORRECTED by WS-0)**: on subscription, `total_cost_usd` is NOTIONAL — it is the
+API-equivalent price, not billed spend. It is therefore used for exactly two things: the
+runaway-anomaly tripwire, and metering when `billing_mode == api`. **Subscription window tracking
+parses `/usage`** (confirmed machine-readable headless).
+
+**Windows — the HeadroomTracker (rung 1 CONFIRMED).** Models both clocks: the 5-hour rolling window and the weekly
 caps (including Max's dual weekly limits — all-models and Sonnet-only — with separate resets).
-Strategies, layered: passive (parse limit-hit responses + stated reset times into state), active
-probe (cheap Haiku ping to detect throttle), manual (operator pastes /usage; dashboard field).
-WS-1 verifies whether /usage is scriptable headlessly. Scheduler behaviors it drives: **quiet-hours is now an OPTIONAL wizard toggle, default OFF**
+PRIMARY: parse `claude -p "/usage"` — session % + dual weekly windows + reset timestamps, all
+machine-readable (WS-0 proven). Parse the weekly label as data (it names a MODEL; the lineup shifts).
+Secondary: passive limit-hit parsing; `~/.claude.json` keys for tier inference (rung 2).
+`/status` is unavailable headless — do not build on it. Scheduler behaviors it drives: **quiet-hours is now an OPTIONAL wizard toggle, default OFF**
 (Craig, Q1/G-14: he expects to work mostly THROUGH the fleet, so interactive contention is managed
 live via the control panel's Pause, not a schedule); **throttle → cheap-groom** (approaching a cap,
 the fleet does NOT idle — it drains Haiku-class chores: doc-sync, triage, campaign recon);
@@ -561,16 +594,9 @@ plan-first — and a harness that provably gets better at its own job.**
 
 ## 10. Workstreams
 
-**WS-0 — Spike** (repo: remudero; sandbox: remudero-sandbox) — the **seven** verdicts:
-(1) headless under existing OAuth, no --bare/API key; (2) result JSON parse (exact field names);
-(3) worktree→PR→merge closes; (4) ★ deny-hook blocks under bypass (planted-probe; fallback dontAsk
-recorded if it fails); (5) ★ zero-prompt git commit/push via Bash under bypass in -p; (6)
-DECISION_REQUEST auto-choose round-trip via session resume; (7) ★ OS-sandbox containment probe
-(§4A: worktree-write OK, outside-write DENIED, prompt-free push under allowedDomains, hook fires
-through sandbox). Prompt v4 + step-5 amendment v4.2 in chat 2026-07-14 (step 5 now probes all
-resource knobs, /status headroom scriptability, and any locally visible plan/tier metadata).
-MANUAL: create remudero + remudero-sandbox repos; mint sandbox-scoped PAT; `mkdir -p
-~/Remudero/{worktrees,state,logs,tmp}`.
+**WS-0 — Spike — ✅ SHIPPED 2026-07-14** (7/7 verdicts GREEN; loop closed unattended; $0.86;
+PR craigoley/remudero#1 pending Craig's merge = D-2 license veto window). Ground truth folded into
+FIELD FINDINGS 10. `src/lib/` kept spike-free ⇒ WS-1 T1 lifts it directly.
 
 **WS-1 — Proto-runner → daemon (G-2: WS-1 builds THROUGH the proto-runner)**: task 1 extracts
 `run-task.ts` from the spike's lib — one tasks.yaml entry in, recon → provenance-linted prompt →

@@ -1,0 +1,224 @@
+# Remudero — plan/tasks.yaml (schema v1)
+# WS-1: proto-runner → daemon. T1 is the LAST hand-built thing; T2+ land VIA the proto-runner (L1).
+# Prompts are pre-authored (G-2). Statuses are flipped by the runner; humans edit narrative only.
+
+- id: W1-T1
+  title: Extract run-task.ts from the spike lib (the proto-runner)
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  hand_built: true          # L0 — the last task written by hand; everything after rides this
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  acceptance:
+    - claim: "`rmd run-task <id>` executes ONE tasks.yaml entry end-to-end: recon → prompt → implement → PR"
+      proof: "a merged PR on remudero-sandbox whose ledger line names the task id"
+    - claim: "src/lib/ is unchanged in behavior (lifted, not rewritten)"
+      proof: "spike's env unit tests still 4/4 green; git diff shows moves, not rewrites"
+    - claim: "worker settings are VALIDATED before spawn (WS-0 FF10a: -p drops invalid settings silently)"
+      proof: "a planted schema typo (allowedDomains at sandbox root) FAILS the guard with a named error"
+  status: queued
+  attempts: 0
+
+- id: W1-T2
+  title: Validate-before-spawn guard + settings schema pin (P0)
+  repo: remudero
+  depends_on: [W1-T1]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  acceptance:
+    - claim: "worker.json is schema-validated against the INSTALLED SDK's SandboxSettingsSchema before any spawn"
+      proof: "unit test: valid config passes; allowedDomains-at-root FAILS with a specific error"
+    - claim: "a post-spawn containment probe confirms the sandbox actually engaged"
+      proof: "probe run output: outside-write OS-denied"
+  status: queued
+  attempts: 0
+
+- id: W1-T3
+  title: Contract parsers + golden tasks (auto-choose near-miss, dontAsk fallback)
+  repo: remudero
+  depends_on: [W1-T1]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  acceptance:
+    - claim: "parseDecisionRequest survives the WS-0 near-miss (inline (RECOMMENDED) marker capturing ')')"
+      proof: "golden test with the exact WS-0 malformed payload passes; option list has no ')'"
+    - claim: "the dontAsk fallback path (currently UNTESTED code) is exercised"
+      proof: "a forced-fallback run completes with the floor holding"
+    - claim: "QUESTION contract parses and appends to plan/questions.ndjson without blocking"
+      proof: "ledger shows task completed with an open question logged"
+  status: queued
+  attempts: 0
+
+- id: W1-T4
+  title: HeadroomTracker v0 — /usage parser
+  repo: remudero
+  depends_on: [W1-T1]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  acceptance:
+    - claim: "parses session % + BOTH weekly windows + reset timestamps from `claude -p /usage`"
+      proof: "parser test against the captured WS-0 fixture returns all five fields"
+    - claim: "the weekly label is read as DATA, not hardcoded (WS-0 saw a model name)"
+      proof: "fixture with a different model label parses identically"
+    - claim: "total_cost_usd is used ONLY as a runaway tripwire, never for window math"
+      proof: "grep: no window arithmetic references total_cost_usd"
+  status: queued
+  attempts: 0
+
+- id: W1-T5
+  title: mounts.yaml v0 + Tier Invariant validation
+  repo: remudero
+  depends_on: [W1-T1]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  acceptance:
+    - claim: "mounts table keyed by (task_type x risk x thinking) resolves to real knobs (maxBudgetUsd, effort, maxTurns)"
+      proof: "resolver test: diagnose steps UP; routine retry does NOT"
+    - claim: "Tier Invariant enforced at load (G-17): architect.tier > max(worker.tier)"
+      proof: "a violating mounts.yaml is REJECTED with a named error"
+  status: queued
+  attempts: 0
+
+- id: W1-T6
+  title: NDJSON ledger + context telemetry + brain-plane calls
+  repo: remudero
+  depends_on: [W1-T1]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  acceptance:
+    - claim: "every worker + brain call logs {model, effort, tokens, total_cost_usd, billing_mode, verdict}"
+      proof: "a run's ledger lines contain all fields; billing_mode reads 'subscription'"
+  status: queued
+  attempts: 0
+
+- id: W1-T7
+  title: Transient-vs-strike classifier + diagnose-then-retry
+  repo: remudero
+  depends_on: [W1-T3, W1-T6]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  acceptance:
+    - claim: "network/5xx/CI-flake retries consume NO strike; deterministic failures do"
+      proof: "classifier unit tests over recorded failure fixtures"
+    - claim: "two strikes dispatches a DIAGNOSE worker (evidence-only, model steps UP) before any third patch"
+      proof: "a seeded double-failure produces a diagnose run in the ledger, never a third blind patch"
+  status: queued
+  attempts: 0
+
+- id: W1-T8
+  title: Escalations as GitHub issues + imessage-local notifier + daily digest
+  repo: remudero
+  depends_on: [W1-T6]
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 4.00
+  acceptance:
+    - claim: "BLOCKED/MANUAL/HARD-STOP escalations open labeled issues with options + a recommendation"
+      proof: "issue URL + needs-human label via gh issue view"
+    - claim: "imessage-local adapter sends via osascript on the host Mac (no BlueBubbles dependency)"
+      proof: "received message + ledger notify line"
+  status: queued
+  attempts: 0
+
+- id: W1-T9
+  title: Config loader + `rmd init` wizard v0 (tier detect→confirm)
+  repo: remudero
+  depends_on: [W1-T4]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  acceptance:
+    - claim: "wizard detects tier via /usage + ~/.claude.json keys, then SHOWS it for confirmation"
+      proof: "transcript: detected value displayed, operator confirms, config written"
+    - claim: "config validation rejects overflow:api_key + daily_cap:none"
+      proof: "named error in the rejection test"
+  status: queued
+  attempts: 0
+
+- id: W1-T10
+  title: Scoped-PAT injection via buildWorkerEnv (FF9 hardening)
+  repo: remudero
+  depends_on: [W1-T1]
+  type: implement
+  verify: human      # requires Craig to enable fine-grained PATs on the craigoley org first
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  acceptance:
+    - claim: "GH_TOKEN is injected from ~/.config/remudero/<project>.pat into the WORKER env only"
+      proof: "env unit test: parent has no GH_TOKEN, child does; the pat file is never read by the worker"
+  status: blocked
+  attempts: 0
+  note: "MANUAL prerequisite: craigoley org → Settings → Third-party Access → enable fine-grained PATs."
+
+- id: W1-T11
+  title: Fleet control set — STOP / Pause (drain-and-hold) / Resume
+  repo: remudero
+  depends_on: [W1-T6]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  acceptance:
+    - claim: "Pause halts new spawns; in-flight tasks run to FULL completion (verdict + merge)"
+      proof: "ledger: pause issued mid-run, in-flight task still reaches merged"
+    - claim: "STOP file + `rmd stop` kill within one tick"
+      proof: "ledger stop line + no subsequent spawns"
+  status: queued
+  attempts: 0
+
+- id: W1-T12
+  title: Daemonize — scheduler loop + launchd unit (LAST task in WS-1)
+  repo: remudero
+  depends_on: [W1-T2, W1-T3, W1-T4, W1-T5, W1-T6, W1-T7, W1-T8, W1-T9, W1-T11]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  acceptance:
+    - claim: "the daemon drains a 3-task plan on remudero-sandbox end-to-end, unattended, overnight"
+      proof: "ledger + merged PRs + daily digest received"
+    - claim: "launchd unit uses absolute paths + explicit PATH; the daemon asserts its own env is ANTHROPIC-clean at boot"
+      proof: "startup ledger line: env_clean=true, billing_mode=subscription"
+    - claim: "daemon killed mid-task recovers correct state from git + GitHub alone"
+      proof: "chaos-drill transcript"
+  status: queued
+  attempts: 0
+
+# ── Golden / smoke tasks on the sandbox repo (WS-8 seeds at WS-0). These target
+#    remudero-sandbox and drive the proto-runner's own proofs. `prompt`/`context`
+#    are pre-authored (G-2); `context` claims MUST carry a [src] (provenance gate).
+- id: SB-HELLO
+  title: "Smoke: proto-runner appends a run-stamped hello line to sandbox docs"
+  repo: remudero-sandbox
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: off}
+  budget_usd: 2.00
+  context:
+    - claim: "remudero-sandbox is the golden-task target; proto-runner smoke markers live under docs/."
+      src: "plan#W1-T1"
+  prompt: >
+    Append a single new line to docs/proto-runner.md (create the file if it does
+    not exist) reading exactly: "proto-runner smoke — ${RUN_ID}". Change nothing else.
+  acceptance:
+    - claim: "proto-runner lands a docs line on remudero-sandbox via `rmd run-task SB-HELLO`"
+      proof: "merged PR whose ledger line names SB-HELLO"
+  status: queued
+  attempts: 0

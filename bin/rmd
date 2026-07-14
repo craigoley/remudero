@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# rmd — Remudero CLI (proto-runner era). Thin wrapper; all logic lives in TS.
+#   rmd run-task <task-id>   run one plan/tasks.yaml entry through the loop
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec "$DIR/node_modules/.bin/tsx" "$DIR/src/run-task.ts" "$@"
