@@ -1,0 +1,90 @@
+# plan/learnings.yaml — the MACHINE-READABLE learnings corpus (WS-8, W1-T19).
+#
+# The READ side of the compounding thesis: Promptsmith (src/lib/learnings.ts)
+# parses this file and injects the entries whose `files:` globs match a task into
+# that task's rendered prompt, each as a cited CONTEXT claim `[src: learnings#<id>]`.
+#
+# This is the STRUCTURED mirror of the prose LEARNINGS.md. The prose file stays
+# the human/Architect-owned narrative (MASTER-PLAN governance); this file is the
+# git-owned, deterministically-matched index. When a worker proves a new durable
+# fact, add it BOTH places — the prose for humans, an entry here for the fleet.
+#
+# Schema per entry:
+#   id:        stable slug → the injected citation `[src: learnings#<id>]`
+#   subsystem: human grouping (advisory; matching is by `files:`, not this)
+#   files:     repo-relative globs; entry injects iff one glob hits a task file
+#   fact:      one line — the thing a worker inherits
+#   src:       provenance of the fact (recorded lineage)
+#   cited:     optional ISO date last cited (recent entries win a budget tie)
+
+- id: shell-isolation
+  subsystem: containment
+  files: [src/lib/worker.ts, src/lib/containment.ts, src/lib/settings.ts]
+  fact: >-
+    Claude Code's Bash-tool snapshot sources $HOME/.zshrc via os.homedir(); ZDOTDIR is IGNORED —
+    worker shell isolation must set CLAUDE_CODE_SHELL (rc filename follows the shell), never ZDOTDIR.
+  src: PR#8
+  cited: "2026-07-14"
+
+- id: bashrc-accident
+  subsystem: containment
+  files: [src/lib/worker.ts, src/lib/containment.ts]
+  fact: >-
+    CLAUDE_CODE_SHELL=/bin/bash isolation works only because ~/.bashrc is ABSENT on this host — an
+    accident, not construction; isolation must be PROVEN per run by probe, never assumed from config.
+  src: PR#8
+  cited: "2026-07-14"
+
+- id: settings-silent-drop
+  subsystem: settings
+  files: [src/lib/settings.ts, src/lib/worker.ts]
+  fact: >-
+    Worker settings that fail schema validation are SILENTLY IGNORED under `claude -p`; the SDK's
+    SandboxSettingsSchema is $loose and strips unknown keys — validate shape explicitly before spawn.
+  src: WS-0
+  cited: "2026-07-14"
+
+- id: sdk-result-envelope
+  subsystem: ledger
+  files: [src/lib/ledger.ts, src/lib/worker.ts, src/run-task.ts]
+  fact: >-
+    The Agent SDK yields the type:"result" envelope (num_turns, total_cost_usd, subtype) and THEN
+    throws from the iterator on an error subtype — read the envelope before the catch or a failure looks free.
+  src: PR#8
+  cited: "2026-07-14"
+
+- id: maxbudget-between-turns
+  subsystem: budget
+  files: [src/run-task.ts]
+  fact: >-
+    maxBudgetUsd is checked BETWEEN turns (a $0.01 budget produced $0.21 of spend): a circuit breaker
+    with up to one turn of overshoot, NOT a hard cap — set budgets with headroom.
+  src: PR#8
+  cited: "2026-07-14"
+
+- id: lazy-config-in-ci
+  subsystem: config
+  files: [src/lib/config.ts, src/lib/containment.ts]
+  fact: >-
+    A lib function that EAGERLY calls loadConfig() (which shells `which claude`) FAILS IN CI where the
+    binary is absent — resolve config LAZILY so injected-executor tests never touch it.
+  src: PR#18
+  cited: "2026-07-14"
+
+- id: required-check-poster
+  subsystem: ci
+  files: [src/lib/review.ts, src/lib/status.ts, ".github/**"]
+  fact: >-
+    A required check must be posted by the ORCHESTRATOR unconditionally, not solely by a worker: a
+    crashed worker leaves it ABSENT, and an absent required check blocks the merge forever (fail-stuck).
+  src: PR#13
+  cited: "2026-07-14"
+
+- id: skipped-check-deadlock
+  subsystem: ci
+  files: [".github/**"]
+  fact: >-
+    A conditionally-skipped required check DEADLOCKS merge forever (reads as expected-pending, never
+    green) — gate on ONE always-runs aggregator job that needs: every sub-job, and require only that.
+  src: operator-fleet
+  cited: "2026-07-14"

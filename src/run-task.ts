@@ -28,6 +28,12 @@ import {
   type Task,
 } from "./lib/plan.js";
 import { ContainmentError, probeContainment } from "./lib/containment.js";
+import {
+  DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+  loadLearnings,
+  renderLearningsContext,
+  selectLearnings,
+} from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
 import {
   REVIEW_CONTEXT,
@@ -388,8 +394,19 @@ function reconObservedToContext(recon: WorkerResult, taskId: string): string {
   return lines.map((l) => `- ${l} ${citation(`recon#${taskId}`)}`).join("\n");
 }
 
-/** Render the implement prompt: cited CONTEXT + TASK + explicit output contract. */
-function renderImplementPrompt(task: Task, reconContext: string, runId: string): string {
+/**
+ * Render the implement prompt: cited CONTEXT + TASK + explicit output contract.
+ *
+ * `learningsContext` is the Promptsmith READ side (W1-T19): the distrust rule,
+ * the autonomy clause, and the task-matched LEARNINGS facts — each already
+ * provenance-tagged, so the whole CONTEXT block still lints clean.
+ */
+export function renderImplementPrompt(
+  task: Task,
+  reconContext: string,
+  runId: string,
+  learningsContext = "",
+): string {
   const contextClaims = (task.context ?? [])
     .map((c) => `- ${c.claim} ${citation(c.src)}`)
     .join("\n");
@@ -399,6 +416,7 @@ function renderImplementPrompt(task: Task, reconContext: string, runId: string):
 
   return [
     "# CONTEXT",
+    learningsContext,
     contextClaims,
     reconContext,
     "",
@@ -606,9 +624,22 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
     const reconFail = failOnWorkerError(recon, "recon");
     if (reconFail) return reconFail;
 
+    // ── Promptsmith READ side (W1-T19): inject the distrust rule, the autonomy
+    // clause, and the task-matched LEARNINGS facts. Matching is deterministic by
+    // file-glob; the KNOWLEDGE BUDGET caps the injected facts and DROPPED entries
+    // are logged so a growing corpus never becomes an unbounded context tax.
+    const learnings = loadLearnings(join(dirname(planPath), "learnings.yaml"));
+    const { selected, dropped } = selectLearnings(learnings, task.files, DEFAULT_KNOWLEDGE_BUDGET_CHARS);
+    const learningsContext = renderLearningsContext(selected);
+    log("learnings.injected", {
+      matched: selected.length,
+      dropped: dropped.map((d) => d.id),
+      budget_chars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+    });
+
     // ── Render + provenance-lint the prompt.
     const reconContext = reconObservedToContext(recon, taskId);
-    const prompt = renderImplementPrompt(task, reconContext, runId);
+    const prompt = renderImplementPrompt(task, reconContext, runId, learningsContext);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     log("prompt.linted", { provenance: "clean" });
     say("prompt provenance-linted: clean");
