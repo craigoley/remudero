@@ -4,9 +4,15 @@ import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import {
   REVIEW_CONTEXT,
   buildReviewPrompt,
+  checkCallersAudited,
+  checkOneConcern,
+  checkRefactorHonesty,
+  checkSatisfiedByGuard,
+  checkTestTheater,
   detectTestTheater,
   failSummary,
   judgeReview,
+  judgeRubric,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
   reviewerVerdictContract,
@@ -331,4 +337,173 @@ test("buildReviewPrompt: fresh, read-only, gh-only, posts remudero-review, never
   assert.match(prompt, /never (edit|modify)/i);
   // The stated proofs must be carried into the reviewer's prompt.
   assert.match(prompt, /context=remudero-review/);
+});
+
+// ── The reviewer RUBRIC (§5 layer 2): four judgment items + the satisfied_by guard ──
+// Recorded (diff, report) tuples, exactly as the design specifies (W1-T3E). The rubric
+// ADVISES (Standing rule 3B — the GitHub-enforced gate decides); each item is a
+// deterministic, pure predicate so its falsifier is a unit fixture.
+
+// A clean, single-concern feature diff: one product stem (`greet`), a real assertion,
+// no signature drift, not labelled a refactor, no satisfied_by. All four items + the
+// guard must pass — the positive control for the whole rubric.
+const CLEAN_DIFF = [
+  "diff --git a/src/lib/greet.ts b/src/lib/greet.ts",
+  "+++ b/src/lib/greet.ts",
+  "@@",
+  "+export function greet(name) {",
+  '+  return "hi " + name;',
+  "+}",
+  "diff --git a/test/greet.test.ts b/test/greet.test.ts",
+  "+++ b/test/greet.test.ts",
+  "@@",
+  '+import assert from "node:assert/strict";',
+  '+test("greet", () => {',
+  '+  assert.equal(greet("x"), "hi x");',
+  "+});",
+].join("\n");
+const CLEAN_REPORT = "REPORT — added greet(); red→green proof attached; one concern.";
+
+// Two distinct product concerns (review + plan) in one PR.
+const TWO_CONCERN_DIFF = [
+  "diff --git a/src/lib/review.ts b/src/lib/review.ts",
+  "+++ b/src/lib/review.ts",
+  "@@",
+  "+export const A = 1;",
+  "diff --git a/src/lib/plan.ts b/src/lib/plan.ts",
+  "+++ b/src/lib/plan.ts",
+  "@@",
+  "+export const B = 2;",
+].join("\n");
+
+// render() gains a required `opts` param; ONE call site is updated (the `+` line)
+// but a sibling caller `render(z)` is left stale on an unchanged context line.
+const CALLER_DRIFT_DIFF = [
+  "diff --git a/src/lib/render.ts b/src/lib/render.ts",
+  "+++ b/src/lib/render.ts",
+  "@@",
+  "-export function render(x) {",
+  "+export function render(x, opts) {",
+  "   return draw(x, opts);",
+  " }",
+  "@@",
+  "-  render(a);",
+  "+  render(a, defaults);",
+  "@@",
+  " function footer() {",
+  "   render(z);",
+  " }",
+].join("\n");
+
+// Same signature change, but every caller is updated — no stale sibling remains.
+const CALLERS_AUDITED_DIFF = [
+  "diff --git a/src/lib/render.ts b/src/lib/render.ts",
+  "+++ b/src/lib/render.ts",
+  "@@",
+  "-export function render(x) {",
+  "+export function render(x, opts) {",
+  "   return draw(x, opts);",
+  " }",
+  "@@",
+  "-  render(a);",
+  "+  render(a, defaults);",
+].join("\n");
+
+// A behavior change (`+` → `-` on the returned expression) presented as a refactor.
+const BEHAVIOR_REFACTOR_DIFF = [
+  "diff --git a/src/lib/calc.ts b/src/lib/calc.ts",
+  "+++ b/src/lib/calc.ts",
+  "@@",
+  "-  return a + b;",
+  "+  return a - b;",
+].join("\n");
+
+// A genuine, behavior-preserving refactor: a function expression becomes an arrow;
+// the one behavior-bearing line (`return a + b;`) is moved verbatim, not changed.
+const PURE_REFACTOR_DIFF = [
+  "diff --git a/src/lib/calc.ts b/src/lib/calc.ts",
+  "+++ b/src/lib/calc.ts",
+  "@@",
+  "-function calc(a, b) {",
+  "-  return a + b;",
+  "-}",
+  "+const calc = (a, b) => {",
+  "+  return a + b;",
+  "+};",
+].join("\n");
+
+// A diff that ADDS a satisfied_by line to plan/tasks.yaml.
+const SATISFIED_BY_DIFF = [
+  "diff --git a/plan/tasks.yaml b/plan/tasks.yaml",
+  "+++ b/plan/tasks.yaml",
+  "@@",
+  '       proof: "some proof"',
+  '+      satisfied_by: "#99"',
+].join("\n");
+
+test("rubric one-concern: a two-concern diff FAILS; a single-concern diff PASSES", () => {
+  const two = checkOneConcern(TWO_CONCERN_DIFF);
+  assert.equal(two.pass, false);
+  assert.match(two.reason, /concern/i);
+  assert.equal(checkOneConcern(CLEAN_DIFF).pass, true);
+});
+
+test("rubric callers-audited: an orphaned sibling caller FAILS; all-updated PASSES", () => {
+  const drift = checkCallersAudited(CALLER_DRIFT_DIFF);
+  assert.equal(drift.pass, false);
+  assert.match(drift.reason, /render/);
+  assert.equal(checkCallersAudited(CALLERS_AUDITED_DIFF).pass, true);
+  assert.equal(checkCallersAudited(CLEAN_DIFF).pass, true);
+});
+
+test("rubric test-theater: an assert-nothing test FAILS; a real assertion PASSES", () => {
+  assert.equal(checkTestTheater(THEATER_DIFF).pass, false);
+  assert.equal(checkTestTheater(REAL_TEST_DIFF).pass, true);
+});
+
+test("rubric refactor-honesty: behavior change labelled 'refactor' FAILS; a pure move PASSES", () => {
+  assert.equal(checkRefactorHonesty(BEHAVIOR_REFACTOR_DIFF, "Refactored calc for clarity").pass, false);
+  // The SAME behavior-changing diff, NOT labelled a refactor, is not the rubric's business here.
+  assert.equal(checkRefactorHonesty(BEHAVIOR_REFACTOR_DIFF, "Fixed the sign bug in calc").pass, true);
+  // A genuine behavior-preserving refactor passes even when labelled one.
+  assert.equal(checkRefactorHonesty(PURE_REFACTOR_DIFF, "Refactor: calc becomes an arrow fn").pass, true);
+});
+
+test("rubric satisfied_by guard: a worker-authored satisfied_by FAILS; a plan-only human PR PASSES", () => {
+  // A worker (non-plan-only) adding satisfied_by to its own criterion = editing the criteria.
+  const worker = checkSatisfiedByGuard(SATISFIED_BY_DIFF, { planOnly: false, humanAuthored: false });
+  assert.equal(worker.pass, false);
+  assert.match(worker.reason, /satisfied_by/);
+  // The SAME addition in a plan-only, human-authored (Architect) PR is allowed.
+  assert.equal(checkSatisfiedByGuard(SATISFIED_BY_DIFF, { planOnly: true, humanAuthored: true }).pass, true);
+  // A diff that adds no satisfied_by never triggers the guard.
+  assert.equal(checkSatisfiedByGuard(CLEAN_DIFF).pass, true);
+});
+
+test("judgeRubric: a clean single-concern diff passes ALL FOUR items + the guard", () => {
+  const r = judgeRubric({ diff: CLEAN_DIFF, report: CLEAN_REPORT });
+  assert.equal(r.pass, true, JSON.stringify(r.failures));
+  assert.deepEqual(
+    r.items.map((i) => i.key).sort(),
+    ["callers-audited", "one-concern", "refactor-honesty", "satisfied-by-guard", "test-theater"],
+  );
+  assert.ok(r.items.every((i) => i.pass));
+});
+
+test("judgeRubric: each falsifier trips its own item and fails the whole rubric", () => {
+  const twoConcern = judgeRubric({ diff: TWO_CONCERN_DIFF, report: "two things at once" });
+  assert.equal(twoConcern.pass, false);
+  assert.ok(twoConcern.failures.some((f) => f.key === "one-concern"));
+
+  const drift = judgeRubric({ diff: CALLER_DRIFT_DIFF, report: "updated render" });
+  assert.ok(drift.failures.some((f) => f.key === "callers-audited"));
+
+  const theater = judgeRubric({ diff: THEATER_DIFF, report: "added a test" });
+  assert.ok(theater.failures.some((f) => f.key === "test-theater"));
+
+  const dishonest = judgeRubric({ diff: BEHAVIOR_REFACTOR_DIFF, report: "just a refactor" });
+  assert.ok(dishonest.failures.some((f) => f.key === "refactor-honesty"));
+
+  const sneaky = judgeRubric({ diff: SATISFIED_BY_DIFF, report: "unblock myself" });
+  assert.ok(sneaky.failures.some((f) => f.key === "satisfied-by-guard"));
 });
