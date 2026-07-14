@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { WorkerSettingsError } from "../src/lib/settings.js";
-import { collectWorkerResult, parseDecisionRequest, spawnWorker } from "../src/lib/worker.js";
+import {
+  DENY_FLOOR_FALLBACK_MODE,
+  collectWorkerResult,
+  evaluateDenyFloor,
+  parseDecisionRequest,
+  spawnWorker,
+} from "../src/lib/worker.js";
 
 // ── Synthetic SDK message streams ──────────────────────────────────────────
 // The real SDK yields a `type:"result"` envelope (even for an error subtype)
@@ -112,6 +118,57 @@ test("spawnWorker: an invalid settings file is REJECTED at the spawn boundary be
     WorkerSettingsError,
     "a misplaced sandbox key must be rejected before spawn, never silently dropped",
   );
+});
+
+// ── evaluateDenyFloor: the dontAsk fallback state machine (spike verdict 4) ──
+// MASTER-PLAN §10.i golden task: the `dontAsk` fallback is implemented in
+// spike.ts but was NOT exercised (the deterministic floor held under bypass, so
+// the fallback branch never ran on 2.1.209). These cases drive the extracted
+// state machine directly — no worker spawn — so the fallback path is covered
+// including that it is `dontAsk` (not any other mode) the probe falls back to.
+
+test("evaluateDenyFloor: floor holds under bypass ⇒ NO dontAsk fallback, contained", () => {
+  // The observed WS-0 outcome: FORBIDDEN_PROBE never landed under bypass.
+  const verdict = evaluateDenyFloor({ forbiddenPresentUnderBypass: false });
+  assert.deepEqual(verdict, {
+    heldUnderBypass: true,
+    usedDontAskFallback: false,
+    contained: true,
+  });
+});
+
+test("evaluateDenyFloor: floor leaks under bypass ⇒ dontAsk fallback runs and contains (claude-code#20946 shape)", () => {
+  // The counter-report shape: the block leaked under bypass, so the probe re-runs
+  // under dontAsk and the forbidden write is blocked there.
+  const verdict = evaluateDenyFloor({
+    forbiddenPresentUnderBypass: true,
+    forbiddenPresentUnderDontAsk: false,
+  });
+  assert.equal(verdict.usedDontAskFallback, true, "the fallback path must be taken");
+  assert.equal(verdict.heldUnderBypass, false, "a leak under bypass is never reported as held");
+  assert.equal(verdict.contained, true, "dontAsk blocked the forbidden write");
+});
+
+test("evaluateDenyFloor: floor leaks under BOTH bypass and dontAsk ⇒ fallback taken but NOT contained", () => {
+  const verdict = evaluateDenyFloor({
+    forbiddenPresentUnderBypass: true,
+    forbiddenPresentUnderDontAsk: true,
+  });
+  assert.equal(verdict.usedDontAskFallback, true);
+  assert.equal(verdict.heldUnderBypass, false);
+  assert.equal(verdict.contained, false, "the floor leaked under dontAsk too — not contained");
+});
+
+test("evaluateDenyFloor: a leak with NO dontAsk observation is conservatively NOT contained", () => {
+  // Guards the honest-verdict invariant: an unverified floor never reports holding.
+  const verdict = evaluateDenyFloor({ forbiddenPresentUnderBypass: true });
+  assert.equal(verdict.usedDontAskFallback, true);
+  assert.equal(verdict.contained, false, "an unrun fallback must not be reported as contained");
+});
+
+test("DENY_FLOOR_FALLBACK_MODE is the dontAsk permission mode", () => {
+  // Pins the fallback mode itself: a regression to any other mode is a defect.
+  assert.equal(DENY_FLOOR_FALLBACK_MODE, "dontAsk");
 });
 
 // ── parseDecisionRequest golden fixtures — DECORATION IS NOT DATA ────────────
