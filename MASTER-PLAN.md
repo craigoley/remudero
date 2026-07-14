@@ -1,4 +1,4 @@
-# REMUDERO — Master Plan (v2.3 · synced 2026-07-14 · ★ CI GATE LIVE (proven red+green under protection) · merge gate becomes a GITHUB-ENFORCED CONTRACT: acceptance verdict = required status check (W1-T1C) · NEXT: rmd run-task W1-T1C — the first self-modification through the loop)
+# REMUDERO — Master Plan (v2.4 · synced 2026-07-14 · ★ CI GATE LIVE (proven red+green under protection) · merge gate is a GITHUB-ENFORCED CONTRACT: acceptance verdict = required status check (W1-T1C) · NEW: §4B FLIGHT CONTROL — in-flight supervision + risk-graded gates + specialist panel (W1-T20/21/22, W2-T1); FIELD FINDING 12 self-updater race · NEXT: rmd run-task W1-T1C — the first self-modification through the loop)
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -127,6 +127,22 @@ WS-0 spike; its six verdicts gate everything after it.
        circuit breaker with up to one turn of overshoot, NOT a hard cap — budgets need headroom. [PR #8]
     e. Reaffirms 10a (settings fail SILENTLY under `-p`) and the `$loose`-schema catch (W1-T1): validating
        against the SDK schema alone PASSES a misplaced key — validate shape explicitly. [WS-0 / W1-T1]
+12. **★ SELF-UPDATER RACE (DIAGNOSIS.md, run W1-T1C-1784038021919 — a "native binary not found" post-mortem).**
+    Claude Code runs a **background self-updater** that `npm install`s the CLI into the global prefix
+    (`~/.npm-global`, the same prefix that holds `openclaw`) mid-session. A worker spawn that lands in
+    npm's unlink/relink window finds no binary at `pathToClaudeCodeExecutable` and dies with **ENOENT**,
+    which the SDK misreports as *"native binary not found"*. Because **every live `claude` process runs
+    its own updater**, fleet concurrency produces a **thundering herd** of simultaneous global installs,
+    widening the window. Two corollaries proven the same run: (a) the SDK's *"native binary not found"*
+    message fires **iff `existsSync(exe) === false`**; a bad `cwd` yields a DIFFERENT message ("exists but
+    failed to launch") — the message is **diagnostic**; (b) an `ls -l` after a failure can show an
+    already-repaired state — **timestamp evidence by BIRTHTIME (`stat -f %SB`), not existence** (the
+    binary present post-mortem was born 8 minutes after the crash). Mitigation: workers set
+    `DISABLE_AUTOUPDATER=1` (confirm empirically per Standing rule 7 — issue reports it is sometimes not
+    honored) and the runner **retries ENOENT-class spawn failures** (safe: no turns/cost consumed before
+    the first message). Long-term, pin the CLI version in config and update out-of-band. Full detail +
+    the exact falsifier in `DIAGNOSIS.md`; the load-bearing lines are in `LEARNINGS.md`. **This is the
+    first "guard caught it AFTER the burn, not while it went wrong" case that motivates §4B Flight control.**
 
 ---
 
@@ -335,6 +351,74 @@ Architect ever grows local tools (in-harness grill-me recon), those run as sandb
 (iii) completes a push with ZERO prompts under pre-configured allowedDomains; (iv) the
 FORBIDDEN_PROBE hook-block still fires through the sandbox. Fallback if sandbox can't run
 prompt-free headless: containment via hook-only, recorded honestly in FINDINGS as the weaker floor.
+
+## 4B. Flight control (in-flight supervision, risk-graded gates, on-demand review)
+
+**Why.** Today's only guards are terminal cliffs — budget, turns, strikes. They catch a worker
+*after* it burns its budget, not *while* it goes wrong (FIELD FINDING 12 is the first such case: the
+spawn race was caught by a cliff, post-burn). Flight control adds in-flight supervision, risk-graded
+human gates, and on-demand specialist review — **without** putting an LLM in the merge decision. The
+governing split: **supervision is deterministic; judgment is advisory. An LLM may recommend a halt;
+only code may enforce one** (Standing rule 12).
+
+**LAYER 1 — deterministic flight signals (no LLM).** Streamed per turn from the worker's stream-json,
+computed by the control plane as pure **predicates** — they FIRE, they never JUDGE:
+- **burn rate** vs. the task-type baseline (spend/turn against the mount's expectation);
+- **diff-growth per turn** (a diff ballooning turn-over-turn);
+- **repeated tool-call hashes** (the same call issued again and again);
+- **error-signature loops** — count only occurrence **N ≥ 3** of a fingerprinted error (the
+  analyze-diagnostics discipline: one failure is noise, three is a loop);
+- **scope drift** — files touched vs. the task's declared files;
+- **stall timeout** — no progress within a wall-clock bound.
+These are cheap, deterministic tripwires. A trip does not decide anything; it *invokes Layer 2*.
+
+**LAYER 2 — the FLIGHT JUDGE (LLM-as-judge on PROCESS, not artifact).** Invoked **ONLY** on a Layer-1
+tripwire (never resident per turn). **FRESH context.** It sees: the goal, the acceptance criteria,
+and the last N turns' **tool calls AND results** — **never the worker's reasoning** (the maker sees
+its own trail; the verifier sees only behavior + rubric, so it cannot be talked into agreement by the
+maker's narrative). It returns:
+`{ state: productive | converging | spiraling | blocked | off_track, evidence[],
+recommendation: continue | nudge | halt_and_diagnose | escalate, confidence }`.
+It **ADVISES**; a **deterministic controller ACTS** on the advice:
+- `spiraling` + high confidence → **halt + dispatch a DIAGNOSE worker** (never a third blind patch,
+  Standing rule 5);
+- `off_track` → **halt + escalate**;
+- `converging` → **raise the tripped threshold ONCE, log it, continue** (slow ≠ stuck).
+The judge **rides a HIGHER tier than the worker** (G-17 Tier Invariant). It is **capped at K
+invocations per run; the Kth must DECIDE, not defer** (no infinite advisory loop). The judge **NEVER
+edits code and NEVER merges.**
+
+**LAYER 3 — RISK SCORING (this is what makes auto-choose SAFE — not a retraction of it).**
+Deterministic, computed from the diff + task metadata:
+- **blast_radius** — does it touch hooks / settings / env / CI / branch protection / credentials /
+  new dependencies / network egress?
+- **reversibility** — how cleanly does `revert PR#N` undo it?
+- **novelty** — first-of-kind change vs. well-trodden path;
+- **confidence** — reviewer score, strike count, flight-judge state.
+Bands and their gates:
+- **low → auto-choose, unchanged** — the overwhelming default (§4 autonomy stands);
+- **medium → reviewer PASS required** — the gate already enforces this (Standing rule 3B);
+- **high → the DECISION_REQUEST becomes a TIMEBOXED QUESTION** with the assumption stated; **unanswered
+  at timeout ⇒ take the recommendation and flag it LOUDLY in the digest** (still no stall — §4);
+- **critical → HARD STOP + escalate, never auto-chosen.** The existing hard-stop list (§4) is the
+  FLOOR, not the ceiling.
+
+**LAYER 4 — the SPECIALIST PANEL: consult, don't committee.** Triggered **BY risk + diff signals**,
+never resident on every task (cost + slop). Each specialist gets **fresh context, read-only tools, a
+scoped rubric**; posts **PR review comments** and contributes to the reviewer's verdict:
+- **security** ← auth / credentials / egress / new deps / hooks / settings;
+- **testing** ← `tdd: strict`, or a negative coverage/mutation delta, or new code paths without tests;
+- **design** ← the diff crosses layer boundaries (fitness rules) or adds an abstraction;
+- **containment** ← ANY diff touching sandbox / settings / deny-floor / env (WS-0 proved a typo there
+  silently drops containment — FIELD FINDING 10a).
+Specialists **ADVISE**; the **GitHub-enforced gate DECIDES** (Standing rule 3B).
+
+**FORBIDDEN.** No standing committee (panels are triggered, not resident). **No LLM in the merge
+decision** — the merge gate is a GitHub-enforced contract, always. No judge-of-the-judge recursion
+(the K-cap terminates advice). Judges and specialists **never edit code.**
+
+**Build order.** Layer 1 = **W1-T20**, Layer 2 = **W1-T21**, Layer 3 = **W1-T22** (T20→T21→T22, all
+after the enforced gate W1-T1D); Layer 4 = **W2-T1** (after the reviewer W1-T1D + risk scoring W1-T22).
 
 ## 5. Principles engine
 
@@ -809,6 +893,10 @@ WS-11 after WS-4 + a second project on the harness.
    preflight probe confirms it on THIS machine, THIS run — config that happens to work by accident of
    the host (PR #8: isolation held only because `~/.bashrc` was absent) must fail closed the moment the
    accident ends. See FIELD FINDING 11, W1-T17.
+12. **Supervision is deterministic; judgment is advisory. An LLM may RECOMMEND a halt; only code may
+   ENFORCE one.** The flight judge and specialist panels (§4B) return verdicts a deterministic
+   controller acts on; no LLM sits in the merge decision, and none edits code. See §4B, W1-T20/21/22,
+   W2-T1.
 
 ## 13. Collaboration protocol (this document)
 
