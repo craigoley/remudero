@@ -88,3 +88,46 @@
     green) — gate on ONE always-runs aggregator job that needs: every sub-job, and require only that.
   src: operator-fleet
   cited: "2026-07-14"
+
+# ── Context engineering & knowledge architecture (§8A/§8B) [research 2026-07-14] ──
+- id: context-economy
+  subsystem: knowledge
+  files: [src/lib/learnings.ts, src/run-task.ts]
+  fact: >-
+    Context is a precious, FINITE resource: find the smallest set of high-signal tokens that maximize the
+    desired outcome — do not dump everything known into the prompt.
+  src: research#effective-context-engineering
+  cited: "2026-07-14"
+- id: claude-code-hybrid-retrieval
+  subsystem: knowledge
+  files: [src/lib/learnings.ts, src/run-task.ts]
+  fact: >-
+    Claude Code is HYBRID: stable context up front + glob/grep for just-in-time retrieval, which bypasses
+    stale indexing. Prefer retrieval (grep-able plan) over injecting whole files.
+  src: research#effective-context-engineering
+  cited: "2026-07-14"
+- id: compaction-recall-first
+  subsystem: context
+  files: [src/lib/retro.ts, src/run-task.ts]
+  fact: >-
+    A compaction summary that DROPS a critical fact is worse than no summary — later steps trust it and
+    cannot recover it. Tune for RECALL first; anchor goal/criteria/constraints verbatim; write durable
+    facts out before compacting.
+  src: research#effective-context-engineering
+  cited: "2026-07-14"
+- id: cache-prefix-bytes
+  subsystem: context
+  files: [src/lib/learnings.ts, src/run-task.ts]
+  fact: >-
+    Prompt caches key on EXACT PREFIX BYTES: any early edit invalidates the cache for everything after it,
+    and cache reads cost ~1/10th of fresh input. Assemble prompts stable-first, volatile-last.
+  src: research#scaling-managed-agents
+  cited: "2026-07-14"
+- id: harness-assumptions-stale
+  subsystem: retro
+  files: [src/lib/retro.ts]
+  fact: >-
+    Harnesses encode assumptions about what Claude cannot do on its own, and those assumptions go STALE as
+    models improve — a retro must question and retire guards, not only add them.
+  src: research#scaling-managed-agents
+  cited: "2026-07-14"
