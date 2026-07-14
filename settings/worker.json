@@ -1,0 +1,47 @@
+{
+  "$comment": "Remudero worker policy TEMPLATE. Rendered at runtime by renderWorkerSettings(): ${HOOKS_DIR} is replaced with the absolute hooks dir (kept out of the committed tree). Passed to workers ONLY — never merged into ~/.claude/settings.json. Sandbox keys match the INSTALLED schema (SDK 0.3.209 / CLI 2.1.209): allowedDomains nests under `network`, denyRead under `filesystem`.",
+  "permissions": {
+    "deny": [
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.config/remudero/**)"
+    ],
+    "allow": [],
+    "ask": []
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${HOOKS_DIR}/deny-floor.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "autoAllowBashIfSandboxed": true,
+    "filesystem": {
+      "denyRead": [
+        "~/.ssh/**",
+        "~/.aws/**",
+        "~/.config/remudero/**"
+      ]
+    },
+    "network": {
+      "allowedDomains": [
+        "github.com",
+        "api.github.com",
+        "codeload.github.com",
+        "registry.npmjs.org"
+      ]
+    },
+    "excludedCommands": ["gh *"]
+  }
+}

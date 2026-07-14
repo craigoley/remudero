@@ -1,0 +1,3 @@
+# Remudero code ownership. Every change requires review from the owner.
+# (Repo Issues/Discussions stay OFF until WS-4; CODEOWNERS ships from PR #1.)
+*       @craigoley

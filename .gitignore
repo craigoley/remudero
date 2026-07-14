@@ -1,0 +1,11 @@
+node_modules/
+local/
+*.pat
+FINDINGS-local*
+
+# build output
+dist/
+*.tsbuildinfo
+
+# os / editor
+.DS_Store

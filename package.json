@@ -1,0 +1,24 @@
+{
+  "name": "remudero",
+  "version": "0.0.0-pre-alpha",
+  "private": true,
+  "description": "Plan-stewarding orchestration harness for Claude Code",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.22.3"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test --import tsx \"test/**/*.test.ts\"",
+    "spike": "tsx src/spike.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.209",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1"
+  }
+}
