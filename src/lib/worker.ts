@@ -9,6 +9,12 @@ import { buildWorkerEnv } from "./env.js";
 export interface WorkerResult {
   sessionId: string;
   costUsd: number;
+  /**
+   * Turns the worker actually took (SDK `num_turns` off the result envelope).
+   * Recorded on BOTH success and error paths — a run's turn count is telemetry
+   * that seeds mounts.yaml calibration (W1-T5), so a failed run is never `0`.
+   */
+  numTurns: number;
   /** Final result text (the `result` field of the SDK result message). */
   text: string;
   /** All assistant text blocks concatenated, in order. */
@@ -81,51 +87,97 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   if (typeof args.maxTurns === "number") options.maxTurns = args.maxTurns;
   if (typeof args.maxBudgetUsd === "number") options.maxBudgetUsd = args.maxBudgetUsd;
 
+  return collectWorkerResult(query({ prompt: args.prompt, options }), {
+    childEnvKeys: Object.keys(childEnv).sort(),
+    stderrChunks,
+  });
+}
+
+/**
+ * Reduce the SDK message stream into a {@link WorkerResult}. Extracted from
+ * spawnWorker so the error-envelope behavior is unit-testable without spawning
+ * a real worker.
+ *
+ * CRITICAL (SDK 0.3.209 ground truth, WS-1 root cause): the SDK still YIELDS the
+ * `type:"result"` envelope for an error subtype (error_max_turns,
+ * error_max_budget_usd, …) — carrying `num_turns` and `total_cost_usd` — and
+ * only THEN throws `Error("Claude Code returned an error result: …")` from the
+ * iterator. If that throw escapes, the run's cost + turns are lost and a failed
+ * run looks FREE in the ledger. So: once a result envelope is seen, the trailing
+ * throw is swallowed and the captured envelope is returned with isError=true. A
+ * throw with NO result envelope is a genuine transport/spawn failure — re-raised.
+ */
+export async function collectWorkerResult(
+  messages: AsyncIterable<unknown>,
+  opts: { childEnvKeys: string[]; stderrChunks?: string[] },
+): Promise<WorkerResult> {
+  const blocks: string[] = [];
+  const stderrChunks = opts.stderrChunks ?? [];
+
   let sessionId = "";
   let costUsd = 0;
+  let numTurns = 0;
   let text = "";
   let subtype = "";
   let isError = false;
   let permissionDenials: unknown[] = [];
+  let sawResult = false;
 
-  for await (const msg of query({ prompt: args.prompt, options })) {
-    if (msg.type === "assistant") {
-      const content = (msg.message as { content?: unknown }).content;
-      if (Array.isArray(content)) {
-        for (const block of content) {
-          if (block && (block as { type?: string }).type === "text") {
-            blocks.push((block as { text: string }).text);
+  try {
+    for await (const raw of messages) {
+      const msg = raw as { type?: string; message?: unknown };
+      if (msg.type === "assistant") {
+        const content = (msg.message as { content?: unknown }).content;
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (block && (block as { type?: string }).type === "text") {
+              blocks.push((block as { text: string }).text);
+            }
           }
         }
+      } else if (msg.type === "result") {
+        const r = raw as {
+          subtype: string;
+          is_error: boolean;
+          result?: string;
+          session_id: string;
+          total_cost_usd: number;
+          num_turns?: number;
+          permission_denials?: unknown[];
+        };
+        sawResult = true;
+        subtype = r.subtype;
+        isError = r.is_error;
+        text = r.result ?? "";
+        sessionId = r.session_id;
+        costUsd = r.total_cost_usd;
+        numTurns = typeof r.num_turns === "number" ? r.num_turns : 0;
+        permissionDenials = r.permission_denials ?? [];
       }
-    } else if (msg.type === "result") {
-      const r = msg as {
-        subtype: string;
-        is_error: boolean;
-        result?: string;
-        session_id: string;
-        total_cost_usd: number;
-        permission_denials?: unknown[];
-      };
-      subtype = r.subtype;
-      isError = r.is_error;
-      text = r.result ?? "";
-      sessionId = r.session_id;
-      costUsd = r.total_cost_usd;
-      permissionDenials = r.permission_denials ?? [];
     }
+  } catch (err) {
+    // No result envelope was seen ⇒ this is a real failure (bad binary, network,
+    // aborted spawn), not an error-subtype result. Re-raise it.
+    if (!sawResult) throw err;
+    // Otherwise the throw is the SDK's post-error-result signal; the envelope is
+    // already captured. Record the message on stderr for the proof surface.
+    stderrChunks.push(
+      `\n[collectWorkerResult] error-result throw swallowed: ${String((err as Error)?.message ?? err)}\n`,
+    );
+    isError = true;
   }
 
   return {
     sessionId,
     costUsd,
+    numTurns,
     text,
     blocks,
     stderr: stderrChunks.join(""),
     subtype,
     isError,
     permissionDenials,
-    childEnvKeys: Object.keys(childEnv).sort(),
+    childEnvKeys: opts.childEnvKeys,
   };
 }
 
@@ -255,6 +307,87 @@ export function worktreeRemove(repoDir: string, worktreePath: string): void {
   execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", worktreePath], {
     stdio: "inherit",
   });
+}
+
+/** Summary of what a start-of-run prune reclaimed (ledgered for provenance). */
+export interface PruneSummary {
+  worktrees: string[];
+  branches: string[];
+}
+
+/**
+ * Reclaim leftovers from crashed prior runs so they cannot block this one.
+ *
+ * A run that dies without reaching its cleanup (WS-1: max-turns run died with the
+ * worktree + branch still on disk) leaves a `run-*` worktree and local branch
+ * behind. `git worktree add -b run-…` for a NEW run has a unique timestamp so it
+ * never collides — but the debris accumulates and a stale branch name could later
+ * clash. At run start we force-remove every `run-*` worktree, `git worktree prune`
+ * the admin records, then delete every remaining local `run-*` branch. All
+ * best-effort and per-item guarded: a repo with nothing to prune returns empties.
+ * The caller's own about-to-be-created branch does not exist yet, so it is safe.
+ */
+export function pruneStaleRuns(repoDir: string, worktreesRoot: string): PruneSummary {
+  const removedWorktrees: string[] = [];
+  const removedBranches: string[] = [];
+
+  // 1. Force-remove any registered worktree whose path is under our worktrees
+  //    root and whose branch is a run-* branch.
+  let list = "";
+  try {
+    list = execFileSync("git", ["-C", repoDir, "worktree", "list", "--porcelain"], {
+      encoding: "utf8",
+    });
+  } catch {
+    list = "";
+  }
+  let curPath = "";
+  for (const line of list.split("\n")) {
+    if (line.startsWith("worktree ")) curPath = line.slice("worktree ".length).trim();
+    else if (line.startsWith("branch ")) {
+      const ref = line.slice("branch ".length).trim(); // e.g. refs/heads/run-…
+      const isRun = /\/run-/.test(ref) || ref.startsWith("run-");
+      if (isRun && curPath.startsWith(worktreesRoot)) {
+        try {
+          execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", curPath], {
+            stdio: "pipe",
+          });
+          removedWorktrees.push(curPath);
+        } catch {
+          // best-effort
+        }
+      }
+    }
+  }
+
+  // 2. Prune admin records for worktrees whose directory is already gone.
+  try {
+    execFileSync("git", ["-C", repoDir, "worktree", "prune"], { stdio: "pipe" });
+  } catch {
+    // best-effort
+  }
+
+  // 3. Delete every remaining local run-* branch (now detached from any worktree).
+  let branches = "";
+  try {
+    branches = execFileSync(
+      "git",
+      ["-C", repoDir, "for-each-ref", "--format=%(refname:short)", "refs/heads/run-*"],
+      { encoding: "utf8" },
+    );
+  } catch {
+    branches = "";
+  }
+  for (const b of branches.split("\n").map((s) => s.trim()).filter(Boolean)) {
+    try {
+      execFileSync("git", ["-C", repoDir, "branch", "-D", b], { stdio: "pipe" });
+      removedBranches.push(b);
+    } catch {
+      // A branch still checked out in a worktree we couldn't remove — leave it.
+    }
+  }
+
+  return { worktrees: removedWorktrees, branches: removedBranches };
 }
 
 // ── gh helpers (run outside the sandbox; TLS fails under Seatbelt) ─────────

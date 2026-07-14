@@ -20,6 +20,7 @@ import {
   parseQuestion,
   parseReconReport,
   parseReport,
+  pruneStaleRuns,
   renderWorkerSettings,
   spawnWorker,
   worktreeAdd,
@@ -142,7 +143,58 @@ export interface RunResult {
   prUrl?: string;
   merged: boolean;
   costUsd: number;
-  verdict: "merged" | "blocked" | "blocked_ci" | "failed";
+  verdict: "merged" | "blocked" | "blocked_ci" | "blocked_budget" | "failed";
+}
+
+/** The verdict + ledger payload a worker's ERROR envelope maps to. */
+export interface WorkerErrorVerdict {
+  verdict: "blocked_budget" | "failed";
+  budgetBreach: boolean;
+  /** Spread verbatim onto the `verdict` ledger line — carries turns + cost. */
+  ledger: {
+    verdict: "blocked_budget" | "failed";
+    stage: string;
+    subtype: string;
+    num_turns: number;
+    cost_usd: number;
+    billing_mode: "subscription";
+    reason: string;
+  };
+}
+
+/**
+ * Pure mapping from a worker's ERROR envelope to a terminal verdict. Returns
+ * null when the result is NOT an error (the caller proceeds normally).
+ *
+ * A budget breach (subtype `error_max_budget_usd`) is verdict=blocked_budget and
+ * is NEVER retried — dollars are the hard backstop. Any other error subtype is
+ * `failed`. The ledger payload always carries `num_turns` and `cost_usd`, so a
+ * failed run is never free in the ledger (WS-1: an implement run's ~6 minutes of
+ * spend was previously invisible because the SDK threw before we read them).
+ */
+export function workerErrorVerdict(
+  r: WorkerResult,
+  costUsd: number,
+  stage: string,
+): WorkerErrorVerdict | null {
+  if (!r.isError) return null;
+  const budgetBreach = r.subtype === "error_max_budget_usd";
+  const verdict: WorkerErrorVerdict["verdict"] = budgetBreach ? "blocked_budget" : "failed";
+  return {
+    verdict,
+    budgetBreach,
+    ledger: {
+      verdict,
+      stage,
+      subtype: r.subtype,
+      num_turns: r.numTurns,
+      cost_usd: costUsd,
+      billing_mode: "subscription",
+      reason: budgetBreach
+        ? "worker breached maxBudgetUsd — not retried (dollars are the backstop)"
+        : `worker error at ${stage}: ${r.subtype}`,
+    },
+  };
 }
 
 function reconObservedToContext(recon: WorkerResult, taskId: string): string {
@@ -221,6 +273,30 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
     return r;
   };
 
+  /**
+   * A worker returned an ERROR envelope (max_turns, max_budget_usd, execution
+   * error). Turn it into a terminal verdict: clean the worktree so no debris
+   * survives, ledger the verdict WITH num_turns + cost_usd (a failed run is never
+   * free in the ledger), and return. A budget breach is verdict=blocked_budget
+   * and is NEVER retried — dollars are the hard backstop. Any other error is
+   * `failed`. Returns null when the result is not an error (caller proceeds).
+   */
+  const failOnWorkerError = (r: WorkerResult, stage: string): RunResult | null => {
+    const v = workerErrorVerdict(r, costUsd, stage);
+    if (!v) return null;
+    try {
+      worktreeRemove(repoDir, worktreePath);
+      log("worktree.remove", { on: `${stage}.error` });
+    } catch (e) {
+      log("worktree.remove.error", { on: `${stage}.error`, error: String((e as Error)?.message ?? e) });
+    }
+    log("verdict", v.ledger);
+    say(
+      `verdict: ${v.verdict} (${r.subtype}) at ${stage} · ${r.numTurns} turns · notional $${costUsd.toFixed(4)}`,
+    );
+    return { taskId, runId, merged: false, costUsd, verdict: v.verdict };
+  };
+
   // ── Validate-before-spawn guard (FF10a): reject a bad settings file BY NAME.
   const settingsFile = renderWorkerSettings({
     templatePath: join(repoRoot, "settings", "worker.json"),
@@ -237,6 +313,15 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
     mkdirSync(dirname(repoDir), { recursive: true });
     execFileSync("gh", ["repo", "clone", `${owner}/${task.repo}`, repoDir], { stdio: "inherit" });
   }
+  // ── Reclaim debris from crashed prior runs (WS-1: a max-turns death left its
+  // run-* worktree + branch behind). Do this BEFORE adding ours so leftovers can
+  // never block the new worktree/branch. Best-effort; ledger what was reclaimed.
+  const pruned = pruneStaleRuns(repoDir, worktreesDir(config));
+  if (pruned.worktrees.length || pruned.branches.length) {
+    log("worktree.prune", { worktrees: pruned.worktrees, branches: pruned.branches });
+    say(`pruned ${pruned.worktrees.length} stale worktree(s), ${pruned.branches.length} branch(es)`);
+  }
+
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesDir(config), branch);
   worktreeAdd(repoDir, worktreePath, branch, "origin/main");
@@ -250,7 +335,8 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
         cwd: worktreePath,
         permissionMode: "bypassPermissions",
         settingsFile,
-        maxTurns: 8,
+        maxTurns: 8, // recon is read-only + bounded; turns stay tight here.
+        maxBudgetUsd: task.budget_usd, // dollars are the real backstop (WS-0 knob a).
         config,
         prompt:
           "You are a RECON worker. Do NOT modify anything. Inspect the current git " +
@@ -259,7 +345,14 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
           "COULDN'T-VERIFY: <unconfirmed>",
       }),
     );
-    log("recon.done", { session_id: recon.sessionId, cost_usd: recon.costUsd, subtype: recon.subtype });
+    log("recon.done", {
+      session_id: recon.sessionId,
+      cost_usd: recon.costUsd,
+      num_turns: recon.numTurns,
+      subtype: recon.subtype,
+    });
+    const reconFail = failOnWorkerError(recon, "recon");
+    if (reconFail) return reconFail;
 
     // ── Render + provenance-lint the prompt.
     const reconContext = reconObservedToContext(recon, taskId);
@@ -274,8 +367,13 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
       await spawnWorker({
         cwd: worktreePath,
         permissionMode: "bypassPermissions",
+        // maxTurns is a runaway-LOOP guard now, not a work limit — dollars
+        // (maxBudgetUsd) are the real backstop. WS-1: an 18-turn cap killed a
+        // legitimate ~6-minute implement run. 60 gives real work room; a run
+        // that hits it is genuinely looping.
+        maxTurns: 60,
+        maxBudgetUsd: task.budget_usd,
         settingsFile,
-        maxTurns: 18,
         config,
         prompt,
       }),
@@ -283,9 +381,12 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
     log("implement.done", {
       session_id: impl.sessionId,
       cost_usd: impl.costUsd,
+      num_turns: impl.numTurns,
       subtype: impl.subtype,
       permission_denials: impl.permissionDenials.length,
     });
+    const implFail = failOnWorkerError(impl, "implement");
+    if (implFail) return implFail;
 
     const fullText = (r: WorkerResult) => [r.text, r.blocks.join("\n")].join("\n");
 
@@ -308,7 +409,8 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
           permissionMode: "bypassPermissions",
           settingsFile,
           resumeSessionId: impl.sessionId,
-          maxTurns: 18,
+          maxTurns: 60, // same runaway guard as the initial implement spawn.
+          maxBudgetUsd: task.budget_usd,
           config,
           prompt:
             `Decision made: ${chosen}. Now execute the change and the OUTPUT CONTRACT from before: ` +
@@ -316,7 +418,14 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
             `and end with a REPORT whose last line is exactly: PR_URL: <url>`,
         }),
       );
-      log("implement.resumed", { session_id: impl.sessionId, cost_usd: impl.costUsd });
+      log("implement.resumed", {
+        session_id: impl.sessionId,
+        cost_usd: impl.costUsd,
+        num_turns: impl.numTurns,
+        subtype: impl.subtype,
+      });
+      const resumeFail = failOnWorkerError(impl, "implement.resumed");
+      if (resumeFail) return resumeFail;
     }
 
     // ── QUESTION contract (non-blocking) — log, don't stall (§2).
@@ -394,7 +503,16 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
     return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
   } catch (err) {
     log("run.error", { error: String((err as Error)?.message ?? err) });
-    // Leave the worktree for post-mortem; surface the error.
+    // Reclaim the worktree even on an unexpected throw — a dead run must not
+    // leave debris that blocks the next one (start-of-run prune is the backstop,
+    // but clean up eagerly here too). Best-effort; the ledger already has the
+    // error. The stale run-* branch is swept by the next run's pruneStaleRuns.
+    try {
+      worktreeRemove(repoDir, worktreePath);
+      log("worktree.remove", { on: "run.error" });
+    } catch (e) {
+      log("worktree.remove.error", { on: "run.error", error: String((e as Error)?.message ?? e) });
+    }
     throw err;
   }
 }
