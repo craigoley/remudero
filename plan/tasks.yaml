@@ -10,6 +10,15 @@
 #  - A YAML round-trip would destroy these comments and a machine writer would race the human editor —
 #    conflict classes we simply do not have by never writing status back.
 #
+# budget_usd is a RUNAWAY TRIPWIRE, not an allowance. It exists to catch a worker in a loop, not to
+# ration honest work. On subscription these dollars are NOTIONAL (an API-equivalent meter, not billed
+# spend — MASTER-PLAN §9). Window pressure (the real limit) is managed by the HeadroomTracker (W1-T4),
+# never by per-task dollar caps. Do NOT lower these to "save money" — you will kill good work and save
+# nothing. Set at 100.00 (an order of magnitude above any observed task) so the cap only fires on
+# pathology. W1-T3 died blocked_budget at $3.57/36 turns against a GUESSED $4 cap — still working, not
+# looping. That is a limit set NEAR the work's cost acting as a WORK LIMIT; the same bug as maxTurns
+# (PR #8), one field over.
+#
 # BINDING RULES for every task below (injected into every rendered prompt):
 #  - DISTRUST THE PROMPT OVER THE INSTALLED VERSION. Read the installed schema/types. Two tasks running,
 #    two prompt errors caught this way (WS-0: allowedDomains nesting; W1-T1: the SDK schema is $loose and
@@ -18,6 +27,8 @@
 #  - Fresh worktrees have NO node_modules: npm ci in the worktree before typecheck/test.
 #  - git push WITHOUT -u inside worktrees (shared .git/config is outside the sandbox write scope).
 #  - Never merge a PR to remudero whose required checks are not green (W1-T1B).
+#  - A blocked worker ADDS the missing work or ESCALATES; it NEVER edits acceptance criteria to match its
+#    diff, and NEVER lowers budget_usd (Standing rules 15 / §9 tripwire doctrine).
 
 - id: W1-T1
   title: Extract run-task.ts from the spike lib (the proto-runner)
@@ -27,7 +38,7 @@
   verify: auto
   hand_built: true          # L0 — the last task written by hand; everything after rides this
   principles: {tdd: strict}
-  budget_usd: 4.00
+  budget_usd: 100.00
   acceptance:
     - claim: "`rmd run-task <id>` executes ONE tasks.yaml entry end-to-end: recon → prompt → implement → PR"
       proof: "a merged PR on remudero-sandbox whose ledger line names the task id"
@@ -46,7 +57,7 @@
   type: implement
   verify: auto
   principles: {tdd: encouraged}
-  budget_usd: 3.00
+  budget_usd: 100.00
   rationale: "T2+ modify the runner itself. A broken self-modifying merge BRICKS the loop. No task
     that changes remudero may merge without a green gate."
   acceptance:
@@ -70,7 +81,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 4.00
+  budget_usd: 100.00
   rationale: "Standing rule 4 says green checks are NOT evidence, yet today `merged` means only that CI
     passed — no one verifies the task's acceptance criteria. Build the JUDGE first, as a decoupled
     step that posts a commit status; enforcement is a separate concern (W1-T1D). Splitting lets the
@@ -104,7 +115,7 @@
   type: implement
   verify: auto
   principles: {tdd: encouraged}
-  budget_usd: 3.00
+  budget_usd: 100.00
   rationale: "W1-T1C makes a verdict VISIBLE; it does not make it BINDING. Today blocked_ci leaves
     auto-merge ARMED, so a runner-rejected PR can still land GitHub-side with no acceptance verdict.
     Root cause: the merge gate is a runner-side decision that can be raced. Fix: make BOTH checks a
@@ -133,7 +144,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 3.00
+  budget_usd: 100.00
   acceptance:
     - claim: "worker.json is schema-validated against the INSTALLED SDK's SandboxSettingsSchema before any spawn"
       proof: "unit test: valid config passes; allowedDomains-at-root FAILS with a specific error"
@@ -149,7 +160,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 3.00
+  budget_usd: 100.00
   acceptance:
     - claim: "parseDecisionRequest survives the WS-0 near-miss (inline (RECOMMENDED) marker capturing ')')"
       proof: "golden test with the exact WS-0 malformed payload passes; option list has no ')'"
@@ -190,7 +201,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 3.00
+  budget_usd: 100.00
   acceptance:
     - claim: "parses session % + BOTH weekly windows + reset timestamps from `claude -p /usage`"
       proof: "parser test against the captured WS-0 fixture returns all five fields"
@@ -208,7 +219,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 3.00
+  budget_usd: 100.00
   acceptance:
     - claim: "mounts table keyed by (task_type x risk x thinking) resolves to real knobs (maxBudgetUsd, effort, maxTurns)"
       proof: "resolver test: diagnose steps UP; routine retry does NOT"
@@ -224,7 +235,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 3.00
+  budget_usd: 100.00
   acceptance:
     - claim: "every worker + brain call logs {model, effort, tokens, total_cost_usd, billing_mode, verdict}"
       proof: "a run's ledger lines contain all fields; billing_mode reads 'subscription'"
@@ -238,7 +249,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 4.00
+  budget_usd: 100.00
   acceptance:
     - claim: "network/5xx/CI-flake retries consume NO strike; deterministic failures do"
       proof: "classifier unit tests over recorded failure fixtures"
@@ -254,7 +265,7 @@
   type: implement
   verify: auto
   principles: {tdd: encouraged}
-  budget_usd: 4.00
+  budget_usd: 100.00
   acceptance:
     - claim: "BLOCKED/MANUAL/HARD-STOP escalations open labeled issues with options + a recommendation"
       proof: "issue URL + needs-human label via gh issue view"
@@ -270,7 +281,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 3.00
+  budget_usd: 100.00
   acceptance:
     - claim: "wizard detects tier via /usage + ~/.claude.json keys, then SHOWS it for confirmation"
       proof: "transcript: detected value displayed, operator confirms, config written"
@@ -286,7 +297,7 @@
   type: implement
   verify: human      # requires Craig to enable fine-grained PATs on the craigoley org first
   principles: {tdd: strict}
-  budget_usd: 2.00
+  budget_usd: 100.00
   acceptance:
     - claim: "GH_TOKEN is injected from ~/.config/remudero/<project>.pat into the WORKER env only"
       proof: "env unit test: parent has no GH_TOKEN, child does; the pat file is never read by the worker"
@@ -301,7 +312,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 3.00
+  budget_usd: 100.00
   acceptance:
     - claim: "Pause halts new spawns; in-flight tasks run to FULL completion (verdict + merge)"
       proof: "ledger: pause issued mid-run, in-flight task still reaches merged"
@@ -317,7 +328,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 5.00
+  budget_usd: 100.00
   acceptance:
     - claim: "the daemon drains a 3-task plan on remudero-sandbox end-to-end, unattended, overnight"
       proof: "ledger + merged PRs + daily digest received"
@@ -334,7 +345,7 @@
   depends_on: []
   type: manual
   verify: human
-  budget_usd: 0
+  budget_usd: 100.00
   rationale: "ANTHROPIC_API_KEY is exported from ~/.zshrc, so INTERACTIVE Claude Code sessions on the
     mini bill the API account instead of Max 20x. The harness's own workers are already clean (WS-0
     verdict 1). Fix: strip the var inside the existing claude() shell function via a subshell — every
@@ -354,7 +365,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 3.00
+  budget_usd: 100.00
   rationale: "package.json has NO `bin` field, so `npm link` is a no-op and `rmd` never lands on PATH —
     every invocation today is `./bin/rmd` from inside the repo. And `private: true` blocks the npm
     publish that WS-4's `npx remudero init` quickstart depends on. Both must change together, and the
@@ -384,7 +395,7 @@
   type: implement
   verify: auto
   principles: {tdd: encouraged}
-  budget_usd: 2.00
+  budget_usd: 100.00
   rationale: "MASTER-PLAN.md and plan/tasks.yaml were once copied into the tree out-of-band (scp), which
     is how they arrived DIRTY with no provenance. Plan changes must arrive by git like any other change,
     through a reviewable PR — the plan is the one artifact whose edit history matters most."
@@ -408,7 +419,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 3.00
+  budget_usd: 100.00
   rationale: "PR #8's shell isolation works ONLY because `~/.bashrc` is absent on this host — an accident
     of the machine, not construction (LEARNINGS.md; FIELD FINDING 11b). On a machine with a populated
     `~/.bashrc` it would silently isolate NOTHING. Standing rule 11: isolation is PROVEN PER RUN by
@@ -437,7 +448,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 4.00
+  budget_usd: 100.00
   rationale: "CLAUDE_CODE_SHELL=/bin/bash isolates only because THIS machine has no ~/.bashrc; most OSS
     users have a populated one and would get zero isolation (FIELD FINDING 11b). Remudero cannot ship a
     fleet whose containment is an accident of the host. Need a mechanism that isolates regardless of the
@@ -466,7 +477,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 3.00
+  budget_usd: 100.00
   rationale: "The prompt has been WRONG three times against the installed version (allowedDomains nesting,
     the $loose schema, ZDOTDIR-vs-snapshot). Every rendered prompt must carry the antidote as a fixed
     preamble, plus the autonomy clause (Standing rule 8) so workers never stall on a human, plus the
@@ -500,7 +511,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 3.00
+  budget_usd: 100.00
   rationale: "MASTER-PLAN §4B Layer 1. In-flight supervision starts with cheap deterministic predicates
     computed per turn from the worker's stream-json: they FIRE, they never JUDGE (Standing rule 2/12).
     A trip is what invokes the Layer-2 judge (W1-T21); on its own it decides nothing."
@@ -528,7 +539,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 4.00
+  budget_usd: 100.00
   rationale: "MASTER-PLAN §4B Layer 2. A Layer-1 tripwire invokes a FRESH-context judge that sees the
     goal, acceptance criteria, and the last N turns' TOOL CALLS AND RESULTS — never the worker's
     reasoning (the maker sees its trail; the verifier sees only behavior + rubric). It ADVISES; a
@@ -561,7 +572,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 3.00
+  budget_usd: 100.00
   rationale: "MASTER-PLAN §4B Layer 3. Risk scoring is what makes auto-choose SAFE — not a retraction of
     it. Deterministic from diff + task metadata (Standing rule 2): blast_radius, reversibility, novelty,
     confidence. low -> auto-choose unchanged (the default); medium -> reviewer PASS; high -> timeboxed
@@ -591,7 +602,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 4.00
+  budget_usd: 100.00
   rationale: "MASTER-PLAN §4B Layer 4. On-demand specialist review, triggered BY risk + diff signals
     (W1-T22), never resident on every task (cost + slop). Each specialist has fresh context, read-only
     tools, a scoped rubric; posts PR review comments and contributes to the reviewer's verdict (W1-T1D).
@@ -625,7 +636,7 @@
   type: implement
   verify: auto
   principles: {tdd: encouraged}
-  budget_usd: 4.00
+  budget_usd: 100.00
   rationale: "MASTER-PLAN §5 TIER 1. The harness eats first: the security gates the fleet paid for run on
     remudero before any project inherits them (§5A). CodeQL default setup conflicts with an explicit
     workflow so it is DISABLED (LEARNINGS); MAJOR dependency bumps are excluded from auto-merge after a
@@ -651,7 +662,7 @@
   type: implement
   verify: auto
   principles: {tdd: encouraged}
-  budget_usd: 3.00
+  budget_usd: 100.00
   rationale: "MASTER-PLAN §5 CI mechanics. A conditionally-skipped required check DEADLOCKS merge forever
     (LEARNINGS); as tiers add path-filtered sub-jobs, the fix is ONE always-runs aggregator that needs:
     every sub-job and is the single required context. The required context is the JOB NAME, not the
@@ -676,7 +687,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 4.00
+  budget_usd: 100.00
   rationale: "MASTER-PLAN §5 TIER 2. Coverage % is not proof tests are real; the MUTATION baseline is the
     falsifier (green tests that kill no mutants are theater — SynthWatch). TS-strict must be proven ACTIVE
     by a planted probe, because 0 violations from an inert gate reads identically to a clean one (neon-drift)."
@@ -699,7 +710,7 @@
   type: implement
   verify: auto
   principles: {tdd: encouraged}
-  budget_usd: 3.00
+  budget_usd: 100.00
   rationale: "MASTER-PLAN §5 TIER 3. The games' purity gates generalized to declarable layering: src/lib
     must import nothing from spike/CLI. A fitness function makes the rule executable, not aspirational."
   acceptance:
@@ -717,7 +728,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 5.00
+  budget_usd: 100.00
   rationale: "MASTER-PLAN §5A: the bar is INHERITED, not optional. rmd project init generalizes the gate
     stack proven on remudero (the T23-T26 tiers + the T24 aggregator) into per-profile templates and
     installs them on a target repo in one PR. Depends on the tiers it packages — you cannot provision a
@@ -743,7 +754,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 3.00
+  budget_usd: 100.00
   rationale: "MASTER-PLAN §5 TIER 1 (agent-specific). W1-T2 built the empirical containment probe; this
     makes it a REQUIRED gate on the diffs that can silently drop containment (WS-0 FF10a: moving
     allowedDomains to the sandbox root disables the domain allowlist). Static validation is not enough —
@@ -767,7 +778,7 @@
   type: implement
   verify: human
   principles: {tdd: encouraged}
-  budget_usd: 4.00
+  budget_usd: 100.00
   rationale: "MASTER-PLAN §3A + §5A: a campaign raises the bar fleet-wide. Once rmd project init exists
     (W1-T27) and risk scoring gates it (W1-T22), instantiate onboarding tasks across the operator's repos.
     verify: human because it opens PRs against PRODUCTION repos the operator owns — it must not auto-run."

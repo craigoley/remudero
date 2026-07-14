@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig, type Config } from "./lib/config.js";
+import { loadConfig, softBudgetThreshold, type Config } from "./lib/config.js";
 import { appendLedger } from "./lib/ledger.js";
 import {
   assertRunnable,
@@ -402,6 +402,31 @@ function renderImplementPrompt(task: Task, reconContext: string, runId: string):
   ].join("\n");
 }
 
+/**
+ * Default HARD budget cap (notional $) when a task omits `budget_usd`. This is a
+ * RUNAWAY TRIPWIRE, not an allowance — set an order of magnitude above any observed
+ * task (hello-world $0.41 · reviewer $2.26 · gate-wiring $1.28 · containment ~$2.0 ·
+ * W1-T3 still working at $3.57/36 turns) so it only fires on pathology. A cap set
+ * NEAR a task's cost is a WORK LIMIT that destroys honest work (the maxTurns bug of
+ * PR #8, one field over — MASTER-PLAN §9). On subscription these dollars are
+ * NOTIONAL; window pressure is the HeadroomTracker's job (W1-T4), never a dollar cap.
+ */
+export const DEFAULT_BUDGET_USD = 100.0;
+
+/**
+ * Pure predicate: should the run emit a SOFT budget WARNING now? True exactly when
+ * cumulative cost has reached the soft threshold and no warning has fired yet — a
+ * VISIBILITY tripwire that never kills (the run continues). Extracted so the
+ * warn-once behavior is unit-testable without spawning a worker.
+ */
+export function softBudgetWarning(
+  costUsd: number,
+  thresholdUsd: number,
+  alreadyWarned: boolean,
+): boolean {
+  return !alreadyWarned && costUsd >= thresholdUsd;
+}
+
 async function runTask(taskId: string, opts: { planPath?: string; config?: Config } = {}): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
   const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
@@ -429,12 +454,31 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, ...extra });
   const say = (msg: string) => console.log(`\n### [${taskId}] ${msg}`);
 
-  log("run.start", { repo: task.repo, type: task.type, budget_usd: task.budget_usd });
+  // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
+  // DEFAULT_BUDGET_USD ($100 — an order of magnitude above any observed task) when a
+  // task omits it; the SOFT threshold ($25 default, config-tunable) only surfaces an
+  // anomaly as a WARNING and never kills.
+  const budgetUsd = task.budget_usd ?? DEFAULT_BUDGET_USD;
+  const softThresholdUsd = softBudgetThreshold(config);
+  log("run.start", { repo: task.repo, type: task.type, budget_usd: budgetUsd, soft_threshold_usd: softThresholdUsd });
   say(`run ${runId} — target ${owner}/${task.repo}`);
 
   let costUsd = 0;
+  let budgetWarned = false;
   const account = (r: WorkerResult) => {
     costUsd += r.costUsd; // NOTIONAL on subscription — tripwire/meter only (FF10d)
+    // SOFT threshold: ledger a WARNING once and CONTINUE — anomalies must be VISIBLE
+    // without being FATAL. The hard cap (maxBudgetUsd, per spawn) remains the kill.
+    if (softBudgetWarning(costUsd, softThresholdUsd, budgetWarned)) {
+      budgetWarned = true;
+      log("budget.warning", {
+        cost_usd: costUsd,
+        soft_threshold_usd: softThresholdUsd,
+        hard_cap_usd: budgetUsd,
+        note: "notional spend crossed the soft tripwire — NOT a kill; a run this expensive is likely looping",
+      });
+      say(`⚠️ budget.warning: notional $${costUsd.toFixed(2)} ≥ soft $${softThresholdUsd.toFixed(2)} (hard cap $${budgetUsd.toFixed(2)}) — continuing`);
+    }
     return r;
   };
 
@@ -481,7 +525,7 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
     const probe = await probeContainment({
       settingsFile,
       config,
-      budgetUsd: task.budget_usd,
+      budgetUsd,
       log: (s, extra) => log(s, extra),
     });
     costUsd += probe.costUsd; // meter the probe spawn (notional; the ledger has it)
@@ -529,7 +573,7 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
         permissionMode: "bypassPermissions",
         settingsFile,
         maxTurns: 8, // recon is read-only + bounded; turns stay tight here.
-        maxBudgetUsd: task.budget_usd, // dollars are the real backstop (WS-0 knob a).
+        maxBudgetUsd: budgetUsd, // dollars are the real backstop (WS-0 knob a).
         config,
         prompt:
           "You are a RECON worker. Do NOT modify anything. Inspect the current git " +
@@ -565,7 +609,7 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
         // legitimate ~6-minute implement run. 60 gives real work room; a run
         // that hits it is genuinely looping.
         maxTurns: 60,
-        maxBudgetUsd: task.budget_usd,
+        maxBudgetUsd: budgetUsd,
         settingsFile,
         config,
         prompt,
@@ -603,7 +647,7 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
           settingsFile,
           resumeSessionId: impl.sessionId,
           maxTurns: 60, // same runaway guard as the initial implement spawn.
-          maxBudgetUsd: task.budget_usd,
+          maxBudgetUsd: budgetUsd,
           config,
           prompt:
             `Decision made: ${chosen}. Now execute the change and the OUTPUT CONTRACT from before: ` +
@@ -692,7 +736,7 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
       report: fullText(impl),
       settingsFile,
       config,
-      budgetUsd: task.budget_usd,
+      budgetUsd,
       log: (s, extra) => log(s, extra),
       say,
       account,

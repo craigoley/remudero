@@ -28,6 +28,14 @@ export interface Config {
    * Optional; defaults to `/bin/bash`.
    */
   workerShell?: string;
+  /**
+   * SOFT budget threshold (notional $) at which a run ledgers a WARNING and
+   * CONTINUES — a visibility tripwire, NOT a kill. Optional; defaults to 25.00.
+   * The HARD cap (a run's `budget_usd`, default 100) is the runaway backstop; this
+   * soft line just surfaces an anomaly before it reaches the hard cap. On
+   * subscription these dollars are NOTIONAL (§9). See {@link softBudgetThreshold}.
+   */
+  softBudgetThresholdUsd?: number;
 }
 
 /**
@@ -49,6 +57,11 @@ export interface Config {
  */
 export function workerShell(config: Config): string {
   return config.workerShell ?? "/bin/bash";
+}
+
+/** The soft budget WARNING threshold (notional $). Default 25.00; never a kill. */
+export function softBudgetThreshold(config: Config): number {
+  return config.softBudgetThresholdUsd ?? 25.0;
 }
 
 /**

@@ -1,4 +1,4 @@
-# REMUDERO — Master Plan (v2.7 · synced 2026-07-14 · ★ THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
+# REMUDERO — Master Plan (v2.8 · synced 2026-07-14 · ★ BUDGET IS A TRIPWIRE, NOT AN ALLOWANCE: budget_usd is a runaway BUG DETECTOR (default $100, an order of magnitude above observed), a soft $25 line WARNS-and-continues, blocked_budget = "looping" — W1-T3 was killed mid-work at $3.57 vs a guessed $4; same bug as maxTurns (PR #8) · THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -728,6 +728,17 @@ jumps.
 API-equivalent price, not billed spend. It is therefore used for exactly two things: the
 runaway-anomaly tripwire, and metering when `billing_mode == api`. **Subscription window tracking
 parses `/usage`** (confirmed machine-readable headless).
+
+**A per-task dollar cap is a BUG DETECTOR, not a budget.** `budget_usd` (and the per-spawn
+`maxBudgetUsd` it feeds) exists to catch a worker in a LOOP, not to ration honest work. Setting it near
+a task's expected cost converts a tripwire into a WORK LIMIT and destroys honest work — **observed twice:
+`maxTurns` (18 vs. ~36 needed, PR #8) and `budget_usd` (W1-T3 killed `blocked_budget` at $3.57/36 turns
+against a GUESSED $4 cap while still working)**. Same bug, one field over. So: caps sit an ORDER OF
+MAGNITUDE above any observed cost (default $100), a SOFT threshold (default $25, config-tunable) only
+LEDGERS A WARNING and continues — anomalies VISIBLE without being FATAL — and `blocked_budget` now means
+"this worker is almost certainly looping," which is what a tripwire should mean. Window pressure (the
+real limit) is the HeadroomTracker's job (W1-T4), never a per-task dollar cap. Do not lower these caps to
+"save money": on subscription the dollars are notional, so you would kill good work and save nothing.
 
 **Windows — the HeadroomTracker (rung 1 CONFIRMED).** Models both clocks: the 5-hour rolling window and the weekly
 caps (including Max's dual weekly limits — all-models and Sonnet-only — with separate resets).
