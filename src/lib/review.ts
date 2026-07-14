@@ -291,6 +291,47 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
   ].join("\n");
 }
 
+/**
+ * Machine-readable verdict contract appended to the fresh reviewer's prompt so
+ * its per-criterion judgment can be folded into the deterministic verdict as a
+ * SEMANTIC downgrade (never an upgrade — {@link judgeReview}). The reviewer emits
+ * one `REVIEW_VERDICT <n>: PASS|FAIL` line per criterion. This is advisory: the
+ * mechanical floor is the binding gate (Standing rules 2/4/12), so a reviewer
+ * that emits nothing parseable simply leaves the floor untouched — never a stall,
+ * never a deadlock.
+ */
+export function reviewerVerdictContract(count: number): string {
+  return [
+    ``,
+    `MACHINE-READABLE OUTPUT (required, in addition to posting the status): emit`,
+    `EXACTLY one line per criterion, in this form and nothing else on the line:`,
+    `  REVIEW_VERDICT <n>: PASS   (proof is responsive and substantiated)`,
+    `  REVIEW_VERDICT <n>: FAIL   (proof missing, unpasted, or non-responsive)`,
+    `for n = 1..${count}. These are folded into the deterministic verdict and may`,
+    `only DOWNGRADE a criterion to failure, never rescue an unpasted proof.`,
+  ].join("\n");
+}
+
+/**
+ * Parse the reviewer's `REVIEW_VERDICT <n>: PASS|FAIL` lines into a semantic
+ * array index-aligned to the criteria (length `count`). `FAIL` ⇒ `false` (forces
+ * that criterion to fail); `PASS`/absent ⇒ `undefined` (defer to the mechanical
+ * floor). Advisory + downgrade-only, so an unparseable reviewer output yields an
+ * all-`undefined` array — the floor stands alone, fail-closed. Case-insensitive;
+ * tolerant of surrounding prose.
+ */
+export function parseReviewerVerdicts(text: string, count: number): (boolean | undefined)[] {
+  const semantic: (boolean | undefined)[] = new Array(count).fill(undefined);
+  const re = /REVIEW_VERDICT\s+(\d+)\s*:\s*(PASS|FAIL)\b/gi;
+  for (const m of text.matchAll(re)) {
+    const n = Number(m[1]) - 1;
+    if (n < 0 || n >= count) continue;
+    // Only ever record a downgrade; a PASS leaves the floor to decide.
+    if (m[2].toUpperCase() === "FAIL") semantic[n] = false;
+  }
+  return semantic;
+}
+
 // ── gh poster (runs outside the sandbox; TLS fails under Seatbelt) ──────────
 
 /**

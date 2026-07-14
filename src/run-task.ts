@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, type Config } from "./lib/config.js";
@@ -12,6 +13,15 @@ import {
   type Task,
 } from "./lib/plan.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
+import {
+  REVIEW_CONTEXT,
+  buildReviewPrompt,
+  judgeReview,
+  parseReviewerVerdicts,
+  postReviewStatus,
+  reviewerVerdictContract,
+  type ReviewVerdict,
+} from "./lib/review.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import { ghGateway, projectPlan } from "./lib/status.js";
 import {
@@ -137,13 +147,134 @@ async function pollToGate(
   return { merged: false, reason: "timeout waiting for checks (pending treated as blocked)" };
 }
 
+/**
+ * Poll the PR's `ci` check to a terminal state BEFORE the review runs (Standing
+ * rule 4: the reviewer judges ACCEPTANCE only once the code is proven to typecheck
+ * and its tests pass). Returns "green" on ci success, "red" on any red conclusion,
+ * "timeout" if ci never resolves — pending is never treated as pass.
+ */
+async function waitForCiGreen(
+  prUrl: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  maxIters = 60,
+  everySec = 6,
+): Promise<"green" | "red" | "timeout"> {
+  for (let i = 0; i < maxIters; i++) {
+    const v = ghJson(["pr", "view", prUrl, "--json", "statusCheckRollup"]) as {
+      statusCheckRollup?: RollupEntry[];
+    };
+    const roll = v.statusCheckRollup ?? [];
+    const red = roll.find((c) => RED_CONCLUSIONS.has(String(c.conclusion ?? c.state ?? "")));
+    if (red) return "red";
+    const ci = roll.find((c) => (c.name ?? c.context) === "ci");
+    if (ci && String(ci.conclusion ?? ci.state ?? "") === "SUCCESS") return "green";
+    if (i === 0 || i % 5 === 0) log("ci.polling", { ci: String(ci?.conclusion ?? ci?.status ?? "pending") });
+    execFileSync("sleep", [String(everySec)]);
+  }
+  return "timeout";
+}
+
+/**
+ * THE REVIEW GATE CALL SITE (W1-T1D — the piece W1-T1C built the reviewer for but
+ * nothing ever called; the split left the call site unowned). After the PR is open
+ * and `ci` is green, JUDGE the task's acceptance criteria and POST the
+ * `remudero-review` commit status to the PR head sha. The caller arms auto-merge
+ * only AFTER this returns.
+ *
+ * The BINDING verdict is DETERMINISTIC ({@link judgeReview}) — a merge gate is a
+ * deterministic predicate, never an LLM decision (Standing rules 2/4/12). The
+ * orchestrator ALWAYS posts the authoritative status here, so a REQUIRED check can
+ * never be missing (a required status that is never posted deadlocks every merge
+ * on the repo — the exact failure this task fixes).
+ *
+ * A FRESH read-only reviewer worker (NEVER resumeSessionId, NEVER forkSession) is
+ * spawned as an ADVISORY semantic layer, in a throwaway cwd so it cannot mutate the
+ * diff it judges. Its per-criterion verdicts may only DOWNGRADE a criterion to
+ * failure ({@link parseReviewerVerdicts} → semantic), never rescue an unpasted
+ * proof. Its spawn is best-effort: a reviewer that fails to spawn (e.g. the
+ * FIELD FINDING 12 self-updater race) never blocks the gate — the deterministic
+ * floor still posts, fail-closed.
+ */
+async function runReview(args: {
+  owner: string;
+  repo: string;
+  prUrl: string;
+  task: Task;
+  report: string;
+  settingsFile: string;
+  config: Config;
+  budgetUsd?: number;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  say: (msg: string) => void;
+  account: (r: WorkerResult) => WorkerResult;
+  /** false ⇒ deterministic floor only, no LLM spawn (used by the live proofs). */
+  spawnReviewer?: boolean;
+}): Promise<ReviewVerdict & { headSha: string }> {
+  const { owner, repo, prUrl, task, report, log, say } = args;
+  const view = ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string };
+  const headSha = view.headRefOid;
+  const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
+  const criteria = task.acceptance ?? [];
+
+  // Advisory semantic layer — a FRESH read-only reviewer (no session inheritance),
+  // in a throwaway cwd so it cannot touch the worktree/diff under review.
+  let semantic: (boolean | undefined)[] | undefined;
+  if (args.spawnReviewer !== false && criteria.length > 0) {
+    try {
+      const reviewCwd = mkdtempSync(join(tmpdir(), "rmd-review-"));
+      const prompt =
+        buildReviewPrompt({ task: { id: task.id, acceptance: criteria }, prUrl, owner, repo, headSha }) +
+        "\n" +
+        reviewerVerdictContract(criteria.length);
+      const reviewer = args.account(
+        await spawnWorker({
+          cwd: reviewCwd,
+          permissionMode: "bypassPermissions",
+          settingsFile: args.settingsFile,
+          maxTurns: 12,
+          maxBudgetUsd: args.budgetUsd,
+          config: args.config,
+          prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
+        }),
+      );
+      semantic = parseReviewerVerdicts(
+        [reviewer.text, reviewer.blocks.join("\n")].join("\n"),
+        criteria.length,
+      );
+      log("review.reviewer", {
+        session_id: reviewer.sessionId,
+        subtype: reviewer.subtype,
+        downgrades: semantic.filter((s) => s === false).length,
+      });
+    } catch (e) {
+      // Advisory only — the deterministic floor still binds and posts below.
+      log("review.reviewer.error", { error: String((e as Error)?.message ?? e) });
+    }
+  }
+
+  // BINDING deterministic verdict; the orchestrator is the authoritative poster.
+  const verdict = judgeReview(criteria, { diff, report, semantic });
+  postReviewStatus({ owner, repo, sha: headSha, state: verdict.state, description: verdict.summary });
+  const reasons = verdict.criteria.filter((c) => !c.met).map((c) => c.reason);
+  if (verdict.testTheater) reasons.push("test theater: added tests assert nothing");
+  log("review.posted", {
+    context: REVIEW_CONTEXT,
+    state: verdict.state,
+    head_sha: headSha,
+    test_theater: verdict.testTheater,
+    reasons,
+  });
+  say(`remudero-review=${verdict.state} posted to ${headSha.slice(0, 7)} — ${verdict.summary}`);
+  return { ...verdict, headSha };
+}
+
 export interface RunResult {
   taskId: string;
   runId: string;
   prUrl?: string;
   merged: boolean;
   costUsd: number;
-  verdict: "merged" | "blocked" | "blocked_ci" | "blocked_budget" | "failed";
+  verdict: "merged" | "blocked" | "blocked_ci" | "blocked_review" | "blocked_budget" | "failed";
 }
 
 /** The verdict + ledger payload a worker's ERROR envelope maps to. */
@@ -471,6 +602,51 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
     log("pr.opened", { pr_url: prUrl });
     say(`PR: ${prUrl}`);
 
+    // ── REVIEW GATE (W1-T1D). Wait for `ci` green, then JUDGE the task's
+    // acceptance criteria and POST `remudero-review` to the PR head sha — only
+    // THEN arm auto-merge. This is the call site the T1C/T1D split left unowned:
+    // a REQUIRED check that nothing posts deadlocks every merge, so the poster
+    // lives here, before arming. A ci that never greens is blocked_ci (no review
+    // over unproven code); a review=failure is blocked_review (the required check
+    // is red and GitHub will not merge). Pending is never treated as pass.
+    const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));
+    if (ci !== "green") {
+      say("fallback: pushing branch already done; ci not green — skipping review, leaving PR open");
+      log("verdict", {
+        verdict: "blocked_ci",
+        pr_url: prUrl,
+        reason: `ci ${ci} before review`,
+        cost_usd: costUsd,
+        billing_mode: "subscription",
+      });
+      say(`verdict: blocked_ci (ci ${ci}) — PR left OPEN: ${prUrl}`);
+      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
+    }
+    const review = await runReview({
+      owner,
+      repo: task.repo,
+      prUrl,
+      task,
+      report: fullText(impl),
+      settingsFile,
+      config,
+      budgetUsd: task.budget_usd,
+      log: (s, extra) => log(s, extra),
+      say,
+      account,
+    });
+    if (review.state !== "success") {
+      log("verdict", {
+        verdict: "blocked_review",
+        pr_url: prUrl,
+        reason: review.summary,
+        cost_usd: costUsd,
+        billing_mode: "subscription",
+      });
+      say(`verdict: blocked_review — PR left OPEN: ${prUrl}`);
+      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_review" };
+    }
+
     // ── ARM auto-merge, then POLL to the gate (W1-T1B).
     // The runner NEVER force-merges: it arms GitHub auto-merge on the PR it just
     // opened against main, then observes. GitHub merges only when the required
@@ -537,4 +713,4 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   });
 }
 
-export { runTask };
+export { runTask, runReview, waitForCiGreen };
