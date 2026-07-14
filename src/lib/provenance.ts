@@ -48,12 +48,43 @@ export function extractContext(prompt: string): string[] {
   return body;
 }
 
-/** Is this a claim line that requires a citation (a bullet or prose, not blank)? */
-function isClaimLine(line: string): boolean {
-  const t = line.trim();
-  if (t === "") return false;
-  if (/^#{1,6}\s/.test(t)) return false; // sub-heading
-  return true;
+/** A list-item marker: `-`, `*`, `+`, or an ordered marker like `1.` / `2)`. */
+const BULLET = /^\s*([-*+]|\d+[.)])\s+/;
+
+/**
+ * Group a CONTEXT block into claim BLOCKS. The linter is BLOCK-oriented, not
+ * line-oriented (W1-T1 open question): a single claim may wrap across several
+ * lines, and one `[src:]` anywhere in the block — canonically on its last
+ * line — cites the whole claim.
+ *
+ * A block begins at a list-item marker (or a prose line with no open block)
+ * and absorbs subsequent CONTINUATION lines (non-blank, non-heading, and not a
+ * new list item) until a blank line, a new bullet, a sub-heading, or EOF. This
+ * keeps sibling bullets as SEPARATE blocks — an uncited neighbour still blocks
+ * on its own — while a wrapped claim counts once.
+ */
+export function contextBlocks(prompt: string): string[][] {
+  const blocks: string[][] = [];
+  let current: string[] | null = null;
+  const close = (): void => {
+    if (current && current.length > 0) blocks.push(current);
+    current = null;
+  };
+  for (const line of extractContext(prompt)) {
+    const t = line.trim();
+    if (t === "" || /^#{1,6}\s/.test(t)) {
+      close(); // blank line or sub-heading ends the current claim
+      continue;
+    }
+    if (current === null || BULLET.test(line)) {
+      close();
+      current = [line];
+    } else {
+      current.push(line); // continuation of the open claim
+    }
+  }
+  close();
+  return blocks;
 }
 
 export interface LintResult {
@@ -61,18 +92,25 @@ export interface LintResult {
   violations: string[];
 }
 
-/** Lint a rendered prompt. Returns every uncited CONTEXT claim. */
+/** Lint a rendered prompt. Returns every uncited CONTEXT claim BLOCK. */
 export function lintPrompt(prompt: string): LintResult {
   const violations: string[] = [];
-  for (const line of extractContext(prompt)) {
-    if (!isClaimLine(line)) continue;
-    const m = line.match(CITATION);
-    if (!m) {
-      violations.push(`uncited: ${line.trim()}`);
+  for (const block of contextBlocks(prompt)) {
+    const head = block[0].trim();
+    let cite: RegExpMatchArray | null = null;
+    for (const line of block) {
+      const m = line.match(CITATION);
+      if (m) {
+        cite = m;
+        break;
+      }
+    }
+    if (!cite) {
+      violations.push(`uncited: ${head}`);
       continue;
     }
-    if (!ACCEPTED_KIND.test(m[1].trim())) {
-      violations.push(`unrecognized source kind '${m[1].trim()}': ${line.trim()}`);
+    if (!ACCEPTED_KIND.test(cite[1].trim())) {
+      violations.push(`unrecognized source kind '${cite[1].trim()}': ${head}`);
     }
   }
   return { ok: violations.length === 0, violations };
