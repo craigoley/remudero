@@ -15,6 +15,8 @@
  * engaged (not in this spike).
  */
 
+import { join } from "node:path";
+
 /**
  * Base variables a worker legitimately needs, copied from the parent by name.
  *
@@ -34,10 +36,25 @@ const ANTHROPIC_KEY = /^ANTHROPIC_/i;
  * vars. Never inherits `process.env` wholesale. Throws if any `ANTHROPIC_*`
  * key survives (including one a caller passed in), so a leak fails loud at the
  * boundary rather than silently on the invoice.
+ *
+ * Shell isolation is the SAME contamination class as the ANTHROPIC_* denial,
+ * mirrored: where ANTHROPIC_* is DENIED, the two shell vars below are GRANTED,
+ * so a worker's shell sources Remudero's own (empty) rc, never the operator's.
+ * Workers inherit NOTHING they aren't explicitly given; neither var is copied
+ * from the parent (an operator ZDOTDIR/CLAUDE_CODE_SHELL is ignored), only set
+ * to the granted value.
+ *  - `opts.shell` → **CLAUDE_CODE_SHELL** (default `/bin/bash`). Claude Code's
+ *    Bash-tool snapshot sources `os.homedir()/.<shell>rc`; bash's `$HOME/.bashrc`
+ *    is absent on a stock macOS, so the snapshot is empty — this is what actually
+ *    stops the operator's `~/.zshrc` (and its interactive `compinit` prompt that
+ *    stalled W1-T1C) from reaching the worker. See config.workerShell.
+ *  - `opts.zdotdir` → **ZDOTDIR** (default derived from HOME). Defense-in-depth
+ *    for any direct `zsh` a worker spawns. See config.workerZdotdir.
  */
 export function buildWorkerEnv(
   extra: Record<string, string> = {},
   parent: NodeJS.ProcessEnv = process.env,
+  opts: { zdotdir?: string; shell?: string } = {},
 ): Record<string, string> {
   const child: Record<string, string> = {};
 
@@ -48,6 +65,22 @@ export function buildWorkerEnv(
 
   for (const [key, val] of Object.entries(extra)) {
     child[key] = val;
+  }
+
+  // Grant CLAUDE_CODE_SHELL (unless the caller set one via `extra`). This is the
+  // var that actually isolates the worker's Bash-tool snapshot from ~/.zshrc.
+  if (!("CLAUDE_CODE_SHELL" in child)) {
+    const shell = opts.shell ?? "/bin/bash";
+    child.CLAUDE_CODE_SHELL = shell;
+  }
+
+  // Grant ZDOTDIR (unless the caller set one via `extra`). Prefer the path the
+  // caller resolved from config; otherwise derive the default from HOME
+  // (`<HOME>/.config/remudero/zdotdir`, i.e. `<root>/../.config/remudero/zdotdir`).
+  if (!("ZDOTDIR" in child)) {
+    const home = child.HOME ?? parent.HOME;
+    const zdotdir = opts.zdotdir ?? (home ? join(home, ".config", "remudero", "zdotdir") : undefined);
+    if (zdotdir) child.ZDOTDIR = zdotdir;
   }
 
   const survivors = Object.keys(child).filter((k) => ANTHROPIC_KEY.test(k));

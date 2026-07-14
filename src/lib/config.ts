@@ -18,6 +18,51 @@ export interface Config {
   claudeBin: string;
   /** Workspace root; everything the fleet touches lives under it (§4A). */
   root: string;
+  /**
+   * Isolated ZDOTDIR handed to every worker shell (see {@link workerZdotdir}).
+   * Optional in the config file; defaults to `<root>/../.config/remudero/zdotdir`.
+   */
+  zdotdir?: string;
+  /**
+   * Shell Claude Code uses for worker Bash tools (see {@link workerShell}).
+   * Optional; defaults to `/bin/bash`.
+   */
+  workerShell?: string;
+}
+
+/**
+ * The shell Claude Code runs for a worker's Bash tool, granted via
+ * `CLAUDE_CODE_SHELL`. Default `/bin/bash`.
+ *
+ * WHY NOT ZDOTDIR ALONE (installed-version ground truth, CLI 2.1.209): Claude
+ * Code builds a shell SNAPSHOT for its Bash tool by sourcing the rc file at
+ * `os.homedir()/.zshrc` — resolved from HOME, NOT `$ZDOTDIR`. Setting ZDOTDIR
+ * does not redirect it, and HOME cannot move (the worker's own `claude` reads
+ * `~/.claude` to authenticate). But the rc filename follows the shell: bash →
+ * `$HOME/.bashrc`, which is ABSENT on a stock zsh-default macOS. Pointing the
+ * snapshot shell at bash therefore sources an empty (nonexistent) rc, so the
+ * worker inherits NO operator alias/function and never fires the interactive
+ * `compinit` prompt that stalled W1-T1C. ZDOTDIR is kept alongside this as
+ * defense-in-depth for any direct `zsh` a worker spawns. The isolation assumes
+ * `$HOME/.bashrc` stays worker-safe — the same contract as the zdotdir staying
+ * empty; both are operator-controlled files the harness relies on.
+ */
+export function workerShell(config: Config): string {
+  return config.workerShell ?? "/bin/bash";
+}
+
+/**
+ * The isolated ZDOTDIR every worker shell is pointed at. It holds empty
+ * `.zshrc`/`.zshenv`, so a worker's zsh sources NO operator rc file — no aliases
+ * or functions leak in, and (the reason this exists) no interactive `compinit`
+ * prompt fires with no tty to answer it, which is how W1-T1C's run stalled.
+ *
+ * Derived from `config.root`, NEVER a hardcoded absolute path (public-repo
+ * hygiene): default `<root>/../.config/remudero/zdotdir`. An instance may pin it
+ * explicitly via the `zdotdir` field in `~/.config/remudero/config.json`.
+ */
+export function workerZdotdir(config: Config): string {
+  return config.zdotdir ?? join(config.root, "..", ".config", "remudero", "zdotdir");
 }
 
 /** Path to the instance config file. Derived, never a committed literal. */
