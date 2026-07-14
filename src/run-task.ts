@@ -14,8 +14,7 @@ import {
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import {
-  ghPrMergeSquash,
-  ghPrView,
+  ghJson,
   parseDecisionRequest,
   parseQuestion,
   parseReconReport,
@@ -44,13 +43,86 @@ function resolveOwner(): string {
   return m[1];
 }
 
+/** Check-run conclusions that mean the gate is RED (fail closed on anything not green). */
+const RED_CONCLUSIONS = new Set([
+  "FAILURE",
+  "CANCELLED",
+  "TIMED_OUT",
+  "ACTION_REQUIRED",
+  "STARTUP_FAILURE",
+  "ERROR",
+]);
+
+interface RollupEntry {
+  __typename?: string;
+  name?: string;
+  context?: string;
+  status?: string;
+  conclusion?: string;
+  state?: string;
+}
+
+/** Arm GitHub auto-merge on a PR the runner opened. Non-fatal: the poll decides. */
+function armAutoMerge(prUrl: string): void {
+  try {
+    execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"], {
+      encoding: "utf8",
+      stdio: "pipe",
+    });
+  } catch {
+    // On repos with zero required checks, GitHub may merge immediately on arm and
+    // gh can report that as a non-zero "clean status" state. The poll below reads
+    // the true PR state, so arming errors are informational, never fatal.
+  }
+}
+
+interface GateOutcome {
+  merged: boolean;
+  reason: string;
+}
+
+/**
+ * Poll a PR to a terminal gate decision. Returns merged only on state MERGED.
+ * A red required check short-circuits to blocked; a timeout with checks still
+ * pending is ALSO blocked (pending is never treated as pass).
+ */
+async function pollToGate(
+  prUrl: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  maxIters = 60,
+  everySec = 6,
+): Promise<GateOutcome> {
+  for (let i = 0; i < maxIters; i++) {
+    const v = ghJson(["pr", "view", prUrl, "--json", "state,statusCheckRollup"]) as {
+      state: string;
+      statusCheckRollup?: RollupEntry[];
+    };
+    if (v.state === "MERGED") return { merged: true, reason: "checks green" };
+    if (v.state === "CLOSED") return { merged: false, reason: "pr closed" };
+    const roll = v.statusCheckRollup ?? [];
+    const red = roll.find((c) => RED_CONCLUSIONS.has(String(c.conclusion ?? c.state ?? "")));
+    if (red) {
+      log("pr.checks", { conclusion: "red", check: red.name ?? red.context ?? "unknown" });
+      return { merged: false, reason: `required check red: ${red.name ?? red.context ?? "unknown"}` };
+    }
+    if (i === 0 || i % 5 === 0) {
+      log("pr.polling", {
+        state: v.state,
+        checks: roll.map((c) => `${c.name ?? c.context}:${c.conclusion ?? c.status ?? c.state}`),
+      });
+    }
+    execFileSync("sleep", [String(everySec)]);
+  }
+  return { merged: false, reason: "timeout waiting for checks (pending treated as blocked)" };
+}
+
 export interface RunResult {
   taskId: string;
   runId: string;
   prUrl?: string;
   merged: boolean;
   costUsd: number;
-  verdict: "merged" | "blocked" | "failed";
+  verdict: "merged" | "blocked" | "blocked_ci" | "failed";
 }
 
 function reconObservedToContext(recon: WorkerResult, taskId: string): string {
@@ -255,25 +327,36 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
     log("pr.opened", { pr_url: prUrl });
     say(`PR: ${prUrl}`);
 
-    // ── Poll + merge.
-    let view = ghPrView(prUrl);
-    for (let i = 0; i < 12 && view.mergeable !== "MERGEABLE" && view.state === "OPEN"; i++) {
-      execFileSync("sleep", ["3"]);
-      view = ghPrView(prUrl);
+    // ── ARM auto-merge, then POLL to the gate (W1-T1B).
+    // The runner NEVER force-merges: it arms GitHub auto-merge on the PR it just
+    // opened against main, then observes. GitHub merges only when the required
+    // check is green. If checks go red or the poll times out, the PR is LEFT
+    // OPEN and the verdict is blocked_ci — pending is treated as blocked, never
+    // as pass. No Action arms a PR; only this code, only on PRs it opened.
+    armAutoMerge(prUrl);
+    log("automerge.armed", {});
+    const outcome = await pollToGate(prUrl, (s, extra) => log(s, extra));
+
+    if (outcome.merged) {
+      log("pr.merged", { state: "MERGED" });
+      worktreeRemove(repoDir, worktreePath);
+      log("worktree.remove", {});
+      log("verdict", { verdict: "merged", pr_url: prUrl, cost_usd: costUsd, billing_mode: "subscription" });
+      say(`verdict: merged · notional cost $${costUsd.toFixed(4)}`);
+      return { taskId, runId, prUrl, merged: true, costUsd, verdict: "merged" };
     }
-    log("pr.mergeable", { mergeable: view.mergeable, state: view.state });
-    ghPrMergeSquash(prUrl);
-    const after = ghPrView(prUrl);
-    const merged = after.state === "MERGED";
-    log("pr.merged", { state: after.state });
 
-    worktreeRemove(repoDir, worktreePath);
-    log("worktree.remove", {});
-
-    const verdict: RunResult["verdict"] = merged ? "merged" : "failed";
-    log("verdict", { verdict, pr_url: prUrl, cost_usd: costUsd, billing_mode: "subscription" });
-    say(`verdict: ${verdict} · notional cost $${costUsd.toFixed(4)}`);
-    return { taskId, runId, prUrl, merged, costUsd, verdict };
+    // Blocked: leave the PR open (auto-merge stays armed; it will land later if
+    // the check goes green) and the worktree for post-mortem.
+    log("verdict", {
+      verdict: "blocked_ci",
+      pr_url: prUrl,
+      reason: outcome.reason,
+      cost_usd: costUsd,
+      billing_mode: "subscription",
+    });
+    say(`verdict: blocked_ci (${outcome.reason}) — PR left OPEN: ${prUrl}`);
+    return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
   } catch (err) {
     log("run.error", { error: String((err as Error)?.message ?? err) });
     // Leave the worktree for post-mortem; surface the error.

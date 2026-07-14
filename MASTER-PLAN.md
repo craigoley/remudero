@@ -1,4 +1,4 @@
-# REMUDERO — Master Plan (v2.0 · synced 2026-07-14 · ★ WS-0 SHIPPED: all 7 verdicts GREEN, loop closed unattended, $0.86 · spike ground truth folded in · NEXT: WS-1 via proto-runner)
+# REMUDERO — Master Plan (v2.2 · synced 2026-07-14 · §6A open-source governance + commercial boundary added (DCO, extension seam, trademark, no-relicense contract) · billing leak fix for the operator's interactive sessions · NEXT: W1-T1B → T2)
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -202,10 +202,15 @@ and machine state:
   budget_usd: 3.00
 ```
 
-**Plan-repo write discipline** (multi-writer safety): the control plane writes MACHINE FILES ONLY
-(tasks.yaml status fields, questions.ndjson, DECISIONS.md appends, ledger pointers) via serialized
-commits with pull-rebase-retry, **debounced to ≤1 commit/min** so a busy fleet doesn't spam a
-public repo's history. Humans and the Architect edit narrative (MASTER-PLAN prose, LEARNINGS,
+**Plan-repo write discipline — status is DERIVED, not written (CORRECTED by W1-T1).** `tasks.yaml`
+is a pure DECLARATION: human/Architect-authored, comment-rich, edited only via PR. The machine NEVER
+rewrites it (YAML round-trip destroys comments; status commits spam a public repo's history; and a
+machine writer racing a human editor is a conflict class we can simply not have). **Task status is
+DERIVED from GitHub** — merged iff a PR naming the task id is merged; blocked iff an escalation issue
+is open; running iff a worker lock exists — with a cached projection in `state/`. GitHub is
+authoritative, so crash recovery needs no local state at all. The control plane still appends to
+questions.ndjson / DECISIONS.md / the ledger (append-only, no round-trip hazard), debounced to
+≤1 commit/min. Humans and the Architect edit narrative (MASTER-PLAN prose, LEARNINGS,
 templates) via PRs. Field ownership is documented per file; a conflict between a machine commit and
 a human edit resolves human-wins-on-narrative, machine-wins-on-status.
 
@@ -386,6 +391,52 @@ on its own codebase before anyone else's.
   WS-4**, then open with templates + DCO sign-off; CODEOWNERS from PR #1.
 - **Dogfooding**: from WS-1 on, Remudero builds Remudero — this repo runs its own harness.
 - **Out of scope v1**: non-GitHub forges, Windows-native, multi-tenant server, non-Claude agents.
+
+## 6A. Open-source governance & the commercial boundary
+
+Not legal advice; a qualified attorney reviews this before any money changes hands. Sourced from
+open-core practice (OCV, TermsFeed, FINOS) 2026-07-14.
+
+**Contribution model: DCO, not CLA — and the door is closed deliberately.** Open core does NOT
+require a CLA: contributions to the core stay under Apache-2.0 and are never relicensed; only the
+proprietary components need consolidated ownership. DCO is the low-friction, community-aligned norm
+(GitLab moved CLA→DCO in 2017 under community pressure). **One-way door, accepted knowingly**: a DCO
+likely cannot support a later relicense (its grant is tied to the license in effect at contribution
+time), so the BSL/SSPL escape hatch Elastic/Redis/MongoDB used is CLOSED to us. That is the point —
+each of those relicensings cost enormous trust, and D-8 already forbids paywalling anything open.
+**We publish the never-relicense commitment as a CONTRACT (README + GOVERNANCE.md), not an internal
+note.** Reversing this requires a CLA from day one; retrofitting is effectively impossible.
+
+**No crippled core (named anti-pattern).** Best practice explicitly warns against withholding
+essential features from the open version to manufacture paid dependency. **The open core must deliver
+complete, uncompromised utility for its scope**: the full loop — daemon, CLI, containment, principles
+engine, retros/knowledge, campaigns, single-project control panel, MCP, public commons — is free
+forever. Pro may only ever be *hosted convenience* (relay/sync, portfolio views, team seats, org-brain
+sync), never a capability amputated from core.
+
+**Extension seam (ENGINEERING REQUIREMENT, WS-4 — currently missing).** Open-core designs need
+abstraction layers so proprietary modules load/unload without destabilizing or forking the core.
+Remudero's adapter boundaries — notifier, VCS, storage, auth/identity, model routing — become
+**first-class plugin interfaces with a stable contract BEFORE any Pro code exists.** Pro must attach,
+never fork. If Pro ever needs a core change, that change lands in core, open.
+
+**Trademark is the control lever, not the license.** Apache-2.0 gives the code away; the NAME stays
+ours and is the only real protection (cf. the WordPress/WP Engine dispute). Ship `TRADEMARK.md`
+(what "Remudero" may/may not be used for); file the wordmark when there's traction. Domains already held.
+
+**Governance: BDFL.** GOVERNANCE.md states it plainly — the roadmap is the maintainer's, PRs welcome,
+CODEOWNERS enforces review. Prevents fork drama and sets honest expectations.
+
+**Required doc set (WS-4)**: LICENSE (Apache-2.0) ✓ · NOTICE · CONTRIBUTING.md (DCO sign-off, one
+concern per PR, proofs-as-acceptance) · CODE_OF_CONDUCT.md · **SECURITY.md — non-negotiable here**:
+threat model (unattended agents + Bash + bypass; prompt-injection via deps/web/repo content), the
+containment stack, and a private disclosure process · GOVERNANCE.md · TRADEMARK.md · CHANGELOG.md
+(keep-a-changelog + semver) · issue/PR templates · third-party license inventory.
+
+**Published promises (README, testable, not marketing):** no telemetry, ever — knowledge reaches the
+commons ONLY via human-gated PRs · nothing open ever moves behind the paywall · operators run on
+their own subscription per Anthropic's terms (one operator, one account, one machine; the harness is
+a tool for your seat, not a seat-multiplier).
 
 ## 7. Collaborative plan UI
 
@@ -711,6 +762,8 @@ WS-11 after WS-4 + a second project on the harness.
 - **D-3 Plan co-editing tech**: CRDT (Yjs) vs PR-proposals-only. Defer until v1 UI is lived-in (rec).
 - **D-4 OSS default permission profile**: `standard` (rec). Craig's instance: `yolo`.
 - **D-5 Repo shape**: monorepo (daemon+UI+MCP+CLI, npm workspaces) (rec) vs multi-repo.
+- **D-9 CLA vs DCO — RESOLVED: DCO**, one-way door closed knowingly (§6A). Reversal requires a CLA
+  from day one; retrofitting is impossible. Revisit ONLY if the project's purpose changes materially.
 - **D-8 Monetization**: open-core per §6 stance (rec); shape/pricing decided post-WS-6 traction,
   never earlier — premature paywalling kills the community the differentiation depends on.
 
@@ -722,7 +775,12 @@ WS-11 after WS-4 + a second project on the harness.
 4. Acceptance criteria are proofs, not vibes. Green checks ≠ evidence (the full-shop-flow lesson).
 5. Never a third blind patch: two strikes → diagnose → one evidence-armed retry → escalate.
 6. Zero ask rules in worker settings. Hooks <1s. Workers carry scoped PATs only. No MCP in workers.
-7. OpenClaw stays out. The mini's protected paths are inviolate (deny-floor).
+7. **DISTRUST THE PROMPT OVER THE INSTALLED VERSION.** Empirically the highest-value line in the
+   template: WS-0 caught `allowedDomains` nesting; W1-T1 caught that the SDK's own schema is `$loose`
+   and silently strips unknown keys — a guard built as specified would have PASSED the typo it exists
+   to catch. Every Promptsmith-rendered prompt injects this rule. Read the installed schema; never
+   trust a prompt's spelling, including this document's.
+8. OpenClaw stays out. The mini's protected paths are inviolate (deny-floor).
 8. The loop never waits on a human unless the plan says so. Idle = groom.
 9. OSS defaults must be defensible on a stranger's machine; yolo is a documented opt-in.
 10. This document is truth. Every session syncs it before acting and after shipping.
