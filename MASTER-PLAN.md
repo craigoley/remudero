@@ -1,4 +1,4 @@
-# REMUDERO — Master Plan (v2.15 · synced 2026-07-14 · ★ SKILL REGISTRY & CAPABILITIES: §5B — Setup/Plan/Refine/Expand/Feedback/Refactor/Design-Review/Retro/Reviewer are ONE Architect-worker primitive (ground→research→grill-or-produce) differing only by a declarative `.remudero/skills/<name>.yaml` PROFILE (a skill is CONFIG, not code); plan=ONE skill THREE MODES (create|clarify|expand; Refine=clarify, Expand=expand — de-duplicated); §3A REFACTOR promoted to a first-class campaign with a measurable Tier-2/3 gate-delta formula (teeth, not vibes); §7C DESIGN REVIEW — the missing UI/UX skill under a hardened browser-egress profile (Playwright MCP accessibility-tree first, screenshots gated, browser_run_code_unsafe HARD-DENIED as RCE-equivalent, verify:human for eye verdicts); W1-T44/45, W2-T3, W3-T7/T8; two ★VERIFY-FIRST (Playwright MCP headless? containment green with widened allowlist?) · FEEDBACK INTAKE — the Architect's front door (§7B): feedback is an ARTIFACT not a command (plan/feedback/ inbox); `rmd triage` grounds→researches→GRILLS-or-PROPOSES as a higher-tier Architect that can propose anything and merge nothing; Architect gets WebSearch/WebFetch, implement workers NEVER (injection surface); `rmd trace` renders feedback→task→run→PR both ways; Standing rule 17 PROVENANCE FOR THE PLAN (`origin:`/`plan_refs:`, Architect-only) + backfilled on all tasks; W1-T40–T43, W3-T6; two ★VERIFY-FIRST items (AskUserQuestion headless? Read image?) · KNOWLEDGE ARCHITECTURE: §8A memory hierarchy (Tier 0 stable prefix · Tier 1 matched injection · Tier 2 plan RETRIEVED not injected · Tier 3 run-local) + cache-aware STABLE-FIRST/VOLATILE-LAST ordering (measured via cache_read tokens); §8B compaction doctrine (detect+ledger, anchored summarization, write-before-compact); retros now question guards too (harness assumptions go stale); W1-T33–T39 close the five knowledge holes · RETROS ×2: R1 (…021334) shipped WS-0 + WS-1 proto-runner (9 PRs), seeded CALIBRATION + proposals P1–P5; R2 (…391543) logs W1-T19/#34 + W1-T3F/#35 (2/2 merged), refreshes NET STATE to 11 PRs / 19 runs, adds this cycle's calibration row, mines 0 new failures, and COMPRESSES the first-retro changelog prose folded here. Prior focus ★ DECOMPOSE BY CONCERN: mis-specified W1-T3 (8 criteria across 4 subsystems) SPLIT into W1-T3/B/C/D/E (+ W1-T3F) — every criterion survives VERBATIM, none dropped/weakened; NEW schema `satisfied_by` (Architect-only) marks a criterion an earlier merge already satisfied; Standing rule 16 (the Architect corrects a mis-specified task, a worker never; no criterion dropped, only redistributed) · CLIENTS & CONTRACT: D-5 RESOLVED (monorepo for everything consuming the daemon API — a breaking change fails CI across all consumers atomically; site/commons/pro stay separate); NEW §7A the API contract is the product boundary (`packages/api-client` GENERATED from ONE tailnet surface, no hand-rolled fetch); §7 rewritten as ONE web app / THREE shells (browser · Tauri macOS · Tauri iOS, Expo the documented iOS fallback; push is an adapter, not an app concern); website → WS-12 repo `remudero-site`; clients W3-T1..T5 gate on the contract · BUDGET IS A TRIPWIRE, NOT AN ALLOWANCE: budget_usd is a runaway BUG DETECTOR (default $100, an order of magnitude above observed), a soft $25 line WARNS-and-continues, blocked_budget = "looping" — W1-T3 was killed mid-work at $3.57 vs a guessed $4; same bug as maxTurns (PR #8) · THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
+# REMUDERO — Master Plan (v2.16 · synced 2026-07-14 · ★ DOCUMENTATION GUARANTEE (§12A): docs are a GATED ARTIFACT in tiers — Tier A GENERATED from ONE command registry (rmd --help + CLI reference + API ref + CHANGELOG), drift = CI-RED (byte-equality regen); Tier B human/Architect-authored, reviewer-gated; the AWARENESS LAYER ties a command/API diff to the docs it falsified; ONE SOURCE → THREE SURFACES (rmd --help | GitHub /docs | website), never three copies; WS-12 site RENDERS canonical docs; W1-T47–T50 fold W1-T30/T31/T39 into one doc story · SKILL REGISTRY & CAPABILITIES: §5B — Setup/Plan/Refine/Expand/Feedback/Refactor/Design-Review/Retro/Reviewer are ONE Architect-worker primitive (ground→research→grill-or-produce) differing only by a declarative `.remudero/skills/<name>.yaml` PROFILE (a skill is CONFIG, not code); plan=ONE skill THREE MODES (create|clarify|expand; Refine=clarify, Expand=expand — de-duplicated); §3A REFACTOR promoted to a first-class campaign with a measurable Tier-2/3 gate-delta formula (teeth, not vibes); §7C DESIGN REVIEW — the missing UI/UX skill under a hardened browser-egress profile (Playwright MCP accessibility-tree first, screenshots gated, browser_run_code_unsafe HARD-DENIED as RCE-equivalent, verify:human for eye verdicts); W1-T44/45, W2-T3, W3-T7/T8; two ★VERIFY-FIRST (Playwright MCP headless? containment green with widened allowlist?) · FEEDBACK INTAKE — the Architect's front door (§7B): feedback is an ARTIFACT not a command (plan/feedback/ inbox); `rmd triage` grounds→researches→GRILLS-or-PROPOSES as a higher-tier Architect that can propose anything and merge nothing; Architect gets WebSearch/WebFetch, implement workers NEVER (injection surface); `rmd trace` renders feedback→task→run→PR both ways; Standing rule 17 PROVENANCE FOR THE PLAN (`origin:`/`plan_refs:`, Architect-only) + backfilled on all tasks; W1-T40–T43, W3-T6; two ★VERIFY-FIRST items (AskUserQuestion headless? Read image?) · KNOWLEDGE ARCHITECTURE: §8A memory hierarchy (Tier 0 stable prefix · Tier 1 matched injection · Tier 2 plan RETRIEVED not injected · Tier 3 run-local) + cache-aware STABLE-FIRST/VOLATILE-LAST ordering (measured via cache_read tokens); §8B compaction doctrine (detect+ledger, anchored summarization, write-before-compact); retros now question guards too (harness assumptions go stale); W1-T33–T39 close the five knowledge holes · RETROS ×2: R1 (…021334) shipped WS-0 + WS-1 proto-runner (9 PRs), seeded CALIBRATION + proposals P1–P5; R2 (…391543) logs W1-T19/#34 + W1-T3F/#35 (2/2 merged), refreshes NET STATE to 11 PRs / 19 runs, adds this cycle's calibration row, mines 0 new failures, and COMPRESSES the first-retro changelog prose folded here. Prior focus ★ DECOMPOSE BY CONCERN: mis-specified W1-T3 (8 criteria across 4 subsystems) SPLIT into W1-T3/B/C/D/E (+ W1-T3F) — every criterion survives VERBATIM, none dropped/weakened; NEW schema `satisfied_by` (Architect-only) marks a criterion an earlier merge already satisfied; Standing rule 16 (the Architect corrects a mis-specified task, a worker never; no criterion dropped, only redistributed) · CLIENTS & CONTRACT: D-5 RESOLVED (monorepo for everything consuming the daemon API — a breaking change fails CI across all consumers atomically; site/commons/pro stay separate); NEW §7A the API contract is the product boundary (`packages/api-client` GENERATED from ONE tailnet surface, no hand-rolled fetch); §7 rewritten as ONE web app / THREE shells (browser · Tauri macOS · Tauri iOS, Expo the documented iOS fallback; push is an adapter, not an app concern); website → WS-12 repo `remudero-site`; clients W3-T1..T5 gate on the contract · BUDGET IS A TRIPWIRE, NOT AN ALLOWANCE: budget_usd is a runaway BUG DETECTOR (default $100, an order of magnitude above observed), a soft $25 line WARNS-and-continues, blocked_budget = "looping" — W1-T3 was killed mid-work at $3.57 vs a guessed $4; same bug as maxTurns (PR #8) · THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -1218,13 +1218,16 @@ from remudero's own retros lands in commons via a reviewed PR and is cited by a 
 second project; proof = provenance chain across two ledgers.
 
 **WS-12 — Website** (repo `remudero-site`, SEPARATE from core — D-5): **Astro Starlight on Vercel**
-(fleet pattern). Content: landing (the **anti-slop thesis**, §Mission) · **<5-min quickstart** · rendered
-MASTER-PLAN · **the harness's own LEARNINGS.md published as a public artifact** (nobody else ships the
-receipts — it IS the differentiator) · an **honest-limitations page** (security posture, bypass mode,
-prompt-injection surface, §8) · CONTRIBUTING / GOVERNANCE / TRADEMARK. Repo creation is MANUAL
-(credentials never agent-handled); post-L2 the site's content maintenance becomes a **harness-run task**
-(the site is dogfood too — W12-T1). Acceptance: the site builds and deploys, and its quickstart takes a
-clean machine to a first auto-merged PR; proof = deploy URL + the quickstart transcript.
+(fleet pattern). It **PUBLISHES the repo's CANONICAL docs, never a second copy** (§12A "one source, three
+surfaces"): the **GENERATED CLI reference** (Tier A, from the command registry — W1-T48) · the
+**GENERATED API reference** (from the §7A OpenAPI surface) · the **rendered Tier-B guides** (concept,
+architecture, operator, troubleshooting, security/limitations) · **LEARNINGS.md as a public artifact**
+(nobody else ships the receipts — the differentiator) · landing (the anti-slop thesis) · **<5-min
+quickstart** · CONTRIBUTING / GOVERNANCE / TRADEMARK. **Nothing on the site is authored twice** — a
+hand-edit to a generated page is rejected by the drift gate (W1-T49). Repo creation is MANUAL (credentials
+never agent-handled); post-L2 the site's content maintenance becomes a **harness-run task** (the site is
+dogfood too — W12-T1). Acceptance: the site builds and deploys, and its quickstart takes a clean machine to
+a first auto-merged PR; proof = deploy URL + the quickstart transcript.
 
 **Client workstream (W3 — the API contract + the three shells)**: `packages/api-client` is generated from
 the daemon surface (§7A) and **BLOCKS every client** (W3-T1); the dashboard (shell 0, W3-T2), Tauri macOS
@@ -1333,6 +1336,40 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
   in Standing rules or the relevant section in place — the repo remembers its outages where they happened.
 - External Claude (design partner) contributions arrive as chat-produced patches until WS-6, then
   through remudero-mcp.
+
+## 12A. Documentation as a gated artifact, in tiers
+
+Docs are scattered (W1-T30 skeleton, W1-T39 ORIENTATION, WS-12 website) with no coherence and no anti-rot
+GUARANTEE. As the CLI grows (`feedback`, `triage`, `trace`, `drain`, `skill`, `plan --mode`, `retro`),
+`rmd --help` and the docs DRIFT from reality unless drift is a CI FAILURE. Docs-as-code fails because "it
+assumes humans notice when docs fall behind" [research]; the fix is an AWARENESS LAYER that ties a change
+to the docs it falsified. Split by AUTOMATABILITY:
+
+**TIER A — GENERATED; drift = CI-RED** (the automatable layer — structured-in → structured-out):
+- **`rmd --help` and every subcommand's help are GENERATED from a single command registry** (one source of
+  truth), never hand-maintained (W1-T47). A CI check asserts every command has help + examples; a command
+  with **no registry entry FAILS CI**.
+- **The CLI reference doc is GENERATED from that same registry** (W1-T48) — so `rmd --help`, the GitHub
+  `/docs`, and the website CLI page CANNOT disagree; they share a source.
+- **The API reference (§7A `packages/api-client`) is GENERATED from the OpenAPI surface.**
+- **CHANGELOG is generated from Conventional Commits** (W1-T31).
+
+**TIER B — HUMAN/ARCHITECT-AUTHORED; gated by the reviewer** (the non-automatable layer — needs context
+absent from the codebase):
+- Concept guides, architecture (§ links), the operator guide, troubleshooting, the security/limitations
+  page. Maintained by `rmd retro` + the docs rubric; the §5-layer-2 reviewer rubric already flags a
+  behavior-changing diff with no doc update (W1-T30) — EXTEND it to require the RIGHT tier (a command
+  change ⇒ Tier A regen; a concept change ⇒ a Tier-B edit or an explicit waiver).
+
+**THE AWARENESS LAYER (the anti-rot mechanism):** a diff touching a COMMAND or the API surface must
+**regenerate Tier A — CI enforces BYTE-EQUALITY** (regenerate in CI and diff; stale generated docs = RED,
+naming the drifted command, W1-T48) — and must update or explicitly WAIVE Tier B. This is W1-T29
+plan-claims applied to docs: **docs are not evidence unless CI proves they match the code.**
+
+**ONE SOURCE, THREE SURFACES:** registry → (`rmd --help` | GitHub `/docs` | website CLI page). Never three
+hand-copies (W1-T49). The website (WS-12) RENDERS the repo's canonical docs; nothing there is authored
+twice. `docs/ORIENTATION.md` (W1-T39, retro-maintained) and the `docs/` skeleton (W1-T30) are the Tier-B
+spine this coheres — one doc set, not scattered tasks.
 
 ## 14. Immediate queue
 

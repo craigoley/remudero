@@ -98,3 +98,7 @@ paid to discover, tagged with the run/PR that proved it. Rules:
 - ★ SECURITY: Playwright's `browser_run_code_unsafe` runs ARBITRARY JS in the Playwright server — it is RCE-EQUIVALENT and "only for trusted MCP clients." A bypass-mode worker is not that: HARD-DENY it in every worker profile. [research 2026-07-14] [subsystem: design-review · files: settings/worker.json]
 - Playwright needs a real browser with NETWORK EGRESS — incompatible with the locked worker `allowedDomains` UNLESS a dedicated Design-Review profile EXPLICITLY allowlists the browser/target domains. Browser egress is a per-skill grant, never global. [research 2026-07-14] [subsystem: design-review · files: settings/worker.json, src/lib/containment.ts]
 - Screenshots blow up token usage (500KB-2MB each) — request them "only when necessary," for artifacts a human must eyeball; use accessibility-tree snapshots for everything structural. [research 2026-07-14] [subsystem: design-review · files: src/lib/containment.ts]
+
+## Documentation as a gated artifact
+
+- Docs are a GATED ARTIFACT, split by automatability: GENERATED docs (rmd --help, CLI reference, API ref, CHANGELOG) drift from code unless CI enforces byte-equality (regenerate + diff = RED) — the anti-rot mechanism; AUTHORED docs (concept/architecture/troubleshooting) are reviewer-gated (the docs rubric). ONE command registry feeds rmd --help + the GitHub /docs + the website — never three hand-copies. [research 2026-07-14] [subsystem: docs · files: src/run-task.ts, docs]
