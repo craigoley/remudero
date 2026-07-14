@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { loadConfig, workerShell, workerZdotdir, type Config } from "./config.js";
 import { buildWorkerEnv } from "./env.js";
+import { validateWorkerSettingsFile } from "./settings.js";
 
 /** Structured result of one worker run. */
 export interface WorkerResult {
@@ -61,6 +62,13 @@ export interface SpawnWorkerArgs {
  *    dropping an invalid settings file and running unsandboxed.
  */
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
+  // Validate-before-spawn guard (WS-0 FF10a) enforced at the spawn boundary, not
+  // by caller convention: `claude -p` SILENTLY IGNORES an invalid settings file
+  // and drops containment, so the settings file is validated against the pinned
+  // SandboxSettingsSchema before ANY worker is spawned. Throws WorkerSettingsError
+  // on the first bad/misplaced key — no unsandboxed worker is ever launched.
+  validateWorkerSettingsFile(args.settingsFile);
+
   const config = args.config ?? loadConfig();
   // Shell isolation (resolved from config, never hardcoded) so a worker sources
   // no operator rc: CLAUDE_CODE_SHELL redirects Claude Code's Bash-tool snapshot
