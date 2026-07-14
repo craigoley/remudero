@@ -36,6 +36,10 @@ export interface Config {
    * subscription these dollars are NOTIONAL (§9). See {@link softBudgetThreshold}.
    */
   softBudgetThresholdUsd?: number;
+  /** Model implement/recon workers ride. Optional; defaults to `sonnet`. */
+  workerModel?: string;
+  /** Model the retro Architect rides — MUST outrank workerModel (G-17). Default `opus`. */
+  architectModel?: string;
 }
 
 /**
@@ -62,6 +66,16 @@ export function workerShell(config: Config): string {
 /** The soft budget WARNING threshold (notional $). Default 25.00; never a kill. */
 export function softBudgetThreshold(config: Config): number {
   return config.softBudgetThresholdUsd ?? 25.0;
+}
+
+/** Model implement/recon workers ride. Default `sonnet`. */
+export function workerModel(config: Config): string {
+  return config.workerModel ?? "sonnet";
+}
+
+/** Model the retro Architect rides (must outrank workerModel — G-17). Default `opus`. */
+export function architectModel(config: Config): string {
+  return config.architectModel ?? "opus";
 }
 
 /**
