@@ -1,0 +1,73 @@
+# Remudero — .remudero/mounts.yaml (mount-routing policy table, v0 — static)
+#
+# MASTER-PLAN §9. A DETERMINISTIC policy table (no per-call LLM judgment): keyed
+# by (task_type × risk) → a mount { model, effort, max_turns, context_budget }.
+# v0 is a STATIC table; the flywheel (WS-8) later proposes downgrades/upgrades as
+# golden-gated PRs — routing is knowledge, so it ships behind the golden suite
+# like every other knowledge change.
+#
+# Operator params (subscription, thinking_default, metering, …) are per-INSTANCE
+# config gathered by `rmd init`, NEVER plan constants — they do not live here.
+#
+# ── The Tier Invariant (G-17, Craig directive) ────────────────────────────────
+# The main agent (the Architect) ALWAYS rides a higher-thinking mount than the
+# coding agents. Enforced deterministically at load (src/lib/mounts.ts) as TWO
+# ANDed conditions, exactly per §9:
+#     architect.tier  >  max(worker.tier)         # STRICT model-tier dominance
+#     architect.effort ≥ thinking_default          # floor: high (plan authorship)
+# A mounts.yaml that violates it is REJECTED at load. The flywheel may lower
+# workers freely but can NEVER lower the Architect to or below the worker ceiling.
+#
+# The invariant is RELATIVE, not absolute: because the Architect rides `opus`
+# (the top tier), every WORKER mount below is CAPPED at `sonnet` — a worker may
+# never reach the Architect's tier. So "diagnose steps up" and "high-risk review"
+# step up to the worker CEILING (sonnet, high effort), not to opus. An economy
+# install could instead run haiku workers under a sonnet Architect and still
+# comply — the ordering is what matters, not the absolute lineup.
+
+# ── Model-tier ordering — CONFIG-MAINTAINED (the lineup shifts, §9) ────────────
+# Higher rank = higher-thinking mount. The Tier Invariant compares models by this
+# rank, so adding/renaming a model is a config edit HERE, not a code change.
+tiers:
+  haiku: 1
+  sonnet: 2
+  opus: 3
+
+# Effort ordering — same idea for the thinking-effort axis.
+efforts:
+  low: 1
+  medium: 2
+  high: 3
+
+# ── The Architect mount (the bookend: plan authorship, orchestration) ──────────
+# opus/high — the sole top-tier mount; strictly above every worker below.
+architect:
+  model: opus
+  effort: high
+  max_turns: 60
+  context_budget: 180000
+
+# ── Worker routing table: task_type → risk band → mount ────────────────────────
+# Sonnet default for execution; Haiku for mechanical/high-volume; sonnet-high is
+# the worker ceiling (bookend work steps up to it, never to opus).
+routes:
+  recon:
+    low:    { model: haiku,  effort: medium, max_turns: 20, context_budget: 60000 }
+    medium: { model: sonnet, effort: medium, max_turns: 25, context_budget: 90000 }
+    high:   { model: sonnet, effort: high,   max_turns: 30, context_budget: 120000 }
+  implement:
+    low:    { model: sonnet, effort: medium, max_turns: 30, context_budget: 120000 }
+    medium: { model: sonnet, effort: high,   max_turns: 40, context_budget: 150000 }
+    high:   { model: sonnet, effort: high,   max_turns: 50, context_budget: 180000 }
+  diagnose:
+    low:    { model: sonnet, effort: high,   max_turns: 30, context_budget: 120000 }
+    medium: { model: sonnet, effort: high,   max_turns: 40, context_budget: 150000 }
+    high:   { model: sonnet, effort: high,   max_turns: 50, context_budget: 180000 }
+  review:
+    low:    { model: haiku,  effort: medium, max_turns: 15, context_budget: 60000 }
+    medium: { model: sonnet, effort: medium, max_turns: 20, context_budget: 90000 }
+    high:   { model: sonnet, effort: high,   max_turns: 30, context_budget: 120000 }
+  manual:
+    low:    { model: haiku,  effort: low,    max_turns: 10, context_budget: 40000 }
+    medium: { model: haiku,  effort: medium, max_turns: 15, context_budget: 60000 }
+    high:   { model: sonnet, effort: medium, max_turns: 20, context_budget: 90000 }
