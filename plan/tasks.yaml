@@ -1532,3 +1532,140 @@
       proof: "the graph view shows a feedback→proposal→task→PR chain; accepting a proposal from the panel is ledgered with the panel bearer as origin — paste the ledger line"
   status: queued
   attempts: 0
+
+# ── §5B SKILL REGISTRY & CAPABILITIES. The Architect-worker primitive (ground→research→grill-or-produce),
+# one config-driven registry; plan de-duplicated to one skill/three modes; refactor promoted to a gated
+# campaign; the missing UI/UX skill (design-review) under a hardened browser profile. origin: the operator's
+# command-taxonomy proposal (feedback#taxonomy). ─────────────────────────────────────────────────────────
+- id: W1-T44
+  title: Skill registry loader — .remudero/skills/<name>.yaml + rmd skill list (a skill is config, not code)
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  origin: feedback#taxonomy
+  plan_refs: ["§5B"]
+  rationale: "MASTER-PLAN §5B: setup/plan/feedback/retro/review/refactor/design-review are ONE primitive (a
+    higher-tier ground→research→grill-or-produce worker) differing only by a declarative PROFILE. So a skill
+    is a CONFIG ENTRY, not new code — a loader + list resolves {tools, permission_profile, output_contract,
+    grounding_sources, gate, tier}, and each entry maps 1:1 to a future UI action (W3-T8)."
+  design: |
+    A loader for .remudero/skills/<name>.yaml ({tools[], permission_profile, output_contract,
+    grounding_sources[], gate, tier}) + `rmd skill list`. Express the existing behaviors (retro, review,
+    triage) as registry entries; adding a new skill requires only a yaml file, no source change.
+  acceptance:
+    - claim: "a skill is added by CONFIG ALONE (no code) and appears in the registry with its fields resolved"
+      proof: "dropping a new .remudero/skills/<name>.yaml makes `rmd skill list` show it with tools/permission_profile/gate/tier resolved, with NO source change — paste the list + the git diff (yaml only)"
+    - claim: "the v1 skills (setup, plan, feedback, retro, review, refactor, design-review) are registry entries"
+      proof: "rmd skill list enumerates the v1 registry; each entry names its tools + permission_profile + tier — paste the output"
+  status: queued
+  attempts: 0
+
+- id: W1-T45
+  title: Unify plan/refine/expand into rmd plan --mode=create|clarify|expand (ONE code path)
+  repo: remudero
+  depends_on: [W1-T44, W1-T41]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  origin: feedback#taxonomy
+  plan_refs: ["§5B"]
+  rationale: "MASTER-PLAN §5B: Refine=clarify and Expand=expand are MODES of plan, not separate skills. The
+    operator's 'Refine is maybe a duplicate of Plan' is correct — three skills would triplicate
+    ground→research→grill→propose and drift apart. One skill, three modes, sharing the Architect primitive
+    (W1-T41's ground/research/grill code path)."
+  design: |
+    `rmd plan --mode=create|clarify|expand` over the shared Architect primitive: create scaffolds a new
+    plan; clarify grills the operator on ambiguous/underspecified existing tasks; expand proposes
+    gap-filling tasks citing research. All three reuse ONE ground→research→grill→propose path.
+  acceptance:
+    - claim: "the three modes behave distinctly: create scaffolds, clarify grills, expand proposes gap-filling tasks citing research"
+      proof: "--mode=clarify on an ambiguous plan yields grill questions; --mode=expand proposes new tasks each citing a research source; --mode=create scaffolds a fresh plan — paste one run of each"
+    - claim: "all three modes share ONE code path (no duplicated ground/research/grill logic)"
+      proof: "grep proof: the ground/research/grill functions have a SINGLE definition invoked by all three modes; no per-mode copy — paste the grep"
+  status: queued
+  attempts: 0
+
+- id: W2-T3
+  title: Refactor campaign — a first-class tech-debt sweep with a MEASURABLE gate-delta formula (teeth)
+  repo: remudero
+  depends_on: [W1-T27, W1-T22, W1-T25, W1-T26]
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 100.00
+  origin: feedback#taxonomy
+  plan_refs: ["§3A", "§5"]
+  rationale: "MASTER-PLAN §3A: 'tech-debt sweep' was under-built as a vibe (operator flagged it). Promote
+    refactor to a first-class campaign whose acceptance FORMULA is a measurable delta on the Tier-2/3 gates
+    (§5): mutation UP, complexity DOWN, duplication DOWN, zero new CVEs, fitness violations resolved.
+    Depends on project-init (W1-T27), risk scoring (W1-T22), and the quality/architecture tiers
+    (W1-T25/T26) whose gates the delta is measured against."
+  design: |
+    A refactor campaign template (plan/campaigns/refactor.yaml): repo selector + the measurable gate-delta
+    formula. A refactor PR that does not move mutation/complexity/dup/CVE/fitness in the right direction is
+    CI-red — proven by the gates, not asserted. Dry-run first (name targets + per-target delta).
+  acceptance:
+    - claim: "a dry-run over remudero names the tech-debt targets and the measurable gate-delta per target"
+      proof: "the refactor campaign dry-run lists each target with its current-vs-goal delta (mutation/complexity/dup/CVE/fitness) — paste the plan; no change until approved"
+    - claim: "a refactor PR that does not improve the gate numbers is CI-red (proven, not asserted)"
+      proof: "a planted refactor that leaves mutation/complexity/dup unchanged or worse fails the campaign's delta check in CI — paste the red run, then revert"
+  status: queued
+  attempts: 0
+
+- id: W3-T7
+  title: Design Review skill — Playwright MCP a11y/visual review under a hardened browser-egress profile
+  repo: remudero
+  depends_on: [W3-T2, W1-T44]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  origin: feedback#taxonomy
+  plan_refs: ["§7C", "§5B"]
+  rationale: "MASTER-PLAN §7C: the one genuinely-missing capability — an Architect-tier skill that validates
+    and improves UI/UX. It is the ONLY skill with browser egress and runs under hard, non-negotiable
+    constraints (dedicated allowlisted sandbox; accessibility-tree-first; screenshots gated;
+    browser_run_code_unsafe HARD-DENIED as RCE-equivalent). verify: human — visual/UX verdicts need a human eye."
+  design: |
+    A design-review skill (registry entry, W1-T44) under a DEDICATED sandbox profile whose allowedDomains
+    explicitly allowlists the browser/target domains; normal workers keep the locked list. Uses Playwright
+    MCP accessibility-tree snapshots for structure/assertions; screenshots only as human-eyeball artifacts.
+    Capabilities: E2E/visual flows, WCAG/a11y + responsive-breakpoint audit, reference-design research
+    (WebSearch), expert UI/UX review proposing concrete diffs. Output: a report + screenshots on the PR.
+  acceptance:
+    - claim: "★ VERIFY-FIRST: a worker under a browser-allowlisted profile can drive Playwright MCP HEADLESS (record the answer in LEARNINGS)"
+      proof: "a probe drives Playwright MCP headless under the design-review profile; the yes/no + mechanism is appended to LEARNINGS.md (provenance-tagged) BEFORE the skill design is finalized"
+    - claim: "★ VERIFY-FIRST: the containment probe is STILL GREEN with the widened (browser) allowlist — egress limited to allowlisted domains, proven not assumed (record in LEARNINGS)"
+      proof: "the containment preflight (W1-T2) runs under the design-review profile and passes (outside-cwd write OS-denied), AND an egress probe shows the browser reaches ONLY the allowlisted domains and a non-allowlisted domain is DENIED — recorded in LEARNINGS"
+    - claim: "a design-review run captures an a11y report + a screenshot artifact on a PR, and browser_run_code_unsafe is DENIED"
+      proof: "a run against a local dashboard build posts a design-review report + a screenshot artifact on a PR; an attempt to use browser_run_code_unsafe is hard-denied — paste the report + the denial"
+  status: queued
+  attempts: 0
+
+- id: W3-T8
+  title: Panel skill actions — each registry skill is a panel button wired to the registry
+  repo: remudero
+  depends_on: [W3-T6, W1-T44]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  origin: feedback#taxonomy
+  plan_refs: ["§5B", "§7"]
+  rationale: "MASTER-PLAN §5B: each skill maps 1:1 to a UI action. The panel (§7 shell 0, W3-T6) surfaces
+    each registry skill (Plan, Refine, Expand, Refactor, Design Review, Feedback) as an action button wired
+    to the registry (W1-T44) via the api-client (§7A) — the button IS the registry entry, not hard-coded UI."
+  design: |
+    Extend the panel to render one action button per registry skill, resolved from `rmd skill list` via the
+    api-client. Invoking a button runs that skill; grills surface inline (§7B). Refine → plan --mode=clarify.
+  acceptance:
+    - claim: "invoking Refine from the panel runs the plan --mode=clarify skill and shows the grill inline"
+      proof: "clicking Refine triggers plan --mode=clarify; its grill questions render inline in the panel and the answer flows back — paste the ledger line + the inline grill"
+    - claim: "each v1 skill appears as a panel button resolved from the registry (not hard-coded UI)"
+      proof: "the panel's action buttons are generated from `rmd skill list` via the api-client; adding a skill yaml adds a button with no UI code change — paste the button set + the source"
+  status: queued
+  attempts: 0

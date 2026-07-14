@@ -1,4 +1,4 @@
-# REMUDERO — Master Plan (v2.14 · synced 2026-07-14 · ★ FEEDBACK INTAKE — the Architect's front door (§7B): feedback is an ARTIFACT not a command (plan/feedback/ inbox); `rmd triage` grounds→researches→GRILLS-or-PROPOSES as a higher-tier Architect that can propose anything and merge nothing; Architect gets WebSearch/WebFetch, implement workers NEVER (injection surface); `rmd trace` renders feedback→task→run→PR both ways; Standing rule 17 PROVENANCE FOR THE PLAN (`origin:`/`plan_refs:`, Architect-only) + backfilled on all tasks; W1-T40–T43, W3-T6; two ★VERIFY-FIRST items (AskUserQuestion headless? Read image?) · KNOWLEDGE ARCHITECTURE: §8A memory hierarchy (Tier 0 stable prefix · Tier 1 matched injection · Tier 2 plan RETRIEVED not injected · Tier 3 run-local) + cache-aware STABLE-FIRST/VOLATILE-LAST ordering (measured via cache_read tokens); §8B compaction doctrine (detect+ledger, anchored summarization, write-before-compact); retros now question guards too (harness assumptions go stale); W1-T33–T39 close the five knowledge holes · RETROS ×2: R1 (…021334) shipped WS-0 + WS-1 proto-runner (9 PRs), seeded CALIBRATION + proposals P1–P5; R2 (…391543) logs W1-T19/#34 + W1-T3F/#35 (2/2 merged), refreshes NET STATE to 11 PRs / 19 runs, adds this cycle's calibration row, mines 0 new failures, and COMPRESSES the first-retro changelog prose folded here. Prior focus ★ DECOMPOSE BY CONCERN: mis-specified W1-T3 (8 criteria across 4 subsystems) SPLIT into W1-T3/B/C/D/E (+ W1-T3F) — every criterion survives VERBATIM, none dropped/weakened; NEW schema `satisfied_by` (Architect-only) marks a criterion an earlier merge already satisfied; Standing rule 16 (the Architect corrects a mis-specified task, a worker never; no criterion dropped, only redistributed) · CLIENTS & CONTRACT: D-5 RESOLVED (monorepo for everything consuming the daemon API — a breaking change fails CI across all consumers atomically; site/commons/pro stay separate); NEW §7A the API contract is the product boundary (`packages/api-client` GENERATED from ONE tailnet surface, no hand-rolled fetch); §7 rewritten as ONE web app / THREE shells (browser · Tauri macOS · Tauri iOS, Expo the documented iOS fallback; push is an adapter, not an app concern); website → WS-12 repo `remudero-site`; clients W3-T1..T5 gate on the contract · BUDGET IS A TRIPWIRE, NOT AN ALLOWANCE: budget_usd is a runaway BUG DETECTOR (default $100, an order of magnitude above observed), a soft $25 line WARNS-and-continues, blocked_budget = "looping" — W1-T3 was killed mid-work at $3.57 vs a guessed $4; same bug as maxTurns (PR #8) · THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
+# REMUDERO — Master Plan (v2.15 · synced 2026-07-14 · ★ SKILL REGISTRY & CAPABILITIES: §5B — Setup/Plan/Refine/Expand/Feedback/Refactor/Design-Review/Retro/Reviewer are ONE Architect-worker primitive (ground→research→grill-or-produce) differing only by a declarative `.remudero/skills/<name>.yaml` PROFILE (a skill is CONFIG, not code); plan=ONE skill THREE MODES (create|clarify|expand; Refine=clarify, Expand=expand — de-duplicated); §3A REFACTOR promoted to a first-class campaign with a measurable Tier-2/3 gate-delta formula (teeth, not vibes); §7C DESIGN REVIEW — the missing UI/UX skill under a hardened browser-egress profile (Playwright MCP accessibility-tree first, screenshots gated, browser_run_code_unsafe HARD-DENIED as RCE-equivalent, verify:human for eye verdicts); W1-T44/45, W2-T3, W3-T7/T8; two ★VERIFY-FIRST (Playwright MCP headless? containment green with widened allowlist?) · FEEDBACK INTAKE — the Architect's front door (§7B): feedback is an ARTIFACT not a command (plan/feedback/ inbox); `rmd triage` grounds→researches→GRILLS-or-PROPOSES as a higher-tier Architect that can propose anything and merge nothing; Architect gets WebSearch/WebFetch, implement workers NEVER (injection surface); `rmd trace` renders feedback→task→run→PR both ways; Standing rule 17 PROVENANCE FOR THE PLAN (`origin:`/`plan_refs:`, Architect-only) + backfilled on all tasks; W1-T40–T43, W3-T6; two ★VERIFY-FIRST items (AskUserQuestion headless? Read image?) · KNOWLEDGE ARCHITECTURE: §8A memory hierarchy (Tier 0 stable prefix · Tier 1 matched injection · Tier 2 plan RETRIEVED not injected · Tier 3 run-local) + cache-aware STABLE-FIRST/VOLATILE-LAST ordering (measured via cache_read tokens); §8B compaction doctrine (detect+ledger, anchored summarization, write-before-compact); retros now question guards too (harness assumptions go stale); W1-T33–T39 close the five knowledge holes · RETROS ×2: R1 (…021334) shipped WS-0 + WS-1 proto-runner (9 PRs), seeded CALIBRATION + proposals P1–P5; R2 (…391543) logs W1-T19/#34 + W1-T3F/#35 (2/2 merged), refreshes NET STATE to 11 PRs / 19 runs, adds this cycle's calibration row, mines 0 new failures, and COMPRESSES the first-retro changelog prose folded here. Prior focus ★ DECOMPOSE BY CONCERN: mis-specified W1-T3 (8 criteria across 4 subsystems) SPLIT into W1-T3/B/C/D/E (+ W1-T3F) — every criterion survives VERBATIM, none dropped/weakened; NEW schema `satisfied_by` (Architect-only) marks a criterion an earlier merge already satisfied; Standing rule 16 (the Architect corrects a mis-specified task, a worker never; no criterion dropped, only redistributed) · CLIENTS & CONTRACT: D-5 RESOLVED (monorepo for everything consuming the daemon API — a breaking change fails CI across all consumers atomically; site/commons/pro stay separate); NEW §7A the API contract is the product boundary (`packages/api-client` GENERATED from ONE tailnet surface, no hand-rolled fetch); §7 rewritten as ONE web app / THREE shells (browser · Tauri macOS · Tauri iOS, Expo the documented iOS fallback; push is an adapter, not an app concern); website → WS-12 repo `remudero-site`; clients W3-T1..T5 gate on the contract · BUDGET IS A TRIPWIRE, NOT AN ALLOWANCE: budget_usd is a runaway BUG DETECTOR (default $100, an order of magnitude above observed), a soft $25 line WARNS-and-continues, blocked_budget = "looping" — W1-T3 was killed mid-work at $3.57 vs a guessed $4; same bug as maxTurns (PR #8) · THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -372,6 +372,13 @@ tech-debt hour in quiet-hours), and **retro-filed** (a retro finding that spans 
 campaign proposal on the plan-PR path). The principles engine (§5) is the fuel gauge: ratchets and
 budgets provide the baselines campaigns move.
 
+**REFACTOR — a first-class campaign type with TEETH (promoted; the operator correctly flagged it as
+under-built).** "tech-debt sweep" was a vibe; it is now a real gated campaign whose acceptance FORMULA is a
+MEASURABLE DELTA on the Tier-2/3 gates (§5): **mutation score UP · cyclomatic complexity DOWN · duplication
+(jscpd) DOWN · ZERO new CVEs · every in-scope dependency-cruiser fitness violation RESOLVED.** A refactor PR
+that does not move those numbers in the right direction is **CI-red** — refactor is proven by the gates, not
+asserted. This is also the `refactor` skill (§5B); the campaign is how it runs fleet-wide (W2-T3).
+
 ## 4. Autonomy doctrine
 
 **The loop never waits on a human unless the plan says `verify: human`.**
@@ -632,6 +639,37 @@ selector, each with its own baseline capture and green-PR proof.
 The invariant: **Remudero runs the strictest profile on itself, and no project it touches runs less than
 its profile's floor.** The harness never ships a gate it hasn't already eaten.
 
+## 5B. The Architect-worker primitive & the skill registry
+
+**OBSERVATION (the unification):** Setup, Plan, Refine, Expand, Feedback/triage, Refactor, Design Review,
+Retro, and the Reviewer are ALL THE SAME PRIMITIVE — a **higher-tier (G-17) worker** that **GROUNDS** (grep
+the plan / learnings / ledger / DECISIONS for what is already decided) → **RESEARCHES** (server-side
+WebSearch) → **GRILLS** (AskUserQuestion / a `needs-human` issue, §4/§7B) or **PRODUCES** (a PR gated by
+`ci + remudero-review`). They differ ONLY in a declarative PROFILE. So they are not nine features to build
+nine times; they are ONE primitive plus a registry of configs.
+
+**The skill registry** — `.remudero/skills/<name>.yaml`:
+`{ tools[], permission_profile, output_contract, grounding_sources[], gate, tier }`. **Adding a skill is a
+CONFIG ENTRY, not new code** (W1-T44). Each skill maps 1:1 to a future UI action (§7 shell, W3-T8) — the
+panel button IS the registry entry.
+
+**The registry (v1):**
+- **setup** → the Setup Agent (WS-4 / G-16), unchanged — folded in as a skill.
+- **plan** → ★ **ONE skill, THREE MODES**: `create | clarify | expand`. **Refine = clarify; Expand =
+  expand.** The operator's "Refine is maybe a duplicate of Plan" is CORRECT — do NOT build three skills
+  that triplicate ground→research→grill→propose and drift apart. `rmd plan --mode=create|clarify|expand`
+  (W1-T45).
+- **feedback / triage** → §7B, folded in.
+- **retro** → the existing retro Architect (`rmd retro`), folded in.
+- **review** → the DETERMINISTIC-gated reviewer (the judge is code — Standing rule 2/§7A; the LLM layer is
+  advisory only), folded in.
+- **refactor** → PROMOTED to a first-class skill + campaign with teeth (§3A, W2-T3).
+- **design-review** → NEW, with its own hardened browser profile (§7C, W3-T7).
+
+**TOOL BOUNDARY stays PER-PROFILE, never global:** the web tools (WebSearch/WebFetch) and browser egress
+are granted PER SKILL (§7B, §7C) — an implement worker's profile grants none of them. A skill can PROPOSE
+anything and MERGE nothing; every output is contained by the same PR + review gate as any worker.
+
 ## 6. Open-source packaging
 
 - **License**: Apache-2.0 (patent grant, enterprise-friendly). D-2.
@@ -830,6 +868,29 @@ metadata (Standing rule 17). **HONEST LIMIT, stated:** v1 triage is WEAKER than 
 an external Architect. The measurable calibration metric is **what fraction of proposal PRs are accepted
 UNCHANGED** — track it; strategy, contested calls, and deep research stay a human/chat path until that
 number earns trust.
+
+## 7C. Design Review (the visual/UX skill)
+
+The one genuinely-MISSING capability: an **Architect-tier skill that validates and improves UI/UX**. It is
+the ONLY skill permitted browser egress, and it runs under HARD CONSTRAINTS (from research, non-negotiable):
+
+- **Dedicated sandbox profile.** Runs under its OWN sandbox whose `allowedDomains` EXPLICITLY allowlists the
+  browser/target domains it needs; every NORMAL worker keeps the locked list (github.com / npm only).
+  Browser egress is a per-skill grant, never global (§5B). Playwright needs a real browser with network
+  egress, so this profile — and only this profile — widens the allowlist [research].
+- **Accessibility-tree first; screenshots on demand.** Uses Playwright MCP **ACCESSIBILITY-TREE snapshots**
+  (2–5 KB structured YAML) for structure/assertions — **10–100× cheaper** than screenshots (500 KB–2 MB
+  images) [research]. SCREENSHOTS only for artifacts a HUMAN must eyeball, and gated (they blow up token
+  usage — request "only when necessary"). MCP is the SANDBOXED-client path; the Playwright CLI's compact
+  YAML snapshots would be cheaper still but REQUIRE shell access, so MCP is chosen.
+- **`browser_run_code_unsafe` is HARD-DENIED.** It runs arbitrary JS in the Playwright server —
+  **RCE-equivalent, "only for trusted MCP clients,"** and a bypass-mode worker is not that [research].
+- **Capabilities:** run Playwright E2E / visual flows, capture screenshots as PR artifacts, audit against
+  WCAG/a11y + responsive breakpoints, research reference designs (WebSearch), and act as an expert UI/UX
+  reviewer proposing concrete diffs. **Output:** a design-review report + screenshots ON THE PR; it
+  PROPOSES, the gate DECIDES.
+- **Human-eye verdicts route to `verify: human`** — the games' draft → playtest → ready flow: anything that
+  needs a human to LOOK is not auto-verifiable. (W3-T7.)
 
 ## 8. Security posture (consolidated)
 
