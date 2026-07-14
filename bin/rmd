@@ -5,6 +5,8 @@
 #                            hatch: same deterministic judge, invoked by hand)
 #   rmd retro [--dry-run]    sync the plan from the ledger (Architect retro);
 #                            --dry-run prints the gather + calibration table only
+#   rmd drain [--until <id>] [--max <n>] [--dry-run]
+#                            drain the DAG through run-task, stop-on-block, headroom-aware
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 exec "$DIR/node_modules/.bin/tsx" "$DIR/src/run-task.ts" "$@"

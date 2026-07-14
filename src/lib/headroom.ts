@@ -114,3 +114,30 @@ export function parseUsage(text: string): UsageSnapshot {
 
   return { billingMode: parseBillingMode(text), session, weekly };
 }
+
+/** Default: at/near a window limit means ≥95% consumed. Never hammer the last 5%. */
+export const HEADROOM_LIMIT_PCT = 95;
+
+/**
+ * Is any window (the 5-hour session or a weekly cap) at/near its limit? Returns
+ * the tightest offending window + its reset, or `null` when there is headroom.
+ * PURE — the drain calls this before each iteration so an unattended burst never
+ * hammers a nearly-exhausted subscription pool (§9; the reason W1-T4 shipped first).
+ */
+export function headroomExhausted(
+  snap: UsageSnapshot,
+  limitPct: number = HEADROOM_LIMIT_PCT,
+): { window: string; percentUsed: number; resetsAt: string } | null {
+  const windows: Array<{ window: string; percentUsed: number; resetsAt: string }> = [
+    { window: "session (5h)", percentUsed: snap.session.percentUsed, resetsAt: snap.session.resetsAt },
+    ...snap.weekly.map((w) => ({
+      window: `weekly (${w.label})`,
+      percentUsed: w.percentUsed,
+      resetsAt: w.resetsAt,
+    })),
+  ];
+  const over = windows
+    .filter((w) => w.percentUsed >= limitPct)
+    .sort((a, b) => b.percentUsed - a.percentUsed);
+  return over[0] ?? null;
+}
