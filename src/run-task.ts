@@ -28,6 +28,7 @@ import {
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import { ghGateway, projectPlan } from "./lib/status.js";
 import {
+  appendQuestion,
   ghJson,
   parseDecisionRequest,
   parseQuestion,
@@ -668,11 +669,16 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
     // ── QUESTION contract (non-blocking) — log, don't stall (§2).
     const question = parseQuestion(fullText(impl));
     if (question) {
-      appendFileSync(
-        join(repoRoot, "plan", "questions.ndjson"),
-        JSON.stringify({ ts: new Date().toISOString(), task: taskId, question: question.question }) + "\n",
-      );
-      log("question.logged", { question: question.question.slice(0, 120) });
+      const logged = appendQuestion(repoRoot, {
+        ts: new Date().toISOString(),
+        task: taskId,
+        question: question.question,
+        current_assumption: question.currentAssumption,
+        impact_if_wrong: question.impactIfWrong,
+      });
+      log(logged ? "question.logged" : "question.log_failed", {
+        question: question.question.slice(0, 120),
+      });
     }
 
     // ── PR (worker REPORT or orchestrator fallback).

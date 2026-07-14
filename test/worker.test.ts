@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { WorkerSettingsError } from "../src/lib/settings.js";
 import {
   DENY_FLOOR_FALLBACK_MODE,
+  appendQuestion,
   collectWorkerResult,
   evaluateDenyFloor,
   parseDecisionRequest,
+  parseQuestion,
   spawnWorker,
 } from "../src/lib/worker.js";
 
@@ -225,4 +227,90 @@ test("parseDecisionRequest: the T1D decorated string — bold, backticks, emoji,
     "Option A — docs/review-gate.md (new doc)",
     "Option B — inline the gate in CONTRIBUTING.md",
   ]);
+});
+
+// ── QUESTION contract goldens (MASTER-PLAN §2) — non-blocking side-channel ────
+// A QUESTION is the assume-log-keep-moving channel: the worker states what it
+// asked, the assumption it PROCEEDED on, and the blast radius if that assumption
+// is wrong (low|med). The parser must capture all three; the store append must be
+// durable (creates plan/ on a fresh checkout) and must NEVER stall the loop.
+
+test("parseQuestion: the full structured contract — question + current_assumption + impact_if_wrong are all captured", () => {
+  const payload = [
+    "REPORT",
+    "QUESTION: Should the ledger be sharded per-day or per-run?",
+    "CURRENT_ASSUMPTION: per-day, matching the digest cadence.",
+    "IMPACT_IF_WRONG: med",
+    "Proceeding on the assumption; not blocking.",
+  ].join("\n");
+
+  const q = parseQuestion(payload);
+  assert.ok(q, "the payload announces QUESTION so it must parse");
+  assert.equal(q.question, "Should the ledger be sharded per-day or per-run?");
+  assert.equal(q.currentAssumption, "per-day, matching the digest cadence.");
+  assert.equal(q.impactIfWrong, "med");
+});
+
+test("parseQuestion: impact_if_wrong normalises `low`/`medium` variants and a bare QUESTION leaves the optional fields undefined", () => {
+  const medium = parseQuestion("QUESTION: X?\nimpact_if_wrong: Medium");
+  assert.equal(medium?.impactIfWrong, "med");
+
+  const bare = parseQuestion("QUESTION: Is the cap a tripwire?");
+  assert.ok(bare);
+  assert.equal(bare.question, "Is the cap a tripwire?");
+  assert.equal(bare.currentAssumption, undefined);
+  assert.equal(bare.impactIfWrong, undefined);
+});
+
+test("parseQuestion: text with no QUESTION line returns null (the guard does not fire on prose)", () => {
+  assert.equal(parseQuestion("REPORT\nchanged: src/foo.ts\nPR_URL: https://x/pull/1"), null);
+});
+
+test("appendQuestion: appends one NDJSON line durably, creating plan/ on a fresh checkout", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "remudero-q-"));
+  // plan/ does not exist yet — the append must create it (durable on fresh checkout).
+  const ok1 = appendQuestion(repoRoot, {
+    ts: "2026-07-14T00:00:00.000Z",
+    task: "W1-T3C",
+    question: "First?",
+    current_assumption: "assume A",
+    impact_if_wrong: "low",
+  });
+  const ok2 = appendQuestion(repoRoot, {
+    ts: "2026-07-14T00:01:00.000Z",
+    task: "W1-T3C",
+    question: "Second?",
+  });
+  assert.equal(ok1, true);
+  assert.equal(ok2, true);
+
+  const lines = readFileSync(join(repoRoot, "plan", "questions.ndjson"), "utf8")
+    .split("\n")
+    .filter(Boolean);
+  assert.equal(lines.length, 2, "one JSON object per line, append-only");
+  const first = JSON.parse(lines[0]);
+  assert.equal(first.question, "First?");
+  assert.equal(first.current_assumption, "assume A");
+  assert.equal(first.impact_if_wrong, "low");
+  // Absent optional fields are simply omitted (JSON.stringify drops undefined).
+  const second = JSON.parse(lines[1]);
+  assert.equal(second.question, "Second?");
+  assert.ok(!("current_assumption" in second));
+});
+
+test("appendQuestion: NON-BLOCKING — an unwritable store returns false, never throws, so the loop keeps moving", () => {
+  // repoRoot is a path UNDER an existing file, so mkdir(plan/) fails with ENOTDIR.
+  const file = join(mkdtempSync(join(tmpdir(), "remudero-q-")), "not-a-dir");
+  writeFileSync(file, "x");
+  const repoRoot = join(file, "nested");
+
+  let threw = false;
+  let result: boolean | undefined;
+  try {
+    result = appendQuestion(repoRoot, { ts: "t", task: "W1-T3C", question: "Q?" });
+  } catch {
+    threw = true;
+  }
+  assert.equal(threw, false, "a failed side-channel write must NEVER throw (§2 non-blocking)");
+  assert.equal(result, false, "the failure is reported as false, not swallowed silently");
 });

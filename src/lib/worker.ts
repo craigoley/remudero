@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { loadConfig, workerShell, workerZdotdir, type Config } from "./config.js";
@@ -287,6 +287,19 @@ export interface DecisionRequest {
 export interface QuestionReport {
   raw: string;
   question: string;
+  /** The assumption the worker PROCEEDED on (§2: assume, log, keep moving). */
+  currentAssumption?: string;
+  /** Blast radius if the assumption is wrong. High-impact is never a QUESTION. */
+  impactIfWrong?: "low" | "med";
+}
+
+/** One durable QUESTION side-channel entry (a line of plan/questions.ndjson). */
+export interface QuestionEntry {
+  ts: string;
+  task: string;
+  question: string;
+  current_assumption?: string;
+  impact_if_wrong?: string;
 }
 
 /** Extract a labelled section (`HEADER:` … until the next known header). */
@@ -354,9 +367,37 @@ export function parseDecisionRequest(text: string): DecisionRequest | null {
 }
 
 export function parseQuestion(text: string): QuestionReport | null {
-  if (!/(^|\n)\s*QUESTION/i.test(text)) return null;
+  if (!/(^|\n)\s*QUESTION\b/i.test(text)) return null;
   const question = text.match(/QUESTION\s*:?\s*(.+)/i)?.[1]?.trim() ?? "";
-  return { raw: text, question };
+  const currentAssumption = text
+    .match(/(?:CURRENT[_\s-]?ASSUMPTION|ASSUMPTION)\s*:?\s*(.+)/i)?.[1]
+    ?.trim();
+  const impactRaw = text
+    .match(/IMPACT[_\s-]?IF[_\s-]?WRONG\s*:?\s*(low|med(?:ium)?)/i)?.[1]
+    ?.toLowerCase();
+  const impactIfWrong = impactRaw ? (impactRaw.startsWith("med") ? "med" : "low") : undefined;
+  return { raw: text, question, currentAssumption, impactIfWrong };
+}
+
+/**
+ * Append a QUESTION to the durable side-channel store, `plan/questions.ndjson`
+ * (one JSON object per line — diffable, append-only, no round-trip hazard).
+ *
+ * NON-BLOCKING by contract (MASTER-PLAN §2): the QUESTION channel is the
+ * assume-log-keep-moving path, so it must NEVER stall the loop. A write failure
+ * is caught and reported as `false` rather than thrown. Ensures `plan/` exists so
+ * a fresh checkout logs durably on its first question. Returns whether the line
+ * was written.
+ */
+export function appendQuestion(repoRoot: string, entry: QuestionEntry): boolean {
+  try {
+    const dir = join(repoRoot, "plan");
+    mkdirSync(dir, { recursive: true });
+    appendFileSync(join(dir, "questions.ndjson"), JSON.stringify(entry) + "\n");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ── Worktree lifecycle (under config.root/worktrees) ──────────────────────
