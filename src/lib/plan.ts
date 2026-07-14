@@ -77,6 +77,13 @@ export interface Task {
   prompt?: string;
   /** Pre-cited context claims folded into the rendered prompt's CONTEXT block. */
   context?: ContextClaim[];
+  /**
+   * Repo-relative globs naming the files this task touches. Promptsmith matches
+   * these against `plan/learnings.yaml` to inject only the RELEVANT learnings
+   * (W1-T19). Absent → the task is treated as repo-wide (all entries candidate,
+   * still budget-bounded).
+   */
+  files?: string[];
 }
 
 export class PlanError extends Error {
@@ -133,6 +140,7 @@ export function loadPlan(path: string): Plan {
       note: e.note as string | undefined,
       prompt: e.prompt as string | undefined,
       context: e.context as ContextClaim[] | undefined,
+      files: Array.isArray(e.files) ? (e.files as string[]) : undefined,
     };
     byId.set(id, task);
     return task;
