@@ -6,6 +6,8 @@ import {
   buildReviewPrompt,
   detectTestTheater,
   judgeReview,
+  parseReviewerVerdicts,
+  reviewerVerdictContract,
 } from "../src/lib/review.js";
 
 // ── Recorded fixtures (acceptance #2, the FALSIFIER) ────────────────────────
@@ -135,6 +137,41 @@ test("a semantic PASS cannot rescue an unpasted proof (proof must be pasted, not
     semantic: [true, true],
   });
   assert.equal(v.state, "failure");
+});
+
+test("parseReviewerVerdicts: FAIL downgrades that index; PASS/absent stay undefined (advisory floor)", () => {
+  const text = [
+    "REPORT",
+    "REVIEW_VERDICT 1: PASS — proof pasted",
+    "REVIEW_VERDICT 2: FAIL — proof never substantiated",
+    "posted remudero-review=failure",
+  ].join("\n");
+  const s = parseReviewerVerdicts(text, 3);
+  assert.deepEqual(s, [undefined, false, undefined]);
+});
+
+test("parseReviewerVerdicts: unparseable reviewer output leaves the floor untouched (all undefined)", () => {
+  const s = parseReviewerVerdicts("the reviewer wandered off and emitted prose only", 2);
+  assert.deepEqual(s, [undefined, undefined]);
+});
+
+test("parseReviewerVerdicts: an out-of-range index is ignored, is case-insensitive", () => {
+  const s = parseReviewerVerdicts("review_verdict 1: fail\nREVIEW_VERDICT 9: FAIL", 2);
+  assert.deepEqual(s, [false, undefined]);
+});
+
+test("a parsed FAIL, folded through judgeReview, downgrades an otherwise-substantiated criterion", () => {
+  const semantic = parseReviewerVerdicts("REVIEW_VERDICT 1: FAIL", CRITERIA.length);
+  const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT, semantic });
+  assert.equal(v.state, "failure");
+  assert.equal(v.criteria[0].met, false);
+});
+
+test("reviewerVerdictContract: names the machine-readable line for each criterion", () => {
+  const c = reviewerVerdictContract(2);
+  assert.match(c, /REVIEW_VERDICT <n>: PASS/);
+  assert.match(c, /REVIEW_VERDICT <n>: FAIL/);
+  assert.match(c, /1\.\.2/);
 });
 
 test("buildReviewPrompt: fresh, read-only, gh-only, posts remudero-review, never edits", () => {
