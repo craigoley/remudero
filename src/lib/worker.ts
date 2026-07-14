@@ -272,20 +272,39 @@ export function parseReport(text: string): Report | null {
   return { raw: text, prUrl };
 }
 
+/**
+ * Strip presentation decoration from a decision option/recommendation label so
+ * the returned value is the DATA, never the DATA-plus-chrome. Decoration is not
+ * data: the WS-0 `)` bleed (an inline `(RECOMMENDED)` marker leaking its closing
+ * paren) and the T1D `**`…`**` / backtick / ✅ / trailing `****` noise are the
+ * same class of bug — a decorated label mistaken for the value it dresses up.
+ * Removes the inline recommend marker, markdown emphasis (`*`) and code ticks
+ * (`` ` ``), and emoji, then collapses the leftover whitespace.
+ */
+function stripDecoration(value: string): string {
+  return value
+    .replace(/\(?\s*RECOMMENDED\s*\)?/gi, " ") // inline (RECOMMENDED) marker
+    .replace(/[`*]+/g, "") // markdown bold/italic + inline-code ticks
+    .replace(/[\p{Extended_Pictographic}️]/gu, " ") // emoji / variation selectors
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function parseDecisionRequest(text: string): DecisionRequest | null {
   if (!/DECISION_REQUEST/i.test(text)) return null;
-  const options = [
-    ...new Set(
-      [...text.matchAll(/^\s*(?:[-*]|\d+[.)])\s*(.+)$/gim)].map((m) => m[1].trim()),
-    ),
-  ];
-  // Prefer an explicit `RECOMMENDED: <value>` line, but ignore a bare inline
-  // `(RECOMMENDED)` marker (which would capture stray punctuation). Fall back to
-  // the option line that carries the marker, with the marker stripped.
-  let recommended = text.match(/^\s*RECOMMENDED\s*[:=]\s*(.+?)\s*$/im)?.[1]?.trim();
+  // Match option lines on their RAW form first (so the inline `(RECOMMENDED)`
+  // marker is still visible for recommendation detection), then normalise each
+  // value through stripDecoration so the option list carries no chrome.
+  const rawOptions = [...text.matchAll(/^\s*(?:[-*]+|\d+[.)])\s*(.+)$/gim)].map((m) => m[1]);
+  const options = [...new Set(rawOptions.map(stripDecoration).filter(Boolean))];
+  // Prefer an explicit `RECOMMENDED: <value>` line, but ignore a value that
+  // decorates down to stray punctuation (the WS-0 `)` bleed). Fall back to the
+  // raw option line that carries the inline marker — decoration stripped.
+  let recommended = text.match(/^\s*RECOMMENDED\s*[:=]\s*(.+?)\s*$/im)?.[1];
+  recommended = recommended ? stripDecoration(recommended) : undefined;
   if (!recommended || /^[)\].,;:]*$/.test(recommended)) {
-    const marked = options.find((o) => /\(?\s*RECOMMENDED\s*\)?/i.test(o));
-    recommended = marked?.replace(/\s*\(?\s*RECOMMENDED\s*\)?/i, "").trim();
+    const marked = rawOptions.find((o) => /\(?\s*RECOMMENDED\s*\)?/i.test(o));
+    recommended = marked ? stripDecoration(marked) : undefined;
   }
   return { raw: text, options, recommended };
 }
