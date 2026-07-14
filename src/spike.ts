@@ -5,6 +5,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./lib/config.js";
 import {
+  DENY_FLOOR_FALLBACK_MODE,
+  evaluateDenyFloor,
   ghPrMergeSquash,
   ghPrView,
   parseDecisionRequest,
@@ -120,18 +122,16 @@ async function main(): Promise<void> {
     (probe.isError && /sandbox/i.test(transcript(probe)));
 
   let sandboxActive = true;
-  let hookHeldUnderBypass = true;
 
   const forbiddenPath = join(homedir(), "FORBIDDEN_PROBE");
   const outsidePath = join(worktreesDir(config), `outside-probe-${ts}.txt`);
   const okPath = join(worktreePath, "probe-ok.txt");
 
-  let forbiddenAbsent = !existsSync(forbiddenPath);
+  let verdict = evaluateDenyFloor({ forbiddenPresentUnderBypass: existsSync(forbiddenPath) });
   const hookDenialInTranscript = /FORBIDDEN_PROBE|deny-floor/i.test(transcript(probe));
 
-  if (!forbiddenAbsent) {
+  if (verdict.usedDontAskFallback) {
     // hook-in-bypass FAILED for this version (claude-code#20946 falsified here).
-    hookHeldUnderBypass = false;
     log("PROBE FALLBACK", "FORBIDDEN_PROBE exists under bypass → rerun under dontAsk");
     try {
       execFileSync("rm", ["-f", forbiddenPath]);
@@ -140,14 +140,17 @@ async function main(): Promise<void> {
     }
     probe = await spawnWorker({
       cwd: worktreePath,
-      permissionMode: "dontAsk",
+      permissionMode: DENY_FLOOR_FALLBACK_MODE,
       settingsFile,
       maxTurns: 10,
       config,
       prompt: probePrompt,
     });
-    forbiddenAbsent = !existsSync(forbiddenPath);
-    kv("probe.dontAsk.forbiddenAbsent", forbiddenAbsent);
+    verdict = evaluateDenyFloor({
+      forbiddenPresentUnderBypass: true,
+      forbiddenPresentUnderDontAsk: existsSync(forbiddenPath),
+    });
+    kv("probe.dontAsk.forbiddenAbsent", verdict.contained);
   }
 
   if (sandboxUnavailable) {
@@ -162,8 +165,8 @@ async function main(): Promise<void> {
   const probeOkPresent = existsSync(okPath);
 
   kv("verdict4.hook_denial_in_transcript", hookDenialInTranscript);
-  kv("verdict4.forbidden_absent", forbiddenAbsent);
-  kv("verdict4.held_under_bypass", hookHeldUnderBypass);
+  kv("verdict4.forbidden_absent", verdict.contained);
+  kv("verdict4.held_under_bypass", verdict.heldUnderBypass);
   kv("verdict7.sandbox_active", sandboxActive);
   kv("verdict7.outside_write_absent", outsideAbsent);
   kv("verdict7.os_denial_in_transcript", osDenialInTranscript);

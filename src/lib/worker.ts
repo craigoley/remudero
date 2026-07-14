@@ -195,6 +195,50 @@ export async function collectWorkerResult(
   };
 }
 
+// ── Deny-floor containment probe: the dontAsk fallback state machine ───────
+// The deterministic deny-floor hook is expected to block a forbidden write even
+// under `bypassPermissions`. claude-code#20946 reported an async race where the
+// block can leak under bypass; the spike guards against it by re-probing under
+// the `dontAsk` permission mode. This state machine is extracted from spike.ts
+// so the fallback is unit-testable WITHOUT spawning a real worker (the same
+// rationale that split collectWorkerResult out of spawnWorker).
+
+/** The permission mode the deny-floor probe falls back to when bypass leaks. */
+export const DENY_FLOOR_FALLBACK_MODE: PermissionMode = "dontAsk";
+
+/** Verdict of the WS-0 deny-floor containment probe (spike verdict 4). */
+export interface DenyFloorVerdict {
+  /** The deny-floor held under `bypassPermissions` — the forbidden write never landed. */
+  heldUnderBypass: boolean;
+  /** The `dontAsk` fallback path was taken because the floor leaked under bypass. */
+  usedDontAskFallback: boolean;
+  /** The forbidden write was ultimately blocked (under whichever mode ran last). */
+  contained: boolean;
+}
+
+/**
+ * Fold the containment probe's observations into a {@link DenyFloorVerdict}.
+ *
+ * Pass only `forbiddenPresentUnderBypass` for the first (bypass) probe. When it
+ * is `true` the floor leaked, so the caller MUST re-run the probe under
+ * {@link DENY_FLOOR_FALLBACK_MODE} and pass `forbiddenPresentUnderDontAsk` from
+ * that second run. An omitted second observation is treated conservatively as
+ * "not contained" — an unverified floor is never reported as holding.
+ */
+export function evaluateDenyFloor(obs: {
+  forbiddenPresentUnderBypass: boolean;
+  forbiddenPresentUnderDontAsk?: boolean;
+}): DenyFloorVerdict {
+  if (!obs.forbiddenPresentUnderBypass) {
+    return { heldUnderBypass: true, usedDontAskFallback: false, contained: true };
+  }
+  return {
+    heldUnderBypass: false,
+    usedDontAskFallback: true,
+    contained: obs.forbiddenPresentUnderDontAsk === false,
+  };
+}
+
 /**
  * Render the committed worker-settings TEMPLATE into a concrete settings file.
  *
