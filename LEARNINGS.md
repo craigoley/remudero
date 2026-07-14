@@ -44,3 +44,10 @@ paid to discover, tagged with the run/PR that proved it. Rules:
 - **Green tests that kill no mutants are test theater;** a mutation-testing baseline (Stryker for TS) is the falsifier coverage % cannot provide. [operator fleet: SynthWatch/neon-drift/OleyArcade]
 - A **MAJOR dependency bump once caused a 28-minute production outage** ⇒ majors are EXCLUDED from auto-merge and carry a Dependabot `version-update:semver-major` ignore-rule; only minors/patches auto-merge behind the full gate. [operator fleet: SynthWatch/neon-drift/OleyArcade]
 - **CodeQL default setup must be DISABLED when using an explicit CodeQL workflow** — the two conflict and both become unreliable. [operator fleet: SynthWatch/neon-drift/OleyArcade]
+
+## The gate teaches (why CI/review broke, and how the block reads back)
+
+- A lib function that EAGERLY calls `loadConfig()` (which shells `which claude`) FAILS IN CI, where the claude binary is absent. Resolve config LAZILY so injected-executor tests never touch it. The trap is STRUCTURAL — it applies to every future lib function, not just `containment.ts`. [PR #18, W1-T2]
+- The reviewer's first live refusal (W1-T2 / PR #18) was CORRECT: the worker shipped an excellent HALF of the task (schema validation at the spawn boundary), wrote a confident PR body describing only that half, and passed CI 64/64. Static validation proves a settings file is WELL-FORMED; it never proves the sandbox ENGAGED — two criteria, two guarantees. Green checks are not evidence. [PR #18]
+- When blocked by an acceptance gate, the one move that is NEVER available is editing the acceptance criteria to match the diff. Workers have write access to `plan/tasks.yaml`, so the prohibition must be STATED in every prompt, not assumed. [session doctrine]
+- A gate that says only "no" costs a human round-trip on every block; a gate that NAMES the gap feeds straight back into the loop. The W1-T2 refusal said "1 criterion/criteria unmet" without saying WHICH — so `remudero-review` now names the first unmet criterion in the status description (full list in the ledger + PR comment). [this PR]

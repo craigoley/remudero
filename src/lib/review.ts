@@ -222,19 +222,43 @@ export function judgeReview(
   );
   const testTheater = detectTestTheater(evidence.diff);
 
-  const reasons: string[] = [];
-  if (criteria.length === 0) reasons.push("no acceptance criteria to judge (fail closed)");
   const unmet = verdicts.filter((v) => !v.met);
-  if (unmet.length > 0) reasons.push(`${unmet.length} criterion/criteria unmet`);
-  if (testTheater) reasons.push("test theater: added tests assert nothing");
-
-  const state: ReviewState = reasons.length === 0 ? "success" : "failure";
+  const noCriteria = criteria.length === 0;
+  const state: ReviewState =
+    noCriteria || unmet.length > 0 || testTheater ? "failure" : "success";
   const summary =
     state === "success"
       ? `remudero-review: PASS — ${verdicts.length} criteria substantiated, no test theater`
-      : `remudero-review: FAIL — ${reasons.join("; ")}`;
+      : failSummary(unmet.map((v) => v.claim), testTheater, noCriteria);
 
   return { state, criteria: verdicts, testTheater, summary };
+}
+
+/** Max length of a GitHub commit-status description (postReviewStatus also truncates). */
+const STATUS_DESC_MAX = 140;
+const FAIL_PREFIX = "remudero-review: FAIL — ";
+
+/**
+ * Build a failure summary that TEACHES: it NAMES the first unmet criterion (not
+ * just a count — the W1-T2/PR #18 refusal said "1 criterion/criteria unmet" and
+ * cost a human round-trip to work out WHICH). The first unmet claim is included in
+ * full or truncated with an ellipsis, plus `(+N more)` when others are unmet, kept
+ * within the status-description length limit. The full unmet list lives in the
+ * ledger `review.posted` line and the PR review comment (run-task.ts).
+ */
+export function failSummary(
+  unmetClaims: string[],
+  testTheater: boolean,
+  noCriteria: boolean,
+): string {
+  if (noCriteria) return `${FAIL_PREFIX}no acceptance criteria to judge (fail closed)`;
+  if (unmetClaims.length === 0) return `${FAIL_PREFIX}test theater: added tests assert nothing`;
+  const more = unmetClaims.length > 1 ? ` (+${unmetClaims.length - 1} more)` : "";
+  const theater = testTheater ? "; test theater" : "";
+  const budget = Math.max(24, STATUS_DESC_MAX - (FAIL_PREFIX.length + "unmet: ".length + more.length + theater.length));
+  const first = unmetClaims[0];
+  const claim = first.length > budget ? `${first.slice(0, budget - 1).trimEnd()}…` : first;
+  return `${FAIL_PREFIX}unmet: ${claim}${more}${theater}`;
 }
 
 // ── The fresh-context reviewer prompt (read-only + gh, never edits) ─────────
