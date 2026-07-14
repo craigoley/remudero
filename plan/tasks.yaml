@@ -1702,3 +1702,109 @@
       proof: "a self-contained failure whose dependents do not need it skips exactly its dependent subtree (flagged) while unrelated runnable tasks still run — paste the subtree skipped + the others merged"
   status: queued
   attempts: 0
+
+# ── §12A DOCUMENTATION GUARANTEE. Docs are a gated artifact: Tier A generated (drift=CI-red) from ONE
+# command registry feeding rmd --help + the CLI reference + the website; Tier B authored + reviewer-gated.
+# Folds W1-T30 (docs skeleton), W1-T31 (CHANGELOG), W1-T39 (ORIENTATION) into ONE coherent doc story. ─────
+- id: W1-T47
+  title: Command registry + generated help (rmd --help / rmd <cmd> --help from ONE source of truth)
+  repo: remudero
+  depends_on: [W1-T14]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  origin: feedback#docs
+  plan_refs: ["§12A"]
+  rationale: "MASTER-PLAN §12A Tier A: as the CLI grows (feedback/triage/trace/drain/skill/plan/retro),
+    hand-maintained help DRIFTS. A single command registry {name, summary, args, examples} is the ONE
+    source of truth; rmd --help and rmd <cmd> --help RENDER from it, never hand-written. A command with no
+    registry entry FAILS CI — no undocumented command ships. Depends on the real CLI (W1-T14)."
+  design: |
+    A command registry ({name, summary, args, examples}) and a renderer: `rmd --help` lists all commands
+    from it; `rmd <cmd> --help` renders that entry. A help-coverage CI check asserts every dispatched
+    command has a registry entry with summary + examples. No hand-written help strings live in command code.
+  acceptance:
+    - claim: "a command added WITHOUT a registry entry FAILS the help-coverage CI check"
+      proof: "adding a new dispatched command with no registry entry turns the help-coverage job RED and names the undocumented command — paste the red run, then add the entry"
+    - claim: "help output is GENERATED from the registry, not hand-written in the command files"
+      proof: "grep proof: rmd --help and rmd <cmd> --help render from the registry; there are no hand-written help/usage strings in the command modules — paste the grep + a rendered help"
+  status: queued
+  attempts: 0
+
+- id: W1-T48
+  title: Generated CLI reference + drift gate (docs/cli-reference.md regenerated + byte-compared in CI)
+  repo: remudero
+  depends_on: [W1-T47]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  origin: feedback#docs
+  plan_refs: ["§12A"]
+  rationale: "MASTER-PLAN §12A the AWARENESS LAYER: docs are not evidence unless CI proves they match the
+    code (W1-T29 plan-claims applied to docs). docs/cli-reference.md is GENERATED from the W1-T47 registry;
+    a CI gate REGENERATES it and byte-compares — a stale reference (code changed, doc not regenerated) is
+    CI-RED and NAMES the drifted command."
+  design: |
+    A generator writes docs/cli-reference.md from the command registry. A CI drift gate regenerates it into
+    a temp file and diffs against the committed copy; any difference fails and names the drifted command(s).
+  acceptance:
+    - claim: "docs/cli-reference.md is regenerated in CI and byte-compared against the committed file"
+      proof: "the drift-gate CI job regenerates the reference and diffs it; on a clean tree it is byte-identical (green) — paste the job output"
+    - claim: "a stale reference (edit a command, do NOT regenerate) turns CI RED and names the drifted command"
+      proof: "changing a command's registry entry without regenerating docs/cli-reference.md fails the drift gate with the drifted command named — paste the red diff, then regenerate"
+  status: queued
+  attempts: 0
+
+- id: W1-T49
+  title: Docs coherence — rmd --help, docs/cli-reference.md, and the website CLI page all derive from ONE registry
+  repo: remudero
+  depends_on: [W1-T47, W12-T1]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  origin: feedback#docs
+  plan_refs: ["§12A", "WS-12"]
+  rationale: "MASTER-PLAN §12A one source, three surfaces: rmd --help, GitHub /docs (docs/cli-reference.md),
+    and the website CLI page CANNOT disagree because they all render the SAME registry. A hand-edit to any
+    downstream copy is rejected by the drift gate (W1-T48). Depends on the registry (W1-T47) and the site
+    (W12-T1) that publishes it."
+  design: |
+    The website CLI page (WS-12) renders from the SAME registry/generator as rmd --help and
+    docs/cli-reference.md — no hand-authored CLI content on the site. One registry change propagates to all
+    three in one regeneration; the drift gate rejects any downstream hand-edit.
+  acceptance:
+    - claim: "a registry change propagates to all THREE surfaces in one regeneration"
+      proof: "editing the registry + regenerating updates rmd --help, docs/cli-reference.md, and the website CLI page identically — paste the three diffs from one regen"
+    - claim: "a hand-edit to any downstream copy is REJECTED by the drift gate"
+      proof: "hand-editing docs/cli-reference.md OR the website CLI page (not the registry) turns the drift gate RED — paste the red run for each"
+  status: queued
+  attempts: 0
+
+- id: W1-T50
+  title: Troubleshooting guide seeded from LEARNINGS failures (Tier B, docs-rubric enforced)
+  repo: remudero
+  depends_on: [W1-T33]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  origin: feedback#docs
+  plan_refs: ["§12A"]
+  rationale: "MASTER-PLAN §12A Tier B: troubleshooting is NOT automatable (needs operator-impact context),
+    but it should be SEEDED from the `failures`-tagged learnings (W1-T33 knowledge split) so the receipts
+    become operator help. The docs rubric flags a new failure learning with operator impact that has no
+    troubleshooting entry — the awareness layer for authored docs."
+  design: |
+    Seed docs/troubleshooting.md from the failures-tagged learnings that carry operator impact (symptom →
+    cause → fix). Extend the §5-layer-2 docs rubric: a new failures learning with operator impact and no
+    troubleshooting entry is flagged.
+  acceptance:
+    - claim: "each operator-impacting failures-tagged learning appears as a troubleshooting entry"
+      proof: "docs/troubleshooting.md contains an entry (symptom/cause/fix) for each failures-tagged learning with operator impact — paste the mapping learning#id -> entry"
+    - claim: "a new failure learning WITHOUT a troubleshooting entry is flagged by the docs rubric"
+      proof: "a fixture: adding a failures-tagged learning with operator impact and no docs/troubleshooting.md entry -> the docs rubric item fails; adding the entry -> passes"
+  status: queued
+  attempts: 0

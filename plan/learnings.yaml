@@ -203,3 +203,14 @@
     must eyeball; use accessibility-tree snapshots for everything structural.
   src: research#playwright
   cited: "2026-07-14"
+
+# ── Documentation as a gated artifact (§12A) [research 2026-07-14] ──
+- id: docs-are-a-gated-artifact
+  subsystem: docs
+  files: [src/run-task.ts, docs]
+  fact: >-
+    Docs are a gated artifact: GENERATED docs (rmd --help / CLI reference / API ref / CHANGELOG) drift
+    unless CI enforces byte-equality (regenerate + diff = RED); AUTHORED docs are reviewer-gated. ONE
+    command registry feeds rmd --help + GitHub /docs + the website — never three hand-copies.
+  src: research#docs-generation
+  cited: "2026-07-14"
