@@ -1,4 +1,4 @@
-# REMUDERO — Master Plan (v2.9 · synced 2026-07-14 · ★ CLIENTS & CONTRACT: D-5 RESOLVED (monorepo for everything consuming the daemon API — a breaking change fails CI across all consumers atomically; site/commons/pro stay separate); NEW §7A the API contract is the product boundary (`packages/api-client` GENERATED from ONE tailnet surface, no hand-rolled fetch); §7 rewritten as ONE web app / THREE shells (browser · Tauri macOS · Tauri iOS, Expo the documented iOS fallback; push is an adapter, not an app concern); website → WS-12 repo `remudero-site`; clients W3-T1..T5 gate on the contract · BUDGET IS A TRIPWIRE, NOT AN ALLOWANCE: budget_usd is a runaway BUG DETECTOR (default $100, an order of magnitude above observed), a soft $25 line WARNS-and-continues, blocked_budget = "looping" — W1-T3 was killed mid-work at $3.57 vs a guessed $4; same bug as maxTurns (PR #8) · THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
+# REMUDERO — Master Plan (v2.10 · synced 2026-07-14 · ★ DECOMPOSE BY CONCERN: mis-specified W1-T3 (8 criteria across 4 subsystems) SPLIT into W1-T3/B/C/D/E (+ W1-T3F) — every criterion survives VERBATIM, none dropped/weakened; NEW schema `satisfied_by` (Architect-only) marks a criterion an earlier merge already satisfied; Standing rule 16 (the Architect corrects a mis-specified task, a worker never; no criterion dropped, only redistributed) · CLIENTS & CONTRACT: D-5 RESOLVED (monorepo for everything consuming the daemon API — a breaking change fails CI across all consumers atomically; site/commons/pro stay separate); NEW §7A the API contract is the product boundary (`packages/api-client` GENERATED from ONE tailnet surface, no hand-rolled fetch); §7 rewritten as ONE web app / THREE shells (browser · Tauri macOS · Tauri iOS, Expo the documented iOS fallback; push is an adapter, not an app concern); website → WS-12 repo `remudero-site`; clients W3-T1..T5 gate on the contract · BUDGET IS A TRIPWIRE, NOT AN ALLOWANCE: budget_usd is a runaway BUG DETECTOR (default $100, an order of magnitude above observed), a soft $25 line WARNS-and-continues, blocked_budget = "looping" — W1-T3 was killed mid-work at $3.57 vs a guessed $4; same bug as maxTurns (PR #8) · THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -439,7 +439,10 @@ thesis of §Mission is only real if the gates are real. Structure: **three ENFOR
    items, each a checked question: **one concern per PR**; **all callers audited** (partial-fix drift —
    a change that fixes one call site and orphans the rest); **test theater** (assertions that assert
    nothing / snapshots-of-nothing / tests that kill no mutants); **refactor-phase honesty** (a "refactor"
-   that changes behavior); coupling/cohesion. TDD Guard's own author documented that mechanical
+   that changes behavior); coupling/cohesion; **no worker-authored `satisfied_by`** (a diff that ADDS a
+   `satisfied_by` line to `plan/tasks.yaml` FAILS unless the PR is plan-only and human-authored —
+   `satisfied_by` is Architect-only; a worker adding it to its own blocking criterion is editing the
+   criteria to match the diff, Standing rule 15). TDD Guard's own author documented that mechanical
    test-first alone still yielded tight coupling + duplication — which is why layer 2 exists.
 3. **Prompt layer**: Promptsmith injects the repo's principles profile into every prompt; weakest,
    never load-bearing.
@@ -1076,8 +1079,12 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    NEVER edit the acceptance criteria to match its diff.** Workers have write access to `plan/tasks.yaml`,
    so this prohibition is stated in every rendered prompt, not assumed. The gate names the gap; the fix
    is to close the gap, not to move the goalposts. [session doctrine]
-
-## 13. Collaboration protocol (this document)
+16. **The Architect may correct a mis-specified task via a plan PR; a worker may never. The test of
+   honesty is that NO criterion is dropped or weakened — only REDISTRIBUTED.** A task whose criteria span
+   multiple subsystems collides with one-concern-per-PR and is undeliverable; the Architect decomposes it
+   by CONCERN (every criterion survives verbatim in some child task), and the `satisfied_by` field
+   (Architect-only, plan-only PRs — rule 15) marks a criterion an earlier merge already satisfied. Splits
+   observed: T1C, T1D, W1-T3. [PR #22, W1-T3] 
 
 - Lives at repo root. Header carries sync date + focus, his-house style.
 - Humans and agents edit via commits/PRs; the Architect does narrative syncs at workstream

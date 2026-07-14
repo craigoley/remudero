@@ -121,6 +121,22 @@ test("empty acceptance criteria fail closed (nothing to judge is never a pass)",
   assert.equal(v.state, "failure");
 });
 
+test("satisfied_by (Architect-only): a criterion already met by an earlier PR is MET, cited to that PR", () => {
+  const criteria: AcceptanceCriterion[] = [
+    // A proof the report does NOT substantiate — it would fail on keyword coverage —
+    // but it was already shipped in an earlier PR, so the Architect marks it satisfied.
+    {
+      claim: "the PR #12 dead-doc golden fixture yields state=failure",
+      proof: "golden test over PR #12 single-doc diff in test/review.test.ts",
+      satisfied_by: "#16",
+    },
+  ];
+  const v = judgeReview(criteria, { diff: "", report: "an unrelated report about something else entirely" });
+  assert.equal(v.state, "success", v.summary);
+  assert.equal(v.criteria[0].met, true);
+  assert.match(v.criteria[0].reason, /satisfied by #16/);
+});
+
 test("a semantic verdict can only DOWNGRADE: reviewer 'not satisfied' forces failure", () => {
   // Mechanically substantiated, but the LLM reviewer judged the proof non-responsive.
   const v = judgeReview(CRITERIA, {
