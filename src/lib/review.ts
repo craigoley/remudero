@@ -332,6 +332,50 @@ export function parseReviewerVerdicts(text: string, count: number): (boolean | u
   return semantic;
 }
 
+// ── Acceptance criteria from a PR body (manual plan/doc PRs) ───────────────
+
+/**
+ * Parse an `Acceptance:` block out of a PR body, for manual plan/doc PRs that
+ * carry no task id. The block is a header line — `Acceptance:` (optionally as
+ * markdown `**Acceptance:**` or `## Acceptance`) — followed by bullet lines, each
+ * `- <claim> | <proof>` (the `|` separates claim from proof). Parsing stops at the
+ * first blank line or non-bullet line after the bullets begin.
+ *
+ * Returns `[]` when there is no block — and an empty criteria list FAILS CLOSED in
+ * {@link judgeReview} (nothing to judge is never a pass). A manual PR that wants to
+ * merge must therefore STATE what it is claiming and how it is proven; silence is
+ * a failure, not a bypass.
+ */
+export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
+  const lines = (body ?? "").split("\n");
+  const criteria: AcceptanceCriterion[] = [];
+  let inBlock = false;
+  for (const raw of lines) {
+    const line = raw.replace(/\r$/, "");
+    // Header: "Acceptance:", "**Acceptance:**", "## Acceptance", "Acceptance criteria:".
+    if (!inBlock) {
+      if (/^\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?\b\s*\**\s*:?\s*\**\s*$/i.test(line)) {
+        inBlock = true;
+      }
+      continue;
+    }
+    const bullet = line.match(/^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/);
+    if (bullet) {
+      const item = bullet[1].trim();
+      const pipe = item.indexOf("|");
+      const claim = (pipe >= 0 ? item.slice(0, pipe) : item).trim();
+      const proof = pipe >= 0 ? item.slice(pipe + 1).trim() : "";
+      if (claim) criteria.push({ claim, proof });
+      continue;
+    }
+    // A blank line before any bullet is tolerated (header, then a gap, then bullets);
+    // once bullets have begun, any blank or non-bullet line ends the block.
+    if (line.trim() === "" && criteria.length === 0) continue;
+    break;
+  }
+  return criteria;
+}
+
 // ── gh poster (runs outside the sandbox; TLS fails under Seatbelt) ──────────
 
 /**

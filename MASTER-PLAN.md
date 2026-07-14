@@ -1,4 +1,4 @@
-# REMUDERO — Master Plan (v2.4 · synced 2026-07-14 · ★ CI GATE LIVE (proven red+green under protection) · merge gate is a GITHUB-ENFORCED CONTRACT: acceptance verdict = required status check (W1-T1C) · NEW: §4B FLIGHT CONTROL — in-flight supervision + risk-graded gates + specialist panel (W1-T20/21/22, W2-T1); FIELD FINDING 12 self-updater race · NEXT: rmd run-task W1-T1C — the first self-modification through the loop)
+# REMUDERO — Master Plan (v2.5 · synced 2026-07-14 · ★ REVIEW GATE LIVE: main requires [ci, remudero-review]; `rmd review <n>` is the manual-PR escape hatch (same judge, by hand) · Standing rules 13 (a doc is not proof) + 14 (splitting orphans the call site) from the PR #12 dead-doc post-mortem · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1); FIELD FINDING 12 self-updater race · NEXT: rmd run-task on the WS-1 queue through the closed gate)
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -897,6 +897,14 @@ WS-11 after WS-4 + a second project on the harness.
    ENFORCE one.** The flight judge and specialist panels (§4B) return verdicts a deterministic
    controller acts on; no LLM sits in the merge decision, and none edits code. See §4B, W1-T20/21/22,
    W2-T1.
+13. **A doc that DESCRIBES a mechanism is never proof the mechanism EXISTS.** Acceptance proofs must be
+   OBSERVABLE SYSTEM STATE — `gh api` output, a status object, a grep of the call site, a passing test —
+   never a file that talks about it. PR #12 shipped `docs/review-gate.md`, passed CI, reported
+   `verdict=merged`, and did none of its job (protection unchanged, no status ever posted). [PR #12/#13]
+14. **Splitting a task can ORPHAN its call site — when you split, name the integration point explicitly
+   as one side's deliverable.** T1C built the reviewer and T1D was to enforce it, but NEITHER owned
+   `run-task.ts` CALLING it; the reviewer was fully-tested dead code for two PRs. The wiring is a
+   deliverable, not a seam. [PR #12/#13]
 
 ## 13. Collaboration protocol (this document)
 
