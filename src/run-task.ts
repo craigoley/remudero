@@ -1,9 +1,23 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig, softBudgetThreshold, type Config } from "./lib/config.js";
+import {
+  architectModel,
+  loadConfig,
+  softBudgetThreshold,
+  workerModel,
+  type Config,
+} from "./lib/config.js";
+import {
+  assertArchitectAboveWorker,
+  buildGather,
+  calibrationTable,
+  codeFilesInDiff,
+  loadMarker,
+  renderGather,
+} from "./lib/retro.js";
 import { appendLedger } from "./lib/ledger.js";
 import {
   assertRunnable,
@@ -878,9 +892,193 @@ async function reviewCommand(prArg: string): Promise<number> {
   return verdict.state === "success" ? 0 : 1;
 }
 
+/**
+ * `rmd retro [--dry-run]` — the harness SYNCS ITS OWN PLAN (MASTER-PLAN
+ * §Self-improvement). A DETERMINISTIC GATHER (lib/retro.ts, no LLM) reduces the
+ * ledger + LEARNINGS into calibration-by-type, verdict distribution, and the
+ * merged-since list; `--dry-run` prints it and stops. A full run then spawns ONE
+ * Architect worker — riding a HIGHER tier than implement workers (G-17, asserted)
+ * — fed ONLY the gather + the current MASTER-PLAN, to write a PLAN-ONLY sync PR
+ * (SHIPPED log, refreshed NET STATE, the calibration table, failure→proposal
+ * notes, and REQUIRED compression — a retro that only ADDS is a failed retro). The
+ * PR is gated by ci + remudero-review (posted via the existing review code path),
+ * then state/last-retro.json advances. Generation (this) is separated from
+ * publication (the gate + the human) [research].
+ */
+async function retroCommand(rest: string[]): Promise<number> {
+  const dryRun = rest.includes("--dry-run");
+  const config = loadConfig();
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const markerPath = join(config.root, "state", "last-retro.json");
+  const learningsPath = join(repoRoot, "LEARNINGS.md");
+  const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
+  const learningsMd = existsSync(learningsPath) ? readFileSync(learningsPath, "utf8") : "";
+  const marker = loadMarker(markerPath);
+  const gather = buildGather({
+    ledgerNdjson,
+    learningsMd,
+    sinceTs: marker?.ts,
+    learningsAtMarker: marker?.learnings_count,
+  });
+  const report = renderGather(gather);
+
+  if (dryRun) {
+    console.log(report);
+    return 0;
+  }
+
+  // G-17 Tier Invariant: the retro Architect MUST outrank implement workers.
+  const arch = architectModel(config);
+  const wrk = workerModel(config);
+  assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
+
+  const { owner, repo } = resolveOwnerRepo();
+  const runId = `RETRO-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, ...extra });
+  const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
+  log("retro.start", { since: gather.sinceTs ?? null, runs_in_scope: gather.totalRuns, architect: arch, worker: wrk });
+  say(`retro ${runId} — architect ${arch} over worker ${wrk}; ${gather.totalRuns} runs in scope`);
+
+  const settingsFile = renderWorkerSettings({
+    templatePath: join(repoRoot, "settings", "worker.json"),
+    hooksDir: join(repoRoot, "hooks"),
+    outPath: join(config.root, "tmp", `retro-settings-${runId}.json`),
+  });
+  validateWorkerSettingsFile(settingsFile);
+
+  const repoDir = join(config.root, "repos", repo);
+  if (!existsSync(repoDir)) {
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+  }
+  const pruned = pruneStaleRuns(repoDir, worktreesDir(config));
+  if (pruned.worktrees.length || pruned.branches.length) log("worktree.prune", { ...pruned });
+  const branch = `run-${runId}`;
+  const worktreePath = join(worktreesDir(config), branch);
+  worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+
+  const prompt = retroPrompt(report, calibrationTable(gather.byType), runId);
+  try {
+    const worker = await spawnWorker({
+      cwd: worktreePath,
+      permissionMode: "bypassPermissions",
+      settingsFile,
+      model: arch, // the Architect tier
+      maxTurns: 40,
+      maxBudgetUsd: DEFAULT_BUDGET_USD,
+      config,
+      prompt,
+    });
+    log("retro.synthesized", { session_id: worker.sessionId, cost_usd: worker.costUsd, subtype: worker.subtype });
+
+    // Ensure the branch reached origin (worker pushes without -u).
+    let onOrigin = false;
+    try {
+      execFileSync("git", ["-C", worktreePath, "ls-remote", "--exit-code", "origin", branch], { stdio: "ignore" });
+      onOrigin = true;
+    } catch {
+      onOrigin = false;
+    }
+    if (!onOrigin) execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+
+    let prUrl = parseReport([worker.text, worker.blocks.join("\n")].join("\n"))?.prUrl;
+    if (!prUrl) {
+      const out = execFileSync(
+        "gh",
+        ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch, "--fill"],
+        { encoding: "utf8" },
+      );
+      prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
+    }
+    if (!prUrl) {
+      log("retro.error", { error: "no PR opened" });
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+    ensureTaskTrailer(prUrl, "RETRO");
+
+    // DETERMINISTIC GUARD: a retro is PLAN-ONLY. If the diff touches src/ or test/,
+    // fail closed (the retro may never carry code — one concern).
+    const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
+    const codeFiles = codeFilesInDiff(diff);
+    if (codeFiles.length > 0) {
+      log("retro.error", { error: "retro PR is NOT plan-only", code_files: codeFiles });
+      say(`retro PR touched code (${codeFiles.join(", ")}) — retros are plan-only; leaving PR OPEN for inspection`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+    log("pr.opened", { pr_url: prUrl, plan_only: true });
+    say(`retro PR (plan-only): ${prUrl}`);
+
+    // Advance the marker (the retro RAN — the gather is now consumed).
+    const nextMarker = { ts: new Date().toISOString(), learnings_count: gather.learningsNow, runs_seen: gather.totalRuns };
+    writeFileSync(markerPath, JSON.stringify(nextMarker, null, 2) + "\n");
+    log("retro.marker.advanced", nextMarker);
+
+    // Gate: ci green → post remudero-review → arm auto-merge.
+    const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));
+    if (ci !== "green") {
+      say(`ci ${ci} — PR left OPEN: ${prUrl}`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+    const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
+    const reviewCode = await reviewCommand(prNum);
+    armAutoMerge(prUrl);
+    log("automerge.armed", {});
+    worktreeRemove(repoDir, worktreePath);
+    say(`retro PR gated + armed (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
+    return reviewCode;
+  } catch (e) {
+    log("retro.error", { error: String((e as Error)?.message ?? e) });
+    try {
+      worktreeRemove(repoDir, worktreePath);
+    } catch {
+      /* best-effort */
+    }
+    throw e;
+  }
+}
+
+/** The Architect retro prompt — fed ONLY the deterministic gather + current plan. */
+function retroPrompt(gatherReport: string, calTable: string, runId: string): string {
+  return [
+    "You are the REMUDERO ARCHITECT running a RETRO (MASTER-PLAN §Self-improvement). You ride a HIGHER",
+    "tier than implement workers. You are fed ONLY the deterministic GATHER below and the current",
+    "MASTER-PLAN.md in this working directory. Produce a PLAN-ONLY sync PR — edit ONLY MASTER-PLAN.md.",
+    "NEVER touch src/ or test/ (this is plan-only; a code change fails the retro).",
+    "",
+    "=== DETERMINISTIC GATHER (no LLM produced this) ===",
+    gatherReport,
+    "",
+    "Editing MASTER-PLAN.md in the current directory, do ALL of:",
+    "1. Append SHIPPED-log entries for what landed (from 'Merged since marker'), each with its PR link.",
+    "2. Refresh the NET STATE section so it reflects reality (it currently predates WS-0).",
+    "3. Add the observed CALIBRATION TABLE below (the numbers mounts.yaml/W1-T5 needs).",
+    "4. Mine FAILURES (blocked_* verdicts) into PROPOSED golden/new tasks — PROPOSALS ONLY, in a",
+    "   'Retro proposals' note. Do NOT edit plan/tasks.yaml.",
+    "5. ★ COMPRESSION (REQUIRED — a retro that only ADDS is a failed retro): find what is STALE,",
+    "   REDUNDANT, or SUPERSEDED and DELETE or fold it. The diff MUST be net-negative somewhere.",
+    "",
+    "CALIBRATION TABLE:",
+    calTable,
+    "",
+    "Then, from the working directory:",
+    "- git add MASTER-PLAN.md && commit with a concise message;",
+    "- `git push origin HEAD` (NOT -u);",
+    "- open a PR: `gh pr create --fill --base main`. The PR body MUST include an `Acceptance:` block of",
+    "  `- <claim> | <proof>` bullets covering: SHIPPED log added, NET STATE refreshed, calibration table",
+    "  present, and COMPRESSION done (name the deletion). Include as the LAST body line:",
+    `  Remudero-Task: RETRO-${runId.replace(/^RETRO-/, "")}`,
+    "- End your REPORT with exactly: PR_URL: <the pull request url>",
+  ].join("\n");
+}
+
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(): Promise<void> {
-  const [, , cmd, arg] = process.argv;
+  const [, , cmd, ...rest] = process.argv;
+  const arg = rest[0];
   if (cmd === "run-task" && arg) {
     const result = await runTask(arg);
     console.log("\n" + JSON.stringify(result, null, 2));
@@ -889,7 +1087,12 @@ async function main(): Promise<void> {
   if (cmd === "review" && arg) {
     process.exit(await reviewCommand(arg));
   }
-  console.error("usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR");
+  if (cmd === "retro") {
+    process.exit(await retroCommand(rest));
+  }
+  console.error(
+    "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)",
+  );
   process.exit(2);
 }
 
@@ -901,4 +1104,4 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   });
 }
 
-export { runTask, runReview, waitForCiGreen, reviewCommand };
+export { runTask, runReview, waitForCiGreen, reviewCommand, retroCommand };
