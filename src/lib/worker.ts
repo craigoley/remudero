@@ -272,20 +272,42 @@ export function parseReport(text: string): Report | null {
   return { raw: text, prUrl };
 }
 
+/**
+ * DECORATION IS NOT DATA. Auto-choose matches the chosen value against the option
+ * list and echoes it into DECISIONS.md + the resume prompt, so a value that still
+ * carries markdown/emoji chrome is a near-miss waiting to happen (T1D:
+ * `**Option A — \`docs/review-gate.md\` (new doc)** ✅ ****` must resolve to the
+ * bare `Option A — docs/review-gate.md (new doc)`). Strip the chrome — bold/italic
+ * asterisks, backticks, pictographic emoji + variation selectors — and collapse
+ * the whitespace those removals leave behind. Structural punctuation the worker
+ * meant as data (em dash, parentheses, slashes) is preserved.
+ */
+export function stripDecoration(value: string): string {
+  return value
+    .replace(/`+/g, "") // inline-code backticks
+    .replace(/\*+/g, "") // markdown bold/italic markers (**, *, and trailing ****)
+    .replace(/\p{Extended_Pictographic}/gu, "") // emoji (e.g. the ✅ marker)
+    .replace(/[\uFE00-\uFE0F]/g, "") // emoji variation selectors
+    .replace(/\s+/g, " ") // collapse the gaps stripping left behind
+    .trim();
+}
+
 export function parseDecisionRequest(text: string): DecisionRequest | null {
   if (!/DECISION_REQUEST/i.test(text)) return null;
   const options = [
     ...new Set(
-      [...text.matchAll(/^\s*(?:[-*]|\d+[.)])\s*(.+)$/gim)].map((m) => m[1].trim()),
+      [...text.matchAll(/^\s*(?:[-*]|\d+[.)])\s*(.+)$/gim)].map((m) => stripDecoration(m[1])),
     ),
   ];
   // Prefer an explicit `RECOMMENDED: <value>` line, but ignore a bare inline
   // `(RECOMMENDED)` marker (which would capture stray punctuation). Fall back to
-  // the option line that carries the marker, with the marker stripped.
-  let recommended = text.match(/^\s*RECOMMENDED\s*[:=]\s*(.+?)\s*$/im)?.[1]?.trim();
+  // the option line that carries the marker, with the marker stripped. Both paths
+  // run through stripDecoration so the chosen value is clean data, not chrome.
+  const explicit = text.match(/^\s*RECOMMENDED\s*[:=]\s*(.+?)\s*$/im)?.[1];
+  let recommended = explicit ? stripDecoration(explicit) : undefined;
   if (!recommended || /^[)\].,;:]*$/.test(recommended)) {
     const marked = options.find((o) => /\(?\s*RECOMMENDED\s*\)?/i.test(o));
-    recommended = marked?.replace(/\s*\(?\s*RECOMMENDED\s*\)?/i, "").trim();
+    recommended = marked && stripDecoration(marked.replace(/\s*\(?\s*RECOMMENDED\s*\)?/i, ""));
   }
   return { raw: text, options, recommended };
 }

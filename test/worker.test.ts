@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { WorkerSettingsError } from "../src/lib/settings.js";
-import { collectWorkerResult, spawnWorker } from "../src/lib/worker.js";
+import {
+  collectWorkerResult,
+  parseDecisionRequest,
+  parseQuestion,
+  spawnWorker,
+  stripDecoration,
+} from "../src/lib/worker.js";
 
 // ── Synthetic SDK message streams ──────────────────────────────────────────
 // The real SDK yields a `type:"result"` envelope (even for an error subtype)
@@ -112,4 +118,86 @@ test("spawnWorker: an invalid settings file is REJECTED at the spawn boundary be
     WorkerSettingsError,
     "a misplaced sandbox key must be rejected before spawn, never silently dropped",
   );
+});
+
+// ── Output-contract parser golden tasks ─────────────────────────────────────
+// These freeze the two near-miss payloads that bit us live (WS-0 marker `)` bleed,
+// T1D markdown decoration) plus the QUESTION contract, so a parser regression can
+// never again silently corrupt an auto-choose. Auto-choose (run-task §4) echoes
+// `recommended` into DECISIONS.md and the resume prompt verbatim — a dirty value
+// there is an unrecoverable wrong turn, so the parser is the load-bearing floor.
+
+test("GOLDEN (WS-0 near-miss): an inline (RECOMMENDED) marker yields a clean value with NO ')' bleed", () => {
+  // The exact WS-0 shape: no explicit `RECOMMENDED:` line, only an inline marker
+  // on an option. The old parser captured `")"` and was right only by luck.
+  const payload = [
+    "DECISION_REQUEST: where should the fallback flag live?",
+    "- Use an env var (RECOMMENDED)",
+    "- Use a CLI flag",
+    "Reversible: yes — flip the default in a follow-up.",
+  ].join("\n");
+  const d = parseDecisionRequest(payload);
+  assert.ok(d, "DECISION_REQUEST must be recognised");
+  assert.equal(d.recommended, "Use an env var", "marker stripped to the bare option value");
+  assert.doesNotMatch(d.recommended ?? "", /\)/, "no stray ')' bleeds into the chosen value");
+  assert.deepEqual(d.options, ["Use an env var (RECOMMENDED)", "Use a CLI flag"]);
+});
+
+test("GOLDEN (T1D near-miss): DECORATION IS NOT DATA — bold, backticks, emoji, trailing '****' are stripped", () => {
+  // PR #12 auto-choose payload: the RECOMMENDED value arrived wrapped in markdown
+  // bold, backticks, a ✅ emoji, and a trailing '****'. None of that is data.
+  const decorated = "**Option A — `docs/review-gate.md` (new doc)** ✅ ****";
+  const payload = [
+    "DECISION_REQUEST: pick the review-gate doc home.",
+    `- ${decorated}`,
+    "- Option B — inline in README",
+    `RECOMMENDED: ${decorated}`,
+  ].join("\n");
+  const d = parseDecisionRequest(payload);
+  assert.ok(d, "DECISION_REQUEST must be recognised");
+  assert.equal(
+    d.recommended,
+    "Option A — docs/review-gate.md (new doc)",
+    "the chosen value is clean data — em dash + parens survive, chrome does not",
+  );
+  for (const junk of ["*", "`", "✅"]) {
+    assert.ok(!d.recommended?.includes(junk), `chosen value must not contain ${junk}`);
+  }
+  assert.ok(!d.recommended?.endsWith("****"), "no trailing '****'");
+  assert.ok(
+    d.options.includes("Option A — docs/review-gate.md (new doc)"),
+    "the option list is decoration-free too, so auto-choose can match the value",
+  );
+});
+
+test("stripDecoration: strips chrome but preserves structural punctuation the worker meant as data", () => {
+  assert.equal(stripDecoration("**bold** `code` ✅"), "bold code");
+  assert.equal(stripDecoration("Option A — foo/bar.md (new)"), "Option A — foo/bar.md (new)");
+  assert.equal(stripDecoration("  plain  "), "plain");
+});
+
+test("no-RECOMMENDED fallback: a DECISION_REQUEST with no marker leaves recommended undefined so §4 falls back to the first option", () => {
+  // The auto-choose floor is `recommended ?? options[0]` — when a worker emits a
+  // DECISION_REQUEST but names no recommendation, the deterministic floor still
+  // resolves it (to the first option) rather than stalling for a human.
+  const payload = [
+    "DECISION_REQUEST: which serialization?",
+    "- NDJSON",
+    "- a single JSON array",
+  ].join("\n");
+  const d = parseDecisionRequest(payload);
+  assert.ok(d);
+  assert.equal(d.recommended, undefined, "no marker ⇒ no recommendation to echo");
+  assert.equal(d.options[0], "NDJSON", "…so the floor auto-chooses the first option");
+});
+
+test("parseDecisionRequest: non-DECISION text returns null (the parser is a gate, not a guess)", () => {
+  assert.equal(parseDecisionRequest("just a normal report, no decision here"), null);
+});
+
+test("GOLDEN (QUESTION contract): a QUESTION parses to its text and never blocks the run", () => {
+  const q = parseQuestion("QUESTION: should the deny-floor also cover $ROOT-relative symlinks?");
+  assert.ok(q, "QUESTION must be recognised");
+  assert.equal(q.question, "should the deny-floor also cover $ROOT-relative symlinks?");
+  assert.equal(parseQuestion("no question marker present"), null);
 });
