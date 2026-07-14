@@ -46,3 +46,44 @@ test("merges caller-supplied non-ANTHROPIC vars", () => {
   const child = buildWorkerEnv({ GH_TOKEN: "TOKEN-EXAMPLE" }, { PATH: "/usr/bin" });
   assert.equal(child.GH_TOKEN, "TOKEN-EXAMPLE");
 });
+
+test("grants ZDOTDIR from the config-resolved path (shell-isolation boundary)", () => {
+  const child = buildWorkerEnv({}, { PATH: "/usr/bin", HOME: "/home/x" }, { zdotdir: "/opt/rmd/zdotdir" });
+  assert.equal(child.ZDOTDIR, "/opt/rmd/zdotdir", "the config path must win");
+});
+
+test("defaults ZDOTDIR from HOME when the caller passes no path", () => {
+  // <HOME>/.config/remudero/zdotdir === <root>/../.config/remudero/zdotdir.
+  const child = buildWorkerEnv({}, { PATH: "/usr/bin", HOME: "/home/x" });
+  assert.equal(child.ZDOTDIR, "/home/x/.config/remudero/zdotdir");
+});
+
+test("NEVER copies the operator's ZDOTDIR from the parent — only the granted path", () => {
+  const child = buildWorkerEnv(
+    {},
+    { PATH: "/usr/bin", HOME: "/home/x", ZDOTDIR: "/home/x/.config/OPERATOR" },
+    { zdotdir: "/opt/rmd/zdotdir" },
+  );
+  assert.equal(child.ZDOTDIR, "/opt/rmd/zdotdir", "an operator ZDOTDIR must not leak in");
+});
+
+test("an explicit ZDOTDIR in extra overrides the default (test/override escape hatch)", () => {
+  const child = buildWorkerEnv({ ZDOTDIR: "/tmp/override" }, { PATH: "/usr/bin", HOME: "/home/x" });
+  assert.equal(child.ZDOTDIR, "/tmp/override");
+});
+
+test("grants CLAUDE_CODE_SHELL (the var that isolates the Bash-tool snapshot from ~/.zshrc)", () => {
+  const withOpt = buildWorkerEnv({}, { PATH: "/usr/bin", HOME: "/home/x" }, { shell: "/bin/bash" });
+  assert.equal(withOpt.CLAUDE_CODE_SHELL, "/bin/bash", "the config shell must be granted");
+  const dflt = buildWorkerEnv({}, { PATH: "/usr/bin", HOME: "/home/x" });
+  assert.equal(dflt.CLAUDE_CODE_SHELL, "/bin/bash", "defaults to /bin/bash");
+});
+
+test("NEVER copies the operator's CLAUDE_CODE_SHELL from the parent — only the granted value", () => {
+  const child = buildWorkerEnv(
+    {},
+    { PATH: "/usr/bin", HOME: "/home/x", CLAUDE_CODE_SHELL: "/opt/operator/zsh" },
+    { shell: "/bin/bash" },
+  );
+  assert.equal(child.CLAUDE_CODE_SHELL, "/bin/bash", "an operator shell must not leak in");
+});

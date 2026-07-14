@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
-import { loadConfig, type Config } from "./config.js";
+import { loadConfig, workerShell, workerZdotdir, type Config } from "./config.js";
 import { buildWorkerEnv } from "./env.js";
 
 /** Structured result of one worker run. */
@@ -62,7 +62,13 @@ export interface SpawnWorkerArgs {
  */
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const config = args.config ?? loadConfig();
-  const childEnv = buildWorkerEnv(args.env ?? {});
+  // Shell isolation (resolved from config, never hardcoded) so a worker sources
+  // no operator rc: CLAUDE_CODE_SHELL redirects Claude Code's Bash-tool snapshot
+  // to an empty rc, ZDOTDIR covers any direct zsh (W1-T1C compinit contamination).
+  const childEnv = buildWorkerEnv(args.env ?? {}, process.env, {
+    zdotdir: workerZdotdir(config),
+    shell: workerShell(config),
+  });
 
   const stderrChunks: string[] = [];
   const blocks: string[] = [];
