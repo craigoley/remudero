@@ -78,7 +78,31 @@ sequence is strict and cannot be reordered:
    ```
 
 Recovery if the repo is ever deadlocked (required check with no poster): reset the
-contexts with the same `PATCH` endpoint down to `["ci"]`.
+contexts with the same `PATCH` endpoint down to `["ci"]`:
+
+```sh
+gh api --method PATCH \
+  repos/craigoley/remudero/branches/main/protection/required_status_checks \
+  -F strict=false -f 'contexts[]=ci'
+```
+
+## Manual PRs — the escape hatch (`rmd review <n>`)
+
+Only `rmd run-task` posts `remudero-review` in its flow. A **hand-opened PR**
+(plan edits, docs, any change made outside the runner) therefore sits BLOCKED with
+the required check absent — a required check with no poster is a permanent
+deadlock. Unblock it with the escape hatch, which invokes the **same deterministic
+`judgeReview`** — never a bypass, never a `--force`:
+
+```sh
+rmd review <pr-number>
+```
+
+It resolves the head sha + diff, finds the acceptance criteria (a `Remudero-Task:`
+trailer → `plan/tasks.yaml`, else an `Acceptance:` block in the PR body), judges
+the PR body against each criterion's proof, and posts the status. **Absent criteria
+FAIL CLOSED** — nothing to judge is never a pass. See
+[CONTRIBUTING.md](../CONTRIBUTING.md) for the `Acceptance:` block format.
 
 ## Live falsification (proven, not asserted)
 

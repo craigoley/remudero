@@ -9,6 +9,7 @@ import {
   assertRunnable,
   loadPlan,
   selectTask,
+  type AcceptanceCriterion,
   type Plan,
   type Task,
 } from "./lib/plan.js";
@@ -17,6 +18,7 @@ import {
   REVIEW_CONTEXT,
   buildReviewPrompt,
   judgeReview,
+  parseAcceptanceBlock,
   parseReviewerVerdicts,
   postReviewStatus,
   reviewerVerdictContract,
@@ -47,12 +49,17 @@ const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
 /** Owner org, read from THIS repo's origin — no hardcoded account in the tree. */
 function resolveOwner(): string {
+  return resolveOwnerRepo().owner;
+}
+
+/** Owner + repo, parsed from THIS repo's origin url — no hardcoded slug in the tree. */
+function resolveOwnerRepo(): { owner: string; repo: string } {
   const url = execFileSync("git", ["-C", repoRoot, "config", "--get", "remote.origin.url"], {
     encoding: "utf8",
   }).trim();
-  const m = url.match(/[/:]([^/:]+)\/[^/]+?(?:\.git)?$/);
-  if (!m) throw new Error(`could not parse owner from origin url`);
-  return m[1];
+  const m = url.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/);
+  if (!m) throw new Error(`could not parse owner/repo from origin url`);
+  return { owner: m[1], repo: m[2] };
 }
 
 /** Check-run conclusions that mean the gate is RED (fail closed on anything not green). */
@@ -199,7 +206,7 @@ async function runReview(args: {
   owner: string;
   repo: string;
   prUrl: string;
-  task: Task;
+  task: { id: string; acceptance?: AcceptanceCriterion[] };
   report: string;
   settingsFile: string;
   config: Config;
@@ -693,16 +700,92 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
   }
 }
 
+/**
+ * `rmd review <pr-number>` — the ESCAPE HATCH for hand-opened PRs. PR #13 made
+ * `remudero-review` a REQUIRED check, but only `rmd run-task` posts it; a manual
+ * plan/doc PR therefore sits BLOCKED forever with no status. This command posts the
+ * status by hand — using the SAME deterministic {@link judgeReview}, NEVER a bypass
+ * and NEVER a --force. It is the same judge, invoked by a human.
+ *
+ * Criteria resolution: a `Remudero-Task: <id>` trailer in the PR body → that task's
+ * acceptance from plan/tasks.yaml; otherwise the PR body's `Acceptance:` block
+ * (manual plan/doc PRs). ABSENT criteria are `[]` ⇒ judgeReview FAILS CLOSED —
+ * nothing to judge is never a pass. The PR body doubles as the REPORT (where a
+ * manual author pastes the proofs the judge checks).
+ */
+async function reviewCommand(prArg: string): Promise<number> {
+  const { owner, repo } = resolveOwnerRepo();
+  const view = ghJson(["pr", "view", prArg, "--json", "headRefOid,body,url,number"]) as {
+    headRefOid: string;
+    body: string;
+    url: string;
+    number: number;
+  };
+  const body = view.body ?? "";
+
+  // Criteria: task trailer → tasks.yaml; else the PR body's Acceptance: block.
+  let criteria: AcceptanceCriterion[] = [];
+  let source = "NONE (fail closed — nothing to judge is never a pass)";
+  const taskId = body.match(/Remudero-Task:\s*(\S+)/)?.[1];
+  if (taskId) {
+    try {
+      const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+      const t = plan.byId.get(taskId);
+      if (t?.acceptance?.length) {
+        criteria = t.acceptance;
+        source = `plan/tasks.yaml task ${taskId} (${criteria.length} criteria)`;
+      }
+    } catch {
+      // A bad/absent plan is not the reviewer's concern; fall through to the body.
+    }
+  }
+  if (criteria.length === 0) {
+    const fromBody = parseAcceptanceBlock(body);
+    if (fromBody.length) {
+      criteria = fromBody;
+      source = `PR body Acceptance: block (${fromBody.length} criteria)`;
+    }
+  }
+
+  const config = loadConfig();
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const runId = `review-PR${view.number}-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, ...extra });
+
+  console.log(`### rmd review PR #${view.number} — criteria from ${source}`);
+  const verdict = await runReview({
+    owner,
+    repo,
+    prUrl: view.url,
+    task: { id: taskId ?? `PR-${view.number}`, acceptance: criteria },
+    report: body, // the PR body is the manual author's REPORT (proofs are pasted here)
+    settingsFile: "",
+    config,
+    log,
+    say: (m) => console.log(m),
+    account: (r) => r,
+    spawnReviewer: false, // deterministic binding path — the same judge, by hand
+  });
+  console.log(
+    `\nremudero-review=${verdict.state} posted to ${view.url} (head ${verdict.headSha.slice(0, 7)})`,
+  );
+  return verdict.state === "success" ? 0 : 1;
+}
+
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(): Promise<void> {
-  const [, , cmd, taskId] = process.argv;
-  if (cmd !== "run-task" || !taskId) {
-    console.error("usage: rmd run-task <task-id>");
-    process.exit(2);
+  const [, , cmd, arg] = process.argv;
+  if (cmd === "run-task" && arg) {
+    const result = await runTask(arg);
+    console.log("\n" + JSON.stringify(result, null, 2));
+    process.exit(result.merged ? 0 : 1);
   }
-  const result = await runTask(taskId);
-  console.log("\n" + JSON.stringify(result, null, 2));
-  process.exit(result.merged ? 0 : 1);
+  if (cmd === "review" && arg) {
+    process.exit(await reviewCommand(arg));
+  }
+  console.error("usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR");
+  process.exit(2);
 }
 
 // Only run when invoked directly (not when imported by tests).
@@ -713,4 +796,4 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   });
 }
 
-export { runTask, runReview, waitForCiGreen };
+export { runTask, runReview, waitForCiGreen, reviewCommand };

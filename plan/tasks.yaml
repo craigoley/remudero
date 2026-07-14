@@ -159,6 +159,17 @@
       proof: "ledger shows task completed with an open question logged"
     - claim: "provenance linter is BLOCK-oriented, not line-oriented (W1-T1 open question)"
       proof: "a claim wrapped across three lines with its [src:] on the last line PASSES; the same claim with no [src:] anywhere BLOCKS"
+    - claim: "GOLDEN (PR #12 dead-doc): the reviewer FAILS PR #12 actual diff — a CI-green, single-file
+        docs/review-gate.md PR that satisfies ZERO acceptance criteria. If the reviewer cannot fail THAT
+        it cannot fail anything (Standing rule 13). This is the canonical reviewer test case."
+      proof: "golden test over PR #12 single-doc diff + its describe-only body vs W1-T1D real acceptance
+        criteria -> judgeReview returns state=failure (criteria 2 and 3 unmet; criterion 1 only
+        keyword-matches the prose, proving a doc DESCRIBES but does not PROVE). Present in test/review.test.ts."
+    - claim: "parseDecisionRequest survives the T1D auto-choose near-miss — DECORATION IS NOT DATA: the
+        option `**Option A — `docs/review-gate.md` (new doc)** ✅ ****` must parse to a clean value with
+        the markdown bold, backticks, emoji, and trailing asterisks STRIPPED (same class as the WS-0 `)` bleed)"
+      proof: "golden test: parseDecisionRequest on that exact decorated payload returns a recommended
+        value of `Option A — docs/review-gate.md (new doc)` with no `**`, no ✅, and no trailing `****`"
   status: queued
   attempts: 0
 

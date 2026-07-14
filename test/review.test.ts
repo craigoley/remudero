@@ -6,6 +6,7 @@ import {
   buildReviewPrompt,
   detectTestTheater,
   judgeReview,
+  parseAcceptanceBlock,
   parseReviewerVerdicts,
   reviewerVerdictContract,
 } from "../src/lib/review.js";
@@ -172,6 +173,98 @@ test("reviewerVerdictContract: names the machine-readable line for each criterio
   assert.match(c, /REVIEW_VERDICT <n>: PASS/);
   assert.match(c, /REVIEW_VERDICT <n>: FAIL/);
   assert.match(c, /1\.\.2/);
+});
+
+// ── parseAcceptanceBlock: criteria for manual plan/doc PRs (from the PR body) ──
+
+test("parseAcceptanceBlock: parses `- claim | proof` bullets under an Acceptance: header", () => {
+  const body = [
+    "## Summary",
+    "Does a thing.",
+    "",
+    "Acceptance:",
+    "- rmd review posts a status | gh api statuses shows context=remudero-review",
+    "- fails closed with no criteria | a body with no Acceptance block yields failure",
+    "",
+    "Remudero-Task: none",
+  ].join("\n");
+  const c = parseAcceptanceBlock(body);
+  assert.equal(c.length, 2);
+  assert.equal(c[0].claim, "rmd review posts a status");
+  assert.equal(c[0].proof, "gh api statuses shows context=remudero-review");
+  assert.equal(c[1].claim, "fails closed with no criteria");
+});
+
+test("parseAcceptanceBlock: tolerates markdown header (**Acceptance:**, ## Acceptance criteria)", () => {
+  assert.equal(parseAcceptanceBlock("**Acceptance:**\n- a | b").length, 1);
+  assert.equal(parseAcceptanceBlock("## Acceptance criteria\n1. a | b\n2. c | d").length, 2);
+});
+
+test("parseAcceptanceBlock: a body with NO Acceptance block yields [] (which fails closed)", () => {
+  const c = parseAcceptanceBlock("## Summary\nJust a docs tweak.\n\nRemudero-Task: none");
+  assert.deepEqual(c, []);
+  // And an empty criteria list is a FAILURE in judgeReview — nothing to judge is never a pass.
+  assert.equal(judgeReview(c, { diff: "", report: "anything" }).state, "failure");
+});
+
+test("parseAcceptanceBlock: a bullet with no `|` keeps the whole line as the claim (proof empty)", () => {
+  const c = parseAcceptanceBlock("Acceptance:\n- a claim with no explicit proof separator");
+  assert.equal(c.length, 1);
+  assert.equal(c[0].claim, "a claim with no explicit proof separator");
+  assert.equal(c[0].proof, "");
+});
+
+// ── GOLDEN FIXTURE: PR #12 — a CI-green single-doc PR that satisfies zero criteria.
+// PR #12 shipped ONLY docs/review-gate.md, passed CI, reported verdict=merged, and
+// did none of W1-T1D's actual work. It is the canonical reviewer test case: if the
+// reviewer cannot fail THAT, it cannot fail anything.
+const PR12_SINGLE_DOC_DIFF = [
+  "diff --git a/docs/review-gate.md b/docs/review-gate.md",
+  "new file mode 100644",
+  "--- /dev/null",
+  "+++ b/docs/review-gate.md",
+  "@@ -0,0 +1,3 @@",
+  "+# Review-enforced merge gate (W1-T1D)",
+  "+",
+  "+`remudero-review` is a REQUIRED status check on `main`, alongside `ci`.",
+].join("\n");
+
+// PR #12's actual body — prose that DESCRIBES the mechanism but pastes no gh api
+// output, no status object, no ledger. Describing is not proving.
+const PR12_BODY = [
+  "## W1-T1D — the gate enforces the reviewer",
+  "Makes `remudero-review` a REQUIRED status check on `main`, alongside `ci`.",
+  "This makes BOTH checks a GitHub-enforced contract; auto-merge is safe to leave armed.",
+  "`required_status_checks.contexts` is updated to `[ci, remudero-review]` after this PR merges.",
+  "Remudero-Task: W1-T1D",
+].join("\n");
+
+// W1-T1D's real acceptance criteria (plan/tasks.yaml) — the proofs demand OBSERVABLE
+// SYSTEM STATE (gh api output, a planted-probe status, a ledger), which a doc lacks.
+const W1T1D_CRITERIA: AcceptanceCriterion[] = [
+  {
+    claim: "protection requires exactly [ci, remudero-review]",
+    proof:
+      "gh api repos/craigoley/remudero/branches/main/protection --jq .required_status_checks.contexts",
+  },
+  {
+    claim: "a PR that is CI-GREEN but FAILS acceptance is NOT merged (verified LIVE)",
+    proof:
+      "planted probe: an implement worker that passes tests but ignores a stated acceptance criterion remudero-review failure PR stays OPEN paste the status and PR state then close",
+  },
+  {
+    claim: "a PR green on BOTH checks auto-merges with no runner-side merge call (verified LIVE)",
+    proof: "ledger shows automerge.armed then pr.merged with no explicit merge command",
+  },
+];
+
+test("GOLDEN (PR #12): a CI-green single-doc PR that satisfies zero criteria yields failure", () => {
+  const v = judgeReview(W1T1D_CRITERIA, { diff: PR12_SINGLE_DOC_DIFF, report: PR12_BODY });
+  assert.equal(v.state, "failure", v.summary);
+  // Note: criterion 1's PROSE keyword-matches (the body names required_status_checks.contexts)
+  // — exactly why a doc that DESCRIBES a mechanism is not proof it EXISTS. Criteria 2 & 3
+  // (which demand a planted-probe status and a ledger) are unmet, so the verdict fails.
+  assert.ok(v.criteria.some((c) => !c.met), "at least one criterion is unmet");
 });
 
 test("buildReviewPrompt: fresh, read-only, gh-only, posts remudero-review, never edits", () => {
