@@ -1,4 +1,4 @@
-# REMUDERO — Master Plan (v2.13 · synced 2026-07-14 · ★ KNOWLEDGE ARCHITECTURE: §8A memory hierarchy (Tier 0 stable prefix · Tier 1 matched injection · Tier 2 plan RETRIEVED not injected · Tier 3 run-local) + cache-aware STABLE-FIRST/VOLATILE-LAST ordering (measured via cache_read tokens); §8B compaction doctrine (detect+ledger, anchored summarization, write-before-compact); retros now question guards too (harness assumptions go stale); W1-T33–T39 close the five knowledge holes · RETROS ×2: R1 (…021334) shipped WS-0 + WS-1 proto-runner (9 PRs), seeded CALIBRATION + proposals P1–P5; R2 (…391543) logs W1-T19/#34 + W1-T3F/#35 (2/2 merged), refreshes NET STATE to 11 PRs / 19 runs, adds this cycle's calibration row, mines 0 new failures, and COMPRESSES the first-retro changelog prose folded here. Prior focus ★ DECOMPOSE BY CONCERN: mis-specified W1-T3 (8 criteria across 4 subsystems) SPLIT into W1-T3/B/C/D/E (+ W1-T3F) — every criterion survives VERBATIM, none dropped/weakened; NEW schema `satisfied_by` (Architect-only) marks a criterion an earlier merge already satisfied; Standing rule 16 (the Architect corrects a mis-specified task, a worker never; no criterion dropped, only redistributed) · CLIENTS & CONTRACT: D-5 RESOLVED (monorepo for everything consuming the daemon API — a breaking change fails CI across all consumers atomically; site/commons/pro stay separate); NEW §7A the API contract is the product boundary (`packages/api-client` GENERATED from ONE tailnet surface, no hand-rolled fetch); §7 rewritten as ONE web app / THREE shells (browser · Tauri macOS · Tauri iOS, Expo the documented iOS fallback; push is an adapter, not an app concern); website → WS-12 repo `remudero-site`; clients W3-T1..T5 gate on the contract · BUDGET IS A TRIPWIRE, NOT AN ALLOWANCE: budget_usd is a runaway BUG DETECTOR (default $100, an order of magnitude above observed), a soft $25 line WARNS-and-continues, blocked_budget = "looping" — W1-T3 was killed mid-work at $3.57 vs a guessed $4; same bug as maxTurns (PR #8) · THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
+# REMUDERO — Master Plan (v2.14 · synced 2026-07-14 · ★ FEEDBACK INTAKE — the Architect's front door (§7B): feedback is an ARTIFACT not a command (plan/feedback/ inbox); `rmd triage` grounds→researches→GRILLS-or-PROPOSES as a higher-tier Architect that can propose anything and merge nothing; Architect gets WebSearch/WebFetch, implement workers NEVER (injection surface); `rmd trace` renders feedback→task→run→PR both ways; Standing rule 17 PROVENANCE FOR THE PLAN (`origin:`/`plan_refs:`, Architect-only) + backfilled on all tasks; W1-T40–T43, W3-T6; two ★VERIFY-FIRST items (AskUserQuestion headless? Read image?) · KNOWLEDGE ARCHITECTURE: §8A memory hierarchy (Tier 0 stable prefix · Tier 1 matched injection · Tier 2 plan RETRIEVED not injected · Tier 3 run-local) + cache-aware STABLE-FIRST/VOLATILE-LAST ordering (measured via cache_read tokens); §8B compaction doctrine (detect+ledger, anchored summarization, write-before-compact); retros now question guards too (harness assumptions go stale); W1-T33–T39 close the five knowledge holes · RETROS ×2: R1 (…021334) shipped WS-0 + WS-1 proto-runner (9 PRs), seeded CALIBRATION + proposals P1–P5; R2 (…391543) logs W1-T19/#34 + W1-T3F/#35 (2/2 merged), refreshes NET STATE to 11 PRs / 19 runs, adds this cycle's calibration row, mines 0 new failures, and COMPRESSES the first-retro changelog prose folded here. Prior focus ★ DECOMPOSE BY CONCERN: mis-specified W1-T3 (8 criteria across 4 subsystems) SPLIT into W1-T3/B/C/D/E (+ W1-T3F) — every criterion survives VERBATIM, none dropped/weakened; NEW schema `satisfied_by` (Architect-only) marks a criterion an earlier merge already satisfied; Standing rule 16 (the Architect corrects a mis-specified task, a worker never; no criterion dropped, only redistributed) · CLIENTS & CONTRACT: D-5 RESOLVED (monorepo for everything consuming the daemon API — a breaking change fails CI across all consumers atomically; site/commons/pro stay separate); NEW §7A the API contract is the product boundary (`packages/api-client` GENERATED from ONE tailnet surface, no hand-rolled fetch); §7 rewritten as ONE web app / THREE shells (browser · Tauri macOS · Tauri iOS, Expo the documented iOS fallback; push is an adapter, not an app concern); website → WS-12 repo `remudero-site`; clients W3-T1..T5 gate on the contract · BUDGET IS A TRIPWIRE, NOT AN ALLOWANCE: budget_usd is a runaway BUG DETECTOR (default $100, an order of magnitude above observed), a soft $25 line WARNS-and-continues, blocked_budget = "looping" — W1-T3 was killed mid-work at $3.57 vs a guessed $4; same bug as maxTurns (PR #8) · THE GATE TEACHES: remudero-review now NAMES the unmet criterion (not just a count); Standing rule 15 — a blocked worker adds the work or escalates, NEVER edits the criteria to match its diff · QUALITY BAR: §5 three-tier gate stack + §5A inherited-not-optional (`rmd project init`, W1-T23–T28, W2-T2) · REVIEW GATE LIVE: main requires [ci, remudero-review], `rmd review <n>` is the manual escape hatch · §4B FLIGHT CONTROL queued (W1-T20/21/22, W2-T1) · NEXT: rmd run-task on the WS-1 queue through the closed gate)
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -795,6 +795,42 @@ loop-continuation ships with the daemon MVP.
 `escalations.list/answer` — a **projection of the same contract (§7A)**, never a parallel API. Exposed
 over tailnet HTTPS → claude.ai custom connector; bearer token, read vs. write scopes.
 
+## 7B. Feedback intake: the Architect's front door
+
+Today the harness has **no front door**: every piece of operator feedback goes chat with an external
+Architect → research → synthesis → a hand-pasted prompt → a plan PR. This is the last fully-manual loop.
+
+**FEEDBACK IS AN ARTIFACT, NOT A COMMAND.** `plan/feedback/` is a durable, diffable inbox — one entry per
+item: `{id, ts, raw text, attachments[] (multimodal — screenshots, terminal dumps, links), origin:
+cli|ui|issue, status: new|grilling|proposed|accepted|rejected, proposal_pr}`. Captured async by
+`rmd feedback` (W1-T40); never lost in a chat scrollback.
+
+**THE INTAKE LOOP (`rmd triage`, W1-T41)** — an ARCHITECT worker, **HIGHER TIER than implement (G-17)**:
+1. **GROUND** — grep the plan, learnings, ledger, and DECISIONS for what is ALREADY decided. Re-deciding a
+   settled question is a failure mode, not a feature.
+2. **RESEARCH** — server-side WebSearch for platform facts. This is what makes a proposal *grounded*
+   rather than merely plausible.
+3. **GRILL OR PROPOSE** —
+   - **AMBIGUOUS ⇒ GRILL** (W1-T42). Interactive: `AskUserQuestion` at the terminal. Async: a `needs-human`
+     GitHub issue with options + a recommendation — **reuse the existing escalation machinery (§4), do not
+     invent a second one**. The grill is where the VALUE is; a triage that never asks anything is guessing.
+   - **CLEAR ⇒ PROPOSE.** A plan-only PR naming which §sections change, which tasks are added/rewired, the
+     rationale, and the **provenance back to the feedback id** (`origin: feedback#<id>`). Gated by
+     `ci + remudero-review` like everything else.
+
+**TOOL BOUNDARY (load-bearing):** the **Architect gets WebSearch/WebFetch; IMPLEMENT WORKERS NEVER DO** —
+fetched content is a prompt-injection surface, and `claude-code-action` disables these by default for
+exactly this reason [research]. WebSearch is server-side (Anthropic's), so the Architect researches
+WITHOUT opening the sandbox's `allowedDomains`. The Architect's output is contained by the **same PR +
+review gate** as any worker: it can **PROPOSE anything and MERGE nothing**.
+
+**TRACEABILITY (`rmd trace`, W1-T43):** feedback → proposal PR → task(s) → run(s) → PR(s) → merge sha,
+renderable both ways (forward from a feedback id, reverse from a task id), off the `origin:`/`plan_refs`
+metadata (Standing rule 17). **HONEST LIMIT, stated:** v1 triage is WEAKER than a research-heavy chat with
+an external Architect. The measurable calibration metric is **what fraction of proposal PRs are accepted
+UNCHANGED** — track it; strategy, contested calls, and deep research stay a human/chat path until that
+number earns trust.
+
 ## 8. Security posture (consolidated)
 
 Worker credential = fine-grained PAT scoped to the product's repos, via GH_TOKEN env only. No MCP in
@@ -1222,6 +1258,12 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    by CONCERN (every criterion survives verbatim in some child task), and the `satisfied_by` field
    (Architect-only, plan-only PRs — rule 15) marks a criterion an earlier merge already satisfied. Splits
    observed: T1C, T1D, W1-T3. [PR #22, W1-T3] 
+17. **PROVENANCE FOR THE PLAN, NOT JUST FOR PROMPTS.** Every task must cite WHY it exists (`origin:`
+   feedback#/retro#/architect/human + `plan_refs:` the sections it implements). A task with no origin is
+   an ORPHAN and cannot be trusted to reflect anyone's intent. `origin:`/`plan_refs:` are Architect-only,
+   plan-only fields (same rule as `satisfied_by`, rule 15): a worker adding an origin to justify its own
+   diff is editing the plan to match the work. `rmd trace` (W1-T43) makes the chain feedback → task → run
+   → PR renderable both ways. [§7B]
 
 - Lives at repo root. Header carries sync date + focus, his-house style.
 - Humans and agents edit via commits/PRs; the Architect does narrative syncs at workstream
