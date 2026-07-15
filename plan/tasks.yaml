@@ -2244,6 +2244,11 @@
     - claim: "the daemon killed WHILE an implement worker is in flight recovers via an ACTUAL orphan reconstruction (not only no-duplicate-run)"
       proof: "operator pastes the chaos-drill: kill mid-implement -> restart -> reconstructOrphan resolves the orphaned run's fate from git+GitHub (merged->done or clean->re-run), evidenced BEYOND no-duplicate"
     # ── LIVE criteria moved VERBATIM from the headless redesigns (Rule 16, items 6/7) ──
+    # CARRY-OVER RESTORED (dropped in #71 item 6 and #72 item 0): W1-T17's live TRIP proof. Drill this
+    # BEFORE W1-T18's mechanism ships (or with it deliberately bypassed) — W1-T18's purpose is that a
+    # planted dotfile STOPS breaking isolation, so the fail-closed TRIP must be demonstrated first.
+    - claim: "with the isolation mechanism absent or bypassed, a planted ~/.bashrc makes rmd run-task REFUSE to start (fail-closed, live)"
+      proof: "operator plants ~/.bashrc with an alias; rmd run-task refuses; ledger shows isolation_preflight_failed with the observed count and NO implement.done line"
     - claim: "removing the planted ~/.bashrc lets the same run proceed past preflight"
       proof: "with ~/.bashrc removed, the same task reaches recon/implement; ledger shows preflight passed (count 0)"
     - claim: "a worker on a machine WITH a populated ~/.bashrc reports 0 aliases (isolation independent of operator dotfiles)"
