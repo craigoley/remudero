@@ -1328,6 +1328,21 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    plan-only fields (same rule as `satisfied_by`, rule 15): a worker adding an origin to justify its own
    diff is editing the plan to match the work. `rmd trace` (W1-T43) makes the chain feedback → task → run
    → PR renderable both ways. [§7B]
+18. **EVERY ACCEPTANCE CRITERION MUST BE SATISFIABLE BY A NON-INTERACTIVE WORKER.** A criterion that
+   requires live operator input ("operator confirms", "user selects", "prompt the human") is STRUCTURALLY
+   UNFIT for the headless runner — there is no TTY and no operator, so the worker cannot satisfy or test
+   it and will burn its whole budget trying (W1-T9 spent its last ~15 turns on readline-repro scripts
+   conjuring an operator that isn't there, then died error_max_turns). Interactive behavior is designed
+   for no-TTY and tested via INJECTED INPUT / FLAGS / TTY-ABSENT DEFAULTS, never a live human in the loop:
+   a prompt is an interactive-only affordance layered on top of a fully non-interactive path. This is a
+   new error CLASS, distinct from over-scoping (rule 19) and looping. [DIAGNOSIS.md diag/w1t9-max-turns, W1-T9]
+19. **SIZING IS A PLAN-LAYER CONCERN, NOT A BUDGET KNOB.** A task spanning ≥2 independent acceptance
+   concerns, or shipping ≥2 new subsystems, must be `risk: high` or DECOMPOSED at plan time — never left
+   `risk: medium` and rescued with a bigger turn budget. Two cross-cutting tasks (W1-T6, W1-T9) overran
+   the medium/80 mount; the medium budget is correctly calibrated for genuine single-concern work
+   (observed 21–42 turns), so raising it would MASK over-scoping and reward it (and W1-T9 was the THIRD
+   max_turns event — a third budget bump was refused). The retro fix lives in task SIZING (rule 16
+   decomposition), not in `.remudero/mounts.yaml`. [DIAGNOSIS.md diag/w1t9-max-turns, W1-T6, W1-T9]
 
 - Lives at repo root. Header carries sync date + focus, his-house style.
 - Humans and agents edit via commits/PRs; the Architect does narrative syncs at workstream

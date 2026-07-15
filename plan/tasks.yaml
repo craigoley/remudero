@@ -441,8 +441,33 @@
   status: queued
   attempts: 0
 
-- id: W1-T9
-  title: Config loader + `rmd init` wizard v0 (tier detect→confirm)
+# W1-T9 was decomposed into W1-T9a/b/c (over-scoped: 2 concerns + a headless-unfit confirm;
+# died error_max_turns at 81 turns — DIAGNOSIS.md on diag/w1t9-max-turns, Standing rules 16/18/19).
+# No criterion dropped: config-validation survives VERBATIM in T9a; tier-detect is made a pure
+# INPUT→tier criterion in T9b; the interactive "operator confirms" criterion — structurally unfit
+# for a headless worker — is REPLACED by a no-TTY flag/default criterion in T9c (rule 18).
+- id: W1-T9a
+  title: Config loader + validation (schema + overflow/daily-cap rejection)
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  acceptance:
+    - claim: "config validation rejects overflow:api_key + daily_cap:none"
+      proof: "named error in the rejection test"
+  risk: medium
+  origin: architect
+  plan_refs: ["§9"]
+  files: [src/lib/config.ts]
+  status: queued
+  attempts: 0
+  note: "Split from W1-T9 (DIAGNOSIS.md, rule 16). Single concern: config loader + validation, no
+    interactivity. Criterion preserved VERBATIM from W1-T9."
+
+- id: W1-T9b
+  title: Tier detection (pure — /usage + ~/.claude.json keys → tier + evidence)
   repo: remudero
   depends_on: [W1-T4]
   type: implement
@@ -450,14 +475,42 @@
   principles: {tdd: strict}
   budget_usd: 100.00
   acceptance:
-    - claim: "wizard detects tier via /usage + ~/.claude.json keys, then SHOWS it for confirmation"
-      proof: "transcript: detected value displayed, operator confirms, config written"
-    - claim: "config validation rejects overflow:api_key + daily_cap:none"
-      proof: "named error in the rejection test"
+    - claim: "given /usage output + ~/.claude.json keys as INPUTS, detectTier returns the tier with its evidence source"
+      proof: "unit tests over fixtures for max5x / max20x / ambiguous — NO live calls, NO interactivity"
   risk: medium
   origin: architect
+  plan_refs: ["§9"]
+  files: [src/lib/tier.ts, src/lib/headroom.ts]
   status: queued
   attempts: 0
+  note: "Split from W1-T9 (DIAGNOSIS.md). Pure detection: consumes the /usage output (W1-T4 headroom
+    parser) + ~/.claude.json keys (hasAvailableSubscription, cachedUsageUtilization, modelAccessCache,
+    oauthAccount) as pure INPUTS and returns tier + evidence source. No live calls, no interactivity."
+
+- id: W1-T9c
+  title: "`rmd init` wizard (no-TTY safe: --tier/--yes flags + TTY-absent default)"
+  repo: remudero
+  depends_on: [W1-T9a, W1-T9b]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  acceptance:
+    - claim: "`rmd init --tier max20x --yes` writes a valid config NON-INTERACTIVELY (no TTY, no operator)"
+      proof: "config written from flags; the test drives the CLI with no stdin / no TTY and asserts the written config"
+    - claim: "when tier detection is confident, init writes the config WITHOUT prompting"
+      proof: "fixture-driven: a confident-detection fixture yields a written config; the prompt path is never entered"
+  risk: high
+  origin: architect
+  plan_refs: ["§9"]
+  files: [src/lib/init.ts, src/run-task.ts, bin/rmd]
+  status: queued
+  attempts: 0
+  note: "Split from W1-T9. The interactive 'operator confirms' criterion was STRUCTURALLY UNFIT for a
+    headless worker (W1-T9 burned its last ~15 turns on readline-repro scripts conjuring an operator that
+    isn't there). REPLACED per Standing rule 18 with a no-TTY design: --tier/--yes flags for non-interactive
+    use; prompt ONLY when a TTY is present; safe default + logged tier when absent. risk:high ⇒ 120-turn
+    mount (the confirm+detect+write wiring is the largest child, not a budget bump for the old bundle)."
 
 - id: W1-T10
   title: Scoped-PAT injection via buildWorkerEnv (FF9 hardening)
@@ -497,7 +550,7 @@
 - id: W1-T12
   title: Daemonize — scheduler loop + launchd unit (LAST task in WS-1)
   repo: remudero
-  depends_on: [W1-T2, W1-T3, W1-T4, W1-T5, W1-T6, W1-T7, W1-T8, W1-T9, W1-T11]
+  depends_on: [W1-T2, W1-T3, W1-T4, W1-T5, W1-T6, W1-T7, W1-T8, W1-T9a, W1-T9b, W1-T9c, W1-T11]
   type: implement
   verify: auto
   principles: {tdd: strict}
