@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_BUDGET_USD, noPrVerdict, softBudgetWarning, workerErrorVerdict } from "../src/run-task.js";
+import {
+  DEFAULT_BUDGET_USD,
+  isTransientResult,
+  noPrVerdict,
+  softBudgetWarning,
+  workerErrorVerdict,
+} from "../src/run-task.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 
 /** Build a minimal WorkerResult for the verdict-mapping tests. */
@@ -14,6 +20,7 @@ function result(over: Partial<WorkerResult>): WorkerResult {
     stderr: "",
     subtype: "success",
     isError: false,
+    apiError: false,
     permissionDenials: [],
     childEnvKeys: [],
     model: "default",
@@ -47,6 +54,28 @@ test("noPrVerdict: a terminal-SUCCESS worker with NO PR yields verdict 'no_pr' w
   // the exact incoherent string from run W1-T12a-1784117152056 must never appear:
   assert.doesNotMatch(v.ledger.reason, /error: success/);
   assert.doesNotMatch(v.ledger.reason, /worker error/);
+});
+
+// ── The W1-T12a REFRAME (PR #59 collapsed two OPPOSITE cases): a server_error mid-response
+// is a TRANSIENT (retry), NOT a no-op. isTransientResult DISTINGUISHES them: an api-error
+// result is transient; a clean terminal-success with zero commits is the real no_pr no-op. ──
+test("isTransientResult: a server_error/<synthetic>/isApiErrorMessage result is TRANSIENT (→ retry, NOT no_pr, NOT block, NOT strike)", () => {
+  assert.equal(isTransientResult(result({ apiError: true, subtype: "success" })), true);
+  // a network-blip error subtype with a transient text signature is also transient (the classifier, now wired)
+  assert.equal(
+    isTransientResult(result({ isError: true, subtype: "error_during_execution", text: "Error: socket hang up" })),
+    true,
+  );
+});
+
+test("isTransientResult: a CLEAN terminal-success (no api-error) is NOT transient → it flows to the no_pr/no-op path", () => {
+  assert.equal(isTransientResult(result({ subtype: "success", apiError: false })), false);
+  // and that clean-success no-op still maps to the honest no_pr verdict (the OPPOSITE of a transient):
+  assert.equal(noPrVerdict(result({ subtype: "success" }), 1, "implement").verdict, "no_pr");
+});
+
+test("isTransientResult: a real task failure (error_max_turns) is NOT transient — it is a strike → failed", () => {
+  assert.equal(isTransientResult(result({ isError: true, subtype: "error_max_turns" })), false);
 });
 
 test("REGRESSION: the real-error path is unchanged — error_max_turns still → failed with its own reason", () => {

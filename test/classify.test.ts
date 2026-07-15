@@ -213,3 +213,25 @@ test("runDiagnoseThenRetry: exhausting strikes past the diagnose-informed retry 
   assert.equal(result.diagnosed, true);
   assert.match(result.reason ?? "", /strikes exhausted/i);
 });
+
+// ── The Anthropic-side transient (server_error mid-response) — W1-T12a-1784117152056.
+// A result carrying the api-error signature is TRANSIENT (retry, no strike), NOT a task
+// failure. This is the SECOND Anthropic-side transient (the autoupdater race was first). ──
+test("classifyFailure: the apiError flag classifies TRANSIENT (server_error / <synthetic> / isApiErrorMessage)", () => {
+  assert.equal(classifyFailure({ apiError: true }), "transient");
+  assert.equal(classifyFailure({ apiError: true, subtype: "success" }), "transient");
+});
+
+test("classifyFailure: the 'Server error mid-response' / overloaded text is TRANSIENT even without the flag", () => {
+  assert.equal(
+    classifyFailure({ text: "API Error: Server error mid-response. The response above may be incomplete." }),
+    "transient",
+  );
+  assert.equal(classifyFailure({ text: "overloaded_error: the model is overloaded" }), "transient");
+});
+
+test("classifyFailure: a real task failure is still a STRIKE — no api-error false positive", () => {
+  assert.equal(classifyFailure({ subtype: "error_max_turns" }), "strike");
+  assert.equal(classifyFailure({ text: "AssertionError: expected 3 to equal 4" }), "strike");
+  assert.equal(classifyFailure({ apiError: false, subtype: "success" }), "strike"); // no evidence ⇒ strike (fail-closed)
+});
