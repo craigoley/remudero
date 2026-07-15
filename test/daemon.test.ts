@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import type { RunResult } from "../src/run-task.js";
 import type { UsageSnapshot } from "../src/lib/headroom.js";
-import { DEFAULT_POLL_INTERVAL_MS, runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
+import { DEFAULT_POLL_INTERVAL_MS, daemonBoot, runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
 import type { MergedSet } from "../src/lib/drain.js";
 
@@ -73,6 +73,42 @@ function fakeClock(): { sleep: (ms: number) => Promise<void>; calls: number[] } 
   const calls: number[] = [];
   return { sleep: async (ms: number) => { calls.push(ms); }, calls };
 }
+
+// ── daemonBoot: the ANTHROPIC-clean-env boot assertion (W1-T12b) ───────────
+// Run entirely in-process over an injected log + env — NO real launchd load
+// (that live commissioning step is W1-T12d).
+
+test("daemonBoot: a clean env logs daemon.boot with env_clean=true, billing_mode=subscription", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const cleanEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op" };
+  const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }), cleanEnv);
+  assert.deepEqual(result, { env_clean: true, billing_mode: "subscription" });
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].step, "daemon.boot");
+  assert.equal(lines[0].extra.env_clean, true);
+  assert.equal(lines[0].extra.billing_mode, "subscription");
+});
+
+test("daemonBoot: a contaminated env (ANTHROPIC_* present) still logs, but env_clean=false — a loud canary, not a throw", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const dirtyEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op", ANTHROPIC_API_KEY: "KEY-SHOULD-NEVER-SURVIVE" };
+  const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }), dirtyEnv);
+  assert.deepEqual(result, { env_clean: false, billing_mode: "subscription" });
+  assert.equal(lines[0].extra.env_clean, false);
+  assert.equal(lines[0].extra.billing_mode, "subscription", "billing_mode is always subscription — this repo never runs a daemon in api mode");
+});
+
+test("daemonBoot: defaults to checking process.env when no env is injected", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const prior = process.env.ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  try {
+    const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }));
+    assert.equal(result.env_clean, true);
+  } finally {
+    if (prior !== undefined) process.env.ANTHROPIC_API_KEY = prior;
+  }
+});
 
 // ── dispatch order: reuses drain.ts's DAG selection, never reimplements it ──
 

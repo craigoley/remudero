@@ -97,3 +97,29 @@ export function buildWorkerEnv(
 export function isBillingClean(env: Record<string, string | undefined>): boolean {
   return !Object.keys(env).some((k) => ANTHROPIC_KEY.test(k));
 }
+
+/** Result of {@link assertCleanBoot} — one ledger-ready boot-time reading. */
+export interface BootAssertion {
+  /** True iff the DAEMON'S OWN process env (not a worker's — see below) is ANTHROPIC_*-free. */
+  env_clean: boolean;
+  /** Always `"subscription"` here: this repo never runs a daemon under `api` billing (§9). */
+  billing_mode: "subscription";
+}
+
+/**
+ * The daemon's boot-time billing assertion (W1-T12b). This checks the DAEMON
+ * PROCESS'S OWN env — what launchd (or a dev shell) handed it at exec — which
+ * is a DIFFERENT env from a worker's: every worker's env is already built fresh
+ * from `buildWorkerEnv`'s allowlist above and can never inherit an ANTHROPIC_*
+ * key regardless of what the daemon process itself carries. So `env_clean:
+ * false` here does not mean a leak reached a worker — it means the daemon was
+ * booted from a contaminated shell rather than launchd's clean one (launchd
+ * never sources `.zshrc` — see file header), which is a canary worth logging
+ * loudly, not a hard gate: {@link isBillingClean} does the read, this just
+ * shapes it into the ledger fields `daemon.boot` (wired in lib/daemon.ts)
+ * records: `env_clean=true / billing_mode=subscription` on the clean path this
+ * repo always expects in production.
+ */
+export function assertCleanBoot(env: NodeJS.ProcessEnv = process.env): BootAssertion {
+  return { env_clean: isBillingClean(env), billing_mode: "subscription" };
+}
