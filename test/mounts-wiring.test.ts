@@ -25,12 +25,15 @@ test("the literal `maxTurns: 60` is GONE from run-task.ts (the hardcoded impleme
 
 // ── An implement task resolves its budget FROM the real mounts.yaml table ───
 
-test("an implement task resolves its max_turns FROM .remudero/mounts.yaml (the recalibrated budgets)", () => {
+test("an implement task resolves its max_turns FROM .remudero/mounts.yaml (the flat tripwire re-base)", () => {
   const m = loadMounts(mountsPath(repoRoot));
-  // Recalibrated from OBSERVED runs (DIAGNOSIS.md): W1-T6 needed >61, so high = 120.
-  assert.equal(resolveMount(m, "implement", "high").maxTurns, 120);
-  assert.equal(resolveMount(m, "implement", "medium").maxTurns, 80);
-  assert.equal(resolveMount(m, "implement", "low").maxTurns, 40);
+  // §9 tripwire re-base: max_turns is a RUNAWAY CLIFF (a flat 400), not a work
+  // limit — sizing is enforced pre-dispatch by the W1-T20c linter, not by a low
+  // cap. (W1-T54b-1784149952116 walled at 81/80 mid-live-campaign under the old
+  // medium=80 — a cap set near expected work is a work limit, not a safety limit.)
+  assert.equal(resolveMount(m, "implement", "high").maxTurns, 400);
+  assert.equal(resolveMount(m, "implement", "medium").maxTurns, 400);
+  assert.equal(resolveMount(m, "implement", "low").maxTurns, 400);
   // The mount also carries the model + effort the spawn now passes.
   const hi = resolveMount(m, "implement", "high");
   assert.equal(typeof hi.model, "string");

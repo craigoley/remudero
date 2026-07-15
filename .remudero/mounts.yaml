@@ -44,37 +44,42 @@ efforts:
 architect:
   model: opus
   effort: high
-  max_turns: 60
+  max_turns: 400
   context_budget: 180000
+
+# ── max_turns is a RUNAWAY CLIFF, not a work limit (§9 tripwire re-base) ────────
+# Every mount's max_turns is a FLAT 400 — a tripwire set WAY above any real run,
+# whose only job is to kill a genuinely runaway loop. It is NOT a sizing knob:
+# task SIZING is enforced PRE-DISPATCH by the W1-T20c task linter (an over-scoped
+# task is decomposed before it ever spawns, never trimmed by a low turn cap). The
+# same bug as maxTurns=60 (PR #8, budget_usd re-base): a cap set NEAR expected work
+# is a work limit masquerading as a safety limit. Concretely, run
+# W1-T54b-1784149952116 (implement×medium) walled at 81/80 turns mid-LIVE-campaign
+# — AFTER its minor proof had already merged #80 through the required gate — because
+# live campaigns burn turns on POLLING the gate, work a cap must never kill.
+# P7-consistent: nothing here is raised to mask over-scoping; the sizer is the linter.
 
 # ── Worker routing table: task_type → risk band → mount ────────────────────────
 # Sonnet default for execution; Haiku for mechanical/high-volume; sonnet-high is
 # the worker ceiling (bookend work steps up to it, never to opus).
 routes:
   recon:
-    low:    { model: haiku,  effort: medium, max_turns: 20, context_budget: 60000 }
-    medium: { model: sonnet, effort: medium, max_turns: 25, context_budget: 90000 }
-    high:   { model: sonnet, effort: high,   max_turns: 30, context_budget: 120000 }
-  # implement max_turns RECALIBRATED from OBSERVED ledger runs (not guesses — DIAGNOSIS.md
-  # W1-T6). max_turns is a RUNAWAY guard, so it sits well ABOVE expected work (LEARNINGS:
-  # "a limit set NEAR the expected cost is a work limit, not a safety limit"). Observed
-  # merged implement runs: W1-T1D 21 · W1-T3D 21 · W1-T1C 30 · W1-T3B/T3E 31 · W1-T3 37 ·
-  # W1-T3C 42 turns; W1-T6 (cross-cutting telemetry) was still PROGRESSING at 61 when the
-  # old hardcoded 60 killed it. So: low 40 (>simple ~20-30), medium 80 (2x the ~40 typical),
-  # high 120 (2x W1-T6's ≥61 — schema/telemetry/CI-cutting work). Only pathology trips these.
+    low:    { model: haiku,  effort: medium, max_turns: 400, context_budget: 60000 }
+    medium: { model: sonnet, effort: medium, max_turns: 400, context_budget: 90000 }
+    high:   { model: sonnet, effort: high,   max_turns: 400, context_budget: 120000 }
   implement:
-    low:    { model: sonnet, effort: medium, max_turns: 40,  context_budget: 120000 }
-    medium: { model: sonnet, effort: high,   max_turns: 80,  context_budget: 160000 }
-    high:   { model: sonnet, effort: high,   max_turns: 120, context_budget: 200000 }
+    low:    { model: sonnet, effort: medium, max_turns: 400,  context_budget: 120000 }
+    medium: { model: sonnet, effort: high,   max_turns: 400,  context_budget: 160000 }
+    high:   { model: sonnet, effort: high,   max_turns: 400, context_budget: 200000 }
   diagnose:
-    low:    { model: sonnet, effort: high,   max_turns: 30, context_budget: 120000 }
-    medium: { model: sonnet, effort: high,   max_turns: 40, context_budget: 150000 }
-    high:   { model: sonnet, effort: high,   max_turns: 50, context_budget: 180000 }
+    low:    { model: sonnet, effort: high,   max_turns: 400, context_budget: 120000 }
+    medium: { model: sonnet, effort: high,   max_turns: 400, context_budget: 150000 }
+    high:   { model: sonnet, effort: high,   max_turns: 400, context_budget: 180000 }
   review:
-    low:    { model: haiku,  effort: medium, max_turns: 15, context_budget: 60000 }
-    medium: { model: sonnet, effort: medium, max_turns: 20, context_budget: 90000 }
-    high:   { model: sonnet, effort: high,   max_turns: 30, context_budget: 120000 }
+    low:    { model: haiku,  effort: medium, max_turns: 400, context_budget: 60000 }
+    medium: { model: sonnet, effort: medium, max_turns: 400, context_budget: 90000 }
+    high:   { model: sonnet, effort: high,   max_turns: 400, context_budget: 120000 }
   manual:
-    low:    { model: haiku,  effort: low,    max_turns: 10, context_budget: 40000 }
-    medium: { model: haiku,  effort: medium, max_turns: 15, context_budget: 60000 }
-    high:   { model: sonnet, effort: medium, max_turns: 20, context_budget: 90000 }
+    low:    { model: haiku,  effort: low,    max_turns: 400, context_budget: 40000 }
+    medium: { model: haiku,  effort: medium, max_turns: 400, context_budget: 60000 }
+    high:   { model: sonnet, effort: medium, max_turns: 400, context_budget: 90000 }

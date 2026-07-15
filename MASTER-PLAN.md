@@ -1200,6 +1200,11 @@ LEDGERS A WARNING and continues — anomalies VISIBLE without being FATAL — an
 "this worker is almost certainly looping," which is what a tripwire should mean. Window pressure (the
 real limit) is the HeadroomTracker's job (W1-T4), never a per-task dollar cap. Do not lower these caps to
 "save money": on subscription the dollars are notional, so you would kill good work and save nothing.
+`max_turns` is now re-based to the SAME tripwire semantics as `budget_usd` — a flat 400 across every
+mount (`.remudero/mounts.yaml`), an order of magnitude above the calibration mean (~45 turns; honest
+merges at 58–69) after run `W1-T54b-1784149952116` walled at 81/80 mid-live-campaign — and this is
+P7-consistent: nothing is raised to mask over-scoping, because task SIZING is enforced pre-dispatch by
+the W1-T20c linter (the sizer is the linter), not by a low turn cap.
 
 **Windows — the HeadroomTracker (rung 1 CONFIRMED).** Models both clocks: the 5-hour rolling window and the weekly
 caps (including Max's dual weekly limits — all-models and Sonnet-only — with separate resets).
