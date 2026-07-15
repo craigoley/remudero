@@ -3,8 +3,9 @@
  *
  * W1-T12 (Daemonize) was split along the machine/human boundary (DIAGNOSIS.md,
  * Rule 16): this is the headless, unit-testable LOGIC half. Launchd unit
- * generation is W1-T12b; crash-recovery is W1-T12c; actually loading the plist
- * on a real session, an overnight drain, and a live kill-and-recover are the
+ * generation is W1-T12b (lib/launchd.ts); crash-recovery reconstruction is
+ * W1-T12c (`reconstructState`, below); actually loading the plist on a real
+ * session, an overnight drain, and a live kill-and-recover are the
  * verify:human commissioning steps of W1-T12d — none of that is here.
  *
  * `rmd drain` (drain.ts) is a bounded, one-shot pass a human kicks off by hand:
@@ -29,6 +30,7 @@ import { nextRunnable, type MergedSet } from "./drain.js";
 import { headroomExhausted } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { Plan } from "./plan.js";
+import type { StatusProjection } from "./status.js";
 
 /** Reason the scheduler loop returned — every terminal state is one of these. */
 export type DaemonStopReason =
@@ -210,4 +212,133 @@ export async function runDaemon(
     }
     merged.push(next.id);
   }
+}
+
+// ── crash recovery (W1-T12c) ────────────────────────────────────────────────
+//
+// A daemon killed mid-task (power loss, `kill -9`, a host reboot — the live
+// chaos drill is W1-T12d) can leave an ORPHANED local run behind: a
+// `git worktree` + its `run-<taskId>-<epochMs>` branch (worker.ts's
+// `runId = ${taskId}-${Date.now()}`, `branch = run-${runId}`) that no live
+// process owns anymore (its inflight-lock.ts pid is dead). Discovering that
+// debris is a real filesystem/`git worktree list` walk — the CLI wiring's job
+// (same boundary as worker.ts's `pruneStaleRuns`), and OUT of scope here; this
+// pure module only reasons about the parsed result.
+//
+// The one question crash recovery must answer per orphan is: does GitHub know
+// about work this task already did? A dead local process is NOT authoritative
+// — an open PR may already exist (pushed right before the crash), and
+// blindly re-running the task from `nextRunnable` (which only checks
+// "merged", not "has an open PR") would spawn a SECOND worker on top of it.
+// So state is reconstructed from git (which task/run the orphan belonged to)
+// + GitHub + the ledger (status.ts's `deriveStatus`, reused wholesale, never
+// reimplemented — same three-source precedence `rmd drain`/`rmd run-task`
+// already trust) — never from the dead process's local state.
+
+/** A local run a crashed process left behind, as found by `git worktree list`
+ * (the CLI wiring's job) and parsed by {@link parseOrphanedBranch}. */
+export interface OrphanedRun {
+  taskId: string;
+  runId: string;
+  branch: string;
+  worktreePath: string;
+}
+
+/** `resume`: GitHub already has a live PR for this task — do not respawn.
+ *  `clean`: no surviving GitHub artifact (or the task is already merged) —
+ *  the local worktree/branch is stale debris, safe to discard. */
+export type RecoveryAction = "resume" | "clean";
+
+export interface RecoveredTask extends OrphanedRun {
+  action: RecoveryAction;
+  detail: string;
+  prUrl?: string;
+}
+
+/**
+ * Parse a `run-<taskId>-<epochMs>` branch name back into its task + run id.
+ * Splits at the LAST `-` (task ids may themselves contain hyphens, e.g.
+ * `W1-T12c`), only accepting the split when the trailing segment is all
+ * digits (an epoch-ms timestamp) — anything else (a retro/review run's
+ * branch, e.g. `run-RETRO-<epochMs>` or `run-review-PR9-<epochMs>`, which is
+ * not task-scoped) is not an orphaned TASK run and returns null.
+ */
+export function parseOrphanedBranch(branch: string, worktreePath: string): OrphanedRun | null {
+  if (!branch.startsWith("run-")) return null;
+  const rest = branch.slice("run-".length);
+  const i = rest.lastIndexOf("-");
+  if (i <= 0 || i === rest.length - 1) return null;
+  const taskId = rest.slice(0, i);
+  const epochMs = rest.slice(i + 1);
+  if (!/^\d+$/.test(epochMs)) return null;
+  if (taskId === "RETRO" || /^review-PR\d+$/.test(taskId)) return null; // not task-scoped
+  return { taskId, runId: `${taskId}-${epochMs}`, branch, worktreePath };
+}
+
+/**
+ * Reconstruct ONE orphan's fate from its task's GitHub-derived projection.
+ * `deriveTaskStatus` is the caller's `status.ts` `deriveStatus`, scoped to
+ * this task id — this function adds NO new GitHub/ledger logic, it only maps
+ * the EXISTING precedence-derived projection onto a recovery verb:
+ *
+ *   - status `running` (an OPEN PR) ⇒ "resume": GitHub, not the dead local
+ *     process, is the task's true state. The orphaned worktree/branch is left
+ *     untouched (not cleaned) — it is the original working tree behind that
+ *     PR, in case anything downstream needs it.
+ *   - `merged`, `blocked` (PR closed without merging), or no evidence at all
+ *     ⇒ "clean": the task is either already done, or never produced a
+ *     surviving GitHub artifact — either way the local worktree/branch is
+ *     pure debris. When not merged, the task is left for `nextRunnable` to
+ *     pick up fresh (a normal, from-scratch run) on the daemon's next tick.
+ */
+export function reconstructOrphan(
+  orphan: OrphanedRun,
+  deriveTaskStatus: (taskId: string) => StatusProjection,
+): RecoveredTask {
+  const projection = deriveTaskStatus(orphan.taskId);
+  if (projection.status === "running") {
+    return {
+      ...orphan,
+      action: "resume",
+      prUrl: projection.prUrl,
+      detail: `${orphan.taskId}: an open PR already exists (${projection.prUrl}) — resuming from GitHub state, not respawning`,
+    };
+  }
+  const why = projection.merged
+    ? `already merged (${projection.prUrl})`
+    : projection.status === "blocked"
+      ? `its PR was closed without merging (${projection.prUrl})`
+      : "no surviving GitHub artifact — the crash happened before a PR existed";
+  return {
+    ...orphan,
+    action: "clean",
+    prUrl: projection.prUrl,
+    detail: `${orphan.taskId}: ${why} — orphaned worktree/branch is stale debris, safe to discard`,
+  };
+}
+
+/**
+ * The daemon's boot-time recovery pass (W1-T12c): reconstruct every orphaned
+ * local run's fate, in order, logging one `daemon.recover` ledger line each.
+ * Pure over its injected `deriveTaskStatus` — no filesystem, no git, no
+ * GitHub call lives in this module (same discipline as the rest of daemon.ts);
+ * the CLI wiring supplies the orphan list (a `git worktree list` walk) and a
+ * `status.ts`-backed `deriveTaskStatus`, and owns the actual worktree/branch
+ * cleanup that `action: "clean"` recommends.
+ */
+export function reconstructState(
+  orphans: OrphanedRun[],
+  deriveTaskStatus: (taskId: string) => StatusProjection,
+  log?: (step: string, extra?: Record<string, unknown>) => void,
+): RecoveredTask[] {
+  return orphans.map((orphan) => {
+    const recovered = reconstructOrphan(orphan, deriveTaskStatus);
+    log?.("daemon.recover", {
+      task: recovered.taskId,
+      run_id: recovered.runId,
+      action: recovered.action,
+      detail: recovered.detail,
+    });
+    return recovered;
+  });
 }

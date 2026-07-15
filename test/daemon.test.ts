@@ -3,12 +3,22 @@ import { test } from "node:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
+import { loadPlan, type Plan, type Task } from "../src/lib/plan.js";
 import type { RunResult } from "../src/run-task.js";
 import type { UsageSnapshot } from "../src/lib/headroom.js";
-import { DEFAULT_POLL_INTERVAL_MS, daemonBoot, runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
+import {
+  DEFAULT_POLL_INTERVAL_MS,
+  daemonBoot,
+  parseOrphanedBranch,
+  reconstructOrphan,
+  reconstructState,
+  runDaemon,
+  type DaemonDeps,
+  type OrphanedRun,
+} from "../src/lib/daemon.js";
 import { pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
 import type { MergedSet } from "../src/lib/drain.js";
+import { deriveStatus, type GitHub, type PrRef } from "../src/lib/status.js";
 
 // A small linear-ish plan: A → B → C (chain) + D (independent), all auto.
 const YAML = `
@@ -362,4 +372,148 @@ test("an unexpected error from runOne is a terminal 'error' stop, naming the tas
   });
   assert.equal(s.stopReason, "error");
   assert.match(s.stopDetail ?? "", /A: boom/);
+});
+
+// ── crash recovery (W1-T12c): reconstruct state from git + GitHub + the
+// ledger over a SEEDED interrupted-run state — NOT a live daemon kill ───────
+
+/** A minimal task; fields not under test get sensible defaults (mirrors status.test.ts). */
+function task(over: Partial<Task> = {}): Task {
+  return {
+    id: "W1-TX",
+    title: "t",
+    repo: "remudero",
+    depends_on: [],
+    type: "implement",
+    risk: "medium",
+    verify: "auto",
+    status: "queued",
+    attempts: 0,
+    ...over,
+  };
+}
+
+/** A fake GitHub gateway driven by fixture maps (mirrors status.test.ts). */
+function fakeGitHub(opts: { byRef?: Record<string, PrRef>; byTrailer?: Record<string, PrRef> }): GitHub {
+  return {
+    prByRef: (ref) => opts.byRef?.[String(ref)] ?? null,
+    findMergedByTrailer: (taskId) => opts.byTrailer?.[taskId] ?? null,
+  };
+}
+
+function ledgerFile(lines: Array<Record<string, unknown>>): string {
+  const dir = mkdtempSync(join(tmpdir(), "daemon-recover-"));
+  const p = join(dir, "ledger.ndjson");
+  writeFileSync(p, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  return p;
+}
+
+/** Wires status.ts's real `deriveStatus` — reused wholesale, never reimplemented. */
+function statusOf(taskId: string, ledgerPath: string, github: GitHub): import("../src/lib/status.js").StatusProjection {
+  return deriveStatus(task({ id: taskId }), { ledgerPath, github });
+}
+
+test("parseOrphanedBranch: splits a run-<taskId>-<epochMs> branch, task ids with hyphens included", () => {
+  const orphan = parseOrphanedBranch("run-W1-T12c-1730000000000", "/root/worktrees/run-W1-T12c-1730000000000");
+  assert.deepEqual(orphan, {
+    taskId: "W1-T12c",
+    runId: "W1-T12c-1730000000000",
+    branch: "run-W1-T12c-1730000000000",
+    worktreePath: "/root/worktrees/run-W1-T12c-1730000000000",
+  });
+});
+
+test("parseOrphanedBranch: rejects RETRO and review-PR branches — not task-scoped", () => {
+  assert.equal(parseOrphanedBranch("run-RETRO-1730000000000", "/x"), null);
+  assert.equal(parseOrphanedBranch("run-review-PR9-1730000000000", "/x"), null);
+});
+
+test("parseOrphanedBranch: rejects anything not shaped run-<id>-<digits>", () => {
+  assert.equal(parseOrphanedBranch("main", "/x"), null);
+  assert.equal(parseOrphanedBranch("run-no-timestamp", "/x"), null);
+  assert.equal(parseOrphanedBranch("run-", "/x"), null);
+});
+
+test("reconstructOrphan: an OPEN PR already on GitHub ⇒ resume, not a respawn", () => {
+  const url = "https://github.com/o/r/pull/11";
+  const github = fakeGitHub({ byRef: { [url]: { number: 11, url, state: "OPEN" } } });
+  const ledgerPath = ledgerFile([
+    { step: "run.start", task_id: "W1-TX" },
+    { step: "pr.opened", task_id: "W1-TX", pr_url: url },
+  ]);
+  const orphan: OrphanedRun = { taskId: "W1-TX", runId: "W1-TX-1", branch: "run-W1-TX-1", worktreePath: "/w" };
+  const recovered = reconstructOrphan(orphan, (id) => statusOf(id, ledgerPath, github));
+  assert.equal(recovered.action, "resume");
+  assert.equal(recovered.prUrl, url);
+  assert.match(recovered.detail, /open PR already exists/);
+});
+
+test("reconstructOrphan: the task already MERGED ⇒ clean — the worktree is stale debris", () => {
+  const url = "https://github.com/o/r/pull/12";
+  const github = fakeGitHub({ byRef: { [url]: { number: 12, url, state: "MERGED" } } });
+  const ledgerPath = ledgerFile([{ step: "pr.opened", task_id: "W1-TX", pr_url: url }]);
+  const orphan: OrphanedRun = { taskId: "W1-TX", runId: "W1-TX-2", branch: "run-W1-TX-2", worktreePath: "/w" };
+  const recovered = reconstructOrphan(orphan, (id) => statusOf(id, ledgerPath, github));
+  assert.equal(recovered.action, "clean");
+  assert.equal(recovered.prUrl, url);
+  assert.match(recovered.detail, /already merged/);
+});
+
+test("reconstructOrphan: a CLOSED (unmerged) PR ⇒ clean — safe to re-run from scratch", () => {
+  const url = "https://github.com/o/r/pull/13";
+  const github = fakeGitHub({ byRef: { [url]: { number: 13, url, state: "CLOSED" } } });
+  const ledgerPath = ledgerFile([{ step: "pr.opened", task_id: "W1-TX", pr_url: url }]);
+  const orphan: OrphanedRun = { taskId: "W1-TX", runId: "W1-TX-3", branch: "run-W1-TX-3", worktreePath: "/w" };
+  const recovered = reconstructOrphan(orphan, (id) => statusOf(id, ledgerPath, github));
+  assert.equal(recovered.action, "clean");
+  assert.match(recovered.detail, /closed without merging/);
+});
+
+test("reconstructOrphan: no PR ever opened (crash mid-implement) ⇒ clean — no GitHub evidence at all", () => {
+  const ledgerPath = ledgerFile([{ step: "run.start", task_id: "W1-TX" }]); // no pr.opened
+  const github = fakeGitHub({});
+  const orphan: OrphanedRun = { taskId: "W1-TX", runId: "W1-TX-4", branch: "run-W1-TX-4", worktreePath: "/w" };
+  const recovered = reconstructOrphan(orphan, (id) => statusOf(id, ledgerPath, github));
+  assert.equal(recovered.action, "clean");
+  assert.equal(recovered.prUrl, undefined);
+  assert.match(recovered.detail, /crash happened before a PR existed/);
+});
+
+test("reconstructState: reconstructs a MIX of orphans in order, logging one daemon.recover line each", () => {
+  const openUrl = "https://github.com/o/r/pull/21";
+  const mergedUrl = "https://github.com/o/r/pull/22";
+  const github = fakeGitHub({
+    byRef: {
+      [openUrl]: { number: 21, url: openUrl, state: "OPEN" },
+      [mergedUrl]: { number: 22, url: mergedUrl, state: "MERGED" },
+    },
+  });
+  const ledgerPath = ledgerFile([
+    { step: "pr.opened", task_id: "W1-A", pr_url: openUrl },
+    { step: "pr.opened", task_id: "W1-B", pr_url: mergedUrl },
+    { step: "run.start", task_id: "W1-C" }, // never got a PR
+  ]);
+  const orphans: OrphanedRun[] = [
+    { taskId: "W1-A", runId: "W1-A-1", branch: "run-W1-A-1", worktreePath: "/w/a" },
+    { taskId: "W1-B", runId: "W1-B-1", branch: "run-W1-B-1", worktreePath: "/w/b" },
+    { taskId: "W1-C", runId: "W1-C-1", branch: "run-W1-C-1", worktreePath: "/w/c" },
+  ];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const recovered = reconstructState(
+    orphans,
+    (id) => statusOf(id, ledgerPath, github),
+    (step, extra = {}) => lines.push({ step, extra }),
+  );
+  assert.deepEqual(
+    recovered.map((r) => [r.taskId, r.action]),
+    [
+      ["W1-A", "resume"],
+      ["W1-B", "clean"],
+      ["W1-C", "clean"],
+    ],
+  );
+  assert.equal(lines.length, 3);
+  assert.deepEqual(lines.map((l) => l.step), ["daemon.recover", "daemon.recover", "daemon.recover"]);
+  assert.deepEqual(lines.map((l) => l.extra.task), ["W1-A", "W1-B", "W1-C"]);
+  assert.deepEqual(lines.map((l) => l.extra.action), ["resume", "clean", "clean"]);
 });
