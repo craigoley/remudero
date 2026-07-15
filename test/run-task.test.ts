@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   DEFAULT_BUDGET_USD,
+  checkPrOwnership,
   isTransientResult,
   resolveReviewTarget,
   resolveDaemonTarget,
@@ -9,8 +10,14 @@ import {
   noPrVerdict,
   softBudgetWarning,
   workerErrorVerdict,
+  type PrHeadGateway,
 } from "../src/run-task.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+
+/** An injected {@link PrHeadGateway} fixture — no `gh` exec, a fixed answer per PR url. */
+function fakeGateway(headRefName: string | undefined): PrHeadGateway {
+  return { headRefName: () => headRefName };
+}
 
 /** Build a minimal WorkerResult for the verdict-mapping tests. */
 function result(over: Partial<WorkerResult>): WorkerResult {
@@ -172,6 +179,42 @@ test("workerErrorVerdict: the ledger payload carries the failing call's model/ef
   assert.equal(v.ledger.model, "claude-opus-4");
   assert.equal(v.ledger.effort, "high");
   assert.deepEqual(v.ledger.tokens, { input: 900, output: 100, cacheRead: 0, cacheCreation: 0 });
+});
+
+// ── checkPrOwnership: the run-ownership GUARD (W1-T62 backstop) ────────────
+// Even if a future parse regression re-admits an evidence URL, a run can never
+// merge-credit a PR whose branch it did not create — the guard is checked via an
+// injected PrHeadGateway fixture, no `gh` exec, matching run W1-T54b-1784151420811
+// where the attributed PR (#80) belonged to Dependabot, not this run.
+
+test("checkPrOwnership: the claimed PR's head branch equals this run's own branch ⇒ null (proceed)", () => {
+  const gateway = fakeGateway("run-W1-T62-123");
+  const v = checkPrOwnership("https://github.com/acme/remudero/pull/91", "run-W1-T62-123", gateway, 1.5);
+  assert.equal(v, null);
+});
+
+test("checkPrOwnership: mismatched headRefName ⇒ named pr_attribution_failed, NEVER merged, ledger records claimed-vs-owned", () => {
+  // Modeled on W1-T54b-1784151420811: the claimed PR (#80) is Dependabot's own PR,
+  // not this run's — the injected gateway reports Dependabot's actual head branch.
+  const gateway = fakeGateway("dependabot/npm_and_yarn/anthropic-ai/claude-agent-sdk-0.3.209");
+  const v = checkPrOwnership("https://github.com/acme/remudero/pull/80", "run-W1-T54b-1784151420811", gateway, 2.1);
+  assert.ok(v, "a branch mismatch must produce a verdict, never a silent pass");
+  assert.equal(v.verdict, "pr_attribution_failed");
+  assert.notEqual(v.verdict, "merged");
+  assert.equal(v.ledger.verdict, "pr_attribution_failed");
+  assert.equal(v.ledger.claimed_url, "https://github.com/acme/remudero/pull/80");
+  assert.equal(v.ledger.claimed_branch, "dependabot/npm_and_yarn/anthropic-ai/claude-agent-sdk-0.3.209");
+  assert.equal(v.ledger.owned_branch, "run-W1-T54b-1784151420811");
+  assert.equal(v.ledger.cost_usd, 2.1);
+});
+
+test("checkPrOwnership: an UNRESOLVABLE head ref (gateway failure) is NOT owned — fails closed, never assumed honest", () => {
+  const gateway = fakeGateway(undefined);
+  const v = checkPrOwnership("https://github.com/acme/remudero/pull/12", "run-W1-T99-1", gateway, 0);
+  assert.ok(v);
+  assert.equal(v.verdict, "pr_attribution_failed");
+  assert.equal(v.ledger.claimed_branch, null);
+  assert.match(v.ledger.reason, /could not be resolved/i);
 });
 
 // ── `rmd review --repo` targets a repo OTHER than the checkout (remudero-sandbox for the

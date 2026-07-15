@@ -14,6 +14,7 @@ import {
   evaluateDenyFloor,
   parseDecisionRequest,
   parseQuestion,
+  parseReport,
   spawnWorker,
   workerLedgerFields,
 } from "../src/lib/worker.js";
@@ -419,6 +420,57 @@ test("parseQuestion: impact_if_wrong normalises `low`/`medium` variants and a ba
 
 test("parseQuestion: text with no QUESTION line returns null (the guard does not fire on prose)", () => {
   assert.equal(parseQuestion("REPORT\nchanged: src/foo.ts\nPR_URL: https://x/pull/1"), null);
+});
+
+// ── parseReport: anchored PR_URL extraction (W1-T62) ────────────────────────
+// Regression fixture modeled on run W1-T54b-1784151420811: the REPORT cited
+// evidence pull-URLs (to satisfy acceptance criteria demanding them) BEFORE its
+// final `PR_URL:` line. The old parse (`text.match(/.../pull/\d+/)?.[0]`) took
+// the FIRST pull-URL anywhere — the evidence PR #80 (Dependabot's) — and won a
+// false verdict=merged. Attribution must anchor to the LAST `PR_URL:` line only.
+
+test("parseReport: an evidence pull-URL BEFORE the final PR_URL line does NOT win attribution (W1-T54b regression)", () => {
+  const text = [
+    "REPORT",
+    "Criteria demand evidence pull-URLs in the REPORT:",
+    "- https://github.com/acme/remudero/pull/80 (dependency PR, evidence only)",
+    "- https://github.com/acme/remudero/pull/81 (dependency PR, evidence only)",
+    "Shipped docs/dep-review.md separately.",
+    "PR_URL: https://github.com/acme/remudero/pull/91",
+  ].join("\n");
+  const report = parseReport(text);
+  assert.ok(report);
+  assert.equal(report.prUrl, "https://github.com/acme/remudero/pull/91");
+});
+
+test("parseReport: multiple PR_URL lines (a DECISION_REQUEST resume appends a second REPORT) — the LAST one wins", () => {
+  const text = [
+    "REPORT",
+    "PR_URL: https://github.com/acme/remudero/pull/5",
+    "DECISION_REQUEST resumed, re-executed:",
+    "REPORT",
+    "PR_URL: https://github.com/acme/remudero/pull/6",
+  ].join("\n");
+  assert.equal(parseReport(text)?.prUrl, "https://github.com/acme/remudero/pull/6");
+});
+
+test("parseReport: a missing final PR_URL line fails CLOSED — no attribution, even with pull-URLs elsewhere", () => {
+  const text = [
+    "REPORT",
+    "See https://github.com/acme/remudero/pull/80 for prior art.",
+    "No PR was opened this run.",
+  ].join("\n");
+  assert.equal(parseReport(text)?.prUrl, undefined);
+});
+
+test("parseReport: a malformed PR_URL line (not a real github pull URL) fails CLOSED — no attribution", () => {
+  const text = ["REPORT", "PR_URL: <the pull request url>"].join("\n");
+  assert.equal(parseReport(text)?.prUrl, undefined);
+});
+
+test("parseReport: the anchor is case-insensitive and tolerant of extra whitespace, still anchored to the line", () => {
+  const text = ["report", "  pr_url:   https://github.com/acme/remudero/pull/12  "].join("\n");
+  assert.equal(parseReport(text)?.prUrl, "https://github.com/acme/remudero/pull/12");
 });
 
 test("appendQuestion: appends one NDJSON line durably, creating plan/ on a fresh checkout", () => {

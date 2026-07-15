@@ -468,12 +468,34 @@ export function parseReconReport(text: string): ReconReport | null {
   };
 }
 
+/**
+ * ANCHORED PR_URL extraction (W1-T62). The OUTPUT CONTRACT (run-task.ts) demands
+ * a REPORT whose LAST line is exactly `PR_URL: <url>` — but the prior parse took
+ * the FIRST pull-URL ANYWHERE in the worker output, so an evidence pull-URL
+ * (e.g. a dependency PR cited to satisfy acceptance criteria) appearing BEFORE
+ * the real PR_URL line won attribution instead. Run W1-T54b-1784151420811 was
+ * ledgered verdict=merged via PR #80 (Dependabot's own PR) by exactly this
+ * defect; the run's real PR was #91.
+ *
+ * Only a line matching `PR_URL:` (anchored to the start of that line, case
+ * -insensitive) followed by a well-formed github pull-request URL counts; every
+ * other pull-URL in the text — evidence, prose, quoted contract text — is INERT.
+ * When the contract is honored more than once (e.g. a DECISION_REQUEST resume
+ * appends a second REPORT), the LAST such line wins, matching "last line of the
+ * REPORT". A missing or malformed line yields `undefined` — never a guess.
+ */
+function anchoredPrUrl(text: string): string | undefined {
+  const matches = [
+    ...text.matchAll(/^[ \t]*PR_URL:[ \t]*(https:\/\/github\.com\/[^\s)"']+\/pull\/\d+)/gim),
+  ];
+  return matches.length ? matches[matches.length - 1][1] : undefined;
+}
+
 export function parseReport(text: string): Report | null {
   if (!/(^|\n)\s*REPORT/i.test(text) || /RECON REPORT/i.test(text)) {
     if (!/PR_URL/i.test(text)) return null;
   }
-  const prUrl = text.match(/https:\/\/github\.com\/[^\s)"']+\/pull\/\d+/)?.[0];
-  return { raw: text, prUrl };
+  return { raw: text, prUrl: anchoredPrUrl(text) };
 }
 
 /**
