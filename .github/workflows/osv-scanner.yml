@@ -1,0 +1,32 @@
+name: OSV-Scanner
+
+# Full dependency-tree scan on push to main and on a weekly schedule —
+# catches advisories cut AFTER a dependency was already merged in, which
+# the PR-time diff scan (osv-scanner-pr.yml) can't see. Reports to the
+# Security tab via SARIF; warn-only so it never blocks main/schedule.
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, off-peak (Mondays 04:43 UTC — staggered from CodeQL).
+    - cron: "43 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  security-events: write
+  contents: read
+  actions: read
+
+jobs:
+  scan:
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+    with:
+      scan-args: |-
+        -r
+        ./
+      upload-sarif: true
+      fail-on-vuln: false
+    permissions:
+      security-events: write
+      contents: read
+      actions: read

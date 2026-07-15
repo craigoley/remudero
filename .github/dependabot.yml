@@ -1,0 +1,29 @@
+version: 2
+updates:
+  # remudero's package.json lives at the repo root.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    # IGNORE-FREE by design (MASTER-PLAN §5 FLEET FINDING): minor+patch
+    # bumps are grouped so they don't flood one-PR-per-bump; MAJOR bumps
+    # are excluded from AUTO-MERGE at the dep-review lane (W1-T54), never
+    # via an `ignore:` block here.
+    groups:
+      npm-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Keeps the SHA-pinned actions in .github/workflows fresh — Dependabot
+  # bumps the pinned SHA and the trailing version comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor-and-patch:
+        update-types:
+          - minor
+          - patch

@@ -1,0 +1,31 @@
+name: Dependency Review
+
+# Inspects dependency changes in a PR diff and comments a summary.
+# Warn-only — catches a bad dep without walling merges; MAJOR-bump
+# exclusion from auto-merge is a separate dep-review-lane job (W1-T54),
+# not this workflow.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: dependency-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    name: Review
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        continue-on-error: true
+        with:
+          comment-summary-in-pr: always
