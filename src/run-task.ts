@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   architectModel,
+  configPath as instanceConfigPath,
   loadConfig,
   notifyRecipient,
   softBudgetThreshold,
@@ -14,6 +15,8 @@ import {
   type Config,
 } from "./lib/config.js";
 import { buildWorkerEnv } from "./lib/env.js";
+import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
+import type { Tier, TierDetection } from "./lib/tier.js";
 import {
   DEFAULT_MAX as DRAIN_DEFAULT_MAX,
   plannedSequence,
@@ -1440,6 +1443,78 @@ async function digestCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
+/**
+ * Interactive `--tier` confirm prompt (readline/promises). ONLY ever wired up
+ * (and only ever called) when `process.stdin.isTTY` is true — a headless run
+ * never reaches this function (Standing rule 18 / init.ts). Blank input accepts
+ * the suggested tier; anything else is re-parsed as a `--tier` value.
+ */
+async function promptForTier(suggested: Tier, detection: TierDetection): Promise<Tier> {
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    console.log(`\n### [init] ${detection.detail}`);
+    for (;;) {
+      const answer = (
+        await rl.question(`Confirm Claude Code tier [pro/max5x/max20x] (default "${suggested}"): `)
+      ).trim();
+      if (!answer) return suggested;
+      const t = answer.toLowerCase();
+      if (t === "pro" || t === "max5x" || t === "max20x") return t;
+      console.log(`  not a known tier: "${answer}" — try again.`);
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+/**
+ * `rmd init [--tier <pro|max5x|max20x>] [--yes]` — headless-safe first-run tier
+ * wizard (lib/init.ts, W1-T9c). Resolution order: an explicit `--tier` override
+ * (never prompts) → confident `~/.claude.json`/`/usage` evidence (never prompts)
+ * → an interactive confirm (ONLY when a real TTY is present and neither of the
+ * above resolved it) → a logged TTY-absent safe default. NEVER blocks on an
+ * operator that may not exist (Standing rule 18 / LEARNINGS.md
+ * no-live-operator-in-headless-worker — the failure mode that killed W1-T9).
+ */
+async function initCommand(rest: string[]): Promise<number> {
+  const tierFlag = flagValue(rest, "--tier");
+  const yes = rest.includes("--yes");
+  const isTTY = Boolean(process.stdin.isTTY);
+
+  const claudeJson = readClaudeJsonKeys(join(homedir(), ".claude.json"));
+  // Best-effort `/usage` capture (rung 3): needs a resolved claudeBin, which may
+  // not exist yet on a genuinely first run. Unavailable ⇒ detection just degrades
+  // a rung (same contract as readUsageSnapshot itself) — init.ts never requires it.
+  let usage: UsageSnapshot | undefined;
+  try {
+    usage = readUsageSnapshot(loadConfig());
+  } catch {
+    usage = undefined;
+  }
+
+  try {
+    const result = await runInit({
+      tierFlag,
+      yes,
+      isTTY,
+      configPath: instanceConfigPath(),
+      claudeJson,
+      usage,
+      confirm: isTTY ? promptForTier : undefined,
+      log: (line) => console.log(`### [init] ${line}`),
+    });
+    console.log(`\nrmd init done — tier=${result.tier} source=${result.source} → ${result.configPath}`);
+    return 0;
+  } catch (e) {
+    if (e instanceof InitError) {
+      console.error(`### rmd init: ${e.message}`);
+      return 2;
+    }
+    throw e;
+  }
+}
+
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(): Promise<void> {
   const [, , cmd, ...rest] = process.argv;
@@ -1467,8 +1542,11 @@ async function main(): Promise<void> {
   if (cmd === "digest") {
     process.exit(await digestCommand(rest));
   }
+  if (cmd === "init") {
+    process.exit(await initCommand(rest));
+  }
   console.error(
-    "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message",
+    "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard",
   );
   process.exit(2);
 }
@@ -1481,4 +1559,4 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   });
 }
 
-export { runTask, runReview, waitForCiGreen, reviewCommand, retroCommand };
+export { runTask, runReview, waitForCiGreen, reviewCommand, retroCommand, initCommand };

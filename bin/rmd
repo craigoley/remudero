@@ -15,6 +15,12 @@
 #   rmd digest [--since <iso>] [--dry-run]
 #                            roll up the ledger since <iso> (default 24h ago) into one
 #                            iMessage digest; --dry-run prints the text without sending
+#   rmd init [--tier <pro|max5x|max20x>] [--yes]
+#                            headless-safe first-run tier wizard: --tier wins outright;
+#                            confident ~/.claude.json/`/usage` evidence writes with no
+#                            prompt; a prompt fires ONLY with a real TTY present; a
+#                            TTY-absent run NEVER blocks — it falls back to a logged
+#                            safe default (no live operator required, Standing rule 18)
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 exec "$DIR/node_modules/.bin/tsx" "$DIR/src/run-task.ts" "$@"
