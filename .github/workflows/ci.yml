@@ -24,8 +24,8 @@ jobs:
     name: ci
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
       - name: Install (clean, from lockfile)
@@ -34,3 +34,14 @@ jobs:
         run: npx tsc -p tsconfig.json --noEmit
       - name: Test
         run: npm test
+
+  leak-grep:
+    # Plaintext-secret tripwire (MASTER-PLAN §5 TIER 1) — runs on every PR,
+    # not required-context-critical yet (W1-T24 wires the aggregator), but
+    # its own job status is what "on every PR" is proven by.
+    name: leak-grep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: leak-grep (plaintext secret tripwire)
+        run: bash .github/scripts/leak-grep.sh
