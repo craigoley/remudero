@@ -26,7 +26,8 @@ import {
   type DrainOpts,
   type MergedSet,
 } from "./lib/drain.js";
-import { DEFAULT_POLL_INTERVAL_MS, runDaemon, type DaemonOpts, type DaemonSummary } from "./lib/daemon.js";
+import { DEFAULT_POLL_INTERVAL_MS, daemonBoot, runDaemon, type DaemonOpts, type DaemonSummary } from "./lib/daemon.js";
+import { generateLaunchdPlist, launchdPlistPath } from "./lib/launchd.js";
 import { buildDigest, sendDigest } from "./lib/digest.js";
 import { escalate, ghIssueGateway, type EscalationClass, type EscalationOption } from "./lib/escalate.js";
 import { imessageChannel, notify } from "./lib/notify.js";
@@ -1581,6 +1582,10 @@ async function daemonCommand(rest: string[]): Promise<number> {
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, ...extra });
   log("daemon.start", { max: opts.max ?? null, poll_interval_ms: opts.pollIntervalMs, lock_pid: drainLock.info.pid });
+  // ANTHROPIC-clean-env boot assertion (W1-T12b): checked once, before the loop
+  // starts, over the daemon process's OWN live env — belt-and-suspenders atop
+  // the launchd unit's own closed EnvironmentVariables allowlist (lib/launchd.ts).
+  daemonBoot(log);
 
   try {
     const summary = await runDaemon(
@@ -1606,6 +1611,38 @@ async function daemonCommand(rest: string[]): Promise<number> {
     process.removeListener("SIGTERM", onSignal);
     drainLock.release();
   }
+}
+
+/**
+ * `rmd daemon-plist [--poll-ms <n>] [--write]` — GENERATE the launchd unit for
+ * `rmd daemon` (W1-T12b; lib/launchd.ts owns the generation, this only wires
+ * the real absolute paths). Default: print the .plist to stdout, plus the
+ * `launchctl load` invocation the operator would run, and do nothing else.
+ * `--write` additionally writes it to `~/Library/LaunchAgents/<label>.plist` —
+ * still just a file write, never a `launchctl` call. Actually LOADING it on a
+ * real user session is W1-T12d (verify:human) — this command only gets the
+ * operator to the point of running `launchctl load` themselves.
+ */
+async function daemonPlistCommand(rest: string[]): Promise<number> {
+  const config = loadConfig();
+  const pollIdx = rest.indexOf("--poll-ms");
+  const pollIntervalMs = pollIdx >= 0 ? Number(rest[pollIdx + 1]) : undefined;
+  const rmdBin = join(repoRoot, "bin", "rmd");
+  const plist = generateLaunchdPlist({ rmdBin, root: config.root, pollIntervalMs });
+  const plistPath = launchdPlistPath();
+
+  if (rest.includes("--write")) {
+    mkdirSync(dirname(plistPath), { recursive: true });
+    writeFileSync(plistPath, plist);
+    console.log(`### rmd daemon-plist — wrote ${plistPath}`);
+  } else {
+    console.log(plist);
+  }
+  console.log(
+    `\n# to commission (W1-T12d, operator-run — NOT done by this command):\n` +
+      `launchctl load ${plistPath}`,
+  );
+  return 0;
 }
 
 /**
@@ -1875,6 +1912,9 @@ async function main(): Promise<void> {
   if (cmd === "daemon") {
     process.exit(await daemonCommand(rest));
   }
+  if (cmd === "daemon-plist") {
+    process.exit(await daemonPlistCommand(rest));
+  }
   if (cmd === "stop") {
     process.exit(await stopCommand(rest));
   }
@@ -1897,7 +1937,7 @@ async function main(): Promise<void> {
     process.exit(await initCommand(rest));
   }
   console.error(
-    "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd daemon [--max <n>] [--poll-ms <n>]   # persistent scheduler loop (STOP/PAUSE/headroom-aware)\n  rmd stop [--reason <text>]    # fleet control: hard kill — no drain spawns until resume\n  rmd pause [--reason <text>]   # fleet control: drain-and-hold — in-flight completes, no new spawns\n  rmd resume                    # fleet control: clear stop + pause, spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard",
+    "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd daemon [--max <n>] [--poll-ms <n>]   # persistent scheduler loop (STOP/PAUSE/headroom-aware)\n  rmd daemon-plist [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon` (commissioning is W1-T12d)\n  rmd stop [--reason <text>]    # fleet control: hard kill — no drain spawns until resume\n  rmd pause [--reason <text>]   # fleet control: drain-and-hold — in-flight completes, no new spawns\n  rmd resume                    # fleet control: clear stop + pause, spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard",
   );
   process.exit(2);
 }

@@ -7,6 +7,12 @@
 #                            --dry-run prints the gather + calibration table only
 #   rmd drain [--until <id>] [--max <n>] [--dry-run]
 #                            drain the DAG through run-task, stop-on-block, headroom-aware
+#   rmd daemon [--max <n>] [--poll-ms <n>]
+#                            persistent scheduler loop (STOP/PAUSE/headroom-aware); logs an
+#                            ANTHROPIC-clean-env boot assertion (env_clean, billing_mode) on start
+#   rmd daemon-plist [--poll-ms <n>] [--write]
+#                            generate the launchd unit that execs `rmd daemon` (absolute paths,
+#                            explicit PATH, no ANTHROPIC_*); loading it live is W1-T12d, operator-run
 #   rmd stop [--reason <text>]    fleet control: hard kill — checked every drain tick;
 #                            a running drain halts within one tick, a new one refuses to spawn
 #   rmd pause [--reason <text>]   fleet control: drain-and-hold — no new spawns, but an
