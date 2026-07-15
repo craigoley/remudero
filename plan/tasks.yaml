@@ -2525,16 +2525,57 @@
   rationale: "The LIVE half of the ci-gate work (W1-T24 split, bootstrap ordering, T1B/T1D class). Once
     ci-gate.yml exists on main (W1-T24) and the OPERATOR has flipped protection, a headless worker can PROVE
     the aggregator end-to-end via probe PRs it opens itself — proofs a first PR structurally cannot exhibit."
-  # ★ PRECONDITION: the OPERATOR flips protection FIRST by running the exact gh api PATCH documented in PR
-  #   #75's description (a protection mutation is NOT PR-shaped — §4 hard-stop — so the flip is a HUMAN
-  #   step, same as T1D's precedent). Only after that flip can this task's gh-observable proofs pass.
+  # ★ PRECONDITION (ALREADY EXECUTED): the OPERATOR flipped protection FIRST by running the exact gh api
+  #   PATCH from PR #75 (a protection mutation is NOT PR-shaped — §4 hard-stop — so the flip is a HUMAN
+  #   step, same as T1D's precedent). VERIFIED 2026-07-15: contexts == [ci-gate, remudero-review]. The flip
+  #   is DONE; this task's gh-observable proofs are now derivable.
+  design: |
+    ★ DIFF DELIVERABLE + EVIDENCE-PACKAGING PROTOCOL (added because two honest no_pr verdicts — runs
+    ...896928 and ...764897 — proved this task, shaped as evidence-without-diff, can NEVER derive `merged`:
+    an implement task must produce a mergeable diff, and its live proofs must be packaged into a REPORT the
+    deterministic reviewer can judge against observable state). Execute in this order:
+
+    (a) REUSE the live evidence already on the repo. Run ...764897 ALREADY opened the two probe PRs that
+        prove the aggregator end-to-end — #82 (probe/skip-path-filter-1784143764897: a path-filtered
+        sub-job is absent, ci-gate still GREEN) and #83 (red-subcheck-1784143764897: a planted FAILING
+        sub-check, ci-gate RED, PR unmergeable). DO NOT re-open probes that already exist; a fresh probe
+        just relitigates a settled point and burns budget. Verify they are still OPEN and in the expected
+        state first; only re-create one if it was closed/lost.
+
+    (b) COMPLETE THE SKIP PROOF THROUGH THE REAL GATE. #82 is BLOCKED only because no `remudero-review` has
+        been posted (it is trailer-less). Add a two-line `Acceptance:` block to #82's BODY stating its
+        claim ("a path-filtered sub-job is absent AND ci-gate reports GREEN, so a legitimately-skipped
+        sub-job does not deadlock the required context") — trailer-less PRs are judged against their body
+        Acceptance block — then run `rmd review 82` and let it MERGE under the live [ci-gate,
+        remudero-review] gate. A merged #82 is the skip proof completed through the real required context,
+        not just asserted.
+
+    (c) CAPTURE #83's EVIDENCE, then retire it. #83 is the RED-holds-closed proof: record the planted
+        sub-check's red state, ci-gate's FAILURE conclusion, the PR's unmergeable/BLOCKED mergeStateStatus
+        under the required context, and the run + PR URLs. Then CLOSE #83 UNMERGED and delete its branch
+        (red-subcheck-1784143764897) — it must never merge; its whole value is the captured evidence.
+
+    (d) THIS TASK'S OWN PR (trailer `Remudero-Task: W1-T24b`) CARRIES THE DIFF. Correct docs/review-gate.md:
+        its stale prove-then-flip paragraph (which frames [ci, remudero-review] as the "CURRENT state" and
+        the flip as "intentionally NOT part of the PR") must be rewritten to the operative
+        flip-then-prove ordering that was ACTUALLY executed — protection was flipped by the operator FIRST
+        (the plan precondition), and these probes prove it AFTER. Record the live-proof evidence in that
+        doc: the final protection contexts ([ci-gate, remudero-review]), the probe PR URLs (#82 merged,
+        #83 closed), the run URLs, and KEEP the recovery PATCH block as-is. That documentation diff is the
+        mergeable deliverable this task was missing.
   acceptance:
+    # NOTE (rule 16): the three criteria below are UNCHANGED (verbatim from the pre-split W1-T24). Their
+    # proofs MAY cite evidence produced by a PRIOR attempt of THIS SAME task — the #82/#83 probes opened by
+    # run ...764897. The deterministic reviewer judges the REPORT + observable repo state (a merged #82, a
+    # closed #83, the live protection contexts), NOT who opened the probe or on which attempt.
     - claim: "branch protection requires exactly ONE aggregator context plus remudero-review"
       proof: "gh api repos/craigoley/remudero/branches/main/protection --jq .required_status_checks.contexts shows [ci-gate, remudero-review]"
     - claim: "a deliberately-SKIPPED sub-job does NOT deadlock merge (proven LIVE)"
       proof: "a PR whose path filter skips a sub-job still reaches ci-gate GREEN and merges; paste the skipped sub-job status, the aggregator success, and the merge"
     - claim: "a deliberately RED sub-check HOLDS the merge closed (proven LIVE)"
       proof: "a planted FAILING sub-check leaves the PR unmergeable with ci-gate RED — paste the sub-check red state + the ci-gate red conclusion + the blocked merge, then revert"
+    - claim: "docs/review-gate.md's ordering paragraph matches the executed flip-then-prove sequence and records the live-proof evidence (probe PR + run URLs + final contexts)"
+      proof: "grep docs/review-gate.md for the corrected ordering and the recorded probe/run URLs"
   risk: high
   origin: architect
   plan_refs: ["§5"]
