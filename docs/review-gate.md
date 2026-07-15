@@ -1,13 +1,15 @@
-# Review-enforced merge gate (W1-T1C + W1-T1D + W1-T24)
+# Review-enforced merge gate (W1-T1C + W1-T1D + W1-T24 + W1-T24b)
 
-`remudero-review` is a **REQUIRED status check** on `main`, alongside `ci`. GitHub
-merges a PR only when BOTH are green. This document describes the gate as it is
-**wired and running** — not an aspiration.
+`remudero-review` is a **REQUIRED status check** on `main`, alongside `ci-gate`.
+GitHub merges a PR only when BOTH are green. This document describes the gate as
+it is **wired and running** — not an aspiration.
 
-★ **`ci-gate` (W1-T24)** now exists as a workflow
-(`.github/workflows/ci-gate.yml`) but is **not yet** a required context — see
-[CI-gate aggregator](#ci-gate-aggregator-w1-t24) below for why the flip to
-`main`'s required contexts is a separate, admin-run step.
+★ **`ci-gate` (W1-T24) is now the required aggregator context** — the operator
+flipped branch protection FIRST (`gh api` PATCH below, run by Craig, VERIFIED
+2026-07-15), and W1-T24b then proved the flip live, AFTER the fact, with two
+probe PRs opened against the armed gate. See
+[CI-gate aggregator](#ci-gate-aggregator-w1-t24) for the mechanics and
+[Live-proof evidence (W1-T24b)](#live-proof-evidence-w1-t24b) for the probes.
 
 ## What each check proves
 
@@ -58,18 +60,16 @@ The reviewer NEVER edits code and exposes no write path (`review.ts` is read-onl
 ## Required contexts
 
 ```
-required_status_checks.contexts = ["ci", "remudero-review"]
-```
-
-**This is the CURRENT state.** W1-T24 lands `ci-gate` as a workflow so it can run
-and be live-proven on real PRs (a real failing sub-check holds it red; a
-deliberately-skipped sub-job does not deadlock it) **before** it becomes a
-required context — see [CI-gate aggregator](#ci-gate-aggregator-w1-t24). Once
-that live proof exists, the target state is:
-
-```
 required_status_checks.contexts = ["ci-gate", "remudero-review"]
 ```
+
+**This is the CURRENT, live state** (flipped by the operator, VERIFIED
+2026-07-15 via `gh api repos/craigoley/remudero/branches/main/protection --jq
+.required_status_checks.contexts`). The prior gate, `["ci", "remudero-review"]`,
+is now only the *recovery* target — see the PATCH block in
+[CI-gate aggregator](#ci-gate-aggregator-w1-t24). W1-T24b proved the armed
+`ci-gate` context live, after the flip, with two probe PRs — see
+[Live-proof evidence (W1-T24b)](#live-proof-evidence-w1-t24b).
 
 ## CI-gate aggregator (W1-T24)
 
@@ -99,12 +99,16 @@ Because `ci-gate` always reports, it is safe to make it (alongside
 contexts (`ci`, and later the tier jobs) keep running and reporting, they are
 just no longer individually *required*.
 
-**The branch-protection flip is intentionally NOT part of the PR that adds this
-workflow.** Per the same bootstrap-ordering discipline as `remudero-review`
-below: land the aggregator, prove it live (a real red sub-check holds it red; a
-skipped sub-job does not deadlock it), and only then repoint
-`required_status_checks.contexts` — an admin `gh api` PATCH that is Craig's to
-run:
+**The branch-protection flip was NOT part of the PR that added this workflow —
+and it was executed FLIP-THEN-PROVE, not prove-then-flip.** A protection
+mutation is not PR-shaped (§4 hard-stop: it is a HUMAN, admin-run step), so the
+sequence actually run was: the operator (Craig) flipped protection FIRST with
+the exact PATCH below (VERIFIED 2026-07-15 — `required_status_checks.contexts`
+reads `[ci-gate, remudero-review]`), and only THEN did a headless worker
+(W1-T24b) live-prove both directions AGAINST the already-armed gate — a real
+red sub-check holds it red; a skipped sub-job does not deadlock it. See
+[Live-proof evidence (W1-T24b)](#live-proof-evidence-w1-t24b) for the probe PRs
+and run URLs. The PATCH that performed the flip:
 
 ```sh
 gh api --method PATCH \
@@ -120,6 +124,44 @@ gh api --method PATCH \
   repos/craigoley/remudero/branches/main/protection/required_status_checks \
   -f 'contexts[]=ci' -f 'contexts[]=remudero-review'
 ```
+
+## Live-proof evidence (W1-T24b)
+
+Final protection state, confirmed live:
+
+```sh
+$ gh api repos/craigoley/remudero/branches/main/protection \
+    --jq .required_status_checks.contexts
+["remudero-review","ci-gate"]
+```
+
+Two probe PRs, opened by the worker itself against the already-armed gate,
+proved both directions of the aggregator end to end:
+
+- **Skip proof — [PR #82](https://github.com/craigoley/remudero/pull/82)**
+  (`probe/skip-path-filter-1784143764897`, MERGED): added
+  `.github/workflows/probe-path-filter.yml`, scoped to a `paths:` glob this PR
+  never touches, so it registers **no check run at all** on the head commit.
+  Head-commit rollup: `ci-gate` = `SUCCESS`, `ci` = `SUCCESS`, plus every
+  security-tier sub-job green or `NEUTRAL` — `probe-path-filter` absent from
+  the rollup entirely (run
+  [29445036456](https://github.com/craigoley/remudero/actions/runs/29445036557)).
+  `remudero-review` was posted via the escape hatch (`rmd review 82`, judged
+  against the PR body's own `Acceptance:` block) and the PR merged under the
+  live `[ci-gate, remudero-review]` gate — a legitimately-skipped sub-job does
+  **not** deadlock merge.
+- **Red proof — [PR #83](https://github.com/craigoley/remudero/pull/83)**
+  (`red-subcheck-1784143764897`, CLOSED, never merged, branch deleted): added
+  `src/__probe/red-subcheck.ts`, a planted TypeScript type error. Head-commit
+  rollup: `ci` = `FAILURE`
+  ([run 29445067715](https://github.com/craigoley/remudero/actions/runs/29445067715)),
+  `ci-gate` = `FAILURE`
+  ([run 29445067530](https://github.com/craigoley/remudero/actions/runs/29445067530)),
+  every other sub-job still green — `gh pr view --json mergeable,mergeStateStatus`
+  read `mergeable: MERGEABLE, mergeStateStatus: BLOCKED`: a deliberately RED
+  sub-check holds the merge closed under the required `ci-gate` context. The
+  red state was captured here, then the PR was closed unmerged and its branch
+  deleted — its only value was the captured evidence.
 
 ## Bootstrap ordering (LOAD-BEARING — same pattern as T1B)
 
