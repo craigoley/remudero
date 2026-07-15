@@ -2286,17 +2286,25 @@
     Remudero-Task-trailered PRs since the last retro (reuse deriveStatus/ghGateway). Each ledger-ABSENT
     merge is annotated ('gate-side merge; run ended <terminal verdict>'); discrepancies are NAMED in the
     retro output so the SHIPPED log can never silently miss a merge again.
+    ★ AMENDED (P9, retro#1784155126258 — the false-attribution class): the union must not credit a PR the run does not OWN, and must honor the ledger's own corrections.
+    (a) OWNERSHIP ASSERT — before crediting ANY merge (ledger OR GitHub side), assert the credited PR's headRefName belongs to the claiming run's branch. A Remudero-Task-trailered PR whose head branch is NOT the run's branch is REJECTED (never credited) — the same guard W1-T62 put in the runner, applied at the READ side. This makes a stale/foreign trailer (e.g. #80's surviving Remudero-Task: W1-T54b) INERT.
+    (b) CORRECTION-AWARE — a correction.provenance ledger line for a run OVERRIDES that run's verdict.pr_url in the gather (the operator already wrote the truth: #91, not #80). A corrected run is credited to actual_pr_url, never claimed_pr_url; corrections are read as first-class events.
   acceptance:
     - claim: "a PR that merged AFTER a blocked run appears in the SHIPPED additions with the gate-side annotation, and the discrepancy is NAMED in the retro output"
       proof: "seeded fixture: a Remudero-Task-trailered PR merged on GitHub whose run ended blocked_review -> the gather's SHIPPED additions include it (annotated) AND the discrepancy is named"
     - claim: "a ledger-merged run behaves exactly as today (no regression)"
       proof: "unit test: a run with verdict=merged in the ledger is included with no annotation, same as the current mergedSince"
+    - claim: "a Remudero-Task-trailered PR whose head branch is NOT the run's branch is REJECTED, never credited (ownership assert — the false #80 / W1-T54b class)"
+      proof: "seeded fixture: run R's ledger/GitHub names a trailered PR whose headRefName != R's branch -> the gather does NOT credit it to R; a PR whose head branch IS R's branch is credited"
+    - claim: "a correction.provenance line for a run OVERRIDES that run's verdict.pr_url in the gather"
+      proof: "seeded fixture modeled on run W1-T54b-1784151420811 (verdict pr_url #80, correction actual_pr_url #91) -> the gather credits the run to #91, never #80"
   risk: medium
   origin: retro#1784133446353
   plan_refs: ["§8A"]
   files: [src/lib/retro.ts]
   status: queued
   attempts: 0
+  note: "Gather spec HARDENED by P9 (retro#1784155126258): ownership-assert + correction-awareness added so the GitHub-union cannot re-inherit the false #80 trailer — build W1-T51 only with these in place."
 
 # Item 4 — P6 triage: name the terminal cause of each `failed`x4 run (read-only, no golden yet).
 - id: W1-T52
