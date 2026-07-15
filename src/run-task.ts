@@ -26,6 +26,7 @@ import {
   type DrainOpts,
   type MergedSet,
 } from "./lib/drain.js";
+import { DEFAULT_POLL_INTERVAL_MS, runDaemon, type DaemonOpts, type DaemonSummary } from "./lib/daemon.js";
 import { buildDigest, sendDigest } from "./lib/digest.js";
 import { escalate, ghIssueGateway, type EscalationClass, type EscalationOption } from "./lib/escalate.js";
 import { imessageChannel, notify } from "./lib/notify.js";
@@ -1496,6 +1497,117 @@ async function drainCommand(rest: string[]): Promise<number> {
   }
 }
 
+/** Render a {@link DaemonSummary} — "what happened, or is happening" — at a glance. */
+function renderDaemonSummary(s: DaemonSummary): string {
+  return [
+    "── daemon summary ────────────────────────────────────────",
+    `attempted : ${s.attempted.length ? s.attempted.join(", ") : "(none)"}`,
+    `merged    : ${s.merged.length ? s.merged.join(", ") : "(none)"}`,
+    `stopped   : ${s.stopReason}${s.stopDetail ? ` — ${s.stopDetail}` : ""}`,
+    `idle ticks: ${s.ticks}`,
+    `cost      : notional $${s.costUsd.toFixed(4)}`,
+    "──────────────────────────────────────────────────────────",
+  ].join("\n");
+}
+
+/**
+ * `rmd daemon [--max <n>] [--poll-ms <n>]` — the PERSISTENT scheduler loop
+ * (W1-T12a; lib/daemon.ts owns the logic, this only wires the real defaults —
+ * same GitHub-derived status, same run-task path, same fleet control +
+ * headroom + locks as `rmd drain`). Unlike `rmd drain`, it does not stop on
+ * "nothing runnable right now" — it paces itself with a real `setTimeout`
+ * sleep and keeps polling, since new work can land later. It DOES still stop
+ * on STOP, PAUSE, headroom-exhausted, a block (v1 stop-on-block — reasoning
+ * about the block is W1-T46), or an unexpected error.
+ *
+ * Shares the SAME single-instance drain lock as `rmd drain` (state/drain.lock)
+ * — a daemon and a drain are both "the loop that spawns run-task", so only one
+ * of either may run at a time; per-task overlap is separately guarded by
+ * run-task's own inflight lock (drain-lock.ts / inflight-lock.ts, both reused
+ * here unchanged, never reimplemented).
+ *
+ * Actually LOADING this as a launchd service (so it survives logout/reboot and
+ * restarts on crash) is W1-T12b/d — this command is what that service execs.
+ */
+async function daemonCommand(rest: string[]): Promise<number> {
+  const maxIdx = rest.indexOf("--max");
+  const pollIdx = rest.indexOf("--poll-ms");
+  const opts: DaemonOpts = {
+    max: maxIdx >= 0 ? Number(rest[maxIdx + 1]) : undefined,
+    pollIntervalMs: pollIdx >= 0 ? Number(rest[pollIdx + 1]) : DEFAULT_POLL_INTERVAL_MS,
+  };
+  const config = loadConfig();
+  const planPath = join(repoRoot, "plan", "tasks.yaml");
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const statusPath = join(config.root, "state", "status.json");
+  const { owner } = resolveOwnerRepo();
+  const plan = loadPlan(planPath);
+
+  const refreshMerged: () => MergedSet = () => {
+    const proj = projectPlan(
+      plan,
+      { ledgerPath, github: ghGateway(owner, "remudero") },
+      statusPath,
+    );
+    return (id: string) => proj.get(id)?.merged ?? false;
+  };
+
+  // SINGLE-INSTANCE GUARD, shared with `rmd drain` (same lock file/DIAGNOSIS.md
+  // diag/drain-concurrency): refuse to start a daemon while a drain (or another
+  // daemon) already holds it; reclaim a stale (dead-pid) lock.
+  const drainLockPath = join(config.root, "state", "drain.lock");
+  let drainLock;
+  try {
+    drainLock = acquireDrainLock(drainLockPath);
+  } catch (e) {
+    if (e instanceof DrainLockError) {
+      console.error(
+        `### rmd daemon REFUSED — a drain/daemon is already running ` +
+          `(pid ${e.holder.pid} on ${e.holder.host}, started ${e.holder.startedAt}).\n` +
+          `If that process is dead, remove ${drainLockPath} and retry.`,
+      );
+      return 1;
+    }
+    throw e;
+  }
+  const onSignal = (sig: NodeJS.Signals) => {
+    drainLock.release();
+    process.kill(process.pid, sig); // re-raise with the default handler now cleared
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+
+  const runId = `DAEMON-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, ...extra });
+  log("daemon.start", { max: opts.max ?? null, poll_interval_ms: opts.pollIntervalMs, lock_pid: drainLock.info.pid });
+
+  try {
+    const summary = await runDaemon(
+      plan,
+      {
+        refreshMerged,
+        runOne: (taskId) => runTask(taskId, { planPath, config }),
+        readUsage: () => readUsageSnapshot(config),
+        checkStop: () => stopDetail(config.root),
+        checkPause: () => pauseDetail(config.root),
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        log,
+      },
+      opts,
+    );
+    console.log("\n" + renderDaemonSummary(summary));
+    // Exit 0 only on a clean stop (STOP requested / max reached); a block,
+    // headroom exhaustion, or error is a non-zero exit so a supervising
+    // wrapper (or launchd, W1-T12b) notices.
+    return summary.stopReason === "stopped" || summary.stopReason === "max_reached" ? 0 : 1;
+  } finally {
+    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onSignal);
+    drainLock.release();
+  }
+}
+
 /**
  * `rmd stop [--reason <text>]` — the fleet control set (W1-T11, MASTER-PLAN §4A/§4B).
  * Writes the STOP flag file. A `rmd drain` already running halts within one tick
@@ -1760,6 +1872,9 @@ async function main(): Promise<void> {
   if (cmd === "drain") {
     process.exit(await drainCommand(rest));
   }
+  if (cmd === "daemon") {
+    process.exit(await daemonCommand(rest));
+  }
   if (cmd === "stop") {
     process.exit(await stopCommand(rest));
   }
@@ -1782,7 +1897,7 @@ async function main(): Promise<void> {
     process.exit(await initCommand(rest));
   }
   console.error(
-    "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd stop [--reason <text>]    # fleet control: hard kill — no drain spawns until resume\n  rmd pause [--reason <text>]   # fleet control: drain-and-hold — in-flight completes, no new spawns\n  rmd resume                    # fleet control: clear stop + pause, spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard",
+    "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd daemon [--max <n>] [--poll-ms <n>]   # persistent scheduler loop (STOP/PAUSE/headroom-aware)\n  rmd stop [--reason <text>]    # fleet control: hard kill — no drain spawns until resume\n  rmd pause [--reason <text>]   # fleet control: drain-and-hold — in-flight completes, no new spawns\n  rmd resume                    # fleet control: clear stop + pause, spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard",
   );
   process.exit(2);
 }
