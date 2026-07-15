@@ -14,6 +14,13 @@ GitHub merges a PR only when BOTH are green. Auto-merge is safe to leave armed.
 `rmd run-task <task-id>` posts `remudero-review` automatically as part of its flow
 (after `ci` is green, before it arms auto-merge). Nothing extra to do.
 
+## Plan edits (`MASTER-PLAN.md`, `plan/tasks.yaml`) — PR only, never scp
+
+The plan is the one artifact whose edit history matters most. It lands **only**
+through a branch + PR, gated by the same `ci` + `remudero-review` checks as
+code — never scp'd, rsync'd, or manually copied into the tree. See
+[docs/plan-sync.md](docs/plan-sync.md) for the full flow.
+
 ## Manual PRs (plan edits, docs, hand-run changes) — you MUST post the review
 
 Because only `rmd run-task` posts `remudero-review`, a **hand-opened PR sits
