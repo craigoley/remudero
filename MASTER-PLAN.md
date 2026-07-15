@@ -1343,6 +1343,14 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    (observed 21–42 turns), so raising it would MASK over-scoping and reward it (and W1-T9 was the THIRD
    max_turns event — a third budget bump was refused). The retro fix lives in task SIZING (rule 16
    decomposition), not in `.remudero/mounts.yaml`. [DIAGNOSIS.md diag/w1t9-max-turns, W1-T6, W1-T9]
+20. **A NEW SIZING/FITNESS RULE MUST RETROACTIVELY RE-GRADE THE OPEN QUEUE — RULES ARE NOT FORWARD-ONLY.**
+   When a rule like 18 or 19 is added, every ALREADY-AUTHORED open task must be re-checked against it, not
+   only new authoring. W1-T12 pre-existed rules 18 and 19 and violated BOTH (three concerns at `risk:medium`;
+   three live-context criteria — overnight drain, launchctl-load, live-kill) yet still reached a worker and
+   burned 81 turns / $10.27 — the FOURTH max_turns event — because the rules were enforced forward-only.
+   `rmd retro` re-grades every open task against every standing rule and files a corrective task for each
+   violation (the executable duty is W1-T20d). A rule the queue is never swept against protects only the
+   tasks written after it. [DIAGNOSIS.md diag/w1t12-max-turns, W1-T12]
 
 - Lives at repo root. Header carries sync date + focus, his-house style.
 - Humans and agents edit via commits/PRs; the Architect does narrative syncs at workstream

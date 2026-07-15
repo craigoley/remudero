@@ -276,3 +276,34 @@
     to detectTier so detection is unit-testable over fixtures (max5x/max20x/ambiguous) with no live calls.
   src: MASTER-PLAN FIELD FINDINGS §9(h), DIAGNOSIS.md (diag/w1t9-max-turns)
   cited: "2026-07-15"
+
+# ── The daemon task bundled 3 concerns AND 3 headless-unfit criteria (W1-T12). Split logic (headless,
+# unit-tested) from live commissioning (verify:human). (DIAGNOSIS.md diag/w1t12-max-turns) ──
+- id: daemon-split-logic-from-live-commissioning
+  subsystem: architecture
+  files: [src/lib/daemon.ts, src/lib/launchd.ts, src/run-task.ts]
+  fact: >-
+    W1-T12 (the daemon) bundled THREE concerns (scheduler loop + launchd unit + crash-recovery) AND three
+    HEADLESS-UNFIT criteria: a live OVERNIGHT drain, a launchctl-LOAD into a real session, and a live
+    KILL-and-recover. A headless worker cannot verify launchd/boot/kill behavior — those are verify:human
+    COMMISSIONING steps. Split the daemon into headless, unit-tested LOGIC (scheduler loop over an injected
+    clock+runner; plist GENERATION + in-process boot assertion; recovery over a SEEDED interrupted state)
+    and a separate verify:human live-commissioning task. The machine builds + unit-proves; the human
+    commissions live (draft→playtest→ready). (Rules 16/18/19.)
+  src: DIAGNOSIS.md (diag/w1t12-max-turns), W1-T12
+  cited: "2026-07-15"
+
+# ── Standing rules were enforced FORWARD-ONLY; W1-T12 pre-existed Rules 18/19 and slipped through to a
+# worker. New rules must sweep the EXISTING open queue, not only govern new authoring. ──
+- id: rules-must-sweep-the-existing-queue
+  subsystem: process
+  files: [plan/tasks.yaml]
+  fact: >-
+    Rules 18 and 19 already existed when W1-T12 ran, but were applied FORWARD-ONLY — nothing re-graded the
+    already-authored queue against them, so a task that violated both (3 concerns at risk:medium + 3
+    live-context criteria) reached a worker and burned 81 turns / $10.27 (the 4th max_turns event). A new
+    sizing/fitness rule must RETROACTIVELY re-grade every open task; `rmd retro` sweeps the queue against
+    every standing rule and files corrective tasks. A rule the queue is never swept against protects only
+    tasks written after it. (MASTER-PLAN Standing rule 20.)
+  src: DIAGNOSIS.md (diag/w1t12-max-turns), W1-T12
+  cited: "2026-07-15"

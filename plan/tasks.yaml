@@ -547,8 +547,14 @@
   status: queued
   attempts: 0
 
-- id: W1-T12
-  title: Daemonize — scheduler loop + launchd unit (LAST task in WS-1)
+# W1-T12 (Daemonize — LAST task in WS-1) was DECOMPOSED into W1-T12a/b/c/d along the
+# machine/human boundary (over-scoped: 3 concerns + 3 headless-unfit criteria; died
+# error_max_turns at 81 turns / $10.27 — DIAGNOSIS.md on diag/w1t12-max-turns; Rules 16/18/19).
+# NO criterion dropped — each original criterion splits into a HEADLESS-verifiable logic half
+# (T12a/b/c, unit-tested) and a LIVE-commissioning half that only the operator can do (T12d,
+# verify:human): overnight drain, launchctl-load, and live kill-and-recover (Rule 18).
+- id: W1-T12a
+  title: "Daemon core — scheduler loop (DAG select → dispatch; honors Pause/Resume/STOP + headroom + locks)"
   repo: remudero
   depends_on: [W1-T2, W1-T3, W1-T4, W1-T5, W1-T6, W1-T7, W1-T8, W1-T9a, W1-T9b, W1-T9c, W1-T11]
   type: implement
@@ -556,16 +562,81 @@
   principles: {tdd: strict}
   budget_usd: 100.00
   acceptance:
-    - claim: "the daemon drains a 3-task plan on remudero-sandbox end-to-end, unattended, overnight"
-      proof: "ledger + merged PRs + daily digest received"
-    - claim: "launchd unit uses absolute paths + explicit PATH; the daemon asserts its own env is ANTHROPIC-clean at boot"
-      proof: "startup ledger line: env_clean=true, billing_mode=subscription"
-    - claim: "daemon killed mid-task recovers correct state from git + GitHub alone"
-      proof: "chaos-drill transcript"
-  risk: medium
+    - claim: "given an INJECTED clock + INJECTED runner, the loop selects and dispatches tasks in dependency order and stops on STOP / Pause / headroom-exhausted"
+      proof: "unit tests over a fake plan + fake runner assert dispatch order + each stop condition — NO real overnight run, NO real worker spawns"
+  risk: high
   origin: architect
+  plan_refs: ["§4B"]
+  files: [src/lib/daemon.ts, src/run-task.ts]
   status: queued
   attempts: 0
+  note: "Split from W1-T12 (DIAGNOSIS.md, Rule 16). The daemon's PURE LOGIC — the scheduler loop over the
+    DAG, honoring W1-T11 Pause/Resume/STOP, the HeadroomTracker, and the drain+inflight locks — provable
+    in-process with an injected clock + runner. risk:high (120): the largest child, the daemon core."
+
+- id: W1-T12b
+  title: "launchd unit generation + ANTHROPIC-clean boot assertion (headless)"
+  repo: remudero
+  depends_on: [W1-T12a]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  acceptance:
+    - claim: "the GENERATED launchd .plist contains absolute paths + an explicit PATH + the ANTHROPIC-clean-env boot assertion, and the startup routine logs env_clean=true / billing_mode=subscription when run in-process"
+      proof: "assert the generated plist contents (absolute paths, explicit PATH, the assertion) + unit-test that the startup routine emits env_clean=true / billing_mode=subscription — NOT a real launchctl load"
+  risk: medium
+  origin: architect
+  plan_refs: ["§4B", "§9"]
+  files: [src/lib/launchd.ts, src/lib/daemon.ts, src/lib/env.ts]
+  status: queued
+  attempts: 0
+  note: "Split from W1-T12. GENERATION + in-process boot assertion only. Actually LOADING the plist on a
+    real user session is W1-T12d (verify:human) — a headless worker cannot launchctl-load (Rule 18)."
+
+- id: W1-T12c
+  title: "Daemon crash-recovery logic (reconstruct state from git + GitHub + ledger — headless)"
+  repo: remudero
+  depends_on: [W1-T12a]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  acceptance:
+    - claim: "given a SIMULATED interrupted-run state (orphaned worktree + unmerged branch + partial ledger), the recovery routine reconstructs correct state (resume/clean) from git + GitHub + the ledger alone"
+      proof: "unit test SEEDS the interrupted state and asserts the reconstructed state — NOT a live daemon kill"
+  risk: medium
+  origin: architect
+  plan_refs: ["§4B"]
+  files: [src/lib/daemon.ts]
+  status: queued
+  attempts: 0
+  note: "Split from W1-T12. The RECOVERY code path, unit-tested over a seeded interrupted state. The LIVE
+    kill-and-recover chaos drill is W1-T12d (verify:human) — a worker can't kill a live daemon (Rule 18)."
+
+- id: W1-T12d
+  title: "Daemon live commissioning — launchctl-load · overnight drain · kill-and-recover (OPERATOR)"
+  repo: remudero
+  depends_on: [W1-T12a, W1-T12b, W1-T12c]
+  type: manual
+  verify: human
+  budget_usd: 100.00
+  acceptance:
+    - claim: "the launchctl-loaded plist starts the daemon on a real user session"
+      proof: "operator pastes the launchctl load + the daemon's startup ledger line (env_clean=true, billing_mode=subscription)"
+    - claim: "a real unattended OVERNIGHT drain of a 3-task plan on remudero-sandbox lands merged PRs + a daily digest"
+      proof: "operator pastes the ledger + the merged PR links + the received daily digest"
+    - claim: "the LIVE daemon killed mid-task recovers correct state on restart from git + GitHub alone"
+      proof: "operator pastes the chaos-drill transcript (kill → restart → reconstructed state)"
+  risk: high
+  origin: architect
+  plan_refs: ["§4B"]
+  status: queued
+  attempts: 0
+  note: "Split from W1-T12. The three things a headless worker STRUCTURALLY CANNOT do (Rule 18): live
+    launchctl-load, a real overnight drain, and a live kill-and-recover — moved to the operator. The machine
+    BUILDS + unit-proves the logic (T12a/b/c); the human COMMISSIONS it live (draft→playtest→ready). These
+    three criteria are the LIVE halves of W1-T12's original three — nothing dropped, only redistributed."
 
 - id: W1-T13
   title: Fix the operator's interactive-session billing leak (Craig instance, MANUAL-verified)
@@ -1804,7 +1875,7 @@
 - id: W1-T46
   title: "drain: intelligent block-handling — the daemon REASONS about a block (successor to v1 stop-on-block)"
   repo: remudero
-  depends_on: [W1-T7, W1-T12]
+  depends_on: [W1-T7, W1-T12a]   # W1-T12 → W1-T12a (the daemon CORE is what "the daemon exists" means for block-reasoning)
   type: implement
   verify: auto
   principles: {tdd: strict}
