@@ -335,3 +335,19 @@
     task-inside-a-task?"). Cheap deterministic checks first; the LLM layer is advisory and does not block.
   src: W1-T12, this session
   cited: "2026-07-15"
+
+# ── Control-surface hazards for an unattended daemon (fix/cli-safe-control-surface). ──
+- id: control-surface-fail-loud-stop-one-shot
+  subsystem: cli
+  files: [src/run-task.ts, src/lib/fleet-control.ts]
+  fact: >-
+    An unknown CLI command / unrecognized subcommand fell THROUGH to launching a drain
+    (`rmd daemon install --dry-run` silently ran the daemon and merged a task unattended),
+    and STOP was a persistent latch that silently blocked every future `rmd drain` until
+    manually cleared — both are unattended-daemon HAZARDS. A control surface must FAIL LOUD
+    on bad input (unknown command/arg → print usage, exit non-zero, spawn NOTHING; validate
+    flags BEFORE any spawn/lock), and STOP must be ONE-SHOT (auto-consumed on the halting
+    run's terminal, and a no-op-that-warns when nothing is running) — distinct from PAUSE, a
+    PERSISTENT hold cleared only by `rmd resume`.
+  src: fix/cli-safe-control-surface (W1-T14/T15 incident)
+  cited: "2026-07-15"

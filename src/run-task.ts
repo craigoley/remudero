@@ -89,10 +89,11 @@ import {
   writeRunLock,
   type WorkerResult,
 } from "./lib/worker.js";
-import { acquireDrainLock, DrainLockError } from "./lib/drain-lock.js";
+import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "./lib/drain-lock.js";
 import { acquireInflightLock, InflightLockError } from "./lib/inflight-lock.js";
 import { classifyFailure, MAX_TRANSIENT_RETRIES, type FailureSignal } from "./lib/classify.js";
 import {
+  consumeStop,
   pauseDetail,
   requestPause,
   requestStop,
@@ -1431,6 +1432,13 @@ function readUsageSnapshot(config: Config): UsageSnapshot | undefined {
  * and bounded. See lib/drain.ts for the loop; this only wires the real defaults.
  */
 async function drainCommand(rest: string[]): Promise<number> {
+  // FAIL LOUD on junk args BEFORE touching config/locks/spawns (a malformed control command
+  // must spawn NOTHING — the daemon-install hazard). drain takes only these flags.
+  const badArg = unknownArgError("drain", rest, ["--until", "--max"], ["--dry-run"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
   const dryRun = rest.includes("--dry-run");
   const untilIdx = rest.indexOf("--until");
   const maxIdx = rest.indexOf("--max");
@@ -1484,8 +1492,11 @@ async function drainCommand(rest: string[]): Promise<number> {
     }
     throw e;
   }
-  // Release on a Ctrl-C / kill too, so a signal never leaves a permanent stale lock.
+  // Release the lock AND auto-consume STOP on a Ctrl-C / kill too, so a signal never leaves a
+  // permanent stale lock or a STOP latch. (SIGKILL is uncatchable — the same limitation the
+  // lock itself has; the next drain reclaims a dead-pid lock, and `rmd stop` no-ops when idle.)
   const onSignal = (sig: NodeJS.Signals) => {
+    consumeStop(config.root);
     drainLock.release();
     process.kill(process.pid, sig); // re-raise with the default handler now cleared
   };
@@ -1519,6 +1530,11 @@ async function drainCommand(rest: string[]): Promise<number> {
     // mid-drain never leaves a stale lock that blocks the next drain forever.
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
+    // AUTO-CONSUME STOP on THIS run's terminal verdict (decided here, justified): STOP is
+    // one-shot — it existed only to halt THIS drain, so the drain it interrupted clears it as
+    // it exits. A concurrent/next drain therefore sees a clean slate, never a silent latch.
+    // PAUSE is deliberately NOT consumed here (persistent hold, cleared only by `rmd resume`).
+    consumeStop(config.root);
     drainLock.release();
   }
 }
@@ -1556,6 +1572,14 @@ function renderDaemonSummary(s: DaemonSummary): string {
  * restarts on crash) is W1-T12b/d — this command is what that service execs.
  */
 async function daemonCommand(rest: string[]): Promise<number> {
+  // FAIL LOUD on junk args BEFORE any spawn/lock — `rmd daemon install --dry-run` silently
+  // ran the daemon (draining W1-T15) because `install`/`--dry-run` were ignored. daemon
+  // takes only these flags; anything else prints usage and exits non-zero, spawning nothing.
+  const badArg = unknownArgError("daemon", rest, ["--max", "--poll-ms"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
   const maxIdx = rest.indexOf("--max");
   const pollIdx = rest.indexOf("--poll-ms");
   const opts: DaemonOpts = {
@@ -1597,6 +1621,7 @@ async function daemonCommand(rest: string[]): Promise<number> {
     throw e;
   }
   const onSignal = (sig: NodeJS.Signals) => {
+    consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
     drainLock.release();
     process.kill(process.pid, sig); // re-raise with the default handler now cleared
   };
@@ -1634,6 +1659,7 @@ async function daemonCommand(rest: string[]): Promise<number> {
   } finally {
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
+    consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
     drainLock.release();
   }
 }
@@ -1679,18 +1705,39 @@ async function daemonPlistCommand(rest: string[]): Promise<number> {
 async function stopCommand(rest: string[]): Promise<number> {
   const config = loadConfig();
   const reason = flagValue(rest, "--reason");
-  const info = requestStop(config.root, reason);
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
+
+  // STOP is ONE-SHOT: it exists only to halt a RUNNING drain/daemon, which auto-consumes it
+  // on termination. With NOTHING running, writing STOP would be a persistent latch that
+  // silently blocks the NEXT drain (the reported bug) — so with nothing to stop, warn + no-op.
+  // "Active" = the shared drain.lock is held by a live pid (a drain or daemon is running).
+  const holder = readDrainLock(join(config.root, "state", "drain.lock"));
+  if (!holder || !defaultIsPidAlive(holder.pid)) {
+    console.warn(
+      `### rmd stop — nothing to stop: no drain/daemon is running. NOT writing a persistent ` +
+        `STOP (it is one-shot). For a maintenance hold that survives across runs, use \`rmd pause\`.`,
+    );
+    appendLedger(ledgerPath, {
+      run_id: `FLEET-${Date.now()}`,
+      task_id: "FLEET",
+      step: "fleet.stop.noop",
+      reason: reason ?? null,
+    });
+    return 0;
+  }
+
+  const info = requestStop(config.root, reason);
   appendLedger(ledgerPath, {
     run_id: `FLEET-${Date.now()}`,
     task_id: "FLEET",
     step: "fleet.stop",
     reason: reason ?? null,
     requested_by_pid: info.pid,
+    target_pid: holder.pid,
   });
   console.log(
-    `### rmd stop — STOP flag written. A running drain halts within one tick; a new ` +
-      `\`rmd drain\` refuses to spawn until \`rmd resume\`.`,
+    `### rmd stop — STOP written; the running drain (pid ${holder.pid}) halts within one tick ` +
+      `and AUTO-CLEARS STOP as it exits. One-shot: your next \`rmd drain\` starts clean — no \`rmd resume\` needed.`,
   );
   return 0;
 }
@@ -1743,6 +1790,33 @@ async function resumeFleetCommand(): Promise<number> {
 function flagValue(rest: string[], flag: string): string | undefined {
   const i = rest.indexOf(flag);
   return i >= 0 ? rest[i + 1] : undefined;
+}
+
+/**
+ * Strict arg check for a FLAGS-ONLY subcommand: return an error string for the FIRST
+ * unrecognized token (a bare positional, or a `--flag` not in `valueFlags`/`boolFlags`),
+ * else null. `valueFlags` consume the following token as their value. This is what makes a
+ * SPAWNING command fail loud on junk instead of draining — `rmd daemon install --dry-run`
+ * silently ran the daemon (draining W1-T15) because `install`/`--dry-run` were ignored.
+ */
+export function unknownArgError(
+  command: string,
+  rest: string[],
+  valueFlags: string[],
+  boolFlags: string[] = [],
+): string | null {
+  const vf = new Set(valueFlags);
+  const bf = new Set(boolFlags);
+  for (let i = 0; i < rest.length; i++) {
+    const tok = rest[i];
+    if (bf.has(tok)) continue;
+    if (vf.has(tok)) {
+      i++; // skip its value
+      continue;
+    }
+    return `rmd ${command}: unexpected argument '${tok}' — see \`rmd --help\``;
+  }
+  return null;
 }
 
 /** Every `--option "label|detail"` in argv tail, in order given. */
@@ -1918,7 +1992,7 @@ async function initCommand(rest: string[]): Promise<number> {
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 const USAGE =
-  "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd daemon [--max <n>] [--poll-ms <n>]   # persistent scheduler loop (STOP/PAUSE/headroom-aware)\n  rmd daemon-plist [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon` (commissioning is W1-T12d)\n  rmd stop [--reason <text>]    # fleet control: hard kill — no drain spawns until resume\n  rmd pause [--reason <text>]   # fleet control: drain-and-hold — in-flight completes, no new spawns\n  rmd resume                    # fleet control: clear stop + pause, spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard";
+  "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd daemon [--max <n>] [--poll-ms <n>]   # persistent scheduler loop (STOP/PAUSE/headroom-aware)\n  rmd daemon-plist [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon` (commissioning is W1-T12d)\n  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.\n  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.\n  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard\n\nAn UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(): Promise<void> {

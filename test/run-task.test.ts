@@ -4,6 +4,7 @@ import {
   DEFAULT_BUDGET_USD,
   isTransientResult,
   resolveReviewTarget,
+  unknownArgError,
   noPrVerdict,
   softBudgetWarning,
   workerErrorVerdict,
@@ -180,4 +181,22 @@ test("resolveReviewTarget: no flag ⇒ the checkout default; --repo overrides (b
   assert.deepEqual(resolveReviewTarget(def, ["--repo", "remudero-sandbox"]), { owner: "craigoley", repo: "remudero-sandbox" });
   assert.deepEqual(resolveReviewTarget(def, ["--repo", "other/box"]), { owner: "other", repo: "box" });
   assert.deepEqual(resolveReviewTarget(def, ["5", "--repo", "remudero-sandbox"]), { owner: "craigoley", repo: "remudero-sandbox" });
+});
+
+// ── BUG 1 (fix/cli-safe-control-surface): a spawning subcommand must FAIL LOUD on junk
+// args, never silently drain. `rmd daemon install --dry-run` drained W1-T15 unattended. ──
+test("unknownArgError: a bare positional (bogus subcommand) is rejected — the daemon-install hazard", () => {
+  const err = unknownArgError("daemon", ["install", "--dry-run"], ["--max", "--poll-ms"], []);
+  assert.ok(err, "an unexpected argument must produce an error");
+  assert.match(err!, /unexpected argument 'install'/);
+});
+
+test("unknownArgError: an unknown --flag is rejected", () => {
+  assert.match(unknownArgError("daemon", ["--dry-run"], ["--max", "--poll-ms"], [])!, /unexpected argument '--dry-run'/);
+});
+
+test("unknownArgError: recognized flags (value + bool) pass, returning null", () => {
+  assert.equal(unknownArgError("daemon", ["--max", "5", "--poll-ms", "1000"], ["--max", "--poll-ms"], []), null);
+  assert.equal(unknownArgError("drain", ["--until", "W1-T3", "--dry-run"], ["--until", "--max"], ["--dry-run"]), null);
+  assert.equal(unknownArgError("drain", [], ["--until", "--max"], ["--dry-run"]), null);
 });

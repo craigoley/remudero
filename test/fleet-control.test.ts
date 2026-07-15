@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  consumeStop,
   isPaused,
   isStopped,
   pauseDetail,
@@ -83,4 +84,44 @@ test("stopFilePath/pauseFilePath are distinct paths under <root>/state", () => {
   assert.notEqual(stopFilePath(root), pauseFilePath(root));
   assert.match(stopFilePath(root), /state[\\/]STOP$/);
   assert.match(pauseFilePath(root), /state[\\/]PAUSE$/);
+});
+
+// ── STOP is ONE-SHOT (fix/cli-safe-control-surface): the halted run consumes it so a
+// future drain is never silently blocked. PAUSE stays PERSISTENT (resume only). ──
+test("consumeStop clears ONLY the STOP flag (one-shot) and leaves PAUSE (persistent)", () => {
+  const root = tmpRoot();
+  requestStop(root, "accidental run");
+  requestPause(root, "maintenance");
+  assert.equal(isStopped(root), true);
+  assert.equal(isPaused(root), true);
+
+  const cleared = consumeStop(root);
+  assert.equal(cleared, true, "consumeStop reports it cleared a present STOP");
+  assert.equal(isStopped(root), false, "STOP is one-shot — consumed");
+  assert.equal(isPaused(root), true, "PAUSE is persistent — NOT consumed by consumeStop");
+});
+
+test("consumeStop with no STOP present is a no-op (idempotent, returns false)", () => {
+  const root = tmpRoot();
+  assert.equal(consumeStop(root), false);
+  assert.equal(isStopped(root), false);
+});
+
+test("LIFECYCLE: after a run consumes STOP, a subsequent drain sees a clean slate WITHOUT a manual resume", () => {
+  const root = tmpRoot();
+  requestStop(root); // operator stops an accidental run
+  assert.equal(isStopped(root), true);
+  consumeStop(root); // the halted run auto-consumes STOP as it terminates
+  // the NEXT drain's gate predicate is clear — no `rmd resume` / manual rm needed:
+  assert.equal(isStopped(root), false);
+});
+
+test("PAUSE still requires resume — it is NOT consumed by consumeStop and survives across runs", () => {
+  const root = tmpRoot();
+  requestPause(root, "hold for maintenance");
+  consumeStop(root); // a run terminating consumes STOP only
+  assert.equal(isPaused(root), true, "PAUSE persists across a STOP consume");
+  const r = resumeFleet(root);
+  assert.equal(r.clearedPause, true);
+  assert.equal(isPaused(root), false, "only resume clears PAUSE");
 });
