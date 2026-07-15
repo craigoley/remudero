@@ -50,3 +50,38 @@ same limitation the lock itself has; the next drain reclaims a dead-pid lock and
 no-ops when idle.)
 
 See `rmd --help` for the full command list.
+
+## Which repo does the daemon drain? (repo targeting)
+
+The daemon reads the **plan it schedules** and scopes its **status-derivation GitHub gateway**
+from an **explicit** repo target — it never silently defaults an unattended run to the repo
+that holds its own source.
+
+- **`rmd daemon --repo <name>`** picks the repo to drain: the gateway is scoped to
+  `<owner>/<name>` and the plan is read from a synced clone of that repo
+  (`<root>/repos/<name>/plan/tasks.yaml`, fetched to the latest `origin/main`).
+- **`rmd daemon --plan <path>`** overrides the plan source with an explicit file.
+- **`rmd daemon --dry-run`** resolves the target, prints the repo/gateway/plan and the planned
+  runnable sequence, logs a `daemon.target` ledger line, and **spawns nothing**.
+- **Self-target guard:** a bare `rmd daemon` (which would drain the daemon's own source repo)
+  is **refused** unless you pass **`--allow-self-target`** (deliberate self-hosting). This is
+  why the launchd unit must bake in a repo — see below.
+
+### Commissioning against remudero-sandbox (W1-T12d)
+
+```
+# preview — resolves the sandbox target + planned tasks, spawns nothing:
+rmd daemon --repo remudero-sandbox --dry-run
+
+# a bounded live drill (one task through the full gate on the sandbox):
+rmd daemon --repo remudero-sandbox --max 1
+
+# generate the launchd unit that drains the sandbox (baked-in --repo), then load it:
+rmd daemon-plist --repo remudero-sandbox --write
+launchctl load ~/Library/LaunchAgents/com.remudero.daemon.plist
+```
+
+`rmd daemon-plist` **bakes `--repo` into the unit's `ProgramArguments`**, so the launchd
+daemon drains the intended repo — never an implicit default. A plist generated **without**
+`--repo` warns you, and the resulting unit's daemon will refuse to start (self-target guard)
+rather than silently drain its own source repo.

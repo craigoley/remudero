@@ -1575,7 +1575,12 @@ async function daemonCommand(rest: string[]): Promise<number> {
   // FAIL LOUD on junk args BEFORE any spawn/lock — `rmd daemon install --dry-run` silently
   // ran the daemon (draining W1-T15) because `install`/`--dry-run` were ignored. daemon
   // takes only these flags; anything else prints usage and exits non-zero, spawning nothing.
-  const badArg = unknownArgError("daemon", rest, ["--max", "--poll-ms"]);
+  const badArg = unknownArgError(
+    "daemon",
+    rest,
+    ["--max", "--poll-ms", "--repo", "--plan"],
+    ["--dry-run", "--allow-self-target"],
+  );
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -1587,20 +1592,74 @@ async function daemonCommand(rest: string[]): Promise<number> {
     pollIntervalMs: pollIdx >= 0 ? Number(rest[pollIdx + 1]) : DEFAULT_POLL_INTERVAL_MS,
   };
   const config = loadConfig();
-  const planPath = join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const statusPath = join(config.root, "state", "status.json");
-  const { owner } = resolveOwnerRepo();
-  const plan = loadPlan(planPath);
+  const self = resolveOwnerRepo();
+  const reposDir = join(config.root, "repos");
+
+  // ── REPO TARGETING + self-target GUARD (fix/daemon-repo-targeting). The daemon must know
+  // WHICH repo to drain, EXPLICITLY — the old code read the plan from its own checkout and
+  // hardcoded the "remudero" gateway, so an unattended run silently drained its own source.
+  // --repo/--plan choose the gateway + plan source; W1-T12d targets the sandbox explicitly.
+  const resolved = resolveDaemonTarget(
+    { selfOwner: self.owner, selfRepo: self.repo, repoRoot, reposDir },
+    rest,
+  );
+  if ("error" in resolved) {
+    console.error(resolved.error + "\n" + USAGE);
+    return 2;
+  }
+  const target = resolved.target;
+
+  const runId = `DAEMON-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, ...extra });
+  log("daemon.target", {
+    repo: target.repo,
+    gateway: `${target.owner}/${target.repo}`,
+    plan_path: target.planPath,
+    self_host: target.isSelf,
+    dry_run: target.dryRun,
+  });
+
+  // Read the plan to schedule. For a NON-self target without an explicit --plan, read it from a
+  // clone of the target repo (the daemon clones it for execution anyway), SYNCED to the latest
+  // default branch so the scheduled plan is current — a stale clone would drain an old plan.
+  if (!target.isSelf && !flagValue(rest, "--plan")) {
+    const repoDir = join(reposDir, target.repo);
+    if (!existsSync(repoDir)) {
+      mkdirSync(dirname(repoDir), { recursive: true });
+      execFileSync("gh", ["repo", "clone", `${target.owner}/${target.repo}`, repoDir], { stdio: "inherit" });
+    } else {
+      execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
+      execFileSync("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
+    }
+  }
+  const plan = loadPlan(target.planPath);
 
   const refreshMerged: () => MergedSet = () => {
     const proj = projectPlan(
       plan,
-      { ledgerPath, github: ghGateway(owner, "remudero") },
+      { ledgerPath, github: ghGateway(target.owner, target.repo) },
       statusPath,
     );
     return (id: string) => proj.get(id)?.merged ?? false;
   };
+
+  // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
+  if (target.dryRun) {
+    const seq = plannedSequence(plan, refreshMerged(), { max: opts.max ?? DRAIN_DEFAULT_MAX });
+    console.log(`### rmd daemon --dry-run — target ${target.owner}/${target.repo} · plan ${target.planPath}`);
+    console.log(seq.length ? seq.map((id, i) => `  ${i + 1}. ${id}`).join("\n") : "  (nothing runnable now)");
+    if (target.isSelf) console.warn("  ⚠️ SELF-HOSTING target — the daemon's own source repo.");
+    return 0;
+  }
+
+  if (target.isSelf) {
+    console.warn(
+      `### rmd daemon — SELF-HOSTING: draining the daemon's own source repo '${target.repo}' (--allow-self-target).`,
+    );
+  }
 
   // SINGLE-INSTANCE GUARD, shared with `rmd drain` (same lock file/DIAGNOSIS.md
   // diag/drain-concurrency): refuse to start a daemon while a drain (or another
@@ -1628,10 +1687,12 @@ async function daemonCommand(rest: string[]): Promise<number> {
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
 
-  const runId = `DAEMON-${Date.now()}`;
-  const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, ...extra });
-  log("daemon.start", { max: opts.max ?? null, poll_interval_ms: opts.pollIntervalMs, lock_pid: drainLock.info.pid });
+  log("daemon.start", {
+    max: opts.max ?? null,
+    poll_interval_ms: opts.pollIntervalMs,
+    lock_pid: drainLock.info.pid,
+    repo: target.repo,
+  });
   // ANTHROPIC-clean-env boot assertion (W1-T12b): checked once, before the loop
   // starts, over the daemon process's OWN live env — belt-and-suspenders atop
   // the launchd unit's own closed EnvironmentVariables allowlist (lib/launchd.ts).
@@ -1642,7 +1703,7 @@ async function daemonCommand(rest: string[]): Promise<number> {
       plan,
       {
         refreshMerged,
-        runOne: (taskId) => runTask(taskId, { planPath, config }),
+        runOne: (taskId) => runTask(taskId, { planPath: target.planPath, config }),
         readUsage: () => readUsageSnapshot(config),
         checkStop: () => stopDetail(config.root),
         checkPause: () => pauseDetail(config.root),
@@ -1675,12 +1736,25 @@ async function daemonCommand(rest: string[]): Promise<number> {
  * operator to the point of running `launchctl load` themselves.
  */
 async function daemonPlistCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("daemon-plist", rest, ["--poll-ms", "--repo"], ["--write"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
   const config = loadConfig();
   const pollIdx = rest.indexOf("--poll-ms");
   const pollIntervalMs = pollIdx >= 0 ? Number(rest[pollIdx + 1]) : undefined;
+  const repo = flagValue(rest, "--repo"); // baked into the unit so it drains the intended repo
   const rmdBin = join(repoRoot, "bin", "rmd");
-  const plist = generateLaunchdPlist({ rmdBin, root: config.root, pollIntervalMs });
+  const plist = generateLaunchdPlist({ rmdBin, root: config.root, pollIntervalMs, repo });
   const plistPath = launchdPlistPath();
+  if (!repo) {
+    console.warn(
+      `### rmd daemon-plist — WARNING: no --repo given, so the unit runs \`rmd daemon\` with no ` +
+        `target. The daemon's self-target guard will REFUSE to start it (no silent self-drain). ` +
+        `For commissioning: \`rmd daemon-plist --repo remudero-sandbox --write\`.`,
+    );
+  }
 
   if (rest.includes("--write")) {
     mkdirSync(dirname(plistPath), { recursive: true });
@@ -1817,6 +1891,51 @@ export function unknownArgError(
     return `rmd ${command}: unexpected argument '${tok}' — see \`rmd --help\``;
   }
   return null;
+}
+
+/** The repo + plan a `rmd daemon` run targets, resolved from its flags. */
+export interface DaemonTarget {
+  owner: string;
+  repo: string; // scopes the status-derivation GitHub gateway
+  planPath: string; // where the plan to schedule is read from
+  isSelf: boolean; // repo === the daemon's OWN source repo
+  dryRun: boolean;
+}
+
+/**
+ * Resolve which repo/plan a `rmd daemon` run targets — PURE (no I/O), so the guard is
+ * unit-testable. The daemon reads its plan from the CHECKOUT it runs in by default and scoped
+ * the status gateway to a hardcoded "remudero"; this makes the target EXPLICIT:
+ *   --repo <name>   scope the gateway to <owner>/<name> and read the plan from that repo's clone
+ *   --plan <path>   read the plan from an explicit file (overrides the derived path)
+ *   --allow-self-target  acknowledge draining the daemon's OWN source repo (deliberate self-host)
+ *   --dry-run       preview only (harmless — allowed even for self)
+ * GUARD (W1-T12d): a bare `rmd daemon` would silently drain the repo that holds the daemon's own
+ * source (self) unattended — REFUSED unless --allow-self-target (or --dry-run). Commissioning
+ * targets the sandbox explicitly: `rmd daemon --repo remudero-sandbox`.
+ */
+export function resolveDaemonTarget(
+  env: { selfOwner: string; selfRepo: string; repoRoot: string; reposDir: string },
+  rest: string[],
+): { target: DaemonTarget } | { error: string } {
+  const repoFlag = flagValue(rest, "--repo");
+  const planFlag = flagValue(rest, "--plan");
+  const allowSelf = rest.includes("--allow-self-target");
+  const dryRun = rest.includes("--dry-run");
+  const repo = repoFlag ?? env.selfRepo;
+  const isSelf = repo === env.selfRepo;
+  if (isSelf && !allowSelf && !dryRun) {
+    return {
+      error:
+        `rmd daemon: refusing to drain the daemon's OWN source repo '${repo}' unattended ` +
+        `(no silent self-default). For commissioning, target the sandbox: ` +
+        `\`rmd daemon --repo remudero-sandbox\`. To self-host deliberately, pass --allow-self-target.`,
+    };
+  }
+  const planPath =
+    planFlag ??
+    (isSelf ? join(env.repoRoot, "plan", "tasks.yaml") : join(env.reposDir, repo, "plan", "tasks.yaml"));
+  return { target: { owner: env.selfOwner, repo, planPath, isSelf, dryRun } };
 }
 
 /** Every `--option "label|detail"` in argv tail, in order given. */
@@ -1992,7 +2111,7 @@ async function initCommand(rest: string[]): Promise<number> {
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 const USAGE =
-  "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd daemon [--max <n>] [--poll-ms <n>]   # persistent scheduler loop (STOP/PAUSE/headroom-aware)\n  rmd daemon-plist [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon` (commissioning is W1-T12d)\n  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.\n  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.\n  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard\n\nAn UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
+  "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing.\n  rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)\n  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.\n  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.\n  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard\n\nAn UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(): Promise<void> {
