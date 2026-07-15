@@ -1435,6 +1435,16 @@ hand-copies (W1-T49). The website (WS-12) RENDERS the repo's canonical docs; not
 twice. `docs/ORIENTATION.md` (W1-T39, retro-maintained) and the `docs/` skeleton (W1-T30) are the Tier-B
 spine this coheres — one doc set, not scattered tasks.
 
+## 13. Plan-sync: the in-repo PR flow (never scp again)
+
+`MASTER-PLAN.md` and `plan/tasks.yaml` were once copied into the tree
+out-of-band (scp), arriving DIRTY with no provenance. Fixed: plan edits land
+**exactly like code** — branch, edit, open a PR, gate on the same `ci` +
+`remudero-review` checks as any other change. No file ever arrives by
+scp/rsync/manual copy again. Full flow, including the `Acceptance:` block a
+plan-only PR needs to unblock `remudero-review`: [docs/plan-sync.md](docs/plan-sync.md)
+(W1-T15).
+
 ## 14. Immediate queue
 
 **SETUP COMPLETE (2026-07-14).** Done: name + domains · repos `remudero` + `remudero-sandbox`
