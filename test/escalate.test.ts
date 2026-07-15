@@ -82,3 +82,31 @@ test("renderIssueBody lists every option AND calls out the recommendation", () =
   assert.match(body, /\*\*abandon\*\* — drop the task and re-plan/);
   assert.match(body, /## Recommendation\nretry/);
 });
+
+// ── PAYLOAD (not plumbing): the issue body the gateway RECEIVES from escalate()
+// actually carries the OPTIONS + the RECOMMENDATION, for BOTH a BLOCKED and a MANUAL
+// escalation, with the needs-human queue label. Criterion 1: "…open labeled issues
+// WITH OPTIONS + a recommendation" — the fake records what escalate() truly sends. ──
+test("escalate() sends the gateway a body CONTAINING every option + the recommendation (BLOCKED and MANUAL), labelled needs-human", () => {
+  for (const cls of ["BLOCKED", "MANUAL"] as const) {
+    const issues = fakeIssues();
+    escalate(
+      escalation({
+        class: cls,
+        options: [
+          { label: "resume", detail: "re-run with a fresh worker" },
+          { label: "abandon", detail: "drop the task and re-plan" },
+        ],
+        recommendation: "resume",
+      }),
+      { issues, ledgerPath: ledgerPath(), runId: "RUN-1" },
+    );
+    const call = issues.calls[0];
+    // the BODY handed to gh (not just the title/labels) carries the actionable payload:
+    assert.match(call.body, /\*\*resume\*\* — re-run with a fresh worker/, `${cls}: option 'resume' in body`);
+    assert.match(call.body, /\*\*abandon\*\* — drop the task and re-plan/, `${cls}: option 'abandon' in body`);
+    assert.match(call.body, /## Recommendation\nresume/, `${cls}: recommendation in body`);
+    // the queue label the §4 control panel reads is always present:
+    assert.ok(call.labels.includes(NEEDS_HUMAN_LABEL), `${cls}: labels ${call.labels} include ${NEEDS_HUMAN_LABEL}`);
+  }
+});

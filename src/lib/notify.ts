@@ -13,10 +13,21 @@ export interface NotifyChannel {
 
 /**
  * Escape a string for embedding inside an AppleScript double-quoted literal.
- * Backslashes first (so the escaping backslash itself isn't re-escaped), then quotes.
+ *
+ * SECURITY: the message is attacker-influenceable content (ledger text) driven through
+ * `osascript`, so this is an injection boundary — every character that could terminate
+ * the `"…"` literal or the `-e` line must be neutralised, or a crafted message could
+ * break out and run arbitrary AppleScript / `do shell script` on the host Mac. We
+ * escape backslashes FIRST (so the escaping backslash isn't itself re-escaped), then
+ * quotes, then carriage-returns and newlines — a RAW newline inside an AppleScript
+ * string literal is not even legal, so it must become the two-char `\n` escape.
  */
 export function escapeAppleScriptString(s: string): string {
-  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n");
 }
 
 /** Build the AppleScript that sends `message` to `recipient` over iMessage. */
