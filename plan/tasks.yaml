@@ -393,6 +393,10 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  # files: drives DETERMINISTIC learnings injection (W1-T19). Without it the task is repo-wide and the
+  # relevant SDK-envelope learnings lose the knowledge-budget tie and are DROPPED — which cost ~33 turns
+  # of re-discovery (DIAGNOSIS.md). With these globs, sdk-result-fields/sdk-result-envelope inject first.
+  files: [src/lib/worker.ts, src/lib/ledger.ts, src/run-task.ts]
   acceptance:
     - claim: "every worker + brain call logs {model, effort, tokens, total_cost_usd, billing_mode, verdict}"
       proof: "a run's ledger lines contain all fields; billing_mode reads 'subscription'"
