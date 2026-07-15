@@ -670,6 +670,47 @@ panel button IS the registry entry.
 are granted PER SKILL (§7B, §7C) — an implement worker's profile grants none of them. A skill can PROPOSE
 anything and MERGE nothing; every output is contained by the same PR + review gate as any worker.
 
+## 5C. Task pre-flight: the plan gate
+
+**Task quality is a GATED, LEARNED property — caught BEFORE dispatch by a deterministic linter, refined by
+the Architect, and continuously re-graded by the retro. The runner is the LAST line of defense, not the
+first.** Four malformed tasks reached workers and burned budget before a human noticed the pattern (W1-T6,
+W1-T9, and W1-T12 — which violated Rules 18 and 19 three times over). Every one was catchable *before*
+dispatch. Reactive diagnosis after an 81-turn / $10 burn is the anti-pattern this project exists to kill;
+task quality moves UPSTREAM of the runner and the plan LEARNS from overruns automatically.
+
+**LAYER A — the DETERMINISTIC task linter (no LLM), run at TWO points, FAIL-CLOSED:** (i) a CI check on any
+PR that edits `plan/tasks.yaml`; (ii) a PRE-DISPATCH guard in `rmd run-task` / `rmd drain` — a task that
+fails the linter is NEVER dispatched (`verdict=blocked_illformed`), so a broken task can never reach a
+worker again. It checks, all from rules we already wrote:
+- **SIZING (Rule 19):** count acceptance criteria; count distinct subsystems implied by `files:` / the
+  criteria. ≥2 concerns or ≥2 subsystems while `risk < high` ⇒ FLAG (raise to high or decompose).
+- **HEADLESS-FITNESS (Rule 18):** grep each criterion against a forbidden live-context LEXICON —
+  `overnight` · `reboot` · `launchctl` · "loads at boot" · `killed` · "operator confirms" · "user selects"
+  · manual-eyeball — on a `type:implement` (auto-verify) task ⇒ FLAG (move to `verify:human` or redesign the
+  criterion for headless verification). The lexicon is DATA, so it grows.
+- **PROOF-SHAPE:** every criterion has an OBSERVABLE proof (not "works" / "correct" / a vibe) ⇒ else FLAG.
+- **PROVENANCE (Rules 16/17):** `origin:` + `risk:` present ⇒ else FLAG.
+- **BUDGET SANITY (soft):** flag a task whose `risk→mount` turn-budget is below the observed mean for its
+  class (ledger calibration) — a WARNING, not a block.
+
+**LAYER B — Architect review (LLM), only for what the linter CAN'T judge.** Invoked on NEW tasks a plan PR
+adds, it grounds (grep `plan/learnings`) and asks the judgment questions the linter can't — "is this
+genuinely ONE concern?", "is any criterion secretly a task-inside-a-task?", "does a learning already warn
+about this?". ADVISORY: it annotates the task with a risk/rationale; it does NOT block (the linter blocks).
+Reuses the §5B Architect-worker primitive. **Most catches are DETERMINISTIC** — criteria count, subsystem
+count, forbidden verbs, proof-shape need no LLM; reserve Layer B for genuine ambiguity. Cheap checks first.
+
+**The retro's PLAN-HEALTH duties (the "learn as we go" half).** `rmd retro`, every run, must:
+- **RE-GRADE** every OPEN task against every standing rule — the forward-only gap that let W1-T12 slip
+  (Standing rule 20). Emit a plan-health report; auto-file a corrective task per violation.
+- **MINE** `max_turns` / `blocked_*` verdicts for PATTERNS: if a CLASS of task overruns (cross-cutting
+  implement tasks — W1-T6, W1-T9, W1-T12 all did), propose a CLASS-level fix (adjust the mount, or a new
+  auto-risk rule like "touches ≥3 files ⇒ `risk:high`"), NOT another per-task patch.
+- **RUN the Layer-A linter across the WHOLE open queue** and surface every current violation.
+
+Layer A = W1-T20c (linter + fail-closed guard); the retro plan-health sweep = W1-T20d.
+
 ## 6. Open-source packaging
 
 - **License**: Apache-2.0 (patent grant, enterprise-friendly). D-2.
