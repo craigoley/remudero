@@ -1107,7 +1107,7 @@
   attempts: 0
 
 - id: W1-T24
-  title: CI-gate aggregator job + branch-protection rewire to a single required context
+  title: "CI-gate aggregator — the check-run aggregator workflow + docs (machine half)"
   repo: remudero
   depends_on: [W1-T1D]
   type: implement
@@ -1129,18 +1129,22 @@
     ONLY on a real failure conclusion. Rewire protection so required_status_checks.contexts == [ci-gate,
     remudero-review] (an admin `gh api` PATCH — Craig's to run).
   acceptance:
-    - claim: "branch protection requires exactly ONE aggregator context plus remudero-review"
-      proof: "gh api repos/craigoley/remudero/branches/main/protection --jq .required_status_checks.contexts shows [ci-gate, remudero-review]"
-    - claim: "a deliberately-SKIPPED sub-job does NOT deadlock merge (proven LIVE)"
-      proof: "a PR whose path filter skips a sub-job still reaches ci-gate GREEN and merges; paste the skipped sub-job status, the aggregator success, and the merge"
-    - claim: "a deliberately RED sub-check HOLDS the merge closed (proven LIVE)"
-      proof: "a planted FAILING sub-check leaves the PR unmergeable with ci-gate RED — paste the sub-check red state + the ci-gate red conclusion + the blocked merge, then revert"
+    - claim: ".github/workflows/ci-gate.yml exists and aggregates the PR head's CHECK-RUNS via gh api (checks: read), not a needs: list — always runs, skipped/absent OK, fails only on a real failure conclusion"
+      proof: "grep the workflow for the gh api check-runs call and the absence of a needs:-based aggregation; the ci-gate run is green on this task's own PR"
+    - claim: "docs/review-gate.md documents the two-step flip: ci-gate ships first, becoming a required context is a separate admin step with the exact PATCH stated"
+      proof: "grep docs/review-gate.md for the ci-gate section and the flip instruction"
+    - claim: "the skipped-check-deadlock LEARNINGS entry is corrected to the cross-workflow check-runs pattern"
+      proof: "grep LEARNINGS.md for the corrected entry citing W1-T24"
   risk: high
   origin: architect
   status: queued
   attempts: 0
-  note: "Ratifies P4 (blocked_ci golden, RETRO-1784058021334) — the aggregator must fail-CLOSED on a real
-    red sub-check, not only pass-through a skipped one; the two liveness proofs are complementary."
+  note: "BOOTSTRAP ORDERING (T1B/T1D class): this PR ships the ci-gate WORKFLOW + docs and MERGES under the
+    CURRENT gate [ci, remudero-review] — it structurally CANNOT exhibit post-rewire protection state, so the
+    three LIVE proofs (protection==[ci-gate, remudero-review]; skipped-sub-job liveness; RED-sub-check
+    holds-closed — the P4 golden ratification) moved VERBATIM to W1-T24b (rule 16), after ci-gate exists on
+    main and the OPERATOR flips protection. PR #75 built this half and was correctly failed by the reviewer
+    for demanding the post-flip state — hence this split. Protection changes ONLY in W1-T24b."
 
 - id: W1-T25
   title: Quality tier on remudero — coverage ratchet + mutation baseline + jscpd + TS-strict FALSIFIED
@@ -2507,3 +2511,35 @@
   plan_refs: ["§4B"]
   status: queued
   attempts: 0
+
+# W1-T24 SPLIT (plan/t24-bootstrap-split): the machine half (W1-T24 — ci-gate workflow + docs) ships under
+# the current gate; this is the LIVE half, provable only AFTER the operator flips protection (bootstrap).
+- id: W1-T24b
+  title: "CI-gate becomes the required context + live proofs (post-flip)"
+  repo: remudero
+  depends_on: [W1-T24]
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 100.00
+  rationale: "The LIVE half of the ci-gate work (W1-T24 split, bootstrap ordering, T1B/T1D class). Once
+    ci-gate.yml exists on main (W1-T24) and the OPERATOR has flipped protection, a headless worker can PROVE
+    the aggregator end-to-end via probe PRs it opens itself — proofs a first PR structurally cannot exhibit."
+  # ★ PRECONDITION: the OPERATOR flips protection FIRST by running the exact gh api PATCH documented in PR
+  #   #75's description (a protection mutation is NOT PR-shaped — §4 hard-stop — so the flip is a HUMAN
+  #   step, same as T1D's precedent). Only after that flip can this task's gh-observable proofs pass.
+  acceptance:
+    - claim: "branch protection requires exactly ONE aggregator context plus remudero-review"
+      proof: "gh api repos/craigoley/remudero/branches/main/protection --jq .required_status_checks.contexts shows [ci-gate, remudero-review]"
+    - claim: "a deliberately-SKIPPED sub-job does NOT deadlock merge (proven LIVE)"
+      proof: "a PR whose path filter skips a sub-job still reaches ci-gate GREEN and merges; paste the skipped sub-job status, the aggregator success, and the merge"
+    - claim: "a deliberately RED sub-check HOLDS the merge closed (proven LIVE)"
+      proof: "a planted FAILING sub-check leaves the PR unmergeable with ci-gate RED — paste the sub-check red state + the ci-gate red conclusion + the blocked merge, then revert"
+  risk: high
+  origin: architect
+  plan_refs: ["§5"]
+  status: queued
+  attempts: 0
+  note: "Acceptance = W1-T24's THREE ORIGINAL criteria moved VERBATIM (rule 16 — nothing dropped, only
+    redistributed across the bootstrap boundary). The RED-sub-check criterion is the P4 golden ratification
+    (blocked_ci, RETRO-1784058021334). Probe PRs are opened by the worker itself (headless-fit post-flip)."
