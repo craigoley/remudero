@@ -2543,3 +2543,43 @@
   note: "Acceptance = W1-T24's THREE ORIGINAL criteria moved VERBATIM (rule 16 — nothing dropped, only
     redistributed across the bootstrap boundary). The RED-sub-check criterion is the P4 golden ratification
     (blocked_ci, RETRO-1784058021334). Probe PRs are opened by the worker itself (headless-fit post-flip)."
+
+# Runner self-sync (plan/runner-self-sync, origin: human — "Shouldn't the Remudero script manage git for me?").
+- id: W1-T60
+  title: "Runner self-syncs git state — fetch origin + dispatch from origin/main, never the operator's checkout"
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR ASK: \"Shouldn't the Remudero script manage git for me?\" VERIFIED FACTS (grep, this
+    PR): run-task reads the plan from the LOCAL checkout (run-task.ts:612 loadPlan(planPath),
+    planPath=join(repoRoot,'plan','tasks.yaml')) and bases worktrees on the LOCAL origin/main ref
+    (:785 runTask, :1280 retro) with NO fetch in that path; the ONLY fetch+reset is the daemon's
+    NON-self-target clone (:1634-35), whose own comment ('a stale clone would drain an old plan') states
+    the exact reasoning that was NEVER applied to run-task or the self target. So a run today silently
+    dispatches from whatever the operator last hand-pulled. The runner must NEVER require a manual pull,
+    and must NEVER mutate the operator's working tree or local branches — fetch updates remote-tracking
+    refs only, and the plan is read AT origin/main, so a dirty DECISIONS.md WIP or a stale local main is
+    irrelevant to a run."
+  design: |
+    At the top of the run-task / drain / daemon-self path: `git fetch origin` (quiet). Read
+    plan/tasks.yaml from the origin/main BLOB (`git show origin/main:plan/tasks.yaml` or equivalent), NOT
+    the working tree. Worktrees continue to base on origin/main (now GUARANTEED fresh by the fetch). A
+    fetch FAILURE => a named ledger error (git_fetch_failed) and NO spawn — FAIL CLOSED — with an explicit
+    `--allow-stale` escape hatch that proceeds on the last-fetched refs and ledgers stale_dispatch=true.
+    Never `git pull`, never touch the working tree or local branch refs.
+  acceptance:
+    - claim: "a run dispatches from origin/main's plan even when the working-tree tasks.yaml differs locally"
+      proof: "injected-git unit test: local tasks.yaml modified; the loaded plan content equals the origin/main blob, and a fetch was issued before worktree.add"
+    - claim: "a run never mutates the operator's checkout: dirty files survive, local main sha unchanged"
+      proof: "unit test: seeded dirty file + local main behind origin -> after the run path, the dirty file is intact and the local main ref sha is unchanged"
+    - claim: "fetch failure fails CLOSED with a named error and no worker spawn; --allow-stale proceeds and ledgers stale_dispatch=true"
+      proof: "injected fetch-failure test: git_fetch_failed ledger line, no spawn; the same run with --allow-stale spawns and carries stale_dispatch=true"
+  risk: medium
+  origin: human
+  plan_refs: ["§2", "§4A"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
