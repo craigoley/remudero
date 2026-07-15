@@ -1,8 +1,13 @@
-# Review-enforced merge gate (W1-T1C + W1-T1D)
+# Review-enforced merge gate (W1-T1C + W1-T1D + W1-T24)
 
 `remudero-review` is a **REQUIRED status check** on `main`, alongside `ci`. GitHub
 merges a PR only when BOTH are green. This document describes the gate as it is
 **wired and running** — not an aspiration.
+
+★ **`ci-gate` (W1-T24)** now exists as a workflow
+(`.github/workflows/ci-gate.yml`) but is **not yet** a required context — see
+[CI-gate aggregator](#ci-gate-aggregator-w1-t24) below for why the flip to
+`main`'s required contexts is a separate, admin-run step.
 
 ## What each check proves
 
@@ -11,6 +16,12 @@ merges a PR only when BOTH are green. This document describes the gate as it is
 - **`remudero-review`** (W1-T1C reviewer, W1-T1D gate) — a verdict on whether the
   PR's REPORT substantiates each of the task's acceptance criteria against its
   stated proof.
+- **`ci-gate`** (W1-T24) — an always-running aggregator that reads every other
+  check-run on the PR's head commit and fails only if one of them genuinely
+  failed (skipped/absent siblings are OK). It exists so that once tiered
+  path-filtered sub-jobs land (W1-T23 security / W1-T25 quality / W1-T26
+  architecture), a legitimately-skipped sub-job can never deadlock a merge —
+  see [CI-gate aggregator](#ci-gate-aggregator-w1-t24).
 
 ## The call site (this is what W1-T1D actually wired)
 
@@ -48,6 +59,66 @@ The reviewer NEVER edits code and exposes no write path (`review.ts` is read-onl
 
 ```
 required_status_checks.contexts = ["ci", "remudero-review"]
+```
+
+**This is the CURRENT state.** W1-T24 lands `ci-gate` as a workflow so it can run
+and be live-proven on real PRs (a real failing sub-check holds it red; a
+deliberately-skipped sub-job does not deadlock it) **before** it becomes a
+required context — see [CI-gate aggregator](#ci-gate-aggregator-w1-t24). Once
+that live proof exists, the target state is:
+
+```
+required_status_checks.contexts = ["ci-gate", "remudero-review"]
+```
+
+## CI-gate aggregator (W1-T24)
+
+`ci` is a single unconditional job today, so it is a safe required context by
+itself. That stops being true the moment a **path-filtered** sub-job is added
+(W1-T23 security tier, W1-T25 quality tier, W1-T26 architecture tier): a
+required check whose workflow is `if:`/`paths:`-skipped on a given PR reads as
+"expected, pending" and **deadlocks that merge forever** (LEARNINGS; proven live
+on the operator fleet — synthwatch #102).
+
+The fix, `.github/workflows/ci-gate.yml`, is ONE always-running job (no `if:`,
+no path filter) that:
+
+1. reads the PR head commit's check-runs **across every workflow** via
+   `gh api repos/.../commits/<sha>/check-runs` (a `needs:`-based aggregator only
+   sees jobs within its own workflow file — insufficient once sub-jobs live in
+   separate tier workflows);
+2. waits for each name in its `REQUIRED` env list to reach a terminal
+   (`completed`) state, fail-closed on timeout (15 min);
+3. fails **only** if a non-ignored check's conclusion is a real failure
+   (`failure`, `timed_out`, `cancelled`, `action_required`, `startup_failure`) —
+   `skipped`, `neutral`, and `success` all pass, so a legitimately path-filtered
+   sub-job never blocks.
+
+Because `ci-gate` always reports, it is safe to make it (alongside
+`remudero-review`) the **only** required status context — the granular sub-job
+contexts (`ci`, and later the tier jobs) keep running and reporting, they are
+just no longer individually *required*.
+
+**The branch-protection flip is intentionally NOT part of the PR that adds this
+workflow.** Per the same bootstrap-ordering discipline as `remudero-review`
+below: land the aggregator, prove it live (a real red sub-check holds it red; a
+skipped sub-job does not deadlock it), and only then repoint
+`required_status_checks.contexts` — an admin `gh api` PATCH that is Craig's to
+run:
+
+```sh
+gh api --method PATCH \
+  repos/craigoley/remudero/branches/main/protection/required_status_checks \
+  -f 'contexts[]=ci-gate' -f 'contexts[]=remudero-review'
+```
+
+Recovery if `ci-gate` is ever found to be misbehaving after the flip: reset
+straight back to the previous, already-proven pair with the same endpoint:
+
+```sh
+gh api --method PATCH \
+  repos/craigoley/remudero/branches/main/protection/required_status_checks \
+  -f 'contexts[]=ci' -f 'contexts[]=remudero-review'
 ```
 
 ## Bootstrap ordering (LOAD-BEARING — same pattern as T1B)

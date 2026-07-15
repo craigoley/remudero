@@ -1,0 +1,111 @@
+name: CI gate
+
+# ──────────────────────────────────────────────────────────────────────────────────────────
+# ci-gate (W1-T24) — ONE always-reporting required status check that aggregates the PR's
+# other check-runs, adapted from the fleet-verified pattern (craigoley/synthwatch
+# .github/workflows/ci-gate.yml).
+#
+# WHY: a required status check that gets SKIPPED can permanently deadlock a merge (synthwatch
+# #102 — a Dependabot esbuild bump sat BLOCKED forever despite every check SUCCESS/SKIPPED,
+# because a required check's workflow was `if:`-skipped on that PR, and a skipped REUSABLE-
+# workflow caller creates NO check run with that nested context name, so branch protection
+# waits for "Expected" forever). This is a CLASS bug: ANY required check that CAN be skipped
+# (job `if:`, path filter, reusable caller) can deadlock a merge — this is exactly the failure
+# mode LEARNINGS calls out for remudero once tiered sub-jobs (W1-T23/T25/T26) add path filters.
+#
+# THE FIX (GitHub's canonical answer): make branch protection require ONLY this one job. It
+# ALWAYS runs (no `if:`, no path filter) so its context ALWAYS reports, and it FAILS ONLY when a
+# sibling check actually FAILED. Skipped / absent siblings do NOT block.
+#
+# NOTE ON IMPLEMENTATION: the textbook `needs: [job, …]` + `join(needs.*.result)` aggregator
+# only works WITHIN ONE workflow. Once the security/quality/architecture tiers (W1-T23/T25/T26)
+# land, remudero's required checks will live in SEPARATE workflow files, and `needs:` cannot
+# reference jobs across files. So ci-gate instead reads the PR head commit's CHECK RUNS (across
+# ALL workflows, via the REST API — `checks: read`) and applies the same logic: fail only on a
+# real failure conclusion.
+#
+# ★ Branch protection must be flipped to require ONLY `ci-gate` + `remudero-review` (dropping
+#   the standalone `ci` context — the granular jobs can stay; they still run + report, ci-gate
+#   just aggregates them). That flip is admin config, done OUTSIDE this PR, and is Craig's to
+#   run — see the PR description for the exact `gh api` PATCH.
+# ──────────────────────────────────────────────────────────────────────────────────────────
+
+on:
+  pull_request:
+
+permissions:
+  checks: read
+  contents: read
+
+concurrency:
+  group: ci-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ci-gate:
+    name: ci-gate
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SHA: ${{ github.event.pull_request.head.sha }}
+      # The check-run names that ALWAYS appear on a PR today (run, or report a SKIPPED run) —
+      # the gate WAITS for all of these to reach a terminal state before deciding, so a slow-to-
+      # register check can never let the gate pass prematurely (the registration race). Keep in
+      # sync as tiered sub-jobs (W1-T23 security / W1-T25 quality / W1-T26 architecture) land —
+      # each adds its job name here once it is live on main.
+      REQUIRED: >-
+        ["ci"]
+      # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
+      # a separate required context posted directly by the orchestrator, not a check-run).
+      IGNORE: >-
+        ["ci-gate"]
+    steps:
+      - name: Aggregate sibling check results (fail only on a REAL failure; skipped/absent are OK)
+        run: |
+          set -euo pipefail
+
+          runs_json() {
+            # All check runs on the PR head SHA, across every workflow + app, merged across pages.
+            # (`--slurp` can't combine with `-q`, so flatten the page array with a separate jq.)
+            gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" --paginate --slurp \
+              | jq -c '[ .[].check_runs[] | {name, status, conclusion} ]'
+          }
+
+          # 1) WAIT until every REQUIRED check is present + completed (terminal). A required check
+          #    that never registers -> timeout -> ci-gate FAILS (fail-closed; never a silent pass).
+          deadline=$(( $(date +%s) + 900 ))   # 15-minute hard cap
+          while :; do
+            runs="$(runs_json)"
+            not_ready="$(jq -r --argjson req "${REQUIRED}" '
+              ([ .[] | select(.status=="completed") | .name ]) as $done
+              | ($req - $done)
+              | .[]' <<< "${runs}")"
+            [ -z "${not_ready}" ] && break
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::ci-gate: timed out waiting for required check(s) to complete:"
+              printf '%s\n' "${not_ready}" | sed 's/^/  - /'
+              exit 1
+            fi
+            echo "waiting for required check(s) to complete:"
+            printf '%s\n' "${not_ready}" | sed 's/^/  - /'
+            sleep 15
+          done
+
+          # 2) FAIL if ANY check (excluding IGNORE) concluded as a real failure. Skipped / neutral
+          #    / success all pass — so a path-filter-skipped (or absent) check never blocks.
+          echo "--- gated check runs ---"
+          printf '%s' "${runs}" | jq -r '.[] | "  \(.conclusion // .status)\t\(.name)"' | sort
+
+          fails="$(jq -r --argjson ig "${IGNORE}" '
+            .[] | .name as $n | .conclusion as $c
+                | select(($ig | index($n)) == null)
+                | select(["failure","timed_out","cancelled","action_required","startup_failure"] | index($c))
+                | $n' <<< "${runs}")"
+
+          if [ -n "${fails}" ]; then
+            echo "::error::ci-gate: required check(s) FAILED — holding merge:"
+            printf '%s\n' "${fails}" | sed 's/^/  - /'
+            exit 1
+          fi
+          echo "ci-gate: all required checks terminal, no failures — merge may proceed."
