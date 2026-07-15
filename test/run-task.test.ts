@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_BUDGET_USD, softBudgetWarning, workerErrorVerdict } from "../src/run-task.js";
+import { DEFAULT_BUDGET_USD, noPrVerdict, softBudgetWarning, workerErrorVerdict } from "../src/run-task.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 
 /** Build a minimal WorkerResult for the verdict-mapping tests. */
@@ -26,6 +26,35 @@ function result(over: Partial<WorkerResult>): WorkerResult {
 
 test("workerErrorVerdict: a non-error result maps to null (caller proceeds)", () => {
   assert.equal(workerErrorVerdict(result({ isError: false, subtype: "success" }), 1.2, "implement"), null);
+});
+
+// ── The W1-T12a bug: a worker that reaches a SUCCESS subtype but whose SDK iterator
+// throws AFTER the envelope (collectWorkerResult sets isError=true, keeps subtype) must
+// NOT be mislabeled a worker error. It was stamped "worker error at implement: success". ──
+test("workerErrorVerdict: a SUCCESS subtype is NEVER a worker error, even if isError is set (SDK post-success throw)", () => {
+  const v = workerErrorVerdict(result({ isError: true, subtype: "success" }), 5.0, "implement");
+  assert.equal(v, null, "a success subtype must not map to a failed/worker-error verdict");
+});
+
+test("noPrVerdict: a terminal-SUCCESS worker with NO PR yields verdict 'no_pr' with a truthful reason — never 'error: success'", () => {
+  const v = noPrVerdict(result({ isError: false, subtype: "success", numTurns: 10 }), 5.05, "implement");
+  assert.equal(v.verdict, "no_pr");
+  assert.equal(v.ledger.verdict, "no_pr");
+  assert.equal(v.ledger.reason, "worker completed without opening a PR");
+  assert.equal(v.ledger.subtype, "success");
+  assert.equal(v.ledger.num_turns, 10);
+  assert.equal(v.ledger.cost_usd, 5.05);
+  // the exact incoherent string from run W1-T12a-1784117152056 must never appear:
+  assert.doesNotMatch(v.ledger.reason, /error: success/);
+  assert.doesNotMatch(v.ledger.reason, /worker error/);
+});
+
+test("REGRESSION: the real-error path is unchanged — error_max_turns still → failed with its own reason", () => {
+  const v = workerErrorVerdict(result({ isError: true, subtype: "error_max_turns", numTurns: 81 }), 1.73, "implement");
+  assert.ok(v);
+  assert.equal(v!.verdict, "failed");
+  assert.equal(v!.ledger.reason, "worker error at implement: error_max_turns");
+  assert.doesNotMatch(v!.ledger.reason, /error: success/);
 });
 
 test("workerErrorVerdict: error_max_budget_usd → blocked_budget, NOT retried, subtype recorded", () => {
