@@ -175,6 +175,89 @@ function ensureTaskTrailer(prUrl: string, taskId: string): void {
   }
 }
 
+/**
+ * The GitHub query the run-ownership guard needs: resolve a PR's `headRefName`.
+ * Behind an interface (mirroring `status.ts`'s {@link GitHub}) so unit tests can
+ * inject a fixture instead of exec'ing `gh`.
+ */
+export interface PrHeadGateway {
+  /** The PR's head branch name, or `undefined` if it cannot be resolved. */
+  headRefName(prUrl: string): string | undefined;
+}
+
+/**
+ * Real gateway: `gh pr view <url> --json headRefName`. Fail-SOFT at the `gh`
+ * layer (any error resolves to `undefined`) is deliberate: {@link checkPrOwnership}
+ * treats an unresolved head ref as NOT owned, so a `gh` hiccup fails CLOSED
+ * (never merged) rather than silently assuming the claim is honest.
+ */
+export function ghPrHeadGateway(): PrHeadGateway {
+  return {
+    headRefName(prUrl) {
+      try {
+        const view = ghJson(["pr", "view", prUrl, "--json", "headRefName"]) as { headRefName?: string };
+        return view.headRefName;
+      } catch {
+        return undefined;
+      }
+    },
+  };
+}
+
+/**
+ * The verdict + ledger payload for a claimed PR whose head branch is NOT this
+ * run's own branch — the false-merged INVERSION class (W1-T62). Run
+ * W1-T54b-1784151420811 was ledgered `verdict=merged` via PR #80 — Dependabot's
+ * own PR, not this run's — because attribution had no ownership check at all.
+ */
+export interface OwnershipVerdict {
+  verdict: "pr_attribution_failed";
+  ledger: {
+    verdict: "pr_attribution_failed";
+    claimed_url: string;
+    claimed_branch: string | null;
+    owned_branch: string;
+    cost_usd: number;
+    reason: string;
+  };
+}
+
+/**
+ * RUN-OWNERSHIP GUARD (W1-T62, the backstop). Before ANY verdict may credit a
+ * claimed PR, resolve that PR's `headRefName` via the injected gateway and
+ * assert it equals `ownBranch` — this run's OWN branch (`run-<runId>`). Returns
+ * `null` when ownership holds (the caller proceeds to trailer/gate/merge as
+ * normal), or a fail-CLOSED, NAMED `pr_attribution_failed` verdict on any
+ * mismatch — including an unresolved head ref, which counts as NOT owned rather
+ * than assumed honest. This is the backstop even a future parse regression
+ * cannot get past: a run can never merge-credit a PR whose branch it did not
+ * create. The caller MUST return immediately on a non-null result, before any
+ * trailer stamp / CI wait / review / auto-merge arm — the PR is left untouched.
+ */
+export function checkPrOwnership(
+  prUrl: string,
+  ownBranch: string,
+  gateway: PrHeadGateway,
+  costUsd: number,
+): OwnershipVerdict | null {
+  const claimedBranch = gateway.headRefName(prUrl) ?? null;
+  if (claimedBranch === ownBranch) return null;
+  return {
+    verdict: "pr_attribution_failed",
+    ledger: {
+      verdict: "pr_attribution_failed",
+      claimed_url: prUrl,
+      claimed_branch: claimedBranch,
+      owned_branch: ownBranch,
+      cost_usd: costUsd,
+      reason:
+        claimedBranch === null
+          ? "claimed PR's head branch could not be resolved — failing closed rather than assumed owned"
+          : `claimed PR's head branch "${claimedBranch}" is not this run's own branch "${ownBranch}"`,
+    },
+  };
+}
+
 interface GateOutcome {
   merged: boolean;
   reason: string;
@@ -374,6 +457,7 @@ export interface RunResult {
     | "blocked_inflight"
     | "no_pr"
     | "blocked_transient"
+    | "pr_attribution_failed"
     | "failed";
 }
 
@@ -1014,6 +1098,18 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
       log("verdict", { verdict: "failed", reason: "no PR opened", cost_usd: costUsd });
       return { taskId, runId, merged: false, costUsd, verdict: "failed" };
     }
+    // RUN-OWNERSHIP GUARD (W1-T62) — before ANY side effect touches this PR, assert
+    // it is actually this run's own PR (the false-merged inversion backstop; see
+    // checkPrOwnership). Fails closed and named on mismatch; the PR is left untouched.
+    const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), costUsd);
+    if (ownership) {
+      log("verdict", ownership.ledger);
+      say(
+        `verdict: pr_attribution_failed — claimed PR ${prUrl} (branch ${ownership.ledger.claimed_branch ?? "unresolved"}) ` +
+          `is not this run's own branch (${branch}) — PR left UNTOUCHED`,
+      );
+      return { taskId, runId, merged: false, costUsd, verdict: "pr_attribution_failed" };
+    }
     // Stamp the provenance trailer (deriveStatus source (c)) before gating.
     ensureTaskTrailer(prUrl, taskId);
     log("pr.opened", { pr_url: prUrl });
@@ -1424,6 +1520,18 @@ async function retroCommand(rest: string[]): Promise<number> {
     }
     if (!prUrl) {
       log("retro.error", { error: "no PR opened" });
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+    // RUN-OWNERSHIP GUARD (W1-T62) — same backstop as runTaskBody: before any side
+    // effect touches this PR, assert it is actually this retro's own PR.
+    const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), worker.costUsd);
+    if (ownership) {
+      log("verdict", ownership.ledger);
+      say(
+        `verdict: pr_attribution_failed — claimed PR ${prUrl} (branch ${ownership.ledger.claimed_branch ?? "unresolved"}) ` +
+          `is not this retro's own branch (${branch}) — PR left UNTOUCHED`,
+      );
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
