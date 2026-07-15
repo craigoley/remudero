@@ -4,6 +4,10 @@
 GitHub merges a PR only when BOTH are green. This document describes the gate as
 it is **wired and running** — not an aspiration.
 
+Dependabot PRs are reviewed by a separate, second deterministic judge —
+see [Dependency-PR review lane](dep-review.md) (W1-T54 + W1-T54b) — which is
+the only thing that ever posts `remudero-review` on a Dependabot PR.
+
 ★ **`ci-gate` (W1-T24) is now the required aggregator context** — the operator
 flipped branch protection FIRST (`gh api` PATCH below, run by Craig, VERIFIED
 2026-07-15), and W1-T24b then proved the flip live, AFTER the fact, with two
