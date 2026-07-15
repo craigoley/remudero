@@ -7,6 +7,11 @@
 #                            --dry-run prints the gather + calibration table only
 #   rmd drain [--until <id>] [--max <n>] [--dry-run]
 #                            drain the DAG through run-task, stop-on-block, headroom-aware
+#   rmd stop [--reason <text>]    fleet control: hard kill — checked every drain tick;
+#                            a running drain halts within one tick, a new one refuses to spawn
+#   rmd pause [--reason <text>]   fleet control: drain-and-hold — no new spawns, but an
+#                            in-flight task always runs to full completion (verdict + merge)
+#   rmd resume               fleet control: clears stop + pause; spawns resume
 #   rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s>
 #                [--detail <d>] [--recommendation <r>] [--option "label|detail"]...
 #                            open a needs-human labeled GitHub issue; MANUAL/HARD_STOP

@@ -44,6 +44,8 @@ export type StopReason =
   | "no_runnable"
   | "blocked"
   | "headroom_exhausted"
+  | "stopped"
+  | "paused"
   | "error";
 
 export interface DrainOpts {
@@ -116,6 +118,20 @@ export interface DrainDeps {
   runOne: (taskId: string) => Promise<RunResult>;
   /** Read current /usage; `undefined` ⇒ unavailable (headroom check is skipped). */
   readUsage?: () => UsageSnapshot | undefined;
+  /**
+   * Fleet control (W1-T11, MASTER-PLAN §4A/§4B): a defined return ⇒ a hard STOP is
+   * in effect, and the string is the ledger/summary detail. Checked FIRST, every
+   * tick — before `--until`, headroom, or picking the next task — so it takes
+   * precedence over PAUSE and wins the race if both flags are set.
+   */
+  checkStop?: () => string | undefined;
+  /**
+   * Fleet control (W1-T11): a defined return ⇒ a graceful PAUSE (drain-and-hold)
+   * is in effect. Checked between iterations only — AFTER the current `runOne`
+   * has resolved — so an in-flight task always runs to full completion (verdict
+   * + merge) before a pause is honoured; no new spawn follows.
+   */
+  checkPause?: () => string | undefined;
   /** One ledger line per task + terminal reason (reuses run-task's ledger). */
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
@@ -139,6 +155,22 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   };
 
   while (attempted.length < max) {
+    // FLEET CONTROL (W1-T11): checked FIRST, every tick — a hard STOP wins any
+    // race against PAUSE and against picking up the next task. Neither check
+    // can ever interrupt a task that is already running: `runOne` below is
+    // awaited to completion before the loop returns here, so an in-flight
+    // task always reaches its verdict + merge (the drain-and-hold guarantee).
+    const stopped = deps.checkStop?.();
+    if (stopped) {
+      log("drain.stop", { detail: stopped });
+      return summary("stopped", stopped);
+    }
+    const paused = deps.checkPause?.();
+    if (paused) {
+      log("drain.pause", { detail: paused });
+      return summary("paused", paused);
+    }
+
     const isMerged = deps.refreshMerged();
 
     // --until satisfied ⇒ done (target task has merged).

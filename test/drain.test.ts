@@ -14,6 +14,7 @@ import {
   runDrain,
   type MergedSet,
 } from "../src/lib/drain.js";
+import { pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
 
 // A small linear-ish plan: A → B → C (chain) + D (independent), all auto.
 const YAML = `
@@ -190,6 +191,101 @@ test("no_runnable: an empty/blocked-out plan stops cleanly", async () => {
   );
   assert.equal(s.stopReason, "no_runnable"); // only H left (verify:human)
   assert.deepEqual(s.attempted, []);
+});
+
+// ── fleet control (W1-T11): STOP / Pause (drain-and-hold) / Resume ─────────
+
+test("PAUSE (drain-and-hold): issued mid-run, the in-flight task still reaches merged; no new spawn follows", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const root = mkdtempSync(join(tmpdir(), "fleet-pause-"));
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => {
+        // Simulate an operator pausing WHILE task A is in flight — the flag
+        // appears mid-run, before A resolves.
+        if (id === "A") requestPause(root, "quiet hours");
+        merged.add(id);
+        return okResult(id);
+      },
+      checkStop: () => stopDetail(root),
+      checkPause: () => pauseDetail(root),
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+  );
+  assert.equal(s.stopReason, "paused");
+  // A was in flight when pause was requested — it still reaches merged (drain-and-hold).
+  assert.deepEqual(s.merged, ["A"]);
+  assert.deepEqual(s.attempted, ["A"]); // B (A's dependent) never spawns
+  assert.ok(lines.some((l) => l.step === "drain.pause"), "a drain.pause ledger line was emitted");
+});
+
+test("STOP: kills within one tick — ledger stop line + no subsequent spawns", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const root = mkdtempSync(join(tmpdir(), "fleet-stop-"));
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const ran: string[] = [];
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => {
+        ran.push(id);
+        requestStop(root, "operator hard-stop");
+        merged.add(id);
+        return okResult(id);
+      },
+      checkStop: () => stopDetail(root),
+      checkPause: () => pauseDetail(root),
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+  );
+  assert.equal(s.stopReason, "stopped");
+  assert.deepEqual(ran, ["A"]); // STOP is checked at the very next tick — no B/C/D spawn
+  assert.ok(
+    lines.some((l) => l.step === "drain.stop" && /operator hard-stop/.test(String(l.extra.detail))),
+    "a drain.stop ledger line, carrying the reason, was emitted",
+  );
+});
+
+test("STOP set BEFORE a drain even starts: zero tasks attempted (a fresh drain also refuses to spawn)", async () => {
+  const plan = fixturePlan();
+  const root = mkdtempSync(join(tmpdir(), "fleet-stop-pre-"));
+  requestStop(root, "pre-armed");
+  let spawned = 0;
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => { spawned++; return okResult(id); },
+      checkStop: () => stopDetail(root),
+      checkPause: () => pauseDetail(root),
+    },
+  );
+  assert.equal(s.stopReason, "stopped");
+  assert.equal(spawned, 0);
+  assert.deepEqual(s.attempted, []);
+});
+
+test("STOP takes precedence over PAUSE when both flags are set", async () => {
+  const plan = fixturePlan();
+  const root = mkdtempSync(join(tmpdir(), "fleet-both-"));
+  requestPause(root, "b");
+  requestStop(root, "a");
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => okResult(id),
+      checkStop: () => stopDetail(root),
+      checkPause: () => pauseDetail(root),
+    },
+  );
+  assert.equal(s.stopReason, "stopped");
 });
 
 test("renderSummary + resumeCommand: 'what happened while away' is reconstructable", () => {
