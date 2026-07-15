@@ -78,9 +78,14 @@ through its own proto-runner:
 knowledge-hole tasks W1-T33–T39 (PR #36); flight control W1-T20–T22 + §5C's task linter W1-T20c/d;
 mounts.yaml v0 (W1-T5) — which is what the calibration table below exists to feed.
 
-**NEXT (L2):** WS-2+ backlogs execute THROUGH the daemon. Drain order is deliberate — **W1-T20c/d first**
-(the task pre-flight linter protects every task dispatched after it; §5C says the runner is the LAST line
-of defense, and 7 of this cycle's 22 runs prove it), then flight control, then the knowledge holes.
+**NEXT (L2) — SECURITY-FIRST kick order (rule-20 sweep, operator-directed):** **security tiers
+(W1-T24 ci-gate → W1-T23 scanners) → plan-health (W1-T20c/d, W1-T20) → quality/architecture
+(W1-T25/T26/T28) → W1-T27 → W2-T2 fleet dry-run.** W1-T24 leads because the cross-workflow ci-gate
+aggregator unblocks the merge path for every path-filtered tier check (else a skipped required check
+deadlocks merge — synthwatch #102); the pre-flight linter W1-T20c/d still gates every task dispatched
+after it. NOTE: `nextRunnable` (drain.ts:31 `plan.tasks.find`) is DECLARATION-ORDERED, but the daemon
+currently drains the SANDBOX; the remudero queue is operator-kicked, so this is the authoritative KICK
+ORDER (mirrored as a comment atop plan/tasks.yaml). Fleet ops (§5D, W1-T54–T57) fold in alongside.
 
 ## SHIPPED log
 
@@ -660,9 +665,16 @@ thesis of §Mission is only real if the gates are real. Structure: **three ENFOR
 **TIER 1 — SECURITY (must-have, day one).**
 - **CodeQL** via an EXPLICIT workflow — GitHub's *default setup* must be **DISABLED**, or the two
   conflict and both go unreliable (fleet lesson). [LEARNINGS]
-- **Dependency scanning (Dependabot)** — but **MAJOR bumps are EXCLUDED from auto-merge** and carry
-  Dependabot **ignore-rules** for `version-update:semver-major`: a major bump once caused a **28-minute
-  production outage**. Minors/patches auto-merge behind the full gate; majors open a PR a human triages.
+- **Dependency scanning (Dependabot)** — **MAJOR bumps are EXCLUDED from auto-merge at the dep-review LANE
+  (W1-T54), NOT via Dependabot ignore-rules.** ★ FLEET FINDING (rule-7 verify, this sweep): the installed
+  fleet dependabot configs are **IGNORE-FREE** — synthwatch `.github/dependabot.yml` carries only
+  minor+patch GROUPING (`update-types: [minor, patch]`, to collapse PRs), NO `ignore:` block; neon-drift's
+  documents "NO ignore list" deliberately. And the fleet's auto-merge does **no semver check**: synthwatch
+  `claude-review.yml` `automerge` fires for any trusted author incl `dependabot[bot]` (majors would
+  auto-merge today); neon-drift SKIPS dependabot entirely. So the earlier "Dependabot ignore-rules for
+  semver-major" was ASPIRATIONAL, not installed. Remudero's real mechanism: ignore-free Dependabot +
+  minor/patch grouping, with the semver level parsed at the dep-review lane — minor/patch auto-merge,
+  majors escalate to a human (the 28-minute-outage lesson enforced in CODE, not config).
 - **OSV / vulnerability scan** on the dependency tree (catches advisories Dependabot hasn't cut a bump
   for yet).
 - **Secret scanning + PUSH PROTECTION** — already live on `remudero` (FIELD FINDING 8); required on
@@ -826,6 +838,31 @@ count, forbidden verbs, proof-shape need no LLM; reserve Layer B for genuine amb
 - **RUN the Layer-A linter across the WHOLE open queue** and surface every current violation.
 
 Layer A = W1-T20c (linter + fail-closed guard); the retro plan-health sweep = W1-T20d.
+
+## 5D. Fleet operations — the ongoing-response loop
+
+**Provisioning the gate stack (§5/§5A) is ONE-TIME; OPERATING it is CONTINUOUS.** Setting up CodeQL/OSV/
+Semgrep/Scorecard/Dependabot on a repo is done once; the alerts and dependency PRs they generate arrive
+forever and, until now, nothing responded to them. The harness owns **three intake lanes**, all
+PR/issue-shaped, all gated by the same [ci, remudero-review] gate as any task:
+
+1. **Dependency PRs** (W1-T54) — a Dependabot PR is UNMERGEABLE today (nothing posts remudero-review on a
+   non-task PR: fail-closed but frozen). A deterministic dep-review lane posts remudero-review + arms
+   auto-merge for minor/patch, and ESCALATES majors (needs-human, no auto-merge). This is where MAJOR
+   exclusion lives — in code, not Dependabot ignore-rules (§5 FLEET FINDING).
+2. **Scanner alerts** (W1-T55 surface → W1-T56 triage) — code-scanning / Dependabot / secret-scanning
+   alerts for the managed repo set land in the daily digest (counts + ages); new critical/high escalate.
+3. **Repo ISSUES on MANAGED repos** (W1-T57) — open issues become feedback artifacts on a schedule,
+   deduped, triaged; the digest carries an issues-reviewed count so "reviewed regularly" is a LEDGERED
+   fact, not an intention.
+
+**Alerts and issues are MACHINE-ORIGIN FEEDBACK** — they flow through the **§7B feedback inbox**
+(`origin: alert#<id>` / `origin: issue#<n>`) and are triaged by `rmd triage` (W1-T41) into corrective
+tasks, NOT a parallel loop. One inbox, one triage discipline, whatever the source.
+
+**★ G-6 (operator standing decision):** remudero's OWN public issues stay **OFF** until WS-4. Flipping that
+is the operator's call, not the harness's; W1-T57 covers issues on repos the harness MANAGES, not
+remudero's own public tracker.
 
 ## 6. Open-source packaging
 
