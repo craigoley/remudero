@@ -1127,9 +1127,34 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
  * nothing to judge is never a pass. The PR body doubles as the REPORT (where a
  * manual author pastes the proofs the judge checks).
  */
-async function reviewCommand(prArg: string): Promise<number> {
-  const { owner, repo } = resolveOwnerRepo();
-  const view = ghJson(["pr", "view", prArg, "--json", "headRefOid,body,url,number"]) as {
+/**
+ * Resolve which `owner/repo` a `rmd review` targets: a `--repo <name>` or
+ * `--repo <owner>/<name>` flag OVERRIDES the checkout's default (a bare name keeps the
+ * default owner). Pure so the sandbox-gating path is unit-tested without a `gh` call.
+ */
+export function resolveReviewTarget(
+  defaults: { owner: string; repo: string },
+  rest: string[],
+): { owner: string; repo: string } {
+  const i = rest.indexOf("--repo");
+  const arg = i >= 0 ? rest[i + 1] : undefined;
+  if (!arg) return defaults;
+  if (arg.includes("/")) {
+    const [owner, repo] = arg.split("/", 2);
+    return { owner, repo };
+  }
+  return { owner: defaults.owner, repo: arg };
+}
+
+async function reviewCommand(prArg: string, rest: string[] = []): Promise<number> {
+  // `--repo <name>` or `--repo <owner>/<name>` lets the runner post remudero-review to a
+  // repo OTHER than this checkout (e.g. remudero-sandbox for the daemon's live commissioning,
+  // W1-T12d). Without it, resolveOwnerRepo() pins to repoRoot's origin (the main repo) and
+  // `gh pr view` resolves the PR in the CWD — so a sandbox PR could never be gated. The lib
+  // layer (runReview / postReviewStatus) already takes owner+repo; only the CLI was pinned.
+  const { owner, repo } = resolveReviewTarget(resolveOwnerRepo(), rest);
+  const slug = `${owner}/${repo}`;
+  const view = ghJson(["pr", "view", prArg, "--repo", slug, "--json", "headRefOid,body,url,number"]) as {
     headRefOid: string;
     body: string;
     url: string;
@@ -1901,7 +1926,7 @@ async function main(): Promise<void> {
     process.exit(result.merged ? 0 : 1);
   }
   if (cmd === "review" && arg) {
-    process.exit(await reviewCommand(arg));
+    process.exit(await reviewCommand(arg, rest.slice(1)));
   }
   if (cmd === "retro") {
     process.exit(await retroCommand(rest));
