@@ -11,7 +11,7 @@ a second, drifting copy of the document it introduces. The sections are the sour
 A retro that re-inflates this header has failed the HARNESS-COMPRESSION bar (§Self-improvement).
 
 **Retro ledger:** R1 (…021334) shipped WS-0 + the WS-1 proto-runner, seeded CALIBRATION + proposals
-P1–P5 · R2 (…391543) logged W1-T19/#34 + W1-T3F/#35 · **R3 (…446353, this sync)** logs the 15 merges
+P1–P5 · R2 (…391543) logged W1-T19/#34 + W1-T3F/#35 · **R3 (…446353, this sync)** logs the 17 merges
 that closed WS-1, refreshes NET STATE to real PR counts, re-bases calibration on 22 runs, mines the
 7 non-merges into P6–P8, and compresses this header + the SHIPPED/calibration/grill records.
 
@@ -49,7 +49,8 @@ ANTHROPIC-clean (env_clean=true, billing_mode=subscription), then survived a **k
 restart** (daemon.start ×3) recovering to correct GitHub-derived state with **no duplicate task run**
 (W1-T12d, verify:human, operator-attested — evidence in the task's `satisfied_by`). The full spine landed
 through the closed gate: run-task → reviewer + merge gate → drain → the daemon (scheduler loop W1-T12a,
-launchd unit + boot assertion W1-T12b, crash recovery W1-T12c), plus §5C task pre-flight, transient
+launchd unit + boot assertion W1-T12b, crash recovery W1-T12c), the §5C task-pre-flight PLAN (#58 — the
+linter CODE is W1-T20c, still QUEUED; the plan does not claim the mechanism exists yet), transient
 classification, and repo-targeted commissioning. Two honest deltas from the literal W1-T12d criteria: the
 drill was bounded (--max 3, not overnight) and no digest send was captured; the kill hit the daemon
 post-drain (recovery proven by no-duplicate + clean idle, not an active reconstructOrphan). The
@@ -86,8 +87,15 @@ of defense, and 7 of this cycle's 22 runs prove it), then flight control, then t
 Shipped arcs, keyed by Remudero-Task (Standing rule 13: the proof is a MERGED PR, not prose).
 Newest first. Cost/turns from the run ledger.
 
-### RETRO-1784133446353 (2026-07-15) — the 15 merges that CLOSED WS-1
+### RETRO-1784133446353 (2026-07-15) — the 17 merges that CLOSED WS-1
 
+<!-- rule-20 sweep reconciliation: these two merged GATE-SIDE after blocked_review runs, so retro.ts
+     mergedSince (ledger verdict==="merged" only) never saw them — the 15→17 correction. W1-T51 fixes the
+     gather so a gate-side merge can't go missing again. -->
+- **W1-T5** — mounts.yaml v0 + Tier Invariant validation → craigoley/remudero#42 · gate-side merge
+  (run ended blocked_review; merged after a rule-16 Architect fix — #44 unblocked it)
+- **W1-T8** — escalations as GitHub issues + imessage-local notifier + daily digest → craigoley/remudero#49
+  · gate-side merge (run ended blocked_review; PR fixed with payload tests + merged)
 - **SBX-T3** — unattended-drain drill, task 3/3 → craigoley/remudero-sandbox#8 · $1.13 · 8 turns
 - **SBX-T2** — unattended-drain drill, task 2/3 → craigoley/remudero-sandbox#7 · $1.19 · 9 turns
 - **SBX-T1** — unattended-drain drill, task 1/3 (the three SBX tasks ARE the WS-1 exit proof: drained
@@ -145,6 +153,12 @@ off. Only `implement` has data; recon/reviewer/diagnose accrue no rows until the
 |---|---|---|---|---|---|
 | implement | 22 | 15 | $3.218 | 45.227 | $70.801 |
 
+_[rule-20 sweep reconciliation]_ The **15 merged** here is LEDGER-derived (runs whose verdict==="merged").
+**GitHub-derived WS-1-closing merges = 17**: W1-T5/#42 and W1-T8/#49 merged GATE-SIDE after their runs
+ended `blocked_review`, so they are not among the 15 ledger-merged RUNS but ARE WS-1-closing merges
+(SHIPPED log above). The per-run $/turn means are per-RUN and stand unchanged; the merge RATE read against
+GitHub is 17/22 (77%), vs the ledger 15/22 (68%). W1-T51 makes the gather union both so this can't recur.
+
 **Prior cycles (R1+R2, FOLDED — superseded as a baseline, retained only as trend):** 19 runs, 11
 merged, $1.838 avg / 21.4 avg turns, $34.919 total. **Derived all-time** (disjoint sets, plain
 arithmetic): 41 runs, 26 merged (63%), $105.72 total, $2.58 avg.
@@ -183,8 +197,9 @@ tasks.yaml PR — never auto-filed, never worker-edited (rule 15).
   catch-all, a golden asserting **every terminal verdict maps to a NAMED class** (an unnamed verdict is
   a verdict the flywheel cannot mine — and §Self-improvement's whole thesis is mining verdicts).
   This is the highest-value item in this list precisely because we cannot yet name what it is.
-- **P7 (plan) — correct rule 19's cited baseline (see Calibration).** Rule 19 cites "observed 21–42
-  turns" as evidence that medium/80 fits single-concern work; the observed mean is now **45.2 turns**,
+- **P7 (plan) — RATIFIED (rule-20 sweep, plan/post-ws1-health-sweep): rule 19's citation updated to the
+  45.2-turn baseline + 58–69 honest merges; doctrine unchanged, no budget raised.** Rule 19 cited "observed
+  21–42 turns" as evidence that medium/80 fits single-concern work; the observed mean is now **45.2 turns**,
   with honest merges at 58–69. The DOCTRINE stands (sizing is a plan concern, never a budget knob); the
   NUMBER is stale. Propose a plan PR that updates the citation to this retro's table and re-checks
   whether medium/80 still has honest headroom at 45-turn means — **without** raising any budget to mask
@@ -195,6 +210,10 @@ tasks.yaml PR — never auto-filed, never worker-edited (rule 15).
   P3's golden (a blocked-review run ADDS the work or ESCALATES, never edits its criteria — rule 15)
   AND that the Architect ratify-or-kill each open proposal every retro, so this list cannot grow into
   a graveyard.
+  _[rule-20 sweep annotation]_ The two `blocked_review` runs were **W1-T5 (#42)** and **W1-T8 (#49)** —
+  both HANDLED: the gate correctly blocked, the Architect applied a rule-16 fix, and both PRs MERGED
+  (now in the SHIPPED log above). So the "unhandled failure recurs" framing SOFTENS to "the gate did its
+  job twice, then the fix landed"; the ratify-or-kill discipline (an unratified proposal decays) STANDS.
 
 **Standing (from RETRO-1784058021334) — status re-graded against this cycle's data:**
 
@@ -1323,8 +1342,14 @@ tasks, and version bumps ship behind the golden suite like any other change (the
 a gated dependency; every knob we probed varies by version). Acceptance: daemon killed mid-task
 recovers to correct state from git+GitHub alone; restore drill executed once from backup.
 
-**WS-8 — Flywheel, retros & evals**: golden-task suite in CI from the proto-runner era onward
-(grows with each workstream, and with every real failure minted into a golden); nightly flywheel
+**WS-8 — Flywheel, retros & evals**: golden-task suite in CI from the proto-runner era onward.
+**★ GOLDENS SPLIT BY EXECUTION SURFACE (rule-20 sweep):** CI-RUN goldens are FIXTURE-only (no LLM, no
+subscription OAuth — GitHub Actions has none, and a self-hosted runner on a PUBLIC repo is a security
+anti-pattern); anything needing a REAL worker/daemon run is a DAEMON-RUN LIVE golden, executed by the
+self-hosting daemon on a SCHEDULE (its own Max-subscription host) which posts a commit STATUS via `gh`
+back to the PR/commit. The CI job never spawns a worker; the daemon is the only thing that holds the
+billing boundary. This split governs every golden below.
+(The suite grows with each workstream, and with every real failure minted into a golden); nightly flywheel
 analyzer + suppression rules; **retro ceremony** (workstream-close + weekly patrol) producing
 LEARNINGS updates AND agents-file/prompt-template PRs; **knowledge budgets gate** (CLAUDE.md line
 cap ~150 default, LEARNINGS provenance + last-cited pruning); **prompt/knowledge-changes-behind-
@@ -1477,9 +1502,11 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    concerns, or shipping ≥2 new subsystems, must be `risk: high` or DECOMPOSED at plan time — never left
    `risk: medium` and rescued with a bigger turn budget. Two cross-cutting tasks (W1-T6, W1-T9) overran
    the medium/80 mount; the medium budget is correctly calibrated for genuine single-concern work
-   (observed 21–42 turns), so raising it would MASK over-scoping and reward it (and W1-T9 was the THIRD
-   max_turns event — a third budget bump was refused). The retro fix lives in task SIZING (rule 16
-   decomposition), not in `.remudero/mounts.yaml`. [DIAGNOSIS.md diag/w1t9-max-turns, W1-T6, W1-T9]
+   (observed mean now 45.2 turns — RETRO-1784133446353, 22 runs; honest single-concern merges ran 58–69
+   turns: #47, #48, #55, #56, #62 — still under the medium/80 ceiling; P7 ratified), so raising it would
+   MASK over-scoping and reward it (and W1-T9 was the THIRD max_turns event — a third budget bump was
+   refused). The retro fix lives in task SIZING (rule 16 decomposition), not in `.remudero/mounts.yaml`.
+   [DIAGNOSIS.md diag/w1t9-max-turns, W1-T6, W1-T9; P7 RETRO-1784133446353]
 20. **A NEW SIZING/FITNESS RULE MUST RETROACTIVELY RE-GRADE THE OPEN QUEUE — RULES ARE NOT FORWARD-ONLY.**
    When a rule like 18 or 19 is added, every ALREADY-AUTHORED open task must be re-checked against it, not
    only new authoring. W1-T12 pre-existed rules 18 and 19 and violated BOTH (three concerns at `risk:medium`;
