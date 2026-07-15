@@ -854,6 +854,77 @@
   status: queued
   attempts: 0
 
+# ── §5C TASK PRE-FLIGHT (the plan gate). Task quality moves UPSTREAM of the runner: a deterministic linter
+# catches malformed tasks BEFORE dispatch (the runner is the LAST line, not the first). Four malformed tasks
+# (W1-T6, W1-T9, W1-T12) reached workers before the pattern was caught. [origin: feedback#plan-health]
+- id: W1-T20c
+  title: "Deterministic task linter + fail-closed pre-dispatch guard (§5C Layer A)"
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §5C Layer A. Task quality must be gated BEFORE dispatch, deterministically and
+    fail-closed. Four malformed tasks (W1-T6, W1-T9, W1-T12 — the last violating Rules 18 and 19 three
+    times) reached workers and burned budget; a no-LLM linter catches sizing (Rule 19), headless-fitness
+    (Rule 18), proof-shape, and provenance before a worker ever spawns."
+  design: |
+    A PURE linter over a loaded plan. Checks: SIZING (≥2 acceptance criteria or ≥2 subsystems implied by
+    files:/criteria while risk<high); HEADLESS-FITNESS (each auto-verify criterion vs a forbidden
+    live-context LEXICON held as DATA — overnight/reboot/launchctl/"loads at boot"/killed/"operator
+    confirms"/"user selects"/manual-eyeball); PROOF-SHAPE (observable proof, not "works"/"correct"/a vibe);
+    PROVENANCE (origin+risk present); BUDGET-SANITY (soft warn if risk->mount turns < class mean). Wired at
+    TWO points: (i) a CI check on plan/tasks.yaml PRs; (ii) a fail-closed pre-dispatch guard in
+    rmd run-task/drain -> verdict=blocked_illformed, no worker spawned.
+  acceptance:
+    - claim: "a task with 3 acceptance concerns at risk:medium is FLAGGED (sizing, Rule 19)"
+      proof: "unit test: the linter returns a sizing violation for a 3-criteria risk:medium task"
+    - claim: "a criterion containing overnight/launchctl/killed on an auto-verify task is FLAGGED (headless-fitness, Rule 18)"
+      proof: "unit test over the forbidden-lexicon fixture -> a headless-fitness violation is returned"
+    - claim: "a proof-less criterion is FLAGGED"
+      proof: "unit test: a criterion whose proof is 'works'/'correct' -> a proof-shape violation is returned"
+    - claim: "rmd run-task REFUSES a linter-failing task with verdict=blocked_illformed (no worker spawned); a clean task passes the guard"
+      proof: "injected-exec test: a malformed task -> blocked_illformed with no spawn; a clean task -> guard passes"
+    - claim: "the linter's CANONICAL regression fixture is W1-T12's ORIGINAL definition, and it is FLAGGED"
+      proof: "a stored fixture of W1-T12's original 3-concern / 3-live-criterion definition -> the linter flags BOTH sizing AND headless-fitness (if it can't catch the task that cost $10, it isn't done)"
+  risk: high
+  origin: feedback#plan-health
+  plan_refs: ["§5C"]
+  files: [src/lib/task-linter.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "The CI-check side integrates with the W1-T29 plan-claims / W1-T30 docs-rubric CI family — a
+    tasks.yaml PR runs the linter in CI alongside the plan-claims check."
+
+- id: W1-T20d
+  title: "Retro plan-health sweep — re-grade the open queue + mine overrun patterns (§5C)"
+  repo: remudero
+  depends_on: [W1-T20c]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §5C + Standing rule 20. Rules were enforced forward-only; W1-T12 pre-existed
+    Rules 18/19 and slipped through to a worker. The retro must re-grade the WHOLE open queue every run and
+    mine overruns for CLASS-level fixes, not per-task patches (the reactive-diagnosis anti-pattern)."
+  design: |
+    Extend rmd retro with plan-health duties: (1) run the W1-T20c linter across every OPEN task, emit a
+    plan-health report, auto-file a corrective task per violation; (2) re-grade every open task against
+    every standing rule; (3) mine max_turns/blocked_* verdicts from the ledger for a task-CLASS pattern and
+    propose ONE class-level fix (mount adjust, or a new auto-risk rule) rather than N per-task patches.
+  acceptance:
+    - claim: "given a seeded OPEN task that violates a standing rule, the retro re-grade FLAGS it and files a corrective task"
+      proof: "unit test seeds an open task violating Rule 18/19 -> retro emits a plan-health flag + a corrective task entry"
+    - claim: "given seeded repeated max_turns verdicts across a task CLASS, the retro proposes a CLASS-level fix, not N per-task patches"
+      proof: "unit test seeds N max_turns verdicts for one task class -> retro proposes ONE class-level fix (mount/auto-risk), not N patches"
+  risk: high
+  origin: feedback#plan-health
+  plan_refs: ["§5C"]
+  files: [src/lib/retro.ts]
+  status: queued
+  attempts: 0
+
 - id: W1-T21
   title: Flight judge (Layer 2) — advisory LLM-as-judge on PROCESS, deterministic controller acts
   repo: remudero

@@ -307,3 +307,31 @@
     tasks written after it. (MASTER-PLAN Standing rule 20.)
   src: DIAGNOSIS.md (diag/w1t12-max-turns), W1-T12
   cited: "2026-07-15"
+
+# ── The runner was the FIRST line of task-quality defense, so 4 malformed tasks reached workers before the
+# pattern was caught. Gate task quality BEFORE dispatch + re-grade continuously. (§5C) ──
+- id: task-quality-gates-before-dispatch
+  subsystem: architecture
+  files: [src/lib/task-linter.ts, src/run-task.ts, src/lib/retro.ts]
+  fact: >-
+    The runner was the FIRST line of task-quality defense, so FOUR malformed tasks (W1-T6, W1-T9, W1-T12)
+    reached workers and burned budget before a human noticed the pattern. Task quality must be gated BEFORE
+    dispatch (a deterministic linter, FAIL-CLOSED: a linter-failing task is never dispatched,
+    verdict=blocked_illformed) and re-graded continuously (the retro plan-health sweep). Reactive diagnosis
+    after an 81-turn / $10 burn is the anti-pattern this project exists to kill — the runner is the LAST
+    line, not the first. (MASTER-PLAN §5C.)
+  src: W1-T12, this session
+  cited: "2026-07-15"
+
+# ── Most task-quality failures are catchable DETERMINISTICALLY — no LLM. Cheap checks first. (§5C) ──
+- id: task-linting-is-mostly-deterministic
+  subsystem: architecture
+  files: [src/lib/task-linter.ts]
+  fact: >-
+    Most task-quality failures are catchable DETERMINISTICALLY with no LLM: criteria COUNT (sizing, Rule
+    19), subsystem COUNT, forbidden live-context VERBS (headless-fitness lexicon, Rule 18 — overnight/
+    launchctl/killed/"operator confirms"/...), and PROOF-SHAPE (observable proof, not a vibe). Reserve the
+    Architect LLM review for genuine ambiguity ("is this really one concern?", "is a criterion secretly a
+    task-inside-a-task?"). Cheap deterministic checks first; the LLM layer is advisory and does not block.
+  src: W1-T12, this session
+  cited: "2026-07-15"
