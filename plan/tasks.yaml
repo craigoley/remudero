@@ -2717,3 +2717,58 @@
   files: [SECURITY.md]
   status: queued
   attempts: 0
+
+# PR-attribution integrity (plan/pr-attribution-integrity, origin: architect — the first integrity
+# INVERSION: a run that CLAIMED work it did not do). Run W1-T54b-1784151420811 was credited verdict=merged
+# via PR #80 (Dependabot's own PR) because parseReport takes the FIRST pull-URL in worker output while the
+# REPORT contract anchors PR_URL to the LAST line — evidence URLs poisoned attribution. Verified this PR.
+- id: W1-T62
+  title: "PR-attribution integrity — anchored PR_URL parse + run-ownership guard (no false merged)"
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The FIRST integrity INVERSION observed. Every prior failure REFUSED to claim unproven work
+    (no_pr, blocked_*, error_max_turns — honest under-claims); this one CLAIMED work it did not do. Run
+    W1-T54b-1784151420811 was ledgered verdict=merged with pr_url=.../pull/80 — DEPENDABOT'S PR — while the
+    run's ACTUAL output (a new docs/dep-review.md, per its own decision.autochoose) shipped separately as
+    #91. MECHANISM (verified this PR): parseReport (src/lib/worker.ts:475) extracts the PR URL with
+    text.match(/...\\/pull\\/\\d+/)?.[0] — the FIRST pull-URL ANYWHERE in the worker output — but the OUTPUT
+    CONTRACT (src/run-task.ts:578, 'a REPORT whose LAST line is exactly: PR_URL: <url>') anchors the URL to
+    the LAST line. W1-T54b's acceptance criteria DEMAND evidence pull-URLs (#80/#81) in the REPORT, so an
+    evidence URL appeared BEFORE the final PR_URL line and won. The callers at run-task.ts:971 and :1416
+    consume parseReport(...).prUrl (the :1011/:1423 sites are the inert gh-pr-create fallback). Result: a
+    FALSE merged verdict, FALSE ledger provenance (pr.opened + verdict both name #80), and a task deriving
+    merged off a PR it does not own. NOTE line/site drift from the report: the parse defect lives in
+    worker.ts:475, not run-task.ts:1010/:1322 — facts confirmed by grep before writing."
+  design: |
+    TWO fixes, both fail-closed, applied to run-task AND the drain/daemon path (both call parseReport):
+    (1) ANCHORED PARSE. Extraction reads ONLY the final REPORT line matching /^\s*PR_URL:\s*(\S+)/ (the
+        :578 contract) — the LAST such line if several exist. Every other pull-URL in the worker output is
+        INERT EVIDENCE and must never be attributed. A missing/malformed final PR_URL line on a PR-expected
+        task is NOT a silent skip: it fails closed with a named reason (no attribution, no merge check).
+    (2) OWNERSHIP GUARD. Before any verdict USES a parsed PR, resolve that PR's headRefName (gh api /
+        gateway) and assert it EQUALS this run's branch. Mismatch => a named fail-closed verdict
+        `pr_attribution_failed` (NEVER merged), the PR left UNTOUCHED (no merge, no trailer stamp, no
+        auto-merge arm), and a ledger line recording claimed_url vs owned_branch so the inversion is
+        auditable. The guard is the backstop: even if a future parse regresses, a run can never merge-credit
+        a PR whose branch it did not create.
+  acceptance:
+    - claim: "a REPORT with evidence pull-URLs BEFORE its final PR_URL line attributes to the PR_URL line's PR"
+      proof: "unit fixture modeled on run W1-T54b-1784151420811 -> attribution equals the anchored URL, not the first URL"
+    - claim: "a PR_URL naming a PR whose head branch is not this run's branch yields pr_attribution_failed, never merged"
+      proof: "injected-gateway test: mismatched headRefName -> named verdict, no merge check, ledger records claimed-vs-owned"
+    - claim: "a missing or malformed final PR_URL line on a PR-expected task fails CLOSED with a named reason"
+      proof: "unit test: report lacking the anchored line -> no attribution, named verdict"
+  risk: high
+  origin: architect
+  plan_refs: ["§2", "§4"]
+  files: [src/lib/worker.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "RETRO PROVENANCE — the SHIPPED ledger/verdict for run W1-T54b-1784151420811 falsely names PR #80
+    (Dependabot's). The run's REAL PR is #91 (docs/dep-review.md). The next retro (or the W1-T51 build that
+    reads the merged-since list) must cite #91, not #80, for this run — do not let the false provenance
+    propagate into the plan's SHIPPED log."
