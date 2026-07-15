@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { WorkerSettingsError } from "../src/lib/settings.js";
 import {
+  BILLING_MODE,
+  DEFAULT_EFFORT_LABEL,
+  DEFAULT_MODEL_LABEL,
   DENY_FLOOR_FALLBACK_MODE,
   appendQuestion,
   collectWorkerResult,
@@ -12,6 +15,7 @@ import {
   parseDecisionRequest,
   parseQuestion,
   spawnWorker,
+  workerLedgerFields,
 } from "../src/lib/worker.js";
 
 // ── Synthetic SDK message streams ──────────────────────────────────────────
@@ -60,6 +64,41 @@ async function* transportFailureStream(): AsyncGenerator<unknown> {
   throw new Error("spawn ENOENT: bad claude binary");
 }
 
+/**
+ * A success stream carrying the REAL envelope's `usage` (NonNullableUsage,
+ * snake_case) and `modelUsage` (camelCase per-model map) — SDK 0.3.209 ground
+ * truth (sdk.d.ts SDKResultSuccess/SDKResultError both carry these).
+ */
+async function* usageStream(): AsyncGenerator<unknown> {
+  yield { type: "assistant", message: { content: [{ type: "text", text: "hi" }] } };
+  yield {
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "PR_URL: https://github.com/x/y/pull/2",
+    session_id: "sess-usage",
+    total_cost_usd: 1.23,
+    num_turns: 7,
+    permission_denials: [],
+    usage: {
+      input_tokens: 1000,
+      output_tokens: 200,
+      cache_read_input_tokens: 500,
+      cache_creation_input_tokens: 50,
+    },
+    modelUsage: {
+      "claude-opus-4": {
+        inputTokens: 1000,
+        outputTokens: 200,
+        cacheReadInputTokens: 500,
+        cacheCreationInputTokens: 50,
+        costUSD: 1.23,
+        contextWindow: 200000,
+      },
+    },
+  };
+}
+
 test("collectWorkerResult: success stream captures cost, turns, and text", async () => {
   const r = await collectWorkerResult(successStream(), { childEnvKeys: ["PATH"] });
   assert.equal(r.isError, false);
@@ -97,6 +136,82 @@ test("collectWorkerResult: a throw with NO result envelope is RE-RAISED (real tr
     /spawn ENOENT/,
     "a genuine spawn failure must not be silently swallowed",
   );
+});
+
+// ── W1-T6: NDJSON ledger + context telemetry + brain-plane calls ───────────
+// Every worker + brain call must ledger {model, effort, tokens, total_cost_usd,
+// billing_mode, verdict}. `model`/`effort` are CONFIGURED INPUTS (never a
+// read-back — effort is not even in the SDK envelope); `tokens` is read off
+// the envelope's `usage` (snake_case NonNullableUsage); `total_cost_usd`/
+// `billing_mode`/`verdict` are derived per workerLedgerFields.
+
+test("collectWorkerResult: captures aggregate tokens off `usage` and the per-model breakdown off `modelUsage`", async () => {
+  const r = await collectWorkerResult(usageStream(), { childEnvKeys: [] });
+  assert.deepEqual(r.tokens, { input: 1000, output: 200, cacheRead: 500, cacheCreation: 50 });
+  assert.deepEqual(r.modelUsage, {
+    "claude-opus-4": {
+      inputTokens: 1000,
+      outputTokens: 200,
+      cacheReadInputTokens: 500,
+      cacheCreationInputTokens: 50,
+      costUSD: 1.23,
+      contextWindow: 200000,
+    },
+  });
+});
+
+test("collectWorkerResult: model/effort are the CONFIGURED inputs passed in opts, not read off the envelope", async () => {
+  const r = await collectWorkerResult(usageStream(), {
+    childEnvKeys: [],
+    model: "claude-opus-4",
+    effort: "high",
+  });
+  assert.equal(r.model, "claude-opus-4");
+  assert.equal(r.effort, "high");
+});
+
+test("collectWorkerResult: model/effort default to the honest 'default' label when the caller configured no override", async () => {
+  const r = await collectWorkerResult(successStream(), { childEnvKeys: [] });
+  assert.equal(r.model, DEFAULT_MODEL_LABEL);
+  assert.equal(r.effort, DEFAULT_EFFORT_LABEL);
+});
+
+test("collectWorkerResult: tokens zero out (never crash) when a synthetic/older stream omits `usage`/`modelUsage`", async () => {
+  const r = await collectWorkerResult(successStream(), { childEnvKeys: [] });
+  assert.deepEqual(r.tokens, { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 });
+  assert.deepEqual(r.modelUsage, {});
+});
+
+test("workerLedgerFields: success call ⇒ {model, effort, tokens, total_cost_usd, billing_mode, verdict} with billing_mode='subscription' and verdict='success'", async () => {
+  const r = await collectWorkerResult(usageStream(), {
+    childEnvKeys: [],
+    model: "claude-opus-4",
+    effort: "high",
+  });
+  const fields = workerLedgerFields(r);
+  assert.deepEqual(fields, {
+    model: "claude-opus-4",
+    effort: "high",
+    tokens: { input: 1000, output: 200, cacheRead: 500, cacheCreation: 50 },
+    total_cost_usd: 1.23,
+    billing_mode: "subscription",
+    verdict: "success",
+  });
+  assert.equal(BILLING_MODE, "subscription");
+});
+
+test("workerLedgerFields: an ERROR call's verdict is the SDK's error subtype, not the string 'success'", async () => {
+  const r = await collectWorkerResult(errorResultStream("error_max_turns", 1.73, 60), {
+    childEnvKeys: [],
+    model: "claude-sonnet-4",
+    effort: "medium",
+  });
+  const fields = workerLedgerFields(r);
+  assert.equal(fields.verdict, "error_max_turns");
+  assert.equal(fields.billing_mode, "subscription");
+  assert.equal(fields.total_cost_usd, 1.73);
+  assert.equal(fields.model, "claude-sonnet-4");
+  assert.equal(fields.effort, "medium");
 });
 
 test("spawnWorker: an invalid settings file is REJECTED at the spawn boundary before any worker launches", async () => {

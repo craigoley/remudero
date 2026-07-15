@@ -6,6 +6,30 @@ import { loadConfig, workerShell, workerZdotdir, type Config } from "./config.js
 import { buildWorkerEnv } from "./env.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 
+/**
+ * Aggregate token usage off the SDK result envelope's `usage` field (verified
+ * ground truth, SDK 0.3.209 `sdk.d.ts`: `NonNullableUsage`, itself `BetaUsage`
+ * with ALL fields non-nullable — snake_case Anthropic-API names). Zeroed when
+ * no result envelope was ever seen (a genuine transport failure).
+ */
+export interface TokenUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+}
+
+/** Per-model cost/token breakdown (SDK 0.3.209 `ModelUsage`) — the map KEYS are
+ * the model(s) actually used, which may differ from the requested `model`. */
+export interface ModelUsageEntry {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  costUSD: number;
+  contextWindow: number;
+}
+
 /** Structured result of one worker run. */
 export interface WorkerResult {
   sessionId: string;
@@ -29,6 +53,62 @@ export interface WorkerResult {
   permissionDenials: unknown[];
   /** The exact env the child was spawned with (billing-boundary proof). */
   childEnvKeys: string[];
+  /**
+   * The model this call was CONFIGURED to run — an INPUT (the caller's
+   * `SpawnWorkerArgs.model`, mount-resolved for implement, unset elsewhere),
+   * never a read-back off the envelope (`DEFAULT_MODEL_LABEL` when unspecified).
+   */
+  model: string;
+  /**
+   * The reasoning effort this call was CONFIGURED to run. Same INPUT-not-output
+   * rule as `model`: effort is NOT in the SDK result envelope (LEARNINGS — the
+   * W1-T6 exploration tax), so this is the configured value, never a read-back.
+   */
+  effort: string;
+  /** Aggregate token usage off the result envelope (zeroed if none was seen). */
+  tokens: TokenUsage;
+  /** Per-model breakdown off the envelope's `modelUsage` map (`{}` if none seen). */
+  modelUsage: Record<string, ModelUsageEntry>;
+}
+
+/** `model`/`effort` label logged when a call rides no explicit mount override
+ * (e.g. recon, the advisory reviewer) — an honest "unset", never a guessed value. */
+export const DEFAULT_MODEL_LABEL = "default";
+export const DEFAULT_EFFORT_LABEL = "default";
+
+/** Billing mode is constant by construction: `buildWorkerEnv` strips every
+ * `ANTHROPIC_*` var before a worker ever spawns (W1-T1), so no worker call can
+ * ever be metered API-key-style. One literal, asserted everywhere (never
+ * inferred per-call), so a ledger line can never drift from the true boundary. */
+export const BILLING_MODE = "subscription" as const;
+
+/**
+ * The standard per-call ledger telemetry (W1-T6 acceptance): every worker AND
+ * brain-plane (architect/reviewer) call logs `{model, effort, tokens,
+ * total_cost_usd, billing_mode, verdict}`. Extracted so every call site in
+ * run-task.ts spreads the SAME shape rather than hand-rolling it — one
+ * definition, so the fields can never drift between recon/implement/review/retro.
+ *
+ * `verdict` here is this CALL's own outcome (`"success"` or the SDK's error
+ * subtype) — distinct from the RUN-level `verdict` ledger line (merged /
+ * blocked_* / failed), which judges the whole run, not one worker spawn.
+ */
+export function workerLedgerFields(r: WorkerResult): {
+  model: string;
+  effort: string;
+  tokens: TokenUsage;
+  total_cost_usd: number;
+  billing_mode: typeof BILLING_MODE;
+  verdict: string;
+} {
+  return {
+    model: r.model,
+    effort: r.effort,
+    tokens: r.tokens,
+    total_cost_usd: r.costUsd,
+    billing_mode: BILLING_MODE,
+    verdict: r.isError ? r.subtype : "success",
+  };
 }
 
 export interface SpawnWorkerArgs {
@@ -107,6 +187,12 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   return collectWorkerResult(query({ prompt: args.prompt, options }), {
     childEnvKeys: Object.keys(childEnv).sort(),
     stderrChunks,
+    // Logged verbatim as CONFIGURED inputs — never a read-back (effort is not
+    // in the SDK envelope at all; model here is the requested knob, which may
+    // differ from the envelope's `modelUsage` map keys for the model(s) actually
+    // billed). Unset ⇒ the honest "default" label, never a guessed value.
+    model: args.model ?? DEFAULT_MODEL_LABEL,
+    effort: args.effort ?? DEFAULT_EFFORT_LABEL,
   });
 }
 
@@ -126,7 +212,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
  */
 export async function collectWorkerResult(
   messages: AsyncIterable<unknown>,
-  opts: { childEnvKeys: string[]; stderrChunks?: string[] },
+  opts: {
+    childEnvKeys: string[];
+    stderrChunks?: string[];
+    /** Configured input, logged verbatim — defaults to `DEFAULT_MODEL_LABEL`. */
+    model?: string;
+    /** Configured input, logged verbatim — defaults to `DEFAULT_EFFORT_LABEL`. */
+    effort?: string;
+  },
 ): Promise<WorkerResult> {
   const blocks: string[] = [];
   const stderrChunks = opts.stderrChunks ?? [];
@@ -139,6 +232,8 @@ export async function collectWorkerResult(
   let isError = false;
   let permissionDenials: unknown[] = [];
   let sawResult = false;
+  let tokens: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+  let modelUsage: Record<string, ModelUsageEntry> = {};
 
   try {
     for await (const raw of messages) {
@@ -161,6 +256,16 @@ export async function collectWorkerResult(
           total_cost_usd: number;
           num_turns?: number;
           permission_denials?: unknown[];
+          // `usage`/`modelUsage` are on BOTH SDKResultSuccess and SDKResultError
+          // (sdk.d.ts ground truth) — optional here only to tolerate a synthetic
+          // test stream that omits them; a real envelope always carries both.
+          usage?: {
+            input_tokens?: number;
+            output_tokens?: number;
+            cache_read_input_tokens?: number | null;
+            cache_creation_input_tokens?: number | null;
+          };
+          modelUsage?: Record<string, Partial<ModelUsageEntry>>;
         };
         sawResult = true;
         subtype = r.subtype;
@@ -170,6 +275,25 @@ export async function collectWorkerResult(
         costUsd = r.total_cost_usd;
         numTurns = typeof r.num_turns === "number" ? r.num_turns : 0;
         permissionDenials = r.permission_denials ?? [];
+        tokens = {
+          input: r.usage?.input_tokens ?? 0,
+          output: r.usage?.output_tokens ?? 0,
+          cacheRead: r.usage?.cache_read_input_tokens ?? 0,
+          cacheCreation: r.usage?.cache_creation_input_tokens ?? 0,
+        };
+        modelUsage = Object.fromEntries(
+          Object.entries(r.modelUsage ?? {}).map(([model, u]) => [
+            model,
+            {
+              inputTokens: u.inputTokens ?? 0,
+              outputTokens: u.outputTokens ?? 0,
+              cacheReadInputTokens: u.cacheReadInputTokens ?? 0,
+              cacheCreationInputTokens: u.cacheCreationInputTokens ?? 0,
+              costUSD: u.costUSD ?? 0,
+              contextWindow: u.contextWindow ?? 0,
+            },
+          ]),
+        );
       }
     }
   } catch (err) {
@@ -195,6 +319,10 @@ export async function collectWorkerResult(
     isError,
     permissionDenials,
     childEnvKeys: opts.childEnvKeys,
+    model: opts.model ?? DEFAULT_MODEL_LABEL,
+    effort: opts.effort ?? DEFAULT_EFFORT_LABEL,
+    tokens,
+    modelUsage,
   };
 }
 

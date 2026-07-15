@@ -71,6 +71,7 @@ import {
   pruneStaleRuns,
   renderWorkerSettings,
   spawnWorker,
+  workerLedgerFields,
   worktreeAdd,
   worktreeRemove,
   worktreesDir,
@@ -288,6 +289,9 @@ async function runReview(args: {
         session_id: reviewer.sessionId,
         subtype: reviewer.subtype,
         downgrades: semantic.filter((s) => s === false).length,
+        // W1-T6: the advisory reviewer is a BRAIN-PLANE call — same telemetry
+        // shape as a worker call, so ledger lines are queryable uniformly.
+        ...workerLedgerFields(reviewer),
       });
     } catch (e) {
       // Advisory only — the deterministic floor still binds and posts below.
@@ -359,6 +363,11 @@ export interface WorkerErrorVerdict {
     cost_usd: number;
     billing_mode: "subscription";
     reason: string;
+    /** W1-T6: the failing call's configured model/effort + its token usage —
+     * a failed worker call is never free OR untelemetered in the ledger. */
+    model: string;
+    effort: string;
+    tokens: WorkerResult["tokens"];
   };
 }
 
@@ -393,6 +402,9 @@ export function workerErrorVerdict(
       reason: budgetBreach
         ? "worker breached maxBudgetUsd — not retried (dollars are the backstop)"
         : `worker error at ${stage}: ${r.subtype}`,
+      model: r.model,
+      effort: r.effort,
+      tokens: r.tokens,
     },
   };
 }
@@ -652,6 +664,8 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
       cost_usd: recon.costUsd,
       num_turns: recon.numTurns,
       subtype: recon.subtype,
+      // W1-T6: every worker call ledgers the standard telemetry shape.
+      ...workerLedgerFields(recon),
     });
     const reconFail = failOnWorkerError(recon, "recon");
     if (reconFail) return reconFail;
@@ -701,6 +715,8 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
       num_turns: impl.numTurns,
       subtype: impl.subtype,
       permission_denials: impl.permissionDenials.length,
+      // W1-T6: every worker call ledgers the standard telemetry shape.
+      ...workerLedgerFields(impl),
     });
     const implFail = failOnWorkerError(impl, "implement");
     if (implFail) return implFail;
@@ -742,6 +758,8 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
         cost_usd: impl.costUsd,
         num_turns: impl.numTurns,
         subtype: impl.subtype,
+        // W1-T6: every worker call ledgers the standard telemetry shape.
+        ...workerLedgerFields(impl),
       });
       const resumeFail = failOnWorkerError(impl, "implement.resumed");
       if (resumeFail) return resumeFail;
@@ -1037,7 +1055,14 @@ async function retroCommand(rest: string[]): Promise<number> {
       config,
       prompt,
     });
-    log("retro.synthesized", { session_id: worker.sessionId, cost_usd: worker.costUsd, subtype: worker.subtype });
+    log("retro.synthesized", {
+      session_id: worker.sessionId,
+      cost_usd: worker.costUsd,
+      subtype: worker.subtype,
+      // W1-T6: the retro Architect is a BRAIN-PLANE call — same telemetry
+      // shape as a worker call (model here is the Architect tier, `arch`).
+      ...workerLedgerFields(worker),
+    });
 
     // Ensure the branch reached origin (worker pushes without -u).
     let onOrigin = false;
