@@ -248,3 +248,31 @@
     (Options.effort / the mount), so log the configured effort, not a read-back.
   src: SDK 0.3.209 (installed sdk.d.ts)
   cited: "2026-07-15"
+
+# ── A live-operator criterion is UNFIT for a headless worker (a NEW error class, W1-T9). Design
+# interactive steps for no-TTY: flags + TTY-absent default; test via injected input. (DIAGNOSIS.md) ──
+- id: no-live-operator-in-headless-worker
+  subsystem: cli
+  files: [src/lib/init.ts, src/run-task.ts, bin/rmd]
+  fact: >-
+    A criterion requiring live operator confirmation ("operator confirms", "user selects") is UNFIT for a
+    headless worker — there is no TTY and no operator. W1-T9 burned its last ~15 turns on readline-repro
+    scripts trying to conjure an operator that isn't there, then died error_max_turns. Redesign every
+    interactive step for no-TTY: expose --tier/--yes-style FLAGS + a TTY-ABSENT SAFE DEFAULT (log the
+    chosen value); prompt ONLY when process.stdin.isTTY. Test the non-interactive path via injected
+    input / flags, never a live human. (MASTER-PLAN Standing rule 18.)
+  src: DIAGNOSIS.md (diag/w1t9-max-turns), W1-T9
+  cited: "2026-07-15"
+
+# ── Tier-detection input keys — the weak-residue learning so tier detection isn't first-time-discovered
+# again (W1-T9 spent ~29 discovery turns; the /usage shape is W1-T4/headroom.ts, the keys were nowhere). ──
+- id: claude-json-tier-keys
+  subsystem: platform
+  files: [src/lib/tier.ts, src/lib/init.ts, src/lib/headroom.ts]
+  fact: >-
+    ~/.claude.json exposes tier-relevant KEYS locally, with NO network call: hasAvailableSubscription,
+    cachedUsageUtilization, modelAccessCache, oauthAccount (tier discovery rung 2). The /usage output
+    (rung 1) is parsed by headroom.ts (W1-T4) and is machine-readable headless. Feed BOTH as pure INPUTS
+    to detectTier so detection is unit-testable over fixtures (max5x/max20x/ambiguous) with no live calls.
+  src: MASTER-PLAN FIELD FINDINGS §9(h), DIAGNOSIS.md (diag/w1t9-max-turns)
+  cited: "2026-07-15"
