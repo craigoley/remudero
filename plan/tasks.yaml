@@ -53,6 +53,13 @@
 # runner resolves resolveMount(task.type, task.risk) → {model, effort, max_turns} at spawn (never a
 # hardcoded literal — the W1-T6 defect, DIAGNOSIS.md). HIGH marks schema/ledger/telemetry/CI/containment-
 # cutting tasks that run long (e.g. W1-T6 needed >61 turns → implement.high = 120). Set by the Architect.
+#
+# ★ KICK ORDER (post-WS-1, SECURITY-FIRST — rule-20 sweep, operator-directed; mirrors NET STATE):
+#   security tiers (W1-T24 ci-gate → W1-T23 scanners) → plan-health (W1-T20c/d, W1-T20) →
+#   quality/architecture (W1-T25/T26/T28) → W1-T27 → W2-T2 fleet dry-run; fleet-ops (§5D, W1-T54–T57)
+#   fold in alongside. nextRunnable (drain.ts) is DECLARATION-ORDERED, but the remudero queue is
+#   operator-kicked (the daemon drains the sandbox), so this is the authoritative kick guide, NOT a
+#   physical reordering of the entries below (a contiguous block-move can't produce this interleaving).
 
 - id: W1-T1
   title: Extract run-task.ts from the spike lib (the proto-runner)
@@ -1071,15 +1078,25 @@
   budget_usd: 100.00
   rationale: "MASTER-PLAN §5 TIER 1. The harness eats first: the security gates the fleet paid for run on
     remudero before any project inherits them (§5A). CodeQL default setup conflicts with an explicit
-    workflow so it is DISABLED (LEARNINGS); MAJOR dependency bumps are excluded from auto-merge after a
-    28-minute outage; workflows are least-privilege + SHA-pinned because a moved tag is a supply-chain vector."
+    workflow so it is DISABLED (LEARNINGS); MAJOR dependency bumps are excluded from auto-merge at the
+    dep-review lane (W1-T54), NOT via Dependabot ignore-rules — the fleet configs are IGNORE-FREE (FLEET
+    FINDING, §5), so the 28-minute-outage lesson is enforced in CODE, not config; workflows are
+    least-privilege + SHA-pinned because a moved tag is a supply-chain vector."
   design: |
-    Add explicit workflows (CodeQL, OSV-Scanner, leak-grep-in-CI) + dependabot.yml (majors ignored and
-    excluded from auto-merge) + SECURITY.md with a private-disclosure path. Every workflow declares a
-    minimal `permissions:` block and pins actions to 40-char SHAs. Turn OFF GitHub CodeQL default setup.
+    Add explicit workflows to the FLEET SECURITY BASELINE (verified on craigoley/synthwatch +
+    craigoley/neon-drift, this sweep): CodeQL (explicit; default setup OFF), Semgrep, dependency-review,
+    OSSF Scorecard, and OSV on BOTH pull_request AND schedule (synthwatch runs osv-scanner-pr.yml AND
+    osv-scanner.yml), plus a leak-grep-in-CI job and SECURITY.md with a private-disclosure path.
+    dependabot.yml is IGNORE-FREE (minor+patch GROUPED into one PR, mirroring the fleet); MAJOR bumps are
+    excluded from AUTO-MERGE at the dep-review lane (W1-T54), never via ignore-rules. Every workflow
+    declares a minimal `permissions:` block and pins actions to 40-char SHAs.
   acceptance:
     - claim: "CodeQL, OSV-Scanner, and Dependabot are LIVE on remudero (explicit workflows; default CodeQL setup OFF)"
       proof: "gh api repos/craigoley/remudero/code-scanning/analyses shows CodeQL results; .github/workflows contains codeql + osv; dependabot.yml present — paste the workflow files"
+    - claim: "the FLEET SECURITY BASELINE is LIVE on remudero: Semgrep, dependency-review, OSSF Scorecard, and OSV on BOTH PR and schedule"
+      proof: ".github/workflows contains semgrep.yml, dependency-review.yml, scorecard.yml, osv-scanner-pr.yml AND osv-scanner.yml (mirroring craigoley/synthwatch's baseline); each runs green on a PR — paste the workflow files + the check runs"
+    - claim: "dependabot.yml is IGNORE-FREE (minor+patch grouped), matching the fleet"
+      proof: "the committed dependabot.yml has NO `ignore:` block, only minor+patch grouping (mirrors craigoley/synthwatch + craigoley/neon-drift); major exclusion is the dep-review lane's job (W1-T54), not this file"
     - claim: "a planted vulnerable dependency is FLAGGED by the scan"
       proof: "a branch pinning a known-CVE package version makes the OSV-Scanner CI JOB go red (its result is AWAITABLE in the PR run), then revert — key off the OSV job, NOT Dependabot's async alert (which arrives on its own schedule and is not awaitable in a PR)"
     - claim: "a leak-grep runs IN CI on every PR, and every workflow is least-privilege + SHA-pinned"
@@ -1098,14 +1115,19 @@
   principles: {tdd: encouraged}
   budget_usd: 100.00
   rationale: "MASTER-PLAN §5 CI mechanics. A conditionally-skipped required check DEADLOCKS merge forever
-    (LEARNINGS); as tiers add path-filtered sub-jobs, the fix is ONE always-runs aggregator that needs:
-    every sub-job and is the single required context. The required context is the JOB NAME, not the
-    workflow file."
+    (LEARNINGS); as tiers add path-filtered sub-jobs, the fix is ONE always-runs aggregator that reads
+    SIBLING check-runs across workflows (NOT `needs:`, which can't cross workflow files) and is the single
+    required context. The required context is the JOB NAME, not the workflow file."
   design: |
-    Add a `ci-gate` aggregator job that `needs:` [typecheck, test, and each tier sub-job] and succeeds
-    ONLY if none of its needed jobs failed (a skipped path-filtered sub-job is treated as pass; a FAILED
-    one fails the aggregator). Rewire protection so required_status_checks.contexts == [ci-gate,
-    remudero-review].
+    ★ CORRECTED to the installed fleet pattern (craigoley/synthwatch .github/workflows/ci-gate.yml, this
+    sweep): a `needs:`-based aggregator only sees jobs WITHIN ONE workflow, but remudero's required checks
+    live in SEPARATE workflows (codeql / semgrep / osv-scanner-pr / claude-review, etc.) — `needs:` cannot
+    reference them, and a SKIPPED reusable-workflow caller creates NO check run, deadlocking branch
+    protection forever (synthwatch #102, an esbuild Dependabot bump sat blocked). So `ci-gate` instead
+    READS THE PR HEAD COMMIT'S CHECK RUNS across ALL workflows (gh api, `checks: read`), ALWAYS runs (no
+    `if:`, no path filter — so its context ALWAYS reports), treats skipped/absent siblings as OK, and FAILS
+    ONLY on a real failure conclusion. Rewire protection so required_status_checks.contexts == [ci-gate,
+    remudero-review] (an admin `gh api` PATCH — Craig's to run).
   acceptance:
     - claim: "branch protection requires exactly ONE aggregator context plus remudero-review"
       proof: "gh api repos/craigoley/remudero/branches/main/protection --jq .required_status_checks.contexts shows [ci-gate, remudero-review]"
@@ -1218,19 +1240,25 @@
 - id: W2-T2
   title: Campaign — raise the fleet to the bar (provision the gate stack across operator repos)
   repo: remudero
-  depends_on: [W1-T27, W1-T22]
+  depends_on: [W1-T27]   # relaxed from [W1-T27, W1-T22] (rule-20 sweep) — see PR body: verify:human + mandatory dry-run IS the gate; fleet coverage should not wait on the whole flight-control chain
   type: implement
   verify: human
   principles: {tdd: encouraged}
   budget_usd: 100.00
   rationale: "MASTER-PLAN §3A + §5A: a campaign raises the bar fleet-wide. Once rmd project init exists
-    (W1-T27) and risk scoring gates it (W1-T22), instantiate onboarding tasks across the operator's repos.
-    verify: human because it opens PRs against PRODUCTION repos the operator owns — it must not auto-run."
+    (W1-T27), instantiate onboarding tasks across the operator's repos. verify: human because it opens PRs
+    against PRODUCTION repos the operator owns — it must not auto-run; the operator's approval of every
+    onboarding PR IS the real gate (risk scoring W1-T22 adds little for this task shape), so fleet coverage
+    is not held behind the whole flight-control chain (operator directed coverage 'as soon as feasible')."
   design: |
     Instantiate rmd project init as per-repo tasks across the fleet selector (SynthWatch, neon-drift,
     rogue-descent, wild-trails, OleyArcade, ClawApp), each capturing that repo's baselines and opening a
     gated onboarding PR. Start with a DRY-RUN plan naming each target and the gate delta per repo; no
     protection change until the operator approves.
+    ★ The per-repo dry-run must report CURRENT-vs-BAR deltas INCLUDING PIN STYLE — the fleet itself is not
+    uniformly at the bar: e.g. craigoley/neon-drift's codeql.yml pins actions by TAG (actions/checkout@v7,
+    codeql-action@v4), NOT 40-char SHA (verified this sweep). So the campaign RAISES existing repos (tag→SHA,
+    missing scanners), not only provisions empty ones.
   acceptance:
     - claim: "a dry-run plan names each target repo and the gate delta per repo"
       proof: "the campaign dry-run output lists each repo with its current-vs-bar gate delta (which tiers/checks it lacks) — paste the plan; no repo is modified until the operator approves"
@@ -2302,5 +2330,117 @@
   origin: feedback#handoff
   plan_refs: ["§4B"]
   files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+# FLEET OPERATIONS (§5D) — new tasks (Architect, plan/fleet-ops-and-tier-amendments).
+# NOTE: the prompt named these W1-T51/52/53, but those ids were taken by the merged health-sweep (#71),
+# so they are renumbered W1-T54–T57 (recorded in the PR body).
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+# Item 5 — dependency-PR review lane (a Dependabot PR is unmergeable today: nothing posts remudero-review).
+- id: W1-T54
+  title: "Dependency-PR review lane — deterministic remudero-review for Dependabot PRs (minor->arm, major->escalate)"
+  repo: remudero
+  depends_on: [W1-T23, W1-T24]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Required checks are [ci, remudero-review]; nothing posts remudero-review on a non-TASK PR, so
+    a Dependabot PR is UNMERGEABLE today (fail-closed but frozen). This is also where MAJOR bumps are
+    excluded from auto-merge (§5 / W1-T23 FLEET FINDING — the fleet's own auto-merge does no semver check;
+    remudero fixes that in code, not Dependabot ignore-rules)."
+  design: |
+    A DETERMINISTIC dep-review (no LLM): assert PR author is dependabot[bot], the diff is confined to
+    manifest/lockfile (+ the grouped-actions workflow files per the fleet grouping), all gates are green,
+    dependency-review + OSV are clean, and parse the SEMVER LEVEL from the PR title/metadata. minor/patch ->
+    post remudero-review=success + arm auto-merge; major -> open a needs-human escalation issue (with the
+    release notes) via the SHIPPED escalate path, NO auto-merge. A dep PR whose diff touches SOURCE files
+    outside manifests is REFUSED (no review posted).
+  acceptance:
+    - claim: "over recorded dep-PR fixtures: minor/patch -> pass + arm auto-merge; major -> escalate (needs-human, no auto-merge); a dep PR touching source files outside manifests -> REFUSED with no review posted"
+      proof: "unit tests over recorded Dependabot-PR fixtures assert each of the three branches (arm / escalate / refuse)"
+    - claim: "a seeded semver-MINOR bump PR on remudero-sandbox merges through the gate with the dep-review status AS its remudero-review"
+      proof: "live: the worker opens the seed minor-bump PR itself via gh on remudero-sandbox, the dep-review posts remudero-review=success + arms auto-merge, and the PR merges — paste the gh api status + the merge"
+  risk: high
+  origin: feedback#fleet-ops
+  plan_refs: ["§5D"]
+  files: [src/lib/dep-review.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+
+# Item 6 v0 — alert intake (surface): scanner alerts land in the digest; new critical/high escalates.
+- id: W1-T55
+  title: "Alert intake v0 — surface code-scanning/Dependabot/secret alerts in the digest + escalate new criticals"
+  repo: remudero
+  depends_on: [W1-T23]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "§5D: provisioning scanners is one-time; RESPONDING to their alerts is continuous and did not
+    exist. Alerts must be surfaced (digest) and new criticals escalated, or a scanner is decoration."
+  design: |
+    A poller (daemon idle-groom step, or `rmd ops` invoked by the scheduler) reads code-scanning,
+    Dependabot, and secret-scanning alerts via gh api for the MANAGED repo set. Open alerts land in the
+    daily digest with COUNTS + AGES; any NEW critical/high files exactly one needs-human escalation via the
+    SHIPPED escalate path. Dedup by alert id across polls so a re-poll never double-escalates.
+  acceptance:
+    - claim: "seeded alert payloads produce the digest block (counts + ages) and exactly ONE escalation per NEW critical, with NO duplicate on re-poll"
+      proof: "fixture-driven unit test: seeded code-scanning/Dependabot/secret alert payloads -> the digest block + one escalation per new critical; a second poll of the same payloads emits zero new escalations"
+  risk: medium
+  origin: feedback#fleet-ops
+  plan_refs: ["§5D"]
+  files: [src/lib/ops.ts]
+  status: queued
+  attempts: 0
+
+# Item 6 v1 — alerts become §7B feedback artifacts, triaged into corrective tasks.
+- id: W1-T56
+  title: "Alert intake v1 — alerts become plan/feedback artifacts (origin: alert#<id>), triaged into corrective tasks"
+  repo: remudero
+  depends_on: [W1-T41, W1-T55]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "§5D + §7B: an alert is MACHINE-ORIGIN FEEDBACK — it flows through the §7B inbox, not a
+    parallel loop. Surfacing (v0) becomes ACTING: the alert becomes a triageable artifact."
+  design: |
+    Each surfaced alert is written as a plan/feedback/ artifact with origin: alert#<id>; `rmd triage`
+    (W1-T41) grounds it (repo state, learnings) and PROPOSES a corrective task citing the alert id.
+  acceptance:
+    - claim: "a seeded alert becomes a plan/feedback artifact with origin: alert#<id> and rmd triage proposes a corrective task citing that alert id"
+      proof: "fixture: a seeded alert -> a plan/feedback/<id> entry with origin: alert#<id>; rmd triage over it proposes a corrective task whose provenance cites the alert id"
+  risk: medium
+  origin: feedback#fleet-ops
+  plan_refs: ["§5D", "§7B"]
+  status: queued
+  attempts: 0
+
+# Item 7 — issues intake for MANAGED repos (remudero's OWN public issues stay OFF until WS-4, §5D/G-6).
+- id: W1-T57
+  title: "Issues intake — open issues on MANAGED repos become feedback artifacts (origin: issue#<n>), triaged + counted"
+  repo: remudero
+  depends_on: [W1-T41]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "§5D: the third intake lane. Open issues on repos the harness MANAGES become feedback so
+    'issues reviewed regularly' is a LEDGERED fact, not an intention. Remudero's OWN public issues stay OFF
+    until WS-4 (G-6 — the operator's standing decision; flipping it is his call, not the harness's)."
+  design: |
+    On a schedule, read open issues on the managed repo set via gh api; each becomes a plan/feedback/
+    artifact with origin: issue#<n>, DEDUPED across runs, triaged by rmd triage (W1-T41). The daily digest
+    carries an issues-reviewed COUNT so regular review is provable from the ledger.
+  acceptance:
+    - claim: "seeded open issues on managed repos become deduped feedback artifacts (origin: issue#<n>) and the digest carries an issues-reviewed count"
+      proof: "fixture: seeded issues -> plan/feedback entries (origin: issue#<n>, deduped on re-run); the digest block shows the issues-reviewed count"
+  risk: medium
+  origin: feedback#fleet-ops
+  plan_refs: ["§5D"]
   status: queued
   attempts: 0
