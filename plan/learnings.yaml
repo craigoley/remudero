@@ -234,3 +234,17 @@
     stale criterion via a plan PR; a worker never — nothing dropped, only realigned to the architecture.
   src: PR#42
   cited: "2026-07-14"
+
+# ── SDK result-envelope FIELD LOCATIONS (kills the W1-T6 exploration tax) — verified from the installed
+# sdk.d.ts (SDK 0.3.209), not the prompt. This is the ground truth ~33 turns were spent re-discovering. ──
+- id: sdk-result-fields
+  subsystem: ledger
+  files: [src/lib/worker.ts, src/lib/ledger.ts, src/run-task.ts]
+  fact: >-
+    The SDK type:"result" envelope carries the telemetry to log: num_turns, total_cost_usd, usage
+    (NonNullableUsage aggregate), and modelUsage: Record<MODEL_NAME, ModelUsage> — the MODEL(S) used are
+    the map KEYS; each ModelUsage has inputTokens, outputTokens, cacheReadInputTokens (camelCase),
+    cacheCreationInputTokens, costUSD, contextWindow. EFFORT is NOT in the envelope — it is an INPUT
+    (Options.effort / the mount), so log the configured effort, not a read-back.
+  src: SDK 0.3.209 (installed sdk.d.ts)
+  cited: "2026-07-15"
