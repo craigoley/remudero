@@ -46,6 +46,52 @@ export interface Config {
    * ID email so the notifier works out of the box on a single-operator instance.
    */
   notifyRecipient?: string;
+  /**
+   * Overflow valve (operator opt-in, §9): `"none"` (default) never routes off the
+   * subscription; `"api_key"` lets priority-queued runs bill via ANTHROPIC_API_KEY
+   * at metered rates once subscription windows are exhausted, rather than waiting
+   * for reset. See {@link validateConfig} for the invariant this field is paired with.
+   */
+  overflow?: "none" | "api_key";
+  /**
+   * Hard daily dollar cap enforced whenever a run bills in `api` mode (§9 conditional
+   * cap guard: "no dollar cap" is valid ONLY under subscription billing — any run
+   * that overflows to `api_key` billing is ALWAYS capped). `undefined`/`null` means
+   * "no cap", which is why `overflow: "api_key"` can never be paired with an unset
+   * `dailyCapUsd` — {@link validateConfig} rejects that combination at load.
+   */
+  dailyCapUsd?: number | null;
+}
+
+/**
+ * Thrown by {@link validateConfig} when a config violates one of the harness's
+ * cross-field invariants. Named (rather than a bare `Error`) so callers/tests can
+ * assert on the specific failure mode instead of matching on message text.
+ */
+export class ConfigValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfigValidationError";
+  }
+}
+
+/**
+ * Validate a config's cross-field invariants (§9). Currently enforces the
+ * **conditional cap guard**: `overflow: "api_key"` routes runs to metered
+ * ANTHROPIC_API_KEY billing, and any run in `api` billing mode MUST be hard-capped
+ * regardless of operator settings — so `overflow: "api_key"` paired with no
+ * `dailyCapUsd` (`daily_cap: none`) is rejected rather than silently letting an
+ * uncapped run bill real money. Throws {@link ConfigValidationError}; does not
+ * return a boolean, so a caller cannot accidentally ignore an invalid config.
+ */
+export function validateConfig(config: Config): void {
+  const dailyCapIsNone = config.dailyCapUsd === undefined || config.dailyCapUsd === null;
+  if (config.overflow === "api_key" && dailyCapIsNone) {
+    throw new ConfigValidationError(
+      'invalid config: overflow: "api_key" requires a dailyCapUsd (api-mode runs must be ' +
+        "hard-capped — §9 conditional cap guard); got daily_cap: none",
+    );
+  }
 }
 
 /**
@@ -143,5 +189,6 @@ export function loadConfig(): Config {
   const parsed = JSON.parse(readFileSync(p, "utf8")) as Partial<Config>;
   if (!parsed.claudeBin) parsed.claudeBin = resolveClaudeBin();
   if (!parsed.root) parsed.root = join(homedir(), "Remudero");
+  validateConfig(parsed as Config);
   return parsed as Config;
 }
