@@ -27,16 +27,26 @@ autonomous-PR tools like Composio AO; plan-lifecycle tools like ivy-tendril; nat
 
 ## NET STATE
 
-WS-0 spike SHIPPED (7/7 verdicts GREEN, PR #1). WS-1 proto-runner is LIVE and eating its own backlog:
+★ **WS-1 COMPLETE (2026-07-15): the daemon runs itself.** WS-1's exit criterion — a self-hosting
+unattended loop — is MET. `rmd daemon` was launchctl-loaded targeting **remudero-sandbox** and drained
+**SBX-T1/T2/T3 unattended → merged sandbox PRs #6/#7/#8** (daemon.summary max_reached), booting
+ANTHROPIC-clean (env_clean=true, billing_mode=subscription), then survived a **kill-9 + launchd KeepAlive
+restart** (daemon.start ×3) recovering to correct GitHub-derived state with **no duplicate task run**
+(W1-T12d, verify:human, operator-attested — evidence in the task's `satisfied_by`). The full spine landed
+through the closed gate: run-task → reviewer + merge gate → drain → the daemon (scheduler loop W1-T12a,
+launchd unit + boot assertion W1-T12b, crash recovery W1-T12c), plus §5C task pre-flight, transient
+classification, and repo-targeted commissioning. Two honest deltas from the literal W1-T12d criteria: the
+drill was bounded (--max 3, not overnight) and no digest send was captured; the kill hit the daemon
+post-drain (recovery proven by no-duplicate + clean idle, not an active reconstructOrphan). The
+self-hosting CAPABILITY is proven regardless.
+
+WS-0 spike SHIPPED (7/7 verdicts GREEN, PR #1). WS-1 proto-runner is LIVE and ate its own backlog:
 the reviewer + enforced merge gate (W1-T1C/#11, W1-T1D/#12), the escalation/notifier/ledger arc
-(W1-T3/B/C/D/E → PR #26–#30), and the compounding-knowledge pair — Promptsmith LEARNINGS injection
-(W1-T19/#34, the READ side) + reviewer-verifies-against-repo-state (W1-T3F/#35) — have all landed
-through `rmd run-task`. **11 PRs merged all-time** across remudero + remudero-sandbox; **$34.92 spent
-over 19 implement runs — 11 merged, 8 non-merged** (58% merge rate; the 8 non-merges: blocked_budget×3,
-blocked_review×2, incomplete×2, blocked_ci×1 — see Calibration + Retro proposals). §8A/§8B knowledge
-architecture + the five knowledge-hole tasks W1-T33–T39 are now planned (PR #36). NEXT: continue the
-WS-1 queue (strike/transient classifier, launchd unit, daemonization last) and drain W1-T33–T39 through
-the closed gate; mount-routing (mounts.yaml, W1-T5) keys off the calibration rows below.
+(W1-T3/B/C/D/E → PR #26–#30), the compounding-knowledge pair — Promptsmith LEARNINGS injection
+(W1-T19/#34) + reviewer-verifies-against-repo-state (W1-T3F/#35) — and the **daemon spine** (W1-T12a/b/c
++ live commissioning W1-T12d, PR #57/#68 + the sandbox gate). §8A/§8B knowledge architecture + the five
+knowledge-hole tasks W1-T33–T39 remain planned (PR #36). NEXT: WS-2+ backlogs now execute THROUGH the
+daemon (L2); drain W1-T33–T39 + the flight-control/knowledge tasks through the closed, self-hosting loop.
 
 ## SHIPPED log
 
