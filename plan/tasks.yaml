@@ -2624,3 +2624,46 @@
   files: [src/run-task.ts]
   status: queued
   attempts: 0
+
+# SECURITY.md shed from W1-T23 (plan/security-policy-task, origin: human — the operator's original ask
+# named a security policy; W1-T23's design promised SECURITY.md but NO criterion carried it, so the file
+# shed silently: 404 at all three GitHub-honored paths — root, .github/, docs/ — verified this PR).
+- id: W1-T61
+  title: "SECURITY.md + private disclosure path (the shed W1-T23 design item)"
+  repo: remudero
+  depends_on: [W1-T23]
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 100.00
+  rationale: "The operator's original security-baseline ask included a security policy BY NAME. W1-T23's
+    design text promised SECURITY.md, but NONE of W1-T23's acceptance criteria carried it, so the reviewer
+    had nothing to check and the file shed silently — a 404 today at all three GitHub-honored paths (root
+    SECURITY.md, .github/SECURITY.md, docs/SECURITY.md, verified via gh api contents this PR). Rule 13
+    corollary: a design item without a proof-bearing criterion is ASPIRATIONAL, not a deliverable — this
+    re-files it as its own task with OBSERVABLE proofs (cite the retro candidate). GitHub private
+    vulnerability reporting is currently DISABLED on the repo (gh api .../private-vulnerability-reporting ->
+    {\"enabled\":false}, verified this PR) — enabling it is part of the deliverable, not just the file."
+  design: |
+    Add SECURITY.md at the repo ROOT (a GitHub-honored path; GitHub surfaces it in the Security tab and the
+    new-issue chooser). It must state: (1) a PRIVATE disclosure channel — enable GitHub's private
+    vulnerability reporting and point contributors at the repo's "Report a vulnerability" flow (NEVER a
+    public issue for a vuln, NEVER a plaintext secret in-repo); (2) supported scope — this is PRE-ALPHA, so
+    only `main` is supported, no released versions/tags; (3) response expectations — acknowledgement window
+    and that fixes land through the same gated PR flow. ENABLE private vulnerability reporting on the repo
+    via the REST endpoint (VERIFY the exact endpoint against gh api docs first — as of this PR it is
+    `PUT /repos/{owner}/{repo}/private-vulnerability-reporting`, and `GET` the same path reports
+    `{enabled: true|false}`; a protection/repo-settings mutation may be an admin step if the token lacks
+    scope — if so, ledger the miss and state it in the REPORT rather than faking it). SECURITY.md then links
+    the Report-a-vulnerability flow (…/security/advisories/new).
+  acceptance:
+    - claim: "SECURITY.md exists at a GitHub-honored path and states a PRIVATE disclosure channel, supported scope (pre-alpha: main only), and response expectations"
+      proof: "grep SECURITY.md for the private-reporting instruction and scope section; file present at repo root"
+    - claim: "GitHub private vulnerability reporting is ENABLED on the repo and SECURITY.md points at it"
+      proof: "VERIFY the endpoint against gh api docs first, then: gh api shows private-vulnerability-reporting enabled; SECURITY.md links the Report-a-vulnerability flow"
+  risk: medium
+  origin: human
+  plan_refs: ["§5", "§5D"]
+  files: [SECURITY.md]
+  status: queued
+  attempts: 0
