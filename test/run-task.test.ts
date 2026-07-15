@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   DEFAULT_BUDGET_USD,
   isTransientResult,
+  resolveReviewTarget,
   noPrVerdict,
   softBudgetWarning,
   workerErrorVerdict,
@@ -169,4 +170,14 @@ test("workerErrorVerdict: the ledger payload carries the failing call's model/ef
   assert.equal(v.ledger.model, "claude-opus-4");
   assert.equal(v.ledger.effort, "high");
   assert.deepEqual(v.ledger.tokens, { input: 900, output: 100, cacheRead: 0, cacheCreation: 0 });
+});
+
+// ── `rmd review --repo` targets a repo OTHER than the checkout (remudero-sandbox for the
+// daemon's live commissioning). Without it the CLI was pinned to repoRoot's origin. ──
+test("resolveReviewTarget: no flag ⇒ the checkout default; --repo overrides (bare name keeps owner; owner/name overrides both)", () => {
+  const def = { owner: "craigoley", repo: "remudero" };
+  assert.deepEqual(resolveReviewTarget(def, []), def);
+  assert.deepEqual(resolveReviewTarget(def, ["--repo", "remudero-sandbox"]), { owner: "craigoley", repo: "remudero-sandbox" });
+  assert.deepEqual(resolveReviewTarget(def, ["--repo", "other/box"]), { owner: "other", repo: "box" });
+  assert.deepEqual(resolveReviewTarget(def, ["5", "--repo", "remudero-sandbox"]), { owner: "craigoley", repo: "remudero-sandbox" });
 });
