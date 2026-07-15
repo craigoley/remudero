@@ -422,6 +422,11 @@
   origin: architect
   status: queued
   attempts: 0
+  note: "Architect (rule-20 sweep): criterion 2 (diagnose dispatch) is NOT yet reachable — classify.ts
+    exports runDiagnoseThenRetry but it has ZERO call site in run-task.ts/daemon.ts (only classifyFailure is
+    imported at run-task.ts:94). The wiring is W1-T7B (Standing rule 14: the call site is the deliverable).
+    The gate passed #48 because the reviewer judges diff+report and the unit test satisfied the STATED proof
+    — reachability was nobody's deliverable. Criterion 2 stays OPEN (not satisfied) until W1-T7B lands."
 
 - id: W1-T8
   title: Escalations as GitHub issues + imessage-local notifier + daily digest
@@ -662,11 +667,13 @@
   acceptance:
     - claim: "interactive `claude` rides the subscription"
       proof: "`claude -p \"/usage\"` shows no precedence warning and reports subscription"
+      satisfied_by: "operator attestation 2026-07-15 — the .zshrc claude() function strips ANTHROPIC_API_KEY in a subshell (verify:human)"
     - claim: "existing automation is unaffected"
       proof: "one ClawApp/OpenClaw script that needs the key still runs green"
+      satisfied_by: "operator attestation 2026-07-15 — the exported key stays untouched for Python services / LaunchAgents / cron (verify:human)"
   risk: medium
   origin: architect
-  status: queued
+  status: done
   attempts: 0
 
 - id: W1-T14
@@ -746,17 +753,20 @@
     (e.g. isolation_preflight_failed with the observed count) and refuse to start task work. Zero ⇒
     proceed. The probe is the empirical backstop the config alone cannot provide.
   acceptance:
-    - claim: "a nonzero alias/function count from the preflight worker aborts the run with a named error before task work"
-      proof: "planted `~/.bashrc` containing an alias makes `rmd run-task` REFUSE to start; ledger shows
-        isolation_preflight_failed with the observed count and NO implement.done line"
-    - claim: "removing the planted ~/.bashrc lets the same run proceed past preflight"
-      proof: "with ~/.bashrc removed, the same task reaches recon/implement; ledger shows preflight passed (count 0)"
+    - claim: "a nonzero alias/function count from the preflight probe aborts the run with a named error before task work"
+      proof: "unit test: the preflight fail-closed LOGIC, given an INJECTED nonzero alias/function count,
+        ledgers isolation_preflight_failed with the observed count and refuses to start (no implement.done);
+        given a count of 0 it proceeds. The probe is WIRED into the run path (grep proof)."
     - claim: "the preflight worker is read-only"
       proof: "unit/transcript: no write tool used by the preflight worker"
   risk: medium
   origin: architect
   status: queued
   attempts: 0
+  note: "Redesigned headless (Rules 18/20): the fail-closed preflight LOGIC is unit-tested via an INJECTED
+    alias/function count (a worker cannot plant the operator's real ~/.bashrc — OS-denied, §4A). The LIVE
+    planted-dotfile end-to-end drill (criterion moved VERBATIM) is W1-T12e, verify:human. Semantics
+    preserved: nonzero count ⇒ fail-closed abort; zero ⇒ proceed."
 
 - id: W1-T18
   title: General shell-isolation mechanism (OSS blocker — stop relying on an absent ~/.bashrc)
@@ -779,15 +789,20 @@
     in LEARNINGS.md and state the fallback (e.g. per-run generated rc + CLAUDE_CODE_SHELL, or a wrapper
     shell). The deliverable is isolation that holds on a stranger's machine, proven by probe.
   acceptance:
-    - claim: "a worker on a machine WITH a populated ~/.bashrc reports 0 aliases (isolation independent of operator dotfiles)"
-      proof: "planted ~/.bashrc with an alias; live worker `alias | wc -l` = 0 AND the worker still
-        authenticates (subscription OAuth) and can run gh"
+    - claim: "a worker with an INJECTED HOME (the Remudero-controlled scratch dir) reports 0 aliases (isolation independent of operator dotfiles)"
+      proof: "unit test: the HOME-redirection logic, given an INJECTED HOME = <root>/worker-home holding
+        only empty rc files, yields 0 aliases/functions, with the auth-path symlinks (~/.claude, ~/.config/gh,
+        ~/.gitconfig) resolving under the redirected HOME. The redirection is WIRED into the spawn (grep proof)."
     - claim: "if HOME-redirection breaks auth, that is recorded as ground truth with the working fallback"
       proof: "LEARNINGS.md gains a provenance-tagged line stating the outcome; the shipped mechanism is proven by probe either way"
   risk: medium
   origin: architect
   status: queued
   attempts: 0
+  note: "Redesigned headless (Rules 18/20): the HOME-redirection logic is unit-tested via an INJECTED HOME
+    (a worker cannot plant the operator's real ~/.bashrc — OS-denied, §4A; CI has no subscription OAuth).
+    The LIVE planted-dotfile drill (populated ~/.bashrc → 0 aliases AND still authenticates) moves VERBATIM
+    to W1-T12e, verify:human. Semantics preserved: a redirected HOME means operator dotfiles cannot leak in."
 
 - id: W1-T19
   title: Promptsmith injects LEARNINGS — the READ side of the compounding thesis (PULLED FORWARD)
@@ -880,16 +895,21 @@
     times) reached workers and burned budget; a no-LLM linter catches sizing (Rule 19), headless-fitness
     (Rule 18), proof-shape, and provenance before a worker ever spawns."
   design: |
-    A PURE linter over a loaded plan. Checks: SIZING (≥2 acceptance criteria or ≥2 subsystems implied by
-    files:/criteria while risk<high); HEADLESS-FITNESS (each auto-verify criterion vs a forbidden
+    A PURE linter over a loaded plan. Checks: SIZING (≥2 DISTINCT SUBSYSTEMS/CONCERNS — inferred from the
+    files: globs PLUS criteria naming modules OUTSIDE files:, NOT the raw criterion COUNT — while risk<high;
+    Rule 19 is about concerns, so a SINGLE-concern task with many criteria, e.g. W1-T3E's 4 criteria at
+    medium clean at 31 turns, must NOT flag); HEADLESS-FITNESS (each auto-verify criterion vs a forbidden
     live-context LEXICON held as DATA — overnight/reboot/launchctl/"loads at boot"/killed/"operator
     confirms"/"user selects"/manual-eyeball); PROOF-SHAPE (observable proof, not "works"/"correct"/a vibe);
-    PROVENANCE (origin+risk present); BUDGET-SANITY (soft warn if risk->mount turns < class mean). Wired at
+    PROVENANCE (origin+risk present); BUDGET-SANITY (soft warn if risk->mount turns < the class mean READ
+    from MASTER-PLAN's current-cycle Calibration row — e.g. $3.218 / 45.2 turns — NEVER a hardcoded mean). Wired at
     TWO points: (i) a CI check on plan/tasks.yaml PRs; (ii) a fail-closed pre-dispatch guard in
     rmd run-task/drain -> verdict=blocked_illformed, no worker spawned.
   acceptance:
-    - claim: "a task with 3 acceptance concerns at risk:medium is FLAGGED (sizing, Rule 19)"
-      proof: "unit test: the linter returns a sizing violation for a 3-criteria risk:medium task"
+    - claim: "a task spanning 3 independent concerns (distinct subsystems) at risk:medium is FLAGGED (sizing, Rule 19)"
+      proof: "unit test: the linter returns a sizing violation for a risk:medium task whose files:/criteria span 3 distinct subsystems"
+    - claim: "a multi-criteria SINGLE-concern task (shape of W1-T4: three parser tests on ONE module) is NOT flagged — no false positive on raw criterion count"
+      proof: "unit test over a 3-criteria / one-subsystem fixture (W1-T4 shape) -> the linter returns NO sizing violation"
     - claim: "a criterion containing overnight/launchctl/killed on an auto-verify task is FLAGGED (headless-fitness, Rule 18)"
       proof: "unit test over the forbidden-lexicon fixture -> a headless-fitness violation is returned"
     - claim: "a proof-less criterion is FLAGGED"
@@ -965,7 +985,10 @@
       proof: "a config where judge.tier <= worker.tier is REJECTED at load with a named Tier-Invariant error (G-17)"
     - claim: "the judge is read-only and capped at K invocations per run"
       proof: "transcript/unit: no write tool used by the judge; a run that would exceed K forces a decision on the Kth call, not another deferral"
-  risk: medium
+  # Architect (rule-20 sweep): the Tier-Invariant criterion (judge.tier > worker.tier, G-17) borders a
+  # SECOND concern (config-load enforcement) atop the flight-judge itself — raised risk medium→high so the
+  # 120-turn mount fits, rather than decomposing a criterion that is only a few lines of load-time assertion.
+  risk: high
   origin: architect
   status: queued
   attempts: 0
@@ -1058,7 +1081,7 @@
     - claim: "CodeQL, OSV-Scanner, and Dependabot are LIVE on remudero (explicit workflows; default CodeQL setup OFF)"
       proof: "gh api repos/craigoley/remudero/code-scanning/analyses shows CodeQL results; .github/workflows contains codeql + osv; dependabot.yml present — paste the workflow files"
     - claim: "a planted vulnerable dependency is FLAGGED by the scan"
-      proof: "a branch pinning a known-CVE package version makes OSV/Dependabot report it (paste the alert/annotation), then revert"
+      proof: "a branch pinning a known-CVE package version makes the OSV-Scanner CI JOB go red (its result is AWAITABLE in the PR run), then revert — key off the OSV job, NOT Dependabot's async alert (which arrives on its own schedule and is not awaitable in a PR)"
     - claim: "a leak-grep runs IN CI on every PR, and every workflow is least-privilege + SHA-pinned"
       proof: "the leak-grep job appears in the CI run log; grep of .github/workflows shows a permissions: block in each and every action pinned to @<40-char-sha> (no tags) — paste the diff"
   risk: high
@@ -1220,39 +1243,77 @@
 # from the daemon surface and BLOCKS every client, so a breaking change fails CI across all consumers in
 # one PR. Nothing client-side starts before W3-T1. One web app, three shells (browser · Tauri macOS ·
 # Tauri iOS); push is an adapter concern, not an app concern. ─────────────────────────────────────────
-- id: W3-T1
-  title: API contract package — packages/api-client GENERATED from the daemon surface (BLOCKS every client)
+# W3-T1 (API contract package) was DECOMPOSED by concern (rule-20 sweep, Rule 16): a new service
+# SUBSYSTEM (T1a) + the GENERATED contract & drift-check (T1b) + the anti-drift CONSUMER gate (T1c).
+# Criteria redistributed VERBATIM — generation/drift → T1b; consumer-red-in-same-PR + no-hand-rolled-fetch
+# → T1c; T1a carries the new service-surface subsystem's own acceptance. Chain T1a → T1b → T1c;
+# downstream W3 clients repoint to W3-T1c (the contract fully enforced).
+- id: W3-T1a
+  title: "Daemon service surface v0 — REST + SSE on a single port, bearer read/write scopes (NEW subsystem)"
   repo: remudero
   depends_on: [W1-T1D]
   type: implement
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  rationale: "MASTER-PLAN §7A: the API contract is the product boundary and is logically PRIOR to every
-    client (D-5 monorepo exists so a breaking contract change fails CI across ALL consumers atomically).
-    Three clients drifting from a daemon with no compile-time contract is runtime breakage no gate
-    catches. This task gates the entire W3 chain — nothing client-side may start before it lands."
-  design: |
-    Define ONE tailnet service surface (REST + SSE, bearer-scoped) and GENERATE packages/api-client from
-    it (OpenAPI -> typed client, §7A justification). A grep gate forbids hand-rolled fetch to the daemon
-    in any consumer. Wire a consumer package + a CI job so a breaking daemon-surface change fails that
-    consumer's build in the SAME PR. The contract is semver'd; MCP tools are a projection of it.
+  rationale: "MASTER-PLAN §7A: the API contract is the product boundary. The SURFACE itself is a NEW
+    subsystem — a bearer-scoped REST+SSE server the daemon exposes over the tailnet — so risk:high, split
+    from the contract-generation (T1b) and the anti-drift gate (T1c) it enables."
+  acceptance:
+    - claim: "the daemon serves REST + SSE on a SINGLE port with bearer READ and WRITE scopes enforced"
+      proof: "unit/integration test: a read-scope token can GET state + subscribe to the SSE stream but a WRITE call is 403; a write-scope token succeeds; both on one port"
+  risk: high
+  origin: architect
+  plan_refs: ["§7A"]
+  files: [src/lib/service.ts]
+  status: queued
+  attempts: 0
+
+- id: W3-T1b
+  title: "OpenAPI spec + GENERATED packages/api-client + stale-client drift check"
+  repo: remudero
+  depends_on: [W3-T1a]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §7A: generate the client from ONE surface, never hand-roll it; drift between the
+    committed client and the surface is caught in CI."
   acceptance:
     - claim: "packages/api-client is GENERATED from the daemon service surface, not hand-written"
       proof: "the generate step runs in CI from the daemon's OpenAPI/type source and the checked-in client matches (a drift check FAILS if the committed client is stale) — paste the generate + drift-check job"
+  risk: high
+  origin: architect
+  plan_refs: ["§7A"]
+  status: queued
+  attempts: 0
+
+- id: W3-T1c
+  title: "No-hand-rolled-fetch grep gate + a consumer whose CI goes red on a breaking surface change"
+  repo: remudero
+  depends_on: [W3-T1b]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §7A: a client that bypasses the contract hand-rolls fetch — the exact drift §7A
+    forbids. A grep gate forbids it, and a wired consumer's CI goes red on a breaking surface change in the
+    SAME PR (D-5 monorepo atomicity)."
+  acceptance:
     - claim: "a deliberately breaking daemon change FAILS CI in a consumer package in the SAME PR"
       proof: "a branch that removes/renames a surface field makes a consumer package's typecheck go RED in that same PR — paste the red check, then revert"
     - claim: "no client contains a hand-rolled fetch to the daemon"
       proof: "a CI grep gate over apps/** finds zero direct fetch/axios calls to the daemon host (all go through api-client) — paste the grep job output"
   risk: medium
   origin: architect
+  plan_refs: ["§7A"]
   status: queued
   attempts: 0
 
 - id: W3-T2
   title: Dashboard v0 (shell 0) — read-only live board over the api-client
   repo: remudero
-  depends_on: [W3-T1]
+  depends_on: [W3-T1c]   # repointed from W3-T1 (decomposed; W3-T1c = contract fully enforced)
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -1266,7 +1327,7 @@
     meter. Transport is daemon file-watch + SSE; git stays the sole writer. UI imports only api-client.
   acceptance:
     - claim: "a ledger state flip appears in the UI within 2s of the write"
-      proof: "timestamp diff pasted: the ledger write ts vs. the UI-observed update ts is <2s (WS-5 acceptance bar)"
+      proof: "timestamp diff: the ledger write ts vs. the SSE-CLIENT receive ts is <2s — an SSE-client timestamp assertion (WS-5 bar), NOT a browser-'UI-observed' verdict (browser egress is design-review-only, §7C)"
     - claim: "the dashboard consumes ONLY the api-client (no hand-rolled fetch)"
       proof: "grep of apps/dashboard shows all daemon calls go through packages/api-client; the W3-T1 grep gate is green"
   risk: medium
@@ -1562,11 +1623,15 @@
   acceptance:
     - claim: "the prompt is assembled stable-first, volatile-last"
       proof: "a rendered-prompt test asserts the invariant preamble precedes the matched-learnings block; an early edit to the preamble is what would move, not the learnings"
-    - claim: "cache tokens are ledgered and the second worker of a run shows cache reads > 0"
-      proof: "paste the ledger lines before and after the change: cache_read_input_tokens is 0/absent before, > 0 on the second worker after (the stable prefix is being reused)"
+    - claim: "cache tokens are ledgered (cache_read + cache_creation columns on every worker's ledger line)"
+      proof: "unit/fixture test: a result envelope carrying cache_read_input_tokens + cache_creation_input_tokens is ledgered into named columns on the worker line"
   risk: medium
   origin: architect
   status: queued
+  note: "Redesigned (Rules 18/20): the ASSEMBLY-ORDERING invariant + the ledger COLUMNS are fixture-provable
+    (verify:auto). The LIVE cache-reuse observation — 'the second worker of a run shows cache reads > 0' —
+    moves VERBATIM to W1-T12e (operator-golden). Semantics preserved: stable-first ordering is MEASURABLE
+    via the ledgered cache tokens; a second real worker demonstrates the reuse."
   attempts: 0
 
 - id: W1-T36
@@ -1586,12 +1651,16 @@
     quality-suspect; its acceptance proofs are re-verified by the reviewer against repo state (W1-T3F).
     Re-inject the task goal + acceptance criteria + hard constraints VERBATIM after any compaction.
   acceptance:
-    - claim: "a forced long run ledgers a compaction event and is flagged quality-suspect"
-      proof: "a run driven past the compaction threshold produces a compaction ledger line and a quality_suspect=true flag on its verdict — paste the ledger lines"
+    - claim: "a compaction event is DETECTED from the stream and ledgered, and a compacted run is flagged quality-suspect"
+      proof: "unit test over a RECORDED stream fixture containing a compaction event: the detector emits a compaction ledger line + quality_suspect=true on the verdict"
     - claim: "the goal, acceptance criteria, and hard constraints are re-injected VERBATIM after compaction"
       proof: "fixture/transcript: after a compaction event the anchored block reappears byte-identical (not summarized) in the continued prompt"
   risk: high
   origin: architect
+  note: "Redesigned (Rules 18/20): compaction-event DETECTION + the VERBATIM re-anchoring are provable from
+    a RECORDED stream fixture (verify:auto). The LIVE half — 'a real forced-compaction run' driven past the
+    threshold — moves VERBATIM to W1-T12e (operator-golden). Semantics preserved: detection + anchoring hold
+    on the recorded stream; the live run confirms the threshold fires in practice."
   status: queued
   attempts: 0
 
@@ -1618,6 +1687,8 @@
   origin: architect
   status: queued
   attempts: 0
+  note: "Architect (rule-20 sweep): the grep-and-retrieve transcript proof may be satisfied by ANY real
+    drained run whose worker greps a §-heading from the injected index — not a purpose-built run."
 
 - id: W1-T38
   title: KNOWLEDGE BUDGET AS A CI RATCHET — total learnings size is capped; over-cap FAILS CI
@@ -2092,5 +2163,144 @@
       proof: "docs/troubleshooting.md contains an entry (symptom/cause/fix) for each failures-tagged learning with operator impact — paste the mapping learning#id -> entry"
     - claim: "a new failure learning WITHOUT a troubleshooting entry is flagged by the docs rubric"
       proof: "a fixture: adding a failures-tagged learning with operator impact and no docs/troubleshooting.md entry -> the docs rubric item fails; adding the entry -> passes"
+  status: queued
+  attempts: 0
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+# POST-WS-1 RULE-20 HEALTH SWEEP — new tasks (Architect, plan/post-ws1-health-sweep). See PR body.
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+# Item 5 — wire the diagnose dispatch (the call site is the deliverable, rule 14).
+- id: W1-T7B
+  title: "Wire the diagnose dispatch — runDiagnoseThenRetry gets a live call site (rule 14)"
+  repo: remudero
+  depends_on: [W1-T7]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "W1-T7 shipped classify.ts (classifyFailure wired, PR #48) but runDiagnoseThenRetry has ZERO
+    call site in the run path — the two-strikes DIAGNOSE dispatch is UNREACHABLE. Standing rule 14: the
+    call site is the deliverable, not the exported function."
+  acceptance:
+    - claim: "two strikes dispatches a DIAGNOSE worker (evidence-only, model steps UP) before any third patch"
+      proof: "a seeded double-failure produces a diagnose run in the ledger, never a third blind patch"
+    - claim: "runDiagnoseThenRetry has a LIVE call site in the run path"
+      proof: "grep proof: run-task.ts (or daemon.ts) imports AND calls runDiagnoseThenRetry on the strike path; a test drives a second strike through it to a diagnose dispatch"
+  risk: medium
+  origin: architect
+  plan_refs: ["§4"]
+  files: [src/run-task.ts, src/lib/classify.ts]
+  status: queued
+  attempts: 0
+
+# Item 8 — commissioning-deltas drill: closes the two W1-T12d deltas + hosts the LIVE goldens the
+# headless redesigns (items 6/7) moved out VERBATIM (rule 16 — nothing dropped, only redistributed).
+- id: W1-T12e
+  title: "Commissioning-deltas drill — overnight/digest, kill-mid-flight orphan reconstruction, + moved live goldens (OPERATOR)"
+  repo: remudero
+  depends_on: [W1-T12d, W1-T17, W1-T18, W1-T35, W1-T36]
+  type: manual
+  verify: human
+  budget_usd: 100.00
+  rationale: "W1-T12d recorded two honest deltas (bounded --max 3, not overnight; kill hit the daemon
+    POST-drain, no in-flight orphan). This drill closes them and hosts the LIVE operator-golden criteria
+    that the headless redesigns (W1-T17/T18/T35/T36) moved out VERBATIM."
+  acceptance:
+    - claim: "an UNBOUNDED daemon drain runs OVERNIGHT on remudero-sandbox and the daily digest SEND is captured"
+      proof: "operator pastes the ledger of an unbounded overnight drain + the RECEIVED daily digest (the SEND captured, not just composed)"
+    - claim: "the daemon killed WHILE an implement worker is in flight recovers via an ACTUAL orphan reconstruction (not only no-duplicate-run)"
+      proof: "operator pastes the chaos-drill: kill mid-implement -> restart -> reconstructOrphan resolves the orphaned run's fate from git+GitHub (merged->done or clean->re-run), evidenced BEYOND no-duplicate"
+    # ── LIVE criteria moved VERBATIM from the headless redesigns (Rule 16, items 6/7) ──
+    - claim: "removing the planted ~/.bashrc lets the same run proceed past preflight"
+      proof: "with ~/.bashrc removed, the same task reaches recon/implement; ledger shows preflight passed (count 0)"
+    - claim: "a worker on a machine WITH a populated ~/.bashrc reports 0 aliases (isolation independent of operator dotfiles)"
+      proof: "planted ~/.bashrc with an alias; live worker `alias | wc -l` = 0 AND the worker still authenticates (subscription OAuth) and can run gh"
+    - claim: "cache tokens are ledgered and the second worker of a run shows cache reads > 0"
+      proof: "paste the ledger lines before and after the change: cache_read_input_tokens is 0/absent before, > 0 on the second worker after (the stable prefix is being reused)"
+    - claim: "a forced long run ledgers a compaction event and is flagged quality-suspect"
+      proof: "a run driven past the compaction threshold produces a compaction ledger line and a quality_suspect=true flag on its verdict — paste the ledger lines"
+  risk: high
+  origin: architect
+  plan_refs: ["§4B"]
+  status: queued
+  attempts: 0
+  note: "Operator-scheduled. Hosts the LIVE halves the headless redesigns (W1-T17/T18/T35/T36) moved here
+    VERBATIM plus the two W1-T12d deltas; depends_on the tasks whose live criteria it verifies."
+
+# Item 3c — retro gather completeness (mergedSince misses gate-side merges after a blocked run).
+- id: W1-T51
+  title: "Retro gather completeness — cross-check ledger-merged vs GitHub-merged trailered PRs"
+  repo: remudero
+  depends_on: [W1-T19]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "retro.ts mergedSince keys ONLY on ledger verdict==='merged', so a PR that merged GATE-SIDE
+    after a non-merged run (W1-T5/#42, W1-T8/#49 — rule-16 Architect fixes that landed after a
+    blocked_review run) is INVISIBLE to the retro's SHIPPED gather. Reconcile against GitHub-derived state."
+  design: |
+    Extend mergedSince (or a sibling) to UNION ledger-merged runs with GitHub-derived merged
+    Remudero-Task-trailered PRs since the last retro (reuse deriveStatus/ghGateway). Each ledger-ABSENT
+    merge is annotated ('gate-side merge; run ended <terminal verdict>'); discrepancies are NAMED in the
+    retro output so the SHIPPED log can never silently miss a merge again.
+  acceptance:
+    - claim: "a PR that merged AFTER a blocked run appears in the SHIPPED additions with the gate-side annotation, and the discrepancy is NAMED in the retro output"
+      proof: "seeded fixture: a Remudero-Task-trailered PR merged on GitHub whose run ended blocked_review -> the gather's SHIPPED additions include it (annotated) AND the discrepancy is named"
+    - claim: "a ledger-merged run behaves exactly as today (no regression)"
+      proof: "unit test: a run with verdict=merged in the ledger is included with no annotation, same as the current mergedSince"
+  risk: medium
+  origin: retro#1784133446353
+  plan_refs: ["§8A"]
+  files: [src/lib/retro.ts]
+  status: queued
+  attempts: 0
+
+# Item 4 — P6 triage: name the terminal cause of each `failed`x4 run (read-only, no golden yet).
+- id: W1-T52
+  title: "P6 triage — name the terminal cause of each `failed`x4 run (read-only; no golden — P6a)"
+  repo: remudero
+  depends_on: [W1-T7]
+  type: diagnose
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 100.00
+  rationale: "Retro RETRO-1784133446353 P6: `failed`x4 is the LARGEST failure class this cycle and is
+    untriaged. A read-only evidence pass (ledger + transcript access, NO patches): is `failed` a classifier
+    HOLE (W1-T7/#48 shipped transient-vs-strike) or a distinct legitimate verdict class?"
+  acceptance:
+    - claim: "each of the 4 `failed` runs' terminal cause is NAMED with transcript evidence"
+      proof: "a findings report cites, per run, the run_id + the terminal cause with a quoted transcript/ledger excerpt"
+    - claim: "an explicit verdict-class mapping OR a confirmed classifier hole is stated (no golden minted — P6a)"
+      proof: "the report concludes either 'failed = <distinct class>' with the mapping, or 'failed = a hole in <classifier>', and mints NO golden"
+  risk: medium
+  origin: retro#1784133446353
+  plan_refs: ["§4"]
+  status: queued
+  attempts: 0
+
+# Item 9 — rmd drain --repo parameterization (drain's gateway is hardcoded; daemon's is not).
+- id: W1-T53
+  title: "rmd drain --repo — parameterize the drain gateway like the daemon path"
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "run-task.ts:1462 hardcodes ghGateway(owner, 'remudero') for drainCommand's merged-predicate,
+    while runTask (:622) correctly derives ghGateway(owner, task.repo) and rmd daemon is already
+    repo-parameterized (fix/daemon-repo-targeting). rmd drain must match so a sandbox drill drains the
+    sandbox, not the main repo."
+  acceptance:
+    - claim: "rmd drain --repo remudero-sandbox derives status and arms merges against the SANDBOX repo"
+      proof: "injected-gateway unit test: drainCommand with --repo remudero-sandbox builds ghGateway(owner, 'remudero-sandbox') for its merged-predicate, not 'remudero'"
+    - claim: "the hardcoded gateway literal is gone from drainCommand"
+      proof: "grep proof: no ghGateway(owner, \"remudero\") literal remains in drainCommand; it derives from the --repo target"
+  risk: medium
+  origin: feedback#handoff
+  plan_refs: ["§4B"]
+  files: [src/run-task.ts]
   status: queued
   attempts: 0
