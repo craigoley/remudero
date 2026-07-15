@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { headroomExhausted, parseUsage, UsageParseError, type UsageSnapshot } from "../src/lib/headroom.js";
+import { hasDualWeeklyCaps, headroomExhausted, parseUsage, UsageParseError, type UsageSnapshot } from "../src/lib/headroom.js";
 
 test("headroomExhausted: returns the tightest window ≥ limit, or null when there is headroom", () => {
   const snap: UsageSnapshot = {
@@ -23,6 +23,24 @@ test("headroomExhausted: returns the tightest window ≥ limit, or null when the
   );
   // The session (5h) window is checked too.
   assert.equal(headroomExhausted({ billingMode: "subscription", session: { percentUsed: 96, resetsAt: "5pm" }, weekly: [{ label: "all", percentUsed: 10, resetsAt: "z" }] })?.window, "session (5h)");
+});
+
+test("hasDualWeeklyCaps: true iff the snapshot carries an all-models cap AND a model-specific cap", () => {
+  const dual: UsageSnapshot = {
+    billingMode: "subscription",
+    session: { percentUsed: 1, resetsAt: "x" },
+    weekly: [
+      { label: "all models", percentUsed: 1, resetsAt: "x" },
+      { label: "Sonnet", percentUsed: 1, resetsAt: "x" },
+    ],
+  };
+  const single: UsageSnapshot = {
+    billingMode: "subscription",
+    session: { percentUsed: 1, resetsAt: "x" },
+    weekly: [{ label: "all models", percentUsed: 1, resetsAt: "x" }],
+  };
+  assert.equal(hasDualWeeklyCaps(dual), true);
+  assert.equal(hasDualWeeklyCaps(single), false);
 });
 
 /**

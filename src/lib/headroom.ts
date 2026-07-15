@@ -141,3 +141,17 @@ export function headroomExhausted(
     .sort((a, b) => b.percentUsed - a.percentUsed);
   return over[0] ?? null;
 }
+
+/**
+ * Does this snapshot carry the "dual weekly caps" signature (an all-models cap
+ * PLUS a model-specific cap) rather than a single weekly window? Max plans have
+ * been observed to report both; a single weekly window is consistent with a
+ * lower-tier plan. This is a WEAK, passive signal (tier-discovery ladder rung 3,
+ * MASTER-PLAN §9) — it can distinguish "some Max-family plan" from "not," but
+ * NOT which multiplier (5x vs 20x). Callers needing tier resolution combine it
+ * with stronger evidence (see `src/lib/tier.ts`, W1-T9b) rather than trusting it
+ * alone.
+ */
+export function hasDualWeeklyCaps(snap: UsageSnapshot): boolean {
+  return snap.weekly.length >= 2;
+}
