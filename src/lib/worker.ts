@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { loadConfig, workerShell, workerZdotdir, type Config } from "./config.js";
+import { defaultIsPidAlive } from "./drain-lock.js";
 import { buildWorkerEnv } from "./env.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 
@@ -562,6 +563,53 @@ export function worktreeRemove(repoDir: string, worktreePath: string): void {
 export interface PruneSummary {
   worktrees: string[];
   branches: string[];
+  /** Worktrees deliberately LEFT because a live run owns them (liveness guard). */
+  skipped: string[];
+}
+
+/**
+ * The liveness token a run writes beside its worktree so a concurrent prune knows
+ * the worktree is ALIVE, not debris. Stored as a SIBLING file (`<worktree>.lock`),
+ * never inside the worktree working tree — otherwise a worker's `git add -A` could
+ * commit it into the PR. See {@link pruneStaleRuns}.
+ */
+export interface RunLockInfo {
+  pid: number;
+  run_id: string;
+  startedAt: string;
+}
+
+/** Path of the sibling run.lock for a worktree (outside the working tree). */
+export function runLockPath(worktreePath: string): string {
+  return `${worktreePath}.lock`;
+}
+
+export function writeRunLock(worktreePath: string, info: RunLockInfo): void {
+  writeFileSync(runLockPath(worktreePath), JSON.stringify(info, null, 2));
+}
+
+export function readRunLock(worktreePath: string): RunLockInfo | null {
+  try {
+    const o = JSON.parse(readFileSync(runLockPath(worktreePath), "utf8"));
+    if (typeof o?.pid === "number") return o as RunLockInfo;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Remove the sibling run.lock (idempotent) — called on terminal verdict / on reap. */
+export function removeRunLock(worktreePath: string): void {
+  try {
+    unlinkSync(runLockPath(worktreePath));
+  } catch {
+    // already gone
+  }
+}
+
+export interface PruneOpts {
+  /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */
+  isPidAlive?: (pid: number) => boolean;
 }
 
 /**
@@ -571,17 +619,31 @@ export interface PruneSummary {
  * worktree + branch still on disk) leaves a `run-*` worktree and local branch
  * behind. `git worktree add -b run-…` for a NEW run has a unique timestamp so it
  * never collides — but the debris accumulates and a stale branch name could later
- * clash. At run start we force-remove every `run-*` worktree, `git worktree prune`
+ * clash. At run start we force-remove every DEAD `run-*` worktree, `git worktree prune`
  * the admin records, then delete every remaining local `run-*` branch. All
  * best-effort and per-item guarded: a repo with nothing to prune returns empties.
  * The caller's own about-to-be-created branch does not exist yet, so it is safe.
+ *
+ * LIVENESS GUARD (DIAGNOSIS.md, diag/drain-concurrency): this prune ORIGINALLY
+ * force-removed ANY `run-*` worktree, an assumption valid ONLY under strictly
+ * sequential execution. Under ANY overlap (two drains; a manual `run-task` beside a
+ * drain) it became an active saboteur — it once `--force`-removed a LIVE worktree
+ * mid-run and destroyed a successful 65-turn implement. We now SKIP any worktree
+ * whose sibling {@link runLockPath} names a LIVE pid, and reap only genuinely dead
+ * ones (no lock, or the lock's pid is dead). A live-pid worktree is NEVER removed.
  */
-export function pruneStaleRuns(repoDir: string, worktreesRoot: string): PruneSummary {
+export function pruneStaleRuns(
+  repoDir: string,
+  worktreesRoot: string,
+  opts: PruneOpts = {},
+): PruneSummary {
+  const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
   const removedWorktrees: string[] = [];
   const removedBranches: string[] = [];
+  const skipped: string[] = [];
 
   // 1. Force-remove any registered worktree whose path is under our worktrees
-  //    root and whose branch is a run-* branch.
+  //    root and whose branch is a run-* branch — UNLESS a live run owns it.
   let list = "";
   try {
     list = execFileSync("git", ["-C", repoDir, "worktree", "list", "--porcelain"], {
@@ -597,10 +659,18 @@ export function pruneStaleRuns(repoDir: string, worktreesRoot: string): PruneSum
       const ref = line.slice("branch ".length).trim(); // e.g. refs/heads/run-…
       const isRun = /\/run-/.test(ref) || ref.startsWith("run-");
       if (isRun && curPath.startsWith(worktreesRoot)) {
+        // LIVENESS GUARD: a worktree whose run.lock names a live pid is IN USE.
+        // Never force-remove it — that is the bug that lost a 65-turn implement.
+        const lock = readRunLock(curPath);
+        if (lock && isPidAlive(lock.pid)) {
+          skipped.push(curPath);
+          continue;
+        }
         try {
           execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", curPath], {
             stdio: "pipe",
           });
+          removeRunLock(curPath); // clear the dead sibling lock so it can't linger
           removedWorktrees.push(curPath);
         } catch {
           // best-effort
@@ -636,7 +706,7 @@ export function pruneStaleRuns(repoDir: string, worktreesRoot: string): PruneSum
     }
   }
 
-  return { worktrees: removedWorktrees, branches: removedBranches };
+  return { worktrees: removedWorktrees, branches: removedBranches, skipped };
 }
 
 // ── gh helpers (run outside the sandbox; TLS fails under Seatbelt) ─────────
