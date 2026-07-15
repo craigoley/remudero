@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { loadConfig, workerShell, workerZdotdir, type Config } from "./config.js";
@@ -607,9 +607,21 @@ export function removeRunLock(worktreePath: string): void {
   }
 }
 
+/**
+ * Grace window (ms) below which a LOCKLESS worktree is presumed to be a run that has
+ * just `git worktree add`-ed but not yet written its {@link runLockPath} — the tiny
+ * create-before-lock race. Callers pass this to protect that window; genuinely old
+ * lockless debris (past the window) is still reaped.
+ */
+export const DEFAULT_PRUNE_GRACE_MS = 120_000;
+
 export interface PruneOpts {
   /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */
   isPidAlive?: (pid: number) => boolean;
+  /** Protect lockless worktrees younger than this (create-before-lock race). Default 0. */
+  graceMs?: number;
+  /** Injectable clock for the age check (tests). Defaults to Date.now. */
+  now?: () => number;
 }
 
 /**
@@ -638,6 +650,8 @@ export function pruneStaleRuns(
   opts: PruneOpts = {},
 ): PruneSummary {
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  const graceMs = opts.graceMs ?? 0;
+  const now = opts.now ?? (() => Date.now());
   const removedWorktrees: string[] = [];
   const removedBranches: string[] = [];
   const skipped: string[] = [];
@@ -665,6 +679,21 @@ export function pruneStaleRuns(
         if (lock && isPidAlive(lock.pid)) {
           skipped.push(curPath);
           continue;
+        }
+        // AGE GUARD: a LOCKLESS worktree younger than graceMs may be a run that just
+        // `git worktree add`-ed but has not yet written its run.lock (the create race).
+        // Protect it; only genuinely-old lockless debris (or a dead-pid lock) is reaped.
+        if (!lock && graceMs > 0) {
+          let mtimeMs = 0;
+          try {
+            mtimeMs = statSync(curPath).mtimeMs;
+          } catch {
+            mtimeMs = 0;
+          }
+          if (now() - mtimeMs < graceMs) {
+            skipped.push(curPath);
+            continue;
+          }
         }
         try {
           execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", curPath], {
