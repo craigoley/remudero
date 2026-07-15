@@ -89,6 +89,13 @@ import {
 } from "./lib/worker.js";
 import { acquireDrainLock, DrainLockError } from "./lib/drain-lock.js";
 import { acquireInflightLock, InflightLockError } from "./lib/inflight-lock.js";
+import {
+  pauseDetail,
+  requestPause,
+  requestStop,
+  resumeFleet,
+  stopDetail,
+} from "./lib/fleet-control.js";
 
 // ── The proto-runner (WS-1 T1). Reads ONE tasks.yaml entry and runs the loop:
 // recon → provenance-linted prompt → implement → PR → merge → verdict, ledgering
@@ -1321,6 +1328,8 @@ async function drainCommand(rest: string[]): Promise<number> {
         refreshMerged,
         runOne: (taskId) => runTask(taskId, { planPath, config }),
         readUsage: () => readUsageSnapshot(config),
+        checkStop: () => stopDetail(config.root),
+        checkPause: () => pauseDetail(config.root),
         log,
       },
       opts,
@@ -1336,6 +1345,75 @@ async function drainCommand(rest: string[]): Promise<number> {
     process.removeListener("SIGTERM", onSignal);
     drainLock.release();
   }
+}
+
+/**
+ * `rmd stop [--reason <text>]` — the fleet control set (W1-T11, MASTER-PLAN §4A/§4B).
+ * Writes the STOP flag file. A `rmd drain` already running halts within one tick
+ * (checked FIRST, every iteration, ahead of PAUSE); a NEW `rmd drain` refuses to
+ * spawn anything until `rmd resume` clears it — same check, same code path.
+ */
+async function stopCommand(rest: string[]): Promise<number> {
+  const config = loadConfig();
+  const reason = flagValue(rest, "--reason");
+  const info = requestStop(config.root, reason);
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  appendLedger(ledgerPath, {
+    run_id: `FLEET-${Date.now()}`,
+    task_id: "FLEET",
+    step: "fleet.stop",
+    reason: reason ?? null,
+    requested_by_pid: info.pid,
+  });
+  console.log(
+    `### rmd stop — STOP flag written. A running drain halts within one tick; a new ` +
+      `\`rmd drain\` refuses to spawn until \`rmd resume\`.`,
+  );
+  return 0;
+}
+
+/**
+ * `rmd pause [--reason <text>]` — drain-and-hold (W1-T11). Writes the PAUSE flag
+ * file. No new task spawns after the current tick, but an in-flight task ALWAYS
+ * runs to full completion (verdict + merge) — the drain loop only checks between
+ * iterations, never mid-task.
+ */
+async function pauseCommand(rest: string[]): Promise<number> {
+  const config = loadConfig();
+  const reason = flagValue(rest, "--reason");
+  const info = requestPause(config.root, reason);
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  appendLedger(ledgerPath, {
+    run_id: `FLEET-${Date.now()}`,
+    task_id: "FLEET",
+    step: "fleet.pause",
+    reason: reason ?? null,
+    requested_by_pid: info.pid,
+  });
+  console.log(
+    `### rmd pause — PAUSE flag written (drain-and-hold). Any in-flight task still ` +
+      `reaches merge; no new task spawns until \`rmd resume\`.`,
+  );
+  return 0;
+}
+
+/** `rmd resume` — clears BOTH the STOP and PAUSE flags (W1-T11). Idempotent. */
+async function resumeFleetCommand(): Promise<number> {
+  const config = loadConfig();
+  const result = resumeFleet(config.root);
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  appendLedger(ledgerPath, {
+    run_id: `FLEET-${Date.now()}`,
+    task_id: "FLEET",
+    step: "fleet.resume",
+    cleared_stop: result.clearedStop,
+    cleared_pause: result.clearedPause,
+  });
+  console.log(
+    `### rmd resume — cleared: stop=${result.clearedStop} pause=${result.clearedPause}. ` +
+      `The fleet is clear to spawn again.`,
+  );
+  return 0;
 }
 
 /** `--flag value` lookup over a raw argv tail; undefined if the flag is absent. */
@@ -1533,6 +1611,15 @@ async function main(): Promise<void> {
   if (cmd === "drain") {
     process.exit(await drainCommand(rest));
   }
+  if (cmd === "stop") {
+    process.exit(await stopCommand(rest));
+  }
+  if (cmd === "pause") {
+    process.exit(await pauseCommand(rest));
+  }
+  if (cmd === "resume") {
+    process.exit(await resumeFleetCommand());
+  }
   if (cmd === "escalate") {
     process.exit(await escalateCommand(rest));
   }
@@ -1546,7 +1633,7 @@ async function main(): Promise<void> {
     process.exit(await initCommand(rest));
   }
   console.error(
-    "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard",
+    "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd stop [--reason <text>]    # fleet control: hard kill — no drain spawns until resume\n  rmd pause [--reason <text>]   # fleet control: drain-and-hold — in-flight completes, no new spawns\n  rmd resume                    # fleet control: clear stop + pause, spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard",
   );
   process.exit(2);
 }
