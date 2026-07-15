@@ -81,3 +81,29 @@ test("pruneStaleRuns: REAPS a worktree whose run.lock pid is DEAD", () => {
     rmSync(t.dir, { recursive: true, force: true });
   }
 });
+
+// ── AGE THRESHOLD: protect the create-before-lock race (worktree made, run.lock not yet written) ──
+
+test("pruneStaleRuns: PROTECTS a FRESH lockless worktree within the grace window (the create-before-lock race)", () => {
+  const t = makeRepoWithRunWorktree();
+  try {
+    // No run.lock yet — but the worktree is younger than graceMs (now() before its mtime).
+    const summary = pruneStaleRuns(t.repoDir, t.worktreesRoot, { graceMs: 120_000, now: () => 0 });
+    assert.ok(existsSync(t.wtPath), "a just-created lockless worktree is NOT reaped inside the grace window");
+    assert.ok(summary.skipped.includes(t.wtPath));
+  } finally {
+    rmSync(t.dir, { recursive: true, force: true });
+  }
+});
+
+test("pruneStaleRuns: REAPS a lockless worktree once it is OLDER than the grace window", () => {
+  const t = makeRepoWithRunWorktree();
+  try {
+    // Far-future clock ⇒ the lockless worktree is well past graceMs ⇒ genuine debris.
+    const summary = pruneStaleRuns(t.repoDir, t.worktreesRoot, { graceMs: 1_000, now: () => 4_000_000_000_000 });
+    assert.ok(!existsSync(t.wtPath), "an aged lockless worktree is reaped");
+    assert.ok(summary.worktrees.includes(t.wtPath));
+  } finally {
+    rmSync(t.dir, { recursive: true, force: true });
+  }
+});

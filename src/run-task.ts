@@ -62,6 +62,7 @@ import {
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import { ghGateway, projectPlan } from "./lib/status.js";
 import {
+  DEFAULT_PRUNE_GRACE_MS,
   appendQuestion,
   ghJson,
   parseDecisionRequest,
@@ -80,6 +81,7 @@ import {
   type WorkerResult,
 } from "./lib/worker.js";
 import { acquireDrainLock, DrainLockError } from "./lib/drain-lock.js";
+import { acquireInflightLock, InflightLockError } from "./lib/inflight-lock.js";
 
 // ── The proto-runner (WS-1 T1). Reads ONE tasks.yaml entry and runs the loop:
 // recon → provenance-linted prompt → implement → PR → merge → verdict, ledgering
@@ -350,6 +352,7 @@ export interface RunResult {
     | "blocked_review"
     | "blocked_budget"
     | "blocked_containment"
+    | "blocked_inflight"
     | "failed";
 }
 
@@ -516,6 +519,30 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, ...extra });
   const say = (msg: string) => console.log(`\n### [${taskId}] ${msg}`);
 
+  // ── PER-TASK IN-FLIGHT LOCK (guard 1, DIAGNOSIS.md diag/drain-sequential-await).
+  // No two runs of the SAME task may overlap — whatever launched them (two drains, or a
+  // manual run-task beside a running drain). A LIVE holder ⇒ REFUSE this run (naming the
+  // holder); a stale (dead-pid) lock ⇒ reclaim. Released on EVERY terminal path via the
+  // finally below, so a crash never leaves a permanent stale lock.
+  const inflightDir = join(config.root, "state", "inflight");
+  let inflightLock;
+  try {
+    inflightLock = acquireInflightLock(inflightDir, taskId, { run_id: runId });
+  } catch (e) {
+    if (e instanceof InflightLockError) {
+      log("inflight.refused", { holder_pid: e.holder.pid, holder_run_id: e.holder.run_id });
+      say(`REFUSED: task ${taskId} already running (pid ${e.holder.pid}, run ${e.holder.run_id}) — not starting a duplicate`);
+      return { taskId, runId, merged: false, costUsd: 0, verdict: "blocked_inflight" };
+    }
+    throw e;
+  }
+  try {
+    return await runTaskBody();
+  } finally {
+    inflightLock.release();
+  }
+
+  async function runTaskBody(): Promise<RunResult> {
   // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
   // DEFAULT_BUDGET_USD ($100 — an order of magnitude above any observed task) when a
   // task omits it; the SOFT threshold ($25 default, config-tunable) only surfaces an
@@ -633,7 +660,7 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
   // ── Reclaim debris from crashed prior runs (WS-1: a max-turns death left its
   // run-* worktree + branch behind). Do this BEFORE adding ours so leftovers can
   // never block the new worktree/branch. Best-effort; ledger what was reclaimed.
-  const pruned = pruneStaleRuns(repoDir, worktreesDir(config));
+  const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) {
     log("worktree.prune", { worktrees: pruned.worktrees, branches: pruned.branches, skipped: pruned.skipped });
     say(
@@ -919,6 +946,7 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
     // sibling file also vanishes with the worktree on the paths that remove it.
     removeRunLock(worktreePath);
   }
+  } // ── end runTaskBody
 }
 
 /**
@@ -1054,7 +1082,7 @@ async function retroCommand(rest: string[]): Promise<number> {
     mkdirSync(dirname(repoDir), { recursive: true });
     execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
   }
-  const pruned = pruneStaleRuns(repoDir, worktreesDir(config));
+  const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesDir(config), branch);
