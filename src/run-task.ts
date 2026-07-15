@@ -1917,9 +1917,17 @@ async function initCommand(rest: string[]): Promise<number> {
 }
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
+const USAGE =
+  "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd daemon [--max <n>] [--poll-ms <n>]   # persistent scheduler loop (STOP/PAUSE/headroom-aware)\n  rmd daemon-plist [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon` (commissioning is W1-T12d)\n  rmd stop [--reason <text>]    # fleet control: hard kill — no drain spawns until resume\n  rmd pause [--reason <text>]   # fleet control: drain-and-hold — in-flight completes, no new spawns\n  rmd resume                    # fleet control: clear stop + pause, spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard";
+
+// ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(): Promise<void> {
   const [, , cmd, ...rest] = process.argv;
   const arg = rest[0];
+  if (cmd === "--help" || cmd === "-h" || cmd === "help") {
+    console.log(USAGE);
+    process.exit(0);
+  }
   if (cmd === "run-task" && arg) {
     const result = await runTask(arg);
     console.log("\n" + JSON.stringify(result, null, 2));
@@ -1961,9 +1969,7 @@ async function main(): Promise<void> {
   if (cmd === "init") {
     process.exit(await initCommand(rest));
   }
-  console.error(
-    "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd daemon [--max <n>] [--poll-ms <n>]   # persistent scheduler loop (STOP/PAUSE/headroom-aware)\n  rmd daemon-plist [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon` (commissioning is W1-T12d)\n  rmd stop [--reason <text>]    # fleet control: hard kill — no drain spawns until resume\n  rmd pause [--reason <text>]   # fleet control: drain-and-hold — in-flight completes, no new spawns\n  rmd resume                    # fleet control: clear stop + pause, spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard",
-  );
+  console.error(USAGE);
   process.exit(2);
 }
 

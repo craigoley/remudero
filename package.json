@@ -1,10 +1,23 @@
 {
   "name": "remudero",
   "version": "0.0.0-pre-alpha",
-  "private": true,
   "description": "Plan-stewarding orchestration harness for Claude Code",
   "license": "Apache-2.0",
   "type": "module",
+  "bin": {
+    "rmd": "bin/rmd"
+  },
+  "files": [
+    "bin",
+    "src",
+    "settings",
+    "hooks",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=22.22.3"
   },
