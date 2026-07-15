@@ -367,6 +367,7 @@ export interface RunResult {
     | "blocked_budget"
     | "blocked_containment"
     | "blocked_inflight"
+    | "no_pr"
     | "failed";
 }
 
@@ -406,7 +407,13 @@ export function workerErrorVerdict(
   costUsd: number,
   stage: string,
 ): WorkerErrorVerdict | null {
-  if (!r.isError) return null;
+  // A "success" subtype is a CLEAN terminal state and is NEVER a worker error — even if
+  // isError is set. collectWorkerResult sets isError=true when the SDK iterator throws
+  // AFTER yielding the result envelope; on a SUCCESS envelope that leaves the pair
+  // {isError:true, subtype:"success"}, which previously produced the contradictory verdict
+  // "worker error at implement: success" (run W1-T12a-1784117152056). A success-but-no-PR
+  // run is handled downstream by noPrVerdict, not here.
+  if (!r.isError || r.subtype === "success") return null;
   const budgetBreach = r.subtype === "error_max_budget_usd";
   const verdict: WorkerErrorVerdict["verdict"] = budgetBreach ? "blocked_budget" : "failed";
   return {
@@ -427,6 +434,67 @@ export function workerErrorVerdict(
       tokens: r.tokens,
     },
   };
+}
+
+/** The verdict + ledger payload for a terminal-SUCCESS worker that produced NO PR. */
+export interface NoPrVerdict {
+  verdict: "no_pr";
+  ledger: {
+    verdict: "no_pr";
+    stage: string;
+    subtype: string;
+    num_turns: number;
+    cost_usd: number;
+    billing_mode: "subscription";
+    reason: string;
+    model: string;
+    effort: string;
+    tokens: WorkerResult["tokens"];
+  };
+}
+
+/**
+ * Terminal verdict for a worker that reached a SUCCESS subtype but committed nothing and
+ * opened no PR — a SILENT NO-OP (run W1-T12a-1784117152056: subtype:success, num_turns:10,
+ * no pr.opened). It gets its OWN honest, distinct verdict `no_pr` with a truthful reason —
+ * NEVER `verdict:failed` with a contradictory "worker error … : success" reason — so the
+ * unattended daemon can reason about it rather than choke on a self-contradicting label.
+ *
+ * BLOCK vs RETRIABLE (decided + justified): `no_pr` is a NON-MERGED verdict, so it stops
+ * the drain (stop-on-block), like every other non-merged terminal state. A no-op success is
+ * anomalous — the worker believed it was done yet produced nothing to merge — and a blind
+ * auto-retry carries NO new information, so under the unattended daemon it risks an unbounded
+ * no-op loop; halting with a DISTINCT verdict is safer than silent retry. The distinct label
+ * is exactly what the future block-reasoner (W1-T46) needs to later classify retry-vs-escalate.
+ */
+export function noPrVerdict(r: WorkerResult, costUsd: number, stage: string): NoPrVerdict {
+  return {
+    verdict: "no_pr",
+    ledger: {
+      verdict: "no_pr",
+      stage,
+      subtype: r.subtype,
+      num_turns: r.numTurns,
+      cost_usd: costUsd,
+      billing_mode: "subscription",
+      reason: "worker completed without opening a PR",
+      model: r.model,
+      effort: r.effort,
+      tokens: r.tokens,
+    },
+  };
+}
+
+/** Commits on the worktree's HEAD ahead of `base` (0 ⇒ the worker committed nothing). */
+function commitsAhead(worktreePath: string, base: string): number {
+  try {
+    const out = execFileSync("git", ["-C", worktreePath, "rev-list", "--count", `${base}..HEAD`], {
+      encoding: "utf8",
+    });
+    return parseInt(out.trim(), 10) || 0;
+  } catch {
+    return 0; // no base ref / detached / unreadable ⇒ treat as "nothing to PR"
+  }
 }
 
 function reconObservedToContext(recon: WorkerResult, taskId: string): string {
@@ -835,6 +903,25 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
 
     // ── PR (worker REPORT or orchestrator fallback).
     let prUrl = parseReport(fullText(impl))?.prUrl;
+
+    // SILENT NO-OP GUARD: by here the worker reached a terminal SUCCESS (non-success
+    // subtypes already returned above via workerErrorVerdict). If it committed NOTHING and
+    // opened no PR, it produced nothing to merge — an honest `no_pr` verdict, NOT a failed
+    // "worker error: success" (run W1-T12a-1784117152056) and NOT a gh-pr-create throw on an
+    // empty branch. Only reached when there's no PR to gate.
+    if (!prUrl && commitsAhead(worktreePath, "origin/main") === 0) {
+      const v = noPrVerdict(impl, costUsd, "implement");
+      try {
+        worktreeRemove(repoDir, worktreePath);
+        log("worktree.remove", { on: "no_pr" });
+      } catch (e) {
+        log("worktree.remove.error", { on: "no_pr", error: String((e as Error)?.message ?? e) });
+      }
+      log("verdict", v.ledger);
+      say(`verdict: no_pr — worker completed without opening a PR · ${impl.numTurns} turns`);
+      return { taskId, runId, merged: false, costUsd, verdict: "no_pr" };
+    }
+
     // Ensure the branch is on origin (worker pushes without -u).
     let branchOnOrigin = false;
     try {
