@@ -40,6 +40,12 @@ export interface Config {
   workerModel?: string;
   /** Model the retro Architect rides — MUST outrank workerModel (G-17). Default `opus`. */
   architectModel?: string;
+  /**
+   * iMessage buddy identifier (phone number or Apple ID email) real-time escalation
+   * pings are sent to (W1-T8, notify.ts). Optional; defaults to the operator's Apple
+   * ID email so the notifier works out of the box on a single-operator instance.
+   */
+  notifyRecipient?: string;
 }
 
 /**
@@ -76,6 +82,15 @@ export function workerModel(config: Config): string {
 /** Model the retro Architect rides (must outrank workerModel — G-17). Default `opus`. */
 export function architectModel(config: Config): string {
   return config.architectModel ?? "opus";
+}
+
+/**
+ * The iMessage buddy identifier real-time pings go to. Default is the operator's
+ * Apple ID email (single-operator instance) — overridable per-instance via
+ * `notifyRecipient` in config.json for a phone number or a different Apple ID.
+ */
+export function notifyRecipient(config: Config): string {
+  return config.notifyRecipient ?? "craigoley@gmail.com";
 }
 
 /**

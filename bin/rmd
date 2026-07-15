@@ -7,6 +7,14 @@
 #                            --dry-run prints the gather + calibration table only
 #   rmd drain [--until <id>] [--max <n>] [--dry-run]
 #                            drain the DAG through run-task, stop-on-block, headroom-aware
+#   rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s>
+#                [--detail <d>] [--recommendation <r>] [--option "label|detail"]...
+#                            open a needs-human labeled GitHub issue; MANUAL/HARD_STOP
+#                            also fire a real-time iMessage ping (BLOCKED collapses to digest)
+#   rmd notify <message>     real-time iMessage ping via osascript, no BlueBubbles dependency
+#   rmd digest [--since <iso>] [--dry-run]
+#                            roll up the ledger since <iso> (default 24h ago) into one
+#                            iMessage digest; --dry-run prints the text without sending
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 exec "$DIR/node_modules/.bin/tsx" "$DIR/src/run-task.ts" "$@"
