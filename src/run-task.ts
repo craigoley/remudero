@@ -68,6 +68,7 @@ import {
   reviewerVerdictContract,
   type ReviewVerdict,
 } from "./lib/review.js";
+import { buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import { ghGateway, projectPlan } from "./lib/status.js";
 import {
@@ -1214,6 +1215,106 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
 }
 
 /**
+ * `rmd dep-review <pr>` — the dependency-PR review lane (W1-T54, MASTER-PLAN §5D
+ * item 1). Required checks are `[ci-gate, remudero-review]`; nothing ever posted
+ * `remudero-review` on a Dependabot PR, so every Dependabot PR sat UNMERGEABLE —
+ * fail-closed but frozen. This is a SECOND deterministic judge (never an LLM),
+ * scoped to Dependabot PRs: {@link decideDepReview} (lib/dep-review.ts) is the
+ * pure verdict; this command is only the `gh` plumbing around it, mirroring
+ * `reviewCommand` above.
+ *
+ *   - refuse:   not a Dependabot PR, or its diff touches source outside the
+ *     manifest/lockfile allowlist. Nothing is posted (exit 2).
+ *   - hold:     a required check is genuinely red. Nothing is posted (exit 1) —
+ *     the caller (a future poll / drain) tries again later.
+ *   - arm:      minor/patch, confined, gates green. Posts remudero-review=success
+ *     and arms auto-merge (exit 0).
+ *   - escalate: major (or unparseable — fail closed). Posts remudero-review=
+ *     failure (so it can NEVER auto-merge) and opens a MANUAL needs-human issue
+ *     carrying the release notes via the SHIPPED escalate() path (exit 1).
+ */
+async function depReviewCommand(prArg: string, rest: string[] = []): Promise<number> {
+  const { owner, repo } = resolveReviewTarget(resolveOwnerRepo(), rest);
+  const slug = `${owner}/${repo}`;
+  const view = ghJson([
+    "pr",
+    "view",
+    prArg,
+    "--repo",
+    slug,
+    "--json",
+    "number,url,title,body,headRefOid,author,statusCheckRollup",
+  ]) as {
+    number: number;
+    url: string;
+    title: string;
+    body: string;
+    headRefOid: string;
+    author?: { login?: string };
+    statusCheckRollup?: RollupEntry[];
+  };
+  const diff = execFileSync("gh", ["pr", "diff", view.url], { encoding: "utf8", maxBuffer: 1 << 26 });
+
+  const config = loadConfig();
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const runId = `dep-review-PR${view.number}-${Date.now()}`;
+  const taskId = `dep-review-PR${view.number}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, ...extra });
+
+  const result = decideDepReview({
+    author: { login: view.author?.login ?? "" },
+    title: view.title ?? "",
+    body: view.body ?? "",
+    diff,
+    checks: view.statusCheckRollup ?? [],
+  });
+  log("dep-review.decided", { ...result, pr_url: view.url });
+  console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
+
+  if (result.decision === "refuse") {
+    console.log(`no remudero-review posted (refused): ${view.url}`);
+    return 2;
+  }
+  if (result.decision === "hold") {
+    console.log(`no remudero-review posted (holding for gates): ${view.url}`);
+    return 1;
+  }
+  if (result.decision === "arm") {
+    postReviewStatus({
+      owner,
+      repo,
+      sha: view.headRefOid,
+      state: "success",
+      description: `remudero-review: PASS — ${result.semverLevel} dependency bump, confined + gates green`,
+    });
+    armAutoMerge(view.url);
+    log("automerge.armed", {});
+    console.log(`remudero-review=success posted + auto-merge armed: ${view.url}`);
+    return 0;
+  }
+  // escalate: post failure (NEVER auto-merge for a major) + open the MANUAL issue.
+  postReviewStatus({
+    owner,
+    repo,
+    sha: view.headRefOid,
+    state: "failure",
+    description: `remudero-review: FAIL — ${result.reason}`, // postReviewStatus truncates to 140
+  });
+  const escalation = buildDepReviewEscalation({
+    prUrl: view.url,
+    prNumber: view.number,
+    title: view.title ?? "",
+    body: view.body ?? "",
+    semverLevel: result.semverLevel,
+  });
+  const issueUrl = escalate(escalation, { issues: ghIssueGateway(owner, repo), ledgerPath, runId });
+  log("dep-review.escalated", { issue_url: issueUrl });
+  console.log(`remudero-review=failure posted (no auto-merge); escalated: ${issueUrl}`);
+  return 1;
+}
+
+/**
  * `rmd retro [--dry-run]` — the harness SYNCS ITS OWN PLAN (MASTER-PLAN
  * §Self-improvement). A DETERMINISTIC GATHER (lib/retro.ts, no LLM) reduces the
  * ledger + LEARNINGS into calibration-by-type, verdict distribution, and the
@@ -2111,7 +2212,7 @@ async function initCommand(rest: string[]): Promise<number> {
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 const USAGE =
-  "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing.\n  rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)\n  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.\n  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.\n  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard\n\nAn UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
+  "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd dep-review <pr-number> [--repo <name>]   # deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing.\n  rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)\n  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.\n  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.\n  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard\n\nAn UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(): Promise<void> {
@@ -2128,6 +2229,9 @@ async function main(): Promise<void> {
   }
   if (cmd === "review" && arg) {
     process.exit(await reviewCommand(arg, rest.slice(1)));
+  }
+  if (cmd === "dep-review" && arg) {
+    process.exit(await depReviewCommand(arg, rest.slice(1)));
   }
   if (cmd === "retro") {
     process.exit(await retroCommand(rest));
@@ -2174,4 +2278,4 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   });
 }
 
-export { runTask, runReview, waitForCiGreen, reviewCommand, retroCommand, initCommand };
+export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, retroCommand, initCommand };
