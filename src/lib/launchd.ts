@@ -62,6 +62,13 @@ export interface LaunchdPlistOpts {
   home?: string;
   /** `rmd daemon --poll-ms <n>`, when set (absent ⇒ the command's own default). */
   pollIntervalMs?: number;
+  /**
+   * `rmd daemon --repo <name>`, baked in so the launchd unit drains the INTENDED repo (e.g.
+   * remudero-sandbox for W1-T12d), never an implicit default. Absent ⇒ no --repo in the unit,
+   * so the daemon's self-target guard refuses to start rather than silently draining its own
+   * source repo. Explicit is safe.
+   */
+  repo?: string;
 }
 
 /** Thrown by {@link generateLaunchdPlist} when an input violates one of its invariants. */
@@ -126,6 +133,9 @@ export function generateLaunchdPlist(opts: LaunchdPlistOpts): string {
   assertNoAnthropicKeys(environment);
 
   const programArguments = [opts.rmdBin, "daemon"];
+  if (opts.repo !== undefined) {
+    programArguments.push("--repo", opts.repo);
+  }
   if (opts.pollIntervalMs !== undefined) {
     programArguments.push("--poll-ms", String(opts.pollIntervalMs));
   }

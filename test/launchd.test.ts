@@ -100,3 +100,16 @@ test("launchdPlistPath: honors a custom label", () => {
   const p = launchdPlistPath("com.example.daemon", "/Users/op");
   assert.equal(p, "/Users/op/Library/LaunchAgents/com.example.daemon.plist");
 });
+
+// ── The plist must BAKE IN the repo target so the unit drains the intended repo, not an
+// implicit default (fix/daemon-repo-targeting; W1-T12d commissions against remudero-sandbox). ──
+test("generateLaunchdPlist bakes `--repo <name>` into ProgramArguments when a repo is given", () => {
+  const plist = generateLaunchdPlist({ ...VALID, repo: "remudero-sandbox" });
+  assert.match(plist, /<string>daemon<\/string>/);
+  assert.match(plist, /<string>--repo<\/string>\s*<string>remudero-sandbox<\/string>/, "the launchd unit targets the chosen repo explicitly");
+});
+
+test("generateLaunchdPlist omits --repo when none is given (no implicit repo baked in)", () => {
+  const plist = generateLaunchdPlist(VALID);
+  assert.doesNotMatch(plist, /<string>--repo<\/string>/);
+});

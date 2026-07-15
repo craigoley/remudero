@@ -4,6 +4,7 @@ import {
   DEFAULT_BUDGET_USD,
   isTransientResult,
   resolveReviewTarget,
+  resolveDaemonTarget,
   unknownArgError,
   noPrVerdict,
   softBudgetWarning,
@@ -199,4 +200,44 @@ test("unknownArgError: recognized flags (value + bool) pass, returning null", ()
   assert.equal(unknownArgError("daemon", ["--max", "5", "--poll-ms", "1000"], ["--max", "--poll-ms"], []), null);
   assert.equal(unknownArgError("drain", ["--until", "W1-T3", "--dry-run"], ["--until", "--max"], ["--dry-run"]), null);
   assert.equal(unknownArgError("drain", [], ["--until", "--max"], ["--dry-run"]), null);
+});
+
+// ── The daemon must target its repo EXPLICITLY and never silently drain its own source repo
+// (fix/daemon-repo-targeting). resolveDaemonTarget is the pure resolver. ──
+const dEnv = { selfOwner: "craigoley", selfRepo: "remudero", repoRoot: "/repo", reposDir: "/root/repos" };
+
+test("resolveDaemonTarget: --repo remudero-sandbox targets the sandbox (gateway repo + plan from the clone)", () => {
+  const r = resolveDaemonTarget(dEnv, ["--repo", "remudero-sandbox"]) as { target: any };
+  assert.ok(r.target);
+  assert.equal(r.target.repo, "remudero-sandbox");
+  assert.equal(r.target.owner, "craigoley");
+  assert.equal(r.target.isSelf, false);
+  assert.equal(r.target.planPath, "/root/repos/remudero-sandbox/plan/tasks.yaml");
+});
+
+test("resolveDaemonTarget: bare `daemon` REFUSES to drain its own source repo unattended (no silent self-default)", () => {
+  const r = resolveDaemonTarget(dEnv, []) as { error: string };
+  assert.ok(r.error, "self-target without acknowledgement is an error");
+  assert.match(r.error, /own source repo/i);
+  assert.match(r.error, /remudero-sandbox/); // points the operator at the commissioning target
+});
+
+test("resolveDaemonTarget: --allow-self-target permits deliberate self-hosting; plan from the checkout", () => {
+  const r = resolveDaemonTarget(dEnv, ["--allow-self-target"]) as { target: any };
+  assert.ok(r.target);
+  assert.equal(r.target.repo, "remudero");
+  assert.equal(r.target.isSelf, true);
+  assert.equal(r.target.planPath, "/repo/plan/tasks.yaml");
+});
+
+test("resolveDaemonTarget: --dry-run against self is allowed (harmless preview, spawns nothing)", () => {
+  const r = resolveDaemonTarget(dEnv, ["--dry-run"]) as { target: any };
+  assert.ok(r.target, "a dry-run self preview is not refused");
+  assert.equal(r.target.dryRun, true);
+  assert.equal(r.target.isSelf, true);
+});
+
+test("resolveDaemonTarget: --plan <path> overrides the plan source", () => {
+  const r = resolveDaemonTarget(dEnv, ["--repo", "remudero-sandbox", "--plan", "/tmp/sbx.yaml"]) as { target: any };
+  assert.equal(r.target.planPath, "/tmp/sbx.yaml");
 });
