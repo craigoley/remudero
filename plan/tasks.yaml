@@ -2357,7 +2357,7 @@
 
 # Item 5 — dependency-PR review lane (a Dependabot PR is unmergeable today: nothing posts remudero-review).
 - id: W1-T54
-  title: "Dependency-PR review lane — deterministic remudero-review for Dependabot PRs (minor->arm, major->escalate)"
+  title: "Dependency-PR review lane — code, fixtures, command (machine half)"
   repo: remudero
   depends_on: [W1-T23, W1-T24]
   type: implement
@@ -2375,15 +2375,65 @@
     post remudero-review=success + arm auto-merge; major -> open a needs-human escalation issue (with the
     release notes) via the SHIPPED escalate path, NO auto-merge. A dep PR whose diff touches SOURCE files
     outside manifests is REFUSED (no review posted).
+    ★ BOOTSTRAP ORDERING (T24/T24b class, THIRD instance): the LIVE end-to-end proof was SPLIT OUT to
+    W1-T54b because it is structurally unsatisfiable by this PR. The lane's OWN author assertion
+    (dep-review.ts isDependabotAuthor + the refuse branch, verified on PR #87's branch run-W1-T54-*) REFUSES
+    any worker-opened seed PR — the worker is not dependabot[bot] — and remudero-sandbox has NO package.json
+    to bump (404 at every path, verified this PR), so there is no confined manifest diff to seed there. A
+    real Dependabot PR under the real [ci-gate, remudero-review] gate is the only valid live exhibit, and
+    those exist ONLY on remudero itself (parked PRs #80/#81). So this half ships the CODE + FIXTURES +
+    command and merges under the current gate; the lane must exist ON MAIN before any live proof can run.
   acceptance:
     - claim: "over recorded dep-PR fixtures: minor/patch -> pass + arm auto-merge; major -> escalate (needs-human, no auto-merge); a dep PR touching source files outside manifests -> REFUSED with no review posted"
       proof: "unit tests over recorded Dependabot-PR fixtures assert each of the three branches (arm / escalate / refuse)"
-    - claim: "a seeded semver-MINOR bump PR on remudero-sandbox merges through the gate with the dep-review status AS its remudero-review"
-      proof: "live: the worker opens the seed minor-bump PR itself via gh on remudero-sandbox, the dep-review posts remudero-review=success + arms auto-merge, and the PR merges — paste the gh api status + the merge"
+    - claim: "rmd dep-review <pr> exists and REFUSES a non-dependabot author with a named reason, posting nothing"
+      proof: "unit/injected-exec test: a non-dependabot-authored PR fixture -> refusal reason, no status posted"
+    - claim: "author identity is normalized across GitHub surfaces (REST 'dependabot[bot]' vs GraphQL 'app/dependabot')"
+      proof: "unit test over both fixture shapes -> both accepted as dependabot"
   risk: high
   origin: feedback#fleet-ops
   plan_refs: ["§5D"]
   files: [src/lib/dep-review.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+
+# W1-T54 SPLIT (plan/t54-live-split, T24/T24b bootstrap class — THIRD instance): the machine half (W1-T54 —
+# code + fixtures + command) ships under the current gate; the LIVE half below is provable only against the
+# REAL parked Dependabot PRs (#80 minor / #81 major) on remudero itself. A worker-opened seed is REFUSED by
+# the lane's own author gate, and remudero-sandbox has no package.json — verified plan/t54-live-split.
+- id: W1-T54b
+  title: "Dependency lane live proofs — the real parked Dependabot PRs"
+  repo: remudero
+  depends_on: [W1-T54]
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 100.00
+  rationale: "The LIVE half of the dep-review lane (W1-T54 split, T24/T24b bootstrap class). The old live
+    criterion (seed a minor bump on remudero-sandbox and merge it) is structurally unsatisfiable: the lane
+    REFUSES a worker-opened seed (author != dependabot[bot], dep-review.ts isDependabotAuthor), and
+    remudero-sandbox has NO package.json to bump. The only valid live exhibits are REAL Dependabot PRs under
+    the REAL [ci-gate, remudero-review] gate — and remudero has two parked right now: #80 (semver-minor
+    group bump) and #81 (semver-MAJOR @types/node 22->26). This task preserves the old criterion's SEMANTICS
+    and STRENGTHENS it: real author, real required gate, both the arm AND the escalate direction proven live."
+  design: |
+    Run the SHIPPED `rmd dep-review <pr>` (W1-T54, now on main) against remudero's two live parked Dependabot
+    PRs. #80 (or its live semver-minor successor) exercises the ARM path: dep-review posts
+    remudero-review=success, arms auto-merge, and the PR merges through [ci-gate, remudero-review]. #81 (or
+    its live semver-major successor) exercises the ESCALATE path: dep-review opens the needs-human escalation
+    (with release notes) via the shipped escalate path, posts remudero-review=failure, and the PR does NOT
+    auto-merge. If either parked PR has been closed/superseded by the time this runs, use the current live PR
+    of the same semver class and record the substitution in the REPORT (do NOT open a synthetic one — the
+    author gate would refuse it). Bases on origin/main; touches no source (the code is W1-T54's).
+  acceptance:
+    - claim: "run against the REAL semver-minor Dependabot PR (#80 class), the lane posts remudero-review=success, arms auto-merge, and the PR MERGES through [ci-gate, remudero-review]"
+      proof: "worker runs rmd dep-review against the live minor PR; paste the posted status + the merge"
+    - claim: "run against the REAL semver-MAJOR Dependabot PR (#81 class), the lane opens the needs-human escalation with release notes, posts remudero-review=failure, and the PR does NOT auto-merge"
+      proof: "paste the escalation issue URL + the failure status + the PR still open"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5D"]
+  files: []
   status: queued
   attempts: 0
 
