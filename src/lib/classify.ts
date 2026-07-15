@@ -36,6 +36,13 @@ export interface FailureSignal {
   subtype?: string;
   text?: string;
   ciConclusion?: string;
+  /**
+   * An Anthropic-SIDE api error hit the worker stream (server_error / `<synthetic>`
+   * model / isApiErrorMessage — the "API Error: Server error mid-response" shape). This
+   * is POSITIVE evidence of a transient, the same class as a network blip: it must be
+   * retried, never counted as a task strike. (worker.ts sets WorkerResult.apiError.)
+   */
+  apiError?: boolean;
 }
 
 // Recorded fixtures (below, in the test suite) drove this list: real network
@@ -49,6 +56,10 @@ const TRANSIENT_TEXT_PATTERNS: RegExp[] = [
   /rate limit exceeded|secondary rate limit|abuse detection mechanism/i, // gh API backpressure
   /runner has received a shutdown signal|lost communication with the server|no space left on device/i,
   /could not resolve host|network is unreachable|connection reset by peer/i,
+  // Anthropic-side api errors (server_error / overload / mid-response truncation) — the
+  // SECOND transient class to hit the runner (the autoupdater race was first). NARROW
+  // phrasing so a task merely mentioning "API error" in its own output is not caught.
+  /server error mid-response|overloaded_error|api error:\s*(server|overloaded)|<synthetic>/i,
 ];
 
 /** CI conclusions that are ambiguous-but-non-deterministic on their own: a
@@ -70,6 +81,9 @@ const TRANSIENT_CI_CONCLUSIONS = new Set(["CANCELLED", "TIMED_OUT", "STARTUP_FAI
  * strike.
  */
 export function classifyFailure(signal: FailureSignal): FailureClass {
+  // An Anthropic-side api error is positive evidence of a transient (like a network blip),
+  // regardless of the misleading result subtype (which may say "success"). Check it first.
+  if (signal.apiError) return "transient";
   const text = signal.text ?? "";
   if (TRANSIENT_TEXT_PATTERNS.some((re) => re.test(text))) return "transient";
   if (signal.ciConclusion && TRANSIENT_CI_CONCLUSIONS.has(signal.ciConclusion)) return "transient";

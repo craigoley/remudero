@@ -89,6 +89,7 @@ import {
 } from "./lib/worker.js";
 import { acquireDrainLock, DrainLockError } from "./lib/drain-lock.js";
 import { acquireInflightLock, InflightLockError } from "./lib/inflight-lock.js";
+import { classifyFailure, MAX_TRANSIENT_RETRIES, type FailureSignal } from "./lib/classify.js";
 import {
   pauseDetail,
   requestPause,
@@ -368,6 +369,7 @@ export interface RunResult {
     | "blocked_containment"
     | "blocked_inflight"
     | "no_pr"
+    | "blocked_transient"
     | "failed";
 }
 
@@ -483,6 +485,30 @@ export function noPrVerdict(r: WorkerResult, costUsd: number, stage: string): No
       tokens: r.tokens,
     },
   };
+}
+
+/** The classifier's view of a worker result: its subtype, its text/stderr evidence, and
+ *  the Anthropic-side api-error flag. Feeds W1-T7's {@link classifyFailure}. */
+function workerSignal(r: WorkerResult): FailureSignal {
+  return {
+    subtype: r.subtype,
+    text: [r.text, r.blocks.join("\n"), r.stderr].join("\n"),
+    apiError: r.apiError,
+  };
+}
+
+/**
+ * True when a worker result is an ANOMALY that W1-T7's classifier judges TRANSIENT — an
+ * Anthropic-side api error (server_error mid-response) or a network/5xx/CI-infra blip — as
+ * opposed to a real task failure (a strike) or a clean success. The `isError || apiError`
+ * gate keeps a CLEAN success (which the classifier fail-closes to "strike") from ever being
+ * mistaken for a failure: a clean success is not anomalous, so it flows to the PR/no_pr path.
+ *
+ * This is the distinction PR #59 collapsed: run W1-T12a-1784117152056 was a transient (retry),
+ * NOT a no-op (no_pr/block). A transient and a genuine no-op are OPPOSITE cases.
+ */
+export function isTransientResult(r: WorkerResult): boolean {
+  return (r.isError || r.apiError) && classifyFailure(workerSignal(r)) === "transient";
 }
 
 /** Commits on the worktree's HEAD ahead of `base` (0 ⇒ the worker committed nothing). */
@@ -811,34 +837,70 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
     log("prompt.linted", { provenance: "clean" });
     say("prompt provenance-linted: clean");
 
-    // ── Implement.
+    // ── Implement. A TRANSIENT (an Anthropic-side server_error mid-response, or a
+    // network/5xx/CI-infra blip) is Anthropic's fault, NOT the task's — W1-T7's classifier
+    // (now WIRED here; it never was — run W1-T12a-1784117152056 reached verdict-assembly
+    // unclassified) RETRIES it, bounded, consuming NO strike and NEVER stamping failed/no_pr.
     say("implement worker");
-    let impl = account(
-      await spawnWorker({
-        cwd: worktreePath,
-        permissionMode: "bypassPermissions",
-        // model/effort/max_turns come from the MOUNT (task_type × risk, §9), never a
-        // hardcoded literal. max_turns is the runaway-LOOP guard; dollars (maxBudgetUsd)
-        // are the real backstop. Recalibrated in mounts.yaml from OBSERVED runs (W1-T6
-        // needed >61 turns — DIAGNOSIS.md), an order of magnitude above expected.
-        model: mount.model,
-        effort: mount.effort,
-        maxTurns: mount.maxTurns,
-        maxBudgetUsd: budgetUsd,
-        settingsFile,
-        config,
-        prompt,
-      }),
-    );
-    log("implement.done", {
-      session_id: impl.sessionId,
-      cost_usd: impl.costUsd,
-      num_turns: impl.numTurns,
-      subtype: impl.subtype,
-      permission_denials: impl.permissionDenials.length,
-      // W1-T6: every worker call ledgers the standard telemetry shape.
-      ...workerLedgerFields(impl),
-    });
+    let impl: WorkerResult;
+    let transientAttempts = 0;
+    for (;;) {
+      impl = account(
+        await spawnWorker({
+          cwd: worktreePath,
+          permissionMode: "bypassPermissions",
+          // model/effort/max_turns come from the MOUNT (task_type × risk, §9), never a
+          // hardcoded literal. max_turns is the runaway-LOOP guard; dollars (maxBudgetUsd)
+          // are the real backstop. Recalibrated in mounts.yaml from OBSERVED runs (W1-T6
+          // needed >61 turns — DIAGNOSIS.md), an order of magnitude above expected.
+          model: mount.model,
+          effort: mount.effort,
+          maxTurns: mount.maxTurns,
+          maxBudgetUsd: budgetUsd,
+          settingsFile,
+          config,
+          prompt,
+        }),
+      );
+      log("implement.done", {
+        session_id: impl.sessionId,
+        cost_usd: impl.costUsd,
+        num_turns: impl.numTurns,
+        subtype: impl.subtype,
+        api_error: impl.apiError,
+        transient_attempt: transientAttempts,
+        permission_denials: impl.permissionDenials.length,
+        // W1-T6: every worker call ledgers the standard telemetry shape.
+        ...workerLedgerFields(impl),
+      });
+      if (!isTransientResult(impl)) break; // clean success OR a real strike ⇒ handled below
+      if (transientAttempts < MAX_TRANSIENT_RETRIES) {
+        transientAttempts++;
+        log("implement.transient_retry", { attempt: transientAttempts, subtype: impl.subtype, api_error: impl.apiError });
+        say(`transient (${impl.apiError ? "api server_error" : impl.subtype}) — retry ${transientAttempts}/${MAX_TRANSIENT_RETRIES}, NO strike`);
+        continue;
+      }
+      // A transient that PERSISTED across the bounded retries: Anthropic-side, not a task
+      // failure and not a no-op. Honest, distinct verdict (NOT failed, NOT no_pr) the daemon
+      // can reason about; it blocks the drain like any non-merged terminal state.
+      try {
+        worktreeRemove(repoDir, worktreePath);
+        log("worktree.remove", { on: "blocked_transient" });
+      } catch (e) {
+        log("worktree.remove.error", { on: "blocked_transient", error: String((e as Error)?.message ?? e) });
+      }
+      log("verdict", {
+        verdict: "blocked_transient",
+        stage: "implement",
+        subtype: impl.subtype,
+        num_turns: impl.numTurns,
+        cost_usd: costUsd,
+        billing_mode: "subscription",
+        reason: `repeated transient API error across ${MAX_TRANSIENT_RETRIES} retries — not a task failure`,
+      });
+      say(`verdict: blocked_transient — repeated transient API error, not a task failure`);
+      return { taskId, runId, merged: false, costUsd, verdict: "blocked_transient" };
+    }
     const implFail = failOnWorkerError(impl, "implement");
     if (implFail) return implFail;
 

@@ -99,6 +99,46 @@ async function* usageStream(): AsyncGenerator<unknown> {
   };
 }
 
+/**
+ * The Anthropic-side TRANSIENT (run W1-T12a-1784117152056): a synthetic api-error
+ * message (isApiErrorMessage + model "<synthetic>" + "API Error: Server error
+ * mid-response") arrives mid-stream, yet the result envelope still reports SUCCESS
+ * (the WS-0 envelope shape). collectWorkerResult must flag this as apiError.
+ */
+async function* apiErrorMidResponseStream(): AsyncGenerator<unknown> {
+  yield { type: "assistant", message: { content: [{ type: "text", text: "reading git remote…" }] } };
+  yield {
+    type: "assistant",
+    isApiErrorMessage: true,
+    error: "server_error",
+    message: {
+      model: "<synthetic>",
+      content: [{ type: "text", text: "API Error: Server error mid-response. The response above may be incomplete." }],
+    },
+  };
+  yield {
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "",
+    session_id: "sess-api",
+    total_cost_usd: 0.5,
+    num_turns: 10,
+    permission_denials: [],
+  };
+}
+
+test("collectWorkerResult: an Anthropic-side server_error mid-response is flagged apiError, even though the envelope reports success", async () => {
+  const r = await collectWorkerResult(apiErrorMidResponseStream(), { childEnvKeys: ["PATH"] });
+  assert.equal(r.apiError, true, "the <synthetic>/isApiErrorMessage message must set apiError");
+  assert.equal(r.subtype, "success", "the result envelope still reports success (WS-0 shape) — that's why classification, not subtype, decides");
+});
+
+test("collectWorkerResult: a clean success is NOT flagged apiError", async () => {
+  const r = await collectWorkerResult(successStream(), { childEnvKeys: ["PATH"] });
+  assert.equal(r.apiError, false);
+});
+
 test("collectWorkerResult: success stream captures cost, turns, and text", async () => {
   const r = await collectWorkerResult(successStream(), { childEnvKeys: ["PATH"] });
   assert.equal(r.isError, false);

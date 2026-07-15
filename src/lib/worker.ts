@@ -50,6 +50,14 @@ export interface WorkerResult {
   /** Result subtype: 'success' | 'error_max_turns' | 'error_max_budget_usd' | … */
   subtype: string;
   isError: boolean;
+  /**
+   * An Anthropic-SIDE api error hit the stream (a `<synthetic>`/`isApiErrorMessage`
+   * "API Error: Server error mid-response" message), which the result ENVELOPE may still
+   * report as subtype:"success" (WS-0 envelope shape). This is a TRANSIENT signal for the
+   * classifier (retry, no strike) — NOT a task failure. Run W1-T12a-1784117152056 lost this
+   * because nothing captured it and the classifier was never wired.
+   */
+  apiError: boolean;
   /** Permission denials the SDK surfaced (hook/permission blocks). */
   permissionDenials: unknown[];
   /** The exact env the child was spawned with (billing-boundary proof). */
@@ -231,6 +239,7 @@ export async function collectWorkerResult(
   let text = "";
   let subtype = "";
   let isError = false;
+  let apiError = false;
   let permissionDenials: unknown[] = [];
   let sawResult = false;
   let tokens: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
@@ -240,6 +249,11 @@ export async function collectWorkerResult(
     for await (const raw of messages) {
       const msg = raw as { type?: string; message?: unknown };
       if (msg.type === "assistant") {
+        // Anthropic-side api error mid-stream (server_error / <synthetic> model /
+        // isApiErrorMessage). A TRANSIENT — the envelope may still report success.
+        const rawAny = raw as { isApiErrorMessage?: boolean; error?: unknown };
+        const model = (msg.message as { model?: string })?.model;
+        if (rawAny.isApiErrorMessage === true || model === "<synthetic>") apiError = true;
         const content = (msg.message as { content?: unknown }).content;
         if (Array.isArray(content)) {
           for (const block of content) {
@@ -318,6 +332,7 @@ export async function collectWorkerResult(
     stderr: stderrChunks.join(""),
     subtype,
     isError,
+    apiError,
     permissionDenials,
     childEnvKeys: opts.childEnvKeys,
     model: opts.model ?? DEFAULT_MODEL_LABEL,
