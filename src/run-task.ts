@@ -69,14 +69,17 @@ import {
   parseReconReport,
   parseReport,
   pruneStaleRuns,
+  removeRunLock,
   renderWorkerSettings,
   spawnWorker,
   workerLedgerFields,
   worktreeAdd,
   worktreeRemove,
   worktreesDir,
+  writeRunLock,
   type WorkerResult,
 } from "./lib/worker.js";
+import { acquireDrainLock, DrainLockError } from "./lib/drain-lock.js";
 
 // ── The proto-runner (WS-1 T1). Reads ONE tasks.yaml entry and runs the loop:
 // recon → provenance-linted prompt → implement → PR → merge → verdict, ledgering
@@ -631,15 +634,24 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
   // run-* worktree + branch behind). Do this BEFORE adding ours so leftovers can
   // never block the new worktree/branch. Best-effort; ledger what was reclaimed.
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config));
-  if (pruned.worktrees.length || pruned.branches.length) {
-    log("worktree.prune", { worktrees: pruned.worktrees, branches: pruned.branches });
-    say(`pruned ${pruned.worktrees.length} stale worktree(s), ${pruned.branches.length} branch(es)`);
+  if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) {
+    log("worktree.prune", { worktrees: pruned.worktrees, branches: pruned.branches, skipped: pruned.skipped });
+    say(
+      `pruned ${pruned.worktrees.length} stale worktree(s), ${pruned.branches.length} branch(es)` +
+        (pruned.skipped.length ? `; SKIPPED ${pruned.skipped.length} live worktree(s)` : ""),
+    );
   }
 
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesDir(config), branch);
   worktreeAdd(repoDir, worktreePath, branch, "origin/main");
   log("worktree.add", { branch, worktreePath });
+  // LIVENESS TOKEN: mark this worktree ALIVE so a concurrent pruneStaleRuns (another
+  // drain, a manual run-task) skips it instead of `--force`-removing it mid-run. The
+  // lock is a SIBLING file (never inside the worktree ⇒ never committed into the PR),
+  // written now and removed on terminal verdict (the finally below). If the process
+  // crashes, the lock's pid goes dead and prune reclaims it. (DIAGNOSIS.md)
+  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
   try {
     // ── Recon (read-only).
@@ -901,6 +913,11 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
       log("worktree.remove.error", { on: "run.error", error: String((e as Error)?.message ?? e) });
     }
     throw err;
+  } finally {
+    // Terminal verdict (or throw) ⇒ this run no longer owns the worktree. Drop the
+    // liveness token so a later prune may reclaim the worktree. Idempotent; the
+    // sibling file also vanishes with the worktree on the paths that remove it.
+    removeRunLock(worktreePath);
   }
 }
 
@@ -1038,10 +1055,12 @@ async function retroCommand(rest: string[]): Promise<number> {
     execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config));
-  if (pruned.worktrees.length || pruned.branches.length) log("worktree.prune", { ...pruned });
+  if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesDir(config), branch);
   worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  // Liveness token so a concurrent drain's prune skips this retro worktree. (See runTask.)
+  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
   const prompt = retroPrompt(report, calibrationTable(gather.byType), runId);
   try {
@@ -1130,6 +1149,8 @@ async function retroCommand(rest: string[]): Promise<number> {
       /* best-effort */
     }
     throw e;
+  } finally {
+    removeRunLock(worktreePath); // terminal ⇒ drop the liveness token
   }
 }
 
@@ -1227,25 +1248,59 @@ async function drainCommand(rest: string[]): Promise<number> {
     return 0;
   }
 
+  // SINGLE-INSTANCE GUARD (DIAGNOSIS.md, diag/drain-concurrency): two concurrent
+  // `rmd drain` processes both selected the still-unmerged W1-T7 and ran it. Refuse
+  // to start if a LIVE drain already holds the lock; reclaim a stale (dead-pid) lock.
+  const drainLockPath = join(config.root, "state", "drain.lock");
+  let drainLock;
+  try {
+    drainLock = acquireDrainLock(drainLockPath);
+  } catch (e) {
+    if (e instanceof DrainLockError) {
+      console.error(
+        `### rmd drain REFUSED — another drain is running ` +
+          `(pid ${e.holder.pid} on ${e.holder.host}, started ${e.holder.startedAt}).\n` +
+          `If that process is dead, remove ${drainLockPath} and retry.`,
+      );
+      return 1;
+    }
+    throw e;
+  }
+  // Release on a Ctrl-C / kill too, so a signal never leaves a permanent stale lock.
+  const onSignal = (sig: NodeJS.Signals) => {
+    drainLock.release();
+    process.kill(process.pid, sig); // re-raise with the default handler now cleared
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+
   const runId = `DRAIN-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "DRAIN", step, ...extra });
-  log("drain.start", { until: opts.until ?? null, max: opts.max });
+  log("drain.start", { until: opts.until ?? null, max: opts.max, lock_pid: drainLock.info.pid });
 
-  const summary = await runDrain(
-    plan,
-    {
-      refreshMerged,
-      runOne: (taskId) => runTask(taskId, { planPath, config }),
-      readUsage: () => readUsageSnapshot(config),
-      log,
-    },
-    opts,
-  );
-  console.log("\n" + renderSummary(summary));
-  // Exit 0 only on a clean drain (target reached / max reached / nothing left);
-  // a block/headroom/error stop is a non-zero exit so an unattended wrapper notices.
-  return summary.stopReason === "blocked" || summary.stopReason === "error" ? 1 : 0;
+  try {
+    const summary = await runDrain(
+      plan,
+      {
+        refreshMerged,
+        runOne: (taskId) => runTask(taskId, { planPath, config }),
+        readUsage: () => readUsageSnapshot(config),
+        log,
+      },
+      opts,
+    );
+    console.log("\n" + renderSummary(summary));
+    // Exit 0 only on a clean drain (target reached / max reached / nothing left);
+    // a block/headroom/error stop is a non-zero exit so an unattended wrapper notices.
+    return summary.stopReason === "blocked" || summary.stopReason === "error" ? 1 : 0;
+  } finally {
+    // Release on EVERY exit path (clean return OR a throw out of runDrain) so a crash
+    // mid-drain never leaves a stale lock that blocks the next drain forever.
+    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onSignal);
+    drainLock.release();
+  }
 }
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
