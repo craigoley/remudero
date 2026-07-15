@@ -16,6 +16,10 @@ function result(over: Partial<WorkerResult>): WorkerResult {
     isError: false,
     permissionDenials: [],
     childEnvKeys: [],
+    model: "default",
+    effort: "default",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
     ...over,
   };
 }
@@ -86,4 +90,25 @@ test("workerErrorVerdict: cost passed by the caller (accumulated) wins over the 
   assert.ok(v);
   assert.equal(v.verdict, "failed");
   assert.equal(v.ledger.cost_usd, 0.9);
+});
+
+// ── W1-T6: a failed worker call is never free OR untelemetered — its
+// configured model/effort and its token usage survive onto the verdict ledger
+// line too, not just the honest-ledger cost/turns (WS-1's original guarantee).
+
+test("workerErrorVerdict: the ledger payload carries the failing call's model/effort/tokens", () => {
+  const r = result({
+    isError: true,
+    subtype: "error_max_turns",
+    numTurns: 60,
+    costUsd: 1.73,
+    model: "claude-opus-4",
+    effort: "high",
+    tokens: { input: 900, output: 100, cacheRead: 0, cacheCreation: 0 },
+  });
+  const v = workerErrorVerdict(r, 1.73, "implement");
+  assert.ok(v);
+  assert.equal(v.ledger.model, "claude-opus-4");
+  assert.equal(v.ledger.effort, "high");
+  assert.deepEqual(v.ledger.tokens, { input: 900, output: 100, cacheRead: 0, cacheCreation: 0 });
 });
