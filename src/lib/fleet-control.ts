@@ -102,6 +102,17 @@ export function pauseDetail(root: string): string | undefined {
   return info?.reason ? `PAUSE requested: ${info.reason}` : "PAUSE file present — run `rmd resume` to clear";
 }
 
+/**
+ * AUTO-CONSUME the STOP flag (one-shot lifecycle). STOP exists only to halt the CURRENTLY
+ * running drain; the drain that observed it clears it as it terminates (drainCommand /
+ * daemonCommand finally), so STOP can NEVER silently block a future drain — unlike PAUSE,
+ * which is a persistent maintenance hold cleared ONLY by `rmd resume`. Clears STOP alone,
+ * never PAUSE. Idempotent (returns false when there was nothing to consume).
+ */
+export function consumeStop(root: string): boolean {
+  return clearFlag(stopFilePath(root));
+}
+
 export interface ResumeResult {
   clearedStop: boolean;
   clearedPause: boolean;
