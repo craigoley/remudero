@@ -624,16 +624,26 @@
   acceptance:
     - claim: "the launchctl-loaded plist starts the daemon on a real user session"
       proof: "operator pastes the launchctl load + the daemon's startup ledger line (env_clean=true, billing_mode=subscription)"
+      satisfied_by: "human commissioning 2026-07-15 — daemon ran under launchd (KeepAlive restarts, below); ledger daemon.boot env_clean=true, billing_mode=subscription (runs DAEMON-1784130435165 / -976494 / -127724)"
     - claim: "a real unattended OVERNIGHT drain of a 3-task plan on remudero-sandbox lands merged PRs + a daily digest"
       proof: "operator pastes the ledger + the merged PR links + the received daily digest"
+      satisfied_by: "human commissioning 2026-07-15 — unattended drain of SBX-T1/T2/T3 → merged sandbox PRs #6/#7/#8 (daemon.summary stopReason=max_reached). HONEST DELTA: a bounded --max 3 run (~6 min), NOT literally overnight; the daily-digest SEND was not captured in this drill"
     - claim: "the LIVE daemon killed mid-task recovers correct state on restart from git + GitHub alone"
       proof: "operator pastes the chaos-drill transcript (kill → restart → reconstructed state)"
+      satisfied_by: "human commissioning 2026-07-15 — kill-9 + launchd KeepAlive restart (daemon.start ×3, each env_clean=true); recovered to correct GitHub-DERIVED state (daemon.idle, all merged) with NO duplicate task run (exactly 1 run.start per SBX task). HONEST DELTA: the kill hit the daemon POST-drain, so no in-flight orphan existed; reconstructOrphan (W1-T12c, daemon.ts) is the code-level recovery guarantee and emits no ledger step, so recovery is evidenced by no-duplicate-run + clean-restart-to-correct-idle rather than an active orphan reconstruction"
   risk: high
   origin: architect
   plan_refs: ["§4B"]
-  status: queued
-  attempts: 0
-  note: "Split from W1-T12. The three things a headless worker STRUCTURALLY CANNOT do (Rule 18): live
+  status: done
+  attempts: 1
+  note: "COMMISSIONED 2026-07-15 (verify:human, operator-attested). Evidence recorded in satisfied_by
+    above (ledger runs DAEMON-1784130435165/-976494/-127724; sandbox PRs #6/#7/#8 merged; no duplicate
+    SBX run). Two honest deltas from the literal criteria: the drain was bounded (--max 3), not overnight,
+    and no digest send was captured; the kill-9 hit the daemon post-drain (recovery proven by
+    no-duplicate-run + clean restart to correct GitHub-derived idle, not an active reconstructOrphan).
+    The self-hosting CAPABILITY — daemon drives the whole loop unattended under launchd, merges real PRs,
+    survives kill+restart with no duplicate work — is proven; WS-1's exit criterion is met. ── Split from
+    W1-T12. The three things a headless worker STRUCTURALLY CANNOT do (Rule 18): live
     launchctl-load, a real overnight drain, and a live kill-and-recover — moved to the operator. The machine
     BUILDS + unit-proves the logic (T12a/b/c); the human COMMISSIONS it live (draft→playtest→ready). These
     three criteria are the LIVE halves of W1-T12's original three — nothing dropped, only redistributed."

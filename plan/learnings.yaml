@@ -370,3 +370,20 @@
     PLAN SOURCE + gateway were pinned.)
   src: fix/daemon-repo-targeting (W1-T12d)
   cited: "2026-07-15"
+
+# ── Daemon commissioning gotchas, observed in the W1-T12d drill (chore/t12d-commissioning-record). ──
+- id: daemon-launchd-keepalive-restart
+  subsystem: platform
+  files: [src/lib/launchd.ts, src/lib/daemon.ts]
+  fact: >-
+    The launchd unit runs the daemon with KeepAlive, so launchd restarts it on ANY exit — a kill-9
+    (this is the crash-recovery path: restart re-derives merged state from GitHub and goes idle,
+    reconstructOrphan W1-T12c handles a real in-flight orphan, NO duplicate task run) AND a clean
+    exit. GOTCHA: a `--max N`-bounded daemon under KeepAlive RESTART-LOOPS — it drains N tasks,
+    exits max_reached, launchd restarts it, it finds nothing runnable and logs daemon.idle, exits,
+    restarts… (observed in commissioning: 3 daemon.start lines, the 2nd/3rd immediately idle). For a
+    real unattended daemon run WITHOUT --max (persistent poll loop); use --max/--dry-run only for a
+    bounded manual drill, and expect KeepAlive to bring it back. Plist path:
+    ~/Library/LaunchAgents/com.remudero.daemon.plist; commission with `launchctl load <path>`.
+  src: chore/t12d-commissioning-record (W1-T12d, 2026-07-15)
+  cited: "2026-07-15"
