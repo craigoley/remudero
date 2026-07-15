@@ -48,6 +48,11 @@
 # These are DECLARATIVE metadata (loadPlan tolerates them; consumed by `rmd trace`, W1-T43). ★ BINDING:
 # only a human/Architect sets them, in a plan-only PR — a worker adding `origin:` to justify its own diff
 # is the satisfied_by violation, one field over (Standing rule 15/17).
+#
+# `risk:` (low | medium | high; default medium) is the SECOND axis of the mount routing table (§9): the
+# runner resolves resolveMount(task.type, task.risk) → {model, effort, max_turns} at spawn (never a
+# hardcoded literal — the W1-T6 defect, DIAGNOSIS.md). HIGH marks schema/ledger/telemetry/CI/containment-
+# cutting tasks that run long (e.g. W1-T6 needed >61 turns → implement.high = 120). Set by the Architect.
 
 - id: W1-T1
   title: Extract run-task.ts from the spike lib (the proto-runner)
@@ -65,6 +70,7 @@
       proof: "spike's env unit tests still 4/4 green; git diff shows moves, not rewrites"
     - claim: "worker settings are VALIDATED before spawn (WS-0 FF10a: -p drops invalid settings silently)"
       proof: "a planted schema typo (allowedDomains at sandbox root) FAILS the guard with a named error"
+  risk: medium
   origin: architect
   status: queued           # decorative — real merge-state is DERIVED FROM GITHUB (see header + lib/status.ts)
   pr: 2                     # merged PR #2 -> deriveStatus resolves this task as merged
@@ -87,6 +93,7 @@
       proof: "a deliberately-red PR is left OPEN with verdict=blocked_ci in the ledger, never merged"
     - claim: "workers npm ci in the worktree before typecheck/test (a fresh worktree has no node_modules)"
       proof: "worker transcript shows npm ci, then tests passing IN the worktree"
+  risk: high
   origin: architect
   status: queued           # decorative — real merge-state is DERIVED FROM GITHUB (see header + lib/status.ts)
   pr: 3                     # merged PR #3 -> deriveStatus resolves this task as merged
@@ -126,6 +133,7 @@
         verdict function returns failure; a responsive+proven criterion -> success"
     - claim: "the reviewer never edits code (read-only tools + gh only)"
       proof: "worker settings/transcript show no write tool used; the PR head sha is unchanged by review"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -156,6 +164,7 @@
         criterion -> remudero-review=failure -> PR stays OPEN -> paste the status + PR state, then close"
     - claim: "a PR green on BOTH checks auto-merges with no runner-side merge call (verified LIVE)"
       proof: "ledger shows automerge.armed then pr.merged with no explicit merge command"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -173,6 +182,7 @@
       proof: "unit test: valid config passes; allowedDomains-at-root FAILS with a specific error"
     - claim: "a post-spawn containment probe confirms the sandbox actually engaged"
       proof: "probe run output: outside-write OS-denied"
+  risk: high
   origin: architect
   status: queued
   attempts: 0
@@ -202,6 +212,7 @@
         the markdown bold, backticks, emoji, and trailing asterisks STRIPPED (same class as the WS-0 `)` bleed)"
       proof: "golden test: parseDecisionRequest on that exact decorated payload returns a recommended
         value of `Option A — docs/review-gate.md (new doc)` with no `**`, no ✅, and no trailing `****`"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -220,6 +231,7 @@
   acceptance:
     - claim: "the dontAsk fallback path (currently UNTESTED code) is exercised"
       proof: "a forced-fallback run completes with the floor holding"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -238,6 +250,7 @@
   acceptance:
     - claim: "QUESTION contract parses and appends to plan/questions.ndjson without blocking"
       proof: "ledger shows task completed with an open question logged"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -256,6 +269,7 @@
   acceptance:
     - claim: "provenance linter is BLOCK-oriented, not line-oriented (W1-T1 open question)"
       proof: "a claim wrapped across three lines with its [src:] on the last line PASSES; the same claim with no [src:] anywhere BLOCKS"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -298,6 +312,7 @@
       proof: "on a planted failure, the status description contains the unmet criterion's text; the golden
         PR #12 fixture asserts the SPECIFIC criterion named, not merely state=failure"
       satisfied_by: "#20"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -324,6 +339,7 @@
     - claim: "observation is bounded and deterministic (only whitelisted proof shapes: a test name or a grep)"
       proof: "unit test: a proof that names a test or a grep is executed; a free-prose proof falls back to
         the keyword floor unchanged (no arbitrary code execution from proof text)"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -343,6 +359,7 @@
       proof: "fixture with a different model label parses identically"
     - claim: "total_cost_usd is used ONLY as a runaway tripwire, never for window math"
       proof: "grep: no window arithmetic references total_cost_usd"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -363,6 +380,7 @@
       proof: "resolver test: diagnose steps UP; routine retry does NOT"
     - claim: "Tier Invariant enforced at load (G-17): architect.tier > max(worker.tier)"
       proof: "a violating mounts.yaml is REJECTED with a named error"
+  risk: high
   origin: architect
   status: queued
   attempts: 0
@@ -378,6 +396,7 @@
   acceptance:
     - claim: "every worker + brain call logs {model, effort, tokens, total_cost_usd, billing_mode, verdict}"
       proof: "a run's ledger lines contain all fields; billing_mode reads 'subscription'"
+  risk: high
   origin: architect
   status: queued
   attempts: 0
@@ -395,6 +414,7 @@
       proof: "classifier unit tests over recorded failure fixtures"
     - claim: "two strikes dispatches a DIAGNOSE worker (evidence-only, model steps UP) before any third patch"
       proof: "a seeded double-failure produces a diagnose run in the ledger, never a third blind patch"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -412,6 +432,7 @@
       proof: "issue URL + needs-human label via gh issue view"
     - claim: "imessage-local adapter sends via osascript on the host Mac (no BlueBubbles dependency)"
       proof: "received message + ledger notify line"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -429,6 +450,7 @@
       proof: "transcript: detected value displayed, operator confirms, config written"
     - claim: "config validation rejects overflow:api_key + daily_cap:none"
       proof: "named error in the rejection test"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -444,6 +466,7 @@
   acceptance:
     - claim: "GH_TOKEN is injected from ~/.config/remudero/<project>.pat into the WORKER env only"
       proof: "env unit test: parent has no GH_TOKEN, child does; the pat file is never read by the worker"
+  risk: medium
   origin: architect
   status: blocked
   attempts: 0
@@ -462,6 +485,7 @@
       proof: "ledger: pause issued mid-run, in-flight task still reaches merged"
     - claim: "STOP file + `rmd stop` kill within one tick"
       proof: "ledger stop line + no subsequent spawns"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -481,6 +505,7 @@
       proof: "startup ledger line: env_clean=true, billing_mode=subscription"
     - claim: "daemon killed mid-task recovers correct state from git + GitHub alone"
       proof: "chaos-drill transcript"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -501,6 +526,7 @@
       proof: "`claude -p \"/usage\"` shows no precedence warning and reports subscription"
     - claim: "existing automation is unaffected"
       proof: "one ClawApp/OpenClaw script that needs the key still runs green"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -532,6 +558,7 @@
         or absolute machine paths appear in the file list"
     - claim: "`rmd --help` exits cleanly (a real CLI has a help path, not just `run-task`)"
       proof: "paste `rmd --help` exit code 0 and its usage text"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -557,6 +584,7 @@
       proof: "the doc (CONTRIBUTING or docs/plan-sync.md) exists and states: plan edits land via PR, never scp"
     - claim: "MASTER-PLAN §13 references the plan-sync flow"
       proof: "grep §13 of MASTER-PLAN.md shows a link/reference to the plan-sync doc"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -587,6 +615,7 @@
       proof: "with ~/.bashrc removed, the same task reaches recon/implement; ledger shows preflight passed (count 0)"
     - claim: "the preflight worker is read-only"
       proof: "unit/transcript: no write tool used by the preflight worker"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -617,6 +646,7 @@
         authenticates (subscription OAuth) and can run gh"
     - claim: "if HOME-redirection breaks auth, that is recorded as ground truth with the working fallback"
       proof: "LEARNINGS.md gains a provenance-tagged line stating the outcome; the shipped mechanism is proven by probe either way"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -655,6 +685,7 @@
     - claim: "the KNOWLEDGE BUDGET cap is enforced (a growing file is not an unbounded context tax)"
       proof: "a test with more matching entries than the char budget injects only up to the cap and drops
         the rest, logging what was dropped; the rendered prompt never exceeds the budget"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -690,6 +721,7 @@
       proof: "unit test over a 12-turn fixture with an unchanged diff -> stall/no-progress predicate returns tripped"
     - claim: "a healthy transcript trips NOTHING (no false positive)"
       proof: "unit test over a productive fixture (growing diff, varied tool calls, no error loop) -> every predicate returns not-tripped"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -724,6 +756,7 @@
       proof: "a config where judge.tier <= worker.tier is REJECTED at load with a named Tier-Invariant error (G-17)"
     - claim: "the judge is read-only and capped at K invocations per run"
       proof: "transcript/unit: no write tool used by the judge; a run that would exceed K forces a decision on the Kth call, not another deferral"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -755,6 +788,7 @@
       proof: "unit test: a single-line docs-only diff -> band=low -> auto-choose proceeds unchanged"
     - claim: "the scorer is deterministic (same diff => same score)"
       proof: "unit test: scoring the same diff twice returns an identical band + factors (no clock/random input)"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -787,6 +821,7 @@
       proof: "router unit test: a docs-only diff -> zero specialists spawned"
     - claim: "specialists are read-only and only advise (the gate decides)"
       proof: "transcript/unit: no write tool used by any specialist; verdicts land as PR review comments feeding remudero-review, never as a merge call"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -817,6 +852,7 @@
       proof: "a branch pinning a known-CVE package version makes OSV/Dependabot report it (paste the alert/annotation), then revert"
     - claim: "a leak-grep runs IN CI on every PR, and every workflow is least-privilege + SHA-pinned"
       proof: "the leak-grep job appears in the CI run log; grep of .github/workflows shows a permissions: block in each and every action pinned to @<40-char-sha> (no tags) — paste the diff"
+  risk: high
   origin: architect
   status: queued
   attempts: 0
@@ -843,6 +879,7 @@
       proof: "gh api repos/craigoley/remudero/branches/main/protection --jq .required_status_checks.contexts shows [ci-gate, remudero-review]"
     - claim: "a deliberately-SKIPPED sub-job does NOT deadlock merge (proven LIVE)"
       proof: "a PR whose path filter skips a sub-job still reaches ci-gate GREEN and merges; paste the skipped sub-job status, the aggregator success, and the merge"
+  risk: high
   origin: architect
   status: queued
   attempts: 0
@@ -867,6 +904,7 @@
       proof: "a branch duplicating a code block over the threshold goes CI-red on jscpd; paste the red, then revert"
     - claim: "TypeScript strict is proven ACTIVE by a planted probe that MUST fail"
       proof: "a planted strict-only violation (e.g. an unchecked index / implicit any) makes typecheck FAIL; a bare 0-violations without the probe is NOT accepted as proof (neon-drift lesson)"
+  risk: high
   origin: architect
   status: queued
   attempts: 0
@@ -886,6 +924,7 @@
       proof: "a branch adding an import of src/spike.ts (or src/run-task.ts) into src/lib goes CI-red on the depcruise job with the named rule; paste the red, then revert"
     - claim: "the fitness ruleset is declared and runs in CI"
       proof: "a .dependency-cruiser config is present with the src/lib-imports-no-spike/CLI rule and the depcruise job appears in the CI run"
+  risk: high
   origin: architect
   status: queued
   attempts: 0
@@ -913,6 +952,7 @@
       proof: "run against remudero-sandbox; paste gh api .../branches/main/protection contexts (single aggregator + remudero-review), the .github/workflows list, and the url of a green first gated PR"
     - claim: "ratchet baselines are captured at onboarding (no repo starts at zero)"
       proof: "sandbox .remudero/principles.yaml (or a baselines file) shows non-empty coverage/mutation/dup floors captured from the repo — paste it"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -938,6 +978,7 @@
       proof: "a branch moving allowedDomains from sandbox.network to the sandbox root (the WS-0 silent-drop typo) makes the containment check FAIL and the PR non-mergeable; paste the failing check + blocked state, then revert"
     - claim: "the containment check is REQUIRED (via the aggregator) for sandbox/hooks/env/deny-floor diffs"
       proof: "the containment job is a needs: of the ci-gate aggregator and a touching-diff PR shows it ran; paste the workflow wiring"
+  risk: high
   origin: architect
   status: queued
   attempts: 0
@@ -961,6 +1002,7 @@
   acceptance:
     - claim: "a dry-run plan names each target repo and the gate delta per repo"
       proof: "the campaign dry-run output lists each repo with its current-vs-bar gate delta (which tiers/checks it lacks) — paste the plan; no repo is modified until the operator approves"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -993,6 +1035,7 @@
       proof: "a branch that removes/renames a surface field makes a consumer package's typecheck go RED in that same PR — paste the red check, then revert"
     - claim: "no client contains a hand-rolled fetch to the daemon"
       proof: "a CI grep gate over apps/** finds zero direct fetch/axios calls to the daemon host (all go through api-client) — paste the grep job output"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -1017,6 +1060,7 @@
       proof: "timestamp diff pasted: the ledger write ts vs. the UI-observed update ts is <2s (WS-5 acceptance bar)"
     - claim: "the dashboard consumes ONLY the api-client (no hand-rolled fetch)"
       proof: "grep of apps/dashboard shows all daemon calls go through packages/api-client; the W3-T1 grep gate is green"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -1041,6 +1085,7 @@
       proof: "a signed local build runs; screenshot/transcript of the menu-bar app showing live fleet state via the api-client"
     - claim: "the web build is UNMODIFIED (same artifact, different shell)"
       proof: "diff proof: the web bundle shipped in the Tauri shell is byte-identical to the shell-0 build (same hash) — paste the hashes"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -1067,6 +1112,7 @@
       proof: "device screenshot/recording of the panel running in the Tauri iOS shell over tailnet"
     - claim: "the APNs remote-push question is VERIFIED and recorded in LEARNINGS.md"
       proof: "a new provenance-tagged LEARNINGS.md line stating whether Tauri supports APNs remote push (with the primary-source citation), plus a go/no-go decision naming the Expo-fallback trigger"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -1091,6 +1137,7 @@
       proof: "ledger line for the answered escalation carries origin=<panel bearer token id>; the answer flows to the Architect — paste the ledger entry"
     - claim: "STOP from the panel halts the fleet within one tick"
       proof: "ledger shows the panel-originated STOP followed by no further spawns (mirrors the rmd stop contract)"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -1119,6 +1166,7 @@
       proof: "deploy URL is live; the LEARNINGS page renders the harness's LEARNINGS.md — paste the URL + the LEARNINGS route"
     - claim: "the quickstart takes a clean machine to a first auto-merged PR"
       proof: "a clean-machine run following ONLY the site quickstart reaches a first auto-merged PR — paste the transcript/recording (the WS-4 acceptance bar)"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -1148,6 +1196,7 @@
       proof: "the claims CI job runs green on main with all seeded assertions exiting 0 — paste the job output"
     - claim: "a deliberately-broken claim turns the claims job RED and NAMES the false claim"
       proof: "reverting one assertion's premise (or breaking its command) makes the job exit non-zero and print the failing claim id/text — paste the red run, then revert"
+  risk: high
   origin: architect
   status: queued
   attempts: 0
@@ -1174,6 +1223,7 @@
       proof: "docs/architecture.md, docs/operator-guide.md, docs/task-lifecycle.md are present and non-trivial — paste the file list + first heading of each"
     - claim: "the reviewer rubric FLAGS a behavior-changing diff with no doc update"
       proof: "fixture test: a planted diff that changes a CLI/gate/verdict surface with NO docs/ change and no stated reason -> the awareness rubric item fails; the same diff WITH a doc update or a stated reason -> passes"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -1198,6 +1248,7 @@
       proof: "running the changelog generator over a history containing a feat: commit yields a new minor version section naming that change — paste the generated diff"
     - claim: "commitlint blocks a malformed commit message in CI"
       proof: "a PR whose commit violates Conventional Commits goes CI-red on the commitlint job — paste the red check, then fix"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -1223,6 +1274,7 @@
         medium+ (or reversibility-noted) decision IS appended — over recorded decision fixtures"
     - claim: "the trivial decisions are still recorded (ledger-only), never silently dropped"
       proof: "the same trivial auto-choice appears as a decision.autochoose ledger line even though it is absent from DECISIONS.md"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -1252,6 +1304,7 @@
       proof: "learnings/{platform,architecture,ci,testing,failures}.* exist; the generated index maps tag/files -> entry ids; a stale index FAILS CI (regenerate check) — paste the index + the check"
     - claim: "a SUPERSEDED entry is NEVER injected (live example: the false ZDOTDIR claim)"
       proof: "the entry claiming 'ZDOTDIR isolates worker shells' is marked lifecycle=superseded; a worker touching env.ts receives ONLY the CLAUDE_CODE_SHELL entry and NEVER the superseded ZDOTDIR one (fixture test over the rendered prompt)"
+  risk: high
   origin: architect
   status: queued
   attempts: 0
@@ -1277,6 +1330,7 @@
       proof: "a deliberately-broken assertion turns the learnings-assertion CI job RED and quarantines its entry (lifecycle flips) — paste the red run naming the entry, then revert"
     - claim: "a quarantined entry is ABSENT from a rendered prompt"
       proof: "fixture test: an entry whose assertion fails is excluded from the injected learnings for a matching task, even though its files: glob matches"
+  risk: high
   origin: architect
   status: queued
   attempts: 0
@@ -1301,6 +1355,7 @@
       proof: "a rendered-prompt test asserts the invariant preamble precedes the matched-learnings block; an early edit to the preamble is what would move, not the learnings"
     - claim: "cache tokens are ledgered and the second worker of a run shows cache reads > 0"
       proof: "paste the ledger lines before and after the change: cache_read_input_tokens is 0/absent before, > 0 on the second worker after (the stable prefix is being reused)"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -1326,6 +1381,7 @@
       proof: "a run driven past the compaction threshold produces a compaction ledger line and a quality_suspect=true flag on its verdict — paste the ledger lines"
     - claim: "the goal, acceptance criteria, and hard constraints are re-injected VERBATIM after compaction"
       proof: "fixture/transcript: after a compaction event the anchored block reappears byte-identical (not summarized) in the continued prompt"
+  risk: high
   origin: architect
   status: queued
   attempts: 0
@@ -1349,6 +1405,7 @@
       proof: "char-count proof before/after: the recon prompt drops from ~plan-body size to ~index size; grep shows the index headings present and the plan body absent"
     - claim: "a worker needing a specific section can grep for it and succeed"
       proof: "a task whose work needs §4A detail: the worker greps MASTER-PLAN for the §4A heading (named in the index) and retrieves it — transcript shows the grep + the hit"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -1373,6 +1430,7 @@
       proof: "a branch adding bulk active learnings over the cap makes the budget-ratchet CI job fail with the measured size vs cap — paste the red run, then revert"
     - claim: "superseded/quarantined entries do NOT count against the cap (only injectable weight is capped)"
       proof: "unit test: marking an entry superseded reduces the counted size; the same bytes as an active entry would exceed the cap"
+  risk: high
   origin: architect
   status: queued
   attempts: 0
@@ -1397,6 +1455,7 @@
       proof: "given ORIENTATION.md + the plan index (and nothing else), the named current state and next runnable task match the derived-from-GitHub status projection — paste both"
     - claim: "rmd retro regenerates ORIENTATION.md (it never goes stale by hand)"
       proof: "a retro run updates docs/ORIENTATION.md in its plan-only PR; the diff shows the refreshed state/next-task — paste the retro's ORIENTATION diff"
+  risk: medium
   origin: architect
   status: queued
   attempts: 0
@@ -1412,6 +1471,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  risk: medium
   origin: architect
   plan_refs: ["§7B"]
   rationale: "MASTER-PLAN §7B: FEEDBACK IS AN ARTIFACT, NOT A COMMAND. Today operator feedback has no front
@@ -1437,6 +1497,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  risk: medium
   origin: architect
   plan_refs: ["§7B"]
   rationale: "MASTER-PLAN §7B intake loop. A HIGHER-TIER Architect (G-17) turns a feedback artifact into a
@@ -1465,6 +1526,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  risk: medium
   origin: architect
   plan_refs: ["§7B"]
   rationale: "MASTER-PLAN §7B: the grill is where the VALUE is — a triage that never asks anything is
@@ -1493,6 +1555,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  risk: medium
   origin: architect
   plan_refs: ["§7B"]
   rationale: "MASTER-PLAN §7B / Standing rule 17: provenance for the plan means it must be TRACEABLE both
@@ -1518,6 +1581,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  risk: medium
   origin: architect
   plan_refs: ["§7B", "§7"]
   rationale: "MASTER-PLAN §7B in the control panel (§7 shell 0). The panel renders the traceability graph
@@ -1548,6 +1612,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  risk: medium
   origin: feedback#taxonomy
   plan_refs: ["§5B"]
   rationale: "MASTER-PLAN §5B: setup/plan/feedback/retro/review/refactor/design-review are ONE primitive (a
@@ -1574,6 +1639,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  risk: medium
   origin: feedback#taxonomy
   plan_refs: ["§5B"]
   rationale: "MASTER-PLAN §5B: Refine=clarify and Expand=expand are MODES of plan, not separate skills. The
@@ -1600,6 +1666,7 @@
   verify: auto
   principles: {tdd: encouraged}
   budget_usd: 100.00
+  risk: medium
   origin: feedback#taxonomy
   plan_refs: ["§3A", "§5"]
   rationale: "MASTER-PLAN §3A: 'tech-debt sweep' was under-built as a vibe (operator flagged it). Promote
@@ -1627,6 +1694,7 @@
   verify: human
   principles: {tdd: strict}
   budget_usd: 100.00
+  risk: medium
   origin: feedback#taxonomy
   plan_refs: ["§7C", "§5B"]
   rationale: "MASTER-PLAN §7C: the one genuinely-missing capability — an Architect-tier skill that validates
@@ -1657,6 +1725,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  risk: medium
   origin: feedback#taxonomy
   plan_refs: ["§5B", "§7"]
   rationale: "MASTER-PLAN §5B: each skill maps 1:1 to a UI action. The panel (§7 shell 0, W3-T6) surfaces
@@ -1683,6 +1752,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  risk: medium
   origin: feedback#drain
   plan_refs: ["§3", "§4"]
   rationale: "SUPERSEDES `rmd drain` v1's blunt STOP-ON-BLOCK (shipped this PR). v1 halts on ANY non-merged
@@ -1717,6 +1787,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  risk: high
   origin: feedback#docs
   plan_refs: ["§12A"]
   rationale: "MASTER-PLAN §12A Tier A: as the CLI grows (feedback/triage/trace/drain/skill/plan/retro),
@@ -1743,6 +1814,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  risk: high
   origin: feedback#docs
   plan_refs: ["§12A"]
   rationale: "MASTER-PLAN §12A the AWARENESS LAYER: docs are not evidence unless CI proves they match the
@@ -1768,6 +1840,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  risk: medium
   origin: feedback#docs
   plan_refs: ["§12A", "WS-12"]
   rationale: "MASTER-PLAN §12A one source, three surfaces: rmd --help, GitHub /docs (docs/cli-reference.md),
@@ -1794,6 +1867,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  risk: medium
   origin: feedback#docs
   plan_refs: ["§12A"]
   rationale: "MASTER-PLAN §12A Tier B: troubleshooting is NOT automatable (needs operator-impact context),

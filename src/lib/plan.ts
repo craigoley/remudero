@@ -24,6 +24,12 @@ export const TASK_STATUSES = [
 ] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
+/** Risk band — the second axis of the mount routing table (task_type × risk, §9). */
+export const TASK_RISKS = ["low", "medium", "high"] as const;
+export type TaskRisk = (typeof TASK_RISKS)[number];
+/** Default risk when a task omits it (medium — the routing table's middle mount). */
+export const DEFAULT_RISK: TaskRisk = "medium";
+
 /** A dependency is "satisfied" only once it has landed. */
 const MERGED_STATUSES = new Set<TaskStatus>(["merged", "done"]);
 
@@ -56,6 +62,12 @@ export interface Task {
   depends_on: string[];
   type: "recon" | "implement" | "diagnose" | "review" | "manual";
   verify: "auto" | "human";
+  /**
+   * Risk band (second mount-routing axis, §9) → resolves the run's mount
+   * (model/effort/max_turns) via resolveMount(type, risk). Absent ⇒ {@link
+   * DEFAULT_RISK} (medium). Schema/CI/telemetry-touching tasks run `high`.
+   */
+  risk: TaskRisk;
   /**
    * DECORATIVE / initial-state only. Real merge-state is DERIVED FROM GITHUB
    * (see lib/status.ts deriveStatus) and never written back here. Kept so the
@@ -119,6 +131,10 @@ export function loadPlan(path: string): Plan {
     const e = entry as Record<string, unknown>;
     const id = req(e.id as string, "id", String(e.id ?? "<unknown>"));
     if (byId.has(id)) throw new PlanError(`duplicate task id '${id}'`);
+    const risk = (e.risk ?? DEFAULT_RISK) as TaskRisk;
+    if (!TASK_RISKS.includes(risk)) {
+      throw new PlanError(`task ${id}: invalid risk '${risk}' (must be ${TASK_RISKS.join("|")})`);
+    }
     const status = (e.status ?? "queued") as TaskStatus;
     if (!TASK_STATUSES.includes(status)) {
       throw new PlanError(`task ${id}: invalid status '${status}'`);
@@ -130,6 +146,7 @@ export function loadPlan(path: string): Plan {
       depends_on: Array.isArray(e.depends_on) ? (e.depends_on as string[]) : [],
       type: req(e.type as Task["type"], "type", id),
       verify: (e.verify as Task["verify"]) ?? "auto",
+      risk,
       status,
       attempts: typeof e.attempts === "number" ? e.attempts : 0,
       principles: e.principles as Record<string, unknown> | undefined,

@@ -14,6 +14,7 @@ function task(over: Partial<Task> = {}): Task {
     repo: "remudero",
     depends_on: [],
     type: "implement",
+    risk: "medium",
     verify: "auto",
     status: "queued", // decorative — deriveStatus must NOT trust this
     attempts: 0,
