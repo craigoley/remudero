@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   architectModel,
   loadConfig,
+  notifyRecipient,
   softBudgetThreshold,
   workerModel,
   workerShell,
@@ -22,6 +23,9 @@ import {
   type DrainOpts,
   type MergedSet,
 } from "./lib/drain.js";
+import { buildDigest, sendDigest } from "./lib/digest.js";
+import { escalate, ghIssueGateway, type EscalationClass, type EscalationOption } from "./lib/escalate.js";
+import { imessageChannel, notify } from "./lib/notify.js";
 import { parseUsage, type UsageSnapshot } from "./lib/headroom.js";
 import {
   assertArchitectAboveWorker,
@@ -1248,6 +1252,111 @@ async function drainCommand(rest: string[]): Promise<number> {
   return summary.stopReason === "blocked" || summary.stopReason === "error" ? 1 : 0;
 }
 
+/** `--flag value` lookup over a raw argv tail; undefined if the flag is absent. */
+function flagValue(rest: string[], flag: string): string | undefined {
+  const i = rest.indexOf(flag);
+  return i >= 0 ? rest[i + 1] : undefined;
+}
+
+/** Every `--option "label|detail"` in argv tail, in order given. */
+function parseOptionFlags(rest: string[]): EscalationOption[] {
+  const options: EscalationOption[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] !== "--option") continue;
+    const raw = rest[i + 1] ?? "";
+    const sep = raw.indexOf("|");
+    options.push(sep >= 0 ? { label: raw.slice(0, sep), detail: raw.slice(sep + 1) } : { label: raw, detail: "" });
+  }
+  return options;
+}
+
+const ESCALATION_CLASSES: EscalationClass[] = ["BLOCKED", "MANUAL", "HARD_STOP"];
+
+/**
+ * `rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s>
+ *   [--detail <d>] [--recommendation <r>] [--option "label|detail"]...`
+ * Opens the `needs-human` labeled issue (escalate.ts) and, for MANUAL/HARD_STOP
+ * ONLY, also fires a real-time iMessage ping (§4: BLOCKED collapses to the digest).
+ */
+async function escalateCommand(rest: string[]): Promise<number> {
+  const cls = flagValue(rest, "--class");
+  const taskId = flagValue(rest, "--task");
+  const summary = flagValue(rest, "--summary");
+  if (!cls || !ESCALATION_CLASSES.includes(cls as EscalationClass) || !taskId || !summary) {
+    console.error(
+      'usage: rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option "label|detail"]...',
+    );
+    return 2;
+  }
+  const config = loadConfig();
+  const { owner, repo } = resolveOwnerRepo();
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const runId = `ESCALATE-${Date.now()}`;
+  const url = escalate(
+    {
+      class: cls as EscalationClass,
+      taskId,
+      runId,
+      summary,
+      detail: flagValue(rest, "--detail") ?? "",
+      options: parseOptionFlags(rest),
+      recommendation: flagValue(rest, "--recommendation") ?? "",
+    },
+    { issues: ghIssueGateway(owner, repo), ledgerPath, runId },
+  );
+  console.log(url);
+  if (cls === "MANUAL" || cls === "HARD_STOP") {
+    notify(`[${cls}] ${taskId}: ${summary}\n${url}`, {
+      channel: imessageChannel(notifyRecipient(config)),
+      ledgerPath,
+      runId,
+      taskId,
+    });
+  }
+  return 0;
+}
+
+/** `rmd notify <message>` — a real-time iMessage ping via osascript (notify.ts). */
+async function notifyCommand(rest: string[]): Promise<number> {
+  const message = rest.join(" ");
+  if (!message) {
+    console.error("usage: rmd notify <message>");
+    return 2;
+  }
+  const config = loadConfig();
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  notify(message, {
+    channel: imessageChannel(notifyRecipient(config)),
+    ledgerPath,
+    runId: `NOTIFY-${Date.now()}`,
+    taskId: "NOTIFY",
+  });
+  return 0;
+}
+
+/**
+ * `rmd digest [--since <iso>] [--dry-run]` — roll up the ledger since `--since`
+ * (default: 24h ago) into one message (digest.ts) and send it over iMessage;
+ * `--dry-run` prints the text without sending.
+ */
+async function digestCommand(rest: string[]): Promise<number> {
+  const since = flagValue(rest, "--since") ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const config = loadConfig();
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  if (rest.includes("--dry-run")) {
+    console.log(buildDigest(ledgerPath, since));
+    return 0;
+  }
+  const text = sendDigest(ledgerPath, since, {
+    channel: imessageChannel(notifyRecipient(config)),
+    ledgerPath,
+    runId: `DIGEST-${Date.now()}`,
+    taskId: "DIGEST",
+  });
+  console.log(text);
+  return 0;
+}
+
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(): Promise<void> {
   const [, , cmd, ...rest] = process.argv;
@@ -1266,8 +1375,17 @@ async function main(): Promise<void> {
   if (cmd === "drain") {
     process.exit(await drainCommand(rest));
   }
+  if (cmd === "escalate") {
+    process.exit(await escalateCommand(rest));
+  }
+  if (cmd === "notify") {
+    process.exit(await notifyCommand(rest));
+  }
+  if (cmd === "digest") {
+    process.exit(await digestCommand(rest));
+  }
   console.error(
-    "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task",
+    "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message",
   );
   process.exit(2);
 }

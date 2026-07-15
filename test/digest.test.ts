@@ -1,0 +1,81 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { buildDigest, collectSince, sendDigest, summarize } from "../src/lib/digest.js";
+import type { NotifyChannel } from "../src/lib/notify.js";
+
+function ledgerFile(lines: Array<Record<string, unknown>>): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-digest-"));
+  const p = join(dir, "ledger.ndjson");
+  writeFileSync(p, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  return p;
+}
+
+function fakeChannel(): NotifyChannel & { sent: string[] } {
+  const sent: string[] = [];
+  return { sent, send: (m) => sent.push(m) };
+}
+
+const LINES = [
+  { ts: "2026-07-13T00:00:00.000Z", step: "verdict", task_id: "W1-T1", verdict: "merged", cost_usd: 1.5 },
+  { ts: "2026-07-14T09:00:00.000Z", step: "verdict", task_id: "W1-T7", verdict: "merged", cost_usd: 2.25 },
+  {
+    ts: "2026-07-14T10:00:00.000Z",
+    step: "verdict",
+    task_id: "W1-T3",
+    verdict: "blocked_ci",
+    pr_url: "https://github.com/craigoley/remudero/pull/22",
+    cost_usd: 0.75,
+  },
+  {
+    ts: "2026-07-14T10:05:00.000Z",
+    step: "escalation.issue_opened",
+    task_id: "W1-T3",
+    class: "BLOCKED",
+    issue_url: "https://github.com/craigoley/remudero/issues/5",
+  },
+];
+
+test("collectSince keeps only lines at/after the marker", () => {
+  const kept = collectSince(LINES, "2026-07-14T00:00:00.000Z");
+  assert.equal(kept.length, 3);
+  assert.ok(kept.every((l) => (l.ts as string) >= "2026-07-14T00:00:00.000Z"));
+});
+
+test("summarize buckets merged/blocked/escalations and sums notional cost, ignoring stale lines", () => {
+  const s = summarize(LINES, "2026-07-14T00:00:00.000Z");
+  assert.deepEqual(s.merged, ["W1-T7"]);
+  assert.deepEqual(s.blocked, [{ taskId: "W1-T3", verdict: "blocked_ci", prUrl: "https://github.com/craigoley/remudero/pull/22" }]);
+  assert.deepEqual(s.escalations, [{ taskId: "W1-T3", class: "BLOCKED", issueUrl: "https://github.com/craigoley/remudero/issues/5" }]);
+  // 2.25 + 0.75, NOT the stale 1.5 from the prior day.
+  assert.equal(s.costUsd, 3.0);
+});
+
+test("buildDigest reads the ledger file and renders merged/blocked/escalations/cost", () => {
+  const path = ledgerFile(LINES);
+  const text = buildDigest(path, "2026-07-14T00:00:00.000Z");
+  assert.match(text, /merged: W1-T7/);
+  assert.match(text, /blocked: W1-T3 \(blocked_ci/);
+  assert.match(text, /escalations: \[BLOCKED\] W1-T3/);
+  assert.match(text, /notional cost: \$3\.00/);
+});
+
+test("an empty window renders (none) rather than blank sections", () => {
+  const path = ledgerFile(LINES);
+  const text = buildDigest(path, "2027-01-01T00:00:00.000Z");
+  assert.match(text, /merged: \(none\)/);
+  assert.match(text, /blocked: \(none\)/);
+  assert.match(text, /escalations: \(none\)/);
+});
+
+test("sendDigest delivers the built text over the notify channel and ledgers it", () => {
+  const path = ledgerFile(LINES);
+  const channel = fakeChannel();
+  const text = sendDigest(path, "2026-07-14T00:00:00.000Z", { channel, ledgerPath: path, runId: "DIGEST-1", taskId: "DIGEST" });
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0], text);
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.ok(lines.some((l) => l.step === "notify.sent"));
+});
