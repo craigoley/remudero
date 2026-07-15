@@ -192,7 +192,7 @@ arithmetic): 41 runs, 26 merged (63%), $105.72 total, $2.58 avg.
 tasks.yaml PR — never auto-filed, never worker-edited (rule 15).
 
 - **★ P6 (triage → golden) — `failed`×4 is a NEW verdict class and the LARGEST failure class this
-  cycle.** Every prior retro mined only `blocked_budget` / `blocked_review` / `blocked_ci` /
+  cycle. ★ FILED as W1-T52 (this PR; P5 `incomplete` folded in).** Every prior retro mined only `blocked_budget` / `blocked_review` / `blocked_ci` /
   `incomplete`. A bare **`failed`** appears in the vocabulary for the first time — and it is not in §2's
   status enum (`queued|recon|prompted|running|review|fixing|diagnosing|blocked|merged|done`) nor on
   rule 5's strike ladder. **The suspicion, stated as a falsifiable hypothesis, not a conclusion:** this
@@ -209,7 +209,9 @@ tasks.yaml PR — never auto-filed, never worker-edited (rule 15).
   NUMBER is stale. Propose a plan PR that updates the citation to this retro's table and re-checks
   whether medium/80 still has honest headroom at 45-turn means — **without** raising any budget to mask
   over-scoping. Rule 20 applies: re-grade the open queue against the corrected number.
-- **P8 (golden) — `blocked_review`×2 RECURS; P3 predicted it and was never ratified.** The same class
+- **P8 (golden) — `blocked_review`×2 RECURS; P3 predicted it and was never ratified. ★ EXECUTED this PR:
+  P3's rule-15 blocked-review golden MINTED as W1-T58, and ratify-or-kill CODIFIED as a standing retro duty
+  (§Self-improvement retro-ceremony prose).** The same class
   fired again a full retro after P3 proposed a guard for it. That is the finding: **an unratified
   proposal is not a neutral backlog item — it decays, and the failure it predicted repeats.** Propose
   P3's golden (a blocked-review run ADDS the work or ESCALATES, never edits its criteria — rule 15)
@@ -222,8 +224,8 @@ tasks.yaml PR — never auto-filed, never worker-edited (rule 15).
 
 **Standing (from RETRO-1784058021334) — status re-graded against this cycle's data:**
 
-- **P1 (golden) — flight control catches a spiral BEFORE the budget cliff. STILL OPEN, premise
-  CHANGED.** P1 was justified as "blocked_budget×3 is the largest failure class." **This cycle had ZERO
+- **P1 (golden) — flight control catches a spiral BEFORE the budget cliff. ★ FILED-DEPRIORITIZED as
+  W1-T59 (this PR); premise CHANGED.** P1 was justified as "blocked_budget×3 is the largest failure class." **This cycle had ZERO
   `blocked_budget` trips in 22 runs** — the $100 tripwire + soft-$25 warn line (§9) did their job. The
   golden is still worth minting (a spiral should be caught in-flight, per §4B), but it is no longer
   urgency-ranked by budget trips; P6 outranks it.
@@ -232,11 +234,11 @@ tasks.yaml PR — never auto-filed, never worker-edited (rule 15).
   MAGNITUDE above observed ($100 default), the soft line only WARNS, and 0/22 budget trips this cycle
   is the empirical confirmation. Recomputing caps from the mean is precisely the "tripwire as work
   limit" anti-pattern §9 exists to forbid. **P2 was proposing the bug.**
-- **P4 (golden) — blocked_ci ×1. STILL OPEN, no new evidence** (zero `blocked_ci` this cycle). Fold into
-  the CI-gate aggregator golden as originally proposed; no re-ranking.
-- **P5 (triage) — incomplete. STILL OPEN, class persists** (×1 this cycle, ×2 prior). Merge the triage
-  into P6's transcript pass — `failed` and `incomplete` may be the same hole seen from two sides, and
-  triaging them together is cheaper than twice.
+- **P4 (golden) — blocked_ci ×1. ★ FOLDED INTO W1-T24 (ratified this PR)** — the "RED sub-check holds the
+  merge closed (live)" criterion; no new `blocked_ci` evidence this cycle, no re-ranking.
+- **P5 (triage) — incomplete. ★ FOLDED INTO W1-T52 (ratified this PR)** — the `incomplete` class (×1 this
+  cycle, ×2 prior) is triaged in the SAME transcript pass as `failed`; they may be one hole seen from two
+  sides, cheaper together than twice.
 
 ## FIELD FINDINGS (from the mini, 2026-07-14 — ground truth, not docs)
 
@@ -1277,6 +1279,14 @@ and verdict-calibration data. Outputs are always artifacts, never vibes: LEARNIN
 **CLAUDE.md / agents-file / prompt-template diffs as PRs**, principles-profile tuning proposals,
 new golden tasks minted from real failures, and campaign proposals (§3A) when a finding spans
 repos. Retros must also DELETE — compression is a deliverable, not just accretion.
+
+**RATIFY-OR-KILL (standing duty, from P8):** every retro RE-GRADES every open proposal to exactly one of
+**ratified** (minted as a tasks.yaml task — cite the id) | **re-ranked** (still open, priority restated
+against new data) | **retired** (superseded/deleted, with the reason). The status is written INTO the
+proposals section, so the list can never become a graveyard. **An unranked proposal that survives TWO
+retros is itself a plan-health flag** (a W1-T20d input) — an unratified proposal is not neutral backlog,
+it decays, and the failure it predicted recurs (P3→P8: `blocked_review` fired again a full retro after
+P3 proposed a guard for it).
 
 **HARNESS-COMPRESSION (a required retro item):** *"Which guards are now unnecessary? Which prompts are
 over-prescriptive?"* Harnesses encode assumptions about what Claude cannot do on its own, and **those

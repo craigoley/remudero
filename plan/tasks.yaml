@@ -1133,10 +1133,14 @@
       proof: "gh api repos/craigoley/remudero/branches/main/protection --jq .required_status_checks.contexts shows [ci-gate, remudero-review]"
     - claim: "a deliberately-SKIPPED sub-job does NOT deadlock merge (proven LIVE)"
       proof: "a PR whose path filter skips a sub-job still reaches ci-gate GREEN and merges; paste the skipped sub-job status, the aggregator success, and the merge"
+    - claim: "a deliberately RED sub-check HOLDS the merge closed (proven LIVE)"
+      proof: "a planted FAILING sub-check leaves the PR unmergeable with ci-gate RED — paste the sub-check red state + the ci-gate red conclusion + the blocked merge, then revert"
   risk: high
   origin: architect
   status: queued
   attempts: 0
+  note: "Ratifies P4 (blocked_ci golden, RETRO-1784058021334) — the aggregator must fail-CLOSED on a real
+    red sub-check, not only pass-through a skipped one; the two liveness proofs are complementary."
 
 - id: W1-T25
   title: Quality tier on remudero — coverage ratchet + mutation baseline + jscpd + TS-strict FALSIFIED
@@ -2287,7 +2291,7 @@
 
 # Item 4 — P6 triage: name the terminal cause of each `failed`x4 run (read-only, no golden yet).
 - id: W1-T52
-  title: "P6 triage — name the terminal cause of each `failed`x4 run (read-only; no golden — P6a)"
+  title: "P6+P5 triage — name the terminal cause of each `failed`x4 AND `incomplete` run (read-only; no golden — P6a)"
   repo: remudero
   depends_on: [W1-T7]
   type: diagnose
@@ -2296,12 +2300,15 @@
   budget_usd: 100.00
   rationale: "Retro RETRO-1784133446353 P6: `failed`x4 is the LARGEST failure class this cycle and is
     untriaged. A read-only evidence pass (ledger + transcript access, NO patches): is `failed` a classifier
-    HOLE (W1-T7/#48 shipped transient-vs-strike) or a distinct legitimate verdict class?"
+    HOLE (W1-T7/#48 shipped transient-vs-strike) or a distinct legitimate verdict class? ★ P5 FOLDED IN
+    (RETRO-1784058021334, ratified this PR): the `incomplete` class (x1 this cycle, x2 prior) is triaged in
+    the SAME transcript pass — `failed` and `incomplete` may be one hole seen from two sides, cheaper to
+    triage together than twice."
   acceptance:
-    - claim: "each of the 4 `failed` runs' terminal cause is NAMED with transcript evidence"
-      proof: "a findings report cites, per run, the run_id + the terminal cause with a quoted transcript/ledger excerpt"
-    - claim: "an explicit verdict-class mapping OR a confirmed classifier hole is stated (no golden minted — P6a)"
-      proof: "the report concludes either 'failed = <distinct class>' with the mapping, or 'failed = a hole in <classifier>', and mints NO golden"
+    - claim: "each of the 4 `failed` AND the `incomplete` runs (x1 this cycle, x2 prior) has its terminal cause NAMED with transcript evidence"
+      proof: "a findings report cites, per run, the run_id + the terminal cause with a quoted transcript/ledger excerpt, covering BOTH classes"
+    - claim: "an explicit verdict-class mapping (incl. whether `failed` and `incomplete` are the same hole) OR a confirmed classifier hole is stated (no golden minted — P6a)"
+      proof: "the report concludes either '<verdict> = <distinct class>' with the mapping, or '<verdict> = a hole in <classifier>', for both classes, and mints NO golden"
   risk: medium
   origin: retro#1784133446353
   plan_refs: ["§4"]
@@ -2442,5 +2449,56 @@
   risk: medium
   origin: feedback#fleet-ops
   plan_refs: ["§5D"]
+  status: queued
+  attempts: 0
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+# PROPOSAL RATIFICATION (Architect, plan/proposal-ratification) — P8 ratify-or-kill. See PR body.
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+# Item 1 — MINT the rule-15 blocked-review golden (ratifies P3 via P8).
+- id: W1-T58
+  title: "Rule-15 blocked-review golden — a blocked_review run ADDS the work or ESCALATES, never edits its criteria"
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P3 via P8 (RETRO-1784058021334): `blocked_review` recurred (W1-T5/#42, W1-T8/#49)
+    because the guard P3 proposed was never minted. The T3E rubric guard covers the REVIEWER side (a
+    worker-authored satisfied_by is flagged); this golden covers the RUN-LOOP side — a blocked_review
+    outcome drives add-work-or-escalate, and a worker-run diff writing plan/tasks.yaml is refused/flagged."
+  acceptance:
+    - claim: "a seeded blocked_review outcome drives the ADD-WORK-OR-ESCALATE path with NO tasks.yaml write from the worker"
+      proof: "fixture test: a seeded blocked_review verdict routes to add-the-work or escalate; the run makes NO write to plan/tasks.yaml (assert the path taken + the absence of a tasks.yaml diff)"
+    - claim: "a worker-run diff that EDITS acceptance criteria (writes plan/tasks.yaml) is refused/flagged (rule 15)"
+      proof: "fixture: a planted worker diff that edits a criterion in plan/tasks.yaml is flagged (the rule-15 guard fires); a clean non-tasks.yaml diff passes"
+  risk: medium
+  origin: retro#1784058021334
+  plan_refs: ["§5"]
+  files: [src/run-task.ts, src/lib/review.ts]
+  status: queued
+  attempts: 0
+
+# Item 2 — FILE the P1 spiral golden, explicitly DEPRIORITIZED (0 blocked_budget in 22 runs; P6 outranks).
+- id: W1-T59
+  title: "P1 spiral golden — an engineered-to-spiral run trips a Layer-1 predicate + invokes the judge BEFORE the budget cliff"
+  repo: remudero
+  depends_on: [W1-T21]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "P1 (RETRO-1784058021334): a spiral should be caught IN-FLIGHT (§4B), not at the budget cliff.
+    ★ DEPRIORITIZED per the re-grade — ZERO blocked_budget trips in 22 runs this cycle (the $100 tripwire +
+    soft $25 warn did their job), so P1 is no longer urgency-ranked by budget trips; P6 (W1-T52) outranks
+    it. Still worth minting so the in-flight catch is PROVEN, not assumed."
+  acceptance:
+    - claim: "an engineered-to-spiral fixture trips a Layer-1 burn-rate/repetition predicate and invokes the flight judge BEFORE any budget cliff"
+      proof: "fixture: a spiraling transcript (same edit reverted / flat burn) trips the Layer-1 predicate and dispatches the flight judge in the ledger, with NO blocked_budget reached"
+  risk: medium
+  origin: retro#1784058021334
+  plan_refs: ["§4B"]
   status: queued
   attempts: 0
