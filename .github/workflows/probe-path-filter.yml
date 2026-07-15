@@ -1,0 +1,28 @@
+name: Probe path-filter sub-job
+
+# W1-T24b live proof (acceptance criterion 2): "a deliberately-SKIPPED sub-job
+# does NOT deadlock merge." This job is scoped, via `paths:`, to a directory no
+# ordinary PR touches — so on a normal PR it registers NO check run at all (the
+# exact synthwatch #102 shape: a path-filtered workflow that produces no
+# check-run under its context name). It is deliberately NOT in ci-gate.yml's
+# REQUIRED list, so its absence must never block ci-gate or the merge. The PR
+# that introduced this file (itself scoped outside fixtures/probe-path-filter/**)
+# is the live proof: ci-gate went green and the PR merged with this job entirely
+# absent from the check-runs list. Proof pasted in docs/ci-gate.md.
+#
+# Kept live afterward as a cheap permanent regression fixture for the same
+# mechanism the future W1-T25/T26 tiered path-filtered sub-jobs will rely on.
+on:
+  pull_request:
+    paths:
+      - "fixtures/probe-path-filter/**"
+
+permissions:
+  contents: read
+
+jobs:
+  probe-path-filter:
+    name: probe-path-filter
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "only runs when fixtures/probe-path-filter/** changes"
