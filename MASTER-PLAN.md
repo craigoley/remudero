@@ -1394,12 +1394,14 @@ both places for two retros). **Remainder scoped here and NOT shipped: flight con
 linter (W1-T20c/d), the knowledge holes (W1-T33–T39)** — mounts.yaml v0 (W1-T5) SHIPPED as #42.
 
 **WS-2 — Flow & quality**: reviewer worker + rubric; provenance linter hardened; N-concurrent
-worktrees with per-repo caps + **merge serialization per repo** (Bors-style: never two auto-merges
+worktrees with per-repo caps + **N per-worker isolated HOMES** — the singleton <root>/worker-home (W1-T18/#100/#102) does NOT survive concurrency; every concurrent worker needs its own worker-home-<runId> with its own empty rc + its own login.keychain-db / .claude / .config/gh symlinks. A shared home races on rc materialization and the keychain grant. VALIDATE at build: N workers symlinked to the one real login.keychain-db — securityd gates per-item by code identity, but confirm concurrent authentication does not serialize on keychain lock contention. + **merge serialization per repo** (Bors-style: never two auto-merges
 racing one main); **task heartbeats + stall detection** (no ledger output in N min ⇒ classify hung,
 kill, transient-retry); stuck-PR shepherd (absorbs/retires pr-pipeline.sh); rate-limit-aware
 dispatch governor; scope guard (diff/files budget); first fleet-repo target (wild-trails backlog).
 Acceptance: two tasks run concurrently, one induced conflict auto-resolves, one induced hang is
 detected and recycled; proof = ledger timeline.
+
+★ PARALLELISM GRANULARITY (grounded — 2026 field consensus + arxiv, Architect 2026-07-16): parallelize INDEPENDENT TASKS (the DAG), NEVER one task's implementation across sub-agents. Git-worktree-per-task isolation is the industry+research standard, but the hard lesson is that worktrees solve FILE collisions, not DEPENDENCY/SEMANTIC conflicts — agents editing related files under incompatible assumptions produce errors that only surface AT INTEGRATION. What makes parallelism safe is HIERARCHICAL TASK DECOMPOSITION (our depends_on DAG), not the concurrency mechanism: independent DAG nodes run concurrent; dependent ones SEQUENCE. A 2026 result (Glite ARF) mirrors this — 12 task-worktrees parallel on one 48GB Mac, zero merge conflicts reaching main, parallelism at TASK granularity NOT agent-granularity-inside-one-problem. This VINDICATES the 'small worker counts, hard verdicts, plan-first' bet and sets its shape: fan out cheap Sonnet workers across independent tasks (mounts already routes implement→sonnet), bounded by the rate-limit-aware governor + headroom, merge-serialized per repo. Intra-task sub-agents are acceptable ONLY for read-heavy recon (additive outputs), never for splitting an implementation. PREREQUISITE: the concurrent drainer depends on the block-reasoner (W1-T46) — until 'one blocked task doesn't stall the independent others' exists, drain-v1 stop-on-block makes concurrency pointless.
 
 **WS-3 — Principles engine**: principles.yaml loader; TDD Guard integration + red→green REPORT
 proof; coverage ratchet + jscpd + dependency-cruiser CI templates; auto-filed refactor tasks;
