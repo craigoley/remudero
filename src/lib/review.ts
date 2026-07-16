@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { AcceptanceCriterion } from "./plan.js";
 
 /**
@@ -30,12 +32,36 @@ export const REVIEW_CONTEXT = "remudero-review";
 /** A commit-status state. GitHub statuses also allow `pending`/`error`; the gate uses these two. */
 export type ReviewState = "success" | "failure";
 
+/**
+ * Observed outcome of executing a criterion's proof against the PR head (W1-T65,
+ * ratifies P15). Recorded per-criterion on {@link CriterionVerdict} and surfaced on
+ * the `review.posted` ledger line + console summary (run-task.ts) so an OBSERVED
+ * verdict is legible vs a KEYWORD one:
+ *   executed_pass  — the proof's whitelisted test/grep ran and passed/matched on
+ *                     the head. MEETS the criterion regardless of report keywords
+ *                     (kills the #100 false-block: repo-state truth, unclaimed).
+ *   executed_fail  — it ran and FAILED / found no match. OVERRIDES any keyword
+ *                     coverage (kills the W1-T51 false-pass: a claim the repo
+ *                     state refutes never merges on prose alone).
+ *   not_executable — the proof is free prose (or no head checkout dir was given).
+ *                     The keyword floor is UNCHANGED — this is the default for
+ *                     every caller that predates this task.
+ *   exec_error     — the whitelisted check threw or timed out. DEGRADES to the
+ *                     keyword floor verdict computed alongside it, verbatim —
+ *                     an environment hiccup must never silently hard-fail or
+ *                     stall the fleet (Standing rule: no absent-check deadlock).
+ */
+export type ProofExecOutcome = "executed_pass" | "executed_fail" | "not_executable" | "exec_error";
+
 /** One criterion's verdict against its stated proof. */
 export interface CriterionVerdict {
   claim: string;
   proof: string;
   met: boolean;
   reason: string;
+  /** See {@link ProofExecOutcome}. Always present — `not_executable` is the safe
+   * default when the proof is prose, or no PR-head checkout was supplied. */
+  proof_exec: ProofExecOutcome;
 }
 
 /** The evidence the JUDGE reads: the PR diff, the implement REPORT, optional LLM verdicts. */
@@ -51,6 +77,23 @@ export interface ReviewEvidence {
    * downgrade — it can never upgrade an unpasted proof to a pass.
    */
   semantic?: (boolean | undefined)[];
+  /**
+   * The checkout dir whitelisted proofs execute in — MUST be the PR HEAD sha (the
+   * runner's own worktree when judging its own run; a fresh checkout fetched at
+   * the head sha on the `rmd review` path). NEVER the operator's working checkout
+   * (HEAD DISCIPLINE, W1-T65 design). Absent ⇒ proof execution is skipped for
+   * every criterion (`proof_exec` is `not_executable` throughout) — the keyword
+   * floor is byte-identical to pre-W1-T65 behavior, which is what every caller
+   * that predates this task (and every fixture below) gets by default.
+   */
+  headCheckoutDir?: string;
+  /**
+   * Injected proof executor. Real callers omit this — {@link execWhitelistedProof}
+   * (the real, whitelist-bounded shell-out) is the default. Tests inject a fake so
+   * override/degrade semantics are proven without touching the filesystem or a
+   * shell (acceptance: "unit test over an injected executor").
+   */
+  execProof?: ProofExecutor;
 }
 
 /** The rolled-up review verdict — exactly what {@link postReviewStatus} posts. */
@@ -174,13 +217,140 @@ export function detectTestTheater(diff: string): boolean {
   return !hasRealAssertion;
 }
 
+// ── Whitelisted proof execution (W1-T65, ratifies P15) ─────────────────────
+//
+// Lifts W1-T3F's whitelisted-proof execution — previously only the ADVISORY
+// fresh-context reviewer's own judgment (buildReviewPrompt below tells the LLM to
+// check out the head and run a proof's test/grep itself) — INTO this deterministic
+// FLOOR, so the gate observes repo state whether or not that LLM reviewer ever
+// completes. WHITELIST UNCHANGED from W1-T3F: only two shapes are ever executed,
+// and NOTHING else — no arbitrary code from proof text:
+//   (1) a named TEST FILE path (`test/**/*.test.ts` or `.spec.*`), run via the
+//       project's own test runner (`node --test --import tsx <path>`, exactly the
+//       package.json `test` script scoped to one file);
+//   (2) a literal, BACKTICK-FENCED `grep ...` command (e.g. `` `grep -n foo bar.ts` ``)
+//       — fenced so a proof must be UNAMBIGUOUS to qualify; unfenced prose like
+//       "grep of src shows X" is NOT this shape and stays on the keyword floor.
+// Both are executed via execFile (never a shell), so proof TEXT can never inject
+// shell metacharacters into a command line — but the fenced grep body is still
+// rejected outright (not_executable, nothing executed) if it contains any of
+// `; & \` $ < >` or a newline, as defense in depth (acceptance: proof execution is
+// bounded to the whitelist). Anything that doesn't match either shape is
+// not_executable — the keyword floor stands alone, unchanged.
+
+/** A proof shape the floor is willing to mechanically execute. */
+export interface WhitelistedProof {
+  kind: "test" | "grep";
+  /** argv[0] — passed to execFile, never a shell. */
+  command: string;
+  /** argv[1..] — proof text is never concatenated into a shell string. */
+  args: string[];
+  /** Human-legible label for reasons (the matched path, or the fenced command). */
+  label: string;
+}
+
+const TEST_PATH_RE = /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/;
+const GREP_FENCE_RE = /`(grep\s+[^`]+)`/;
+const UNSAFE_FENCE_CHARS_RE = /[;&`$<>\n]/;
+
+/** Tokenise a fenced shell-like command, honoring simple `"…"` / `'…'` quoting. No
+ * escape sequences (a proof needing one is simply not whitelisted — fine). */
+function tokenizeFenced(s: string): string[] {
+  const tokens: string[] = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(s))) tokens.push(m[1] ?? m[2] ?? m[3]);
+  return tokens;
+}
+
+/**
+ * Parse a proof for a whitelisted, mechanically-executable shape. Returns `null`
+ * for free prose (or an unsafe/unwhitelisted shape) — the caller then defers
+ * entirely to the keyword floor, never attempting execution.
+ */
+export function parseWhitelistedProof(proof: string): WhitelistedProof | null {
+  const testMatch = proof.match(TEST_PATH_RE);
+  if (testMatch) {
+    const path = testMatch[0];
+    if (path.includes("..")) return null; // no path traversal out of the checkout
+    return { kind: "test", command: "node", args: ["--test", "--import", "tsx", path], label: path };
+  }
+  const grepMatch = proof.match(GREP_FENCE_RE);
+  if (grepMatch) {
+    const fenced = grepMatch[1];
+    if (UNSAFE_FENCE_CHARS_RE.test(fenced)) return null; // shell metacharacters ⇒ refuse, not sanitize
+    const tokens = tokenizeFenced(fenced);
+    if (tokens[0] !== "grep" || tokens.length < 2) return null;
+    return { kind: "grep", command: "grep", args: tokens.slice(1), label: fenced };
+  }
+  return null;
+}
+
+/** Executes a {@link WhitelistedProof}'s argv and reports whether it passed —
+ * injectable so unit tests fake pass/fail/throw without touching the filesystem. */
+export type ProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => "pass" | "fail";
+
+const DEFAULT_PROOF_TIMEOUT_MS = 30_000;
+const npmCiPrimed = new Set<string>();
+
+/** `npm ci` a fresh checkout ONCE before its first test proof (design: "fresh
+ * worktrees have no node_modules"). Best-effort: a failed/skipped install is never
+ * a silent hard-fail here — the test command below will itself fail to run, which
+ * surfaces as exec_error on that criterion, never a false pass. */
+function ensureDeps(cwd: string): void {
+  if (npmCiPrimed.has(cwd)) return;
+  npmCiPrimed.add(cwd); // mark attempted regardless of outcome — never retry-storm a cwd
+  if (!existsSync(join(cwd, "package.json")) || existsSync(join(cwd, "node_modules"))) return;
+  try {
+    execFileSync("npm", ["ci"], { cwd, stdio: "pipe", timeout: 120_000 });
+  } catch {
+    /* best-effort priming; see doc comment above */
+  }
+}
+
+/**
+ * The REAL proof executor (production default): run a {@link WhitelistedProof}'s
+ * argv, no shell, in `cwd`, with a HARD per-proof timeout — a hanging test must
+ * never stall the required check into the absent-check deadlock class. Returns
+ * `"pass"` on a clean exit 0; `"fail"` on ANY clean nonzero exit — a failing test,
+ * a grep that found no match (exit 1), AND a grep given a since-renamed/missing
+ * path (exit 2) all count as "fail": the proof named something the PR head does
+ * not observably contain, which is the criterion genuinely unmet, not an
+ * environment hiccup. THROWS only when the process never ran to a clean exit at
+ * all (a timeout kill, a spawn error like the command itself missing) so the
+ * caller surfaces `exec_error` — a timeout must never be misjudged as an
+ * observed "fail".
+ */
+export function execWhitelistedProof(
+  whitelisted: WhitelistedProof,
+  cwd: string,
+  timeoutMs = DEFAULT_PROOF_TIMEOUT_MS,
+): "pass" | "fail" {
+  if (whitelisted.kind === "test") ensureDeps(cwd);
+  try {
+    execFileSync(whitelisted.command, whitelisted.args, { cwd, stdio: "pipe", timeout: timeoutMs });
+    return "pass";
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException & { status?: number | null };
+    if (typeof err.status === "number") return "fail"; // ran to a clean nonzero exit
+    throw err; // killed by signal (timeout) / spawn error (ENOENT, …) ⇒ exec_error
+  }
+}
+
 // ── The pure JUDGE ─────────────────────────────────────────────────────────
+
+/** PR-head checkout a criterion's proof may be executed against (W1-T65). */
+export interface ProofExecContext {
+  cwd: string;
+  exec?: ProofExecutor;
+}
 
 /** Verdict one criterion against its proof, given the report + optional semantic. */
 export function judgeCriterion(
   criterion: AcceptanceCriterion,
   reportTokens: Set<string>,
   semantic?: boolean,
+  execCtx?: ProofExecContext,
 ): CriterionVerdict {
   const base = { claim: criterion.claim, proof: criterion.proof };
 
@@ -189,7 +359,12 @@ export function judgeCriterion(
   // without this an earlier-PR criterion is permanently unsatisfiable by a later PR.
   // (Setting this is a human/Architect act in a plan PR — never a worker's own edit.)
   if (criterion.satisfied_by) {
-    return { ...base, met: true, reason: `satisfied by ${criterion.satisfied_by} (prior merge)` };
+    return {
+      ...base,
+      met: true,
+      reason: `satisfied by ${criterion.satisfied_by} (prior merge)`,
+      proof_exec: "not_executable",
+    };
   }
 
   const kws = proofKeywords(criterion.proof);
@@ -214,14 +389,45 @@ export function judgeCriterion(
     }
   }
 
+  // WHITELISTED PROOF EXECUTION (W1-T65 — lifts W1-T3F's observation into the
+  // FLOOR): when a PR-head checkout dir is given AND the proof names an executable
+  // check, RUN it and let the OBSERVED result override the keyword floor above in
+  // BOTH directions:
+  //   executed_pass ⇒ MET, even if the report never claimed it (kills #100).
+  //   executed_fail ⇒ UNMET, even if the report keyword-claimed it (kills W1-T51).
+  // exec_error DEGRADES to the keyword floor computed above, verbatim — never a
+  // silent hard-fail, never a stall.
+  let proofExec: ProofExecOutcome = "not_executable";
+  if (execCtx) {
+    const whitelisted = parseWhitelistedProof(criterion.proof);
+    if (whitelisted) {
+      const exec = execCtx.exec ?? execWhitelistedProof;
+      try {
+        const outcome = exec(whitelisted, execCtx.cwd);
+        if (outcome === "pass") {
+          proofExec = "executed_pass";
+          met = true;
+          reason = `proof executed and PASSED on the PR head (${whitelisted.kind}: ${whitelisted.label})`;
+        } else {
+          proofExec = "executed_fail";
+          met = false;
+          reason = `proof executed and FAILED on the PR head (${whitelisted.kind}: ${whitelisted.label}) — overrides any keyword coverage`;
+        }
+      } catch {
+        proofExec = "exec_error"; // met/reason stay EXACTLY the keyword-floor verdict above
+      }
+    }
+  }
+
   // Semantic can only DOWNGRADE: an explicit `false` fails the criterion even if
-  // it was mechanically substantiated; it can never rescue an unpasted proof.
+  // it was mechanically substantiated (or executed-pass); it can never rescue an
+  // unpasted / executed-fail proof.
   if (semantic === false && met) {
     met = false;
     reason = "reviewer judged the proof non-responsive (semantic downgrade)";
   }
 
-  return { ...base, met, reason };
+  return { ...base, met, reason, proof_exec: proofExec };
 }
 
 /**
@@ -235,8 +441,14 @@ export function judgeReview(
   evidence: ReviewEvidence,
 ): ReviewVerdict {
   const reportTokens = new Set(tokenize(evidence.report));
+  // Absent headCheckoutDir ⇒ execCtx is undefined ⇒ every criterion is
+  // not_executable and the keyword floor is byte-identical to pre-W1-T65 —
+  // exactly what every fixture/caller that predates this task still gets.
+  const execCtx: ProofExecContext | undefined = evidence.headCheckoutDir
+    ? { cwd: evidence.headCheckoutDir, exec: evidence.execProof }
+    : undefined;
   const verdicts = criteria.map((c, i) =>
-    judgeCriterion(c, reportTokens, evidence.semantic?.[i]),
+    judgeCriterion(c, reportTokens, evidence.semantic?.[i], execCtx),
   );
   const testTheater = detectTestTheater(evidence.diff);
 

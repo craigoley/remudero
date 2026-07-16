@@ -15,8 +15,10 @@ import {
   judgeRubric,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
+  parseWhitelistedProof,
   reviewerOutcome,
   reviewerVerdictContract,
+  type ProofExecutor,
 } from "../src/lib/review.js";
 
 // ── Recorded fixtures (acceptance #2, the FALSIFIER) ────────────────────────
@@ -558,4 +560,188 @@ test("reviewerOutcome: never attempted (spawnReviewer=false or no criteria) is d
 test("reviewerOutcome: a spawn that THREW (no subtype to report) is distinct from a subtype outcome", () => {
   const outcome = reviewerOutcome({ attempted: true, spawnError: true, subtype: undefined });
   assert.equal(outcome, "spawn_error");
+});
+
+// ── W1-T65 (ratifies P15): the deterministic FLOOR executes whitelisted proofs
+// against the PR head — observation survives reviewer death. GROUND TRUTH the
+// task is built to fix: W1-T18/#100 (a criterion GENUINELY met in repo state but
+// never keyword-claimed in the report was blocked) and W1-T51 (a criterion
+// keyword-claimed in the report was merged though the repo state refuted it).
+// Every fixture below injects `execProof` (a fake executor) — never touches the
+// filesystem or a real shell — per the acceptance's own falsifier shape.
+
+test("parseWhitelistedProof: a named test-file proof is the 'test' shape", () => {
+  const wp = parseWhitelistedProof("run `test/foo.test.ts` and see it pass");
+  assert.ok(wp);
+  assert.equal(wp!.kind, "test");
+  assert.deepEqual(wp!.args, ["--test", "--import", "tsx", "test/foo.test.ts"]);
+});
+
+test("parseWhitelistedProof: a fenced literal grep command is the 'grep' shape", () => {
+  const wp = parseWhitelistedProof('proof: `grep -n "frobnicate(" src/lib/thing.ts`');
+  assert.ok(wp);
+  assert.equal(wp!.kind, "grep");
+  assert.deepEqual(wp!.args, ["-n", "frobnicate(", "src/lib/thing.ts"]);
+});
+
+test("parseWhitelistedProof: free prose (no fence, no test path) is null — not_executable", () => {
+  assert.equal(parseWhitelistedProof("grep of src shows frobnicate(widget) called at the boundary"), null);
+  assert.equal(parseWhitelistedProof("the resolver returns max_turns per mount"), null);
+});
+
+test("parseWhitelistedProof: a fenced grep with shell metacharacters is REFUSED (null), not sanitized", () => {
+  assert.equal(parseWhitelistedProof("`grep foo; rm -rf /`"), null);
+  assert.equal(parseWhitelistedProof("`grep foo && cat /etc/passwd`"), null);
+  assert.equal(parseWhitelistedProof("`grep $(whoami) bar.ts`"), null);
+  assert.equal(parseWhitelistedProof("`grep foo > /tmp/x`"), null);
+});
+
+test("parseWhitelistedProof: a test path with '..' is refused (no traversal out of the checkout)", () => {
+  assert.equal(parseWhitelistedProof("run `test/../../etc/evil.test.ts`"), null);
+});
+
+// A criterion whose proof names a whitelisted test, but whose CLAIM/PROOF share no
+// keywords with the report at all (so the keyword floor alone would fail it).
+const T100_CRITERIA: AcceptanceCriterion[] = [
+  {
+    claim: "the HOME-redirection code is present on the branch",
+    proof: "run `test/home-redirect.test.ts`",
+  },
+];
+const T100_SILENT_REPORT = "REPORT — did a bunch of unrelated cleanup, said nothing about the above.";
+
+test("ACCEPTANCE #1 (the #100 false-block): executed_pass MEETS the criterion though the report never claims it", () => {
+  const alwaysPass: ProofExecutor = () => "pass";
+  const v = judgeReview(T100_CRITERIA, {
+    diff: "",
+    report: T100_SILENT_REPORT,
+    headCheckoutDir: "/fake/head/checkout",
+    execProof: alwaysPass,
+  });
+  assert.equal(v.state, "success", v.summary);
+  assert.equal(v.criteria[0].met, true);
+  assert.equal(v.criteria[0].proof_exec, "executed_pass");
+});
+
+// A criterion the report keyword-claims fully (would PASS the keyword floor alone)
+// but whose named proof genuinely FAILS on the head.
+const W1T51_CRITERIA: AcceptanceCriterion[] = [
+  { claim: "the union merges cleanly", proof: "run `test/gather-union.test.ts`" },
+];
+const W1T51_CLAIMING_REPORT =
+  "REPORT — the union merges cleanly: run test/gather-union.test.ts and see it pass. Done.";
+
+test("ACCEPTANCE #2 (the W1-T51 false-pass): executed_fail OVERRIDES full keyword coverage", () => {
+  const alwaysFail: ProofExecutor = () => "fail";
+  const v = judgeReview(W1T51_CRITERIA, {
+    diff: "",
+    report: W1T51_CLAIMING_REPORT,
+    headCheckoutDir: "/fake/head/checkout",
+    execProof: alwaysFail,
+  });
+  assert.equal(v.state, "failure", v.summary);
+  assert.equal(v.criteria[0].met, false);
+  assert.equal(v.criteria[0].proof_exec, "executed_fail");
+  assert.match(v.criteria[0].reason, /overrides any keyword coverage/);
+});
+
+test("ACCEPTANCE #3: a free-prose proof is byte-identical to the pre-W1-T65 floor (proof_exec=not_executable)", () => {
+  const proseCriteria: AcceptanceCriterion[] = [
+    { claim: "the widget is frobnicated", proof: "grep of src shows frobnicate(widget) called at the boundary" },
+  ];
+  const neverCalled: ProofExecutor = () => {
+    throw new Error("must never be called for a free-prose proof");
+  };
+  const withExec = judgeReview(proseCriteria, {
+    diff: "",
+    report: "did something else entirely",
+    headCheckoutDir: "/fake/head/checkout",
+    execProof: neverCalled,
+  });
+  const withoutExec = judgeReview(proseCriteria, { diff: "", report: "did something else entirely" });
+  assert.deepEqual(withExec.criteria[0], { ...withoutExec.criteria[0], proof_exec: "not_executable" });
+  assert.equal(withoutExec.criteria[0].proof_exec, "not_executable");
+  assert.equal(withExec.state, withoutExec.state);
+});
+
+test("ACCEPTANCE #4: an executor that THROWS (exec_error/timeout) degrades to the keyword floor verdict, never a stall", () => {
+  const throwing: ProofExecutor = () => {
+    throw new Error("ETIMEDOUT: proof timed out");
+  };
+  const criteria: AcceptanceCriterion[] = [
+    { claim: "the resolver returns maxTurns", proof: "run `test/resolver.test.ts`" },
+  ];
+  const responsiveReport = "the resolver returns maxTurns and context_budget per mount";
+  const withExec = judgeReview(criteria, {
+    diff: "",
+    report: responsiveReport,
+    headCheckoutDir: "/fake/head/checkout",
+    execProof: throwing,
+  });
+  const floorOnly = judgeReview(criteria, { diff: "", report: responsiveReport });
+  // Verdict equals the keyword-floor verdict exactly (met + reason), and the ONLY
+  // difference is the legible proof_exec field.
+  assert.equal(withExec.criteria[0].met, floorOnly.criteria[0].met);
+  assert.equal(withExec.criteria[0].reason, floorOnly.criteria[0].reason);
+  assert.equal(withExec.criteria[0].proof_exec, "exec_error");
+  assert.equal(floorOnly.criteria[0].proof_exec, "not_executable");
+  assert.equal(withExec.state, floorOnly.state);
+});
+
+test("ACCEPTANCE #5: an unwhitelisted/unsafe proof shape is not_executable and the executor is NEVER called", () => {
+  const neverCalled: ProofExecutor = () => {
+    throw new Error("must never be called for an unwhitelisted proof");
+  };
+  const criteria: AcceptanceCriterion[] = [
+    { claim: "no injection possible", proof: "`grep foo; rm -rf /`" },
+  ];
+  const v = judgeReview(criteria, {
+    diff: "",
+    report: "grep foo; rm -rf /", // even if the report echoes it verbatim
+    headCheckoutDir: "/fake/head/checkout",
+    execProof: neverCalled,
+  });
+  assert.equal(v.criteria[0].proof_exec, "not_executable");
+});
+
+test("ACCEPTANCE #6: proofs execute in the PROVIDED head-checkout dir (never a hardcoded/operator path)", () => {
+  const seenCwds: string[] = [];
+  const recording: ProofExecutor = (_wp, cwd) => {
+    seenCwds.push(cwd);
+    return "pass";
+  };
+  const criteria: AcceptanceCriterion[] = [{ claim: "x", proof: "run `test/whatever.test.ts`" }];
+  const headDir = "/fake/pr-head/checkout-at-sha-abc123";
+  judgeReview(criteria, { diff: "", report: "unrelated", headCheckoutDir: headDir, execProof: recording });
+  assert.deepEqual(seenCwds, [headDir]);
+});
+
+test("satisfied_by short-circuits proof execution entirely (proof_exec=not_executable, executor never called)", () => {
+  const neverCalled: ProofExecutor = () => {
+    throw new Error("satisfied_by must never trigger execution");
+  };
+  const criteria: AcceptanceCriterion[] = [
+    { claim: "already shipped", proof: "run `test/whatever.test.ts`", satisfied_by: "#16" },
+  ];
+  const v = judgeReview(criteria, {
+    diff: "",
+    report: "unrelated",
+    headCheckoutDir: "/fake/head",
+    execProof: neverCalled,
+  });
+  assert.equal(v.criteria[0].met, true);
+  assert.equal(v.criteria[0].proof_exec, "not_executable");
+});
+
+test("a semantic FAIL still downgrades an executed_pass criterion (semantic remains downgrade-only)", () => {
+  const alwaysPass: ProofExecutor = () => "pass";
+  const v = judgeReview(T100_CRITERIA, {
+    diff: "",
+    report: T100_SILENT_REPORT,
+    headCheckoutDir: "/fake/head/checkout",
+    execProof: alwaysPass,
+    semantic: [false],
+  });
+  assert.equal(v.criteria[0].met, false);
+  assert.equal(v.criteria[0].proof_exec, "executed_pass"); // observability is unaffected by the downgrade
 });
