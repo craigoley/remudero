@@ -40,6 +40,17 @@ test("workerHomePlan: symlinks map each ALLOWLISTED path from the real HOME into
   }
 });
 
+test("workerHomePlan: the macOS login keychain is symlinked back — the OAuth token is HOME-relative (W1-T18 spawn-deadlock fix)", () => {
+  const plan = workerHomePlan({ workerHome: "/scratch/worker-home", realHome: "/Users/operator" });
+  const kc = plan.symlinks.find((s) => s.from.endsWith("/Library/Keychains/login.keychain-db"));
+  assert.ok(kc, "the login keychain (Claude Code-credentials OAuth token) must be granted back, or a redirected HOME hides it and the worker exits 'Not logged in' at $0 before any turn");
+  assert.equal(kc!.to, "/Users/operator/Library/Keychains/login.keychain-db", "must point at the REAL login keychain");
+  assert.match(kc!.reason, /keychain|OAuth/i, "the grant states why the keychain is needed");
+  // Minimality: ONLY the single DB file is granted, never the whole ~/Library.
+  const libGrants = plan.symlinks.filter((s) => s.from.includes("/Library/"));
+  assert.equal(libGrants.length, 1, "exactly ONE path under ~/Library is granted (the login keychain DB), not the whole Library");
+});
+
 // ── materializeWorkerHome: given an INJECTED HOME, isolation holds on disk ──
 
 test("materializeWorkerHome: every rc file is created and EMPTY under the injected workerHome (isolation independent of operator dotfiles)", () => {
