@@ -85,6 +85,10 @@ export interface Task {
   acceptance?: AcceptanceCriterion[];
   hand_built?: boolean;
   note?: string;
+  /** Provenance (Rules 16/17): where this task came from — `architect`, `feedback#…`,
+   *  `alert#…`, `issue#…`. Never defaulted (unlike `risk`) — its absence is itself
+   *  the fact the §5C linter's provenance check reports. */
+  origin?: string;
   /** Pre-authored worker instruction (the "what to do"). */
   prompt?: string;
   /** Pre-cited context claims folded into the rendered prompt's CONTEXT block. */
@@ -115,13 +119,20 @@ function req<T>(v: T | undefined, field: string, id: string): T {
   return v;
 }
 
-/** Parse and validate plan/tasks.yaml. Throws {@link PlanError} on any problem. */
-export function loadPlan(path: string): Plan {
+/**
+ * Parse and validate an already-read plan/tasks.yaml BLOB (schema v1). Split out
+ * of {@link loadPlan} so a caller that already has the text some other way (the
+ * §5C linter's CI check reads a PAST revision via `git show <ref>:plan/tasks.yaml`,
+ * never a second file on disk) can validate it identically — one schema, one
+ * source of truth, whether the bytes came from a file or a git ref. Throws
+ * {@link PlanError} on any problem; `sourceLabel` names the blob in error text.
+ */
+export function loadPlanFromYaml(text: string, sourceLabel: string): Plan {
   let raw: unknown;
   try {
-    raw = parseYaml(readFileSync(path, "utf8"));
+    raw = parseYaml(text);
   } catch (err) {
-    throw new PlanError(`plan is not valid YAML (${path}): ${String(err)}`);
+    throw new PlanError(`plan is not valid YAML (${sourceLabel}): ${String(err)}`);
   }
   if (!Array.isArray(raw)) throw new PlanError("plan must be a YAML list of task entries (schema v1).");
 
@@ -155,6 +166,7 @@ export function loadPlan(path: string): Plan {
       hand_built: e.hand_built as boolean | undefined,
       pr: typeof e.pr === "number" ? e.pr : undefined,
       note: e.note as string | undefined,
+      origin: e.origin as string | undefined,
       prompt: e.prompt as string | undefined,
       context: e.context as ContextClaim[] | undefined,
       files: Array.isArray(e.files) ? (e.files as string[]) : undefined,
@@ -170,6 +182,17 @@ export function loadPlan(path: string): Plan {
     }
   }
   return { tasks, byId };
+}
+
+/** Parse and validate plan/tasks.yaml from disk. Throws {@link PlanError} on any problem. */
+export function loadPlan(path: string): Plan {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (err) {
+    throw new PlanError(`cannot read plan file (${path}): ${String(err)}`);
+  }
+  return loadPlanFromYaml(text, path);
 }
 
 /** Select one task by id. Throws if absent. */

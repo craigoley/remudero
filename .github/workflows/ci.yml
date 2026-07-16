@@ -45,3 +45,36 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: leak-grep (plaintext secret tripwire)
         run: bash .github/scripts/leak-grep.sh
+
+  lint-plan:
+    # §5C Layer A (W1-T20c) — the CI half of the deterministic task linter. Runs
+    # UNCONDITIONALLY on every PR (no path filter) so it always registers a check
+    # run — a path-filtered REQUIRED check that can go silently absent is the
+    # exact synthwatch #102 deadlock class ci-gate.yml exists to avoid. Cheap
+    # (pure JS over plan/tasks.yaml, no network), so running it on every PR costs
+    # nothing.
+    #
+    # SCOPED to the PR's own edit (`--base <pr-base-sha>`): lints only task ids
+    # that are NEW or CHANGED versus the PR base, not the whole historical queue
+    # — re-grading everything already open is the retro's separate plan-health
+    # sweep (W1-T20d), not every PR's gate. `fetch-depth: 0` so the base commit's
+    # plan/tasks.yaml is resolvable via `git show`.
+    #
+    # FAIL-CLOSED: any BLOCKING violation (sizing/headless-fitness/proof-shape/
+    # provenance) on an in-scope task fails this job, which ci-gate's REQUIRED
+    # list waits on before it can pass — see ci-gate.yml.
+    name: lint-plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: rmd lint-plan (PR-changed tasks only)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: npm run --silent lint-plan -- --base "$BASE_SHA"

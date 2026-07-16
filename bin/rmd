@@ -3,6 +3,11 @@
 #   rmd run-task <task-id>   run one plan/tasks.yaml entry through the loop
 #   rmd review <pr-number>   post remudero-review on a hand-opened PR (the escape
 #                            hatch: same deterministic judge, invoked by hand)
+#   rmd lint-plan [--plan <path>]
+#                            §5C Layer A: deterministic task linter (no LLM) over the whole
+#                            plan — sizing/headless-fitness/proof-shape/provenance; exits
+#                            non-zero on any blocking violation, spawns nothing (CI half; the
+#                            pre-dispatch half gates run-task/drain automatically)
 #   rmd retro [--dry-run]    sync the plan from the ledger (Architect retro);
 #                            --dry-run prints the gather + calibration table only
 #   rmd drain [--until <id>] [--max <n>] [--dry-run]
