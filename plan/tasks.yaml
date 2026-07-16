@@ -2919,3 +2919,89 @@
   note: "Ratifies P15 (Architect-captured #101, not retro-mined — REPORT if plan convention differs).
     Live confirmation — a real floor-observed verdict on a genuine PR — is the next real run's
     review.posted proof_exec fields, operator-observed (Rule 18), not an auto-verify criterion here."
+
+# Alert backlog triage 2026-07-16 (operator-enumerated code-scanning alerts): THREE tasks, one defect class
+# each. origin: architect (alert# is not yet a legal origin — arrives with W1-T56; alert ids carried in note).
+- id: W1-T66
+  title: "Workflow security hardening — least-privilege permissions + pinned deps (Scorecard TokenPermissions/PinnedDependencies backlog)"
+  repo: remudero
+  depends_on: [W1-T23]
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 100.00
+  rationale: "Scorecard flags 6 TokenPermissions instances (codeql.yml:19, semgrep.yml:14, osv-scanner.yml:16+30, osv-scanner-pr.yml:13+29) and 1 unpinned dependency (semgrep.yml:38). Workflows without explicit permissions inherit the default token scope — broader than any of them needs. TRAP, stated: CodeQL/OSV upload SARIF and REQUIRE security-events: write at the job level; a blanket read-all with no job-level escalation breaks the scanner tier silently. Derive each workflow's needed permissions from what it does, never blanket-deny."
+  design: |
+    Add an explicit least-privilege top-level permissions block (contents: read) to each flagged workflow,
+    with job-level escalations ONLY where the job provably needs them (security-events: write for SARIF
+    upload jobs; read the workflow's steps to derive, distrust-the-prompt). Pin the semgrep.yml:38
+    reference by SHA/digest (read line 38 first to see whether it is an action or an image). Do not touch
+    ci.yml/ci-gate.yml unless Scorecard flagged them — they did not appear in the backlog.
+  acceptance:
+    - claim: "every flagged workflow file carries an explicit top-level permissions block; the semgrep.yml:38 reference is pinned by SHA/digest"
+      proof: "grep: a top-level permissions: block in codeql.yml, semgrep.yml, osv-scanner.yml, osv-scanner-pr.yml; the line-38 reference carries a full SHA/digest"
+    - claim: "the scanner tier still functions under the new permissions — SARIF uploads succeed"
+      proof: "this PR's own runs of the flagged PR-triggered workflows complete green (the ci-gate aggregator reads all check runs); any schedule-only workflow is proven by a permissions block that includes security-events: write on its upload job (grep)"
+  risk: high
+  origin: architect
+  plan_refs: ["§5", "§5D"]
+  files: [.github/workflows/codeql.yml, .github/workflows/semgrep.yml, .github/workflows/osv-scanner.yml, .github/workflows/osv-scanner-pr.yml]
+  status: queued
+  attempts: 0
+  note: "Alert backlog triage 2026-07-16 (operator-enumerated): code-scanning alerts #2-#8. Fix closes the alerts on next Scorecard run — do not dismiss them by hand."
+
+- id: W1-T67
+  title: "Exclusive-create discipline for config/tier first-run writes (CodeQL js/file-system-race, both HIGHs)"
+  repo: remudero
+  depends_on: [W1-T9c]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "CodeQL #15 (config.ts:212) and #16 (init.ts:190) are exists-check-then-write TOCTOU: loadConfig()'s first-run bootstrap and writeTierIntoConfig() both gate a writeFileSync on existsSync. Two concurrent callers (daemon + CLI + workers all call loadConfig) both observe absent and both write — last-writer-wins on the control plane's own config. The repo already holds the correct pattern: the per-task inflight lock creates with O_EXCL. Apply the same discipline here."
+  design: |
+    Replace existsSync-gated creation with exclusive create: writeFileSync(..., { flag: "wx", mode: 0o600 })
+    catching EEXIST to fall through to the read path; replace existsSync-gated reads with direct
+    readFileSync catching ENOENT. Preserve the exact observable behavior (created config contents, 0600
+    mode, createdFile flag semantics in WriteTierConfigResult). Cite inflight-lock.ts as the in-repo
+    precedent. Both sites are ONE defect class — fix both, change nothing else in either function.
+  acceptance:
+    - claim: "no existsSync-gated write remains at either flagged site; creation is exclusive (wx) with EEXIST falling through to read"
+      proof: "grep: zero existsSync calls gating the create paths in loadConfig/writeTierIntoConfig; the wx flag present at both writes; unit test simulates EEXIST -> the existing file is read, not clobbered"
+    - claim: "first-run behavior is byte-identical to today (contents, 0600 mode, createdFile semantics)"
+      proof: "existing config/init tests pass unchanged; a new unit test asserts mode 0o600 and createdFile=true on genuine first run, createdFile=false when the file exists"
+  risk: high
+  origin: architect
+  plan_refs: ["§5"]
+  files: [src/lib/config.ts, src/lib/init.ts]
+  status: queued
+  attempts: 0
+  note: "Alert backlog triage 2026-07-16: code-scanning alerts #15/#16 (both HIGH). The race is live today only in narrow windows, but WS-2 concurrency widens every window — fix before N-concurrent, not after."
+
+- id: W1-T68
+  title: "Kill the unused-local class — enable noUnusedLocals/noUnusedParameters + clear the CodeQL backlog instances"
+  repo: remudero
+  depends_on: [W1-T1B]
+  type: implement
+  verify: auto
+  principles: {tdd: encouraged}
+  budget_usd: 100.00
+  rationale: "Seven note/warning CodeQL alerts (#17-#23) are one janitorial class: unused locals in worker.ts:2/:194, drain-lock.ts:1, inflight-lock.ts:1, two test files, plus a dead assignment at spike.ts:262. Per-instance patches are the reactive anti-pattern; tsconfig currently has NO noUnusedLocals, so nothing prevents recurrence. The class-level fix is the compiler flag — CI's typecheck then owns the class forever."
+  design: |
+    Enable noUnusedLocals + noUnusedParameters in tsconfig.json, fix EVERYTHING the compiler then flags
+    (which is a superset of the 6 unused-local alerts — that is the point), and remove the dead assignment
+    at spike.ts:262 (TS does not flag assigned-but-never-read; handle that one by hand). spike.ts is the
+    frozen WS-0 record — touch ONLY the flagged line; git history preserves the original. Underscore-prefix
+    is acceptable ONLY where a parameter is required by an interface signature; otherwise delete.
+  acceptance:
+    - claim: "noUnusedLocals and noUnusedParameters are on, and typecheck is green"
+      proof: "grep tsconfig.json for both flags true; this PR's ci (typecheck) passes"
+    - claim: "the six flagged unused-local sites and the spike.ts:262 dead assignment are gone"
+      proof: "grep: the flagged identifiers no longer present at worker.ts/drain-lock.ts/inflight-lock.ts/the two test files; spike.ts:262's assigned-never-read local removed"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5"]
+  files: [tsconfig.json, src/spike.ts, src/lib/worker.ts, src/lib/drain-lock.ts, src/lib/inflight-lock.ts, test/learnings-injection-w1t6.test.ts, test/drain-lock.test.ts]
+  status: queued
+  attempts: 0
+  note: "Alert backlog triage 2026-07-16: code-scanning alerts #17-#23. ONE concern (one defect class) despite the file spread — the files: list is the alert inventory, not a multi-subsystem scope."
