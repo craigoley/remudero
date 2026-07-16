@@ -2857,3 +2857,65 @@
   status: queued
   attempts: 0
   note: "Sibling of W1-T63 — same hardcoded-turn-cap class, on the retro/architect spawn W1-T63 didn't cover. Unblocks the self-improvement loop (retro can't currently open its own PR)."
+
+# Ratifies P15 (captured #101): the deterministic FLOOR observes repo state, not just report keywords —
+# so a correct verdict survives reviewer death (kills both the #100 false-block and the W1-T51 false-pass).
+- id: W1-T65
+  title: "The deterministic FLOOR executes whitelisted proofs against the PR head (observation survives reviewer death; ratifies P15)"
+  repo: remudero
+  depends_on: [W1-T3F]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P15 (captured #101). GROUND TRUTH (self-host cycle): the reviewer completes on
+    simple PRs and dies error_max_turns on complex ones; on death the gate falls to the FLOOR, which
+    keyword-matches the REPORT and is BLIND to repo state (review.ts's own comment: 'the deeper fix is
+    observing repo state, not keywords'). One fact, both failure directions: FALSE-PASS (W1-T51 merged
+    '2 of 4 criteria substantiated') and FALSE-BLOCK (W1-T18/#100 — the work was genuinely on the branch,
+    verified from source, but not keyword-claimed in the report). W1-T63 makes the reviewer complete more
+    often; the floor stays blind, so ANY future reviewer death re-opens both holes. W1-T3F/#35 built
+    whitelisted observation in the ADVISORY layer; this task lifts it into the BINDING one, making the
+    reviewer purely additive (subtle-catch) and never load-bearing for basic correctness."
+  design: |
+    Lift W1-T3F's whitelisted-proof execution into judgeCriterion's floor. WHITELIST UNCHANGED from
+    W1-T3F (a named test or a grep; free-prose proofs keep the keyword floor; no arbitrary code
+    execution from proof text). Execution semantics, all legible:
+    (1) executed_pass -> criterion MET, regardless of report keywords (kills the #100 false-block).
+    (2) executed_fail -> criterion UNMET, OVERRIDING any keyword-coverage pass (kills the W1-T51
+        false-pass: a claim the repo state refutes never merges on prose).
+    (3) not_executable (free-prose proof) -> keyword floor UNCHANGED.
+    (4) exec_error/timeout -> degrade to the keyword floor, NEVER a silent hard-fail (an environment
+        hiccup must not false-block the fleet); every proof carries a HARD per-proof timeout so a
+        hanging test cannot stall the required check into the absent-check deadlock class.
+    OBSERVABILITY (the W1-T63 pattern, one layer down): per-criterion proof_exec outcome
+    (executed_pass|executed_fail|not_executable|exec_error) recorded on the review.posted ledger line
+    and printed in the console summary, so an OBSERVED verdict is legible vs a KEYWORD one.
+    HEAD DISCIPLINE (stale-checkout class, documented): proofs execute against a checkout AT THE PR
+    HEAD SHA — the runner's own worktree when judging its own run; a fresh temp worktree fetched at
+    the head SHA on the rmd review path; NEVER the operator's working checkout. VERIFY the judge call
+    site's current checkout source in run-task.ts by reading it first; the call site passing the head
+    checkout path into the judge is a NAMED DELIVERABLE of this task (the orphaned-call-site lesson).
+    Test proofs run after npm ci in that checkout (fresh worktrees have no node_modules).
+  acceptance:
+    - claim: "a criterion SATISFIED in repo state but not keyword-claimed in the report is judged MET by the floor (the #100 case)"
+      proof: "unit test over an injected executor: proof names a test/grep, executor returns pass/match, report contains NO proof keywords -> criterion MET with proof_exec=executed_pass"
+    - claim: "a criterion keyword-CLAIMED in the report whose named proof FAILS on the head is judged UNMET (executed_fail overrides keyword coverage)"
+      proof: "unit test: report echoes every proof keyword, injected executor returns fail -> criterion UNMET with proof_exec=executed_fail"
+    - claim: "a free-prose proof leaves the keyword floor byte-identical to today"
+      proof: "unit test: a prose-proof criterion yields the same verdict + reason as the pre-change floor, proof_exec=not_executable"
+    - claim: "an exec error or timeout degrades to the keyword floor and is legible, never a silent hard-fail or a stall"
+      proof: "unit test: injected executor throws/times out -> verdict equals the keyword-floor verdict, proof_exec=exec_error surfaced on the ledger line + console"
+    - claim: "proof execution is bounded to the W1-T3F whitelist — no arbitrary code from proof text"
+      proof: "unit test: a proof containing shell metacharacters / an unwhitelisted shape is not_executable, nothing executed (injected executor never called)"
+    - claim: "the judge call site passes the PR-head checkout path (never the operator checkout) into the floor"
+      proof: "grep of the run-task.ts judge call site shows the head-checkout path parameter wired; unit test over an injected path asserts proofs execute in the provided head checkout dir"
+  risk: high
+  origin: architect
+  plan_refs: ["§5", "§4B"]
+  files: [src/lib/review.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Ratifies P15 (Architect-captured #101, not retro-mined — REPORT if plan convention differs).
+    Live confirmation — a real floor-observed verdict on a genuine PR — is the next real run's
+    review.posted proof_exec fields, operator-observed (Rule 18), not an auto-verify criterion here."
