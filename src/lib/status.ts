@@ -30,7 +30,7 @@ import type { Plan, Task, TaskStatus } from "./plan.js";
  */
 
 /** The three precedence sources, plus `none` when GitHub has no evidence. */
-export type StatusSource = "ledger" | "pr-field" | "trailer" | "none";
+export type StatusSource = "ledger" | "pr-field" | "trailer" | "correction" | "none";
 
 /** A PR's identity + GitHub merge state, as seen by the {@link GitHub} gateway. */
 export interface PrRef {
@@ -52,6 +52,14 @@ export interface StatusProjection {
   prNumber?: number;
   prUrl?: string;
   prState?: string;
+  /**
+   * LEGIBILITY (P16 / W1-T69): trailer search hits that were REJECTED by rung (c)'s
+   * ownership-assert / anchored-trailer verify, each with a machine-readable reason.
+   * A false trailer in the wild is thereby VISIBLE, not silently dropped — the same
+   * "surface the rejection" discipline the W1-T20c false-credit reproduction motivated.
+   * Present (and non-empty) ONLY when a candidate was actually rejected.
+   */
+  rejected_candidates?: Array<{ pr: string; reason: string }>;
 }
 
 /**
@@ -160,6 +168,30 @@ function debunkedTrailerUrls(lines: Array<Record<string, unknown>>, taskId: stri
 }
 
 /**
+ * CORRECTIONS WIN (P9-iv / W1-T69): a `correction.provenance` line is the operator's
+ * AUTHORITATIVE override of a mis-attribution — it debunks a `claimed_pr_url` AND
+ * names the `actual_pr_url` (the real PR, e.g. #80→#91). deriveStatus credits that
+ * actual url directly, ahead of and instead of the fuzzy trailer search. Crucially
+ * the actual PR is NOT re-subjected to the ownership/anchor asserts: the correction
+ * is a deliberate human act that SUPERSEDES those automated checks (the real PR is
+ * often a hand-authored one from a non-`run-` branch — #91 was a docs PR). Last
+ * correction wins. Returns undefined when the task has no correction.
+ */
+function latestActualPrUrl(lines: Array<Record<string, unknown>>, taskId: string): string | undefined {
+  let url: string | undefined;
+  for (const line of lines) {
+    if (
+      line.step === "correction.provenance" &&
+      line.task_id === taskId &&
+      typeof line.actual_pr_url === "string"
+    ) {
+      url = line.actual_pr_url; // keep scanning: last correction wins
+    }
+  }
+  return url;
+}
+
+/**
  * RUNG (c) OWNERSHIP-ASSERT (MASTER-PLAN P16 / W1-T69, ratifying the same class
  * W1-T62 fixed on the write side and W1-T51 on the retro read side): a trailer
  * credit is only trustworthy if the PR was opened from THIS task's own branch
@@ -215,6 +247,15 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   // deriveStatus GATES DISPATCH, so a false/foreign credit here is worse than
   // the same attribution class W1-T51 fixed in the retro gather (which only
   // mis-reports); a bad credit here makes the daemon BUILD against an unmet dep.
+  // Corrections win FIRST: an operator correction OVERRIDES the fuzzy search entirely.
+  const correctedUrl = latestActualPrUrl(ledgerLines, task.id);
+  if (correctedUrl) {
+    const pr = deps.github.prByRef(correctedUrl);
+    if (pr) {
+      return { taskId: task.id, source: "correction", ...fromPrState(pr.state), prNumber: pr.number, prUrl: pr.url, prState: pr.state };
+    }
+  }
+
   const trailerPr = deps.github.findMergedByTrailer(task.id);
   if (trailerPr && !debunkedTrailerUrls(ledgerLines, task.id).has(trailerPr.url)) {
     const head = deps.github.headRefName(trailerPr.url);
@@ -222,8 +263,17 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
     if (ownsBranch(head, task.id) && hasAnchoredTrailer(body, task.id)) {
       return { taskId: task.id, source: "trailer", ...fromPrState(trailerPr.state), prNumber: trailerPr.number, prUrl: trailerPr.url, prState: trailerPr.state };
     }
-    // Rejected: unresolved/foreign head branch or an unanchored search hit —
-    // never credited. Falls through to "none" rather than trust it.
+    // Rejected: foreign/unresolved head branch or an unanchored search hit — never
+    // credited. Surface WHY (legibility, W1-T69): a false trailer in the wild is
+    // visible on the projection, not silently dropped. Falls through to "none".
+    const reason = !ownsBranch(head, task.id) ? "head-branch-not-owned" : "trailer-not-anchored";
+    return {
+      taskId: task.id,
+      status: "queued",
+      merged: false,
+      source: "none",
+      rejected_candidates: [{ pr: trailerPr.url, reason }],
+    };
   }
 
   // No GitHub evidence: not merged. The yaml `status:` is decorative, not trusted.

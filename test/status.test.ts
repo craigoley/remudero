@@ -3,7 +3,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Task } from "../src/lib/plan.js";
+import type { Plan, Task } from "../src/lib/plan.js";
+import { nextRunnable, type MergedSet } from "../src/lib/drain.js";
 import { deriveStatus, type GitHub, type PrRef } from "../src/lib/status.js";
 
 /** A minimal task; fields not under test get sensible defaults. */
@@ -219,4 +220,72 @@ test("a ledger PR that 404s falls through to the next source", () => {
   const proj = deriveStatus(task(), { ledgerPath, github });
   assert.equal(proj.source, "trailer");
   assert.equal(proj.prNumber, 8);
+});
+
+// ── W1-T69: the FOUR acceptance criteria (deriveStatus crediting integrity, P16) ──────────
+
+test("W1-T69 C1: a foreign plan PR (head=plan/*, body QUOTES the trailer in prose) never credits — rejected_candidates NAMES it with a reason", () => {
+  // The exact 2026-07-16 W1-T20c shape: a plan/ratify PR whose body discusses the
+  // trailer mid-prose; GitHub's fuzzy body search surfaces it, but it is not this
+  // task's own run-branch. It must not credit — and the rejection must be LEGIBLE.
+  const github = fakeGitHub({
+    byTrailer: { "W1-T20c": { number: 128, url: "u/128", state: "MERGED" } },
+    headRefByUrl: { "u/128": "plan/renumber-duplicate-p21" }, // NOT run-W1-T20c-<N>
+    bodyByUrl: { "u/128": "This PR discusses the `Remudero-Task: W1-T20c` trailer mid-prose." },
+  });
+  const proj = deriveStatus(task({ id: "W1-T20c" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.source, "none");
+  assert.equal(proj.merged, false);
+  assert.deepEqual(proj.rejected_candidates, [{ pr: "u/128", reason: "head-branch-not-owned" }]);
+});
+
+test("W1-T69 C2: a genuine run PR (anchored trailer + run-<taskId>-N head) credits exactly as today — source=trailer, nothing rejected", () => {
+  const github = fakeGitHub({
+    byTrailer: { "W1-TX": { number: 12, url: "u/12", state: "MERGED" } },
+    headRefByUrl: { "u/12": "run-W1-TX-1784000000000" },
+    bodyByUrl: { "u/12": "Implements it.\n\nRemudero-Task: W1-TX\n" },
+  });
+  const proj = deriveStatus(task({ id: "W1-TX" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.source, "trailer");
+  assert.equal(proj.merged, true);
+  assert.equal(proj.prNumber, 12);
+  assert.equal(proj.rejected_candidates, undefined); // a clean credit rejects nothing
+});
+
+test("W1-T69 C3: a correction.provenance line credits the actual_pr_url (B), OVERRIDING the search hit (A) — the #80→#91 shape", () => {
+  const A = "u/80"; // the mis-attributed PR the search still turns up
+  const B = "u/91"; // the operator's corrected, real PR
+  const github = fakeGitHub({
+    byTrailer: { "W1-TX": { number: 80, url: A, state: "MERGED" } }, // search returns A
+    byRef: { [B]: { number: 91, url: B, state: "MERGED" } }, // B is a real merged PR
+    // A would even pass ownership+anchor — the correction still overrides it.
+    headRefByUrl: { [A]: "run-W1-TX-1730000000000" },
+    bodyByUrl: { [A]: "Remudero-Task: W1-TX\n" },
+  });
+  const ledgerPath = ledgerFile([
+    { step: "correction.provenance", task_id: "W1-TX", claimed_pr_url: A, actual_pr_url: B, by: "operator", reason: "misattributed" },
+  ]);
+  const proj = deriveStatus(task({ id: "W1-TX" }), { ledgerPath, github });
+  assert.equal(proj.source, "correction");
+  assert.equal(proj.prNumber, 91); // credits B, never A
+  assert.equal(proj.merged, true);
+});
+
+test("W1-T69 C4: a dependent task is NOT runnable when its dependency's only merge evidence is a foreign-body match", () => {
+  const t20c = task({ id: "W1-T20c", depends_on: [] });
+  const t20d = task({ id: "W1-T20d", depends_on: ["W1-T20c"] });
+  // Declare W1-T20d FIRST so a pass only happens by SKIPPING it on an unmet dep.
+  const plan: Plan = { tasks: [t20d, t20c], byId: new Map([["W1-T20c", t20c], ["W1-T20d", t20d]]) };
+  // W1-T20c's ONLY GitHub evidence is a foreign plan PR quoting its trailer -> deriveStatus = none.
+  const github = fakeGitHub({
+    byTrailer: { "W1-T20c": { number: 128, url: "u/128", state: "MERGED" } },
+    headRefByUrl: { "u/128": "plan/some-plan-branch" },
+    bodyByUrl: { "u/128": "mentions Remudero-Task: W1-T20c in prose only" },
+  });
+  const ledgerPath = ledgerFile([]);
+  const isMerged: MergedSet = (id) => deriveStatus(plan.byId.get(id)!, { ledgerPath, github }).merged;
+  assert.equal(isMerged("W1-T20c"), false); // the foreign-body match did NOT credit the linter task
+  // W1-T20c IS runnable (not merged, no deps); W1-T20d is NOT (its sole dep is uncredited) —
+  // nextRunnable picks W1-T20c even though W1-T20d is declared first.
+  assert.equal(nextRunnable(plan, isMerged)?.id, "W1-T20c");
 });
