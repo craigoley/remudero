@@ -463,6 +463,13 @@ async function runReview(args: {
    * W1-T63) — MOUNT-GOVERNED, never a hardcoded literal. Only consulted when a
    * reviewer is actually spawned (spawnReviewer!==false && criteria.length>0). */
   reviewerMount: Mount;
+  /**
+   * PR-HEAD checkout dir the deterministic FLOOR executes whitelisted proofs in
+   * (W1-T65, ratifies P15 — HEAD DISCIPLINE: never the operator's working
+   * checkout). Absent ⇒ the floor is keyword-only, exactly the pre-W1-T65
+   * behavior (used by `rmd review`'s manual-PR path, which has no checkout).
+   */
+  headCheckoutDir?: string;
 }): Promise<ReviewVerdict & { headSha: string; reviewerOutcome: string }> {
   const { owner, repo, prUrl, task, report, log, say } = args;
   const view = ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string };
@@ -530,12 +537,21 @@ async function runReview(args: {
   });
 
   // BINDING deterministic verdict; the orchestrator is the authoritative poster.
-  const verdict = judgeReview(criteria, { diff, report, semantic });
+  // W1-T65 (ratifies P15): headCheckoutDir wires the FLOOR's whitelisted-proof
+  // execution to the PR HEAD (never the operator's working checkout) — so the
+  // gate observes repo state whether or not the advisory reviewer above ever
+  // completed.
+  const verdict = judgeReview(criteria, { diff, report, semantic, headCheckoutDir: args.headCheckoutDir });
   postReviewStatus({ owner, repo, sha: headSha, state: verdict.state, description: verdict.summary });
   const unmet = verdict.criteria.filter((c) => !c.met);
   const unmetClaims = unmet.map((c) => c.claim);
   const reasons = unmet.map((c) => c.reason);
   if (verdict.testTheater) reasons.push("test theater: added tests assert nothing");
+  // OBSERVABILITY (W1-T65 design): per-criterion proof_exec outcome, so an
+  // OBSERVED verdict (executed_pass/executed_fail) is legible on the ledger vs a
+  // KEYWORD one (not_executable), and an environment hiccup (exec_error) is never
+  // silently indistinguishable from either.
+  const proofExec = verdict.criteria.map((c) => c.proof_exec);
   // The gate TEACHES: the FULL list of unmet criteria goes to the ledger (and the
   // PR comment below) — the status description names only the first (length-capped).
   log("review.posted", {
@@ -548,6 +564,8 @@ async function runReview(args: {
     // W1-T63/P10-a: makes a floor-only PASS LEGIBLE — never byte-identical to a
     // review the LLM reviewer actually completed.
     reviewer_outcome: outcome,
+    // W1-T65/P15: per-criterion proof_exec, index-aligned to verdict.criteria.
+    proof_exec: proofExec,
   });
   if (verdict.state !== "success" && (unmetClaims.length > 0 || verdict.testTheater)) {
     // Post the full unmet list as a PR comment so a blocked PR names its gap in one
@@ -565,7 +583,14 @@ async function runReview(args: {
   }
   // W1-T63/P10-a: the console summary distinguishes a completed review from a
   // floor-only one (reviewer never attempted, or attempted but walled/failed).
-  say(`remudero-review=${verdict.state} posted to ${headSha.slice(0, 7)} — ${verdict.summary} (reviewer_outcome: ${outcome})`);
+  // W1-T65/P15: and now names how many criteria the FLOOR itself OBSERVED
+  // (executed_pass/executed_fail) vs judged on report keywords (not_executable) —
+  // legible whether or not the sentence above ever completed.
+  const executed = proofExec.filter((p) => p === "executed_pass" || p === "executed_fail").length;
+  say(
+    `remudero-review=${verdict.state} posted to ${headSha.slice(0, 7)} — ${verdict.summary} ` +
+      `(reviewer_outcome: ${outcome}; proof_exec: ${executed}/${proofExec.length} observed on the PR head)`,
+  );
   return { ...verdict, headSha, reviewerOutcome: outcome };
 }
 
@@ -1341,6 +1366,11 @@ async function runTask(
       say,
       account,
       reviewerMount,
+      // W1-T65 (ratifies P15) — HEAD DISCIPLINE: worktreePath IS the PR head here
+      // (this run's own worktree, checked out at the branch it just pushed; CI
+      // that follows never mutates it). NEVER the operator's working checkout —
+      // the deterministic floor observes THIS run's repo state, not report prose.
+      headCheckoutDir: worktreePath,
     });
     if (review.state !== "success") {
       log("verdict", {
@@ -1501,6 +1531,13 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
     // is a safe, always-resolvable placeholder — a manual `rmd review` PR carries
     // no plan task risk of its own to key a real one off.
     reviewerMount: resolveMount(loadMounts(mountsPath(repoRoot)), "reviewer", "medium"),
+    // No headCheckoutDir: this manual escape hatch has no run-owned worktree at
+    // the PR head (GROUND TRUTH's blocked_review class — and P15 — is the
+    // AUTONOMOUS `runTask` path above, which does). A fresh temp checkout fetched
+    // at the head sha here is a reasonable follow-up, out of THIS task's one
+    // concern; until then this path stays keyword-floor-only (proof_exec is
+    // not_executable throughout), exactly its pre-W1-T65 behavior — never a
+    // regression, just not yet the observed floor.
   });
   console.log(
     `\nremudero-review=${verdict.state} posted to ${view.url} (head ${verdict.headSha.slice(0, 7)})`,
