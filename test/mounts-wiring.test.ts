@@ -84,3 +84,35 @@ test("every task in the real plan carries a valid risk (0 missing) and W1-T6 is 
   // A task that omits risk in yaml defaults to medium (loadPlan).
   assert.ok(TASK_RISKS.includes(plan.byId.get("W1-T1")!.risk));
 });
+
+// ── W1-T64: the retro/architect spawn is MOUNT-GOVERNED (the maxTurns:40 W1-T63 missed) ─
+
+test("the retro/architect spawn is GONE of its hardcoded maxTurns: 40 literal", () => {
+  assert.doesNotMatch(runTaskSrc, /maxTurns:\s*40\b/, "the hardcoded retro maxTurns: 40 must be replaced by the mount");
+  assert.match(runTaskSrc, /maxTurns:\s*mountsTable\.architect\.maxTurns/, "the retro spawn must read its turn budget from the mounts.yaml architect row");
+});
+
+test("the retro Architect's turn budget, resolved from the real mounts.yaml, is >> the old hardcoded 40", () => {
+  const m = loadMounts(mountsPath(repoRoot));
+  assert.ok(m.architect.maxTurns > 40, `architect.maxTurns (${m.architect.maxTurns}) must exceed the old hardcoded 40`);
+  assert.equal(typeof m.architect.model, "string");
+  assert.equal(typeof m.architect.effort, "string");
+});
+
+// ── W1-T64: gh pr create is GUARDED by commitsAhead — never PR'd on an empty branch ─────
+
+test("the retro's gh-pr-create fallback is guarded by commitsAhead — an empty branch takes the no-op path, never the PR call", () => {
+  // Isolate the retroCommand function body so the assertion can't accidentally match the
+  // OTHER commitsAhead guard (the implement no-op path, elsewhere in this file).
+  const start = runTaskSrc.indexOf("async function retroCommand(");
+  assert.ok(start >= 0, "retroCommand must exist in run-task.ts");
+  const body = runTaskSrc.slice(start, runTaskSrc.indexOf("\nasync function", start + 1));
+
+  const guardIdx = body.search(/if\s*\(\s*commitsAhead\(worktreePath,\s*"origin\/main"\)\s*===\s*0\s*\)/);
+  const prCreateIdx = body.indexOf('"pr", "create"');
+  assert.ok(guardIdx >= 0, "retroCommand must guard on commitsAhead(worktreePath, \"origin/main\") === 0");
+  assert.ok(prCreateIdx >= 0, "retroCommand must still call gh pr create on the non-empty-branch path");
+  assert.ok(guardIdx < prCreateIdx, "the commitsAhead guard must run BEFORE the gh pr create fallback, never after");
+  // The no-op path must never fall through to the PR call — it returns straight away.
+  assert.match(body, /commitsAhead\(worktreePath, "origin\/main"\) === 0\) \{\s*\n\s*log\("retro\.no_op"/);
+});
