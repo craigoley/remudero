@@ -45,9 +45,31 @@ export interface RunSummary {
   costUsd: number;
   numTurns: number;
   prUrl?: string;
+  /**
+   * Present only when a `correction.provenance` ledger line overrode this run's
+   * ledger-claimed PR url (W1-T51/P9-b — the false-attribution class, e.g. run
+   * W1-T54b-1784151420811: `verdict.pr_url` claimed #80, the correction names #91).
+   * Holds the ORIGINAL claimed url that was overridden; `prUrl` above is always
+   * the truth (corrected when a correction exists, the ledger's own claim otherwise).
+   */
+  correctedFromPrUrl?: string;
 }
 
 const DONE_STEPS = new Set(["recon.done", "implement.done", "implement.resumed"]);
+
+/**
+ * A `correction.provenance` line for this run, if any — a FIRST-CLASS ledger
+ * EVENT (MASTER-PLAN P9-iv): the operator has already written the truth (an
+ * `actual_pr_url`) over a run's false ledger claim, and every reducer must honor
+ * it rather than re-deriving the false claim. Last one wins if several exist.
+ */
+function correctionFor(lines: LedgerRecord[]): string | undefined {
+  let url: string | undefined;
+  for (const l of lines) {
+    if (l.step === "correction.provenance" && typeof l.actual_pr_url === "string") url = l.actual_pr_url;
+  }
+  return url;
+}
 
 /** Reduce ledger lines into per-run summaries, keyed by run_id (deterministic). */
 export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
@@ -69,6 +91,8 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
     const costLine = verdictLine ?? lines.find((l) => typeof l.cost_usd === "number");
     const prLine =
       lines.find((l) => l.step === "pr.opened") ?? verdictLine ?? lines.find((l) => l.pr_url);
+    const claimedPrUrl = typeof prLine?.pr_url === "string" ? prLine.pr_url : undefined;
+    const correctedUrl = correctionFor(lines);
     runs.push({
       runId,
       taskId: String(start.task_id ?? ""),
@@ -77,7 +101,8 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
       verdict: String(verdictLine?.verdict ?? "incomplete"),
       costUsd: typeof costLine?.cost_usd === "number" ? costLine.cost_usd : 0,
       numTurns,
-      prUrl: typeof prLine?.pr_url === "string" ? prLine.pr_url : undefined,
+      prUrl: correctedUrl ?? claimedPrUrl,
+      ...(correctedUrl !== undefined ? { correctedFromPrUrl: claimedPrUrl } : {}),
     });
   }
   // Deterministic order: by start timestamp then run id.
@@ -130,6 +155,140 @@ export function verdictDistribution(runs: RunSummary[]): Record<string, number> 
 /** Merged runs strictly AFTER the marker ts, keyed by task (Remudero-Task trailer). */
 export function mergedSince(runs: RunSummary[], sinceTs: string | undefined): RunSummary[] {
   return runs.filter((r) => r.verdict === "merged" && (!sinceTs || r.startTs > sinceTs));
+}
+
+// ── W1-T51: the SHIPPED union (ledger ∪ GitHub-derived trailered merges) ──────
+//
+// `mergedSince` above keys ONLY on ledger verdict==='merged', so a PR that merges
+// GATE-SIDE after its run ended some other terminal verdict (a Rule-16 Architect
+// fix landing after a blocked_review run) is INVISIBLE to it — the gap this task
+// closes. `mergedSince` itself is left untouched (no regression, MASTER-PLAN P11);
+// `shippedSince` below is the sibling that unions both sources.
+
+/** A run's own worktree branch — deterministic, matches run-task.ts's `run-<runId>` naming. */
+export function ownBranchOf(runId: string): string {
+  return `run-${runId}`;
+}
+
+/** One credited SHIPPED entry — either a ledger-native merge or a GitHub-discovered gate-side merge. */
+export interface ShippedRecord {
+  taskId: string;
+  runId: string;
+  prUrl: string;
+  costUsd: number;
+  numTurns: number;
+  source: "ledger" | "github";
+  /** Present ONLY for a GitHub-discovered merge whose run did NOT end verdict=merged. */
+  annotation?: string;
+}
+
+/**
+ * The GitHub queries `shippedSince` needs: a trailer lookup for the GitHub-side
+ * union half, and a PR's head branch for the P9 ownership assert — the exact
+ * shape of run-task.ts's `PrHeadGateway` (W1-T62's write-side guard), applied
+ * here at the READ side. A real implementation composes `status.ts`'s
+ * `ghGateway` (for `findMergedByTrailer`) with a `gh pr view --json headRefName`
+ * lookup (for `headRefName`), mirroring run-task.ts's `ghPrHeadGateway`.
+ */
+export interface ShippedGithub {
+  /** Find a MERGED PR whose body contains `Remudero-Task: <taskId>`. null if none. */
+  findMergedByTrailer(taskId: string): { number: number; url: string } | null;
+  /** The PR's head branch name, or undefined if it cannot be resolved. */
+  headRefName(prUrl: string): string | undefined;
+}
+
+/** The result of the SHIPPED union: what got credited, and every named discrepancy. */
+export interface ShippedResult {
+  shipped: ShippedRecord[];
+  discrepancies: string[];
+}
+
+/**
+ * UNION ledger-merged runs with GitHub-derived merged Remudero-Task-trailered PRs,
+ * scoped to runs started strictly after `sinceTs` (W1-T51). Each ledger-ABSENT
+ * merge (a run that ended some OTHER terminal verdict, whose task nonetheless has
+ * a merged trailered PR on GitHub) is credited with source "github" and annotated
+ * `gate-side merge; run ended <verdict>` — the gap `mergedSince` alone cannot see.
+ *
+ * P9 OWNERSHIP ASSERT (retro#1784155126258, the false-attribution class): before
+ * crediting ANY merge — ledger OR GitHub side — the credited PR's `headRefName`
+ * must equal the claiming run's OWN branch ({@link ownBranchOf}). A stale/foreign
+ * trailer (the #80/W1-T54b class: PR #80 is Dependabot's own PR, not the run's)
+ * or an unresolved head ref is REJECTED — never credited — and named in
+ * `discrepancies` rather than silently dropped or silently trusted.
+ *
+ * P9 CORRECTION-AWARE: `runs` is expected to already carry the correction
+ * override (see {@link gatherRuns}'s `correctedFromPrUrl` handling) — a
+ * `correction.provenance` line's `actual_pr_url` is what `RunSummary.prUrl`
+ * holds, so the ownership assert checks (and credits) the TRUTH, never the
+ * original false claim.
+ *
+ * Every rejection AND every GitHub-side addition is named in `discrepancies` —
+ * the SHIPPED log can never silently miss (or wrongly gain) a merge.
+ */
+export function shippedSince(
+  runs: RunSummary[],
+  sinceTs: string | undefined,
+  github: ShippedGithub,
+): ShippedResult {
+  const scoped = sinceTs ? runs.filter((r) => r.startTs > sinceTs) : runs;
+  const shipped: ShippedRecord[] = [];
+  const discrepancies: string[] = [];
+
+  for (const r of scoped) {
+    const ownBranch = ownBranchOf(r.runId);
+    if (r.verdict === "merged") {
+      if (!r.prUrl) {
+        discrepancies.push(`${r.taskId} (${r.runId}): ledger verdict=merged but has no pr_url — cannot credit`);
+        continue;
+      }
+      const head = github.headRefName(r.prUrl);
+      if (head !== ownBranch) {
+        discrepancies.push(
+          `${r.taskId} (${r.runId}): REJECTED — ledger claims ${r.prUrl} but its head branch ` +
+            `("${head ?? "unresolved"}") is not this run's own branch ("${ownBranch}") — stale/foreign trailer, never credited`,
+        );
+        continue;
+      }
+      shipped.push({ taskId: r.taskId, runId: r.runId, prUrl: r.prUrl, costUsd: r.costUsd, numTurns: r.numTurns, source: "ledger" });
+    } else {
+      const pr = github.findMergedByTrailer(r.taskId);
+      if (!pr) continue; // no GitHub evidence either — genuinely not shipped
+      const head = github.headRefName(pr.url);
+      if (head !== ownBranch) {
+        discrepancies.push(
+          `${r.taskId} (${r.runId}): REJECTED — GitHub trailer names ${pr.url} but its head branch ` +
+            `("${head ?? "unresolved"}") is not this run's own branch ("${ownBranch}") — stale/foreign trailer, never credited`,
+        );
+        continue;
+      }
+      shipped.push({
+        taskId: r.taskId,
+        runId: r.runId,
+        prUrl: pr.url,
+        costUsd: r.costUsd,
+        numTurns: r.numTurns,
+        source: "github",
+        annotation: `gate-side merge; run ended ${r.verdict}`,
+      });
+      discrepancies.push(
+        `${r.taskId} (${r.runId}): ledger verdict=${r.verdict} but GitHub shows ${pr.url} MERGED — gate-side merge, now credited`,
+      );
+    }
+  }
+
+  shipped.sort((a, b) => (a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0));
+  return { shipped, discrepancies };
+}
+
+/** The ledger-only fallback for `RetroGather.shipped` when no GitHub gateway is
+ * wired — IDENTICAL to today's `mergedSince` crediting (no ownership check, no
+ * annotation): a caller that hasn't wired a gateway yet gets no regression and
+ * no unverified claim, rather than a default that silently trusts everything. */
+function ledgerOnlyShipped(merged: RunSummary[]): ShippedRecord[] {
+  return merged
+    .filter((r): r is RunSummary & { prUrl: string } => typeof r.prUrl === "string")
+    .map((r) => ({ taskId: r.taskId, runId: r.runId, prUrl: r.prUrl, costUsd: r.costUsd, numTurns: r.numTurns, source: "ledger" as const }));
 }
 
 /** Count LEARNINGS entries (top-level `- ` bullets) — used for the added-since delta. */
@@ -187,25 +346,42 @@ export interface RetroGather {
   byType: TypeCalibration[];
   verdicts: Record<string, number>;
   mergedSince: RunSummary[];
+  /** The SHIPPED union (W1-T51) — ledger ∪ GitHub-derived, ownership-asserted, correction-aware. */
+  shipped: ShippedRecord[];
+  /** Every named discrepancy the union found (gate-side additions AND rejected foreign trailers). */
+  discrepancies: string[];
   learningsNow: number;
   learningsAtMarker: number;
 }
 
-/** Build the whole deterministic gather from raw inputs. Pure. */
+/**
+ * Build the whole deterministic gather from raw inputs. Pure over its injected
+ * `github` gateway (deps.github omitted ⇒ `shipped` degrades to the ledger-only
+ * list, same as today's `mergedSince` — no GitHub union, no ownership assert,
+ * no unverified annotation; see {@link ledgerOnlyShipped}).
+ */
 export function buildGather(opts: {
   ledgerNdjson: string;
   learningsMd: string;
   sinceTs?: string;
   learningsAtMarker?: number;
+  /** GitHub gateway for the SHIPPED union (W1-T51/P9). Omit to fall back ledger-only. */
+  github?: ShippedGithub;
 }): RetroGather {
   const runs = gatherRuns(parseLedger(opts.ledgerNdjson));
   const scoped = opts.sinceTs ? runs.filter((r) => r.startTs > opts.sinceTs!) : runs;
+  const merged = mergedSince(runs, opts.sinceTs);
+  const { shipped, discrepancies } = opts.github
+    ? shippedSince(runs, opts.sinceTs, opts.github)
+    : { shipped: ledgerOnlyShipped(merged), discrepancies: [] as string[] };
   return {
     sinceTs: opts.sinceTs,
     totalRuns: scoped.length,
     byType: aggregateByType(scoped),
     verdicts: verdictDistribution(scoped),
-    mergedSince: mergedSince(runs, opts.sinceTs),
+    mergedSince: merged,
+    shipped,
+    discrepancies,
     learningsNow: learningsCount(opts.learningsMd),
     learningsAtMarker: opts.learningsAtMarker ?? 0,
   };
@@ -239,6 +415,18 @@ export function renderGather(g: RetroGather): string {
     ...(g.mergedSince.length
       ? g.mergedSince.map((r) => `- ${r.taskId} → ${r.prUrl ?? "(no pr)"} · $${r.costUsd.toFixed(3)} · ${r.numTurns} turns`)
       : ["- (none)"]),
+    "",
+    "## SHIPPED since marker (W1-T51 — ledger ∪ GitHub-derived trailered merges, ownership-asserted)",
+    ...(g.shipped.length
+      ? g.shipped.map(
+          (s) =>
+            `- ${s.taskId} → ${s.prUrl} · $${s.costUsd.toFixed(3)} · ${s.numTurns} turns` +
+            (s.annotation ? ` · (${s.annotation})` : ""),
+        )
+      : ["- (none)"]),
+    ...(g.discrepancies.length
+      ? ["", "## Discrepancies (ledger vs GitHub — every gate-side addition and rejected foreign trailer)", ...g.discrepancies.map((d) => `- ${d}`)]
+      : []),
   ].join("\n");
 }
 
