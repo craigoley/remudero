@@ -3352,3 +3352,136 @@
   attempts: 0
   note: "After this merges, the operator runs: ./bin/rmd correct W1-T20c --pr 134 — then rmd drain
     --dry-run must DROP W1-T20c and LIST W1-T20d (the linter chain unblocks). Rule 18 live confirmation."
+
+# JOINT P21+P22 ratification (three-task family; P21 SUPERSEDED-BY-P22, absorbed into W1-T76). DEVIATION
+# from the ADDENDUM's two: the fix-worker (P21's content) serves BOTH the manual run-task path AND the
+# sweep independently, so it is its own task — bundling it into sweep-core is the W1-T12 multi-concern class.
+- id: W1-T76
+  title: "The blocked_review FIX RUNG — one bounded worker, the FULL unmet set, the SAME creditable run branch (absorbs P21; §3's fixing state, built)"
+  repo: remudero
+  depends_on: [W1-T63, W1-T65]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Absorbs P21 (superseded by P22 this PR). FIVE hand-authored resolutions this session —
+    #111, #113, #123, #130, #133 — each a CORRECT reviewer block (proof-quality: missing or
+    structural-instead-of-behavioral tests) whose computed unmet_criteria + reasons (W1-T63, sharpened
+    by W1-T65's observed verdicts) nothing consumed; each resolved by exactly what this rung automates:
+    ONE worker, the full criteria set, one branch. The #111/#113 ping-pong proved one-criterion-at-a-time
+    loops forever. blocked_review is terminal in BOTH paths today (run-task.ts ~:1316-1354, drift
+    expected); §3's fixing state (resume round 1 / fresh round 2) is the design home; the fix/diagnose
+    mount rows (W1-T63) finally gain their consumer."
+  design: |
+    On blocked_review — manual rmd run-task AND the drain path (both call runTask) — dispatch ONE
+    bounded fix worker that receives: the FULL unmet_criteria + the reviewer's verbatim reasons at once
+    (the anti-ping-pong invariant), the task spec, and the standing instruction that its PR body must
+    substantiate EVERY task criterion, not only the fixed ones (the #134 corollary — the floor judges
+    the body against all). It amends the SAME run-<taskId>-<epochMs> branch/PR — NEVER a fresh PR, NEVER
+    a fix/* branch — because deriveStatus's ownership assert (status.ts:204) credits ONLY
+    ^run-<taskId>-\d+$ heads: creditability is LOAD-BEARING, not just anti-orphan (LIVE PROOF: hand-fix
+    #134 on fix/* left W1-T20c listed runnable; without amend-run-PR the fix rung would loop forever on
+    tasks it already fixed). Add ONE comment line at the status.ts:204 assert during this task's build:
+    the legit fix workflow amends the run branch — never weaken this assert to accommodate fix/* heads.
+    Strike cap from config (default 2, §3's ladder: resume then fresh); on exhaustion route to escalate
+    (W1-T8) — the clarification rung (W1-T78) upgrades that route when it lands. Fix spawns resolve the
+    "fix" mount row. Every dispatch/exhaustion is a ledger line.
+  acceptance:
+    - claim: "a seeded blocked_review with TWO unmet criteria dispatches ONE fix worker receiving BOTH + the reviewer reasons (P21's golden, verbatim)"
+      proof: "unit test over an injected spawner: exactly one spawn; its rendered prompt contains both criteria and both reasons"
+    - claim: "the fix worker amends the same run branch — its output is creditable AND the task leaves the dispatch queue"
+      proof: "unit test: the spawn's worktree/branch equals the blocked run's run-<taskId>-<epochMs> head; a fixture deriveStatus over the amended-merged state credits the task AND nextRunnable over that fixture EXCLUDES it (the drain-drops-it confirmation at fixture level); a fix/* head fixture is REJECTED by the :204 assert"
+    - claim: "a second block after N strikes escalates rather than looping (P21's golden, verbatim)"
+      proof: "unit test: strike counter at cap -> no third spawn; escalate() invoked; ledger line records exhaustion"
+    - claim: "both paths are wired — manual and drain reach the same rung"
+      proof: "unit tests drive runTask's blocked_review branch from each entry point -> one rung, one implementation, two callers (grep: no duplicated fix-dispatch logic)"
+  risk: high
+  origin: architect
+  plan_refs: ["§3", "§5"]
+  files: [src/run-task.ts, src/lib/worker.ts, src/lib/status.ts]
+  status: queued
+  attempts: 0
+  note: "P21 absorbed verbatim (invariant + golden). status.ts is COMMENT-ONLY in this task (the
+    assert-stays-strict note); any behavioral status.ts change is out of scope. Reviewer reasons ->
+    fix prompt is the W1-T63 payoff."
+
+- id: W1-T77
+  title: "rmd sweep — the level-triggered PR-pipeline reconciler: every open PR gets exactly one disposition (ratifies P22 core)"
+  repo: remudero
+  depends_on: [W1-T76]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P22's core. The pipeline is EDGE-TRIGGERED today — a verdict fires once and if its
+    consumer is missing the PR strands (five instances this session). The reconciler is LEVEL-TRIGGERED
+    [research: prow-tide-2017, level-triggered-reconciliation]: each daemon poll + on-demand rmd sweep
+    re-derives EVERY open PR's disposition from observed state and takes the gated action. Third
+    policy-gated ACT lane (§5D): dep lane W1-T54 · alert lane P20 · PR-pipeline, this."
+  design: |
+    Deterministic predicate (policy-as-data, rule 2) over each open PR's observed state:
+    MERGEABLE (required contexts green, review success, unmerged) -> arm auto-merge (rule 3B; per-repo
+    merge serialization slots under this disposition when WS-2 lands — it does NOT exist today).
+    BLOCKED-FIXABLE (blocked_review, criteria a worker can act on) -> invoke the W1-T76 rung.
+    STALE/SUPERSEDED (a newer PR credits the same task, or no activity in N days) -> close with a stated
+    reason (superseded-by #N / abandoned) — the #111/#113 manual chore, automated.
+    BLOCKED-AMBIGUOUS (W1-T76 strikes exhausted, or contradictory criteria) -> escalate via W1-T8 as the
+    interim route; W1-T78 upgrades it to the clarification question.
+    HUNG is EXPLICITLY DEFERRED to WS-2 — worker liveness is run-state, not PR-state; the sweep's
+    domain is PR state only (scoping honesty, stated in the module doc).
+    INVARIANTS: no open PR ends a sweep with disposition=none; IDEMPOTENCE — a second sweep over
+    unchanged state dispatches nothing new (dispositions re-derived, actions deduped by state-change).
+    Every disposition is a ledger line (sweep.disposed).
+  acceptance:
+    - claim: "the P22 golden, verbatim: seeded {mergeable, blocked-fixable(2 criteria), superseded-orphan, strikes-exhausted} -> exactly {one arm, ONE fix-worker carrying BOTH, one close-with-reason, one escalation}; no seeded PR ends disposition=none"
+      proof: "fixture-driven unit test over injected GitHub/spawner deps asserting the exact action set and the none-count==0 invariant"
+    - claim: "idempotence — the level-triggered core"
+      proof: "unit test: the same fixture swept twice unchanged -> second sweep performs zero actions, dispositions identical"
+    - claim: "policy is data, not code branches"
+      proof: "unit test: tightening the stale-days threshold in the policy table flips a fixture PR's disposition with zero sweep-code changes"
+    - claim: "the daemon poll and rmd sweep share one implementation"
+      proof: "grep: a single sweep entry point invoked from both; unit test drives it from each caller"
+  risk: high
+  origin: architect
+  plan_refs: ["§5D", "§4B"]
+  files: [src/lib/sweep.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Ratifies P22 with its capture ADDENDUM's corrections honored (arm-not-serialize today; HUNG deferred)."
+
+- id: W1-T78
+  title: "The CLARIFICATION-QUESTION rung — an ambiguous block yields a specific, decidable operator question, never silence (ratifies P22's new rung)"
+  repo: remudero
+  depends_on: [W1-T77]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The genuinely new rung (operator-requested by name): when the fix rung exhausts strikes or
+    criteria are contradictory, today's best outcome is a generic needs-human. This rung generates a
+    SPECIFIC question — the exact decision, the two candidate resolutions, the run/PR context — into the
+    §2 QUESTION contract, surfacing on the §7 question backlog with W1-T8's escalate() as transport.
+    The inverse grill: rmd -> operator to disambiguate a block."
+  design: |
+    On BLOCKED-AMBIGUOUS from the sweep: render the question deterministically from ledger ground truth
+    (task id, criterion, the reviewer's stated requirement vs the spec's text, what the fix worker tried
+    per strike). Emit per the §2 QUESTION contract (READ the contract first — distrust-the-prompt) to the
+    question backlog + escalate() notification. The operator's answer feeds a W1-T76 re-dispatch as an
+    added constraint, or a task-edit PROPOSAL — never a silent guess, never a self-authored tasks.yaml
+    edit (rule 15). One question per blocked PR per sweep (idempotent with W1-T77's dedup).
+  acceptance:
+    - claim: "a strikes-exhausted fixture yields ONE question naming the decision, both candidate resolutions, and the PR/run context"
+      proof: "unit test: rendered question contains the criterion text, the reviewer requirement, the spec text, and both resolution options; conforms to the §2 QUESTION contract shape"
+    - claim: "an operator answer re-arms the fix rung with the constraint attached"
+      proof: "unit test: answer fixture -> W1-T76 re-dispatch whose prompt carries the answer verbatim; strike counter reset policy per config"
+    - claim: "no self-edits, no guesses"
+      proof: "grep: the rung writes no plan files; an unanswered question leaves the PR in BLOCKED-AMBIGUOUS with the question ledgered, nothing else dispatched"
+  risk: high
+  origin: architect
+  plan_refs: ["§2", "§7", "§7B"]
+  files: [src/lib/sweep.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Interim route (plain W1-T8 escalate) ships in W1-T77; this upgrades it. Question quality is the
+    §7B grill primitive pointed at blocks. RISK raised medium->high per the §5C linter's own sizing
+    resolution (2 subsystems sweep+run-task): matches its high-risk siblings W1-T76/T77, not a decompose."
