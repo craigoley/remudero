@@ -181,14 +181,33 @@ export interface WriteTierConfigResult {
  * other existing key (claudeBin/root/etc. — config.ts owns those; this never
  * clobbers them). Creates the file (and its directory) on first run, matching
  * `loadConfig`'s own bootstrap behavior (config.ts) — mode 0600, same as there.
+ *
+ * EXCLUSIVE-CREATE DISCIPLINE (CodeQL js/file-system-race): the old shape here
+ * was `existsSync(path) ? merge : create` — a TOCTOU. Between the `existsSync`
+ * check and the `writeFileSync`, a second writer (e.g. `loadConfig()` racing
+ * this on a genuine first run) could create the file first; this call's
+ * unconditional overwrite would then clobber whatever the other writer put
+ * there with just `{tier, tierSource}`, silently dropping `claudeBin`/`root`.
+ * `writeFileSync(path, ..., { flag: "wx" })` folds the check and the create
+ * into one atomic syscall — it succeeds only if THIS call created the file,
+ * and fails with `EEXIST` if anything else already had, in which case (and
+ * only in which case) we fall back to the read-merge-write path below.
  */
 export function writeTierIntoConfig(path: string, tier: Tier, source: TierSource): WriteTierConfigResult {
-  const createdFile = !existsSync(path);
-  const existing = createdFile ? {} : (JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>);
-  const next = { ...existing, tier, tierSource: source };
   mkdirSync(dirname(path), { recursive: true });
+  try {
+    writeFileSync(path, JSON.stringify({ tier, tierSource: source }, null, 2) + "\n", {
+      mode: 0o600,
+      flag: "wx",
+    });
+    return { path, createdFile: true };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
+  const existing = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  const next = { ...existing, tier, tierSource: source };
   writeFileSync(path, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
-  return { path, createdFile };
+  return { path, createdFile: false };
 }
 
 export interface RunInitOpts {
