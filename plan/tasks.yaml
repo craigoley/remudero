@@ -2780,3 +2780,38 @@
     (Dependabot's). The run's REAL PR is #91 (docs/dep-review.md). The next retro (or the W1-T51 build that
     reads the merged-since list) must cite #91, not #80, for this run — do not let the false provenance
     propagate into the plan's SHIPPED log."
+
+# Ratifies P10 + P10-a (retro#1784155126258): the reviewer walls every substantive code PR, so the merge
+# gate is FLOOR-ONLY for code today — a blocker for safe autonomy (a self-modifying loop must not merge its
+# own code with its output-verifier dead). plan/ratify-reviewer-mounts.
+- id: W1-T63
+  title: "Reviewer/fix/diagnose phases are mount-governed + reviewer_outcome surfaced (the reviewer stops walling; floor-only merges become legible)"
+  repo: remudero
+  depends_on: [W1-T5]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P10 (retro#1784155126258) + P10-a. GROUND TRUTH (ledger, 3 instances - runs ...811, W1-T62-1784153160547, W1-T51-1784161630203): review.reviewer ends error_max_turns at model=default/effort=default on EVERY substantive code PR, so review.posted falls to a floor-only PASS (state=success, unmet_criteria:[]) and the PR auto-merges with the LLM reviewer never completing. remudero-review is therefore effectively FLOOR-ONLY for real code PRs - the layer that catches test-theater / criteria-misses / partial-fix-drift (W1-T3F observation + the rubric) is OFF. MECHANISM (P10, VERIFY by grep before editing - line drift expected): mounts.yaml has rows for recon/implement ONLY (no reviewer/fix/diagnose row), and those spawns read HARDCODED maxTurns literals (P10 cited run-task.ts:385=12, run-task.ts:1488=40, containment.ts:122=6), so a ~12-turn reviewer cap reviewing a 60-turn implementation walls every time. This BLOCKS safe autonomy: a self-modifying loop must not merge its own code with its output-verifier dead."
+  design: |
+    THREE changes, all fail-safe:
+    (1) MOUNT-GOVERN reviewer/fix/diagnose. Add reviewer/fix/diagnose rows to .remudero/mounts.yaml keyed by (task_type x risk x thinking) -> {model, effort, max_turns, context_budget}, sized so a reviewer completes a real PR review (implement mount is the floor reference; the reviewer is an Architect-tier verifier and rides a HIGHER tier per G-17). Then REPLACE the hardcoded maxTurns literals on those spawn paths with resolveMount(phase, risk).max_turns. A deliberately-bounded literal may stay ONLY if defensible and NAMED in a comment (recon's 8, a containment probe) - reviewer/fix/diagnose are NOT that. VERIFY every literal's current location by grep first (distrust-the-prompt).
+    (2) SURFACE reviewer_outcome. Record the review.reviewer subtype (error_max_turns | success | ...) on the review.posted ledger line as reviewer_outcome, AND print it in the console review summary, so a floor-only PASS (reviewer walled) is LEGIBLE and not byte-identical to a completed review (P10-a; the operator needs it for autonomous troubleshooting).
+    (3) CORRECT the doctrine. Update MASTER-PLAN Sec 9's flat-400 paragraph to name which phases are MOUNT-GOVERNED vs DELIBERATELY-BOUNDED (awareness layer: behavior change -> doc update).
+    HEADLESS-FITNESS (Rule 18): the criteria below are PLUMBING (unit-testable). The LIVE confirmation - 'the reviewer completes instead of walling' - is the NEXT real rmd run's review.reviewer subtype != error_max_turns, an operator observation, NOT an auto-verify criterion here.
+  acceptance:
+    - claim: "reviewer/fix/diagnose phases resolve a mount from .remudero/mounts.yaml (real max_turns), not a hardcoded literal"
+      proof: "resolver unit test: resolveMount('reviewer',risk)/('fix',...)/('diagnose',...) each return a mount whose max_turns >> the old 12; grep run-task.ts + containment.ts shows NO hardcoded maxTurns literal remains on those spawn paths (any that stays is a NAMED deliberate bound)"
+    - claim: "the Tier Invariant still holds with the new rows (reviewer.tier > worker.tier, G-17)"
+      proof: "a mounts.yaml whose reviewer row violates architect.tier > worker.tier is REJECTED at load with the named Tier-Invariant error (W1-T5 validation, extended)"
+    - claim: "reviewer_outcome is recorded on the review.posted ledger line and printed in the console review summary"
+      proof: "unit test: a review.posted built from a review.reviewer that ended error_max_turns carries reviewer_outcome=error_max_turns; a completed one carries reviewer_outcome=success; the console summary distinguishes floor-only from completed"
+    - claim: "MASTER-PLAN Sec 9 names mount-governed vs deliberately-bounded phases (flat-400 claim corrected)"
+      proof: "grep MASTER-PLAN.md Sec 9 for the corrected paragraph naming reviewer/fix/diagnose mount-governed, recon/containment-probe deliberately-bounded"
+  risk: high
+  origin: retro#1784155126258
+  plan_refs: ["§9", "§4B", "§5"]
+  files: [.remudero/mounts.yaml, src/run-task.ts, src/lib/containment.ts, MASTER-PLAN.md]
+  status: queued
+  attempts: 0
+  note: "Ratifies P10 + P10-a. Blocker for safe autonomy: reviewer walls every substantive PR (3 ledgered instances), so the merge gate is floor-only for code today. Live 'reviewer no longer walls' confirmation is the next real run's review.reviewer subtype (operator-observed), Rule 18."
