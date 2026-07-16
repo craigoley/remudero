@@ -1,11 +1,13 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
-import { loadConfig, workerShell, workerZdotdir, type Config } from "./config.js";
+import { loadConfig, workerHomeDir, workerShell, workerZdotdir, type Config } from "./config.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { buildWorkerEnv } from "./env.js";
 import { validateWorkerSettingsFile } from "./settings.js";
+import { materializeWorkerHome } from "./worker-home.js";
 
 /**
  * Aggregate token usage off the SDK result envelope's `usage` field (verified
@@ -169,12 +171,23 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   validateWorkerSettingsFile(args.settingsFile);
 
   const config = args.config ?? loadConfig();
+  // W1-T18 general isolation mechanism: redirect HOME to a Remudero-controlled
+  // scratch dir holding ONLY empty rc files (never the operator's real HOME),
+  // with the few paths a worker legitimately needs symlinked back in. Best-
+  // effort/idempotent — safe to call before every spawn. See worker-home.ts.
+  const workerHome = workerHomeDir(config);
+  materializeWorkerHome({ workerHome, realHome: process.env.HOME ?? homedir() });
+
   // Shell isolation (resolved from config, never hardcoded) so a worker sources
-  // no operator rc: CLAUDE_CODE_SHELL redirects Claude Code's Bash-tool snapshot
-  // to an empty rc, ZDOTDIR covers any direct zsh (W1-T1C compinit contamination).
+  // no operator rc: HOME is redirected (above) so CLAUDE_CODE_SHELL's Bash-tool
+  // snapshot (which sources `$HOME/.bashrc`) resolves to the redirected scratch
+  // HOME's empty rc, never the operator's — isolation independent of whatever
+  // the operator's real dotfiles contain. ZDOTDIR covers any direct zsh (W1-T1C
+  // compinit contamination).
   const childEnv = buildWorkerEnv(args.env ?? {}, process.env, {
     zdotdir: workerZdotdir(config),
     shell: workerShell(config),
+    home: workerHome,
   });
 
   const stderrChunks: string[] = [];
