@@ -44,11 +44,13 @@ import { appendLedger } from "./lib/ledger.js";
 import {
   assertRunnable,
   loadPlan,
+  loadPlanFromYaml,
   selectTask,
   type AcceptanceCriterion,
   type Plan,
   type Task,
 } from "./lib/plan.js";
+import { assertLintClean, changedTaskIds, lintTask, TaskLintError } from "./lib/task-linter.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./lib/mounts.js";
 import { ContainmentError, probeContainment } from "./lib/containment.js";
 import { IsolationError, probeIsolation } from "./lib/isolation.js";
@@ -610,6 +612,7 @@ export interface RunResult {
     | "blocked_isolation"
     | "blocked_inflight"
     | "blocked_git_fetch"
+    | "blocked_illformed"
     | "no_pr"
     | "blocked_transient"
     | "pr_attribution_failed"
@@ -893,6 +896,26 @@ async function runTask(
   );
   const isMerged = (t: Task): boolean => projection.get(t.id)?.merged ?? false;
   assertRunnable(plan, task, isMerged); // refuse unmerged deps / blocked / verify:human
+
+  // ── §5C LAYER A: deterministic task linter, FAIL-CLOSED pre-dispatch guard
+  // (MASTER-PLAN §5C). Four malformed tasks (W1-T6, W1-T9, W1-T12) reached a
+  // worker and burned budget before a human noticed the pattern; this refuses a
+  // linter-failing task BEFORE the inflight lock is even taken — no lock, no
+  // worktree, no worker ever spawns. `rmd drain` dispatches every task through
+  // this same `runTask` path, so this ONE call site gates both entry points.
+  try {
+    assertLintClean(task);
+  } catch (e) {
+    if (e instanceof TaskLintError) {
+      log("lint.blocked", { violations: e.violations });
+      say(
+        `REFUSED: task ${taskId} failed the pre-dispatch linter — ${e.violations.length} violation(s):\n` +
+          e.violations.map((v) => `  • [${v.check}] ${v.message}`).join("\n"),
+      );
+      return { taskId, runId, merged: false, costUsd: 0, verdict: "blocked_illformed" };
+    }
+    throw e;
+  }
 
   // ── PER-TASK IN-FLIGHT LOCK (guard 1, DIAGNOSIS.md diag/drain-sequential-await).
   // No two runs of the SAME task may overlap — whatever launched them (two drains, or a
@@ -1643,6 +1666,79 @@ async function depReviewCommand(prArg: string, rest: string[] = []): Promise<num
   log("dep-review.escalated", { issue_url: issueUrl });
   console.log(`remudero-review=failure posted (no auto-merge); escalated: ${issueUrl}`);
   return 1;
+}
+
+/**
+ * `rmd lint-plan [--plan <path>] [--base <git-ref>]` — the CI half of §5C Layer A
+ * (the pre-dispatch half lives in `runTask`, see `assertLintClean`).
+ *
+ * With `--base`, lints ONLY the task ids that are NEW or CHANGED relative to
+ * that git ref (`changedTaskIds`, comparing `<ref>:plan/tasks.yaml` to the
+ * working copy) — this is what makes the FAIL-CLOSED CI gate safe to turn on
+ * immediately: it judges the PR's OWN edit, not the whole historical queue
+ * (re-grading everything already open is the retro's separate, periodic
+ * plan-health sweep, W1-T20d — not every PR's gate). Without `--base`, lints
+ * the WHOLE plan (the mode a future retro sweep wants).
+ *
+ * Exits non-zero iff any IN-SCOPE task has a BLOCKING violation. Resolving
+ * `--base` itself failing (bad ref, unreadable git history) is a LOUD
+ * configuration error (exit 2), never a silent fall-back to full-plan or
+ * no-op — the control surface never guesses on ambiguous input.
+ */
+async function lintPlanCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const planPath = flagValue(rest, "--plan") ?? join(repoRoot, "plan", "tasks.yaml");
+  const baseRef = flagValue(rest, "--base");
+  let plan: Plan;
+  try {
+    plan = loadPlan(planPath);
+  } catch (e) {
+    console.error(`### rmd lint-plan: ${(e as Error).message}`);
+    return 2;
+  }
+
+  let scope: Set<string> | undefined;
+  if (baseRef) {
+    const relPath = relative(repoRoot, planPath);
+    try {
+      const oldRaw = execFileSync("git", ["show", `${baseRef}:${relPath}`], {
+        cwd: repoRoot,
+        encoding: "utf8",
+      });
+      const oldPlan = loadPlanFromYaml(oldRaw, `${baseRef}:${relPath}`);
+      scope = changedTaskIds(oldPlan.tasks, plan.tasks);
+    } catch (e) {
+      console.error(`### rmd lint-plan: cannot resolve --base ${baseRef}: ${(e as Error).message}`);
+      return 2;
+    }
+  }
+
+  let failing = 0;
+  let warned = 0;
+  let checked = 0;
+  for (const task of plan.tasks) {
+    if (scope && !scope.has(task.id)) continue;
+    checked++;
+    const { violations } = lintTask(task);
+    const blocking = violations.filter((v) => v.severity === "block");
+    const soft = violations.filter((v) => v.severity === "warn");
+    if (blocking.length) {
+      failing++;
+      console.error(`✗ ${task.id}: ${blocking.length} violation(s)`);
+      for (const v of blocking) console.error(`    [${v.check}] ${v.message}`);
+    }
+    for (const v of soft) {
+      warned++;
+      console.warn(`  ⚠ ${task.id}: [${v.check}] ${v.message}`);
+    }
+  }
+  const scopeNote = scope ? ` (${scope.size} new/changed vs ${baseRef})` : "";
+  console.log(`\nrmd lint-plan: ${checked} task(s) checked${scopeNote} — ${failing} failing, ${warned} warning(s)`);
+  return failing > 0 ? 1 : 0;
 }
 
 /**
@@ -2608,7 +2704,7 @@ async function initCommand(rest: string[]): Promise<number> {
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 const USAGE =
-  "usage:\n  rmd run-task <task-id> [--allow-stale]   # dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd dep-review <pr-number> [--repo <name>]   # deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60)\n  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.\n  rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)\n  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.\n  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.\n  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard\n\nAn UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
+  "usage:\n  rmd run-task <task-id> [--allow-stale]   # dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd dep-review <pr-number> [--repo <name>]   # deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse\n  rmd lint-plan [--plan <path>] [--base <git-ref>]   # §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60)\n  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.\n  rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)\n  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.\n  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.\n  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard\n\nAn UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(): Promise<void> {
@@ -2633,6 +2729,9 @@ async function main(): Promise<void> {
   }
   if (cmd === "dep-review" && arg) {
     process.exit(await depReviewCommand(arg, rest.slice(1)));
+  }
+  if (cmd === "lint-plan") {
+    process.exit(await lintPlanCommand(rest));
   }
   if (cmd === "retro") {
     process.exit(await retroCommand(rest));

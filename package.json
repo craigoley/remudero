@@ -24,6 +24,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "node --test --import tsx \"test/**/*.test.ts\"",
+    "lint-plan": "tsx src/run-task.ts lint-plan",
     "spike": "tsx src/spike.ts"
   },
   "dependencies": {

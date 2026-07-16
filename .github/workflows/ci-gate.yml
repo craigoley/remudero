@@ -54,8 +54,11 @@ jobs:
       # register check can never let the gate pass prematurely (the registration race). Keep in
       # sync as tiered sub-jobs (W1-T23 security / W1-T25 quality / W1-T26 architecture) land —
       # each adds its job name here once it is live on main.
+      # `lint-plan` (W1-T20c, §5C Layer A) added: UNCONDITIONAL (no path filter, runs every PR),
+      # same safety property as `ci` — a path-filtered required check is the synthwatch #102
+      # deadlock class this list must never reproduce.
       REQUIRED: >-
-        ["ci"]
+        ["ci", "lint-plan"]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
       IGNORE: >-
