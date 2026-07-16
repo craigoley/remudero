@@ -136,6 +136,14 @@ export interface SpawnWorkerArgs {
   maxTurns?: number;
   maxBudgetUsd?: number;
   config?: Config;
+  /**
+   * Restrict the model's base built-in tool set (SDK `Options.tools`). Unset
+   * ⇒ the SDK default (all Claude Code tools). Pass e.g. `["Bash"]` to make a
+   * worker read-only BY CONSTRUCTION — Write/Edit/NotebookEdit/MultiEdit are
+   * never in the model's context, so it cannot use one even if asked
+   * (isolation.ts's preflight probe, W1-T17).
+   */
+  tools?: string[];
 }
 
 /**
@@ -192,6 +200,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   if (args.effort) options.effort = args.effort as Options["effort"];
   if (typeof args.maxTurns === "number") options.maxTurns = args.maxTurns;
   if (typeof args.maxBudgetUsd === "number") options.maxBudgetUsd = args.maxBudgetUsd;
+  if (args.tools) options.tools = args.tools;
 
   return collectWorkerResult(query({ prompt: args.prompt, options }), {
     childEnvKeys: Object.keys(childEnv).sort(),
