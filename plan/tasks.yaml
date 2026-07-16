@@ -3307,7 +3307,7 @@
 - id: W1-T75
   title: "Operator corrections are SUPREME in deriveStatus — hoist above rung (a) + a sanctioned `rmd correct` writer (ratifies P9; the W1-T20c/#134 stranding)"
   repo: remudero
-  depends_on: [W1-T69]
+  depends_on: [W1-T62]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -3351,7 +3351,14 @@
   status: queued
   attempts: 0
   note: "After this merges, the operator runs: ./bin/rmd correct W1-T20c --pr 134 — then rmd drain
-    --dry-run must DROP W1-T20c and LIST W1-T20d (the linter chain unblocks). Rule 18 live confirmation."
+    --dry-run must DROP W1-T20c and LIST W1-T20d (the linter chain unblocks). Rule 18 live confirmation.
+    BOOTSTRAP DEP-REMAP 2026-07-16: W1-T69's CODE is on main (#131, hand-fixed on fix/* after run PR #130
+    closed) but reads uncredited — deriveStatus rung (a) returns on the closed run's pr.opened line before
+    the pr: field or corrections are consulted, so the task that makes corrections supreme was itself
+    blocked by assertRunnable (PlanError, plan.ts:244) on the very crediting gap it fixes. W1-T62 is a
+    credited true ancestor (the write-side guard; also W1-T69's own dep). One-time bootstrap seam — rmd
+    correct cannot be reachable before this task builds, by the mechanism this task exists to fix. After
+    this task merges, the operator credits W1-T69 (#131) and W1-T20c (#134) via rmd correct."
 
 # JOINT P21+P22 ratification (three-task family; P21 SUPERSEDED-BY-P22, absorbed into W1-T76). DEVIATION
 # from the ADDENDUM's two: the fix-worker (P21's content) serves BOTH the manual run-task path AND the
