@@ -247,7 +247,7 @@ tasks.yaml PR — never auto-filed, never worker-edited (rule 15).
   W1-T62's write-side guard: an inversion the runner can no longer WRITE can still be READ by a consumer
   that ignores the correction. **The general lesson, which is bigger than this bug: a fix that repairs the mechanism
   but not the CORRUPT DATA IT ALREADY EMITTED is half a fix — and the plan is downstream of that data.**
-- **★ P10 (plan) — §9's "never a hardcoded literal" is enforced on the IMPLEMENT path ONLY; the phases
+- **★ P10 (plan) — RATIFIED 2026-07-16 -> W1-T63 (reviewer mount-governance + reviewer_outcome; P10-a fail-open observability folded in). §9's "never a hardcoded literal" is enforced on the IMPLEMENT path ONLY; the phases
   that actually walled this cycle are the ones mounts.yaml cannot reach.** #90 re-based every mount to a
   flat 400-turn tripwire, and §9 now reads as though the runaway cliff is uniformly 400. **It is not.**
   Three of ten runs ended `error_max_turns` — and in `W1-T54b-1784151420811` the walling phase came AFTER
