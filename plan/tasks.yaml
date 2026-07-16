@@ -3253,3 +3253,50 @@
   attempts: 0
   note: "Independent of W1-T72 (mines the existing proof_exec field); W1-T72's floor_degraded flag becomes
     a second table row when it lands. Relayed 2026-07-16."
+
+# Filed from the #128 root-cause flag: the retro minted a duplicate proposal id (P21) without deriving
+# next-unused. Third surface of the derive-the-id-deterministically class (PR attribution, trailer, now
+# proposal numbering) — the strong half is a uniqueness gate on every PR's ci.
+- id: W1-T74
+  title: "Proposal-id integrity — retro minting derives next-unused + a deterministic uniqueness gate in ci (the #125/#118 P21 collision)"
+  repo: remudero
+  depends_on: [W1-T62]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "GROUND TRUTH (2026-07-16, resolved by #128): RETRO-1784213948025/#125 minted a proposal
+    numbered P21 while #118's P21 already sat on main — two active proposals shared one id for ~2 hours,
+    and NET STATE cross-references pointed at an ambiguous target. Root cause: the retro's synthesis
+    assigned an id without deriving next-unused. This is the derive-the-id-deterministically class,
+    third surface: PR attribution (W1-T62/W1-T69), trailer extraction (W1-T70), now proposal numbering.
+    Prompt discipline is the weak half (rule 2: instructions shape, gates guarantee) — the strong half
+    is a uniqueness gate that runs on EVERY PR's ci, which would have gone red on #125 at its own gate."
+  design: |
+    TWO halves, one concern (proposal-id integrity):
+    (i) PREVENTION: the retro synthesis instructions (locate the retro prompt template in run-task.ts by
+        grep — the retro-run rendering near the RETRO trailer construction; distrust-the-prompt, drift
+        expected) gain the standing Architect-capture discipline verbatim: grep the proposals section for
+        the highest existing P-number, take the next unused, REPORT the mapping in the PR body.
+    (ii) GUARANTEE: a repo test (test/plan-proposals.test.ts) parses MASTER-PLAN.md's Retro-proposals
+        section and asserts every ACTIVE proposal id (the ★/- P<number> headers between the section head
+        and the Closed block) is unique. It runs in npm test, hence in the required ci context on every
+        PR — plan PRs included. Parse tolerantly (ids may be stamped RATIFIED/retired inline); assert
+        uniqueness of the id tokens only, never format.
+  acceptance:
+    - claim: "the canonical regression fixture — the #118/#125 collision state (two active P21 headers) — fails the uniqueness test"
+      proof: "unit test over a fixture proposals-section snapshot reproducing the duplicate -> the test reports the duplicated id (if it cannot catch the collision that motivated it, it is not done)"
+    - claim: "the current main proposals section passes"
+      proof: "the test runs against the real MASTER-PLAN.md in ci on this PR and is green"
+    - claim: "the retro synthesis template carries the next-unused-id instruction"
+      proof: "grep the retro prompt template for the grep-highest/next-unused/REPORT-the-mapping instruction text"
+    - claim: "ratified/retired stamps do not false-positive"
+      proof: "unit test: a fixture with 'P15 ... RATIFIED -> W1-T65' and a retired P10 alongside active ids -> no duplicate reported"
+  risk: medium
+  origin: architect
+  plan_refs: ["§Self-improvement", "§12"]
+  files: [src/run-task.ts, test/plan-proposals.test.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from the #128 worker's root-cause flag. The uniqueness test is the gate; the template line
+    is courtesy — a colliding retro PR now goes RED at its own ci instead of merging ambiguity."
