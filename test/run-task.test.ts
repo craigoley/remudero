@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   DEFAULT_BUDGET_USD,
+  GitFetchError,
   checkPrOwnership,
   isTransientResult,
   resolveReviewTarget,
   resolveDaemonTarget,
+  syncPlanFromOrigin,
+  syncPlanOrRefuse,
   unknownArgError,
   noPrVerdict,
   softBudgetWarning,
@@ -283,4 +290,98 @@ test("resolveDaemonTarget: --dry-run against self is allowed (harmless preview, 
 test("resolveDaemonTarget: --plan <path> overrides the plan source", () => {
   const r = resolveDaemonTarget(dEnv, ["--repo", "remudero-sandbox", "--plan", "/tmp/sbx.yaml"]) as { target: any };
   assert.equal(r.target.planPath, "/tmp/sbx.yaml");
+});
+
+// ── W1-T60: the runner self-syncs git state — fetch origin + dispatch from origin/main,
+// never the operator's working tree. Real, throwaway git repos (no mocking) so the
+// fetch/show plumbing is genuinely exercised.
+
+function planYaml(title: string): string {
+  return `- id: T1\n  title: "${title}"\n  repo: remudero\n  type: implement\n`;
+}
+
+/** A tiny real "origin" repo + a real clone of it, both with a committed plan/tasks.yaml. */
+function gitFixture(): { originDir: string; localDir: string } {
+  const root = mkdtempSync(join(tmpdir(), "rmd-git-sync-"));
+  const originDir = join(root, "origin");
+  const localDir = join(root, "local");
+  mkdirSync(join(originDir, "plan"), { recursive: true });
+  const git = (dir: string, args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+  git(originDir, ["init", "--quiet", "-b", "main"]);
+  git(originDir, ["config", "user.email", "test@example.com"]);
+  git(originDir, ["config", "user.name", "Test"]);
+  writeFileSync(join(originDir, "plan", "tasks.yaml"), planYaml("origin-title"), "utf8");
+  git(originDir, ["add", "."]);
+  git(originDir, ["commit", "--quiet", "-m", "init"]);
+  execFileSync("git", ["clone", "--quiet", originDir, localDir], { encoding: "utf8" });
+  git(localDir, ["config", "user.email", "test@example.com"]);
+  git(localDir, ["config", "user.name", "Test"]);
+  return { originDir, localDir };
+}
+
+test("syncPlanFromOrigin: dispatches from the origin/main BLOB (a real fetch), never a dirty local working tree", () => {
+  const { originDir, localDir } = gitFixture();
+  // Dirty, UNCOMMITTED local edit — must never win.
+  writeFileSync(join(localDir, "plan", "tasks.yaml"), planYaml("DIRTY-LOCAL"), "utf8");
+  // Publish a NEW commit on origin AFTER the clone — proves an actual fetch happens, not a
+  // remote-tracking ref cached from clone time.
+  writeFileSync(join(originDir, "plan", "tasks.yaml"), planYaml("PUBLISHED"), "utf8");
+  execFileSync("git", ["add", "."], { cwd: originDir });
+  execFileSync("git", ["commit", "--quiet", "-m", "update"], { cwd: originDir });
+
+  const localMainBefore = execFileSync("git", ["-C", localDir, "rev-parse", "main"], { encoding: "utf8" }).trim();
+
+  const { plan, staleDispatch } = syncPlanFromOrigin(localDir, "plan/tasks.yaml");
+
+  assert.equal(staleDispatch, false);
+  assert.equal(plan.tasks[0].title, "PUBLISHED");
+  // The operator's dirty working-tree file survives untouched — never `git pull`/checkout.
+  assert.equal(readFileSync(join(localDir, "plan", "tasks.yaml"), "utf8"), planYaml("DIRTY-LOCAL"));
+  // `fetch` only moves the remote-tracking ref — the local `main` branch is never touched.
+  const localMainAfter = execFileSync("git", ["-C", localDir, "rev-parse", "main"], { encoding: "utf8" }).trim();
+  assert.equal(localMainAfter, localMainBefore);
+});
+
+test("syncPlanFromOrigin: a fetch failure FAILS CLOSED; --allow-stale proceeds on the last-fetched refs and reports staleDispatch", () => {
+  const { localDir } = gitFixture();
+  execFileSync("git", ["-C", localDir, "remote", "set-url", "origin", "/no/such/path"]);
+
+  assert.throws(() => syncPlanFromOrigin(localDir, "plan/tasks.yaml"), GitFetchError);
+
+  const { plan, staleDispatch } = syncPlanFromOrigin(localDir, "plan/tasks.yaml", { allowStale: true });
+  assert.equal(staleDispatch, true);
+  assert.equal(plan.tasks[0].title, "origin-title"); // the last-known (clone-time) origin/main
+});
+
+test("syncPlanFromOrigin: --allow-stale still fails closed when origin/main has never been resolved (nothing to fall back to)", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-git-sync-never-fetched-"));
+  execFileSync("git", ["init", "--quiet", "-b", "main"], { cwd: root });
+  execFileSync("git", ["remote", "add", "origin", "/no/such/path"], { cwd: root });
+  assert.throws(() => syncPlanFromOrigin(root, "plan/tasks.yaml", { allowStale: true }), GitFetchError);
+});
+
+test("syncPlanOrRefuse: a hard fetch failure ledgers a NAMED git_fetch_failed error and refuses (no plan, no spawn) unless allowStale", () => {
+  const { localDir } = gitFixture();
+  execFileSync("git", ["-C", localDir, "remote", "set-url", "origin", "/no/such/path"]);
+  const planPath = join(localDir, "plan", "tasks.yaml");
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const said: string[] = [];
+  const log = (step: string, extra?: Record<string, unknown>) => logged.push({ step, extra });
+  const say = (msg: string) => said.push(msg);
+
+  const refused = syncPlanOrRefuse(planPath, { allowStale: false, log, say });
+  assert.ok("error" in refused, "no plan is returned on a hard fetch failure");
+  assert.ok(logged.some((l) => l.step === "git_fetch_failed"), "a NAMED ledger error is emitted");
+
+  logged.length = 0;
+  const proceeded = syncPlanOrRefuse(planPath, { allowStale: true, log, say }) as {
+    plan: { tasks: Array<{ title: string }> };
+    staleDispatch: boolean;
+  };
+  assert.equal("error" in proceeded, false);
+  assert.equal(proceeded.staleDispatch, true);
+  assert.ok(
+    logged.some((l) => l.step === "git.stale_dispatch" && l.extra?.stale_dispatch === true),
+    "stale_dispatch=true is ledgered when --allow-stale carries a run through a fetch failure",
+  );
 });
