@@ -3005,3 +3005,57 @@
   status: queued
   attempts: 0
   note: "Alert backlog triage 2026-07-16: code-scanning alerts #17-#23. ONE concern (one defect class) despite the file spread — the files: list is the alert inventory, not a multi-subsystem scope."
+
+# Ratifies P16 (captured #101): deriveStatus rung (c) credits a merged PR off a punctuation-loose body
+# search with no line-anchor and no ownership check — the READ side that gates DISPATCH (third consumer of
+# the attribution class after W1-T62 write side, W1-T51 retro read side). REPRODUCED LIVE 2026-07-16.
+- id: W1-T69
+  title: "deriveStatus rung (c): ownership-assert + anchored-trailer verify + correction-awareness (ratifies P16; the W1-T20c false credit)"
+  repo: remudero
+  depends_on: [W1-T62]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P16 — REPRODUCED LIVE 2026-07-16 (operator dry-run): rmd drain --dry-run listed
+    W1-T20d as runnable position 2 while its sole dependency W1-T20c is UNBUILT (task-linter.ts absent
+    from main, ZERO W1-T20c lines in the ledger, no run-W1-T20c-* branch among the six merged PRs whose
+    bodies mention the id). MECHANISM (from source): rung (c) at status.ts:142-145 credits the NEWEST
+    merged PR returned by a gh search for the trailer phrase in:body (:197-200) — GitHub phrase search is
+    punctuation-loose, so a plan/retro PR that merely QUOTES or discusses the trailer matches, and nothing
+    asserts the credited PR belongs to a run of this task. This is the THIRD consumer of the attribution
+    class: W1-T62 guarded the WRITE side, W1-T51 the retro-gather READ side; deriveStatus is the read
+    side that gates DISPATCH — the daemon builds on what it credits."
+  design: |
+    Three guards on rung (c), one concern (crediting integrity):
+    (1) SEARCH IS A FILTER, NEVER THE PROOF: after the gh search returns candidates, fetch each
+        candidate's body and require a LINE-ANCHORED trailer match (^Remudero-Task: <id>$, trimmed) —
+        a body that contains the phrase in prose/quotation never credits.
+    (2) TRAILER => OWNERSHIP (the W1-T62 guard, read-side): the credited PR's headRefName must match
+        this task's run-branch shape (run-<taskId>-*). A foreign-branch PR with even a genuine anchored
+        trailer never credits — trailers are claims; the branch is the evidence.
+    (3) CORRECTIONS WIN: read the ledger's correction.provenance lines for this task's runs before
+        crediting; a corrected pr_url OVERRIDES search-derived credit (the P9 read-side rule — corrections
+        already exist in the ledger and every consumer must honor them, ratified or not).
+    Fail direction: when no candidate survives the guards, the task is NOT merged (fail-closed to
+    "build it" — the projection may only credit on evidence). Surface the rejection legibly: a
+    status.json entry that rejected candidates carries rejected_candidates: [{pr, reason}] so a false
+    trailer in the wild is visible, not silent.
+  acceptance:
+    - claim: "a foreign plan PR whose body QUOTES the trailer text (the 2026-07-16 W1-T20c shape) never credits; the task derives NOT merged"
+      proof: "unit test over an injected GitHub gateway: a merged PR fixture on branch plan/* whose body contains the trailer phrase in prose -> source=none, merged=false, rejected_candidates names it with reason"
+    - claim: "a genuine run PR (anchored trailer + run-<taskId>-* head branch) credits exactly as today"
+      proof: "unit test: an anchored-trailer fixture on run-W1-TXX-123 -> source=trailer, merged reflects PR state"
+    - claim: "a correction.provenance line overrides search-derived credit"
+      proof: "unit test: ledger fixture with a correction pointing at PR B while search returns PR A -> the projection credits B"
+    - claim: "a dependent task is NOT runnable when its dependency's only merge evidence is a foreign-body match"
+      proof: "unit test: nextRunnable over the W1-T20c/W1-T20d fixture pair -> W1-T20c IS runnable, W1-T20d is NOT"
+  risk: high
+  origin: architect
+  plan_refs: ["§2", "§4"]
+  files: [src/lib/status.ts]
+  status: queued
+  attempts: 0
+  note: "Ratifies P16 (captured #101). Canonical fixture is the 2026-07-16 reproduction: dry-run listed
+    W1-T20d runnable / W1-T20c absent-unbuilt. Live confirmation post-merge is operator-observed (Rule 18):
+    rmd drain --dry-run lists W1-T20c and drops W1-T20d."
