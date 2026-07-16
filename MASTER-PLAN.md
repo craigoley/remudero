@@ -29,8 +29,8 @@ plan → recon → prompt → implement → review → merge → plan-sync loop 
 workers in git worktrees, escalating to the human like a senior engineer would: rarely, batched,
 with options and a recommendation. Open source; runs on a Claude Code subscription; GitHub-native.
 
-**Differentiators vs. the field** (session managers like Claude Squad/Crystal/Vibe Kanban;
-autonomous-PR tools like Composio AO; plan-lifecycle tools like ivy-tendril; native Agent Teams):
+**Differentiators vs. the field** (session managers like Claude Squad/Nimbalyst (Crystal's successor — Crystal deprecated 2026-02)/Vibe Kanban/Emdash [research: field-survey-2026-07-16, crystal-deprecated-2026-02];
+autonomous-PR tools like Composio AO; control-plane tools like MartinLoop (budget stops, verifier gates, inspectable run receipts) and ivy-tendril (plan lifecycle + verification gates) [research: field-survey-2026-07-16]; native Agent Teams):
 
 1. **Plan stewardship** — MASTER-PLAN.md + tasks.yaml in git is the product; the harness keeps it true.
 2. **Provenance gate** — no claim enters a worker prompt without a cited source. Mechanized, not disciplined.
@@ -39,6 +39,8 @@ autonomous-PR tools like Composio AO; plan-lifecycle tools like ivy-tendril; nat
 5. **Escalation as GitHub issues** — decisions get provenance, threading, and an audit trail for free.
 6. **Durable by design** — native Agent Teams is interactive/ephemeral with documented coordination gaps
    (leads stopping early, task-status lag); Remudero is a daemon that survives restarts and works for days.
+
+COMMODITY BOUNDARY (2026-07-16): parallel-worktree session management is now table stakes — dozens of OSS tools plus Claude Code's NATIVE managed worktrees, workflow primitives, and agent teams [research: cc-native-worktrees-2026, cc-workflows-2026]. The moat is items 1–6 plus the receipts thesis (WS-12), never the concurrency mechanism.
 
 ## NET STATE
 
