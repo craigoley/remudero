@@ -3059,3 +3059,50 @@
   note: "Ratifies P16 (captured #101). Canonical fixture is the 2026-07-16 reproduction: dry-run listed
     W1-T20d runnable / W1-T20c absent-unbuilt. Live confirmation post-merge is operator-observed (Rule 18):
     rmd drain --dry-run lists W1-T20c and drops W1-T20d."
+
+# 4th instance of the first-match parser class: the rmd review path body-parses the trailer UNANCHORED
+# (run-task.ts:1460), so a body quoting a trailer mid-prose is captured before the genuine final trailer.
+- id: W1-T70
+  title: "rmd review honors the trailer contract — line-anchored, last-line-wins Remudero-Task extraction (4th instance of the first-match parser class)"
+  repo: remudero
+  depends_on: [W1-T62]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The worker prompt DICTATES the contract at run-task.ts:791 ('Include this exact trailer as
+    the LAST line of the PR body') while reviewCommand READS it with an unanchored first-match at :1460
+    (body.match(/Remudero-Task:\\s*(\\S+)/)) — any body that QUOTES a trailer mid-prose is captured before
+    the genuine final trailer. Observed live on plan/ratify PRs (#119 and one earlier): harmless so far
+    only because the captured ids were invalid and fell through to the Acceptance block; a quoted VALID id
+    (increasingly likely — plan PRs now routinely discuss trailers) resolves criteria from the WRONG task.
+    This is the FIRST-MATCH PARSER CLASS, 4th instance: DECISION_REQUEST near-miss (FIELD FINDING 10j),
+    parseReport first-URL (W1-T62/#93), deriveStatus rung (c) (W1-T69), now the review-path extractor.
+    Exposure verified from source: the runner-side judge knows its task id directly; only the manual
+    rmd review path body-parses — which is exactly the path every plan PR rides."
+  design: |
+    Replace the :1460 extraction with the W1-T62 discipline: scan the body's lines from the END and
+    accept only a line-anchored trailer (^Remudero-Task:\s*(\S+)\s*$ on a trimmed line); the LAST such
+    line wins (the contract's own phrasing). A mid-prose quotation never matches; a body with no
+    anchored trailer extracts nothing and falls through to the Acceptance block exactly as today.
+    Do NOT touch retro.ts or status.ts — status.ts is W1-T69's remit; for retro.ts:194
+    (findMergedByTrailer), VERIFY whether the shipped W1-T51 union anchors the trailer on the fetched
+    body and asserts run-branch ownership per its #96-hardened spec, and REPORT the finding in the PR
+    body — a gap there is W1-T51 residue to file separately, never this PR's diff.
+  acceptance:
+    - claim: "a body quoting a valid-looking trailer mid-prose with the genuine trailer as last line extracts the genuine id (the #119 shape)"
+      proof: "unit test: body containing 'Remudero-Task: W1-T20c' in prose and 'Remudero-Task: W1-T70' as final line -> W1-T70 extracted"
+    - claim: "a body with ONLY mid-prose quotations extracts nothing and falls through to the Acceptance block"
+      proof: "unit test: quoted-only fixture -> extraction undefined; criteria source is the body's Acceptance block (current fallback preserved)"
+    - claim: "the plain contract case is unchanged"
+      proof: "unit test: a standard run-PR body with the trailer as last line -> extracted identically to today"
+    - claim: "retro.ts:194's guard state is verified and reported, not modified"
+      proof: "the PR body carries a VERIFICATION section citing retro.ts's fetched-body anchor + ownership-assert state by line; git diff shows zero retro.ts changes"
+  risk: medium
+  origin: architect
+  plan_refs: ["§2", "§5"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from the #119 worker's flag. Resolves it structurally — once anchored, report authors
+    need no quoting discipline; the parser enforces the contract instead of trusting prose."
