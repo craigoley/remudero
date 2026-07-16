@@ -47,6 +47,20 @@ architect:
   max_turns: 400
   context_budget: 180000
 
+# ── The flight-judge mount (Layer 2, W1-T21 — MASTER-PLAN §4B) ─────────────────
+# The advisory process-judge a Layer-1 trip (flight-signals.ts, W1-T20) spawns
+# with FRESH context. It must ride a HIGHER tier than the worker it supervises
+# (G-17 Tier Invariant) — enforced at LOAD in src/lib/mounts.ts, the SAME
+# enforcement shape as the Architect's own invariant above. Since every worker
+# route below is capped at the sonnet ceiling, opus is the only tier that
+# clears it, so the judge rides the Architect's own tier (there is no
+# requirement it be strictly BELOW the Architect — only strictly ABOVE workers).
+judge:
+  model: opus
+  effort: high
+  max_turns: 400
+  context_budget: 150000
+
 # ── max_turns is a RUNAWAY CLIFF, not a work limit (§9 tripwire re-base) ────────
 # Every mount's max_turns is a FLAT 400 — a tripwire set WAY above any real run,
 # whose only job is to kill a genuinely runaway loop. It is NOT a sizing knob:

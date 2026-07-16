@@ -23,6 +23,13 @@ import { parse as parseYaml } from "yaml";
  * worker ceiling can never load. The invariant is RELATIVE — the model-tier and
  * effort orderings are DATA in the file (`tiers`/`efforts`), read as such rather
  * than hardcoded, since the lineup shifts.
+ *
+ * ── The judge extension (Layer 2, W1-T21 — MASTER-PLAN §4B) ────────────────────
+ * The flight judge is a second, SEPARATE entity subject to the SAME shape of
+ * invariant: `judge.tier > max(worker.tier)` — it must ride strictly above
+ * every worker it may be asked to supervise, so it can never be talked into
+ * agreement by a worker riding its own tier or higher. A table with a `judge`
+ * mount that fails this is REJECTED at load, same as the Architect's check.
  */
 
 /** Base error for any structural or semantic mounts.yaml violation. */
@@ -61,6 +68,8 @@ export interface Mounts {
   efforts: Record<string, number>;
   /** The Architect (main agent) mount — strictly above every worker below. */
   architect: Mount;
+  /** The Layer-2 flight-judge mount (W1-T21) — strictly above every worker below. */
+  judge: Mount;
   /** Worker routing: task_type → risk band → mount. */
   routes: Record<string, Record<string, Mount>>;
 }
@@ -127,7 +136,11 @@ function parseMount(
  */
 function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
   const architectTier = m.tiers[m.architect.model];
+  const judgeTier = m.tiers[m.judge.model];
   // architect.tier > max(worker.tier): strict model-tier dominance.
+  // judge.tier > max(worker.tier): the Layer-2 flight judge (W1-T21) must ALSO
+  // ride strictly above every worker it may supervise — same enforcement shape,
+  // a separate entity.
   for (const [type, byRisk] of Object.entries(m.routes)) {
     for (const [risk, mount] of Object.entries(byRisk)) {
       const workerTier = m.tiers[mount.model];
@@ -136,6 +149,13 @@ function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
           `Tier Invariant (G-17) violated: worker routes.${type}.${risk} rides '${mount.model}' ` +
             `(tier ${workerTier}) which is not strictly below the Architect '${m.architect.model}' (tier ${architectTier}). ` +
             `The Architect must ride a higher tier than every worker.`,
+        );
+      }
+      if (workerTier >= judgeTier) {
+        throw new TierInvariantError(
+          `Tier Invariant (G-17) violated: worker routes.${type}.${risk} rides '${mount.model}' ` +
+            `(tier ${workerTier}) which is not strictly below the flight judge '${m.judge.model}' (tier ${judgeTier}). ` +
+            `The Layer-2 judge must ride a higher tier than every worker it supervises.`,
         );
       }
     }
@@ -183,6 +203,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   const tiers = parseOrdering(raw.tiers, "tiers");
   const efforts = parseOrdering(raw.efforts, "efforts");
   const architect = parseMount(raw.architect, "architect", tiers, efforts);
+  const judge = parseMount(raw.judge, "judge", tiers, efforts);
 
   if (!isObject(raw.routes)) throw new MountsError("'routes' must be a mapping of task_type → risk → mount.");
   const routes: Record<string, Record<string, Mount>> = {};
@@ -199,7 +220,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     }
   }
 
-  const mounts: Mounts = { tiers, efforts, architect, routes };
+  const mounts: Mounts = { tiers, efforts, architect, judge, routes };
   enforceTierInvariant(mounts, opts.thinkingDefault);
   return mounts;
 }
