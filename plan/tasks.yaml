@@ -3492,3 +3492,54 @@
   note: "Interim route (plain W1-T8 escalate) ships in W1-T77; this upgrades it. Question quality is the
     §7B grill primitive pointed at blocks. RISK raised medium->high per the §5C linter's own sizing
     resolution (2 subsystems sweep+run-task): matches its high-risk siblings W1-T76/T77, not a decompose."
+
+# CLI self-freshness — the code-freshness half of the W1-T60 pair (W1-T60 self-syncs the PLAN; nothing
+# self-syncs the CODE). Live incident #138: rmd correct existed on main but the operator's stale local CLI
+# printed the OLD usage — the binary predated its own merge.
+- id: W1-T79
+  title: "rmd manages its own git — CLI self-freshness at entry (auto ff-pull when clean, refuse-with-command when not; the stale-binary class)"
+  repo: remudero
+  depends_on: [W1-T60]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (2026-07-16, operator-reported): rmd correct existed on main (#138) but the
+    operator's invocation printed the OLD usage and exited — run-task had just built the feature from a
+    fresh origin/main worktree while the CLI executing locally predated its own merge. W1-T60 made rmd
+    self-sync the PLAN (dispatch from the origin/main blob); nothing self-syncs the CODE. The operator
+    should never be the freshness mechanism — 'rmd should be managing git for me' is the requirement,
+    verbatim."
+  design: |
+    At CLI entry (every subcommand, before dispatch): compare local HEAD to origin/main (a fetch is
+    already performed for dispatch paths per W1-T60 — reuse it; other subcommands fetch the same way,
+    honoring --allow-stale semantics on fetch failure).
+    CLEAN + BEHIND (ff-possible) -> git pull --ff-only automatically, print one line
+      (### rmd self-sync: <old>..<new>), re-exec the CLI once (the freshly pulled code must be what
+      runs — a pulled-but-stale process is the same bug wearing a fix; guard the re-exec with an env
+      flag so it cannot loop).
+    DIRTY or DIVERGED -> never mutate; refuse with the exact command to run and exit non-zero
+      (the control surface never falls through on staleness, matching the bad-input doctrine).
+    UP-TO-DATE -> zero output, zero added latency beyond the fetch already performed.
+    Daemon note: this covers daemon STARTUP; long-run in-process staleness is the WS-2 self-updater's
+    remit (thundering-herd risks already noted there) — out of scope here, say so in the module doc.
+  acceptance:
+    - claim: "a clean checkout behind origin/main self-syncs and the NEW code executes (the #138 incident shape)"
+      proof: "unit test over injected git deps: behind+clean -> ff-pull invoked, re-exec invoked exactly once with the loop-guard env set"
+    - claim: "a dirty or diverged checkout is never mutated — refuse with the exact remedy"
+      proof: "unit tests: dirty -> no pull, stderr carries git pull --ff-only guidance, exit non-zero; diverged (non-ff) -> same refusal, no merge attempted"
+    - claim: "up-to-date adds nothing"
+      proof: "unit test: same-sha fixture -> no pull, no re-exec, no output beyond the command's own"
+    - claim: "the re-exec cannot loop"
+      proof: "unit test: entry with the loop-guard env already set skips the freshness check entirely"
+  risk: high
+  origin: architect
+  plan_refs: ["§2", "§4B"]
+  files: [src/run-task.ts, src/lib/self-sync.ts]
+  status: queued
+  attempts: 0
+  note: "Operator-requested verbatim 2026-07-16. Completes the W1-T60 pair: plan freshness (shipped) +
+    code freshness (this). The refuse path exists so rmd never destroys local state to help. RISK raised
+    medium->high per the §5C linter's sizing resolution (2 subsystems run-task+self-sync) — and
+    auto-pull + re-exec on every entry is genuinely high-risk (mutates the working tree, re-execs the
+    binary), so high is the more accurate rating, not a decompose."
