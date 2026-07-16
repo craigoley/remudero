@@ -66,6 +66,7 @@ import {
   parseAcceptanceBlock,
   parseReviewerVerdicts,
   postReviewStatus,
+  reviewerOutcome,
   reviewerVerdictContract,
   type ReviewVerdict,
 } from "./lib/review.js";
@@ -361,7 +362,11 @@ async function runReview(args: {
   account: (r: WorkerResult) => WorkerResult;
   /** false ⇒ deterministic floor only, no LLM spawn (used by the live proofs). */
   spawnReviewer?: boolean;
-}): Promise<ReviewVerdict & { headSha: string }> {
+  /** The (task_type="reviewer" × the under-review task's risk) mount (§9,
+   * W1-T63) — MOUNT-GOVERNED, never a hardcoded literal. Only consulted when a
+   * reviewer is actually spawned (spawnReviewer!==false && criteria.length>0). */
+  reviewerMount: Mount;
+}): Promise<ReviewVerdict & { headSha: string; reviewerOutcome: string }> {
   const { owner, repo, prUrl, task, report, log, say } = args;
   const view = ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string };
   const headSha = view.headRefOid;
@@ -371,7 +376,10 @@ async function runReview(args: {
   // Advisory semantic layer — a FRESH read-only reviewer (no session inheritance),
   // in a throwaway cwd so it cannot touch the worktree/diff under review.
   let semantic: (boolean | undefined)[] | undefined;
-  if (args.spawnReviewer !== false && criteria.length > 0) {
+  const attemptReviewer = args.spawnReviewer !== false && criteria.length > 0;
+  let reviewerSubtype: string | undefined;
+  let reviewerSpawnFailed = false;
+  if (attemptReviewer) {
     try {
       const reviewCwd = mkdtempSync(join(tmpdir(), "rmd-review-"));
       const prompt =
@@ -383,7 +391,14 @@ async function runReview(args: {
           cwd: reviewCwd,
           permissionMode: "bypassPermissions",
           settingsFile: args.settingsFile,
-          maxTurns: 12,
+          // MOUNT-GOVERNED (§9, W1-T63/P10): model/effort/max_turns come from the
+          // resolved "reviewer" mount, never a hardcoded literal. Before this, an
+          // undeclared 12-turn cap with no model/effort override walled
+          // `error_max_turns` on every substantive code PR — a floor-only PASS silently masquerading
+          // as a completed review (P10-a; reviewerOutcome below makes it legible).
+          model: args.reviewerMount.model,
+          effort: args.reviewerMount.effort,
+          maxTurns: args.reviewerMount.maxTurns,
           maxBudgetUsd: args.budgetUsd,
           config: args.config,
           prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
@@ -393,6 +408,7 @@ async function runReview(args: {
         [reviewer.text, reviewer.blocks.join("\n")].join("\n"),
         criteria.length,
       );
+      reviewerSubtype = reviewer.subtype;
       log("review.reviewer", {
         session_id: reviewer.sessionId,
         subtype: reviewer.subtype,
@@ -403,9 +419,18 @@ async function runReview(args: {
       });
     } catch (e) {
       // Advisory only — the deterministic floor still binds and posts below.
+      reviewerSpawnFailed = true;
       log("review.reviewer.error", { error: String((e as Error)?.message ?? e) });
     }
   }
+  // W1-T63/P10-a: LEGIBLE outcome of the reviewer spawn — a floor-only PASS
+  // (never attempted, or attempted but walled/spawn-failed) is never
+  // byte-identical in the ledger/console to a review the reviewer COMPLETED.
+  const outcome = reviewerOutcome({
+    attempted: attemptReviewer,
+    subtype: reviewerSubtype,
+    spawnError: reviewerSpawnFailed,
+  });
 
   // BINDING deterministic verdict; the orchestrator is the authoritative poster.
   const verdict = judgeReview(criteria, { diff, report, semantic });
@@ -423,6 +448,9 @@ async function runReview(args: {
     test_theater: verdict.testTheater,
     unmet_criteria: unmetClaims,
     reasons,
+    // W1-T63/P10-a: makes a floor-only PASS LEGIBLE — never byte-identical to a
+    // review the LLM reviewer actually completed.
+    reviewer_outcome: outcome,
   });
   if (verdict.state !== "success" && (unmetClaims.length > 0 || verdict.testTheater)) {
     // Post the full unmet list as a PR comment so a blocked PR names its gap in one
@@ -438,8 +466,10 @@ async function runReview(args: {
       /* comment is best-effort; the status + ledger already carry the verdict */
     }
   }
-  say(`remudero-review=${verdict.state} posted to ${headSha.slice(0, 7)} — ${verdict.summary}`);
-  return { ...verdict, headSha };
+  // W1-T63/P10-a: the console summary distinguishes a completed review from a
+  // floor-only one (reviewer never attempted, or attempted but walled/failed).
+  say(`remudero-review=${verdict.state} posted to ${headSha.slice(0, 7)} — ${verdict.summary} (reviewer_outcome: ${outcome})`);
+  return { ...verdict, headSha, reviewerOutcome: outcome };
 }
 
 export interface RunResult {
@@ -757,7 +787,15 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
   // The table is a COMMITTED repo artifact (§9, golden-gated), so read it from the
   // repo checkout (repoRoot), NOT the workspace root (config.root = ~/Remudero, which
   // holds worktrees/state, not .remudero/mounts.yaml).
-  const mount: Mount = resolveMount(loadMounts(mountsPath(repoRoot)), task.type, task.risk);
+  const mountsTable = loadMounts(mountsPath(repoRoot));
+  const mount: Mount = resolveMount(mountsTable, task.type, task.risk);
+  // The fresh advisory reviewer (runReview, below) is its OWN mount-governed phase,
+  // keyed by task_type="reviewer" — distinct from `mount` above (this task's own
+  // implement/recon/etc. work) and from task_type="review" (a plan task whose own
+  // type happens to be "review"). W1-T63/P10: previously ungoverned (an undeclared
+  // 12-turn cap, no model/effort), it walled `error_max_turns` on every
+  // substantive code PR.
+  const reviewerMount: Mount = resolveMount(mountsTable, "reviewer", task.risk);
   log("run.start", {
     repo: task.repo,
     type: task.type,
@@ -1180,6 +1218,7 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
       log: (s, extra) => log(s, extra),
       say,
       account,
+      reviewerMount,
     });
     if (review.state !== "success") {
       log("verdict", {
@@ -1336,6 +1375,10 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
     say: (m) => console.log(m),
     account: (r) => r,
     spawnReviewer: false, // deterministic binding path — the same judge, by hand
+    // spawnReviewer:false ⇒ never actually consulted (no spawn happens); "medium"
+    // is a safe, always-resolvable placeholder — a manual `rmd review` PR carries
+    // no plan task risk of its own to key a real one off.
+    reviewerMount: resolveMount(loadMounts(mountsPath(repoRoot)), "reviewer", "medium"),
   });
   console.log(
     `\nremudero-review=${verdict.state} posted to ${view.url} (head ${verdict.headSha.slice(0, 7)})`,

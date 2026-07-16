@@ -40,6 +40,28 @@ test("an implement task resolves its max_turns FROM .remudero/mounts.yaml (the f
   assert.equal(typeof hi.effort, "string");
 });
 
+// ── W1-T63/P10: reviewer/fix/diagnose are MOUNT-GOVERNED, not hardcoded ─────
+
+test("resolveMount('reviewer'|'fix'|'diagnose', risk) each resolve a real mount whose max_turns >> the old 12", () => {
+  const m = loadMounts(mountsPath(repoRoot));
+  for (const type of ["reviewer", "fix", "diagnose"]) {
+    for (const risk of TASK_RISKS) {
+      const mount = resolveMount(m, type, risk);
+      assert.ok(mount.maxTurns > 12, `${type}.${risk}.maxTurns (${mount.maxTurns}) must exceed the old hardcoded 12`);
+      assert.equal(typeof mount.model, "string");
+      assert.equal(typeof mount.effort, "string");
+    }
+  }
+});
+
+test("the reviewer spawn path reads its mount from resolveMount(..., 'reviewer', ...), not a hardcoded literal", () => {
+  assert.doesNotMatch(runTaskSrc, /maxTurns:\s*12\b/, "the hardcoded reviewer maxTurns: 12 must be gone");
+  assert.match(runTaskSrc, /resolveMount\(mountsTable,\s*"reviewer",\s*task\.risk\)/, "the reviewer mount must resolve from the (task_type='reviewer' × risk) table");
+  assert.match(runTaskSrc, /maxTurns:\s*args\.reviewerMount\.maxTurns/);
+  assert.match(runTaskSrc, /model:\s*args\.reviewerMount\.model/);
+  assert.match(runTaskSrc, /effort:\s*args\.reviewerMount\.effort/);
+});
+
 // ── A mount miss FAILS LOUD — a routing gap is never a silent fallback ──────
 
 test("a mount miss FAILS LOUD (unknown risk / unknown type both throw MountsError)", () => {

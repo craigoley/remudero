@@ -1249,13 +1249,25 @@ real limit) is the HeadroomTracker's job (W1-T4), never a per-task dollar cap. D
 `.remudero/mounts.yaml`, an order of magnitude above the calibration mean (~45–55 turns; honest merges at
 58–69) after run `W1-T54b-1784149952116` walled at 81/80 mid-live-campaign — and this is P7-consistent:
 nothing is raised to mask over-scoping, because task SIZING is enforced pre-dispatch by the W1-T20c linter
-(the sizer is the linter), not by a low turn cap. **★ HONEST LIMIT (R4/P10) — "flat 400" governs
-MOUNT-DISPATCHED phases only, and that is NOT every worker.** `run-task.ts:946/:1018` read `mount.maxTurns`;
-`run-task.ts:385` (12), `run-task.ts:1488` (40) and `containment.ts:122` (6) are HARDCODED and mounts.yaml
-cannot reach them — and the table has rows for `recon`/`implement` ONLY, so `reviewer`/`fix`/`diagnose`
-have nothing to key off. Three of R4's ten runs walled `error_max_turns` on such a phase AFTER the re-base
-landed. A bounded literal can be correct (recon's `maxTurns: 8` is deliberate); an UNDECLARED one is not.
-Until P10 lands, do not read this paragraph as "no worker walls under 400."
+(the sizer is the linter), not by a low turn cap. **★ HONEST LIMIT (R4/P10, closed by W1-T63) — "flat 400"
+governs MOUNT-GOVERNED phases only, and that is NOT every worker.** MOUNT-GOVERNED phases resolve
+`{model, effort, max_turns, context_budget}` from `.remudero/mounts.yaml` via `resolveMount(task_type, risk)`
+— never a hardcoded literal: `implement` (`run-task.ts` initial + DECISION_REQUEST-resume spawns) and, as of
+W1-T63, `reviewer` (the fresh advisory reviewer `runReview()` spawns for the review gate on ANY task's PR)
+and the `fix`/`diagnose` routes (`diagnose` also serves a plan task whose own type is `diagnose`; `fix` is
+reserved for classify.ts's `runDiagnoseThenRetry`, W1-T7 — designed but not yet wired to a live spawn, so it
+has nothing to key off TODAY, but the row exists so wiring it can never reintroduce an undeclared literal).
+DELIBERATELY-BOUNDED phases are a literal outside mounts.yaml's reach BY DESIGN, and each is NAMED in its own
+comment: recon's `maxTurns: 8` (`run-task.ts:958` — read-only + tightly scoped) and the containment probe's
+`maxTurns: 6` (`containment.ts:122` — a once-per-run preflight, not task work). Before W1-T63 the fresh
+reviewer spawn was a THIRD, UNDECLARED kind — a hardcoded 12-turn cap with no model/effort override at all —
+and mounts.yaml had no `reviewer` row to key off even if it had asked; three of R4's ten runs walled
+`error_max_turns` on it, so `remudero-review` silently fell to its mechanical floor on every substantive code
+PR (P10-a). `review.posted` now also carries `reviewer_outcome` (the reviewer's terminal subtype, or
+`not_attempted`/`spawn_error`), surfaced in the ledger and the console summary, so a floor-only PASS is
+LEGIBLE and never byte-identical to a review the reviewer actually completed. The retro command's Architect
+spawn (`run-task.ts:1564`, `maxTurns: 40`) is a SEPARATE bookend case — it rides the Architect mount
+directly (`model: arch`), not a worker route — and is out of this paragraph's scope.
 
 **Windows — the HeadroomTracker (rung 1 CONFIRMED).** Models both clocks: the 5-hour rolling window and the weekly
 caps (including Max's dual weekly limits — all-models and Sonnet-only — with separate resets).
