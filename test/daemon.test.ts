@@ -398,6 +398,10 @@ function fakeGitHub(opts: { byRef?: Record<string, PrRef>; byTrailer?: Record<st
   return {
     prByRef: (ref) => opts.byRef?.[String(ref)] ?? null,
     findMergedByTrailer: (taskId) => opts.byTrailer?.[taskId] ?? null,
+    // None of these fixtures exercise rung (c)'s trailer path; unresolved
+    // ownership/anchor data is correct (fail-closed, never silently credited).
+    headRefName: () => undefined,
+    prBody: () => undefined,
   };
 }
 

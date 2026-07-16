@@ -16,7 +16,13 @@ import type { Plan, Task, TaskStatus } from "./plan.js";
  * Precedence for a task id:
  *   (a) state/ledger.ndjson `pr.opened` line for this task -> query that PR's state;
  *   (b) an explicit `pr:` field in tasks.yaml (tasks executed by hand, pre-ledger);
- *   (c) a merged PR whose body carries the trailer `Remudero-Task: <id>`.
+ *   (c) a merged PR whose body carries the trailer `Remudero-Task: <id>` —
+ *       ownership-asserted (its head branch must be this task's own `run-<id>-*`),
+ *       anchor-verified (the trailer must be an exact line, not a fuzzy search
+ *       hit), and correction-aware (a `correction.provenance` line debunking this
+ *       exact credit is honored) — MASTER-PLAN P16 / W1-T69, the "W1-T20c
+ *       false-credit" class: deriveStatus GATES DISPATCH, so a bad credit here
+ *       is worse than the same class W1-T51 fixed in the retro gather.
  * First source that resolves a PR wins. If none resolve, the task is not merged.
  *
  * NOTHING in this module writes tasks.yaml. It reads the plan and the ledger and
@@ -24,7 +30,7 @@ import type { Plan, Task, TaskStatus } from "./plan.js";
  */
 
 /** The three precedence sources, plus `none` when GitHub has no evidence. */
-export type StatusSource = "ledger" | "pr-field" | "trailer" | "none";
+export type StatusSource = "ledger" | "pr-field" | "trailer" | "correction" | "none";
 
 /** A PR's identity + GitHub merge state, as seen by the {@link GitHub} gateway. */
 export interface PrRef {
@@ -46,6 +52,14 @@ export interface StatusProjection {
   prNumber?: number;
   prUrl?: string;
   prState?: string;
+  /**
+   * LEGIBILITY (P16 / W1-T69): trailer search hits that were REJECTED by rung (c)'s
+   * ownership-assert / anchored-trailer verify, each with a machine-readable reason.
+   * A false trailer in the wild is thereby VISIBLE, not silently dropped — the same
+   * "surface the rejection" discipline the W1-T20c false-credit reproduction motivated.
+   * Present (and non-empty) ONLY when a candidate was actually rejected.
+   */
+  rejected_candidates?: Array<{ pr: string; reason: string }>;
 }
 
 /**
@@ -57,6 +71,19 @@ export interface GitHub {
   prByRef(ref: string | number): PrRef | null;
   /** Find a MERGED PR whose body contains `Remudero-Task: <taskId>`. null if none. */
   findMergedByTrailer(taskId: string): PrRef | null;
+  /**
+   * The PR's head branch name, or undefined if it cannot be resolved. Backs
+   * rung (c)'s ownership-assert (MASTER-PLAN P16 / W1-T69) — mirrors
+   * run-task.ts's `PrHeadGateway` and retro.ts's `ShippedGithub.headRefName`.
+   */
+  headRefName(prUrl: string): string | undefined;
+  /**
+   * The PR's raw body text, or undefined if it cannot be resolved. Backs rung
+   * (c)'s anchored-trailer verify (P16 / W1-T69): GitHub's body search is a
+   * fuzzy full-text match, so a candidate must be re-checked locally for the
+   * EXACT `Remudero-Task: <id>` line before it may be credited.
+   */
+  prBody(prUrl: string): string | undefined;
 }
 
 /** Reader for the append-only ledger; injectable for tests. */
@@ -115,15 +142,91 @@ function lastPrOpened(
   return url;
 }
 
+/** Escape a string for literal use inside a `RegExp` (dot/hyphen-safe task ids). */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * `Remudero-Task: <id>` claimed as false for THIS task by a `correction.provenance`
+ * ledger line (P9-iv, a FIRST-CLASS event) — the operator has already established
+ * the credit is wrong and deriveStatus must never re-surface it, even if GitHub's
+ * search keeps turning it up. Every `claimed_pr_url` named for `taskId` is debunked.
+ */
+function debunkedTrailerUrls(lines: Array<Record<string, unknown>>, taskId: string): Set<string> {
+  const out = new Set<string>();
+  for (const line of lines) {
+    if (
+      line.step === "correction.provenance" &&
+      line.task_id === taskId &&
+      typeof line.claimed_pr_url === "string"
+    ) {
+      out.add(line.claimed_pr_url);
+    }
+  }
+  return out;
+}
+
+/**
+ * CORRECTIONS WIN (P9-iv / W1-T69): a `correction.provenance` line is the operator's
+ * AUTHORITATIVE override of a mis-attribution — it debunks a `claimed_pr_url` AND
+ * names the `actual_pr_url` (the real PR, e.g. #80→#91). deriveStatus credits that
+ * actual url directly, ahead of and instead of the fuzzy trailer search. Crucially
+ * the actual PR is NOT re-subjected to the ownership/anchor asserts: the correction
+ * is a deliberate human act that SUPERSEDES those automated checks (the real PR is
+ * often a hand-authored one from a non-`run-` branch — #91 was a docs PR). Last
+ * correction wins. Returns undefined when the task has no correction.
+ */
+function latestActualPrUrl(lines: Array<Record<string, unknown>>, taskId: string): string | undefined {
+  let url: string | undefined;
+  for (const line of lines) {
+    if (
+      line.step === "correction.provenance" &&
+      line.task_id === taskId &&
+      typeof line.actual_pr_url === "string"
+    ) {
+      url = line.actual_pr_url; // keep scanning: last correction wins
+    }
+  }
+  return url;
+}
+
+/**
+ * RUNG (c) OWNERSHIP-ASSERT (MASTER-PLAN P16 / W1-T69, ratifying the same class
+ * W1-T62 fixed on the write side and W1-T51 on the retro read side): a trailer
+ * credit is only trustworthy if the PR was opened from THIS task's own branch
+ * (`run-<taskId>-<epochMs>`, run-task.ts's naming). A foreign PR that merely
+ * mentions the task id in its body — or one whose head ref cannot be resolved —
+ * is NOT owned and must never be credited.
+ */
+function ownsBranch(head: string | undefined, taskId: string): boolean {
+  if (!head) return false;
+  return new RegExp(`^run-${escapeRegExp(taskId)}-\\d+$`).test(head);
+}
+
+/**
+ * RUNG (c) ANCHORED-TRAILER VERIFY (P16 / W1-T69): `findMergedByTrailer` is a
+ * GitHub full-text body search — fuzzy, tokenized on punctuation, and capable of
+ * matching a PR whose trailer actually names a DIFFERENT (e.g. prefix-sharing)
+ * task id, the exact "W1-T20c false-credit" class this rung ratifies. The search
+ * hit is a first pass only; this is the authoritative local check that the body
+ * carries the trailer as its own exact, anchored line.
+ */
+function hasAnchoredTrailer(body: string | undefined, taskId: string): boolean {
+  if (!body) return false;
+  return new RegExp(`^Remudero-Task:\\s*${escapeRegExp(taskId)}\\s*$`, "m").test(body);
+}
+
 /**
  * Derive one task's merge-state from GitHub, in the fixed precedence.
  * Pure over its injected deps — no writes, no tasks.yaml access.
  */
 export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   const readLedger = deps.readLedger ?? readLedgerLines;
+  const ledgerLines = readLedger(deps.ledgerPath);
 
   // (a) ledger `pr.opened` for this task -> query that PR.
-  const openedUrl = lastPrOpened(readLedger(deps.ledgerPath), task.id);
+  const openedUrl = lastPrOpened(ledgerLines, task.id);
   if (openedUrl) {
     const pr = deps.github.prByRef(openedUrl);
     if (pr) {
@@ -139,10 +242,38 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
     }
   }
 
-  // (c) a merged PR carrying the `Remudero-Task: <id>` trailer.
+  // (c) a merged PR carrying the `Remudero-Task: <id>` trailer — ownership-
+  // asserted, anchor-verified, and correction-aware (MASTER-PLAN P16 / W1-T69).
+  // deriveStatus GATES DISPATCH, so a false/foreign credit here is worse than
+  // the same attribution class W1-T51 fixed in the retro gather (which only
+  // mis-reports); a bad credit here makes the daemon BUILD against an unmet dep.
+  // Corrections win FIRST: an operator correction OVERRIDES the fuzzy search entirely.
+  const correctedUrl = latestActualPrUrl(ledgerLines, task.id);
+  if (correctedUrl) {
+    const pr = deps.github.prByRef(correctedUrl);
+    if (pr) {
+      return { taskId: task.id, source: "correction", ...fromPrState(pr.state), prNumber: pr.number, prUrl: pr.url, prState: pr.state };
+    }
+  }
+
   const trailerPr = deps.github.findMergedByTrailer(task.id);
-  if (trailerPr) {
-    return { taskId: task.id, source: "trailer", ...fromPrState(trailerPr.state), prNumber: trailerPr.number, prUrl: trailerPr.url, prState: trailerPr.state };
+  if (trailerPr && !debunkedTrailerUrls(ledgerLines, task.id).has(trailerPr.url)) {
+    const head = deps.github.headRefName(trailerPr.url);
+    const body = deps.github.prBody(trailerPr.url);
+    if (ownsBranch(head, task.id) && hasAnchoredTrailer(body, task.id)) {
+      return { taskId: task.id, source: "trailer", ...fromPrState(trailerPr.state), prNumber: trailerPr.number, prUrl: trailerPr.url, prState: trailerPr.state };
+    }
+    // Rejected: foreign/unresolved head branch or an unanchored search hit — never
+    // credited. Surface WHY (legibility, W1-T69): a false trailer in the wild is
+    // visible on the projection, not silently dropped. Falls through to "none".
+    const reason = !ownsBranch(head, task.id) ? "head-branch-not-owned" : "trailer-not-anchored";
+    return {
+      taskId: task.id,
+      status: "queued",
+      merged: false,
+      source: "none",
+      rejected_candidates: [{ pr: trailerPr.url, reason }],
+    };
   }
 
   // No GitHub evidence: not merged. The yaml `status:` is decorative, not trusted.
@@ -195,12 +326,22 @@ export function ghGateway(owner: string, repo: string): GitHub {
     },
     findMergedByTrailer(taskId) {
       // GitHub body search for the exact trailer, merged PRs only, newest first.
+      // Fuzzy (P16 / W1-T69) — callers must re-verify via headRefName + prBody
+      // before crediting; this is a first pass, never the authority.
       const list = tryJson<PrRef[]>([
         "pr", "list", "--repo", slug, "--state", "merged",
         "--search", `"Remudero-Task: ${taskId}" in:body`,
         "--json", "number,url,state", "--limit", "1",
       ]);
       return list && list.length > 0 ? list[0] : null;
+    },
+    headRefName(prUrl) {
+      const view = tryJson<{ headRefName?: string }>(["pr", "view", prUrl, "--json", "headRefName"]);
+      return view?.headRefName;
+    },
+    prBody(prUrl) {
+      const view = tryJson<{ body?: string }>(["pr", "view", prUrl, "--json", "body"]);
+      return view?.body;
     },
   };
 }
