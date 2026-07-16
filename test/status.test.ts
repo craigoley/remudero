@@ -26,6 +26,10 @@ function task(over: Partial<Task> = {}): Task {
 function fakeGitHub(opts: {
   byRef?: Record<string, PrRef>;
   byTrailer?: Record<string, PrRef>;
+  /** headRefName per PR url — rung (c)'s ownership-assert. */
+  headRefByUrl?: Record<string, string>;
+  /** raw PR body per PR url — rung (c)'s anchored-trailer verify. */
+  bodyByUrl?: Record<string, string>;
 }): GitHub & { calls: string[] } {
   const calls: string[] = [];
   return {
@@ -38,6 +42,22 @@ function fakeGitHub(opts: {
       calls.push(`trailer:${taskId}`);
       return opts.byTrailer?.[taskId] ?? null;
     },
+    headRefName(prUrl) {
+      calls.push(`headRefName:${prUrl}`);
+      return opts.headRefByUrl?.[prUrl];
+    },
+    prBody(prUrl) {
+      calls.push(`prBody:${prUrl}`);
+      return opts.bodyByUrl?.[prUrl];
+    },
+  };
+}
+
+/** A well-formed own-branch head ref + exactly-anchored body for `taskId`/`runId`. */
+function ownedTrailerFixture(taskId: string, runId: string) {
+  return {
+    headRefName: `run-${runId}`,
+    body: `Implements ${taskId}.\n\nRemudero-Task: ${taskId}\n`,
   };
 }
 
@@ -89,15 +109,71 @@ test("source (b): explicit pr: field resolves when there is no ledger entry", ()
   assert.equal(proj.prNumber, 3);
 });
 
-test("source (c): a merged PR carrying the Remudero-Task trailer resolves", () => {
+test("source (c): a merged PR carrying the Remudero-Task trailer resolves when owned + anchored", () => {
+  const fixture = ownedTrailerFixture("W1-TX", "W1-TX-1730000000000");
   const github = fakeGitHub({
     byTrailer: { "W1-TX": { number: 12, url: "u/12", state: "MERGED" } },
+    headRefByUrl: { "u/12": fixture.headRefName },
+    bodyByUrl: { "u/12": fixture.body },
   });
   const ledgerPath = ledgerFile([]);
   const proj = deriveStatus(task(), { ledgerPath, github });
   assert.equal(proj.source, "trailer");
   assert.equal(proj.merged, true);
   assert.equal(proj.prNumber, 12);
+});
+
+test("source (c) ownership-assert: a trailer hit whose head branch is a FOREIGN/unrelated branch is rejected (the W1-T20c false-credit class)", () => {
+  const github = fakeGitHub({
+    byTrailer: { "W1-T20c": { number: 12, url: "u/12", state: "MERGED" } },
+    // The PR is real and merged, but it was opened from W1-T20's branch, not
+    // W1-T20c's — a sibling/foreign task, not this task's own run.
+    headRefByUrl: { "u/12": "run-W1-T20-1730000000000" },
+    bodyByUrl: { "u/12": "Remudero-Task: W1-T20c\n" },
+  });
+  const proj = deriveStatus(task({ id: "W1-T20c" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.source, "none");
+  assert.equal(proj.merged, false);
+});
+
+test("source (c) ownership-assert: an unresolved head ref fails CLOSED, never credited", () => {
+  const github = fakeGitHub({
+    byTrailer: { "W1-TX": { number: 12, url: "u/12", state: "MERGED" } },
+    bodyByUrl: { "u/12": "Remudero-Task: W1-TX\n" },
+    // headRefByUrl deliberately omitted: gh could not resolve it.
+  });
+  const proj = deriveStatus(task(), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.source, "none");
+  assert.equal(proj.merged, false);
+});
+
+test("source (c) anchored-trailer verify: a search hit whose body names a DIFFERENT (prefix-sharing) task id is rejected", () => {
+  const fixture = ownedTrailerFixture("W1-T20", "W1-T20c-1730000000000");
+  const github = fakeGitHub({
+    byTrailer: { "W1-T20c": { number: 12, url: "u/12", state: "MERGED" } },
+    headRefByUrl: { "u/12": fixture.headRefName },
+    // GitHub's fuzzy search matched "W1-T20c" against a body whose trailer
+    // actually reads "W1-T20" — the unrelated parent task, never anchored.
+    bodyByUrl: { "u/12": fixture.body },
+  });
+  const proj = deriveStatus(task({ id: "W1-T20c" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.source, "none");
+  assert.equal(proj.merged, false);
+});
+
+test("source (c) correction-awareness: a correction.provenance line debunking this exact credit blocks it, even though ownership + anchor would otherwise pass", () => {
+  const fixture = ownedTrailerFixture("W1-TX", "W1-TX-1730000000000");
+  const github = fakeGitHub({
+    byTrailer: { "W1-TX": { number: 12, url: "u/12", state: "MERGED" } },
+    headRefByUrl: { "u/12": fixture.headRefName },
+    bodyByUrl: { "u/12": fixture.body },
+  });
+  const ledgerPath = ledgerFile([
+    { step: "correction.provenance", task_id: "W1-TX", claimed_pr_url: "u/12", actual_pr_url: "u/99" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.source, "none");
+  assert.equal(proj.merged, false);
 });
 
 test("precedence: ledger (a) is consulted before pr: (b)", () => {
@@ -132,8 +208,13 @@ test("no GitHub evidence -> not merged, source none (decorative status ignored)"
 
 test("a ledger PR that 404s falls through to the next source", () => {
   const url = "https://github.com/craigoley/remudero/pull/7";
+  const fixture = ownedTrailerFixture("W1-TX", "W1-TX-1730000000000");
   // prByRef returns null for the ledger url (deleted PR), but the trailer resolves.
-  const github = fakeGitHub({ byTrailer: { "W1-TX": { number: 8, url: "u/8", state: "MERGED" } } });
+  const github = fakeGitHub({
+    byTrailer: { "W1-TX": { number: 8, url: "u/8", state: "MERGED" } },
+    headRefByUrl: { "u/8": fixture.headRefName },
+    bodyByUrl: { "u/8": fixture.body },
+  });
   const ledgerPath = ledgerFile([{ step: "pr.opened", task_id: "W1-TX", pr_url: url }]);
   const proj = deriveStatus(task(), { ledgerPath, github });
   assert.equal(proj.source, "trailer");
