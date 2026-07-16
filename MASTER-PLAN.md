@@ -1,11 +1,11 @@
-# REMUDERO — Master Plan (v2.19 · synced 2026-07-16)
+# REMUDERO — Master Plan (v2.20 · synced 2026-07-16)
 
-**FOCUS — L2 running: the daemon closed three of its own self-hosting holes this cycle.** WS-1 is COMPLETE
-and the **§5 security tier RUNS ON REMUDERO ITSELF**. This cycle: the retro gather now unions ledger∪GitHub
-so gate-side merges are visible (W1-T51/#97), the reviewer/fix/diagnose phases are mount-governed so the
-reviewer stops walling (W1-T63/#104), and the runner self-syncs from origin/main (W1-T60/#105). Next, in
-order: **§5C task pre-flight linter (W1-T20c/d)** → flight control (W1-T20→T21→T22) → knowledge holes
-(W1-T33–T39).
+**FOCUS — L2 running: the deterministic FLOOR now observes repo state, not just report keywords.** WS-1 is
+COMPLETE and the **§5 security tier RUNS ON REMUDERO ITSELF**. This cycle: W1-T65/#122 LIFTS W1-T3F's
+whitelisted-proof execution INTO the floor — the criterion's named test/grep runs against the PR head, so
+the gate is correct whether or not the LLM reviewer completes and the reviewer becomes purely additive
+(P15 CLOSED). Next, in order: **§5C task pre-flight linter (W1-T20c/d)** → flight control
+(W1-T20→T21→T22) → knowledge holes (W1-T33–T39).
 
 **Header discipline (v2.17).** This header carries the **sync date + current focus and nothing else**.
 The sections are the source of truth; read them. A retro that re-inflates this header has failed the
@@ -13,9 +13,11 @@ HARNESS-COMPRESSION bar (§Self-improvement).
 
 **Retro ledger:** R1–R3 (…021334/…391543/…446353) seeded CALIBRATION + P1–P8 (all closed) and logged the
 WS-1-closing merges · R4 (…126258) logged the security-tier + dep-lane cycle, CORRECTED the false-merged
-W1-T54b attribution (#80 → #91), and mined P9–P20 · **R5 (…206755808, this sync)** logs the gather-union +
-reviewer-mount + git-self-sync merges (W1-T51/#97, W1-T17/#99, W1-T63/#104, W1-T60/#105), re-bases
-calibration on 9 runs, RETIRES P10+P11 (both now SHIPPED), and mines the containment/isolation blocks.
+W1-T54b attribution (#80 → #91), and mined P9–P20 · R5 (…206755808) logged the gather-union +
+reviewer-mount + git-self-sync merges (W1-T51/#97, W1-T17/#99, W1-T63/#104, W1-T60/#105), re-based
+calibration on 9 runs, RETIRED P10+P11, and mined the containment/isolation blocks · **R6 (…213948025,
+this sync)** logs W1-T65/#122 (the floor executes whitelisted proofs against the PR head), re-bases
+calibration on this cycle's 2 runs, and RETIRES P15 (now SHIPPED).
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -63,7 +65,15 @@ required context (W1-T24/#75, live-proven by the W1-T24b probes #82/#85), and th
 (W1-T54/#87) with its live proof against the real parked Dependabot PRs (W1-T54b/#91). §5A's "the harness
 eats first" is now FACT on the security tier, not intention.
 
-★ **THIS CYCLE (RETRO-1784206755808, 2026-07-16): three self-hosting holes CLOSED.** (1) The retro gather
+★ **THIS CYCLE (RETRO-1784213948025, 2026-07-16): the FLOOR became state-aware.** W1-T65/#122 shipped the
+P15 fix — the deterministic floor now executes each criterion's whitelisted proof (named test/grep,
+case-normalized) against the PR head instead of keyword-matching the reviewer's REPORT. This closes BOTH
+failure modes the blind floor produced: the FALSE-PASS (a merge on unsubstantiated criteria) and the
+FALSE-BLOCK (complete work on the branch the report didn't keyword-claim). The LLM reviewer is now purely
+additive (subtle-catch), never load-bearing for basic correctness, so a future reviewer death no longer
+re-opens the gate hole. **P15 CLOSED.** (2 runs in scope this cycle: W1-T65 merged, one `blocked_review`.)
+
+★ **PRIOR CYCLE (RETRO-1784206755808, 2026-07-16): three self-hosting holes CLOSED.** (1) The retro gather
 now unions ledger∪GitHub-derived trailered merges (W1-T51/#97) — the gate-side-invisible-merge gap that
 recurred through R3 (15-vs-17) and R4 (2-vs-6) did NOT recur: this cycle ledger-merged == GitHub-merged ==
 4, and the reconciliation is now MECHANICAL, not hand-paid (P11 CLOSED). (2) The reviewer/fix/diagnose
@@ -121,6 +131,13 @@ plan/tasks.yaml). Remaining fleet ops (§5D, W1-T55–T57) fold in alongside.
 
 Shipped arcs, keyed by Remudero-Task (Standing rule 13: the proof is a MERGED PR, not prose).
 Newest first. Cost/turns from the run ledger.
+
+### RETRO-1784213948025 (2026-07-16) — the deterministic floor executes proofs
+
+- **W1-T65** — the deterministic FLOOR executes whitelisted proofs against the PR head: each criterion's
+  named test/grep runs against repo state (case-normalized), so the gate is correct whether or not the LLM
+  reviewer completes and the reviewer is purely additive (ratifies P15; closes the FALSE-PASS/FALSE-BLOCK
+  blind-floor hole) → craigoley/remudero#122 · $7.123 · 94 turns
 
 ### RETRO-1784206755808 (2026-07-16) — the gather union + the reviewer mount + git self-sync
 
@@ -206,44 +223,52 @@ Newest first. Cost/turns from the run ledger.
 - **WS-0 spike** — 7/7 verdicts GREEN, loop closed unattended; ground truth in FIELD FINDING 10 →
   craigoley/remudero#1 · $0.86
 
-## Calibration (observed — through RETRO-1784206755808, 2026-07-16)
+## Calibration (observed — through RETRO-1784213948025, 2026-07-16)
 
 The empirical baseline **mounts.yaml (W1-T5, shipped #42)** and Flight-control burn-rate signals (§4B
 Layer 1) key off. Only `implement` has data; recon/reviewer/diagnose accrue no rows until they run as
-typed tasks — the gap P10 named, now CLOSED on the reviewer side by W1-T63/#104.
+typed tasks — the gap P10 named, CLOSED on the reviewer side by W1-T63/#104.
 
-**★ CURRENT BASELINE — this cycle (RETRO-1784206755808, 9 runs). This is the row W1-T5's mount table keys off:**
+**★ CURRENT BASELINE — this cycle (RETRO-1784213948025, 2 runs). This is the row W1-T5's mount table keys off:**
 
 | task_type | runs | merged | avg $ | avg turns | total $ |
 |---|---|---|---|---|---|
-| implement | 9 | 4 | $3.613 | 56.889 | $32.521 |
+| implement | 2 | 1 | $4.673 | 64 | $9.345 |
 
-**★ LEDGER-MERGED == GITHUB-MERGED == 4 THIS CYCLE — the reconciliation gap is CLOSED.** Through R3
-(15-vs-17) and R4 (2-vs-6) the ledger `verdict==="merged"` count undercounted gate-side merges and every
-retro hand-reconciled it. W1-T51/#97 shipped the ledger∪GitHub union this cycle; the two counts now AGREE
-(4) and the check is MECHANICAL (P11 CLOSED). Merge rate this cycle: **4/9 (44%)**; the other 5 are
-guard-fired blocks (`blocked_review`×3, `blocked_containment`×1, `blocked_isolation`×1 — Retro proposals).
+**Merge rate this cycle: 1/2 (50%)** — the one merge is W1-T65/#122 (the floor-executes-proofs fix, 94
+turns / $7.123); the one non-merge is a single `blocked_review` (the bootstrap class — Retro proposals).
+Small-N: two runs is a thin sample and the $4.673 avg is pulled by the 94-turn merge; read it as a spot
+check on the plateau, not a trend break.
 
-**Prior cycles (FOLDED — trend only):** R4 10 runs / 2 ledger-merged (6 real) / $3.290 avg / 54.5 turns ·
-R3 22 / 15 / $3.218 / 45.2t · R1+R2 19 / 11 / $1.838 / 21.4t. **Derived all-time:** ~60 runs, ~36 merged.
+**Prior cycles (FOLDED — trend only):** R5 9 runs / 4 merged (ledger==GitHub, P11) / $3.613 avg / 56.9t ·
+R4 10 / 2 ledger-merged (6 real) / $3.290 / 54.5t · R3 22 / 15 / $3.218 / 45.2t · R1+R2 19 / 11 / $1.838 /
+21.4t. **Derived all-time:** ~62 runs, ~37 merged.
 
 **Reads:**
-- **Cost per run ticked $3.29 → $3.61 and turns 54.5 → 56.9 — both flat within noise.** The mean plateaued
-  two retros ago and stays there; this cycle's four merges include two 100-turn self-hosting fixes
-  (W1-T63/101t, W1-T60/98t) that pulled the average up without a cost blow-out.
-- **`blocked_review`×3 is again this cycle's largest block class — the bootstrap class, re-confirmed.**
-  Honest blocks on criteria demanding LIVE proof the worker cannot produce in-flight; the gate does its
-  job, a human/Architect closes the gap. **Do not mine it as breakage** (the standing R3 lesson), and
-  P15→W1-T65 (ratified: the floor executes proofs against the PR head) is the standing structural fix.
-- **TWO NEW block classes — `blocked_containment`×1, `blocked_isolation`×1 — appeared for the first time.**
-  Most likely the OS-sandbox/deny-hook (§4A) and W1-T17's just-shipped isolation preflight (#99) firing
-  fail-closed as designed, not breakage — but the ledger cannot yet prove which. See P21.
-- **The $100 `budget_usd` tripwire sits ~28× the mean; 0/9 budget trips.** Still a runaway detector, not
+- **The plateau holds.** Cost/turns per merged PR stay in the $3–7 / 45–100-turn band the last three retros
+  established; W1-T65's 94-turn merge is a state-machine change (the floor gains a proof executor), which is
+  reliably a high-turn shape — not a regression.
+- **`blocked_review`×1 — the bootstrap class, re-confirmed, and now STRUCTURALLY covered.** With W1-T65
+  SHIPPED the floor executes proofs against the PR head, so criteria that used to block for lack of an
+  in-flight LIVE proof are now adjudicated deterministically. **Do not mine it as breakage** (the standing
+  R3 lesson). See Retro proposals.
+- **The $100 `budget_usd` tripwire sits ~21× the mean; 0/2 budget trips.** Still a runaway detector, not
   an allowance (§9). No action.
 
 ## Retro proposals (PROPOSALS ONLY; NOT yet in plan/tasks.yaml)
 
-**RETRO-1784206755808 (this cycle)** — mined from the 5 non-merges of 9 runs (`blocked_review`×3,
+**RETRO-1784213948025 (this cycle)** — mined from the 1 non-merge of 2 runs (`blocked_review`×1).
+Candidates for the Architect to ratify via a tasks.yaml PR (rule 15) — never auto-filed.
+
+- **`blocked_review`×1 — NO new proposal; the bootstrap class, re-confirmed, and its structural fix SHIPPED
+  this cycle.** The lone non-merge is an honest block on a criterion demanding proof the worker cannot
+  produce in-flight. P15→W1-T65 (SHIPPED #122 this cycle) is exactly the standing fix: the deterministic
+  floor now executes the criterion's whitelisted proof against the PR head, so this class is now
+  adjudicated by repo state, not report keywords. A new proposal here would be accretion, not analysis (the
+  standing rule on `blocked_review`). INVESTIGATE the run-id if the block recurs on a criterion the floor
+  SHOULD have proved — that would be a W1-T65 gap, not the bootstrap class.
+
+**RETRO-1784206755808 (prior cycle)** — mined from the 5 non-merges of 9 runs (`blocked_review`×3,
 `blocked_containment`×1, `blocked_isolation`×1). Candidates for the Architect to ratify via a tasks.yaml PR
 (rule 15) — never auto-filed.
 
@@ -293,7 +318,6 @@ tasks.yaml PR — never auto-filed, never worker-edited (rule 15).
 - *(learning-system completeness review — Architect + research 2026-07-15)* ★ P12 (plan + measurement) — WE INJECT LEARNINGS BUT NEVER MEASURE WHETHER THEY HELP: the learning system has no effectiveness signal, so it cannot be shown to compound. W1-T19 injects matched learnings; W1-T34 (proposed) prunes STALE ones; W1-T38 (proposed) caps SIZE. NONE tracks UTILITY — whether an injected learning is load-bearing. The 2026 memory literature names the metric: the WIPE TEST [research: self-evolving-agents-2026] — what performance survives if external memory is deleted; a memory-centric system (Remudero, deliberately — no weight updates) must PROVE its gains, or 'better notes' is unfalsifiable. Measured directly as RELIABILITY (success rate over repeats) + EFFICIENCY (turns/cost) [research: procedural-memory-reliability]. For Remudero: (i) ledger, per injected learning, whether the run it fed MERGED clean vs needed fix/diagnose — a learning accrues a utility signal; (ii) periodically run a task-CLASS with learnings SUPPRESSED (a Wipe-Test golden on the sandbox) and compare merge-rate/turns to the injected baseline; (iii) feed utility INTO W1-T34 quarantine + W1-T38 budget — prune LOW-utility as hard as STALE, so the corpus is pruned by VALUE, not only truth and size. This is the metric the whole Self-improvement section exists to make true and currently asserts without evidence.
 - *(learning-system completeness review — Architect + research 2026-07-15)* ★ P13 (plan) — THE FLYWHEEL MINES FAILURE, NOT SUCCESS: half the compounding loop is missing. Self-improvement's flywheel reads the ledger for FAILURE patterns (repeated transients, prompts that needed fixes, gates that never fire, reviewer misses). The 2026 frontier distills BOTH: successful trajectories -> reusable procedures, failed -> corrective lessons [research: reasoningbank, expel, agentic-workflow-memory, trajectory-informed-memory]. Remudero captures a clean single-shot merge NOWHERE — the prompt shape that produced W1-T3F at 21 turns, or a 4-turn recon, is never distilled into procedural memory (the Sec 5B skill registry / a template diff). Propose: extend the flywheel + retro to mine SUCCESSFUL runs — a run that merged clean, fast, first-try is a POSITIVE signal whose reusable shape becomes a procedural-memory proposal (skill-registry entry or template diff), gated behind the golden suite like any knowledge change (RSI-safety unchanged). 'Compounding engineering' completed: codify what WORKS, not only patch what breaks.
 - *(learning-system completeness review — Architect + research 2026-07-15)* P14 (plan -> extends W1-T33) — CONSOLIDATION HAS NO CONTRADICTION DETECTION; supersession is recency-overwrite. W1-T33 (proposed) adds a lifecycle (active|superseded) and filters superseded entries, but marking-superseded is MANUAL and nothing DETECTS when a newly-distilled learning CONTRADICTS an existing one. The 2026 consolidation literature makes conflict detection explicit — multi-pass consolidation with conflict resolution [research: trace2skill, scientific-agent-consolidation] — and names naive recency-overwrite's failure: it breaks when knowledge is REFINED, not replaced. Propose (fold into W1-T33's ratification): the DISTILL/retro consolidation pass, before adding a learning, checks it against existing entries on the same subsystem/files for CONTRADICTION and forces an explicit supersede-or-reconcile decision — a contradiction may never SILENTLY coexist with the entry it contradicts (both would inject; a worker would receive mutually-exclusive guidance).
-- ★ P15 (plan + golden) — RATIFIED 2026-07-16 -> W1-T65 (the floor executes whitelisted proofs against the PR head — observation survives reviewer death). W1-T3F OBSERVATION LIVES IN THE REVIEWER, NOT THE FLOOR, so a dead reviewer makes the gate INACCURATE IN BOTH DIRECTIONS. GROUND TRUTH (this cycle, daemon self-host): the reviewer COMPLETES on simple PRs (W1-T17 review.reviewer subtype=success) and DIES error_max_turns on complex ones (W1-T18/#100, W1-T51, W1-T62); on death the gate falls back to the deterministic FLOOR, which keyword-matches the REPORT and is BLIND to repo state. That one fact produces BOTH modes: FALSE-PASS (W1-T51 merged '2 of 4 criteria substantiated' — observation would have caught the gap) AND FALSE-BLOCK (W1-T18/#100 — the required LEARNINGS entry AND the HOME-redirection code are GENUINELY on the branch, verified from source, but not keyword-substantiated in the report, so the floor blocked complete work). W1-T63 (mount the reviewer) makes it complete more often, but the FLOOR stays blind, so ANY future reviewer death re-opens the hole. Propose (the handoff's Sec 4 T3F-executor candidate, now with a live instance): LIFT W1-T3F's whitelisted-proof execution — run the criterion's named test/grep against the PR head, case-normalized — INTO the deterministic floor, so the FLOOR observes repo state, not just report keywords. Then the gate is correct whether or not the LLM reviewer completes; the reviewer becomes purely additive (subtle-catch), never load-bearing for basic correctness. GOLDEN: a PR that SATISFIES a criterion in repo state but does not keyword-claim it in the report must PASS the floor (the #100 case); a PR that keyword-claims a criterion its repo state does not satisfy must FAIL.
 - ★ P16 (plan -> investigate-then-build) — RATIFIED 2026-07-16 -> W1-T69 (deriveStatus rung (c): anchored-trailer verify + ownership-assert + correction-awareness; the W1-T20c false-credit reproduced live). deriveStatus, the STATUS PROJECTION THAT GATES DISPATCH, may credit a task off a false/foreign trailer — the same attribution class W1-T51 fixed in the gather, but here affecting what the daemon BUILDS, not just what it reports (worse). GROUND TRUTH (this cycle): the daemon dry-run listed W1-T20d as RUNNABLE (position 4) while its dependency W1-T20c (the pre-flight linter) is NOT built — task-linter.ts absent from main, no blocked_illformed guard wired. So either nextRunnable dispatched a task whose dep is unmet, or deriveStatus (via the Remudero-Task trailer / ledger pr.opened) falsely reports W1-T20c MERGED — in which case the daemon would build W1-T20d against a linter that does not exist. INVESTIGATE FIRST (grep the ledger for W1-T20c; gh pr list --state merged --search 'W1-T20c in:body'): if W1-T20c has no real owned merged PR, deriveStatus needs the SAME ownership-assert + correction-awareness W1-T51 put in the gather — assert the crediting PR's headRefName equals the run's branch; honor correction.provenance — the READ-side guard applied to the DISPATCH projection. W1-T62 fixed the WRITE side, W1-T51 the retro READ side; deriveStatus is the THIRD consumer and the one that gates what runs.
 - ★ P17 (plan -> design + build) — RATIFIED 2026-07-16 -> W1-T71 (rmd receipt <pr>: deterministic in-toto-style attestation from ledger ground truth + the byte-equal drift golden; Sigstore + WS-12 schema publish deferred to v2). THE LEDGER PROVES OUR RUNS TO US; NOTHING PROVES THEM TO ANYONE ELSE. Remudero already writes every field a provenance attestation needs — append-only ledger, ownership-asserted Remudero-Task trailers (W1-T62), correction.provenance lineage (P9) — but emits no standardized artifact a THIRD PARTY can verify. The 2026 context makes this the open lane: EU AI Act Art. 50 machine-readable-disclosure enforcement begins 2026-08 and SOC2/vendor due-diligence now asks about AI-authored code [research: eu-ai-act-art50-2026]; SLSA's source track + in-toto attestations are the established supply-chain vocabulary [research: slsa-source-track, in-toto]; NIST's agent-identity concept work names the requirements — tamper-proof logs, binding to human intent, non-repudiation [research: nist-agent-identity-2026]; and the VS Code co-author-trailer backlash (reverted 2026-05) set the design bar: provenance must be EXPLICIT and VERIFIABLE, never a silent default [research: vscode-coauthor-backlash-2026]. Nearest competitor ships "inspectable run receipts" (MartinLoop) — inspectable, not standardized, not verifiable [research: field-survey-2026-07-16]. Propose: (i) `rmd receipt <pr>` — a DETERMINISTIC generator assembling an in-toto-style attestation predicate from ledger ground truth: task id, run id, head branch, prompt-template hash, injected learning ids, mount (model/effort), num_turns, notional cost, reviewer_outcome, gate contexts at merge, correction lineage; (ii) posted as a PR comment + committed artifact on every merged agent PR; (iii) the predicate SCHEMA published as a Tier-A generated doc (WS-12) — the interop play: a format others can adopt; (iv) Sigstore keyless signing is the v2 rung, DEFERRED until the format proves out (rule: never ship the crypto before the content is right); (v) GOLDEN: a receipt regenerated from the ledger byte-equals the posted artifact (the W1-T49 drift-gate discipline applied to receipts). This makes WS-12's "nobody else ships the receipts" claim LITERAL and machine-verifiable — the differentiator the commodity field cannot follow without our ledger/trailer/correction substrate.
 - ★ P18 (plan + measurement) — OUR FAILURE CLASSES ARE PRIVATE VOCABULARY; THE FIELD PUBLISHED A TAXONOMY AND NOBODY'S LIVE SYSTEM IS CODED TO IT. MAST (NeurIPS 2025; 1,600+ annotated traces across 7 frameworks, kappa 0.88) names 14 failure modes in 3 categories — specification (~42%), inter-agent misalignment (~37%), verification (~21%) [research: mast-neurips2025]; the companion finding quantifies our §4 bet: uncoordinated MAS amplify errors up to 17x while centralized-with-validation-bottleneck architectures contain amplification to ~4.4x [research: mas-error-amplification-2026]. Remudero's ledger is ALREADY a MAST-annotatable trace corpus — verdict classes map cleanly (blocked_illformed -> specification; the W1-T62/#80 attribution inversion + dead-reviewer floor-only pass -> verification; the rider-shedding class -> specification/decomposition). Propose: (i) a DETERMINISTIC verdict->MAST mapping held as DATA (a YAML table, rule 2 — never LLM-classified), applied at retro-read so historical ledger lines code retroactively; (ii) `rmd retro` reports each cycle's failure distribution BY MAST CATEGORY — class-level mining (W1-T20d) gains the field's shared vocabulary, and a category trending wrong is a plan-health signal; (iii) WS-12 publishes ledger-derived reliability numbers as a GENERATED site artifact — merge rate, cost/turns per merged PR, failure mix by MAST category, and the P12 wipe-test deltas on the same surface — extending "LEARNINGS.md as a public artifact" from narrative to NUMBERS. Positioning: the first orchestrator whose live operational failure data is coded to the published research taxonomy and shipped in the open. GOLDEN: a seeded ledger fixture of known verdicts produces the expected category distribution (the mapping is tested, not vibes).
@@ -306,15 +330,17 @@ tasks.yaml PR — never auto-filed, never worker-edited (rule 15).
   W1-T24b, whose criteria demanded live post-flip proof — the bootstrap class, and the ordering fix
   already shipped via the #84/#77 splits. Adding a fourth proposal here would be accretion, not analysis.
 
-**Closed proposals (P1–P8, P10, P11) — RETIRED FROM THIS LIST, ids preserved.** Per RATIFY-OR-KILL every
-one now has a terminal status, so the adjudication prose they carried is DELETED rather than maintained
-twice (the tasks are the record now): **P1**→W1-T59 (filed, deprioritized) · **P2**→retired as superseded
-by §9 (it proposed the tripwire-as-work-limit bug) · **P3**→W1-T58 · **P4**→folded into W1-T24 (SHIPPED
-#75) · **P5, P6**→W1-T52 (open) · **P7**→ratified into rule 19's citation · **P8**→W1-T58 + the
+**Closed proposals (P1–P8, P10, P11, P15) — RETIRED FROM THIS LIST, ids preserved.** Per RATIFY-OR-KILL
+every one now has a terminal status, so the adjudication prose they carried is DELETED rather than
+maintained twice (the tasks are the record now): **P1**→W1-T59 (filed, deprioritized) · **P2**→retired as
+superseded by §9 (it proposed the tripwire-as-work-limit bug) · **P3**→W1-T58 · **P4**→folded into W1-T24
+(SHIPPED #75) · **P5, P6**→W1-T52 (open) · **P7**→ratified into rule 19's citation · **P8**→W1-T58 + the
 ratify-or-kill duty (§Self-improvement) · **P10**→W1-T63 (SHIPPED #104 — reviewer/fix/diagnose
 mount-governed + `reviewer_outcome`) · **P11**→W1-T51 (SHIPPED #97 — the gather unions ledger∪GitHub, so
-the recurring reconciliation gap is now closed mechanically). A closed proposal's reasoning lives in its
-task or in the rule it amended; restating it here is what turns this list into the graveyard P8 warned about.
+the recurring reconciliation gap is now closed mechanically) · **P15**→W1-T65 (SHIPPED #122 — the
+deterministic floor executes whitelisted proofs against the PR head; the blind-floor FALSE-PASS/FALSE-BLOCK
+hole is closed and the reviewer is now purely additive). A closed proposal's reasoning lives in its task or
+in the rule it amended; restating it here is what turns this list into the graveyard P8 warned about.
 
 ## FIELD FINDINGS (from the mini, 2026-07-14 — ground truth, not docs)
 
