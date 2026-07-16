@@ -122,7 +122,7 @@ quality/architecture (W1-T25/T26/T28) → W1-T27 → W2-T2 fleet dry-run.** The 
 order is **DONE** (W1-T24/#75 → W1-T23/#76, both merged gate-side this cycle), so the pre-flight linter
 W1-T20c/d now leads on its own merit: it gates every task dispatched after it. R4's cap-plumbing findings
 (P10/P11) both SHIPPED this cycle (W1-T63/#104, W1-T51/#97); R5's remaining blocks (containment/isolation)
-are guard-fired fail-closed, not task defects (P21). NOTE: `nextRunnable`
+are guard-fired fail-closed, not task defects (P23). NOTE: `nextRunnable`
 (drain.ts:31 `plan.tasks.find`) is DECLARATION-ORDERED, but the daemon currently drains the SANDBOX; the
 remudero queue is operator-kicked, so this is the authoritative KICK ORDER (mirrored as a comment atop
 plan/tasks.yaml). Remaining fleet ops (§5D, W1-T55–T57) fold in alongside.
@@ -272,7 +272,7 @@ Candidates for the Architect to ratify via a tasks.yaml PR (rule 15) — never a
 `blocked_containment`×1, `blocked_isolation`×1). Candidates for the Architect to ratify via a tasks.yaml PR
 (rule 15) — never auto-filed.
 
-- **★ P21 (investigate-then-build) — TWO NEW BLOCK CLASSES (`blocked_containment`, `blocked_isolation`)
+- **★ P23 (investigate-then-build) — TWO NEW BLOCK CLASSES (`blocked_containment`, `blocked_isolation`)
   appeared this cycle, and the retro cannot yet tell a GUARD-FIRED fail-close from a REAL host regression.**
   Every prior block was `blocked_review`/`no_pr`/`failed`/`incomplete`; these two are new. W1-T17/#99 (the
   isolation preflight, fail-closed) shipped THIS cycle, so a `blocked_isolation` verdict is most likely the
