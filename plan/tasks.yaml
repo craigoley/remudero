@@ -2829,3 +2829,31 @@
   status: queued
   attempts: 0
   note: "Ratifies P10 + P10-a. Blocker for safe autonomy: reviewer walls every substantive PR (3 ledgered instances), so the merge gate is floor-only for code today. Live 'reviewer no longer walls' confirmation is the next real run's review.reviewer subtype (operator-observed), Rule 18."
+
+# Sibling of W1-T63: same hardcoded-turn-cap class, on the retro/architect spawn W1-T63 didn't cover.
+# The retro can't currently open its own PR (walls at 40 turns -> empty branch -> gh-pr-create fails).
+- id: W1-T64
+  title: "Retro/architect spawn is mount-governed (the maxTurns:40 W1-T63 missed) + gh-pr-create guarded by commitsAhead"
+  repo: remudero
+  depends_on: [W1-T63]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "GROUND TRUTH (this session): `rmd retro` fails at `gh pr create --fill` on an EMPTY branch (0 commits ahead of main). Source (retroCommand, run-task.ts): the retro/architect worker is spawned with a HARDCODED maxTurns:40 — the SAME cap that walled the reviewer (error_max_turns). W1-T63 mount-governed reviewer/fix/diagnose but MISSED the retro/architect spawn. On a dense retro (6 runs: reviewer deaths, false-blocks, the isolation/containment/spawn cascade) the Opus worker walls at 40 turns BEFORE staging/committing/pushing/opening the PR -> empty branch -> the gh-pr-create fallback fails (no diff for --fill). This DISABLES the self-improvement loop: the system drains but cannot learn."
+  design: |
+    TWO changes, sibling to W1-T63. VERIFY every literal/line by grep first (distrust-the-prompt; line drift expected).
+    (1) ROOT: replace the hardcoded maxTurns:40 on retroCommand's spawnWorker call with the mount-resolved turn budget — the SAME resolveMount(...) wiring W1-T63 applied to reviewer/fix/diagnose, keyed to the architect/retro tier (the `architect` row exists in mounts.yaml; #90 re-based all rows to the flat-400 tripwire — a runaway cliff, not a work limit). No hardcoded turn literal remains on that spawn.
+    (2) GUARD: before the `gh pr create --fill` fallback, check commitsAhead(worktreePath, "origin/main") (the helper already exists in this file). If 0, the worker produced nothing (its subtype is already logged) — log a clear retro-no-op line and remove the worktree/branch; NEVER open a PR on an empty branch. A real retro (>=1 commit) proceeds exactly as today.
+  acceptance:
+    - claim: "the retro/architect spawn resolves its turn budget from mounts (flat-400 tripwire), not a hardcoded 40"
+      proof: "grep retroCommand's spawnWorker: NO maxTurns:40 literal remains, the budget resolves via resolveMount; a resolver unit test shows the retro turn budget is >> 40"
+    - claim: "gh pr create is guarded by commitsAhead — an empty branch is logged + cleaned, never PR'd"
+      proof: "unit/integration: a retro worktree with 0 commits ahead of origin/main takes the no-op path (log + worktree remove) and NEVER calls gh pr create; a worktree with >=1 commit still opens the PR"
+  risk: medium
+  origin: retro#session-2026-07-16
+  plan_refs: ["§8", "§9"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Sibling of W1-T63 — same hardcoded-turn-cap class, on the retro/architect spawn W1-T63 didn't cover. Unblocks the self-improvement loop (retro can't currently open its own PR)."
