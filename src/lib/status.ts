@@ -13,7 +13,10 @@ import type { Plan, Task, TaskStatus } from "./plan.js";
  * the truth of whether a task landed is computed on demand from GitHub, in a
  * fixed precedence, and cached to a machine-owned projection (state/status.json).
  *
- * Precedence for a task id:
+ * Precedence for a task id — an operator correction is checked FIRST and is
+ * SUPREME (MASTER-PLAN P9 / W1-T75): it is DECLARED ground truth, not inferred
+ * evidence, so it outranks every rung below rather than being read only inside
+ * rung (c). Then, absent a correction:
  *   (a) state/ledger.ndjson `pr.opened` line for this task -> query that PR's state;
  *   (b) an explicit `pr:` field in tasks.yaml (tasks executed by hand, pre-ledger);
  *   (c) a merged PR whose body carries the trailer `Remudero-Task: <id>` —
@@ -168,14 +171,16 @@ function debunkedTrailerUrls(lines: Array<Record<string, unknown>>, taskId: stri
 }
 
 /**
- * CORRECTIONS WIN (P9-iv / W1-T69): a `correction.provenance` line is the operator's
- * AUTHORITATIVE override of a mis-attribution — it debunks a `claimed_pr_url` AND
- * names the `actual_pr_url` (the real PR, e.g. #80→#91). deriveStatus credits that
- * actual url directly, ahead of and instead of the fuzzy trailer search. Crucially
- * the actual PR is NOT re-subjected to the ownership/anchor asserts: the correction
- * is a deliberate human act that SUPERSEDES those automated checks (the real PR is
- * often a hand-authored one from a non-`run-` branch — #91 was a docs PR). Last
- * correction wins. Returns undefined when the task has no correction.
+ * CORRECTIONS WIN, SUPREME (P9-iv / W1-T75, generalizing W1-T69): a `correction.provenance`
+ * line is the operator's AUTHORITATIVE override of a mis-attribution — it debunks a
+ * `claimed_pr_url` AND names the `actual_pr_url` (the real PR, e.g. #80→#91). deriveStatus
+ * credits that actual url directly, checked BEFORE rungs (a)/(b)/(c) — a stale ledger
+ * `pr.opened` line or a `pr:` field is no more trustworthy than the fuzzy trailer search
+ * this originally only outranked. Crucially the actual PR is NOT re-subjected to the
+ * ownership/anchor asserts: the correction is a deliberate human act that SUPERSEDES
+ * those automated checks (the real PR is often a hand-authored one from a non-`run-`
+ * branch — #91 was a docs PR, #134 a `fix/*` PR). Last correction wins. Returns
+ * undefined when the task has no correction.
  */
 function latestActualPrUrl(lines: Array<Record<string, unknown>>, taskId: string): string | undefined {
   let url: string | undefined;
@@ -225,6 +230,29 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   const readLedger = deps.readLedger ?? readLedgerLines;
   const ledgerLines = readLedger(deps.ledgerPath);
 
+  // SUPREMACY (MASTER-PLAN P9 / W1-T75, ratifying the W1-T20c/#134 stranding): an
+  // operator correction is checked FIRST, above rungs (a)/(b)/(c) — not merely
+  // inside rung (c) ahead of the trailer search. A correction is DECLARED credit
+  // (operator ground truth via the sanctioned `rmd correct` writer), not INFERRED
+  // evidence, so it is deliberately EXEMPT from the run-branch ownership-assert
+  // (that assert guards rung (c)'s fuzzy trailer search, not a human declaration) —
+  // the canonical case is a merged PR on a `fix/*` head (#134), which the assert
+  // would otherwise reject, making the un-strand impossible by construction.
+  //
+  // The un-credit direction (P9-iv): once a correction exists for this task it is
+  // authoritative in BOTH directions and deriveStatus never falls through to a
+  // stale rung below it — including when the correction's own target PR cannot be
+  // resolved (closed/absent/deleted), which derives NOT merged rather than
+  // silently re-crediting whatever rung (a)/(b)/(c) would have said.
+  const correctedUrl = latestActualPrUrl(ledgerLines, task.id);
+  if (correctedUrl) {
+    const pr = deps.github.prByRef(correctedUrl);
+    if (pr) {
+      return { taskId: task.id, source: "correction", ...fromPrState(pr.state), prNumber: pr.number, prUrl: pr.url, prState: pr.state };
+    }
+    return { taskId: task.id, status: "queued", merged: false, source: "correction" };
+  }
+
   // (a) ledger `pr.opened` for this task -> query that PR.
   const openedUrl = lastPrOpened(ledgerLines, task.id);
   if (openedUrl) {
@@ -247,15 +275,6 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   // deriveStatus GATES DISPATCH, so a false/foreign credit here is worse than
   // the same attribution class W1-T51 fixed in the retro gather (which only
   // mis-reports); a bad credit here makes the daemon BUILD against an unmet dep.
-  // Corrections win FIRST: an operator correction OVERRIDES the fuzzy search entirely.
-  const correctedUrl = latestActualPrUrl(ledgerLines, task.id);
-  if (correctedUrl) {
-    const pr = deps.github.prByRef(correctedUrl);
-    if (pr) {
-      return { taskId: task.id, source: "correction", ...fromPrState(pr.state), prNumber: pr.number, prUrl: pr.url, prState: pr.state };
-    }
-  }
-
   const trailerPr = deps.github.findMergedByTrailer(task.id);
   if (trailerPr && !debunkedTrailerUrls(ledgerLines, task.id).has(trailerPr.url)) {
     const head = deps.github.headRefName(trailerPr.url);
