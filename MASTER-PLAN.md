@@ -294,7 +294,7 @@ Candidates for the Architect to ratify via a tasks.yaml PR (rule 15) — never a
 `no_pr`×2, `failed`×1, `incomplete`×1). Candidate golden/plan tasks for the Architect to ratify via a
 tasks.yaml PR — never auto-filed, never worker-edited (rule 15).
 
-- **★ P9 (plan + golden) — THE FALSE ATTRIBUTION SURVIVES ITS OWN FIX. Highest value in this list.**
+- **★ P9 (plan + golden) — RATIFIED 2026-07-16 -> W1-T75 (operator corrections are SUPREME in deriveStatus — hoisted above rung (a) + a sanctioned `rmd correct` writer; the W1-T20c/#134 stranding). THE FALSE ATTRIBUTION SURVIVES ITS OWN FIX. Highest value in this list.**
   W1-T62/#93 fixed the *parser* (anchored `PR_URL` + ownership guard), so no FUTURE run can mis-attribute.
   It did **not** undo what the bad run already wrote: **PR #80's body still carries
   `Remudero-Task: W1-T54b`** (run-task stamps the trailer onto the PR it believes it owns). Consequences,

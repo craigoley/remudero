@@ -3300,3 +3300,55 @@
   attempts: 0
   note: "Filed from the #128 worker's root-cause flag. The uniqueness test is the gate; the template line
     is courtesy — a colliding retro PR now goes RED at its own ci instead of merging ambiguity."
+
+# Ratifies P9's live remainder: operator corrections must be SUPREME in deriveStatus. W1-T20c was hand-fixed
+# (#134) but deriveStatus still lists it runnable — rung (a) returns the CLOSED superseded run's pr.opened
+# line before corrections (read only inside rung c) are ever consulted. Hoist corrections to the top.
+- id: W1-T75
+  title: "Operator corrections are SUPREME in deriveStatus — hoist above rung (a) + a sanctioned `rmd correct` writer (ratifies P9; the W1-T20c/#134 stranding)"
+  repo: remudero
+  depends_on: [W1-T69]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P9's live remainder. GROUND TRUTH (2026-07-16): W1-T20c was completed by hand-fix
+    #134 on a fix/* branch after its run PRs blocked and closed; deriveStatus STILL lists it runnable
+    because rung (a) returns at the most recent pr.opened ledger line — the CLOSED superseded run —
+    and neither the pr: field (rung b) nor corrections (read only inside rung c) is ever reached. The
+    operator's ground truth cannot override a stale ledger line in the projection that GATES DISPATCH;
+    a drain would rebuild an already-built task. P9's thesis, now with its forcing fixture:
+    correction.provenance is first-class and EVERY rung of every consumer honors it."
+  design: |
+    (1) SUPREMACY: hoist the correction lookup (latestActualPrUrl) to the TOP of deriveStatus — an
+        operator correction resolves the task's PR before rungs (a)/(b)/(c) are consulted, with
+        source: "correction". Rungs otherwise unchanged.
+    (2) DECLARATION VS INFERENCE, explicit: a correction is OPERATOR GROUND TRUTH and is EXEMPT from
+        the run-branch ownership assert (status.ts ~:204). The assert guards INFERRED credit (trailer
+        search); a correction is DECLARED credit — the live target of the canonical case is a merged
+        PR on a fix/* head (#134), and it MUST credit. Never apply the ownership assert to corrections;
+        that would make the un-strand impossible by construction.
+    (3) SANCTIONED WRITER: `rmd correct <taskId> --pr <n>` appends the correction event to the ledger —
+        READ latestActualPrUrl first and emit the exact line shape it already parses (compatibility with
+        the existing hand-written #80->#91-era correction; never a second dialect). The command prints
+        the derived status before/after so the operator sees the flip. Append-only; no ledger rewrites.
+    (4) The un-credit direction works too: a correction may point AWAY from a falsely-credited PR
+        (the P9 #80 case) — deriveStatus over a correction whose target PR is closed/absent derives
+        NOT merged, never falls through to the stale rung-(a) line.
+  acceptance:
+    - claim: "the canonical stranding fixture credits on correction: last pr.opened -> a CLOSED run PR, correction -> a merged PR on a fix/* head (the #134 shape; corrections are declarations, exempt from the ownership assert) => derived MERGED, source=correction"
+      proof: "unit test over injected deps reproducing the W1-T20c state with the correction target's headRefName set to fix/w1t20c-style -> merged=true; and WITHOUT the correction the same fixture derives not-merged (regression lock on today's behavior)"
+    - claim: "corrections outrank every rung, both directions"
+      proof: "unit tests: correction beats a live rung-(a) line, beats a pr: field, beats a trailer credit; an away-pointing correction un-credits a task rung-(c) would have credited"
+    - claim: "rmd correct writes the shape latestActualPrUrl parses, append-only"
+      proof: "unit test: write via the command against a temp ledger, re-derive -> source=correction; grep the implementation for append-mode writes only"
+    - claim: "no-correction behavior is byte-identical to today"
+      proof: "the full existing W1-T69 test suite passes unchanged"
+  risk: high
+  origin: architect
+  plan_refs: ["§2", "§4"]
+  files: [src/lib/status.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "After this merges, the operator runs: ./bin/rmd correct W1-T20c --pr 134 — then rmd drain
+    --dry-run must DROP W1-T20c and LIST W1-T20d (the linter chain unblocks). Rule 18 live confirmation."
