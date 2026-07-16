@@ -22,6 +22,7 @@ function goodRaw() {
     tiers: { haiku: 1, sonnet: 2, opus: 3 },
     efforts: { low: 1, medium: 2, high: 3 },
     architect: { model: "opus", effort: "high", max_turns: 60, context_budget: 180000 },
+    judge: { model: "opus", effort: "high", max_turns: 60, context_budget: 150000 },
     routes: {
       implement: {
         low: { model: "sonnet", effort: "medium", max_turns: 30, context_budget: 120000 },
@@ -37,16 +38,49 @@ function goodRaw() {
 test("the SHIPPED .remudero/mounts.yaml loads and satisfies the Tier Invariant", () => {
   const m = loadMounts(SHIPPED);
   assert.equal(m.architect.model, "opus");
-  // Every worker rides strictly below the Architect tier.
+  assert.equal(m.judge.model, "opus");
+  // Every worker rides strictly below the Architect tier AND the judge tier.
   const architectTier = m.tiers[m.architect.model];
+  const judgeTier = m.tiers[m.judge.model];
   for (const [type, byRisk] of Object.entries(m.routes)) {
     for (const [risk, mount] of Object.entries(byRisk)) {
       assert.ok(
         m.tiers[mount.model] < architectTier,
         `${type}.${risk} (${mount.model}) must ride below the Architect`,
       );
+      assert.ok(
+        m.tiers[mount.model] < judgeTier,
+        `${type}.${risk} (${mount.model}) must ride below the flight judge`,
+      );
     }
   }
+});
+
+test("REJECTS a `judge` mount at or below the worker ceiling (W1-T21/G-17)", () => {
+  const bad = goodRaw();
+  bad.judge.model = "sonnet"; // judge == the sonnet worker ceiling
+  assert.throws(
+    () => validateMounts(bad),
+    (e: unknown) =>
+      e instanceof TierInvariantError &&
+      /flight judge/.test((e as Error).message) &&
+      /G-17/.test((e as Error).message),
+    "must name the flight judge and cite the invariant",
+  );
+});
+
+test("REJECTS a worker riding AT the judge's tier even when it stays below the Architect", () => {
+  const bad = goodRaw();
+  bad.judge.model = "sonnet";
+  bad.architect.model = "opus";
+  bad.routes.implement.high.model = "sonnet"; // == judge tier, still < architect tier
+  assert.throws(() => validateMounts(bad), TierInvariantError);
+});
+
+test("ACCEPTS a `judge` mount riding the Architect's own tier, strictly above every worker", () => {
+  const good = goodRaw();
+  good.judge.model = "opus";
+  assert.doesNotThrow(() => validateMounts(good));
 });
 
 test("SHIPPED table also passes when the operator thinking_default is supplied (Craig: medium)", () => {
