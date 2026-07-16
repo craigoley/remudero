@@ -51,6 +51,7 @@ import {
 } from "./lib/plan.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./lib/mounts.js";
 import { ContainmentError, probeContainment } from "./lib/containment.js";
+import { IsolationError, probeIsolation } from "./lib/isolation.js";
 import {
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
   loadLearnings,
@@ -454,6 +455,7 @@ export interface RunResult {
     | "blocked_review"
     | "blocked_budget"
     | "blocked_containment"
+    | "blocked_isolation"
     | "blocked_inflight"
     | "no_pr"
     | "blocked_transient"
@@ -843,6 +845,37 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
       });
       say(`verdict: blocked_containment — ${e.message}`);
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_containment" };
+    }
+    throw e;
+  }
+
+  // ── Isolation PREFLIGHT (W1-T17 / Standing rule 11 / FIELD FINDING 11b): the
+  // current shell isolation (CLAUDE_CODE_SHELL routing the Bash-tool snapshot to
+  // an empty rc) works ONLY because THIS host's `~/.bashrc` happens to be absent
+  // — an accident of the machine, not construction (LEARNINGS.md). A populated
+  // `~/.bashrc` would silently isolate NOTHING. Once per run, empirically confirm
+  // a worker inherits ZERO operator aliases/functions before any task worker
+  // (recon/implement) runs. FAIL CLOSED: a nonzero count means isolation is not
+  // holding on this host — the run refuses to start.
+  try {
+    const isoProbe = await probeIsolation({
+      settingsFile,
+      config,
+      budgetUsd,
+      log: (s, extra) => log(s, extra),
+    });
+    costUsd += isoProbe.costUsd; // meter the probe spawn (notional; the ledger has it)
+    say(`isolation preflight PASSED — ${isoProbe.reason}`);
+  } catch (e) {
+    if (e instanceof IsolationError) {
+      log("verdict", {
+        verdict: "blocked_isolation",
+        reason: e.message,
+        cost_usd: costUsd,
+        billing_mode: "subscription",
+      });
+      say(`verdict: blocked_isolation — ${e.message}`);
+      return { taskId, runId, merged: false, costUsd, verdict: "blocked_isolation" };
     }
     throw e;
   }
