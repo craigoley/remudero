@@ -74,7 +74,7 @@ import {
 } from "./lib/review.js";
 import { buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
-import { ghGateway, projectPlan } from "./lib/status.js";
+import { ghGateway, projectPlan, type GitHub } from "./lib/status.js";
 import {
   DEFAULT_PRUNE_GRACE_MS,
   appendQuestion,
@@ -856,9 +856,16 @@ async function runTask(
      *  sync — the operator named an exact file, so honor it verbatim, same as the sibling
      *  guard around the daemon's own non-self clone-sync (`!flagValue(rest, "--plan")`). */
     skipGitSync?: boolean;
+    /** Injectable worker-spawn — behavioral tests (W1-T20c criterion 5) count calls to prove
+     *  a linter-failing task NEVER reaches a spawn. Default: the real {@link spawnWorker}. */
+    spawn?: typeof spawnWorker;
+    /** Injectable GitHub gateway for the status projection — lets a behavioral test drive the
+     *  dispatch path without a network round-trip. Default: the real {@link ghGateway}. */
+    github?: GitHub;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
+  const spawn = opts.spawn ?? spawnWorker;
   const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const owner = resolveOwner();
@@ -891,7 +898,7 @@ async function runTask(
   const statusPath = join(config.root, "state", "status.json");
   const projection = projectPlan(
     plan,
-    { ledgerPath: join(config.root, "state", "ledger.ndjson"), github: ghGateway(owner, task.repo) },
+    { ledgerPath: join(config.root, "state", "ledger.ndjson"), github: opts.github ?? ghGateway(owner, task.repo) },
     statusPath,
   );
   const isMerged = (t: Task): boolean => projection.get(t.id)?.merged ?? false;
@@ -1121,7 +1128,7 @@ async function runTask(
     // ── Recon (read-only).
     say("recon worker");
     const recon = account(
-      await spawnWorker({
+      await spawn({
         cwd: worktreePath,
         permissionMode: "bypassPermissions",
         settingsFile,
