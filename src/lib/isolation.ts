@@ -31,7 +31,32 @@ import { spawnWorker, type SpawnWorkerArgs } from "./worker.js";
  * so Write/Edit/NotebookEdit/MultiEdit are never even in the model's context —
  * a probe that is merely instructed to be read-only could still attempt a
  * write; one that never HAS a write tool cannot.
+ *
+ * CLAUDE-CODE'S OWN TOOL WRAPPERS ARE NOT OPERATOR STATE (CLI ≥ 2.1.211, verified
+ * live this cycle). Every Claude Code Bash session injects a small, FIXED set of
+ * shell FUNCTIONS into its snapshot that shadow `find`/`grep`/`rg` with Claude
+ * Code's embedded `bfs`/`ugrep`/`ripgrep` binaries (the snapshot literally reads
+ * `# Shadow find/grep with embedded bfs/ugrep`, `_cc_bin=$CLAUDE_CODE_EXECPATH`).
+ * These are the SAME for every user on every host — they are the tool's own
+ * plumbing, NOT operator shell customization — so counting them as "leakage" is a
+ * FALSE POSITIVE that would block every run on a modern CLI. The probe therefore
+ * counts only functions OUTSIDE {@link CLAUDE_CODE_TOOL_WRAPPERS}. This does NOT
+ * weaken the invariant: an operator function of ANY OTHER name still trips the
+ * gate, and an operator's own `find`/`grep`/`rg` function can never survive into
+ * a worker anyway — Claude Code's snapshot `unalias`es and re-`function`s those
+ * three names on top of whatever the shell had. Aliases are counted RAW (Claude
+ * Code injects none). A wrapper name Claude Code adds in a FUTURE version is not
+ * on this list, so it counts as operator state and fails CLOSED — the drift is
+ * surfaced, never silently absorbed.
  */
+
+/**
+ * Claude Code's OWN Bash-tool wrapper function names (CLI ≥ 2.1.211) — excluded
+ * from the isolation function count because they are the tool's plumbing, not
+ * operator shell state (see file header). Kept deliberately SMALL and explicit:
+ * a name not on this list is treated as operator leakage (fail closed).
+ */
+export const CLAUDE_CODE_TOOL_WRAPPERS = ["find", "grep", "rg"] as const;
 
 /** Named error so callers (and tests) can assert the fail-closed fired by type. */
 export class IsolationError extends Error {
@@ -89,14 +114,21 @@ export interface ProbeExecResult {
 /** Injectable probe runner (default spawns a real worker); tests provide a fake. */
 export type ProbeExecutor = () => Promise<ProbeExecResult>;
 
-/** The probe worker prompt: report inherited alias/function counts, read-only. */
+/** The probe worker prompt: report inherited alias/function counts, read-only.
+ * The function count EXCLUDES Claude Code's own {@link CLAUDE_CODE_TOOL_WRAPPERS}
+ * (find/grep/rg) — those are tool plumbing, not operator state (see file header).
+ * `awk` is used for the filter because it is NOT one of the wrapped commands. */
 export function isolationProbePrompt(): string {
+  const wrappers = CLAUDE_CODE_TOOL_WRAPPERS.join("|");
   return [
     "You are an ISOLATION PREFLIGHT PROBE. READ-ONLY: use ONLY the Bash tool to run",
     "these TWO commands, IN ORDER, and report the EXACT numbers. Do NOT create,",
     "modify, or delete any file — you have no write tool available for a reason.",
     "1) alias | wc -l        (count of shell aliases this worker inherited)",
-    "2) declare -F | wc -l   (count of shell functions this worker inherited)",
+    `2) declare -F | awk '$NF !~ /^(${wrappers})$/ {c++} END {print c+0}'`,
+    `   (count of shell functions this worker inherited, EXCLUDING Claude Code's`,
+    `    OWN find/grep/rg tool wrappers — those are injected into every Claude Code`,
+    `    Bash session and are NOT operator shell state)`,
     "End with exactly:",
     "REPORT",
     "aliases: <exact number from command 1>",

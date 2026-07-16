@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  CLAUDE_CODE_TOOL_WRAPPERS,
   IsolationError,
   assessIsolation,
   isolationProbePrompt,
@@ -61,9 +62,20 @@ test("isolationProbeSpawnArgs: restricts the tool set to Bash ONLY — no Write/
 test("isolationProbePrompt: instructs Bash-only commands and explicitly forbids writing", () => {
   const p = isolationProbePrompt();
   assert.match(p, /alias \| wc -l/);
-  assert.match(p, /declare -F \| wc -l/);
+  assert.match(p, /declare -F \| awk/); // functions counted via awk (not the CC-wrapped grep)
   assert.match(p, /READ-ONLY/i);
   assert.match(p, /no write tool available/i);
+});
+
+test("isolationProbePrompt: EXCLUDES Claude Code's own find/grep/rg tool wrappers from the function count (not operator state)", () => {
+  const p = isolationProbePrompt();
+  // The awk filter names every Claude Code wrapper, so the count is operator-only.
+  for (const w of CLAUDE_CODE_TOOL_WRAPPERS) {
+    assert.ok(p.includes(w), `the prompt's exclusion filter must name the Claude Code wrapper '${w}'`);
+  }
+  assert.match(p, /\$NF !~/); // awk excludes functions whose name matches a wrapper
+  // The wrappers are exactly find/grep/rg — a tight, explicit list (fail-closed on any other name).
+  assert.deepEqual([...CLAUDE_CODE_TOOL_WRAPPERS], ["find", "grep", "rg"]);
 });
 
 // ── probeIsolation: the fail-closed gate, via an injected executor ──────────

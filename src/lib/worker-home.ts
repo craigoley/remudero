@@ -22,13 +22,25 @@ import { dirname, join } from "node:path";
  * never a wholesale HOME copy, the same allowlist discipline as env.ts's
  * ANTHROPIC_* boundary.
  *
- * WS-0 FIELD FINDING 11c: the Keychain OAuth token resolves off `USER`, not
- * `HOME` — env.ts already grants USER unconditionally, independent of this
- * redirection. Whether Claude Code ALSO reads state under `~/.claude/` that a
- * redirected HOME would need symlinked is unverified live (no subscription
- * OAuth in CI — Standing rule 18/20); this module symlinks `.claude` back in
- * as a defensive default either way. See LEARNINGS.md for the recorded
- * decision and the fallback if live drilling (W1-T12e) finds it insufficient.
+ * WS-0 FIELD FINDING 11c — CORRECTED (W1-T18 live drill, this fix): the earlier
+ * belief that "the Keychain OAuth token resolves off `USER`, not `HOME`" was
+ * FALSE. USER is necessary but NOT sufficient: the macOS login keychain that
+ * holds the `Claude Code-credentials` OAuth item is located HOME-RELATIVELY at
+ * `$HOME/Library/Keychains/login.keychain-db`. So the moment HOME was redirected
+ * to the scratch dir (which has no `Library/Keychains`), the keychain lookup hit
+ * an empty path and Claude Code returned "Not logged in · Please run /login" —
+ * exiting at $0 / 0 real turns BEFORE any tool ran, which is exactly why the
+ * first post-#100 spawn (the containment probe) produced nothing (inside-write
+ * absent, no denial, cost 0). The worker never started. The fix is the SAME
+ * defensive symlink-back this module already does for `.claude`/`.config/gh`:
+ * add `Library/Keychains/login.keychain-db` to the allowlist so the redirected
+ * HOME resolves the real login keychain. This does NOT weaken isolation (the rc
+ * files are still empty ⇒ 0 aliases/0 functions) or containment (keychain I/O is
+ * mediated by `securityd` over XPC, not a direct file write into the sandbox
+ * scope; the outside-cwd write is still OS-denied). Only the single keychain DB
+ * file is granted — never the whole `~/Library`. Verified live: a trivial task
+ * completes under the redirect, the containment probe passes, isolation stays
+ * 0/0. See LEARNINGS.md and the drill (W1-T12e), now a real spawn-under-redirect.
  */
 
 /** Empty-by-construction rc files a worker's HOME must hold — bash AND zsh
@@ -65,6 +77,11 @@ export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
   { relPath: ".claude", reason: "Claude Code session/config state (OAuth may read under HOME — unverified live, see LEARNINGS.md)" },
   { relPath: ".config/gh", reason: "gh CLI auth token, so a worker can open/merge PRs" },
   { relPath: ".gitconfig", reason: "git author identity for commits the worker makes" },
+  {
+    relPath: "Library/Keychains/login.keychain-db",
+    reason:
+      "macOS login keychain holds the Claude Code OAuth token ('Claude Code-credentials'); the keychain is HOME-relative ($HOME/Library/Keychains/login.keychain-db), so a redirected HOME hides it and Claude Code exits 'Not logged in' at $0 before any turn (W1-T18 spawn deadlock, verified live). ONLY this single DB file is granted — not the whole ~/Library — and securityd still gates per-item access by code identity.",
+  },
 ];
 
 /**

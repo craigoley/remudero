@@ -2257,6 +2257,12 @@
       proof: "with ~/.bashrc removed, the same task reaches recon/implement; ledger shows preflight passed (count 0)"
     - claim: "a worker on a machine WITH a populated ~/.bashrc reports 0 aliases (isolation independent of operator dotfiles)"
       proof: "planted ~/.bashrc with an alias; live worker `alias | wc -l` = 0 AND the worker still authenticates (subscription OAuth) and can run gh"
+    # ── SPAWN-UNDER-REDIRECT AUTH DRILL (converted from a never-run verify:human placeholder to a REAL
+    #    drill after fix/worker-spawn-under-redirected-home: #100 shipped HOME-redirection on FIXTURES and
+    #    the first live spawn deadlocked — the OAuth token is in the HOME-relative login keychain, which the
+    #    redirect hid. This criterion must be exercised LIVE before any HOME/auth change to worker spawn.)
+    - claim: "a REAL worker spawned under the redirected HOME actually STARTS and completes a trivial task — auth (subscription OAuth via the HOME-relative login keychain) resolves under the redirect, not 'Not logged in' at $0"
+      proof: "spawn a real worker under HOME=<root>/worker-home with the sandbox settings (e.g. the repro in fix/worker-spawn-under-redirected-home, or `rmd run-task` on a trivial task): it returns real text + nonzero cost, NOT 'Not logged in · Please run /login' at cost 0. VERIFIED LIVE 2026-07-16 (this fix): trivial task -> 'OK', cost ~$0.21; containment probe PASS (outside OS-denied, inside succeeds); isolation probe 0 aliases / 0 operator functions (Claude Code's own find/grep/rg wrappers excluded)."
     - claim: "cache tokens are ledgered and the second worker of a run shows cache reads > 0"
       proof: "paste the ledger lines before and after the change: cache_read_input_tokens is 0/absent before, > 0 on the second worker after (the stable prefix is being reused)"
     - claim: "a forced long run ledgers a compaction event and is flagged quality-suspect"
@@ -2267,7 +2273,15 @@
   status: queued
   attempts: 0
   note: "Operator-scheduled. Hosts the LIVE halves the headless redesigns (W1-T17/T18/T35/T36) moved here
-    VERBATIM plus the two W1-T12d deltas; depends_on the tasks whose live criteria it verifies."
+    VERBATIM plus the two W1-T12d deltas; depends_on the tasks whose live criteria it verifies.
+    ★ SPAWN-UNDER-REDIRECT AUTH DRILL RAN LIVE 2026-07-16 (fix/worker-spawn-under-redirected-home): root
+    cause of the post-#100 deadlock was that the macOS login keychain holding the Claude Code OAuth token is
+    HOME-relative ($HOME/Library/Keychains/login.keychain-db), so redirecting HOME hid it -> worker exited
+    'Not logged in' at $0 before any turn (the containment probe's zero-cost/zero-write signature). Fix =
+    symlink that ONE keychain DB back into worker-home (worker-home.ts allowlist); isolation probe also
+    corrected to exclude Claude Code's own find/grep/rg Bash-tool wrappers (CLI >= 2.1.211), which are tool
+    plumbing, not operator state. All three now green live. This criterion is why #100 must never again
+    merge on fixtures alone: the auth-under-redirect path is unprovable without a real subscription spawn."
 
 # Item 3c — retro gather completeness (mergedSince misses gate-side merges after a blocked run).
 - id: W1-T51
