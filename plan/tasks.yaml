@@ -3476,11 +3476,12 @@
       proof: "unit test: answer fixture -> W1-T76 re-dispatch whose prompt carries the answer verbatim; strike counter reset policy per config"
     - claim: "no self-edits, no guesses"
       proof: "grep: the rung writes no plan files; an unanswered question leaves the PR in BLOCKED-AMBIGUOUS with the question ledgered, nothing else dispatched"
-  risk: medium
+  risk: high
   origin: architect
   plan_refs: ["§2", "§7", "§7B"]
   files: [src/lib/sweep.ts, src/run-task.ts]
   status: queued
   attempts: 0
   note: "Interim route (plain W1-T8 escalate) ships in W1-T77; this upgrades it. Question quality is the
-    §7B grill primitive pointed at blocks."
+    §7B grill primitive pointed at blocks. RISK raised medium->high per the §5C linter's own sizing
+    resolution (2 subsystems sweep+run-task): matches its high-risk siblings W1-T76/T77, not a decompose."
