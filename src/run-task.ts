@@ -4,7 +4,6 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  architectModel,
   configPath as instanceConfigPath,
   loadConfig,
   notifyRecipient,
@@ -1643,9 +1642,18 @@ async function retroCommand(rest: string[]): Promise<number> {
     return 0;
   }
 
-  // G-17 Tier Invariant: the retro Architect MUST outrank implement workers.
-  const arch = architectModel(config);
+  // MOUNT RESOLUTION (§9): the retro Architect spawn rides mounts.yaml's `architect`
+  // mount — model, effort, AND max_turns — never a hand-picked literal. W1-T63
+  // mount-governed the reviewer phase (P10) but missed this one: the spawn below
+  // still rode a bare `maxTurns: 40` atop architectModel(config)'s model string,
+  // neither of them routed. Read from repoRoot (the committed, golden-gated
+  // table), same as runTaskBody's mount resolution above.
+  const architectMount: Mount = loadMounts(mountsPath(repoRoot)).architect;
+  const arch = architectMount.model;
   const wrk = workerModel(config);
+  // G-17 Tier Invariant: the retro Architect MUST outrank implement workers.
+  // loadMounts() already enforces this structurally at load time; asserted again
+  // here as defense-in-depth against wrk drifting from the routed worker mounts.
   assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
 
   const { owner, repo } = resolveOwnerRepo();
@@ -1682,8 +1690,9 @@ async function retroCommand(rest: string[]): Promise<number> {
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
       settingsFile,
-      model: arch, // the Architect tier
-      maxTurns: 40,
+      model: arch, // the Architect tier — mount-governed (§9), not a literal.
+      effort: architectMount.effort,
+      maxTurns: architectMount.maxTurns,
       maxBudgetUsd: DEFAULT_BUDGET_USD,
       config,
       prompt,
@@ -1709,6 +1718,17 @@ async function retroCommand(rest: string[]): Promise<number> {
 
     let prUrl = parseReport([worker.text, worker.blocks.join("\n")].join("\n"))?.prUrl;
     if (!prUrl) {
+      // SILENT NO-OP GUARD (mirrors runTaskBody's commitsAhead guard above): `gh pr
+      // create` THROWS on a branch with nothing ahead of base ("No commits between
+      // main and <branch>") — an unhandled crash, not an honest outcome. The
+      // Architect may legitimately conclude nothing needs syncing this cycle; that
+      // is a no-op, never a reason to attempt opening an empty PR.
+      if (commitsAhead(worktreePath, "origin/main") === 0) {
+        log("retro.no_op", { reason: "architect committed nothing" });
+        say("architect committed nothing this cycle — no PR to open (no-op)");
+        worktreeRemove(repoDir, worktreePath);
+        return 0;
+      }
       const out = execFileSync(
         "gh",
         ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch, "--fill"],
