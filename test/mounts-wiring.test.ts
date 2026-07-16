@@ -92,9 +92,13 @@ test("the retro/architect spawn is GONE of its hardcoded maxTurns: 40 literal", 
   assert.match(runTaskSrc, /maxTurns:\s*mountsTable\.architect\.maxTurns/, "the retro spawn must read its turn budget from the mounts.yaml architect row");
 });
 
-test("the retro Architect's turn budget, resolved from the real mounts.yaml, is >> the old hardcoded 40", () => {
+test("the retro Architect's turn budget, resolved from the real mounts.yaml, is the flat-400 tripwire (NOT the old hardcoded 40)", () => {
   const m = loadMounts(mountsPath(repoRoot));
-  assert.ok(m.architect.maxTurns > 40, `architect.maxTurns (${m.architect.maxTurns}) must exceed the old hardcoded 40`);
+  // §9 tripwire re-base (#90): every mount is a flat 400 — a runaway cliff, not a work limit. The retro
+  // spawn reads THIS row (mountsTable.architect.maxTurns), so its budget is 400, an order of magnitude
+  // above any observed retro cost — never the 40 that walled the dense retro before W1-T64.
+  assert.equal(m.architect.maxTurns, 400, `architect.maxTurns (${m.architect.maxTurns}) must be the flat-400 tripwire, not 40`);
+  assert.ok(m.architect.maxTurns > 40, "and it must exceed the old hardcoded 40 (the wall this fix removes)");
   assert.equal(typeof m.architect.model, "string");
   assert.equal(typeof m.architect.effort, "string");
 });

@@ -8,6 +8,7 @@ import {
   DEFAULT_BUDGET_USD,
   GitFetchError,
   checkPrOwnership,
+  commitsAhead,
   isTransientResult,
   resolveReviewTarget,
   resolveDaemonTarget,
@@ -340,6 +341,32 @@ test("syncPlanFromOrigin: dispatches from the origin/main BLOB (a real fetch), n
   // `fetch` only moves the remote-tracking ref — the local `main` branch is never touched.
   const localMainAfter = execFileSync("git", ["-C", localDir, "rev-parse", "main"], { encoding: "utf8" }).trim();
   assert.equal(localMainAfter, localMainBefore);
+});
+
+// ── W1-T64: the retro no-op guard's predicate, BEHAVIORALLY (real git, both branches) ──────
+// The retro (and implement) no-op path branches on `commitsAhead(worktreePath, "origin/main") === 0`:
+// 0 commits ahead ⇒ the worker produced NOTHING, so retroCommand logs `retro.no_op` + worktreeRemove and
+// NEVER calls `gh pr create` (a `--fill` on an empty branch throws); >= 1 commit ⇒ it still opens the PR.
+// This exercises those two paths against a REAL repo, not a source grep — the behavioral gap #113 missed.
+test("commitsAhead: a worktree with 0 commits ahead of origin/main returns 0 (the retro no-op path — never gh pr create)", () => {
+  const { localDir } = gitFixture();
+  // A fresh clone's HEAD == origin/main: nothing to PR. This is the empty-branch case the guard catches.
+  assert.equal(commitsAhead(localDir, "origin/main"), 0);
+});
+
+test("commitsAhead: a worktree with >= 1 commit ahead of origin/main returns > 0 (the retro still opens the PR)", () => {
+  const { localDir } = gitFixture();
+  writeFileSync(join(localDir, "plan", "tasks.yaml"), planYaml("A-REAL-RETRO-EDIT"), "utf8");
+  execFileSync("git", ["-C", localDir, "add", "."]);
+  execFileSync("git", ["-C", localDir, "commit", "--quiet", "-m", "retro synthesized a real change"]);
+  // One commit ahead of origin/main ⇒ there IS a diff, so the guard falls through to gh pr create.
+  assert.equal(commitsAhead(localDir, "origin/main"), 1);
+});
+
+test("commitsAhead: an unreadable/absent base ref degrades to 0 (treated as nothing-to-PR, never a throw)", () => {
+  const { localDir } = gitFixture();
+  // A base that does not resolve must not crash the guard — it fails closed to the no-op (0), never throws.
+  assert.equal(commitsAhead(localDir, "origin/no-such-branch"), 0);
 });
 
 test("syncPlanFromOrigin: a fetch failure FAILS CLOSED; --allow-stale proceeds on the last-fetched refs and reports staleDispatch", () => {

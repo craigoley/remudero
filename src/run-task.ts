@@ -2643,3 +2643,6 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 }
 
 export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, retroCommand, initCommand };
+// Exported for a behavioral test of the retro no-op guard (W1-T64): commitsAhead is the predicate the
+// retro/implement no-op path branches on (=== 0 ⇒ nothing to PR). Logic UNCHANGED — export only.
+export { commitsAhead };
