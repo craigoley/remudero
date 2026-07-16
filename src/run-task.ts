@@ -1648,6 +1648,14 @@ async function retroCommand(rest: string[]): Promise<number> {
   const wrk = workerModel(config);
   assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
 
+  // MOUNT-GOVERNED (§9, W1-T64 — sibling of W1-T63/P10): the retro/architect spawn's
+  // turn budget comes from mounts.yaml's `architect` row (the flat-400 tripwire, #90),
+  // NEVER a hardcoded literal. Before this, a hardcoded 40-turn cap — the SAME class of
+  // cap that walled the reviewer (error_max_turns) — could wall the Architect mid-retro
+  // BEFORE it staged/committed/pushed/opened the PR, leaving an empty branch that then
+  // crashed `gh pr create --fill` (no diff to fill).
+  const mountsTable = loadMounts(mountsPath(repoRoot));
+
   const { owner, repo } = resolveOwnerRepo();
   const runId = `RETRO-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -1683,7 +1691,7 @@ async function retroCommand(rest: string[]): Promise<number> {
       permissionMode: "bypassPermissions",
       settingsFile,
       model: arch, // the Architect tier
-      maxTurns: 40,
+      maxTurns: mountsTable.architect.maxTurns, // MOUNT-GOVERNED (W1-T64) — never a hardcoded literal.
       maxBudgetUsd: DEFAULT_BUDGET_USD,
       config,
       prompt,
@@ -1709,6 +1717,18 @@ async function retroCommand(rest: string[]): Promise<number> {
 
     let prUrl = parseReport([worker.text, worker.blocks.join("\n")].join("\n"))?.prUrl;
     if (!prUrl) {
+      // GUARD (W1-T64): 0 commits ahead of origin/main means the Architect produced
+      // nothing to PR (its subtype is already logged above via retro.synthesized) —
+      // `gh pr create --fill` has no diff to fill and THROWS on an empty branch, which
+      // used to crash the retro outright. commitsAhead already exists (the implement
+      // no-op guard, above in this file); reuse it here rather than ever attempting a PR
+      // on an empty branch. A real retro (>=1 commit) proceeds exactly as before.
+      if (commitsAhead(worktreePath, "origin/main") === 0) {
+        log("retro.no_op", { reason: "worker committed nothing", subtype: worker.subtype });
+        say(`retro no-op — worker (subtype ${worker.subtype}) committed nothing; nothing to PR`);
+        worktreeRemove(repoDir, worktreePath);
+        return 1;
+      }
       const out = execFileSync(
         "gh",
         ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch, "--fill"],
