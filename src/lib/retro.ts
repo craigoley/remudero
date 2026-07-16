@@ -10,6 +10,8 @@
  */
 
 import { readFileSync } from "node:fs";
+import type { Task } from "./plan.js";
+import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
 
 /** One parsed ledger line (superset of ledger.ts LedgerLine, as read back). */
 export interface LedgerRecord {
@@ -53,6 +55,14 @@ export interface RunSummary {
    * the truth (corrected when a correction exists, the ledger's own claim otherwise).
    */
   correctedFromPrUrl?: string;
+  /** The task's risk band at `run.start` time (§9 mount axis), if logged. Used
+   *  by {@link mineOverrunClasses} to group overruns by (type, risk) — the same
+   *  axis mounts.yaml routes on — rather than by type alone. */
+  risk?: string;
+  /** The worker-error `subtype` off the terminal `verdict` line (e.g.
+   *  `error_max_turns`, `error_max_budget_usd`), if the run ended in one. A
+   *  clean merge or a non-error verdict carries no subtype. */
+  subtype?: string;
 }
 
 const DONE_STEPS = new Set(["recon.done", "implement.done", "implement.resumed"]);
@@ -103,6 +113,8 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
       numTurns,
       prUrl: correctedUrl ?? claimedPrUrl,
       ...(correctedUrl !== undefined ? { correctedFromPrUrl: claimedPrUrl } : {}),
+      ...(typeof start.risk === "string" ? { risk: start.risk } : {}),
+      ...(typeof verdictLine?.subtype === "string" ? { subtype: verdictLine.subtype } : {}),
     });
   }
   // Deterministic order: by start timestamp then run id.
@@ -428,6 +440,187 @@ export function renderGather(g: RetroGather): string {
       ? ["", "## Discrepancies (ledger vs GitHub — every gate-side addition and rejected foreign trailer)", ...g.discrepancies.map((d) => `- ${d}`)]
       : []),
   ].join("\n");
+}
+
+// ── §5C plan-health sweep (W1-T20d, Standing rule 20) ─────────────────────
+//
+// Rules are enforced FORWARD-ONLY at authoring time (the CI half of §5C Layer
+// A, task-linter.ts's `changedTaskIds` scoping). W1-T12 pre-existed Rules
+// 18/19, violated both, and still reached a worker — burning 81 turns/$10.27
+// (the FOURTH max_turns event) — because nothing ever re-checked an
+// ALREADY-AUTHORED task against a rule added after it was written. The retro
+// closes that gap: every run, it re-lints the WHOLE open queue (not just a
+// PR's own edit) and turns every violation into a named corrective-task
+// proposal for the Architect's plan-only PR to act on.
+
+/** Statuses that mean a task has already shipped — everything else is OPEN
+ *  and in scope for the plan-health sweep (mirrors plan.ts's own merged set,
+ *  kept local since plan.ts does not export it). */
+const CLOSED_TASK_STATUSES = new Set(["merged", "done"]);
+
+/** One OPEN task the sweep found in violation, with its BLOCKING violations only
+ *  (a WARN, e.g. budget-sanity, is visibility-only and never files a corrective task). */
+export interface PlanHealthFlag {
+  taskId: string;
+  violations: LintViolation[];
+}
+
+/** A proposed corrective task, auto-filed per violating OPEN task — DATA for the
+ *  Architect's plan-only PR to ratify, never written to plan/tasks.yaml directly
+ *  (Standing rule 16: only the Architect authors tasks). */
+export interface CorrectiveTaskProposal {
+  /** The OPEN task this proposal corrects. */
+  forTaskId: string;
+  title: string;
+  /** Always `retro#plan-health` — the sweep is the origin, satisfying Rule 17. */
+  origin: string;
+  violations: LintViolation[];
+}
+
+export interface PlanHealthReport {
+  flags: PlanHealthFlag[];
+  correctiveTasks: CorrectiveTaskProposal[];
+}
+
+/**
+ * RE-GRADE every OPEN task against every standing rule the deterministic
+ * linter encodes (sizing/Rule 19, headless-fitness/Rule 18, proof-shape,
+ * provenance/Rules 16-17) — the forward-only gap Standing rule 20 names. A
+ * MERGED/DONE task is out of scope (it already shipped; re-litigating it fixes
+ * nothing). Pure: no I/O, no plan/tasks.yaml write — the corrective tasks are
+ * PROPOSALS the retro's Architect stage files, same discipline as `plan/
+ * learnings.yaml` never being hand-edited by a worker.
+ */
+export function planHealthSweep(
+  tasks: Task[],
+  optsFor: (task: Task) => LintOpts = () => ({}),
+): PlanHealthReport {
+  const flags: PlanHealthFlag[] = [];
+  const correctiveTasks: CorrectiveTaskProposal[] = [];
+  for (const task of tasks) {
+    if (CLOSED_TASK_STATUSES.has(task.status)) continue; // out of scope — already shipped
+    const { violations } = lintTask(task, optsFor(task));
+    const blocking = violations.filter((v) => v.severity === "block");
+    if (blocking.length === 0) continue; // clean, or WARN-only — nothing to file
+    flags.push({ taskId: task.id, violations: blocking });
+    correctiveTasks.push({
+      forTaskId: task.id,
+      title: `Plan-health: fix ${task.id} — ${blocking.map((v) => v.check).join(", ")}`,
+      origin: "retro#plan-health",
+      violations: blocking,
+    });
+  }
+  return { flags, correctiveTasks };
+}
+
+/** Render the plan-health report (markdown) — printed by `--dry-run` and fed to the Architect. */
+export function renderPlanHealth(report: PlanHealthReport): string {
+  if (report.flags.length === 0) return "## Plan-health sweep\n\nNo violations across the open queue.";
+  return [
+    "## Plan-health sweep — OPEN queue re-graded against every standing rule",
+    "",
+    ...report.flags.map(
+      (f) => `- ${f.taskId}: ${f.violations.map((v) => `[${v.check}] ${v.message}`).join("; ")}`,
+    ),
+    "",
+    "### Corrective tasks proposed (for the Architect's plan-only PR)",
+    ...report.correctiveTasks.map((c) => `- ${c.title} (origin: ${c.origin})`),
+  ].join("\n");
+}
+
+// ── Mining overruns for a CLASS-level fix (W1-T20d, Standing rule 20/§5C) ──
+//
+// "If a CLASS of task overruns... propose a CLASS-level fix... NOT another
+// per-task patch" (MASTER-PLAN §5C). W1-T6, W1-T9, W1-T12 were three SEPARATE
+// per-task rescues for the SAME class (implement × medium) before the pattern
+// was named — the reactive-diagnosis anti-pattern this sweep exists to kill.
+
+/** Terminal verdicts that represent an OVERRUN/blocked outcome worth mining for
+ *  a class pattern — every non-merge terminal state a run can end in. DATA, not
+ *  hardcoded logic, same pattern as task-linter.ts's lexicons. */
+export const OVERRUN_VERDICTS: ReadonlySet<string> = new Set([
+  "blocked",
+  "blocked_ci",
+  "blocked_review",
+  "blocked_budget",
+  "blocked_containment",
+  "blocked_isolation",
+  "blocked_inflight",
+  "blocked_git_fetch",
+  "blocked_illformed",
+  "blocked_transient",
+  "no_pr",
+  "pr_attribution_failed",
+  "failed",
+]);
+
+/** A run counts as an overrun for mining purposes: a listed verdict, OR a
+ *  `failed` run whose subtype names the max-turns runaway class specifically. */
+function isOverrunRun(r: RunSummary): boolean {
+  return OVERRUN_VERDICTS.has(r.verdict);
+}
+
+/** The (task_type × risk) key — the SAME two axes mounts.yaml (§9) routes on —
+ *  so a mined class maps directly onto a mount-table row, not an ad hoc bucket. */
+function overrunClassKey(r: RunSummary): string {
+  return `${r.type}:${r.risk ?? "unknown"}`;
+}
+
+/** ONE proposed class-level fix, covering every run in that (type, risk) class —
+ *  never one proposal per task (the anti-pattern this mining exists to kill). */
+export interface ClassOverrunProposal {
+  taskType: string;
+  risk: string;
+  count: number;
+  taskIds: string[];
+  verdicts: string[];
+  proposal: string;
+}
+
+/**
+ * MINE the ledger's overrun/blocked verdicts for a task-CLASS pattern. Returns
+ * ONE {@link ClassOverrunProposal} per (type, risk) class that meets
+ * `opts.threshold` (default 2 — "repeated") overruns, never one per offending
+ * task. Below threshold, a class is a single incident, not yet a pattern, and
+ * is silently omitted (no proposal) rather than over-fitted to one data point.
+ */
+export function mineOverrunClasses(
+  runs: RunSummary[],
+  opts: { threshold?: number } = {},
+): ClassOverrunProposal[] {
+  const threshold = opts.threshold ?? 2;
+  const byClass = new Map<string, RunSummary[]>();
+  for (const r of runs) {
+    if (!isOverrunRun(r)) continue;
+    const key = overrunClassKey(r);
+    const arr = byClass.get(key) ?? [];
+    arr.push(r);
+    byClass.set(key, arr);
+  }
+  const out: ClassOverrunProposal[] = [];
+  for (const [key, rs] of byClass) {
+    if (rs.length < threshold) continue; // one incident is not yet a pattern
+    const [taskType, risk] = key.split(":");
+    out.push({
+      taskType,
+      risk,
+      count: rs.length,
+      taskIds: [...new Set(rs.map((r) => r.taskId))].sort(),
+      verdicts: [...new Set(rs.map((r) => r.subtype ?? r.verdict))].sort(),
+      proposal:
+        `${rs.length} overrun(s) across ${taskType}×${risk} (${[...new Set(rs.map((r) => r.taskId))].sort().join(", ")}) ` +
+        `— propose ONE class-level fix (raise this class to risk:high / decompose at plan time per Rule 19, ` +
+        `or adjust mounts.yaml's ${taskType}×${risk} turn budget), not ${rs.length} per-task patches`,
+    });
+  }
+  out.sort((a, b) => (a.taskType + a.risk < b.taskType + b.risk ? -1 : a.taskType + a.risk > b.taskType + b.risk ? 1 : 0));
+  return out;
+}
+
+/** Render the mined overrun proposals (markdown) — printed by `--dry-run` and fed to the Architect. */
+export function renderOverrunProposals(proposals: ClassOverrunProposal[]): string {
+  if (proposals.length === 0) return "## Overrun mining\n\nNo class-level pattern found (each class is below threshold).";
+  return ["## Overrun mining — CLASS-level fixes proposed", "", ...proposals.map((p) => `- ${p.proposal}`)].join("\n");
 }
 
 // ── The retro marker (state/last-retro.json) ──────────────────────────────

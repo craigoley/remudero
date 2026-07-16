@@ -8,13 +8,19 @@ import {
   codeFilesInDiff,
   gatherRuns,
   mergedSince,
+  mineOverrunClasses,
   ownBranchOf,
   parseLedger,
+  planHealthSweep,
+  renderOverrunProposals,
+  renderPlanHealth,
   shippedSince,
   tierOf,
   verdictDistribution,
+  type RunSummary,
   type ShippedGithub,
 } from "../src/lib/retro.js";
+import type { Task } from "../src/lib/plan.js";
 
 // A recorded ledger fixture: two implement runs (one merged, one budget-blocked)
 // and a recon run, exactly as run-task.ts writes them.
@@ -238,4 +244,142 @@ test("buildGather scopes runs by the marker and computes the learnings delta", (
   assert.equal(g.totalRuns, 1); // only C started strictly after 2026-01-02T00:00:00
   assert.equal(g.learningsNow, 3);
   assert.equal(g.learningsNow - g.learningsAtMarker, 2);
+});
+
+// ── §5C plan-health sweep (W1-T20d) ────────────────────────────────────────
+
+/** A minimal, otherwise-clean OPEN Task fixture (mirrors test/task-linter.test.ts's shape). */
+function task(over: Partial<Task> & { id: string }): Task {
+  return {
+    title: over.id,
+    repo: "remudero",
+    depends_on: [],
+    type: "implement",
+    verify: "auto",
+    risk: "medium",
+    status: "queued",
+    attempts: 0,
+    origin: "architect",
+    acceptance: [{ claim: "does the thing", proof: "unit test test/foo.test.ts asserts the thing" }],
+    ...over,
+  };
+}
+
+test("planHealthSweep: an OPEN task violating a standing rule (Rule 19 sizing) is FLAGGED and a corrective task is filed", () => {
+  const violating = task({
+    id: "W1-T-SEED",
+    files: ["src/lib/foo.ts"],
+    acceptance: [
+      { claim: "the daemon does X", proof: "unit test asserts X" },
+      { claim: "launchctl loads the unit", proof: "unit test asserts the unit" },
+    ],
+  });
+  const clean = task({ id: "W1-T-CLEAN" });
+  const report = planHealthSweep([violating, clean]);
+  assert.equal(report.flags.length, 1);
+  assert.equal(report.flags[0]!.taskId, "W1-T-SEED");
+  assert.ok(report.flags[0]!.violations.some((v) => v.check === "sizing"));
+  assert.equal(report.correctiveTasks.length, 1);
+  assert.equal(report.correctiveTasks[0]!.forTaskId, "W1-T-SEED");
+  assert.equal(report.correctiveTasks[0]!.origin, "retro#plan-health");
+  assert.ok(/sizing/.test(report.correctiveTasks[0]!.title));
+});
+
+test("planHealthSweep: a MERGED/DONE task is out of scope even if it would otherwise violate a rule", () => {
+  const shippedButBad = task({
+    id: "W1-T-OLD",
+    status: "merged",
+    files: ["src/lib/foo.ts"],
+    acceptance: [{ claim: "the daemon does X", proof: "unit test asserts X" }],
+  });
+  const report = planHealthSweep([shippedButBad]);
+  assert.deepEqual(report.flags, []);
+  assert.deepEqual(report.correctiveTasks, []);
+});
+
+test("planHealthSweep: a WARN-only violation (budget-sanity) is never filed as a corrective task", () => {
+  const t = task({ id: "W1-T-WARN" });
+  const report = planHealthSweep([t], () => ({ mountMaxTurns: 10, calibration: { avgTurns: 45.2 } }));
+  assert.deepEqual(report.flags, []);
+  assert.deepEqual(report.correctiveTasks, []);
+});
+
+test("renderPlanHealth reports 'no violations' when the open queue is clean", () => {
+  const report = planHealthSweep([task({ id: "W1-T-CLEAN" })]);
+  assert.match(renderPlanHealth(report), /No violations/);
+});
+
+test("renderPlanHealth names the flagged task and its corrective task when the queue is dirty", () => {
+  const violating = task({
+    id: "W1-T-SEED",
+    acceptance: [{ claim: "operator confirms the thing", proof: "unit test asserts the thing" }],
+  });
+  const report = planHealthSweep([violating]);
+  const rendered = renderPlanHealth(report);
+  assert.match(rendered, /W1-T-SEED/);
+  assert.match(rendered, /Plan-health: fix W1-T-SEED/);
+});
+
+// ── Mining overruns for a CLASS-level fix (Standing rule 20) ───────────────
+
+/** A minimal RunSummary fixture for overrun-mining tests. */
+function run(over: Partial<RunSummary> & { runId: string; taskId: string }): RunSummary {
+  return {
+    type: "implement",
+    startTs: "2026-01-01T00:00:00.000Z",
+    verdict: "failed",
+    costUsd: 5,
+    numTurns: 80,
+    risk: "medium",
+    subtype: "error_max_turns",
+    ...over,
+  };
+}
+
+test("mineOverrunClasses: N max_turns verdicts across ONE class propose ONE class-level fix, not N per-task patches", () => {
+  const runs = [
+    run({ runId: "R1", taskId: "W1-T6" }),
+    run({ runId: "R2", taskId: "W1-T9" }),
+    run({ runId: "R3", taskId: "W1-T12" }),
+  ];
+  const proposals = mineOverrunClasses(runs);
+  assert.equal(proposals.length, 1); // ONE proposal, not 3
+  const p = proposals[0]!;
+  assert.equal(p.taskType, "implement");
+  assert.equal(p.risk, "medium");
+  assert.equal(p.count, 3);
+  assert.deepEqual(p.taskIds, ["W1-T12", "W1-T6", "W1-T9"]);
+  assert.match(p.proposal, /class-level fix/);
+});
+
+test("mineOverrunClasses: a class below threshold (a single incident) proposes NOTHING", () => {
+  const runs = [run({ runId: "R1", taskId: "W1-T-ONEOFF" })];
+  assert.deepEqual(mineOverrunClasses(runs), []);
+});
+
+test("mineOverrunClasses: distinct classes each get their OWN proposal, and a merged run never counts", () => {
+  const runs = [
+    run({ runId: "R1", taskId: "W1-T6", type: "implement", risk: "medium" }),
+    run({ runId: "R2", taskId: "W1-T9", type: "implement", risk: "medium" }),
+    run({ runId: "R3", taskId: "W1-T-R1", type: "review", risk: "low", verdict: "blocked_review", subtype: undefined }),
+    run({ runId: "R4", taskId: "W1-T-R2", type: "review", risk: "low", verdict: "blocked_review", subtype: undefined }),
+    run({ runId: "R5", taskId: "W1-T-OK", verdict: "merged", subtype: undefined }),
+  ];
+  const proposals = mineOverrunClasses(runs);
+  assert.equal(proposals.length, 2);
+  assert.ok(proposals.some((p) => p.taskType === "implement" && p.risk === "medium"));
+  assert.ok(proposals.some((p) => p.taskType === "review" && p.risk === "low"));
+  assert.ok(!proposals.some((p) => p.taskIds.includes("W1-T-OK")));
+});
+
+test("renderOverrunProposals reports 'no pattern' when nothing meets threshold", () => {
+  assert.match(renderOverrunProposals([]), /No class-level pattern/);
+});
+
+test("renderOverrunProposals names the proposed fix when a class overruns", () => {
+  const proposals = mineOverrunClasses([
+    run({ runId: "R1", taskId: "W1-T6" }),
+    run({ runId: "R2", taskId: "W1-T9" }),
+  ]);
+  assert.match(renderOverrunProposals(proposals), /implement×medium/);
 });
