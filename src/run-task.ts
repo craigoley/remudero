@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   architectModel,
@@ -123,6 +123,103 @@ function resolveOwnerRepo(): { owner: string; repo: string } {
   const m = url.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/);
   if (!m) throw new Error(`could not parse owner/repo from origin url`);
   return { owner: m[1], repo: m[2] };
+}
+
+/**
+ * A `git fetch`/`git show` step failed. Distinct from a generic Error so callers can tell
+ * "the plan sync itself is broken" apart from any other failure and react the fail-closed
+ * way (§ named ledger error, no spawn — W1-T60).
+ */
+export class GitFetchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GitFetchError";
+  }
+}
+
+export interface SyncedPlan {
+  plan: Plan;
+  /** True when `git fetch` failed and `allowStale` let the run proceed on the last-known refs. */
+  staleDispatch: boolean;
+}
+
+/**
+ * Sync git state and load the plan from the `origin/main` BLOB — never the working tree
+ * (W1-T60: "the runner must never require a manual pull, and must never mutate the
+ * operator's working tree or local branches"). `git fetch origin --quiet` updates
+ * remote-tracking refs ONLY (never `git pull`, never a checkout/reset), then the plan is
+ * read via `git show origin/main:<relPath>` — so a dirty working-tree file or a stale local
+ * `main` is irrelevant to what a run dispatches.
+ *
+ * FAILS CLOSED by default: a fetch failure throws {@link GitFetchError} and the caller must
+ * ledger a NAMED error and spawn nothing. `allowStale: true` is the explicit escape hatch —
+ * it proceeds on whatever `origin/main` already resolves to locally (the last successful
+ * fetch) and reports `staleDispatch: true`; it still throws if `origin/main` can't be
+ * resolved AT ALL (nothing to fall back to, e.g. a checkout that has never fetched).
+ */
+export function syncPlanFromOrigin(
+  repoDir: string,
+  relPath: string,
+  opts: { allowStale?: boolean } = {},
+): SyncedPlan {
+  let staleDispatch = false;
+  try {
+    execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
+  } catch (err) {
+    if (!opts.allowStale) {
+      throw new GitFetchError(`git fetch origin failed in ${repoDir}: ${String(err)}`);
+    }
+    staleDispatch = true;
+  }
+  let blob: string;
+  try {
+    blob = execFileSync("git", ["-C", repoDir, "show", `origin/main:${relPath}`], { encoding: "utf8" });
+  } catch (err) {
+    throw new GitFetchError(`git show origin/main:${relPath} failed in ${repoDir}: ${String(err)}`);
+  }
+  const tmpDir = mkdtempSync(join(tmpdir(), "rmd-plan-"));
+  try {
+    const tmpFile = join(tmpDir, "tasks.yaml");
+    writeFileSync(tmpFile, blob, "utf8");
+    return { plan: loadPlan(tmpFile), staleDispatch };
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Shared fail-closed gate for the run-task/drain/daemon-self dispatch paths (W1-T60): sync +
+ * load the plan from `origin/main`, ledgering `git_fetch_failed` and returning `{ error }`
+ * (already reported via `say`) on a hard failure instead of throwing — so a caller can refuse
+ * cleanly with no spawn. A successful-but-stale sync (`--allow-stale`) is also ledgered and
+ * surfaced via `say`, then returned normally so the run proceeds.
+ */
+export function syncPlanOrRefuse(
+  planPath: string,
+  opts: {
+    allowStale: boolean;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    say: (msg: string) => void;
+  },
+): SyncedPlan | { error: string } {
+  const repoDir = dirname(dirname(planPath));
+  const relPath = relative(repoDir, planPath);
+  try {
+    const synced = syncPlanFromOrigin(repoDir, relPath, { allowStale: opts.allowStale });
+    if (synced.staleDispatch) {
+      opts.log("git.stale_dispatch", { stale_dispatch: true });
+      opts.say(`WARNING: dispatching from a STALE origin/main ref (--allow-stale, fetch failed)`);
+    }
+    return synced;
+  } catch (e) {
+    if (e instanceof GitFetchError) {
+      opts.log("git_fetch_failed", { reason: e.message, allow_stale: opts.allowStale });
+      const hint = opts.allowStale ? "" : " (pass --allow-stale to proceed on the last-fetched refs)";
+      opts.say(`REFUSED: ${e.message}${hint}`);
+      return { error: e.message };
+    }
+    throw e;
+  }
 }
 
 /** Check-run conclusions that mean the gate is RED (fail closed on anything not green). */
@@ -487,6 +584,7 @@ export interface RunResult {
     | "blocked_containment"
     | "blocked_isolation"
     | "blocked_inflight"
+    | "blocked_git_fetch"
     | "no_pr"
     | "blocked_transient"
     | "pr_attribution_failed"
@@ -720,13 +818,42 @@ export function softBudgetWarning(
   return !alreadyWarned && costUsd >= thresholdUsd;
 }
 
-async function runTask(taskId: string, opts: { planPath?: string; config?: Config } = {}): Promise<RunResult> {
+async function runTask(
+  taskId: string,
+  opts: {
+    planPath?: string;
+    config?: Config;
+    allowStale?: boolean;
+    /** Explicit `--plan <path>` escape hatch (daemon only): read that file LITERALLY, no git
+     *  sync — the operator named an exact file, so honor it verbatim, same as the sibling
+     *  guard around the daemon's own non-self clone-sync (`!flagValue(rest, "--plan")`). */
+    skipGitSync?: boolean;
+  } = {},
+): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
   const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const owner = resolveOwner();
 
-  const plan: Plan = loadPlan(planPath);
+  const runId = `${taskId}-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, ...extra });
+  const say = (msg: string) => console.log(`\n### [${taskId}] ${msg}`);
+
+  // ── GIT SELF-SYNC (W1-T60): read the plan from `origin/main`, never the working tree — a
+  // dirty local WIP file or a stale local `main` must never change what this run dispatches,
+  // and the runner must never require a manual `git pull` first. A fetch failure FAILS
+  // CLOSED (named ledger error, no spawn) unless `--allow-stale` explicitly opts in.
+  let plan: Plan;
+  if (opts.skipGitSync) {
+    plan = loadPlan(planPath);
+  } else {
+    const synced = syncPlanOrRefuse(planPath, { allowStale: opts.allowStale ?? false, log, say });
+    if ("error" in synced) {
+      return { taskId, runId, merged: false, costUsd: 0, verdict: "blocked_git_fetch" };
+    }
+    plan = synced.plan;
+  }
   const task = selectTask(plan, taskId);
 
   // ── Merge-state is DERIVED FROM GITHUB, never from the yaml `status:` field
@@ -741,11 +868,6 @@ async function runTask(taskId: string, opts: { planPath?: string; config?: Confi
   );
   const isMerged = (t: Task): boolean => projection.get(t.id)?.merged ?? false;
   assertRunnable(plan, task, isMerged); // refuse unmerged deps / blocked / verify:human
-
-  const runId = `${taskId}-${Date.now()}`;
-  const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, ...extra });
-  const say = (msg: string) => console.log(`\n### [${taskId}] ${msg}`);
 
   // ── PER-TASK IN-FLIGHT LOCK (guard 1, DIAGNOSIS.md diag/drain-sequential-await).
   // No two runs of the SAME task may overlap — whatever launched them (two drains, or a
@@ -1719,12 +1841,13 @@ function readUsageSnapshot(config: Config): UsageSnapshot | undefined {
 async function drainCommand(rest: string[]): Promise<number> {
   // FAIL LOUD on junk args BEFORE touching config/locks/spawns (a malformed control command
   // must spawn NOTHING — the daemon-install hazard). drain takes only these flags.
-  const badArg = unknownArgError("drain", rest, ["--until", "--max"], ["--dry-run"]);
+  const badArg = unknownArgError("drain", rest, ["--until", "--max"], ["--dry-run", "--allow-stale"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
   const dryRun = rest.includes("--dry-run");
+  const allowStale = rest.includes("--allow-stale");
   const untilIdx = rest.indexOf("--until");
   const maxIdx = rest.indexOf("--max");
   const opts: DrainOpts = {
@@ -1736,7 +1859,21 @@ async function drainCommand(rest: string[]): Promise<number> {
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const statusPath = join(config.root, "state", "status.json");
   const { owner } = resolveOwnerRepo();
-  const plan = loadPlan(planPath);
+
+  const runId = `DRAIN-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "DRAIN", step, ...extra });
+
+  // ── GIT SELF-SYNC (W1-T60): dispatch from the origin/main plan blob, never the operator's
+  // working tree — see runTask's identical gate for the full rationale. FAILS CLOSED (no
+  // lock taken, no spawn) on a fetch failure unless --allow-stale.
+  const synced = syncPlanOrRefuse(planPath, {
+    allowStale,
+    log,
+    say: (msg) => console.error(`### rmd drain — ${msg}`),
+  });
+  if ("error" in synced) return 1;
+  const plan = synced.plan;
 
   // Merged predicate, re-derived from GitHub each call (status.ts). The plan is
   // stewarded in `remudero`, so the gateway targets it; cross-repo tasks resolve
@@ -1788,9 +1925,6 @@ async function drainCommand(rest: string[]): Promise<number> {
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
 
-  const runId = `DRAIN-${Date.now()}`;
-  const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: "DRAIN", step, ...extra });
   log("drain.start", { until: opts.until ?? null, max: opts.max, lock_pid: drainLock.info.pid });
 
   try {
@@ -1798,7 +1932,7 @@ async function drainCommand(rest: string[]): Promise<number> {
       plan,
       {
         refreshMerged,
-        runOne: (taskId) => runTask(taskId, { planPath, config }),
+        runOne: (taskId) => runTask(taskId, { planPath, config, allowStale }),
         readUsage: () => readUsageSnapshot(config),
         checkStop: () => stopDetail(config.root),
         checkPause: () => pauseDetail(config.root),
@@ -1864,12 +1998,13 @@ async function daemonCommand(rest: string[]): Promise<number> {
     "daemon",
     rest,
     ["--max", "--poll-ms", "--repo", "--plan"],
-    ["--dry-run", "--allow-self-target"],
+    ["--dry-run", "--allow-self-target", "--allow-stale"],
   );
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
+  const allowStale = rest.includes("--allow-stale");
   const maxIdx = rest.indexOf("--max");
   const pollIdx = rest.indexOf("--poll-ms");
   const opts: DaemonOpts = {
@@ -1910,6 +2045,7 @@ async function daemonCommand(rest: string[]): Promise<number> {
   // Read the plan to schedule. For a NON-self target without an explicit --plan, read it from a
   // clone of the target repo (the daemon clones it for execution anyway), SYNCED to the latest
   // default branch so the scheduled plan is current — a stale clone would drain an old plan.
+  let plan: Plan;
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {
@@ -1919,8 +2055,21 @@ async function daemonCommand(rest: string[]): Promise<number> {
       execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
       execFileSync("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
     }
+    plan = loadPlan(target.planPath);
+  } else if (target.isSelf && !flagValue(rest, "--plan")) {
+    // ── GIT SELF-SYNC (W1-T60): self-hosting must not read the daemon's own working tree
+    // either — same fail-closed gate as run-task/drain (see syncPlanOrRefuse).
+    const synced = syncPlanOrRefuse(target.planPath, {
+      allowStale,
+      log,
+      say: (msg) => console.error(`### rmd daemon — ${msg}`),
+    });
+    if ("error" in synced) return 1;
+    plan = synced.plan;
+  } else {
+    // An explicit --plan overrides the derived path — read it literally, no git sync.
+    plan = loadPlan(target.planPath);
   }
-  const plan = loadPlan(target.planPath);
 
   const refreshMerged: () => MergedSet = () => {
     const proj = projectPlan(
@@ -1988,7 +2137,13 @@ async function daemonCommand(rest: string[]): Promise<number> {
       plan,
       {
         refreshMerged,
-        runOne: (taskId) => runTask(taskId, { planPath: target.planPath, config }),
+        runOne: (taskId) =>
+          runTask(taskId, {
+            planPath: target.planPath,
+            config,
+            allowStale,
+            skipGitSync: !!flagValue(rest, "--plan"),
+          }),
         readUsage: () => readUsageSnapshot(config),
         checkStop: () => stopDetail(config.root),
         checkPause: () => pauseDetail(config.root),
@@ -2396,7 +2551,7 @@ async function initCommand(rest: string[]): Promise<number> {
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 const USAGE =
-  "usage:\n  rmd run-task <task-id>\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd dep-review <pr-number> [--repo <name>]   # deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run]   # drain the DAG through run-task\n  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing.\n  rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)\n  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.\n  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.\n  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard\n\nAn UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
+  "usage:\n  rmd run-task <task-id> [--allow-stale]   # dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd dep-review <pr-number> [--repo <name>]   # deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60)\n  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.\n  rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)\n  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.\n  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.\n  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard\n\nAn UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(): Promise<void> {
@@ -2407,7 +2562,12 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   if (cmd === "run-task" && arg) {
-    const result = await runTask(arg);
+    const badArg = unknownArgError("run-task", rest.slice(1), [], ["--allow-stale"]);
+    if (badArg) {
+      console.error(badArg + "\n" + USAGE);
+      process.exit(2);
+    }
+    const result = await runTask(arg, { allowStale: rest.includes("--allow-stale") });
     console.log("\n" + JSON.stringify(result, null, 2));
     process.exit(result.merged ? 0 : 1);
   }
