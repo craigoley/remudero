@@ -750,6 +750,34 @@ export function judgeRubric(input: RubricInput): RubricResult {
   return { items, failures, pass: failures.length === 0 };
 }
 
+// ── reviewer_outcome (W1-T63/P10-a — the reviewer stops walling silently) ──
+
+/**
+ * The observable OUTCOME of the fresh advisory reviewer spawn, surfaced on the
+ * `review.posted` ledger line and the console review summary. Before this, a
+ * floor-only PASS (the LLM reviewer walled `error_max_turns` on an undeclared
+ * `maxTurns: 12` cap, or was never spawned at all) was byte-identical in the
+ * ledger to a review the reviewer actually COMPLETED — an operator could not
+ * tell "remudero-review=success, verified" from "remudero-review=success,
+ * mechanical floor only" (P10-a). `judgeReview`'s binding verdict is unaffected
+ * either way (Standing rules 2/4/12); this is purely a LEGIBILITY signal.
+ */
+export function reviewerOutcome(opts: {
+  /** false when spawnReviewer===false or there were no criteria to judge — the
+   * reviewer was never dispatched, by design, not by failure. */
+  attempted: boolean;
+  /** The reviewer WorkerResult.subtype, when a spawn actually ran to a terminal
+   * state ("success" | "error_max_turns" | …). */
+  subtype?: string;
+  /** true when the spawn itself THREW (e.g. before yielding any result) —
+   * distinct from a subtype, since there is none to report. */
+  spawnError?: boolean;
+}): string {
+  if (!opts.attempted) return "not_attempted";
+  if (opts.spawnError) return "spawn_error";
+  return opts.subtype ?? "unknown";
+}
+
 // ── gh poster (runs outside the sandbox; TLS fails under Seatbelt) ──────────
 
 /**

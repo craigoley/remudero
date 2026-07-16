@@ -15,6 +15,7 @@ import {
   judgeRubric,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
+  reviewerOutcome,
   reviewerVerdictContract,
 } from "../src/lib/review.js";
 
@@ -529,4 +530,32 @@ test("judgeRubric: each falsifier trips its own item and fails the whole rubric"
 
   const sneaky = judgeRubric({ diff: SATISFIED_BY_DIFF, report: "unblock myself" });
   assert.ok(sneaky.failures.some((f) => f.key === "satisfied-by-guard"));
+});
+
+// ── reviewer_outcome (W1-T63/P10-a — the reviewer stops walling silently) ───
+// A floor-only PASS must never be byte-identical, in the ledger or console, to a
+// review the LLM reviewer actually completed. reviewerOutcome() is the pure seam
+// review.posted (run-task.ts) reads to make that distinction legible.
+
+test("reviewerOutcome: a reviewer that walled error_max_turns carries reviewer_outcome=error_max_turns", () => {
+  assert.equal(
+    reviewerOutcome({ attempted: true, subtype: "error_max_turns" }),
+    "error_max_turns",
+  );
+});
+
+test("reviewerOutcome: a reviewer that completed carries reviewer_outcome=success", () => {
+  assert.equal(reviewerOutcome({ attempted: true, subtype: "success" }), "success");
+});
+
+test("reviewerOutcome: never attempted (spawnReviewer=false or no criteria) is distinct from either", () => {
+  const outcome = reviewerOutcome({ attempted: false });
+  assert.equal(outcome, "not_attempted");
+  assert.notEqual(outcome, "success");
+  assert.notEqual(outcome, "error_max_turns");
+});
+
+test("reviewerOutcome: a spawn that THREW (no subtype to report) is distinct from a subtype outcome", () => {
+  const outcome = reviewerOutcome({ attempted: true, spawnError: true, subtype: undefined });
+  assert.equal(outcome, "spawn_error");
 });

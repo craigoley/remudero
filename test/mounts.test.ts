@@ -70,6 +70,28 @@ test("REJECTS a worker riding the Architect's tier (Tier Invariant, G-17)", () =
   );
 });
 
+test("REJECTS a `reviewer` row riding the Architect's tier (W1-T63/G-17 — the new row is not exempt)", () => {
+  const bad = goodRaw();
+  (bad.routes as Record<string, unknown>).reviewer = {
+    high: { model: "opus", effort: "high", max_turns: 400, context_budget: 200000 },
+  };
+  assert.throws(
+    () => validateMounts(bad),
+    (e: unknown) =>
+      e instanceof TierInvariantError &&
+      /routes\.reviewer\.high/.test((e as Error).message) &&
+      /G-17/.test((e as Error).message),
+  );
+});
+
+test("ACCEPTS a `reviewer` row at the sonnet worker ceiling, strictly below the opus Architect", () => {
+  const good = goodRaw();
+  (good.routes as Record<string, unknown>).reviewer = {
+    high: { model: "sonnet", effort: "high", max_turns: 400, context_budget: 200000 },
+  };
+  assert.doesNotThrow(() => validateMounts(good));
+});
+
 test("REJECTS a worker riding ABOVE the Architect (Tier Invariant)", () => {
   const bad = goodRaw();
   bad.architect.model = "sonnet"; // architect below the sonnet workers' would-be ceiling

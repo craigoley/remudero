@@ -79,6 +79,29 @@ routes:
     low:    { model: haiku,  effort: medium, max_turns: 400, context_budget: 60000 }
     medium: { model: sonnet, effort: medium, max_turns: 400, context_budget: 90000 }
     high:   { model: sonnet, effort: high,   max_turns: 400, context_budget: 120000 }
+  # `reviewer` — the FRESH advisory reviewer runReview() spawns for the review gate on
+  # ANY task's PR (run-task.ts), keyed by the UNDER-REVIEW task's risk. Distinct from
+  # `review` above (a plan task whose own type happens to be "review"). W1-T63 (P10):
+  # this row previously did not exist, so the reviewer spawn read a hardcoded
+  # `maxTurns: 12` with NO model/effort — a ~12-turn cap reviewing a 400-turn-budgeted
+  # implementation walled `error_max_turns` on every substantive code PR (3 ledgered
+  # instances), silently degrading remudero-review to its mechanical floor (P10-a).
+  # `implement`'s mount is the FLOOR reference; the reviewer rides effort=high at every
+  # risk band (a HIGHER bar than implement's low/medium — G-17: it verifies acceptance,
+  # never rescuing an unpasted proof, so it must not be under-mounted relative to the
+  # work it judges) while staying at the sonnet worker CEILING, never opus (G-17).
+  reviewer:
+    low:    { model: sonnet, effort: high, max_turns: 400, context_budget: 120000 }
+    medium: { model: sonnet, effort: high, max_turns: 400, context_budget: 160000 }
+    high:   { model: sonnet, effort: high, max_turns: 400, context_budget: 200000 }
+  # `fix` — a patch/retry attempt after a strike (classify.ts's runDiagnoseThenRetry,
+  # W1-T7; not yet wired to a live spawn, but mount-governed from day one so wiring it
+  # never reintroduces an undeclared literal). Mirrors `implement`: a fix attempt is the
+  # same class of work as the original implementation, riding the same mount per risk.
+  fix:
+    low:    { model: sonnet, effort: medium, max_turns: 400, context_budget: 120000 }
+    medium: { model: sonnet, effort: high,   max_turns: 400, context_budget: 160000 }
+    high:   { model: sonnet, effort: high,   max_turns: 400, context_budget: 200000 }
   manual:
     low:    { model: haiku,  effort: low,    max_turns: 400, context_budget: 40000 }
     medium: { model: haiku,  effort: medium, max_turns: 400, context_budget: 60000 }
