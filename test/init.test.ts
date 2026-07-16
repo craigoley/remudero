@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -17,6 +17,34 @@ function tmpConfigPath(): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-init-test-"));
   return join(dir, "config.json");
 }
+
+// ── W1-T67: writeTierIntoConfig exclusive-create (mode 0o600 + createdFile + EEXIST merge) ──
+// The create path is `writeFileSync(path, ..., { flag: "wx", mode: 0o600 })` — no
+// existsSync-then-write TOCTOU. On a genuine first run it creates the file 0600 and
+// reports createdFile=true; when the file already exists, `wx` throws EEXIST and the
+// call falls through to read-merge-write, preserving every other key and reporting
+// createdFile=false — never clobbering a concurrent winner's claudeBin/root.
+test("W1-T67: writeTierIntoConfig on genuine first run creates the file mode 0o600 and reports createdFile=true", () => {
+  const path = tmpConfigPath();
+  const res = writeTierIntoConfig(path, "max20x", "flag");
+  assert.equal(res.createdFile, true);
+  assert.equal(statSync(path).mode & 0o777, 0o600, "the created config must be mode 0600");
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { tier: "max20x", tierSource: "flag" });
+});
+
+test("W1-T67: writeTierIntoConfig when the file EXISTS falls through to merge (createdFile=false), preserving other keys — no clobber", () => {
+  const path = tmpConfigPath();
+  // A concurrent first-run winner already wrote a full config with claudeBin/root.
+  writeFileSync(path, JSON.stringify({ claudeBin: "/opt/homebrew/bin/claude", root: "/SENTINEL/root" }, null, 2) + "\n");
+  const res = writeTierIntoConfig(path, "pro", "detected");
+  assert.equal(res.createdFile, false, "an existing file takes the EEXIST fallback, never the create branch");
+  const merged = JSON.parse(readFileSync(path, "utf8"));
+  // The exclusive-create discipline's whole point: the pre-existing keys SURVIVE the merge.
+  assert.equal(merged.claudeBin, "/opt/homebrew/bin/claude");
+  assert.equal(merged.root, "/SENTINEL/root");
+  assert.equal(merged.tier, "pro");
+  assert.equal(merged.tierSource, "detected");
+});
 
 // ── parseTierFlag ────────────────────────────────────────────────────────────
 
