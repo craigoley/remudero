@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -200,17 +200,41 @@ function resolveClaudeBin(): string {
 /**
  * Load the instance config, creating it on first run with resolved defaults.
  * `root` defaults to `~/Remudero`. Returns fully-resolved absolute paths.
+ *
+ * EXCLUSIVE-CREATE DISCIPLINE (CodeQL js/file-system-race): the old shape here
+ * was `existsSync(p) ? read : write` — a classic TOCTOU. Between the `existsSync`
+ * check and the `writeFileSync`, a second process (two workers racing their first
+ * `loadConfig()` call) could create the file first; this process's unconditional
+ * write would then silently clobber it. `openSync(p, "wx")` folds the check and
+ * the create into one atomic syscall: it succeeds only if THIS call created the
+ * file, and fails with `EEXIST` if anything else already had — no window for a
+ * second writer to win a race that this branch doesn't already know about.
+ * `resolveClaudeBin()` (shells `which claude`) is deliberately called only
+ * *after* the exclusive create wins, and not at all on the `EEXIST` fallback
+ * path unless the existing config is missing the field — same laziness as
+ * before (LEARNINGS.md lazy-config-in-ci: it must stay absent from CI runs
+ * where the config file already exists and the binary doesn't).
  */
 export function loadConfig(): Config {
   const p = configPath();
-  if (!existsSync(p)) {
-    const created: Config = {
-      claudeBin: resolveClaudeBin(),
-      root: join(homedir(), "Remudero"),
-    };
-    mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, JSON.stringify(created, null, 2) + "\n", { mode: 0o600 });
-    return created;
+  mkdirSync(dirname(p), { recursive: true });
+  let fd: number | undefined;
+  try {
+    fd = openSync(p, "wx", 0o600);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
+  if (fd !== undefined) {
+    try {
+      const created: Config = {
+        claudeBin: resolveClaudeBin(),
+        root: join(homedir(), "Remudero"),
+      };
+      writeSync(fd, JSON.stringify(created, null, 2) + "\n");
+      return created;
+    } finally {
+      closeSync(fd);
+    }
   }
   const parsed = JSON.parse(readFileSync(p, "utf8")) as Partial<Config>;
   if (!parsed.claudeBin) parsed.claudeBin = resolveClaudeBin();
