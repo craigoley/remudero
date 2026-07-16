@@ -162,19 +162,39 @@ test("source (c) anchored-trailer verify: a search hit whose body names a DIFFER
   assert.equal(proj.merged, false);
 });
 
-test("source (c) correction-awareness: a correction.provenance line debunking this exact credit blocks it, even though ownership + anchor would otherwise pass", () => {
+test("source (c) correction-awareness (pure debunk, no replacement named): a correction.provenance line naming only claimed_pr_url blocks that exact credit, even though ownership + anchor would otherwise pass", () => {
   const fixture = ownedTrailerFixture("W1-TX", "W1-TX-1730000000000");
   const github = fakeGitHub({
     byTrailer: { "W1-TX": { number: 12, url: "u/12", state: "MERGED" } },
     headRefByUrl: { "u/12": fixture.headRefName },
     bodyByUrl: { "u/12": fixture.body },
   });
+  // No actual_pr_url -> latestActualPrUrl (the SUPREME rung, W1-T75) sees no
+  // correction and this falls through to rung (c), whose debunkedTrailerUrls
+  // still rejects the exact named claimed_pr_url.
   const ledgerPath = ledgerFile([
-    { step: "correction.provenance", task_id: "W1-TX", claimed_pr_url: "u/12", actual_pr_url: "u/99" },
+    { step: "correction.provenance", task_id: "W1-TX", claimed_pr_url: "u/12" },
   ]);
   const proj = deriveStatus(task(), { ledgerPath, github });
   assert.equal(proj.source, "none");
   assert.equal(proj.merged, false);
+});
+
+test("W1-T75 un-credit direction: a correction naming an actual_pr_url that GitHub cannot resolve (closed/absent) SUPREMELY derives NOT merged — it never falls through to rung (c)'s otherwise-valid trailer credit", () => {
+  const fixture = ownedTrailerFixture("W1-TX", "W1-TX-1730000000000");
+  const github = fakeGitHub({
+    byTrailer: { "W1-TX": { number: 12, url: "u/12", state: "MERGED" } },
+    headRefByUrl: { "u/12": fixture.headRefName },
+    bodyByUrl: { "u/12": fixture.body },
+    // byRef deliberately omits "u/99": gh cannot resolve the correction's target.
+  });
+  const ledgerPath = ledgerFile([
+    { step: "correction.provenance", task_id: "W1-TX", claimed_pr_url: "u/12", actual_pr_url: "u/99" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.source, "correction");
+  assert.equal(proj.merged, false);
+  assert.ok(!github.calls.includes("trailer:W1-TX"), "supreme correction must short-circuit before rung (c) is ever consulted");
 });
 
 test("precedence: ledger (a) is consulted before pr: (b)", () => {
@@ -288,4 +308,74 @@ test("W1-T69 C4: a dependent task is NOT runnable when its dependency's only mer
   // W1-T20c IS runnable (not merged, no deps); W1-T20d is NOT (its sole dep is uncredited) —
   // nextRunnable picks W1-T20c even though W1-T20d is declared first.
   assert.equal(nextRunnable(plan, isMerged)?.id, "W1-T20c");
+});
+
+// ── W1-T75 (ratifies P9): operator corrections are SUPREME — hoisted above rung (a) ──────
+
+test("W1-T75: the canonical W1-T20c/#134 stranding — a correction credits a merged PR on a fix/* head even though the LAST pr.opened line is a CLOSED superseded run", () => {
+  const closedRunPr = "https://github.com/craigoley/remudero/pull/125"; // rung (a): the closed, superseded run
+  const handFixPr = "https://github.com/craigoley/remudero/pull/134"; // the operator's correction target: a fix/* PR
+  const github = fakeGitHub({
+    byRef: {
+      [closedRunPr]: { number: 125, url: closedRunPr, state: "CLOSED" },
+      [handFixPr]: { number: 134, url: handFixPr, state: "MERGED" },
+    },
+    // #134 is a hand-authored fix/* PR — it would FAIL the run-branch ownership
+    // assert if it were ever subjected to it (design point 2: it must not be).
+    headRefByUrl: { [handFixPr]: "fix/w1t20c-style" },
+  });
+  const ledgerPath = ledgerFile([
+    { step: "pr.opened", task_id: "W1-T20c", pr_url: closedRunPr },
+    { step: "correction.provenance", task_id: "W1-T20c", claimed_pr_url: closedRunPr, actual_pr_url: handFixPr },
+  ]);
+
+  const proj = deriveStatus(task({ id: "W1-T20c" }), { ledgerPath, github });
+  assert.equal(proj.source, "correction");
+  assert.equal(proj.merged, true);
+  assert.equal(proj.prNumber, 134);
+  assert.ok(!github.calls.includes("headRefName:" + handFixPr), "a correction is DECLARED credit — never re-subjected to the ownership assert");
+
+  // REGRESSION LOCK: the identical fixture WITHOUT the correction line derives
+  // NOT merged — rung (a) resolves to the CLOSED run and nothing else is
+  // consulted, exactly today's (pre-fix) stranding.
+  const noCorrectionLedger = ledgerFile([{ step: "pr.opened", task_id: "W1-T20c", pr_url: closedRunPr }]);
+  const projNoCorrection = deriveStatus(task({ id: "W1-T20c" }), { ledgerPath: noCorrectionLedger, github });
+  assert.equal(projNoCorrection.merged, false);
+  assert.equal(projNoCorrection.source, "ledger");
+});
+
+test("W1-T75: a correction beats a LIVE rung (a) ledger line (an OPEN pr.opened, not merely a closed/stale one)", () => {
+  const rungAUrl = "u/50";
+  const correctedUrl = "u/51";
+  const github = fakeGitHub({
+    byRef: {
+      [rungAUrl]: { number: 50, url: rungAUrl, state: "OPEN" },
+      [correctedUrl]: { number: 51, url: correctedUrl, state: "MERGED" },
+    },
+  });
+  const ledgerPath = ledgerFile([
+    { step: "pr.opened", task_id: "W1-TX", pr_url: rungAUrl },
+    { step: "correction.provenance", task_id: "W1-TX", claimed_pr_url: rungAUrl, actual_pr_url: correctedUrl },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.source, "correction");
+  assert.equal(proj.merged, true);
+  assert.ok(!github.calls.includes(`prByRef:${rungAUrl}`), "rung (a) must never even be queried once a correction exists");
+});
+
+test("W1-T75: a correction beats rung (b)'s explicit pr: field", () => {
+  const correctedUrl = "u/61";
+  const github = fakeGitHub({
+    byRef: {
+      "60": { number: 60, url: "u/60", state: "MERGED" }, // the pr: field's target — would credit if reached
+      [correctedUrl]: { number: 61, url: correctedUrl, state: "MERGED" },
+    },
+  });
+  const ledgerPath = ledgerFile([
+    { step: "correction.provenance", task_id: "W1-TX", claimed_pr_url: "u/60", actual_pr_url: correctedUrl },
+  ]);
+  const proj = deriveStatus(task({ pr: 60 }), { ledgerPath, github });
+  assert.equal(proj.source, "correction");
+  assert.equal(proj.prNumber, 61);
+  assert.ok(!github.calls.includes("prByRef:60"), "rung (b) must never even be queried once a correction exists");
 });

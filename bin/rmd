@@ -23,6 +23,10 @@
 #   rmd pause [--reason <text>]   fleet control: drain-and-hold — no new spawns, but an
 #                            in-flight task always runs to full completion (verdict + merge)
 #   rmd resume               fleet control: clears stop + pause; spawns resume
+#   rmd correct <task-id> --pr <n> [--reason <text>]
+#                            sanctioned operator-correction writer (P9/W1-T75): appends a
+#                            correction.provenance ledger line naming the task's TRUE merged PR,
+#                            SUPREME over every deriveStatus rung; prints derived status before/after
 #   rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s>
 #                [--detail <d>] [--recommendation <r>] [--option "label|detail"]...
 #                            open a needs-human labeled GitHub issue; MANUAL/HARD_STOP
