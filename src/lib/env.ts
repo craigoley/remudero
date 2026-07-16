@@ -38,23 +38,28 @@ const ANTHROPIC_KEY = /^ANTHROPIC_/i;
  * boundary rather than silently on the invoice.
  *
  * Shell isolation is the SAME contamination class as the ANTHROPIC_* denial,
- * mirrored: where ANTHROPIC_* is DENIED, the two shell vars below are GRANTED,
- * so a worker's shell sources Remudero's own (empty) rc, never the operator's.
- * Workers inherit NOTHING they aren't explicitly given; neither var is copied
- * from the parent (an operator ZDOTDIR/CLAUDE_CODE_SHELL is ignored), only set
- * to the granted value.
+ * mirrored: where ANTHROPIC_* is DENIED, the vars below are GRANTED, so a
+ * worker's shell sources Remudero's own (empty) rc, never the operator's.
+ * Workers inherit NOTHING they aren't explicitly given; none of these is
+ * copied from the parent (an operator HOME/ZDOTDIR/CLAUDE_CODE_SHELL is
+ * ignored), only set to the granted value.
+ *  - `opts.home` → **HOME** (W1-T18 general isolation mechanism). When set,
+ *    OVERRIDES whatever the allowlist copied from the parent's real HOME with
+ *    a Remudero-controlled scratch dir (`worker-home.ts`) holding only empty
+ *    rc files — this is what makes isolation hold on ANY host, not just one
+ *    whose `~/.bashrc` happens to be absent. See config.workerHomeDir.
  *  - `opts.shell` → **CLAUDE_CODE_SHELL** (default `/bin/bash`). Claude Code's
- *    Bash-tool snapshot sources `os.homedir()/.<shell>rc`; bash's `$HOME/.bashrc`
- *    is absent on a stock macOS, so the snapshot is empty — this is what actually
- *    stops the operator's `~/.zshrc` (and its interactive `compinit` prompt that
- *    stalled W1-T1C) from reaching the worker. See config.workerShell.
+ *    Bash-tool snapshot sources `os.homedir()/.<shell>rc`, resolved off HOME —
+ *    combined with `opts.home` above, that path is the redirected scratch
+ *    HOME's empty rc, never the operator's `~/.zshrc` (and its interactive
+ *    `compinit` prompt that stalled W1-T1C). See config.workerShell.
  *  - `opts.zdotdir` → **ZDOTDIR** (default derived from HOME). Defense-in-depth
  *    for any direct `zsh` a worker spawns. See config.workerZdotdir.
  */
 export function buildWorkerEnv(
   extra: Record<string, string> = {},
   parent: NodeJS.ProcessEnv = process.env,
-  opts: { zdotdir?: string; shell?: string } = {},
+  opts: { zdotdir?: string; shell?: string; home?: string } = {},
 ): Record<string, string> {
   const child: Record<string, string> = {};
 
@@ -65,6 +70,15 @@ export function buildWorkerEnv(
 
   for (const [key, val] of Object.entries(extra)) {
     child[key] = val;
+  }
+
+  // Grant the HOME redirection (unless the caller set HOME explicitly via
+  // `extra` — test/override escape hatch), OVERRIDING whatever the allowlist
+  // above copied from the parent's real HOME. This is the W1-T18 mechanism:
+  // isolation no longer depends on the operator's real `~/.bashrc` being
+  // absent, because the worker's HOME is never the operator's real HOME.
+  if (opts.home && !("HOME" in extra)) {
+    child.HOME = opts.home;
   }
 
   // Grant CLAUDE_CODE_SHELL (unless the caller set one via `extra`). This is the

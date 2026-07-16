@@ -87,3 +87,37 @@ test("NEVER copies the operator's CLAUDE_CODE_SHELL from the parent — only the
   );
   assert.equal(child.CLAUDE_CODE_SHELL, "/bin/bash", "an operator shell must not leak in");
 });
+
+// ── W1-T18: HOME redirection (isolation independent of the operator's real ~/.bashrc) ──
+
+test("grants an INJECTED HOME override, replacing whatever the allowlist copied from the parent's real HOME", () => {
+  const child = buildWorkerEnv(
+    {},
+    { PATH: "/usr/bin", HOME: "/Users/operator" },
+    { home: "/opt/rmd/worker-home" },
+  );
+  assert.equal(child.HOME, "/opt/rmd/worker-home", "the redirected scratch HOME must win over the operator's real HOME");
+});
+
+test("with no opts.home, HOME still falls back to the parent's (back-compat default)", () => {
+  const child = buildWorkerEnv({}, { PATH: "/usr/bin", HOME: "/Users/operator" });
+  assert.equal(child.HOME, "/Users/operator");
+});
+
+test("an explicit HOME in extra overrides opts.home (test/override escape hatch)", () => {
+  const child = buildWorkerEnv(
+    { HOME: "/tmp/explicit-override" },
+    { PATH: "/usr/bin", HOME: "/Users/operator" },
+    { home: "/opt/rmd/worker-home" },
+  );
+  assert.equal(child.HOME, "/tmp/explicit-override");
+});
+
+test("ZDOTDIR defaults nest under the REDIRECTED HOME, not the operator's real one, when opts.home is set", () => {
+  const child = buildWorkerEnv(
+    {},
+    { PATH: "/usr/bin", HOME: "/Users/operator" },
+    { home: "/opt/rmd/worker-home" },
+  );
+  assert.equal(child.ZDOTDIR, "/opt/rmd/worker-home/.config/remudero/zdotdir");
+});

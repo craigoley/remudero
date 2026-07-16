@@ -29,6 +29,12 @@ export interface Config {
    */
   workerShell?: string;
   /**
+   * Scratch HOME every worker is redirected into (see {@link workerHomeDir}) —
+   * the W1-T18 general isolation mechanism. Optional in the config file;
+   * defaults to `<root>/worker-home`.
+   */
+  workerHomeRoot?: string;
+  /**
    * SOFT budget threshold (notional $) at which a run ledgers a WARNING and
    * CONTINUES — a visibility tripwire, NOT a kill. Optional; defaults to 25.00.
    * The HARD cap (a run's `budget_usd`, default 100) is the runaway backstop; this
@@ -101,15 +107,17 @@ export function validateConfig(config: Config): void {
  * WHY NOT ZDOTDIR ALONE (installed-version ground truth, CLI 2.1.209): Claude
  * Code builds a shell SNAPSHOT for its Bash tool by sourcing the rc file at
  * `os.homedir()/.zshrc` — resolved from HOME, NOT `$ZDOTDIR`. Setting ZDOTDIR
- * does not redirect it, and HOME cannot move (the worker's own `claude` reads
- * `~/.claude` to authenticate). But the rc filename follows the shell: bash →
- * `$HOME/.bashrc`, which is ABSENT on a stock zsh-default macOS. Pointing the
- * snapshot shell at bash therefore sources an empty (nonexistent) rc, so the
- * worker inherits NO operator alias/function and never fires the interactive
- * `compinit` prompt that stalled W1-T1C. ZDOTDIR is kept alongside this as
- * defense-in-depth for any direct `zsh` a worker spawns. The isolation assumes
- * `$HOME/.bashrc` stays worker-safe — the same contract as the zdotdir staying
- * empty; both are operator-controlled files the harness relies on.
+ * does not redirect it. But the rc filename follows the shell: bash →
+ * `$HOME/.bashrc`. Pointing the snapshot shell at bash used to work only
+ * because THIS host's `$HOME/.bashrc` happened to be absent (LEARNINGS.md,
+ * PR #8) — an accident, not construction; a stranger's populated `~/.bashrc`
+ * would isolate nothing. W1-T18 (see {@link workerHomeDir}, `worker-home.ts`)
+ * fixes the accident by redirecting the worker's `HOME` itself to a
+ * Remudero-controlled scratch dir holding only empty rc files, so `bash →
+ * $HOME/.bashrc` now resolves to a path the OPERATOR never wrote regardless
+ * of what their real `~/.bashrc` contains. ZDOTDIR is kept alongside this as
+ * defense-in-depth for any direct `zsh` a worker spawns, and never fires the
+ * interactive `compinit` prompt that stalled W1-T1C.
  */
 export function workerShell(config: Config): string {
   return config.workerShell ?? "/bin/bash";
@@ -151,6 +159,24 @@ export function notifyRecipient(config: Config): string {
  */
 export function workerZdotdir(config: Config): string {
   return config.zdotdir ?? join(config.root, "..", ".config", "remudero", "zdotdir");
+}
+
+/**
+ * The Remudero-controlled scratch directory every worker's `HOME` is
+ * redirected to (W1-T18 general shell-isolation mechanism, `worker-home.ts`).
+ * It holds ONLY empty rc files Remudero itself wrote, plus explicit symlinks
+ * back to the real HOME for the few paths a worker legitimately needs
+ * (`.claude`, `.config/gh`, `.gitconfig`) — so a worker's shell-snapshot rc
+ * (`$HOME/.bashrc`, resolved off `HOME` — see {@link workerShell}) is isolated
+ * from the OPERATOR's real dotfiles regardless of what they contain, not just
+ * on hosts where `~/.bashrc` happens to be absent.
+ *
+ * Derived from `config.root`, never a hardcoded absolute path (public-repo
+ * hygiene): default `<root>/worker-home`. An instance may pin it explicitly
+ * via `workerHomeRoot` in `~/.config/remudero/config.json`.
+ */
+export function workerHomeDir(config: Config): string {
+  return config.workerHomeRoot ?? join(config.root, "worker-home");
 }
 
 /** Path to the instance config file. Derived, never a committed literal. */
