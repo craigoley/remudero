@@ -3164,3 +3164,92 @@
   note: "Ratifies P17 (captured #108). First rung = the deterministic generator + byte-equal golden;
     Sigstore signing + the WS-12 schema publish are DEFERRED v2 rungs. Live 'a receipt is posted on every
     merged agent PR' is operator-observed (Rule 18), not an auto-verify criterion here."
+
+# W1-T65 follow-up pair (relayed from the operator's second Architect thread 2026-07-16): the proof-executing
+# floor's guarantee is CONDITIONAL AND SILENT — the extractor parses two strict shapes and returns null for
+# the house proof dialect, so most criteria degrade to the keyword floor invisibly (proof_exec 0/2 #123, 0/6 #125).
+- id: W1-T72
+  title: "Proof-executor coverage + degraded-floor legibility — parse the house proof dialect; a full keyword-fallback is LOUD (W1-T65 follow-up)"
+  repo: remudero
+  depends_on: [W1-T65]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "W1-T65's guarantee is CONDITIONAL AND SILENT (operator's second thread, verdict-line ground
+    truth): W1-T67/#123 reviewed proof_exec 0/2, the retro's own #125 reviewed 0/6 — the extractor
+    (review.ts ~:222-291) parses two strict shapes and returns null for free prose, so the house dialect
+    we actually write ('grep: <pattern> ...', 'unit test: <name>') degrades to the blind keyword floor on
+    EVERY criterion, invisibly unless the verdict line is read. NOT a W1-T65 regression — conservative
+    fallback is the safe direction; this is a COVERAGE + LEGIBILITY gap. The invariant: 'observed on the
+    PR head' is never CLAIMED when execution fell back to keywords."
+  design: |
+    TWO coupled changes in the proof executor, one concern (the executor's honesty):
+    (i) LEGIBILITY: when executed==0 AND at least one proof matches the house-dialect prefix (i.e. was
+        WRITTEN to be runnable), set floor_degraded: true on the review.posted ledger line and print a
+        LOUD console annotation (FLOOR DEGRADED: 0/N proofs executed; keyword floor was binding).
+        NO blocking-behavior change: the keyword floor remains the binding fallback exactly as shipped —
+        whether a degraded floor should HOLD a risk:high PR is the operator's doctrine call, explicitly
+        OUT of this task (state this in the PR body).
+    (ii) COVERAGE: widen the extractor grammar to the house dialect — grep: <pattern> [in <path-or-glob>]
+        and unit test: <file-or-test-name> — compiled to concrete whitelisted commands. Keep every
+        existing safety bound (no shell metacharacters/escapes per the ~:257 discipline; unparseable or
+        unsafe shapes still return null -> keyword + flagged per (i)). Pure prose proofs LEGITIMATELY
+        stay keyword-only and legible as unexecuted — never counted as observed.
+  acceptance:
+    - claim: "a house-dialect grep proof compiles and EXECUTES (proof_exec counts it as observed)"
+      proof: "unit test over an injected executor: criterion proof 'grep: wx flag present in src/lib/config.ts' -> executed (pass/fail per executor), proof_exec != not_executable"
+    - claim: "a house-dialect unit-test proof compiles and EXECUTES"
+      proof: "unit test: proof 'unit test: exclusive-create EEXIST falls through to read' -> executed via the injected runner"
+    - claim: "a pure-prose proof stays keyword-only and is LEGIBLE as unexecuted"
+      proof: "unit test: prose proof -> proof_exec=not_executable; with zero executed overall and >=1 dialect-prefixed proof present, review.posted carries floor_degraded:true and the console prints the FLOOR DEGRADED annotation"
+    - claim: "a fully-observed review is NOT flagged; the shipped W1-T65 semantics are unchanged"
+      proof: "unit test: N/N executed -> no floor_degraded flag; existing W1-T65 tests pass unchanged (executed_fail still overrides keyword coverage)"
+    - claim: "safety bounds hold — metacharacters never execute"
+      proof: "unit test: a dialect-prefixed proof containing shell metacharacters -> null/not_executable, injected executor never called (the W1-T65 whitelist test extended to the new grammar)"
+  risk: high
+  origin: architect
+  plan_refs: ["§5"]
+  files: [src/lib/review.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Relayed from the operator's second Architect thread 2026-07-16; canonical fixtures are the live
+    0/2 (#123) and 0/6 (#125) verdict lines. proof_exec is ALREADY ledgered (verified from source) — this
+    task adds the degraded flag + grammar, no schema work."
+
+- id: W1-T73
+  title: "Retro mines DEGRADED-SUCCESS telemetry — a PASS that used a weaker path than its criteria named (proof_exec 0/N and the class)"
+  repo: remudero
+  depends_on: [W1-T65]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The meta-finding (operator's second thread): the retro mines FAILURE verdicts and structure
+    but is BLIND to successful-but-degraded telemetry — RETRO-1784213948025 gathered the same 2-run ledger
+    that showed proof_exec 0/N and logged W1-T65 as a closed win without surfacing it. Same class the
+    retro itself named a cycle ago ('a run that CLAIMED work it did not do') applied to the gate's own
+    assertion. proof_exec is on the review.posted ledger line (verified from source) — the field exists;
+    the gather does not read it."
+  design: |
+    Extend rmd retro's gather to mine degraded-success: a merged run whose review.posted shows
+    executed==0 with >=1 dialect-prefixed proof (or floor_degraded:true once W1-T72 lands) emits a
+    DEGRADED-SUCCESS finding in the retro report — named per run, aggregated per cycle, feeding the same
+    proposal-candidate flow as failure mining. Generalize the predicate as DATA (a list of
+    weaker-path-than-claimed signals) so the next degraded-success class (e.g. reviewer_outcome=
+    error_max_turns on a merged PR) is a table row, not new code.
+  acceptance:
+    - claim: "a seeded ledger with a merged run at proof_exec 0/N (dialect-prefixed proofs present) makes rmd retro emit a degraded-success finding naming the run"
+      proof: "fixture-driven unit test: seeded review.posted with executed==0 -> the retro report carries the degraded-success block citing the run id"
+    - claim: "a fully-observed merged run emits nothing; re-run emits no duplicate"
+      proof: "unit test: N/N fixture -> no finding; gather over the same fixture twice -> one finding, not two"
+    - claim: "the signal set is data, not code branches"
+      proof: "unit test: adding a second signal row (reviewer_outcome=error_max_turns on merged) to the table flags a seeded matching run with zero executor-code changes"
+  risk: medium
+  origin: architect
+  plan_refs: ["§Self-improvement", "§5"]
+  files: [src/lib/retro.ts]
+  status: queued
+  attempts: 0
+  note: "Independent of W1-T72 (mines the existing proof_exec field); W1-T72's floor_degraded flag becomes
+    a second table row when it lands. Relayed 2026-07-16."
