@@ -3631,3 +3631,142 @@
   attempts: 0
   note: "Filed from the #146 worker's finding. Until this lands, whole-plan lint counts carry known noise;
     --base (CI mode) remains trustworthy for new/changed tasks written post-linter."
+
+- id: W1-T82
+  title: "rmd onboard phase 1 — deterministic repo inventory (languages, CI, protection, docs, plan artifacts; no LLM)"
+  repo: remudero
+  depends_on: [W1-T14]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P24(1). The onboarding front door starts rule-2 pure: policy-as-data detectors over
+    a target checkout — languages/build/test/CI systems, branch-protection state, docs presence (README,
+    CONTRIBUTING, AGENTS.md, CLAUDE.md, ADRs, ROADMAP, TODO), issue/milestone counts, test-signal
+    presence — emitting plan/onboarding/inventory.json. Everything downstream (recon, questions,
+    synthesis) cites this artifact; the LLM never re-derives what a detector can state."
+  design: |
+    rmd onboard <repo> --phase inventory (CLI wiring in run-task.ts; detectors as a DATA table in
+    src/lib/onboard/inventory.ts — adding a detector is a row, not a branch). Read-only against the
+    target checkout + gh API; writes ONLY the inventory artifact. Unknowns are recorded as unknown,
+    never guessed.
+  acceptance:
+    - claim: "the fixture repo (code + ROADMAP.md + issues fixture) produces the expected inventory JSON"
+      proof: "unit test over injected fs/gh deps: byte-stable inventory matching the committed expectation fixture"
+    - claim: "detectors are data — a new doc-type row detects without code changes"
+      proof: "unit test: adding a row to the detector table flags a seeded file with zero engine changes"
+    - claim: "the phase is read-only against the target"
+      proof: "unit test: injected fs write-spy records zero writes outside plan/onboarding/"
+  risk: high
+  origin: architect
+  plan_refs: ["P24", "§5A"]
+  files: [src/lib/onboard/inventory.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+
+- id: W1-T83
+  title: "rmd onboard phase 2 — recon understanding + plan-artifact mining (read-only specialist lenses; every candidate cites its source)"
+  repo: remudero
+  depends_on: [W1-T82, W2-T1]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P24(2). Read-only recon workers — REUSING the W2-T1 specialist spawn machinery
+    (security/testing/design/containment lenses pointed at the whole repo instead of a diff) — produce an
+    architecture-and-conventions map, and a deterministic miner lifts existing plan artifacts (ROADMAP
+    entries, TODOs, open issues, ADR intents) into CANDIDATE goals, each carrying provenance to the exact
+    file/line/issue it came from. Candidates are inputs to the session, never tasks — nothing here is
+    dispatchable (rule 15)."
+  design: |
+    rmd onboard <repo> --phase recon: spawns read-only workers via the specialist spawn path (containment
+    preflight applies); the miner is deterministic (patterns-as-data over the inventory's discovered
+    artifacts). Output: plan/onboarding/findings.md + candidates.json (each candidate: text, source ref,
+    confidence: mined|inferred). Inferred (LLM) claims are LABELED as inferred — the findings doc never
+    launders recon guesses as ground truth.
+  acceptance:
+    - claim: "every mined candidate cites its source verbatim (file+line or issue number)"
+      proof: "unit test: the fixture ROADMAP/issue set yields candidates whose source refs resolve; a candidate without a source ref fails validation"
+    - claim: "recon workers are read-only via the specialist path"
+      proof: "unit test: spawn args exclude write tools (the W2-T1 assertion reused); zero target writes outside plan/onboarding/"
+    - claim: "mined vs inferred is a labeled distinction"
+      proof: "unit test: a deterministic-miner candidate carries confidence=mined; an LLM-map claim carries inferred; the findings renderer preserves the labels"
+  risk: high
+  origin: architect
+  plan_refs: ["P24", "§5A"]
+  files: [src/lib/onboard/recon.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+
+- id: W1-T84
+  title: "rmd onboard phase 3 — the planning session (decidable questions per the §2 contract; answers ledgered)"
+  repo: remudero
+  depends_on: [W1-T83]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P24(3)+(4). The field's brownfield guidance is an interview-mode constitution
+    exercise done by hand [research: sdd-constitution-interview-2026]; this productizes it. Questions are
+    generated from GAPS (what the scan could not resolve) + goal elicitation (what done looks like,
+    priorities, risk appetite, no-touch zones, verify:human boundaries) — every question names its
+    decision and candidate answers (the W1-T78 discipline at day zero), per the §2 QUESTION contract.
+    Answers are LEDGERED (onboard.answered): the drafted plan's decisions carry provenance to the
+    operator's own words."
+  design: |
+    rmd onboard <repo> --phase session: renders findings + the question set; v1 answer surface is a CLI
+    loop (readline) writing plan/onboarding/answers.json + one onboard.answered ledger line per answer;
+    the banked rmd chat/grill intake upgrades the surface later — this flow is its first consumer, say so
+    in the module doc. Unanswered questions persist across invocations (resumable session).
+  acceptance:
+    - claim: "questions conform to the §2 contract and each names its decision + candidate answers"
+      proof: "unit test: generated questions from the fixture findings validate against the contract shape; a generic question without a named decision fails generation"
+    - claim: "answers are ledgered with provenance"
+      proof: "unit test: an answered session writes answers.json + matching onboard.answered ledger lines (append-only)"
+    - claim: "the session is resumable"
+      proof: "unit test: a second invocation with partial answers re-presents ONLY the unanswered set"
+  risk: high
+  origin: architect
+  plan_refs: ["P24", "§2", "§7B"]
+  files: [src/lib/onboard/session.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+
+- id: W1-T85
+  title: "rmd onboard phase 4 — synthesis: draft MASTER-PLAN + tasks.yaml + AGENTS.md as ONE ratifiable PR (lint-plan-clean at birth; refuses without answers)"
+  repo: remudero
+  depends_on: [W1-T84, W1-T20c]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P24(5)+(6). An Architect worker drafts the TARGET repo's constitution
+    (MASTER-PLAN.md: mission, conventions AS FOUND), a CHANGE-LEVEL tasks.yaml seed from the ratified
+    goals (progressive adoption, never a big-bang respec [research: sdd-brownfield-gap-2026]), and
+    AGENTS.md (the cross-tool convention, so other agents respect the same constitution). HARD GATE:
+    every generated task must pass rmd lint-plan — §5C applies to machine-drafted plans at birth. The
+    ENTIRE output lands as ONE draft PR to the target; the human's merge IS the ratification (rule 15).
+    Static-spec tools stop at the markdown; this plan is drained by a daemon with gates, ledger, and
+    receipts [research: sdd-field-survey-2026]."
+  design: |
+    rmd onboard <repo> --phase synthesize: REFUSES (non-zero, naming the unanswered questions) unless the
+    session's question set is answered — goals are never guessed. The synthesis worker receives inventory
+    + findings + candidates + answers; drafts to a branch onboard/<repo>-plan; runs lint-plan over the
+    drafted tasks and iterates until clean BEFORE opening the PR; opens exactly ONE draft PR; writes
+    nothing to the target outside that branch. Composition documented: onboard produces the BRAIN,
+    rmd project init (W1-T27) installs the BAR, the daemon drains.
+  acceptance:
+    - claim: "synthesis refuses without complete answers"
+      proof: "unit test: partial-answers fixture -> non-zero exit naming the unanswered question ids; no branch, no PR"
+    - claim: "every generated task is lint-plan-clean at birth"
+      proof: "unit test: the fixture flow's drafted tasks.yaml passes the real linter; a seeded draft with a live-verb proof is caught and regenerated before PR"
+    - claim: "exactly one draft PR; zero writes outside its branch"
+      proof: "unit test over injected git/gh deps: one branch, one PR call, write-spy clean elsewhere; drafted tasks carry provenance to answers/candidates"
+  risk: high
+  origin: architect
+  plan_refs: ["P24", "§5C", "§5A"]
+  files: [src/lib/onboard/synthesize.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Live confirmation (Rule 18): the first real onboarding target is operator-chosen; the fleet
+    dry-run (W2-T2) is the natural candidate — onboard it, ratify its drafted plan, drain it."
