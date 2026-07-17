@@ -11,6 +11,8 @@ import {
   checkTestTheater,
   detectTestTheater,
   failSummary,
+  floorDegradedAnnotation,
+  isDialectPrefixed,
   judgeReview,
   judgeRubric,
   parseAcceptanceBlock,
@@ -744,4 +746,202 @@ test("a semantic FAIL still downgrades an executed_pass criterion (semantic rema
   });
   assert.equal(v.criteria[0].met, false);
   assert.equal(v.criteria[0].proof_exec, "executed_pass"); // observability is unaffected by the downgrade
+});
+
+// ── W1-T72 (W1-T65 follow-up): parse the HOUSE PROOF DIALECT — the shapes
+// acceptance proofs are actually written in ('grep: <pattern> ...', 'unit
+// test: <name>'), which the strict W1-T65 extractor returned null for on
+// EVERY criterion (W1-T67/#123 proof_exec 0/2, the retro's own #125 0/6). Every
+// fixture below injects `execProof` — never touches the filesystem or a real
+// shell, same discipline as the W1-T65 fixtures above.
+
+test("parseWhitelistedProof: house-dialect 'grep: <pattern> in <path>' compiles to a concrete grep shape (recursive, so a directory target works too)", () => {
+  const wp = parseWhitelistedProof("grep: wx flag present in src/lib/config.ts");
+  assert.ok(wp);
+  assert.equal(wp!.kind, "grep");
+  assert.deepEqual(wp!.args, ["-rn", "--", "wx flag present", "src/lib/config.ts"]);
+});
+
+test("parseWhitelistedProof: house-dialect 'grep: <pattern>' with no 'in <path>' defaults to a recursive search that excludes plan/ (self-match), .git/, node_modules/", () => {
+  const wp = parseWhitelistedProof("grep: O_EXCL");
+  assert.ok(wp);
+  assert.equal(wp!.kind, "grep");
+  assert.deepEqual(wp!.args, [
+    "-rn",
+    "--exclude-dir=.git",
+    "--exclude-dir=node_modules",
+    "--exclude-dir=plan",
+    "--",
+    "O_EXCL",
+    ".",
+  ]);
+});
+
+test("parseWhitelistedProof: a dialect grep 'in <path>' containing a literal glob '*' is refused (null) — execFile never shells, so nothing expands it", () => {
+  assert.equal(parseWhitelistedProof("grep: O_EXCL in src/lib/*.ts"), null);
+});
+
+test("parseWhitelistedProof: a dialect grep whose pattern happens to look like a test-file path is NOT swallowed by the legacy test-path shape — it stays a grep", () => {
+  const wp = parseWhitelistedProof("grep: TODO in test/foo.test.ts");
+  assert.ok(wp);
+  assert.equal(wp!.kind, "grep");
+  assert.deepEqual(wp!.args, ["-rn", "--", "TODO", "test/foo.test.ts"]);
+});
+
+test("parseWhitelistedProof: an unsafe dialect body is refused OUTRIGHT — never falls through to a legacy shape that matches a different substring of the same text", () => {
+  // The ';' makes the dialect body unsafe; the same raw string also contains a
+  // literal test-file path substring the OLD (pre-fix) fallthrough would have
+  // picked up and silently executed instead of refusing.
+  assert.equal(parseWhitelistedProof("unit test: test/foo.test.ts; rm -rf /"), null);
+});
+
+test("parseWhitelistedProof: house-dialect 'unit test: <name>' (not a path) compiles to a name-filtered test shape", () => {
+  const wp = parseWhitelistedProof("unit test: exclusive-create EEXIST falls through to read");
+  assert.ok(wp);
+  assert.equal(wp!.kind, "test");
+  assert.deepEqual(wp!.args, [
+    "--test",
+    "--import",
+    "tsx",
+    "--test-name-pattern",
+    "exclusive-create EEXIST falls through to read",
+    "test/**/*.test.ts",
+  ]);
+});
+
+test("parseWhitelistedProof: house-dialect 'unit test: <path>' reuses the exact-file shape verbatim", () => {
+  const wp = parseWhitelistedProof("unit test: test/foo.test.ts");
+  assert.ok(wp);
+  assert.deepEqual(wp!.args, ["--test", "--import", "tsx", "test/foo.test.ts"]);
+});
+
+test("parseWhitelistedProof: a dialect grep with shell metacharacters is REFUSED (null), not sanitized", () => {
+  assert.equal(parseWhitelistedProof("grep: foo; rm -rf / in src/lib/config.ts"), null);
+  assert.equal(parseWhitelistedProof("grep: $(whoami)"), null);
+});
+
+test("parseWhitelistedProof: a dialect unit-test name with shell metacharacters is REFUSED (null)", () => {
+  assert.equal(parseWhitelistedProof("unit test: $(whoami)"), null);
+  assert.equal(parseWhitelistedProof("unit test: foo; rm -rf /"), null);
+});
+
+test("parseWhitelistedProof: a dialect test path with '..' is refused (no traversal out of the checkout)", () => {
+  assert.equal(parseWhitelistedProof("unit test: test/../../etc/evil.test.ts"), null);
+});
+
+test("ACCEPTANCE (W1-T72 #1): a house-dialect grep proof EXECUTES (proof_exec != not_executable)", () => {
+  const alwaysPass: ProofExecutor = () => "pass";
+  const criteria: AcceptanceCriterion[] = [
+    { claim: "the wx flag is present", proof: "grep: wx flag present in src/lib/config.ts" },
+  ];
+  const v = judgeReview(criteria, {
+    diff: "",
+    report: "unrelated",
+    headCheckoutDir: "/fake/head/checkout",
+    execProof: alwaysPass,
+  });
+  assert.equal(v.criteria[0].proof_exec, "executed_pass");
+  assert.notEqual(v.criteria[0].proof_exec, "not_executable");
+});
+
+test("ACCEPTANCE (W1-T72 #2): a house-dialect unit-test proof EXECUTES via the injected runner", () => {
+  const alwaysPass: ProofExecutor = () => "pass";
+  const criteria: AcceptanceCriterion[] = [
+    {
+      claim: "exclusive-create falls through on EEXIST",
+      proof: "unit test: exclusive-create EEXIST falls through to read",
+    },
+  ];
+  const v = judgeReview(criteria, {
+    diff: "",
+    report: "unrelated",
+    headCheckoutDir: "/fake/head/checkout",
+    execProof: alwaysPass,
+  });
+  assert.equal(v.criteria[0].proof_exec, "executed_pass");
+});
+
+test("ACCEPTANCE (W1-T72 safety): a dialect-prefixed proof with shell metacharacters is not_executable and the executor is NEVER called", () => {
+  const neverCalled: ProofExecutor = () => {
+    throw new Error("must never be called for an unsafe dialect proof");
+  };
+  const criteria: AcceptanceCriterion[] = [
+    { claim: "no injection possible", proof: "grep: foo; rm -rf / in src/lib/config.ts" },
+  ];
+  const v = judgeReview(criteria, {
+    diff: "",
+    report: "grep: foo; rm -rf / in src/lib/config.ts",
+    headCheckoutDir: "/fake/head/checkout",
+    execProof: neverCalled,
+  });
+  assert.equal(v.criteria[0].proof_exec, "not_executable");
+});
+
+// ── W1-T72 (i): floorDegraded — LOUD when execution fell back to keywords on
+// EVERY criterion while at least one proof was WRITTEN to be runnable.
+
+test("isDialectPrefixed: recognizes the two house-dialect labels, not incidental prose", () => {
+  assert.equal(isDialectPrefixed("grep: O_EXCL in src/lib/x.ts"), true);
+  assert.equal(isDialectPrefixed("unit test: some test name"), true);
+  assert.equal(isDialectPrefixed("a grep of src shows the pattern"), false);
+  assert.equal(isDialectPrefixed("the resolver returns max_turns per mount"), false);
+});
+
+test("ACCEPTANCE (W1-T72 #3): a pure-prose proof stays keyword-only and is LEGIBLE as unexecuted", () => {
+  const v = judgeReview([{ claim: "the widget is frobnicated", proof: "the widget frobnicates on load" }], {
+    diff: "",
+    report: "unrelated",
+  });
+  assert.equal(v.criteria[0].proof_exec, "not_executable");
+});
+
+test("ACCEPTANCE (W1-T72 #3): zero executed overall + >=1 dialect-prefixed proof -> floorDegraded true, and the console annotation is available", () => {
+  const criteria: AcceptanceCriterion[] = [
+    { claim: "a", proof: "the widget frobnicates on load" }, // pure prose — legitimately unexecuted
+    { claim: "b", proof: "grep: frobnicate in src/lib/widget.ts" }, // dialect-prefixed, but no headCheckoutDir here
+  ];
+  const v = judgeReview(criteria, { diff: "", report: "unrelated" }); // no headCheckoutDir/execProof at all
+  assert.ok(v.criteria.every((c) => c.proof_exec === "not_executable"));
+  assert.equal(v.floorDegraded, true);
+  assert.match(floorDegradedAnnotation(v.criteria.length), /FLOOR DEGRADED/);
+  assert.match(floorDegradedAnnotation(v.criteria.length), /0\/2/);
+});
+
+test("ACCEPTANCE (W1-T72 #4): a fully-observed review (N/N executed) is NOT flagged — shipped W1-T65 semantics unchanged", () => {
+  const alwaysPass: ProofExecutor = () => "pass";
+  const criteria: AcceptanceCriterion[] = [{ claim: "x", proof: "grep: frobnicate in src/lib/widget.ts" }];
+  const v = judgeReview(criteria, {
+    diff: "",
+    report: "unrelated",
+    headCheckoutDir: "/fake/head/checkout",
+    execProof: alwaysPass,
+  });
+  assert.equal(v.floorDegraded, false);
+});
+
+test("W1-T72: executed_fail (a genuinely observed FAIL) still overrides keyword coverage AND is not flagged degraded", () => {
+  const alwaysFail: ProofExecutor = () => "fail";
+  const v = judgeReview(W1T51_CRITERIA, {
+    diff: "",
+    report: W1T51_CLAIMING_REPORT,
+    headCheckoutDir: "/fake/head/checkout",
+    execProof: alwaysFail,
+  });
+  assert.equal(v.criteria[0].proof_exec, "executed_fail");
+  assert.equal(v.criteria[0].met, false); // W1-T65 semantics: unaffected by this task
+  assert.equal(v.floorDegraded, false); // something WAS observed (a fail) — not a degraded floor
+});
+
+test("W1-T72: empty criteria list has floorDegraded=false (nothing to flag)", () => {
+  const v = judgeReview([], { diff: "", report: "" });
+  assert.equal(v.floorDegraded, false);
+});
+
+test("W1-T72: a satisfied_by criterion's dialect-looking proof does not itself trigger floorDegraded", () => {
+  const criteria: AcceptanceCriterion[] = [
+    { claim: "already shipped", proof: "grep: something in src/lib/x.ts", satisfied_by: "#16" },
+  ];
+  const v = judgeReview(criteria, { diff: "", report: "" });
+  assert.equal(v.criteria[0].proof_exec, "not_executable");
+  assert.equal(v.floorDegraded, false);
 });
