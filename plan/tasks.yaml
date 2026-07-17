@@ -4110,3 +4110,35 @@
   files: [src/run-task.ts, src/lib/worker.ts]
   status: queued
   attempts: 0
+
+- id: W1-T95
+  title: "rmd fix <pr> — the operator verb for the fix rung (bootstrap/manual-override; the sweep cannot sweep itself into existence)"
+  repo: remudero
+  depends_on: [W1-T76]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "PROVEN GAP (operator thread): the fix rung is drive-only (drain/sweep invoke it; no operator
+    verb), so a block on the sweep ITSELF (#160 — the driver was the blocked PR) had no automated driver
+    and was hand-fixed. The bootstrap class, again: the machinery that heals blocks cannot heal a block
+    on its own delivery. rmd fix <pr> invokes the rung directly — the same rung, same mode derivation
+    (W1-T94 when present), same amend-run-branch discipline, same strike accounting — making #160-shaped
+    incidents a one-liner."
+  design: |
+    CLI: rmd fix <pr-number> — resolves the PR's task + block evidence, invokes the EXISTING rung (one
+    implementation, third caller after drain/sweep; grep-provable no duplicated dispatch logic). Refuses
+    with a stated reason when the PR is not in a fixable state (merged, closed, or no block evidence).
+    Strike caps honored — rmd fix does not bypass exhaustion; an exhausted PR gets the escalate/
+    clarification route with the count named.
+  acceptance:
+    - claim: "rmd fix on a blocked fixture dispatches the rung identically to the drain path"
+      proof: "unit test: same spawn args/prompt as the drain-invoked fixture (one rung, three callers); grep: no duplicated fix-dispatch logic"
+    - claim: "non-fixable states refuse with reasons; strike exhaustion is honored"
+      proof: "unit tests: merged/closed/no-evidence fixtures -> refusal naming the state, zero spawns; strikes-at-cap fixture -> escalate route, no spawn"
+  risk: medium
+  origin: architect
+  plan_refs: ["P22", "§3"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
