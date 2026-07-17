@@ -105,6 +105,16 @@ export interface DaemonDeps {
   sleep: (ms: number) => Promise<void>;
   /** One ledger line per tick/task/terminal reason (reuses run-task's ledger). */
   log?: (step: string, extra?: Record<string, unknown>) => void;
+  /**
+   * The level-triggered PR-pipeline reconciler (W1-T77, ratifies P22 core): the
+   * SAME `runSweep` entry point `rmd sweep` invokes, wired here so it runs once
+   * per poll iteration — every open PR is re-derived to a disposition and its
+   * gated action taken, deduped for idempotence. Optional: omitted ⇒ the loop
+   * behaves exactly as before the reconciler existed. Best-effort by contract
+   * (the real wiring swallows its own errors) so a sweep hiccup never halts the
+   * scheduler. Called alongside dispatch, NOT a replacement for it.
+   */
+  sweep?: () => Promise<void> | void;
 }
 
 /**
@@ -174,6 +184,13 @@ export async function runDaemon(
     }
 
     const isMerged = deps.refreshMerged();
+
+    // LEVEL-TRIGGERED PR-PIPELINE RECONCILER (W1-T77, ratifies P22 core): once
+    // per iteration, re-derive every open PR's disposition and take its gated
+    // action. Runs alongside dispatch (not instead of it): dispatch opens NEW
+    // work, the sweep reconciles the OPEN PRs already in flight so none strands
+    // open-and-orphaned (the #111/#113/#123 class). Best-effort by contract.
+    if (deps.sweep) await deps.sweep();
 
     // HEADROOM: never hammer a nearly-exhausted pool. Best-effort — an unreadable
     // /usage does not halt the daemon; an at/near-limit reading DOES, with the

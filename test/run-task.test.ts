@@ -708,9 +708,14 @@ test("runFixRung: a CI regression after a fix attempt does not stall the rung �
 // ── Wiring: ONE call site, both entry points (drain + manual `rmd run-task`
 // both call the SAME `runTask`, so there is exactly one place to gate) ──────
 
-test("runFixRung is called from exactly ONE site in runTask's blocked_review branch — one rung, one implementation, no duplicated fix-dispatch logic", () => {
+test("runFixRung is REUSED, never reimplemented — one dispatch from runTask's blocked_review branch, one from the W1-T77 sweep real-wiring; no duplicated fix-dispatch logic", () => {
   const dispatchSites = runTaskSrc.match(/await runFixRung\(/g) ?? [];
-  assert.equal(dispatchSites.length, 1, "runFixRung must be dispatched from exactly one call site");
+  // Two CALL sites, ONE implementation: (1) runTask's blocked_review branch (the
+  // live-run path — drain + manual `rmd run-task` both reach it via the SAME
+  // runTask), and (2) the W1-T77 level-triggered sweep's real wiring, which
+  // reconciles a PR discovered COLD by REUSING runFixRung (the sanctioned design:
+  // "only CALL it, NOT reimplement"). Neither duplicates the rung's logic.
+  assert.equal(dispatchSites.length, 2, "runFixRung must be REUSED (called), never reimplemented");
   // runTask itself is defined exactly once — the drain path (runOne) and the
   // manual CLI path both call this SAME function, so the one dispatch site
   // above already covers both entry points; grep confirms no second runTask.
