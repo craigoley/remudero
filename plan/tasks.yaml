@@ -4028,3 +4028,42 @@
   attempts: 0
   note: "Filed from the #153 worker's flag; companion to W1-T81 (recall+negation) — together they make
     whole-plan lint counts trustworthy."
+
+- id: W1-T93
+  title: "Sweep dispositions incorporate CI state — a CI-red PR is NEVER mergeable, and the terminal catch-all is escalate, not arm (the #161 hole)"
+  repo: remudero
+  depends_on: [W1-T77]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE DEFECT (operator thread, 2026-07-17): W1-T25/#161 verdicted blocked_ci (review SKIPPED,
+    run-task.ts:1639-1648), and rmd sweep --dry-run dispositioned it MERGEABLE — every block rule keys on
+    the review failure verdict, a review-skipped PR matches none, and the terminal when:()=>true row is
+    the MERGEABLE catch-all. A live sweep would ARM a CI-red PR: protected from actual merge by
+    required-CI, so it stalls armed — never fixed, never escalated, invisible. The no-disposition=none
+    invariant was made structural via the MOST permissive default; the safe inversion: the catch-all is
+    the LEAST permissive disposition, and CI state is a first-class predicate input."
+  design: |
+    (i) OpenPrView gains ci state (green|red|pending — from the PR's required check contexts, one read).
+    (ii) The MERGEABLE rule requires ci=green AND review=success explicitly (the P22 spec's own words:
+    'required contexts green, review success, unmerged'). (iii) blocked_ci-shaped PRs (ci=red, no review
+    verdict) route to blocked-fixable ONCE the fix rung accepts CI-log input (W1-T94) — until that lands,
+    they route to ESCALATE with the CI state named (never silent, never armed). (iv) The terminal
+    catch-all row becomes blocked-ambiguous/escalate; mergeable is only ever POSITIVELY matched. All
+    table edits, no new code branches (the DISPOSITION_RULES shape preserved).
+  acceptance:
+    - claim: "the #161 fixture (ci red, review skipped) is dispositioned escalate (or blocked-fixable once W1-T94 lands), NEVER mergeable"
+      proof: "unit test: the seeded blocked_ci PR state -> disposition != mergeable; the reason names ci=red"
+    - claim: "mergeable requires positive ci-green + review-success"
+      proof: "unit tests: {ci green + review success} -> mergeable; {ci pending + review success} -> not mergeable; {ci green, review failure} -> blocked-fixable (unchanged)"
+    - claim: "the catch-all is escalate-shaped and the none-invariant still holds"
+      proof: "unit test: a synthetic PR state matching no positive rule -> escalate with a stated reason; disposition-none count remains structurally zero"
+  risk: high
+  origin: architect
+  plan_refs: ["P22", "§5D"]
+  files: [src/lib/sweep.ts]
+  status: queued
+  attempts: 0
+  note: "Operator holds the live sweep until this lands (their call, correct). The dry-run's
+    'mergeable 1' on #161 is the canonical fixture."
