@@ -3912,3 +3912,40 @@
     retroactive-coding change to the retro read path is genuinely wider than a single-file medium task;
     the mapping and its reader are co-designed and inseparable, so decompose is wrong — raise-to-high is
     the accurate rating and the linter's sanctioned resolution."
+
+- id: W1-T90
+  title: "The alert-fix lane — policy-gated autofix rung for §5D lane 2, dep-lane precedent (ratifies P20)"
+  repo: remudero
+  depends_on: [W1-T55]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P20. Lane 2 ends at 'triage PROPOSES'; every alert then waits on a human, including
+    trivial ones. The dep lane (W1-T54, SHIPPED) is the precedent: a deterministic policy decides
+    act-vs-escalate with no per-item plan task and no per-item ratification. Same split here: the lane
+    consumes W1-T55's alert polling, dispatches ephemeral gated fix runs for policy-matched alerts, and
+    NEVER writes tasks.yaml (rule 15 — the lane owns its run shape like dep-review does)."
+  design: |
+    plan/alert-policy.yaml (data, rule 2): (severity x path-class x tool) -> act | escalate. severity<=
+    medium AND path outside the gate/containment-critical set (the policy file names it: review, gate,
+    containment, ledger, status paths are IN it) -> dispatch ONE ephemeral lane-owned fix run through the
+    FULL [ci, remudero-review] gate with origin alert#<id> provenance + standard trailer/ownership
+    discipline; critical/high OR gate-cutting path -> escalate needs-human (W1-T55's rung). Dedup: an
+    alert with an open lane PR or a prior lane attempt is never re-dispatched (the W1-T80 discipline,
+    lane-side). Every act/escalate decision is a ledger line.
+  acceptance:
+    - claim: "a seeded medium alert on a non-critical path dispatches exactly ONE lane run; re-poll dispatches no duplicate"
+      proof: "unit test over injected deps: one spawn with alert provenance; second poll over unchanged alerts -> zero spawns"
+    - claim: "a seeded critical, and a seeded medium touching a policy-named critical path, each escalate and dispatch NOTHING"
+      proof: "unit tests: both fixtures -> escalate() invoked, zero spawns"
+    - claim: "the lane never writes the plan; policy is data"
+      proof: "grep: no tasks.yaml writes in the lane; unit test: a policy-row edit flips a fixture alert's disposition with zero lane-code changes"
+  risk: high
+  origin: architect
+  plan_refs: ["P20", "§5D"]
+  files: [src/lib/alert-lane.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Dispatch-gated on W1-T55 (the poller) by depends_on — files now, builds when the surface exists.
+    OOTB: lane + policy ship in the WS-4 scaffold per P20."
