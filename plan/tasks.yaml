@@ -4295,4 +4295,8 @@
   files: [src/lib/sweep.ts, src/run-task.ts]
   status: queued
   attempts: 0
-  note: "Until built, rmd fix <pr> (W1-T95) is the operator bridge for blocked_ci — proven live on #170."
+  note: "CORRECTED 2026-07-17: the original note claimed rmd fix (W1-T95) bridges blocked_ci — FALSIFIED
+    live the same day, verbatim: 'rmd fix — PR #170 is not fixable: ... (no block evidence to drive the
+    rung). No spawn.' T95's evidence resolver is reviewer-shaped until this task's (ii) generalizes it;
+    blocked_ci has NO bridge until this task builds. The honest interim was building this task first and
+    letting the sweep heal #170 — which is what happened."
