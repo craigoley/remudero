@@ -10,6 +10,8 @@ import {
   GitFetchError,
   checkPrOwnership,
   commitsAhead,
+  deriveFixMode,
+  FIX_MODE_RULES,
   isTransientResult,
   renderFixPrompt,
   resolveReviewTarget,
@@ -21,6 +23,7 @@ import {
   noPrVerdict,
   softBudgetWarning,
   workerErrorVerdict,
+  type FixEvidence,
   type PrHeadGateway,
 } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
@@ -487,13 +490,17 @@ function fakeIssues(calls: Array<{ title: string; body: string; labels: string[]
 test("renderFixPrompt: renders the FULL unmet set at once — both criteria + both reviewer reasons, never one at a time", () => {
   const prompt = renderFixPrompt({
     task: { id: "W1-TX", title: "Some task" },
-    unmetCriteria: [
-      criterion({ claim: "criterion A merges cleanly", proof: "proof A", met: false, reason: "reason-A-missing" }),
-      criterion({ claim: "criterion B has a test", proof: "proof B", met: false, reason: "reason-B-missing" }),
-    ],
-    summary: "remudero-review: FAIL — 2 criteria unmet",
     round: 1,
     branch: "run-W1-TX-1730000000000",
+    evidence: {
+      review: {
+        unmetCriteria: [
+          criterion({ claim: "criterion A merges cleanly", proof: "proof A", met: false, reason: "reason-A-missing" }),
+          criterion({ claim: "criterion B has a test", proof: "proof B", met: false, reason: "reason-B-missing" }),
+        ],
+        summary: "remudero-review: FAIL — 2 criteria unmet",
+      },
+    },
   });
   assert.match(prompt, /criterion A merges cleanly/);
   assert.match(prompt, /reason-A-missing/);
@@ -502,6 +509,7 @@ test("renderFixPrompt: renders the FULL unmet set at once — both criteria + bo
   assert.match(prompt, /run-W1-TX-1730000000000/);
   assert.match(prompt, /do NOT open a new PR/i);
   assert.match(prompt, /fix\/\*/, "must explicitly warn off a fix/* branch — only a run-<taskId>-<epochMs> head is creditable");
+  assert.match(prompt, /MODE: reviewer-unmet/, "the rendered prompt names its derived mode");
 });
 
 test("renderFixPrompt: a testTheater/noCriteria failure (EMPTY unmetCriteria) still carries the review's summary — never an empty, unexplained prompt", () => {
@@ -510,12 +518,133 @@ test("renderFixPrompt: a testTheater/noCriteria failure (EMPTY unmetCriteria) st
   // the fix worker must still learn WHY the gate is red.
   const prompt = renderFixPrompt({
     task: { id: "W1-TX", title: "Some task" },
-    unmetCriteria: [],
-    summary: "remudero-review: FAIL — test theater detected (assertion-free tests)",
     round: 1,
     branch: "run-W1-TX-1730000000000",
+    evidence: {
+      review: { unmetCriteria: [], summary: "remudero-review: FAIL — test theater detected (assertion-free tests)" },
+    },
   });
   assert.match(prompt, /test theater detected/);
+});
+
+// ── W1-T94: the fix-rung failure-mode taxonomy — MODE derives deterministically
+// from the block evidence (a table, never an if/else chain); the rendered
+// prompt names its mode and carries ONLY that mode's inputs. ────────────────
+
+test("deriveFixMode: a reviewer failure verdict + unmet set (no coverage-only reasons) derives reviewer-unmet", () => {
+  const evidence: FixEvidence = {
+    review: {
+      unmetCriteria: [criterion({ claim: "criterion A", met: false, reason: "executed and failed: assertion mismatch" })],
+      summary: "remudero-review: FAIL",
+    },
+  };
+  assert.equal(deriveFixMode(evidence), "reviewer-unmet");
+});
+
+test("deriveFixMode: a 'matched N/M proof keywords' coverage reason with no executed_fail derives body-coverage", () => {
+  const evidence: FixEvidence = {
+    review: {
+      unmetCriteria: [
+        criterion({
+          claim: "criterion A is documented",
+          met: false,
+          reason: "proof unmet: report does not substantiate it (matched 4/12 proof keywords)",
+        }),
+      ],
+      summary: "remudero-review: FAIL",
+    },
+  };
+  assert.equal(deriveFixMode(evidence), "body-coverage");
+});
+
+test("deriveFixMode: an OBSERVED executed_fail is NEVER body-coverage, even alongside a keyword-coverage reason elsewhere — real code broke", () => {
+  const evidence: FixEvidence = {
+    review: {
+      unmetCriteria: [
+        criterion({
+          claim: "criterion A is documented",
+          met: false,
+          reason: "proof unmet: report does not substantiate it (matched 4/12 proof keywords)",
+        }),
+        criterion({ claim: "criterion B runs", met: false, reason: "executed and failed", proof_exec: "executed_fail" }),
+      ],
+      summary: "remudero-review: FAIL",
+    },
+  };
+  assert.equal(deriveFixMode(evidence), "reviewer-unmet");
+});
+
+test("deriveFixMode: blocked_ci with no review verdict at all derives ci-log", () => {
+  const evidence: FixEvidence = { ciFailures: [{ name: "ci", logTail: "tsc: error TS2322 …" }] };
+  assert.equal(deriveFixMode(evidence), "ci-log");
+});
+
+test("renderFixPrompt: the three mode fixtures each render a mode-named prompt carrying ONLY that mode's inputs", () => {
+  const reviewerUnmet = renderFixPrompt({
+    task: { id: "W1-TX", title: "T" },
+    round: 1,
+    branch: "run-W1-TX-1",
+    evidence: {
+      review: {
+        unmetCriteria: [criterion({ claim: "crit-reviewer", met: false, reason: "executed and failed" })],
+        summary: "s",
+      },
+    },
+  });
+  assert.match(reviewerUnmet, /MODE: reviewer-unmet/);
+  assert.match(reviewerUnmet, /crit-reviewer/);
+  assert.doesNotMatch(reviewerUnmet, /PR BODY's Acceptance block/, "reviewer-unmet must not carry body-coverage's instruction");
+  assert.doesNotMatch(reviewerUnmet, /making CI GREEN/, "reviewer-unmet must not carry ci-log's instruction");
+
+  const bodyCoverage = renderFixPrompt({
+    task: { id: "W1-TX", title: "T" },
+    round: 1,
+    branch: "run-W1-TX-1",
+    evidence: {
+      review: {
+        unmetCriteria: [
+          criterion({ claim: "crit-coverage", met: false, reason: "proof unmet (matched 4/12 proof keywords)" }),
+        ],
+        summary: "s",
+      },
+    },
+  });
+  assert.match(bodyCoverage, /MODE: body-coverage/);
+  assert.match(bodyCoverage, /crit-coverage/);
+  assert.match(bodyCoverage, /PR BODY's Acceptance block/i, "body-coverage states the body-first, code-only-if-false instruction");
+  assert.match(bodyCoverage, /code ONLY if the body's claim would actually\s+be FALSE/i);
+  assert.doesNotMatch(bodyCoverage, /making CI GREEN/, "body-coverage must not carry ci-log's instruction");
+
+  const ciLog = renderFixPrompt({
+    task: { id: "W1-TX", title: "T" },
+    round: 1,
+    branch: "run-W1-TX-1",
+    evidence: { ciFailures: [{ name: "test", logTail: "AssertionError: expected 1 to equal 2" }] },
+  });
+  assert.match(ciLog, /MODE: ci-log/);
+  assert.match(ciLog, /check: test/);
+  assert.match(ciLog, /AssertionError: expected 1 to equal 2/);
+  assert.match(ciLog, /making CI GREEN/i, "ci-log states the target is making CI green on the same branch");
+  assert.doesNotMatch(ciLog, /PR BODY's Acceptance block/, "ci-log must not carry body-coverage's instruction");
+  assert.doesNotMatch(ciLog, /crit-reviewer|crit-coverage/, "ci-log must not carry any review-mode criteria");
+});
+
+test("FIX_MODE_RULES: adding a table row for a new evidence shape derives a new mode with ZERO change to deriveFixMode", () => {
+  // Policy-as-data (rule 2), mirroring sweep.ts's DISPOSITION_RULES/policy param:
+  // a caller-supplied rules table (never a code branch) picks the mode.
+  const withDesignConformanceRow = [
+    { mode: "design-conformance", when: (e: FixEvidence) => (e as { designNote?: string }).designNote === "off-design" },
+    ...FIX_MODE_RULES,
+  ];
+  const evidence = {
+    review: { unmetCriteria: [], summary: "s" }, // review present -> not the ci-log shape
+    designNote: "off-design",
+  } as unknown as FixEvidence;
+  assert.equal(deriveFixMode(evidence, withDesignConformanceRow), "design-conformance");
+  // The SAME evidence with the stock table (no new row) falls through to the
+  // terminal reviewer-unmet default — proving the new mode came from the row,
+  // not from any change inside deriveFixMode.
+  assert.equal(deriveFixMode(evidence), "reviewer-unmet");
 });
 
 test("runFixRung: a seeded blocked_review with TWO unmet criteria dispatches ONE fix worker receiving BOTH + the reviewer reasons (P21's golden, verbatim)", async () => {

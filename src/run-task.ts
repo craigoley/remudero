@@ -631,49 +631,190 @@ async function runReview(args: {
 // single branch — exactly what this rung automates.
 // ────────────────────────────────────────────────────────────────────────────
 
+// ── FIX-RUNG FAILURE-MODE TAXONOMY (W1-T94, W1-T76 follow-up) ────────────────
+//
+// GROUND TRUTH this taxonomy fixes: the rung's ONE prompt shape assumed every
+// block was a reviewer-computed unmet set. Two live proofs said otherwise: (1)
+// the Architect's own #157 mis-diagnosis read source WITHOUT the verbatim
+// failure signal and produced a confidently-wrong code fix for what was really
+// a PROOF-KEYWORD COVERAGE gap (the report just never mentioned the proof) —
+// an automated fix worker with the same blindness thrashes the same way, at
+// machine speed; (2) `blocked_ci` carries NO reviewer unmet-criteria at all —
+// the failing signal IS the CI log — so the old single-shape prompt has
+// nothing to render for it. MODE is derived DETERMINISTICALLY from the block
+// evidence (policy-as-data, rule 2 — a table, mirroring sweep.ts's
+// DISPOSITION_RULES), never an LLM classification and never an if/else chain:
+// adding proof_exec-executed_fail or design-conformance later is a ROW in
+// {@link FIX_MODE_RULES}, never a change to {@link deriveFixMode}'s loop.
+// FLOOR-DEGRADED HONESTY (the #157 finding): "FLOOR DEGRADED: 0/N" on a
+// PASSING review is W1-T72 working as designed — it is never a mode input and
+// never a dispatch trigger here.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** One failing required CI check's name + the tail of its log — the `ci-log` mode's only input. */
+export interface CiFailure {
+  name: string;
+  logTail: string;
+}
+
+/** The three known fix-rung failure modes. See the taxonomy note above. */
+export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | (string & {});
+
 /**
- * Render the fix worker's prompt: the FULL unmet acceptance criteria + the
- * reviewer's verbatim reasons, ALL AT ONCE — the anti-ping-pong invariant
- * (P21's golden, absorbed verbatim). Never a narrowed, one-criterion prompt;
- * both `resume` (round 1) and `fresh` (round 2+) rounds get the identical
- * full-set framing.
+ * The block evidence a fix dispatch derives its MODE from. Exactly one shape
+ * is populated by any real caller today: `review` for a `blocked_review`
+ * verdict (reviewer-unmet / body-coverage — the rung's live callers), `review`
+ * left `undefined` for a bare `blocked_ci` block with no review verdict at all
+ * (ci-log — a future caller; the sweep's own module doc names this task as its
+ * prerequisite). `ciFailures` carries the ci-log mode's input either way.
+ */
+export interface FixEvidence {
+  review?: { unmetCriteria: CriterionVerdict[]; summary: string };
+  ciFailures?: CiFailure[];
+}
+
+interface FixModeRule {
+  readonly mode: FixMode;
+  readonly when: (e: FixEvidence) => boolean;
+}
+
+/**
+ * THE MODE TABLE (policy-as-data, rule 2). Precedence is table order (first
+ * match wins); the terminal row (`reviewer-unmet`) matches unconditionally, so
+ * a mode is ALWAYS derived — no undispatched evidence shape.
  *
- * `summary` is the review's overall one-line verdict — ALWAYS included. A
- * review can fail with an EMPTY `unmetCriteria` (judgeReview: `testTheater` or
- * `noCriteria` alone fails the state even when every named criterion is met);
- * the summary is what keeps the prompt from going out with nothing to act on.
+ *   1. ci-log         — no review verdict at all (`review` undefined): the
+ *                        failing signal IS the CI log, never a reviewer verdict.
+ *   2. body-coverage   — every unmet criterion's reason is a keyword-coverage
+ *                        gap ("matched N/M proof keywords") and NONE was an
+ *                        OBSERVED `executed_fail` (an actual failed run always
+ *                        means real code broke — never treat that as body-only,
+ *                        the #157/#143 lesson).
+ *   3. reviewer-unmet  — the default: a real reviewer-computed unmet set
+ *                        (W1-T76, unchanged).
+ */
+export const FIX_MODE_RULES: readonly FixModeRule[] = [
+  {
+    mode: "ci-log",
+    when: (e) => e.review === undefined,
+  },
+  {
+    mode: "body-coverage",
+    when: (e) => {
+      const unmet = e.review?.unmetCriteria ?? [];
+      return (
+        unmet.length > 0 &&
+        unmet.every((c) => /matched \d+\/\d+ proof keywords/.test(c.reason)) &&
+        !unmet.some((c) => c.proof_exec === "executed_fail")
+      );
+    },
+  },
+  {
+    mode: "reviewer-unmet",
+    when: () => true,
+  },
+];
+
+/**
+ * Derive the fix mode from block evidence — pure, total, table-driven (rule
+ * 2). `rules` is injectable (mirrors `deriveDisposition`'s `policy` param in
+ * sweep.ts) so a test can prove a NEW table row derives a NEW mode with zero
+ * change to this function.
+ */
+export function deriveFixMode(evidence: FixEvidence, rules: readonly FixModeRule[] = FIX_MODE_RULES): FixMode {
+  const rule = rules.find((r) => r.when(evidence));
+  return rule ? rule.mode : "reviewer-unmet";
+}
+
+/**
+ * Render the fix worker's prompt. The prompt NAMES its derived MODE and
+ * carries ONLY that mode's inputs — never a mix, never the other modes'
+ * fields. `reviewer-unmet` and `body-coverage` both come from `evidence.review`
+ * (the FULL unmet acceptance criteria + the reviewer's verbatim reasons, ALL AT
+ * ONCE — the anti-ping-pong invariant, P21's golden, absorbed verbatim; never a
+ * narrowed, one-criterion prompt). `ci-log` comes from `evidence.ciFailures`
+ * instead — the failing check names + log tails, with no review-shaped input
+ * at all. Both `resume` (round 1) and `fresh` (round 2+) rounds get the
+ * identical full-set framing for their mode.
+ *
+ * A review can fail with an EMPTY `unmetCriteria` (judgeReview: `testTheater`
+ * or `noCriteria` alone fails the state even when every named criterion is
+ * met); `evidence.review.summary` is what keeps the prompt from going out with
+ * nothing to act on in that case.
  */
 export function renderFixPrompt(opts: {
   task: { id: string; title: string };
-  unmetCriteria: CriterionVerdict[];
-  summary: string;
   round: number;
   branch: string;
+  evidence: FixEvidence;
 }): string {
-  const n = opts.unmetCriteria.length;
-  const list =
-    n > 0
-      ? opts.unmetCriteria
-          .map(
-            (c, i) =>
-              `${i + 1}. claim: ${c.claim}\n   proof required: ${c.proof}\n   reviewer verdict: UNMET — ${c.reason}`,
-          )
-          .join("\n")
-      : `(no single criterion is unmet — the review floor's overall verdict is: ${opts.summary})`;
-  return [
-    `You are a FIX worker for task ${opts.task.id} (${opts.task.title}) — round ${opts.round}.`,
-    `The review gate is FAILING (${n} UNMET acceptance criterion${n === 1 ? "" : "a"}). Resolve ALL`,
-    `of them together in this ONE pass — never fix one and leave another; patching one criterion`,
-    `at a time is exactly what causes an infinite ping-pong across review rounds. Review summary:`,
-    `${opts.summary}`,
-    "",
-    list,
+  const mode = deriveFixMode(opts.evidence);
+  const header = `You are a FIX worker for task ${opts.task.id} (${opts.task.title}) — round ${opts.round}.\nMODE: ${mode}.`;
+  const footer = [
     "",
     `Amend the SAME branch (${opts.branch}) — do NOT open a new PR and do NOT create a fix/*`,
     `branch (only a run-<taskId>-<epochMs> head is creditable). \`git push origin HEAD\` (no`,
     `-u) when done — never force-push. Your PR body must substantiate EVERY task acceptance`,
     `criterion, not only the ones fixed here — the review floor judges the body against the`,
     `FULL criteria set. End with a REPORT whose last line is exactly: PR_URL: <url>`,
+  ];
+
+  if (mode === "ci-log") {
+    const failures = opts.evidence.ciFailures ?? [];
+    const rendered =
+      failures.length > 0
+        ? failures.map((f, i) => `${i + 1}. check: ${f.name}\n   log tail:\n${f.logTail}`).join("\n\n")
+        : "(no failing check detail was captured — re-check `gh pr checks` for the current state.)";
+    return [
+      header,
+      `Required CI check(s) are FAILING and NO review has run yet (a review needs green CI`,
+      `first) — the failing signal here IS the CI log, not a reviewer verdict. Your target is`,
+      `making CI GREEN on the SAME branch; do not expand scope beyond what the failing`,
+      `check(s) below require.`,
+      "",
+      rendered,
+      ...footer,
+    ].join("\n");
+  }
+
+  const unmet = opts.evidence.review?.unmetCriteria ?? [];
+  const summary = opts.evidence.review?.summary ?? "";
+  const n = unmet.length;
+  const list =
+    n > 0
+      ? unmet
+          .map(
+            (c, i) =>
+              `${i + 1}. claim: ${c.claim}\n   proof required: ${c.proof}\n   reviewer verdict: UNMET — ${c.reason}`,
+          )
+          .join("\n")
+      : `(no single criterion is unmet — the review floor's overall verdict is: ${summary})`;
+
+  if (mode === "body-coverage") {
+    return [
+      header,
+      `The review gate is FAILING on ${n} unmet acceptance criteri${n === 1 ? "on" : "a"} whose reviewer`,
+      `reason is a PROOF-KEYWORD COVERAGE gap — the report text never mentions the proof, this is`,
+      `NOT an executed failure. The likely fix is the PR BODY's Acceptance block: add the`,
+      `missing substantiation there FIRST. Change code ONLY if the body's claim would actually`,
+      `be FALSE — never patch code just to satisfy keywords (the #157/#143 lesson). Review`,
+      `summary: ${summary}`,
+      "",
+      list,
+      ...footer,
+    ].join("\n");
+  }
+
+  // reviewer-unmet (default, W1-T76 unchanged).
+  return [
+    header,
+    `The review gate is FAILING (${n} UNMET acceptance criterion${n === 1 ? "" : "a"}). Resolve ALL`,
+    `of them together in this ONE pass — never fix one and leave another; patching one criterion`,
+    `at a time is exactly what causes an infinite ping-pong across review rounds. Review summary:`,
+    `${summary}`,
+    "",
+    list,
+    ...footer,
   ].join("\n");
 }
 
@@ -753,10 +894,9 @@ export async function runFixRung(opts: {
     const unmet = review.criteria.filter((c) => !c.met);
     const prompt = renderFixPrompt({
       task: opts.task,
-      unmetCriteria: unmet,
-      summary: review.summary,
       round: strikes,
       branch: opts.branch,
+      evidence: { review: { unmetCriteria: unmet, summary: review.summary } },
     });
     deps.log("fix.dispatch", { strike: strikes, strike_cap: opts.strikeCap, unmet_count: unmet.length, round });
     deps.say(
