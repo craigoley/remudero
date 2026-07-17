@@ -4258,3 +4258,41 @@
   files: [src/lib/escalate.ts, src/lib/sweep.ts]
   status: queued
   attempts: 0
+
+- id: W1-T100
+  title: "Route blocked_ci to the ci-log fix path — fix FIRST, ask after exhaustion (the #170 inverted ladder)"
+  repo: remudero
+  depends_on: [W1-T93, W1-T94]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (#170): the sweep routed a checks-red/review-none PR to BLOCKED-AMBIGUOUS and
+    generated a question whose own text admits the inversion — 'no fix-rung strike is recorded for this
+    PR.' W1-T93 shipped its escalate-interim for blocked_ci; W1-T94 shipped the ci-log fix mode; the
+    intent-wiring between them (T93's design: 'route to blocked-fixable ONCE the fix rung accepts CI-log
+    input') was never built once both landed — the deliberately-soft dep left a seam. The ladder must
+    read: fix (<=strike cap) FIRST, question after exhaustion — the clarification rung exists for
+    genuine ambiguity, not for untried work."
+  design: |
+    (i) DISPOSITION_RULES gains a positive blocked-fixable rule for ci=red + review-verdict-none (table
+    edit, above the escalate catch-all). (ii) dispatchFix's input generalizes from the reviewer unmet set
+    to the W1-T94 mode-evidence shape, so the sweep's ci-red dispatch derives ci-log mode (failing check
+    names + log tails, same branch). (iii) BLOCKED-AMBIGUOUS is reserved per the W1-T78 spec: strike
+    exhaustion or contradictory criteria — a ci-red PR reaches the question rung only THROUGH the strike
+    ladder. (iv) Strikes on ci-log fixes share the same counter and cap as review fixes (one ladder,
+    one exhaustion route).
+  acceptance:
+    - claim: "the #170 fixture (ci red, review none, zero strikes) dispositions blocked-fixable and dispatches ONE ci-log-mode fix worker"
+      proof: "unit test: the seeded state -> disposition blocked-fixable; the rendered fix prompt names ci-log mode and carries failing check names + log tails, not reviewer criteria"
+    - claim: "a strike-exhausted ci-red PR routes to the question rung — the ladder, not a loop"
+      proof: "unit test: same state with strikes at cap -> blocked-ambiguous, question generated, zero new spawns"
+    - claim: "review-failure routing is unchanged"
+      proof: "existing W1-T93/W1-T77 disposition tests pass; a review-failure fixture still dispatches reviewer-unmet mode"
+  risk: high
+  origin: architect
+  plan_refs: ["P22", "§3"]
+  files: [src/lib/sweep.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Until built, rmd fix <pr> (W1-T95) is the operator bridge for blocked_ci — proven live on #170."
