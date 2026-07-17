@@ -11,6 +11,7 @@ import {
   checkPrOwnership,
   commitsAhead,
   deriveFixMode,
+  deriveStrikeHistory,
   FIX_MODE_RULES,
   isTransientResult,
   renderFixPrompt,
@@ -30,7 +31,7 @@ import {
 } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, strikeCapForAnswer, type ClarificationQuestion, type OpenPrView } from "../src/lib/sweep.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
@@ -879,6 +880,143 @@ test("runFixRung is REUSED, never reimplemented — one dispatch from runTask's 
   assert.equal(runTaskDefs.length, 1, "there must be exactly one runTask implementation for both callers to share");
 });
 
+// ── W1-T78: the CLARIFICATION-QUESTION rung's fix-rung side — an operator's
+// answer re-arms `runFixRung` carrying the answer as an added constraint,
+// VERBATIM, on every strike; the strike allowance is config policy. ──────────
+
+test("renderFixPrompt: an operator's clarification answer (evidence.constraint) is carried VERBATIM, mode-agnostic, ahead of the mode-specific content", () => {
+  const withConstraint = renderFixPrompt({
+    task: { id: "W1-TX", title: "T" },
+    round: 1,
+    branch: "run-W1-TX-1",
+    evidence: {
+      review: { unmetCriteria: [criterion({ claim: "crit-A", met: false, reason: "still broken" })], summary: "s" },
+      constraint: "use approach X — the reviewer's real requirement is Y, not Z",
+    },
+  });
+  assert.match(withConstraint, /use approach X — the reviewer's real requirement is Y, not Z/);
+  assert.match(withConstraint, /OPERATOR CONSTRAINT/i);
+
+  // Absent for an ORIGINAL dispatch (no constraint) — never a spurious block.
+  const withoutConstraint = renderFixPrompt({
+    task: { id: "W1-TX", title: "T" },
+    round: 1,
+    branch: "run-W1-TX-1",
+    evidence: { review: { unmetCriteria: [criterion({ claim: "crit-A", met: false, reason: "still broken" })], summary: "s" } },
+  });
+  assert.doesNotMatch(withoutConstraint, /OPERATOR CONSTRAINT/i);
+});
+
+test("runFixRung: an operator's answer is threaded as an added constraint on EVERY strike's prompt, verbatim; the re-dispatch's strike cap is set per config policy (strikeCapForAnswer)", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const stillFailing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })]);
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const answer = "the reviewer wants a unit test, not an integration test — add one at test/foo.test.ts";
+
+  // resetStrikeCounterOnAnswer=false -> exactly ONE bounded strike (policy-as-data, W1-T78).
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: strikeCapForAnswer(2, { resetStrikeCounterOnAnswer: false }),
+    initialReview: stillFailing,
+    constraint: answer,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `fix-session-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => stillFailing, // still broken — proves the cap, not luck
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(spawnCalls.length, 1, "resetStrikeCounterOnAnswer=false grants exactly ONE strike");
+  assert.match(spawnCalls[0].prompt, new RegExp(answer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "the answer is carried VERBATIM");
+  assert.equal(outcome.outcome, "escalated", "the one bounded strike failing still escalates — never loops forever");
+  assert.equal(outcome.strikes, 1);
+  assert.equal(issueCalls.length, 1);
+});
+
+test("runFixRung: resetStrikeCounterOnAnswer=true (default) grants a FRESH full strikeCap for the answer's re-dispatch", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })]);
+  const passing = fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })]);
+  let reviewCalls = 0;
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: strikeCapForAnswer(2), // default policy — a fresh cap of 2
+    initialReview: failing,
+    constraint: "try approach Y instead",
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `fix-session-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => {
+        reviewCalls++;
+        return reviewCalls === 1 ? failing : passing; // resolved on the SECOND strike
+      },
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(spawnCalls.length, 2, "a fresh full strikeCap (2) grants a second strike");
+  assert.match(spawnCalls[0].prompt, /try approach Y instead/, "the answer rides EVERY strike's prompt, not just the first");
+  assert.match(spawnCalls[1].prompt, /try approach Y instead/);
+  assert.equal(outcome.outcome, "fixed");
+});
+
+test("deriveStrikeHistory: pairs fix.dispatch (round + unmet count going IN) with its matching fix.review (outcome) BY STRIKE NUMBER, ignoring lines from a DIFFERENT task — the regression a mis-stamped ledger line (e.g. a cold-dispatch log defaulting task_id to \"SWEEP\") would silently starve", () => {
+  const lines = [
+    { task_id: "W1-D", step: "fix.dispatch", strike: 1, round: "resume", unmet_count: 2 },
+    { task_id: "W1-D", step: "fix.review", strike: 1, state: "failure" },
+    { task_id: "W1-D", step: "fix.ci_not_green", strike: 1, ci: "red" },
+    { task_id: "W1-D", step: "fix.dispatch", strike: 2, round: "fresh", unmet_count: 1 },
+    { task_id: "W1-D", step: "fix.review", strike: 2, state: "success" },
+    // A DIFFERENT task's strikes on the same shared ledger must never bleed in.
+    { task_id: "W1-OTHER", step: "fix.dispatch", strike: 1, round: "resume", unmet_count: 9 },
+    // A line stamped with the WRONG task_id (the sweep/fix cold-dispatch bug
+    // class) must not be picked up as W1-D's own strike 3.
+    { task_id: "SWEEP", step: "fix.dispatch", strike: 3, round: "fresh", unmet_count: 5 },
+  ];
+
+  const history = deriveStrikeHistory(lines, "W1-D");
+
+  assert.equal(history.length, 2, "only W1-D's own two strikes — never the other task's, never the mis-stamped one");
+  assert.deepEqual(history[0], { strike: 1, round: "resume", unmetCount: 2, ciGreen: true, reviewState: "failure" });
+  assert.deepEqual(history[1], { strike: 2, round: "fresh", unmetCount: 1, ciGreen: true, reviewState: "success" });
+});
+
+test("deriveStrikeHistory: a strike whose fix.review never arrived (CI never went green) stays ciGreen:false with no reviewState — never crashes on the missing pair", () => {
+  const lines = [
+    { task_id: "W1-D", step: "fix.dispatch", strike: 1, round: "resume", unmet_count: 3 },
+    { task_id: "W1-D", step: "fix.ci_not_green", strike: 1, ci: "red" },
+    // A fix.review with NO matching fix.dispatch (e.g. truncated ledger) must
+    // be silently ignored, never thrown.
+    { task_id: "W1-D", step: "fix.review", strike: 7, state: "success" },
+  ];
+  const history = deriveStrikeHistory(lines, "W1-D");
+  assert.equal(history.length, 1);
+  assert.deepEqual(history[0], { strike: 1, round: "resume", unmetCount: 3, ciGreen: false });
+  assert.equal(history[0].reviewState, undefined);
+});
+
+test("deriveStrikeHistory: an undefined taskId (a PR with no resolvable Remudero-Task trailer) returns [] rather than matching every untagged line", () => {
+  assert.deepEqual(deriveStrikeHistory([{ task_id: "W1-D", step: "fix.dispatch", strike: 1 }], undefined), []);
+});
+
 // ── `rmd fix <pr>` (W1-T95): the pure routing core, injectable so refusal/
 // escalate/dispatch is a unit fixture with zero live `gh`/spawn calls ─────────
 
@@ -900,17 +1038,20 @@ function fixPr(over: Partial<OpenPrView> = {}): OpenPrView {
 }
 
 /** Records calls into the two gated effects `routeFix` may fire; never touches `gh`/spawn. */
-function fakeFixDeps(): FixDeps & { fixed: Array<{ pr: OpenPrView; unmet: CriterionVerdict[] }>; escalated: Array<{ pr: OpenPrView; reason: string }> } {
+function fakeFixDeps(): FixDeps & {
+  fixed: Array<{ pr: OpenPrView; unmet: CriterionVerdict[] }>;
+  escalated: Array<{ pr: OpenPrView; reason: string; question: ClarificationQuestion }>;
+} {
   const fixed: Array<{ pr: OpenPrView; unmet: CriterionVerdict[] }> = [];
-  const escalated: Array<{ pr: OpenPrView; reason: string }> = [];
+  const escalated: Array<{ pr: OpenPrView; reason: string; question: ClarificationQuestion }> = [];
   return {
     fixed,
     escalated,
     dispatchFix: (p, unmet) => {
       fixed.push({ pr: p, unmet });
     },
-    escalate: (p, reason) => {
-      escalated.push({ pr: p, reason });
+    escalate: (p, reason, question) => {
+      escalated.push({ pr: p, reason, question });
     },
   };
 }
@@ -979,6 +1120,10 @@ test("routeFix: strikes already at the cap escalate (naming the count) rather th
   assert.match(result.reason, new RegExp(`${DEFAULT_SWEEP_POLICY.strikeCap}/${DEFAULT_SWEEP_POLICY.strikeCap}`));
   assert.equal(deps.fixed.length, 0, "an exhausted PR must NOT dispatch another fix strike");
   assert.equal(deps.escalated.length, 1, "escalate must fire exactly once");
+  // W1-T78: `rmd fix` renders the SAME clarification question the sweep does —
+  // one rung, one implementation, three callers.
+  assert.match(deps.escalated[0].question.question, /x/, "the question names the unmet criterion");
+  assert.equal(deps.escalated[0].question.resolutions.length, 2);
 });
 
 test("the terminal blocked_review return (no fix rung) is gone — a failing review always enters the fix rung before any terminal verdict", () => {

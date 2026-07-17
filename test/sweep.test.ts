@@ -4,16 +4,23 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  DEFAULT_CLARIFY_POLICY,
   DEFAULT_SWEEP_POLICY,
   DISPOSITION_RULES,
   deriveDisposition,
+  renderClarificationQuestion,
   renderSweepSummary,
   runSweep,
+  strikeCapForAnswer,
+  toQuestionEntry,
+  type ClarificationQuestion,
   type OpenPrView,
+  type StrikeAttempt,
   type SweepDeps,
   type SweepPolicy,
 } from "../src/lib/sweep.js";
 import type { CriterionVerdict } from "../src/lib/review.js";
+import { readLedgerLines } from "../src/lib/status.js";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -89,12 +96,12 @@ function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & {
   armed: OpenPrView[];
   closed: Array<{ pr: OpenPrView; reason: string }>;
   fixed: Array<{ pr: OpenPrView; unmet: CriterionVerdict[] }>;
-  escalated: Array<{ pr: OpenPrView; reason: string }>;
+  escalated: Array<{ pr: OpenPrView; reason: string; question: ClarificationQuestion }>;
 } {
   const armed: OpenPrView[] = [];
   const closed: Array<{ pr: OpenPrView; reason: string }> = [];
   const fixed: Array<{ pr: OpenPrView; unmet: CriterionVerdict[] }> = [];
-  const escalated: Array<{ pr: OpenPrView; reason: string }> = [];
+  const escalated: Array<{ pr: OpenPrView; reason: string; question: ClarificationQuestion }> = [];
   return {
     armed,
     closed,
@@ -103,7 +110,7 @@ function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & {
     arm: (p) => { armed.push(p); },
     close: (p, reason) => { closed.push({ pr: p, reason }); },
     dispatchFix: (p, unmet) => { fixed.push({ pr: p, unmet }); },
-    escalate: (p, reason) => { escalated.push({ pr: p, reason }); },
+    escalate: (p, reason, question) => { escalated.push({ pr: p, reason, question }); },
     ledgerPath: ledgerPath(),
     runId: "SWEEP-1",
     now: () => NOW,
@@ -362,4 +369,122 @@ test("renderSweepSummary is a single legible line", () => {
     noneCount: 0,
   };
   assert.match(renderSweepSummary(s), /4 open PR\(s\) · 4 action\(s\) taken/);
+});
+
+// ── W1-T78: the CLARIFICATION-QUESTION rung — an ambiguous block yields a
+// specific, decidable operator question, never silence (ratifies P22's new
+// rung). ────────────────────────────────────────────────────────────────────
+
+function strike(over: Partial<StrikeAttempt> = {}): StrikeAttempt {
+  return { strike: 1, round: "resume", unmetCount: 1, ciGreen: true, reviewState: "failure", ...over };
+}
+
+test("renderClarificationQuestion: a strikes-exhausted fixture yields ONE question naming the decision, both candidate resolutions, and the PR/run context", () => {
+  const pr = strikesExhaustedPr();
+  const { reason } = deriveDisposition(pr);
+  const history = [strike({ strike: 1, round: "resume" }), strike({ strike: 2, round: "fresh" })];
+
+  const q = renderClarificationQuestion(pr, reason, history);
+
+  assert.equal(q.taskId, "W1-D");
+  assert.equal(q.prNumber, 13);
+  assert.equal(q.prUrl, "url/13");
+  // Names the exact decision: the unmet criterion's claim.
+  assert.match(q.question, /still unmet/);
+  assert.equal(q.criterion, "still unmet");
+  // The reviewer's stated requirement vs the spec's own proof text.
+  assert.equal(q.reviewerRequirement, "the thing is not done");
+  assert.equal(q.specText, "unit test: it works");
+  assert.match(q.question, /the thing is not done/);
+  assert.match(q.question, /unit test: it works/);
+  // Both candidate resolutions, verbatim, in the question text.
+  assert.equal(q.resolutions.length, 2);
+  assert.match(q.question, /re-dispatch-with-constraint/);
+  assert.match(q.question, /revise-spec/);
+  // What the fix worker tried per strike (ledger ground truth) is carried too.
+  assert.equal(q.strikeHistory.length, 2);
+  assert.match(q.question, /strike 1 \(resume\)/);
+  assert.match(q.question, /strike 2 \(fresh\)/);
+});
+
+test("renderClarificationQuestion: no single unmet criterion (the contradictory/terminal rows) still yields a decidable question naming the observed reason — never silent, never an invented criterion", () => {
+  const view = pr({ prNumber: 20, prUrl: "url/20", taskId: "W1-E", reviewState: "failure", unmetCriteria: [] });
+  const q = renderClarificationQuestion(view, "review failing with no actionable unmet criteria (contradictory) — escalating", []);
+  assert.equal(q.criterion, "", "no criterion observed — never invented");
+  assert.equal(q.specText, "");
+  assert.match(q.question, /contradictory/);
+  assert.equal(q.resolutions.length, 2);
+});
+
+test("toQuestionEntry: conforms to the §2 QUESTION contract's shape (worker.ts's QuestionEntry)", () => {
+  const pr = strikesExhaustedPr();
+  const { reason } = deriveDisposition(pr);
+  const q = renderClarificationQuestion(pr, reason, []);
+  const entry = toQuestionEntry(q, "2026-07-17T00:00:00.000Z");
+  assert.equal(entry.ts, "2026-07-17T00:00:00.000Z");
+  assert.equal(entry.task, "W1-D");
+  assert.equal(entry.question, q.question);
+  assert.match(entry.current_assumption ?? "", /BLOCKED-AMBIGUOUS/);
+  assert.equal(entry.impact_if_wrong, "med");
+  assert.deepEqual(Object.keys(entry).sort(), ["current_assumption", "impact_if_wrong", "question", "task", "ts"]);
+});
+
+test("strikeCapForAnswer: resetStrikeCounterOnAnswer=true (default) grants a FRESH full strikeCap; false grants exactly one bounded strike — policy-as-data, per config", () => {
+  assert.equal(strikeCapForAnswer(2), 2);
+  assert.equal(strikeCapForAnswer(2, DEFAULT_CLARIFY_POLICY), 2);
+  assert.equal(strikeCapForAnswer(2, { resetStrikeCounterOnAnswer: false }), 1);
+  assert.equal(strikeCapForAnswer(5, { resetStrikeCounterOnAnswer: true }), 5);
+});
+
+test("deriveDisposition: an operator's answer RE-ARMS a strikes-exhausted PR to blocked-fixable — the answer's own strike allowance overrides exhaustion", () => {
+  const answered: OpenPrView = { ...strikesExhaustedPr(), pendingAnswer: { constraint: "use approach X" } };
+  // Un-answered, this fixture is strikes-exhausted -> blocked-ambiguous (baseline).
+  assert.equal(deriveDisposition(strikesExhaustedPr()).disposition, "blocked-ambiguous");
+  // Answered, with the default reset policy (a FRESH strikeCap), it re-arms.
+  const result = deriveDisposition(answered);
+  assert.equal(result.disposition, "blocked-fixable");
+  assert.match(result.reason, /operator answered/);
+});
+
+test("deriveDisposition: resetStrikeCounterOnAnswer=false grants exactly ONE extra strike beyond the original cap — a PR that has ALSO exhausted that one extra strike still escalates rather than looping forever", () => {
+  const policy: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, clarify: { resetStrikeCounterOnAnswer: false } };
+  // strikeCap is 2; a bounded extra strike raises the cumulative ceiling to 3
+  // (policy.strikeCap + strikeCapForAnswer(2, {reset:false}) === 2 + 1).
+  const justAnswered: OpenPrView = { ...strikesExhaustedPr(), priorStrikes: 2, pendingAnswer: { constraint: "use approach X" } };
+  // priorStrikes (2) IS below the ceiling (3) -> the one bounded extra strike is granted.
+  assert.equal(deriveDisposition(justAnswered, policy).disposition, "blocked-fixable");
+
+  // The extra strike was ALSO spent (ledger now shows 3 dispatches) and the PR
+  // is STILL failing with a (new, unconsumed) pendingAnswer -> the ceiling (3)
+  // is no longer above priorStrikes (3) -> escalates again rather than granting
+  // a THIRD attempt off the same answer.
+  const stillFailing: OpenPrView = { ...justAnswered, priorStrikes: 3 };
+  assert.equal(deriveDisposition(stillFailing, policy).disposition, "blocked-ambiguous");
+});
+
+test("runSweep: a BLOCKED-AMBIGUOUS PR ledgers its clarification question EVERY sweep, even once escalate() is deduped — an unanswered question stays visible, nothing else is ever dispatched", async () => {
+  const shared = ledgerPath();
+  const first = fakeDeps({ ledgerPath: shared });
+  const summary1 = await runSweep([strikesExhaustedPr()], first);
+  assert.equal(first.escalated.length, 1, "escalate() fires on the first sweep");
+  assert.match(first.escalated[0].question.question, /still unmet/);
+  assert.equal(summary1.actions[0].question?.question, first.escalated[0].question.question);
+
+  // A second sweep over the SAME (unanswered) state: deduped — no repeat escalate() —
+  // but the disposition (and its question) is still re-derived and ledgered.
+  const second = fakeDeps({ ledgerPath: shared });
+  const summary2 = await runSweep([strikesExhaustedPr()], second);
+  assert.equal(second.escalated.length, 0, "deduped — escalate() does not fire again");
+  assert.equal(second.armed.length, 0);
+  assert.equal(second.closed.length, 0);
+  assert.equal(second.fixed.length, 0, "nothing else is ever dispatched for an unanswered clarification");
+  assert.equal(summary2.byDisposition["blocked-ambiguous"], 1, "still BLOCKED-AMBIGUOUS");
+  assert.ok(summary2.actions[0].question, "the question is still rendered/ledgered on the deduped sweep");
+
+  const lines = readLedgerLines(shared);
+  const disposed = lines.filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed.length, 2, "one sweep.disposed line per sweep");
+  for (const line of disposed) {
+    assert.match(String(line.question ?? ""), /still unmet/, "the question is ledgered on EVERY sweep");
+  }
 });

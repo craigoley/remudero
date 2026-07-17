@@ -1,6 +1,7 @@
 import { appendLedger } from "./ledger.js";
 import { readLedgerLines } from "./status.js";
 import type { CriterionVerdict } from "./review.js";
+import type { QuestionEntry } from "./worker.js";
 
 /**
  * lib/sweep.ts — the level-triggered PR-pipeline reconciler (W1-T77, ratifies
@@ -39,14 +40,16 @@ import type { CriterionVerdict } from "./review.js";
  *   - BLOCKED-AMBIGUOUS— fix strikes exhausted, contradictory criteria, OR the
  *                        TERMINAL catch-all (anything not positively mergeable and
  *                        not already failure-shaped, e.g. CI-red with review
- *                        skipped/none/pending) -> escalate via W1-T8's
- *                        `escalate()`, naming the observed CI/review state so it is
- *                        never silent and never armed (a dedicated
- *                        clarification-question rung is W1-T78, NOT this task —
- *                        plain escalate() is correct and sufficient here).
- *                        blocked_ci-shaped PRs route here only UNTIL the fix rung
- *                        accepts CI-log input (W1-T94); once that lands, this row
- *                        should split so ci=red carries actionable log input to
+ *                        skipped/none/pending) -> the CLARIFICATION-QUESTION rung
+ *                        (W1-T78, ratifies P22's new rung): {@link renderClarificationQuestion}
+ *                        renders a SPECIFIC, decidable operator question from ledger
+ *                        ground truth (never a generic needs-human), which the real
+ *                        wiring (run-task.ts's `buildSweepEffects`) logs to the §2
+ *                        question backlog AND opens via W1-T8's `escalate()` as the
+ *                        notification transport — so it is never silent and never
+ *                        armed. blocked_ci-shaped PRs route here only UNTIL the fix
+ *                        rung accepts CI-log input (W1-T94); once that lands, this
+ *                        row should split so ci=red carries actionable log input to
  *                        blocked-fixable instead.
  *
  * SCOPING (honest): HUNG workers are EXPLICITLY DEFERRED to a future WS-2 task.
@@ -74,6 +77,21 @@ import type { CriterionVerdict } from "./review.js";
 export type Disposition = "mergeable" | "blocked-fixable" | "stale" | "blocked-ambiguous";
 
 /**
+ * W1-T78 policy (policy-as-data, rule 2 — never hardcoded): how many strikes a
+ * fix-rung RE-DISPATCH gets once an operator answers a clarification
+ * question. Nested inside {@link SweepPolicy} — the SAME config object every
+ * `runSweep` caller already threads — rather than a second, separately-sourced
+ * policy object.
+ */
+export interface ClarifyPolicy {
+  /** true (default): the answer resets the counter to a FRESH strikeCap. false: exactly one bounded extra strike. */
+  resetStrikeCounterOnAnswer: boolean;
+}
+
+/** The default clarify policy — an answer earns a fresh full strikeCap. */
+export const DEFAULT_CLARIFY_POLICY: ClarifyPolicy = { resetStrikeCounterOnAnswer: true };
+
+/**
  * Tunable thresholds as DATA (rule 2) — never inlined constants in the predicate.
  * A test overrides these to prove policy is data (acceptance 3): tightening
  * `staleDays` flips a fixture PR's disposition with zero sweep-code changes.
@@ -83,12 +101,15 @@ export interface SweepPolicy {
   staleDays: number;
   /** Max fix-rung strikes before a failing review escalates instead of fixing. */
   strikeCap: number;
+  /** W1-T78: re-dispatch strike-cap policy once an operator answers a clarification question. */
+  clarify: ClarifyPolicy;
 }
 
 /** The default policy — 14-day stale window, 2 fix strikes (mirrors fixStrikeCap). */
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   staleDays: 14,
   strikeCap: 2,
+  clarify: DEFAULT_CLARIFY_POLICY,
 };
 
 /**
@@ -119,6 +140,33 @@ export interface OpenPrView {
   autoMergeArmed: boolean;
   /** The failing review's one-line summary (context for fix/escalate). */
   reviewSummary?: string;
+  /**
+   * What each recorded fix-rung strike TRIED for this PR's task, ledger
+   * ground truth only (W1-T78) — the clarification-question rung's "what the
+   * fix worker tried per strike" input. `[]`/undefined when no strike is
+   * recorded (e.g. the terminal catch-all, which never dispatched a fix).
+   */
+  strikeHistory?: StrikeAttempt[];
+  /**
+   * An operator's answer to a PRIOR clarification question (W1-T78), if one
+   * has been recorded for this PR and not yet consumed. Its `constraint`
+   * feeds the NEXT fix-rung dispatch verbatim (never a silent guess); routes
+   * this PR to `blocked-fixable` instead of `blocked-ambiguous` even with
+   * strikes at cap (a new, config-driven strike allowance — see
+   * {@link ClarifyPolicy}/{@link strikeCapForAnswer}), so the answer actually
+   * re-arms the rung rather than immediately re-exhausting it.
+   *
+   * SCOPE (honest, mirrors how W1-T77 shipped BLOCKED-AMBIGUOUS's interim
+   * escalate() route for THIS task to upgrade): this field, its
+   * DISPOSITION_RULES row, and `dispatchFix`'s constraint/strikeCap threading
+   * are the full MECHANISM, wired end-to-end and unit-tested — but nothing in
+   * `run-task.ts` populates it yet (`buildOpenPrViews`/`fixCommand` never set
+   * it). Recording an operator's answer against a specific question — a
+   * CLI/control-panel PRODUCER for this field — is a future task; until it
+   * lands, `pendingAnswer` is always `undefined` in the real gateway, so every
+   * BLOCKED-AMBIGUOUS PR keeps asking (never silently re-arms itself).
+   */
+  pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean };
 }
 
 /** The disposition derived for one PR, plus a stated human reason. */
@@ -155,21 +203,27 @@ interface DispositionRule {
  *
  *   1. SUPERSEDED  — a newer PR credits the same task: close regardless of review.
  *   2. STALE       — no activity in >= policy.staleDays: abandoned, close.
- *   3. FAILING + strikes exhausted (>= cap)              -> blocked-ambiguous (escalate).
- *   4. FAILING + actionable unmet criteria, strikes left -> blocked-fixable (fix rung).
- *   5. FAILING + no actionable criteria (contradictory)  -> blocked-ambiguous (escalate).
- *   6. CI GREEN + REVIEW SUCCESS (POSITIVE match only)   -> mergeable (arm).
- *   7. TERMINAL catch-all (the #161 fix, W1-T93): anything not positively
+ *   3. ANSWERED (W1-T78) — an operator answered a clarification question AND the
+ *      answer-extended strike allowance is not itself exhausted -> blocked-fixable
+ *      (re-dispatch WITH the answer as an added constraint), even when the
+ *      ORIGINAL strikeCap was already hit — this is what makes an answer actually
+ *      re-arm the rung instead of landing straight back on row 4's escalate.
+ *   4. FAILING + strikes exhausted (>= cap)              -> blocked-ambiguous (escalate).
+ *   5. FAILING + actionable unmet criteria, strikes left -> blocked-fixable (fix rung).
+ *   6. FAILING + no actionable criteria (contradictory)  -> blocked-ambiguous (escalate).
+ *   7. CI GREEN + REVIEW SUCCESS (POSITIVE match only)   -> mergeable (arm).
+ *   8. TERMINAL catch-all (the #161 fix, W1-T93): anything not positively
  *      mergeable and not already failure-shaped — including CI-red with review
- *      skipped/none/pending — -> blocked-ambiguous (escalate), naming the
- *      observed checks/review state. The catch-all is the LEAST permissive
- *      disposition, never the most permissive one; mergeable is ONLY ever
- *      positively matched (row 6), never a fallback.
+ *      skipped/none/pending — -> blocked-ambiguous (the CLARIFICATION-QUESTION
+ *      rung, W1-T78), naming the observed checks/review state. The catch-all is
+ *      the LEAST permissive disposition, never the most permissive one; mergeable
+ *      is ONLY ever positively matched (row 7), never a fallback.
  *
  * Stale/superseded rows precede the failing/mergeable rows so tightening the
- * stale threshold flips an otherwise-mergeable PR to a close. Rows 3-5 (review
- * FAILING) precede row 6 so a CI-green-but-review-failing PR still routes to
- * fix/escalate, not mergeable.
+ * stale threshold flips an otherwise-mergeable PR to a close. Row 3 (answered)
+ * precedes row 4 (strikes exhausted) so an answer's extended allowance actually
+ * overrides exhaustion; rows 4-6 (review FAILING) precede row 7 so a
+ * CI-green-but-review-failing PR still routes to fix/escalate, not mergeable.
  */
 export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
@@ -182,6 +236,27 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     when: (_pr, policy, ageDays) => ageDays >= policy.staleDays,
     reason: (_pr, policy, ageDays) =>
       `abandoned — no activity in ${Math.floor(ageDays)}d (>= ${policy.staleDays}d threshold)`,
+  },
+  {
+    // W1-T78: an operator's answer to a clarification question RE-ARMS the fix
+    // rung — but only within its own (config-policy) strike allowance, never
+    // unconditionally, so a bad answer still eventually escalates rather than
+    // looping forever.
+    disposition: "blocked-fixable",
+    when: (pr, policy) => {
+      if (!pr.pendingAnswer || pr.reviewState !== "failure" || pr.unmetCriteria.length === 0) return false;
+      const clarify: ClarifyPolicy = {
+        resetStrikeCounterOnAnswer: pr.pendingAnswer.resetStrikeCounter ?? policy.clarify.resetStrikeCounterOnAnswer,
+      };
+      // strikeCapForAnswer returns the ADDITIONAL strikes the answer grants (the
+      // SAME number the real re-dispatch passes as runFixRung's own fresh
+      // strikeCap, since runFixRung always counts a NEW call from 0) — so the
+      // cumulative ceiling this answered PR gets is the ORIGINAL cap plus that
+      // allowance, never an unconditional bypass of the ledger's running count.
+      return pr.priorStrikes < policy.strikeCap + strikeCapForAnswer(policy.strikeCap, clarify);
+    },
+    reason: (pr) =>
+      `operator answered the clarification question — re-dispatching the fix rung with the added constraint (strike ${pr.priorStrikes + 1})`,
   },
   {
     disposition: "blocked-ambiguous",
@@ -248,6 +323,166 @@ export function deriveDisposition(
   return { disposition: rule.disposition, reason: rule.reason(pr, policy, ageDays) };
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// W1-T78 — the CLARIFICATION-QUESTION rung (ratifies P22's new rung): an
+// ambiguous (BLOCKED-AMBIGUOUS) block yields a SPECIFIC, decidable operator
+// question, never silence. `renderClarificationQuestion` is PURE and
+// deterministic — it renders ONLY from what the sweep/ledger observed (the
+// unmet criterion's claim/proof/reason already carried on {@link OpenPrView},
+// plus the per-strike ledger history) and never invents a criterion or a
+// resolution that was not itself observed. Emitted per the §2 QUESTION
+// contract's shape ({@link toQuestionEntry}, matching worker.ts's
+// `QuestionEntry`) — extended with the PR/run context and exactly two
+// candidate resolutions a plain QUESTION does not carry — to the durable
+// question backlog, with W1-T8's `escalate()` as the notification transport
+// (both wired in run-task.ts's `buildSweepEffects`, the real gateway).
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One recorded fix-rung strike's outcome for a task, ledger ground truth ONLY
+ * — "what the fix worker tried" (never inferred, never guessed). Derived from
+ * `fix.dispatch`/`fix.review` ledger lines by run-task.ts's `deriveStrikeHistory`.
+ */
+export interface StrikeAttempt {
+  strike: number;
+  round: "resume" | "fresh";
+  /** Unmet criteria count going INTO this strike. */
+  unmetCount: number;
+  /** Whether CI reached green after this strike (a review only runs once it does). */
+  ciGreen: boolean;
+  /** The review verdict AFTER this strike, if one ran. */
+  reviewState?: "success" | "failure";
+}
+
+/** One of exactly two candidate resolutions the operator can pick between. */
+export interface ClarificationResolution {
+  label: string;
+  detail: string;
+}
+
+/**
+ * The rendered output of the CLARIFICATION-QUESTION rung for ONE
+ * BLOCKED-AMBIGUOUS PR: the exact decision, both candidate resolutions, and
+ * the run/PR context — never a generic needs-human.
+ */
+export interface ClarificationQuestion {
+  taskId: string;
+  prNumber: number;
+  prUrl: string;
+  /** The single, specific decision the operator must make. */
+  question: string;
+  /** The unmet criterion's claim text driving the block ("" for the contradictory/terminal rows — no single criterion to point at). */
+  criterion: string;
+  /** The reviewer's stated unmet reason, verbatim (or the disposition reason, when there is no single criterion). */
+  reviewerRequirement: string;
+  /** The acceptance criterion's own proof text — the spec the reviewer is judging against ("" when there is no single criterion). */
+  specText: string;
+  /** What each fix-rung strike tried and its outcome, ledger ground truth (§ StrikeAttempt). */
+  strikeHistory: StrikeAttempt[];
+  /** Exactly two candidate resolutions — never a silent guess, never more than two. */
+  resolutions: readonly [ClarificationResolution, ClarificationResolution];
+}
+
+/**
+ * Render ONE blocked-ambiguous PR's clarification question, deterministically,
+ * from ledger ground truth ONLY: the task id, the unmet criterion (claim vs
+ * the reviewer's stated requirement vs the spec's own proof text), and what
+ * the fix worker already tried per strike. PURE — no guessing: when there is
+ * no single unmet criterion to point at (the contradictory-criteria row or the
+ * terminal catch-all), the question names the observed disposition `reason`
+ * instead of inventing one, but it is NEVER silent either way.
+ */
+export function renderClarificationQuestion(
+  pr: OpenPrView,
+  reason: string,
+  strikeHistory: StrikeAttempt[] = [],
+): ClarificationQuestion {
+  const primary = pr.unmetCriteria[0];
+  const criterion = primary?.claim ?? "";
+  const reviewerRequirement = primary?.reason ?? reason;
+  const specText = primary?.proof ?? "";
+
+  const tried = strikeHistory.length
+    ? strikeHistory
+        .map(
+          (s) =>
+            `strike ${s.strike} (${s.round}): ${s.unmetCount} unmet criteri${s.unmetCount === 1 ? "on" : "a"} going in, ` +
+            `CI ${s.ciGreen ? "went green" : "did not go green"}` +
+            (s.reviewState ? `, review came back ${s.reviewState}` : ""),
+        )
+        .join("; ")
+    : "no fix-rung strike is recorded for this PR";
+
+  const resolutions: readonly [ClarificationResolution, ClarificationResolution] = [
+    {
+      label: "re-dispatch-with-constraint",
+      detail:
+        "re-arm the W1-T76 fix rung on the same branch, carrying the operator's answer as an added " +
+        "constraint on the next prompt (strike-counter reset is config policy).",
+    },
+    {
+      label: "revise-spec",
+      detail:
+        "the acceptance criterion's own spec text is wrong or unattainable as written — file a task-edit " +
+        "PROPOSAL (a plan-only PR); the rung itself never self-edits tasks.yaml (rule 15).",
+    },
+  ];
+
+  // Shared by both branches below (single source of the "name both options"
+  // suffix — editing the resolutions never requires editing this text twice).
+  const decisionSuffix = `Which is right — (1) ${resolutions[0].label}: ${resolutions[0].detail}, or (2) ${resolutions[1].label}: ${resolutions[1].detail}`;
+
+  const question = criterion
+    ? `Task ${pr.taskId}, PR #${pr.prNumber} (${pr.prUrl}): after ${strikeHistory.length} fix strike(s) — ${tried} — ` +
+      `"${criterion}" is still unmet. The reviewer requires: "${reviewerRequirement}". The spec's own proof text says: ` +
+      `"${specText}". ${decisionSuffix}`
+    : `Task ${pr.taskId}, PR #${pr.prNumber} (${pr.prUrl}): ${reason} — ${tried}. There is no single actionable unmet ` +
+      `criterion to point at. ${decisionSuffix}`;
+
+  return {
+    taskId: pr.taskId ?? "UNKNOWN",
+    prNumber: pr.prNumber,
+    prUrl: pr.prUrl,
+    question,
+    criterion,
+    reviewerRequirement,
+    specText,
+    strikeHistory,
+    resolutions,
+  };
+}
+
+/**
+ * Render a {@link ClarificationQuestion} into the §2 QUESTION contract's own
+ * shape (worker.ts's `QuestionEntry`) for the durable question backlog —
+ * `current_assumption` names what stays true while the PR is unanswered (it
+ * never proceeds on a guess; it stays blocked), matching the contract's own
+ * "the worker proceeds on this" framing.
+ */
+export function toQuestionEntry(q: ClarificationQuestion, ts: string): QuestionEntry {
+  return {
+    ts,
+    task: q.taskId,
+    question: q.question,
+    current_assumption: `PR #${q.prNumber} (${q.prUrl}) stays BLOCKED-AMBIGUOUS — unmerged, no further fix strikes dispatched — until the operator answers.`,
+    impact_if_wrong: "med",
+  };
+}
+
+/**
+ * The ADDITIONAL strikes an operator's clarification answer grants — PURE,
+ * table-free (the policy has exactly one lever today; a second lever is a
+ * field on {@link ClarifyPolicy}, never a branch here). Two uses, ONE number:
+ * (1) it IS the fresh `strikeCap` the real re-dispatch passes to `runFixRung`
+ * (which always counts a NEW call from 0), and (2) `DISPOSITION_RULES`' answer
+ * row adds it to `policy.strikeCap` to get the cumulative ledger ceiling an
+ * answered PR is allowed to reach before it escalates again — never an
+ * unconditional bypass of the running strike count.
+ */
+export function strikeCapForAnswer(originalCap: number, policy: ClarifyPolicy = DEFAULT_CLARIFY_POLICY): number {
+  return policy.resetStrikeCounterOnAnswer ? originalCap : 1;
+}
+
 /** Injected effects — the real command wires arm/close/fix/escalate; tests fake them. */
 export interface SweepDeps {
   /** Arm GitHub auto-merge (armAutoMerge). Idempotent at the GitHub level. */
@@ -256,8 +491,13 @@ export interface SweepDeps {
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
   /** Dispatch the W1-T76 fix rung carrying the FULL unmet set at once. */
   dispatchFix: (pr: OpenPrView, unmet: CriterionVerdict[]) => void | Promise<void>;
-  /** Escalate an ambiguous block via W1-T8's escalate(). */
-  escalate: (pr: OpenPrView, reason: string) => void | Promise<void>;
+  /**
+   * Escalate a BLOCKED-AMBIGUOUS PR. `question` is the rung's rendered
+   * {@link ClarificationQuestion} (W1-T78) — the real wiring logs it to the §2
+   * question backlog AND uses W1-T8's `escalate()` as the notification
+   * transport, carrying the SAME two candidate resolutions as its options.
+   */
+  escalate: (pr: OpenPrView, reason: string, question: ClarificationQuestion) => void | Promise<void>;
   /** Absolute path to state/ledger.ndjson — dedup source + sweep.disposed sink. */
   ledgerPath: string;
   /** The sweep's run id (e.g. SWEEP-<epochMs> / DAEMON-<epochMs>). */
@@ -286,6 +526,8 @@ export interface SweepAction {
   reason: string;
   /** True ⇒ the gated effect actually fired; false ⇒ deduped (already true). */
   acted: boolean;
+  /** Set only for `blocked-ambiguous` (W1-T78) — the rendered clarification question. */
+  question?: ClarificationQuestion;
 }
 
 /** The whole sweep's outcome — counts per disposition + the per-PR actions. */
@@ -375,6 +617,12 @@ export async function runSweep(
     const { disposition, reason } = deriveDisposition(pr, policy, now);
     byDisposition[disposition]++;
 
+    // W1-T78: render the clarification question up front for blocked-ambiguous
+    // PRs — it is ledgered EVERY sweep (so an unanswered question stays
+    // visible), even on a deduped sweep where `escalate` itself does not fire.
+    const question =
+      disposition === "blocked-ambiguous" ? renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []) : undefined;
+
     // Is this action already true (deduped)? Keyed per disposition.
     let alreadyDone: boolean;
     switch (disposition) {
@@ -408,7 +656,7 @@ export async function runSweep(
           await deps.close(pr, reason);
           break;
         case "blocked-ambiguous":
-          await deps.escalate(pr, reason);
+          await deps.escalate(pr, reason, question!);
           break;
       }
       actionsTaken++;
@@ -421,6 +669,7 @@ export async function runSweep(
       disposition,
       reason,
       acted,
+      question,
     });
 
     log("sweep.dispose", {
@@ -432,7 +681,10 @@ export async function runSweep(
     });
 
     // One ledger line per disposition (the INVARIANT). Skipped under --dry-run —
-    // a preview must leave no trace, so a real run afterward still acts.
+    // a preview must leave no trace, so a real run afterward still acts. The
+    // rendered question rides along whenever one exists (W1-T78) — an
+    // UNANSWERED question stays ledgered on every subsequent sweep, even once
+    // `acted` goes false (deduped: no repeat escalate()).
     if (!deps.dryRun) {
       appendLine(deps.ledgerPath, {
         run_id: deps.runId,
@@ -444,6 +696,7 @@ export async function runSweep(
         acted,
         reason,
         head_sha: pr.headSha,
+        ...(question ? { question: question.question } : {}),
       });
     }
   }

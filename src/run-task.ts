@@ -82,9 +82,14 @@ import { ghGateway, projectPlan, readLedgerLines, type GitHub, type StatusProjec
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
+  renderClarificationQuestion,
   renderSweepSummary,
   runSweep,
+  strikeCapForAnswer,
+  toQuestionEntry,
+  type ClarificationQuestion,
   type OpenPrView,
+  type StrikeAttempt,
   type SweepDeps,
   type SweepPolicy,
 } from "./lib/sweep.js";
@@ -673,6 +678,12 @@ export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | (string & 
 export interface FixEvidence {
   review?: { unmetCriteria: CriterionVerdict[]; summary: string };
   ciFailures?: CiFailure[];
+  /**
+   * W1-T78: an operator's answer to a clarification question, carried VERBATIM
+   * as an added constraint on the prompt — never paraphrased, never dropped.
+   * Mode-agnostic: rendered ahead of whichever mode's own content follows.
+   */
+  constraint?: string;
 }
 
 interface FixModeRule {
@@ -752,6 +763,15 @@ export function renderFixPrompt(opts: {
 }): string {
   const mode = deriveFixMode(opts.evidence);
   const header = `You are a FIX worker for task ${opts.task.id} (${opts.task.title}) — round ${opts.round}.\nMODE: ${mode}.`;
+  // W1-T78: an operator's clarification answer, when present, is carried
+  // VERBATIM ahead of the mode-specific content — mode-agnostic, never dropped.
+  const constraintBlock = opts.evidence.constraint
+    ? [
+        "",
+        "OPERATOR CONSTRAINT (the clarification-question rung, W1-T78 — answered; carried verbatim):",
+        opts.evidence.constraint,
+      ]
+    : [];
   const footer = [
     "",
     `Amend the SAME branch (${opts.branch}) — do NOT open a new PR and do NOT create a fix/*`,
@@ -769,6 +789,7 @@ export function renderFixPrompt(opts: {
         : "(no failing check detail was captured — re-check `gh pr checks` for the current state.)";
     return [
       header,
+      ...constraintBlock,
       `Required CI check(s) are FAILING and NO review has run yet (a review needs green CI`,
       `first) — the failing signal here IS the CI log, not a reviewer verdict. Your target is`,
       `making CI GREEN on the SAME branch; do not expand scope beyond what the failing`,
@@ -795,6 +816,7 @@ export function renderFixPrompt(opts: {
   if (mode === "body-coverage") {
     return [
       header,
+      ...constraintBlock,
       `The review gate is FAILING on ${n} unmet acceptance criteri${n === 1 ? "on" : "a"} whose reviewer`,
       `reason is a PROOF-KEYWORD COVERAGE gap — the report text never mentions the proof, this is`,
       `NOT an executed failure. The likely fix is the PR BODY's Acceptance block: add the`,
@@ -810,6 +832,7 @@ export function renderFixPrompt(opts: {
   // reviewer-unmet (default, W1-T76 unchanged).
   return [
     header,
+    ...constraintBlock,
     `The review gate is FAILING (${n} UNMET acceptance criterion${n === 1 ? "" : "a"}). Resolve ALL`,
     `of them together in this ONE pass — never fix one and leave another; patching one criterion`,
     `at a time is exactly what causes an infinite ping-pong across review rounds. Review summary:`,
@@ -868,6 +891,13 @@ export async function runFixRung(opts: {
   /** The blocked_review verdict that triggered this rung. */
   initialReview: ReviewVerdict & { headSha: string; reviewerOutcome: string };
   reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount };
+  /**
+   * W1-T78: an operator's answer to a clarification question, if this is a
+   * RE-DISPATCH — carried verbatim on EVERY strike's prompt as an added
+   * constraint (never paraphrased). Absent for an ORIGINAL blocked_review
+   * dispatch (W1-T76, unchanged).
+   */
+  constraint?: string;
   deps: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     waitForCiGreen: (
@@ -898,7 +928,7 @@ export async function runFixRung(opts: {
       task: opts.task,
       round: strikes,
       branch: opts.branch,
-      evidence: { review: { unmetCriteria: unmet, summary: review.summary } },
+      evidence: { review: { unmetCriteria: unmet, summary: review.summary }, constraint: opts.constraint },
     });
     deps.log("fix.dispatch", { strike: strikes, strike_cap: opts.strikeCap, unmet_count: unmet.length, round });
     deps.say(
@@ -2935,21 +2965,61 @@ function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string):
   }));
 }
 
-/** Fix strikes already attempted for a PR — fix.dispatch (task) + prior swept strikes (pr). */
-function priorStrikesFor(lines: Array<Record<string, unknown>>, taskId: string | undefined, prNumber: number): number {
+/**
+ * Fix strikes already attempted for a PR — a straight `fix.dispatch` (task_id)
+ * count. W1-T78 fixed the cold-dispatch `log` wrapper (`buildSweepEffects`'s
+ * `dispatchFix`) to stamp the REAL `task.id` on every `fix.dispatch`/`fix.review`
+ * line it writes — before that fix, a cold dispatch's lines carried the OUTER
+ * caller's synthetic id ("SWEEP"/"FIX"/"DAEMON"), so this function used to fall
+ * back to counting `sweep.disposed{disposition:"blocked-fixable",acted:true}`
+ * lines by `pr_number` as a PROXY (one such line ⇒ one dispatchFix CALL, which
+ * internally runs up to `strikeCap` strikes before returning). That proxy is
+ * REMOVED now that the root cause is fixed: `fix.dispatch` lines are reliably
+ * task-tagged for every caller, so counting BOTH would double-count every real
+ * strike (N `fix.dispatch` lines + 1 proxy line per dispatchFix call) and could
+ * starve an answered PR of its one legitimate extra strike (W1-T78's
+ * `strikeCapForAnswer` ceiling check).
+ */
+function priorStrikesFor(lines: Array<Record<string, unknown>>, taskId: string | undefined): number {
+  if (!taskId) return 0;
   let n = 0;
   for (const line of lines) {
-    if (line.step === "fix.dispatch" && taskId && line.task_id === taskId) n++;
-    else if (
-      line.step === "sweep.disposed" &&
-      line.acted === true &&
-      line.disposition === "blocked-fixable" &&
-      line.pr_number === prNumber
-    ) {
-      n++;
-    }
+    if (line.step === "fix.dispatch" && line.task_id === taskId) n++;
   }
   return n;
+}
+
+/**
+ * W1-T78: what each fix-rung strike TRIED for a task, ledger ground truth
+ * ONLY (never inferred) — the clarification-question rung's "what the fix
+ * worker tried per strike" input. `fix.dispatch` opens a strike (round +
+ * unmet count going IN); `fix.review` (only reached once CI is green) records
+ * its outcome. A strike with no matching `fix.review` line simply never
+ * reached a review (e.g. `fix.ci_not_green` — CI never went green).
+ */
+export function deriveStrikeHistory(lines: Array<Record<string, unknown>>, taskId: string | undefined): StrikeAttempt[] {
+  if (!taskId) return [];
+  const byStrike = new Map<number, StrikeAttempt>();
+  for (const line of lines) {
+    if (line.task_id !== taskId) continue;
+    const strike = typeof line.strike === "number" ? line.strike : undefined;
+    if (strike === undefined) continue;
+    if (line.step === "fix.dispatch") {
+      byStrike.set(strike, {
+        strike,
+        round: line.round === "fresh" ? "fresh" : "resume",
+        unmetCount: typeof line.unmet_count === "number" ? line.unmet_count : 0,
+        ciGreen: false,
+      });
+    } else if (line.step === "fix.review") {
+      const existing = byStrike.get(strike);
+      if (existing) {
+        existing.ciGreen = true; // fix.review only ever runs once CI is green
+        existing.reviewState = line.state === "success" ? "success" : "failure";
+      }
+    }
+  }
+  return [...byStrike.values()].sort((a, b) => a.strike - b.strike);
 }
 
 /**
@@ -2985,7 +3055,8 @@ function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): Open
       reviewState,
       checksState: checksStateFromRollup(pr.statusCheckRollup),
       unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
-      priorStrikes: priorStrikesFor(ledger, taskId, pr.number),
+      priorStrikes: priorStrikesFor(ledger, taskId),
+      strikeHistory: deriveStrikeHistory(ledger, taskId),
       supersededBy,
       lastActivityAt: pr.updatedAt,
       headSha: pr.headRefOid,
@@ -3012,6 +3083,7 @@ function buildSweepEffects(
   runId: string,
   plan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = ghIssueGateway(owner, repo);
@@ -3030,21 +3102,31 @@ function buildSweepEffects(
       }
     },
 
-    escalate: (pr, reason) => {
+    // W1-T78 — the CLARIFICATION-QUESTION rung's real wiring: `question` is
+    // ALREADY rendered (deterministically, from ledger ground truth) by the
+    // caller (runSweep/routeFix via renderClarificationQuestion). This closure
+    // does the TWO things the rung's design calls for: (1) log it to the
+    // durable §2 question backlog (plan/questions.ndjson — an append-only side
+    // channel, never a tasks.yaml edit, rule 15), and (2) use W1-T8's
+    // `escalate()` purely as the notification TRANSPORT, carrying the SAME two
+    // candidate resolutions as its options — never a generic needs-human.
+    escalate: (pr, reason, question) => {
+      const logged = appendQuestion(repoRoot, toQuestionEntry(question, new Date().toISOString()));
+      log(logged ? "sweep.question.logged" : "sweep.question.log_failed", {
+        pr_number: pr.prNumber,
+        question: question.question.slice(0, 120),
+      });
       escalate(
         {
           class: "BLOCKED",
           taskId: pr.taskId ?? "UNKNOWN",
           runId,
-          summary: `PR ${pr.prUrl} is blocked-ambiguous — ${reason}`,
+          summary: `PR ${pr.prUrl} needs a clarification — ${reason}`,
           detail:
-            `The level-triggered sweep (W1-T77) reconciled open PR #${pr.prNumber} to BLOCKED-AMBIGUOUS: ${reason}. ` +
-            `A dedicated clarification-question rung is W1-T78; the interim route is this plain escalation.`,
-          options: [
-            { label: "hand-fix", detail: "resolve the remaining criteria on the same branch, then re-run `rmd review`." },
-            { label: "close", detail: "close the PR and re-scope the task if the criteria themselves are wrong." },
-          ],
-          recommendation: "hand-fix",
+            `The CLARIFICATION-QUESTION rung (W1-T78, ratifies P22's new rung) reconciled open PR #${pr.prNumber} ` +
+            `to BLOCKED-AMBIGUOUS: ${reason}.\n\n${question.question}`,
+          options: question.resolutions.map((r) => ({ label: r.label, detail: r.detail })),
+          recommendation: question.resolutions[0].label,
         },
         { issues, ledgerPath, runId },
       );
@@ -3094,6 +3176,22 @@ function buildSweepEffects(
           reviewerOutcome: "sweep-reconstructed",
         };
 
+        // W1-T78: an operator's answer to a PRIOR clarification question
+        // (routed here by the DISPOSITION_RULES "answered" row) re-arms this
+        // SAME dispatch — never a new call site — carrying the answer as an
+        // added constraint and a strike cap set per the answer's own policy
+        // (config-driven, {@link strikeCapForAnswer}), instead of the
+        // ORIGINAL blocked_review dispatch's plain strikeCap. The fallback
+        // (when the answer itself carries no override) is `policy.clarify` —
+        // the SAME policy `DISPOSITION_RULES`' answered row just used to
+        // ROUTE here — never a second, independently-hardcoded default that
+        // could silently diverge from the routing decision.
+        const strikeCap = pr.pendingAnswer
+          ? strikeCapForAnswer(fixStrikeCap(config), {
+              resetStrikeCounterOnAnswer: pr.pendingAnswer.resetStrikeCounter ?? policy.clarify.resetStrikeCounterOnAnswer,
+            })
+          : fixStrikeCap(config);
+
         await runFixRung({
           taskId: task.id,
           runId,
@@ -3106,8 +3204,9 @@ function buildSweepEffects(
           settingsFile,
           config,
           budgetUsd,
-          strikeCap: fixStrikeCap(config),
+          strikeCap,
           initialReview,
+          constraint: pr.pendingAnswer?.constraint,
           reviewBase: { owner, repo, headCheckoutDir: worktreePath, reviewerMount },
           deps: {
             // Fresh-spawn adapter: an empty resumeSessionId (cold PR) becomes a
@@ -3124,7 +3223,16 @@ function buildSweepEffects(
             },
             issues,
             ledgerPath,
-            log,
+            // W1-T78: the OUTER `log` stamps every line `task_id: "SWEEP"`/`"FIX"`
+            // (this closure is shared by both `rmd sweep`'s and `rmd fix`'s
+            // callers) — but `fix.dispatch`/`fix.review` lines need the REAL
+            // task id so `deriveStrikeHistory` can find them again later (its
+            // `line.task_id !== taskId` filter would otherwise match nothing
+            // for every COLD dispatch, silently starving the clarification
+            // question's "what the fix worker tried" input). `extra`'s own
+            // `task_id` wins over the outer default (spread order in `log`'s
+            // body), so this is a pure override, not a second ledger writer.
+            log: (s, extra) => log(s, { task_id: task.id, ...extra }),
             say,
             account: (r) => r, // sweep meters nothing extra; the ledger carries per-spawn cost
           },
@@ -3185,7 +3293,7 @@ async function sweepCommand(rest: string[]): Promise<number> {
     return 1;
   }
 
-  const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log);
+  const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
   const summary = await runSweep(
     openPrs,
     { ...effects, ledgerPath, runId, log, dryRun },
@@ -3212,7 +3320,7 @@ function buildSweepHook(
   return async () => {
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath);
-      const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log);
+      const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
       await runSweep(openPrs, { ...effects, ledgerPath, runId, log }, DEFAULT_SWEEP_POLICY);
     } catch (e) {
       log("sweep.error", { error: String((e as Error)?.message ?? e) });
@@ -3260,7 +3368,11 @@ export async function routeFix(
   // Strike cap honored: the SAME rule the sweep policy uses to route to escalate
   // (failing review + strikes already at/over cap) — rmd fix never bypasses it.
   if (pr.reviewState === "failure" && pr.priorStrikes >= policy.strikeCap) {
-    await deps.escalate(pr, reason);
+    // W1-T78: the SAME clarification-question rendering the sweep uses — one
+    // rung, one implementation, three callers now (drain live / sweep cold /
+    // rmd fix bootstrap).
+    const question = renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []);
+    await deps.escalate(pr, reason, question);
     return { outcome: "escalated", reason };
   }
   return { outcome: "refused", reason: `${reason} (no block evidence to drive the rung)` };
@@ -3328,7 +3440,8 @@ async function fixCommand(rest: string[]): Promise<number> {
     reviewState,
     checksState: checksStateFromRollup(raw.statusCheckRollup),
     unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
-    priorStrikes: priorStrikesFor(ledger, taskId, raw.number),
+    priorStrikes: priorStrikesFor(ledger, taskId),
+    strikeHistory: deriveStrikeHistory(ledger, taskId),
     // superseded-by is a cross-PR sweep concern (which OTHER open PR credits the
     // same task) — out of scope for a single explicitly-named PR lookup.
     supersededBy: undefined,
@@ -3347,7 +3460,7 @@ async function fixCommand(rest: string[]): Promise<number> {
     log("fix.plan.unavailable", { plan_path: planPath, error: String((e as Error)?.message ?? e) });
   }
 
-  const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log);
+  const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
   const { outcome, reason } = await routeFix(raw.state, pr, effects, DEFAULT_SWEEP_POLICY);
 
   log(`fix.${outcome === "refused" ? "refused" : "disposed"}`, { pr_number: prNumber, task_id: taskId, outcome, reason });
@@ -3759,7 +3872,7 @@ async function correctCommand(rest: string[]): Promise<number> {
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 const USAGE =
-  "usage:\n  rmd run-task <task-id> [--allow-stale]   # dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd dep-review <pr-number> [--repo <name>]   # deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse\n  rmd lint-plan [--plan <path>] [--base <git-ref>]   # §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60)\n  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.\n  rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)\n  rmd sweep [--repo <name>] [--dry-run]   # level-triggered PR-pipeline reconciler (W1-T77, P22): re-derive EVERY open PR's disposition from observed state and take the ONE gated action — mergeable->arm auto-merge; blocked-fixable->W1-T76 fix rung; stale/superseded->close-with-reason; blocked-ambiguous->escalate. Idempotent (a second sweep over unchanged state acts on nothing). The daemon runs this every poll; --dry-run previews dispositions and takes nothing.\n  rmd fix <pr-number> [--repo <name>]   # operator verb for the W1-T76 fix rung (W1-T95, bootstrap/manual-override — drives a block on the sweep/drain delivery ITSELF, e.g. #160): dispatches the SAME rung sweep uses; refuses (zero spawns) when the PR is merged, closed, or has no block evidence; strikes-at-cap routes to escalate naming the count, never bypassing the cap.\n  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.\n  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.\n  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume\n  rmd correct <task-id> --pr <n> [--reason <text>]   # sanctioned operator-correction writer (P9/W1-T75): appends a correction.provenance ledger line naming the task's TRUE merged PR, SUPREME over every deriveStatus rung; prints derived status before/after\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard\n\nAn UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
+  "usage:\n  rmd run-task <task-id> [--allow-stale]   # dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd dep-review <pr-number> [--repo <name>]   # deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse\n  rmd lint-plan [--plan <path>] [--base <git-ref>]   # §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60)\n  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.\n  rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)\n  rmd sweep [--repo <name>] [--dry-run]   # level-triggered PR-pipeline reconciler (W1-T77, P22): re-derive EVERY open PR's disposition from observed state and take the ONE gated action — mergeable->arm auto-merge; blocked-fixable->W1-T76 fix rung; stale/superseded->close-with-reason; blocked-ambiguous->the W1-T78 clarification-question rung (a specific, decidable operator question to the §2 backlog + escalate() as transport, never a generic needs-human). Idempotent (a second sweep over unchanged state acts on nothing). The daemon runs this every poll; --dry-run previews dispositions and takes nothing.\n  rmd fix <pr-number> [--repo <name>]   # operator verb for the W1-T76 fix rung (W1-T95, bootstrap/manual-override — drives a block on the sweep/drain delivery ITSELF, e.g. #160): dispatches the SAME rung sweep uses; refuses (zero spawns) when the PR is merged, closed, or has no block evidence; strikes-at-cap routes to escalate naming the count, never bypassing the cap.\n  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.\n  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.\n  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume\n  rmd correct <task-id> --pr <n> [--reason <text>]   # sanctioned operator-correction writer (P9/W1-T75): appends a correction.provenance ledger line naming the task's TRUE merged PR, SUPREME over every deriveStatus rung; prints derived status before/after\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard\n\nAn UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(): Promise<void> {
