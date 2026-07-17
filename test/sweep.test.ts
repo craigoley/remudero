@@ -13,7 +13,9 @@ import {
   runSweep,
   strikeCapForAnswer,
   toQuestionEntry,
+  type CiFailure,
   type ClarificationQuestion,
+  type FixDispatchEvidence,
   type OpenPrView,
   type StrikeAttempt,
   type SweepDeps,
@@ -91,16 +93,36 @@ function strikesExhaustedPr(): OpenPrView {
   });
 }
 
+// W1-T100 (the #170 fix): blocked_ci — checks red, NO review posted yet.
+function ciFailure(over: Partial<CiFailure> = {}): CiFailure {
+  return { name: "ci", logTail: "tsc: error TS2322: ...", ...over };
+}
+function blockedCiPr(): OpenPrView {
+  return pr({
+    prNumber: 170,
+    prUrl: "url/170",
+    taskId: "W1-F",
+    reviewState: "none",
+    checksState: "red",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    ciFailures: [ciFailure()],
+  });
+}
+function blockedCiExhaustedPr(): OpenPrView {
+  return { ...blockedCiPr(), prNumber: 171, prUrl: "url/171", priorStrikes: 2 };
+}
+
 /** A recording fake for every injected effect. */
 function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & {
   armed: OpenPrView[];
   closed: Array<{ pr: OpenPrView; reason: string }>;
-  fixed: Array<{ pr: OpenPrView; unmet: CriterionVerdict[] }>;
+  fixed: Array<{ pr: OpenPrView; evidence: FixDispatchEvidence }>;
   escalated: Array<{ pr: OpenPrView; reason: string; question: ClarificationQuestion }>;
 } {
   const armed: OpenPrView[] = [];
   const closed: Array<{ pr: OpenPrView; reason: string }> = [];
-  const fixed: Array<{ pr: OpenPrView; unmet: CriterionVerdict[] }> = [];
+  const fixed: Array<{ pr: OpenPrView; evidence: FixDispatchEvidence }> = [];
   const escalated: Array<{ pr: OpenPrView; reason: string; question: ClarificationQuestion }> = [];
   return {
     armed,
@@ -109,7 +131,7 @@ function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & {
     escalated,
     arm: (p) => { armed.push(p); },
     close: (p, reason) => { closed.push({ pr: p, reason }); },
-    dispatchFix: (p, unmet) => { fixed.push({ pr: p, unmet }); },
+    dispatchFix: (p, evidence) => { fixed.push({ pr: p, evidence }); },
     escalate: (p, reason, question) => { escalated.push({ pr: p, reason, question }); },
     ledgerPath: ledgerPath(),
     runId: "SWEEP-1",
@@ -155,13 +177,22 @@ test("deriveDisposition: in-flight (pending review, pending checks, not stale) -
 });
 
 // ── the #161 hole: CI-red + review-skipped must NEVER be mergeable ───────────
+// ── the #170 fix (W1-T100): that same shape is now POSITIVELY fixable (ci-log
+//    mode) while strikes remain — fix FIRST, ask only after exhaustion ───────
 
-test("deriveDisposition: the #161 fixture — ci=red, review skipped (none), no unmet criteria -> blocked-ambiguous, NEVER mergeable; reason names ci=red", () => {
+test("deriveDisposition: the #161/#170 fixture — ci=red, review skipped (none), no unmet criteria, strikes left -> blocked-fixable (ci-log fix), NEVER mergeable", () => {
   const p = pr({ prNumber: 161, reviewState: "none", checksState: "red", unmetCriteria: [] });
   const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
   assert.notEqual(r.disposition, "mergeable");
+  assert.equal(r.disposition, "blocked-fixable");
+  assert.match(r.reason, /checks red/);
+});
+
+test("deriveDisposition: the #170 fixture — blocked_ci with strikes EXHAUSTED -> blocked-ambiguous (the question rung), never mergeable, never a fourth fix", () => {
+  const r = deriveDisposition(blockedCiExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW);
+  assert.notEqual(r.disposition, "mergeable");
   assert.equal(r.disposition, "blocked-ambiguous");
-  assert.match(r.reason, /red/);
+  assert.match(r.reason, /exhausted/);
 });
 
 test("deriveDisposition: mergeable requires POSITIVE ci=green AND review=success — {ci green, review success} -> mergeable", () => {
@@ -196,6 +227,44 @@ test("deriveDisposition is TOTAL — superseded takes precedence over a failing 
   assert.equal(deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW).disposition, "stale");
 });
 
+// ── W1-T100 (the #170 fix): route blocked_ci to the ci-log fix path — fix
+// FIRST, ask after exhaustion (plan/tasks.yaml's own acceptance fixtures) ────
+
+test("W1-T100 acceptance 1 — the #170 fixture (ci red, review none, zero strikes) dispositions blocked-fixable and dispatches ONE ci-log-mode fix worker, carrying failing check names + log tails, not reviewer criteria", async () => {
+  const deps = fakeDeps();
+  const seeded = blockedCiPr();
+
+  const summary = await runSweep([seeded], deps);
+
+  assert.equal(summary.byDisposition["blocked-fixable"], 1);
+  assert.equal(deps.fixed.length, 1, "exactly ONE ci-log fix worker dispatch");
+  assert.equal(deps.escalated.length, 0, "never straight to the question rung — fix FIRST");
+  assert.deepEqual(deps.fixed[0].evidence.unmetCriteria, [], "no reviewer criteria — blocked_ci carries none");
+  assert.deepEqual(deps.fixed[0].evidence.ciFailures, seeded.ciFailures, "the failing check names + log tails ride the dispatch");
+});
+
+test("W1-T100 acceptance 2 — a strike-exhausted ci-red PR routes to the question rung — the ladder, not a loop: zero new spawns", async () => {
+  const deps = fakeDeps();
+  const seeded = blockedCiExhaustedPr();
+
+  const summary = await runSweep([seeded], deps);
+
+  assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
+  assert.equal(deps.fixed.length, 0, "zero new spawns once strikes are exhausted");
+  assert.equal(deps.escalated.length, 1, "escalates to the clarification-question rung instead");
+  assert.match(deps.escalated[0].reason, /exhausted/);
+  assert.ok(deps.escalated[0].question, "a clarification question is generated, never silence");
+  assert.equal(deps.escalated[0].question.prNumber, seeded.prNumber);
+});
+
+test("W1-T100 acceptance 3 — review-failure routing is unchanged: a review-failure fixture still dispatches reviewer-unmet-shaped evidence", async () => {
+  const deps = fakeDeps();
+  await runSweep([blockedFixablePr()], deps);
+  assert.equal(deps.fixed.length, 1);
+  assert.equal(deps.fixed[0].evidence.unmetCriteria.length, 2, "the FULL unmet set, unchanged");
+  assert.equal(deps.fixed[0].evidence.ciFailures, undefined, "a review-mode dispatch never carries ci-log evidence");
+});
+
 // ── ACCEPTANCE 1: the P22 golden, verbatim ────────────────────────────────────
 
 test("acceptance 1 — the P22 golden: {mergeable, blocked-fixable(2 criteria), superseded-orphan, strikes-exhausted} -> exactly {one arm, ONE fix carrying BOTH criteria, one close, one escalation}; none-count == 0", async () => {
@@ -211,9 +280,9 @@ test("acceptance 1 — the P22 golden: {mergeable, blocked-fixable(2 criteria), 
   assert.equal(deps.escalated.length, 1, "exactly one escalation");
 
   // The ONE fix worker carries BOTH criteria at once (anti-ping-pong).
-  assert.equal(deps.fixed[0].unmet.length, 2, "the single fix dispatch carries BOTH unmet criteria");
+  assert.equal(deps.fixed[0].evidence.unmetCriteria.length, 2, "the single fix dispatch carries BOTH unmet criteria");
   assert.deepEqual(
-    deps.fixed[0].unmet.map((c) => c.claim).sort(),
+    deps.fixed[0].evidence.unmetCriteria.map((c) => c.claim).sort(),
     ["criterion one", "criterion two"],
   );
 
@@ -441,6 +510,17 @@ test("deriveDisposition: an operator's answer RE-ARMS a strikes-exhausted PR to 
   // Un-answered, this fixture is strikes-exhausted -> blocked-ambiguous (baseline).
   assert.equal(deriveDisposition(strikesExhaustedPr()).disposition, "blocked-ambiguous");
   // Answered, with the default reset policy (a FRESH strikeCap), it re-arms.
+  const result = deriveDisposition(answered);
+  assert.equal(result.disposition, "blocked-fixable");
+  assert.match(result.reason, /operator answered/);
+});
+
+test("deriveDisposition: an operator's answer ALSO re-arms a strikes-exhausted blocked_ci PR (W1-T100) — the ANSWERED row was generalized alongside the exhaustion/fixable rows, one ladder for both shapes", () => {
+  const answered: OpenPrView = { ...blockedCiExhaustedPr(), pendingAnswer: { constraint: "pin the dependency version" } };
+  // Un-answered, this fixture is strikes-exhausted -> blocked-ambiguous (baseline).
+  assert.equal(deriveDisposition(blockedCiExhaustedPr()).disposition, "blocked-ambiguous");
+  // Answered, with the default reset policy (a FRESH strikeCap), it re-arms — the
+  // SAME row that re-arms a review-failure PR, never a second, un-generalized path.
   const result = deriveDisposition(answered);
   assert.equal(result.disposition, "blocked-fixable");
   assert.match(result.reason, /operator answered/);
