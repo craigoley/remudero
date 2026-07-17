@@ -3993,3 +3993,38 @@
   note: "risk high per the 2-subsystem precedent (W1-T78/T79/T89). If W1-T89 is unbuilt at build time,
     the mapping row lands in the same plan/mast-mapping.yaml W1-T89 will read — file-level composition,
     no hard dep."
+
+- id: W1-T92
+  title: "lint-plan sizing precision — data/config files are not subsystems (the #153 code+yaml false positive)"
+  repo: remudero
+  depends_on: [W1-T20c]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "GROUND TRUTH (#153, worker-reported): moduleIdFromPath tags files by basename, so a task
+    pairing a code file with its OWN data artifact (retro.ts + plan/mast-mapping.yaml) counts as 2
+    subsystems and trips sizing at risk:medium — pushing genuine single-concern tasks to risk:high just
+    to satisfy the linter (W1-T89 took the bump). Recurring class: it fires on ANY code+.yaml pairing,
+    which policy-as-data doctrine makes the HOUSE PATTERN — the linter currently taxes the doctrine
+    rule 2 prescribes. Same precision family as W1-T81's headless-fitness FPs."
+  design: |
+    subsystemsOf discounts non-code data files (yaml/json/md under plan/ or config paths — an extensions
+    +paths table, data not branches) from the subsystem count; they still appear in files: and in the
+    lint report as artifacts, just not as concern-count. A task touching TWO code subsystems still flags
+    exactly as today.
+  acceptance:
+    - claim: "the #153 shape no longer flags"
+      proof: "unit test: files [src/lib/retro.ts, plan/mast-mapping.yaml] at risk:medium -> 1 subsystem, no sizing violation"
+    - claim: "two genuine code subsystems still flag at medium"
+      proof: "unit test: [src/lib/sweep.ts, src/run-task.ts] at risk:medium -> sizing violation exactly as today (regression lock)"
+    - claim: "the discount set is data"
+      proof: "unit test: adding an extension row discounts a seeded file with zero engine changes"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [src/lib/task-linter.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from the #153 worker's flag; companion to W1-T81 (recall+negation) — together they make
+    whole-plan lint counts trustworthy."
