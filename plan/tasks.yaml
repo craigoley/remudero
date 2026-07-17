@@ -3396,8 +3396,8 @@
   acceptance:
     - claim: "a seeded blocked_review with TWO unmet criteria dispatches ONE fix worker receiving BOTH + the reviewer reasons (P21's golden, verbatim)"
       proof: "unit test over an injected spawner: exactly one spawn; its rendered prompt contains both criteria and both reasons"
-    - claim: "the fix worker amends the same run branch — its output is creditable AND the task leaves the dispatch queue"
-      proof: "unit test: the spawn's worktree/branch equals the blocked run's run-<taskId>-<epochMs> head; a fixture deriveStatus over the amended-merged state credits the task AND nextRunnable over that fixture EXCLUDES it (the drain-drops-it confirmation at fixture level); a fix/* head fixture is REJECTED by the :204 assert"
+    - claim: "the fix worker amends the same run branch — its output is creditable, the task leaves the dispatch queue, AND its DEPENDENTS unblock"
+      proof: "unit test: the spawn's worktree/branch equals the blocked run's run-<taskId>-<epochMs> head; a fixture deriveStatus over the amended-merged state credits the task; nextRunnable over a fixture where a SECOND task depends_on the fixed one EXCLUDES the fixed task and INCLUDES the dependent (assertRunnable no longer throws for it); a fix/* head fixture is REJECTED by the :204 assert"
     - claim: "a second block after N strikes escalates rather than looping (P21's golden, verbatim)"
       proof: "unit test: strike counter at cap -> no third spawn; escalate() invoked; ledger line records exhaustion"
     - claim: "both paths are wired — manual and drain reach the same rung"
@@ -3410,7 +3410,10 @@
   attempts: 0
   note: "P21 absorbed verbatim (invariant + golden). status.ts is COMMENT-ONLY in this task (the
     assert-stays-strict note); any behavioral status.ts change is out of scope. Reviewer reasons ->
-    fix prompt is the W1-T63 payoff."
+    fix prompt is the W1-T63 payoff. Amended 2026-07-16 with the live cascade: a fix/* strand blocks not
+    just the task but every downstream dependent via assertRunnable (verbatim: PlanError W1-T75 has
+    unmerged dependencies: W1-T69 — the crediting fix blocked by the crediting bug). Creditability is
+    load-bearing for the whole dependency DAG, not one task."
 
 - id: W1-T77
   title: "rmd sweep — the level-triggered PR-pipeline reconciler: every open PR gets exactly one disposition (ratifies P22 core)"
