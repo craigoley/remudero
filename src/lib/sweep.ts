@@ -117,70 +117,101 @@ export interface DispositionResult {
 const MS_PER_DAY = 86_400_000;
 
 /**
+ * One row of the POLICY-AS-DATA table (rule 2): a mapping from an observed
+ * PR-state predicate to the disposition it produces, plus the stated reason.
+ * The disposition SELECTION lives in {@link DISPOSITION_RULES} — a data
+ * structure, never imperative if/else branches — exactly the shape the dep lane
+ * (W1-T54, `MANIFEST_PATTERNS`) and alert lane express their policy in. Adding,
+ * removing, or reordering a disposition is a TABLE edit, never a code branch.
+ */
+interface DispositionRule {
+  readonly disposition: Disposition;
+  /** Observed-state predicate over the PR + the tunable {@link SweepPolicy} thresholds. */
+  readonly when: (pr: OpenPrView, policy: SweepPolicy, ageDays: number) => boolean;
+  readonly reason: (pr: OpenPrView, policy: SweepPolicy, ageDays: number) => string;
+}
+
+/**
+ * THE POLICY TABLE — the ordered rules mapping observed PR-state -> disposition.
+ * Precedence is table order (first match wins); the terminal rule matches
+ * unconditionally, so a disposition is ALWAYS produced (the no-disposition=none
+ * invariant is structural, not a branch). Because the mapping is DATA, a test —
+ * or a future policy edit — flips a disposition by changing a threshold in
+ * {@link SweepPolicy} or a row here, with ZERO change to {@link deriveDisposition}
+ * (acceptance 3):
+ *
+ *   1. SUPERSEDED  — a newer PR credits the same task: close regardless of review.
+ *   2. STALE       — no activity in >= policy.staleDays: abandoned, close.
+ *   3. FAILING + strikes exhausted (>= cap)              -> blocked-ambiguous (escalate).
+ *   4. FAILING + actionable unmet criteria, strikes left -> blocked-fixable (fix rung).
+ *   5. FAILING + no actionable criteria (contradictory)  -> blocked-ambiguous (escalate).
+ *   6. DEFAULT (passing or in-flight, not failing/stale) -> mergeable (arm; GitHub gates).
+ *
+ * Stale/superseded rows precede the failing/mergeable rows so tightening the
+ * stale threshold flips an otherwise-mergeable PR to a close.
+ */
+export const DISPOSITION_RULES: readonly DispositionRule[] = [
+  {
+    disposition: "stale",
+    when: (pr) => pr.supersededBy != null,
+    reason: (pr) => `superseded-by #${pr.supersededBy}`,
+  },
+  {
+    disposition: "stale",
+    when: (_pr, policy, ageDays) => ageDays >= policy.staleDays,
+    reason: (_pr, policy, ageDays) =>
+      `abandoned — no activity in ${Math.floor(ageDays)}d (>= ${policy.staleDays}d threshold)`,
+  },
+  {
+    disposition: "blocked-ambiguous",
+    when: (pr, policy) => pr.reviewState === "failure" && pr.priorStrikes >= policy.strikeCap,
+    reason: (pr, policy) => `fix strikes exhausted (${pr.priorStrikes}/${policy.strikeCap}) — escalating`,
+  },
+  {
+    disposition: "blocked-fixable",
+    when: (pr) => pr.reviewState === "failure" && pr.unmetCriteria.length > 0,
+    reason: (pr, policy) =>
+      `${pr.unmetCriteria.length} unmet criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} — strike ${pr.priorStrikes + 1}/${policy.strikeCap}`,
+  },
+  {
+    disposition: "blocked-ambiguous",
+    when: (pr) => pr.reviewState === "failure",
+    reason: () => "review failing with no actionable unmet criteria (contradictory) — escalating",
+  },
+  {
+    // TERMINAL rule (matches unconditionally): passing, or in-flight and not
+    // failing/stale — arm and let GitHub's required-check gate hold it.
+    disposition: "mergeable",
+    when: () => true,
+    reason: (pr) =>
+      pr.reviewState === "success"
+        ? "review success — arming auto-merge"
+        : `review ${pr.reviewState} / checks ${pr.checksState} — arming; GitHub's required-check gate holds until green`,
+  },
+];
+
+/**
  * Derive ONE open PR's disposition from observed state + policy — PURE, TOTAL,
- * deterministic (rule 2: policy-as-data, never LLM-classified). Precedence:
- *
- *   1. SUPERSEDED — a newer PR credits the same task: close regardless of review
- *      state (the orphan is dead weight).
- *   2. STALE — no activity in >= policy.staleDays: abandoned, close.
- *   3. FAILING REVIEW (blocked_review):
- *        - strikes exhausted (>= cap)                 -> blocked-ambiguous (escalate)
- *        - actionable unmet criteria, strikes left    -> blocked-fixable (fix rung)
- *        - failing with NO actionable criteria        -> blocked-ambiguous (contradictory)
- *   4. PASSING REVIEW or still in-flight (pending/none, not failing, not stale)
- *      -> mergeable (arm; GitHub's required-check gate holds it until green).
- *
- * Stale/superseded is checked FIRST so tightening the stale threshold can flip an
- * otherwise-mergeable PR to a close (acceptance 3).
+ * deterministic (rule 2: policy-as-data, never LLM-classified). This function
+ * holds NO disposition branches: it computes the one derived scalar the table
+ * needs (the PR's age in days) and returns the first {@link DISPOSITION_RULES}
+ * row whose predicate matches. The mapping from state to disposition is entirely
+ * in the data table.
  */
 export function deriveDisposition(
   pr: OpenPrView,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
   now: number = Date.now(),
 ): DispositionResult {
-  // 1. superseded — a newer PR already credits this task.
-  if (pr.supersededBy != null) {
-    return { disposition: "stale", reason: `superseded-by #${pr.supersededBy}` };
-  }
-
-  // 2. stale by inactivity.
   const parsed = Date.parse(pr.lastActivityAt);
-  if (!Number.isNaN(parsed)) {
-    const ageDays = (now - parsed) / MS_PER_DAY;
-    if (ageDays >= policy.staleDays) {
-      return {
-        disposition: "stale",
-        reason: `abandoned — no activity in ${Math.floor(ageDays)}d (>= ${policy.staleDays}d threshold)`,
-      };
-    }
+  const ageDays = Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : (now - parsed) / MS_PER_DAY;
+  const rule = DISPOSITION_RULES.find((r) => r.when(pr, policy, ageDays));
+  if (!rule) {
+    // UNREACHABLE — the terminal row matches unconditionally. This guards the
+    // no-disposition=none invariant against a future table edit that drops it.
+    return { disposition: "mergeable", reason: "default (no rule matched) — arming" };
   }
-
-  // 3. failing review — fix if actionable and strikes remain, else escalate.
-  if (pr.reviewState === "failure") {
-    if (pr.priorStrikes >= policy.strikeCap) {
-      return {
-        disposition: "blocked-ambiguous",
-        reason: `fix strikes exhausted (${pr.priorStrikes}/${policy.strikeCap}) — escalating`,
-      };
-    }
-    if (pr.unmetCriteria.length > 0) {
-      return {
-        disposition: "blocked-fixable",
-        reason: `${pr.unmetCriteria.length} unmet criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} — strike ${pr.priorStrikes + 1}/${policy.strikeCap}`,
-      };
-    }
-    return {
-      disposition: "blocked-ambiguous",
-      reason: "review failing with no actionable unmet criteria (contradictory) — escalating",
-    };
-  }
-
-  // 4. passing, or still in-flight and not failing/stale — arm and let GitHub gate.
-  const detail =
-    pr.reviewState === "success"
-      ? "review success — arming auto-merge"
-      : `review ${pr.reviewState} / checks ${pr.checksState} — arming; GitHub's required-check gate holds until green`;
-  return { disposition: "mergeable", reason: detail };
+  return { disposition: rule.disposition, reason: rule.reason(pr, policy, ageDays) };
 }
 
 /** Injected effects — the real command wires arm/close/fix/escalate; tests fake them. */

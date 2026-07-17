@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   DEFAULT_SWEEP_POLICY,
+  DISPOSITION_RULES,
   deriveDisposition,
   renderSweepSummary,
   runSweep,
@@ -235,7 +236,11 @@ test("acceptance 2 — a NEW push (changed head sha) legitimately re-earns a fix
 
 // ── ACCEPTANCE 3: policy is DATA, not code branches ───────────────────────────
 
-test("acceptance 3 — policy is data: tightening staleDays flips a fixture PR's disposition with zero sweep-code changes", () => {
+test("acceptance 3 — policy is data, not code branches: tightening the stale-days threshold in the policy table flips a fixture PR's disposition with zero sweep-code changes", () => {
+  // The disposition SELECTION is a DATA table (rule 2), not if/else branches:
+  // every disposition is one row of DISPOSITION_RULES, iterated by deriveDisposition.
+  assert.ok(Array.isArray(DISPOSITION_RULES) && DISPOSITION_RULES.length >= 4);
+
   // A mergeable PR whose last activity is 10 days ago.
   const tenDaysAgo = new Date(NOW - 10 * 86_400_000).toISOString();
   const p = pr({ reviewState: "success", checksState: "green", lastActivityAt: tenDaysAgo });
@@ -243,7 +248,8 @@ test("acceptance 3 — policy is data: tightening staleDays flips a fixture PR's
   // Default 14-day window: NOT stale -> mergeable.
   assert.equal(deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW).disposition, "mergeable");
 
-  // Tighten the threshold in the POLICY TABLE (data, passed in) to 7 days: now stale.
+  // Tighten the threshold in the POLICY TABLE (data, passed in) to 7 days: the SAME
+  // fixture PR now flips to stale — no change to deriveDisposition or any rule row.
   const tighter: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, staleDays: 7 };
   assert.equal(deriveDisposition(p, tighter, NOW).disposition, "stale");
 });
