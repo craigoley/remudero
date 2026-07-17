@@ -140,8 +140,48 @@ test("deriveDisposition: failing review with NO actionable criteria -> blocked-a
   assert.match(r.reason, /contradictory/);
 });
 
-test("deriveDisposition: in-flight (pending review, not stale) -> mergeable (arm; GitHub gate holds it)", () => {
-  assert.equal(deriveDisposition(pr(), DEFAULT_SWEEP_POLICY, NOW).disposition, "mergeable");
+test("deriveDisposition: in-flight (pending review, pending checks, not stale) -> blocked-ambiguous (the #161 fix — never armed pre-green)", () => {
+  const r = deriveDisposition(pr(), DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-ambiguous");
+  assert.match(r.reason, /checks pending/);
+  assert.match(r.reason, /review pending/);
+});
+
+// ── the #161 hole: CI-red + review-skipped must NEVER be mergeable ───────────
+
+test("deriveDisposition: the #161 fixture — ci=red, review skipped (none), no unmet criteria -> blocked-ambiguous, NEVER mergeable; reason names ci=red", () => {
+  const p = pr({ prNumber: 161, reviewState: "none", checksState: "red", unmetCriteria: [] });
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.notEqual(r.disposition, "mergeable");
+  assert.equal(r.disposition, "blocked-ambiguous");
+  assert.match(r.reason, /red/);
+});
+
+test("deriveDisposition: mergeable requires POSITIVE ci=green AND review=success — {ci green, review success} -> mergeable", () => {
+  const p = pr({ reviewState: "success", checksState: "green" });
+  assert.equal(deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW).disposition, "mergeable");
+});
+
+test("deriveDisposition: {ci pending, review success} -> NOT mergeable (checks aren't green yet)", () => {
+  const p = pr({ reviewState: "success", checksState: "pending" });
+  assert.notEqual(deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW).disposition, "mergeable");
+});
+
+test("deriveDisposition: {ci green, review failure} -> blocked-fixable, unchanged by the ci predicate", () => {
+  const p = pr({
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [criterion({ claim: "still needs work" })],
+  });
+  assert.equal(deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-fixable");
+});
+
+test("deriveDisposition: a synthetic state matching no positive rule -> escalate (blocked-ambiguous) with a stated reason; never disposition=none", () => {
+  // Neither failing, nor superseded/stale, nor positively ci-green+review-success.
+  const p = pr({ reviewState: "pending", checksState: "pending" });
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-ambiguous");
+  assert.ok(r.reason.length > 0, "the catch-all states a reason");
 });
 
 test("deriveDisposition is TOTAL — superseded takes precedence over a failing review", () => {

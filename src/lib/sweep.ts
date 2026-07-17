@@ -20,21 +20,34 @@ import type { CriterionVerdict } from "./review.js";
  * a test might flip lives in the policy object so a fixture can override it.
  *
  * Every open PR gets EXACTLY ONE of four dispositions and its gated action:
- *   - MERGEABLE        — on a path to merge (review success, or in-flight and not
- *                        failing/stale) -> arm auto-merge. GitHub's required-check
- *                        gate is the backstop, so arming a still-pending PR is safe
- *                        and idempotent (per-repo merge SERIALIZATION slots are a
- *                        future WS-2 task and deliberately NOT built here — today we
- *                        just ARM, honoring P22's capture ADDENDUM).
+ *   - MERGEABLE        — POSITIVELY matched only: required checks green AND review
+ *                        success -> arm auto-merge (per-repo merge SERIALIZATION
+ *                        slots are a future WS-2 task and deliberately NOT built
+ *                        here — today we just ARM, honoring P22's capture
+ *                        ADDENDUM). Never inferred from the mere ABSENCE of a
+ *                        failure — see BLOCKED-AMBIGUOUS's terminal row below (the
+ *                        #161 fix, W1-T93): a CI-red PR whose review was SKIPPED
+ *                        matches no failure rule either, and used to fall through
+ *                        to this row's old unconditional catch-all, arming a PR
+ *                        GitHub's required-CI gate would then stall FOREVER —
+ *                        never fixed, never escalated, invisible.
  *   - BLOCKED-FIXABLE  — a failing review with actionable unmet criteria and strikes
  *                        left -> dispatch the W1-T76 fix rung (reused, not
  *                        reimplemented) carrying the FULL unmet set at once.
  *   - STALE/SUPERSEDED — a newer PR credits the same task, or no activity in N days
  *                        -> close with a stated reason (the #111/#113 manual chore).
- *   - BLOCKED-AMBIGUOUS— fix strikes exhausted, or contradictory criteria -> escalate
- *                        via W1-T8's `escalate()` (a dedicated clarification-question
- *                        rung is W1-T78, NOT this task — plain escalate() is correct
- *                        and sufficient here).
+ *   - BLOCKED-AMBIGUOUS— fix strikes exhausted, contradictory criteria, OR the
+ *                        TERMINAL catch-all (anything not positively mergeable and
+ *                        not already failure-shaped, e.g. CI-red with review
+ *                        skipped/none/pending) -> escalate via W1-T8's
+ *                        `escalate()`, naming the observed CI/review state so it is
+ *                        never silent and never armed (a dedicated
+ *                        clarification-question rung is W1-T78, NOT this task —
+ *                        plain escalate() is correct and sufficient here).
+ *                        blocked_ci-shaped PRs route here only UNTIL the fix rung
+ *                        accepts CI-log input (W1-T94); once that lands, this row
+ *                        should split so ci=red carries actionable log input to
+ *                        blocked-fixable instead.
  *
  * SCOPING (honest): HUNG workers are EXPLICITLY DEFERRED to a future WS-2 task.
  * Worker liveness is RUN-state, not PR-state, and this sweep's domain is PR state
@@ -145,10 +158,18 @@ interface DispositionRule {
  *   3. FAILING + strikes exhausted (>= cap)              -> blocked-ambiguous (escalate).
  *   4. FAILING + actionable unmet criteria, strikes left -> blocked-fixable (fix rung).
  *   5. FAILING + no actionable criteria (contradictory)  -> blocked-ambiguous (escalate).
- *   6. DEFAULT (passing or in-flight, not failing/stale) -> mergeable (arm; GitHub gates).
+ *   6. CI GREEN + REVIEW SUCCESS (POSITIVE match only)   -> mergeable (arm).
+ *   7. TERMINAL catch-all (the #161 fix, W1-T93): anything not positively
+ *      mergeable and not already failure-shaped — including CI-red with review
+ *      skipped/none/pending — -> blocked-ambiguous (escalate), naming the
+ *      observed checks/review state. The catch-all is the LEAST permissive
+ *      disposition, never the most permissive one; mergeable is ONLY ever
+ *      positively matched (row 6), never a fallback.
  *
  * Stale/superseded rows precede the failing/mergeable rows so tightening the
- * stale threshold flips an otherwise-mergeable PR to a close.
+ * stale threshold flips an otherwise-mergeable PR to a close. Rows 3-5 (review
+ * FAILING) precede row 6 so a CI-green-but-review-failing PR still routes to
+ * fix/escalate, not mergeable.
  */
 export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
@@ -179,14 +200,26 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: () => "review failing with no actionable unmet criteria (contradictory) — escalating",
   },
   {
-    // TERMINAL rule (matches unconditionally): passing, or in-flight and not
-    // failing/stale — arm and let GitHub's required-check gate hold it.
+    // POSITIVE MATCH ONLY (the #161 fix, W1-T93): mergeable is NEVER inferred
+    // from the mere absence of a failure — it requires required-checks green AND
+    // review success, named explicitly (P22's own words: "required contexts
+    // green, review success, unmerged").
     disposition: "mergeable",
+    when: (pr) => pr.checksState === "green" && pr.reviewState === "success",
+    reason: () => "review success, required checks green — arming auto-merge",
+  },
+  {
+    // TERMINAL rule (matches unconditionally) — the LEAST permissive disposition
+    // (the #161 fix, W1-T93), not the most permissive one. A CI-red PR with its
+    // review skipped/none/pending — the #161 shape — matches no failure rule
+    // (reviewState isn't "failure") and no longer falls through to mergeable by
+    // default: it lands here and ESCALATES, naming the observed state, so it is
+    // never silent and never armed. (blocked_ci-shaped PRs route here only UNTIL
+    // the fix rung accepts CI-log input — W1-T94.)
+    disposition: "blocked-ambiguous",
     when: () => true,
     reason: (pr) =>
-      pr.reviewState === "success"
-        ? "review success — arming auto-merge"
-        : `review ${pr.reviewState} / checks ${pr.checksState} — arming; GitHub's required-check gate holds until green`,
+      `not positively mergeable — checks ${pr.checksState}, review ${pr.reviewState} — escalating`,
   },
 ];
 
@@ -209,7 +242,8 @@ export function deriveDisposition(
   if (!rule) {
     // UNREACHABLE — the terminal row matches unconditionally. This guards the
     // no-disposition=none invariant against a future table edit that drops it.
-    return { disposition: "mergeable", reason: "default (no rule matched) — arming" };
+    // The safe fallback is the LEAST permissive disposition — escalate, never arm.
+    return { disposition: "blocked-ambiguous", reason: "default (no rule matched) — escalating" };
   }
   return { disposition: rule.disposition, reason: rule.reason(pr, policy, ageDays) };
 }
