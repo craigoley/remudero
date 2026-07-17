@@ -272,7 +272,7 @@ Candidates for the Architect to ratify via a tasks.yaml PR (rule 15) — never a
 `blocked_containment`×1, `blocked_isolation`×1). Candidates for the Architect to ratify via a tasks.yaml PR
 (rule 15) — never auto-filed.
 
-- **★ P23 (investigate-then-build) — TWO NEW BLOCK CLASSES (`blocked_containment`, `blocked_isolation`)
+- **★ P23 (investigate-then-build) — RATIFIED 2026-07-17 -> W1-T91 — investigation confirmed guard-fired-correctly, bootstrap-night class. ORIGINAL: TWO NEW BLOCK CLASSES (`blocked_containment`, `blocked_isolation`)
   appeared this cycle, and the retro cannot yet tell a GUARD-FIRED fail-close from a REAL host regression.**
   Every prior block was `blocked_review`/`no_pr`/`failed`/`incomplete`; these two are new. W1-T17/#99 (the
   isolation preflight, fail-closed) shipped THIS cycle, so a `blocked_isolation` verdict is most likely the
