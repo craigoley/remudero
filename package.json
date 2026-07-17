@@ -24,6 +24,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "node --test --import tsx \"test/**/*.test.ts\"",
+    "test:unit": "node --test --import tsx \"test/*.test.ts\"",
+    "test:coverage": "tsx .github/scripts/coverage-ratchet.mjs",
+    "dup-check": "jscpd . --config .jscpd.json",
+    "mutation": "tsx .github/scripts/mutation-ratchet.mjs",
+    "ts-strict-probe": "bash .github/scripts/ts-strict-probe.sh",
     "lint-plan": "tsx src/run-task.ts lint-plan",
     "spike": "tsx src/spike.ts"
   },
@@ -34,6 +39,8 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "@types/node": "^22.20.1"
+    "@stryker-mutator/core": "^9.6.1",
+    "@types/node": "^22.20.1",
+    "jscpd": "^5.0.12"
   }
 }

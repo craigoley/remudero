@@ -1,0 +1,43 @@
+{
+  "_comment": [
+    "TIER 2 quality-gate baselines (W1-T25, MASTER-PLAN §5 'Coverage ratchet' /",
+    "'Mutation-testing baseline' / 'Duplication budget'). Captured at onboarding",
+    "so every ratchet has a real floor from day one (§5A) — never lowered by a",
+    "PR; only raised, by hand, once the new number has held for a while.",
+    "",
+    "coverage: measured via `node --test --experimental-test-coverage` (see",
+    "  .github/scripts/coverage-ratchet.mjs). Node's --test-coverage-* threshold",
+    "  flags only compare at INTEGER-percent granularity (verified empirically —",
+    "  93.76 passed a 93.76 threshold against 93.75% actual, but so did every",
+    "  non-integer value below 94; only whole-percent thresholds actually gate).",
+    "  These floors are the measured baseline at PR time (93.75/91.77/92.03),",
+    "  floored to the nearest whole percent so today's suite passes exactly at",
+    "  the floor.",
+    "coverage_measured_at_baseline: { lines: 93.75, branches: 91.77, functions: 92.03 }",
+    "",
+    "duplication: jscpd 'total duplicated lines %' across the whole tree",
+    "  (.jscpd.json). Measured 1.99% at baseline; ceiling set to 3 for headroom.",
+    "",
+    "mutation: Stryker (command runner, src/lib/**/*.ts only — src/run-task.ts",
+    "  and src/spike.ts are CLI glue, excluded; see stryker.conf.mjs). Runs on a",
+    "  schedule + push-to-main (.github/workflows/mutation.yml), NOT per-PR — a",
+    "  full run serially executes the whole suite once per mutant (no per-mutant",
+    "  test selection without a Jest/Mocha/Karma runner plugin, and TypeScript 7",
+    "  breaks Stryker's sandboxed tsconfig rewrite, forcing --inPlace i.e.",
+    "  concurrency 1 — see stryker.conf.mjs comment). Mutation score is the",
+    "  falsifier coverage % cannot provide: green tests that kill no mutants are",
+    "  theater (LEARNINGS)."
+  ],
+  "coverage": {
+    "lines": 93,
+    "branches": 91,
+    "functions": 92
+  },
+  "duplication": {
+    "max_percent": 3
+  },
+  "mutation": {
+    "score": null,
+    "note": "BOOTSTRAP — null disables Stryker's thresholds.break (stryker.conf.mjs reads this file directly), so the mutation.yml job reports the score but never fails on it yet. A full src/lib run is ~6200 mutants at ~2s/mutant serially (inPlace forces concurrency 1) — multiple hours, infeasible to run inline while authoring this PR (measured directly: a 2-file/291-mutant slice of src/lib took 9m30s — see PR description). Once the first real scheduled/dispatched mutation.yml run on main completes, hand-record its score here (never fabricate one) to arm the ratchet."
+  }
+}

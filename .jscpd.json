@@ -1,0 +1,15 @@
+{
+  "threshold": 3,
+  "reporters": ["console"],
+  "format": ["typescript", "bash"],
+  "absolute": false,
+  "gitignore": true,
+  "ignore": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/coverage/**",
+    "**/.stryker-tmp*/**",
+    "**/reports/**",
+    "**/fixtures/**"
+  ]
+}

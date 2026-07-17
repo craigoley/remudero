@@ -1,0 +1,76 @@
+# Remudero CI — mutation-testing baseline (W1-T25, MASTER-PLAN §5 TIER 2).
+# "Green tests that kill no mutants are theater; the mutation score is the
+# falsifier that coverage % cannot provide" (LEARNINGS).
+#
+# NOT a per-PR gate — see stryker.conf.mjs's header for the full reasoning.
+# Short version: this repo's test runner (Node's built-in `--test`, not
+# jest/mocha/karma) has no Stryker plugin, so mutation testing here uses
+# Stryker's generic 'command' runner, which re-execs the WHOLE `npm run
+# test:unit` suite per mutant (no per-mutant test selection). Worse, this
+# repo's pinned TypeScript 7 breaks Stryker's sandboxed-copy tsconfig
+# rewrite (`ts.parseConfigFileTextToJson` was removed — verified
+# empirically, not assumed), forcing `inPlace: true`, which in turn forces
+# `concurrency: 1` (mutants can't run in parallel against the same in-place
+# file tree). Measured directly: 291 mutants (2 of ~118 src/lib files) took
+# 9m30s. src/lib/**/*.ts instruments to ~6200 mutants — several hours,
+# serially. That is why this runs on a SCHEDULE + manual dispatch only,
+# mirroring the fleet's existing full-vs-PR split for other expensive scans
+# (codeql.yml / osv-scanner.yml run weekly + on push; osv-scanner-pr.yml is
+# the cheap PR-time path). There is no cheap PR-time path for mutation here
+# — a partial (changed-files-only) mutation run was considered and rejected
+# for this PR: it would silently under-report the score's meaning (a
+# "mutation score" that only ever covers whichever files a PR happened to
+# touch is not comparable run-to-run, and Stryker's own `--since` diffing
+# still pays the same per-mutant test-run cost per surviving mutant it does
+# select).
+#
+# RATCHET BOOTSTRAP: .remudero/quality-baseline.json's mutation.score is
+# `null` today — no full run has completed yet (infeasible to run for hours
+# while authoring this PR). `npm run mutation`
+# (.github/scripts/mutation-ratchet.mjs) runs Stryker, reads that value, and
+# evaluates it via src/lib/mutation-ratchet.ts's pure ratchet logic (the
+# same logic test/mutation-ratchet.test.ts exercises over fixture scores);
+# `null` means nothing to ratchet against yet, so this first run (and any
+# run before a human hand-records a real baseline) always succeeds and just
+# REPORTS the number. Once a real score lands, hand-set mutation.score in
+# the baseline file (never fabricate one) to arm the gate.
+name: Mutation
+
+on:
+  schedule:
+    # Weekly, off-peak (Mondays 05:11 UTC — staggered from CodeQL 04:17 and
+    # OSV-Scanner 04:43).
+    - cron: "11 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  mutation:
+    name: mutation
+    runs-on: ubuntu-latest
+    # Generous cap for a several-hour serial run (see header); GitHub's own
+    # job default is 6h (360m) — this leaves headroom under that ceiling
+    # rather than relying on the implicit default.
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Mutation baseline (Stryker; ratchet via thresholds.break — see stryker.conf.mjs)
+        run: npm run --silent mutation
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mutation-report
+          path: reports/mutation/
+          retention-days: 30

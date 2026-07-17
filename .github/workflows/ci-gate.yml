@@ -57,8 +57,12 @@ jobs:
       # `lint-plan` (W1-T20c, §5C Layer A) added: UNCONDITIONAL (no path filter, runs every PR),
       # same safety property as `ci` — a path-filtered required check is the synthwatch #102
       # deadlock class this list must never reproduce.
+      # `coverage-ratchet` / `dup-check` / `ts-strict-probe` (W1-T25, quality.yml, MASTER-PLAN
+      # §5 TIER 2) added: same UNCONDITIONAL property. `mutation` (mutation.yml) is
+      # DELIBERATELY excluded — it is schedule/dispatch-only (a full run is hours long; see
+      # mutation.yml's header), never a per-PR check-run, so it must never appear here.
       REQUIRED: >-
-        ["ci", "lint-plan"]
+        ["ci", "lint-plan", "coverage-ratchet", "dup-check", "ts-strict-probe"]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
       IGNORE: >-

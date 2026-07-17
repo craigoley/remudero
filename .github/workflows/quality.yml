@@ -1,0 +1,71 @@
+# Remudero CI — TIER 2 quality gate (W1-T25, MASTER-PLAN §5).
+#
+# Three PER-PR, always-runs checks (no `paths:`/`if:` filter — a conditionally
+# skipped required check deadlocks merge forever, the synthwatch #102 class
+# ci-gate.yml exists to avoid; see that file's header):
+#
+#   coverage-ratchet — "never down; ratchets up." Fails if the suite's line/
+#     branch/function coverage drops below the floor in
+#     .remudero/quality-baseline.json.
+#   dup-check        — jscpd duplication budget (.jscpd.json); breach is
+#     CI-red. (The idle-groom "auto-file a refactor task" half of this bullet
+#     is follow-up work, not this gate.)
+#   ts-strict-probe  — "'0 violations' from a fresh strict gate is suspicious
+#     until falsified." Plants a strictNullChecks-only violation into src/lib,
+#     runs the REAL `tsc -p tsconfig.json --noEmit` build command, and fails
+#     unless tsc actually rejects it — proving strict mode is enforced by the
+#     configured gate, not merely assumed.
+#
+# Mutation testing (the fourth TIER 2 bullet) is DELIBERATELY NOT here — see
+# .github/workflows/mutation.yml's header for why a full src/lib run cannot
+# be a per-PR blocking gate on this test runner.
+#
+# ⚠️ Each job name below must be added to ci-gate.yml's REQUIRED list once
+# live on main (same rule as `ci`/`lint-plan` — see ci-gate.yml header).
+name: Quality
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  coverage-ratchet:
+    name: coverage-ratchet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Coverage ratchet (never down; see .remudero/quality-baseline.json)
+        run: npm run --silent test:coverage
+
+  dup-check:
+    name: dup-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Duplication budget (jscpd)
+        run: npm run --silent dup-check
+
+  ts-strict-probe:
+    name: ts-strict-probe
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: TS-strict planted-probe falsifier
+        run: npm run --silent ts-strict-probe
