@@ -7,5 +7,9 @@ FINDINGS-local*
 dist/
 *.tsbuildinfo
 
+# generated coverage reports (W1-T25 coverage-ratchet gate consumes coverage/lcov.info,
+# regenerated fresh every run — never committed)
+coverage/
+
 # os / editor
 .DS_Store

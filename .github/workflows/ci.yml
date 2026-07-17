@@ -46,6 +46,32 @@ jobs:
       - name: leak-grep (plaintext secret tripwire)
         run: bash .github/scripts/leak-grep.sh
 
+  coverage-ratchet:
+    # §5 TIER 2, quality gate 1/4 (W1-T25) — coverage never goes down. Runs UNCONDITIONALLY (no
+    # path filter, no `if:`) so it always registers a check run, same fail-closed shape as `ci`/
+    # `lint-plan` above — a conditionally-skipped required check deadlocks merge forever
+    # (LEARNINGS: the #102-class skipped-check deadlock). scripts/coverage-ratchet.mjs compares
+    # this run's lcov totals against the recorded floor in scripts/coverage-baseline.json and
+    # exits non-zero on any coverage-lowering PR; that floor only ever ratchets UP (a deliberate,
+    # reviewed bump when coverage genuinely improves), never down to make a red PR pass.
+    name: coverage-ratchet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Test with coverage (lcov, src/** only — test/** excluded from the ratio)
+        run: |
+          mkdir -p coverage
+          node --experimental-test-coverage --test-coverage-exclude="test/**" \
+            --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
+            --test --import tsx "test/**/*.test.ts"
+      - name: Coverage ratchet (blocks a coverage-lowering PR)
+        run: node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
+
   lint-plan:
     # §5C Layer A (W1-T20c) — the CI half of the deterministic task linter. Runs
     # UNCONDITIONALLY on every PR (no path filter) so it always registers a check

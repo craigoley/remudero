@@ -1,0 +1,6 @@
+{
+  "_comment": "Coverage ratchet floor (W1-T25, MASTER-PLAN §5 TIER 2 gate 1/4). Captured from remudero's own test suite (src/** only, test/** excluded) via `node --experimental-test-coverage --test-coverage-exclude=test/** --test-reporter=lcov`. Never lower these numbers to make a PR pass -- raise them (ratchet up) when coverage genuinely improves; a coverage-lowering PR must go CI-red on scripts/coverage-ratchet.mjs.",
+  "capturedAt": "2026-07-17",
+  "linesPct": 89.64,
+  "branchesPct": 87.61
+}
