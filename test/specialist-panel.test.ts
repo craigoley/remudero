@@ -67,6 +67,28 @@ test("ACCEPTANCE 3: the specialist prompt tells the worker it must never edit/mo
   assert.match(prompt, /GitHub-enforced merge gate DECIDES/i);
 });
 
+test("ACCEPTANCE 3: a specialist's only sanctioned GitHub action is an ADVISORY PR review comment — its verdict feeds remudero-review, NEVER a merge/arm call (the gate decides)", () => {
+  const args = buildSpecialistSpawnArgs({
+    specialist: "design",
+    reasons: ["new exported surface"],
+    taskId: "W2-T1",
+    prUrl: "https://github.com/craigoley/remudero/pull/999",
+    cwd: "/tmp/x",
+    settingsFile: "/tmp/settings.json",
+  });
+  // Read-only by construction: no write tool, so a specialist cannot mutate the repo.
+  for (const forbidden of ["Write", "Edit", "NotebookEdit", "MultiEdit"]) {
+    assert.equal(args.tools?.includes(forbidden), false, `must not include ${forbidden}`);
+  }
+  // Advisory by construction: the sanctioned action is a review comment; the prompt
+  // NEVER instructs a merge/arm — the GitHub-enforced gate is the sole decider.
+  const prompt = args.prompt;
+  assert.match(prompt, /gh pr comment/, "the specialist advises via a PR review comment");
+  assert.doesNotMatch(prompt, /gh pr merge/, "a specialist must never be told to merge");
+  assert.doesNotMatch(prompt, /--merge\b|--auto\b|auto-?merge|\barm\b/i, "a specialist must never arm/merge — that is the gate's call");
+  assert.match(prompt, /ADVISE only|gate (DECIDES|decides)/i, "the verdict is advice; the gate decides");
+});
+
 // ── routeSpecialists: fixed order, evidence-carrying reasons ────────────────
 
 test("routeSpecialists: hooks/deny-floor.sh triggers BOTH security and containment, in fixed panel order", () => {
