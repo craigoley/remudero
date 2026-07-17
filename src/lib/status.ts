@@ -203,6 +203,11 @@ function latestActualPrUrl(lines: Array<Record<string, unknown>>, taskId: string
  * (`run-<taskId>-<epochMs>`, run-task.ts's naming). A foreign PR that merely
  * mentions the task id in its body — or one whose head ref cannot be resolved —
  * is NOT owned and must never be credited.
+ *
+ * LOAD-BEARING for the blocked_review FIX RUNG too (W1-T76, absorbs P21): the
+ * legit fix workflow amends THIS SAME run branch, never a `fix/*` branch or a
+ * fresh PR — creditability here is what lets a fixed task's dependents unblock.
+ * Never weaken this assert to accommodate a `fix/*` head.
  */
 function ownsBranch(head: string | undefined, taskId: string): boolean {
   if (!head) return false;

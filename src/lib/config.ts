@@ -67,6 +67,12 @@ export interface Config {
    * `dailyCapUsd` — {@link validateConfig} rejects that combination at load.
    */
   dailyCapUsd?: number | null;
+  /**
+   * Strike cap for the blocked_review FIX RUNG (W1-T76, absorbs P21; MASTER-PLAN
+   * §3's fixing ladder: round 1 resumes the failing session, round 2 is a fresh
+   * worker on the same branch). Optional; defaults to 2 — see {@link fixStrikeCap}.
+   */
+  fixStrikeCap?: number;
 }
 
 /**
@@ -126,6 +132,15 @@ export function workerShell(config: Config): string {
 /** The soft budget WARNING threshold (notional $). Default 25.00; never a kill. */
 export function softBudgetThreshold(config: Config): number {
   return config.softBudgetThresholdUsd ?? 25.0;
+}
+
+/**
+ * The blocked_review FIX RUNG's strike cap (W1-T76, absorbs P21). Default 2 —
+ * §3's ladder: strike 1 resumes the failing session, strike 2 is a fresh
+ * worker on the same branch; exhausting the cap escalates rather than looping.
+ */
+export function fixStrikeCap(config: Config): number {
+  return config.fixStrikeCap ?? 2;
 }
 
 /** Model implement/recon workers ride. Default `sonnet`. */

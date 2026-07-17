@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   architectModel,
   configPath as instanceConfigPath,
+  fixStrikeCap,
   loadConfig,
   notifyRecipient,
   softBudgetThreshold,
@@ -29,7 +30,7 @@ import {
 import { DEFAULT_POLL_INTERVAL_MS, daemonBoot, runDaemon, type DaemonOpts, type DaemonSummary } from "./lib/daemon.js";
 import { generateLaunchdPlist, launchdPlistPath } from "./lib/launchd.js";
 import { buildDigest, sendDigest } from "./lib/digest.js";
-import { escalate, ghIssueGateway, type EscalationClass, type EscalationOption } from "./lib/escalate.js";
+import { escalate, ghIssueGateway, type EscalationClass, type EscalationOption, type IssueGateway } from "./lib/escalate.js";
 import { imessageChannel, notify } from "./lib/notify.js";
 import { parseUsage, type UsageSnapshot } from "./lib/headroom.js";
 import {
@@ -71,6 +72,7 @@ import {
   postReviewStatus,
   reviewerOutcome,
   reviewerVerdictContract,
+  type CriterionVerdict,
   type ReviewVerdict,
 } from "./lib/review.js";
 import { buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
@@ -94,6 +96,7 @@ import {
   worktreeRemove,
   worktreesDir,
   writeRunLock,
+  type SpawnWorkerArgs,
   type WorkerResult,
 } from "./lib/worker.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "./lib/drain-lock.js";
@@ -606,6 +609,243 @@ async function runReview(args: {
   return { ...verdict, headSha, reviewerOutcome: outcome };
 }
 
+// ── THE blocked_review FIX RUNG (W1-T76, absorbs P21; MASTER-PLAN §3's fixing
+// state — "red CI/changes-requested → fixing: resume round 1, fresh round 2").
+//
+// GROUND TRUTH this rung fixes: a mounted reviewer posts FAILURE with specific
+// unmet_criteria + reasons (W1-T63, sharpened by W1-T65's observed verdicts),
+// and `runReview`'s failing verdict used to be a DEAD END — the PR sat OPEN,
+// the criteria/reasons were dropped, and re-running the task from scratch
+// spawned a fresh worker with the identical spec, which patched WHICHEVER
+// criterion the LAST block happened to name and dropped the other → an
+// infinite ping-pong across two criteria (#111/#113). The hand-fix that broke
+// that loop (#115) was ONE worker told to resolve ALL unmet criteria on a
+// single branch — exactly what this rung automates.
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Render the fix worker's prompt: the FULL unmet acceptance criteria + the
+ * reviewer's verbatim reasons, ALL AT ONCE — the anti-ping-pong invariant
+ * (P21's golden, absorbed verbatim). Never a narrowed, one-criterion prompt;
+ * both `resume` (round 1) and `fresh` (round 2+) rounds get the identical
+ * full-set framing.
+ *
+ * `summary` is the review's overall one-line verdict — ALWAYS included. A
+ * review can fail with an EMPTY `unmetCriteria` (judgeReview: `testTheater` or
+ * `noCriteria` alone fails the state even when every named criterion is met);
+ * the summary is what keeps the prompt from going out with nothing to act on.
+ */
+export function renderFixPrompt(opts: {
+  task: { id: string; title: string };
+  unmetCriteria: CriterionVerdict[];
+  summary: string;
+  round: number;
+  branch: string;
+}): string {
+  const n = opts.unmetCriteria.length;
+  const list =
+    n > 0
+      ? opts.unmetCriteria
+          .map(
+            (c, i) =>
+              `${i + 1}. claim: ${c.claim}\n   proof required: ${c.proof}\n   reviewer verdict: UNMET — ${c.reason}`,
+          )
+          .join("\n")
+      : `(no single criterion is unmet — the review floor's overall verdict is: ${opts.summary})`;
+  return [
+    `You are a FIX worker for task ${opts.task.id} (${opts.task.title}) — round ${opts.round}.`,
+    `The review gate is FAILING (${n} UNMET acceptance criterion${n === 1 ? "" : "a"}). Resolve ALL`,
+    `of them together in this ONE pass — never fix one and leave another; patching one criterion`,
+    `at a time is exactly what causes an infinite ping-pong across review rounds. Review summary:`,
+    `${opts.summary}`,
+    "",
+    list,
+    "",
+    `Amend the SAME branch (${opts.branch}) — do NOT open a new PR and do NOT create a fix/*`,
+    `branch (only a run-<taskId>-<epochMs> head is creditable). \`git push origin HEAD\` (no`,
+    `-u) when done — never force-push. Your PR body must substantiate EVERY task acceptance`,
+    `criterion, not only the ones fixed here — the review floor judges the body against the`,
+    `FULL criteria set. End with a REPORT whose last line is exactly: PR_URL: <url>`,
+  ].join("\n");
+}
+
+/** Outcome of one full pass through the fix rung. */
+export interface FixRungOutcome {
+  outcome: "fixed" | "escalated";
+  /** The last review computed — passing when `outcome === "fixed"`. */
+  review: ReviewVerdict & { headSha: string; reviewerOutcome: string };
+  strikes: number;
+  /** Set only when `outcome === "escalated"`. */
+  issueUrl?: string;
+}
+
+/**
+ * Dispatch ONE bounded fix worker per strike, up to `strikeCap` (config,
+ * default 2), on a `blocked_review` verdict. Every dispatch receives the FULL
+ * unmet_criteria set + the reviewer's reasons at once (never one criterion at
+ * a time — the anti-ping-pong invariant) and amends the SAME branch/PR this
+ * run already opened — never a fresh PR, never a `fix/*` branch, because
+ * `deriveStatus`'s ownership-assert (status.ts's `ownsBranch`) credits ONLY a
+ * `run-<taskId>-<epochMs>` head: creditability is LOAD-BEARING, not just
+ * anti-orphan (a fix on an uncreditable head would loop this rung forever on
+ * tasks it already fixed, and strand every dependent behind it).
+ *
+ * §3's ladder: strike 1 RESUMES the failing implement session (it already has
+ * the context of what it tried); strike 2 (and any further strike up to the
+ * cap) is a FRESH worker on the same branch, never resumed twice. Exhausting
+ * the cap escalates (BLOCKED class, W1-T8) rather than looping forever.
+ *
+ * Every external interaction is injected (`deps`) so the whole rung is
+ * unit-testable with fakes — no real spawn, git, or `gh` call in the test
+ * suite. The real call site (`runTaskBody`) wires the module's own
+ * `spawnWorker`/`waitForCiGreen`/`runReview` plus a small git-push wrapper.
+ */
+export async function runFixRung(opts: {
+  taskId: string;
+  runId: string;
+  task: { id: string; title: string; acceptance?: AcceptanceCriterion[] };
+  prUrl: string;
+  branch: string;
+  worktreePath: string;
+  /** The failing implement worker's session id — resumed on strike 1. */
+  initialSessionId: string;
+  mount: Mount;
+  settingsFile: string;
+  config: Config;
+  budgetUsd: number;
+  strikeCap: number;
+  /** The blocked_review verdict that triggered this rung. */
+  initialReview: ReviewVerdict & { headSha: string; reviewerOutcome: string };
+  reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount };
+  deps: {
+    spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+    waitForCiGreen: (
+      prUrl: string,
+      log: (step: string, extra?: Record<string, unknown>) => void,
+    ) => Promise<"green" | "red" | "timeout">;
+    runReview: (args: Parameters<typeof runReview>[0]) => ReturnType<typeof runReview>;
+    /** Push whatever the fix worker committed. Best-effort — a worker that
+     * already pushed leaves nothing new, which is not an error. */
+    push: (worktreePath: string, branch: string) => void;
+    issues: IssueGateway;
+    ledgerPath: string;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    say: (msg: string) => void;
+    account: (r: WorkerResult) => WorkerResult;
+  };
+}): Promise<FixRungOutcome> {
+  const { deps } = opts;
+  let review = opts.initialReview;
+  let strikes = 0;
+  let sessionToResume: string | undefined = opts.initialSessionId;
+
+  while (review.state !== "success" && strikes < opts.strikeCap) {
+    strikes++;
+    const round: "resume" | "fresh" = strikes === 1 ? "resume" : "fresh";
+    const unmet = review.criteria.filter((c) => !c.met);
+    const prompt = renderFixPrompt({
+      task: opts.task,
+      unmetCriteria: unmet,
+      summary: review.summary,
+      round: strikes,
+      branch: opts.branch,
+    });
+    deps.log("fix.dispatch", { strike: strikes, strike_cap: opts.strikeCap, unmet_count: unmet.length, round });
+    deps.say(
+      `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE fix worker for ` +
+        `${unmet.length} unmet criteri${unmet.length === 1 ? "on" : "a"}`,
+    );
+
+    const fixArgs: SpawnWorkerArgs = {
+      cwd: opts.worktreePath,
+      permissionMode: "bypassPermissions",
+      settingsFile: opts.settingsFile,
+      model: opts.mount.model,
+      effort: opts.mount.effort,
+      maxTurns: opts.mount.maxTurns,
+      maxBudgetUsd: opts.budgetUsd,
+      config: opts.config,
+      prompt,
+      resumeSessionId: round === "resume" ? sessionToResume : undefined,
+    };
+
+    const fixResult = deps.account(await deps.spawn(fixArgs));
+    sessionToResume = fixResult.sessionId;
+    deps.log("fix.done", {
+      strike: strikes,
+      round,
+      session_id: fixResult.sessionId,
+      subtype: fixResult.subtype,
+      cost_usd: fixResult.costUsd,
+      num_turns: fixResult.numTurns,
+    });
+
+    deps.push(opts.worktreePath, opts.branch);
+
+    const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
+    if (ci !== "green") {
+      deps.log("fix.ci_not_green", { strike: strikes, ci });
+      continue; // still failing — loop to the next strike (or exhaust below)
+    }
+
+    review = await deps.runReview({
+      owner: opts.reviewBase.owner,
+      repo: opts.reviewBase.repo,
+      prUrl: opts.prUrl,
+      task: opts.task,
+      report: [fixResult.text, fixResult.blocks.join("\n")].join("\n"),
+      settingsFile: opts.settingsFile,
+      config: opts.config,
+      budgetUsd: opts.budgetUsd,
+      log: deps.log,
+      say: deps.say,
+      account: deps.account,
+      reviewerMount: opts.reviewBase.reviewerMount,
+      headCheckoutDir: opts.reviewBase.headCheckoutDir,
+    });
+    deps.log("fix.review", {
+      strike: strikes,
+      state: review.state,
+      unmet: review.criteria.filter((c) => !c.met).length,
+    });
+  }
+
+  if (review.state === "success") {
+    deps.log("fix.resolved", { strikes });
+    deps.say(`fix rung: resolved after ${strikes} strike(s) — review now passes`);
+    return { outcome: "fixed", review, strikes };
+  }
+
+  // Strikes exhausted — escalate (BLOCKED class, W1-T8) rather than loop
+  // forever; the clarification rung (W1-T78) upgrades this route when it lands.
+  const unmet = review.criteria.filter((c) => !c.met);
+  const issueUrl = escalate(
+    {
+      class: "BLOCKED",
+      taskId: opts.taskId,
+      runId: opts.runId,
+      summary: `blocked_review fix rung exhausted (${strikes} strike(s)) — ${opts.prUrl}`,
+      detail:
+        `The blocked_review FIX RUNG (W1-T76) dispatched ${strikes} bounded fix worker(s) on ` +
+        `${opts.branch} and the review gate is STILL failing. Unmet criteria:\n\n` +
+        unmet.map((c) => `- ${c.claim}\n  reason: ${c.reason}`).join("\n"),
+      options: [
+        {
+          label: "hand-fix",
+          detail:
+            "resolve the remaining criteria on the same branch by hand, then re-run `rmd review` to re-post the gate.",
+        },
+        { label: "close", detail: "close the PR and re-scope the task if the criteria themselves are wrong." },
+      ],
+      recommendation: "hand-fix",
+    },
+    { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+  );
+  deps.log("fix.exhausted", { strikes, issue_url: issueUrl });
+  deps.say(`fix rung: exhausted after ${strikes} strike(s) — escalated: ${issueUrl}`);
+  return { outcome: "escalated", review, strikes, issueUrl };
+}
+
 export interface RunResult {
   taskId: string;
   runId: string;
@@ -983,6 +1223,12 @@ async function runTask(
   // 12-turn cap, no model/effort), it walled `error_max_turns` on every
   // substantive code PR.
   const reviewerMount: Mount = resolveMount(mountsTable, "reviewer", task.risk);
+  // The blocked_review FIX RUNG's mount (W1-T76, absorbs P21) — its own
+  // task_type="fix" row (§9), distinct from `mount` (the original implement
+  // attempt). Resolved once here, alongside every other mount, even though it
+  // is only USED if the review gate ever fails — a fix spawn must never ride
+  // an undeclared literal any more than the reviewer used to (W1-T63/P10).
+  const fixMount: Mount = resolveMount(mountsTable, "fix", task.risk);
   log("run.start", {
     repo: task.repo,
     type: task.type,
@@ -1393,7 +1639,7 @@ async function runTask(
       say(`verdict: blocked_ci (ci ${ci}) — PR left OPEN: ${prUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
     }
-    const review = await runReview({
+    let review = await runReview({
       owner,
       repo: task.repo,
       prUrl,
@@ -1412,16 +1658,63 @@ async function runTask(
       // the deterministic floor observes THIS run's repo state, not report prose.
       headCheckoutDir: worktreePath,
     });
+
+    // ── THE blocked_review FIX RUNG (W1-T76, absorbs P21; §3's fixing state).
+    // A failing review used to be TERMINAL here — the PR sat OPEN, the reviewer's
+    // computed unmet_criteria + reasons were dropped, and a fresh re-run patched
+    // whichever criterion the LAST block named and dropped the other (#111/#113's
+    // ping-pong). Dispatch ONE bounded fix worker with the FULL unmet set at once,
+    // amending this SAME branch/PR. Wired at the ONE call site `runTask` has — the
+    // drain/daemon path and the manual `rmd run-task` path both reach it, so both
+    // get the rung for free (no duplicated fix-dispatch logic).
     if (review.state !== "success") {
-      log("verdict", {
-        verdict: "blocked_review",
-        pr_url: prUrl,
-        reason: review.summary,
-        cost_usd: costUsd,
-        billing_mode: "subscription",
+      const rung = await runFixRung({
+        taskId,
+        runId,
+        task,
+        prUrl,
+        branch,
+        worktreePath,
+        initialSessionId: impl.sessionId,
+        mount: fixMount,
+        settingsFile,
+        config,
+        budgetUsd,
+        strikeCap: fixStrikeCap(config),
+        initialReview: review,
+        reviewBase: { owner, repo: task.repo, headCheckoutDir: worktreePath, reviewerMount },
+        deps: {
+          spawn,
+          waitForCiGreen,
+          runReview,
+          push: (wt) => {
+            try {
+              execFileSync("git", ["-C", wt, "push", "origin", "HEAD"], { stdio: "ignore" });
+            } catch {
+              // best-effort — the fix worker may already have pushed itself;
+              // nothing new to push is not an error.
+            }
+          },
+          issues: ghIssueGateway(owner, task.repo),
+          ledgerPath,
+          log: (s, extra) => log(s, extra),
+          say,
+          account,
+        },
       });
-      say(`verdict: blocked_review — PR left OPEN: ${prUrl}`);
-      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_review" };
+      review = rung.review;
+      if (rung.outcome === "escalated") {
+        log("verdict", {
+          verdict: "blocked",
+          pr_url: prUrl,
+          reason: `fix rung exhausted after ${rung.strikes} strike(s)`,
+          issue_url: rung.issueUrl,
+          cost_usd: costUsd,
+          billing_mode: "subscription",
+        });
+        say(`verdict: blocked — fix rung exhausted (${rung.strikes} strike(s)), escalated: ${rung.issueUrl}`);
+        return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
+      }
     }
 
     // ── ARM auto-merge, then POLL to the gate (W1-T1B).
