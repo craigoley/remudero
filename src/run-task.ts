@@ -81,10 +81,12 @@ import { validateWorkerSettingsFile } from "./lib/settings.js";
 import { ghGateway, projectPlan, readLedgerLines, type GitHub, type StatusProjection } from "./lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
+  deriveDisposition,
   renderSweepSummary,
   runSweep,
   type OpenPrView,
   type SweepDeps,
+  type SweepPolicy,
 } from "./lib/sweep.js";
 import { applyCorrection } from "./lib/correct.js";
 import {
@@ -3218,6 +3220,149 @@ function buildSweepHook(
   };
 }
 
+/** What `routeFix` did with one PR — mirrors the sweep's per-PR action shape. */
+export type FixOutcome = "fixed" | "escalated" | "refused";
+
+/** The two gated effects `routeFix` may fire — the SAME shape `SweepDeps` wires. */
+export interface FixDeps {
+  dispatchFix: SweepDeps["dispatchFix"];
+  escalate: SweepDeps["escalate"];
+}
+
+/**
+ * The PURE decision core of `rmd fix <pr-number>` (W1-T95) — injectable so the
+ * routing is a unit fixture, independent of any live `gh`/spawn call. Given the
+ * PR's raw GitHub state and its sweep-shaped view, this reuses the SAME
+ * disposition rules `rmd sweep` derives from (`deriveDisposition` + `policy`)
+ * and fires the SAME injected effects sweep wires (`dispatchFix`/`escalate`) —
+ * never a reimplementation of the rung's dispatch:
+ *   - not OPEN (merged/closed)                       -> refused, naming the state.
+ *   - OPEN, disposition="blocked-fixable"             -> dispatchFix (fixed).
+ *   - OPEN, failing review + strikes at/over the cap  -> escalate (escalated),
+ *     naming the count — the cap is honored, never bypassed.
+ *   - anything else (no block evidence: mergeable,
+ *     stale, contradictory-failure)                   -> refused, naming the reason.
+ */
+export async function routeFix(
+  prState: string | undefined,
+  pr: OpenPrView,
+  deps: FixDeps,
+  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+): Promise<{ outcome: FixOutcome; reason: string }> {
+  if (prState !== "OPEN") {
+    return { outcome: "refused", reason: `state is ${prState ?? "UNKNOWN"} (only an OPEN PR carries a live block)` };
+  }
+  const { disposition, reason } = deriveDisposition(pr, policy);
+  if (disposition === "blocked-fixable") {
+    await deps.dispatchFix(pr, pr.unmetCriteria);
+    return { outcome: "fixed", reason };
+  }
+  // Strike cap honored: the SAME rule the sweep policy uses to route to escalate
+  // (failing review + strikes already at/over cap) — rmd fix never bypasses it.
+  if (pr.reviewState === "failure" && pr.priorStrikes >= policy.strikeCap) {
+    await deps.escalate(pr, reason);
+    return { outcome: "escalated", reason };
+  }
+  return { outcome: "refused", reason: `${reason} (no block evidence to drive the rung)` };
+}
+
+/**
+ * `rmd fix <pr-number> [--repo <name>]` — the operator verb for the W1-T76 fix
+ * rung (W1-T95). The rung is drive-only: drain invokes it live (a blocked_review
+ * verdict inside a running task) and sweep invokes it cold (a PR discovered on a
+ * poll). Neither helps when the BLOCKED PR *is* the sweep/drain delivery itself —
+ * #160's shape — so this is the bootstrap/manual-override third caller: it
+ * builds the single PR's observed state, then hands off to {@link routeFix}
+ * wired with `buildSweepEffects`'s `dispatchFix`/`escalate` closures VERBATIM
+ * (the exact functions `rmd sweep` wires) rather than adding a third direct call
+ * into the rung itself — grep-provable: the rung dispatch call-site count is
+ * unchanged.
+ *
+ * FAIL LOUD on junk args BEFORE any `gh` lookup/spawn (Standing rule).
+ */
+async function fixCommand(rest: string[]): Promise<number> {
+  const prArg = rest[0];
+  const badArg = unknownArgError("fix", rest.slice(1), ["--repo"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const prNumber = Number(prArg);
+  if (!prArg || !Number.isInteger(prNumber) || prNumber <= 0) {
+    console.error(`rmd fix: '${prArg ?? ""}' is not a valid PR number — usage: rmd fix <pr-number> [--repo <name>]\n` + USAGE);
+    return 2;
+  }
+
+  const config = loadConfig();
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const self = resolveOwnerRepo();
+  const repo = flagValue(rest, "--repo") ?? self.repo;
+  const owner = self.owner;
+  const runId = `FIX-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "FIX", step, ...extra });
+
+  let raw: RawOpenPr & { state?: string };
+  try {
+    raw = ghJson([
+      "pr",
+      "view",
+      String(prNumber),
+      "--repo",
+      `${owner}/${repo}`,
+      "--json",
+      "number,url,headRefName,headRefOid,updatedAt,body,autoMergeRequest,statusCheckRollup,state",
+    ]) as RawOpenPr & { state?: string };
+  } catch (e) {
+    console.error(`### rmd fix — could not look up PR #${prNumber} in ${owner}/${repo}: ${String((e as Error)?.message ?? e)}`);
+    return 1;
+  }
+
+  const ledger = readLedgerLines(ledgerPath);
+  const taskId = taskIdFromBody(raw.body ?? "");
+  const reviewState = reviewStateFromRollup(raw.statusCheckRollup);
+  const pr: OpenPrView = {
+    prNumber: raw.number,
+    prUrl: raw.url,
+    taskId,
+    reviewState,
+    checksState: checksStateFromRollup(raw.statusCheckRollup),
+    unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
+    priorStrikes: priorStrikesFor(ledger, taskId, raw.number),
+    // superseded-by is a cross-PR sweep concern (which OTHER open PR credits the
+    // same task) — out of scope for a single explicitly-named PR lookup.
+    supersededBy: undefined,
+    lastActivityAt: raw.updatedAt,
+    headSha: raw.headRefOid,
+    autoMergeArmed: raw.autoMergeRequest != null,
+    reviewSummary: undefined,
+  };
+
+  const planPath =
+    repo === self.repo ? join(repoRoot, "plan", "tasks.yaml") : join(config.root, "repos", repo, "plan", "tasks.yaml");
+  let plan: Plan = { tasks: [], byId: new Map() };
+  try {
+    plan = loadPlan(planPath);
+  } catch (e) {
+    log("fix.plan.unavailable", { plan_path: planPath, error: String((e as Error)?.message ?? e) });
+  }
+
+  const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log);
+  const { outcome, reason } = await routeFix(raw.state, pr, effects, DEFAULT_SWEEP_POLICY);
+
+  log(`fix.${outcome === "refused" ? "refused" : "disposed"}`, { pr_number: prNumber, task_id: taskId, outcome, reason });
+  if (outcome === "fixed") {
+    console.log(`### rmd fix — PR #${prNumber} (${taskId}): ${reason} — dispatched the fix rung.`);
+    return 0;
+  }
+  if (outcome === "escalated") {
+    console.log(`### rmd fix — PR #${prNumber} (${taskId ?? "unknown task"}): ${reason} — escalated, no spawn.`);
+    return 0;
+  }
+  console.error(`### rmd fix — PR #${prNumber} is not fixable: ${reason}. No spawn.`);
+  return 1;
+}
+
 /**
  * `rmd stop [--reason <text>]` — the fleet control set (W1-T11, MASTER-PLAN §4A/§4B).
  * Writes the STOP flag file. A `rmd drain` already running halts within one tick
@@ -3614,7 +3759,7 @@ async function correctCommand(rest: string[]): Promise<number> {
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 const USAGE =
-  "usage:\n  rmd run-task <task-id> [--allow-stale]   # dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd dep-review <pr-number> [--repo <name>]   # deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse\n  rmd lint-plan [--plan <path>] [--base <git-ref>]   # §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60)\n  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.\n  rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)\n  rmd sweep [--repo <name>] [--dry-run]   # level-triggered PR-pipeline reconciler (W1-T77, P22): re-derive EVERY open PR's disposition from observed state and take the ONE gated action — mergeable->arm auto-merge; blocked-fixable->W1-T76 fix rung; stale/superseded->close-with-reason; blocked-ambiguous->escalate. Idempotent (a second sweep over unchanged state acts on nothing). The daemon runs this every poll; --dry-run previews dispositions and takes nothing.\n  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.\n  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.\n  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume\n  rmd correct <task-id> --pr <n> [--reason <text>]   # sanctioned operator-correction writer (P9/W1-T75): appends a correction.provenance ledger line naming the task's TRUE merged PR, SUPREME over every deriveStatus rung; prints derived status before/after\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard\n\nAn UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
+  "usage:\n  rmd run-task <task-id> [--allow-stale]   # dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd dep-review <pr-number> [--repo <name>]   # deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse\n  rmd lint-plan [--plan <path>] [--base <git-ref>]   # §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60)\n  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.\n  rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)\n  rmd sweep [--repo <name>] [--dry-run]   # level-triggered PR-pipeline reconciler (W1-T77, P22): re-derive EVERY open PR's disposition from observed state and take the ONE gated action — mergeable->arm auto-merge; blocked-fixable->W1-T76 fix rung; stale/superseded->close-with-reason; blocked-ambiguous->escalate. Idempotent (a second sweep over unchanged state acts on nothing). The daemon runs this every poll; --dry-run previews dispositions and takes nothing.\n  rmd fix <pr-number> [--repo <name>]   # operator verb for the W1-T76 fix rung (W1-T95, bootstrap/manual-override — drives a block on the sweep/drain delivery ITSELF, e.g. #160): dispatches the SAME rung sweep uses; refuses (zero spawns) when the PR is merged, closed, or has no block evidence; strikes-at-cap routes to escalate naming the count, never bypassing the cap.\n  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.\n  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.\n  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume\n  rmd correct <task-id> --pr <n> [--reason <text>]   # sanctioned operator-correction writer (P9/W1-T75): appends a correction.provenance ledger line naming the task's TRUE merged PR, SUPREME over every deriveStatus rung; prints derived status before/after\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard\n\nAn UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(): Promise<void> {
@@ -3657,6 +3802,9 @@ async function main(): Promise<void> {
   }
   if (cmd === "sweep") {
     process.exit(await sweepCommand(rest));
+  }
+  if (cmd === "fix" && arg) {
+    process.exit(await fixCommand(rest));
   }
   if (cmd === "stop") {
     process.exit(await stopCommand(rest));

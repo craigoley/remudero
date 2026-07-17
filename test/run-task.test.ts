@@ -16,6 +16,7 @@ import {
   renderFixPrompt,
   resolveReviewTarget,
   resolveDaemonTarget,
+  routeFix,
   runFixRung,
   syncPlanFromOrigin,
   syncPlanOrRefuse,
@@ -23,11 +24,13 @@ import {
   noPrVerdict,
   softBudgetWarning,
   workerErrorVerdict,
+  type FixDeps,
   type FixEvidence,
   type PrHeadGateway,
 } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
+import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
@@ -874,6 +877,108 @@ test("runFixRung is REUSED, never reimplemented — one dispatch from runTask's 
   // above already covers both entry points; grep confirms no second runTask.
   const runTaskDefs = runTaskSrc.match(/^async function runTask\(/gm) ?? [];
   assert.equal(runTaskDefs.length, 1, "there must be exactly one runTask implementation for both callers to share");
+});
+
+// ── `rmd fix <pr>` (W1-T95): the pure routing core, injectable so refusal/
+// escalate/dispatch is a unit fixture with zero live `gh`/spawn calls ─────────
+
+/** A minimal, overridable `OpenPrView` fixture for `routeFix` (mirrors sweep.test.ts's `pr()`). */
+function fixPr(over: Partial<OpenPrView> = {}): OpenPrView {
+  return {
+    prNumber: 1,
+    prUrl: "https://github.com/o/r/pull/1",
+    taskId: "W1-TX",
+    reviewState: "pending",
+    checksState: "pending",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    lastActivityAt: "2026-07-16T12:00:00Z",
+    headSha: "aaaa111",
+    autoMergeArmed: false,
+    ...over,
+  };
+}
+
+/** Records calls into the two gated effects `routeFix` may fire; never touches `gh`/spawn. */
+function fakeFixDeps(): FixDeps & { fixed: Array<{ pr: OpenPrView; unmet: CriterionVerdict[] }>; escalated: Array<{ pr: OpenPrView; reason: string }> } {
+  const fixed: Array<{ pr: OpenPrView; unmet: CriterionVerdict[] }> = [];
+  const escalated: Array<{ pr: OpenPrView; reason: string }> = [];
+  return {
+    fixed,
+    escalated,
+    dispatchFix: (p, unmet) => {
+      fixed.push({ pr: p, unmet });
+    },
+    escalate: (p, reason) => {
+      escalated.push({ pr: p, reason });
+    },
+  };
+}
+
+test("routeFix: a blocked-fixable PR dispatches via the SAME dispatchFix effect `rmd sweep` wires — one rung, three callers, no duplicated dispatch logic", async () => {
+  const deps = fakeFixDeps();
+  const unmet = [criterion({ claim: "does the thing", met: false })];
+  const pr = fixPr({ reviewState: "failure", priorStrikes: 0, unmetCriteria: unmet });
+
+  const result = await routeFix("OPEN", pr, deps);
+
+  assert.equal(result.outcome, "fixed");
+  assert.equal(deps.fixed.length, 1, "dispatchFix must fire exactly once");
+  assert.equal(deps.escalated.length, 0, "escalate must not fire on a fixable PR");
+  // Identical shape to the drain/sweep dispatch: the SAME pr + the FULL unmet set.
+  assert.deepEqual(deps.fixed[0].pr, pr);
+  assert.deepEqual(deps.fixed[0].unmet, unmet);
+});
+
+test("routeFix: a MERGED PR refuses naming the state — zero spawns", async () => {
+  const deps = fakeFixDeps();
+  const pr = fixPr({ reviewState: "failure", unmetCriteria: [criterion({ claim: "x", met: false })] });
+
+  const result = await routeFix("MERGED", pr, deps);
+
+  assert.equal(result.outcome, "refused");
+  assert.match(result.reason, /MERGED/);
+  assert.equal(deps.fixed.length, 0);
+  assert.equal(deps.escalated.length, 0);
+});
+
+test("routeFix: a CLOSED PR refuses naming the state — zero spawns", async () => {
+  const deps = fakeFixDeps();
+  const pr = fixPr();
+
+  const result = await routeFix("CLOSED", pr, deps);
+
+  assert.equal(result.outcome, "refused");
+  assert.match(result.reason, /CLOSED/);
+  assert.equal(deps.fixed.length, 0);
+  assert.equal(deps.escalated.length, 0);
+});
+
+test("routeFix: an OPEN PR with no block evidence (review success) refuses — zero spawns", async () => {
+  const deps = fakeFixDeps();
+  const pr = fixPr({ reviewState: "success", checksState: "green" });
+
+  const result = await routeFix("OPEN", pr, deps);
+
+  assert.equal(result.outcome, "refused");
+  assert.equal(deps.fixed.length, 0);
+  assert.equal(deps.escalated.length, 0);
+});
+
+test("routeFix: strikes already at the cap escalate (naming the count) rather than dispatching another fix — the cap is honored, never bypassed", async () => {
+  const deps = fakeFixDeps();
+  const pr = fixPr({
+    reviewState: "failure",
+    priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap,
+    unmetCriteria: [criterion({ claim: "x", met: false })],
+  });
+
+  const result = await routeFix("OPEN", pr, deps);
+
+  assert.equal(result.outcome, "escalated");
+  assert.match(result.reason, new RegExp(`${DEFAULT_SWEEP_POLICY.strikeCap}/${DEFAULT_SWEEP_POLICY.strikeCap}`));
+  assert.equal(deps.fixed.length, 0, "an exhausted PR must NOT dispatch another fix strike");
+  assert.equal(deps.escalated.length, 1, "escalate must fire exactly once");
 });
 
 test("the terminal blocked_review return (no fix rung) is gone — a failing review always enters the fix rung before any terminal verdict", () => {
