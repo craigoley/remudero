@@ -31,7 +31,13 @@ import {
 } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import { DEFAULT_SWEEP_POLICY, strikeCapForAnswer, type ClarificationQuestion, type OpenPrView } from "../src/lib/sweep.js";
+import {
+  DEFAULT_SWEEP_POLICY,
+  strikeCapForAnswer,
+  type ClarificationQuestion,
+  type FixDispatchEvidence,
+  type OpenPrView,
+} from "../src/lib/sweep.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
@@ -862,6 +868,127 @@ test("runFixRung: a CI regression after a fix attempt does not stall the rung �
   assert.equal(outcome.outcome, "fixed");
 });
 
+// ── W1-T100 (the #170 fix): route blocked_ci to the ci-log fix path — fix
+// FIRST, ask after exhaustion. The intent-wiring W1-T93/W1-T94 left as a seam
+// (a checks-red/review-none PR carried NO reviewer unmet-criteria at all, so
+// the rung's ONE prompt shape had nothing to render for it) is closed here:
+// `runFixRung` itself must derive ci-log evidence, not just deriveFixMode. ──
+
+test("runFixRung: a seeded blocked_ci (ciFailures, no review posted yet) dispatches ONE fix worker in ci-log mode, carrying failing check names + log tails, not reviewer criteria (W1-T100, the #170 fix)", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const noReviewYet = fakeReview("failure", []); // blocked_ci's own placeholder — no reviewer verdict exists yet
+  const passing = fakeReview("success", []);
+  const ciFailures = [{ name: "test", logTail: "AssertionError: expected 1 to equal 2" }];
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: noReviewYet,
+    ciFailures,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: "fix-session-1" });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => passing,
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(spawnCalls.length, 1, "exactly one fix worker spawn");
+  assert.match(spawnCalls[0].prompt, /MODE: ci-log/, "the rendered prompt names ci-log mode");
+  assert.match(spawnCalls[0].prompt, /check: test/);
+  assert.match(spawnCalls[0].prompt, /AssertionError: expected 1 to equal 2/, "the failing check's log tail rides the prompt");
+  assert.doesNotMatch(spawnCalls[0].prompt, /UNMET acceptance criterion/i, "never reviewer-mode criteria — blocked_ci has none");
+  assert.equal(outcome.outcome, "fixed");
+  assert.equal(outcome.strikes, 1);
+});
+
+test("runFixRung: once CI goes green and a real review posts (even a failing one), the NEXT strike reverts to reviewer-unmet mode — never ci-log again", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const noReviewYet = fakeReview("failure", []);
+  const stillFailingReview = fakeReview("failure", [
+    criterion({ claim: "criterion A merges cleanly", met: false, reason: "executed and failed" }),
+  ]);
+  const passing = fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })]);
+  let reviewCalls = 0;
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: noReviewYet,
+    ciFailures: [{ name: "ci", logTail: "tsc: error TS2322" }],
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `fix-session-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => {
+        reviewCalls++;
+        return reviewCalls === 1 ? stillFailingReview : passing;
+      },
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(spawnCalls.length, 2);
+  assert.match(spawnCalls[0].prompt, /MODE: ci-log/, "strike 1: no review has run yet");
+  assert.match(spawnCalls[1].prompt, /MODE: reviewer-unmet/, "strike 2: a real (failing) review now exists — never ci-log again");
+  assert.match(spawnCalls[1].prompt, /criterion A merges cleanly/);
+  assert.equal(outcome.outcome, "fixed");
+  assert.equal(outcome.strikes, 2);
+});
+
+test("runFixRung: a blocked_ci dispatch that exhausts its strikes without CI EVER going green escalates naming the failing checks, never an empty/misleading 'Unmet criteria:' list", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const noReviewYet = fakeReview("failure", []);
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const ciFailures = [{ name: "typecheck", logTail: "tsc: error TS2322" }];
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: noReviewYet,
+    ciFailures,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `fix-session-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "red", // CI never goes green — no review is ever reached
+      runReview: async () => {
+        throw new Error("runReview must never be called — CI never went green");
+      },
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(spawnCalls.length, 2, "exactly strikeCap ci-log spawns");
+  assert.equal(outcome.outcome, "escalated");
+  assert.equal(issueCalls.length, 1);
+  assert.match(issueCalls[0].title, /blocked_ci/, "the escalation names blocked_ci, not blocked_review");
+  assert.match(issueCalls[0].body, /Failing check\(s\)/);
+  assert.match(issueCalls[0].body, /typecheck/, "the failing check name is carried");
+  assert.doesNotMatch(issueCalls[0].body, /Unmet criteria:/, "never the review-mode framing for a dispatch that never had a review");
+});
+
 // ── Wiring: ONE call site, both entry points (drain + manual `rmd run-task`
 // both call the SAME `runTask`, so there is exactly one place to gate) ──────
 
@@ -1039,16 +1166,16 @@ function fixPr(over: Partial<OpenPrView> = {}): OpenPrView {
 
 /** Records calls into the two gated effects `routeFix` may fire; never touches `gh`/spawn. */
 function fakeFixDeps(): FixDeps & {
-  fixed: Array<{ pr: OpenPrView; unmet: CriterionVerdict[] }>;
+  fixed: Array<{ pr: OpenPrView; evidence: FixDispatchEvidence }>;
   escalated: Array<{ pr: OpenPrView; reason: string; question: ClarificationQuestion }>;
 } {
-  const fixed: Array<{ pr: OpenPrView; unmet: CriterionVerdict[] }> = [];
+  const fixed: Array<{ pr: OpenPrView; evidence: FixDispatchEvidence }> = [];
   const escalated: Array<{ pr: OpenPrView; reason: string; question: ClarificationQuestion }> = [];
   return {
     fixed,
     escalated,
-    dispatchFix: (p, unmet) => {
-      fixed.push({ pr: p, unmet });
+    dispatchFix: (p, evidence) => {
+      fixed.push({ pr: p, evidence });
     },
     escalate: (p, reason, question) => {
       escalated.push({ pr: p, reason, question });
@@ -1068,7 +1195,37 @@ test("routeFix: a blocked-fixable PR dispatches via the SAME dispatchFix effect 
   assert.equal(deps.escalated.length, 0, "escalate must not fire on a fixable PR");
   // Identical shape to the drain/sweep dispatch: the SAME pr + the FULL unmet set.
   assert.deepEqual(deps.fixed[0].pr, pr);
-  assert.deepEqual(deps.fixed[0].unmet, unmet);
+  assert.deepEqual(deps.fixed[0].evidence.unmetCriteria, unmet);
+});
+
+test("routeFix: a blocked_ci PR (checks red, review none) dispatches ci-log evidence — failing check names + log tails, not an (always-empty) reviewer-unmet array (W1-T100, the #170 fix)", async () => {
+  const deps = fakeFixDeps();
+  const ciFailures = [{ name: "ci", logTail: "tsc: error TS2322: ..." }];
+  const pr = fixPr({ reviewState: "none", checksState: "red", priorStrikes: 0, ciFailures });
+
+  const result = await routeFix("OPEN", pr, deps);
+
+  assert.equal(result.outcome, "fixed");
+  assert.equal(deps.fixed.length, 1);
+  assert.equal(deps.escalated.length, 0, "fix FIRST — never straight to the question rung while strikes remain");
+  assert.deepEqual(deps.fixed[0].evidence.unmetCriteria, [], "no reviewer criteria for a blocked_ci dispatch");
+  assert.deepEqual(deps.fixed[0].evidence.ciFailures, ciFailures);
+});
+
+test("routeFix: a strike-exhausted blocked_ci PR escalates to the question rung rather than dispatching a further fix — the SAME cap review-failure honors (W1-T100)", async () => {
+  const deps = fakeFixDeps();
+  const pr = fixPr({
+    reviewState: "none",
+    checksState: "red",
+    priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap,
+    ciFailures: [{ name: "ci", logTail: "..." }],
+  });
+
+  const result = await routeFix("OPEN", pr, deps);
+
+  assert.equal(result.outcome, "escalated");
+  assert.equal(deps.fixed.length, 0, "an exhausted blocked_ci PR must NOT dispatch another fix strike");
+  assert.equal(deps.escalated.length, 1);
 });
 
 test("routeFix: a MERGED PR refuses naming the state — zero spawns", async () => {
