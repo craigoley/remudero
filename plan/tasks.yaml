@@ -1147,30 +1147,109 @@
     for demanding the post-flip state — hence this split. Protection changes ONLY in W1-T24b."
 
 - id: W1-T25
-  title: Quality tier on remudero — coverage ratchet + mutation baseline + jscpd + TS-strict FALSIFIED
+  title: "Quality tier 1/4: coverage ratchet (decomposed from the four-gate W1-T25; the #161 lesson)"
   repo: remudero
   depends_on: [W1-T1D]
   type: implement
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  rationale: "MASTER-PLAN §5 TIER 2. Coverage % is not proof tests are real; the MUTATION baseline is the
-    falsifier (green tests that kill no mutants are theater — SynthWatch). TS-strict must be proven ACTIVE
-    by a planted probe, because 0 violations from an inert gate reads identically to a clean one (neon-drift)."
+  rationale: "MASTER-PLAN §5 TIER 2, gate 1/4. Coverage % is not proof tests are real — the ratchet gate
+    must be proven ACTIVE by a falsifier fixture (a below-baseline score is REJECTED), never merely
+    present. Decomposed from the four-gate W1-T25 so this single gate lands in one pass."
   acceptance:
     - claim: "the coverage ratchet BLOCKS a coverage-lowering change — its gate script exits non-zero below the recorded baseline"
       proof: "unit test: the ratchet script, given fixture coverage data BELOW the recorded baseline, exits non-zero; given data AT/above baseline, exits zero — the falsifier fixture proves the gate is ACTIVE, not merely present"
+  risk: high
+  origin: architect
+  plan_refs: ["§5"]
+  files: [scripts/coverage-ratchet.mjs, .github/workflows/ci.yml]
+  status: queued
+  attempts: 0
+  note: "Decomposed 2026-07-17 from the four-gate W1-T25 (coverage ratchet · mutation baseline · jscpd ·
+    TS-strict) into W1-T25/W1-T96/W1-T97/W1-T98 — one gate per task, each landing in one pass. The
+    four-gate original blocked_ci at #161 ($13, now CLOSED decomposed). Pre-linter vintage: the §5C sizing
+    linter now catches this over-scoped class at birth; this task predates it — decomposition changes
+    SIZE, never strength. Headless-fitness rewrite 2026-07-16 (the W1-T25 no_pr incident: no_pr after 122
+    turns because every criterion demanded 'paste the red, then revert', which a headless worker cannot
+    do) — the live proof is a falsifier FIXTURE; the guarantee (a 0-violation gate must be proven ACTIVE
+    by a planted probe) survives as a fixture. LIVE CONFIRMATION (Rule 18, operator-observed, NOT
+    auto-verify): a real coverage-lowering PR goes CI-red on the ratchet job (paste the red, then revert)
+    — observed on a real CI run, operator-attested."
+
+- id: W1-T96
+  title: "Quality tier 2/4: mutation-testing baseline (Stryker) enforced by a script (decomposed from W1-T25)"
+  repo: remudero
+  depends_on: [W1-T25]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §5 TIER 2, gate 2/4. The MUTATION baseline is the falsifier: green tests that
+    kill no mutants are theater (SynthWatch). Decomposed from the four-gate W1-T25 so this single gate
+    lands in one pass."
+  acceptance:
     - claim: "a mutation-testing baseline is established and ENFORCED by a script, with a recorded score"
       proof: "unit test: the Stryker config + a recorded baseline file are present, and the baseline-check script REJECTS a fixture mutation score below the recorded baseline (accepts at/above); grep the CI workflow shows the mutation job wired"
+  risk: high
+  origin: architect
+  plan_refs: ["§5"]
+  files: [stryker.conf.json, .github/workflows/ci.yml]
+  status: queued
+  attempts: 0
+  note: "Decomposed 2026-07-17 from the four-gate W1-T25 (the #161/$13 blocked_ci lesson) — one gate per
+    task; decomposition changes SIZE, never strength. LIVE CONFIRMATION (Rule 18, operator-observed, NOT
+    auto-verify): Stryker's recorded score + config go CI-red on a below-baseline PR — observed on a real
+    CI run, operator-attested."
+
+- id: W1-T97
+  title: "Quality tier 3/4: jscpd duplication gate (decomposed from W1-T25)"
+  repo: remudero
+  depends_on: [W1-T96]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §5 TIER 2, gate 3/4. A duplication gate must BLOCK a planted duplicate above
+    threshold, proven by a falsifier fixture, not merely be wired. Decomposed from the four-gate W1-T25 so
+    this single gate lands in one pass."
+  acceptance:
     - claim: "the jscpd duplication threshold BLOCKS a planted duplicate — the jscpd gate exits non-zero over a duplicate above threshold"
       proof: "unit/integration test: jscpd over a fixture containing a code block duplicated ABOVE the threshold exits non-zero; a below-threshold fixture exits zero; grep the CI workflow shows the jscpd job wired"
+  risk: high
+  origin: architect
+  plan_refs: ["§5"]
+  files: [.jscpd.json, .github/workflows/ci.yml]
+  status: queued
+  attempts: 0
+  note: "Decomposed 2026-07-17 from the four-gate W1-T25 (the #161/$13 blocked_ci lesson) — one gate per
+    task; decomposition changes SIZE, never strength. LIVE CONFIRMATION (Rule 18, operator-observed, NOT
+    auto-verify): jscpd goes CI-red on a planted duplicate — observed on a real CI run, operator-attested."
+
+- id: W1-T98
+  title: "Quality tier 4/4: TS-strict proven ACTIVE by a planted probe (decomposed from W1-T25)"
+  repo: remudero
+  depends_on: [W1-T97]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN §5 TIER 2, gate 4/4. TS-strict must be proven ACTIVE by a planted probe, because
+    0 violations from an inert gate reads identically to a clean one (neon-drift). Decomposed from the
+    four-gate W1-T25 so this single gate lands in one pass."
+  acceptance:
     - claim: "TypeScript strict is proven ACTIVE by a committed probe that MUST fail — a bare 0-violations is NOT accepted"
       proof: "unit test: a committed strict-only-probe fixture (e.g. an unchecked index / implicit any) is REJECTED by typecheck when strict is on and would pass with it off; the doctrine 'a bare 0-violations without the probe is not proof' (neon-drift) is encoded as this falsifier fixture, never a live paste"
   risk: high
   origin: architect
+  plan_refs: ["§5"]
+  files: [scripts/strict-probe.ts, .github/workflows/ci.yml]
   status: queued
   attempts: 0
-  note: "Headless-fitness rewrite 2026-07-16 (the W1-T25 no_pr incident: verdict no_pr after 122 turns because every criterion demanded 'paste the red, then revert', which a headless worker cannot do). Live proofs converted to falsifier FIXTURES; the guarantee (a 0-violation gate must be proven ACTIVE by a planted probe) survives as fixtures. LIVE CONFIRMATION (Rule 18, operator-observed, NOT auto-verify): a real coverage-lowering PR goes CI-red on the ratchet job (paste the red, then revert); Stryker's recorded score + config; jscpd red on a planted duplicate; the strict-probe red — observed on a real CI run, operator-attested."
+  note: "Decomposed 2026-07-17 from the four-gate W1-T25 (the #161/$13 blocked_ci lesson) — one gate per
+    task; decomposition changes SIZE, never strength. LIVE CONFIRMATION (Rule 18, operator-observed, NOT
+    auto-verify): the strict-probe goes CI-red when strict is active — observed on a real CI run,
+    operator-attested."
 
 - id: W1-T26
   title: Architecture tier on remudero — dependency-cruiser fitness rules + ADR discipline
