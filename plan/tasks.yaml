@@ -3770,3 +3770,104 @@
   attempts: 0
   note: "Live confirmation (Rule 18): the first real onboarding target is operator-chosen; the fleet
     dry-run (W2-T2) is the natural candidate — onboard it, ratify its drafted plan, drain it."
+
+- id: W1-T86
+  title: "rmd wipe-test — the learning-utility A/B harness (ratifies P12: injected learnings must be shown to help, or pruned)"
+  repo: remudero
+  depends_on: [W1-T19, W1-T12a]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P12. W1-T19 injects matched learnings; nothing measures whether they change
+    outcomes, so the learning system cannot be SHOWN to compound — the claim 'memory helps' is currently
+    unfalsifiable, which rule 4 does not permit for a load-bearing subsystem. The wipe test is the
+    falsifier: paired runs with the store present vs masked, deltas measured."
+  design: |
+    rmd wipe-test <task-id> [--repo remudero-sandbox]: runs the SAME task twice on the sandbox — arm A
+    with normal learnings injection, arm B with the store MASKED for that run (injection returns empty;
+    the store itself is never touched — masking, not deletion) — and reports deltas: num_turns, notional
+    cost, verdict, strike count, proof_exec. Pairing discipline stated in the module doc: single pairs
+    are anecdotes; the report accumulates pairs per ledger (wipetest.pair lines) and only aggregate
+    deltas are treated as signal. The HARNESS is this task; running the experiment is operator-scheduled.
+  acceptance:
+    - claim: "arm B runs with injection masked and the store untouched"
+      proof: "unit test over injected deps: arm B's rendered prompt contains zero learning blocks; a store-write spy records nothing; arm A's prompt carries the matched learnings"
+    - claim: "paired deltas are computed and ledgered"
+      proof: "unit test: fixture pair of run results -> a wipetest.pair ledger line with turn/cost/verdict deltas; the report aggregates two seeded pairs correctly"
+    - claim: "the harness refuses non-sandbox targets by default"
+      proof: "unit test: target=remudero without an explicit override flag -> refusal naming the sandbox default (experiments never burn the primary repo unflagged)"
+  risk: high
+  origin: architect
+  plan_refs: ["P12", "§Self-improvement"]
+  files: [src/lib/wipe-test.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Live experiment (Rule 18): operator schedules pairs on the sandbox; the aggregate report is the
+    publishable learning-utility number (the WS-12 receipts thesis applied to memory)."
+
+- id: W1-T87
+  title: "Retro mines SUCCESS — procedural learnings from merged runs (ratifies P13: half the flywheel)"
+  repo: remudero
+  depends_on: [W1-T51]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P13. The flywheel mines FAILURE (transients, blocks, corrections); merged runs are
+    logged and forgotten, so what WORKED — recon shapes, fix sequences, proof patterns that executed —
+    never becomes reusable memory. Half the compounding loop is missing, and the field's memory research
+    (per P13's capture tags) finds success-derived procedures are the higher-value half."
+  design: |
+    Extend the retro gather: merged runs are mined for procedure candidates (deterministic signals first:
+    proof_exec executed_pass patterns, single-strike merges, fix-rung one-shot resolutions; LLM synthesis
+    only phrases the candidate, never invents the evidence). Candidates become learnings with
+    kind: procedural, flowing through the EXISTING consolidation + injection + lifecycle machinery
+    (W1-T33's lifecycle governs them like any learning — no parallel store). Bloat guard: procedural
+    candidates require >=2 supporting runs before consolidation admits them (one success is an anecdote).
+  acceptance:
+    - claim: "a seeded ledger with two merged runs sharing a procedure shape yields ONE procedural learning candidate citing both runs"
+      proof: "fixture unit test: the gather emits the candidate with kind=procedural + both run ids as provenance; a single-run shape emits nothing"
+    - claim: "procedural learnings ride the existing pipeline, no parallel store"
+      proof: "grep: no new store file; unit test: an admitted procedural learning is injected by the W1-T19 matcher like any other"
+    - claim: "evidence is deterministic; the LLM only phrases"
+      proof: "unit test: candidate detection runs with the LLM stubbed out entirely; the stub receives only pre-detected evidence to phrase"
+  risk: medium
+  origin: architect
+  plan_refs: ["P13", "§Self-improvement"]
+  files: [src/lib/retro.ts]
+  status: queued
+  attempts: 0
+
+- id: W1-T88
+  title: "Consolidation contradiction detection — conflicting learnings surface as a pair for resolution, never silent recency-overwrite (ratifies P14; extends W1-T33)"
+  repo: remudero
+  depends_on: [W1-T33]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P14. Supersession today is recency-overwrite: a new learning contradicting an old
+    one silently wins by being newer, so a wrong late lesson can bury a right early one with no signal.
+    W1-T33's lifecycle (active|superseded) gives contradiction a place to be RECORDED; nothing DETECTS it."
+  design: |
+    In consolidation: candidate learnings are keyed (deterministic: same files-glob overlap + same topic
+    key); a keyed pair with OPPOSING directives (the consolidation pass flags opposition — advisory LLM
+    flag over a deterministic candidate-pair set, rule 2 shape) is NEVER auto-resolved: both entries are
+    marked lifecycle: contested, the pair surfaces in the retro report + question backlog (§2 contract —
+    which governs?), and injection EXCLUDES contested pairs until the Architect resolves (resolution =
+    one marked active, one superseded, ledgered). Recency-overwrite remains for NON-contradicting
+    supersession (a refinement is not a contradiction).
+  acceptance:
+    - claim: "a seeded contradicting pair is marked contested, excluded from injection, and surfaced as a decidable question"
+      proof: "unit test: fixture pair with opposing directives -> both contested, matcher skips them, the retro report + question carry both texts and name the decision"
+    - claim: "a refining (non-opposing) newer learning supersedes exactly as today"
+      proof: "unit test: refinement fixture -> recency supersession unchanged, no contested flag"
+    - claim: "resolution is Architect-authored and ledgered"
+      proof: "unit test: a resolution fixture (one active, one superseded) re-admits the winner to injection + writes the resolution ledger line; no code path auto-resolves"
+  risk: medium
+  origin: architect
+  plan_refs: ["P14", "§Self-improvement"]
+  files: [src/lib/retro.ts]
+  status: queued
+  attempts: 0
