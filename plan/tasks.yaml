@@ -3593,3 +3593,41 @@
   note: "Filed from the 2026-07-16 duplicate-build incident (#143 orphaned by #145, $3.32 duplicate spend).
     Complements W1-T77's MERGEABLE disposition: the sweep handles the open PR's next action; this guard
     stops the drain from creating a competitor for it."
+- id: W1-T81
+  title: "lint-plan headless-fitness precision — negation/self-reference aware, plus phrase-level live-demonstration signals (the #146 false-positive/false-negative pair)"
+  repo: remudero
+  depends_on: [W1-T20c]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "GROUND TRUTH (#146 sweep, worker-reported): the headless-fitness check matches its lexicon
+    whole-word anywhere, so it FALSE-POSITIVES on negations ('NO real overnight run' — W1-T12a) and on
+    self-describing criteria (W1-T20c's own lexicon description), flagging 3 merged, correctly-fixture
+    tasks — while FALSE-NEGATIVING the genuinely-unfit live proofs it was built to catch ('paste the red
+    check, then revert' — the W1-T25 no_pr incident) because those are PHRASES, not lexicon words. Both
+    directions wrong on the same rule: the whole-plan count is currently mostly noise."
+  design: |
+    (i) PRECISION: a lexicon hit inside a negation scope (no/not/never/without preceding within the
+        clause) does not flag; the linter's own self-describing criteria are exempted by content shape,
+        never by task-id allowlist (an id allowlist rots).
+    (ii) RECALL: add phrase-level live-demonstration signals as DATA (a patterns table, rule 2): paste
+        the <red|green|score|check>, then revert; run against <live repo>; operator observes; screenshot;
+        and the class generally — imperative demonstrations no headless worker can perform.
+    (iii) The #146 sweep's before/after states are the regression corpus: pre-sweep W1-T25/26/27/28
+        criteria MUST flag; post-sweep versions MUST NOT; W1-T12a/b and W1-T20c MUST NOT.
+  acceptance:
+    - claim: "the three #146 false-positives no longer flag"
+      proof: "unit tests over the three merged, correctly-fixture tasks the current whole-word lexicon wrongly hits — W1-T12a's negation criterion (a forbidden term inside a 'NO real ... run' clause), W1-T12b's negation criterion (a 'NOT a real ... load' clause), and W1-T20c's self-description criterion (whose proof IS the lexicon table) — each loaded verbatim from the plan and asserted to yield no headless-fitness violation"
+    - claim: "the W1-T25-class live proofs now flag"
+      proof: "unit tests: the pre-sweep verbatim criteria ('goes CI-red...paste the red check, then revert') -> headless-fitness violation naming the matched phrase"
+    - claim: "the post-sweep fixture criteria stay clean and the signal set is data"
+      proof: "unit tests: rewritten W1-T25-T28 criteria -> no violation; adding a new phrase row to the patterns table flags a seeded matching criterion with zero linter-code changes"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [src/lib/task-linter.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from the #146 worker's finding. Until this lands, whole-plan lint counts carry known noise;
+    --base (CI mode) remains trustworthy for new/changed tasks written post-linter."
