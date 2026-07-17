@@ -4067,3 +4067,46 @@
   attempts: 0
   note: "Operator holds the live sweep until this lands (their call, correct). The dry-run's
     'mergeable 1' on #161 is the canonical fixture."
+
+- id: W1-T94
+  title: "Fix-rung failure-mode taxonomy + per-mode input contracts — the fix worker branches on MODE (reviewer-unmet | body-coverage | ci-log), never thrashes (W1-T76 follow-up)"
+  repo: remudero
+  depends_on: [W1-T76]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "TWO live proofs (operator thread): (1) the Architect's own #157 mis-diagnosis — reading
+    source WITHOUT the verbatim failure signal produced a confidently-wrong STEP-2 code fix that would
+    have regressed criterion 2; the worker's distrust caught it. An automated fix worker with the same
+    blindness thrashes the same way, at machine speed. (2) blocked_ci carries NO reviewer unmet-criteria
+    — the failing signal is the CI LOG (tsc/test/lint output) — so W1-T76's input contract (the
+    reviewer's unmet set) cannot express the mode at all. The rung needs a MODE field and mode-specific
+    inputs, or W1-T93's blocked-fixable routing for CI-red has nothing to dispatch."
+  design: |
+    The fix dispatch derives MODE deterministically from the block evidence (data, rule 2):
+    - reviewer-unmet (review failure + unmet_criteria present): input = the FULL unmet set + verbatim
+      reasons (W1-T76 today, unchanged).
+    - body-coverage (reviewer reason matches the 'matched N/M proof keywords' shape, proof_exec shows no
+      executed_fail): input = the criteria + the coverage reason; the prompt STATES the likely fix is the
+      PR BODY's Acceptance block, code changes only if the body claim would be false (the #157/#143
+      lesson: don't patch code to satisfy keywords).
+    - ci-log (blocked_ci, no review verdict): input = the failing check names + the tail of each failing
+      log; the prompt states the target is making CI green on the SAME branch.
+    The rendered fix prompt NAMES its mode and carries only that mode's inputs. Modes are a table —
+    adding proof_exec-executed_fail or design-conformance later is a row. FLOOR-DEGRADED HONESTY (the
+    #157 finding, in the module doc): 'FLOOR DEGRADED: 0/N' on a PASSING review is W1-T72 working as
+    designed for prose/arrow proofs — never a mode, never a dispatch trigger."
+  acceptance:
+    - claim: "each mode derives deterministically from its fixture evidence and renders a mode-named prompt with only its inputs"
+      proof: "unit tests: the three fixture shapes (reviewer failure verdict + unmet set; 'matched 4/12 proof keywords' reason; blocked_ci + failing check logs) -> mode correctly derived, prompt contains the mode name + that mode's inputs and NOT the others'"
+    - claim: "body-coverage mode instructs body-first, code-only-if-false"
+      proof: "unit test: the rendered body-coverage prompt contains the body-first instruction verbatim-class text"
+    - claim: "modes are data"
+      proof: "unit test: adding a table row for a new evidence shape derives the new mode with zero dispatch-code changes"
+  risk: high
+  origin: architect
+  plan_refs: ["P22", "§3"]
+  files: [src/run-task.ts, src/lib/worker.ts]
+  status: queued
+  attempts: 0
