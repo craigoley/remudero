@@ -104,6 +104,19 @@ export interface ReviewVerdict {
   testTheater: boolean;
   /** One-line human summary, safe to use as the commit-status description. */
   summary: string;
+  /**
+   * W1-T72 (W1-T65 follow-up — LEGIBILITY, not a blocking-behavior change): true
+   * when NOTHING was observed on the PR head (no criterion's `proof_exec` is
+   * `executed_pass`/`executed_fail`) while at least one non-`satisfied_by` proof
+   * was WRITTEN in the house dialect (`grep: …` / `unit test: …` —
+   * {@link isDialectPrefixed}) — i.e. a proof authored to be mechanically
+   * checked never actually got checked, and the binding verdict fell back to
+   * the blind keyword floor on EVERY criterion. `state`/`met` are UNCHANGED
+   * either way — the keyword floor remains the binding fallback exactly as
+   * W1-T65 shipped it. Whether a degraded floor should HOLD a risk:high PR is
+   * the operator's doctrine call, explicitly out of scope here.
+   */
+  floorDegraded: boolean;
 }
 
 // ── Tokenisation (deterministic, dependency-free) ──────────────────────────
@@ -217,26 +230,44 @@ export function detectTestTheater(diff: string): boolean {
   return !hasRealAssertion;
 }
 
-// ── Whitelisted proof execution (W1-T65, ratifies P15) ─────────────────────
+// ── Whitelisted proof execution (W1-T65, ratifies P15; grammar widened W1-T72) ──
 //
 // Lifts W1-T3F's whitelisted-proof execution — previously only the ADVISORY
 // fresh-context reviewer's own judgment (buildReviewPrompt below tells the LLM to
 // check out the head and run a proof's test/grep itself) — INTO this deterministic
 // FLOOR, so the gate observes repo state whether or not that LLM reviewer ever
-// completes. WHITELIST UNCHANGED from W1-T3F: only two shapes are ever executed,
-// and NOTHING else — no arbitrary code from proof text:
+// completes. Two ORIGINAL strict shapes (W1-T65):
 //   (1) a named TEST FILE path (`test/**/*.test.ts` or `.spec.*`), run via the
 //       project's own test runner (`node --test --import tsx <path>`, exactly the
 //       package.json `test` script scoped to one file);
 //   (2) a literal, BACKTICK-FENCED `grep ...` command (e.g. `` `grep -n foo bar.ts` ``)
 //       — fenced so a proof must be UNAMBIGUOUS to qualify; unfenced prose like
 //       "grep of src shows X" is NOT this shape and stays on the keyword floor.
-// Both are executed via execFile (never a shell), so proof TEXT can never inject
-// shell metacharacters into a command line — but the fenced grep body is still
-// rejected outright (not_executable, nothing executed) if it contains any of
+// PLUS the HOUSE DIALECT (W1-T72 — coverage: W1-T67/#123 and #125 both showed
+// proof_exec 0/N because the acceptance proofs are actually written this way, not
+// as fenced commands or bare paths):
+//   (3) `grep: <pattern> [in <path>]` — a leading `grep:` label, the pattern
+//       free text, optionally followed by `in <path>` (a trailing token that
+//       looks like a path — contains `/` or `.`, no whitespace), a FILE or a
+//       DIRECTORY (searched recursively either way). No `in` clause ⇒ search
+//       recursively from the checkout root, excluding `plan/` (where a
+//       proof's own text lives verbatim — an unscoped search would trivially
+//       self-match), `.git/`, `node_modules/`. A literal `*` in the path is
+//       refused (not_executable): execFile never shells out, so nothing
+//       expands a glob — a wildcard target can never resolve to a real file.
+//   (4) `unit test: <file-or-test-name>` — a leading `unit test:` label, then
+//       EITHER a literal test-file path (shape (1), reused verbatim) OR a bare
+//       TEST NAME, run via `node --test --import tsx --test-name-pattern <name>
+//       test/**/*.test.ts` (the SAME file glob the project's own `test` script
+//       uses) — the whole suite, filtered.
+// ALL FOUR are executed via execFile (never a shell), so proof TEXT can never
+// inject shell metacharacters into a command line — but a dialect/fenced body is
+// still rejected outright (not_executable, nothing executed) if it contains any of
 // `; & \` $ < >` or a newline, as defense in depth (acceptance: proof execution is
-// bounded to the whitelist). Anything that doesn't match either shape is
-// not_executable — the keyword floor stands alone, unchanged.
+// bounded to the whitelist). Anything that doesn't match any shape is
+// not_executable — the keyword floor stands alone, unchanged, and (W1-T72,
+// legibility) is flagged `floorDegraded` when it was written to be runnable
+// (see {@link isDialectPrefixed}) but nothing on the review ended up executed.
 
 /** A proof shape the floor is willing to mechanically execute. */
 export interface WhitelistedProof {
@@ -247,11 +278,115 @@ export interface WhitelistedProof {
   args: string[];
   /** Human-legible label for reasons (the matched path, or the fenced command). */
   label: string;
+  /**
+   * W1-T72: true when `kind==="test"` was compiled from a bare TEST NAME (house
+   * dialect `unit test: <name>`, not a literal file path) — i.e. `args`
+   * includes `--test-name-pattern`. {@link execWhitelistedProof} uses this to
+   * guard a node quirk: `--test-name-pattern` with ZERO matches still exits 0
+   * (every file's own wrapper "passes" trivially even though nothing inside it
+   * ran) — a named test that does not exist on the PR head must count as FAIL
+   * (the proof named something the head does not observably contain, exactly
+   * the existing "grep with no match" class), never a silent pass.
+   */
+  nameFiltered?: boolean;
 }
 
 const TEST_PATH_RE = /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/;
+const TEST_PATH_EXACT_RE = /^test\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
 const GREP_FENCE_RE = /`(grep\s+[^`]+)`/;
 const UNSAFE_FENCE_CHARS_RE = /[;&`$<>\n]/;
+/** The house-dialect PREFIXES a proof is WRITTEN in when it is meant to be
+ * mechanically checked (W1-T72). Matched against the proof's leading text only
+ * — a dialect label is how a proof STARTS, never something incidentally
+ * mentioned mid-sentence. */
+const DIALECT_GREP_RE = /^grep:\s*(.+)$/i;
+const DIALECT_TEST_RE = /^unit test:\s*(.+)$/i;
+/** The project's own `test` script glob (package.json) — reused verbatim so a
+ * name-filtered run scopes to exactly the suite `npm test` would run. */
+const TEST_GLOB = "test/**/*.test.ts";
+
+/**
+ * True when a proof's TEXT is written in the house dialect — i.e. it was
+ * WRITTEN to be mechanically executed, independent of whether
+ * {@link parseWhitelistedProof} actually accepted it (an unsafe/unparseable
+ * dialect body still returns null from that function). Used ONLY for the
+ * `floorDegraded` legibility signal (W1-T72) — never affects execution.
+ */
+export function isDialectPrefixed(proof: string): boolean {
+  const trimmed = proof.trim();
+  return DIALECT_GREP_RE.test(trimmed) || DIALECT_TEST_RE.test(trimmed);
+}
+
+/**
+ * Split a `grep:` dialect body into its pattern + optional path. The path is
+ * the trailing token after the LAST `\s+in\s+` boundary that itself looks like
+ * a path/glob (contains `/`, `.`, or `*`, no whitespace) — this keeps
+ * multi-word patterns like "wx flag present" intact while still correctly
+ * splitting "... in src/lib/config.ts". No such boundary ⇒ the whole body is
+ * the pattern and the search defaults to recursive from the checkout root.
+ */
+const DIALECT_GREP_PATH_RE = /^(.*?)\s+in\s+(\S*[./*]\S*)$/i;
+
+/**
+ * Directories excluded from the NO-PATH recursive default (`grep: <pattern>`
+ * with no `in <path>` clause). `plan/` is the load-bearing one: it is where
+ * every acceptance PROOF's own text lives verbatim (plan/tasks.yaml), so an
+ * unscoped repo-root search would trivially self-match a proof's own
+ * description string and report `executed_pass` regardless of whether the
+ * claimed property holds anywhere in actual code — the false-pass class this
+ * whole floor exists to prevent. `.git`/`node_modules` are excluded because
+ * they carry no source signal and only cost time on a large checkout.
+ */
+const GREP_DEFAULT_EXCLUDES = ["--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=plan"];
+
+function parseDialectGrep(body: string): WhitelistedProof | null {
+  const trimmed = body.trim();
+  if (!trimmed) return null;
+  const withPath = trimmed.match(DIALECT_GREP_PATH_RE);
+  const pattern = (withPath ? withPath[1] : trimmed).trim();
+  const path = withPath ? withPath[2] : undefined;
+  if (!pattern || UNSAFE_FENCE_CHARS_RE.test(pattern)) return null; // refuse, not sanitize
+  if (path !== undefined) {
+    if (UNSAFE_FENCE_CHARS_RE.test(path) || path.includes("..")) return null;
+    // No shell here (execFile) ⇒ no glob expansion — a literal '*' target can
+    // never resolve to a real file and would always exit non-zero, silently
+    // manufacturing a spurious executed_fail. Refuse rather than run it.
+    if (path.includes("*")) return null;
+    // "-r" is a no-op on a plain FILE target (confirmed: `grep -rn pat
+    // file.ts` behaves identically to `grep -n pat file.ts`) and is what
+    // makes a DIRECTORY target work at all — always pass it so "in <path>"
+    // covers a file OR a directory without a second branch.
+    return { kind: "grep", command: "grep", args: ["-rn", "--", pattern, path], label: `${pattern} in ${path}` };
+  }
+  return {
+    kind: "grep",
+    command: "grep",
+    args: ["-rn", ...GREP_DEFAULT_EXCLUDES, "--", pattern, "."],
+    label: pattern,
+  };
+}
+
+/**
+ * Compile a `unit test:` dialect body — either a literal test-file path (reuses
+ * the exact-file shape verbatim) or a bare TEST NAME (name-filtered across the
+ * whole suite glob).
+ */
+function parseTestTarget(body: string): WhitelistedProof | null {
+  const trimmed = body.trim();
+  if (!trimmed) return null;
+  if (TEST_PATH_EXACT_RE.test(trimmed)) {
+    if (trimmed.includes("..")) return null; // no path traversal out of the checkout
+    return { kind: "test", command: "node", args: ["--test", "--import", "tsx", trimmed], label: trimmed };
+  }
+  if (UNSAFE_FENCE_CHARS_RE.test(trimmed)) return null; // refuse, not sanitize
+  return {
+    kind: "test",
+    command: "node",
+    args: ["--test", "--import", "tsx", "--test-name-pattern", trimmed, TEST_GLOB],
+    label: trimmed,
+    nameFiltered: true,
+  };
+}
 
 /** Tokenise a fenced shell-like command, honoring simple `"…"` / `'…'` quoting. No
  * escape sequences (a proof needing one is simply not whitelisted — fine). */
@@ -269,12 +404,30 @@ function tokenizeFenced(s: string): string[] {
  * entirely to the keyword floor, never attempting execution.
  */
 export function parseWhitelistedProof(proof: string): WhitelistedProof | null {
+  // House dialect (W1-T72) checked FIRST and EXCLUSIVELY: a proof WRITTEN with
+  // a dialect label is handled ONLY by its own parser — success or refuse
+  // (null) — and NEVER falls through to a legacy shape below. Falling through
+  // would let a dialect body that fails ITS OWN safety check (or that names a
+  // pattern which happens to contain a `test/*.test.ts`-shaped substring) get
+  // silently reinterpreted via an unrelated legacy match over the same raw
+  // text — e.g. `grep: TODO in test/foo.test.ts` must run the GREP, never get
+  // swallowed by the legacy unanchored TEST_PATH_RE below into "run that whole
+  // test file instead" (a different check than the one actually written).
+  const trimmed = proof.trim();
+  const dialectTest = trimmed.match(DIALECT_TEST_RE);
+  if (dialectTest) return parseTestTarget(dialectTest[1]);
+  const dialectGrep = trimmed.match(DIALECT_GREP_RE);
+  if (dialectGrep) return parseDialectGrep(dialectGrep[1]);
+
+  // Legacy strict shapes (W1-T65) — only reached when the proof carries no
+  // dialect label at all.
   const testMatch = proof.match(TEST_PATH_RE);
   if (testMatch) {
     const path = testMatch[0];
     if (path.includes("..")) return null; // no path traversal out of the checkout
     return { kind: "test", command: "node", args: ["--test", "--import", "tsx", path], label: path };
   }
+
   const grepMatch = proof.match(GREP_FENCE_RE);
   if (grepMatch) {
     const fenced = grepMatch[1];
@@ -328,13 +481,33 @@ export function execWhitelistedProof(
 ): "pass" | "fail" {
   if (whitelisted.kind === "test") ensureDeps(cwd);
   try {
-    execFileSync(whitelisted.command, whitelisted.args, { cwd, stdio: "pipe", timeout: timeoutMs });
+    const stdout = execFileSync(whitelisted.command, whitelisted.args, {
+      cwd,
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: timeoutMs,
+      encoding: "utf8",
+    });
+    // W1-T72 GUARD: `--test-name-pattern` with ZERO matches still exits 0 (every
+    // file's own wrapper "passes" trivially even though nothing named ran) — a
+    // named test that does not exist on the PR head must be FAIL, never a
+    // silent pass (see {@link WhitelistedProof.nameFiltered}).
+    if (whitelisted.nameFiltered && !testNameMatched(stdout)) return "fail";
     return "pass";
   } catch (e) {
     const err = e as NodeJS.ErrnoException & { status?: number | null };
     if (typeof err.status === "number") return "fail"; // ran to a clean nonzero exit
     throw err; // killed by signal (timeout) / spawn error (ENOENT, …) ⇒ exec_error
   }
+}
+
+/**
+ * True when node's TAP stream shows at least one subtest whose name is NOT
+ * itself a bare test-FILE path — i.e. `--test-name-pattern` matched a real
+ * named test somewhere in the suite, as opposed to every file trivially
+ * reporting its own wrapper as "ok" with zero internal matches.
+ */
+function testNameMatched(stdout: string): boolean {
+  return /^# Subtest: (?!.*\.(?:test|spec)\.[cm]?[jt]sx?\s*$).+$/m.test(stdout);
 }
 
 // ── The pure JUDGE ─────────────────────────────────────────────────────────
@@ -461,7 +634,34 @@ export function judgeReview(
       ? `remudero-review: PASS — ${verdicts.length} criteria substantiated, no test theater`
       : failSummary(unmet.map((v) => v.claim), testTheater, noCriteria);
 
-  return { state, criteria: verdicts, testTheater, summary };
+  // W1-T72 (W1-T65 follow-up, legibility): nothing was OBSERVED on the PR head
+  // anywhere in this review, yet at least one proof was WRITTEN to be runnable
+  // (house dialect) — the binding verdict fell back to the blind keyword floor
+  // on EVERY criterion, not because the proofs were legitimately prose. A
+  // `satisfied_by` criterion is excluded: it never attempts execution BY
+  // DESIGN (an Architect override), which is not a keyword-floor fallback.
+  const executedCount = verdicts.filter(
+    (v) => v.proof_exec === "executed_pass" || v.proof_exec === "executed_fail",
+  ).length;
+  const floorDegraded =
+    executedCount === 0 && criteria.some((c) => !c.satisfied_by && isDialectPrefixed(c.proof));
+
+  return { state, criteria: verdicts, testTheater, summary, floorDegraded };
+}
+
+/**
+ * The LOUD console annotation for a degraded floor (W1-T72, design (i)) —
+ * printed once per review when {@link ReviewVerdict.floorDegraded} is true.
+ * `criteriaCount` is the total number of criteria judged (the "N" in "0/N").
+ * Pure + exported so the exact text is a unit-testable falsifier, independent
+ * of the console call site (run-task.ts).
+ */
+export function floorDegradedAnnotation(criteriaCount: number): string {
+  return (
+    `FLOOR DEGRADED: 0/${criteriaCount} proofs executed; keyword floor was binding — ` +
+    `a dialect-prefixed proof ('grep: …' / 'unit test: …') was written to be runnable ` +
+    `but nothing was observed on the PR head.`
+  );
 }
 
 /** Max length of a GitHub commit-status description (postReviewStatus also truncates). */

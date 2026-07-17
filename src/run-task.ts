@@ -64,6 +64,7 @@ import { assertProvenance, citation } from "./lib/provenance.js";
 import {
   REVIEW_CONTEXT,
   buildReviewPrompt,
+  floorDegradedAnnotation,
   judgeReview,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
@@ -569,7 +570,15 @@ async function runReview(args: {
     reviewer_outcome: outcome,
     // W1-T65/P15: per-criterion proof_exec, index-aligned to verdict.criteria.
     proof_exec: proofExec,
+    // W1-T72 (W1-T65 follow-up): LOUD legibility — true when execution fell
+    // back to the keyword floor on EVERY criterion while at least one proof
+    // was WRITTEN to be runnable (house dialect). NO blocking-behavior change:
+    // `state` above is exactly what it always was.
+    floor_degraded: verdict.floorDegraded,
   });
+  if (verdict.floorDegraded) {
+    say(floorDegradedAnnotation(proofExec.length));
+  }
   if (verdict.state !== "success" && (unmetClaims.length > 0 || verdict.testTheater)) {
     // Post the full unmet list as a PR comment so a blocked PR names its gap in one
     // place a human (or the next run) reads. Best-effort — never blocks the verdict.
