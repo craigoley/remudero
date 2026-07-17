@@ -1158,18 +1158,19 @@
     falsifier (green tests that kill no mutants are theater — SynthWatch). TS-strict must be proven ACTIVE
     by a planted probe, because 0 violations from an inert gate reads identically to a clean one (neon-drift)."
   acceptance:
-    - claim: "the coverage ratchet BLOCKS a coverage-lowering PR (live)"
-      proof: "a PR deleting a covered test drops coverage below the recorded baseline and goes CI-red on the ratchet job; paste the red check, then revert"
-    - claim: "a mutation-testing baseline is established with a recorded score"
-      proof: "Stryker runs in CI and the mutation score is recorded as the baseline (paste the score + config)"
-    - claim: "the jscpd duplication threshold BLOCKS a planted duplicate"
-      proof: "a branch duplicating a code block over the threshold goes CI-red on jscpd; paste the red, then revert"
-    - claim: "TypeScript strict is proven ACTIVE by a planted probe that MUST fail"
-      proof: "a planted strict-only violation (e.g. an unchecked index / implicit any) makes typecheck FAIL; a bare 0-violations without the probe is NOT accepted as proof (neon-drift lesson)"
+    - claim: "the coverage ratchet BLOCKS a coverage-lowering change — its gate script exits non-zero below the recorded baseline"
+      proof: "unit test: the ratchet script, given fixture coverage data BELOW the recorded baseline, exits non-zero; given data AT/above baseline, exits zero — the falsifier fixture proves the gate is ACTIVE, not merely present"
+    - claim: "a mutation-testing baseline is established and ENFORCED by a script, with a recorded score"
+      proof: "unit test: the Stryker config + a recorded baseline file are present, and the baseline-check script REJECTS a fixture mutation score below the recorded baseline (accepts at/above); grep the CI workflow shows the mutation job wired"
+    - claim: "the jscpd duplication threshold BLOCKS a planted duplicate — the jscpd gate exits non-zero over a duplicate above threshold"
+      proof: "unit/integration test: jscpd over a fixture containing a code block duplicated ABOVE the threshold exits non-zero; a below-threshold fixture exits zero; grep the CI workflow shows the jscpd job wired"
+    - claim: "TypeScript strict is proven ACTIVE by a committed probe that MUST fail — a bare 0-violations is NOT accepted"
+      proof: "unit test: a committed strict-only-probe fixture (e.g. an unchecked index / implicit any) is REJECTED by typecheck when strict is on and would pass with it off; the doctrine 'a bare 0-violations without the probe is not proof' (neon-drift) is encoded as this falsifier fixture, never a live paste"
   risk: high
   origin: architect
   status: queued
   attempts: 0
+  note: "Headless-fitness rewrite 2026-07-16 (the W1-T25 no_pr incident: verdict no_pr after 122 turns because every criterion demanded 'paste the red, then revert', which a headless worker cannot do). Live proofs converted to falsifier FIXTURES; the guarantee (a 0-violation gate must be proven ACTIVE by a planted probe) survives as fixtures. LIVE CONFIRMATION (Rule 18, operator-observed, NOT auto-verify): a real coverage-lowering PR goes CI-red on the ratchet job (paste the red, then revert); Stryker's recorded score + config; jscpd red on a planted duplicate; the strict-probe red — observed on a real CI run, operator-attested."
 
 - id: W1-T26
   title: Architecture tier on remudero — dependency-cruiser fitness rules + ADR discipline
@@ -1182,14 +1183,15 @@
   rationale: "MASTER-PLAN §5 TIER 3. The games' purity gates generalized to declarable layering: src/lib
     must import nothing from spike/CLI. A fitness function makes the rule executable, not aspirational."
   acceptance:
-    - claim: "a dependency-cruiser rule BLOCKS a planted layering violation"
-      proof: "a branch adding an import of src/spike.ts (or src/run-task.ts) into src/lib goes CI-red on the depcruise job with the named rule; paste the red, then revert"
-    - claim: "the fitness ruleset is declared and runs in CI"
-      proof: "a .dependency-cruiser config is present with the src/lib-imports-no-spike/CLI rule and the depcruise job appears in the CI run"
+    - claim: "a dependency-cruiser rule BLOCKS a planted layering violation — depcruise exits non-zero citing the named rule"
+      proof: "unit/integration test: dependency-cruiser over a fixture where src/lib imports src/spike.ts (or a run-task/CLI module) exits non-zero CITING the named rule; a clean fixture exits zero — the falsifier proves the rule is ACTIVE, not merely declared"
+    - claim: "the fitness ruleset is declared and wired into CI"
+      proof: "a .dependency-cruiser config is present with the src/lib-imports-no-spike/CLI rule; grep the CI workflow shows the depcruise job"
   risk: high
   origin: architect
   status: queued
   attempts: 0
+  note: "Headless-fitness rewrite 2026-07-16 (W1-T25-vintage tier arc): live 'paste the red, then revert' proof converted to a falsifier fixture over dependency-cruiser; the layering guarantee survives. LIVE CONFIRMATION (Rule 18, operator-observed, NOT auto-verify): a real branch adding the forbidden src/lib->spike/CLI import goes CI-red on the depcruise job (paste the red, then revert) — operator-attested."
 
 - id: W1-T27
   title: rmd project init <repo> — provision the whole gate stack on a NEW repo (fleet inheritance)
@@ -1210,14 +1212,15 @@
     and branch protection wired to the single aggregator context. Coverage/mutation/dup/complexity
     BASELINES are captured from the target at onboarding — no repo starts at zero.
   acceptance:
-    - claim: "rmd project init provisions the full stack on remudero-sandbox and its first gated PR is green"
-      proof: "run against remudero-sandbox; paste gh api .../branches/main/protection contexts (single aggregator + remudero-review), the .github/workflows list, and the url of a green first gated PR"
-    - claim: "ratchet baselines are captured at onboarding (no repo starts at zero)"
-      proof: "sandbox .remudero/principles.yaml (or a baselines file) shows non-empty coverage/mutation/dup floors captured from the repo — paste it"
+    - claim: "rmd project init GENERATES the full gate stack — the protection payload names a single aggregator + remudero-review and the workflow/config set is complete"
+      proof: "unit test over injected deps: rmd project init produces the branch-protection PATCH payload with contexts [<single aggregator>, remudero-review], the full .github/workflows set (ci/ci-gate/scanners/depcruise), and the profile configs (dependabot/dependency-cruiser/tsconfig/SECURITY.md) — asserted against fixtures, no live repo required"
+    - claim: "ratchet baselines are captured at onboarding from the repo, never zero"
+      proof: "unit test: onboarding over a fixture repo (injected coverage/mutation/dup data) writes NON-EMPTY coverage/mutation/dup floors to .remudero/principles.yaml (or a baselines file); a repo with real coverage never onboards at zero"
   risk: medium
   origin: architect
   status: queued
   attempts: 0
+  note: "Headless-fitness rewrite 2026-07-16 (W1-T25-vintage tier arc): the inherently-live 'run against remudero-sandbox, paste the green PR' proof converted to fixture assertions of the GENERATED provisioning; the inheritance guarantee survives. LIVE CONFIRMATION (Rule 18, operator-observed, NOT auto-verify): rmd project init run against remudero-sandbox provisions protection (contexts [aggregator, remudero-review]) + the workflow set and its first gated PR goes green — paste the gh api protection contexts, the workflows list, and the green PR url; operator-attested."
 
 - id: W1-T28
   title: Containment probe as a REQUIRED check for any diff touching sandbox/hooks/env/deny-floor
@@ -1236,14 +1239,15 @@
     settings/ / hooks/ / env or the deny-floor, and the reviewer requires it on such diffs. A
     containment-weakening diff FAILS the check.
   acceptance:
-    - claim: "a planted containment-weakening diff is BLOCKED"
-      proof: "a branch moving allowedDomains from sandbox.network to the sandbox root (the WS-0 silent-drop typo) makes the containment check FAIL and the PR non-mergeable; paste the failing check + blocked state, then revert"
+    - claim: "a planted containment-weakening diff is BLOCKED — the containment check rejects the misplaced-allowedDomains settings"
+      proof: "unit test: the containment settings check, given a settings fixture with allowedDomains at the sandbox ROOT instead of under sandbox.network (the WS-0 silent-drop typo), returns invalid / exits non-zero; a correctly-nested fixture passes — the falsifier proves the check catches the real regression"
     - claim: "the containment check is REQUIRED (via the aggregator) for sandbox/hooks/env/deny-floor diffs"
-      proof: "the containment job is a needs: of the ci-gate aggregator and a touching-diff PR shows it ran; paste the workflow wiring"
+      proof: "grep the CI workflow: the containment job is a needs: of the ci-gate aggregator and is triggered on diffs touching sandbox/hooks/env/deny-floor paths"
   risk: high
   origin: architect
   status: queued
   attempts: 0
+  note: "Headless-fitness rewrite 2026-07-16 (W1-T25-vintage tier arc): live 'paste the failing check + blocked state, then revert' proof converted to a falsifier fixture over the containment settings check; the guarantee (the misplaced-allowedDomains typo is caught) survives. LIVE CONFIRMATION (Rule 18, operator-observed, NOT auto-verify): a real branch moving allowedDomains to the sandbox root makes the containment check FAIL and the PR non-mergeable (paste the failing check + blocked state, then revert) — operator-attested."
 
 - id: W2-T2
   title: Campaign — raise the fleet to the bar (provision the gate stack across operator repos)
