@@ -13,6 +13,7 @@ import {
   resumeCommand,
   runDrain,
   type MergedSet,
+  type OpenPrCheck,
 } from "../src/lib/drain.js";
 import { pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
 import { deriveStatus, type GitHub } from "../src/lib/status.js";
@@ -107,6 +108,85 @@ test("W1-T76: once the fix rung's SAME-branch amendment merges, deriveStatus cre
   const next = nextRunnable(plan, isMerged);
   assert.equal(next?.id, "B", "A's dependent (B) is now runnable — the fix rung's merge unblocked it");
   assert.notEqual(next?.id, "A", "the already-merged/fixed task itself is EXCLUDED from runnable");
+});
+
+// ── W1-T80: dispatch dedup — an OPEN PR means IN-FLIGHT, never runnable ─────
+// (the #143/#145 duplicate-build race: rmd review posted success on #143, the
+// drain started seconds later — merging is async, so the task looked
+// not-merged and a fresh worker rebuilt it end-to-end as #145, orphaning the
+// reviewed-green #143).
+
+test("W1-T80 canonical race fixture: a task whose latest PR is OPEN is excluded from nextRunnable, with a legible skip naming the PR", () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const isOpenPr: OpenPrCheck = (id) => (id === "A" ? 143 : undefined);
+  const skips: Array<{ id: string; prNumber: number }> = [];
+  const next = nextRunnable(plan, NONE_MERGED, {
+    isOpenPr,
+    onSkip: (t, prNumber) => skips.push({ id: t.id, prNumber }),
+  });
+  // A is IN-FLIGHT (open PR #143) — excluded, never re-dispatched as a duplicate build.
+  assert.deepEqual(skips, [{ id: "A", prNumber: 143 }]);
+  // D is the next runnable candidate in file order once A is skipped (B/C still
+  // depend on the un-merged A).
+  assert.equal(next?.id, "D");
+});
+
+test("W1-T80: a CLOSED (unmerged) PR does NOT block — an abandoned/superseded attempt leaves the task runnable", () => {
+  const plan = fixturePlan();
+  // A's latest PR is CLOSED (not open) — isOpenPr correctly reports "not open".
+  const isOpenPr: OpenPrCheck = () => undefined;
+  const next = nextRunnable(plan, NONE_MERGED, { isOpenPr, onSkip: () => assert.fail("no skip expected") });
+  assert.equal(next?.id, "A", "a closed-unmerged PR leaves the task runnable — re-runs stay possible");
+});
+
+test("W1-T80: merged and correction-credited tasks are excluded exactly as today, isOpenPr never even consulted for them", () => {
+  const plan = fixturePlan();
+  const consulted: string[] = [];
+  const isOpenPr: OpenPrCheck = (id) => {
+    consulted.push(id);
+    return undefined;
+  };
+  const next = nextRunnable(plan, mergedSetOf("A"), { isOpenPr });
+  assert.equal(next?.id, "B");
+  assert.ok(!consulted.includes("A"), "an already-merged task is filtered out before isOpenPr is ever asked");
+});
+
+test("W1-T80: no isOpenPr wired at all ⇒ nextRunnable behaves exactly as before this guard existed", () => {
+  const plan = fixturePlan();
+  assert.equal(nextRunnable(plan, NONE_MERGED)?.id, "A");
+  assert.equal(nextRunnable(plan, mergedSetOf("A"))?.id, "B");
+});
+
+test("W1-T80 runDrain integration: the #143 state is skipped with a dispatch.skipped ledger line (task + PR number), and the drain proceeds to the next runnable task instead of halting", async () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      // A's most recent PR (#143) is OPEN — reviewed-green but not yet merged
+      // (merge is async). It must never be re-dispatched as a fresh build.
+      isOpenPr: (id) => (id === "A" ? 143 : undefined),
+      runOne: async (id) => {
+        ran.push(id);
+        merged.add(id);
+        return okResult(id);
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1 },
+  );
+  assert.ok(!ran.includes("A"), "A (in-flight under open PR #143) was never re-dispatched as a duplicate build");
+  // D is the only other runnable candidate (B/C depend on the still-open A).
+  assert.deepEqual(ran, ["D"]);
+  assert.equal(s.stopReason, "max_reached");
+  const skipLine = lines.find((l) => l.step === "dispatch.skipped");
+  assert.ok(skipLine, "a dispatch.skipped ledger line was emitted");
+  assert.equal(skipLine?.extra.task, "A");
+  assert.equal(skipLine?.extra.pr_number, 143);
+  assert.equal(skipLine?.extra.reason, "open-pr");
 });
 
 test("plannedSequence (--dry-run order): simulates merges forward, honouring deps + --max + --until", () => {

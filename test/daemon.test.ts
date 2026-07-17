@@ -17,7 +17,7 @@ import {
   type OrphanedRun,
 } from "../src/lib/daemon.js";
 import { pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
-import type { MergedSet } from "../src/lib/drain.js";
+import type { MergedSet, OpenPrCheck } from "../src/lib/drain.js";
 import { deriveStatus, type GitHub, type PrRef } from "../src/lib/status.js";
 
 // A small linear-ish plan: A → B → C (chain) + D (independent), all auto.
@@ -140,6 +140,51 @@ test("dispatches in dependency order (DAG), skipping verify:human and merged tas
   assert.deepEqual(s.merged, ["A", "B", "C", "D"]);
   assert.equal(s.stopReason, "max_reached");
   assert.ok(!ran.includes("H"), "verify:human is never auto-dispatched");
+});
+
+// ── W1-T80: dispatch dedup — an OPEN PR means IN-FLIGHT, never runnable ─────
+// (the #143/#145 duplicate-build race applies to the daemon's persistent loop
+// exactly as it does to a bounded `rmd drain`: nextRunnable is the SAME shared
+// machinery, reused wholesale, never reimplemented — see this module's header.)
+
+test("W1-T80: a task whose latest PR is OPEN is never re-dispatched — the daemon skips it (dispatch.skipped, PR number) and picks the next runnable task instead of halting", async () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const clock = fakeClock();
+  const isOpenPr: OpenPrCheck = (id) => (id === "A" ? 143 : undefined);
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      isOpenPr,
+      runOne: async (id) => { ran.push(id); merged.add(id); return okResult(id); },
+      sleep: clock.sleep,
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1 },
+  );
+  assert.ok(!ran.includes("A"), "A (in-flight under open PR #143) was never re-dispatched as a duplicate build");
+  assert.deepEqual(ran, ["D"]); // B/C still depend on the un-merged A; D is the only other candidate
+  assert.equal(s.stopReason, "max_reached");
+  const skipLine = lines.find((l) => l.step === "dispatch.skipped");
+  assert.ok(skipLine, "a dispatch.skipped ledger line was emitted");
+  assert.deepEqual(skipLine?.extra, { task: "A", reason: "open-pr", pr_number: 143 });
+});
+
+test("W1-T80: no isOpenPr wired ⇒ the daemon dispatches exactly as before this guard existed", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const clock = fakeClock();
+  const s = await runDaemon(
+    plan,
+    { refreshMerged: () => (id) => merged.has(id), runOne: async (id) => { ran.push(id); merged.add(id); return okResult(id); }, sleep: clock.sleep },
+    { max: 4 },
+  );
+  assert.deepEqual(ran, ["A", "B", "C", "D"]);
+  assert.equal(s.stopReason, "max_reached");
 });
 
 // ── STOP / PAUSE (W1-T11) ───────────────────────────────────────────────────

@@ -26,6 +26,7 @@ import {
   runDrain,
   type DrainOpts,
   type MergedSet,
+  type OpenPrCheck,
 } from "./lib/drain.js";
 import { DEFAULT_POLL_INTERVAL_MS, daemonBoot, runDaemon, type DaemonOpts, type DaemonSummary } from "./lib/daemon.js";
 import { generateLaunchdPlist, launchdPlistPath } from "./lib/launchd.js";
@@ -2341,13 +2342,24 @@ async function drainCommand(rest: string[]): Promise<number> {
   // Merged predicate, re-derived from GitHub each call (status.ts). The plan is
   // stewarded in `remudero`, so the gateway targets it; cross-repo tasks resolve
   // via the ledger's full pr_url (deriveStatus source (a)) or are verify:human.
+  //
+  // `lastProj` also backs `isOpenPr` (W1-T80, the in-flight dispatch-dedup
+  // guard) — the SAME projection `refreshMerged` just derived, never a second
+  // GitHub read path. `refreshMerged` is always called at the top of each
+  // drain tick before `isOpenPr` is consulted, so it is never stale.
+  let lastProj: Map<string, StatusProjection> | undefined;
   const refreshMerged: () => MergedSet = () => {
     const proj = projectPlan(
       plan,
       { ledgerPath, github: ghGateway(owner, "remudero") },
       statusPath,
     );
+    lastProj = proj;
     return (id: string) => proj.get(id)?.merged ?? false;
+  };
+  const isOpenPr: OpenPrCheck = (id) => {
+    const p = lastProj?.get(id);
+    return p?.prState === "OPEN" ? p.prNumber : undefined;
   };
 
   if (dryRun) {
@@ -2395,6 +2407,7 @@ async function drainCommand(rest: string[]): Promise<number> {
       plan,
       {
         refreshMerged,
+        isOpenPr,
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale }),
         readUsage: () => readUsageSnapshot(config),
         checkStop: () => stopDetail(config.root),
@@ -2534,13 +2547,22 @@ async function daemonCommand(rest: string[]): Promise<number> {
     plan = loadPlan(target.planPath);
   }
 
+  // `lastProj` also backs `isOpenPr` (W1-T80, the in-flight dispatch-dedup
+  // guard) — the SAME projection `refreshMerged` just derived, never a second
+  // GitHub read path.
+  let lastProj: Map<string, StatusProjection> | undefined;
   const refreshMerged: () => MergedSet = () => {
     const proj = projectPlan(
       plan,
       { ledgerPath, github: ghGateway(target.owner, target.repo) },
       statusPath,
     );
+    lastProj = proj;
     return (id: string) => proj.get(id)?.merged ?? false;
+  };
+  const isOpenPr: OpenPrCheck = (id) => {
+    const p = lastProj?.get(id);
+    return p?.prState === "OPEN" ? p.prNumber : undefined;
   };
 
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
@@ -2600,6 +2622,7 @@ async function daemonCommand(rest: string[]): Promise<number> {
       plan,
       {
         refreshMerged,
+        isOpenPr,
         runOne: (taskId) =>
           runTask(taskId, {
             planPath: target.planPath,
