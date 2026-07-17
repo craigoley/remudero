@@ -3871,3 +3871,44 @@
   files: [src/lib/retro.ts]
   status: queued
   attempts: 0
+
+- id: W1-T89
+  title: "MAST-coded verdicts — a deterministic verdict->taxonomy mapping (data) + retro failure distribution by category (ratifies P18 core)"
+  repo: remudero
+  depends_on: [W1-T51]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P18's mineable core. MAST (NeurIPS 2025; 1,600+ traces, 7 frameworks, kappa 0.88;
+    14 modes, 3 categories — specification ~42%, inter-agent ~37%, verification ~21%) is the field's
+    failure taxonomy; our verdict classes are private vocabulary. A mapping held as DATA (YAML: verdict
+    class + context -> MAST mode/category; rule 2, never LLM-classified) applied at RETRO-READ codes the
+    whole ledger retroactively — every historical verdict gains the field's vocabulary with zero
+    ledger rewrites. rmd retro reports each cycle's failure distribution BY CATEGORY, and W1-T20d's
+    class-mining keys off it. Publishing the numbers is WS-12's rung, deferred with the site."
+  design: |
+    plan/mast-mapping.yaml: rows of (verdict_class, optional qualifiers) -> (mast_mode, category);
+    unmapped classes report as unmapped (visible, never guessed). Applied read-side in the retro gather;
+    the retro report gains a per-cycle category distribution table + trend vs prior cycle. Blocked-guard
+    classes (blocked_containment/isolation, P23's pair) map to a provisional category with a comment —
+    P23's investigation refines them; the mapping being data makes that a row edit.
+  acceptance:
+    - claim: "a seeded ledger fixture of known verdicts produces the expected category distribution"
+      proof: "unit test: the fixture's blocked_illformed -> specification, attribution-class -> verification, etc., aggregate matches the committed expectation"
+    - claim: "unmapped classes surface as unmapped, never silently dropped or guessed"
+      proof: "unit test: a novel verdict class in the fixture -> counted under unmapped with the class named in the report"
+    - claim: "the mapping is data — a new row codes a class with zero code changes"
+      proof: "unit test: adding a row to a temp mapping flags a seeded verdict accordingly"
+  risk: high
+  origin: architect
+  plan_refs: ["P18", "§Self-improvement"]
+  files: [src/lib/retro.ts, plan/mast-mapping.yaml]
+  status: queued
+  attempts: 0
+  note: "Rank before the next retro so the gather lands coded from its first cycle. [research:
+    mast-neurips2025, mas-error-amplification-2026] carried from P18's capture. Risk raised medium->high
+    at filing (lint-plan sizing): the new plan-data artifact (plan/mast-mapping.yaml) + the ledger-wide
+    retroactive-coding change to the retro read path is genuinely wider than a single-file medium task;
+    the mapping and its reader are co-designed and inseparable, so decompose is wrong — raise-to-high is
+    the accurate rating and the linter's sanctioned resolution."
