@@ -4221,3 +4221,40 @@
   files: [src/run-task.ts]
   status: queued
   attempts: 0
+
+- id: W1-T99
+  title: "Escalation transport resilience — ensure labels exist, and ONE failed action never kills the sweep (the first live escalation's crash)"
+  repo: remudero
+  depends_on: [W1-T77]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (2026-07-17, first BLOCKED-class escalation ever fired): gh issue create
+    fails ENTIRELY on a missing label ('escalation-blocked' not found — the per-class label map,
+    escalate.ts:46, was never provisioned on the repo), so the question was generated and then LOST, and
+    execFileSync's throw propagated through runSweep — one PR's transport failure killed the whole
+    reconciler. Two violations of the level-triggered doctrine: a notification transport must not lose
+    its payload to provisioning drift, and the loop must reconcile the remaining PRs no matter what one
+    action does."
+  design: |
+    (i) ENSURE-LABELS: escalate's gateway ensures its label set exists before create (gh label create
+    per missing label, tolerate-exists) — provisioning is the transport's job, never the operator's
+    memory; the WS-4 scaffold inherits the set. (ii) DEGRADE, DON'T LOSE: if label ops still fail, create
+    the issue WITHOUT the failing label and note the degradation in the body — the payload outranks its
+    decoration. (iii) ISOLATE: the sweep wraps each disposition ACTION per-PR — a throw ledgers
+    sweep.action_failed (pr, disposition, error) and the loop CONTINUES; the summary line reports
+    failed actions distinctly. Fail-closed stays intact: an action that failed is not an action taken.
+  acceptance:
+    - claim: "a missing label no longer loses the escalation or crashes anything"
+      proof: "unit test over an injected gateway: label-create called for the missing label then issue created; a gateway whose label ops hard-fail still creates the issue without the label, degradation noted in body"
+    - claim: "one PR's action failure isolates — the sweep reconciles the rest"
+      proof: "unit test: a 3-PR fixture where the middle PR's escalate throws -> sweep.action_failed ledgered for it, the other two PRs' actions complete, summary counts the failure"
+    - claim: "the canonical crash is the regression fixture"
+      proof: "unit test: the 2026-07-17 shape (single ambiguous PR, gateway throwing label-not-found) -> no throw escapes runSweep; the question payload reaches an issue"
+  risk: high
+  origin: architect
+  plan_refs: ["P22", "§4"]
+  files: [src/lib/escalate.ts, src/lib/sweep.ts]
+  status: queued
+  attempts: 0
