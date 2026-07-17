@@ -3550,3 +3550,46 @@
     medium->high per the §5C linter's sizing resolution (2 subsystems run-task+self-sync) — and
     auto-pull + re-exec on every entry is genuinely high-risk (mutates the working tree, re-execs the
     binary), so high is the more accurate rating, not a decompose."
+
+# Dispatch dedup — an OPEN PR means the task is IN-FLIGHT. Live incident #143/#145: rmd review posted
+# success on #143, the drain started seconds later (merge is async -> not-merged), nextRunnable has no
+# in-flight concept, and a fresh worker rebuilt W2-T1 as #145, orphaning the reviewed-green #143.
+- id: W1-T80
+  title: "Dispatch dedup — a task with an OPEN PR is IN-FLIGHT, never runnable (the #143/#145 duplicate-build race)"
+  repo: remudero
+  depends_on: [W1-T69]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (2026-07-16): rmd review posted success on #143, and the drain started seconds
+    later — merging is ASYNC, so deriveStatus correctly read not-merged, nextRunnable has no concept of
+    in-flight, and a fresh worker rebuilt W2-T1 end-to-end as #145 (merged), orphaning the reviewed-green
+    #143. The review-to-merge gap race. The same missing guard is why blocked-open PRs could be
+    re-dispatched as fresh identical workers (the #111/#113 ping-pong): an OPEN PR means the task is
+    IN-FLIGHT — its next action belongs to the merge queue, the fix rung (W1-T76), or a human — never a
+    duplicate fresh build."
+  design: |
+    nextRunnable (locate it — drain-side; verify by grep, distrust this prompt) additionally consults the
+    task's derived PR state: a task whose most recent PR is OPEN is skipped with a legible line
+    (dispatch.skipped reason=open-pr #N) on console + ledger. CLOSED (unmerged) PRs do NOT block — an
+    abandoned/superseded attempt leaves the task runnable (intentional re-runs stay possible). Reuse the
+    deriveStatus projection (corrections-supreme + all guards intact) rather than a second GitHub read
+    path. Drain-v1 semantics otherwise unchanged: skip means CONTINUE to the next runnable task, not halt
+    — an in-flight PR must not stop the drain the way a block does.
+  acceptance:
+    - claim: "the canonical race fixture: a task whose latest PR is OPEN (reviewed-green or blocked alike) is excluded from nextRunnable with a legible skip"
+      proof: "unit test over injected deps reproducing the #143 state -> task skipped, dispatch.skipped ledger line with the PR number, drain proceeds to the next runnable task"
+    - claim: "a CLOSED-unmerged PR leaves the task runnable (re-runs stay possible)"
+      proof: "unit test: closed-PR fixture -> task included in nextRunnable"
+    - claim: "merged and correction-credited tasks are excluded exactly as today"
+      proof: "existing deriveStatus/nextRunnable tests pass unchanged; a correction-credited fixture stays excluded"
+  risk: high
+  origin: architect
+  plan_refs: ["§4B", "§2"]
+  files: [src/lib/drain.ts, src/lib/plan.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from the 2026-07-16 duplicate-build incident (#143 orphaned by #145, $3.32 duplicate spend).
+    Complements W1-T77's MERGEABLE disposition: the sweep handles the open PR's next action; this guard
+    stops the drain from creating a competitor for it."
