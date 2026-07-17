@@ -78,7 +78,14 @@ import {
 } from "./lib/review.js";
 import { buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
-import { ghGateway, projectPlan, type GitHub, type StatusProjection } from "./lib/status.js";
+import { ghGateway, projectPlan, readLedgerLines, type GitHub, type StatusProjection } from "./lib/status.js";
+import {
+  DEFAULT_SWEEP_POLICY,
+  renderSweepSummary,
+  runSweep,
+  type OpenPrView,
+  type SweepDeps,
+} from "./lib/sweep.js";
 import { applyCorrection } from "./lib/correct.js";
 import {
   DEFAULT_PRUNE_GRACE_MS,
@@ -2634,6 +2641,10 @@ async function daemonCommand(rest: string[]): Promise<number> {
         checkStop: () => stopDetail(config.root),
         checkPause: () => pauseDetail(config.root),
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        // LEVEL-TRIGGERED PR-PIPELINE RECONCILER (W1-T77): the SAME runSweep the
+        // `rmd sweep` CLI invokes, run once per poll iteration so no open PR
+        // strands open-and-orphaned (#111/#113/#123). Best-effort by contract.
+        sweep: buildSweepHook(target.owner, target.repo, config, ledgerPath, runId, plan, log),
         log,
       },
       opts,
@@ -2694,6 +2705,377 @@ async function daemonPlistCommand(rest: string[]): Promise<number> {
       `launchctl load ${plistPath}`,
   );
   return 0;
+}
+
+// ── rmd sweep — the level-triggered PR-pipeline reconciler (W1-T77, P22 core) ──
+//
+// The deterministic core (predicate + orchestration + idempotence) lives in
+// lib/sweep.ts and is graded by test/sweep.test.ts over INJECTED deps. This is
+// its real wiring: it BUILDS the observed open-PR state from `gh`/the ledger and
+// supplies the four gated effects (arm / dispatch-fix / close / escalate). The
+// SAME `runSweep` entry point is invoked by `rmd daemon`'s poll loop (see
+// buildSweepHook, wired into DaemonDeps.sweep) — acceptance 4's shared impl.
+
+/** One rollup check entry as `gh pr list --json statusCheckRollup` returns it. */
+interface RollupCheck {
+  __typename?: string;
+  name?: string;
+  context?: string;
+  status?: string;
+  conclusion?: string;
+  state?: string;
+}
+
+interface RawOpenPr {
+  number: number;
+  url: string;
+  headRefName: string;
+  headRefOid: string;
+  updatedAt: string;
+  body: string;
+  autoMergeRequest: unknown;
+  statusCheckRollup?: RollupCheck[];
+}
+
+const REVIEW_CTX = "remudero-review";
+
+/** Map the `remudero-review` rollup entry onto the sweep's reviewState. */
+function reviewStateFromRollup(rollup: RollupCheck[] | undefined): OpenPrView["reviewState"] {
+  const r = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
+  if (!r) return "none";
+  const s = (r.state ?? r.conclusion ?? r.status ?? "").toUpperCase();
+  if (s === "SUCCESS") return "success";
+  if (s === "FAILURE" || s === "ERROR") return "failure";
+  return "pending";
+}
+
+/** Aggregate every required check into the sweep's checksState. */
+function checksStateFromRollup(rollup: RollupCheck[] | undefined): OpenPrView["checksState"] {
+  const all = rollup ?? [];
+  if (all.length === 0) return "none";
+  let anyPending = false;
+  for (const c of all) {
+    const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
+    if (s === "FAILURE" || s === "ERROR") return "red";
+    if (s !== "SUCCESS") anyPending = true;
+  }
+  return anyPending ? "pending" : "green";
+}
+
+/** The `Remudero-Task: <id>` trailer in a PR body, if present (anchored line). */
+function taskIdFromBody(body: string): string | undefined {
+  const m = body.match(/^Remudero-Task:\s*(\S+)\s*$/m);
+  return m ? m[1] : undefined;
+}
+
+/**
+ * Recover the most recent failing review's unmet criteria for a task from the
+ * ledger (`review.posted` / `fix.review` lines carry `unmet_criteria` + `reasons`).
+ * No PR-head checkout needed just to ROUTE the disposition — the fix rung itself
+ * re-derives the authoritative verdict when it runs. Proof text is unavailable
+ * from the ledger, so it degrades to "" (the fix prompt leans on claim + reason).
+ */
+function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string): CriterionVerdict[] {
+  let claims: string[] = [];
+  let reasons: string[] = [];
+  for (const line of lines) {
+    if (line.step !== "review.posted" || line.task_id !== taskId) continue;
+    if (line.state === "success") { claims = []; reasons = []; continue; }
+    if (Array.isArray(line.unmet_criteria)) claims = line.unmet_criteria.map(String);
+    if (Array.isArray(line.reasons)) reasons = line.reasons.map(String);
+  }
+  return claims.map((claim, i) => ({
+    claim,
+    proof: "",
+    met: false,
+    reason: reasons[i] ?? "",
+    proof_exec: "not_executable" as const,
+  }));
+}
+
+/** Fix strikes already attempted for a PR — fix.dispatch (task) + prior swept strikes (pr). */
+function priorStrikesFor(lines: Array<Record<string, unknown>>, taskId: string | undefined, prNumber: number): number {
+  let n = 0;
+  for (const line of lines) {
+    if (line.step === "fix.dispatch" && taskId && line.task_id === taskId) n++;
+    else if (
+      line.step === "sweep.disposed" &&
+      line.acted === true &&
+      line.disposition === "blocked-fixable" &&
+      line.pr_number === prNumber
+    ) {
+      n++;
+    }
+  }
+  return n;
+}
+
+/**
+ * Build the observed open-PR state the sweep reconciles — the real gateway
+ * (`gh pr list --state open`), cross-referenced with the ledger. No `gh`/network
+ * lives in lib/sweep.ts; this is the injected edge.
+ */
+function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): OpenPrView[] {
+  const raw = ghJson([
+    "pr", "list", "--repo", `${owner}/${repo}`, "--state", "open", "--limit", "100",
+    "--json", "number,url,headRefName,headRefOid,updatedAt,body,autoMergeRequest,statusCheckRollup",
+  ]) as RawOpenPr[];
+  const ledger = readLedgerLines(ledgerPath);
+
+  // supersededBy: the HIGHEST-numbered other open PR crediting the same task.
+  const byTask = new Map<string, number[]>();
+  for (const pr of raw) {
+    const t = taskIdFromBody(pr.body ?? "");
+    if (!t) continue;
+    (byTask.get(t) ?? byTask.set(t, []).get(t)!).push(pr.number);
+  }
+
+  return raw.map((pr) => {
+    const taskId = taskIdFromBody(pr.body ?? "");
+    const peers = taskId ? (byTask.get(taskId) ?? []) : [];
+    const newest = peers.length ? Math.max(...peers) : pr.number;
+    const supersededBy = newest > pr.number ? newest : undefined;
+    const reviewState = reviewStateFromRollup(pr.statusCheckRollup);
+    return {
+      prNumber: pr.number,
+      prUrl: pr.url,
+      taskId,
+      reviewState,
+      checksState: checksStateFromRollup(pr.statusCheckRollup),
+      unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
+      priorStrikes: priorStrikesFor(ledger, taskId, pr.number),
+      supersededBy,
+      lastActivityAt: pr.updatedAt,
+      headSha: pr.headRefOid,
+      autoMergeArmed: pr.autoMergeRequest != null,
+      reviewSummary: undefined,
+    };
+  });
+}
+
+/**
+ * Wire the four gated effects to their real implementations. dispatchFix
+ * reconstructs a W1-T76 `runFixRung` invocation for a PR discovered COLD (no live
+ * run/session): it checks the PR head branch out into a scratch worktree, seeds a
+ * failing verdict from the ledger's unmet criteria, and degrades strike 1 to a
+ * FRESH spawn (a spawn adapter drops an empty resumeSessionId). All effects are
+ * fail-soft — a reconstruction hiccup escalates rather than crashing the sweep,
+ * so one bad PR never strands the reconciler over the rest.
+ */
+function buildSweepEffects(
+  owner: string,
+  repo: string,
+  config: Config,
+  ledgerPath: string,
+  runId: string,
+  plan: Plan,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate"> {
+  const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
+  const issues = ghIssueGateway(owner, repo);
+  const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
+
+  return {
+    arm: (pr) => armAutoMerge(pr.prUrl),
+
+    close: (pr, reason) => {
+      try {
+        execFileSync("gh", ["pr", "close", pr.prUrl, "--comment", `Closed by rmd sweep: ${reason}`, "--delete-branch"], {
+          stdio: "pipe",
+        });
+      } catch (e) {
+        log("sweep.close.error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
+      }
+    },
+
+    escalate: (pr, reason) => {
+      escalate(
+        {
+          class: "BLOCKED",
+          taskId: pr.taskId ?? "UNKNOWN",
+          runId,
+          summary: `PR ${pr.prUrl} is blocked-ambiguous — ${reason}`,
+          detail:
+            `The level-triggered sweep (W1-T77) reconciled open PR #${pr.prNumber} to BLOCKED-AMBIGUOUS: ${reason}. ` +
+            `A dedicated clarification-question rung is W1-T78; the interim route is this plain escalation.`,
+          options: [
+            { label: "hand-fix", detail: "resolve the remaining criteria on the same branch, then re-run `rmd review`." },
+            { label: "close", detail: "close the PR and re-scope the task if the criteria themselves are wrong." },
+          ],
+          recommendation: "hand-fix",
+        },
+        { issues, ledgerPath, runId },
+      );
+    },
+
+    dispatchFix: async (pr, unmet) => {
+      const task = plan.tasks.find((t) => t.id === pr.taskId);
+      if (!task) {
+        log("sweep.fix.no_task", { pr_number: pr.prNumber, task_id: pr.taskId });
+        return;
+      }
+      let worktreePath = "";
+      try {
+        // Creditability is load-bearing (status.ts ownsBranch): a fix must amend
+        // THIS task's own run-branch (run-<id>-<epochMs>), never a foreign/fix-*
+        // head — a fix on an uncreditable head loops forever + strands dependents.
+        const headRef = ghJson(["pr", "view", pr.prUrl, "--json", "headRefName"]) as { headRefName?: string };
+        const realBranch = headRef.headRefName;
+        if (!realBranch || !new RegExp(`^run-${task.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d+$`).test(realBranch)) {
+          log("sweep.fix.uncreditable_head", { pr_number: pr.prNumber, head: realBranch });
+          return;
+        }
+        worktreePath = join(worktreesDir(config), `sweep-${task.id}-${Date.now()}`);
+        execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" });
+        execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${realBranch}`], { stdio: "pipe" });
+        execFileSync("git", ["-C", worktreePath, "checkout", "-B", realBranch, `origin/${realBranch}`], { stdio: "pipe" });
+
+        const mountsTable = loadMounts(mountsPath(repoRoot));
+        const fixMount: Mount = resolveMount(mountsTable, "fix", task.risk);
+        const reviewerMount: Mount = resolveMount(mountsTable, "reviewer", task.risk);
+        const settingsFile = renderWorkerSettings({
+          templatePath: join(repoRoot, "settings", "worker.json"),
+          hooksDir: join(repoRoot, "hooks"),
+          outPath: join(config.root, "tmp", `sweep-fix-settings-${task.id}-${Date.now()}.json`),
+        });
+        const budgetUsd = task.budget_usd ?? DEFAULT_BUDGET_USD;
+
+        // A failing verdict seeded from the ledger's unmet criteria. The fix rung
+        // re-derives the AUTHORITATIVE verdict via runReview after each strike.
+        const initialReview: ReviewVerdict & { headSha: string; reviewerOutcome: string } = {
+          state: "failure",
+          criteria: unmet,
+          testTheater: false,
+          summary: pr.reviewSummary ?? `sweep-reconstructed failing review (${unmet.length} unmet)`,
+          floorDegraded: false,
+          headSha: pr.headSha,
+          reviewerOutcome: "sweep-reconstructed",
+        };
+
+        await runFixRung({
+          taskId: task.id,
+          runId,
+          task,
+          prUrl: pr.prUrl,
+          branch: realBranch,
+          worktreePath,
+          initialSessionId: "", // cold PR: no session — strike 1 degrades to fresh (adapter below)
+          mount: fixMount,
+          settingsFile,
+          config,
+          budgetUsd,
+          strikeCap: fixStrikeCap(config),
+          initialReview,
+          reviewBase: { owner, repo, headCheckoutDir: worktreePath, reviewerMount },
+          deps: {
+            // Fresh-spawn adapter: an empty resumeSessionId (cold PR) becomes a
+            // fresh spawn rather than an attempt to resume a session that doesn't exist.
+            spawn: (args) => spawnWorker({ ...args, resumeSessionId: args.resumeSessionId || undefined }),
+            waitForCiGreen,
+            runReview,
+            push: (wt) => {
+              try {
+                execFileSync("git", ["-C", wt, "push", "origin", "HEAD"], { stdio: "ignore" });
+              } catch {
+                /* best-effort — the worker may already have pushed */
+              }
+            },
+            issues,
+            ledgerPath,
+            log,
+            say,
+            account: (r) => r, // sweep meters nothing extra; the ledger carries per-spawn cost
+          },
+        });
+      } catch (e) {
+        log("sweep.fix.error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
+      } finally {
+        if (worktreePath) {
+          try {
+            worktreeRemove(repoDir, worktreePath);
+          } catch {
+            /* best-effort cleanup */
+          }
+        }
+      }
+    },
+  };
+}
+
+/**
+ * `rmd sweep [--repo <name>] [--dry-run]` — run ONE level-triggered reconciliation
+ * pass over every open PR (W1-T77, ratifies P22 core). FAIL LOUD on junk args
+ * BEFORE any `gh`/spawn (Standing rule). --dry-run previews dispositions and takes
+ * NO effects. Non-zero exit only on a hard error.
+ */
+async function sweepCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("sweep", rest, ["--repo"], ["--dry-run"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const dryRun = rest.includes("--dry-run");
+  const config = loadConfig();
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const self = resolveOwnerRepo();
+  const repo = flagValue(rest, "--repo") ?? self.repo;
+  const owner = self.owner;
+  const runId = `SWEEP-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "SWEEP", step, ...extra });
+
+  // The plan backs the fix rung's task lookup (title/acceptance/risk). Best-effort:
+  // a repo without a readable plan can still arm/close/escalate; only fix needs it.
+  const planPath =
+    repo === self.repo ? join(repoRoot, "plan", "tasks.yaml") : join(config.root, "repos", repo, "plan", "tasks.yaml");
+  let plan: Plan = { tasks: [], byId: new Map() };
+  try {
+    plan = loadPlan(planPath);
+  } catch (e) {
+    log("sweep.plan.unavailable", { plan_path: planPath, error: String((e as Error)?.message ?? e) });
+  }
+
+  let openPrs: OpenPrView[];
+  try {
+    openPrs = buildOpenPrViews(owner, repo, ledgerPath);
+  } catch (e) {
+    console.error(`### rmd sweep — could not list open PRs for ${owner}/${repo}: ${String((e as Error)?.message ?? e)}`);
+    return 1;
+  }
+
+  const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log);
+  const summary = await runSweep(
+    openPrs,
+    { ...effects, ledgerPath, runId, log, dryRun },
+    DEFAULT_SWEEP_POLICY,
+  );
+  console.log(`### rmd sweep${dryRun ? " --dry-run" : ""} — ${owner}/${repo}\n` + renderSweepSummary(summary));
+  return 0;
+}
+
+/**
+ * The daemon's per-iteration sweep hook (acceptance 4: the SAME runSweep the CLI
+ * uses). Best-effort by the DaemonDeps.sweep contract — swallows its own errors so
+ * a sweep hiccup never halts the scheduler loop.
+ */
+function buildSweepHook(
+  owner: string,
+  repo: string,
+  config: Config,
+  ledgerPath: string,
+  runId: string,
+  plan: Plan,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): () => Promise<void> {
+  return async () => {
+    try {
+      const openPrs = buildOpenPrViews(owner, repo, ledgerPath);
+      const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log);
+      await runSweep(openPrs, { ...effects, ledgerPath, runId, log }, DEFAULT_SWEEP_POLICY);
+    } catch (e) {
+      log("sweep.error", { error: String((e as Error)?.message ?? e) });
+    }
+  };
 }
 
 /**
@@ -3092,7 +3474,7 @@ async function correctCommand(rest: string[]): Promise<number> {
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 const USAGE =
-  "usage:\n  rmd run-task <task-id> [--allow-stale]   # dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd dep-review <pr-number> [--repo <name>]   # deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse\n  rmd lint-plan [--plan <path>] [--base <git-ref>]   # §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60)\n  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.\n  rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)\n  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.\n  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.\n  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume\n  rmd correct <task-id> --pr <n> [--reason <text>]   # sanctioned operator-correction writer (P9/W1-T75): appends a correction.provenance ledger line naming the task's TRUE merged PR, SUPREME over every deriveStatus rung; prints derived status before/after\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard\n\nAn UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
+  "usage:\n  rmd run-task <task-id> [--allow-stale]   # dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd dep-review <pr-number> [--repo <name>]   # deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse\n  rmd lint-plan [--plan <path>] [--base <git-ref>]   # §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60)\n  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.\n  rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)\n  rmd sweep [--repo <name>] [--dry-run]   # level-triggered PR-pipeline reconciler (W1-T77, P22): re-derive EVERY open PR's disposition from observed state and take the ONE gated action — mergeable->arm auto-merge; blocked-fixable->W1-T76 fix rung; stale/superseded->close-with-reason; blocked-ambiguous->escalate. Idempotent (a second sweep over unchanged state acts on nothing). The daemon runs this every poll; --dry-run previews dispositions and takes nothing.\n  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.\n  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.\n  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume\n  rmd correct <task-id> --pr <n> [--reason <text>]   # sanctioned operator-correction writer (P9/W1-T75): appends a correction.provenance ledger line naming the task's TRUE merged PR, SUPREME over every deriveStatus rung; prints derived status before/after\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard\n\nAn UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(): Promise<void> {
@@ -3132,6 +3514,9 @@ async function main(): Promise<void> {
   }
   if (cmd === "daemon-plist") {
     process.exit(await daemonPlistCommand(rest));
+  }
+  if (cmd === "sweep") {
+    process.exit(await sweepCommand(rest));
   }
   if (cmd === "stop") {
     process.exit(await stopCommand(rest));
