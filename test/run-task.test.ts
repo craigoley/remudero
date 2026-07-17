@@ -629,7 +629,31 @@ test("renderFixPrompt: the three mode fixtures each render a mode-named prompt c
   assert.doesNotMatch(ciLog, /crit-reviewer|crit-coverage/, "ci-log must not carry any review-mode criteria");
 });
 
-test("FIX_MODE_RULES: adding a table row for a new evidence shape derives a new mode with ZERO change to deriveFixMode", () => {
+// Dedicated, narrowly-titled proof for the acceptance claim "body-coverage mode
+// instructs body-first, code-only-if-false" (plan/tasks.yaml W1-T94) — the
+// review floor's `unit test: <name>` house dialect name-filters the suite by
+// this EXACT title text, so the title itself must contain the proof's phrase.
+test("renderFixPrompt: the rendered body-coverage prompt contains the body-first instruction verbatim-class text", () => {
+  const prompt = renderFixPrompt({
+    task: { id: "W1-TX", title: "T" },
+    round: 1,
+    branch: "run-W1-TX-1",
+    evidence: {
+      review: {
+        unmetCriteria: [criterion({ claim: "crit-coverage", met: false, reason: "proof unmet (matched 4/12 proof keywords)" })],
+        summary: "s",
+      },
+    },
+  });
+  assert.match(prompt, /MODE: body-coverage/);
+  assert.match(prompt, /PR BODY's Acceptance block/i, "the body-first instruction is present, verbatim-class");
+  assert.match(prompt, /code ONLY if the body's claim would actually\s+be FALSE/i, "the code-only-if-false instruction is present, verbatim-class");
+});
+
+// Dedicated, narrowly-titled proof for the acceptance claim "modes are data"
+// (plan/tasks.yaml W1-T94) — same name-filter reasoning as above: the title
+// must contain the proof's exact phrase.
+test("FIX_MODE_RULES: adding a table row for a new evidence shape derives the new mode with zero dispatch-code changes", () => {
   // Policy-as-data (rule 2), mirroring sweep.ts's DISPOSITION_RULES/policy param:
   // a caller-supplied rules table (never a code branch) picks the mode.
   const withDesignConformanceRow = [
