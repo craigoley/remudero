@@ -137,6 +137,25 @@ test("source (c) ownership-assert: a trailer hit whose head branch is a FOREIGN/
   assert.equal(proj.merged, false);
 });
 
+// ── W1-T76 (absorbs P21): the blocked_review FIX RUNG amends the SAME
+// run-<taskId>-<epochMs> branch — never a fix/* branch. This is the SAME
+// ownership-assert as the foreign-branch case above, exercised with the
+// EXACT head shape the fix rung is forbidden from ever producing.
+test("source (c) ownership-assert: a fix/* head is REJECTED — the fix rung must amend the run branch, never a fix/* branch (W1-T76)", () => {
+  const github = fakeGitHub({
+    byTrailer: { "W1-TX": { number: 134, url: "u/134", state: "MERGED" } },
+    // A real, merged PR carrying the task's own trailer — but opened from a
+    // hand-authored fix/* branch rather than this task's own run branch (the
+    // #134 shape LEARNINGS/MASTER-PLAN name as the live cascade this assert
+    // guards against: a fix/* credit would strand every dependent behind it).
+    headRefByUrl: { "u/134": "fix/w1tx-style" },
+    bodyByUrl: { "u/134": "Remudero-Task: W1-TX\n" },
+  });
+  const proj = deriveStatus(task({ id: "W1-TX" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.source, "none", "a fix/* head must never be creditable, even with an anchored trailer");
+  assert.equal(proj.merged, false);
+});
+
 test("source (c) ownership-assert: an unresolved head ref fails CLOSED, never credited", () => {
   const github = fakeGitHub({
     byTrailer: { "W1-TX": { number: 12, url: "u/12", state: "MERGED" } },

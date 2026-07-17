@@ -4,14 +4,17 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   DEFAULT_BUDGET_USD,
   GitFetchError,
   checkPrOwnership,
   commitsAhead,
   isTransientResult,
+  renderFixPrompt,
   resolveReviewTarget,
   resolveDaemonTarget,
+  runFixRung,
   syncPlanFromOrigin,
   syncPlanOrRefuse,
   unknownArgError,
@@ -20,7 +23,13 @@ import {
   workerErrorVerdict,
   type PrHeadGateway,
 } from "../src/run-task.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import type { Config } from "../src/lib/config.js";
+import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
+import type { Mount } from "../src/lib/mounts.js";
+import type { IssueGateway } from "../src/lib/escalate.js";
+import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
 /** An injected {@link PrHeadGateway} fixture — no `gh` exec, a fixed answer per PR url. */
 function fakeGateway(headRefName: string | undefined): PrHeadGateway {
@@ -410,5 +419,312 @@ test("syncPlanOrRefuse: a hard fetch failure ledgers a NAMED git_fetch_failed er
   assert.ok(
     logged.some((l) => l.step === "git.stale_dispatch" && l.extra?.stale_dispatch === true),
     "stale_dispatch=true is ledgered when --allow-stale carries a run through a fetch failure",
+  );
+});
+
+// ── W1-T76 (absorbs P21): the blocked_review FIX RUNG ───────────────────────
+// GROUND TRUTH: a mounted reviewer posts FAILURE with specific unmet_criteria
+// + reasons; the manual path used to leave the PR OPEN and drop them. A fresh
+// re-run patched whichever criterion the LAST block named and dropped the
+// other, ping-ponging forever across #111/#113. This rung dispatches ONE
+// bounded fix worker per strike, ALWAYS the FULL unmet set at once, amending
+// the SAME branch/PR — never a fresh PR, never a `fix/*` branch.
+
+/** Build a minimal `CriterionVerdict`; only the fields the rung reads matter. */
+function criterion(over: Partial<CriterionVerdict> & Pick<CriterionVerdict, "claim" | "met">): CriterionVerdict {
+  return { proof: "proof", reason: "", proof_exec: "not_executable", ...over };
+}
+
+/** Build a `ReviewVerdict` (+ the runReview augmentation) from a criteria list. */
+function fakeReview(
+  state: "success" | "failure",
+  criteria: CriterionVerdict[],
+): ReviewVerdict & { headSha: string; reviewerOutcome: string } {
+  return {
+    state,
+    criteria,
+    testTheater: false,
+    summary: state === "success" ? "all criteria met" : "unmet criteria",
+    floorDegraded: false,
+    headSha: "deadbeef",
+    reviewerOutcome: "success",
+  };
+}
+
+const FIX_RUNG_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
+
+/** Shared, injectable base options for `runFixRung` — each test overrides `initialReview`/`strikeCap`/`deps`. */
+function fixRungBaseOpts() {
+  return {
+    taskId: "W1-TX",
+    runId: "W1-TX-1730000000000",
+    task: { id: "W1-TX", title: "Some task" },
+    prUrl: "https://github.com/acme/remudero/pull/1",
+    branch: "run-W1-TX-1730000000000",
+    worktreePath: "/tmp/rmd-fixrung-wt",
+    initialSessionId: "session-0",
+    mount: FIX_RUNG_MOUNT,
+    settingsFile: "/tmp/rmd-fixrung-settings.json",
+    config: {} as Config,
+    budgetUsd: 10,
+    reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: "/tmp/rmd-fixrung-wt", reviewerMount: FIX_RUNG_MOUNT },
+  };
+}
+
+function tmpLedgerPath(): string {
+  return join(mkdtempSync(join(tmpdir(), "rmd-fixrung-")), "ledger.ndjson");
+}
+
+function fakeIssues(calls: Array<{ title: string; body: string; labels: string[] }>): IssueGateway {
+  return {
+    create(title, body, labels) {
+      calls.push({ title, body, labels });
+      return "https://github.com/acme/remudero/issues/9";
+    },
+  };
+}
+
+test("renderFixPrompt: renders the FULL unmet set at once — both criteria + both reviewer reasons, never one at a time", () => {
+  const prompt = renderFixPrompt({
+    task: { id: "W1-TX", title: "Some task" },
+    unmetCriteria: [
+      criterion({ claim: "criterion A merges cleanly", proof: "proof A", met: false, reason: "reason-A-missing" }),
+      criterion({ claim: "criterion B has a test", proof: "proof B", met: false, reason: "reason-B-missing" }),
+    ],
+    summary: "remudero-review: FAIL — 2 criteria unmet",
+    round: 1,
+    branch: "run-W1-TX-1730000000000",
+  });
+  assert.match(prompt, /criterion A merges cleanly/);
+  assert.match(prompt, /reason-A-missing/);
+  assert.match(prompt, /criterion B has a test/);
+  assert.match(prompt, /reason-B-missing/);
+  assert.match(prompt, /run-W1-TX-1730000000000/);
+  assert.match(prompt, /do NOT open a new PR/i);
+  assert.match(prompt, /fix\/\*/, "must explicitly warn off a fix/* branch — only a run-<taskId>-<epochMs> head is creditable");
+});
+
+test("renderFixPrompt: a testTheater/noCriteria failure (EMPTY unmetCriteria) still carries the review's summary — never an empty, unexplained prompt", () => {
+  // judgeReview can fail the overall state on testTheater/noCriteria alone,
+  // even when every NAMED criterion is met — unmetCriteria is then empty, but
+  // the fix worker must still learn WHY the gate is red.
+  const prompt = renderFixPrompt({
+    task: { id: "W1-TX", title: "Some task" },
+    unmetCriteria: [],
+    summary: "remudero-review: FAIL — test theater detected (assertion-free tests)",
+    round: 1,
+    branch: "run-W1-TX-1730000000000",
+  });
+  assert.match(prompt, /test theater detected/);
+});
+
+test("runFixRung: a seeded blocked_review with TWO unmet criteria dispatches ONE fix worker receiving BOTH + the reviewer reasons (P21's golden, verbatim)", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const failing = fakeReview("failure", [
+    criterion({ claim: "criterion A merges cleanly", met: false, reason: "reason-A-missing" }),
+    criterion({ claim: "criterion B has a test", met: false, reason: "reason-B-missing" }),
+  ]);
+  const passing = fakeReview("success", [
+    criterion({ claim: "criterion A merges cleanly", met: true }),
+    criterion({ claim: "criterion B has a test", met: true }),
+  ]);
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: failing,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: "fix-session-1" });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => passing,
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(spawnCalls.length, 1, "exactly one fix worker spawn");
+  assert.match(spawnCalls[0].prompt, /criterion A merges cleanly/);
+  assert.match(spawnCalls[0].prompt, /reason-A-missing/);
+  assert.match(spawnCalls[0].prompt, /criterion B has a test/);
+  assert.match(spawnCalls[0].prompt, /reason-B-missing/);
+  assert.equal(outcome.outcome, "fixed");
+  assert.equal(outcome.strikes, 1);
+  assert.equal(issueCalls.length, 0, "no escalation once the fix resolves the review");
+});
+
+test("runFixRung: the fix worker amends the SAME run branch — its spawn's cwd is the blocked run's own worktree, never a fresh checkout", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
+  const passing = fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })]);
+  const pushCalls: Array<[string, string]> = [];
+  const base = fixRungBaseOpts();
+
+  await runFixRung({
+    ...base,
+    strikeCap: 2,
+    initialReview: failing,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: "fix-session-1" });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => passing,
+      push: (wt, br) => pushCalls.push([wt, br]),
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(spawnCalls[0].cwd, base.worktreePath, "the fix worker's cwd is THIS run's own worktree");
+  assert.deepEqual(pushCalls[0], [base.worktreePath, base.branch], "the fix rung pushes the SAME branch — never opens a fresh PR");
+});
+
+test("runFixRung: strike 1 RESUMES the failing implement session; strike 2 is a FRESH worker on the SAME branch — never resumed twice", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })]);
+  const passing = fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })]);
+  let reviewCalls = 0;
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: failing,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `fix-session-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => {
+        reviewCalls++;
+        return reviewCalls === 1 ? failing : passing; // still broken after strike 1, fixed after strike 2
+      },
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(spawnCalls.length, 2);
+  assert.equal(spawnCalls[0].resumeSessionId, "session-0", "strike 1 resumes the ORIGINAL failing implement session");
+  assert.equal(spawnCalls[1].resumeSessionId, undefined, "strike 2 is a FRESH worker — never resumed a second time");
+  assert.equal(outcome.outcome, "fixed");
+  assert.equal(outcome.strikes, 2);
+});
+
+test("runFixRung: a second block after N strikes escalates rather than looping (P21's golden, verbatim) — no third spawn", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const stillFailing = fakeReview("failure", [
+    criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" }),
+  ]);
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const ledgerPath = tmpLedgerPath();
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: stillFailing,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `fix-session-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => stillFailing, // never resolves
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath,
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(spawnCalls.length, 2, "exactly strikeCap spawns — NEVER a third");
+  assert.equal(outcome.outcome, "escalated");
+  assert.equal(outcome.strikes, 2);
+  assert.equal(issueCalls.length, 1, "escalate() is invoked exactly once on exhaustion");
+  assert.ok(issueCalls[0].labels.includes("escalation-blocked"), "the BLOCKED escalation class label is applied");
+  assert.match(issueCalls[0].body, /criterion A merges cleanly/);
+  assert.match(issueCalls[0].body, /still broken/);
+  const ledgerLines = readFileSync(ledgerPath, "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
+  assert.ok(
+    ledgerLines.some((l) => l.step === "escalation.issue_opened"),
+    "the ledger records exhaustion via the SAME escalation.issue_opened line escalate.ts already emits",
+  );
+});
+
+test("runFixRung: a CI regression after a fix attempt does not stall the rung — it is treated as still-failing and consumes the next strike", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
+  const passing = fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })]);
+  let ciCalls = 0;
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: failing,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `fix-session-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => {
+        ciCalls++;
+        return ciCalls === 1 ? "red" : "green"; // strike 1's fix regresses CI; strike 2 is clean
+      },
+      runReview: async () => passing,
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(spawnCalls.length, 2, "the non-green CI strike still counts — the rung tries again, bounded by strikeCap");
+  assert.equal(outcome.outcome, "fixed");
+});
+
+// ── Wiring: ONE call site, both entry points (drain + manual `rmd run-task`
+// both call the SAME `runTask`, so there is exactly one place to gate) ──────
+
+test("runFixRung is called from exactly ONE site in runTask's blocked_review branch — one rung, one implementation, no duplicated fix-dispatch logic", () => {
+  const dispatchSites = runTaskSrc.match(/await runFixRung\(/g) ?? [];
+  assert.equal(dispatchSites.length, 1, "runFixRung must be dispatched from exactly one call site");
+  // runTask itself is defined exactly once — the drain path (runOne) and the
+  // manual CLI path both call this SAME function, so the one dispatch site
+  // above already covers both entry points; grep confirms no second runTask.
+  const runTaskDefs = runTaskSrc.match(/^async function runTask\(/gm) ?? [];
+  assert.equal(runTaskDefs.length, 1, "there must be exactly one runTask implementation for both callers to share");
+});
+
+test("the terminal blocked_review return (no fix rung) is gone — a failing review always enters the fix rung before any terminal verdict", () => {
+  // Before W1-T76: `if (review.state !== "success") { ... return {..., verdict: "blocked_review"}; }`
+  // right after the review call, with NOTHING in between. Guard against that
+  // shape reappearing (a regression that silences the rung).
+  assert.doesNotMatch(
+    runTaskSrc,
+    /if \(review\.state !== "success"\) \{\s*log\("verdict"/,
+    "a failing review must route through runFixRung, never straight back to a blocked_review verdict",
   );
 });

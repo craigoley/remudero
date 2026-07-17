@@ -15,6 +15,7 @@ import {
   type MergedSet,
 } from "../src/lib/drain.js";
 import { pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
+import { deriveStatus, type GitHub } from "../src/lib/status.js";
 
 // A small linear-ish plan: A → B → C (chain) + D (independent), all auto.
 const YAML = `
@@ -77,6 +78,35 @@ test("nextRunnable: first in file order whose deps are merged; skips verify:huma
   assert.equal(nextRunnable(plan, mergedSetOf("A"))?.id, "B");
   // A,B,C,D merged: only H left, and it is verify:human ⇒ nothing runnable.
   assert.equal(nextRunnable(plan, mergedSetOf("A", "B", "C", "D")), undefined);
+});
+
+// ── W1-T76 (absorbs P21): creditability is LOAD-BEARING for the whole DAG,
+// not just anti-orphan. The fix rung amends the SAME run-<taskId>-<epochMs>
+// branch this run opened; once THAT branch merges, deriveStatus credits the
+// task exactly as an unfixed merge would, and nextRunnable naturally unblocks
+// its dependent — composing status.ts's existing ownership-assert with
+// drain.ts's existing DAG walk, no new production code required.
+test("W1-T76: once the fix rung's SAME-branch amendment merges, deriveStatus credits the fixed task AND nextRunnable unblocks its dependent", () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const runId = "A-1730000000000"; // this run's OWN branch — never a fix/* head
+  const github: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: (taskId) => (taskId === "A" ? { number: 50, url: "u/50", state: "MERGED" } : null),
+    headRefName: (prUrl) => (prUrl === "u/50" ? `run-${runId}` : undefined),
+    prBody: (prUrl) => (prUrl === "u/50" ? "Remudero-Task: A\n" : undefined),
+  };
+  const dir = mkdtempSync(join(tmpdir(), "rmd-drain-fixrung-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  writeFileSync(ledgerPath, "");
+  const isMerged: MergedSet = (taskId) => {
+    const t = plan.tasks.find((x) => x.id === taskId);
+    return t ? deriveStatus(t, { ledgerPath, github }).merged : false;
+  };
+
+  assert.equal(isMerged("A"), true, "the fixed task's SAME-branch merge is credited (source: trailer)");
+  const next = nextRunnable(plan, isMerged);
+  assert.equal(next?.id, "B", "A's dependent (B) is now runnable — the fix rung's merge unblocked it");
+  assert.notEqual(next?.id, "A", "the already-merged/fixed task itself is EXCLUDED from runnable");
 });
 
 test("plannedSequence (--dry-run order): simulates merges forward, honouring deps + --max + --until", () => {
