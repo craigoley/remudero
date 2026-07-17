@@ -26,7 +26,7 @@
 
 import type { RunResult } from "../run-task.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
-import { nextRunnable, type MergedSet } from "./drain.js";
+import { nextRunnable, type MergedSet, type OpenPrCheck } from "./drain.js";
 import { headroomExhausted } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { Plan } from "./plan.js";
@@ -71,6 +71,13 @@ export interface DaemonSummary {
 export interface DaemonDeps {
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: () => MergedSet;
+  /**
+   * The in-flight guard (W1-T80, the #143/#145 duplicate-build race): the OPEN
+   * PR number for a task, re-derived from the SAME projection `refreshMerged`
+   * just built (never a second GitHub read path). Optional — omitted,
+   * dispatch behaves exactly as before this guard existed.
+   */
+  isOpenPr?: OpenPrCheck;
   /** Run ONE task through the existing run-task path (default = runTask). */
   runOne: (taskId: string) => Promise<RunResult>;
   /** Read current /usage; `undefined` ⇒ unavailable (headroom check is skipped). */
@@ -181,7 +188,12 @@ export async function runDaemon(
       if (!snap) log("daemon.headroom.unavailable", { note: "usage unreadable — continuing (best-effort)" });
     }
 
-    const next = nextRunnable(plan, isMerged);
+    const next = nextRunnable(plan, isMerged, {
+      isOpenPr: deps.isOpenPr,
+      // IN-FLIGHT (W1-T80): a legible skip on console + ledger; the daemon
+      // keeps polling rather than treating an open PR as a block.
+      onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
+    });
     if (!next) {
       // UNLIKE drain.ts (where `no_runnable` is a terminal stop): the daemon is
       // PERSISTENT — new work can land later, so it paces itself with the
@@ -228,9 +240,11 @@ export async function runDaemon(
 // The one question crash recovery must answer per orphan is: does GitHub know
 // about work this task already did? A dead local process is NOT authoritative
 // — an open PR may already exist (pushed right before the crash), and
-// blindly re-running the task from `nextRunnable` (which only checks
-// "merged", not "has an open PR") would spawn a SECOND worker on top of it.
-// So state is reconstructed from git (which task/run the orphan belonged to)
+// blindly re-running the task from `nextRunnable` would spawn a SECOND worker
+// on top of it UNLESS the caller wires the `isOpenPr` in-flight guard (W1-T80,
+// the #143/#145 duplicate-build race) — belt-and-suspenders here: crash
+// recovery reasons about the orphan directly rather than depending on that
+// guard alone. So state is reconstructed from git (which task/run the orphan belonged to)
 // + GitHub + the ledger (status.ts's `deriveStatus`, reused wholesale, never
 // reimplemented — same three-source precedence `rmd drain`/`rmd run-task`
 // already trust) — never from the dead process's local state.

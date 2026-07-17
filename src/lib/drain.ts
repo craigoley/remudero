@@ -21,20 +21,49 @@ import { unmetDependencies, type Plan, type Task } from "./plan.js";
 export type MergedSet = (taskId: string) => boolean;
 
 /**
- * The next runnable task in FILE ORDER (ties broken by declaration order, so plan
- * sequencing is preserved): not itself merged, `verify: auto`, not `blocked`, and
- * all `depends_on` merged. Reuses `unmetDependencies` — the DAG logic is never
- * reimplemented here. Returns `undefined` when nothing is runnable.
+ * Resolves the OPEN PR number for a task's most-recently-derived PR — undefined
+ * when that PR is merged, closed, or there is none. Backs the in-flight
+ * dispatch-dedup guard (W1-T80, the #143/#145 duplicate-build race): DERIVED
+ * FROM GITHUB (status.ts's `deriveStatus` projection) in the real runner, never
+ * a second read path.
  */
-export function nextRunnable(plan: Plan, isMerged: MergedSet): Task | undefined {
+export type OpenPrCheck = (taskId: string) => number | undefined;
+
+/** Optional in-flight-skip controls for {@link nextRunnable} (W1-T80). */
+export interface NextRunnableOpts {
+  /** Returns the open PR number for a task whose latest PR is currently OPEN. */
+  isOpenPr?: OpenPrCheck;
+  /** Called once per task excluded because of an open PR — for ledger/console legibility. */
+  onSkip?: (task: Task, prNumber: number) => void;
+}
+
+/**
+ * The next runnable task in FILE ORDER (ties broken by declaration order, so plan
+ * sequencing is preserved): not itself merged, `verify: auto`, not `blocked`, all
+ * `depends_on` merged, and — per `opts.isOpenPr` (W1-T80) — not IN-FLIGHT under an
+ * OPEN PR. An OPEN PR means the task's next action belongs to the merge queue, the
+ * fix rung (W1-T76), or a human — never a duplicate fresh build (the #143/#145
+ * race: a reviewed-green #143 was still un-merged, async, when the drain started
+ * again and rebuilt the same task end-to-end as #145). A CLOSED (unmerged) PR does
+ * NOT block — an abandoned/superseded attempt leaves the task runnable. Reuses
+ * `unmetDependencies` — the DAG logic is never reimplemented here. Returns
+ * `undefined` when nothing is runnable.
+ */
+export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts = {}): Task | undefined {
   const merged: import("./plan.js").MergedResolver = (t) => isMerged(t.id);
-  return plan.tasks.find(
-    (t) =>
-      !isMerged(t.id) &&
-      t.verify === "auto" &&
-      t.status !== "blocked" &&
-      unmetDependencies(plan, t, merged).length === 0,
-  );
+  for (const t of plan.tasks) {
+    if (isMerged(t.id)) continue;
+    if (t.verify !== "auto") continue;
+    if (t.status === "blocked") continue;
+    if (unmetDependencies(plan, t, merged).length > 0) continue;
+    const openPrNumber = opts.isOpenPr?.(t.id);
+    if (openPrNumber !== undefined) {
+      opts.onSkip?.(t, openPrNumber);
+      continue; // IN-FLIGHT — never a duplicate fresh build.
+    }
+    return t;
+  }
+  return undefined;
 }
 
 /** Reason a drain stopped — every terminal state is one of these. */
@@ -114,6 +143,13 @@ export function renderSummary(s: DrainSummary): string {
 export interface DrainDeps {
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: () => MergedSet;
+  /**
+   * The in-flight guard (W1-T80): the OPEN PR number for a task, re-derived
+   * from the SAME projection `refreshMerged` just built (never a second
+   * GitHub read path). Optional — omitted, dispatch behaves exactly as before
+   * this guard existed.
+   */
+  isOpenPr?: OpenPrCheck;
   /** Run ONE task through the existing run-task path (default = runTask). */
   runOne: (taskId: string) => Promise<RunResult>;
   /** Read current /usage; `undefined` ⇒ unavailable (headroom check is skipped). */
@@ -189,7 +225,13 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       if (!snap) log("drain.headroom.unavailable", { note: "usage unreadable — continuing (best-effort)" });
     }
 
-    const next = nextRunnable(plan, isMerged);
+    const next = nextRunnable(plan, isMerged, {
+      isOpenPr: deps.isOpenPr,
+      // IN-FLIGHT (W1-T80): a legible skip on console + ledger, then the drain
+      // proceeds to the next runnable task — an open PR must not halt the drain
+      // the way a block does.
+      onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
+    });
     if (!next) return summary("no_runnable");
 
     log("drain.iteration", { task: next.id, attempted: attempted.length + 1, max });
