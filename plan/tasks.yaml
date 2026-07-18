@@ -4374,3 +4374,37 @@
   files: [src/run-task.ts]
   status: queued
   attempts: 0
+
+- id: W1-T103
+  title: "checksState green means REQUIRED contexts green — skipped non-required checks never veto mergeable (the #170 stuck-ambiguous)"
+  repo: remudero
+  depends_on: [W1-T93]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (#170 post-heal): 13 successful checks, 0 pending, 0 failing, 1 SKIPPED
+    non-required context (the schedule-workflow's stub), review PASS — and the sweep dispositioned it
+    blocked-ambiguous ('not positively mergeable') on both passes. The W1-T93 positive-match doctrine is
+    right; its green DERIVATION is too strict. GitHub itself treats skipped required checks as
+    satisfying protection; a non-required skipped context vetoing our green makes healed PRs
+    permanently ambiguous and forces operator hand-arms."
+  design: |
+    VERIFY the checksState derivation first (status.ts per the sweep's module doc). Green = every
+    REQUIRED context (branch protection's own list, read once per repo) is SUCCESS (or skipped, matching
+    GitHub's protection semantics); non-required contexts are reported but never veto. Pending required
+    -> pending (wait, not ambiguous — the sweep leaves it for the next pass with a legible line). Red
+    required -> the existing W1-T100 fixable/escalate routing, unchanged.
+  acceptance:
+    - claim: "the #170 fixture (all required success, one non-required skipped, review success) is MERGEABLE"
+      proof: "unit test: the seeded state -> disposition mergeable, arm invoked"
+    - claim: "pending required is wait, not ambiguous; red required routes exactly as today"
+      proof: "unit tests: pending-required fixture -> no action + legible pending line; red-required fixture -> unchanged W1-T100 routing (regression lock)"
+    - claim: "a skipped REQUIRED context follows GitHub's own semantics"
+      proof: "unit test: skipped-required fixture -> counts as satisfied, matching a documented-in-test GitHub protection behavior note"
+  risk: high
+  origin: architect
+  plan_refs: ["P22", "§5D"]
+  files: [src/lib/status.ts, src/lib/sweep.ts]
+  status: queued
+  attempts: 0
