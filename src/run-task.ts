@@ -433,10 +433,36 @@ async function pollToGate(
 }
 
 /**
+ * Interpret a PR's `statusCheckRollup` for the `ci` gate — EXCLUDING the
+ * `remudero-review` entry itself (W1-T102, the #177 stale-status
+ * exhaustion). `remudero-review` is a commit status POSTED BY this same fix
+ * rung's own judge (`runReview`), pinned to a head sha. A body-only strike
+ * (e.g. a `gh pr edit` with no new commit) never changes the head sha, so
+ * the PREVIOUS strike's FAILURE status is still sitting in the rollup the
+ * next time this polls. Counting that as a red check made the gate
+ * un-satisfiable forever after any failing review: the rung exhausted its
+ * strikes against its OWN stale verdict instead of ever re-judging the
+ * fix. `ci` gates on the real `ci` check going SUCCESS; `remudero-review`
+ * is judged FRESH by `runReview` every strike, never trusted from the
+ * rollup here.
+ */
+export function ciGateFromRollup(rollup: RollupEntry[] | undefined): "green" | "red" | "pending" {
+  const roll = (rollup ?? []).filter((c) => (c.name ?? c.context) !== REVIEW_CTX);
+  const red = roll.find((c) => RED_CONCLUSIONS.has(String(c.conclusion ?? c.state ?? "")));
+  if (red) return "red";
+  const ci = roll.find((c) => (c.name ?? c.context) === "ci");
+  if (ci && String(ci.conclusion ?? ci.state ?? "") === "SUCCESS") return "green";
+  return "pending";
+}
+
+/**
  * Poll the PR's `ci` check to a terminal state BEFORE the review runs (Standing
  * rule 4: the reviewer judges ACCEPTANCE only once the code is proven to typecheck
  * and its tests pass). Returns "green" on ci success, "red" on any red conclusion,
- * "timeout" if ci never resolves — pending is never treated as pass.
+ * "timeout" if ci never resolves — pending is never treated as pass. The scan
+ * ignores `remudero-review`'s OWN pinned status ({@link ciGateFromRollup}) so a
+ * body-only fix strike (unchanged head sha) is never blocked by the review
+ * verdict it is itself about to replace.
  */
 async function waitForCiGreen(
   prUrl: string,
@@ -448,11 +474,10 @@ async function waitForCiGreen(
     const v = ghJson(["pr", "view", prUrl, "--json", "statusCheckRollup"]) as {
       statusCheckRollup?: RollupEntry[];
     };
-    const roll = v.statusCheckRollup ?? [];
-    const red = roll.find((c) => RED_CONCLUSIONS.has(String(c.conclusion ?? c.state ?? "")));
-    if (red) return "red";
-    const ci = roll.find((c) => (c.name ?? c.context) === "ci");
-    if (ci && String(ci.conclusion ?? ci.state ?? "") === "SUCCESS") return "green";
+    const state = ciGateFromRollup(v.statusCheckRollup);
+    if (state === "red") return "red";
+    if (state === "green") return "green";
+    const ci = (v.statusCheckRollup ?? []).find((c) => (c.name ?? c.context) === "ci");
     if (i === 0 || i % 5 === 0) log("ci.polling", { ci: String(ci?.conclusion ?? ci?.status ?? "pending") });
     execFileSync("sleep", [String(everySec)]);
   }

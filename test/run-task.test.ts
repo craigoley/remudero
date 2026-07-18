@@ -9,6 +9,7 @@ import {
   DEFAULT_BUDGET_USD,
   GitFetchError,
   checkPrOwnership,
+  ciGateFromRollup,
   commitsAhead,
   deriveFixMode,
   deriveStrikeHistory,
@@ -866,6 +867,79 @@ test("runFixRung: a CI regression after a fix attempt does not stall the rung �
 
   assert.equal(spawnCalls.length, 2, "the non-green CI strike still counts — the rung tries again, bounded by strikeCap");
   assert.equal(outcome.outcome, "fixed");
+});
+
+// ── W1-T102 (the #177/#178 fix): a body-only strike (e.g. a `gh pr edit` with
+// NO new commit) never changes the head sha, so `remudero-review`'s own
+// PREVIOUS FAILURE status is still pinned to that sha the next time the ci
+// gate polls. `waitForCiGreen`'s scan used to treat ANY red rollup entry —
+// including that self-posted, now-stale status — as a reason to skip
+// re-review, so the rung exhausted every strike against its OWN pinned
+// verdict and never re-judged a fix that had actually already succeeded.
+// `ciGateFromRollup` is the extracted, gh-free predicate this bug lived in —
+// unit-testable directly against rollup fixtures, no `gh` process needed. ──
+
+test("ciGateFromRollup: a stale remudero-review FAILURE pinned to an unchanged head sha does not veto a green ci check (the #177 stale-status exhaustion)", () => {
+  const rollup = [
+    { name: "ci", conclusion: "SUCCESS" },
+    { name: "remudero-review", conclusion: "FAILURE" }, // the PREVIOUS strike's now-stale verdict
+  ];
+  assert.equal(ciGateFromRollup(rollup), "green");
+});
+
+test("ciGateFromRollup: a genuinely red OTHER check still gates red — a real code-push regression is never masked", () => {
+  const rollup = [
+    { name: "ci", conclusion: "SUCCESS" },
+    { name: "test", conclusion: "FAILURE" }, // an actual required check, not remudero-review
+  ];
+  assert.equal(ciGateFromRollup(rollup), "red");
+});
+
+test("ciGateFromRollup: remudero-review alone (ci not reported yet) is pending, never green — a stale status excluded is not the same as a pass", () => {
+  const rollup = [{ name: "remudero-review", conclusion: "FAILURE" }];
+  assert.equal(ciGateFromRollup(rollup), "pending");
+});
+
+test("runFixRung: a stale failing verdict heals in ONE strike once the body edit satisfies the criteria — fresh PASS, no escalation (the #177 fixture)", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  // The stale, pinned verdict this rung was seeded with — mirrors the live
+  // incident's 7/28-unmet shape (only the count/shape matters here, not 7/28
+  // exactly): a real, failing verdict from BEFORE the body-only fix landed.
+  const staleFailing = fakeReview("failure", [
+    criterion({ claim: "criterion A is documented in the PR body", met: false, reason: "proof unmet (matched 4/12 proof keywords)" }),
+  ]);
+  const freshPassing = fakeReview("success", [
+    criterion({ claim: "criterion A is documented in the PR body", met: true }),
+  ]);
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: staleFailing,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: "fix-session-1" });
+      },
+      // Post-fix, the real ci gate correctly reports green for a body-only
+      // strike (the stale remudero-review status no longer vetoes it) —
+      // this is what unblocks the re-judge below.
+      waitForCiGreen: async () => "green",
+      runReview: async () => freshPassing,
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(outcome.outcome, "fixed");
+  assert.equal(outcome.strikes, 1, "the rung resolves after the ONE strike whose fresh re-judge passes");
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(issueCalls.length, 0, "no escalation — the fresh verdict is a PASS, never the stale one");
 });
 
 // ── W1-T100 (the #170 fix): route blocked_ci to the ci-log fix path — fix
