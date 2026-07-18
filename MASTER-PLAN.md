@@ -311,7 +311,7 @@ R4 10 / 2 ledger-merged (6 real) / $3.290 / 54.5t · R3 22 / 15 / $3.218 / 45.2t
 `blocked_review`×5, `blocked_ci`×3, `blocked`×1, `no_pr`×1). Candidates for the Architect to ratify via a
 tasks.yaml PR (rule 15) — never auto-filed.
 
-- **★ P27 (investigate-then-build) — `blocked_isolation`×5 IS A VOLUME SIGNAL, not five independent
+- **★ P27 (investigate-then-build) — RESOLVED 2026-07-18 — investigation COMPLETE via the live loop, no build warranted: all five blocks were ONE cause, a Claude Code 2.1.214 auto-update (02:43) adding a pkill wrapper function the static allowlist predated — named by #184's probe instrument on first firing ([pkill]), absorbed explicitly + version-annotated by #185, isolation passing since (W1-T96's run). The proposed host-hygiene fix is REFUTED by the name: not rc-pollution, not the claude shell function, no daemon-env defect — the guard fail-closed correctly on toolchain drift, exactly per isolation.ts's surfaced-never-absorbed doctrine. The re-raised cause-field is ALREADY RATIFIED: P23 -> W1-T91 (queued), with #184 as its shipped naming half. Five probes cost ~$1.17 total — the designed price of a correct fail-close. ORIGINAL: `blocked_isolation`×5 IS A VOLUME SIGNAL, not five independent
   bootstrap blocks.** Five of 29 runs (17%) tripped the isolation preflight this cycle — the highest single
   block class. Per the STANDING P23 lesson a `blocked_isolation` is most likely the W1-T17/#99 probe DOING
   ITS JOB (a populated rc / inherited shell state — FIELD FINDING 11b), and #184 already sharpened the probe
