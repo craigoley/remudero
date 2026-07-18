@@ -41,6 +41,15 @@
 #                            prompt; a prompt fires ONLY with a real TTY present; a
 #                            TTY-absent run NEVER blocks — it falls back to a logged
 #                            safe default (no live operator required, Standing rule 18)
+#   rmd project init <repo> [--profile ts-node|ts-web|python|dotnet]
+#                --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>
+#                            fleet-inheritance onboarding primitive (MASTER-PLAN §5A,
+#                            W1-T27): generates the whole gate stack (workflows, configs,
+#                            SECURITY.md, .remudero/principles.yaml) plus the
+#                            branch-protection payload for a target repo, with the
+#                            injected baseline numbers written in as ratchet floors — a
+#                            repo never onboards at zero; prints the file list and manual
+#                            next steps, does not push/PR/arm protection itself
 set -euo pipefail
 # Resolve the real package root even when invoked through symlinks (npm link /
 # a global install both put `rmd` on PATH as a symlink chain, not a copy).
