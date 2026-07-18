@@ -74,8 +74,9 @@ test("isolationProbePrompt: EXCLUDES Claude Code's own find/grep/rg tool wrapper
     assert.ok(p.includes(w), `the prompt's exclusion filter must name the Claude Code wrapper '${w}'`);
   }
   assert.match(p, /\$NF !~/); // awk excludes functions whose name matches a wrapper
-  // The wrappers are exactly find/grep/rg — a tight, explicit list (fail-closed on any other name).
-  assert.deepEqual([...CLAUDE_CODE_TOOL_WRAPPERS], ["find", "grep", "rg"]);
+  // The wrappers are exactly find/grep/rg/pkill — a tight, explicit list (fail-closed on any other name).
+  // pkill added CLI >= 2.1.214 (2026-07-18 auto-update; live fixture W3-T1a [pkill]).
+  assert.deepEqual([...CLAUDE_CODE_TOOL_WRAPPERS], ["find", "grep", "rg", "pkill"]);
 });
 
 // ── probeIsolation: the fail-closed gate, via an injected executor ──────────
@@ -134,4 +135,95 @@ test("probeIsolation: a CLEAN run never logs isolation_preflight_failed", async 
   const events: string[] = [];
   await probeIsolation({ settingsFile: "unused", log: (step) => events.push(step), exec: cleanExec });
   assert.equal(events.includes("isolation_preflight_failed"), false);
+});
+
+// ── OBSERVABILITY: NAME the inherited state, not just count it ────────────────
+// (the live incident: three W3-T1a blocked_isolation runs at "1 function", CC
+// auto-update in the window, five operator diagnostics where one name sufficed)
+
+test("isolationProbePrompt: also requests the alias_names / function_names lines (same wrapper exclusion for functions)", () => {
+  const p = isolationProbePrompt();
+  assert.match(p, /alias_names:/);
+  assert.match(p, /function_names:/);
+  // Command 4 lists function NAMES under the SAME find/grep/rg exclusion as the count.
+  assert.match(p, /printf "%s ", \$NF/);
+  for (const w of CLAUDE_CODE_TOOL_WRAPPERS) assert.ok(p.includes(w));
+});
+
+test("parseIsolationReport: extracts the NAMES when the report carries them", () => {
+  const r = parseIsolationReport("REPORT\naliases: 2\nfunctions: 1\nalias_names: cc gg\nfunction_names: claude");
+  assert.deepEqual(r, { aliasCount: 2, functionCount: 1, aliasNames: "cc gg", functionNames: "claude" });
+});
+
+test("parseIsolationReport: names RESPECT the CLAUDE_CODE_TOOL_WRAPPERS exclusion (find/grep/rg stripped from function names)", () => {
+  const r = parseIsolationReport(
+    "REPORT\naliases: 0\nfunctions: 1\nalias_names: -\nfunction_names: claude grep find rg",
+  );
+  // Only the real operator function survives; the injected wrappers are stripped, matching the count's exclusion.
+  assert.equal(r?.functionNames, "claude");
+  assert.equal(r?.aliasNames, undefined); // "-" ⇒ no names
+});
+
+test("parseIsolationReport: an OLD-prompt report (no name lines) parses to the exact same shape as before (byte-identical)", () => {
+  const r = parseIsolationReport("preamble\nREPORT\naliases: 4\nfunctions: 2\n");
+  assert.deepEqual(r, { aliasCount: 4, functionCount: 2 }); // no aliasNames/functionNames keys
+});
+
+test("assessIsolation: a nonzero verdict with NAMES surfaces them in the reason (one name replaces a diagnostics session)", () => {
+  const v = assessIsolation({ aliasCount: 0, functionCount: 1, functionNames: "claude" });
+  assert.equal(v.isolated, false);
+  assert.match(v.reason, /1 function\(s\) \[claude\]/);
+});
+
+test("assessIsolation: a nonzero verdict WITHOUT names is byte-identical to the count-only reason (regression lock)", () => {
+  const named = assessIsolation({ aliasCount: 3, functionCount: 0 });
+  assert.equal(
+    named.reason,
+    "worker inherited 3 alias(es) and 0 function(s) from operator shell state — isolation is NOT holding on this host/run",
+  );
+});
+
+test("probeIsolation: the IsolationError NAMES the inherited functions when the probe reported them", async () => {
+  const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  await assert.rejects(
+    () =>
+      probeIsolation({
+        settingsFile: "unused",
+        log: (step, extra) => events.push({ step, extra }),
+        exec: async (): Promise<ProbeExecResult> => ({
+          transcript: "REPORT\naliases: 0\nfunctions: 1\nalias_names: -\nfunction_names: claude",
+          aliasCount: 0,
+          functionCount: 1,
+          functionNames: "claude",
+        }),
+      }),
+    (e: unknown) => e instanceof IsolationError && /1 function\(s\) \[claude\]/.test((e as Error).message),
+  );
+  // The named state is also on the dedicated ledger event.
+  const failed = events.find((e) => e.step === "isolation_preflight_failed");
+  assert.equal(failed?.extra?.function_names, "claude");
+});
+
+// ── pkill (CLI >= 2.1.214) allowlist: the first firing of #184's named probe ──
+// Live block W3-T1a-1784377428404 reported "1 function(s) [pkill]" coincident with
+// the 2.1.214 auto-update; pkill is CC self-protection plumbing, not operator state.
+
+test("pkill is allowlisted: in the count-regex AND stripped by the parser, so a pkill-only shell PASSES isolation", () => {
+  // (1) the awk exclusion regex — generated from the const — now names pkill, so
+  //     the WORKER's function count excludes it (a pkill-only shell counts 0).
+  assert.ok(isolationProbePrompt().includes("/^(find|grep|rg|pkill)$/"));
+  // (2) the parser's defensive name filter also strips pkill (matches the count).
+  const r = parseIsolationReport("REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: pkill");
+  assert.equal(r?.functionNames, undefined); // pkill ⇒ no operator names
+  // (3) with pkill excluded the count is 0 → the verdict is isolated (the block clears).
+  assert.equal(assessIsolation({ aliasCount: 0, functionCount: 0 }).isolated, true);
+});
+
+test("the invariant is intact: allowlisting pkill does NOT loosen fail-closed — any OTHER unlisted name still FAILS with the name surfaced", () => {
+  const v = assessIsolation({ aliasCount: 0, functionCount: 1, functionNames: "claude" });
+  assert.equal(v.isolated, false);
+  assert.match(v.reason, /1 function\(s\) \[claude\]/);
+  // A mixed report strips ONLY the wrapper (pkill); the real operator leak (claude) survives to fail closed.
+  const r = parseIsolationReport("REPORT\naliases: 0\nfunctions: 1\nalias_names: -\nfunction_names: claude pkill");
+  assert.equal(r?.functionNames, "claude");
 });

@@ -4221,3 +4221,265 @@
   files: [src/run-task.ts]
   status: queued
   attempts: 0
+
+- id: W1-T99
+  title: "Escalation transport resilience — ensure labels exist, and ONE failed action never kills the sweep (the first live escalation's crash)"
+  repo: remudero
+  depends_on: [W1-T77]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (2026-07-17, first BLOCKED-class escalation ever fired): gh issue create
+    fails ENTIRELY on a missing label ('escalation-blocked' not found — the per-class label map,
+    escalate.ts:46, was never provisioned on the repo), so the question was generated and then LOST, and
+    execFileSync's throw propagated through runSweep — one PR's transport failure killed the whole
+    reconciler. Two violations of the level-triggered doctrine: a notification transport must not lose
+    its payload to provisioning drift, and the loop must reconcile the remaining PRs no matter what one
+    action does."
+  design: |
+    (i) ENSURE-LABELS: escalate's gateway ensures its label set exists before create (gh label create
+    per missing label, tolerate-exists) — provisioning is the transport's job, never the operator's
+    memory; the WS-4 scaffold inherits the set. (ii) DEGRADE, DON'T LOSE: if label ops still fail, create
+    the issue WITHOUT the failing label and note the degradation in the body — the payload outranks its
+    decoration. (iii) ISOLATE: the sweep wraps each disposition ACTION per-PR — a throw ledgers
+    sweep.action_failed (pr, disposition, error) and the loop CONTINUES; the summary line reports
+    failed actions distinctly. Fail-closed stays intact: an action that failed is not an action taken.
+  acceptance:
+    - claim: "a missing label no longer loses the escalation or crashes anything"
+      proof: "unit test over an injected gateway: label-create called for the missing label then issue created; a gateway whose label ops hard-fail still creates the issue without the label, degradation noted in body"
+    - claim: "one PR's action failure isolates — the sweep reconciles the rest"
+      proof: "unit test: a 3-PR fixture where the middle PR's escalate throws -> sweep.action_failed ledgered for it, the other two PRs' actions complete, summary counts the failure"
+    - claim: "the canonical crash is the regression fixture"
+      proof: "unit test: the 2026-07-17 shape (single ambiguous PR, gateway throwing label-not-found) -> no throw escapes runSweep; the question payload reaches an issue"
+  risk: high
+  origin: architect
+  plan_refs: ["P22", "§4"]
+  files: [src/lib/escalate.ts, src/lib/sweep.ts]
+  status: queued
+  attempts: 0
+
+- id: W1-T100
+  title: "Route blocked_ci to the ci-log fix path — fix FIRST, ask after exhaustion (the #170 inverted ladder)"
+  repo: remudero
+  depends_on: [W1-T93, W1-T94]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (#170): the sweep routed a checks-red/review-none PR to BLOCKED-AMBIGUOUS and
+    generated a question whose own text admits the inversion — 'no fix-rung strike is recorded for this
+    PR.' W1-T93 shipped its escalate-interim for blocked_ci; W1-T94 shipped the ci-log fix mode; the
+    intent-wiring between them (T93's design: 'route to blocked-fixable ONCE the fix rung accepts CI-log
+    input') was never built once both landed — the deliberately-soft dep left a seam. The ladder must
+    read: fix (<=strike cap) FIRST, question after exhaustion — the clarification rung exists for
+    genuine ambiguity, not for untried work."
+  design: |
+    (i) DISPOSITION_RULES gains a positive blocked-fixable rule for ci=red + review-verdict-none (table
+    edit, above the escalate catch-all). (ii) dispatchFix's input generalizes from the reviewer unmet set
+    to the W1-T94 mode-evidence shape, so the sweep's ci-red dispatch derives ci-log mode (failing check
+    names + log tails, same branch). (iii) BLOCKED-AMBIGUOUS is reserved per the W1-T78 spec: strike
+    exhaustion or contradictory criteria — a ci-red PR reaches the question rung only THROUGH the strike
+    ladder. (iv) Strikes on ci-log fixes share the same counter and cap as review fixes (one ladder,
+    one exhaustion route).
+  acceptance:
+    - claim: "the #170 fixture (ci red, review none, zero strikes) dispositions blocked-fixable and dispatches ONE ci-log-mode fix worker"
+      proof: "unit test: the seeded state -> disposition blocked-fixable; the rendered fix prompt names ci-log mode and carries failing check names + log tails, not reviewer criteria"
+    - claim: "a strike-exhausted ci-red PR routes to the question rung — the ladder, not a loop"
+      proof: "unit test: same state with strikes at cap -> blocked-ambiguous, question generated, zero new spawns"
+    - claim: "review-failure routing is unchanged"
+      proof: "existing W1-T93/W1-T77 disposition tests pass; a review-failure fixture still dispatches reviewer-unmet mode"
+  risk: high
+  origin: architect
+  plan_refs: ["P22", "§3"]
+  files: [src/lib/sweep.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "CORRECTED 2026-07-17: the original note claimed rmd fix (W1-T95) bridges blocked_ci — FALSIFIED
+    live the same day, verbatim: 'rmd fix — PR #170 is not fixable: ... (no block evidence to drive the
+    rung). No spawn.' T95's evidence resolver is reviewer-shaped until this task's (ii) generalizes it;
+    blocked_ci has NO bridge until this task builds. The honest interim was building this task first and
+    letting the sweep heal #170 — which is what happened."
+
+- id: W1-T101
+  title: "lint-plan proof-resolvability — a dialect prefix is a promise: the payload must name a runnable artifact or drop the prefix (the W1-T100 0/3)"
+  repo: remudero
+  depends_on: [W1-T20c]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LEDGER GROUND TRUTH (2026-07-17, W1-T100's own build): proof_exec [not_executable x3] with
+    floor_degraded:true — every proof was dialect-prefixed ('unit test: ...') yet named no resolvable
+    test file or test-name token, so the W1-T72 executor correctly refused to guess and the keyword floor
+    was binding on a gate-cutting merge. W1-T72 is working AS BOUNDED; the gap is AUTHORING: a prefix
+    that promises executability with an unresolvable payload produces permanent silent-ish degradation.
+    The birth gate is the right home — new tasks' proofs become genuinely executable by construction,
+    and floor_degraded becomes a legacy-only signal that W1-T73's mining tracks down."
+  design: |
+    New lint-plan rule (Layer A, warning-then-blocking per the linter's rollout convention — REPORT which
+    the codebase convention supports): a criterion proof beginning with the executable dialect
+    ('unit test:' | 'grep:') must contain a RESOLVABLE payload — for unit test: a path-like token
+    (test/*.test.ts) or a ::test-name token; for grep: a pattern AND an in <path> clause. Fails with the
+    remedy stated: name the artifact, or drop the prefix (prose proofs are legitimate and keyword-bound
+    by design — the rule polices the PROMISE, never mandates the dialect). Resolvability shapes are a
+    DATA table (companion rows to W1-T81's phrase signals and W1-T92's path classes).
+  acceptance:
+    - claim: "the W1-T100 regression corpus flags — all three verbatim proofs, prefix-promised but unresolvable"
+      proof: "unit test: the three proof strings loaded verbatim from the plan -> violation each, remedy text names both options"
+    - claim: "resolvable dialect proofs and prose proofs both pass"
+      proof: "unit tests: 'unit test: test/sweep.test.ts::routes ci-red to blocked-fixable' -> clean; 'grep: the wx flag in src/lib/config.ts' -> clean; an unprefixed prose proof -> untouched by this rule"
+    - claim: "the shapes are data"
+      proof: "unit test: adding a payload-shape row admits a seeded new form with zero engine changes"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [src/lib/task-linter.ts]
+  status: queued
+  attempts: 0
+  note: "Third precision companion: W1-T81 (recall/negation), W1-T92 (data-file sizing), this
+    (proof-resolvability). Together: the birth gate makes the observing floor's coverage grow instead
+    of the degradation flag."
+
+- id: W1-T102
+  title: "Every fix strike ends with a FRESH verdict — re-judge and re-post after body-only fixes too (the #177 stale-status exhaustion)"
+  repo: remudero
+  depends_on: [W1-T76]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (#177/#178, hand-fix worker's diagnosis): W1-T94's body-coverage mode derived
+    CORRECTLY — both strikes fixed the PR body via gh pr edit, no commit — but remudero-review is a
+    commit status pinned to the unchanged head SHA, the rung never re-judged after either strike, and two
+    CORRECT fixes 'exhausted' against a stale 7/28 verdict, escalating a properly-fixed PR. Post-fix
+    measurement of the empirical body scored 28/28 and ALL MET. The strike ladder's exit condition must
+    be a FRESH judgment, never the pinned status."
+  design: |
+    After EVERY strike — body-only or code-push alike — the rung re-runs the judge against the CURRENT
+    head + CURRENT body and re-posts remudero-review before evaluating the strike's outcome. VERIFY the
+    existing post-strike condition first (the code-push path appeared to re-review on #170's heal; the
+    body-only path did not — locate the conditional and make the re-judge unconditional). A strike
+    counts as failed ONLY against its own fresh verdict.
+  acceptance:
+    - claim: "the #177 fixture heals in one strike: a body-only fix that satisfies the criteria yields a fresh PASS and the rung resolves"
+      proof: "unit test over injected deps: stale failure status + a strike whose body edit satisfies -> re-judge invoked, success posted, resolved after 1 strike, no escalation"
+    - claim: "a genuinely-unfixed strike still fails, on its own fresh verdict"
+      proof: "unit test: a strike leaving criteria unmet -> fresh failure posted, strike counted, ladder proceeds"
+    - claim: "the code-push path is unchanged"
+      proof: "existing fix-rung tests pass; the #170-shape fixture still re-reviews the new head"
+  risk: high
+  origin: architect
+  plan_refs: ["P22", "§3"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+
+- id: W1-T103
+  title: "checksState green means REQUIRED contexts green — skipped non-required checks never veto mergeable (the #170 stuck-ambiguous)"
+  repo: remudero
+  depends_on: [W1-T93]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (#170 post-heal): 13 successful checks, 0 pending, 0 failing, 1 SKIPPED
+    non-required context (the schedule-workflow's stub), review PASS — and the sweep dispositioned it
+    blocked-ambiguous ('not positively mergeable') on both passes. The W1-T93 positive-match doctrine is
+    right; its green DERIVATION is too strict. GitHub itself treats skipped required checks as
+    satisfying protection; a non-required skipped context vetoing our green makes healed PRs
+    permanently ambiguous and forces operator hand-arms."
+  design: |
+    VERIFY the checksState derivation first (status.ts per the sweep's module doc). Green = every
+    REQUIRED context (branch protection's own list, read once per repo) is SUCCESS (or skipped, matching
+    GitHub's protection semantics); non-required contexts are reported but never veto. Pending required
+    -> pending (wait, not ambiguous — the sweep leaves it for the next pass with a legible line). Red
+    required -> the existing W1-T100 fixable/escalate routing, unchanged.
+  acceptance:
+    - claim: "the #170 fixture (all required success, one non-required skipped, review success) is MERGEABLE"
+      proof: "unit test: the seeded state -> disposition mergeable, arm invoked"
+    - claim: "pending required is wait, not ambiguous; red required routes exactly as today"
+      proof: "unit tests: pending-required fixture -> no action + legible pending line; red-required fixture -> unchanged W1-T100 routing (regression lock)"
+    - claim: "a skipped REQUIRED context follows GitHub's own semantics"
+      proof: "unit test: skipped-required fixture -> counts as satisfied, matching a documented-in-test GitHub protection behavior note"
+  risk: high
+  origin: architect
+  plan_refs: ["P22", "§5D"]
+  files: [src/lib/status.ts, src/lib/sweep.ts]
+  status: queued
+  attempts: 0
+
+- id: W1-T104
+  title: "Escalation dedup lives in the TRANSPORT — one open needs-human issue per (task, PR), across every caller (the #178/#180 duplicate)"
+  repo: remudero
+  depends_on: [W1-T8]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT: the sweep created #180 for PR #177 while the drain-path exhaustion
+    escalation #178 for the SAME PR sat open — the sweep's actions-deduped-against-what-is-already-true
+    check doesn't see other callers' escalations (different title templates, different ledger keys).
+    Dedup keyed per-caller re-derives the same duplicate every time a new caller learns to escalate;
+    the invariant belongs in escalate() itself: at most one OPEN needs-human issue per (task, PR)."
+  design: |
+    escalate() searches open needs-human issues for the (task id + PR number) reference before creating;
+    found -> append a comment with the new context (a fresh reason updates the record) and ledger
+    escalate.deduped instead of creating; not found -> create as today. The search key is CONTENT
+    (task id + PR reference), never the title template. All callers inherit the guard by construction.
+  acceptance:
+    - claim: "the #178/#180 fixture creates one issue then comments, never a second issue"
+      proof: "unit test over an injected issue gateway: first escalate creates; second (different caller template, same task+PR) -> comment appended, escalate.deduped ledgered, zero creates"
+    - claim: "a CLOSED prior issue does not suppress a new escalation"
+      proof: "unit test: closed-issue fixture -> new issue created (re-blocks re-escalate)"
+    - claim: "distinct PRs for one task escalate separately"
+      proof: "unit test: same task, different PR numbers -> two issues"
+  risk: medium
+  origin: architect
+  plan_refs: ["§4", "P22"]
+  files: [src/lib/escalate.ts]
+  status: queued
+  attempts: 0
+
+- id: W1-T105
+  title: "Follow-up harvest — worker reports declare follow-ups (research | task | action), the ledger carries them, the retro mints proposal candidates; nothing discovered mid-task is lost (rule 15 preserved)"
+  repo: remudero
+  depends_on: [W1-T51]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Operator requirement, verbatim: 'ensure that if any implementations come back with follow-up
+    research, actions, tasks, etc — they get added to the plan.' The manual version ran all session and
+    is the proof of value: worker closing notes became W1-T81 (the #146 linter FP/FN report), W1-T92 (the
+    #153 sizing flag), W1-T102 (the #177 hand-fix's stale-status finding) — each harvested by a HUMAN
+    reading reports. Grep-verified 2026-07-18: no follow-up field exists in the report contract, no
+    harvest exists in the retro — a worker's discovery survives today only if a person notices it."
+  design: |
+    (i) CONTRACT: the §2 worker report gains an OPTIONAL '## Follow-ups' section — one typed entry per
+    line (research: | task: | action:), each with a one-line why; worker prompts (implement, fix, recon)
+    instruct: anything discovered that is OUT OF SCOPE for the one concern goes here, never into the
+    diff. (ii) LEDGER: report ingestion parses the section into a report.followups event (typed entries
+    + run/task/PR provenance); absent section => no event, byte-identical behavior. (iii) HARVEST: the
+    retro gather collects unharvested followups and renders them as PROPOSAL CANDIDATES in the retro
+    PR's proposals section — rule 15 intact: candidates for Architect ratification, NEVER auto-filed
+    tasks; each candidate cites its originating run/PR verbatim. Harvested entries are ledger-marked
+    (followup.harvested) so no candidate mints twice. (iv) DEDUP: an entry whose text matches an open
+    proposal or an existing task title is recorded as followup.deduped, not re-minted. (v) When P25's
+    ratification inbox ratifies, candidates surface there — this task is a named producer for it.
+  acceptance:
+    - claim: "a report with a typed Follow-ups section ledgers the entries with provenance"
+      proof: "unit test: fixture report (one research:, one task: line) -> report.followups event carrying both entries, types, and the run/task/PR refs"
+    - claim: "the retro mints each unharvested entry as ONE cited proposal candidate, exactly once"
+      proof: "unit test: fixture ledger with two followups (one already followup.harvested) -> retro output contains one new candidate citing its run/PR; second retro over the updated ledger mints zero"
+    - claim: "absent sections and duplicate entries change nothing"
+      proof: "unit tests: a report without the section -> no event, existing report parsing byte-identical; an entry matching an open proposal title -> followup.deduped ledgered, no candidate"
+  risk: high
+  origin: architect
+  plan_refs: ["§2", "§Self-improvement", "P25"]
+  files: [src/run-task.ts, src/lib/retro.ts]
+  status: queued
+  attempts: 0
+  note: "The automation of the Architect-harvest role this session performed by hand. Composes with
+    W1-T87 (success mining) and W1-T73 (degraded-success mining) as the third retro intake; the P25
+    inbox is its consumer surface."

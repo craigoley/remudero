@@ -16,6 +16,8 @@ import {
   type Config,
 } from "./lib/config.js";
 import { buildWorkerEnv } from "./lib/env.js";
+import type { RunResult } from "./lib/run-result.js";
+export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
 import type { Tier, TierDetection } from "./lib/tier.js";
 import {
@@ -82,12 +84,15 @@ import { ghGateway, projectPlan, readLedgerLines, type GitHub, type StatusProjec
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
+  isBlockedCi,
   renderClarificationQuestion,
   renderSweepSummary,
   runSweep,
   strikeCapForAnswer,
   toQuestionEntry,
+  type CiFailure,
   type ClarificationQuestion,
+  type FixDispatchEvidence,
   type OpenPrView,
   type StrikeAttempt,
   type SweepDeps,
@@ -658,11 +663,10 @@ async function runReview(args: {
 // never a dispatch trigger here.
 // ────────────────────────────────────────────────────────────────────────────
 
-/** One failing required CI check's name + the tail of its log — the `ci-log` mode's only input. */
-export interface CiFailure {
-  name: string;
-  logTail: string;
-}
+// `CiFailure` — one failing required CI check's name + the tail of its log,
+// the `ci-log` mode's only input — is defined in lib/sweep.ts (imported above)
+// because `OpenPrView` carries it and this module already imports OpenPrView
+// from sweep.js; the reverse import would be circular (W1-T100).
 
 /** The three known fix-rung failure modes. See the taxonomy note above. */
 export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | (string & {});
@@ -898,6 +902,19 @@ export async function runFixRung(opts: {
    * dispatch (W1-T76, unchanged).
    */
   constraint?: string;
+  /**
+   * W1-T100 (the #170 fix): failing required-check name+log-tail evidence for
+   * a blocked_ci dispatch — this PR is checks-red with NO review verdict
+   * posted yet, so the failing signal IS the CI log, never a reviewer verdict.
+   * Present ONLY for a ci-log-mode dispatch; undefined for the ordinary
+   * blocked_review path (W1-T76, unchanged). Drives the ci-log MODE
+   * (deriveFixMode/renderFixPrompt, W1-T94) for every strike UNTIL a real
+   * review actually runs (only reached once CI goes green) — from then on
+   * every subsequent strike reverts to review-mode evidence, even if that
+   * review itself still fails (a real verdict is never re-treated as "no
+   * review yet").
+   */
+  ciFailures?: CiFailure[];
   deps: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     waitForCiGreen: (
@@ -919,21 +936,34 @@ export async function runFixRung(opts: {
   let review = opts.initialReview;
   let strikes = 0;
   let sessionToResume: string | undefined = opts.initialSessionId;
+  // W1-T100: true until a REAL review has run. A blocked_ci dispatch
+  // (opts.ciFailures set) has no reviewer verdict at all yet, so its evidence
+  // is ci-log-shaped rather than review-shaped. Flips false the moment
+  // deps.runReview actually executes (only reached once CI is green) — from
+  // then on a real verdict exists, so every later strike is review-mode again,
+  // even if that review itself still fails.
+  let noReviewYet = opts.ciFailures !== undefined;
 
   while (review.state !== "success" && strikes < opts.strikeCap) {
     strikes++;
     const round: "resume" | "fresh" = strikes === 1 ? "resume" : "fresh";
     const unmet = review.criteria.filter((c) => !c.met);
+    const evidence: FixEvidence = noReviewYet
+      ? { ciFailures: opts.ciFailures, constraint: opts.constraint }
+      : { review: { unmetCriteria: unmet, summary: review.summary }, constraint: opts.constraint };
     const prompt = renderFixPrompt({
       task: opts.task,
       round: strikes,
       branch: opts.branch,
-      evidence: { review: { unmetCriteria: unmet, summary: review.summary }, constraint: opts.constraint },
+      evidence,
     });
-    deps.log("fix.dispatch", { strike: strikes, strike_cap: opts.strikeCap, unmet_count: unmet.length, round });
+    deps.log("fix.dispatch", { strike: strikes, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: deriveFixMode(evidence) });
     deps.say(
-      `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE fix worker for ` +
-        `${unmet.length} unmet criteri${unmet.length === 1 ? "on" : "a"}`,
+      noReviewYet
+        ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE ci-log fix worker for ` +
+          `${(opts.ciFailures ?? []).length} failing check(s)`
+        : `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE fix worker for ` +
+          `${unmet.length} unmet criteri${unmet.length === 1 ? "on" : "a"}`,
     );
 
     const fixArgs: SpawnWorkerArgs = {
@@ -983,6 +1013,7 @@ export async function runFixRung(opts: {
       reviewerMount: opts.reviewBase.reviewerMount,
       headCheckoutDir: opts.reviewBase.headCheckoutDir,
     });
+    noReviewYet = false; // W1-T100: a real review verdict now exists — never ci-log again.
     deps.log("fix.review", {
       strike: strikes,
       state: review.state,
@@ -999,24 +1030,42 @@ export async function runFixRung(opts: {
   // Strikes exhausted — escalate (BLOCKED class, W1-T8) rather than loop
   // forever; the clarification rung (W1-T78) upgrades this route when it lands.
   const unmet = review.criteria.filter((c) => !c.met);
+  // W1-T100: `noReviewYet` is still true only when EVERY strike stayed ci-log
+  // mode — required checks never went green across the whole strikeCap, so no
+  // review ever ran. The escalation names the failing checks it actually
+  // tried to fix, never an empty "Unmet criteria:" list (which would be
+  // misleading — a blocked_ci PR never had reviewer criteria to begin with).
   const issueUrl = escalate(
     {
       class: "BLOCKED",
       taskId: opts.taskId,
       runId: opts.runId,
-      summary: `blocked_review fix rung exhausted (${strikes} strike(s)) — ${opts.prUrl}`,
-      detail:
-        `The blocked_review FIX RUNG (W1-T76) dispatched ${strikes} bounded fix worker(s) on ` +
-        `${opts.branch} and the review gate is STILL failing. Unmet criteria:\n\n` +
-        unmet.map((c) => `- ${c.claim}\n  reason: ${c.reason}`).join("\n"),
-      options: [
-        {
-          label: "hand-fix",
-          detail:
-            "resolve the remaining criteria on the same branch by hand, then re-run `rmd review` to re-post the gate.",
-        },
-        { label: "close", detail: "close the PR and re-scope the task if the criteria themselves are wrong." },
-      ],
+      summary: noReviewYet
+        ? `blocked_ci fix rung exhausted (${strikes} strike(s), checks never went green) — ${opts.prUrl}`
+        : `blocked_review fix rung exhausted (${strikes} strike(s)) — ${opts.prUrl}`,
+      detail: noReviewYet
+        ? `The blocked_ci FIX RUNG (ci-log mode, W1-T94/W1-T100) dispatched ${strikes} bounded fix worker(s) on ` +
+          `${opts.branch} and required checks are STILL red — no review has run yet. Failing check(s):\n\n` +
+          (opts.ciFailures ?? []).map((f) => `- ${f.name}`).join("\n")
+        : `The blocked_review FIX RUNG (W1-T76) dispatched ${strikes} bounded fix worker(s) on ` +
+          `${opts.branch} and the review gate is STILL failing. Unmet criteria:\n\n` +
+          unmet.map((c) => `- ${c.claim}\n  reason: ${c.reason}`).join("\n"),
+      options: noReviewYet
+        ? [
+            {
+              label: "hand-fix",
+              detail: "resolve the failing check(s) on the same branch by hand, then push to re-trigger CI.",
+            },
+            { label: "close", detail: "close the PR and re-scope the task if CI itself cannot be made to pass." },
+          ]
+        : [
+            {
+              label: "hand-fix",
+              detail:
+                "resolve the remaining criteria on the same branch by hand, then re-run `rmd review` to re-post the gate.",
+            },
+            { label: "close", detail: "close the PR and re-scope the task if the criteria themselves are wrong." },
+          ],
       recommendation: "hand-fix",
     },
     { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
@@ -1024,29 +1073,6 @@ export async function runFixRung(opts: {
   deps.log("fix.exhausted", { strikes, issue_url: issueUrl });
   deps.say(`fix rung: exhausted after ${strikes} strike(s) — escalated: ${issueUrl}`);
   return { outcome: "escalated", review, strikes, issueUrl };
-}
-
-export interface RunResult {
-  taskId: string;
-  runId: string;
-  prUrl?: string;
-  merged: boolean;
-  costUsd: number;
-  verdict:
-    | "merged"
-    | "blocked"
-    | "blocked_ci"
-    | "blocked_review"
-    | "blocked_budget"
-    | "blocked_containment"
-    | "blocked_isolation"
-    | "blocked_inflight"
-    | "blocked_git_fetch"
-    | "blocked_illformed"
-    | "no_pr"
-    | "blocked_transient"
-    | "pr_attribution_failed"
-    | "failed";
 }
 
 /** The verdict + ledger payload a worker's ERROR envelope maps to. */
@@ -2896,6 +2922,8 @@ interface RollupCheck {
   status?: string;
   conclusion?: string;
   state?: string;
+  /** The check's GitHub Actions job URL (…/actions/runs/<run>/job/<job>) — the ci-log mode's log source (W1-T100). */
+  detailsUrl?: string;
 }
 
 interface RawOpenPr {
@@ -2932,6 +2960,41 @@ function checksStateFromRollup(rollup: RollupCheck[] | undefined): OpenPrView["c
     if (s !== "SUCCESS") anyPending = true;
   }
   return anyPending ? "pending" : "green";
+}
+
+/**
+ * W1-T100 (the #170 fix): failing required-check names + a tail of each one's
+ * log — the ci-log fix mode's ONLY input (deriveFixMode/renderFixPrompt,
+ * W1-T94). Best-effort: a log-fetch failure degrades to an EMPTY tail
+ * (renderFixPrompt already renders "no failing check detail was captured" for
+ * that case) — NEVER throws, so one unreadable log never strands the sweep.
+ * `owner`/`repo` are REQUIRED and passed as `--repo` on the `gh` call — the
+ * daemon/sweep can target a repo other than its own checkout's cwd (the
+ * daemon-repo-targeting design), so this must never rely on `gh`'s ambient
+ * cwd-inferred repo, which would silently query the WRONG repo's job ids.
+ */
+function fetchCiFailures(owner: string, repo: string, rollup: RollupCheck[] | undefined, tailLines = 60): CiFailure[] {
+  const failing = (rollup ?? []).filter((c) => {
+    const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
+    return s === "FAILURE" || s === "ERROR";
+  });
+  return failing.map((c) => {
+    const name = c.name ?? c.context ?? "unknown";
+    let logTail = "";
+    try {
+      const jobId = c.detailsUrl?.match(/\/job\/(\d+)/)?.[1];
+      if (jobId) {
+        const out = execFileSync("gh", ["run", "view", "--job", jobId, "--repo", `${owner}/${repo}`, "--log-failed"], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        });
+        logTail = out.split("\n").slice(-tailLines).join("\n");
+      }
+    } catch {
+      /* best-effort — degrades to an empty tail, never throws */
+    }
+    return { name, logTail };
+  });
 }
 
 /** The `Remudero-Task: <id>` trailer in a PR body, if present (anchored line). */
@@ -3048,12 +3111,13 @@ function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): Open
     const newest = peers.length ? Math.max(...peers) : pr.number;
     const supersededBy = newest > pr.number ? newest : undefined;
     const reviewState = reviewStateFromRollup(pr.statusCheckRollup);
+    const checksState = checksStateFromRollup(pr.statusCheckRollup);
     return {
       prNumber: pr.number,
       prUrl: pr.url,
       taskId,
       reviewState,
-      checksState: checksStateFromRollup(pr.statusCheckRollup),
+      checksState,
       unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
       priorStrikes: priorStrikesFor(ledger, taskId),
       strikeHistory: deriveStrikeHistory(ledger, taskId),
@@ -3062,6 +3126,9 @@ function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): Open
       headSha: pr.headRefOid,
       autoMergeArmed: pr.autoMergeRequest != null,
       reviewSummary: undefined,
+      // W1-T100: the ci-log fix mode's input — only worth fetching when checks
+      // are actually red (a PR gate that already needs blocked_ci's rung).
+      ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, pr.statusCheckRollup) : undefined,
     };
   });
 }
@@ -3132,7 +3199,12 @@ function buildSweepEffects(
       );
     },
 
-    dispatchFix: async (pr, unmet) => {
+    dispatchFix: async (pr, evidence) => {
+      // W1-T100: `evidence.ciFailures` is defined ONLY for a blocked_ci
+      // dispatch (runSweep/routeFix set it, undefined otherwise) — the SAME
+      // discriminator both callers use to pick this evidence shape.
+      const isCiLog = evidence.ciFailures !== undefined;
+      const unmet = evidence.unmetCriteria;
       const task = plan.tasks.find((t) => t.id === pr.taskId);
       if (!task) {
         log("sweep.fix.no_task", { pr_number: pr.prNumber, task_id: pr.taskId });
@@ -3164,17 +3236,30 @@ function buildSweepEffects(
         });
         const budgetUsd = task.budget_usd ?? DEFAULT_BUDGET_USD;
 
-        // A failing verdict seeded from the ledger's unmet criteria. The fix rung
-        // re-derives the AUTHORITATIVE verdict via runReview after each strike.
-        const initialReview: ReviewVerdict & { headSha: string; reviewerOutcome: string } = {
-          state: "failure",
-          criteria: unmet,
-          testTheater: false,
-          summary: pr.reviewSummary ?? `sweep-reconstructed failing review (${unmet.length} unmet)`,
-          floorDegraded: false,
-          headSha: pr.headSha,
-          reviewerOutcome: "sweep-reconstructed",
-        };
+        // A failing verdict seeded from the ledger's unmet criteria (review mode)
+        // — OR, for a blocked_ci dispatch (W1-T100), a placeholder verdict naming
+        // that NO review has run yet (ci-log mode's own precondition: a review
+        // only runs once CI is green). Either way, the fix rung re-derives the
+        // AUTHORITATIVE verdict via runReview after each strike.
+        const initialReview: ReviewVerdict & { headSha: string; reviewerOutcome: string } = isCiLog
+          ? {
+              state: "failure",
+              criteria: [],
+              testTheater: false,
+              summary: `sweep-reconstructed: required checks red, no review posted yet (${(evidence.ciFailures ?? []).length} failing check(s))`,
+              floorDegraded: false,
+              headSha: pr.headSha,
+              reviewerOutcome: "sweep-reconstructed-ci-log",
+            }
+          : {
+              state: "failure",
+              criteria: unmet,
+              testTheater: false,
+              summary: pr.reviewSummary ?? `sweep-reconstructed failing review (${unmet.length} unmet)`,
+              floorDegraded: false,
+              headSha: pr.headSha,
+              reviewerOutcome: "sweep-reconstructed",
+            };
 
         // W1-T78: an operator's answer to a PRIOR clarification question
         // (routed here by the DISPOSITION_RULES "answered" row) re-arms this
@@ -3207,6 +3292,7 @@ function buildSweepEffects(
           strikeCap,
           initialReview,
           constraint: pr.pendingAnswer?.constraint,
+          ciFailures: evidence.ciFailures,
           reviewBase: { owner, repo, headCheckoutDir: worktreePath, reviewerMount },
           deps: {
             // Fresh-spawn adapter: an empty resumeSessionId (cold PR) becomes a
@@ -3362,12 +3448,21 @@ export async function routeFix(
   }
   const { disposition, reason } = deriveDisposition(pr, policy);
   if (disposition === "blocked-fixable") {
-    await deps.dispatchFix(pr, pr.unmetCriteria);
+    // W1-T100: the SAME evidence-shape selection runSweep uses, off the SAME
+    // exported `isBlockedCi` predicate (never a second, independently-hardcoded
+    // check) — a failing review carries the unmet set, a blocked_ci PR carries
+    // ci-log evidence instead.
+    await deps.dispatchFix(
+      pr,
+      isBlockedCi(pr) ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] } : { unmetCriteria: pr.unmetCriteria },
+    );
     return { outcome: "fixed", reason };
   }
   // Strike cap honored: the SAME rule the sweep policy uses to route to escalate
-  // (failing review + strikes already at/over cap) — rmd fix never bypasses it.
-  if (pr.reviewState === "failure" && pr.priorStrikes >= policy.strikeCap) {
+  // (failing review OR blocked_ci — checks red, no review yet — with strikes
+  // already at/over cap; W1-T100 generalizes this from review-only, one ladder,
+  // one exhaustion route) — rmd fix never bypasses it.
+  if ((pr.reviewState === "failure" || isBlockedCi(pr)) && pr.priorStrikes >= policy.strikeCap) {
     // W1-T78: the SAME clarification-question rendering the sweep uses — one
     // rung, one implementation, three callers now (drain live / sweep cold /
     // rmd fix bootstrap).
@@ -3433,12 +3528,13 @@ async function fixCommand(rest: string[]): Promise<number> {
   const ledger = readLedgerLines(ledgerPath);
   const taskId = taskIdFromBody(raw.body ?? "");
   const reviewState = reviewStateFromRollup(raw.statusCheckRollup);
+  const checksState = checksStateFromRollup(raw.statusCheckRollup);
   const pr: OpenPrView = {
     prNumber: raw.number,
     prUrl: raw.url,
     taskId,
     reviewState,
-    checksState: checksStateFromRollup(raw.statusCheckRollup),
+    checksState,
     unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
     priorStrikes: priorStrikesFor(ledger, taskId),
     strikeHistory: deriveStrikeHistory(ledger, taskId),
@@ -3449,6 +3545,8 @@ async function fixCommand(rest: string[]): Promise<number> {
     headSha: raw.headRefOid,
     autoMergeArmed: raw.autoMergeRequest != null,
     reviewSummary: undefined,
+    // W1-T100: the ci-log fix mode's input — see buildOpenPrViews.
+    ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, raw.statusCheckRollup) : undefined,
   };
 
   const planPath =
