@@ -74,8 +74,9 @@ test("isolationProbePrompt: EXCLUDES Claude Code's own find/grep/rg tool wrapper
     assert.ok(p.includes(w), `the prompt's exclusion filter must name the Claude Code wrapper '${w}'`);
   }
   assert.match(p, /\$NF !~/); // awk excludes functions whose name matches a wrapper
-  // The wrappers are exactly find/grep/rg — a tight, explicit list (fail-closed on any other name).
-  assert.deepEqual([...CLAUDE_CODE_TOOL_WRAPPERS], ["find", "grep", "rg"]);
+  // The wrappers are exactly find/grep/rg/pkill — a tight, explicit list (fail-closed on any other name).
+  // pkill added CLI >= 2.1.214 (2026-07-18 auto-update; live fixture W3-T1a [pkill]).
+  assert.deepEqual([...CLAUDE_CODE_TOOL_WRAPPERS], ["find", "grep", "rg", "pkill"]);
 });
 
 // ── probeIsolation: the fail-closed gate, via an injected executor ──────────
@@ -201,4 +202,28 @@ test("probeIsolation: the IsolationError NAMES the inherited functions when the 
   // The named state is also on the dedicated ledger event.
   const failed = events.find((e) => e.step === "isolation_preflight_failed");
   assert.equal(failed?.extra?.function_names, "claude");
+});
+
+// ── pkill (CLI >= 2.1.214) allowlist: the first firing of #184's named probe ──
+// Live block W3-T1a-1784377428404 reported "1 function(s) [pkill]" coincident with
+// the 2.1.214 auto-update; pkill is CC self-protection plumbing, not operator state.
+
+test("pkill is allowlisted: in the count-regex AND stripped by the parser, so a pkill-only shell PASSES isolation", () => {
+  // (1) the awk exclusion regex — generated from the const — now names pkill, so
+  //     the WORKER's function count excludes it (a pkill-only shell counts 0).
+  assert.ok(isolationProbePrompt().includes("/^(find|grep|rg|pkill)$/"));
+  // (2) the parser's defensive name filter also strips pkill (matches the count).
+  const r = parseIsolationReport("REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: pkill");
+  assert.equal(r?.functionNames, undefined); // pkill ⇒ no operator names
+  // (3) with pkill excluded the count is 0 → the verdict is isolated (the block clears).
+  assert.equal(assessIsolation({ aliasCount: 0, functionCount: 0 }).isolated, true);
+});
+
+test("the invariant is intact: allowlisting pkill does NOT loosen fail-closed — any OTHER unlisted name still FAILS with the name surfaced", () => {
+  const v = assessIsolation({ aliasCount: 0, functionCount: 1, functionNames: "claude" });
+  assert.equal(v.isolated, false);
+  assert.match(v.reason, /1 function\(s\) \[claude\]/);
+  // A mixed report strips ONLY the wrapper (pkill); the real operator leak (claude) survives to fail closed.
+  const r = parseIsolationReport("REPORT\naliases: 0\nfunctions: 1\nalias_names: -\nfunction_names: claude pkill");
+  assert.equal(r?.functionNames, "claude");
 });

@@ -51,12 +51,26 @@ import { spawnWorker, type SpawnWorkerArgs } from "./worker.js";
  */
 
 /**
- * Claude Code's OWN Bash-tool wrapper function names (CLI ≥ 2.1.211) — excluded
+ * Claude Code's OWN Bash-tool / self-protection wrapper function names — excluded
  * from the isolation function count because they are the tool's plumbing, not
  * operator shell state (see file header). Kept deliberately SMALL and explicit:
- * a name not on this list is treated as operator leakage (fail closed).
+ * a name not on this list is treated as operator leakage (fail closed). Each entry
+ * is EXPLICIT and version-annotated — never pattern-absorbed — so the NEXT drift
+ * still surfaces as a named block rather than being silently swallowed.
+ *
+ * SINGLE SOURCE OF TRUTH: the probe prompt's awk exclusion regex and the parser's
+ * name filter both DERIVE from this const — adding a name here updates all three.
  */
-export const CLAUDE_CODE_TOOL_WRAPPERS = ["find", "grep", "rg"] as const;
+export const CLAUDE_CODE_TOOL_WRAPPERS = [
+  // find/grep/rg: the Bash-tool search wrappers, CLI >= 2.1.211.
+  "find",
+  "grep",
+  "rg",
+  // pkill: added CLI >= 2.1.214 (2026-07-18 auto-update; live fixture W3-T1a [pkill]).
+  // Per the module doc, additions are EXPLICIT and version-annotated — never
+  // pattern-absorbed — so the next drift also surfaces.
+  "pkill",
+] as const;
 
 /** Named error so callers (and tests) can assert the fail-closed fired by type. */
 export class IsolationError extends Error {
@@ -79,7 +93,7 @@ export interface IsolationEvidence {
    */
   aliasNames?: string;
   /**
-   * The NAMES of the inherited functions (space-joined, find/grep/rg wrappers
+   * The NAMES of the inherited functions (space-joined, CLAUDE_CODE_TOOL_WRAPPERS
    * excluded to match the count); omitted when unreported or none. Observability
    * only — the fail-closed decision is still purely the counts.
    */
@@ -137,7 +151,8 @@ export type ProbeExecutor = () => Promise<ProbeExecResult>;
 
 /** The probe worker prompt: report inherited alias/function counts, read-only.
  * The function count EXCLUDES Claude Code's own {@link CLAUDE_CODE_TOOL_WRAPPERS}
- * (find/grep/rg) — those are tool plumbing, not operator state (see file header).
+ * (find/grep/rg/pkill) — those are tool plumbing, not operator state (see file
+ * header). The awk filter is generated from the const, so it tracks additions.
  * `awk` is used for the filter because it is NOT one of the wrapped commands. */
 export function isolationProbePrompt(): string {
   const wrappers = CLAUDE_CODE_TOOL_WRAPPERS.join("|");
@@ -148,12 +163,13 @@ export function isolationProbePrompt(): string {
     "1) alias | wc -l        (count of shell aliases this worker inherited)",
     `2) declare -F | awk '$NF !~ /^(${wrappers})$/ {c++} END {print c+0}'`,
     `   (count of shell functions this worker inherited, EXCLUDING Claude Code's`,
-    `    OWN find/grep/rg tool wrappers — those are injected into every Claude Code`,
-    `    Bash session and are NOT operator shell state)`,
+    `    OWN tool / self-protection wrappers named in the awk filter above`,
+    `    (find/grep/rg/pkill) — those are injected into every Claude Code Bash`,
+    `    session and are NOT operator shell state)`,
     `3) alias | awk '{sub(/^alias /, ""); sub(/=.*/, ""); printf "%s ", $0}'`,
     "   (the NAMES of those aliases, space-separated — empty output means none)",
     `4) declare -F | awk '$NF !~ /^(${wrappers})$/ {printf "%s ", $NF}'`,
-    `   (the NAMES of those functions, the SAME find/grep/rg exclusion as command 2`,
+    `   (the NAMES of those functions, the SAME wrapper exclusion as command 2`,
     "    — empty output means none)",
     "End with exactly:",
     "REPORT",
