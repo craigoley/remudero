@@ -4555,3 +4555,48 @@
   files: [.github/workflows/ci-gate.yml]
   status: queued
   attempts: 0
+
+- id: W1-T113
+  title: "Toolchain resolution + spawn-infra degradation — resolve the claude executable at spawn, refuse legibly, and NEVER crash-loop silently (the vanished-binary incident)"
+  repo: remudero
+  depends_on: [W1-T12b]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (2026-07-18 daemon logs): a Claude Code auto-update migrated the install off
+    /Users/craigoleyagent/.npm-global/bin/claude mid-operation — W3-T1a's implement worker ran, its fix
+    strike minutes later could not spawn ('Claude Code native binary not found'), and the daemon then
+    CRASH-LOOPED: error -> process exit -> KeepAlive restart -> identical failure every ~90s, five
+    consecutive polls, ZERO escalations, zero backoff. Two defects: the executable path is pinned while
+    the toolchain self-updates (the stale-binary class in its most literal form — the pkill drift's
+    sibling, one layer deeper), and a spawn-INFRASTRUCTURE failure is treated as a fatal crash instead
+    of a degraded state the daemon reports and survives."
+  design: |
+    (i) RESOLUTION: resolve the executable at spawn time — env override, then PATH, then the known
+    install locations as a DATA table (npm-global, ~/.local/bin, the native installer path — VERIFY the
+    current native default from CC docs in the checkout, distrust this prompt's memory); cache per
+    process; log the resolved path once at daemon boot.
+    (ii) PREFLIGHT: worker settings validation gains executable-exists + executable-runs (--version);
+    absence fails THE RUN as an infrastructure verdict (blocked_toolchain — the W1-T91 classification:
+    never a task defect) with every searched path named in the reason.
+    (iii) DEGRADE, DON'T DIE: the daemon catches spawn-infra errors, escalates ONCE per distinct cause
+    (dedup via the W1-T104 discipline — content-keyed, an open toolchain issue suppresses repeats), and
+    keeps POLLING with backoff on the failing dispatch — sweeps and status work continue; the process
+    does not exit. The five-identical-crashes-90s-apart log is the regression fixture.
+  acceptance:
+    - claim: "the vanished-binary fixture resolves via the location table; a fully-absent toolchain fails the run as blocked_toolchain naming every searched path"
+      proof: "unit tests over injected fs/exec: pinned-path-absent + table-hit -> spawn proceeds with the resolved path logged; all-absent -> blocked_toolchain verdict, searched paths in the reason, run refused cleanly"
+    - claim: "the daemon survives spawn-infra failure: one escalation, continued polling, backoff"
+      proof: "unit test: a spawner throwing the not-found error across 3 poll ticks -> exactly ONE escalation, daemon loop continues (no process exit), dispatch attempts backed off while sweep still runs"
+    - claim: "the location table is data"
+      proof: "unit test: adding a location row resolves a seeded path with zero resolution-code changes"
+  risk: high
+  origin: architect
+  plan_refs: ["§9", "§4B", "P23"]
+  files: [src/lib/worker.ts, src/lib/daemon.ts]
+  status: queued
+  attempts: 0
+  note: "Third toolchain-drift incident this week (2.1.214 pkill wrapper; the CLI-behind-main class W1-T79
+    tracks; now the install location itself). The pattern: the harness's substrate self-updates beneath
+    it — every pinned assumption about the toolchain needs a resolve-or-refuse-legibly path."
