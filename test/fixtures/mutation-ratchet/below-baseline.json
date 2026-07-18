@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "1.0",
+  "files": {
+    "src/lib/fixture.ts": {
+      "mutants": [
+        { "id": "1", "mutatorName": "EqualityOperator", "status": "Killed" },
+        { "id": "2", "mutatorName": "EqualityOperator", "status": "Killed" },
+        { "id": "3", "mutatorName": "StringLiteral", "status": "Survived" },
+        { "id": "4", "mutatorName": "StringLiteral", "status": "Survived" },
+        { "id": "5", "mutatorName": "StringLiteral", "status": "Survived" },
+        { "id": "6", "mutatorName": "StringLiteral", "status": "Survived" },
+        { "id": "7", "mutatorName": "StringLiteral", "status": "Survived" },
+        { "id": "8", "mutatorName": "StringLiteral", "status": "Survived" },
+        { "id": "9", "mutatorName": "StringLiteral", "status": "Survived" },
+        { "id": "10", "mutatorName": "StringLiteral", "status": "Survived" }
+      ]
+    }
+  }
+}

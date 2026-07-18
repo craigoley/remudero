@@ -64,8 +64,10 @@ jobs:
       # touching sandbox/hooks/env/deny-floor via containmentTrigger() (src/lib/specialist-panel.ts).
       # `coverage-ratchet` (W1-T25, §5 TIER 2 quality gate 1/4) added: UNCONDITIONAL (no path
       # filter, no `if:`), same safety property as `ci`/`lint-plan` above.
+      # `mutation-ratchet` (W1-T96, §5 TIER 2 quality gate 2/4) added: same UNCONDITIONAL shape —
+      # no path filter, runs every PR (scoped internally to one module — see ci.yml's comment).
       REQUIRED: >-
-        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet"]
+        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet"]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
       IGNORE: >-

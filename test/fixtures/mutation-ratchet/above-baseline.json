@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "1.0",
+  "files": {
+    "src/lib/fixture.ts": {
+      "mutants": [
+        { "id": "1", "mutatorName": "EqualityOperator", "status": "Killed" },
+        { "id": "2", "mutatorName": "EqualityOperator", "status": "Killed" },
+        { "id": "3", "mutatorName": "EqualityOperator", "status": "Killed" },
+        { "id": "4", "mutatorName": "EqualityOperator", "status": "Killed" },
+        { "id": "5", "mutatorName": "EqualityOperator", "status": "Killed" },
+        { "id": "6", "mutatorName": "EqualityOperator", "status": "Killed" },
+        { "id": "7", "mutatorName": "EqualityOperator", "status": "Killed" },
+        { "id": "8", "mutatorName": "EqualityOperator", "status": "Killed" },
+        { "id": "9", "mutatorName": "ConditionalExpression", "status": "Timeout" },
+        { "id": "10", "mutatorName": "BlockStatement", "status": "NoCoverage" },
+        { "id": "11", "mutatorName": "ArithmeticOperator", "status": "Ignored" }
+      ]
+    }
+  }
+}

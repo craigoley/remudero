@@ -11,5 +11,11 @@ dist/
 # regenerated fresh every run — never committed)
 coverage/
 
+# generated mutation-testing reports (W1-T96 mutation-ratchet gate consumes
+# reports/mutation/mutation.json, regenerated fresh every run — never committed) + Stryker's
+# own scratch sandbox directory
+reports/mutation/
+.stryker-tmp/
+
 # os / editor
 .DS_Store

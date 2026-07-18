@@ -1,0 +1,3 @@
+{
+  "_comment": "report with no `files` key at all -- exercises the `report.files ?? {}` fallback"
+}
