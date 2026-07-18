@@ -6,7 +6,8 @@
     "command": "npm test"
   },
   "mutate": ["src/lib/classify.ts"],
-  "ignorePatterns": ["tsconfig.json"],
+  "tsconfigFile": "tsconfig.stryker-unused.json",
+  "disableTypeChecks": "{src,test}/**/*.ts",
   "reporters": ["clear-text", "progress", "json"],
   "jsonReporter": {
     "fileName": "reports/mutation/mutation.json"
