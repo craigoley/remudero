@@ -5,6 +5,7 @@ import {
   REVIEW_CONTEXT,
   buildReviewPrompt,
   checkCallersAudited,
+  checkDocsAwareness,
   checkOneConcern,
   checkRefactorHonesty,
   checkSatisfiedByGuard,
@@ -469,6 +470,26 @@ const SATISFIED_BY_DIFF = [
   '+      satisfied_by: "#99"',
 ].join("\n");
 
+// A gate-surface change (src/lib/review.ts) with NO accompanying docs/ change.
+const SURFACE_NO_DOCS_DIFF = [
+  "diff --git a/src/lib/review.ts b/src/lib/review.ts",
+  "+++ b/src/lib/review.ts",
+  "@@",
+  "+export const NEW_GATE_ITEM = true;",
+].join("\n");
+
+// The SAME gate-surface change, but docs/ is updated alongside it in the same diff.
+const SURFACE_WITH_DOCS_DIFF = [
+  "diff --git a/src/lib/review.ts b/src/lib/review.ts",
+  "+++ b/src/lib/review.ts",
+  "@@",
+  "+export const NEW_GATE_ITEM = true;",
+  "diff --git a/docs/review-gate.md b/docs/review-gate.md",
+  "+++ b/docs/review-gate.md",
+  "@@",
+  "+Documented the new gate item.",
+].join("\n");
+
 test("rubric one-concern: a two-concern diff FAILS; a single-concern diff PASSES", () => {
   const two = checkOneConcern(TWO_CONCERN_DIFF);
   assert.equal(two.pass, false);
@@ -497,6 +518,26 @@ test("rubric refactor-honesty: behavior change labelled 'refactor' FAILS; a pure
   assert.equal(checkRefactorHonesty(PURE_REFACTOR_DIFF, "Refactor: calc becomes an arrow fn").pass, true);
 });
 
+test("rubric docs-awareness (W1-T30): a gate-surface change with no docs update and no stated reason FAILS; a doc update PASSES; a stated reason PASSES; non-surface diffs never trigger it", () => {
+  const noDocs = checkDocsAwareness(SURFACE_NO_DOCS_DIFF, "Added a new gate item.");
+  assert.equal(noDocs.pass, false);
+  assert.match(noDocs.reason, /docs/i);
+  // The identical surface change, with docs/ updated in the same diff, passes.
+  assert.equal(checkDocsAwareness(SURFACE_WITH_DOCS_DIFF, "Added a new gate item.").pass, true);
+  // No docs/ touched, but the report STATES why not — also passes.
+  assert.equal(
+    checkDocsAwareness(
+      SURFACE_NO_DOCS_DIFF,
+      "Added a new gate item. no docs update because it is an internal-only helper, never user-facing.",
+    ).pass,
+    true,
+  );
+  // A bare "no docs update" with nothing stated after it is NOT an excuse — still fails.
+  assert.equal(checkDocsAwareness(SURFACE_NO_DOCS_DIFF, "Added a new gate item. no docs update.").pass, false);
+  // A diff touching no CLI/config/gate/verdict surface never trips the item.
+  assert.equal(checkDocsAwareness(CLEAN_DIFF, "").pass, true);
+});
+
 test("rubric satisfied_by guard: a worker-authored satisfied_by FAILS; a plan-only human PR PASSES", () => {
   // A worker (non-plan-only) adding satisfied_by to its own criterion = editing the criteria.
   const worker = checkSatisfiedByGuard(SATISFIED_BY_DIFF, { planOnly: false, humanAuthored: false });
@@ -508,12 +549,12 @@ test("rubric satisfied_by guard: a worker-authored satisfied_by FAILS; a plan-on
   assert.equal(checkSatisfiedByGuard(CLEAN_DIFF).pass, true);
 });
 
-test("judgeRubric: a clean single-concern diff passes ALL FOUR items + the guard", () => {
+test("judgeRubric: a clean single-concern diff passes ALL FIVE items + the guard", () => {
   const r = judgeRubric({ diff: CLEAN_DIFF, report: CLEAN_REPORT });
   assert.equal(r.pass, true, JSON.stringify(r.failures));
   assert.deepEqual(
     r.items.map((i) => i.key).sort(),
-    ["callers-audited", "one-concern", "refactor-honesty", "satisfied-by-guard", "test-theater"],
+    ["callers-audited", "docs-awareness", "one-concern", "refactor-honesty", "satisfied-by-guard", "test-theater"],
   );
   assert.ok(r.items.every((i) => i.pass));
 });
@@ -531,6 +572,9 @@ test("judgeRubric: each falsifier trips its own item and fails the whole rubric"
 
   const dishonest = judgeRubric({ diff: BEHAVIOR_REFACTOR_DIFF, report: "just a refactor" });
   assert.ok(dishonest.failures.some((f) => f.key === "refactor-honesty"));
+
+  const noAwareness = judgeRubric({ diff: SURFACE_NO_DOCS_DIFF, report: "added a new gate item" });
+  assert.ok(noAwareness.failures.some((f) => f.key === "docs-awareness"));
 
   const sneaky = judgeRubric({ diff: SATISFIED_BY_DIFF, report: "unblock myself" });
   assert.ok(sneaky.failures.some((f) => f.key === "satisfied-by-guard"));

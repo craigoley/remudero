@@ -873,7 +873,9 @@ thesis of §Mission is only real if the gates are real. Structure: **three ENFOR
    items, each a checked question: **one concern per PR**; **all callers audited** (partial-fix drift —
    a change that fixes one call site and orphans the rest); **test theater** (assertions that assert
    nothing / snapshots-of-nothing / tests that kill no mutants); **refactor-phase honesty** (a "refactor"
-   that changes behavior); coupling/cohesion; **no worker-authored `satisfied_by`** (a diff that ADDS a
+   that changes behavior); coupling/cohesion; **docs awareness** (§12A — a diff changing user-visible
+   behavior — CLI surface, config, gate, verdicts — must update `docs/` or state why not in the REPORT,
+   W1-T30); **no worker-authored `satisfied_by`** (a diff that ADDS a
    `satisfied_by` line to `plan/tasks.yaml` FAILS unless the PR is plan-only and human-authored —
    `satisfied_by` is Architect-only; a worker adding it to its own blocking criterion is editing the
    criteria to match the diff, Standing rule 15). TDD Guard's own author documented that mechanical
