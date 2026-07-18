@@ -25,6 +25,7 @@
     "build": "tsc -p tsconfig.json",
     "test": "node --test --import tsx \"test/**/*.test.ts\"",
     "lint-plan": "tsx src/run-task.ts lint-plan",
+    "depcruise": "depcruise src --config .dependency-cruiser.cjs",
     "spike": "tsx src/spike.ts"
   },
   "dependencies": {
@@ -34,6 +35,8 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "@types/node": "^22.20.1"
+    "@swc/core": "^1.15.43",
+    "@types/node": "^22.20.1",
+    "dependency-cruiser": "^18.1.0"
   }
 }

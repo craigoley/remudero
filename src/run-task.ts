@@ -16,6 +16,8 @@ import {
   type Config,
 } from "./lib/config.js";
 import { buildWorkerEnv } from "./lib/env.js";
+import type { RunResult } from "./lib/run-result.js";
+export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
 import type { Tier, TierDetection } from "./lib/tier.js";
 import {
@@ -1071,29 +1073,6 @@ export async function runFixRung(opts: {
   deps.log("fix.exhausted", { strikes, issue_url: issueUrl });
   deps.say(`fix rung: exhausted after ${strikes} strike(s) — escalated: ${issueUrl}`);
   return { outcome: "escalated", review, strikes, issueUrl };
-}
-
-export interface RunResult {
-  taskId: string;
-  runId: string;
-  prUrl?: string;
-  merged: boolean;
-  costUsd: number;
-  verdict:
-    | "merged"
-    | "blocked"
-    | "blocked_ci"
-    | "blocked_review"
-    | "blocked_budget"
-    | "blocked_containment"
-    | "blocked_isolation"
-    | "blocked_inflight"
-    | "blocked_git_fetch"
-    | "blocked_illformed"
-    | "no_pr"
-    | "blocked_transient"
-    | "pr_attribution_failed"
-    | "failed";
 }
 
 /** The verdict + ledger payload a worker's ERROR envelope maps to. */

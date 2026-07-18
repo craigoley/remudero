@@ -12,7 +12,7 @@
  * needs the diagnose loop + daemon (W1-T46, the successor to this stop-on-block).
  */
 
-import type { RunResult } from "../run-task.js";
+import type { RunResult } from "./run-result.js";
 import { headroomExhausted } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import { unmetDependencies, type Plan, type Task } from "./plan.js";

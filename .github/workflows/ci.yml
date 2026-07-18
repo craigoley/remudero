@@ -78,3 +78,29 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: npm run --silent lint-plan -- --base "$BASE_SHA"
+
+  depcruise:
+    # MASTER-PLAN §5 TIER 3 (W1-T26) — the architecture fitness gate. The games'
+    # purity gates ("src/game imports no Three.js") generalized into a
+    # declarable layering rule: `src/lib` must not import the CLI entrypoint
+    # (`src/run-task.ts`) or the scratch spike script (`src/spike.ts`) — see
+    # `.dependency-cruiser.cjs`'s `lib-no-spike-or-cli` rule and its falsifier
+    # in `test/architecture-fitness.test.ts` (a planted violation proves the
+    # rule is ACTIVE, not merely declared).
+    #
+    # Runs UNCONDITIONALLY on every PR (no path filter) — same reasoning as
+    # `lint-plan`/`leak-grep`: cheap static analysis, and a path-filtered
+    # REQUIRED check that can go silently absent is the synthwatch #102
+    # deadlock class ci-gate.yml exists to avoid. A violating import anywhere
+    # under src/lib fails this job, which ci-gate's REQUIRED list waits on.
+    name: depcruise
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: dependency-cruiser fitness rules
+        run: npm run --silent depcruise

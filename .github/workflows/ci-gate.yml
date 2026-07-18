@@ -57,8 +57,10 @@ jobs:
       # `lint-plan` (W1-T20c, §5C Layer A) added: UNCONDITIONAL (no path filter, runs every PR),
       # same safety property as `ci` — a path-filtered required check is the synthwatch #102
       # deadlock class this list must never reproduce.
+      # `depcruise` (W1-T26, §5 TIER 3 architecture fitness) added: same UNCONDITIONAL shape —
+      # no path filter, runs every PR.
       REQUIRED: >-
-        ["ci", "lint-plan"]
+        ["ci", "lint-plan", "depcruise"]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
       IGNORE: >-

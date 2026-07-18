@@ -24,7 +24,7 @@
  * already does — this pure module never touches the filesystem.
  */
 
-import type { RunResult } from "../run-task.js";
+import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { nextRunnable, type MergedSet, type OpenPrCheck } from "./drain.js";
 import { headroomExhausted } from "./headroom.js";
