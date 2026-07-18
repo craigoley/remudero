@@ -4440,3 +4440,46 @@
   files: [src/lib/escalate.ts]
   status: queued
   attempts: 0
+
+- id: W1-T105
+  title: "Follow-up harvest — worker reports declare follow-ups (research | task | action), the ledger carries them, the retro mints proposal candidates; nothing discovered mid-task is lost (rule 15 preserved)"
+  repo: remudero
+  depends_on: [W1-T51]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Operator requirement, verbatim: 'ensure that if any implementations come back with follow-up
+    research, actions, tasks, etc — they get added to the plan.' The manual version ran all session and
+    is the proof of value: worker closing notes became W1-T81 (the #146 linter FP/FN report), W1-T92 (the
+    #153 sizing flag), W1-T102 (the #177 hand-fix's stale-status finding) — each harvested by a HUMAN
+    reading reports. Grep-verified 2026-07-18: no follow-up field exists in the report contract, no
+    harvest exists in the retro — a worker's discovery survives today only if a person notices it."
+  design: |
+    (i) CONTRACT: the §2 worker report gains an OPTIONAL '## Follow-ups' section — one typed entry per
+    line (research: | task: | action:), each with a one-line why; worker prompts (implement, fix, recon)
+    instruct: anything discovered that is OUT OF SCOPE for the one concern goes here, never into the
+    diff. (ii) LEDGER: report ingestion parses the section into a report.followups event (typed entries
+    + run/task/PR provenance); absent section => no event, byte-identical behavior. (iii) HARVEST: the
+    retro gather collects unharvested followups and renders them as PROPOSAL CANDIDATES in the retro
+    PR's proposals section — rule 15 intact: candidates for Architect ratification, NEVER auto-filed
+    tasks; each candidate cites its originating run/PR verbatim. Harvested entries are ledger-marked
+    (followup.harvested) so no candidate mints twice. (iv) DEDUP: an entry whose text matches an open
+    proposal or an existing task title is recorded as followup.deduped, not re-minted. (v) When P25's
+    ratification inbox ratifies, candidates surface there — this task is a named producer for it.
+  acceptance:
+    - claim: "a report with a typed Follow-ups section ledgers the entries with provenance"
+      proof: "unit test: fixture report (one research:, one task: line) -> report.followups event carrying both entries, types, and the run/task/PR refs"
+    - claim: "the retro mints each unharvested entry as ONE cited proposal candidate, exactly once"
+      proof: "unit test: fixture ledger with two followups (one already followup.harvested) -> retro output contains one new candidate citing its run/PR; second retro over the updated ledger mints zero"
+    - claim: "absent sections and duplicate entries change nothing"
+      proof: "unit tests: a report without the section -> no event, existing report parsing byte-identical; an entry matching an open proposal title -> followup.deduped ledgered, no candidate"
+  risk: high
+  origin: architect
+  plan_refs: ["§2", "§Self-improvement", "P25"]
+  files: [src/run-task.ts, src/lib/retro.ts]
+  status: queued
+  attempts: 0
+  note: "The automation of the Architect-harvest role this session performed by hand. Composes with
+    W1-T87 (success mining) and W1-T73 (degraded-success mining) as the third retro intake; the P25
+    inbox is its consumer surface."
