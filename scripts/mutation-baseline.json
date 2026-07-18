@@ -1,0 +1,10 @@
+{
+  "_comment": "Mutation-testing ratchet floor (W1-T96, MASTER-PLAN §5 TIER 2 gate 2/4). Captured from a real `npx stryker run` against stryker.conf.json's scoped mutate target (src/lib/classify.ts) via the command test runner (`npm test`). SCOPE NOTE: mutation testing with the command runner reruns the whole suite per mutant (no coverage-based test filtering exists for Node's built-in test runner yet), so the mutate glob is deliberately scoped to one pure-logic module today to keep the CI job inside ci-gate.yml's 15-minute required-check wait ceiling -- widening it later is a one-line glob change here plus a baseline recapture, no script or CI changes required. Never lower this number to make a PR pass -- raise it (ratchet up) when the mutation score genuinely improves; a test-suite-weakening PR must go CI-red on scripts/mutation-ratchet.mjs.",
+  "capturedAt": "2026-07-18",
+  "mutateScope": ["src/lib/classify.ts"],
+  "scorePct": 75.92,
+  "killed": 70,
+  "timeout": 12,
+  "survived": 26,
+  "noCoverage": 0
+}

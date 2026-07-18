@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "1.0",
+  "files": {
+    "src/lib/fixture.ts": {
+      "_comment": "no `mutants` key on this file record -- exercises the `mutants ?? []` fallback"
+    }
+  }
+}

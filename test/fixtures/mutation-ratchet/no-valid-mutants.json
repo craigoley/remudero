@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0",
+  "files": {
+    "src/lib/fixture.ts": {
+      "mutants": [
+        { "id": "1", "mutatorName": "ArithmeticOperator", "status": "Ignored" },
+        { "id": "2", "mutatorName": "ArithmeticOperator", "status": "CompileError" }
+      ]
+    }
+  }
+}
