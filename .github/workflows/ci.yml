@@ -104,3 +104,49 @@ jobs:
         run: npm ci
       - name: dependency-cruiser fitness rules
         run: npm run --silent depcruise
+
+  containment-probe:
+    # MASTER-PLAN §5 TIER 1 (W1-T28): "Containment probe as a REQUIRED check —
+    # on any diff touching sandbox / deny-floor / env" (WS-0 FF10a: a settings
+    # typo SILENTLY drops containment, so static validation alone is not
+    # enough — the probe is the empirical guarantee, W1-T2/W1-T28).
+    #
+    # Runs UNCONDITIONALLY on every PR (no path filter, no job `if:`) — same
+    # reasoning as `lint-plan`/`depcruise`: a path-filtered REQUIRED check that
+    # can go silently absent is the synthwatch #102 deadlock class ci-gate.yml
+    # exists to avoid (probe-path-filter.yml is the live fixture proving that
+    # shape). What's SCOPED to this PR's changed paths is the job's internal
+    # behavior, not its registration: `containment-diff-trigger.ts` reuses
+    # `containmentTrigger()` (src/lib/specialist-panel.ts) — the SAME
+    # deterministic predicate the Layer-4 containment specialist is routed by
+    # — so the CI gate and the advisory panel never drift on what counts as
+    # "touches sandbox/hooks/env/deny-floor".
+    #
+    # When the diff matches, this job runs the deterministic
+    # `test/containment.test.ts` suite (the fail-closed verdict logic — no
+    # network, no secrets, no live worker spawn) as an explicit, dedicated
+    # required assertion. When it doesn't match, the job still completes
+    # successfully so it never blocks an unrelated PR.
+    name: containment-probe
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Determine whether this diff touches sandbox/hooks/env/deny-floor
+        id: trigger
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git diff --name-only "${BASE_SHA}"...HEAD > changed-files.txt
+          cat changed-files.txt
+          node --import tsx .github/scripts/containment-diff-trigger.ts changed-files.txt
+      - name: Containment probe (test/containment.test.ts — required, this diff touches a containment-relevant path)
+        if: steps.trigger.outputs.matched == 'true'
+        run: node --test --import tsx test/containment.test.ts
