@@ -72,6 +72,18 @@ export interface IsolationEvidence {
   aliasCount: number;
   /** `declare -F | wc -l` as reported by the probe worker (NaN if unparseable). */
   functionCount: number;
+  /**
+   * The NAMES of the inherited aliases (space-joined) when the probe reported
+   * them; omitted when the report carried no `alias_names:` line (an OLD-prompt
+   * worker) or listed none. OBSERVABILITY ONLY — never consulted by the verdict.
+   */
+  aliasNames?: string;
+  /**
+   * The NAMES of the inherited functions (space-joined, find/grep/rg wrappers
+   * excluded to match the count); omitted when unreported or none. Observability
+   * only — the fail-closed decision is still purely the counts.
+   */
+  functionNames?: string;
 }
 
 /**
@@ -89,10 +101,15 @@ export function assessIsolation(e: IsolationEvidence): { isolated: boolean; reas
     };
   }
   if (e.aliasCount > 0 || e.functionCount > 0) {
+    // Observability (the W1-T91(i) direction, NOT completing that task): NAME the
+    // inherited state so one line replaces a diagnostics session. The `[names]`
+    // suffix appears ONLY when the probe reported names; absent ⇒ the reason is
+    // byte-identical to the count-only version a worker on the old prompt produces.
+    const named = (names?: string) => (names ? ` [${names}]` : "");
     return {
       isolated: false,
       reason:
-        `worker inherited ${e.aliasCount} alias(es) and ${e.functionCount} function(s) from operator ` +
+        `worker inherited ${e.aliasCount} alias(es)${named(e.aliasNames)} and ${e.functionCount} function(s)${named(e.functionNames)} from operator ` +
         "shell state — isolation is NOT holding on this host/run",
     };
   }
@@ -107,6 +124,10 @@ export interface ProbeExecResult {
   transcript: string;
   aliasCount: number;
   functionCount: number;
+  /** Inherited alias names (space-joined) when the probe reported them; omitted otherwise. */
+  aliasNames?: string;
+  /** Inherited function names (space-joined, wrappers excluded) when reported; omitted otherwise. */
+  functionNames?: string;
   /** Notional cost of the probe spawn (subscription) — surfaced so the run meters it. */
   costUsd?: number;
 }
@@ -122,28 +143,70 @@ export function isolationProbePrompt(): string {
   const wrappers = CLAUDE_CODE_TOOL_WRAPPERS.join("|");
   return [
     "You are an ISOLATION PREFLIGHT PROBE. READ-ONLY: use ONLY the Bash tool to run",
-    "these TWO commands, IN ORDER, and report the EXACT numbers. Do NOT create,",
+    "these commands, IN ORDER, and report the EXACT results. Do NOT create,",
     "modify, or delete any file — you have no write tool available for a reason.",
     "1) alias | wc -l        (count of shell aliases this worker inherited)",
     `2) declare -F | awk '$NF !~ /^(${wrappers})$/ {c++} END {print c+0}'`,
     `   (count of shell functions this worker inherited, EXCLUDING Claude Code's`,
     `    OWN find/grep/rg tool wrappers — those are injected into every Claude Code`,
     `    Bash session and are NOT operator shell state)`,
+    `3) alias | awk '{sub(/^alias /, ""); sub(/=.*/, ""); printf "%s ", $0}'`,
+    "   (the NAMES of those aliases, space-separated — empty output means none)",
+    `4) declare -F | awk '$NF !~ /^(${wrappers})$/ {printf "%s ", $NF}'`,
+    `   (the NAMES of those functions, the SAME find/grep/rg exclusion as command 2`,
+    "    — empty output means none)",
     "End with exactly:",
     "REPORT",
     "aliases: <exact number from command 1>",
     "functions: <exact number from command 2>",
+    "alias_names: <exact names from command 3, or - if command 3 printed nothing>",
+    "function_names: <exact names from command 4, or - if command 4 printed nothing>",
   ].join("\n");
 }
 
 /** Matches the probe's `aliases: N` / `functions: N` report lines, in order. */
 const REPORT_RE = /aliases:\s*(\d+)[\s\S]*?functions:\s*(\d+)/i;
+/** Optional name lines (added alongside the counts) — matched TOLERANTLY: a worker
+ * on the OLD prompt emits neither, and parsing is unchanged when they are absent. */
+const ALIAS_NAMES_RE = /alias_names:\s*(.+)/i;
+const FUNCTION_NAMES_RE = /function_names:\s*(.+)/i;
 
-/** Parse the probe transcript into raw counts; `null` if the report never appeared. */
-export function parseIsolationReport(transcript: string): { aliasCount: number; functionCount: number } | null {
+/** Normalize a reported names line to a space-joined display string, or `undefined`
+ * when the line was absent, a literal `-`, or (for functions) left with only wrappers.
+ * `excludeWrappers` re-applies the CLAUDE_CODE_TOOL_WRAPPERS filter in code so the
+ * names honor the SAME exclusion as the count regardless of what the worker emitted. */
+function normalizeNames(raw: string | undefined, excludeWrappers: boolean): string | undefined {
+  if (raw == null) return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === "-") return undefined;
+  let names = trimmed.split(/\s+/).filter((n) => n && n !== "-");
+  if (excludeWrappers) {
+    const wrappers = new Set<string>(CLAUDE_CODE_TOOL_WRAPPERS);
+    names = names.filter((n) => !wrappers.has(n));
+  }
+  return names.length ? names.join(" ") : undefined;
+}
+
+/**
+ * Parse the probe transcript into raw counts (and, when present, the inherited
+ * NAMES); `null` if the report never appeared. The name fields are added to the
+ * result ONLY when the probe reported them, so an old-prompt report parses to the
+ * exact same `{ aliasCount, functionCount }` shape as before.
+ */
+export function parseIsolationReport(
+  transcript: string,
+): { aliasCount: number; functionCount: number; aliasNames?: string; functionNames?: string } | null {
   const m = REPORT_RE.exec(transcript);
   if (!m) return null;
-  return { aliasCount: Number(m[1]), functionCount: Number(m[2]) };
+  const aliasNames = normalizeNames(ALIAS_NAMES_RE.exec(transcript)?.[1], false);
+  const functionNames = normalizeNames(FUNCTION_NAMES_RE.exec(transcript)?.[1], true);
+  const out: { aliasCount: number; functionCount: number; aliasNames?: string; functionNames?: string } = {
+    aliasCount: Number(m[1]),
+    functionCount: Number(m[2]),
+  };
+  if (aliasNames) out.aliasNames = aliasNames;
+  if (functionNames) out.functionNames = functionNames;
+  return out;
 }
 
 /**
@@ -186,6 +249,8 @@ function defaultExecutor(settingsFile: string, config: Config, budgetUsd?: numbe
         transcript,
         aliasCount: parsed?.aliasCount ?? NaN,
         functionCount: parsed?.functionCount ?? NaN,
+        aliasNames: parsed?.aliasNames,
+        functionNames: parsed?.functionNames,
         costUsd: probe.costUsd,
       };
     } finally {
@@ -216,6 +281,9 @@ export async function probeIsolation(opts: {
 
   const r = await exec();
   const evidence: IsolationEvidence = { aliasCount: r.aliasCount, functionCount: r.functionCount };
+  // Names are observability-only; carry them only when the probe reported them.
+  if (r.aliasNames) evidence.aliasNames = r.aliasNames;
+  if (r.functionNames) evidence.functionNames = r.functionNames;
   const verdict = assessIsolation(evidence);
   const costUsd = r.costUsd ?? 0;
   log("isolation.probe", {
@@ -223,16 +291,20 @@ export async function probeIsolation(opts: {
     reason: verdict.reason,
     alias_count: evidence.aliasCount,
     function_count: evidence.functionCount,
+    alias_names: evidence.aliasNames ?? null,
+    function_names: evidence.functionNames ?? null,
     cost_usd: costUsd,
   });
   if (!verdict.isolated) {
-    // Named error carrying the OBSERVED count (W1-T17 acceptance #1) — logged
-    // as its own ledger event, distinct from the run-level `verdict` line the
-    // caller (run-task.ts) appends when it converts this throw into a terminal
-    // run outcome.
+    // Named error carrying the OBSERVED count (W1-T17 acceptance #1) AND, when the
+    // probe reported them, the OBSERVED names — logged as its own ledger event,
+    // distinct from the run-level `verdict` line the caller (run-task.ts) appends
+    // when it converts this throw into a terminal run outcome.
     log("isolation_preflight_failed", {
       alias_count: evidence.aliasCount,
       function_count: evidence.functionCount,
+      alias_names: evidence.aliasNames ?? null,
+      function_names: evidence.functionNames ?? null,
       reason: verdict.reason,
     });
     throw new IsolationError(`isolation_preflight_failed: ${verdict.reason} — FAIL CLOSED, the run does not proceed`);
