@@ -4630,3 +4630,86 @@
   files: [src/run-task.ts]
   status: queued
   attempts: 0
+
+- id: W1-T110
+  title: "rmd inbox — the ratification inbox's deterministic core: Architect-drafted candidates + a rule-2 readiness predicate; deferred-with-trigger is never recommended (ratifies P25 i)"
+  repo: remudero
+  depends_on: [W1-T20c]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P25(i), operator-requested by name and now forced by the daemon commissioning:
+    the machine generates decisions on a five-minute cadence while ratification rides a chat ledger. The
+    field's 2026 finding is that approval controls fail by FATIGUE — reflexive approval is a documented
+    clickthrough vulnerability, and the cure is risk-tiering plus surfacing only what is genuinely
+    actionable [research: hitl-approval-fatigue-2026]. This task is the tiering: only READY proposals
+    ever surface, readiness is computed not asserted, and a proposal whose trigger has not fired is
+    DEFERRED-WITH-TRIGGER, never recommended (the dead-consumer discipline, now code)."
+  design: |
+    (a) DRAFT RUNG: for each ACTIVE proposal, a bounded Architect worker drafts the candidate
+    ratification — a tasks.yaml fragment + the stamp line — cached (state-side, never committed) and
+    invalidated when main moves past the proposal's evidence anchors. Drafting is the LLM's job;
+    everything after is deterministic.
+    (b) READINESS PREDICATE (rule 2, policy-as-data): READY = drafted tasks' deps all merged
+    (deriveStatus, corrections-supreme) AND the proposal's cited evidence anchors still grep-true on
+    main AND the drafted set passes rmd lint-plan AND no open conflicting proposal. Otherwise
+    DEP-UNMET / EVIDENCE-DRIFTED / DEFERRED-WITH-TRIGGER (a named unfired trigger, e.g. P19@WS-2),
+    each with the failing predicate named.
+    (c) rmd inbox renders the classification with the drafted tasks attached to READY items — the
+    reasoning rides with the recommendation, never a bare ask.
+  acceptance:
+    - claim: "the four-state fixture classifies correctly and only READY carries a draft"
+      proof: "unit test over injected deps: a seeded proposal set {ready, dep-unmet, evidence-drifted, deferred-with-trigger} -> exactly one READY with its lint-clean draft attached; each non-ready names its failing predicate; the deferred item names its trigger and is never marked recommended"
+    - claim: "readiness is deterministic and draft-cache invalidation is anchor-keyed"
+      proof: "unit tests: the predicate runs with the LLM stubbed out entirely; moving a fixture anchor flips READY -> EVIDENCE-DRIFTED and marks the cached draft stale"
+    - claim: "a draft that fails lint-plan is not READY"
+      proof: "unit test: a drafted fragment with a live-verb proof -> lint violation -> DEP state reported as draft-unclean, not surfaced as READY"
+  risk: high
+  origin: architect
+  plan_refs: ["P25", "§7", "§2"]
+  files: [src/lib/inbox.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+
+- id: W1-T111
+  title: "rmd approve / rmd reframe — one bit ratifies through the gate, feedback redrafts through the ledger; approve-rate is telemetry (ratifies P25 ii-iv)"
+  repo: remudero
+  depends_on: [W1-T110, W1-T8]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P25(ii)-(iv). The operator's requirement verbatim: 'just request a thumbs up on
+    each to agree, or a way to provide feedback to reframe/replan the item.' Intent stays separated from
+    execution: the bit INITIATES a plan PR that rides the full gate — rule 15's human-initiation
+    preserved, audit and revert first-class [research: hitl-approval-fatigue-2026]. And because the
+    field's failure mode is the rubber-stamp queue, the approve/reframe ratio is LEDGERED telemetry —
+    a sustained approval rate near 100% is a signal the readiness triggers are too loose, surfaced in
+    the retro, not discovered in a postmortem."
+  design: |
+    (ii) rmd approve <P##>: valid only for READY items; opens the plan PR carrying W1-T110's pre-drafted
+    lint-clean tasks + the RATIFIED stamp; ledgers ratify.approved. The gate reviews; auto-merge lands
+    it; nothing auto-files without the bit.
+    (iii) rmd reframe <P##> --feedback "<text>": ledgers ratify.reframed with the feedback verbatim;
+    invalidates the draft; the next inbox pass redrafts WITH the feedback in the Architect prompt —
+    the reframe history rides the proposal until resolution.
+    (iv) TRANSPORT v1: READY items surface through the existing digest + escalate with numbered options
+    (approve / reframe / defer) — no new UI; the §7 panel and WS-6 MCP upgrade the surface later.
+    Escalation dedup discipline applies (one open item per proposal).
+    TELEMETRY: the retro gather reports approve/reframe counts and the running approval rate.
+  acceptance:
+    - claim: "approve on a READY fixture produces exactly ONE plan-PR payload carrying the draft + stamp, and a ledger line; approve on a non-READY refuses naming the state"
+      proof: "unit test over injected git/gh deps: one branch, one PR call, payload deepEquals the cached draft + stamp; dep-unmet fixture -> refusal, zero PR calls"
+    - claim: "reframe ledgers feedback verbatim, invalidates the draft, and the redraft prompt carries it"
+      proof: "unit test: reframe fixture -> ratify.reframed with the text; next draft-rung invocation's rendered prompt contains the feedback; no PR opened"
+    - claim: "the approval-rate telemetry lands in the retro"
+      proof: "unit test: a seeded ledger with 3 approvals + 1 reframe -> the retro report carries 75% with both counts"
+  risk: high
+  origin: architect
+  plan_refs: ["P25", "§7", "§4"]
+  files: [src/lib/inbox.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Named consumers already filed: W1-T105's follow-up candidates and the retro's minted proposals
+    flow here. P26's issue-reaction transport is the roadmapped upgrade."
