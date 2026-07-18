@@ -1,0 +1,3 @@
+{
+  "_comment": "baseline record with neither metric present -- the ratchet must not crash or false-block"
+}

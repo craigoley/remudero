@@ -62,8 +62,10 @@ jobs:
       # `containment-probe` (W1-T28, §5 TIER 1 "containment probe as a REQUIRED check") added:
       # same UNCONDITIONAL shape — no path filter, runs every PR; internally scoped to diffs
       # touching sandbox/hooks/env/deny-floor via containmentTrigger() (src/lib/specialist-panel.ts).
+      # `coverage-ratchet` (W1-T25, §5 TIER 2 quality gate 1/4) added: UNCONDITIONAL (no path
+      # filter, no `if:`), same safety property as `ci`/`lint-plan` above.
       REQUIRED: >-
-        ["ci", "lint-plan", "depcruise", "containment-probe"]
+        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet"]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
       IGNORE: >-
