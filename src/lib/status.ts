@@ -327,6 +327,35 @@ export function projectPlan(
   return byId;
 }
 
+/**
+ * Read a repo's REQUIRED status-check contexts straight from GitHub branch
+ * protection (W1-T103, the #170 stuck-ambiguous fix) — the authoritative list
+ * {@link checksStateFromRollup} in lib/sweep.ts gates checksState on, read
+ * ONCE per repo/branch by the real wiring rather than inferred from whichever
+ * checks happen to report on a given PR. Fails SOFT to `undefined` on ANY
+ * error (missing protection, an unprivileged token, `gh` absent) — never
+ * throws, so an unreadable protection rule degrades the caller to its
+ * pre-fix conservative fallback instead of crashing the sweep.
+ */
+export function ghRequiredStatusCheckContexts(owner: string, repo: string, branch = "main"): string[] | undefined {
+  try {
+    const raw = execFileSync(
+      "gh",
+      ["api", `repos/${owner}/${repo}/branches/${branch}/protection/required_status_checks`],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    const parsed = JSON.parse(raw) as { contexts?: unknown; checks?: Array<{ context?: unknown }> };
+    const fromChecks = (parsed.checks ?? [])
+      .map((c) => c.context)
+      .filter((c): c is string => typeof c === "string" && c.length > 0);
+    if (fromChecks.length > 0) return fromChecks;
+    const fromContexts = Array.isArray(parsed.contexts) ? parsed.contexts.filter((c): c is string => typeof c === "string") : [];
+    return fromContexts.length > 0 ? fromContexts : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // ── Real GitHub gateway (execs `gh`; runs outside the sandbox — TLS only there).
 
 /**

@@ -200,6 +200,87 @@ export interface DispositionResult {
   reason: string;
 }
 
+/**
+ * One PR status-check-rollup entry, structurally — a CheckRun or StatusContext
+ * as `gh pr list/view --json statusCheckRollup` reports it. Kept minimal (name
+ * ONLY the fields {@link checksStateFromRollup} reads) so this deterministic
+ * core never depends on run-task.ts's richer `RollupCheck` wiring shape —
+ * that type is structurally assignable here without an import.
+ */
+export interface RollupCheckEntry {
+  name?: string;
+  context?: string;
+  status?: string;
+  conclusion?: string;
+  state?: string;
+}
+
+/**
+ * Conclusions GitHub's OWN branch-protection merge-eligibility treats as
+ * SATISFYING a required check (W1-T103, the #170 stuck-ambiguous fix): a
+ * required check that reports SKIPPED or NEUTRAL still counts as green — only
+ * a genuinely unresolved/incomplete check (anything not in this set and not a
+ * failure below) holds checksState at "pending".
+ */
+const REQUIRED_CHECK_OK = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
+
+/** Conclusions that veto a required check outright — checksState goes "red". */
+const REQUIRED_CHECK_FAIL = new Set([
+  "FAILURE",
+  "ERROR",
+  "TIMED_OUT",
+  "CANCELLED",
+  "ACTION_REQUIRED",
+  "STARTUP_FAILURE",
+]);
+
+/**
+ * Aggregate ONLY the REQUIRED contexts into the sweep's checksState (W1-T103,
+ * the #170 stuck-ambiguous fix). `requiredContexts` is branch protection's OWN
+ * list — read once per repo by the real gateway (status.ts's
+ * `ghRequiredStatusCheckContexts`) and threaded in here, never hardcoded
+ * (rule 2, policy-as-data) — matched against each rollup entry's `name` or
+ * `context`.
+ *
+ * LIVE INCIDENT this fixes (#170 post-heal): the pre-fix derivation scanned
+ * EVERY reported check with no required/non-required distinction, so a single
+ * SKIPPED non-required context (e.g. a path-filtered or schedule-only
+ * workflow's stub run) held checksState at "pending" forever even when every
+ * REQUIRED context was green and GitHub itself would happily merge the PR —
+ * the sweep just couldn't see it, and dispositioned it blocked-ambiguous on
+ * every pass. Non-required contexts are still carried in the raw rollup for
+ * OTHER consumers (fetchCiFailures' evidence) but never vote on checksState
+ * here.
+ *
+ * `requiredContexts` empty/undefined (e.g. the branch-protection API was
+ * unreadable) degrades to the PRE-FIX conservative behavior — every reported
+ * context counts, AND only SUCCESS satisfies one (the SKIPPED/NEUTRAL
+ * leniency above is itself part of THIS fix, so it does not apply when we
+ * can't confirm which contexts are actually required) — fail-closed: an
+ * unreadable protection rule must never manufacture a false green.
+ */
+export function checksStateFromRollup(
+  rollup: RollupCheckEntry[] | undefined,
+  requiredContexts: Iterable<string> | undefined,
+): OpenPrView["checksState"] {
+  const all = rollup ?? [];
+  if (all.length === 0) return "none";
+  const required = new Set(requiredContexts ?? []);
+  const knownRequired = required.size > 0;
+  const gate = knownRequired ? all.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? "")) : all;
+  // Required contexts are configured but none has registered on this head yet
+  // (e.g. the workflow hasn't started) — waiting, not "no checks at all".
+  if (gate.length === 0) return knownRequired ? "pending" : "none";
+  const ok = knownRequired ? REQUIRED_CHECK_OK : new Set(["SUCCESS"]);
+  let anyPending = false;
+  for (const c of gate) {
+    const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
+    if (REQUIRED_CHECK_FAIL.has(s)) return "red";
+    if (!ok.has(s)) anyPending = true;
+  }
+  return anyPending ? "pending" : "green";
+}
+
 const MS_PER_DAY = 86_400_000;
 
 /**

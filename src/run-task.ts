@@ -80,9 +80,17 @@ import {
 } from "./lib/review.js";
 import { buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
-import { ghGateway, projectPlan, readLedgerLines, type GitHub, type StatusProjection } from "./lib/status.js";
+import {
+  ghGateway,
+  ghRequiredStatusCheckContexts,
+  projectPlan,
+  readLedgerLines,
+  type GitHub,
+  type StatusProjection,
+} from "./lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
+  checksStateFromRollup,
   deriveDisposition,
   isBlockedCi,
   renderClarificationQuestion,
@@ -2949,19 +2957,6 @@ function reviewStateFromRollup(rollup: RollupCheck[] | undefined): OpenPrView["r
   return "pending";
 }
 
-/** Aggregate every required check into the sweep's checksState. */
-function checksStateFromRollup(rollup: RollupCheck[] | undefined): OpenPrView["checksState"] {
-  const all = rollup ?? [];
-  if (all.length === 0) return "none";
-  let anyPending = false;
-  for (const c of all) {
-    const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
-    if (s === "FAILURE" || s === "ERROR") return "red";
-    if (s !== "SUCCESS") anyPending = true;
-  }
-  return anyPending ? "pending" : "green";
-}
-
 /**
  * W1-T100 (the #170 fix): failing required-check names + a tail of each one's
  * log — the ci-log fix mode's ONLY input (deriveFixMode/renderFixPrompt,
@@ -3096,6 +3091,11 @@ function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): Open
     "--json", "number,url,headRefName,headRefOid,updatedAt,body,autoMergeRequest,statusCheckRollup",
   ]) as RawOpenPr[];
   const ledger = readLedgerLines(ledgerPath);
+  // W1-T103: branch protection's OWN required-contexts list, read ONCE per
+  // repo for this whole sweep pass (never per-PR, never hardcoded) — see
+  // checksStateFromRollup's doc for why this must gate checksState instead of
+  // every reported check.
+  const requiredContexts = ghRequiredStatusCheckContexts(owner, repo);
 
   // supersededBy: the HIGHEST-numbered other open PR crediting the same task.
   const byTask = new Map<string, number[]>();
@@ -3111,7 +3111,7 @@ function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): Open
     const newest = peers.length ? Math.max(...peers) : pr.number;
     const supersededBy = newest > pr.number ? newest : undefined;
     const reviewState = reviewStateFromRollup(pr.statusCheckRollup);
-    const checksState = checksStateFromRollup(pr.statusCheckRollup);
+    const checksState = checksStateFromRollup(pr.statusCheckRollup, requiredContexts);
     return {
       prNumber: pr.number,
       prUrl: pr.url,
@@ -3528,7 +3528,10 @@ async function fixCommand(rest: string[]): Promise<number> {
   const ledger = readLedgerLines(ledgerPath);
   const taskId = taskIdFromBody(raw.body ?? "");
   const reviewState = reviewStateFromRollup(raw.statusCheckRollup);
-  const checksState = checksStateFromRollup(raw.statusCheckRollup);
+  // W1-T103: same required-contexts gate as buildOpenPrViews — see
+  // checksStateFromRollup's doc.
+  const requiredContexts = ghRequiredStatusCheckContexts(owner, repo);
+  const checksState = checksStateFromRollup(raw.statusCheckRollup, requiredContexts);
   const pr: OpenPrView = {
     prNumber: raw.number,
     prUrl: raw.url,
