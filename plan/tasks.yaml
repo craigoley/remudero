@@ -4340,3 +4340,37 @@
   note: "Third precision companion: W1-T81 (recall/negation), W1-T92 (data-file sizing), this
     (proof-resolvability). Together: the birth gate makes the observing floor's coverage grow instead
     of the degradation flag."
+
+- id: W1-T102
+  title: "Every fix strike ends with a FRESH verdict — re-judge and re-post after body-only fixes too (the #177 stale-status exhaustion)"
+  repo: remudero
+  depends_on: [W1-T76]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (#177/#178, hand-fix worker's diagnosis): W1-T94's body-coverage mode derived
+    CORRECTLY — both strikes fixed the PR body via gh pr edit, no commit — but remudero-review is a
+    commit status pinned to the unchanged head SHA, the rung never re-judged after either strike, and two
+    CORRECT fixes 'exhausted' against a stale 7/28 verdict, escalating a properly-fixed PR. Post-fix
+    measurement of the empirical body scored 28/28 and ALL MET. The strike ladder's exit condition must
+    be a FRESH judgment, never the pinned status."
+  design: |
+    After EVERY strike — body-only or code-push alike — the rung re-runs the judge against the CURRENT
+    head + CURRENT body and re-posts remudero-review before evaluating the strike's outcome. VERIFY the
+    existing post-strike condition first (the code-push path appeared to re-review on #170's heal; the
+    body-only path did not — locate the conditional and make the re-judge unconditional). A strike
+    counts as failed ONLY against its own fresh verdict.
+  acceptance:
+    - claim: "the #177 fixture heals in one strike: a body-only fix that satisfies the criteria yields a fresh PASS and the rung resolves"
+      proof: "unit test over injected deps: stale failure status + a strike whose body edit satisfies -> re-judge invoked, success posted, resolved after 1 strike, no escalation"
+    - claim: "a genuinely-unfixed strike still fails, on its own fresh verdict"
+      proof: "unit test: a strike leaving criteria unmet -> fresh failure posted, strike counted, ladder proceeds"
+    - claim: "the code-push path is unchanged"
+      proof: "existing fix-rung tests pass; the #170-shape fixture still re-reviews the new head"
+  risk: high
+  origin: architect
+  plan_refs: ["P22", "§3"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
