@@ -7,6 +7,7 @@ import {
   DEFAULT_CLARIFY_POLICY,
   DEFAULT_SWEEP_POLICY,
   DISPOSITION_RULES,
+  checksStateFromRollup,
   deriveDisposition,
   renderClarificationQuestion,
   renderSweepSummary,
@@ -17,6 +18,7 @@ import {
   type ClarificationQuestion,
   type FixDispatchEvidence,
   type OpenPrView,
+  type RollupCheckEntry,
   type StrikeAttempt,
   type SweepDeps,
   type SweepPolicy,
@@ -567,4 +569,94 @@ test("runSweep: a BLOCKED-AMBIGUOUS PR ledgers its clarification question EVERY 
   for (const line of disposed) {
     assert.match(String(line.question ?? ""), /still unmet/, "the question is ledgered on EVERY sweep");
   }
+});
+
+// ── W1-T103 — checksState green means REQUIRED contexts green (the #170 ──────
+//    stuck-ambiguous fix): skipped non-required checks never veto.
+
+const REQUIRED = ["ci-gate", "remudero-review"];
+
+function rollupCheck(over: Partial<RollupCheckEntry> = {}): RollupCheckEntry {
+  return { name: "check", conclusion: "SUCCESS", ...over };
+}
+
+test("W1-T103 acceptance 3 — checksStateFromRollup: 13 required SUCCESS + 1 SKIPPED NON-required context -> green (the live #170 post-heal fixture)", () => {
+  const rollup: RollupCheckEntry[] = [
+    ...Array.from({ length: 13 }, (_, i) => rollupCheck({ name: `required-${i}`, conclusion: "SUCCESS" })),
+    rollupCheck({ name: "schedule-stub", conclusion: "SKIPPED" }),
+  ];
+  const required = Array.from({ length: 13 }, (_, i) => `required-${i}`);
+  assert.equal(checksStateFromRollup(rollup, required), "green");
+});
+
+test("W1-T103 acceptance 3 — checksStateFromRollup: a SKIPPED context that IS required still satisfies it (matches GitHub's own protection semantics)", () => {
+  const rollup: RollupCheckEntry[] = [
+    rollupCheck({ name: "ci-gate", conclusion: "SKIPPED" }),
+    rollupCheck({ name: "remudero-review", conclusion: "SUCCESS" }),
+  ];
+  assert.equal(checksStateFromRollup(rollup, REQUIRED), "green");
+});
+
+test("W1-T103 — checksStateFromRollup: a FAILING non-required context never vetoes green (non-required contexts are reported but never veto)", () => {
+  const rollup: RollupCheckEntry[] = [
+    rollupCheck({ name: "ci-gate", conclusion: "SUCCESS" }),
+    rollupCheck({ name: "remudero-review", conclusion: "SUCCESS" }),
+    rollupCheck({ name: "codeql-flaky", conclusion: "FAILURE" }),
+  ];
+  assert.equal(checksStateFromRollup(rollup, REQUIRED), "green");
+});
+
+test("W1-T103 acceptance 2 (regression lock) — checksStateFromRollup: a PENDING required context -> pending, unchanged", () => {
+  const rollup: RollupCheckEntry[] = [
+    rollupCheck({ name: "ci-gate", conclusion: "" , status: "IN_PROGRESS" }),
+    rollupCheck({ name: "remudero-review", conclusion: "SUCCESS" }),
+  ];
+  assert.equal(checksStateFromRollup(rollup, REQUIRED), "pending");
+});
+
+test("W1-T103 acceptance 2 (regression lock) — checksStateFromRollup: a FAILING required context -> red, unchanged (the existing W1-T100 blocked_ci routing)", () => {
+  const rollup: RollupCheckEntry[] = [
+    rollupCheck({ name: "ci-gate", conclusion: "FAILURE" }),
+    rollupCheck({ name: "remudero-review", conclusion: "SUCCESS" }),
+    rollupCheck({ name: "unrelated-optional-scan", conclusion: "SUCCESS" }),
+  ];
+  assert.equal(checksStateFromRollup(rollup, REQUIRED), "red");
+});
+
+test("W1-T103 — checksStateFromRollup: no requiredContexts supplied (unreadable branch protection) degrades to the pre-fix conservative fallback — every reported context counts", () => {
+  const rollup: RollupCheckEntry[] = [
+    rollupCheck({ name: "ci-gate", conclusion: "SUCCESS" }),
+    rollupCheck({ name: "schedule-stub", conclusion: "SKIPPED" }),
+  ];
+  assert.equal(checksStateFromRollup(rollup, undefined), "pending", "SKIPPED isn't SUCCESS under the fail-closed fallback");
+
+  const withFailure: RollupCheckEntry[] = [
+    rollupCheck({ name: "ci-gate", conclusion: "SUCCESS" }),
+    rollupCheck({ name: "anything", conclusion: "FAILURE" }),
+  ];
+  assert.equal(checksStateFromRollup(withFailure, undefined), "red", "any failure still vetoes under the fallback");
+});
+
+test("W1-T103 — checksStateFromRollup: empty rollup -> none; required contexts configured but none registered yet -> pending", () => {
+  assert.equal(checksStateFromRollup(undefined, REQUIRED), "none");
+  assert.equal(checksStateFromRollup([], REQUIRED), "none");
+  assert.equal(checksStateFromRollup([rollupCheck({ name: "unrelated" })], REQUIRED), "pending");
+});
+
+test("W1-T103 acceptance 1 — the #170 fixture (all required success, one non-required skipped, review success) is MERGEABLE end-to-end: disposition mergeable, arm invoked", async () => {
+  const rollup: RollupCheckEntry[] = [
+    ...Array.from({ length: 13 }, (_, i) => rollupCheck({ name: `required-${i}`, conclusion: "SUCCESS" })),
+    rollupCheck({ name: "schedule-stub", conclusion: "SKIPPED" }),
+  ];
+  const required = Array.from({ length: 13 }, (_, i) => `required-${i}`);
+  const checksState = checksStateFromRollup(rollup, required);
+  assert.equal(checksState, "green");
+
+  const healedPr = pr({ prNumber: 170, prUrl: "url/170", taskId: "W1-T170", reviewState: "success", checksState });
+  assert.equal(deriveDisposition(healedPr, DEFAULT_SWEEP_POLICY).disposition, "mergeable");
+
+  const deps = fakeDeps();
+  await runSweep([healedPr], deps);
+  assert.equal(deps.armed.length, 1, "arm invoked exactly once");
+  assert.equal(deps.armed[0].prNumber, 170);
 });
