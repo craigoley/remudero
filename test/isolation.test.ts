@@ -135,3 +135,70 @@ test("probeIsolation: a CLEAN run never logs isolation_preflight_failed", async 
   await probeIsolation({ settingsFile: "unused", log: (step) => events.push(step), exec: cleanExec });
   assert.equal(events.includes("isolation_preflight_failed"), false);
 });
+
+// ── OBSERVABILITY: NAME the inherited state, not just count it ────────────────
+// (the live incident: three W3-T1a blocked_isolation runs at "1 function", CC
+// auto-update in the window, five operator diagnostics where one name sufficed)
+
+test("isolationProbePrompt: also requests the alias_names / function_names lines (same wrapper exclusion for functions)", () => {
+  const p = isolationProbePrompt();
+  assert.match(p, /alias_names:/);
+  assert.match(p, /function_names:/);
+  // Command 4 lists function NAMES under the SAME find/grep/rg exclusion as the count.
+  assert.match(p, /printf "%s ", \$NF/);
+  for (const w of CLAUDE_CODE_TOOL_WRAPPERS) assert.ok(p.includes(w));
+});
+
+test("parseIsolationReport: extracts the NAMES when the report carries them", () => {
+  const r = parseIsolationReport("REPORT\naliases: 2\nfunctions: 1\nalias_names: cc gg\nfunction_names: claude");
+  assert.deepEqual(r, { aliasCount: 2, functionCount: 1, aliasNames: "cc gg", functionNames: "claude" });
+});
+
+test("parseIsolationReport: names RESPECT the CLAUDE_CODE_TOOL_WRAPPERS exclusion (find/grep/rg stripped from function names)", () => {
+  const r = parseIsolationReport(
+    "REPORT\naliases: 0\nfunctions: 1\nalias_names: -\nfunction_names: claude grep find rg",
+  );
+  // Only the real operator function survives; the injected wrappers are stripped, matching the count's exclusion.
+  assert.equal(r?.functionNames, "claude");
+  assert.equal(r?.aliasNames, undefined); // "-" ⇒ no names
+});
+
+test("parseIsolationReport: an OLD-prompt report (no name lines) parses to the exact same shape as before (byte-identical)", () => {
+  const r = parseIsolationReport("preamble\nREPORT\naliases: 4\nfunctions: 2\n");
+  assert.deepEqual(r, { aliasCount: 4, functionCount: 2 }); // no aliasNames/functionNames keys
+});
+
+test("assessIsolation: a nonzero verdict with NAMES surfaces them in the reason (one name replaces a diagnostics session)", () => {
+  const v = assessIsolation({ aliasCount: 0, functionCount: 1, functionNames: "claude" });
+  assert.equal(v.isolated, false);
+  assert.match(v.reason, /1 function\(s\) \[claude\]/);
+});
+
+test("assessIsolation: a nonzero verdict WITHOUT names is byte-identical to the count-only reason (regression lock)", () => {
+  const named = assessIsolation({ aliasCount: 3, functionCount: 0 });
+  assert.equal(
+    named.reason,
+    "worker inherited 3 alias(es) and 0 function(s) from operator shell state — isolation is NOT holding on this host/run",
+  );
+});
+
+test("probeIsolation: the IsolationError NAMES the inherited functions when the probe reported them", async () => {
+  const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  await assert.rejects(
+    () =>
+      probeIsolation({
+        settingsFile: "unused",
+        log: (step, extra) => events.push({ step, extra }),
+        exec: async (): Promise<ProbeExecResult> => ({
+          transcript: "REPORT\naliases: 0\nfunctions: 1\nalias_names: -\nfunction_names: claude",
+          aliasCount: 0,
+          functionCount: 1,
+          functionNames: "claude",
+        }),
+      }),
+    (e: unknown) => e instanceof IsolationError && /1 function\(s\) \[claude\]/.test((e as Error).message),
+  );
+  // The named state is also on the dedicated ledger event.
+  const failed = events.find((e) => e.step === "isolation_preflight_failed");
+  assert.equal(failed?.extra?.function_names, "claude");
+});
