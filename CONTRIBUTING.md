@@ -68,10 +68,24 @@ gh api --method PATCH \
 
 To restore the full gate afterward, add `-f 'contexts[]=remudero-review'`.
 
+## Architecture — fitness rules and irreversible decisions
+
+`src/lib` is the reusable core and must never import the CLI entrypoint
+(`src/run-task.ts`) or the scratch spike script (`src/spike.ts`) —
+`.dependency-cruiser.cjs` enforces this (`npm run depcruise`) and CI runs it
+on every PR.
+
+A one-way-door change (one materially harder to revert than an ordinary PR)
+gets a short Architecture Decision Record in [`docs/adr/`](docs/adr/README.md)
+landed in the same PR. Reversible, PR-shaped changes stay in
+[`DECISIONS.md`](DECISIONS.md)/auto-choose — see
+[`docs/adr/README.md`](docs/adr/README.md) for which is which.
+
 ## Local checks before pushing
 
 ```sh
-npm ci        # a fresh worktree has no node_modules
-npm run build # typecheck (tsc)
-npm test      # full suite
+npm ci            # a fresh worktree has no node_modules
+npm run build     # typecheck (tsc)
+npm run depcruise # architecture fitness rules
+npm test          # full suite
 ```
