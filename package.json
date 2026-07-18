@@ -39,5 +39,8 @@
     "@swc/core": "^1.15.43",
     "@types/node": "^22.20.1",
     "dependency-cruiser": "^18.1.0"
+  },
+  "overrides": {
+    "qs": "^6.15.3"
   }
 }
