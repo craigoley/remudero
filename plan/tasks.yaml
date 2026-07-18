@@ -4483,3 +4483,45 @@
   note: "The automation of the Architect-harvest role this session performed by hand. Composes with
     W1-T87 (success mining) and W1-T73 (degraded-success mining) as the third retro intake; the P25
     inbox is its consumer surface."
+
+- id: W1-T106
+  title: "CONFLICTED is a disposition — the sweep sees mergeStateStatus, and the fix rung gains a merge-conflict mode (the #170 DIRTY strand)"
+  repo: remudero
+  depends_on: [W1-T93, W1-T94]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (#170): review PASS, all checks SUCCESS, auto-merge armed — and the PR sat
+    unmergeable for hours at mergeStateStatus DIRTY (ci-gate.yml REQUIRED-array conflict vs #177/#26),
+    invisible to every disposition rule because conflict state is not an OpenPrView input. The operator's
+    requirement, near-verbatim: the orchestrator should recognize a stuck PR's merge conflict and address
+    it so the queue keeps rolling. The hand-resolution demonstrated the heal is bounded worker-shaped
+    work: merge origin/main into the run branch, verify by merge-base that neither side removed what the
+    other adds (union is resolution, not clobber), push, and the changed head re-judges through the
+    normal gate."
+  design: |
+    (i) OpenPrView gains mergeState (clean|dirty|behind|unknown — one field from the same PR read).
+    (ii) DISPOSITION_RULES: a positive CONFLICTED row (mergeState=dirty) ABOVE mergeable — a dirty PR is
+    never armed no matter how green — routing to the fix rung. (iii) W1-T94's mode table gains
+    merge-conflict: input = the conflicting file list + both sides' log since merge-base; the prompt
+    instructs the hand-fix's discipline verbatim: merge (never rebase-force), resolve toward the union
+    ONLY where merge-base analysis shows pure concurrent addition, REFUSE into escalate when either side
+    deleted or the conflict is semantic (a wrong auto-resolution is worse than a strand). Strikes and
+    the W1-T102 fresh-verdict discipline apply as in every mode. (iv) behind-but-clean stays out of
+    scope: auto-merge handles it; document why.
+  acceptance:
+    - claim: "the #170 fixture (green, review PASS, mergeState dirty) dispositions CONFLICTED, never mergeable"
+      proof: "unit test: seeded state -> conflicted; the mergeable rule cannot match a dirty PR (regression lock above it)"
+    - claim: "a pure-concurrent-addition conflict dispatches ONE merge-conflict-mode fix worker with both sides' context"
+      proof: "unit test: the rendered prompt names the mode, the conflicting files, and the union-with-merge-base discipline; exactly one spawn"
+    - claim: "a deletion-involved conflict refuses into escalate, not auto-resolution"
+      proof: "unit test: merge-base fixture where one side removed an entry -> no resolution attempt, escalate with the files named"
+  risk: high
+  origin: architect
+  plan_refs: ["P22", "§3", "§5D"]
+  files: [src/lib/sweep.ts, src/lib/status.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Completes the disposition inputs: checks (T93), review (T77), required-contexts green (T103),
+    in-flight (T80), and now merge state. The #170 hand-resolution is the mode's canonical procedure."
