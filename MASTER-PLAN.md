@@ -1,23 +1,25 @@
-# REMUDERO — Master Plan (v2.20 · synced 2026-07-16)
+# REMUDERO — Master Plan (v2.21 · synced 2026-07-18)
 
-**FOCUS — L2 running: the deterministic FLOOR now observes repo state, not just report keywords.** WS-1 is
-COMPLETE and the **§5 security tier RUNS ON REMUDERO ITSELF**. This cycle: W1-T65/#122 LIFTS W1-T3F's
-whitelisted-proof execution INTO the floor — the criterion's named test/grep runs against the PR head, so
-the gate is correct whether or not the LLM reviewer completes and the reviewer becomes purely additive
-(P15 CLOSED). Next, in order: **§5C task pre-flight linter (W1-T20c/d)** → flight control
-(W1-T20→T21→T22) → knowledge holes (W1-T33–T39).
+**FOCUS — L2 running: FLIGHT CONTROL and the PR-PIPELINE RECONCILER both landed.** WS-1 is COMPLETE, the
+**§5 security tier RUNS ON REMUDERO ITSELF**, and the deterministic floor executes proofs against the PR
+head. This cycle drained the two big backlogs: **flight control's four layers** (W1-T20 per-turn signals
+→ T21 advisory judge → T22 risk bands → W2-T1 specialist panel) and **the level-triggered PR-pipeline
+reconciler family** (W1-T76 blocked_review fix rung → T78 clarification rung → T80 dispatch dedup → T93/T94/T95
+sweep dispositions + fix taxonomy + `rmd fix`), plus the **blocked_ci → ci-log fix path** (W1-T100), the
+**deriveStatus corrections-supreme** fix (W1-T75), the **retro plan-health sweep** (W1-T20d), and the
+**architecture fitness tier** (W1-T26). Next, in order: knowledge holes (W1-T33–T39) → the learning-utility
++ success-mining flywheel (W1-T86/T87/T88) → brownfield onboarding (W1-T82–T85).
 
 **Header discipline (v2.17).** This header carries the **sync date + current focus and nothing else**.
 The sections are the source of truth; read them. A retro that re-inflates this header has failed the
 HARNESS-COMPRESSION bar (§Self-improvement).
 
-**Retro ledger:** R1–R3 (…021334/…391543/…446353) seeded CALIBRATION + P1–P8 (all closed) and logged the
-WS-1-closing merges · R4 (…126258) logged the security-tier + dep-lane cycle, CORRECTED the false-merged
-W1-T54b attribution (#80 → #91), and mined P9–P20 · R5 (…206755808) logged the gather-union +
-reviewer-mount + git-self-sync merges (W1-T51/#97, W1-T17/#99, W1-T63/#104, W1-T60/#105), re-based
-calibration on 9 runs, RETIRED P10+P11, and mined the containment/isolation blocks · **R6 (…213948025,
-this sync)** logs W1-T65/#122 (the floor executes whitelisted proofs against the PR head), re-bases
-calibration on this cycle's 2 runs, and RETIRES P15 (now SHIPPED).
+**Retro ledger:** R1–R6 (…021334/…391543/…446353/…126258/…206755808/…213948025) seeded CALIBRATION +
+P1–P26, logged the WS-1-closing merges + the security/dep-lane + gather-union/reviewer-mount + the
+proof-executing floor, corrected the false-merged W1-T54b attribution (#80 → #91), and closed P1–P11+P15 ·
+**R7 (…383376396, this sync)** logs the 14-merge flight-control + PR-pipeline-reconciler cycle
+(W1-T20/T21/T22/W2-T1, W1-T76/T78/T80/T93/T94/T95, W1-T100, W1-T75, W1-T20d, W1-T26), re-bases calibration
+on this cycle's 29 runs, and mines the blocked_isolation×5 / blocked_ci×3 volume signals.
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -65,13 +67,28 @@ required context (W1-T24/#75, live-proven by the W1-T24b probes #82/#85), and th
 (W1-T54/#87) with its live proof against the real parked Dependabot PRs (W1-T54b/#91). §5A's "the harness
 eats first" is now FACT on the security tier, not intention.
 
-★ **THIS CYCLE (RETRO-1784213948025, 2026-07-16): the FLOOR became state-aware.** W1-T65/#122 shipped the
-P15 fix — the deterministic floor now executes each criterion's whitelisted proof (named test/grep,
-case-normalized) against the PR head instead of keyword-matching the reviewer's REPORT. This closes BOTH
-failure modes the blind floor produced: the FALSE-PASS (a merge on unsubstantiated criteria) and the
-FALSE-BLOCK (complete work on the branch the report didn't keyword-claim). The LLM reviewer is now purely
-additive (subtle-catch), never load-bearing for basic correctness, so a future reviewer death no longer
-re-opens the gate hole. **P15 CLOSED.** (2 runs in scope this cycle: W1-T65 merged, one `blocked_review`.)
+★ **THIS CYCLE (RETRO-1784383376396, 2026-07-18): flight control and the PR-pipeline reconciler both
+LANDED — 14 merges.** Two backlogs the last three retros kept naming as NEXT are now SHIPPED. (1) **Flight
+control's four layers** — deterministic per-turn tripwires (W1-T20/#132), an advisory LLM-as-judge on
+process while a deterministic controller acts (W1-T21/#141), risk-scored diff bands that make auto-choose
+safe (W1-T22/#142), and the specialist panel that consults rather than committees (W2-T1/#145). (2) **The
+level-triggered PR-pipeline reconciler** (P22's family) — the blocked_review FIX RUNG dispatches ONE bounded
+worker carrying the FULL unmet-criteria set on the SAME branch (W1-T76/#158, absorbs P21's anti-ping-pong
+invariant VERBATIM), the CLARIFICATION-QUESTION rung turns an ambiguous block into a specific decidable
+operator question (W1-T78/#168), dispatch dedup treats an OPEN PR as in-flight (W1-T80/#159), and the sweep
+gained CI-state dispositions + a fix-mode taxonomy + the `rmd fix <pr>` operator verb (W1-T93/#165,
+W1-T94/#166, W1-T95/#167). PLUS: **blocked_ci now routes to the ci-log fix path — fix FIRST, ask after
+exhaustion** (W1-T100/#173); **deriveStatus hoists operator corrections above rung (a)** with an `rmd
+correct` writer (W1-T75/#138, ratifies P9); **the retro runs a plan-health sweep** re-grading the open queue
+(W1-T20d/#140); and **the architecture fitness tier** enforces a dependency-cruiser layering rule + ADR
+discipline (W1-T26/#176). One honest delta: W1-T100's interim claim that `rmd fix` bridges blocked_ci was
+FALSIFIED live (#175) — the ci-log fix path is the real bridge, and `rmd fix`'s evidence resolver stays
+reviewer-shaped until the sweep task generalizes it.
+
+★ **PRIOR CYCLE (RETRO-1784213948025, 2026-07-16): the FLOOR became state-aware.** W1-T65/#122 made the
+deterministic floor execute each criterion's whitelisted proof (named test/grep, case-normalized) against
+the PR head instead of keyword-matching the reviewer's REPORT — closing the blind-floor FALSE-PASS and
+FALSE-BLOCK and making the LLM reviewer purely additive. **P15 CLOSED.**
 
 ★ **PRIOR CYCLE (RETRO-1784206755808, 2026-07-16): three self-hosting holes CLOSED.** (1) The retro gather
 now unions ledger∪GitHub-derived trailered merges (W1-T51/#97) — the gate-side-invisible-merge gap that
@@ -90,7 +107,7 @@ attribution is now a gate concern, not bookkeeping. **W1-T62/#93 fixed the parse
 already emitted SURVIVES** (#80's body still carries the task trailer, which is how this retro's gather
 reported `W1-T54b → #80`). Mechanism, residue, and the un-stamp proposal: **P9**.
 
-**Inventory (verified 2026-07-15 via `gh pr list --state merged`: 82 merged PRs on `remudero`, 6 on
+**Inventory (verified 2026-07-18 via `gh pr list --state merged`: 168 merged PRs on `remudero`, 6 on
 `remudero-sandbox`).** WS-0 spike SHIPPED (7/7 verdicts GREEN, PR #1). WS-1 then ate its ENTIRE backlog
 through its own proto-runner:
 
@@ -108,29 +125,60 @@ through its own proto-runner:
 - **the operator surface** — `rmd` as a real installable CLI (W1-T14/#65), plan-sync as an in-repo PR
   flow (W1-T15/#66).
 
-**★ CORRECTION (R4): mounts.yaml v0 (W1-T5) IS SHIPPED — #42, with Tier-Invariant validation, on disk at
-`.remudero/mounts.yaml` and re-based to a flat-400 tripwire by #90.** Through v2.17 this line claimed it
-was still planned while the SHIPPED log two screens down recorded its merge — the document contradicted
-itself for a full retro. The calibration table below does not exist to UNBLOCK W1-T5; it exists to
-**re-base the mount table W1-T5 already shipped**.
+**mounts.yaml v0 (W1-T5) is SHIPPED** — #42, Tier-Invariant validation, on disk at `.remudero/mounts.yaml`,
+re-based to a flat-400 tripwire by #90. The calibration table below exists to re-base that shipped mount
+table, not to unblock it.
 
 **Still PLANNED, not shipped** (the honest remainder): §8A/§8B knowledge architecture + the five
-knowledge-hole tasks W1-T33–T39 (PR #36); flight control W1-T20–T22 + §5C's task linter W1-T20c/d.
+knowledge-hole tasks W1-T33–T39 (PR #36); the ratified-but-unbuilt flywheel/onboarding families
+(W1-T82–T85 onboard, W1-T86 wipe-test, W1-T87 success-mining, W1-T88 consolidation, W1-T89 MAST publish,
+W1-T90 alert-fix lane, W1-T91 isolation golden); remaining quality/fleet tasks (W1-T25/T28, W1-T27, W1-T55–T57,
+W2-T2 dry-run).
 
-**NEXT (L2) — kick order, re-graded against R4's data:** **plan-health (W1-T20c/d, W1-T20) →
-quality/architecture (W1-T25/T26/T28) → W1-T27 → W2-T2 fleet dry-run.** The security tier that led this
-order is **DONE** (W1-T24/#75 → W1-T23/#76, both merged gate-side this cycle), so the pre-flight linter
-W1-T20c/d now leads on its own merit: it gates every task dispatched after it. R4's cap-plumbing findings
-(P10/P11) both SHIPPED this cycle (W1-T63/#104, W1-T51/#97); R5's remaining blocks (containment/isolation)
-are guard-fired fail-closed, not task defects (P23). NOTE: `nextRunnable`
-(drain.ts:31 `plan.tasks.find`) is DECLARATION-ORDERED, but the daemon currently drains the SANDBOX; the
-remudero queue is operator-kicked, so this is the authoritative KICK ORDER (mirrored as a comment atop
-plan/tasks.yaml). Remaining fleet ops (§5D, W1-T55–T57) fold in alongside.
+**NEXT (L2) — kick order, re-graded against R7's data:** **knowledge holes (W1-T33–T39) →
+learning-utility + success-mining flywheel (W1-T86/T87/T88) → brownfield onboarding (W1-T82–T85) →
+W1-T25/T28/T27 → W2-T2 fleet dry-run.** Flight control (W1-T20/T21/T22/W2-T1) and the PR-pipeline
+reconciler family (W1-T76/T78/T80/T93/T94/T95) both DRAINED this cycle, so the queue's center of gravity
+shifts to the KNOWLEDGE architecture and the learning-utility measurement the whole Self-improvement section
+asserts but has never proven (P12/P13/P14). R7's block volume (blocked_isolation×5, blocked_ci×3) is
+guard-fired fail-closed, not task defects — but the VOLUME is a host-hygiene signal, mined in Retro
+proposals. NOTE: `nextRunnable` (drain.ts:31 `plan.tasks.find`) is DECLARATION-ORDERED, but the daemon
+currently drains the SANDBOX; the remudero queue is operator-kicked, so this is the authoritative KICK
+ORDER (mirrored as a comment atop plan/tasks.yaml).
 
 ## SHIPPED log
 
 Shipped arcs, keyed by Remudero-Task (Standing rule 13: the proof is a MERGED PR, not prose).
 Newest first. Cost/turns from the run ledger.
+
+### RETRO-1784383376396 (2026-07-18) — flight control + the PR-pipeline reconciler (14 merges)
+
+- **W1-T26** — architecture fitness tier: dependency-cruiser layering rule enforced in CI + ADR discipline
+  → craigoley/remudero#176 · $4.464 · 92 turns
+- **W1-T100** — blocked_ci routes to the ci-log fix path: fix FIRST, ask after exhaustion (the #170 fix;
+  interim `rmd fix` bridge claim FALSIFIED live #175 — the fix path is the real bridge) →
+  craigoley/remudero#173 · $19.270 · 175 turns
+- **W1-T78** — the CLARIFICATION-QUESTION rung: an ambiguous block yields a specific, decidable operator
+  question, never silence (ratifies P22's new rung) → craigoley/remudero#168 · $21.066 · 215 turns
+- **W1-T95** — `rmd fix <pr>`: the operator verb for the fix rung → craigoley/remudero#167 · $4.503 · 70 turns
+- **W1-T94** — fix-rung failure-mode taxonomy: MODE derives from block evidence (per-mode inputs) →
+  craigoley/remudero#166 · $5.470 · 53 turns
+- **W1-T93** — sweep dispositions incorporate CI state: CI-red is never mergeable, escalate is the
+  catch-all (closes the #161 hole) → craigoley/remudero#165 · $2.599 · 30 turns
+- **W1-T80** — dispatch dedup: an OPEN PR means IN-FLIGHT, never runnable (the #143/#145 race) →
+  craigoley/remudero#159 · $4.319 · 72 turns
+- **W1-T76** — the blocked_review FIX RUNG: ONE bounded worker, the FULL unmet-criteria set at once, the
+  SAME branch (absorbs P21's anti-ping-pong invariant + golden verbatim) → craigoley/remudero#158 · $9.701 · 148 turns
+- **W2-T1** — specialist panel (Layer 4): consult, don't committee → craigoley/remudero#145 · $3.317 · 31 turns
+- **W1-T22** — flight control Layer 3: risk scoring — deterministic diff-risk bands that make auto-choose
+  SAFE → craigoley/remudero#142 · $3.065 · 50 turns
+- **W1-T21** — flight control Layer 2: the flight judge — advisory LLM-as-judge on process, deterministic
+  controller acts → craigoley/remudero#141 · $6.829 · 77 turns
+- **W1-T20d** — the retro plan-health sweep: re-grade the open queue + mine overrun patterns →
+  craigoley/remudero#140 · $3.879 · 61 turns
+- **W1-T75** — deriveStatus hoists operator corrections above rung (a) + an `rmd correct` writer (ratifies
+  P9 — the crediting fix that was blocked by the crediting bug) → craigoley/remudero#138 · $5.532 · 87 turns
+- **W1-T20** — flight control Layer 1: deterministic per-turn tripwire signals → craigoley/remudero#132 · $3.619 · 42 turns
 
 ### RETRO-1784213948025 (2026-07-16) — the deterministic floor executes proofs
 
@@ -223,41 +271,78 @@ Newest first. Cost/turns from the run ledger.
 - **WS-0 spike** — 7/7 verdicts GREEN, loop closed unattended; ground truth in FIELD FINDING 10 →
   craigoley/remudero#1 · $0.86
 
-## Calibration (observed — through RETRO-1784213948025, 2026-07-16)
+## Calibration (observed — through RETRO-1784383376396, 2026-07-18)
 
 The empirical baseline **mounts.yaml (W1-T5, shipped #42)** and Flight-control burn-rate signals (§4B
-Layer 1) key off. Only `implement` has data; recon/reviewer/diagnose accrue no rows until they run as
-typed tasks — the gap P10 named, CLOSED on the reviewer side by W1-T63/#104.
+Layer 1, now BUILT — W1-T20/#132) key off. Only `implement` has data; recon/reviewer/diagnose accrue no
+rows until they run as typed tasks — the gap P10 named, CLOSED on the reviewer side by W1-T63/#104.
 
-**★ CURRENT BASELINE — this cycle (RETRO-1784213948025, 2 runs). This is the row W1-T5's mount table keys off:**
+**★ CURRENT BASELINE — this cycle (RETRO-1784383376396, 29 runs). This is the row W1-T5's mount table keys off:**
 
 | task_type | runs | merged | avg $ | avg turns | total $ |
 |---|---|---|---|---|---|
-| implement | 2 | 1 | $4.673 | 64 | $9.345 |
+| implement | 29 | 14 | $5.794 | 72.172 | $168.027 |
 
-**Merge rate this cycle: 1/2 (50%)** — the one merge is W1-T65/#122 (the floor-executes-proofs fix, 94
-turns / $7.123); the one non-merge is a single `blocked_review` (the bootstrap class — Retro proposals).
-Small-N: two runs is a thin sample and the $4.673 avg is pulled by the 94-turn merge; read it as a spot
-check on the plateau, not a trend break.
+**Merge rate this cycle: 14/29 (48%)** — the healthiest large-N sample yet: 14 merges landing two big
+backlogs. The $5.794 avg and 72.2-turn mean sit slightly above the historical $3–7 / 45–100 band, pulled up
+by two genuine tail runs — W1-T78/#168 (the clarification rung, $21.066 / 215 turns) and W1-T100/#173 (the
+blocked_ci fix path, $19.270 / 175 turns), both new state-machine surfaces (a reliably high-turn shape).
+Strip those two and the remaining 12 merges average ~$4.4 / ~60 turns — squarely on the plateau.
 
-**Prior cycles (FOLDED — trend only):** R5 9 runs / 4 merged (ledger==GitHub, P11) / $3.613 avg / 56.9t ·
+**Prior cycles (FOLDED — trend only):** R6 2 runs / 1 merged / $4.673 / 64t · R5 9 / 4 / $3.613 / 56.9t ·
 R4 10 / 2 ledger-merged (6 real) / $3.290 / 54.5t · R3 22 / 15 / $3.218 / 45.2t · R1+R2 19 / 11 / $1.838 /
-21.4t. **Derived all-time:** ~62 runs, ~37 merged.
+21.4t. **Derived all-time:** ~91 runs, ~51 merged.
 
 **Reads:**
-- **The plateau holds.** Cost/turns per merged PR stay in the $3–7 / 45–100-turn band the last three retros
-  established; W1-T65's 94-turn merge is a state-machine change (the floor gains a proof executor), which is
-  reliably a high-turn shape — not a regression.
-- **`blocked_review`×1 — the bootstrap class, re-confirmed, and now STRUCTURALLY covered.** With W1-T65
-  SHIPPED the floor executes proofs against the PR head, so criteria that used to block for lack of an
-  in-flight LIVE proof are now adjudicated deterministically. **Do not mine it as breakage** (the standing
-  R3 lesson). See Retro proposals.
-- **The $100 `budget_usd` tripwire sits ~21× the mean; 0/2 budget trips.** Still a runaway detector, not
-  an allowance (§9). No action.
+- **The plateau holds at scale.** Across 29 runs the per-merge cost/turns stay in the established band once
+  the two new-surface tail runs are set aside; the mean drift is composition (two state-machine builds), not
+  regression.
+- **Block mix shifted to `blocked_isolation`×5 + `blocked_ci`×3 (was `blocked_review`-dominated).** Both are
+  guard-fired fail-closed classes (P23 isolation preflight; W1-T100 ci routing), NOT task defects — but the
+  VOLUME (8 of 15 non-merges) is a new host-hygiene signal, mined in Retro proposals, not folded silently.
+- **`blocked_review`×5 — the bootstrap class, structurally covered by the W1-T76 fix rung SHIPPED this
+  cycle.** Do not mine as breakage (the standing R3 lesson). See Retro proposals.
+- **The $100 `budget_usd` tripwire sits ~17× the mean; 0/29 budget trips** even with two $19–21 tail runs.
+  Still a runaway detector, not an allowance (§9). No action.
 
 ## Retro proposals (PROPOSALS ONLY; NOT yet in plan/tasks.yaml)
 
-**RETRO-1784213948025 (this cycle)** — mined from the 1 non-merge of 2 runs (`blocked_review`×1).
+**RETRO-1784383376396 (this cycle)** — mined from the 15 non-merges of 29 runs (`blocked_isolation`×5,
+`blocked_review`×5, `blocked_ci`×3, `blocked`×1, `no_pr`×1). Candidates for the Architect to ratify via a
+tasks.yaml PR (rule 15) — never auto-filed.
+
+- **★ P27 (investigate-then-build) — `blocked_isolation`×5 IS A VOLUME SIGNAL, not five independent
+  bootstrap blocks.** Five of 29 runs (17%) tripped the isolation preflight this cycle — the highest single
+  block class. Per the STANDING P23 lesson a `blocked_isolation` is most likely the W1-T17/#99 probe DOING
+  ITS JOB (a populated rc / inherited shell state — FIELD FINDING 11b), and #184 already sharpened the probe
+  to NAME the inherited aliases/functions rather than just count them. But five trips in one cycle is not
+  noise: it says the daemon's launch environment is REPEATABLY polluting worktrees, and the retro still
+  cannot read the `cause` (P23's proposed cause-field remains a PROPOSAL, unbuilt). PROPOSE: (i) INVESTIGATE
+  the five run-ids first — grep the ledger + the #184 NAMED-alias output — to confirm all five are the same
+  inherited-shell-state cause and not a real mount/keychain regression; (ii) if confirmed, this is a
+  HOST-HYGIENE fix, NOT more task work: scope the daemon's launch env so interactive aliases/functions
+  (FIELD FINDING 3 — `claude` is a shell FUNCTION; the `.zshrc` overlay) never reach a worker shell, so the
+  probe stops fail-closing on a self-inflicted environment. GATE ON EVIDENCE: do NOT treat any of the five
+  as breakage until the cause shows a mis-fire; a designed fail-close at volume is a SETUP defect the
+  operator owns, not a task the fleet builds. This also RE-RAISES P23's cause-field as now clearly worth
+  building — five un-classifiable blocks in one cycle is exactly the legibility gap P23 named.
+- **`blocked_ci`×3 — NO new proposal; structurally covered by W1-T100/#173 SHIPPED this cycle, with one
+  honest caveat to INVESTIGATE.** W1-T100 routes blocked_ci to the ci-log fix path (fix FIRST, ask after
+  exhaustion). The three blocked_ci runs are the bootstrap class this fix targets. CAVEAT: the interim
+  `rmd fix` bridge was FALSIFIED live (#175 — `rmd fix`'s evidence resolver is reviewer-shaped and produced
+  "no block evidence to drive the rung. No spawn." on #170's ci-red). INVESTIGATE whether any of the three
+  runs post-date the #173 merge and STILL blocked — that would be a W1-T100 gap (the resolver not
+  generalizing to ci-log evidence), not the bootstrap class. If all three pre-date the merge, they are
+  covered; do not re-mine (the standing `blocked_review` lesson, extended to ci).
+- **`blocked_review`×5 — NO new proposal; the bootstrap class, structurally covered by the W1-T76 fix rung
+  SHIPPED this cycle.** Honest blocks whose reviewer computed exact unmet_criteria; the fix rung (one
+  bounded worker, full unmet set, same branch) is the standing consumer. A new proposal here is accretion,
+  not analysis. INVESTIGATE only if a block recurs on a PR the fix rung SHOULD have healed — a W1-T76 gap.
+- **`blocked`×1 + `no_pr`×1 — NO new proposal; folded into the OPEN W1-T52 triage.** W1-T52 (filed by R3
+  for the transcript-pass classes) already owns the generic-block / no-PR remainder. INVESTIGATE the two
+  run-ids under that task; adding a proposal here would be accretion.
+
+**RETRO-1784213948025 (prior cycle)** — mined from the 1 non-merge of 2 runs (`blocked_review`×1).
 Candidates for the Architect to ratify via a tasks.yaml PR (rule 15) — never auto-filed.
 
 - **`blocked_review`×1 — NO new proposal; the bootstrap class, re-confirmed, and its structural fix SHIPPED
@@ -323,8 +408,10 @@ tasks.yaml PR — never auto-filed, never worker-edited (rule 15).
 - ★ P18 (plan + measurement) — RATIFIED 2026-07-17 (core) -> W1-T89 — the WS-12 publish rung ratifies with the site. ORIGINAL: OUR FAILURE CLASSES ARE PRIVATE VOCABULARY; THE FIELD PUBLISHED A TAXONOMY AND NOBODY'S LIVE SYSTEM IS CODED TO IT. MAST (NeurIPS 2025; 1,600+ annotated traces across 7 frameworks, kappa 0.88) names 14 failure modes in 3 categories — specification (~42%), inter-agent misalignment (~37%), verification (~21%) [research: mast-neurips2025]; the companion finding quantifies our §4 bet: uncoordinated MAS amplify errors up to 17x while centralized-with-validation-bottleneck architectures contain amplification to ~4.4x [research: mas-error-amplification-2026]. Remudero's ledger is ALREADY a MAST-annotatable trace corpus — verdict classes map cleanly (blocked_illformed -> specification; the W1-T62/#80 attribution inversion + dead-reviewer floor-only pass -> verification; the rider-shedding class -> specification/decomposition). Propose: (i) a DETERMINISTIC verdict->MAST mapping held as DATA (a YAML table, rule 2 — never LLM-classified), applied at retro-read so historical ledger lines code retroactively; (ii) `rmd retro` reports each cycle's failure distribution BY MAST CATEGORY — class-level mining (W1-T20d) gains the field's shared vocabulary, and a category trending wrong is a plan-health signal; (iii) WS-12 publishes ledger-derived reliability numbers as a GENERATED site artifact — merge rate, cost/turns per merged PR, failure mix by MAST category, and the P12 wipe-test deltas on the same surface — extending "LEARNINGS.md as a public artifact" from narrative to NUMBERS. Positioning: the first orchestrator whose live operational failure data is coded to the published research taxonomy and shipped in the open. GOLDEN: a seeded ledger fixture of known verdicts produces the expected category distribution (the mapping is tested, not vibes).
 - P19 (plan -> WS-2 addendum) — DAG INDEPENDENCE IS DECLARED, NEVER VERIFIED; rule 4 says claims need proofs and the concurrent drainer is about to trust this one. The #103 doctrine is right that hierarchical decomposition, not worktrees, makes parallelism safe — but depends_on independence is an ARCHITECT CLAIM, and two tasks the DAG calls independent can still declare overlapping files: (or touch the same exported symbols), producing exactly the integration-surfacing semantic conflicts #103 warns about. Field instance of the finer-grained answer: wit locks SYMBOLS via Tree-sitter AST parsing, not files, because file-level isolation misses function-level collisions [research: wit-symbol-locks, field-survey-2026-07-16]. Propose a two-rung DETERMINISTIC pre-dispatch check in the WS-2 concurrent drainer: RUNG 1 (ships WITH concurrency, cheap) — intersect the files: globs of concurrently-runnable tasks; non-empty intersection => SERIALIZE, never parallel-dispatch, with a ledger line `dispatch.serialized reason=file-overlap` so the decision is legible; RUNG 2 (BANKED until a rung-1 escape is observed in the ledger — build on evidence, not anticipation) — symbol-level touch-set intersection via Tree-sitter for tasks whose globs are disjoint but whose criteria name the same exported symbols. HONESTY BOUND, stated in the doctrine: files: is advisory metadata a worker can exceed — this check REDUCES collision probability, it does not eliminate it; per-repo merge serialization (already WS-2) remains the backstop, and the check must never be described as a guarantee. GOLDEN: two seeded tasks with overlapping files: are NEVER dispatched concurrently (fixture-only, no LLM).
 - P20 (plan -> §5D lane-2 ACT rung) — RATIFIED 2026-07-17 -> W1-T90 (the alert-fix lane — policy-gated autofix rung for §5D lane 2, applying the shipped dep-lane precedent to scanners). ORIGINAL: THE ALERT LOOP REVIEWS AND TRIAGES BUT NEVER FIXES WITHOUT A HUMAN PER ALERT. §5D lane 2 (W1-T55 surface -> W1-T56 triage) ends at "rmd triage PROPOSES a corrective task"; every proposal then waits on Architect ratification (rule 15), so "scanner findings get fixed on the regular" keeps a human in the seat for EVERY alert, including trivial ones. GROUND TRUTH (2026-07-16, operator-reported): the §5 scanners have been live since #76 and open code-scanning findings sit unfixed on the repo — the operating loop is specified (§5D) but unbuilt (W1-T41/T55/T56 all queued), and even built it would not CLOSE most alerts unattended. PRECEDENT: the dep lane (W1-T54, SHIPPED) already established the pattern this proposal extends — a DETERMINISTIC policy decides act-vs-escalate (minors auto-merge, majors escalate) with no per-item plan task and no per-item ratification. Propose the same split for lane 2: an ALERT-FIX LANE where policy-as-data over (severity x path-class x tool) decides — severity<=medium AND path outside a gate/containment-critical set (the policy file names it; review/gate/containment/ledger paths are IN it) -> DISPATCH one ephemeral lane-owned fix run through the FULL [ci, remudero-review] gate with origin: alert#<id> provenance and the standard trailer/ownership discipline; critical/high OR gate-cutting path -> escalate needs-human (exactly W1-T55's rung). RULE-15 RESOLUTION, explicit: the lane NEVER writes tasks.yaml — like dep-review it owns its run shape; the plan stays human-authored. Rule 2 holds: act-vs-escalate is a deterministic predicate, never an LLM call. GOLDEN (fixture-only): a seeded medium alert on a non-critical path dispatches exactly ONE lane run; a seeded critical, and a seeded medium touching src/lib/review.ts, each escalate and dispatch NOTHING; a re-poll of the same alerts dispatches no duplicate. OOTB: the lane + its policy file ship in the WS-4 scaffold so a fresh install fixes its own scanner findings from day one — "the harness eats first" (§5A) extended to the harness's own security debt.
-- ★ P21 (plan) — SUPERSEDED-BY-P22 2026-07-16 — absorbed into W1-T76 (its anti-ping-pong invariant + golden ratified VERBATIM there; never ratified separately). ORIGINAL (likely a SHARPENING of the §5 "fixing" rung / W1-T46, not a new task — GROUND that first) — BLOCKED_REVIEW IS TERMINAL IN THE MANUAL PATH; a completed reviewer's unmet-criteria should dispatch a BOUNDED FIX WORKER, not sit open for the operator to babysit. GROUND TRUTH (this session — W1-T64, PRs #111/#113/#115): a mounted reviewer posted FAILURE with specific unmet_criteria + reasons; `rmd run-task`'s manual path left the PR OPEN and dropped those reasons. Re-running spawned a fresh worker with the identical spec, which patched WHICHEVER criterion the last block named and dropped the other → an infinite C1↔C2 ping-pong across #111/#113. The hand-fix that broke it (#115) was ONE worker told to resolve ALL unmet criteria on a single branch — which is exactly what an automated fix rung does. PROPOSE: on blocked_review, dispatch a BOUNDED fix worker that (a) receives the FULL set of unmet_criteria + the reviewer's reasons at once — never one criterion at a time (the anti-ping-pong invariant, the direct W1-T64 lesson); (b) amends the SAME PR/branch, never opening a fresh PR (no orphans like #111/#113); (c) caps at N strikes, then routes to diagnose/escalate per the existing §5 flow; (d) applies in BOTH the drain AND the manual `rmd run-task` path — the §5 "fixing" rung is designed for the daemon but the manual path lacks it entirely, which is the live gap this session hit. This is the missing half of the review loop: the reviewer already computes precisely what's wrong (reviewer_outcome + reasons, shipped in W1-T63); nothing consumes it. GROUND BEFORE BUILDING: check whether W1-T46's block-handling scope already covers a fix rung — if so this is a sharpening of W1-T46, not a new task; if the daemon's "fixing" rung is specced but the manual path isn't, the gap is the wiring. Fixture-only golden: a seeded blocked_review with two unmet criteria dispatches ONE fix worker that receives BOTH, amends the same PR, and a second block after N strikes escalates rather than looping.
-  ★ ADDENDUM (capture-time grounding, Architect from source 2026-07-16 — the GROUND-BEFORE-BUILDING conditional is RESOLVED): this is a NEW BUILD, not a W1-T46 sharpening and not a wiring job. (i) NO fix spawn exists in code — zero fix-worker constructs in run-task.ts/worker.ts/classify.ts, and resolveMount is called only for the task mount and the reviewer, so the fix/diagnose mount rows W1-T63 added have NO consumer (the dead-consumer class, third instance: mounts table dead until #45, transient classifier until #60, runDiagnoseThenRetry still unwired per §9). (ii) The rung's design home EXISTS: §3's fixing state ("red CI/changes-requested → fixing — resume round 1, fresh round 2") — P21's strike cap lands there; the anti-ping-pong invariant (full unmet set, same branch/PR) is the new content that design lacks. (iii) W1-T46's verbs are retry/skip-subtree/escalate — a drain-level ROUTER with no repair capability; it COMPOSES with this rung (reasoner routes blocked_review → fix) rather than containing it, so neither task blocks the other. (iv) blocked_review is terminal at run-task.ts:1316-1354 (line drift expected — verify by grep), PR left open, reviewer reasons dropped, in BOTH paths (the daemon calls the same runTask). Ratification shape: one task, files [src/run-task.ts, src/lib/worker.ts], building §3's fixing state triggered by blocked_review, both paths, with P21's golden verbatim.
+- **P21 — SHIPPED & RETIRED this cycle (RETRO-1784383376396).** Superseded-by-P22 and absorbed into
+  W1-T76 (the blocked_review fix rung), which MERGED #158 with P21's anti-ping-pong invariant + golden
+  verbatim. Full prose DELETED per RATIFY-OR-KILL (the task is the record now; restating a shipped proposal
+  is the graveyard P8 warned about). Id preserved; see the closed-proposals line.
 - ★ P22 (plan → the INTEGRATION home) — RATIFIED 2026-07-16 -> W1-T76/W1-T77/W1-T78 (the blocked_review fix rung absorbing P21 · the level-triggered `rmd sweep` reconciler core · the clarification-question rung; three-task family, arm-not-serialize + HUNG-deferred per the ADDENDUM). ORIGINAL: the INTEGRATION home for WS-2's stuck-PR shepherd + the fix-worker loop (relayed P21) + a NEW clarification rung; Fable to decide filing — new task, WS-2 amendment, or the section that ABSORBS the fix-worker P21 — this is a SUPERSET of that proposal, not a rival, so do not ratify both separately) — NO OPEN PR SHOULD EVER END A CYCLE WITH NO NEXT ACTION. There is no loop that reconciles the full set of open PRs into dispositions, so blocked/orphaned PRs accumulate and the operator + Architect become the pipe-cleaners by hand.
 
   GROUND TRUTH (this session): three PRs — #111, #113, #123 — sat open-and-orphaned at the same time. Each was a blocked_review whose reviewer computed exact unmet_criteria + reasons (shipped: W1-T63 reviewer_outcome, now sharpened by W1-T65's proof-executing floor); nothing consumed them. The resolution each time was a HUMAN noticing the block and an Architect hand-authoring a one-worker-all-criteria fix — three times in one night. The pieces to automate this exist but SCATTERED and un-orchestrated: WS-2's stuck-PR shepherd (absorbs pr-pipeline.sh) + stall detection; the fix-worker loop (relayed P21 — blocked_review → bounded fix worker with the FULL criteria on the same PR); W1-T8's escalation (needs-human issue + notify + digest, SHIPPED). What is missing is (a) a SWEEP that runs these over EVERY open PR so none is left with no next action, and (b) a rung for the case none of them handles — a genuinely AMBIGUOUS block.
@@ -366,7 +453,7 @@ tasks.yaml PR — never auto-filed, never worker-edited (rule 15).
   W1-T24b, whose criteria demanded live post-flip proof — the bootstrap class, and the ordering fix
   already shipped via the #84/#77 splits. Adding a fourth proposal here would be accretion, not analysis.
 
-**Closed proposals (P1–P8, P10, P11, P15) — RETIRED FROM THIS LIST, ids preserved.** Per RATIFY-OR-KILL
+**Closed proposals (P1–P8, P10, P11, P15, P21) — RETIRED FROM THIS LIST, ids preserved.** Per RATIFY-OR-KILL
 every one now has a terminal status, so the adjudication prose they carried is DELETED rather than
 maintained twice (the tasks are the record now): **P1**→W1-T59 (filed, deprioritized) · **P2**→retired as
 superseded by §9 (it proposed the tripwire-as-work-limit bug) · **P3**→W1-T58 · **P4**→folded into W1-T24
@@ -375,7 +462,9 @@ ratify-or-kill duty (§Self-improvement) · **P10**→W1-T63 (SHIPPED #104 — r
 mount-governed + `reviewer_outcome`) · **P11**→W1-T51 (SHIPPED #97 — the gather unions ledger∪GitHub, so
 the recurring reconciliation gap is now closed mechanically) · **P15**→W1-T65 (SHIPPED #122 — the
 deterministic floor executes whitelisted proofs against the PR head; the blind-floor FALSE-PASS/FALSE-BLOCK
-hole is closed and the reviewer is now purely additive). A closed proposal's reasoning lives in its task or
+hole is closed and the reviewer is now purely additive) · **P21**→W1-T76 (SHIPPED #158 — the blocked_review
+fix rung; superseded-by-P22 and absorbed verbatim, so its full prose is DELETED from the proposals list this
+cycle). A closed proposal's reasoning lives in its task or
 in the rule it amended; restating it here is what turns this list into the graveyard P8 warned about.
 
 ## FIELD FINDINGS (from the mini, 2026-07-14 — ground truth, not docs)
