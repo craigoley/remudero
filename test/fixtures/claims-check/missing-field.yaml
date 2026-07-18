@@ -1,0 +1,5 @@
+# Fixture: a claim missing its `assertion` field -- a structurally invalid claims file must fail
+# loudly at parse time, never silently skip the malformed entry.
+- id: fixture-missing-assertion
+  claim: "This claim has no assertion field."
+  plan_section: "test fixture -- not a real plan claim"

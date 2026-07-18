@@ -1,0 +1,3 @@
+# Fixture: zero claims -- an empty gate proves nothing, so this must be REJECTED, not silently
+# pass as "vacuously true".
+[]

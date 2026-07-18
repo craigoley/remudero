@@ -1,0 +1,66 @@
+# plan/claims.yaml — the AWARENESS LAYER for prose (W1-T29, MASTER-PLAN §12A).
+#
+# Plan prose is unverifiable; a FALSIFIABLE claim with a command that must exit 0 is not. Every
+# entry below is a fact the plan asserts ABOUT THE SYSTEM, paired with a shell command that proves
+# it true right now. The `claims` CI job (.github/workflows/ci.yml) runs every assertion on every
+# PR; a red claim means THE PLAN IS LYING ABOUT THE SYSTEM — caught in CI, naming the false claim,
+# not by a human noticing months later. scripts/claims-check.mjs is the runner; its falsifier
+# fixture (test/claims-check.test.ts) proves a broken assertion actually turns the job RED and
+# names the failing claim, not just that the file parses.
+#
+# Schema per entry (all four fields required, all strings):
+#   id:           stable slug — printed in the CI failure output, never reused for a different fact
+#   claim:        the human-readable assertion the plan is making about the system
+#   plan_section: where the claim is asserted in prose (MASTER-PLAN.md section or a docs/*.md file)
+#   assertion:    a shell command (run via `sh -c` from the repo root) that MUST exit 0 iff the
+#                 claim holds. Keep it cheap, offline, and deterministic — no network, no live
+#                 GitHub state (a PR's default GITHUB_TOKEN cannot read branch-protection settings;
+#                 see the merge-gate claim below), no wall-clock dependence.
+#
+# Seeded (W1-T29) with the six claims named in this task's design note. One of those six —
+# the merge-gate claim — had already DRIFTED by the time this file was written: the design note's
+# literal wording was `[ci, remudero-review]`, but W1-T24 replaced the standalone `ci` context with
+# the `ci-gate` aggregator (docs/review-gate.md, VERIFIED 2026-07-15; live-checked via
+# `gh api repos/craigoley/remudero/branches/main/protection/required_status_checks` while authoring
+# this file: `["remudero-review","ci-gate"]`). Seeding the stale wording would make this claims file
+# lie on arrival — exactly the failure mode plan-claims exists to catch — so it is seeded with the
+# CURRENT, correct fact instead (Standing rule 7: distrust the prompt over the installed version).
+
+- id: worker-no-mcp-config
+  claim: "Workers get NO MCP config (MCP auto-approves under bypass, so the surface stays zero) —
+    spawnWorker's SDK Options and the worker settings template carry no MCP field at all."
+  plan_section: "MASTER-PLAN.md §1 Architecture — four planes (Worker plane)"
+  assertion: '! grep -rIiq "mcp" src/lib/worker.ts settings/worker.json'
+
+- id: worker-env-strips-anthropic
+  claim: "buildWorkerEnv strips every ANTHROPIC_* env var from the child process — a worker never
+    inherits the operator's API key and always falls back to subscription OAuth."
+  plan_section: "MASTER-PLAN.md §9 Resource doctrine — mounts, windows & context (FIELD FINDING 1,
+    the billing boundary)"
+  assertion: 'node --test --import tsx --test-name-pattern "strips ANTHROPIC_\* from a polluted parent env" test/env.test.ts'
+
+- id: tasks-yaml-never-machine-written
+  claim: "plan/tasks.yaml is never machine-written — no writeFileSync/writeFile call anywhere in
+    src/ or bin/ targets it; merge-state is DERIVED FROM GITHUB and only the Architect edits the
+    file, via a plan-only human PR."
+  plan_section: "MASTER-PLAN.md §13 Plan-sync: the in-repo PR flow (never scp again)"
+  assertion: '! grep -rnE "writeFileSync\(|writeFile\(" src bin --include=*.ts --include=*.mjs --include=*.js 2>/dev/null | grep -i "tasks\.yaml"'
+
+- id: default-budget-usd-100
+  claim: "DEFAULT_BUDGET_USD is 100 — the runaway tripwire, not a work allowance."
+  plan_section: "MASTER-PLAN.md §9 Resource doctrine — mounts, windows & context"
+  assertion: 'grep -qE "^export const DEFAULT_BUDGET_USD = 100(\.0)?;" src/run-task.ts'
+
+- id: containment-fails-closed
+  claim: "Containment fails closed: an unproven or silently-dropped sandbox BLOCKS the run (throws
+    ContainmentError before any worker writes a byte) rather than allowing it — absence of an
+    outside-cwd write is not itself proof; an OS denial must be OBSERVED."
+  plan_section: "MASTER-PLAN.md §4A Workspace containment (fleet-wide)"
+  assertion: 'node --test --import tsx test/containment.test.ts'
+
+- id: merge-gate-required-contexts
+  claim: "The merge gate's required status checks are [ci-gate, remudero-review] — the ci-gate
+    aggregator (W1-T24) replaced the standalone ci context, so a skipped granular job can never
+    deadlock a merge."
+  plan_section: "docs/review-gate.md#required-contexts"
+  assertion: 'grep -qF ''required_status_checks.contexts = ["ci-gate", "remudero-review"]'' docs/review-gate.md'

@@ -68,8 +68,10 @@ jobs:
       # no path filter, runs every PR (scoped internally to one module — see ci.yml's comment).
       # `jscpd-gate` (W1-T97, §5 TIER 2 quality gate 3/4) added: same UNCONDITIONAL shape — no
       # path filter, runs every PR; jscpd's own --threshold flag enforces the ceiling natively.
+      # `claims` (W1-T29, §12A the AWARENESS LAYER for prose) added: same UNCONDITIONAL shape —
+      # no path filter, runs every PR; a red claim means THE PLAN IS LYING ABOUT THE SYSTEM.
       REQUIRED: >-
-        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet", "jscpd-gate"]
+        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet", "jscpd-gate", "claims"]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
       IGNORE: >-
