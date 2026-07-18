@@ -4300,3 +4300,43 @@
     rung). No spawn.' T95's evidence resolver is reviewer-shaped until this task's (ii) generalizes it;
     blocked_ci has NO bridge until this task builds. The honest interim was building this task first and
     letting the sweep heal #170 — which is what happened."
+
+- id: W1-T101
+  title: "lint-plan proof-resolvability — a dialect prefix is a promise: the payload must name a runnable artifact or drop the prefix (the W1-T100 0/3)"
+  repo: remudero
+  depends_on: [W1-T20c]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LEDGER GROUND TRUTH (2026-07-17, W1-T100's own build): proof_exec [not_executable x3] with
+    floor_degraded:true — every proof was dialect-prefixed ('unit test: ...') yet named no resolvable
+    test file or test-name token, so the W1-T72 executor correctly refused to guess and the keyword floor
+    was binding on a gate-cutting merge. W1-T72 is working AS BOUNDED; the gap is AUTHORING: a prefix
+    that promises executability with an unresolvable payload produces permanent silent-ish degradation.
+    The birth gate is the right home — new tasks' proofs become genuinely executable by construction,
+    and floor_degraded becomes a legacy-only signal that W1-T73's mining tracks down."
+  design: |
+    New lint-plan rule (Layer A, warning-then-blocking per the linter's rollout convention — REPORT which
+    the codebase convention supports): a criterion proof beginning with the executable dialect
+    ('unit test:' | 'grep:') must contain a RESOLVABLE payload — for unit test: a path-like token
+    (test/*.test.ts) or a ::test-name token; for grep: a pattern AND an in <path> clause. Fails with the
+    remedy stated: name the artifact, or drop the prefix (prose proofs are legitimate and keyword-bound
+    by design — the rule polices the PROMISE, never mandates the dialect). Resolvability shapes are a
+    DATA table (companion rows to W1-T81's phrase signals and W1-T92's path classes).
+  acceptance:
+    - claim: "the W1-T100 regression corpus flags — all three verbatim proofs, prefix-promised but unresolvable"
+      proof: "unit test: the three proof strings loaded verbatim from the plan -> violation each, remedy text names both options"
+    - claim: "resolvable dialect proofs and prose proofs both pass"
+      proof: "unit tests: 'unit test: test/sweep.test.ts::routes ci-red to blocked-fixable' -> clean; 'grep: the wx flag in src/lib/config.ts' -> clean; an unprefixed prose proof -> untouched by this rule"
+    - claim: "the shapes are data"
+      proof: "unit test: adding a payload-shape row admits a seeded new form with zero engine changes"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [src/lib/task-linter.ts]
+  status: queued
+  attempts: 0
+  note: "Third precision companion: W1-T81 (recall/negation), W1-T92 (data-file sizing), this
+    (proof-resolvability). Together: the birth gate makes the observing floor's coverage grow instead
+    of the degradation flag."
