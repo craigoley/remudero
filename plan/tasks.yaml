@@ -4525,3 +4525,33 @@
   attempts: 0
   note: "Completes the disposition inputs: checks (T93), review (T77), required-contexts green (T103),
     in-flight (T80), and now merge state. The #170 hand-resolution is the mode's canonical procedure."
+
+- id: W1-T107
+  title: "ci-gate REQUIRED array — one entry per line, so concurrent gate additions merge instead of conflicting (the tier-gate collision class)"
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The #170 conflict's structural cause (worker-flagged at resolution): every tier gate
+    (W1-T25/26/28, now T96-T98 incoming) edits the SAME single line — ci-gate.yml's REQUIRED array — so
+    any two concurrently-open run branches touching it conflict by construction. One entry per line makes
+    concurrent additions adjacent-line changes git merges cleanly, retiring the class for the remaining
+    tier chain and every future gate."
+  design: |
+    Reformat the REQUIRED array one-entry-per-line (trailing-comma style if the parser allows — VERIFY
+    how ci-gate reads it: JSON.parse vs YAML list, and keep it valid for that reader). Pure formatting:
+    the parsed value must be byte-identical. Include a comment above the array stating the convention
+    and why (this class), so future gate PRs preserve it.
+  acceptance:
+    - claim: "the parsed REQUIRED set is unchanged"
+      proof: "unit test: parse ci-gate.yml's array pre/post fixture -> deepEqual the same 5 entries"
+    - claim: "the format is one entry per line with the convention documented"
+      proof: "grep: each entry on its own line; the convention comment present naming the conflict class"
+  risk: low
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [.github/workflows/ci-gate.yml]
+  status: queued
+  attempts: 0
