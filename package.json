@@ -26,6 +26,7 @@
     "test": "node --test --import tsx \"test/**/*.test.ts\"",
     "lint-plan": "tsx src/run-task.ts lint-plan",
     "depcruise": "depcruise src --config .dependency-cruiser.cjs",
+    "jscpd": "jscpd src --config .jscpd.json",
     "spike": "tsx src/spike.ts"
   },
   "dependencies": {
@@ -38,7 +39,8 @@
     "@stryker-mutator/core": "^9.6.1",
     "@swc/core": "^1.15.43",
     "@types/node": "^22.20.1",
-    "dependency-cruiser": "^18.1.0"
+    "dependency-cruiser": "^18.1.0",
+    "jscpd": "^5.0.12"
   },
   "overrides": {
     "qs": "^6.15.3"

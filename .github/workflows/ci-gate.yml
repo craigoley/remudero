@@ -66,8 +66,10 @@ jobs:
       # filter, no `if:`), same safety property as `ci`/`lint-plan` above.
       # `mutation-ratchet` (W1-T96, §5 TIER 2 quality gate 2/4) added: same UNCONDITIONAL shape —
       # no path filter, runs every PR (scoped internally to one module — see ci.yml's comment).
+      # `jscpd-gate` (W1-T97, §5 TIER 2 quality gate 3/4) added: same UNCONDITIONAL shape — no
+      # path filter, runs every PR; jscpd's own --threshold flag enforces the ceiling natively.
       REQUIRED: >-
-        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet"]
+        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet", "jscpd-gate"]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
       IGNORE: >-
