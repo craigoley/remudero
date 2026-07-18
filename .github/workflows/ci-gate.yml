@@ -59,8 +59,11 @@ jobs:
       # deadlock class this list must never reproduce.
       # `depcruise` (W1-T26, §5 TIER 3 architecture fitness) added: same UNCONDITIONAL shape —
       # no path filter, runs every PR.
+      # `containment-probe` (W1-T28, §5 TIER 1 "containment probe as a REQUIRED check") added:
+      # same UNCONDITIONAL shape — no path filter, runs every PR; internally scoped to diffs
+      # touching sandbox/hooks/env/deny-floor via containmentTrigger() (src/lib/specialist-panel.ts).
       REQUIRED: >-
-        ["ci", "lint-plan", "depcruise"]
+        ["ci", "lint-plan", "depcruise", "containment-probe"]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
       IGNORE: >-
