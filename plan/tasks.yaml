@@ -4589,7 +4589,7 @@
       proof: "unit test: a classify.ts-touching fixture -> run decision; the existing 8 mutation-ratchet falsifier tests pass unchanged (below-baseline still rejects)"
     - claim: "the paths list is data"
       proof: "unit test: adding a path row flips a seeded fixture from skip to run with zero script changes"
-  risk: medium
+  risk: high
   origin: architect
   plan_refs: ["§5C", "§5A"]
   files: [.github/workflows/ci.yml, scripts/mutation-ratchet.mjs]
