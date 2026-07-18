@@ -1,0 +1,9 @@
+# Fixture: every assertion exits 0 -- the gate must ACCEPT.
+- id: fixture-true-one
+  claim: "The shell command `true` exits 0."
+  plan_section: "test fixture -- not a real plan claim"
+  assertion: "true"
+- id: fixture-true-two
+  claim: "This repo's package.json exists on disk."
+  plan_section: "test fixture -- not a real plan claim"
+  assertion: "test -f package.json"

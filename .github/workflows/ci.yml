@@ -133,6 +133,33 @@ jobs:
       - name: jscpd duplication gate (blocks a duplicate above the recorded threshold)
         run: npm run --silent jscpd
 
+  claims:
+    # PLAN-CLAIMS gate (W1-T29, MASTER-PLAN §12A) — the AWARENESS LAYER for prose. Plan prose is
+    # unverifiable; a FALSIFIABLE claim with a command that must exit 0 is not. `plan/claims.yaml`
+    # lists facts the plan asserts about the system, each paired with a shell assertion; this job
+    # runs every one of them via `scripts/claims-check.mjs` and fails the moment any assertion
+    # exits non-zero, printing the false claim's id/prose/plan_section so the log NAMES the lie
+    # instead of leaving a bare exit code. Falsifier fixture proving this is ACTIVE (a planted
+    # broken claim turns the CLI red and names it, a healthy claims file turns it green) lives in
+    # test/claims-check.test.ts, driving the real CLI as a subprocess.
+    #
+    # Runs UNCONDITIONALLY on every PR (no path filter, no job `if:`) — same reasoning as
+    # `lint-plan`/`depcruise`/`jscpd-gate` above: a path-filtered REQUIRED check that can go
+    # silently absent is the synthwatch #102 deadlock class ci-gate.yml exists to avoid, and a
+    # claim about the system can be falsified by a change anywhere in the tree, not just under
+    # plan/.
+    name: claims
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Plan claims (every plan/claims.yaml assertion must exit 0)
+        run: npm run --silent claims
+
   lint-plan:
     # §5C Layer A (W1-T20c) — the CI half of the deterministic task linter. Runs
     # UNCONDITIONALLY on every PR (no path filter) so it always registers a check

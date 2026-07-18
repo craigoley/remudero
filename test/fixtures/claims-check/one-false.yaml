@@ -1,0 +1,10 @@
+# Fixture: one true claim, one DELIBERATELY-BROKEN claim -- the gate must REJECT and NAME the
+# false claim (id + prose), leaving the true claim's own PASS line intact.
+- id: fixture-true
+  claim: "The shell command `true` exits 0."
+  plan_section: "test fixture -- not a real plan claim"
+  assertion: "true"
+- id: fixture-false-planted-lie
+  claim: "This is a deliberately false claim: that /definitely-not-a-real-path-xyz exists."
+  plan_section: "test fixture -- not a real plan claim"
+  assertion: "test -e /definitely-not-a-real-path-xyz"
