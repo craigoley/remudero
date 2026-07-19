@@ -1,0 +1,4 @@
+{
+  "_comment": "alpha (a.yaml, 41 chars) + gamma (b.yaml, 41 chars) = 82 -- must SUM across shards.",
+  "capChars": 82
+}

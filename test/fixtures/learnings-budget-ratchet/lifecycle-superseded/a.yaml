@@ -1,0 +1,12 @@
+# alpha (active, 41-char injectable weight) + beta (SUPERSEDED) -- beta must contribute ZERO chars.
+- id: alpha
+  fact: "Short fact one."
+  src: test
+  files: [x]
+
+- id: beta
+  lifecycle: superseded
+  superseded_by: alpha
+  fact: "This is a much longer superseded fact that would blow the cap if it counted at all against the budget."
+  src: test
+  files: [x]

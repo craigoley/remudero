@@ -1,0 +1,11 @@
+# COUNTERFACTUAL: the exact same beta bytes as lifecycle-superseded/a.yaml, but ACTIVE -- proves the
+# same bytes that pass when superseded would BLOW the cap when active (acceptance criterion 2).
+- id: alpha
+  fact: "Short fact one."
+  src: test
+  files: [x]
+
+- id: beta
+  fact: "This is a much longer superseded fact that would blow the cap if it counted at all against the budget."
+  src: test
+  files: [x]

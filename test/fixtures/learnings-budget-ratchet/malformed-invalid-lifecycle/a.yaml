@@ -1,0 +1,5 @@
+- id: bad-lifecycle
+  lifecycle: retired
+  fact: "has an invalid lifecycle"
+  src: test
+  files: [x]

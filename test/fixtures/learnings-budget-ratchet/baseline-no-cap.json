@@ -1,0 +1,3 @@
+{
+  "_comment": "baseline record with no capChars at all -- the ratchet must not crash or false-block."
+}

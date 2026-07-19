@@ -1,0 +1,4 @@
+{
+  "_comment": "exactly alpha's 41-char injectable weight -- beta must contribute ZERO for this to still pass.",
+  "capChars": 41
+}

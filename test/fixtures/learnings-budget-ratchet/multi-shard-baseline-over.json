@@ -1,0 +1,4 @@
+{
+  "_comment": "alpha (a.yaml, 41 chars) + gamma (b.yaml, 41 chars) = 82 -- one under this, must BLOCK.",
+  "capChars": 81
+}
