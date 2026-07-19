@@ -34,3 +34,22 @@ decision reversible.
   this task's one-concern scope (this task is the extraction, not the dispatcher) and is left for a
   separate task against the dispatch/drain path.
 - Rollback: revert this PR (removes only this DECISIONS.md entry; no runtime code touched).
+
+## 2026-07-19T13:37:00.000Z — W1-T1 re-dispatch (fourth occurrence): already-satisfied, no-op close
+- Options: (A) close as already-satisfied, no functional code change (RECOMMENDED) | (B) force a
+  cosmetic edit to `src/run-task.ts` or `src/spike.ts` just to produce a non-empty diff
+- Chosen (RECOMMENDED, auto): Option A — no functional code change.
+- Rationale: unchanged from the third closure above. `src/run-task.ts` (4,344 lines) is already the
+  fully-built proto-runner, importing only from `src/lib/*` — no proto-runner logic remains inside
+  `src/spike.ts` (308 lines, the WS-0 sandbox smoke-test only) to extract. `plan/tasks.yaml`'s own
+  W1-T1 entry still carries `pr: 2  # merged PR #2 -> deriveStatus resolves this task as merged`.
+  At this dispatch, the worktree's `HEAD` (`bca5cd0`) equaled `origin/main` with a clean tree —
+  there was nothing to extract, diff, or PR. `git fetch` in this sandbox failed on a credential-
+  helper lock (`unable to get credential storage lock`, an environment restriction, not a repo
+  state issue); the local `origin/main` ref already matched `HEAD` so the no-op conclusion holds
+  regardless. This re-dispatch's root cause is the same one already named and scoped out twice
+  before: `tasks.yaml`'s `status: queued` field is decorative (real merge-state is DERIVED FROM
+  GITHUB — see file header + `lib/status.ts`), so a dispatcher keying off that field instead of
+  GitHub-derived status keeps re-queuing an already-merged task. Fixing the dispatcher is outside
+  this task's one-concern scope and remains a separate follow-up against the dispatch/drain path.
+- Rollback: revert this PR (removes only this DECISIONS.md entry; no runtime code touched).
