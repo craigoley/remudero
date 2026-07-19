@@ -34,8 +34,10 @@
     "plan-index:check": "node scripts/generate-plan-index.mjs --check",
     "learnings-assert": "node scripts/learnings-assert-check.mjs",
     "learnings-assert:check": "node scripts/learnings-assert-check.mjs --check",
-    "learnings-budget-ratchet": "node scripts/learnings-budget-ratchet.mjs",
+    "cli-reference": "tsx scripts/generate-cli-reference.mjs",
+    "cli-reference:check": "tsx scripts/generate-cli-reference.mjs --check",
     "spike": "tsx src/spike.ts",
+    "learnings-budget-ratchet": "node scripts/learnings-budget-ratchet.mjs",
     "commitlint": "commitlint",
     "changelog": "commit-and-tag-version"
   },
