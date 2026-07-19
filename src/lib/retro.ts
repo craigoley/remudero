@@ -643,3 +643,128 @@ export function loadMarker(path: string): RetroMarker | undefined {
 function round(n: number): number {
   return Math.round(n * 1000) / 1000;
 }
+
+// ── docs/ORIENTATION.md — the Architect handoff doc (W1-T39) ──────────────
+//
+// "A fresh Architect session should orient from ONE small doc, not re-derive
+// state from a 900-line plan + a ledger." ORIENTATION.md states: current
+// state, the next runnable task, and the never-do invariants. It is
+// MAINTAINED BY `rmd retro` (never hand-edited) so it can never go stale —
+// the retro already computes the gather and derives the next task from the
+// SAME GitHub-projected status drain uses; this only renders it.
+
+/** Collapse a wrapped markdown fragment into one line, stripping bold markers
+ *  (the Standing rules use `**TITLE**` emphasis that reads oddly mid-sentence
+ *  once collapsed). Pure text transform — no interpretation of meaning. */
+function collapseRuleText(s: string): string {
+  return s.replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Extract the numbered "never-do" invariants from MASTER-PLAN.md's own
+ * `## 12. Standing rules` section — a pure text extraction (no LLM, no
+ * interpretation) so ORIENTATION.md's invariant list can never drift from
+ * the source of truth by hand-copy. Each rule (numbered `N.` or `NB.` at the
+ * start of a line) is returned as one collapsed, re-wrapped line; a rule's
+ * continuation lines (indented markdown wrap) are folded back in. Returns
+ * `[]` if the section heading is not found (fail-soft — a missing section
+ * yields an empty invariants list, never a thrown error, since ORIENTATION
+ * generation must never abort a retro over a heading rename).
+ */
+export function extractStandingRules(masterPlanMd: string): string[] {
+  const lines = masterPlanMd.split("\n");
+  const startIdx = lines.findIndex((l) => /^## 12\. Standing rules\s*$/.test(l));
+  if (startIdx === -1) return [];
+  let endIdx = lines.findIndex((l, i) => i > startIdx && /^## /.test(l));
+  if (endIdx === -1) endIdx = lines.length;
+  const section = lines.slice(startIdx + 1, endIdx);
+
+  const rules: string[] = [];
+  let current = "";
+  const isRuleStart = (l: string) => /^\d+[A-Z]?\.\s+\S/.test(l);
+  const isBullet = (l: string) => /^[-*]\s+\S/.test(l);
+  for (const raw of section) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (isRuleStart(line)) {
+      if (current) rules.push(collapseRuleText(current));
+      current = line;
+    } else if (isBullet(line)) {
+      // A markdown bullet (`- ...`) is NOT a numbered rule's wrapped continuation —
+      // it marks trailing prose after the numbered list (e.g. this section's closing
+      // notes on how MASTER-PLAN.md itself is maintained). Stop extracting: nothing
+      // past the numbered list is a Standing rule, however this section is worded later.
+      if (current) rules.push(collapseRuleText(current));
+      current = "";
+      break;
+    } else if (current) {
+      current += " " + line;
+    }
+  }
+  if (current) rules.push(collapseRuleText(current));
+  return rules;
+}
+
+/** Everything {@link renderOrientation} needs to render docs/ORIENTATION.md. */
+export interface OrientationInput {
+  /** ISO timestamp of this retro run — injected by the caller (retro.ts is pure; it never calls Date itself). */
+  generatedAt: string;
+  /** The same deterministic gather the retro's plan-sync PR is built from. */
+  gather: RetroGather;
+  /** The next runnable task per the SAME DAG + GitHub-derived-status logic
+   *  `rmd drain` dispatches from ({@link import("./drain.js").nextRunnable}) —
+   *  `undefined` when nothing is currently runnable. */
+  nextTask?: Task;
+  /** MASTER-PLAN §12 Standing rules, extracted via {@link extractStandingRules}. */
+  standingRules: string[];
+}
+
+/**
+ * Render docs/ORIENTATION.md: current state (the deterministic gather),
+ * the next runnable task (DAG + GitHub-derived, matching `rmd drain`'s own
+ * pick), and the never-do invariants (MASTER-PLAN §12, extracted verbatim).
+ * Pure — no I/O; the caller writes the returned string to disk.
+ */
+export function renderOrientation(input: OrientationInput): string {
+  const { gather, nextTask, standingRules } = input;
+  const shippedLines = gather.shipped.length
+    ? gather.shipped.map(
+        (s) => `- ${s.taskId} → ${s.prUrl}${s.annotation ? ` (${s.annotation})` : ""}`,
+      )
+    : ["- (none since the last retro marker)"];
+  const nextTaskBlock = nextTask
+    ? [
+        `**${nextTask.id}** — ${nextTask.title}`,
+        "",
+        `- risk: ${nextTask.risk ?? "medium"} · depends_on: ${nextTask.depends_on?.length ? nextTask.depends_on.join(", ") : "(none)"}`,
+      ].join("\n")
+    : "(none runnable right now — the DAG is exhausted, every remaining task is blocked/unmet, or awaits `verify: human`)";
+  const invariantLines = standingRules.length
+    ? standingRules.map((r) => `- ${r}`)
+    : ["- (none extracted — see MASTER-PLAN.md §12 Standing rules directly)"];
+
+  return [
+    "# ORIENTATION",
+    "",
+    `_MAINTAINED BY \`rmd retro\` — regenerated ${input.generatedAt}. Hand edits are overwritten on the` +
+      " next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._",
+    "",
+    "A fresh Architect session should be able to orient from THIS doc alone plus the plan index —",
+    "not by re-deriving state from the full plan and ledger.",
+    "",
+    "## Current state",
+    "",
+    `${gather.totalRuns} run(s) since the last retro marker. Verdicts: ${JSON.stringify(gather.verdicts)}.`,
+    "",
+    "### Shipped since marker",
+    ...shippedLines,
+    "",
+    "## Next runnable task",
+    "",
+    nextTaskBlock,
+    "",
+    "## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)",
+    "",
+    ...invariantLines,
+  ].join("\n");
+}
