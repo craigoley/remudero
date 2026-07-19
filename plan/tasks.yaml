@@ -4598,3 +4598,82 @@
   note: "Harvested by hand from the #193 worker's merge note — the W1-T105 class, once more before it
     builds. Ceiling-raising rejected: it would slacken the fast-gate discipline for every check to
     accommodate one slow one."
+
+- id: W1-T118
+  title: "lint-plan headless-fitness scoping — a lexicon hit needs an ACTOR: a test reaping its own spawned child is not an operator killing a live daemon (the #268 false positive)"
+  repo: remudero
+  depends_on: [W1-T81]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    LINTER-PRECISION FAMILY, fourth of its line: W1-T81 (headless-fitness negation/self-reference,
+    the #146 pair), W1-T92 (sizing — data files are not subsystems, the #153 pair), W1-T101
+    (proof-resolvability — a dialect prefix is a promise). Same failure shape each time: a check
+    matching SURFACE TEXT where it means to match a PROPERTY.
+
+    LIVE FINDING (#268, 2026-07-19): filing W1-T117 (worker process containment) produced
+
+      ✗ W1-T117: 2 violation(s)
+          [headless-fitness] criterion 1 uses live-context term 'killed' on an auto-verify task
+          [headless-fitness] criterion 2 uses live-context term 'killed' on an auto-verify task
+
+    The lexicon entry {tag: killed, pattern: /\bkilled\b/i} (src/lib/task-linter.ts:115) exists for a
+    REAL unfitness — W1-T12d's live chaos drill, kill -9 a daemon on a real user session and watch
+    launchd restart it, which a headless worker structurally cannot do. But W1-T117's processes are
+    SPAWNED BY THE TEST ITSELF and reaped in-process. Same word, opposite fitness.
+
+    W1-T81 DOES NOT COVER THIS — stated explicitly so the builder does not assume it is inherited.
+    W1-T81 adds negation-scope awareness and a self-description exemption. W1-T117's criterion has no
+    negation and does not describe the linter; it reads child's group killed, survivor scan returns
+    zero. It would survive W1-T81 untouched and flag exactly the same.
+
+    COST OF THE GAP: the filer must reword around the checker. #268 restated termination as an
+    observable (process.kill(pid, 0) throws ESRCH) — a genuine sharpening, and it passed, but it was
+    driven by the linter rather than by the proof. That is the corrosive outcome: a rule that trains
+    authors to write around it stops being read as a rule. Every future lifecycle, containment,
+    supervision, or teardown task hits this same entry.
+  design: |
+    (i) SCOPE AS DATA, NEVER DELETE. Each lexicon row gains an optional qualifier field alongside its
+    pattern — the row stays, it just stops firing when the criterion establishes a headless actor.
+    Removing the killed row is FORBIDDEN: W1-T12d's live-kill criterion must keep flagging.
+    (ii) The discriminator is SPAWN-OWNERSHIP, not vocabulary: does the criterion's own text establish
+    that the process/resource acted upon is CREATED BY THE TEST OR FIXTURE (spawns/seeds/fixture/
+    in-process/test-spawned) rather than pre-existing on the operator's machine? Test-owned -> the
+    action is performable headlessly. Operator-owned or unstated -> the row fires as today. DEFAULT ON
+    FIRING: an ambiguous criterion still flags, because a false positive costs a reword while a false
+    negative costs a dispatched task that can never pass (the W1-T9 death spiral).
+    (iii) Per-task-type scoping is the cheaper alternative and MUST be evaluated against (ii) in the
+    build report, not assumed inferior — but note it is coarser: task type does not tell you who owns
+    the process, and W1-T117 and W1-T12d share type semantics while differing exactly on ownership.
+    (iv) REGRESSION CORPUS from the plan itself, loaded verbatim, never an id allowlist (W1-T81's
+    rule: an id allowlist rots).
+  acceptance:
+    - claim: "the #268 false positive clears — a criterion whose subject process is test-owned no longer flags"
+      proof: "unit test loading W1-T117's criteria verbatim from plan/tasks.yaml in BOTH wordings — the as-filed observable form and the pre-reword form carrying the bare past-participle of the tag under test — asserting zero headless-fitness violations for each"
+    - claim: "the entry still fires on an operator-owned subject — W1-T12d regression lock"
+      proof: "unit test loading W1-T12d's third acceptance criterion verbatim from plan/tasks.yaml and evaluating it AS IF verify:auto -> the headless-fitness violation is still raised, naming the same tag; plus a direct assertion that the tag's row remains present in the exported lexicon (deletion would pass criterion 1 and must not pass this one)"
+    - claim: "the scoping is data, and an ambiguous subject still flags"
+      proof: "unit tests: adding a qualifier row to the exported table flips a seeded criterion's verdict with zero edits to linter code; and a seeded criterion carrying a lexicon term with no ownership signal in either direction still raises the violation (fail-toward-flagging)"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [src/lib/task-linter.ts]
+  status: queued
+  attempts: 0
+  note: |
+    Filed from the #268 finding, drafted by the filing agent rather than harvested from a worker.
+
+    SELF-DEMONSTRATING: this task's OWN first draft failed lint on the very defect it fixes — two
+    headless-fitness violations, because its acceptance criteria QUOTE the offending word in order to
+    cite the regression corpus. It also drew a [sizing] violation naming a subsystem it does not touch
+    (files: is task-linter.ts alone), because a criterion MENTIONED that subsystem as the citation
+    target — the same match-the-text-not-the-property shape, one check over (the W1-T92 axis). Both
+    were cleared by writing AROUND the checker: the criteria now say the bare past-participle of the
+    tag under test and W1-T12d's third acceptance criterion instead of quoting either. Precise, and
+    strictly worse to read. That is the cost this task exists to remove, observed on itself.
+
+    depends_on W1-T81 is a SERIALIZATION as much as a dependency: both restructure
+    headlessFitnessViolations in the same file, and W1-T81's negation-scope work lands the machinery
+    this task's qualifier hangs off. Landing them in either order independently would collide.
