@@ -83,3 +83,12 @@ gates:
 
 targets:
   top_n: 10
+  # Each named target's GOAL on the complexity gate: cut its cyclomatic-approximation score by
+  # this percentage. The dry-run prints per-target `current -> goal (delta)` from it, which is
+  # what makes the dry-run an actionable PLAN rather than a ranked list of filenames. The
+  # project-wide complexity gate is the SUM of these per-file scores, so a per-target goal is a
+  # real decomposition of the project-wide number, not a parallel invention. The duplication and
+  # fitness gates need no percentage — their per-target goal is always 0 (remove every clone pair
+  # / resolve every violation naming that file). `mutation` and `cve` do not decompose per file
+  # and are reported per target as "n/a (project-wide gate)" rather than given an invented goal.
+  goal_complexity_reduction_pct: 20

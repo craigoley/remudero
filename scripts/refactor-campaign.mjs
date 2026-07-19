@@ -210,42 +210,92 @@ export function evaluateCampaign(deltas) {
 
 // ── Named tech-debt targets for the dry-run ──────────────────────────────
 
+/** Default per-target complexity reduction the dry-run proposes as each target's GOAL. */
+export const DEFAULT_GOAL_COMPLEXITY_REDUCTION_PCT = 20;
+
 /**
- * Rank the top `topN` files by complexity (descending) and annotate each with the OTHER gates
- * that also flag it: a duplication hit (the file appears as either side of a jscpd clone pair)
- * or a fitness violation (the file appears in a depcruise violation's `from`/`to`).
+ * Rank the top `topN` files by complexity (descending) and give each one its own measurable
+ * CURRENT-vs-GOAL delta on every gate that is per-file measurable -- this is what makes the
+ * dry-run a refactor PLAN ("here is each target and what it must move") rather than a list of
+ * filenames beside a project-wide summary.
+ *
+ * Which gates are per-target, and what "goal" means for each:
+ *   - complexity  CURRENT = this file's cyclomatic-approximation score; GOAL = a
+ *                 `goalReductionPct` cut of it (config `targets.goal_complexity_reduction_pct`,
+ *                 default {@link DEFAULT_GOAL_COMPLEXITY_REDUCTION_PCT}); DELTA = goal - current,
+ *                 i.e. NEGATIVE = "remove this much complexity". The project-wide complexity gate
+ *                 is the sum of exactly these per-file scores, so a per-target goal is a real
+ *                 decomposition of the project-wide one, not a parallel invention.
+ *   - duplication CURRENT = how many jscpd clone pairs this file participates in; GOAL = 0.
+ *   - fitness     CURRENT = how many depcruise rule violations name this file; GOAL = 0.
+ *
+ * Deliberately NOT faked per target: `mutation` is scoped to one file by .stryker.conf, and `cve`
+ * is a property of the dependency tree, not of any src file. Neither decomposes per target, so
+ * each target reports them as `n/a (project-wide gate)` rather than inventing a number -- a goal
+ * nobody can act on per file is worse than an honest gap.
+ *
  * @param {Record<string, number>} complexityFiles path (relative to srcDir, no `src/` prefix) -> score
- * @param {string} srcDir the directory the complexity scan ran over (used to reconstitute the
- *   `src/...` path jscpd/depcruise report against, since both tools are invoked with `src` as
- *   their target and so report paths relative to it too)
  * @param {number} topN
  * @param {{duplicates?: Array<{firstFile?:{name?:string}, secondFile?:{name?:string}}>}} [jscpdReport]
  * @param {{modules?: Array<{source?:string, dependencies?: Array<{resolved?:string, valid?:boolean, rules?: Array<{name?:string}>}>}>}} [depcruiseReport]
+ * @param {number} [goalReductionPct]
  */
-export function rankTargets(complexityFiles, topN, jscpdReport, depcruiseReport) {
-  const dupFiles = new Set();
+export function rankTargets(
+  complexityFiles,
+  topN,
+  jscpdReport,
+  depcruiseReport,
+  goalReductionPct = DEFAULT_GOAL_COMPLEXITY_REDUCTION_PCT,
+) {
+  // Count PARTICIPATIONS, not presence: a file in three clone pairs has three things to remove,
+  // and "current=3 -> goal=0" is the actionable number. A bare boolean would under-state it.
+  const dupCounts = new Map();
+  const bump = (map, key) => {
+    if (key) map.set(key, (map.get(key) ?? 0) + 1);
+  };
   for (const dup of jscpdReport?.duplicates ?? []) {
-    if (dup.firstFile?.name) dupFiles.add(dup.firstFile.name);
-    if (dup.secondFile?.name) dupFiles.add(dup.secondFile.name);
+    bump(dupCounts, dup.firstFile?.name);
+    bump(dupCounts, dup.secondFile?.name);
   }
-  const fitnessFiles = new Set();
+  const fitnessCounts = new Map();
   for (const mod of depcruiseReport?.modules ?? []) {
     for (const dep of mod.dependencies ?? []) {
       if ((dep.rules?.length ?? 0) > 0) {
-        if (mod.source) fitnessFiles.add(mod.source);
-        if (dep.resolved) fitnessFiles.add(dep.resolved);
+        bump(fitnessCounts, mod.source);
+        bump(fitnessCounts, dep.resolved);
       }
     }
   }
+  const countFor = (map, path) => map.get(`src/${path}`) ?? map.get(path) ?? 0;
 
   return Object.entries(complexityFiles)
     .sort((a, b) => b[1] - a[1])
     .slice(0, topN)
     .map(([path, complexity]) => {
+      const dupCurrent = countFor(dupCounts, path);
+      const fitnessCurrent = countFor(fitnessCounts, path);
+      const complexityGoal = Math.round(complexity * (1 - goalReductionPct / 100));
       const flags = [];
-      if (dupFiles.has(path)) flags.push('duplication');
-      if (fitnessFiles.has(`src/${path}`) || fitnessFiles.has(path)) flags.push('fitness');
-      return { path: `src/${path}`, complexity, alsoFlaggedBy: flags };
+      if (dupCurrent > 0) flags.push('duplication');
+      if (fitnessCurrent > 0) flags.push('fitness');
+      return {
+        path: `src/${path}`,
+        complexity,
+        alsoFlaggedBy: flags,
+        // The per-target gate-delta: each gate's CURRENT versus this target's GOAL.
+        gateDeltas: [
+          {
+            id: 'complexity',
+            current: complexity,
+            goal: complexityGoal,
+            delta: complexityGoal - complexity,
+            unit: 'points',
+          },
+          { id: 'duplication', current: dupCurrent, goal: 0, delta: -dupCurrent, unit: 'clone pairs' },
+          { id: 'fitness', current: fitnessCurrent, goal: 0, delta: -fitnessCurrent, unit: 'violations' },
+        ],
+        projectWideOnly: ['mutation', 'cve'],
+      };
     });
 }
 
@@ -312,14 +362,25 @@ function renderDryRun(config, deltas, targets) {
     );
   }
   lines.push('');
-  lines.push(`named tech-debt targets (top ${targets.length} by complexity):`);
+  lines.push(`named tech-debt targets (top ${targets.length} by complexity), each with its current-vs-goal delta:`);
   if (targets.length === 0) {
     lines.push('  (none -- src/ scan found no .ts files)');
   }
   for (const t of targets) {
     const flags = t.alsoFlaggedBy.length > 0 ? ` [also flagged by: ${t.alsoFlaggedBy.join(', ')}]` : '';
-    lines.push(`  - ${t.path}: complexity=${t.complexity}${flags}`);
+    lines.push(`  - ${t.path}${flags}`);
+    for (const g of t.gateDeltas ?? []) {
+      const sign = g.delta > 0 ? '+' : '';
+      lines.push(
+        `      ${g.id}: current=${round(g.current)} goal=${round(g.goal)} delta=${sign}${round(g.delta)} ${g.unit}`,
+      );
+    }
+    if ((t.projectWideOnly ?? []).length > 0) {
+      lines.push(`      ${t.projectWideOnly.join(', ')}: n/a (project-wide gate, not per-target)`);
+    }
   }
+  lines.push('');
+  lines.push('no change until approved -- this is the plan, not an edit.');
   return lines.join('\n');
 }
 
@@ -402,7 +463,9 @@ function main(argv) {
     } catch {
       depcruiseReport = undefined;
     }
-    const targets = rankTargets(complexityScan.files, topN, jscpdReport, depcruiseReport);
+    const goalPct =
+      config.targets?.goal_complexity_reduction_pct ?? DEFAULT_GOAL_COMPLEXITY_REDUCTION_PCT;
+    const targets = rankTargets(complexityScan.files, topN, jscpdReport, depcruiseReport, goalPct);
     console.log(renderDryRun(config, deltas, targets));
     process.exitCode = 0;
     return;

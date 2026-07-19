@@ -56,6 +56,39 @@ referenced against which of those files also show up in the duplication/
 fitness reports). `check` is the CI gate: exit 0 is GREEN, non-zero is RED
 with the failing reason(s) printed.
 
+### The per-target gate-delta
+
+Each named target carries its **own** `current -> goal` delta, so the dry-run is
+an actionable refactor **plan**, not a ranked list of filenames beside a
+project-wide summary:
+
+```
+named tech-debt targets (top 10 by complexity), each with its current-vs-goal delta:
+  - src/run-task.ts [also flagged by: duplication]
+      complexity: current=214 goal=171 delta=-43 points
+      duplication: current=2 goal=0 delta=-2 clone pairs
+      fitness: current=0 goal=0 delta=0 violations
+      mutation, cve: n/a (project-wide gate, not per-target)
+
+no change until approved -- this is the plan, not an edit.
+```
+
+How each per-target goal is derived:
+
+| Gate | Per-target CURRENT | Per-target GOAL |
+|---|---|---|
+| `complexity` | the file's cyclomatic-approximation score | a `targets.goal_complexity_reduction_pct` cut of it (default 20%) |
+| `duplication` | how many jscpd clone pairs the file participates in | `0` |
+| `fitness` | how many depcruise rule violations name the file | `0` |
+| `mutation`, `cve` | — | **n/a**: reported as project-wide, never given an invented per-file goal |
+
+The project-wide `complexity` gate is the **sum** of exactly these per-file
+scores, so a per-target complexity goal is a real decomposition of the
+project-wide number rather than a parallel invention. `mutation` is scoped to a
+single file by `.stryker.conf` and `cve` is a property of the dependency tree —
+neither decomposes per source file, and a goal nobody can act on per file is
+worse than an honest gap, so those two are labelled `n/a` per target instead.
+
 ## CI wiring
 
 The `refactor-campaign` job (`.github/workflows/ci.yml`) runs **unconditionally**
