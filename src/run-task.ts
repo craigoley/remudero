@@ -44,11 +44,10 @@ import {
   buildGather,
   calibrationTable,
   codeFilesInDiff,
-  extractStandingRules,
   loadMarker,
   renderGather,
-  renderOrientation,
 } from "./lib/retro.js";
+import { regenerateOrientation } from "./lib/orientation.js";
 import { appendLedger } from "./lib/ledger.js";
 import {
   assertRunnable,
@@ -2468,30 +2467,19 @@ async function retroCommand(rest: string[]): Promise<number> {
     // here (never LLM-authored) so it can never go stale by hand-copy or by an
     // Architect forgetting to touch it. Runs AFTER the worker so it also reflects
     // whatever the Architect just changed in MASTER-PLAN.md §12 (Standing rules).
-    // A regenerated-but-unstaged file would silently vanish from the PR, so this
-    // ALWAYS commits it as its own labeled commit when content changed — never
-    // relying on the Architect to `git add` it.
+    // The mechanism itself lives in lib/orientation.ts (independently exercised
+    // against a real git worktree by test/orientation.test.ts, see that file for
+    // the falsifier that proves a second pass's diff names the REFRESHED state).
     let orientationCommitted = false;
     try {
-      const standingRules = extractStandingRules(readFileSync(join(worktreePath, "MASTER-PLAN.md"), "utf8"));
-      const orientationMd = renderOrientation({
+      const result = regenerateOrientation({
+        worktreePath,
         generatedAt: new Date().toISOString(),
         gather,
         nextTask,
-        standingRules,
       });
-      mkdirSync(join(worktreePath, "docs"), { recursive: true });
-      writeFileSync(join(worktreePath, "docs", "ORIENTATION.md"), orientationMd);
-      execFileSync("git", ["-C", worktreePath, "add", "docs/ORIENTATION.md"]);
-      try {
-        execFileSync("git", ["-C", worktreePath, "diff", "--cached", "--quiet"]);
-        // exit 0 ⇒ nothing staged ⇒ ORIENTATION.md content is unchanged; nothing to commit.
-      } catch {
-        // non-zero ⇒ staged changes exist ⇒ commit them as their own, clearly-labeled commit.
-        execFileSync("git", ["-C", worktreePath, "commit", "-m", "rmd retro: regenerate docs/ORIENTATION.md"]);
-        orientationCommitted = true;
-        log("orientation.regenerated", {});
-      }
+      orientationCommitted = result.committed;
+      if (result.committed) log("orientation.regenerated", { diff_bytes: result.diff?.length ?? 0 });
     } catch (e) {
       log("orientation.write.error", { error: String((e as Error)?.message ?? e) });
     }
