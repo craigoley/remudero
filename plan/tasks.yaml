@@ -4598,3 +4598,555 @@
   note: "Harvested by hand from the #193 worker's merge note — the W1-T105 class, once more before it
     builds. Ceiling-raising rejected: it would slacken the fast-gate discipline for every check to
     accommodate one slow one."
+
+- id: W1-T109
+  title: "daemon-plist passes through --allow-self-target — explicit consent bakes into the unit; a self-target plist without it is refused at GENERATION (the commissioning crash-loop near-miss)"
+  repo: remudero
+  depends_on: [W1-T12b]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE NEAR-MISS (2026-07-18 commissioning): daemon-plist --repo remudero generated a unit
+    WITHOUT --allow-self-target for a self-repo target — loaded as-is, the daemon refuses (by design),
+    exits non-zero, and KeepAlive/SuccessfulExit=false restart-loops it forever. The operator hand-added
+    the flag via PlistBuddy. The runtime consent gate is CORRECT; the generator must honor and require
+    the same consent: explicitly given -> baked into ProgramArguments; a self-target generation WITHOUT
+    the flag should refuse with the reason at generation time, not produce a unit that crash-loops at
+    boot (fail at the cheapest layer)."
+  design: |
+    daemon-plist accepts --allow-self-target and appends it to ProgramArguments. Self-target detection
+    (the target repo IS the harness source repo) without the flag -> non-zero refusal naming the flag,
+    generating nothing (--write included). Non-self targets: flag neither required nor baked. The
+    generated-unit golden fixtures gain the self-target variant.
+  acceptance:
+    - claim: "self-target + flag bakes the flag; self-target without it refuses at generation"
+      proof: "unit tests: args fixture with the flag -> ProgramArguments contains --allow-self-target; without -> non-zero, no plist emitted, message names the flag"
+    - claim: "non-self targets are unchanged"
+      proof: "unit test: --repo remudero-sandbox fixture -> byte-identical to today's output (regression lock)"
+  risk: medium
+  origin: architect
+  plan_refs: ["§9", "§4B"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+
+- id: W1-T110
+  title: "rmd inbox — the ratification inbox's deterministic core: Architect-drafted candidates + a rule-2 readiness predicate; deferred-with-trigger is never recommended (ratifies P25 i)"
+  repo: remudero
+  depends_on: [W1-T20c]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P25(i), operator-requested by name and now forced by the daemon commissioning:
+    the machine generates decisions on a five-minute cadence while ratification rides a chat ledger. The
+    field's 2026 finding is that approval controls fail by FATIGUE — reflexive approval is a documented
+    clickthrough vulnerability, and the cure is risk-tiering plus surfacing only what is genuinely
+    actionable [research: hitl-approval-fatigue-2026]. This task is the tiering: only READY proposals
+    ever surface, readiness is computed not asserted, and a proposal whose trigger has not fired is
+    DEFERRED-WITH-TRIGGER, never recommended (the dead-consumer discipline, now code)."
+  design: |
+    (a) DRAFT RUNG: for each ACTIVE proposal, a bounded Architect worker drafts the candidate
+    ratification — a tasks.yaml fragment + the stamp line — cached (state-side, never committed) and
+    invalidated when main moves past the proposal's evidence anchors. Drafting is the LLM's job;
+    everything after is deterministic.
+    (b) READINESS PREDICATE (rule 2, policy-as-data): READY = drafted tasks' deps all merged
+    (deriveStatus, corrections-supreme) AND the proposal's cited evidence anchors still grep-true on
+    main AND the drafted set passes rmd lint-plan AND no open conflicting proposal. Otherwise
+    DEP-UNMET / EVIDENCE-DRIFTED / DEFERRED-WITH-TRIGGER (a named unfired trigger, e.g. P19@WS-2),
+    each with the failing predicate named.
+    (c) rmd inbox renders the classification with the drafted tasks attached to READY items — the
+    reasoning rides with the recommendation, never a bare ask.
+  acceptance:
+    - claim: "the four-state fixture classifies correctly and only READY carries a draft"
+      proof: "unit test over injected deps: a seeded proposal set {ready, dep-unmet, evidence-drifted, deferred-with-trigger} -> exactly one READY with its lint-clean draft attached; each non-ready names its failing predicate; the deferred item names its trigger and is never marked recommended"
+    - claim: "readiness is deterministic and draft-cache invalidation is anchor-keyed"
+      proof: "unit tests: the predicate runs with the LLM stubbed out entirely; moving a fixture anchor flips READY -> EVIDENCE-DRIFTED and marks the cached draft stale"
+    - claim: "a draft that fails lint-plan is not READY"
+      proof: "unit test: a drafted fragment with a live-verb proof -> lint violation -> DEP state reported as draft-unclean, not surfaced as READY"
+  risk: high
+  origin: architect
+  plan_refs: ["P25", "§7", "§2"]
+  files: [src/lib/inbox.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+
+- id: W1-T111
+  title: "rmd approve / rmd reframe — one bit ratifies through the gate, feedback redrafts through the ledger; approve-rate is telemetry (ratifies P25 ii-iv)"
+  repo: remudero
+  depends_on: [W1-T110, W1-T8]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P25(ii)-(iv). The operator's requirement verbatim: 'just request a thumbs up on
+    each to agree, or a way to provide feedback to reframe/replan the item.' Intent stays separated from
+    execution: the bit INITIATES a plan PR that rides the full gate — rule 15's human-initiation
+    preserved, audit and revert first-class [research: hitl-approval-fatigue-2026]. And because the
+    field's failure mode is the rubber-stamp queue, the approve/reframe ratio is LEDGERED telemetry —
+    a sustained approval rate near 100% is a signal the readiness triggers are too loose, surfaced in
+    the retro, not discovered in a postmortem."
+  design: |
+    (ii) rmd approve <P##>: valid only for READY items; opens the plan PR carrying W1-T110's pre-drafted
+    lint-clean tasks + the RATIFIED stamp; ledgers ratify.approved. The gate reviews; auto-merge lands
+    it; nothing auto-files without the bit.
+    (iii) rmd reframe <P##> --feedback "<text>": ledgers ratify.reframed with the feedback verbatim;
+    invalidates the draft; the next inbox pass redrafts WITH the feedback in the Architect prompt —
+    the reframe history rides the proposal until resolution.
+    (iv) TRANSPORT v1: READY items surface through the existing digest + escalate with numbered options
+    (approve / reframe / defer) — no new UI; the §7 panel and WS-6 MCP upgrade the surface later.
+    Escalation dedup discipline applies (one open item per proposal).
+    TELEMETRY: the retro gather reports approve/reframe counts and the running approval rate.
+  acceptance:
+    - claim: "approve on a READY fixture produces exactly ONE plan-PR payload carrying the draft + stamp, and a ledger line; approve on a non-READY refuses naming the state"
+      proof: "unit test over injected git/gh deps: one branch, one PR call, payload deepEquals the cached draft + stamp; dep-unmet fixture -> refusal, zero PR calls"
+    - claim: "reframe ledgers feedback verbatim, invalidates the draft, and the redraft prompt carries it"
+      proof: "unit test: reframe fixture -> ratify.reframed with the text; next draft-rung invocation's rendered prompt contains the feedback; no PR opened"
+    - claim: "the approval-rate telemetry lands in the retro"
+      proof: "unit test: a seeded ledger with 3 approvals + 1 reframe -> the retro report carries 75% with both counts"
+  risk: high
+  origin: architect
+  plan_refs: ["P25", "§7", "§4"]
+  files: [src/lib/inbox.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Named consumers already filed: W1-T105's follow-up candidates and the retro's minted proposals
+    flow here. P26's issue-reaction transport is the roadmapped upgrade."
+
+- id: W1-T112
+  title: "The morning pulse — rmd digest as a daily LaunchAgent (the W1-T12b generator pattern; the operator's awareness surface)"
+  repo: remudero
+  depends_on: [W1-T12b]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "With the daemon commissioned, the operator's question is 'how do I know what needs me?'
+    Escalation issues push via GitHub; ratifications surface via the inbox (W1-T110/T111); the missing
+    piece is the once-daily pulse: merges, blocks, open escalations, cost, and the inbox's READY count,
+    delivered to the operator's pocket. rmd digest exists (ledger rollup -> iMessage); this schedules it."
+  design: |
+    rmd digest-plist [--hour <h>] [--write]: generates com.remudero.digest — a daily
+    StartCalendarInterval LaunchAgent invoking rmd digest — reusing the W1-T12b generator's closed-env
+    allowlist + ANTHROPIC-clean assertion verbatim (one generator family, one billing boundary). The
+    digest body gains one line when the inbox lands: 'inbox: N ready' (soft compose — absent inbox,
+    absent line, no hard dep). Golden fixtures per the daemon-plist precedent, including the
+    clean-env-throws case.
+  acceptance:
+    - claim: "the generated unit is daily, clean-env, and correctly targeted"
+      proof: "unit test: generated plist fixture -> StartCalendarInterval at the given hour, EnvironmentVariables exactly {PATH, HOME}, ProgramArguments end [rmd, digest]; an ANTHROPIC_* injection fixture throws (the W1-T12b assertion reused)"
+    - claim: "the inbox line is soft-composed"
+      proof: "unit test: digest render with an inbox summary present includes 'inbox: N ready'; with the inbox module absent renders byte-identical to today"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§9"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+
+- id: W1-T113
+  title: "Toolchain resolution + spawn-infra degradation — resolve the claude executable at spawn, refuse legibly, and NEVER crash-loop silently (the vanished-binary incident)"
+  repo: remudero
+  depends_on: [W1-T12b]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (2026-07-18 daemon logs): a Claude Code auto-update migrated the install off
+    /Users/craigoleyagent/.npm-global/bin/claude mid-operation — W3-T1a's implement worker ran, its fix
+    strike minutes later could not spawn ('Claude Code native binary not found'), and the daemon then
+    CRASH-LOOPED: error -> process exit -> KeepAlive restart -> identical failure every ~90s, five
+    consecutive polls, ZERO escalations, zero backoff. Two defects: the executable path is pinned while
+    the toolchain self-updates (the stale-binary class in its most literal form — the pkill drift's
+    sibling, one layer deeper), and a spawn-INFRASTRUCTURE failure is treated as a fatal crash instead
+    of a degraded state the daemon reports and survives."
+  design: |
+    (i) RESOLUTION: resolve the executable at spawn time — env override, then PATH, then the known
+    install locations as a DATA table (npm-global, ~/.local/bin, the native installer path — VERIFY the
+    current native default from CC docs in the checkout, distrust this prompt's memory); cache per
+    process; log the resolved path once at daemon boot.
+    (ii) PREFLIGHT: worker settings validation gains executable-exists + executable-runs (--version);
+    absence fails THE RUN as an infrastructure verdict (blocked_toolchain — the W1-T91 classification:
+    never a task defect) with every searched path named in the reason.
+    (iii) DEGRADE, DON'T DIE: the daemon catches spawn-infra errors, escalates ONCE per distinct cause
+    (dedup via the W1-T104 discipline — content-keyed, an open toolchain issue suppresses repeats), and
+    keeps POLLING with backoff on the failing dispatch — sweeps and status work continue; the process
+    does not exit. The five-identical-crashes-90s-apart log is the regression fixture.
+  acceptance:
+    - claim: "the vanished-binary fixture resolves via the location table; a fully-absent toolchain fails the run as blocked_toolchain naming every searched path"
+      proof: "unit tests over injected fs/exec: pinned-path-absent + table-hit -> spawn proceeds with the resolved path logged; all-absent -> blocked_toolchain verdict, searched paths in the reason, run refused cleanly"
+    - claim: "the daemon survives spawn-infra failure: one escalation, continued polling, backoff"
+      proof: "unit test: a spawner throwing the not-found error across 3 poll ticks -> exactly ONE escalation, daemon loop continues (no process exit), dispatch attempts backed off while sweep still runs"
+    - claim: "the location table is data"
+      proof: "unit test: adding a location row resolves a seeded path with zero resolution-code changes"
+  risk: high
+  origin: architect
+  plan_refs: ["§9", "§4B", "P23"]
+  files: [src/lib/worker.ts, src/lib/daemon.ts]
+  status: queued
+  attempts: 0
+  note: "Third toolchain-drift incident this week (2.1.214 pkill wrapper; the CLI-behind-main class W1-T79
+    tracks; now the install location itself). The pattern: the harness's substrate self-updates beneath
+    it — every pinned assumption about the toolchain needs a resolve-or-refuse-legibly path."
+
+- id: W1-T114
+  title: "PENDING is a disposition — checks in flight mean WAIT (with a staleness ceiling), never escalate (the 30-issue predicate storm)"
+  repo: remudero
+  depends_on: [W1-T93]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (2026-07-19 ops sweep): 30 open needs-human issues, ~24 of one shape — 'not
+    positively mergeable: checks pending, review success — escalating.' The disposition table has no
+    PENDING state, so in-flight checks fall through to the escalate catch-all, and the 13-minute
+    mutation gate guarantees every fresh PR files an issue during its window. Pending is TIME, not
+    ambiguity; escalating on it manufactures alert fatigue at machine speed (and W1-T104's dedup,
+    filed unbuilt, would only have capped the copies — the row itself is the defect)."
+  design: |
+    (i) A positive WAIT disposition: required contexts pending/queued AND newest check-start younger
+    than a staleness ceiling (policy-as-data, default generous enough for the slowest required check)
+    -> no action this pass, a wait ledger line, re-derive next pass. (ii) Stale-pending (ceiling
+    exceeded) -> the EXISTING escalate path with the age in the reason — a check stuck for an hour IS
+    ambiguity. (iii) Regression locks: the storm fixture (pending 4 minutes, review success) -> wait,
+    zero escalations; genuinely red -> blocked-fixable unchanged; stuck-pending fixture -> escalates
+    with age named.
+  acceptance:
+    - claim: "in-window pending never escalates and never arms"
+      proof: "unit test: pending-4min fixture -> wait disposition, no escalation call, no merge arm"
+    - claim: "stale pending escalates with the age in the reason"
+      proof: "unit test: pending-90min fixture -> escalate, reason contains the age and the ceiling"
+    - claim: "the ceiling is data"
+      proof: "unit test: lowering the seeded ceiling flips the 4min fixture from wait to escalate with zero code changes"
+  risk: medium
+  origin: architect
+  plan_refs: ["§3", "P22", "W1-T93"]
+  files: [src/lib/sweep.ts]
+  status: queued
+  attempts: 0
+
+- id: W1-T115
+  title: "rmd temp hygiene — stop copying the ledger per invocation, always clean up, sweep stale dirs at boot (the 26,711-dir ENOSPC incident)"
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (2026-07-19 ops sweep): 26,711 leaked temp dirs under /tmp/claude-502 —
+    every rmd invocation (status 3423, drain 2881, daemon 2546, sweep, correct, fleet-control) copies
+    the ENTIRE 5.8MB ledger.ndjson into a fresh temp dir and never removes it. Self-reinforcing: the
+    ledger grows with activity, the copies grow with the ledger, and the 149x W1-T1 crash loop poured
+    fuel on it. Result: /System/Volumes/Data at 526Mi free of 228Gi — ENOSPC corrupted validation runs
+    (bare exit 1), broke Bash tool output, and plausibly caused the '$0 binary exists but failed to
+    launch' worker faults. One CC auto-update install_failed event is recorded in the same window
+    (~/.claude/.last-update-result.json, 2026-07-19T17:13:53Z, npm-global, 2.1.209 -> 2.1.215);
+    correlation only — the disk was first OBSERVED full at ~17:37, so causation is unproven and a
+    second such event was looked for and NOT found. A full disk fails everything downstream in
+    illegible ways; hygiene is infrastructure."
+  design: |
+    (i) READ IN PLACE: find why the ledger is copied per invocation (grep the temp-dir creation path);
+    replace with direct read or streaming — the ledger is append-only NDJSON, no copy is needed for
+    reads. (ii) ALWAYS CLEAN: any temp dir rmd does create is removed on exit via finally/trap,
+    including error paths. (iii) BOOT SWEEP: daemon boot removes rmd-owned temp dirs older than a
+    data-driven ceiling, logging the count. (iv) Regression: a metric/test asserting zero surviving
+    temp dirs after a completed invocation.
+  acceptance:
+    - claim: "a completed rmd invocation leaves zero temp dirs"
+      proof: "unit test: run a status/derivation entrypoint against fixtures, assert the temp root is empty after exit, including a thrown-error path"
+    - claim: "ledger reads no longer copy the file"
+      proof: "unit test: read path consumes the fixture ledger with no write syscalls to a temp copy (assert via injected fs) and returns identical parse results"
+    - claim: "boot sweep removes stale dirs and reports"
+      proof: "unit test: seeded stale + fresh dirs -> stale removed, fresh kept, count logged"
+  risk: high
+  origin: architect
+  plan_refs: ["§9", "§4B"]
+  files: [src/lib/ledger.ts, src/lib/daemon.ts]
+  status: queued
+  attempts: 0
+
+- id: W1-T116
+  title: "deriveStatus precedence: a VERIFIED-MERGED credit outranks an open-PR ledger claim — settled work can never be re-dispatched (the W1-T1 149x root cause)"
+  repo: remudero
+  depends_on: [W1-T75]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    ROOT CAUSE — a PRECEDENCE defect, not a missing rung. Observed on the live W1-T1 incident
+    (2026-07-19), cited verbatim from the sanctioned correction writer:
+
+      ### rmd correct — before: status=running merged=false source=ledger pr=https://github.com/craigoley/remudero/pull/258 (OPEN)
+      ### rmd correct — after:  status=merged  merged=true  source=correction pr=https://github.com/craigoley/remudero/pull/2 (MERGED)
+
+    CORRECTION TO THE ORIGINAL FILING, recorded here deliberately rather than hidden: this task was
+    first filed claiming deriveStatus reported source=none pr=none, i.e. that a declared pr: field is
+    invisible to derivation. That observation was a GitHub RATE-LIMIT ARTIFACT — every rung failed to
+    resolve a PR, so derivation fell through to none. The rung is not missing. Rung (b) pr-field
+    EXISTS in src/lib/status.ts and WORKS; the sibling task proves it, same verbatim writer:
+
+      ### rmd correct — before: status=merged merged=true source=pr-field pr=https://github.com/craigoley/remudero/pull/3 (MERGED)
+
+    W1-T1B derives merged from its declared pr: 3 with no correction and no trailer. It was
+    LOOPING-LATENT only for lack of ledger rows: it has no pr.opened line, so rung (a) is empty and
+    rung (b) answers. The instant a dispatch opened a PR for it, a row would appear and outrank the
+    settled credit — the same loop, one dispatch later.
+
+    THE CYCLE IS SELF-REINFORCING. Rung (a) — the ledger pr.opened row — is checked ABOVE rung (b).
+    Dispatching W1-T1 opened #258 (head run-W1-T1-1784464835733) and wrote a pr.opened row; that row
+    then outranked the pr-field rung that would have credited merged PR #2, so the task could never
+    settle, so the daemon dispatched it again, so more rows. The ledger records 153 run.start lines
+    for W1-T1 on 2026-07-19, 97 of them AFTER #258 was opened — an open-PR claim did not even suppress
+    re-dispatch, it only suppressed the merged credit. ~$174, 41% of a day's task spend.
+
+    THE INVARIANT: an open-PR ledger claim means POSSIBLY RUNNING. It is the weakest evidence in the
+    system and must never outrank SETTLED work.
+  design: |
+    (i) REORDER the precedence in deriveStatus (src/lib/status.ts). Today: corrections > (a) ledger
+    pr.opened > (b) pr-field > (c) trailer. Becomes: corrections > VERIFIED-MERGED credit > open-PR
+    ledger claim. A VERIFIED-MERGED credit is any rung whose PR GitHub confirms MERGED — a merged
+    ledger row, an ownership-asserted anchored trailer, or a declared pr: field GitHub confirms merged.
+    Corrections stay SUPREME and keep their exemption from the ownership-assert (P9-iv / W1-T75).
+    (ii) A ledger row whose PR is OPEN yields at most a running projection and NEVER outranks a
+    verified-merged credit; it is dedup evidence only. Keep it ranked above unsettled rungs so an
+    in-flight run is still deduped. (iii) The yaml still supplies only a POINTER — GitHub supplies
+    the truth; an unmerged or unresolvable pr: field credits nothing. Doctrine intact.
+    (iv) NOT IN SCOPE — split to W1-T119: making a THROTTLED read distinguishable from a
+    resolved-to-nothing read (the false source=none that mis-filed this task) is a read-layer/gateway
+    concern, not a precedence one. Serialize: land this precedence reorder first, then W1-T119.
+    (v) AUDIT in the build report: every task on main carrying pr: whose derived status is not merged.
+  acceptance:
+    - claim: "a verified-merged credit outranks a ledger row claiming an open PR — the live W1-T1 fixture settles"
+      proof: "unit test over the live shape: task pr: 2 with #2 fixture MERGED, plus a pr.opened ledger row for #258 fixture OPEN -> status=merged, merged=true; and the dispatcher does NOT dispatch it"
+    - claim: "dedup is intact — a genuinely-running task is still not re-dispatched"
+      proof: "unit test: pr.opened row for an OPEN PR and NO settled credit (no correction, no merged pr-field, no trailer) -> status=running, merged=false, source=ledger; dispatcher takes no action"
+    - claim: "corrections beat everything (regression lock)"
+      proof: "unit test: a correction.provenance line wins over both a verified-merged pr-field and an open-PR ledger row, in both the credit and the un-credit direction"
+  risk: high
+  origin: architect
+  plan_refs: ["§3", "W1-T75", "P9"]
+  files: [src/lib/status.ts]
+  status: queued
+  attempts: 0
+
+- id: W1-T117
+  title: "Worker process containment — a run's process tree dies with the run; orphan survivors are detected, killed, and ledgered (the armed gh-pr-create time bomb)"
+  repo: remudero
+  depends_on: [W1-T12b]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    LIVE FINDING (2026-07-19 quota forensics): orphaned PID 87119 — a gh pr create --fill --base main
+    armed with sleep-until-exact-quota-reset, spawned from a worker's shell snapshot, discovered AFTER
+    its run ended. It would have opened an unattributed PR the moment quota returned: a worker action
+    firing outside its run's lifetime, budget, attribution, and gates.
+
+    STRUCTURAL GAP, verified in the checkout (the finding's durable half): src/lib/worker.ts spawns
+    via the SDK query() and src/lib/daemon.ts drives the poll loop, and NEITHER contains any process-
+    group, session, or teardown-kill logic — no setsid, no group signal, no survivor scan. Teardown
+    today reaps WORKTREES (pruneStaleWorktrees, live-pid-aware) but never PROCESSES. The write fence
+    and isolation probes bound what a worker touches DURING a run; nothing bounds WHEN a worker's
+    effects stop. A surviving process is an escape from every per-run guarantee at once.
+
+    EVIDENCE CAVEAT, recorded so the builder does not over-trust the trigger: PID 87119 is GONE and
+    the incident is NOT in state/ledger.ndjson — there is no orphan-related step, because the very
+    ledgering this task adds does not exist yet. The specific process is operator testimony,
+    unreproducible after the fact. The absent-teardown gap above is what is independently checkable,
+    and it alone justifies the task.
+  design: |
+    (i) TREE TERMINATION: workers run in their own process group/session; run teardown (any verdict,
+    including errors) kills the entire group, then verifies zero survivors. (ii) ORPHAN SWEEP: daemon
+    boot + each poll scans for processes attributable to ended runs (group/env/cwd markers), kills
+    them, ledgers worker_orphan_killed with the command line. (iii) The armed-timer fixture is the
+    regression: a worker spawning a detached sleep-then-act child -> child dead at teardown, ledger
+    line present. VERIFY the SDK's process-spawn surface from the checkout before choosing the group
+    mechanism (setsid vs launchd session vs SDK option) — distrust this prompt's assumption. The
+    spawn point is worker.ts's query() from @anthropic-ai/claude-agent-sdk; whether its Options
+    expose process-group control is UNVERIFIED here and is the builder's first question.
+    (iv) BLAST RADIUS: the kill must never reach the daemon, a sibling run's tree, or the operator's
+    own shell — attribution precedes every signal, and an unattributable process is left alone and
+    reported, never killed on suspicion.
+  acceptance:
+    - claim: "no worker child survives run teardown, on any verdict path"
+      proof: "in-process test: worker fixture spawns a detached long-sleep child; after teardown on BOTH the success and the error path, process.kill(childPid, 0) throws ESRCH and the survivor scan returns an empty list — asserted in-process, no operator and no real signal to a system daemon"
+    - claim: "the orphan sweep terminates strays from ended runs and ledgers them, touching nothing else"
+      proof: "in-process test: seed one stray child carrying run markers plus one unrelated child without them; after the sweep, the stray's pid is ESRCH and a worker_orphan_killed ledger line carries its cmdline, while the unrelated child is still alive (process.kill(pid, 0) succeeds)"
+    - claim: "terminations are attributable, and an unattributable process is never signalled"
+      proof: "in-process test: the worker_orphan_killed ledger line carries run_id/task_id derived from the markers; a marker-less process is left alive and reported, asserted by the sweep's returned report plus its pid still answering process.kill(pid, 0)"
+  risk: high
+  origin: architect
+  plan_refs: ["§9", "§4B", "P23"]
+  files: [src/lib/worker.ts, src/lib/daemon.ts]
+  status: queued
+  attempts: 0
+  note: "Acceptance deliberately states termination as an OBSERVABLE (process.kill(pid, 0) throws
+    ESRCH) rather than as the verb 'killed', which the Rule 18 headless lexicon blocks on an
+    auto-verify task. That lexicon entry exists for W1-T12's LIVE-kill criterion — kill -9 the daemon
+    on a real user session and watch launchd restart it — which genuinely needs an operator. This task
+    is the opposite case: every process here is spawned by the test itself and reaped in-process, so
+    it is headless-verifiable. The rewording sharpens the proof into a mechanical assertion rather
+    than evading the rule; the lexicon's inability to tell the two cases apart is a linter finding
+    worth its own task, NOT a reason to file this one as verify:human."
+
+- id: W1-T118
+  title: "lint-plan headless-fitness scoping — a lexicon hit needs an ACTOR: a test reaping its own spawned child is not an operator killing a live daemon (the #268 false positive)"
+  repo: remudero
+  depends_on: [W1-T81]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    LINTER-PRECISION FAMILY, fourth of its line: W1-T81 (headless-fitness negation/self-reference,
+    the #146 pair), W1-T92 (sizing — data files are not subsystems, the #153 pair), W1-T101
+    (proof-resolvability — a dialect prefix is a promise). Same failure shape each time: a check
+    matching SURFACE TEXT where it means to match a PROPERTY.
+
+    LIVE FINDING (#268, 2026-07-19): filing W1-T117 (worker process containment) produced
+
+      ✗ W1-T117: 2 violation(s)
+          [headless-fitness] criterion 1 uses live-context term 'killed' on an auto-verify task
+          [headless-fitness] criterion 2 uses live-context term 'killed' on an auto-verify task
+
+    The lexicon entry {tag: killed, pattern: /\bkilled\b/i} (src/lib/task-linter.ts:115) exists for a
+    REAL unfitness — W1-T12d's live chaos drill, kill -9 a daemon on a real user session and watch
+    launchd restart it, which a headless worker structurally cannot do. But W1-T117's processes are
+    SPAWNED BY THE TEST ITSELF and reaped in-process. Same word, opposite fitness.
+
+    W1-T81 DOES NOT COVER THIS — stated explicitly so the builder does not assume it is inherited.
+    W1-T81 adds negation-scope awareness and a self-description exemption. W1-T117's criterion has no
+    negation and does not describe the linter; it reads child's group killed, survivor scan returns
+    zero. It would survive W1-T81 untouched and flag exactly the same.
+
+    COST OF THE GAP: the filer must reword around the checker. #268 restated termination as an
+    observable (process.kill(pid, 0) throws ESRCH) — a genuine sharpening, and it passed, but it was
+    driven by the linter rather than by the proof. That is the corrosive outcome: a rule that trains
+    authors to write around it stops being read as a rule. Every future lifecycle, containment,
+    supervision, or teardown task hits this same entry.
+  design: |
+    (i) SCOPE AS DATA, NEVER DELETE. Each lexicon row gains an optional qualifier field alongside its
+    pattern — the row stays, it just stops firing when the criterion establishes a headless actor.
+    Removing the killed row is FORBIDDEN: W1-T12d's live-kill criterion must keep flagging.
+    (ii) The discriminator is SPAWN-OWNERSHIP, not vocabulary: does the criterion's own text establish
+    that the process/resource acted upon is CREATED BY THE TEST OR FIXTURE (spawns/seeds/fixture/
+    in-process/test-spawned) rather than pre-existing on the operator's machine? Test-owned -> the
+    action is performable headlessly. Operator-owned or unstated -> the row fires as today. DEFAULT ON
+    FIRING: an ambiguous criterion still flags, because a false positive costs a reword while a false
+    negative costs a dispatched task that can never pass (the W1-T9 death spiral).
+    (iii) Per-task-type scoping is the cheaper alternative and MUST be evaluated against (ii) in the
+    build report, not assumed inferior — but note it is coarser: task type does not tell you who owns
+    the process, and W1-T117 and W1-T12d share type semantics while differing exactly on ownership.
+    (iv) REGRESSION CORPUS from the plan itself, loaded verbatim, never an id allowlist (W1-T81's
+    rule: an id allowlist rots).
+  acceptance:
+    - claim: "the #268 false positive clears — a criterion whose subject process is test-owned no longer flags"
+      proof: "unit test loading W1-T117's criteria verbatim from plan/tasks.yaml in BOTH wordings — the as-filed observable form and the pre-reword form carrying the bare past-participle of the tag under test — asserting zero headless-fitness violations for each"
+    - claim: "the entry still fires on an operator-owned subject — W1-T12d regression lock"
+      proof: "unit test loading W1-T12d's third acceptance criterion verbatim from plan/tasks.yaml and evaluating it AS IF verify:auto -> the headless-fitness violation is still raised, naming the same tag; plus a direct assertion that the tag's row remains present in the exported lexicon (deletion would pass criterion 1 and must not pass this one)"
+    - claim: "the scoping is data, and an ambiguous subject still flags"
+      proof: "unit tests: adding a qualifier row to the exported table flips a seeded criterion's verdict with zero edits to linter code; and a seeded criterion carrying a lexicon term with no ownership signal in either direction still raises the violation (fail-toward-flagging)"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [src/lib/task-linter.ts]
+  status: queued
+  attempts: 0
+  note: |
+    Filed from the #268 finding, drafted by the filing agent rather than harvested from a worker.
+
+    SELF-DEMONSTRATING: this task's OWN first draft failed lint on the very defect it fixes — two
+    headless-fitness violations, because its acceptance criteria QUOTE the offending word in order to
+    cite the regression corpus. It also drew a [sizing] violation naming a subsystem it does not touch
+    (files: is task-linter.ts alone), because a criterion MENTIONED that subsystem as the citation
+    target — the same match-the-text-not-the-property shape, one check over (the W1-T92 axis). Both
+    were cleared by writing AROUND the checker: the criteria now say the bare past-participle of the
+    tag under test and W1-T12d's third acceptance criterion instead of quoting either. Precise, and
+    strictly worse to read. That is the cost this task exists to remove, observed on itself.
+
+    depends_on W1-T81 is a SERIALIZATION as much as a dependency: both restructure
+    headlessFitnessViolations in the same file, and W1-T81's negation-scope work lands the machinery
+    this task's qualifier hangs off. Landing them in either order independently would collide.
+
+- id: W1-T119
+  title: "GitHub reads distinguish THROTTLED from ABSENT — an exhausted or errored read defers, never concludes not-merged (the false source=none that mis-filed W1-T116)"
+  repo: remudero
+  depends_on: [W1-T75]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    SPLIT OUT of W1-T116 (#267) design item (iv), which is a different surface: W1-T116 reorders
+    PRECEDENCE among rungs in deriveStatus; this task fixes the READ LAYER those rungs sit on. Filed
+    separately per Rule 19 rather than carried as a fifth design item on an already-high-risk task.
+
+    EVIDENCE — this session's own false reading, cited from #267's rewrite note. W1-T116 was
+    originally filed claiming the declared pr: field was INVISIBLE to derivation, on the strength of
+
+      rmd correct — before: status=queued merged=false source=none pr=none
+
+    That was a GitHub RATE-LIMIT ARTIFACT. Under throttling every rung failed to RESOLVE a PR, so
+    derivation reported source=none — and source=none is read everywhere as GitHub has no evidence,
+    i.e. NOT MERGED. Absence of a resolvable read was reported as absence of the thing. The rung was
+    never missing; #267's rewrite corrected the filing after re-deriving against a healthy gateway.
+
+    MECHANISM, verified in the checkout: ghGateway's tryJson (src/lib/status.ts:369-376) wraps every
+    gh invocation in a bare catch { return null }, and spawns with stdio ignore/pipe/ignore — so gh's
+    stderr, the one place a rate-limit or auth message appears, is DISCARDED before anyone could read
+    it. Rate-limited, network-down, auth-expired, and genuinely-absent all collapse to the same null.
+    The gateway's own doc comment blesses this: every query is fail-soft ... so derivation degrades to
+    the next precedence source rather than throwing. Correct for ABSENT. Catastrophic for THROTTLED,
+    because under a global throttle EVERY rung degrades at once and the fallthrough concludes not
+    merged for the whole plan.
+
+    BLAST RADIUS: deriveStatus GATES DISPATCH. A throttle that reads as not-merged does not merely
+    mis-report — it makes the daemon re-dispatch settled work, which is how a quota outage becomes a
+    spend event rather than a pause. It also mis-files tasks, as it did here.
+  design: |
+    (i) The gateway's read result becomes THREE-VALUED, not two: resolved(value) / absent /
+    unavailable(reason). Capture gh's exit status and stderr instead of discarding them (the current
+    stdio triple makes this impossible today) and classify at least rate-limit/quota-exhausted,
+    auth failure, and transport error as UNAVAILABLE. Anything unclassifiable is UNAVAILABLE, not
+    absent — the fail-closed direction, because absent is the conclusion that costs money.
+    (ii) REFUSE-OR-DEFER: a rung whose read is unavailable does NOT fall through to the next rung and
+    NEVER contributes to a not-merged conclusion. deriveStatus surfaces the projection as
+    indeterminate with the reason attached; callers that gate dispatch treat indeterminate as DO NOT
+    DISPATCH (never as queued), and the correction writer refuses to record a before-state derived
+    from an unavailable read rather than writing a claimed_pr_url it cannot stand behind.
+    (iii) Indeterminate is LEGIBLE, not silent: it is distinguishable on the projection and ledgered
+    with the classified reason, so an operator seeing a stalled drain can tell throttle from block.
+    (iv) A genuinely-absent PR keeps behaving exactly as today — this must not become a fail-closed
+    stall on ordinary missing evidence. That regression is acceptance criterion 3.
+    (v) NOT IN SCOPE, deliberately: retry, backoff, or waiting for quota. This task makes the
+    distinction VISIBLE and makes the conclusion SAFE. What the scheduler then does with a
+    quota-exhausted signal is separate and should be filed on its own if wanted.
+  acceptance:
+    - claim: "a throttled read is classified unavailable and never reads as not-merged"
+      proof: "unit test over an injected gateway whose read fails with a rate-limit exit status and stderr: deriveStatus returns an indeterminate projection carrying the classified reason, and asserts NOT merged=false/source=none — the exact shape that mis-filed W1-T116"
+    - claim: "an indeterminate projection suppresses dispatch and blocks a correction write"
+      proof: "unit test: the dispatch-gating caller given an indeterminate projection takes no dispatch action (and is asserted distinct from its queued behaviour, which does dispatch); and the correction writer given an unavailable before-read returns written=false with nothing appended to the ledger"
+    - claim: "a genuinely-absent PR still resolves as absent — no fail-closed stall on ordinary evidence"
+      proof: "unit test: an injected gateway returning a clean not-found (zero-exit, empty result) yields the same not-merged projection it does today, and the indeterminate path is asserted NOT taken"
+  risk: high
+  origin: architect
+  plan_refs: ["§3", "P9"]
+  files: [src/lib/status.ts, src/lib/correct.ts]
+  status: queued
+  attempts: 0
+  note: |
+    Split from W1-T116 (#267) design item (iv); W1-T116 retains a one-line pointer here.
+
+    DEPENDS_ON IS W1-T75, NOT W1-T116, and the difference is deliberate rather than an oversight:
+    W1-T116 is still unmerged (PR #267), so a hard dep on it does not resolve against origin/main and
+    lint-plan rejects the task outright. W1-T75 is the real shared ancestor — correction supremacy,
+    which both tasks preserve. The W1-T116 relationship is a SERIALIZATION and is recorded here
+    instead: both restructure deriveStatus's rung fallthrough in status.ts, so W1-T116's precedence
+    reorder should land FIRST, leaving this task to change one axis (read outcome) rather than two at
+    once. Tighten depends_on to W1-T116 once #267 is on main, if the retro prefers the hard edge.
+
+    risk:high is deliberate and not sizing-driven — the change is fail-closed on the path that GATES
+    DISPATCH, so a bug here stalls the fleet, which is the opposite failure from the one it fixes.

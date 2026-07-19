@@ -31,6 +31,15 @@ jobs:
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Typecheck
+        # §5 TIER 2, quality gate 4/4 (W1-T98): this step is TS-strict's actual enforcement --
+        # tsconfig.json has `strict: true`, and a strict-mode violation anywhere in src/**/test/**
+        # fails this step and blocks merge via ci-gate. That "0 violations" reads identically
+        # whether strict is genuinely wired or silently inert (the neon-drift `_probe(x)` lesson)
+        # is why it isn't taken on faith: test/strict-probe.test.ts drives the real `tsc` binary
+        # against a permanently-broken, deliberately-excluded probe file
+        # (scripts/strict-probe.ts, outside this step's `-p tsconfig.json` scope) and asserts
+        # strict mode rejects it while strict-off accepts the same file unchanged -- that test
+        # runs as part of `npm test` below and is the falsifier proof this step is ACTIVE.
         run: npx tsc -p tsconfig.json --noEmit
       - name: Test
         run: npm test
@@ -84,9 +93,30 @@ jobs:
     # reruns the WHOLE suite per mutant). Mutating this project's full ~15k-line src/** tree was
     # measured at ~4 hours in that mode — that blows through ci-gate.yml's 15-minute
     # required-check wait ceiling and would deadlock every PR. `stryker.conf.json`'s `mutate`
-    # glob is therefore deliberately scoped to one pure-logic module (src/lib/classify.ts) today,
-    # keeping this job to ~5 minutes. Widening scope later is a one-line glob change plus a
-    # baseline recapture in scripts/mutation-baseline.json — no script or CI-wiring change.
+    # glob is therefore deliberately scoped to one pure-logic module (src/lib/classify.ts) today.
+    # Widening scope later is a one-line glob change plus a baseline recapture in
+    # scripts/mutation-baseline.json — no script or CI-wiring change.
+    #
+    # LATENCY (W1-T108): even scoped to one module, a real `npx stryker run` was still costing
+    # ~13 minutes on every PR, including PRs that never touched src/lib/classify.ts and so could
+    # not possibly move its mutation score. Two independent fixes, same job:
+    #  1. DIFF-SCOPED, the containment-probe shape (see that job's comment below): this job's
+    #     check run still registers UNCONDITIONALLY (no path filter, no job `if:`) so it can
+    #     never go silently absent and deadlock merge — but the `trigger` step below runs
+    #     `scripts/mutation-ratchet.mjs --changed-files` (that script's OWN path-filter mode, so
+    #     the "what counts as mutate-scope" list lives in exactly one place — see that script's
+    #     usage comment) against this PR's changed files, and the expensive Stryker run + ratchet
+    #     comparison only execute `if:` that diff can actually move src/lib/classify.ts's score
+    #     (the file itself, its test, or the gate's own config/script/baseline). Every other PR
+    #     still gets a green, near-instant check run — proven in test/mutation-ratchet.test.ts.
+    #  2. Stryker's own INCREMENTAL MODE (`incremental`/`incrementalFile` in stryker.conf.json):
+    #     when the run does happen, mutants whose covering code + tests are unchanged since the
+    #     last run are reused from the incremental report instead of re-executed. The cache step
+    #     below persists that report across runs via actions/cache (key includes the run id so
+    #     every run saves a fresh entry; `restore-keys` falls back to the most recent one) — the
+    #     underlying diff is a pure text comparison against the PREVIOUS report, so restoring a
+    #     report captured on a different branch is still correct, just possibly less of a
+    #     shortcut, never an incorrect one.
     #
     # scripts/mutation-ratchet.mjs compares this run's Stryker JSON report against the recorded
     # floor in scripts/mutation-baseline.json and exits non-zero on any test-suite-weakening PR;
@@ -96,14 +126,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
       - name: Install (clean, from lockfile)
         run: npm ci
-      - name: Stryker mutation run (scoped target — see stryker.conf.json)
+      - name: Determine whether this diff can move src/lib/classify.ts's mutation score
+        id: trigger
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git diff --name-only "${BASE_SHA}"...HEAD > changed-files.txt
+          cat changed-files.txt
+          node scripts/mutation-ratchet.mjs --changed-files changed-files.txt
+      - name: Restore Stryker incremental cache
+        if: steps.trigger.outputs.matched == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: reports/stryker-incremental.json
+          key: mutation-incremental-${{ github.run_id }}
+          restore-keys: |
+            mutation-incremental-
+      - name: Stryker mutation run (scoped target — see stryker.conf.json; this diff touches it, see trigger step)
+        if: steps.trigger.outputs.matched == 'true'
         run: npx stryker run
       - name: Mutation ratchet (blocks a test-suite-weakening PR)
+        if: steps.trigger.outputs.matched == 'true'
         run: node scripts/mutation-ratchet.mjs --report reports/mutation/mutation.json --baseline scripts/mutation-baseline.json
 
   jscpd-gate:
@@ -132,6 +183,60 @@ jobs:
         run: npm ci
       - name: jscpd duplication gate (blocks a duplicate above the recorded threshold)
         run: npm run --silent jscpd
+
+  refactor-campaign:
+    # Refactor campaign — the measurable gate-delta formula (W2-T3, MASTER-PLAN §3A/§5).
+    # "Tech-debt sweep" was under-built as a vibe (operator flagged it); this job is the teeth.
+    # Applies ONLY to a PR carrying the `refactor-campaign` label -- an ordinary PR is not a
+    # refactor campaign and must not be required to move mutation/complexity/duplication/CVE/
+    # fitness numbers. Runs UNCONDITIONALLY (no path filter, no job `if:`) so it always registers
+    # a check run -- same fail-closed shape as every other job above (a path-filtered REQUIRED
+    # check that can go silently absent is the synthwatch #102 deadlock class ci-gate.yml exists
+    # to avoid). What's SCOPED to the label is the job's INTERNAL behavior (mirrors
+    # containment-probe's diff-based scoping above), not its registration: when the label is
+    # absent, this job still completes successfully so it never blocks an unrelated PR.
+    #
+    # scripts/refactor-campaign.mjs's `check` mode is GREEN iff no gate regressed versus
+    # plan/campaigns/refactor.yaml's recorded baselines (scripts/{mutation,complexity,dup,cve,
+    # fitness}-baseline.json) AND at least one gate strictly improved -- a refactor that leaves
+    # every number unchanged is a no-op, not a refactor (RED); a refactor that regresses one gate
+    # to buy improvement on another is RED too (no trading one debt for another). Falsifier
+    # fixtures proving this is ACTIVE (an all-improved fixture is ACCEPTED, a no-improvement and a
+    # one-gate-regressed fixture are both REJECTED) live in test/refactor-campaign.test.ts, driving
+    # the real CLI as a subprocess.
+    name: refactor-campaign
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Determine whether this PR carries the refactor-campaign label
+        id: trigger
+        env:
+          LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          echo "labels: ${LABELS_JSON}"
+          if echo "${LABELS_JSON}" | grep -q '"refactor-campaign"'; then
+            echo "matched=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "matched=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Generate fresh gate reports (mutation, duplication, architecture fitness, CVEs)
+        if: steps.trigger.outputs.matched == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p reports/mutation reports/jscpd reports/depcruise reports/audit
+          npx stryker run
+          node node_modules/jscpd/run-jscpd.js src --config .jscpd.json --reporters json --output reports/jscpd
+          npx depcruise src --config .dependency-cruiser.cjs --output-type json > reports/depcruise/depcruise-report.json
+          npm audit --json > reports/audit/npm-audit.json || true
+      - name: Refactor-campaign gate-delta check (blocks a refactor PR that does not improve the gate numbers)
+        if: steps.trigger.outputs.matched == 'true'
+        run: node scripts/refactor-campaign.mjs check
 
   claims:
     # PLAN-CLAIMS gate (W1-T29, MASTER-PLAN §12A) — the AWARENESS LAYER for prose. Plan prose is

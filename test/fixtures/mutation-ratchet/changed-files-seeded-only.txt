@@ -1,0 +1,1 @@
+fixtures/seeded-mutation-scope.ts

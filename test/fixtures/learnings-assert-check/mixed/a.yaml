@@ -1,0 +1,53 @@
+# Fixture shard for test/learnings-assert-check.test.ts — one entry per lifecycle/assertion
+# combination the runner must handle. Assertions are plain `exit N` so the fixture never depends
+# on repo layout.
+
+- id: fixture-active-passing
+  subsystem: fixture
+  lifecycle: active
+  files: [fixture.ts]
+  fact: an active entry whose assertion still holds -- must stay active, untouched.
+  src: fixture
+  assertion: "exit 0"
+
+- id: fixture-active-failing
+  subsystem: fixture
+  lifecycle: active
+  files: [fixture.ts]
+  fact: an active entry whose assertion now fails -- must be auto-quarantined.
+  src: fixture
+  assertion: "exit 1"
+
+- id: fixture-quarantined-now-passing
+  subsystem: fixture
+  lifecycle: quarantined
+  quarantined_reason: "assertion failed (exit 1): exit 1"
+  files: [fixture.ts]
+  fact: a quarantined entry whose assertion now passes -- re-verification must restore it.
+  src: fixture
+  assertion: "exit 0"
+
+- id: fixture-quarantined-still-failing
+  subsystem: fixture
+  lifecycle: quarantined
+  quarantined_reason: "assertion failed (exit 1): exit 1"
+  files: [fixture.ts]
+  fact: a quarantined entry whose assertion still fails -- must stay quarantined, untouched.
+  src: fixture
+  assertion: "exit 1"
+
+- id: fixture-superseded-with-failing-assertion
+  subsystem: fixture
+  lifecycle: superseded
+  superseded_by: fixture-active-passing
+  files: [fixture.ts]
+  fact: a superseded entry is never evaluated, even carrying a failing assertion.
+  src: fixture
+  assertion: "exit 1"
+
+- id: fixture-no-assertion
+  subsystem: fixture
+  lifecycle: active
+  files: [fixture.ts]
+  fact: an entry with no assertion at all is never evaluated or mutated.
+  src: fixture

@@ -1,0 +1,5 @@
+{
+  "_comment": "Refactor-campaign duplication ceiling (W2-T3, MASTER-PLAN §3A/§5). Captured from a real `jscpd src --config .jscpd.json --reporters json` run's statistics.total.percentage. This is a SEPARATE floor from .jscpd.json's own CI `threshold` (2%, W1-T97) -- that gate blocks any PR crossing an absolute ceiling; this one additionally requires a refactor campaign to move the number DOWN, not merely stay under the ceiling. Never raise this number to make a refactor PR pass -- lower it (ratchet down) only when duplication genuinely drops; a duplication-INCREASING refactor PR must go CI-red on scripts/refactor-campaign.mjs's check mode.",
+  "capturedAt": "2026-07-19",
+  "percentage": 1.15
+}

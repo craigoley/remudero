@@ -11,17 +11,31 @@
 # process runs on top of (shell isolation, SDK result shapes, tier detection, Playwright, launchd).
 #
 # Schema per entry:
-#   id:            stable slug → the injected citation `[src: learnings#<id>]`
-#   subsystem:     human grouping (advisory; matching is by `files:`, not this)
-#   lifecycle:     active | superseded (default active if omitted).
-#                  A SUPERSEDED entry is NEVER injected (src/lib/learnings.ts filters it out before
-#                  ranking) — it stays in this file for PROVENANCE ONLY. Provenance decays: a fact
-#                  can become FALSE (see `zdotdir-alone-isolates-shells` below for the live example).
-#   superseded_by: (superseded entries only) the id of the entry that replaced this one.
-#   files:         repo-relative globs; entry injects iff one glob hits a task file
-#   fact:          one line — the thing a worker inherits
-#   src:           provenance of the fact (recorded lineage)
-#   cited:         optional ISO date last cited (recent entries win a budget tie)
+#   id:                stable slug → the injected citation `[src: learnings#<id>]`
+#   subsystem:         human grouping (advisory; matching is by `files:`, not this)
+#   lifecycle:         active | superseded | quarantined (default active if omitted). A
+#                      SUPERSEDED or QUARANTINED entry is NEVER injected (src/lib/learnings.ts
+#                      filters both out before ranking) — it stays in this file for PROVENANCE
+#                      ONLY. Provenance decays two ways: a human corrects a fact (superseded — see
+#                      `zdotdir-alone-isolates-shells` below for the live example), or a fact stops
+#                      proving itself (quarantined — see `assertion` below).
+#   superseded_by:     (superseded entries only) the id of the entry that replaced this one.
+#   assertion:         (W1-T34, optional) a shell command (`sh -c`, run from the repo root) that
+#                      must exit 0 for this entry's `fact` to still be considered true — e.g. a
+#                      fact pinned to a specific file/SDK shape must not keep being injected once
+#                      that shape changes. `npm run learnings-assert` runs every entry's assertion
+#                      and flips `lifecycle: quarantined` (recording why in `quarantined_reason`)
+#                      the moment one fails; `npm run learnings-assert:check` (wired into `npm
+#                      test` via test/learnings-assert-check.test.ts) FAILS CI when the committed
+#                      corpus doesn't match a fresh re-verification — a STALE quarantine state,
+#                      same shape as the `learnings-index:check` staleness gate above. Re-running
+#                      `learnings-assert` after the underlying fact is fixed restores `active`.
+#   quarantined_reason: (quarantined entries only) why the assertion failed — set by
+#                      `learnings-assert-check.mjs`, not by hand.
+#   files:             repo-relative globs; entry injects iff one glob hits a task file
+#   fact:              one line — the thing a worker inherits
+#   src:               provenance of the fact (recorded lineage)
+#   cited:             optional ISO date last cited (recent entries win a budget tie)
 
 - id: shell-isolation
   subsystem: containment
@@ -32,6 +46,10 @@
     worker shell isolation must set CLAUDE_CODE_SHELL (rc filename follows the shell), never ZDOTDIR.
   src: PR#8
   cited: "2026-07-14"
+  # W1-T34 seed: the fact is pinned to src/lib/env.ts actually granting CLAUDE_CODE_SHELL — if a
+  # future refactor drops that env var, this assertion (not a human noticing months later) is what
+  # auto-quarantines the entry.
+  assertion: 'grep -q "CLAUDE_CODE_SHELL" src/lib/env.ts'
 
 # SUPERSEDED — the live example for the W1-T33 acceptance proof. This was the pre-PR#8 working
 # assumption (ZDOTDIR "obviously" isolates a spawned shell); disassembling the installed Claude Code
