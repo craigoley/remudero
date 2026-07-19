@@ -4524,7 +4524,7 @@
   status: queued
   attempts: 0
   note: "Completes the disposition inputs: checks (T93), review (T77), required-contexts green (T103),
-    in-flight (T80), and now merge state. The #170 hand-resolution is the mode's canonical procedure."
+    in-flight (T80), and now merge state. The #170 hand-resolution is the mode's canonical procedure. A CONFLICTING PR registers ZERO pull_request runs -- no merge ref means no checks at all, which is indistinguishable from \"still queued.\" When GitHub cannot compute a PR's merge ref it does not produce a red check; it produces NO check, and the PR silently stops being gated. Observed on #242: after #274 merged, two pushes and a close/reopen produced zero workflow runs before the mergeability state (CONFLICTING/DIRTY) explained it; resolving a purely additive .gitignore collision restored CI instantly. Re-confirmed 2026-07-19 across #232/#220/#238/#240, each sitting CONFLICTING with zero check runs on its head until the merge was resolved. The ZERO-CHECKS-WITH-NONZERO-HISTORY signature -- a PR whose head has no check-runs while earlier heads on the same branch do -- is therefore a DETECTION INPUT for the CONFLICTED disposition, and a cheaper one than parsing mergeStateStatus, because it is visible from the same check-run read the sweep already performs. This strengthens the premise rather than adding a case: the rationale says conflict state is invisible to every disposition rule because it is not an OpenPrView input; the sharper statement is that a conflicted PR is invisible TO CI ITSELF, so a disposition rule waiting on checks waits forever."
 
 - id: W1-T107
   title: "ci-gate REQUIRED array — one entry per line, so concurrent gate additions merge instead of conflicting (the tier-gate collision class)"
@@ -5150,3 +5150,779 @@
 
     risk:high is deliberate and not sizing-driven — the change is fail-closed on the path that GATES
     DISPATCH, so a bug here stalls the fleet, which is the opposite failure from the one it fixes.
+- id: W1-T120
+  title: A gate PROVES it read the file under test — repoRoot resolves from cwd, and lint/review emit
+    a read-identity assertion (the silent-green wrong-plan class)
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: "GATE INTEGRITY, filed from #271 holding-note item 1. src/run-task.ts derives\n`const repoRoot\
+    \ = dirname(dirname(fileURLToPath(import.meta.url)))` — from WHERE THE SCRIPT\nLIVES, never from cwd\
+    \ (bin/rmd resolves symlinks and execs $DIR/src/run-task.ts, reinforcing\nit). Invoking ONE checkout's\
+    \ bin/rmd from ANOTHER tree therefore lints the WRONG PLAN and\nvouches for it.\n\nLIVE FIXTURE (observed\
+    \ while gate-checking #271 itself). FALSE GREEN — main checkout's\nbin/rmd, cwd = the consolidation\
+    \ worktree; it read the main checkout's plan and never opened\nthe 8-task file under test:\n\n  rmd\
+    \ lint-plan: 2 task(s) checked (2 new/changed vs origin/main) - 0 failing, 0 warning(s)\n\nTRUE —\
+    \ the worktree's OWN ./bin/rmd, same cwd, same --base:\n\n  rmd lint-plan: 8 task(s) checked (8 new/changed\
+    \ vs origin/main) - 0 failing, 0 warning(s)\n\nBOTH EXIT 0. Nothing in the false run signals the file\
+    \ under test was never opened: the\nfailure is silent AND green, the most dangerous shape a gate has.\
+    \ Escaping via --plan does\nnot save you either — relative(repoRoot, planPath) yields a ../../.. path\
+    \ and\n`git show <base>:<that>` dies as a base-resolution failure rather than as 'your plan is\noutside\
+    \ my root'.\n\nWHY (b) IS THE REAL DELIVERABLE: the repo already requires gates to be proven ACTIVE,\
+    \ not\nmerely present (W1-T98's planted TS-strict probe, W1-T26's depcruise falsifier, the coverage\n\
+    ratchet's falsifier). This class needs something those cannot give — a gate proving it read\nthe RIGHT\
+    \ INPUT. An active gate pointed at the wrong file is still green and still wrong;\nidentity is a distinct\
+    \ property from activeness, and no existing falsifier would have caught\nit."
+  design: '(i) Resolve repoRoot by CWD-ASCENT (`git rev-parse --show-toplevel` from process.cwd()) or
+    an
+
+    explicit --repo-root, replacing the install-path derivation. Fall back to the install path
+
+    ONLY when cwd is not inside a git work tree, and say so on stderr.
+
+    (ii) REFUSE when --plan resolves outside the resolved root, with a message naming both paths,
+
+    instead of the current silent relative()/git-show failure that mis-reports as a base problem.
+
+    (iii) READ-IDENTITY ASSERTION — the deliverable that kills the CLASS. lint-plan and review
+
+    emit, in their summary line, the ABSOLUTE path plus a content hash of the plan file they
+
+    actually opened. The proof of what was gated becomes legible in the output itself rather than
+
+    inferred from cwd.
+
+    (iv) NOT IN SCOPE: changing what lint-plan checks. This task changes only WHICH FILE it reads
+
+    and how that choice is evidenced.'
+  acceptance:
+  - claim: 'invoking a checkout''s bin/rmd with cwd inside a DIFFERENT work tree gates the cwd tree''s
+      plan, not the install tree''s — the live #271 false-green fixture, locked as a regression test'
+    proof: 'unit test: test/repo-root-identity.test.ts'
+  - claim: a --plan path resolving outside the resolved root is REFUSED by name, not reported as a base-resolution
+      failure
+    proof: 'unit test: test/repo-root-identity.test.ts'
+  - claim: the lint summary line carries the absolute path and content hash of the plan file actually
+      opened, so a wrong-file run is visible in its own output
+    proof: 'unit test: test/repo-root-identity.test.ts'
+  risk: high
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#5C
+  files:
+  - src/run-task.ts
+  - src/lib/task-linter.ts
+  depends_on: []
+- id: W1-T121
+  title: QUEUE GOVERNOR — a WIP limit on DISPATCH only; flow control throttles intake, never drainage
+    (the 23-open-PR incident)
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: 'Filed from #271 holding-note item 3. No backpressure exists anywhere in the pipeline, so
+
+    authoring rate converts DIRECTLY into queue depth with nothing to arrest it — the 23-open-PR
+
+    incident. Little''s law is the argument: throughput comes from bounding WIP, not from pushing
+
+    harder on intake.
+
+
+    CORROBORATION, the governor''s thesis run by hand: with the dispatcher DOWN and only the sweep
+
+    loop running, the queue drained 23 -> 14 open PRs in a single pass window; and on 2026-07-19,
+
+    with dispatch again halted, the remaining ten drained to ZERO. Drainage is demonstrably
+
+    healthy while intake is zero — the two halves are separable IN PRACTICE, not just in
+
+    principle, which is exactly what makes a dispatch-only throttle safe rather than a stall.
+
+
+    THRESHOLDS ARE POLICY DATA, NOT CONSTANTS, and the home already exists: SweepPolicy /
+
+    DEFAULT_SWEEP_POLICY (src/lib/sweep.ts) is the repo''s declarative threshold table, whose own
+
+    doc comment insists disposition is a function of observed PR state plus an exported
+
+    SweepPolicy table and NEVER an ad-hoc check. The governor''s limit belongs in that table.'
+  design: '(i) Add the WIP limit as a ROW in SweepPolicy/DEFAULT_SWEEP_POLICY — not a constant, not a
+
+    flag read at a call site.
+
+    (ii) The dispatch path consults it: at or above the limit, dispatch of NEW tasks is deferred.
+
+    (iii) sweep / heal / arm / merge are UNGATED at any depth — the governor bounds what ENTERS
+
+    the system and never what LEAVES it. This asymmetry is the whole design; a governor that also
+
+    throttled drainage would deepen the very queue it exists to bound.
+
+    (iv) A throttled pass is NOT silent: ledger `dispatch_deferred_wip` carrying the observed open
+
+    count, so a quiet daemon is distinguishable from a throttled one.'
+  acceptance:
+  - claim: 'at the limit: zero dispatches, a dispatch_deferred_wip ledger line carrying the observed count,
+      and sweep/heal/arm/merge in the SAME pass unaffected — proving the throttle hits intake only'
+    proof: 'unit test: test/queue-governor.test.ts'
+  - claim: 'below the limit: dispatch proceeds normally — the falsifier proving the governor is not simply
+      off or always-on'
+    proof: 'unit test: test/queue-governor.test.ts'
+  - claim: changing the limit is a policy-data row edit with zero code change, the falsifier for whether
+      this is really policy-data
+    proof: 'unit test: test/queue-governor.test.ts'
+  risk: high
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#5C
+  files:
+  - src/lib/sweep.ts
+  depends_on: []
+- id: W1-T122
+  title: PLAN SHARDING (plan/tasks.d/) — concurrent filings become conflict-free BY CONSTRUCTION, not
+    by a wider merge window
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: 'Filed from #271 holding-note item 4. One file per task: plan/tasks.d/<id>.yaml. Two concurrent
+
+    filings no longer share an EOF to collide on, so they CANNOT textually conflict.
+
+
+    MEASURED EVIDENCE: the nine-PR appender train consolidated by #271. All 437 consolidated lines
+
+    are pure appends to the SINGLE EOF of one file — exactly the collision surface. #206 and #214
+
+    had auto-merge ARMED yet sat DIRTY, i.e. conflict-blocked on that shared EOF where auto-merge
+
+    could never fire. Under sharding those two would have merged untouched and #271 would not have
+
+    needed to exist.
+
+
+    W1-T107 already solved this exact class ONE LINE AT A TIME (ci-gate REQUIRED array, one entry
+
+    per line, so concurrent gate additions merge instead of conflicting). Sharding is the same
+
+    insight at FILE granularity: it deletes the class rather than widening the window.'
+  design: '(i) loadPlan globs plan/tasks.d/*.yaml and merges with plan/tasks.yaml during migration.
+
+    (ii) FAIL on duplicate ids across shards — the uniqueness guard the single-file format gave
+
+    for free must not be lost in the split.
+
+    (iii) Every consumer (lint-plan, claims, status derivation) operates over the MERGED VIEW, so
+
+    the change is invisible above loadPlan.
+
+    (iv) NOT IN SCOPE: migrating the existing entries. That is a one-time codemod filed
+
+    separately; this task must leave the current single-file plan loading unchanged so migration
+
+    can be staged.'
+  acceptance:
+  - claim: two branches each adding a DIFFERENT shard merge with zero textual conflict — the whole point,
+      proven by a real two-branch merge rather than asserted
+    proof: 'unit test: test/plan-sharding.test.ts'
+  - claim: a duplicate id across two shards fails loadPlan, preserving the uniqueness guard the single-file
+      format gave for free
+    proof: 'unit test: test/plan-sharding.test.ts'
+  - claim: the existing single-file plan/tasks.yaml still loads unchanged — the back-compat lock that
+      lets migration be staged
+    proof: 'unit test: test/plan-sharding.test.ts'
+  risk: high
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#5C
+  files:
+  - src/lib/plan.ts
+  depends_on: []
+- id: W1-T123
+  title: ci-gate dedupes check-runs BY NAME and evaluates only the LATEST attempt — today a stale red
+    is unretractable and permanently poisons its SHA
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: "Filed from #271 holding-note item 5's fold-in, split out per Rule 19 because it BOUNDS that\n\
+    item rather than elaborating it. ci-gate aggregates commits/<sha>/check-runs and fails on ANY\nentry\
+    \ whose conclusion is a failure, with NO grouping by name. A SHA accumulates one check-run\nPER ATTEMPT,\
+    \ so once a job has failed on a SHA, re-running it to green CANNOT clear the gate —\nthe stale failure\
+    \ is still in the list and is unretractable. That SHA is permanently\nun-mergeable.\n\nOBSERVED LIVE\
+    \ ON #242. After the refactor-campaign label was removed the job re-ran and PASSED\non head 287cbcb,\
+    \ and ci-gate still held merge naming refactor-campaign. Both check-runs were\nlive on that SHA at\
+    \ once:\n\n  refactor-campaign completed/failure started=19:37:44 id=88229873992\n  refactor-campaign\
+    \ completed/success started=19:52:17 id=88231013731\n\nCost: one throwaway empty commit (a61ddd7)\
+    \ purely to obtain a clean SHA.\n\nWHY THIS GATES W1-T124: re-verification's whole premise is 're-run\
+    \ the failed required check\nand re-dispose on the fresh result', which on this ci-gate DOES NOT WORK\
+    \ — the fresh green is\ninvisible under the stale red. Without this fix the self-healing rung silently\
+    \ no-ops on\nexactly the PRs it exists to rescue."
+  design: '(i) Group the check-run list by `name`, keep the attempt with the latest started_at, and
+
+    evaluate ONLY that one. A name with a failed attempt followed by a successful attempt reads as
+
+    SUCCESS.
+
+    (ii) Preserve the existing IGNORE list and the fail-on-absent semantics unchanged — this task
+
+    narrows WHICH runs are evaluated, never what a REQUIRED check means.
+
+    (iii) Keep the aggregation in jq inside ci-gate.yml, so the gate stays self-contained and
+
+    readable in the workflow it enforces.'
+  acceptance:
+  - claim: 'a SHA carrying a failed then a later successful run of the SAME required check name reads
+      as SUCCESS — the #242 fixture, locked so a re-run can clear a red in place'
+    proof: 'unit test: test/ci-gate-dedupe.test.ts'
+  - claim: a SHA whose LATEST attempt for a name is a failure still FAILS the gate — the falsifier proving
+      dedupe did not weaken the gate into ignoring real reds
+    proof: 'unit test: test/ci-gate-dedupe.test.ts'
+  - claim: a required check absent from the list still blocks, and IGNORE-listed names are still skipped
+      — the pre-existing contract is untouched
+    proof: 'unit test: test/ci-gate-dedupe.test.ts'
+  risk: medium
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#5
+  files:
+  - .github/workflows/ci-gate.yml
+  depends_on: []
+- id: W1-T124
+  title: POST-FIX RE-VERIFICATION — when a systemic fix merges, stale reds of that class self-heal instead
+    of rotting (the drainage-side complement to the governor)
+  repo: remudero
+  depends_on:
+  - W1-T123
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: 'Filed from #271 holding-note item 5. A sweep rung that, once a fix PR merges, re-runs the
+
+    failed required checks on every open PR whose recorded failure MATCHES THE FIXED CLASS —
+
+    driven by a data-mapped failure-pattern -> fix-PR table, never a hardcoded special case. A red
+
+    caused by infrastructure, whose cause is now merged, should not need a human to notice it.
+
+
+    EVIDENCE — the 14-PR pile, and then a second, sharper instance on 2026-07-19. A large share of
+
+    that queue was blocked on ci-gate/mutation-ratchet failures that were INFRASTRUCTURE ARTIFACTS
+
+    of the ~13-minute Stryker tax, not defects. W1-T108 removed the cause, but nothing re-examined
+
+    the PRs the cause had already poisoned. The 2026-07-19 instance is the regression fixture:
+
+    FOUR PRs (#265/#249/#245/#236) went red on ''ci-gate: timed out waiting for required check(s):
+
+    mutation-ratchet'' while mutation-ratchet itself completed SUCCESS on those same heads moments
+
+    later — the gate timed out, the work was fine. All four needed a hand-pushed fresh head.
+
+
+    This is the DRAINAGE-side complement to W1-T121: the governor stops the queue GROWING, this
+
+    stops it ROTTING.
+
+
+    STRIKE INTERACTION, load-bearing: a re-verification pass must either not consume a strike, or
+
+    must credit back strikes spent on a now-fixed class. Otherwise self-healing is capped by the
+
+    very counter it exists to relieve.'
+  design: '(i) A failure-pattern -> fix-PR mapping held as DATA, so covering a new systemic fix is a row,
+
+    not code.
+
+    (ii) On a fix PR merging, re-drive the matching required checks on each open PR whose recorded
+
+    failure matches that class; re-dispose on the fresh result.
+
+    (iii) The re-drive MUST work against real ci-gate semantics — see W1-T123, which is a hard
+
+    dependency: until check-runs dedupe by name, a re-run in place cannot clear a stale red and
+
+    this rung would silently no-op. If W1-T123 has not landed, the re-drive must push a refresh
+
+    commit instead of re-running in place.
+
+    (iv) Strike accounting: a re-verification pass does not consume a strike, and strikes already
+
+    spent on a now-fixed class are credited back.'
+  acceptance:
+  - claim: an open PR whose recorded failure matches a merged fix-PR's class has its required check re-driven
+      exactly once and re-disposes on the fresh result
+    proof: 'unit test: test/post-fix-reverification.test.ts'
+  - claim: an open PR whose failure does NOT match the class is untouched with no re-drive — the falsifier
+      proving the mapping does real work rather than blanket-rerunning
+    proof: 'unit test: test/post-fix-reverification.test.ts'
+  - claim: a strike-exhausted PR whose only defect was the fixed class becomes eligible again, with the
+      strike credited back or never consumed
+    proof: 'unit test: test/post-fix-reverification.test.ts'
+  - claim: the four 2026-07-19 ci-gate-timeout PRs, replayed as a fixture, all re-dispose to mergeable
+      without a hand-pushed head
+    proof: 'unit test: test/post-fix-reverification.test.ts'
+  risk: high
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#5C
+  files:
+  - src/lib/sweep.ts
+- id: W1-T125
+  title: ARM-AT-OPEN — auto-merge is armed when the PR is CREATED, not when the runner regains control
+    (2-8 minutes of measured dead time, sometimes never)
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: 'Filed from #271 holding-note item 6. Because remudero-review is a REQUIRED commit status,
+
+    GitHub''s server-side auto-merge fires the instant checks plus review go green: event-driven
+
+    merging, zero polling latency, no sweep pass needed on the happy path. Sweep then demotes to
+
+    EXCEPTION RECONCILER — conflicts, staleness, heals — which is what a level-triggered system
+
+    should be.
+
+
+    PRECISION ON THE DEFECT, because the arm call ALREADY EXISTS: armAutoMerge is invoked in the
+
+    ''ARM auto-merge, then POLL to the gate'' block AFTER THE WORKER RETURNS. The PR itself was
+
+    opened by the worker minutes earlier. The gap is not a missing arm; it is an arm positioned at
+
+    the wrong moment in the lifecycle. This task MOVES the arm, it does not ADD one.
+
+
+    MEASURED (own-repo run PRs, created -> armed): #251 8m13s, #245 5m42s, #240 2m42s, #249
+
+    2m05s, #265 NEVER ARMED, #274 still unarmed 11+ min later. #274 is the clearest case: its
+
+    worker was still alive running fix rungs, so control never reached the arm call.
+
+
+    ALSO IN SCOPE: the spike path arms only AFTER waitForCiGreen returns — strictly worse, since
+
+    it forfeits server-side auto-merge entirely and re-implements the wait client-side.'
+  design: '(i) Arm at PR-CREATION time, in the same code path that opens the PR.
+
+    (ii) Remove the post-return arm as the PRIMARY path; keep an idempotent re-arm in sweep as the
+
+    exception reconciler for PRs that somehow opened unarmed.
+
+    (iii) The spike path stops waiting client-side and arms at creation like every other path.
+
+    (iv) SAFETY ARGUMENT, which must be preserved explicitly: early arming is safe ONLY because
+
+    the required-status contract still gates the merge. Arming earlier must never merge anything
+
+    the gate would have refused.'
+  acceptance:
+  - claim: a run PR has a non-null autoMergeRequest immediately at creation, asserted at creation rather
+      than eventually
+    proof: 'unit test: test/arm-at-open.test.ts'
+  - claim: a PR that greens merges with no sweep action ledgered, proving the happy path no longer depends
+      on the reconciler
+    proof: 'unit test: test/arm-at-open.test.ts'
+  - claim: a red or failed PR is unchanged and does NOT merge — the falsifier proving early arming did
+      not bypass the required-status contract
+    proof: 'unit test: test/arm-at-open.test.ts'
+  - claim: 'the created-to-armed delta is ~0 rather than the 2-8 minutes measured on #251/#245/#240/#249,
+      locked as a regression fixture'
+    proof: 'unit test: test/arm-at-open.test.ts'
+  risk: medium
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#5C
+  files:
+  - src/run-task.ts
+  depends_on: []
+- id: W1-T126
+  title: DAEMON SELF-FRESHNESS — the daemon notices origin/main has advanced past its boot sha and restarts
+    into the new code (five hand cycles in one weekend)
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: 'Filed from #271 holding-note item 7. Each poll, the daemon checks whether origin/main has
+
+    advanced past the sha its PROCESS loaded — cheap: a fetch plus rev-parse against a sha
+
+    recorded at boot. If stale: finish in-flight work, pull, restart into the new sha. A
+
+    long-lived daemon is otherwise pinned to whatever code it booted with, and every pipeline fix
+
+    merged after boot is invisible to the process that most needs it.
+
+
+    EVIDENCE: five manual pull-and-reload cycles in a single weekend. Every merged pipeline fix
+
+    was invisible to the running daemon until a human noticed and cycled it by hand.
+
+
+    TRAP — THE RESTART SEMANTICS INVERT THE OBVIOUS IMPLEMENTATION. The service definition runs
+
+    SuccessfulExit=false, which means a ZERO exit does NOT restart the daemon: a clean exit reads
+
+    as ''job done''. So the intentional-restart path must exit NON-ZERO, or be re-kickstarted
+
+    externally. Either way it must ledger daemon_selfrestart_for_freshness, because under
+
+    SuccessfulExit=false an intentional restart and a crash-loop look IDENTICAL from the outside.
+
+    This is the same edge already recorded from WS-1, where a --max-bounded daemon restart-loops.
+
+
+    SIBLING: W1-T79 (CLI freshness) is the same staleness class in a different process; they
+
+    should share one freshness check rather than grow two.'
+  design: '(i) Record the boot sha at process start.
+
+    (ii) Each poll: fetch and compare origin/main against it.
+
+    (iii) If stale: let in-flight work COMPLETE (never abandon a run mid-flight), then restart —
+
+    exiting NON-ZERO so the supervisor''s SuccessfulExit=false semantics actually restart it.
+
+    (iv) Ledger daemon_selfrestart_for_freshness on the intentional path, so it is
+
+    distinguishable in the record from a crash-loop.
+
+    (v) Share the freshness predicate with W1-T79 rather than duplicating it.'
+  acceptance:
+  - claim: 'stale fixture (origin/main ahead of the boot sha): in-flight work completes, the restart is
+      ledgered as daemon_selfrestart_for_freshness, and the next process records the NEW sha'
+    proof: 'unit test: test/daemon-freshness.test.ts'
+  - claim: 'current fixture (boot sha equals origin/main): NO restart — the falsifier proving the check
+      reads the sha rather than restarting on a timer'
+    proof: 'unit test: test/daemon-freshness.test.ts'
+  - claim: the intentional restart exits non-zero and is distinguishable in the ledger from a crash-loop
+      under SuccessfulExit=false semantics
+    proof: 'unit test: test/daemon-freshness.test.ts'
+  risk: high
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#5C
+  files:
+  - src/lib/daemon.ts
+  depends_on: []
+- id: W1-T127
+  title: 'STRIKE-ACCOUNTING INTEGRITY — a strike exists only where a worker RAN and a judgment was POSTED
+    (the #212 fixture: 20h41m blocked on a strike that never happened)'
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: 'Filed from #271 holding-note item 8. Today an infrastructure failure can debit the strike
+
+    budget without producing either a run or a judgment. A task can therefore exhaust its strikes
+
+    and escalate to a human ON WORK THAT WAS NEVER ATTEMPTED.
+
+
+    EVIDENCE — PR #212, and it is the fixture. The July-19 binary crash (the spawn-ENOENT /
+
+    autoupdater-race class) debited budget and counted a strike with NO WORKER AND NO JUDGMENT.
+
+    The escalation issue (#213) claimed ''fix strikes exhausted (2/2)'' while its own detail text
+
+    said ''after 1 fix strike(s)''. Only one strike was ever judged; the second was fiction. The PR
+
+    then sat 20h41m on that fiction — with all 16 CI checks GREEN and only remudero-review red,
+
+    against code that was complete and correct from its first commit. When finally examined by
+
+    hand the fix was BODY-ONLY: zero code changes. The entire block was accounting.'
+  design: '(i) A strike is recorded ONLY on the conjunction (worker ran AND judgment posted). Assert
+
+    both, never either.
+
+    (ii) A spawn-infra failure (the blocked_toolchain class) increments NEITHER strikes NOR
+
+    attempts-toward-escalation.
+
+    (iii) Its cost line is tagged `infra`, not `task`, so budget forensics can separate ''this task
+
+    was expensive'' from ''the host was broken''.
+
+    (iv) The #212 replay is the regression lock, not an illustration.'
+  acceptance:
+  - claim: a blocked_toolchain spawn-infra failure increments neither the strike counter nor attempts-toward-escalation
+    proof: 'unit test: test/strike-accounting.test.ts'
+  - claim: its cost line is tagged infra rather than task, so budget forensics separates an expensive
+      task from a broken host
+    proof: 'unit test: test/strike-accounting.test.ts'
+  - claim: a strike is recorded only where a worker ran AND a judgment was posted — asserted as a conjunction,
+      with each half alone proven insufficient
+    proof: 'unit test: test/strike-accounting.test.ts'
+  - claim: 'replaying the #212 fixture leaves the strike counter at its pre-crash value and does NOT escalate'
+    proof: 'unit test: test/strike-accounting.test.ts'
+  risk: high
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#5C
+  files:
+  - src/lib/ledger.ts
+  depends_on: []
+- id: W1-T128
+  title: THE DEAD PROOF FLOOR — 101 of 126 runnable-dialect proofs (80%) can never execute, so proof_exec
+    has read 0/N since W1-T72 and the anti-theater gate performs theater
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: 'RETRO PRIORITY 1, filed from #271 holding-note item 9. It re-scores the reliability of every
+
+    review verdict on record.
+
+
+    MEASURED 2026-07-19 over plan/tasks.yaml: 381 acceptance proofs, of which 126 carry a runnable
+
+    house-dialect prefix (''unit test:'' / ''grep:'') and only 25 can EVER execute. 101 (80%) are
+
+    REFUSED. Mechanism: UNSAFE_FENCE_CHARS_RE in src/lib/review.ts rejects any dialect body
+
+    containing ; & backtick $ < > unless it is a literal test path. Nearly every refusal is a
+
+    single SEMICOLON in ordinary prose — W1-T38''s own proof reads ''unit test: marking an entry
+
+    superseded reduces the counted size; the same bytes as an active entry would exceed the cap''.
+
+    The semicolon alone refuses it.
+
+
+    CONSEQUENCE: proof_exec has read 0/N on essentially every review since W1-T72 shipped, and
+
+    every FLOOR DEGRADED line traces to this one cause. The floor was designed to catch test
+
+    theater and instead PERFORMS it — green from keyword overlap, rendered as ''no test theater''.
+
+    Confirmed on the four PRs that PASSED on 2026-07-19 (#232/#240/#238/#220): all four report
+
+    proof_exec 0/2 alongside ''PASS - 2 criteria substantiated, no test theater''.
+
+
+    SUB-FINDING, cheap and independently useful: the floor reads the PR BODY ONLY. On #234 the
+
+    identical proof text posted as a PR COMMENT changed nothing; moved into the body it flipped
+
+    FAIL to PASS. Substantiation written to a comment is invisible to the gate.
+
+
+    FIX DIRECTION: execute proofs in the EXISTING WORKER SANDBOX — containment already bounds
+
+    them, and the character blocklist was standing in for isolation the harness already has.
+
+    Alternatively a structured proof format (cmd plus expect fields) needing no fence-parsing.'
+  design: '(i) Replace character-blocklist REFUSAL with EXECUTION IN THE EXISTING SANDBOX, or adopt a
+
+    structured proof format with explicit cmd/expect fields. The blocklist substituted for
+
+    isolation that containment already provides.
+
+    (ii) The gate must not merely start passing — a genuinely failing proof must still FAIL the
+
+    review. This is the load-bearing constraint: a fix that makes proof_exec non-zero by relaxing
+
+    judgment would deepen the exact defect being fixed.
+
+    (iii) Make the body-only read explicit and documented, or extend substantiation to comments —
+
+    either is acceptable, silently reading one and not the other is not.
+
+    (iv) Report proof_exec honestly: a refused or unexecutable proof must be visibly distinct from
+
+    an executed-and-passed one in the verdict line.'
+  acceptance:
+  - claim: the 101 currently-refused dialect proofs measurably become executable — proof_exec reads N
+      greater than 0 on a standard filing, against the recorded 2026-07-19 baseline of 25 of 126
+    proof: 'unit test: test/proof-execution.test.ts'
+  - claim: a genuinely failing proof still FAILS the review — the falsifier proving the floor was repaired
+      rather than merely relaxed into passing
+    proof: 'unit test: test/proof-execution.test.ts'
+  - claim: 'the W1-T38 over-cap fixture executes end-to-end: a bulk active corpus goes RED naming the
+      overage, reverts, and the same bytes marked superseded go green'
+    proof: 'unit test: test/proof-execution.test.ts'
+  - claim: 'a proof whose body contains a semicolon executes rather than being refused — the #234 regression
+      fixture, the single character that disabled 80 percent of the floor'
+    proof: 'unit test: test/proof-execution.test.ts'
+  risk: high
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#12A
+  files:
+  - src/lib/review.ts
+  depends_on: []
+- id: W1-T129
+  title: COMMITLINT LINTS THE ARTIFACT THAT PERSISTS — the repo squash-merges, so branch commits that
+    never reach main must not gate the PR
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: 'Filed from #271 holding-note item 10. The commitlint gate that landed in #220 lints base..head
+
+    BRANCH commits, but this repo SQUASH-MERGES everything — branch histories never reach main.
+
+    The gate therefore fails PRs over commits THAT WILL NOT EXIST POST-MERGE, while the commit
+
+    that DOES land (the squash) is never linted at all.
+
+
+    EVIDENCE, the same weekend it shipped: #234, #238 and #251 each had to be collapsed to a
+
+    single conventional commit purely to satisfy it. For #234 and #238 the collapse was
+
+    MESSAGE-ONLY, with the resulting tree verified byte-identical to the pre-collapse merged tree
+
+    — the change bought nothing but a passing gate. The workers'' own original messages (e.g.
+
+    ''KNOWLEDGE BUDGET AS A CI RATCHET - active learnings corpus size is capped (W1-T38)'') are
+
+    non-conventional, so EVERY branch predating the gate inherits a check its own history cannot
+
+    pass the moment it merges main.
+
+
+    Keep the Conventional Commits standard. Point it at the artifact that actually persists.'
+  design: '(i) Lint the PR TITLE, which becomes the squash commit subject — or restrict linting to
+
+    commits authored after the gate landed.
+
+    (ii) The standard is RELOCATED, never dropped: a non-conventional title must still fail.
+
+    (iii) No branch predating the gate should need history rewriting to merge — that is the
+
+    regression this task exists to prevent recurring.'
+  acceptance:
+  - claim: a PR whose branch commits are non-conventional but whose TITLE is conventional passes the gate
+    proof: 'unit test: test/commitlint-mode.test.ts'
+  - claim: a PR with a non-conventional TITLE fails — the falsifier proving the standard was relocated
+      rather than removed
+    proof: 'unit test: test/commitlint-mode.test.ts'
+  - claim: the squash commit landing on main is the linted object, so git log on main reads conventional
+      end to end
+    proof: 'unit test: test/commitlint-mode.test.ts'
+  - claim: 'the #234 and #238 collapse fixtures merge WITHOUT history rewriting, locking the cost this
+      gate imposed on branches predating it'
+    proof: 'unit test: test/commitlint-mode.test.ts'
+  risk: medium
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#6A
+  files:
+  - .github/workflows/ci.yml
+  depends_on: []
+- id: W1-T130
+  title: A CORRECTION IS SUPREME OFFLINE — ledger-local credit is authoritative with NO GitHub read, so
+    no throttle or error can demote settled work into a spend event
+  repo: remudero
+  depends_on:
+  - W1-T119
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: 'Filed from #271 holding-note item 11. DISTINCT FROM ITS TWO SIBLINGS, filed separately per
+
+    Rule 19 rather than folded into either: W1-T116 reorders PRECEDENCE among deriveStatus rungs;
+
+    W1-T119 fixes the READ LAYER so a throttled read DEFERS instead of concluding not-merged.
+
+    This task removes the READ FROM THE PATH ENTIRELY for correction-credited work — a correction
+
+    is ledger-local evidence and must be authoritative with NO gh read at all. W1-T119 is the
+
+    enabling distinction (it makes a read''s failure legible); this is the guarantee that even a
+
+    HEALTHY read may never demote ledger-local credit.
+
+
+    LIVE INCIDENT, 2026-07-19. Measured from the daemon logs: SIXTY distinct W1-T1 run ids across
+
+    363 poll cycles, 76 of which spent money, totalling $206.15 notional — every one of them
+
+    re-dispatching a task SATISFIED BY PR #2, MERGED 2026-07-14. The operator''s own correction
+
+    records the overlapping count from the ledger side as 149 dispatches and roughly $174; the two
+
+    figures come from different sources and windows and are reported here unreconciled rather than
+
+    averaged. Every cycle was paired in the error log with ''GraphQL: API rate limit already
+
+    exceeded''. The retro gather over the same window reports 191 runs, ZERO merged, $232.58.
+
+
+    MECHANISM: under quota exhaustion ghGateway''s fail-soft catch returns null for every rung, so
+
+    derivation falls through to status queued with source none — and NOT-OBSERVABLE was read as
+
+    NOT-DONE. The loop is SELF-REINFORCING: each re-dispatch consumes more quota, deepening the
+
+    exhaustion that caused it. Fail-open on the money-spending path.
+
+
+    CONFIRMATION that the diagnosis is right: once quota recovered, drain --dry-run correctly
+
+    skipped W1-T1 and selected W3-T1b, with no code change.'
+  design: '(i) A correction.provenance credit is read from the LEDGER ALONE and short-circuits derivation
+
+    BEFORE any gateway call. No gh invocation may occur on the path that honours a correction.
+
+    (ii) NO read result — healthy, throttled, errored or absent — may demote a correction-credited
+
+    task to dispatchable. Supremacy is unconditional, not best-effort.
+
+    (iii) CANNOT-OBSERVE MEANS WAIT, NEVER SPEND: where derivation is indeterminate and no
+
+    correction applies, the dispatch path defers. Spending money is never the fallback for a
+
+    failed read.
+
+    (iv) Builds on W1-T119''s three-valued read: this task consumes that distinction rather than
+
+    re-deriving it.'
+  acceptance:
+  - claim: a correction-credited task is honoured with ZERO gateway calls — asserted by an injected gateway
+      that FAILS the test if invoked at all, proving the read is off the path rather than merely tolerant
+    proof: 'unit test: test/correction-supremacy.test.ts'
+  - claim: a correction-credited task stays non-dispatchable under a throttled, an errored, and a healthy-but-contradicting
+      read — supremacy is unconditional across all three
+    proof: 'unit test: test/correction-supremacy.test.ts'
+  - claim: an indeterminate derivation with no applicable correction DEFERS rather than dispatching —
+      cannot-observe means wait, never spend
+    proof: 'unit test: test/correction-supremacy.test.ts'
+  - claim: replaying the W1-T1 loop fixture under an exhausted-quota gateway yields ZERO dispatches, against
+      the recorded 60 run ids and $206.15 notional of 2026-07-19
+    proof: 'unit test: test/correction-supremacy.test.ts'
+  risk: high
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#9
+  files:
+  - src/lib/correct.ts
