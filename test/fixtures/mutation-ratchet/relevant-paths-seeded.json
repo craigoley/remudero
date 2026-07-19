@@ -1,0 +1,8 @@
+[
+  "src/lib/classify.ts",
+  "test/classify.test.ts",
+  "stryker.conf.json",
+  "scripts/mutation-ratchet.mjs",
+  "scripts/mutation-baseline.json",
+  "fixtures/seeded-mutation-scope.ts"
+]
