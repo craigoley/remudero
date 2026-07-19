@@ -1,0 +1,6 @@
+# Fixture for test/learnings-assert-check.test.ts — an entry missing the required 'id' field.
+- subsystem: fixture
+  lifecycle: active
+  files: [fixture.ts]
+  fact: an entry with no id at all.
+  src: fixture

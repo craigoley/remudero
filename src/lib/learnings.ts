@@ -31,11 +31,25 @@ import { citation } from "./provenance.js";
  * time. The prose `LEARNINGS.md` stays the human/Architect-owned narrative
  * (MASTER-PLAN governance) and is intentionally NOT parsed here.
  *
- * SUPERSESSION: an entry carries `lifecycle: active | superseded` (default
- * `active`). Provenance decays — a fact can become FALSE — so a `superseded`
- * entry is NEVER injected (`selectLearnings` filters it out before ranking); it
- * stays in its shard file for provenance only, optionally naming the entry that
- * replaced it via `superseded_by`.
+ * SUPERSESSION: an entry carries `lifecycle: active | superseded | quarantined`
+ * (default `active`). Provenance decays — a fact can become FALSE — so a
+ * `superseded` entry is NEVER injected (`selectLearnings` filters it out before
+ * ranking); it stays in its shard file for provenance only, optionally naming
+ * the entry that replaced it via `superseded_by`.
+ *
+ * SELF-VERIFICATION (W1-T34): an entry may additionally carry an `assertion` —
+ * a shell command that must exit 0 for the fact to still be considered true (a
+ * fact pinned to, say, an SDK version must not keep being injected once the SDK
+ * moves). `scripts/learnings-assert-check.mjs` runs every entry's assertion; a
+ * FAILING one flips that entry's committed `lifecycle` to `quarantined` (and
+ * records why in `quarantined_reason`) — the exact same generate-and-`--check`
+ * shape as the W1-T33 index (`npm run learnings-assert` mutates the shard,
+ * `npm run learnings-assert:check` fails CI when the committed corpus doesn't
+ * match a fresh re-verification, naming the stale entry). A `quarantined`
+ * entry is filtered out by `selectLearnings` exactly like `superseded` — this
+ * module never itself executes an assertion, keeping injection a pure, fast,
+ * non-shelling lookup. Re-verification (the assertion passing again) is what
+ * lets a subsequent `npm run learnings-assert` restore `lifecycle: active`.
  */
 
 /** Standing rule 7 — empirically the highest-value line in the template. */
@@ -58,13 +72,16 @@ const AUTONOMY_SRC = "learnings#standing-rule-8";
 export const DEFAULT_KNOWLEDGE_BUDGET_CHARS = 1800;
 
 /**
- * An entry's LIFECYCLE (W1-T33). `active` (the default) is a candidate for
- * injection; `superseded` means provenance decayed — the fact is no longer
- * trusted, but the entry stays in its shard for the historical record. A
- * `superseded` entry is filtered out by `selectLearnings` before ranking, so
- * it can NEVER be injected into a rendered prompt.
+ * An entry's LIFECYCLE (W1-T33 + W1-T34). `active` (the default) is a
+ * candidate for injection. `superseded` means provenance decayed by human
+ * correction — a newer entry replaced this fact — and the entry stays in its
+ * shard for the historical record. `quarantined` means provenance decayed
+ * AUTOMATICALLY: the entry's `assertion` currently fails, so
+ * `scripts/learnings-assert-check.mjs` flipped it here. Both `superseded` and
+ * `quarantined` entries are filtered out by `selectLearnings` before ranking,
+ * so neither can ever be injected into a rendered prompt.
  */
-export type Lifecycle = "active" | "superseded";
+export type Lifecycle = "active" | "superseded" | "quarantined";
 
 /** One durable, provenance-tagged fact, tagged for deterministic matching. */
 export interface LearningEntry {
@@ -72,10 +89,22 @@ export interface LearningEntry {
   id: string;
   /** Human-facing grouping (e.g. `containment`, `ci`); advisory, not matched. */
   subsystem: string;
-  /** `active` | `superseded` (default `active`). See {@link Lifecycle}. */
+  /** `active` | `superseded` | `quarantined` (default `active`). See {@link Lifecycle}. */
   lifecycle: Lifecycle;
   /** (superseded entries only) the id of the entry that replaced this one. */
   supersededBy?: string;
+  /**
+   * (W1-T34) An optional shell command (run via `sh -c` from the repo root)
+   * that must exit 0 for this entry's `fact` to still be considered true.
+   * Verified by `scripts/learnings-assert-check.mjs`, never by this module.
+   */
+  assertion?: string;
+  /**
+   * (quarantined entries only, W1-T34) why `learnings-assert-check.mjs`
+   * auto-quarantined this entry — the failing assertion plus its exit code,
+   * recorded so a human reading the shard sees why without re-running it.
+   */
+  quarantinedReason?: string;
   /** Repo-relative globs; an entry matches a task iff one glob hits a task file. */
   files: string[];
   /** The fact itself — one line, the thing a worker inherits. */
@@ -157,9 +186,9 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
     }
     let lifecycle: Lifecycle = "active";
     if (e.lifecycle !== undefined) {
-      if (e.lifecycle !== "active" && e.lifecycle !== "superseded") {
+      if (e.lifecycle !== "active" && e.lifecycle !== "superseded" && e.lifecycle !== "quarantined") {
         throw new LearningsError(
-          `learnings '${id}': 'lifecycle' must be 'active' or 'superseded', got ${JSON.stringify(e.lifecycle)} (${sourceLabel}).`,
+          `learnings '${id}': 'lifecycle' must be 'active', 'superseded', or 'quarantined', got ${JSON.stringify(e.lifecycle)} (${sourceLabel}).`,
         );
       }
       lifecycle = e.lifecycle;
@@ -170,11 +199,24 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
         `learnings '${id}': 'superseded_by' is set but 'lifecycle' is not 'superseded' (${sourceLabel}).`,
       );
     }
+    if (e.assertion !== undefined && (typeof e.assertion !== "string" || e.assertion.length === 0)) {
+      throw new LearningsError(`learnings '${id}': 'assertion' must be a non-empty string (${sourceLabel}).`);
+    }
+    const assertion = typeof e.assertion === "string" ? e.assertion : undefined;
+    const quarantinedReason =
+      typeof e.quarantined_reason === "string" && e.quarantined_reason.length > 0 ? e.quarantined_reason : undefined;
+    if (quarantinedReason !== undefined && lifecycle !== "quarantined") {
+      throw new LearningsError(
+        `learnings '${id}': 'quarantined_reason' is set but 'lifecycle' is not 'quarantined' (${sourceLabel}).`,
+      );
+    }
     return {
       id,
       subsystem: typeof e.subsystem === "string" ? e.subsystem : "",
       lifecycle,
       supersededBy,
+      assertion,
+      quarantinedReason,
       files: e.files as string[],
       fact: e.fact,
       src: e.src,
@@ -307,11 +349,13 @@ export function loadLearningsForTaskFiles(learningsDir: string, taskFiles: strin
 /**
  * Select the learnings to inject for a task, DETERMINISTICALLY.
  *
- * SUPERSESSION (W1-T33) first: an entry with `lifecycle: superseded` is
- * dropped from candidacy before matching even runs — its provenance has
- * decayed and it must NEVER be injected, no matter how well its `files:`
- * would otherwise match. It is excluded here, not merely de-prioritized, so
- * no budget pressure or tie-break can let it slip through.
+ * LIFECYCLE FILTER (W1-T33 supersession, W1-T34 quarantine) first: an entry
+ * whose `lifecycle` is `superseded` OR `quarantined` is dropped from
+ * candidacy before matching even runs — its provenance has decayed (by human
+ * correction, or by a failing self-verification assertion) and it must NEVER
+ * be injected, no matter how well its `files:` would otherwise match. It is
+ * excluded here, not merely de-prioritized, so no budget pressure or
+ * tie-break can let it slip through.
  *
  * Matching: an entry is a candidate iff one of its globs matches one of
  * `taskFiles`. When `taskFiles` is empty/absent the task is treated as
@@ -327,7 +371,7 @@ export function selectLearnings(
   taskFiles: string[] | undefined,
   budgetChars: number = DEFAULT_KNOWLEDGE_BUDGET_CHARS,
 ): { selected: LearningEntry[]; dropped: LearningEntry[] } {
-  const active = entries.filter((e) => e.lifecycle !== "superseded");
+  const active = entries.filter((e) => e.lifecycle === "active");
   const files = taskFiles ?? [];
   const repoWide = files.length === 0;
   const ranked = active

@@ -282,7 +282,7 @@ test("a bare entry (no lifecycle:) defaults to active", () => {
 
 test("loadLearnings rejects an invalid lifecycle value", () => {
   const path = writeCorpus("- id: bad\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  lifecycle: retired\n");
-  assert.throws(() => loadLearnings(path), /'lifecycle' must be 'active' or 'superseded'/);
+  assert.throws(() => loadLearnings(path), /'lifecycle' must be 'active', 'superseded', or 'quarantined'/);
 });
 
 test("loadLearnings rejects superseded_by set without lifecycle: superseded", () => {
@@ -290,6 +290,66 @@ test("loadLearnings rejects superseded_by set without lifecycle: superseded", ()
     "- id: bad\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  superseded_by: other\n",
   );
   assert.throws(() => loadLearnings(path), /'superseded_by' is set but 'lifecycle' is not 'superseded'/);
+});
+
+// ── SELF-VERIFICATION (W1-T34): assertion + quarantine lifecycle ────────────
+
+test("loadLearnings accepts an optional 'assertion' string", () => {
+  const path = writeCorpus("- id: x\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  assertion: 'exit 0'\n");
+  const [entry] = loadLearnings(path);
+  assert.equal(entry.assertion, "exit 0");
+});
+
+test("loadLearnings rejects an empty-string assertion", () => {
+  const path = writeCorpus("- id: x\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  assertion: ''\n");
+  assert.throws(() => loadLearnings(path), /'assertion' must be a non-empty string/);
+});
+
+test("loadLearnings rejects quarantined_reason set without lifecycle: quarantined", () => {
+  const path = writeCorpus(
+    "- id: bad\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  quarantined_reason: 'why'\n",
+  );
+  assert.throws(() => loadLearnings(path), /'quarantined_reason' is set but 'lifecycle' is not 'quarantined'/);
+});
+
+test("loadLearnings accepts lifecycle: quarantined with a quarantined_reason", () => {
+  const path = writeCorpus(
+    "- id: q\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  lifecycle: quarantined\n  quarantined_reason: 'assertion failed'\n",
+  );
+  const [entry] = loadLearnings(path);
+  assert.equal(entry.lifecycle, "quarantined");
+  assert.equal(entry.quarantinedReason, "assertion failed");
+});
+
+test("QUARANTINE: a quarantined entry is NEVER selected, even when its files: match exactly (acceptance §2)", () => {
+  const entries: LearningEntry[] = [
+    {
+      id: "flaky-fact",
+      subsystem: "platform",
+      lifecycle: "quarantined",
+      quarantinedReason: "assertion failed (exit 1): exit 1",
+      assertion: "exit 1",
+      files: ["src/lib/worker.ts"],
+      fact: "A fact whose self-check no longer holds.",
+      src: "PR#1",
+    },
+    {
+      id: "still-good",
+      subsystem: "platform",
+      lifecycle: "active",
+      files: ["src/lib/worker.ts"],
+      fact: "A fact that still holds.",
+      src: "PR#1",
+    },
+  ];
+  const { selected, dropped } = selectLearnings(entries, ["src/lib/worker.ts"]);
+  const selectedIds = selected.map((e) => e.id);
+  assert.deepEqual(selectedIds, ["still-good"], "a matching task gets ONLY the active entry");
+  assert.ok(!selectedIds.includes("flaky-fact"), "the quarantined entry must never be selected");
+  assert.ok(
+    !dropped.map((e) => e.id).includes("flaky-fact"),
+    "quarantined is filtered before ranking, not dropped for budget",
+  );
 });
 
 test("SUPERSESSION: a superseded entry is NEVER selected, even when its files: match exactly (acceptance §2, the ZDOTDIR live example)", () => {
@@ -383,4 +443,63 @@ test("loadLearningsForTaskFiles: falls back to a full scan when the index is abs
   writeFileSync(join(dir, "a.yaml"), "- id: from-a\n  files: [a.ts]\n  fact: fact a\n  src: PR#1\n");
   const entries = loadLearningsForTaskFiles(dir, ["a.ts"]);
   assert.deepEqual(entries.map((e) => e.id), ["from-a"]);
+});
+
+// ── Further parseLearningsDoc validation branches ────────────────────────────
+
+test("loadLearnings: an empty file (parses to `undefined`, not a list) is zero entries, not an error", () => {
+  const path = writeCorpus("");
+  assert.deepEqual(loadLearnings(path), []);
+});
+
+test("loadLearnings rejects a YAML document that is not a list", () => {
+  const path = writeCorpus("id: not-a-list\n");
+  assert.throws(() => loadLearnings(path), /must be a YAML list of entries/);
+});
+
+test("loadLearnings rejects a list entry that is not a mapping", () => {
+  const path = writeCorpus("- just-a-string\n");
+  assert.throws(() => loadLearnings(path), /must be a mapping/);
+});
+
+test("loadLearnings rejects an entry missing string 'id' specifically", () => {
+  const path = writeCorpus("- files: [a.ts]\n  fact: a fact\n  src: PR#1\n");
+  assert.throws(() => loadLearnings(path), /missing string 'id'/);
+});
+
+test("loadLearnings rejects an entry missing 'src' specifically", () => {
+  const path = writeCorpus("- id: x\n  files: [a.ts]\n  fact: a fact\n");
+  assert.throws(() => loadLearnings(path), /missing string 'src'/);
+});
+
+test("loadLearnings rejects an entry whose 'files' is not a list of strings", () => {
+  const path = writeCorpus("- id: x\n  files: not-a-list\n  fact: a fact\n  src: PR#1\n");
+  assert.throws(() => loadLearnings(path), /'files' must be a list of globs/);
+});
+
+test("loadLearnings rejects an entry whose 'files' list contains a non-string glob", () => {
+  const path = writeCorpus("- id: x\n  files: [a.ts, 5]\n  fact: a fact\n  src: PR#1\n");
+  assert.throws(() => loadLearnings(path), /'files' must be a list of globs/);
+});
+
+test("loadLearnings rejects malformed YAML (not valid syntax at all)", () => {
+  const path = writeCorpus("- id: x\n  files: [a.ts\n  fact: unterminated flow sequence\n");
+  assert.throws(() => loadLearnings(path), /is not valid YAML/);
+});
+
+test("loadLearningsCorpus rejects malformed YAML in one shard, naming that shard's path", () => {
+  const dir = mkdtempSync(join(tmpdir(), "learnings-corpus-badyaml-"));
+  writeFileSync(join(dir, "a.yaml"), "- id: x\n  files: [a.ts\n  fact: unterminated\n");
+  assert.throws(() => loadLearningsCorpus(dir), /is not valid YAML/);
+});
+
+test("candidateShardFiles: an explicit empty taskFiles array is treated the same as repo-wide (every shard candidates)", () => {
+  const index = {
+    files: {
+      "a.yaml": { entries: ["x"], globs: ["src/a.ts"] },
+      "b.yaml": { entries: ["y"], globs: ["src/b.ts"] },
+    },
+    bySubsystem: {},
+  };
+  assert.deepEqual(candidateShardFiles(index, []), ["a.yaml", "b.yaml"]);
 });
