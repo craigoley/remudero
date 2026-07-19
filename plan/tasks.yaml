@@ -4598,3 +4598,39 @@
   note: "Harvested by hand from the #193 worker's merge note — the W1-T105 class, once more before it
     builds. Ceiling-raising rejected: it would slacken the fast-gate discipline for every check to
     accommodate one slow one."
+
+- id: W1-T114
+  title: "PENDING is a disposition — checks in flight mean WAIT (with a staleness ceiling), never escalate (the 30-issue predicate storm)"
+  repo: remudero
+  depends_on: [W1-T93]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (2026-07-19 ops sweep): 30 open needs-human issues, ~24 of one shape — 'not
+    positively mergeable: checks pending, review success — escalating.' The disposition table has no
+    PENDING state, so in-flight checks fall through to the escalate catch-all, and the 13-minute
+    mutation gate guarantees every fresh PR files an issue during its window. Pending is TIME, not
+    ambiguity; escalating on it manufactures alert fatigue at machine speed (and W1-T104's dedup,
+    filed unbuilt, would only have capped the copies — the row itself is the defect)."
+  design: |
+    (i) A positive WAIT disposition: required contexts pending/queued AND newest check-start younger
+    than a staleness ceiling (policy-as-data, default generous enough for the slowest required check)
+    -> no action this pass, a wait ledger line, re-derive next pass. (ii) Stale-pending (ceiling
+    exceeded) -> the EXISTING escalate path with the age in the reason — a check stuck for an hour IS
+    ambiguity. (iii) Regression locks: the storm fixture (pending 4 minutes, review success) -> wait,
+    zero escalations; genuinely red -> blocked-fixable unchanged; stuck-pending fixture -> escalates
+    with age named.
+  acceptance:
+    - claim: "in-window pending never escalates and never arms"
+      proof: "unit test: pending-4min fixture -> wait disposition, no escalation call, no merge arm"
+    - claim: "stale pending escalates with the age in the reason"
+      proof: "unit test: pending-90min fixture -> escalate, reason contains the age and the ceiling"
+    - claim: "the ceiling is data"
+      proof: "unit test: lowering the seeded ceiling flips the 4min fixture from wait to escalate with zero code changes"
+  risk: medium
+  origin: architect
+  plan_refs: ["§3", "P22", "W1-T93"]
+  files: [src/lib/sweep.ts]
+  status: queued
+  attempts: 0
