@@ -17,5 +17,12 @@ coverage/
 reports/mutation/
 .stryker-tmp/
 
+# generated refactor-campaign reports (W2-T3 — jscpd/depcruise/npm-audit JSON, regenerated fresh
+# by the refactor-campaign CI job every run — never committed; scripts/refactor-campaign.mjs
+# compares them against the checked-in scripts/*-baseline.json floors)
+reports/jscpd/
+reports/depcruise/
+reports/audit/
+
 # os / editor
 .DS_Store

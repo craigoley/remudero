@@ -1,0 +1,5 @@
+{
+  "_comment": "Refactor-campaign complexity ceiling (W2-T3, MASTER-PLAN §3A/§5). Captured from scripts/refactor-campaign.mjs's own scanComplexity() over src/**/*.ts (a cyclomatic-approximation: 1 + one per if/for/while/case/catch/&&/||/??/ternary, comments and string/template literal bodies stripped first). Never raise this number to make a refactor PR pass -- lower it (ratchet down) only when the aggregate genuinely drops; a complexity-INCREASING PR must go CI-red on scripts/refactor-campaign.mjs's check mode.",
+  "capturedAt": "2026-07-19",
+  "totalComplexity": 1870
+}
