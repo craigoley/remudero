@@ -4600,36 +4600,63 @@
     accommodate one slow one."
 
 - id: W1-T116
-  title: "deriveStatus honors a task's declared pr: field — verified against GitHub, below corrections — so bootstrap-credited tasks can never dispatch-loop (the W1-T1 149x root cause)"
+  title: "deriveStatus precedence: a VERIFIED-MERGED credit outranks an open-PR ledger claim — settled work can never be re-dispatched (the W1-T1 149x root cause)"
   repo: remudero
   depends_on: [W1-T75]
   type: implement
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  rationale: "ROOT CAUSE, ground-truthed by the ops agent (2026-07-19): W1-T1 carries pr: 2 in
-    tasks.yaml, PR #2 merged 2026-07-14 — yet deriveStatus reported source=none pr=none, computed
-    queued-forever, and the daemon dispatched it 149 times ($174, 41% of a day's spend), opening no-op
-    PRs its workers couldn't attribute. Derivation's sources today are trailered merged PRs and
-    corrections; a DECLARED pr: field is invisible. The doctrine 'status derives from GitHub, not
-    tasks.yaml' is preserved by VERIFICATION: the declaration only credits when GitHub confirms that
-    PR merged — the yaml supplies the pointer, GitHub supplies the truth."
+  rationale: |
+    ROOT CAUSE — a PRECEDENCE defect, not a missing rung. Observed on the live W1-T1 incident
+    (2026-07-19), cited verbatim from the sanctioned correction writer:
+
+      ### rmd correct — before: status=running merged=false source=ledger pr=https://github.com/craigoley/remudero/pull/258 (OPEN)
+      ### rmd correct — after:  status=merged  merged=true  source=correction pr=https://github.com/craigoley/remudero/pull/2 (MERGED)
+
+    CORRECTION TO THE ORIGINAL FILING, recorded here deliberately rather than hidden: this task was
+    first filed claiming deriveStatus reported source=none pr=none, i.e. that a declared pr: field is
+    invisible to derivation. That observation was a GitHub RATE-LIMIT ARTIFACT — every rung failed to
+    resolve a PR, so derivation fell through to none. The rung is not missing. Rung (b) pr-field
+    EXISTS in src/lib/status.ts and WORKS; the sibling task proves it, same verbatim writer:
+
+      ### rmd correct — before: status=merged merged=true source=pr-field pr=https://github.com/craigoley/remudero/pull/3 (MERGED)
+
+    W1-T1B derives merged from its declared pr: 3 with no correction and no trailer. It was
+    LOOPING-LATENT only for lack of ledger rows: it has no pr.opened line, so rung (a) is empty and
+    rung (b) answers. The instant a dispatch opened a PR for it, a row would appear and outrank the
+    settled credit — the same loop, one dispatch later.
+
+    THE CYCLE IS SELF-REINFORCING. Rung (a) — the ledger pr.opened row — is checked ABOVE rung (b).
+    Dispatching W1-T1 opened #258 (head run-W1-T1-1784464835733) and wrote a pr.opened row; that row
+    then outranked the pr-field rung that would have credited merged PR #2, so the task could never
+    settle, so the daemon dispatched it again, so more rows. The ledger records 153 run.start lines
+    for W1-T1 on 2026-07-19, 97 of them AFTER #258 was opened — an open-PR claim did not even suppress
+    re-dispatch, it only suppressed the merged credit. ~$174, 41% of a day's task spend.
+
+    THE INVARIANT: an open-PR ledger claim means POSSIBLY RUNNING. It is the weakest evidence in the
+    system and must never outrank SETTLED work.
   design: |
-    (i) New derivation source declared_pr, precedence: corrections > trailered merges > declared_pr.
-    Credits ONLY when the referenced PR is confirmed merged via the existing PR-state read; an
-    unmerged/unresolvable declared PR contributes nothing and is ledgered as declared_pr_unverified
-    (never an error, never a credit). (ii) The dispatcher treats declared_pr credit identically to any
-    other done state. (iii) Fixture = the live incident: a task with pr: 2, GitHub fixture showing #2
-    merged -> done(source=declared_pr); same task with the PR fixture open -> queued + the unverified
-    ledger line. (iv) AUDIT in the build report: list every task on main carrying pr: with derived
-    status still queued.
+    (i) REORDER the precedence in deriveStatus (src/lib/status.ts). Today: corrections > (a) ledger
+    pr.opened > (b) pr-field > (c) trailer. Becomes: corrections > VERIFIED-MERGED credit > open-PR
+    ledger claim. A VERIFIED-MERGED credit is any rung whose PR GitHub confirms MERGED — a merged
+    ledger row, an ownership-asserted anchored trailer, or a declared pr: field GitHub confirms merged.
+    Corrections stay SUPREME and keep their exemption from the ownership-assert (P9-iv / W1-T75).
+    (ii) A ledger row whose PR is OPEN yields at most a running projection and NEVER outranks a
+    verified-merged credit; it is dedup evidence only. Keep it ranked above unsettled rungs so an
+    in-flight run is still deduped. (iii) The yaml still supplies only a POINTER — GitHub supplies
+    the truth; an unmerged or unresolvable pr: field credits nothing. Doctrine intact.
+    (iv) Rate-limit honesty: a rung that fails to resolve because the gateway errored must be
+    distinguishable from a rung that resolved to nothing, so a throttled read can never again be
+    read as evidence of absence. (v) AUDIT in the build report: every task on main carrying pr:
+    whose derived status is not merged.
   acceptance:
-    - claim: "a declared, verifiably-merged PR credits the task"
-      proof: "unit test: the W1-T1 fixture (pr: 2, merged) -> done, source=declared_pr, pr=2; dispatcher skips it"
-    - claim: "an unverified declared PR never credits and is ledgered"
-      proof: "unit test: pr declared but fixture-open -> queued, declared_pr_unverified ledgered, no credit"
-    - claim: "precedence holds"
-      proof: "unit test: a correction contradicting a declared pr wins (corrections-supreme regression lock)"
+    - claim: "a verified-merged credit outranks a ledger row claiming an open PR — the live W1-T1 fixture settles"
+      proof: "unit test over the live shape: task pr: 2 with #2 fixture MERGED, plus a pr.opened ledger row for #258 fixture OPEN -> status=merged, merged=true; and the dispatcher does NOT dispatch it"
+    - claim: "dedup is intact — a genuinely-running task is still not re-dispatched"
+      proof: "unit test: pr.opened row for an OPEN PR and NO settled credit (no correction, no merged pr-field, no trailer) -> status=running, merged=false, source=ledger; dispatcher takes no action"
+    - claim: "corrections beat everything (regression lock)"
+      proof: "unit test: a correction.provenance line wins over both a verified-merged pr-field and an open-PR ledger row, in both the credit and the un-credit direction"
   risk: high
   origin: architect
   plan_refs: ["§3", "W1-T75", "P9"]
