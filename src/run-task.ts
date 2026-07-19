@@ -37,6 +37,7 @@ import { generateLaunchdPlist, launchdPlistPath } from "./lib/launchd.js";
 import { buildDigest, sendDigest } from "./lib/digest.js";
 import { escalate, ghIssueGateway, type EscalationClass, type EscalationOption, type IssueGateway } from "./lib/escalate.js";
 import { imessageChannel, notify } from "./lib/notify.js";
+import { captureFeedback, parseFeedbackAddArgs, FeedbackError } from "./lib/feedback.js";
 import { parseUsage, type UsageSnapshot } from "./lib/headroom.js";
 import {
   assertArchitectAboveWorker,
@@ -3924,6 +3925,32 @@ async function notifyCommand(rest: string[]): Promise<number> {
 }
 
 /**
+ * `rmd feedback <text...> [--attach <path-or-url>]... [--origin cli|ui|issue]` — the durable
+ * inbox's async-capture front door (lib/feedback.ts, MASTER-PLAN §7B, W1-T40). Writes one
+ * `plan/feedback/<id>.yaml` entry with `status: new` and returns immediately (plain filesystem
+ * I/O — no network, no LLM call). Fails loud (exit 2, writes nothing) on a bad flag, an
+ * unreadable `--attach` path, or empty text; never falls through to a silent no-op.
+ */
+async function feedbackCommand(rest: string[]): Promise<number> {
+  const parsed = parseFeedbackAddArgs(rest);
+  if ("error" in parsed) {
+    console.error(parsed.error);
+    return 2;
+  }
+  try {
+    const entry = captureFeedback(repoRoot, parsed);
+    console.log(JSON.stringify(entry, null, 2));
+    return 0;
+  } catch (err) {
+    if (err instanceof FeedbackError) {
+      console.error(`rmd feedback: ${err.message}`);
+      return 1;
+    }
+    throw err;
+  }
+}
+
+/**
  * `rmd digest [--since <iso>] [--dry-run]` — roll up the ledger since `--since`
  * (default: 24h ago) into one message (digest.ts) and send it over iMessage;
  * `--dry-run` prints the text without sending.
@@ -4267,6 +4294,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>   # fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps, does not push/PR/arm protection itself",
   },
   {
+    name: "feedback",
+    usage:
+      "rmd feedback <text...> [--attach <path-or-url>]... [--origin cli|ui|issue]   # durable-inbox async capture (MASTER-PLAN \u00a77B, W1-T40): writes plan/feedback/<id>.yaml with status: new; --attach copies a local screenshot/terminal-dump into plan/feedback/attachments/<id>/ or records an http(s) link verbatim; browse the inbox with plain ls/cat/git diff, no bespoke reader",
+  },
+  {
     name: "skill",
     usage:
       "rmd skill list   # §5B skill-registry reader (W1-T44): resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); adding a skill is a config entry, no source change",
@@ -4377,6 +4409,9 @@ async function main(): Promise<void> {
   }
   if (cmd === "notify") {
     process.exit(await notifyCommand(rest));
+  }
+  if (cmd === "feedback") {
+    process.exit(await feedbackCommand(rest));
   }
   if (cmd === "digest") {
     process.exit(await digestCommand(rest));
