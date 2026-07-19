@@ -34,3 +34,19 @@ decision reversible.
   this task's one-concern scope (this task is the extraction, not the dispatcher) and is left for a
   separate task against the dispatch/drain path.
 - Rollback: revert this PR (removes only this DECISIONS.md entry; no runtime code touched).
+
+## 2026-07-19T17:27:50.789Z — W1-T1 re-dispatch (fourth occurrence): already-satisfied, no-op close
+- Options: (A) close as already-satisfied, no functional code change (RECOMMENDED) | (B) force a
+  cosmetic edit to `src/run-task.ts` or `src/spike.ts` just to produce a non-empty diff
+- Chosen (RECOMMENDED, auto): Option A — no functional code change.
+- Rationale: identical situation to the third closure (`bca5cd0`, PR #255) one dispatch later. At
+  this dispatch, `HEAD` and `origin/main` both sat at `bca5cd0` with a clean tree — no code or docs
+  had changed since that closure. `src/run-task.ts` (4,343 lines) still carries the full proto-runner
+  (`recon → prompt → implement → PR`, per its own module header) extracted from the WS-0 spike in
+  `83ff9a8` (remudero PR #2); `src/spike.ts` (308 lines) still holds only the sandbox smoke-test with
+  no proto-runner logic left in it. There was nothing to extract, diff, or PR beyond recording this
+  closure. This is the FOURTH re-dispatch of this exact task; the third closure already diagnosed the
+  likely root cause (`tasks.yaml`'s decorative `status: queued` field vs GitHub-derived merge state,
+  `lib/status.ts`) and scoped fixing the dispatcher outside this task's one-concern boundary — that
+  diagnosis still stands and is not re-litigated here.
+- Rollback: revert this PR (removes only this DECISIONS.md entry; no runtime code touched).
