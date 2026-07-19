@@ -1,0 +1,13 @@
+- id: fixture-a-one
+  subsystem: containment
+  files: [src/a.ts, src/shared.ts]
+  fact: fixture fact one.
+  src: PR#1
+
+- id: fixture-a-two
+  subsystem: containment
+  files: [src/a2.ts]
+  fact: fixture fact two.
+  src: PR#1
+  lifecycle: superseded
+  superseded_by: fixture-a-one

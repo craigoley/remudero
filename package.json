@@ -28,6 +28,8 @@
     "depcruise": "depcruise src --config .dependency-cruiser.cjs",
     "jscpd": "jscpd src --config .jscpd.json",
     "claims": "node scripts/claims-check.mjs",
+    "learnings-index": "node scripts/generate-learnings-index.mjs",
+    "learnings-index:check": "node scripts/generate-learnings-index.mjs --check",
     "spike": "tsx src/spike.ts"
   },
   "dependencies": {

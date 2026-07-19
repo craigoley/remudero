@@ -1,0 +1,81 @@
+# learnings/failures.yaml — FAILURES-subsystem shard of the learnings corpus (W1-T33).
+#
+# One of five subsystem shards (learnings/{platform,architecture,ci,testing,failures}.yaml) — see
+# learnings/platform.yaml's header for the full split/index/lifecycle explanation. Regenerate the
+# index with `npm run learnings-index` after editing any shard.
+#
+# FAILURES = incident/postmortem learnings — a specific run/PR went wrong, and the durable fact a
+# worker must inherit so the same failure class doesn't repeat.
+#
+# Schema per entry: see learnings/platform.yaml's header (identical schema across every shard).
+
+# ── Reviewer floor & stale criteria (PR #42, W1-T5) ──
+- id: reviewer-floor-casing-blind
+  subsystem: reviewer
+  lifecycle: active
+  files: [src/lib/review.ts]
+  fact: >-
+    The reviewer keyword floor was casing/separator-blind: maxTurns vs max_turns tokenized as a miss and
+    false-blocked a correct PR. Normalized (split camelCase before lowercasing); the real fix is W1-T3F
+    (observe repo state, not report keywords).
+  src: PR#42
+  cited: "2026-07-14"
+- id: criteria-go-stale-on-relocation
+  subsystem: acceptance
+  lifecycle: active
+  files: [plan/tasks.yaml, src/lib/review.ts]
+  fact: >-
+    A criterion goes STALE when a later PR relocates a concept (PR #23 moved budget off the mount to
+    per-task budget_usd, but W1-T5 still named maxBudgetUsd as a mount knob). The Architect corrects a
+    stale criterion via a plan PR; a worker never — nothing dropped, only realigned to the architecture.
+  src: PR#42
+  cited: "2026-07-14"
+
+# ── A live-operator criterion is UNFIT for a headless worker (a NEW error class, W1-T9). Design
+# interactive steps for no-TTY: flags + TTY-absent default; test via injected input. (DIAGNOSIS.md) ──
+- id: no-live-operator-in-headless-worker
+  subsystem: cli
+  lifecycle: active
+  files: [src/lib/init.ts, src/run-task.ts, bin/rmd]
+  fact: >-
+    A criterion requiring live operator confirmation ("operator confirms", "user selects") is UNFIT for a
+    headless worker — there is no TTY and no operator. W1-T9 burned its last ~15 turns on readline-repro
+    scripts trying to conjure an operator that isn't there, then died error_max_turns. Redesign every
+    interactive step for no-TTY: expose --tier/--yes-style FLAGS + a TTY-ABSENT SAFE DEFAULT (log the
+    chosen value); prompt ONLY when process.stdin.isTTY. Test the non-interactive path via injected
+    input / flags, never a live human. (MASTER-PLAN Standing rule 18.)
+  src: DIAGNOSIS.md (diag/w1t9-max-turns), W1-T9
+  cited: "2026-07-15"
+
+# ── Standing rules were enforced FORWARD-ONLY; W1-T12 pre-existed Rules 18/19 and slipped through to a
+# worker. New rules must sweep the EXISTING open queue, not only govern new authoring. ──
+- id: rules-must-sweep-the-existing-queue
+  subsystem: process
+  lifecycle: active
+  files: [plan/tasks.yaml]
+  fact: >-
+    Rules 18 and 19 already existed when W1-T12 ran, but were applied FORWARD-ONLY — nothing re-graded the
+    already-authored queue against them, so a task that violated both (3 concerns at risk:medium + 3
+    live-context criteria) reached a worker and burned 81 turns / $10.27 (the 4th max_turns event). A new
+    sizing/fitness rule must RETROACTIVELY re-grade every open task; `rmd retro` sweeps the queue against
+    every standing rule and files corrective tasks. A rule the queue is never swept against protects only
+    tasks written after it. (MASTER-PLAN Standing rule 20.)
+  src: DIAGNOSIS.md (diag/w1t12-max-turns), W1-T12
+  cited: "2026-07-15"
+
+# ── Control-surface hazards for an unattended daemon (fix/cli-safe-control-surface). ──
+- id: control-surface-fail-loud-stop-one-shot
+  subsystem: cli
+  lifecycle: active
+  files: [src/run-task.ts, src/lib/fleet-control.ts]
+  fact: >-
+    An unknown CLI command / unrecognized subcommand fell THROUGH to launching a drain
+    (`rmd daemon install --dry-run` silently ran the daemon and merged a task unattended),
+    and STOP was a persistent latch that silently blocked every future `rmd drain` until
+    manually cleared — both are unattended-daemon HAZARDS. A control surface must FAIL LOUD
+    on bad input (unknown command/arg → print usage, exit non-zero, spawn NOTHING; validate
+    flags BEFORE any spawn/lock), and STOP must be ONE-SHOT (auto-consumed on the halting
+    run's terminal, and a no-op-that-warns when nothing is running) — distinct from PAUSE, a
+    PERSISTENT hold cleared only by `rmd resume`.
+  src: fix/cli-safe-control-surface (W1-T14/T15 incident)
+  cited: "2026-07-15"

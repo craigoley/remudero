@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { loadLearnings, renderLearningsContext, selectLearnings } from "../src/lib/learnings.js";
+import { loadLearningsCorpus, renderLearningsContext, selectLearnings } from "../src/lib/learnings.js";
 import { loadPlan } from "../src/lib/plan.js";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
-const corpus = loadLearnings(fileURLToPath(new URL("../plan/learnings.yaml", import.meta.url)));
+const corpus = loadLearningsCorpus(fileURLToPath(new URL("../learnings/", import.meta.url)));
 const plan = loadPlan(fileURLToPath(new URL("../plan/tasks.yaml", import.meta.url)));
 
 // The SDK-envelope facts that killed W1-T6's turn budget by being re-discovered.

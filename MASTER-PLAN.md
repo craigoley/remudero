@@ -1054,7 +1054,7 @@ worker again. It checks, all from rules we already wrote:
   class (ledger calibration) — a WARNING, not a block.
 
 **LAYER B — Architect review (LLM), only for what the linter CAN'T judge.** Invoked on NEW tasks a plan PR
-adds, it grounds (grep `plan/learnings`) and asks the judgment questions the linter can't — "is this
+adds, it grounds (grep `learnings/`) and asks the judgment questions the linter can't — "is this
 genuinely ONE concern?", "is any criterion secretly a task-inside-a-task?", "does a learning already warn
 about this?". ADVISORY: it annotates the task with a risk/rationale; it does NOT block (the linter blocks).
 Reuses the §5B Architect-worker primitive. **Most catches are DETERMINISTIC** — criteria count, subsystem
