@@ -2956,6 +2956,36 @@ async function daemonCommand(rest: string[]): Promise<number> {
         // `rmd sweep` CLI invokes, run once per poll iteration so no open PR
         // strands open-and-orphaned (#111/#113/#123). Best-effort by contract.
         sweep: buildSweepHook(target.owner, target.repo, config, ledgerPath, runId, plan, log),
+        // W1-T46 block-reasoning: a GENUINE BLOCKER (real downstream work
+        // transitively needs the blocked task) opens a `needs-human` issue
+        // naming the dependents it protects, via W1-T8's escalation taxonomy
+        // — never a bare halt with no actionable trail.
+        escalateBlock: ({ task, result, dependents }) => {
+          escalate(
+            {
+              class: "BLOCKED",
+              taskId: task.id,
+              runId,
+              summary: `${task.id} blocked (${result.verdict}) — ${dependents.length} task(s) transitively need it`,
+              detail:
+                `W1-T46 block-reasoning: ${task.id} did not merge (${result.verdict}` +
+                `${result.prUrl ? `, ${result.prUrl}` : ""}). Real downstream work transitively depends on it ` +
+                `(${dependents.join(", ")}), so the daemon halted rather than continue into the gap.`,
+              options: [
+                {
+                  label: "fix and resume",
+                  detail: `Resolve ${task.id}'s block (\`rmd fix\` or a manual patch), then \`rmd daemon\`/\`rmd drain\` to continue.`,
+                },
+                {
+                  label: "unblock the dependents",
+                  detail: `If ${task.id} is not a real prerequisite for ${dependents.join(", ")}, edit plan/tasks.yaml's depends_on and resume.`,
+                },
+              ],
+              recommendation: "fix and resume",
+            },
+            { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId },
+          );
+        },
         log,
       },
       opts,

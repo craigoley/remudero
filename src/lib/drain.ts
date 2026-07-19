@@ -8,8 +8,11 @@
  *
  * v1 is deterministic with ZERO LLM decisions and STOPS ON ANY BLOCK — a blocked
  * task's DEPENDENTS would build on missing work, so continuing risks compounding a
- * gap. Skip-and-continue (per-block reasoning) is deliberately NOT built here; it
- * needs the diagnose loop + daemon (W1-T46, the successor to this stop-on-block).
+ * gap. Skip-and-continue (per-block reasoning) is deliberately NOT built here — it
+ * needed the diagnose loop + daemon (W1-T7 + W1-T12a) first, and now lives in the
+ * PERSISTENT daemon loop (block-reason.ts, wired into `daemon.ts`'s `runDaemon`,
+ * W1-T46), not in this bounded one-shot command. `rmd drain` keeps its blunt
+ * stop-on-block on purpose: a human kicked it off by hand and is watching it.
  */
 
 import type { RunResult } from "./run-result.js";

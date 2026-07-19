@@ -8,6 +8,7 @@ import {
   loadPlan,
   PlanError,
   selectTask,
+  transitiveDependents,
   unmetDependencies,
 } from "../src/lib/plan.js";
 
@@ -86,6 +87,29 @@ test("rejects verify:human as not auto-runnable", () => {
 `;
   const plan = loadPlan(planFile(y));
   assert.throws(() => assertRunnable(plan, selectTask(plan, "H")), PlanError);
+});
+
+// ── transitiveDependents (W1-T46 block-reasoning: does anything need this
+// task to exist at all?) — A -> B -> C chain.
+
+test("transitiveDependents: C (a leaf, nothing depends on it) is EMPTY — self-contained", () => {
+  const plan = loadPlan(planFile(YAML));
+  assert.deepEqual(transitiveDependents(plan, "C"), new Set());
+});
+
+test("transitiveDependents: B's only direct dependent is C", () => {
+  const plan = loadPlan(planFile(YAML));
+  assert.deepEqual(transitiveDependents(plan, "B"), new Set(["C"]));
+});
+
+test("transitiveDependents: A's transitive dependents are B AND C (through the chain)", () => {
+  const plan = loadPlan(planFile(YAML));
+  assert.deepEqual(transitiveDependents(plan, "A"), new Set(["B", "C"]));
+});
+
+test("transitiveDependents: an id with no declared tasks depending on it at all (unknown/isolated) is EMPTY", () => {
+  const plan = loadPlan(planFile(YAML));
+  assert.deepEqual(transitiveDependents(plan, "NOPE"), new Set());
 });
 
 test("the real plan/tasks.yaml loads; W1-T1 has no deps; W1-T1B gates the rest", () => {
