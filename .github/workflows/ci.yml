@@ -35,6 +35,32 @@ jobs:
       - name: Test
         run: npm test
 
+  commitlint:
+    # W1-T31 (MASTER-PLAN §6A) — Conventional Commits gate. Lints every commit ADDED by this PR
+    # (the base..head range, never the whole historical log, so pre-existing non-conventional
+    # commits on main can't retroactively block an unrelated PR) against commitlint.config.mjs.
+    # Runs UNCONDITIONALLY on every PR (no path filter, no job `if:`) — same fail-closed shape as
+    # `lint-plan`/`depcruise`/`claims` above: a path-filtered REQUIRED check that can go silently
+    # absent is the synthwatch #102 deadlock class ci-gate.yml exists to avoid. A commit whose
+    # message doesn't parse as `type(scope): subject` (or uses an unrecognized type) fails this
+    # job — see test/commitlint-config.test.ts for the falsifier proof the config itself rejects/
+    # accepts the right messages.
+    name: commitlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: commitlint (this PR's commits, base..head)
+        env:
+          FROM_SHA: ${{ github.event.pull_request.base.sha }}
+        run: npx commitlint --from "$FROM_SHA" --to HEAD --verbose
+
   leak-grep:
     # Plaintext-secret tripwire (MASTER-PLAN §5 TIER 1) — runs on every PR,
     # not required-context-critical yet (W1-T24 wires the aggregator), but

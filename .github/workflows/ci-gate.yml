@@ -70,8 +70,10 @@ jobs:
       # path filter, runs every PR; jscpd's own --threshold flag enforces the ceiling natively.
       # `claims` (W1-T29, §12A the AWARENESS LAYER for prose) added: same UNCONDITIONAL shape —
       # no path filter, runs every PR; a red claim means THE PLAN IS LYING ABOUT THE SYSTEM.
+      # `commitlint` (W1-T31, §6A Conventional Commits) added: same UNCONDITIONAL shape — no path
+      # filter, runs every PR; lints only this PR's own base..head commit range.
       REQUIRED: >-
-        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet", "jscpd-gate", "claims"]
+        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet", "jscpd-gate", "claims", "commitlint"]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
       IGNORE: >-
