@@ -1,0 +1,29 @@
+# learnings/ci.yaml — CI-subsystem shard of the learnings corpus (W1-T33).
+#
+# One of five subsystem shards (learnings/{platform,architecture,ci,testing,failures}.yaml) — see
+# learnings/platform.yaml's header for the full split/index/lifecycle explanation. Regenerate the
+# index with `npm run learnings-index` after editing any shard.
+#
+# CI = facts about GitHub Actions / required checks / the merge gate.
+#
+# Schema per entry: see learnings/platform.yaml's header (identical schema across every shard).
+
+- id: required-check-poster
+  subsystem: ci
+  lifecycle: active
+  files: [src/lib/review.ts, src/lib/status.ts, ".github/**"]
+  fact: >-
+    A required check must be posted by the ORCHESTRATOR unconditionally, not solely by a worker: a
+    crashed worker leaves it ABSENT, and an absent required check blocks the merge forever (fail-stuck).
+  src: PR#13
+  cited: "2026-07-14"
+
+- id: skipped-check-deadlock
+  subsystem: ci
+  lifecycle: active
+  files: [".github/**"]
+  fact: >-
+    A conditionally-skipped required check DEADLOCKS merge forever (reads as expected-pending, never
+    green) — gate on ONE always-runs aggregator job that needs: every sub-job, and require only that.
+  src: operator-fleet
+  cited: "2026-07-14"

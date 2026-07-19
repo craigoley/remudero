@@ -61,7 +61,7 @@ import { ContainmentError, probeContainment } from "./lib/containment.js";
 import { IsolationError, probeIsolation } from "./lib/isolation.js";
 import {
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-  loadLearnings,
+  loadLearningsForTaskFiles,
   renderLearningsContext,
   selectLearnings,
 } from "./lib/learnings.js";
@@ -1649,11 +1649,17 @@ async function runTask(
     const reconFail = failOnWorkerError(recon, "recon");
     if (reconFail) return reconFail;
 
-    // ── Promptsmith READ side (W1-T19): inject the distrust rule, the autonomy
-    // clause, and the task-matched LEARNINGS facts. Matching is deterministic by
-    // file-glob; the KNOWLEDGE BUDGET caps the injected facts and DROPPED entries
-    // are logged so a growing corpus never becomes an unbounded context tax.
-    const learnings = loadLearnings(join(dirname(planPath), "learnings.yaml"));
+    // ── Promptsmith READ side (W1-T19; SPLIT + INDEX + SUPERSESSION, W1-T33):
+    // inject the distrust rule, the autonomy clause, and the task-matched
+    // LEARNINGS facts. `loadLearningsForTaskFiles` is a LOOKUP (via the
+    // generated learnings/index.json), not a scan: it parses only the corpus
+    // shards task.files could match. `selectLearnings` then matches by file-glob
+    // and filters out any `lifecycle: superseded` entry before ranking, so a
+    // decayed fact can never be injected; the KNOWLEDGE BUDGET caps the
+    // injected facts and DROPPED entries are logged so a growing corpus never
+    // becomes an unbounded context tax.
+    const learningsDir = join(dirname(planPath), "..", "learnings");
+    const learnings = loadLearningsForTaskFiles(learningsDir, task.files);
     const { selected, dropped } = selectLearnings(learnings, task.files, DEFAULT_KNOWLEDGE_BUDGET_CHARS);
     const learningsContext = renderLearningsContext(selected);
     log("learnings.injected", {

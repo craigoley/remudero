@@ -1,0 +1,123 @@
+# learnings/architecture.yaml — ARCHITECTURE-subsystem shard of the learnings corpus (W1-T33).
+#
+# One of five subsystem shards (learnings/{platform,architecture,ci,testing,failures}.yaml) — see
+# learnings/platform.yaml's header for the full split/index/lifecycle explanation. Regenerate the
+# index with `npm run learnings-index` after editing any shard.
+#
+# ARCHITECTURE = facts about how remudero's own components fit together and were deliberately
+# designed/split (context engineering, docs pipeline, daemon decomposition, task-quality gating).
+#
+# Schema per entry: see learnings/platform.yaml's header (identical schema across every shard).
+
+# ── Context engineering & knowledge architecture (§8A/§8B) [research 2026-07-14] ──
+- id: context-economy
+  subsystem: knowledge
+  lifecycle: active
+  files: [src/lib/learnings.ts, src/run-task.ts]
+  fact: >-
+    Context is a precious, FINITE resource: find the smallest set of high-signal tokens that maximize the
+    desired outcome — do not dump everything known into the prompt.
+  src: research#effective-context-engineering
+  cited: "2026-07-14"
+- id: claude-code-hybrid-retrieval
+  subsystem: knowledge
+  lifecycle: active
+  files: [src/lib/learnings.ts, src/run-task.ts]
+  fact: >-
+    Claude Code is HYBRID: stable context up front + glob/grep for just-in-time retrieval, which bypasses
+    stale indexing. Prefer retrieval (grep-able plan) over injecting whole files.
+  src: research#effective-context-engineering
+  cited: "2026-07-14"
+- id: compaction-recall-first
+  subsystem: context
+  lifecycle: active
+  files: [src/lib/retro.ts, src/run-task.ts]
+  fact: >-
+    A compaction summary that DROPS a critical fact is worse than no summary — later steps trust it and
+    cannot recover it. Tune for RECALL first; anchor goal/criteria/constraints verbatim; write durable
+    facts out before compacting.
+  src: research#effective-context-engineering
+  cited: "2026-07-14"
+- id: cache-prefix-bytes
+  subsystem: context
+  lifecycle: active
+  files: [src/lib/learnings.ts, src/run-task.ts]
+  fact: >-
+    Prompt caches key on EXACT PREFIX BYTES: any early edit invalidates the cache for everything after it,
+    and cache reads cost ~1/10th of fresh input. Assemble prompts stable-first, volatile-last.
+  src: research#scaling-managed-agents
+  cited: "2026-07-14"
+- id: harness-assumptions-stale
+  subsystem: retro
+  lifecycle: active
+  files: [src/lib/retro.ts]
+  fact: >-
+    Harnesses encode assumptions about what Claude cannot do on its own, and those assumptions go STALE as
+    models improve — a retro must question and retire guards, not only add them.
+  src: research#scaling-managed-agents
+  cited: "2026-07-14"
+
+# ── Documentation as a gated artifact (§12A) [research 2026-07-14] ──
+- id: docs-are-a-gated-artifact
+  subsystem: docs
+  lifecycle: active
+  files: [src/run-task.ts, docs]
+  fact: >-
+    Docs are a gated artifact: GENERATED docs (rmd --help / CLI reference / API ref / CHANGELOG) drift
+    unless CI enforces byte-equality (regenerate + diff = RED); AUTHORED docs are reviewer-gated. ONE
+    command registry feeds rmd --help + GitHub /docs + the website — never three hand-copies.
+  src: research#docs-generation
+  cited: "2026-07-14"
+
+# ── The daemon task bundled 3 concerns AND 3 headless-unfit criteria (W1-T12). Split logic (headless,
+# unit-tested) from live commissioning (verify:human). (DIAGNOSIS.md diag/w1t12-max-turns) ──
+- id: daemon-split-logic-from-live-commissioning
+  subsystem: architecture
+  lifecycle: active
+  files: [src/lib/daemon.ts, src/lib/launchd.ts, src/run-task.ts]
+  fact: >-
+    W1-T12 (the daemon) bundled THREE concerns (scheduler loop + launchd unit + crash-recovery) AND three
+    HEADLESS-UNFIT criteria: a live OVERNIGHT drain, a launchctl-LOAD into a real session, and a live
+    KILL-and-recover. A headless worker cannot verify launchd/boot/kill behavior — those are verify:human
+    COMMISSIONING steps. Split the daemon into headless, unit-tested LOGIC (scheduler loop over an injected
+    clock+runner; plist GENERATION + in-process boot assertion; recovery over a SEEDED interrupted state)
+    and a separate verify:human live-commissioning task. The machine builds + unit-proves; the human
+    commissions live (draft→playtest→ready). (Rules 16/18/19.)
+  src: DIAGNOSIS.md (diag/w1t12-max-turns), W1-T12
+  cited: "2026-07-15"
+
+# ── The runner was the FIRST line of task-quality defense, so 4 malformed tasks reached workers before the
+# pattern was caught. Gate task quality BEFORE dispatch + re-grade continuously. (§5C) ──
+- id: task-quality-gates-before-dispatch
+  subsystem: architecture
+  lifecycle: active
+  files: [src/lib/task-linter.ts, src/run-task.ts, src/lib/retro.ts]
+  fact: >-
+    The runner was the FIRST line of task-quality defense, so FOUR malformed tasks (W1-T6, W1-T9, W1-T12)
+    reached workers and burned budget before a human noticed the pattern. Task quality must be gated BEFORE
+    dispatch (a deterministic linter, FAIL-CLOSED: a linter-failing task is never dispatched,
+    verdict=blocked_illformed) and re-graded continuously (the retro plan-health sweep). Reactive diagnosis
+    after an 81-turn / $10 burn is the anti-pattern this project exists to kill — the runner is the LAST
+    line, not the first. (MASTER-PLAN §5C.)
+  src: W1-T12, this session
+  cited: "2026-07-15"
+
+# ── How the daemon selects its repo (fix/daemon-repo-targeting; W1-T12d commissioning). ──
+- id: daemon-repo-targeting-explicit
+  subsystem: cli
+  lifecycle: active
+  files: [src/run-task.ts, src/lib/launchd.ts]
+  fact: >-
+    `rmd daemon` originally read its plan from the CHECKOUT it ran in (join(repoRoot,
+    plan/tasks.yaml)) and hardcoded the status gateway to ghGateway(owner, "remudero") — so an
+    unattended run could only drain the main repo and would SILENTLY self-target. The daemon now
+    takes an EXPLICIT target: --repo <name> scopes the gateway to <owner>/<name> and reads the
+    plan from a synced clone (<root>/repos/<name>/plan/tasks.yaml, reset --hard to origin/main so
+    it's current); --plan <path> overrides; --dry-run previews (spawns nothing, logs
+    daemon.target). A SELF-TARGET GUARD refuses to drain the daemon's own source repo unattended
+    without --allow-self-target. `rmd daemon-plist --repo <name>` bakes --repo into the launchd
+    unit's ProgramArguments so the unit drains the intended repo, not an implicit default.
+    (Task EXECUTION already derives its repo from task.repo via runTask — only the daemon's
+    PLAN SOURCE + gateway were pinned.)
+  src: fix/daemon-repo-targeting (W1-T12d)
+  cited: "2026-07-15"

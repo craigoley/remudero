@@ -1,0 +1,4 @@
+- id: dup-fixture
+  files: [src/b.ts]
+  fact: fixture fact b.
+  src: PR#2

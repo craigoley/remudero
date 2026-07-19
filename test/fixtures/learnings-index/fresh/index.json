@@ -1,0 +1,32 @@
+{
+  "files": {
+    "a.yaml": {
+      "entries": [
+        "fixture-a-one",
+        "fixture-a-two"
+      ],
+      "globs": [
+        "src/a.ts",
+        "src/a2.ts",
+        "src/shared.ts"
+      ]
+    },
+    "b.yaml": {
+      "entries": [
+        "fixture-b-one"
+      ],
+      "globs": [
+        ".github/**",
+        "src/shared.ts"
+      ]
+    }
+  },
+  "bySubsystem": {
+    "ci": [
+      "b.yaml"
+    ],
+    "containment": [
+      "a.yaml"
+    ]
+  }
+}

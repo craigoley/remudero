@@ -1,0 +1,161 @@
+{
+  "files": {
+    "architecture.yaml": {
+      "entries": [
+        "cache-prefix-bytes",
+        "claude-code-hybrid-retrieval",
+        "compaction-recall-first",
+        "context-economy",
+        "daemon-repo-targeting-explicit",
+        "daemon-split-logic-from-live-commissioning",
+        "docs-are-a-gated-artifact",
+        "harness-assumptions-stale",
+        "task-quality-gates-before-dispatch"
+      ],
+      "globs": [
+        "docs",
+        "src/lib/daemon.ts",
+        "src/lib/launchd.ts",
+        "src/lib/learnings.ts",
+        "src/lib/retro.ts",
+        "src/lib/task-linter.ts",
+        "src/run-task.ts"
+      ]
+    },
+    "ci.yaml": {
+      "entries": [
+        "required-check-poster",
+        "skipped-check-deadlock"
+      ],
+      "globs": [
+        ".github/**",
+        "src/lib/review.ts",
+        "src/lib/status.ts"
+      ]
+    },
+    "failures.yaml": {
+      "entries": [
+        "control-surface-fail-loud-stop-one-shot",
+        "criteria-go-stale-on-relocation",
+        "no-live-operator-in-headless-worker",
+        "reviewer-floor-casing-blind",
+        "rules-must-sweep-the-existing-queue"
+      ],
+      "globs": [
+        "bin/rmd",
+        "plan/tasks.yaml",
+        "src/lib/fleet-control.ts",
+        "src/lib/init.ts",
+        "src/lib/review.ts",
+        "src/run-task.ts"
+      ]
+    },
+    "platform.yaml": {
+      "entries": [
+        "askuserquestion-headless-unverified",
+        "bashrc-accident",
+        "browser-egress-needs-dedicated-profile",
+        "claude-json-tier-keys",
+        "daemon-launchd-keepalive-restart",
+        "maxbudget-between-turns",
+        "playwright-mcp-accessibility-tree",
+        "playwright-run-code-unsafe-is-rce",
+        "screenshots-are-token-expensive",
+        "sdk-builtin-tools-are-the-boundary",
+        "sdk-result-envelope",
+        "sdk-result-fields",
+        "settings-silent-drop",
+        "shell-isolation",
+        "websearch-serverside-webfetch-unverified",
+        "webtools-are-injection-surface",
+        "zdotdir-alone-isolates-shells"
+      ],
+      "globs": [
+        "settings/worker.json",
+        "src/lib/containment.ts",
+        "src/lib/daemon.ts",
+        "src/lib/env.ts",
+        "src/lib/headroom.ts",
+        "src/lib/init.ts",
+        "src/lib/launchd.ts",
+        "src/lib/ledger.ts",
+        "src/lib/settings.ts",
+        "src/lib/tier.ts",
+        "src/lib/worker.ts",
+        "src/run-task.ts"
+      ]
+    },
+    "testing.yaml": {
+      "entries": [
+        "lazy-config-in-ci",
+        "task-linting-is-mostly-deterministic"
+      ],
+      "globs": [
+        "src/lib/config.ts",
+        "src/lib/containment.ts",
+        "src/lib/task-linter.ts"
+      ]
+    }
+  },
+  "bySubsystem": {
+    "acceptance": [
+      "failures.yaml"
+    ],
+    "architecture": [
+      "architecture.yaml",
+      "testing.yaml"
+    ],
+    "budget": [
+      "platform.yaml"
+    ],
+    "ci": [
+      "ci.yaml"
+    ],
+    "cli": [
+      "architecture.yaml",
+      "failures.yaml"
+    ],
+    "config": [
+      "testing.yaml"
+    ],
+    "containment": [
+      "platform.yaml"
+    ],
+    "context": [
+      "architecture.yaml"
+    ],
+    "design-review": [
+      "platform.yaml"
+    ],
+    "docs": [
+      "architecture.yaml"
+    ],
+    "feedback": [
+      "platform.yaml"
+    ],
+    "knowledge": [
+      "architecture.yaml"
+    ],
+    "ledger": [
+      "platform.yaml"
+    ],
+    "platform": [
+      "platform.yaml"
+    ],
+    "process": [
+      "failures.yaml"
+    ],
+    "retro": [
+      "architecture.yaml"
+    ],
+    "reviewer": [
+      "failures.yaml"
+    ],
+    "sdk-tools": [
+      "platform.yaml"
+    ],
+    "settings": [
+      "platform.yaml"
+    ]
+  }
+}

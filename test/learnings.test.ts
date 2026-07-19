@@ -5,9 +5,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   AUTONOMY_CLAUSE,
+  candidateShardFiles,
   DISTRUST_RULE,
   LearningsError,
   loadLearnings,
+  loadLearningsCorpus,
+  loadLearningsForTaskFiles,
+  loadLearningsIndex,
   renderLearningsContext,
   selectLearnings,
   type LearningEntry,
@@ -23,6 +27,7 @@ const CORPUS: LearningEntry[] = [
   {
     id: "shell-isolation",
     subsystem: "containment",
+    lifecycle: "active",
     files: ["src/lib/worker.ts", "src/lib/containment.ts"],
     fact: "ZDOTDIR is IGNORED; set CLAUDE_CODE_SHELL for worker shell isolation.",
     src: "PR#8",
@@ -31,6 +36,7 @@ const CORPUS: LearningEntry[] = [
   {
     id: "settings-silent-drop",
     subsystem: "settings",
+    lifecycle: "active",
     files: ["src/lib/settings.ts", "src/lib/worker.ts"],
     fact: "Invalid worker settings are silently ignored under `claude -p`.",
     src: "WS-0",
@@ -39,6 +45,7 @@ const CORPUS: LearningEntry[] = [
   {
     id: "skipped-check-deadlock",
     subsystem: "ci",
+    lifecycle: "active",
     files: [".github/**"],
     fact: "A conditionally-skipped required check deadlocks merge forever.",
     src: "operator-fleet",
@@ -134,6 +141,7 @@ test("the KNOWLEDGE BUDGET caps injected facts and drops the rest, logged", () =
   const many: LearningEntry[] = Array.from({ length: 10 }, (_, i) => ({
     id: `e${i}`,
     subsystem: "containment",
+    lifecycle: "active" as const,
     files: ["src/lib/worker.ts"],
     fact: `fact number ${i} is a reasonably long durable sentence about worker behaviour.`,
     src: "PR#8",
@@ -178,11 +186,146 @@ test("loadLearnings rejects duplicate ids", () => {
   assert.throws(() => loadLearnings(path), /duplicate learnings id/);
 });
 
-test("the shipped plan/learnings.yaml loads and matches worker.ts to shell-isolation, not CI", () => {
-  const entries = loadLearnings(join(REPO_ROOT, "plan", "learnings.yaml"));
+test("the shipped learnings/ corpus loads (across every shard) and matches worker.ts to shell-isolation, not CI", () => {
+  const entries = loadLearningsCorpus(join(REPO_ROOT, "learnings"));
   assert.ok(entries.length > 0, "the shipped corpus is non-empty");
   const { selected } = selectLearnings(entries, ["src/lib/worker.ts"]);
   const ids = selected.map((e) => e.id);
   assert.ok(ids.includes("shell-isolation"), "worker.ts inherits the shell-isolation learning");
   assert.ok(!ids.includes("skipped-check-deadlock"), "worker.ts does not inherit the CI-only learning");
+});
+
+// ── SPLIT + INDEX + SUPERSESSION (W1-T33) ────────────────────────────────────
+
+test("loadLearningsCorpus: a MISSING directory is not an error (returns [])", () => {
+  assert.deepEqual(loadLearningsCorpus(join(tmpdir(), "does-not-exist-learnings-dir")), []);
+});
+
+test("loadLearningsCorpus merges entries from every shard file in a directory", () => {
+  const dir = mkdtempSync(join(tmpdir(), "learnings-corpus-"));
+  writeFileSync(join(dir, "a.yaml"), "- id: from-a\n  files: [a.ts]\n  fact: fact a\n  src: PR#1\n");
+  writeFileSync(join(dir, "b.yaml"), "- id: from-b\n  files: [b.ts]\n  fact: fact b\n  src: PR#2\n");
+  const entries = loadLearningsCorpus(dir);
+  assert.deepEqual(
+    entries.map((e) => e.id).sort(),
+    ["from-a", "from-b"],
+  );
+});
+
+test("loadLearningsCorpus rejects a duplicate id ACROSS two different shard files", () => {
+  const dir = mkdtempSync(join(tmpdir(), "learnings-corpus-dup-"));
+  writeFileSync(join(dir, "a.yaml"), "- id: dup\n  files: [a.ts]\n  fact: fact a\n  src: PR#1\n");
+  writeFileSync(join(dir, "b.yaml"), "- id: dup\n  files: [b.ts]\n  fact: fact b\n  src: PR#2\n");
+  assert.throws(() => loadLearningsCorpus(dir), /duplicate learnings id 'dup'/);
+});
+
+test("a bare entry (no lifecycle:) defaults to active", () => {
+  const path = writeCorpus("- id: bare\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n");
+  const [entry] = loadLearnings(path);
+  assert.equal(entry.lifecycle, "active");
+});
+
+test("loadLearnings rejects an invalid lifecycle value", () => {
+  const path = writeCorpus("- id: bad\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  lifecycle: retired\n");
+  assert.throws(() => loadLearnings(path), /'lifecycle' must be 'active' or 'superseded'/);
+});
+
+test("loadLearnings rejects superseded_by set without lifecycle: superseded", () => {
+  const path = writeCorpus(
+    "- id: bad\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  superseded_by: other\n",
+  );
+  assert.throws(() => loadLearnings(path), /'superseded_by' is set but 'lifecycle' is not 'superseded'/);
+});
+
+test("SUPERSESSION: a superseded entry is NEVER selected, even when its files: match exactly (acceptance §2, the ZDOTDIR live example)", () => {
+  const entries: LearningEntry[] = [
+    {
+      id: "shell-isolation",
+      subsystem: "containment",
+      lifecycle: "active",
+      files: ["src/lib/env.ts"],
+      fact: "ZDOTDIR is IGNORED; set CLAUDE_CODE_SHELL for worker shell isolation.",
+      src: "PR#8",
+      cited: "2026-07-14",
+    },
+    {
+      id: "zdotdir-alone-isolates-shells",
+      subsystem: "containment",
+      lifecycle: "superseded",
+      supersededBy: "shell-isolation",
+      files: ["src/lib/env.ts"],
+      fact: "ZDOTDIR alone isolates worker shells.",
+      src: "pre-PR#8 assumption, disproven",
+      cited: "2026-07-14",
+    },
+  ];
+  const { selected, dropped } = selectLearnings(entries, ["src/lib/env.ts"]);
+  const selectedIds = selected.map((e) => e.id);
+  assert.deepEqual(selectedIds, ["shell-isolation"], "a worker touching env.ts gets ONLY the active entry");
+  assert.ok(!selectedIds.includes("zdotdir-alone-isolates-shells"), "the superseded entry must never be selected");
+  // Confirmed excluded at the candidacy stage, not merely budget-dropped.
+  assert.ok(
+    !dropped.map((e) => e.id).includes("zdotdir-alone-isolates-shells"),
+    "superseded is filtered before ranking, not dropped for budget",
+  );
+});
+
+test("SUPERSESSION over the REAL shipped corpus: a task touching src/lib/env.ts gets shell-isolation and never the superseded zdotdir entry", () => {
+  const entries = loadLearningsCorpus(join(REPO_ROOT, "learnings"));
+  const superseded = entries.find((e) => e.id === "zdotdir-alone-isolates-shells");
+  assert.ok(superseded, "the shipped corpus carries the superseded ZDOTDIR fixture entry");
+  assert.equal(superseded!.lifecycle, "superseded");
+  const { selected } = selectLearnings(entries, ["src/lib/env.ts"]);
+  const ids = selected.map((e) => e.id);
+  assert.ok(ids.includes("shell-isolation"), "env.ts inherits the active shell-isolation learning");
+  assert.ok(!ids.includes("zdotdir-alone-isolates-shells"), "env.ts NEVER inherits the superseded learning");
+});
+
+test("candidateShardFiles: repo-wide (no taskFiles) candidates every shard in the index", () => {
+  const index = {
+    files: {
+      "a.yaml": { entries: ["x"], globs: ["src/a.ts"] },
+      "b.yaml": { entries: ["y"], globs: ["src/b.ts"] },
+    },
+    bySubsystem: {},
+  };
+  assert.deepEqual(candidateShardFiles(index, undefined), ["a.yaml", "b.yaml"]);
+});
+
+test("candidateShardFiles: a task file matching only b.yaml's globs candidates b.yaml alone (a LOOKUP, not a scan)", () => {
+  const index = {
+    files: {
+      "a.yaml": { entries: ["x"], globs: ["src/a.ts"] },
+      "b.yaml": { entries: ["y"], globs: ["src/b.ts"] },
+    },
+    bySubsystem: {},
+  };
+  assert.deepEqual(candidateShardFiles(index, ["src/b.ts"]), ["b.yaml"]);
+});
+
+test("loadLearningsIndex: a missing/malformed index returns null (non-fatal)", () => {
+  assert.equal(loadLearningsIndex(join(tmpdir(), "does-not-exist-index.json")), null);
+  const dir = mkdtempSync(join(tmpdir(), "bad-index-"));
+  const badPath = join(dir, "index.json");
+  writeFileSync(badPath, "not json");
+  assert.equal(loadLearningsIndex(badPath), null);
+});
+
+test("loadLearningsForTaskFiles: an index-narrowed lookup yields the SAME selection as a full-corpus scan (the lookup loses nothing)", () => {
+  const dir = join(REPO_ROOT, "learnings");
+  const taskFiles = ["src/lib/worker.ts"];
+  const viaLookup = selectLearnings(loadLearningsForTaskFiles(dir, taskFiles), taskFiles).selected.map((e) => e.id).sort();
+  const viaFullScan = selectLearnings(loadLearningsCorpus(dir), taskFiles).selected.map((e) => e.id).sort();
+  assert.deepEqual(viaLookup, viaFullScan);
+});
+
+test("loadLearningsForTaskFiles: a MISSING learnings directory returns [] (no corpus yet)", () => {
+  assert.deepEqual(loadLearningsForTaskFiles(join(tmpdir(), "does-not-exist-learnings-dir"), ["a.ts"]), []);
+});
+
+test("loadLearningsForTaskFiles: falls back to a full scan when the index is absent, without losing entries", () => {
+  const dir = mkdtempSync(join(tmpdir(), "learnings-no-index-"));
+  writeFileSync(join(dir, "a.yaml"), "- id: from-a\n  files: [a.ts]\n  fact: fact a\n  src: PR#1\n");
+  const entries = loadLearningsForTaskFiles(dir, ["a.ts"]);
+  assert.deepEqual(entries.map((e) => e.id), ["from-a"]);
 });
