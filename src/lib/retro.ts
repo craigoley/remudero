@@ -488,8 +488,8 @@ export interface PlanHealthReport {
  * provenance/Rules 16-17) — the forward-only gap Standing rule 20 names. A
  * MERGED/DONE task is out of scope (it already shipped; re-litigating it fixes
  * nothing). Pure: no I/O, no plan/tasks.yaml write — the corrective tasks are
- * PROPOSALS the retro's Architect stage files, same discipline as `plan/
- * learnings.yaml` never being hand-edited by a worker.
+ * PROPOSALS the retro's Architect stage files, same discipline as the
+ * `learnings/` corpus shards never being hand-edited outside a reviewed PR.
  */
 export function planHealthSweep(
   tasks: Task[],

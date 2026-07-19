@@ -95,9 +95,10 @@ export interface Task {
   context?: ContextClaim[];
   /**
    * Repo-relative globs naming the files this task touches. Promptsmith matches
-   * these against `plan/learnings.yaml` to inject only the RELEVANT learnings
-   * (W1-T19). Absent → the task is treated as repo-wide (all entries candidate,
-   * still budget-bounded).
+   * these against the `learnings/` corpus (subsystem shards + generated index,
+   * W1-T33; originally one flat `plan/learnings.yaml`, W1-T19) to inject only
+   * the RELEVANT, non-superseded learnings. Absent → the task is treated as
+   * repo-wide (all entries candidate, still budget-bounded).
    */
   files?: string[];
 }

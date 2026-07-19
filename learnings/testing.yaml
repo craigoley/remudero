@@ -1,0 +1,34 @@
+# learnings/testing.yaml — TESTING-subsystem shard of the learnings corpus (W1-T33).
+#
+# One of five subsystem shards (learnings/{platform,architecture,ci,testing,failures}.yaml) — see
+# learnings/platform.yaml's header for the full split/index/lifecycle explanation. Regenerate the
+# index with `npm run learnings-index` after editing any shard.
+#
+# TESTING = facts about how to write/verify code in THIS repo (test-vs-CI interaction, what is
+# deterministically checkable vs needs an LLM judgment call).
+#
+# Schema per entry: see learnings/platform.yaml's header (identical schema across every shard).
+
+- id: lazy-config-in-ci
+  subsystem: config
+  lifecycle: active
+  files: [src/lib/config.ts, src/lib/containment.ts]
+  fact: >-
+    A lib function that EAGERLY calls loadConfig() (which shells `which claude`) FAILS IN CI where the
+    binary is absent — resolve config LAZILY so injected-executor tests never touch it.
+  src: PR#18
+  cited: "2026-07-14"
+
+# ── Most task-quality failures are catchable DETERMINISTICALLY — no LLM. Cheap checks first. (§5C) ──
+- id: task-linting-is-mostly-deterministic
+  subsystem: architecture
+  lifecycle: active
+  files: [src/lib/task-linter.ts]
+  fact: >-
+    Most task-quality failures are catchable DETERMINISTICALLY with no LLM: criteria COUNT (sizing, Rule
+    19), subsystem COUNT, forbidden live-context VERBS (headless-fitness lexicon, Rule 18 — overnight/
+    launchctl/killed/"operator confirms"/...), and PROOF-SHAPE (observable proof, not a vibe). Reserve the
+    Architect LLM review for genuine ambiguity ("is this really one concern?", "is a criterion secretly a
+    task-inside-a-task?"). Cheap deterministic checks first; the LLM layer is advisory and does not block.
+  src: W1-T12, this session
+  cited: "2026-07-15"

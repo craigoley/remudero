@@ -1,0 +1,8 @@
+# Fixture for test/learnings-assert-check.test.ts — an entry with an empty-string 'assertion'.
+- id: fixture-bad-assertion
+  subsystem: fixture
+  lifecycle: active
+  files: [fixture.ts]
+  fact: an entry with an empty-string assertion.
+  src: fixture
+  assertion: ""

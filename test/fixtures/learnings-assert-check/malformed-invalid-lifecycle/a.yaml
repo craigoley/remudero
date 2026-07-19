@@ -1,0 +1,7 @@
+# Fixture for test/learnings-assert-check.test.ts — an entry with an invalid 'lifecycle' value.
+- id: fixture-bad-lifecycle
+  subsystem: fixture
+  lifecycle: retired
+  files: [fixture.ts]
+  fact: an entry with an invalid lifecycle value.
+  src: fixture

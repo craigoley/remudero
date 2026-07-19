@@ -68,6 +68,8 @@ function result(over: Partial<WorkerResult>): WorkerResult {
     effort: "default",
     tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
     modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
     ...over,
   };
 }
@@ -85,7 +87,11 @@ test("workerErrorVerdict: a SUCCESS subtype is NEVER a worker error, even if isE
 });
 
 test("noPrVerdict: a terminal-SUCCESS worker with NO PR yields verdict 'no_pr' with a truthful reason — never 'error: success'", () => {
-  const v = noPrVerdict(result({ isError: false, subtype: "success", numTurns: 10 }), 5.05, "implement");
+  const v = noPrVerdict(
+    result({ isError: false, subtype: "success", numTurns: 10, tokens: { input: 400, output: 40, cacheRead: 350, cacheCreation: 0 } }),
+    5.05,
+    "implement",
+  );
   assert.equal(v.verdict, "no_pr");
   assert.equal(v.ledger.verdict, "no_pr");
   assert.equal(v.ledger.reason, "worker completed without opening a PR");
@@ -95,6 +101,9 @@ test("noPrVerdict: a terminal-SUCCESS worker with NO PR yields verdict 'no_pr' w
   // the exact incoherent string from run W1-T12a-1784117152056 must never appear:
   assert.doesNotMatch(v.ledger.reason, /error: success/);
   assert.doesNotMatch(v.ledger.reason, /worker error/);
+  // W1-T35: cache tokens are ALSO ledgered as flat named columns on this line.
+  assert.equal(v.ledger.cache_read_input_tokens, 350);
+  assert.equal(v.ledger.cache_creation_input_tokens, 0);
 });
 
 // ── The W1-T12a REFRAME (PR #59 collapsed two OPPOSITE cases): a server_error mid-response
@@ -203,13 +212,16 @@ test("workerErrorVerdict: the ledger payload carries the failing call's model/ef
     costUsd: 1.73,
     model: "claude-opus-4",
     effort: "high",
-    tokens: { input: 900, output: 100, cacheRead: 0, cacheCreation: 0 },
+    tokens: { input: 900, output: 100, cacheRead: 300, cacheCreation: 20 },
   });
   const v = workerErrorVerdict(r, 1.73, "implement");
   assert.ok(v);
   assert.equal(v.ledger.model, "claude-opus-4");
   assert.equal(v.ledger.effort, "high");
-  assert.deepEqual(v.ledger.tokens, { input: 900, output: 100, cacheRead: 0, cacheCreation: 0 });
+  assert.deepEqual(v.ledger.tokens, { input: 900, output: 100, cacheRead: 300, cacheCreation: 20 });
+  // W1-T35: the same cache tokens are ALSO ledgered as flat named columns.
+  assert.equal(v.ledger.cache_read_input_tokens, 300);
+  assert.equal(v.ledger.cache_creation_input_tokens, 20);
 });
 
 // ── checkPrOwnership: the run-ownership GUARD (W1-T62 backstop) ────────────
