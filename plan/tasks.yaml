@@ -4598,3 +4598,41 @@
   note: "Harvested by hand from the #193 worker's merge note — the W1-T105 class, once more before it
     builds. Ceiling-raising rejected: it would slacken the fast-gate discipline for every check to
     accommodate one slow one."
+
+- id: W1-T116
+  title: "deriveStatus honors a task's declared pr: field — verified against GitHub, below corrections — so bootstrap-credited tasks can never dispatch-loop (the W1-T1 149x root cause)"
+  repo: remudero
+  depends_on: [W1-T75]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "ROOT CAUSE, ground-truthed by the ops agent (2026-07-19): W1-T1 carries pr: 2 in
+    tasks.yaml, PR #2 merged 2026-07-14 — yet deriveStatus reported source=none pr=none, computed
+    queued-forever, and the daemon dispatched it 149 times ($174, 41% of a day's spend), opening no-op
+    PRs its workers couldn't attribute. Derivation's sources today are trailered merged PRs and
+    corrections; a DECLARED pr: field is invisible. The doctrine 'status derives from GitHub, not
+    tasks.yaml' is preserved by VERIFICATION: the declaration only credits when GitHub confirms that
+    PR merged — the yaml supplies the pointer, GitHub supplies the truth."
+  design: |
+    (i) New derivation source declared_pr, precedence: corrections > trailered merges > declared_pr.
+    Credits ONLY when the referenced PR is confirmed merged via the existing PR-state read; an
+    unmerged/unresolvable declared PR contributes nothing and is ledgered as declared_pr_unverified
+    (never an error, never a credit). (ii) The dispatcher treats declared_pr credit identically to any
+    other done state. (iii) Fixture = the live incident: a task with pr: 2, GitHub fixture showing #2
+    merged -> done(source=declared_pr); same task with the PR fixture open -> queued + the unverified
+    ledger line. (iv) AUDIT in the build report: list every task on main carrying pr: with derived
+    status still queued.
+  acceptance:
+    - claim: "a declared, verifiably-merged PR credits the task"
+      proof: "unit test: the W1-T1 fixture (pr: 2, merged) -> done, source=declared_pr, pr=2; dispatcher skips it"
+    - claim: "an unverified declared PR never credits and is ledgered"
+      proof: "unit test: pr declared but fixture-open -> queued, declared_pr_unverified ledgered, no credit"
+    - claim: "precedence holds"
+      proof: "unit test: a correction contradicting a declared pr wins (corrections-supreme regression lock)"
+  risk: high
+  origin: architect
+  plan_refs: ["§3", "W1-T75", "P9"]
+  files: [src/lib/status.ts]
+  status: queued
+  attempts: 0
