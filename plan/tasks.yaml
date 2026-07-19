@@ -4598,3 +4598,83 @@
   note: "Harvested by hand from the #193 worker's merge note — the W1-T105 class, once more before it
     builds. Ceiling-raising rejected: it would slacken the fast-gate discipline for every check to
     accommodate one slow one."
+
+- id: W1-T119
+  title: "GitHub reads distinguish THROTTLED from ABSENT — an exhausted or errored read defers, never concludes not-merged (the false source=none that mis-filed W1-T116)"
+  repo: remudero
+  depends_on: [W1-T75]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    SPLIT OUT of W1-T116 (#267) design item (iv), which is a different surface: W1-T116 reorders
+    PRECEDENCE among rungs in deriveStatus; this task fixes the READ LAYER those rungs sit on. Filed
+    separately per Rule 19 rather than carried as a fifth design item on an already-high-risk task.
+
+    EVIDENCE — this session's own false reading, cited from #267's rewrite note. W1-T116 was
+    originally filed claiming the declared pr: field was INVISIBLE to derivation, on the strength of
+
+      rmd correct — before: status=queued merged=false source=none pr=none
+
+    That was a GitHub RATE-LIMIT ARTIFACT. Under throttling every rung failed to RESOLVE a PR, so
+    derivation reported source=none — and source=none is read everywhere as GitHub has no evidence,
+    i.e. NOT MERGED. Absence of a resolvable read was reported as absence of the thing. The rung was
+    never missing; #267's rewrite corrected the filing after re-deriving against a healthy gateway.
+
+    MECHANISM, verified in the checkout: ghGateway's tryJson (src/lib/status.ts:369-376) wraps every
+    gh invocation in a bare catch { return null }, and spawns with stdio ignore/pipe/ignore — so gh's
+    stderr, the one place a rate-limit or auth message appears, is DISCARDED before anyone could read
+    it. Rate-limited, network-down, auth-expired, and genuinely-absent all collapse to the same null.
+    The gateway's own doc comment blesses this: every query is fail-soft ... so derivation degrades to
+    the next precedence source rather than throwing. Correct for ABSENT. Catastrophic for THROTTLED,
+    because under a global throttle EVERY rung degrades at once and the fallthrough concludes not
+    merged for the whole plan.
+
+    BLAST RADIUS: deriveStatus GATES DISPATCH. A throttle that reads as not-merged does not merely
+    mis-report — it makes the daemon re-dispatch settled work, which is how a quota outage becomes a
+    spend event rather than a pause. It also mis-files tasks, as it did here.
+  design: |
+    (i) The gateway's read result becomes THREE-VALUED, not two: resolved(value) / absent /
+    unavailable(reason). Capture gh's exit status and stderr instead of discarding them (the current
+    stdio triple makes this impossible today) and classify at least rate-limit/quota-exhausted,
+    auth failure, and transport error as UNAVAILABLE. Anything unclassifiable is UNAVAILABLE, not
+    absent — the fail-closed direction, because absent is the conclusion that costs money.
+    (ii) REFUSE-OR-DEFER: a rung whose read is unavailable does NOT fall through to the next rung and
+    NEVER contributes to a not-merged conclusion. deriveStatus surfaces the projection as
+    indeterminate with the reason attached; callers that gate dispatch treat indeterminate as DO NOT
+    DISPATCH (never as queued), and the correction writer refuses to record a before-state derived
+    from an unavailable read rather than writing a claimed_pr_url it cannot stand behind.
+    (iii) Indeterminate is LEGIBLE, not silent: it is distinguishable on the projection and ledgered
+    with the classified reason, so an operator seeing a stalled drain can tell throttle from block.
+    (iv) A genuinely-absent PR keeps behaving exactly as today — this must not become a fail-closed
+    stall on ordinary missing evidence. That regression is acceptance criterion 3.
+    (v) NOT IN SCOPE, deliberately: retry, backoff, or waiting for quota. This task makes the
+    distinction VISIBLE and makes the conclusion SAFE. What the scheduler then does with a
+    quota-exhausted signal is separate and should be filed on its own if wanted.
+  acceptance:
+    - claim: "a throttled read is classified unavailable and never reads as not-merged"
+      proof: "unit test over an injected gateway whose read fails with a rate-limit exit status and stderr: deriveStatus returns an indeterminate projection carrying the classified reason, and asserts NOT merged=false/source=none — the exact shape that mis-filed W1-T116"
+    - claim: "an indeterminate projection suppresses dispatch and blocks a correction write"
+      proof: "unit test: the dispatch-gating caller given an indeterminate projection takes no dispatch action (and is asserted distinct from its queued behaviour, which does dispatch); and the correction writer given an unavailable before-read returns written=false with nothing appended to the ledger"
+    - claim: "a genuinely-absent PR still resolves as absent — no fail-closed stall on ordinary evidence"
+      proof: "unit test: an injected gateway returning a clean not-found (zero-exit, empty result) yields the same not-merged projection it does today, and the indeterminate path is asserted NOT taken"
+  risk: high
+  origin: architect
+  plan_refs: ["§3", "P9"]
+  files: [src/lib/status.ts, src/lib/correct.ts]
+  status: queued
+  attempts: 0
+  note: |
+    Split from W1-T116 (#267) design item (iv); W1-T116 retains a one-line pointer here.
+
+    DEPENDS_ON IS W1-T75, NOT W1-T116, and the difference is deliberate rather than an oversight:
+    W1-T116 is still unmerged (PR #267), so a hard dep on it does not resolve against origin/main and
+    lint-plan rejects the task outright. W1-T75 is the real shared ancestor — correction supremacy,
+    which both tasks preserve. The W1-T116 relationship is a SERIALIZATION and is recorded here
+    instead: both restructure deriveStatus's rung fallthrough in status.ts, so W1-T116's precedence
+    reorder should land FIRST, leaving this task to change one axis (read outcome) rather than two at
+    once. Tighten depends_on to W1-T116 once #267 is on main, if the retro prefers the hard edge.
+
+    risk:high is deliberate and not sizing-driven — the change is fail-closed on the path that GATES
+    DISPATCH, so a bug here stalls the fleet, which is the opposite failure from the one it fixes.
