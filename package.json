@@ -1,6 +1,6 @@
 {
   "name": "remudero",
-  "version": "0.0.0-pre-alpha",
+  "version": "0.1.0",
   "description": "Plan-stewarding orchestration harness for Claude Code",
   "license": "Apache-2.0",
   "type": "module",
@@ -34,7 +34,9 @@
     "plan-index:check": "node scripts/generate-plan-index.mjs --check",
     "learnings-assert": "node scripts/learnings-assert-check.mjs",
     "learnings-assert:check": "node scripts/learnings-assert-check.mjs --check",
-    "spike": "tsx src/spike.ts"
+    "spike": "tsx src/spike.ts",
+    "commitlint": "commitlint",
+    "changelog": "commit-and-tag-version"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.210",
@@ -43,13 +45,22 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
+    "@commitlint/cli": "^21.2.1",
+    "@commitlint/config-conventional": "^21.2.0",
     "@stryker-mutator/core": "^9.6.1",
     "@swc/core": "^1.15.43",
     "@types/node": "^22.20.1",
+    "commit-and-tag-version": "^13.0.0",
     "dependency-cruiser": "^18.1.0",
     "jscpd": "^5.0.12"
   },
   "overrides": {
     "qs": "^6.15.3"
+  },
+  "commit-and-tag-version": {
+    "skip": {
+      "commit": true,
+      "tag": true
+    }
   }
 }

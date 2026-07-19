@@ -81,6 +81,17 @@ landed in the same PR. Reversible, PR-shaped changes stay in
 [`DECISIONS.md`](DECISIONS.md)/auto-choose — see
 [`docs/adr/README.md`](docs/adr/README.md) for which is which.
 
+## Commit messages — Conventional Commits (W1-T31, §6A)
+
+Every commit message must follow [Conventional Commits](https://www.conventionalcommits.org/)
+(`type(scope): subject`, e.g. `fix(cli): correct the flag parsing`). The `commitlint` CI job
+lints this PR's own commit range and fails red on a malformed message — see
+`commitlint.config.mjs`. `type` drives `CHANGELOG.md`'s generated version bump: `feat:` → minor,
+`fix:` → patch, a `BREAKING CHANGE:` footer (or `!` after the type/scope) → major. Regenerate the
+changelog with `npm run changelog` (wraps `commit-and-tag-version`, configured to only edit
+`CHANGELOG.md`/`package.json` — never to commit, tag, or push on its own); the resulting diff
+lands through the normal PR gate like any other change.
+
 ## Local checks before pushing
 
 ```sh
