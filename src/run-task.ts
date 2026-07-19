@@ -3574,7 +3574,7 @@ async function fixCommand(rest: string[]): Promise<number> {
   }
   const prNumber = Number(prArg);
   if (!prArg || !Number.isInteger(prNumber) || prNumber <= 0) {
-    console.error(`rmd fix: '${prArg ?? ""}' is not a valid PR number — usage: rmd fix <pr-number> [--repo <name>]\n` + USAGE);
+    console.error(`rmd fix: '${prArg ?? ""}' is not a valid PR number — usage: ${commandSyntax("fix")}\n` + USAGE);
     return 2;
   }
 
@@ -3848,9 +3848,7 @@ async function escalateCommand(rest: string[]): Promise<number> {
   const taskId = flagValue(rest, "--task");
   const summary = flagValue(rest, "--summary");
   if (!cls || !ESCALATION_CLASSES.includes(cls as EscalationClass) || !taskId || !summary) {
-    console.error(
-      'usage: rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option "label|detail"]...',
-    );
+    console.error(`usage: ${commandSyntax("escalate")}`);
     return 2;
   }
   const config = loadConfig();
@@ -3885,7 +3883,7 @@ async function escalateCommand(rest: string[]): Promise<number> {
 async function notifyCommand(rest: string[]): Promise<number> {
   const message = rest.join(" ");
   if (!message) {
-    console.error("usage: rmd notify <message>");
+    console.error(`usage: ${commandSyntax("notify")}`);
     return 2;
   }
   const config = loadConfig();
@@ -4015,10 +4013,7 @@ async function initCommand(rest: string[]): Promise<number> {
 async function projectCommand(rest: string[]): Promise<number> {
   const sub = rest[0];
   if (sub !== "init") {
-    console.error(
-      `rmd project: unknown subcommand '${sub ?? ""}' — usage: rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>\n` +
-        USAGE,
-    );
+    console.error(`rmd project: unknown subcommand '${sub ?? ""}' — usage: ${commandSyntax("project")}\n` + USAGE);
     return 2;
   }
 
@@ -4084,7 +4079,7 @@ async function correctCommand(rest: string[]): Promise<number> {
   }
   const prFlag = flagValue(rest, "--pr");
   if (!prFlag) {
-    console.error("rmd correct: --pr <n> is required — usage: rmd correct <task-id> --pr <n> [--reason <text>]\n" + USAGE);
+    console.error(`rmd correct: --pr <n> is required — usage: ${commandSyntax("correct")}\n` + USAGE);
     return 2;
   }
 
@@ -4222,6 +4217,29 @@ function commandHelp(spec: CommandSpec): string {
   return `usage:\n  ${spec.usage}\n\nSee \`rmd --help\` for the full command list.`;
 }
 
+/**
+ * Look up a COMMANDS entry by name — throws if absent, which can only happen if a
+ * command handler calls this with a name the registry doesn't have (a bug in THIS file,
+ * caught by test/help-registry.test.ts's dispatch<->registry coverage check, never a
+ * user-facing failure mode).
+ */
+function commandSpec(name: string): CommandSpec {
+  const spec = COMMANDS.find((c) => c.name === name);
+  if (!spec) throw new Error(`commandSpec: no COMMANDS entry for "${name}" — registry/dispatch are out of sync`);
+  return spec;
+}
+
+/**
+ * Just the invocation shape of one command ("rmd <name> ...", no trailing "# description"
+ * comment) — for inline error-usage hints (`rmd fix: '<x>' is not a valid PR number —
+ * usage: ...`) that need one command's syntax, not its full prose. Derived from the SAME
+ * COMMANDS entry `rmd --help`/`rmd <cmd> --help` render from, so these hints cannot drift
+ * from the registry the way hand-typed duplicates of this text used to.
+ */
+function commandSyntax(name: string): string {
+  return commandSpec(name).usage.split(/\s{2,}#/)[0].trimEnd();
+}
+
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(): Promise<void> {
   const [, , cmd, ...rest] = process.argv;
@@ -4320,4 +4338,6 @@ export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, re
 export { commitsAhead };
 // Exported for W1-T47's help-registry test: COMMANDS is the ONE source of truth both USAGE
 // (`rmd --help`) and commandHelp (`rmd <cmd> --help`) generate from — export only, logic unchanged.
-export { COMMANDS, USAGE, commandHelp, type CommandSpec };
+// commandSyntax/commandSpec are the same lookup individual command handlers use for their
+// inline usage hints (fix/escalate/notify/project/correct) — no hand-written duplicate text.
+export { COMMANDS, USAGE, commandHelp, commandSpec, commandSyntax, type CommandSpec };
