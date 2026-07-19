@@ -24,6 +24,7 @@ import {
   syncPlanOrRefuse,
   unknownArgError,
   noPrVerdict,
+  renderReconPrompt,
   softBudgetWarning,
   workerErrorVerdict,
   type FixDeps,
@@ -42,6 +43,7 @@ import {
 import type { Mount } from "../src/lib/mounts.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { loadPlanIndex, renderPlanIndex } from "../src/lib/plan-index.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
@@ -73,6 +75,51 @@ function result(over: Partial<WorkerResult>): WorkerResult {
     ...over,
   };
 }
+
+// ── W1-T37: the plan is RETRIEVED, not injected — the recon prompt carries a PLAN INDEX, never the
+// plan body (MASTER-PLAN §8A Tier 2). ────────────────────────────────────────────────────────────
+
+test("renderReconPrompt: with an index block, the rendered prompt carries the fixed recon instructions THEN the index, verbatim", () => {
+  const prompt = renderReconPrompt('PLAN INDEX — MASTER-PLAN.md is retrieved, not injected.\n- "Mission" (line 31): x');
+  assert.match(prompt, /You are a RECON worker\. Do NOT modify anything\./);
+  assert.match(prompt, /RECON REPORT/);
+  assert.match(prompt, /PLAN INDEX — MASTER-PLAN\.md is retrieved, not injected\./);
+  assert.match(prompt, /"Mission" \(line 31\): x/);
+  // The recon instructions precede the index (stable-ish fixed text first).
+  assert.ok(prompt.indexOf("RECON worker") < prompt.indexOf("PLAN INDEX"));
+});
+
+test("renderReconPrompt: an EMPTY index block (fresh checkout, before the first `npm run plan-index`) never crashes — just the fixed recon instructions", () => {
+  const prompt = renderReconPrompt("");
+  assert.match(prompt, /You are a RECON worker\./);
+  assert.doesNotMatch(prompt, /PLAN INDEX/);
+});
+
+test("renderReconPrompt: the REAL committed plan/plan-index.json renders a prompt orders of magnitude smaller than MASTER-PLAN.md itself — the index is injected, the plan body is not", () => {
+  const repoRoot = join(new URL("..", import.meta.url).pathname);
+  const masterPlan = readFileSync(join(repoRoot, "MASTER-PLAN.md"), "utf8");
+  const index = loadPlanIndex(join(repoRoot, "plan", "plan-index.json"));
+  assert.ok(index, "plan/plan-index.json must exist and parse (run `npm run plan-index`)");
+  const planIndexBlock = renderPlanIndex(index!);
+  const prompt = renderReconPrompt(planIndexBlock);
+  // Char-count proof: the rendered prompt is a small fraction of the full plan body's size.
+  assert.ok(
+    prompt.length < masterPlan.length / 10,
+    `rendered recon prompt (${prompt.length} chars) should be well under 1/10th of MASTER-PLAN.md (${masterPlan.length} chars)`,
+  );
+  // The index carries the §4A heading (a grep target)...
+  assert.match(prompt, /"4A\. Workspace containment \(fleet-wide\)"/);
+  // ...but NOT the plan body prose that lives under it in MASTER-PLAN.md (a worker who needs it
+  // must grep MASTER-PLAN.md itself, per the index's own instruction).
+  assert.doesNotMatch(prompt, /Hooks <1s\. Craig overlay/);
+});
+
+test("wiring: the recon worker's spawn prompt is built via renderReconPrompt(planIndexBlock), not a hardcoded literal", () => {
+  const reconIdx = runTaskSrc.indexOf('"recon worker"');
+  const promptCallIdx = runTaskSrc.indexOf("prompt: renderReconPrompt(planIndexBlock)");
+  assert.ok(reconIdx >= 0, "the recon worker section must exist");
+  assert.ok(promptCallIdx > reconIdx, "the recon spawn must build its prompt via renderReconPrompt, after the recon worker say()");
+});
 
 test("workerErrorVerdict: a non-error result maps to null (caller proceeds)", () => {
   assert.equal(workerErrorVerdict(result({ isError: false, subtype: "success" }), 1.2, "implement"), null);

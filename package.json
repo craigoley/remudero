@@ -30,6 +30,8 @@
     "claims": "node scripts/claims-check.mjs",
     "learnings-index": "node scripts/generate-learnings-index.mjs",
     "learnings-index:check": "node scripts/generate-learnings-index.mjs --check",
+    "plan-index": "node scripts/generate-plan-index.mjs",
+    "plan-index:check": "node scripts/generate-plan-index.mjs --check",
     "learnings-assert": "node scripts/learnings-assert-check.mjs",
     "learnings-assert:check": "node scripts/learnings-assert-check.mjs --check",
     "spike": "tsx src/spike.ts"
