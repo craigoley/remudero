@@ -68,6 +68,7 @@ import {
   selectLearnings,
 } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
+import { loadPlanIndex, renderPlanIndex } from "./lib/plan-index.js";
 import {
   REVIEW_CONTEXT,
   buildReviewPrompt,
@@ -1283,6 +1284,28 @@ function reconObservedToContext(recon: WorkerResult, taskId: string): string {
 }
 
 /**
+ * Render the RECON worker's prompt (W1-T37, MASTER-PLAN §8A Tier 2): the fixed read-only recon
+ * instructions, plus the generated PLAN INDEX in place of the plan body. The plan (MASTER-PLAN.md)
+ * is NOT shipped to workers — `planIndexBlock` (from {@link renderPlanIndex}) is a compact list of
+ * section headings + one-line summaries + a grep hint, so a recon worker that needs a specific
+ * section's detail can retrieve it itself (`grep -n '<heading>' MASTER-PLAN.md`) instead of every
+ * run paying to carry the whole ~1900-line document. `planIndexBlock` is `""` when no index is
+ * committed yet (a fresh checkout before the first `npm run plan-index`) — recon still runs, just
+ * without the pointer; correctness never depends on the index being present.
+ */
+export function renderReconPrompt(planIndexBlock: string): string {
+  return [
+    "You are a RECON worker. Do NOT modify anything. Inspect the current git " +
+      "repository read-only (git remote -v, git log --oneline -5, ls). Output one report:\n" +
+      "RECON REPORT\nOBSERVED: <commands + key output>\nINFERRED: <conclusions>\n" +
+      "COULDN'T-VERIFY: <unconfirmed>",
+    planIndexBlock,
+  ]
+    .filter((s) => s.length > 0)
+    .join("\n\n");
+}
+
+/**
  * Render the implement prompt: cited CONTEXT + TASK + explicit output contract.
  *
  * CACHE-AWARE ASSEMBLY (MASTER-PLAN §8A / W1-T35): the Anthropic prompt cache
@@ -1644,6 +1667,12 @@ async function runTask(
   try {
     // ── Recon (read-only).
     say("recon worker");
+    // W1-T37 / MASTER-PLAN §8A Tier 2: the plan is RETRIEVED, not injected — the recon prompt
+    // carries the generated PLAN INDEX (section headings + one-line summaries + a grep hint), not
+    // the plan body. `loadPlanIndex` is non-fatal (a fresh checkout before the first `npm run
+    // plan-index` just omits the block); `npm run plan-index:check` fails CI on a stale index.
+    const planIndex = loadPlanIndex(join(dirname(planPath), "plan-index.json"));
+    const planIndexBlock = planIndex ? renderPlanIndex(planIndex) : "";
     const recon = account(
       await spawn({
         cwd: worktreePath,
@@ -1652,11 +1681,7 @@ async function runTask(
         maxTurns: 8, // recon is read-only + bounded; turns stay tight here.
         maxBudgetUsd: budgetUsd, // dollars are the real backstop (WS-0 knob a).
         config,
-        prompt:
-          "You are a RECON worker. Do NOT modify anything. Inspect the current git " +
-          "repository read-only (git remote -v, git log --oneline -5, ls). Output one report:\n" +
-          "RECON REPORT\nOBSERVED: <commands + key output>\nINFERRED: <conclusions>\n" +
-          "COULDN'T-VERIFY: <unconfirmed>",
+        prompt: renderReconPrompt(planIndexBlock),
       }),
     );
     log("recon.done", {
