@@ -94,11 +94,34 @@ export const DEFAULT_EFFORT_LABEL = "default";
 export const BILLING_MODE = "subscription" as const;
 
 /**
+ * Cache-token NAMED COLUMNS (MASTER-PLAN §8A / W1-T35): the aggregate
+ * `tokens.cacheRead`/`cacheCreation` (camelCase, nested inside `tokens`)
+ * mirrored as FLAT, snake_case columns matching the SDK result envelope's own
+ * field names (`cache_read_input_tokens`/`cache_creation_input_tokens`). A
+ * ledger line's other telemetry (`cost_usd`, `num_turns`, …) is already flat
+ * snake_case — the nested `tokens` object was the odd one out and not
+ * grep/jq-able as a "column". This makes the cache-reuse signal MASTER-PLAN
+ * §8A calls for ("near-zero cache reads on the second worker of a run means
+ * the ordering is wrong") directly queryable off a worker's ledger line
+ * without reaching into a nested object.
+ */
+export function cacheTokenLedgerFields(tokens: TokenUsage): {
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+} {
+  return {
+    cache_read_input_tokens: tokens.cacheRead,
+    cache_creation_input_tokens: tokens.cacheCreation,
+  };
+}
+
+/**
  * The standard per-call ledger telemetry (W1-T6 acceptance): every worker AND
  * brain-plane (architect/reviewer) call logs `{model, effort, tokens,
- * total_cost_usd, billing_mode, verdict}`. Extracted so every call site in
- * run-task.ts spreads the SAME shape rather than hand-rolling it — one
- * definition, so the fields can never drift between recon/implement/review/retro.
+ * cache_read_input_tokens, cache_creation_input_tokens, total_cost_usd,
+ * billing_mode, verdict}`. Extracted so every call site in run-task.ts spreads
+ * the SAME shape rather than hand-rolling it — one definition, so the fields
+ * can never drift between recon/implement/review/retro.
  *
  * `verdict` here is this CALL's own outcome (`"success"` or the SDK's error
  * subtype) — distinct from the RUN-level `verdict` ledger line (merged /
@@ -108,6 +131,8 @@ export function workerLedgerFields(r: WorkerResult): {
   model: string;
   effort: string;
   tokens: TokenUsage;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
   total_cost_usd: number;
   billing_mode: typeof BILLING_MODE;
   verdict: string;
@@ -116,6 +141,7 @@ export function workerLedgerFields(r: WorkerResult): {
     model: r.model,
     effort: r.effort,
     tokens: r.tokens,
+    ...cacheTokenLedgerFields(r.tokens),
     total_cost_usd: r.costUsd,
     billing_mode: BILLING_MODE,
     verdict: r.isError ? r.subtype : "success",

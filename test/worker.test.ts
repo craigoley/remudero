@@ -10,6 +10,7 @@ import {
   DEFAULT_MODEL_LABEL,
   DENY_FLOOR_FALLBACK_MODE,
   appendQuestion,
+  cacheTokenLedgerFields,
   collectWorkerResult,
   evaluateDenyFloor,
   parseDecisionRequest,
@@ -223,7 +224,7 @@ test("collectWorkerResult: tokens zero out (never crash) when a synthetic/older 
   assert.deepEqual(r.modelUsage, {});
 });
 
-test("workerLedgerFields: success call ⇒ {model, effort, tokens, total_cost_usd, billing_mode, verdict} with billing_mode='subscription' and verdict='success'", async () => {
+test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_input_tokens, cache_creation_input_tokens, total_cost_usd, billing_mode, verdict} with billing_mode='subscription' and verdict='success'", async () => {
   const r = await collectWorkerResult(usageStream(), {
     childEnvKeys: [],
     model: "claude-opus-4",
@@ -234,11 +235,39 @@ test("workerLedgerFields: success call ⇒ {model, effort, tokens, total_cost_us
     model: "claude-opus-4",
     effort: "high",
     tokens: { input: 1000, output: 200, cacheRead: 500, cacheCreation: 50 },
+    cache_read_input_tokens: 500,
+    cache_creation_input_tokens: 50,
     total_cost_usd: 1.23,
     billing_mode: "subscription",
     verdict: "success",
   });
   assert.equal(BILLING_MODE, "subscription");
+});
+
+// ── W1-T35: cache tokens ledgered as NAMED COLUMNS (flat, snake_case — matching
+// the SDK envelope's own field names) so the cache-reuse signal (MASTER-PLAN
+// §8A: "near-zero cache reads on the second worker of a run means the ordering
+// is wrong") is directly grep/jq-able on a ledger line, not buried in `tokens`.
+
+test("cacheTokenLedgerFields: mirrors tokens.cacheRead/cacheCreation as flat cache_read_input_tokens/cache_creation_input_tokens", () => {
+  assert.deepEqual(
+    cacheTokenLedgerFields({ input: 1000, output: 200, cacheRead: 500, cacheCreation: 50 }),
+    { cache_read_input_tokens: 500, cache_creation_input_tokens: 50 },
+  );
+});
+
+test("cacheTokenLedgerFields: zero cache tokens ledger as zero columns, not omitted", () => {
+  assert.deepEqual(
+    cacheTokenLedgerFields({ input: 10, output: 5, cacheRead: 0, cacheCreation: 0 }),
+    { cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  );
+});
+
+test("workerLedgerFields: a result envelope carrying cache_read_input_tokens + cache_creation_input_tokens is ledgered into named columns on the worker line", async () => {
+  const r = await collectWorkerResult(usageStream(), { childEnvKeys: [] });
+  const fields = workerLedgerFields(r);
+  assert.equal(fields.cache_read_input_tokens, 500);
+  assert.equal(fields.cache_creation_input_tokens, 50);
 });
 
 test("workerLedgerFields: an ERROR call's verdict is the SDK's error subtype, not the string 'success'", async () => {

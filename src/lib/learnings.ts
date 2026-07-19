@@ -363,17 +363,45 @@ function renderLearningLine(entry: LearningEntry): string {
 }
 
 /**
+ * Render ONLY the two mandatory, INVARIANT doctrine lines (Tier 0, MASTER-PLAN
+ * §8A) — the distrust rule and the autonomy clause. This is the STABLE PREFIX
+ * of the cache-aware assembly rule (W1-T35): it is line-capped and must change
+ * RARELY, since an edit here busts the prompt cache for every worker rendered
+ * after it. Callers place this FIRST in a rendered prompt, ahead of anything
+ * volatile (task context, recon output, matched learnings). Always non-empty.
+ */
+export function renderDoctrinePreamble(): string {
+  return [
+    `- ${DISTRUST_RULE} ${citation(DISTRUST_SRC)}`,
+    `- ${AUTONOMY_CLAUSE} ${citation(AUTONOMY_SRC)}`,
+  ].join("\n");
+}
+
+/**
+ * Render ONLY the task-matched LEARNINGS facts (Tier 1, W1-T19/W1-T33) — no
+ * doctrine lines. VOLATILE: the corpus grows every retro, so callers place
+ * this LAST in a rendered prompt (cache-aware ordering, W1-T35), never ahead
+ * of the stable {@link renderDoctrinePreamble} block. "" when nothing matched.
+ */
+export function renderMatchedLearnings(selected: LearningEntry[]): string {
+  return selected.map(renderLearningLine).join("\n");
+}
+
+/**
  * Render the LEARNINGS half of a prompt's CONTEXT block: the two mandatory
  * doctrine lines followed by the pre-selected, matched facts. Every line is
  * cited, so the block passes the provenance linter. Returns "" only if you pass
  * an empty selection AND the doctrine lines are unwanted (never — they always
  * emit), so the string is always non-empty.
+ *
+ * Bundles {@link renderDoctrinePreamble} + {@link renderMatchedLearnings} in
+ * historical (doctrine-then-facts) order for callers that want ONE block
+ * rather than the two pieces separately. `renderImplementPrompt` (run-task.ts)
+ * does NOT use this — it keeps the two pieces apart so it can place the
+ * stable preamble first and the volatile matched facts last in the wider
+ * CONTEXT block (cache-aware ordering, W1-T35), not merely relative to each
+ * other.
  */
 export function renderLearningsContext(selected: LearningEntry[]): string {
-  const lines = [
-    `- ${DISTRUST_RULE} ${citation(DISTRUST_SRC)}`,
-    `- ${AUTONOMY_CLAUSE} ${citation(AUTONOMY_SRC)}`,
-    ...selected.map(renderLearningLine),
-  ];
-  return lines.join("\n");
+  return [renderDoctrinePreamble(), renderMatchedLearnings(selected)].filter((s) => s.length > 0).join("\n");
 }

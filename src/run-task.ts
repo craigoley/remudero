@@ -62,7 +62,8 @@ import { IsolationError, probeIsolation } from "./lib/isolation.js";
 import {
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
   loadLearningsForTaskFiles,
-  renderLearningsContext,
+  renderDoctrinePreamble,
+  renderMatchedLearnings,
   selectLearnings,
 } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
@@ -120,6 +121,7 @@ import {
   removeRunLock,
   renderWorkerSettings,
   spawnWorker,
+  cacheTokenLedgerFields,
   workerLedgerFields,
   worktreeAdd,
   worktreeRemove,
@@ -1128,6 +1130,9 @@ export interface WorkerErrorVerdict {
     model: string;
     effort: string;
     tokens: WorkerResult["tokens"];
+    /** W1-T35 named columns — see {@link cacheTokenLedgerFields}. */
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
   };
 }
 
@@ -1171,6 +1176,7 @@ export function workerErrorVerdict(
       model: r.model,
       effort: r.effort,
       tokens: r.tokens,
+      ...cacheTokenLedgerFields(r.tokens),
     },
   };
 }
@@ -1189,6 +1195,9 @@ export interface NoPrVerdict {
     model: string;
     effort: string;
     tokens: WorkerResult["tokens"];
+    /** W1-T35 named columns — see {@link cacheTokenLedgerFields}. */
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
   };
 }
 
@@ -1220,6 +1229,7 @@ export function noPrVerdict(r: WorkerResult, costUsd: number, stage: string): No
       model: r.model,
       effort: r.effort,
       tokens: r.tokens,
+      ...cacheTokenLedgerFields(r.tokens),
     },
   };
 }
@@ -1274,15 +1284,27 @@ function reconObservedToContext(recon: WorkerResult, taskId: string): string {
 /**
  * Render the implement prompt: cited CONTEXT + TASK + explicit output contract.
  *
- * `learningsContext` is the Promptsmith READ side (W1-T19): the distrust rule,
- * the autonomy clause, and the task-matched LEARNINGS facts — each already
- * provenance-tagged, so the whole CONTEXT block still lints clean.
+ * CACHE-AWARE ASSEMBLY (MASTER-PLAN §8A / W1-T35): the Anthropic prompt cache
+ * keys on EXACT PREFIX BYTES — any early edit invalidates the cache for
+ * everything after it, and a cache READ prices at ~1/10th of fresh input. So
+ * the CONTEXT block is ordered STABLE-FIRST, VOLATILE-LAST:
+ *   1. `renderDoctrinePreamble()` — Tier 0, the distrust rule + the autonomy
+ *      clause. Invariant; changes rarely (MASTER-PLAN §8A: "line-capped
+ *      ~150, must change RARELY"). This is the cacheable prefix.
+ *   2. `contextClaims` / `reconContext` — per-task, fixed for the life of a
+ *      run once recon has completed (recon never re-runs mid-run).
+ *   3. `matchedLearnings` (Tier 1, W1-T19/W1-T33) — the task-matched LEARNINGS
+ *      facts. VOLATILE: the corpus grows every retro, so it goes LAST, never
+ *      ahead of the stable prefix — a corpus edit can never bust the cache for
+ *      the doctrine/task/recon bytes that precede it.
+ * Every line is already provenance-tagged, so the whole CONTEXT block still
+ * lints clean regardless of ordering.
  */
 export function renderImplementPrompt(
   task: Task,
   reconContext: string,
   runId: string,
-  learningsContext = "",
+  matchedLearnings = "",
 ): string {
   const contextClaims = (task.context ?? [])
     .map((c) => `- ${c.claim} ${citation(c.src)}`)
@@ -1293,9 +1315,10 @@ export function renderImplementPrompt(
 
   return [
     "# CONTEXT",
-    learningsContext,
+    renderDoctrinePreamble(),
     contextClaims,
     reconContext,
+    matchedLearnings,
     "",
     "# TASK",
     body,
@@ -1662,7 +1685,11 @@ async function runTask(
     const learningsDir = join(dirname(planPath), "..", "learnings");
     const learnings = loadLearningsForTaskFiles(learningsDir, task.files);
     const { selected, dropped } = selectLearnings(learnings, task.files, DEFAULT_KNOWLEDGE_BUDGET_CHARS);
-    const learningsContext = renderLearningsContext(selected);
+    // VOLATILE (Tier 1) — deliberately NOT combined with the stable doctrine
+    // preamble here: renderImplementPrompt places this LAST in the CONTEXT
+    // block (cache-aware ordering, W1-T35) so a growing corpus can never bust
+    // the cache for the stable/per-task bytes that precede it.
+    const matchedLearnings = renderMatchedLearnings(selected);
     log("learnings.injected", {
       matched: selected.length,
       dropped: dropped.map((d) => d.id),
@@ -1671,7 +1698,7 @@ async function runTask(
 
     // ── Render + provenance-lint the prompt.
     const reconContext = reconObservedToContext(recon, taskId);
-    const prompt = renderImplementPrompt(task, reconContext, runId, learningsContext);
+    const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     log("prompt.linted", { provenance: "clean" });
     say("prompt provenance-linted: clean");
