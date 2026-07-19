@@ -73,8 +73,12 @@ jobs:
       # path filter, runs every PR; jscpd's own --threshold flag enforces the ceiling natively.
       # `claims` (W1-T29, §12A the AWARENESS LAYER for prose) added: same UNCONDITIONAL shape —
       # no path filter, runs every PR; a red claim means THE PLAN IS LYING ABOUT THE SYSTEM.
+      # `refactor-campaign` (W2-T3, §3A/§5 the refactor campaign's measurable gate-delta formula)
+      # added: same UNCONDITIONAL shape — no path filter, runs every PR; internally scoped to
+      # PRs carrying the `refactor-campaign` label (mirrors containment-probe's diff-scoping — a
+      # non-matching PR still completes the job successfully, so it never blocks).
       REQUIRED: >-
-        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet", "jscpd-gate", "claims"]
+        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet", "jscpd-gate", "claims", "refactor-campaign"]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
       IGNORE: >-

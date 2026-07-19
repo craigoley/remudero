@@ -1,0 +1,94 @@
+# plan/campaigns/refactor.yaml — the refactor campaign template (W2-T3, MASTER-PLAN §3A/§5).
+#
+# "Tech-debt sweep" was under-built as a vibe (operator flagged it, origin: feedback#taxonomy).
+# This file promotes refactor to a first-class campaign whose acceptance is a MEASURABLE delta on
+# the Tier-2/3 gates already live on this repo (§5): mutation UP, complexity DOWN, duplication
+# DOWN, zero new CVEs, fitness violations resolved. A refactor PR that does not move these numbers
+# in the right direction is CI-red — PROVEN by scripts/refactor-campaign.mjs, never asserted in
+# prose.
+#
+# Schema:
+#   repo:    the repo this campaign instance targets (a campaign is a per-repo selector + formula;
+#            other repos onboarded via project-init (W1-T27) get their own instance of this file).
+#   gates:   the five measurable dimensions the delta formula grades. Each entry:
+#     id:          stable slug, printed in dry-run/check output
+#     direction:   "up" (higher is better, e.g. mutation score) or "down" (lower is better —
+#                  complexity/duplication/CVEs/fitness violations)
+#     baseline:    path to the recorded floor/ceiling this run is compared against (never hand-
+#                  edited to make a red run pass — ratchets only in the improving direction, same
+#                  convention as scripts/mutation-baseline.json / scripts/coverage-baseline.json)
+#     source:      how the CURRENT value is produced for this run — a report file the CI job
+#                  generates fresh (never a stale checked-in number)
+#   targets:
+#     top_n:       how many tech-debt targets the dry-run names (ranked by complexity, the one
+#                  truly per-file metric this campaign computes itself; cross-referenced against
+#                  which of those files also appear in the duplication/fitness reports)
+#
+# THE FORMULA (scripts/refactor-campaign.mjs `evaluateCampaign`): GREEN iff (a) no gate regressed
+# (moved the wrong direction versus its baseline) AND (b) at least one gate strictly improved. A
+# refactor that leaves every number unchanged is a no-op, not a refactor — RED. A refactor that
+# regresses even one gate to buy improvement on another is RED (no trading one debt for another).
+
+repo: remudero
+
+gates:
+  - id: mutation
+    label: "mutation score (Stryker, src/lib/classify.ts scope)"
+    direction: up
+    baseline: scripts/mutation-baseline.json
+    baseline_field: scorePct
+    source:
+      kind: mutation-report
+      path: reports/mutation/mutation.json
+
+  - id: complexity
+    label: "aggregate cyclomatic-approximation complexity (src/**/*.ts)"
+    direction: down
+    baseline: scripts/complexity-baseline.json
+    baseline_field: totalComplexity
+    source:
+      kind: complexity-scan
+      path: src
+
+  - id: duplication
+    label: "duplicated-lines percentage (jscpd, src/**)"
+    direction: down
+    baseline: scripts/dup-baseline.json
+    baseline_field: percentage
+    # jscpd's percentage has real measurement noise (a 1-2 line change anywhere in src/** nudges
+    # it) even when nothing meaningful moved -- 0.01 percentage points is well under what an
+    # actual refactor swings, so sub-threshold drift reads as "unchanged", not a false regression.
+    epsilon: 0.01
+    source:
+      kind: jscpd-report
+      path: reports/jscpd/jscpd-report.json
+
+  - id: cve
+    label: "known vulnerabilities (npm audit, total across severities)"
+    direction: down
+    baseline: scripts/cve-baseline.json
+    baseline_field: total
+    source:
+      kind: npm-audit-report
+      path: reports/audit/npm-audit.json
+
+  - id: fitness
+    label: "architecture-fitness violations (dependency-cruiser, .dependency-cruiser.cjs)"
+    direction: down
+    baseline: scripts/fitness-baseline.json
+    baseline_field: violations
+    source:
+      kind: depcruise-report
+      path: reports/depcruise/depcruise-report.json
+
+targets:
+  top_n: 10
+  # Each named target's GOAL on the complexity gate: cut its cyclomatic-approximation score by
+  # this percentage. The dry-run prints per-target `current -> goal (delta)` from it, which is
+  # what makes the dry-run an actionable PLAN rather than a ranked list of filenames. The
+  # project-wide complexity gate is the SUM of these per-file scores, so a per-target goal is a
+  # real decomposition of the project-wide number, not a parallel invention. The duplication and
+  # fitness gates need no percentage — their per-target goal is always 0 (remove every clone pair
+  # / resolve every violation naming that file). `mutation` and `cve` do not decompose per file
+  # and are reported per target as "n/a (project-wide gate)" rather than given an invented goal.
+  goal_complexity_reduction_pct: 20
