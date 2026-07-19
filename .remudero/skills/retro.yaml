@@ -1,0 +1,24 @@
+# .remudero/skills/retro.yaml — the existing Architect retro (`rmd retro`),
+# folded into the §5B registry unchanged ("retro -> the existing retro
+# Architect (rmd retro), folded in"). Syncs plan/tasks.yaml from the ledger's
+# observed outcomes (src/lib/retro.ts's gather + calibration table).
+tools:
+  - Read
+  - Grep
+  - Glob
+  - Bash
+
+permission_profile: architect
+
+output_contract: >
+  a plan-sync PR reconciling plan/tasks.yaml status/calibration against
+  state/ledger.ndjson, gated by ci-gate+remudero-review; --dry-run prints
+  the gather + calibration table only, proposing nothing.
+
+grounding_sources:
+  - state/ledger.ndjson
+  - plan/tasks.yaml
+  - LEARNINGS.md
+
+gate: ci-gate+remudero-review
+tier: architect

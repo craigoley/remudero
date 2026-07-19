@@ -1,0 +1,31 @@
+# .remudero/skills/setup.yaml — the Setup Agent (WS-4 / G-16), folded into the
+# §5B skill registry unchanged. MASTER-PLAN §5B: "setup -> the Setup Agent
+# (WS-4 / G-16), unchanged — folded in as a skill." Counsels org-vs-user
+# namespace + public-vs-private tradeoffs, verifies GitHub access, and
+# sub-agent-executes the repo scaffold (docs set, CI templates, adapters).
+tools:
+  - Read
+  - Grep
+  - Glob
+  - Write
+  - Edit
+  - Bash
+  - WebSearch
+  - AskUserQuestion
+
+permission_profile: architect
+
+output_contract: >
+  a repo-scaffold PR (required doc set, CI templates, .remudero/ config) gated
+  by ci-gate+remudero-review; org-vs-user namespace and public-vs-private
+  counsel is GRILLED via AskUserQuestion when the operator hasn't already
+  decided, never silently assumed.
+
+grounding_sources:
+  - MASTER-PLAN.md#5A
+  - MASTER-PLAN.md#WS-4
+  - DECISIONS.md
+  - CODEOWNERS
+
+gate: ci-gate+remudero-review
+tier: architect

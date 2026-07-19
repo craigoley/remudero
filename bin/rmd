@@ -50,6 +50,12 @@
 #                            injected baseline numbers written in as ratchet floors — a
 #                            repo never onboards at zero; prints the file list and manual
 #                            next steps, does not push/PR/arm protection itself
+#   rmd skill list          the §5B skill registry (MASTER-PLAN §5B, W1-T44): every
+#                            Architect-worker profile (setup, plan, feedback, retro,
+#                            review, refactor, design-review) is a
+#                            .remudero/skills/<name>.yaml config entry, not new code —
+#                            this resolves and lists {tools, permission_profile,
+#                            output_contract, grounding_sources, gate, tier} for each
 set -euo pipefail
 # Resolve the real package root even when invoked through symlinks (npm link /
 # a global install both put `rmd` on PATH as a symlink chain, not a copy).

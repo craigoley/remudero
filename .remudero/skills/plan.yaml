@@ -1,0 +1,33 @@
+# .remudero/skills/plan.yaml — ONE skill, THREE MODES (MASTER-PLAN §5B):
+# `rmd plan --mode=create|clarify|expand` (W1-T45). "Refine = clarify; Expand =
+# expand" — one ground->research->grill-or-propose code path, never three
+# skills that triplicate and drift apart.
+tools:
+  - Read
+  - Grep
+  - Glob
+  - WebSearch
+  - WebFetch
+  - AskUserQuestion
+  - Write
+  - Edit
+  - Bash
+
+permission_profile: architect
+
+output_contract: >
+  a plan-only PR naming which MASTER-PLAN sections change and which
+  plan/tasks.yaml entries are added/rewired, with rationale and (when the
+  triggering item is a feedback entry) origin: feedback#<id> provenance;
+  gated by ci-gate+remudero-review. AMBIGUOUS scope grills via
+  AskUserQuestion (interactive) or a needs-human issue (async) before
+  proposing.
+
+grounding_sources:
+  - MASTER-PLAN.md
+  - plan/tasks.yaml
+  - LEARNINGS.md
+  - DECISIONS.md
+
+gate: ci-gate+remudero-review
+tier: architect
