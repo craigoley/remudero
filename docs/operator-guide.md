@@ -34,10 +34,12 @@ All logic lives in TypeScript; `bin/rmd` is a thin `exec` wrapper into
 | `rmd project init <repo> [--profile ts-node\|ts-web\|python\|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>` | Fleet-inheritance onboarding: generates the target repo's whole gate stack with the given numbers as ratchet floors. Prints next steps; does not push/PR/arm protection itself. |
 
 An **unknown command or unrecognized flag never spawns anything** — it prints
-usage and exits non-zero (see [control-surface.md](control-surface.md)). If a
-command you expect isn't listed here, check `bin/rmd`'s own header comment —
-this table is kept in sync with it by hand today (Tier B doc, §12A) until the
-generated CLI reference (Tier A) exists.
+usage and exits non-zero (see [control-surface.md](control-surface.md)). This
+table is Tier B (hand-maintained, may lag); the authoritative, generated
+reference is the CLI itself — run `rmd --help` for the full command list or
+`rmd <cmd> --help` for one command, both produced from the single `COMMANDS`
+registry in `src/run-task.ts` (W1-T47) so they can't drift from what's
+actually dispatched.
 
 ## A normal day
 

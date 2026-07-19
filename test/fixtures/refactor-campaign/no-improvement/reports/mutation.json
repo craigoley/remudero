@@ -1,0 +1,10 @@
+{
+  "files": {
+    "src/module.ts": {
+      "mutants": [
+        { "status": "Killed" },
+        { "status": "Survived" }
+      ]
+    }
+  }
+}

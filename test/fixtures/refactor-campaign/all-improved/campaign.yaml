@@ -1,0 +1,30 @@
+repo: fixture-all-improved
+gates:
+  - id: mutation
+    direction: up
+    baseline: baselines/mutation.json
+    baseline_field: scorePct
+    source: { kind: mutation-report, path: reports/mutation.json }
+  - id: complexity
+    direction: down
+    baseline: baselines/complexity.json
+    baseline_field: totalComplexity
+    source: { kind: complexity-scan, path: src }
+  - id: duplication
+    direction: down
+    baseline: baselines/dup.json
+    baseline_field: percentage
+    epsilon: 0.01
+    source: { kind: jscpd-report, path: reports/jscpd.json }
+  - id: cve
+    direction: down
+    baseline: baselines/cve.json
+    baseline_field: total
+    source: { kind: npm-audit-report, path: reports/audit.json }
+  - id: fitness
+    direction: down
+    baseline: baselines/fitness.json
+    baseline_field: violations
+    source: { kind: depcruise-report, path: reports/depcruise.json }
+targets:
+  top_n: 5

@@ -1,0 +1,10 @@
+{
+  "summary": {
+    "violations": [
+      { "from": "src/a.ts", "to": "src/b.ts", "rule": { "name": "x" } },
+      { "from": "src/a.ts", "to": "src/c.ts", "rule": { "name": "x" } },
+      { "from": "src/b.ts", "to": "src/c.ts", "rule": { "name": "x" } },
+      { "from": "src/c.ts", "to": "src/d.ts", "rule": { "name": "x" } }
+    ]
+  }
+}

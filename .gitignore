@@ -17,5 +17,16 @@ coverage/
 reports/mutation/
 .stryker-tmp/
 
+# Stryker's incremental-mode cache (W1-T108: restored/saved by ci.yml's mutation-ratchet job
+# via actions/cache, never committed — a stale local copy must never be mistaken for CI's)
+reports/stryker-incremental.json
+
+# generated refactor-campaign reports (W2-T3 — jscpd/depcruise/npm-audit JSON, regenerated fresh
+# by the refactor-campaign CI job every run — never committed; scripts/refactor-campaign.mjs
+# compares them against the checked-in scripts/*-baseline.json floors)
+reports/jscpd/
+reports/depcruise/
+reports/audit/
+
 # os / editor
 .DS_Store

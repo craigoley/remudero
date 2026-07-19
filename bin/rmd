@@ -1,61 +1,12 @@
 #!/usr/bin/env bash
 # rmd — Remudero CLI (proto-runner era). Thin wrapper; all logic lives in TS.
-#   rmd run-task <task-id>   run one plan/tasks.yaml entry through the loop
-#   rmd review <pr-number>   post remudero-review on a hand-opened PR (the escape
-#                            hatch: same deterministic judge, invoked by hand)
-#   rmd lint-plan [--plan <path>]
-#                            §5C Layer A: deterministic task linter (no LLM) over the whole
-#                            plan — sizing/headless-fitness/proof-shape/provenance; exits
-#                            non-zero on any blocking violation, spawns nothing (CI half; the
-#                            pre-dispatch half gates run-task/drain automatically)
-#   rmd retro [--dry-run]    sync the plan from the ledger (Architect retro);
-#                            --dry-run prints the gather + calibration table only
-#   rmd drain [--until <id>] [--max <n>] [--dry-run]
-#                            drain the DAG through run-task, stop-on-block, headroom-aware
-#   rmd daemon [--max <n>] [--poll-ms <n>]
-#                            persistent scheduler loop (STOP/PAUSE/headroom-aware); logs an
-#                            ANTHROPIC-clean-env boot assertion (env_clean, billing_mode) on start
-#   rmd daemon-plist [--poll-ms <n>] [--write]
-#                            generate the launchd unit that execs `rmd daemon` (absolute paths,
-#                            explicit PATH, no ANTHROPIC_*); loading it live is W1-T12d, operator-run
-#   rmd stop [--reason <text>]    fleet control: hard kill — checked every drain tick;
-#                            a running drain halts within one tick, a new one refuses to spawn
-#   rmd pause [--reason <text>]   fleet control: drain-and-hold — no new spawns, but an
-#                            in-flight task always runs to full completion (verdict + merge)
-#   rmd resume               fleet control: clears stop + pause; spawns resume
-#   rmd correct <task-id> --pr <n> [--reason <text>]
-#                            sanctioned operator-correction writer (P9/W1-T75): appends a
-#                            correction.provenance ledger line naming the task's TRUE merged PR,
-#                            SUPREME over every deriveStatus rung; prints derived status before/after
-#   rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s>
-#                [--detail <d>] [--recommendation <r>] [--option "label|detail"]...
-#                            open a needs-human labeled GitHub issue; MANUAL/HARD_STOP
-#                            also fire a real-time iMessage ping (BLOCKED collapses to digest)
-#   rmd notify <message>     real-time iMessage ping via osascript, no BlueBubbles dependency
-#   rmd digest [--since <iso>] [--dry-run]
-#                            roll up the ledger since <iso> (default 24h ago) into one
-#                            iMessage digest; --dry-run prints the text without sending
-#   rmd init [--tier <pro|max5x|max20x>] [--yes]
-#                            headless-safe first-run tier wizard: --tier wins outright;
-#                            confident ~/.claude.json/`/usage` evidence writes with no
-#                            prompt; a prompt fires ONLY with a real TTY present; a
-#                            TTY-absent run NEVER blocks — it falls back to a logged
-#                            safe default (no live operator required, Standing rule 18)
-#   rmd project init <repo> [--profile ts-node|ts-web|python|dotnet]
-#                --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>
-#                            fleet-inheritance onboarding primitive (MASTER-PLAN §5A,
-#                            W1-T27): generates the whole gate stack (workflows, configs,
-#                            SECURITY.md, .remudero/principles.yaml) plus the
-#                            branch-protection payload for a target repo, with the
-#                            injected baseline numbers written in as ratchet floors — a
-#                            repo never onboards at zero; prints the file list and manual
-#                            next steps, does not push/PR/arm protection itself
-#   rmd skill list          the §5B skill registry (MASTER-PLAN §5B, W1-T44): every
-#                            Architect-worker profile (setup, plan, feedback, retro,
-#                            review, refactor, design-review) is a
-#                            .remudero/skills/<name>.yaml config entry, not new code —
-#                            this resolves and lists {tools, permission_profile,
-#                            output_contract, grounding_sources, gate, tier} for each
+#
+# The full, authoritative command list lives in ONE place — the COMMANDS registry in
+# src/run-task.ts — not here. Run `rmd --help` for every command, or `rmd <cmd> --help`
+# for one (both generated from that registry, W1-T47). This header used to hand-duplicate
+# that list in prose and had already drifted from what main() actually dispatched
+# (missing dep-review/sweep/fix, stale flags on drain/daemon) — exactly the failure mode
+# a single source of truth is meant to prevent. Do not re-add a duplicate list here.
 set -euo pipefail
 # Resolve the real package root even when invoked through symlinks (npm link /
 # a global install both put `rmd` on PATH as a symlink chain, not a copy).
