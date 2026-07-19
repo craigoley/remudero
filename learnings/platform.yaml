@@ -39,8 +39,7 @@
 
 - id: shell-isolation
   subsystem: containment
-  lifecycle: quarantined
-  quarantined_reason: "assertion failed (exit 1): grep -q \"CLAUDE_CODE_SHELL_DELIBERATELY_BROKEN_PROOF_W1_T34\" src/lib/env.ts"
+  lifecycle: active
   files: [src/lib/worker.ts, src/lib/containment.ts, src/lib/settings.ts, src/lib/env.ts]
   fact: >-
     Claude Code's Bash-tool snapshot sources $HOME/.zshrc via os.homedir(); ZDOTDIR is IGNORED —
@@ -50,7 +49,7 @@
   # W1-T34 seed: the fact is pinned to src/lib/env.ts actually granting CLAUDE_CODE_SHELL — if a
   # future refactor drops that env var, this assertion (not a human noticing months later) is what
   # auto-quarantines the entry.
-  assertion: 'grep -q "CLAUDE_CODE_SHELL_DELIBERATELY_BROKEN_PROOF_W1_T34" src/lib/env.ts'
+  assertion: 'grep -q "CLAUDE_CODE_SHELL" src/lib/env.ts'
 
 # SUPERSEDED — the live example for the W1-T33 acceptance proof. This was the pre-PR#8 working
 # assumption (ZDOTDIR "obviously" isolates a spawned shell); disassembling the installed Claude Code
