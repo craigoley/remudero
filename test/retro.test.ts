@@ -6,12 +6,14 @@ import {
   buildGather,
   calibrationTable,
   codeFilesInDiff,
+  extractStandingRules,
   gatherRuns,
   mergedSince,
   mineOverrunClasses,
   ownBranchOf,
   parseLedger,
   planHealthSweep,
+  renderOrientation,
   renderOverrunProposals,
   renderPlanHealth,
   shippedSince,
@@ -382,4 +384,89 @@ test("renderOverrunProposals names the proposed fix when a class overruns", () =
     run({ runId: "R2", taskId: "W1-T9" }),
   ]);
   assert.match(renderOverrunProposals(proposals), /implement×medium/);
+});
+
+// ── docs/ORIENTATION.md (W1-T39) ───────────────────────────────────────────
+
+const STANDING_RULES_FIXTURE = `
+## 11. Open decisions
+
+Some unrelated section with a numbered list that must NOT leak into §12:
+1. not a standing rule.
+
+## 12. Standing rules
+
+1. PROVENANCE OR IT DOESN'T GO IN A PROMPT.
+2. Trust, scheduling, strikes, budgets = deterministic predicates. Never LLM decisions.
+3B. **The merge gate is a GitHub-enforced CONTRACT**, wrapped onto
+   a SECOND line that must fold back into rule 3B, never becoming its own bullet.
+20. A LAST NUMBERED RULE.
+
+- Lives at repo root. Header carries sync date + focus, his-house style.
+- A second trailing bullet that is NOT a Standing rule.
+
+## 12A. Documentation as a gated artifact, in tiers
+
+Unrelated section content that must never appear in the extracted list.
+`;
+
+test("extractStandingRules: pulls ONLY the numbered rules from §12, folding wrapped continuation lines back in", () => {
+  const rules = extractStandingRules(STANDING_RULES_FIXTURE);
+  assert.deepEqual(rules, [
+    "1. PROVENANCE OR IT DOESN'T GO IN A PROMPT.",
+    "2. Trust, scheduling, strikes, budgets = deterministic predicates. Never LLM decisions.",
+    "3B. The merge gate is a GitHub-enforced CONTRACT, wrapped onto a SECOND line that must fold back into rule 3B, never becoming its own bullet.",
+    "20. A LAST NUMBERED RULE.",
+  ]);
+});
+
+test("extractStandingRules: never leaks a numbered list from a DIFFERENT section, and stops at the trailing bullets after the numbered list", () => {
+  const rules = extractStandingRules(STANDING_RULES_FIXTURE);
+  assert.ok(!rules.some((r) => r.includes("not a standing rule")));
+  assert.ok(!rules.some((r) => r.includes("Lives at repo root")));
+  assert.ok(!rules.some((r) => r.includes("gated artifact")));
+});
+
+test("extractStandingRules: a missing §12 heading fails SOFT (empty list), never throws", () => {
+  assert.deepEqual(extractStandingRules("# Some doc\n\nNo standing rules here.\n"), []);
+});
+
+function fixtureTask(overrides: Partial<Task> = {}): Task {
+  return {
+    id: "W1-TX",
+    title: "Example next task",
+    repo: "remudero",
+    depends_on: [],
+    type: "implement",
+    verify: "auto",
+    risk: "medium",
+    status: "queued",
+    attempts: 0,
+    ...overrides,
+  };
+}
+
+test("renderOrientation: names the next runnable task, the shipped-since-marker list, and the invariants", () => {
+  const gather = buildGather({ ledgerNdjson: SHIP_LEDGER, learningsMd: "# L\n- a\n" });
+  const md = renderOrientation({
+    generatedAt: "2026-07-18T00:00:00.000Z",
+    gather,
+    nextTask: fixtureTask({ id: "W1-T7", title: "Transient-vs-strike classifier", depends_on: ["W1-T3"] }),
+    standingRules: ["1. RULE ONE.", "2. RULE TWO."],
+  });
+  assert.match(md, /# ORIENTATION/);
+  assert.match(md, /MAINTAINED BY `rmd retro`/);
+  assert.match(md, /## Next runnable task/);
+  assert.match(md, /\*\*W1-T7\*\* — Transient-vs-strike classifier/);
+  assert.match(md, /depends_on: W1-T3/);
+  assert.match(md, /## Never-do invariants/);
+  assert.match(md, /1\. RULE ONE\./);
+  assert.match(md, /2\. RULE TWO\./);
+});
+
+test("renderOrientation: no runnable task renders an explicit '(none runnable)' state, never a blank/undefined section", () => {
+  const gather = buildGather({ ledgerNdjson: "", learningsMd: "# L\n" });
+  const md = renderOrientation({ generatedAt: "2026-07-18T00:00:00.000Z", gather, standingRules: [] });
+  assert.match(md, /none runnable right now/);
+  assert.doesNotMatch(md, /undefined/);
 });

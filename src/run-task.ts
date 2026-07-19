@@ -24,6 +24,7 @@ import type { Tier, TierDetection } from "./lib/tier.js";
 import { buildProjectInit, parseProjectInitArgs } from "./lib/project-init.js";
 import {
   DEFAULT_MAX as DRAIN_DEFAULT_MAX,
+  nextRunnable,
   plannedSequence,
   renderSummary,
   resumeCommand,
@@ -43,8 +44,10 @@ import {
   buildGather,
   calibrationTable,
   codeFilesInDiff,
+  extractStandingRules,
   loadMarker,
   renderGather,
+  renderOrientation,
 } from "./lib/retro.js";
 import { appendLedger } from "./lib/ledger.js";
 import {
@@ -2419,6 +2422,27 @@ async function retroCommand(rest: string[]): Promise<number> {
   // Liveness token so a concurrent drain's prune skips this retro worktree. (See runTask.)
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
+  // W1-T39: the next-runnable task for docs/ORIENTATION.md, from the SAME DAG +
+  // GitHub-derived-status projection `rmd drain` dispatches from — never a second,
+  // divergent read path. Read from the freshly-branched worktree's plan/tasks.yaml
+  // (origin/main at branch time), same source `rmd drain` syncs from.
+  const statusPath = join(config.root, "state", "status.json");
+  let nextTask: Task | undefined;
+  try {
+    const orientationPlan = loadPlan(join(worktreePath, "plan", "tasks.yaml"));
+    const proj = projectPlan(orientationPlan, { ledgerPath, github: ghGateway(owner, repo) }, statusPath);
+    const isMerged: MergedSet = (id) => proj.get(id)?.merged ?? false;
+    const isOpenPr: OpenPrCheck = (id) => {
+      const p = proj.get(id);
+      return p?.prState === "OPEN" ? p.prNumber : undefined;
+    };
+    nextTask = nextRunnable(orientationPlan, isMerged, { isOpenPr });
+  } catch (e) {
+    // Best-effort: ORIENTATION.md's "next task" section degrades to "(none)"
+    // rather than aborting the whole retro over a plan/GitHub read hiccup.
+    log("orientation.next_task.error", { error: String((e as Error)?.message ?? e) });
+  }
+
   const prompt = retroPrompt(report, calibrationTable(gather.byType), runId);
   try {
     const worker = await spawnWorker({
@@ -2440,7 +2464,41 @@ async function retroCommand(rest: string[]): Promise<number> {
       ...workerLedgerFields(worker),
     });
 
-    // Ensure the branch reached origin (worker pushes without -u).
+    // W1-T39: docs/ORIENTATION.md is HARNESS-OWNED — deterministically regenerated
+    // here (never LLM-authored) so it can never go stale by hand-copy or by an
+    // Architect forgetting to touch it. Runs AFTER the worker so it also reflects
+    // whatever the Architect just changed in MASTER-PLAN.md §12 (Standing rules).
+    // A regenerated-but-unstaged file would silently vanish from the PR, so this
+    // ALWAYS commits it as its own labeled commit when content changed — never
+    // relying on the Architect to `git add` it.
+    let orientationCommitted = false;
+    try {
+      const standingRules = extractStandingRules(readFileSync(join(worktreePath, "MASTER-PLAN.md"), "utf8"));
+      const orientationMd = renderOrientation({
+        generatedAt: new Date().toISOString(),
+        gather,
+        nextTask,
+        standingRules,
+      });
+      mkdirSync(join(worktreePath, "docs"), { recursive: true });
+      writeFileSync(join(worktreePath, "docs", "ORIENTATION.md"), orientationMd);
+      execFileSync("git", ["-C", worktreePath, "add", "docs/ORIENTATION.md"]);
+      try {
+        execFileSync("git", ["-C", worktreePath, "diff", "--cached", "--quiet"]);
+        // exit 0 ⇒ nothing staged ⇒ ORIENTATION.md content is unchanged; nothing to commit.
+      } catch {
+        // non-zero ⇒ staged changes exist ⇒ commit them as their own, clearly-labeled commit.
+        execFileSync("git", ["-C", worktreePath, "commit", "-m", "rmd retro: regenerate docs/ORIENTATION.md"]);
+        orientationCommitted = true;
+        log("orientation.regenerated", {});
+      }
+    } catch (e) {
+      log("orientation.write.error", { error: String((e as Error)?.message ?? e) });
+    }
+
+    // Ensure the branch reached origin (worker pushes without -u). Also push when
+    // ORIENTATION.md was regenerated AFTER the worker's own push, so that commit
+    // isn't silently left local (never reaches the PR the worker already opened).
     let onOrigin = false;
     try {
       execFileSync("git", ["-C", worktreePath, "ls-remote", "--exit-code", "origin", branch], { stdio: "ignore" });
@@ -2448,7 +2506,7 @@ async function retroCommand(rest: string[]): Promise<number> {
     } catch {
       onOrigin = false;
     }
-    if (!onOrigin) execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+    if (!onOrigin || orientationCommitted) execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
 
     let prUrl = parseReport([worker.text, worker.blocks.join("\n")].join("\n"))?.prUrl;
     if (!prUrl) {
@@ -2542,6 +2600,9 @@ function retroPrompt(gatherReport: string, calTable: string, runId: string): str
     "tier than implement workers. You are fed ONLY the deterministic GATHER below and the current",
     "MASTER-PLAN.md in this working directory. Produce a PLAN-ONLY sync PR — edit ONLY MASTER-PLAN.md.",
     "NEVER touch src/ or test/ (this is plan-only; a code change fails the retro).",
+    "NEVER touch docs/ORIENTATION.md — it is HARNESS-OWNED: the harness deterministically regenerates",
+    "it from this same gather right after you finish and commits it separately. Any edit you make to it",
+    "is overwritten.",
     "",
     "=== DETERMINISTIC GATHER (no LLM produced this) ===",
     gatherReport,
