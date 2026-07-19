@@ -105,6 +105,15 @@ export interface LearningEntry {
    * recorded so a human reading the shard sees why without re-running it.
    */
   quarantinedReason?: string;
+  /**
+   * (W1-T50) Marks a `failures`-subsystem incident whose SYMPTOM is
+   * operator-visible (something you'd see running `rmd`, not only in a
+   * worker's internal diff). Optional; defaults to `false` — most failures
+   * entries are dev-time postmortems, not operator-facing. `true` obligates a
+   * matching `docs/troubleshooting.md` entry; `checkTroubleshootingCoverage`
+   * (src/lib/review.ts) enforces that at review time from the diff alone.
+   */
+  operatorImpact?: boolean;
   /** Repo-relative globs; an entry matches a task iff one glob hits a task file. */
   files: string[];
   /** The fact itself — one line, the thing a worker inherits. */
@@ -210,6 +219,10 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
         `learnings '${id}': 'quarantined_reason' is set but 'lifecycle' is not 'quarantined' (${sourceLabel}).`,
       );
     }
+    if (e.operator_impact !== undefined && typeof e.operator_impact !== "boolean") {
+      throw new LearningsError(`learnings '${id}': 'operator_impact' must be a boolean (${sourceLabel}).`);
+    }
+    const operatorImpact = e.operator_impact === true;
     return {
       id,
       subsystem: typeof e.subsystem === "string" ? e.subsystem : "",
@@ -217,6 +230,7 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
       supersededBy,
       assertion,
       quarantinedReason,
+      operatorImpact,
       files: e.files as string[],
       fact: e.fact,
       src: e.src,

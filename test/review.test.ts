@@ -10,6 +10,7 @@ import {
   checkRefactorHonesty,
   checkSatisfiedByGuard,
   checkTestTheater,
+  checkTroubleshootingCoverage,
   detectTestTheater,
   failSummary,
   floorDegradedAnnotation,
@@ -461,6 +462,59 @@ const PURE_REFACTOR_DIFF = [
   "+};",
 ].join("\n");
 
+// A diff that adds a NEW operator-impacting failures entry, with NO accompanying
+// docs/troubleshooting.md touch.
+const NEW_OPERATOR_FAILURE_NO_DOCS_DIFF = [
+  "diff --git a/learnings/failures.yaml b/learnings/failures.yaml",
+  "+++ b/learnings/failures.yaml",
+  "@@",
+  "+- id: new-operator-visible-bug",
+  "+  subsystem: cli",
+  "+  lifecycle: active",
+  "+  operator_impact: true",
+  "+  files: [bin/rmd]",
+  '+  fact: "some new operator-visible incident"',
+  "+  src: PR#999",
+].join("\n");
+
+// The SAME new entry, but docs/troubleshooting.md is updated in the same diff
+// naming the new entry's id.
+const NEW_OPERATOR_FAILURE_WITH_DOCS_DIFF = [
+  NEW_OPERATOR_FAILURE_NO_DOCS_DIFF,
+  "diff --git a/docs/troubleshooting.md b/docs/troubleshooting.md",
+  "+++ b/docs/troubleshooting.md",
+  "@@",
+  "+## Something breaks",
+  "+[learnings#new-operator-visible-bug]",
+].join("\n");
+
+// A new failures entry WITHOUT operator_impact: true — never triggers the item.
+const NEW_NON_OPERATOR_FAILURE_DIFF = [
+  "diff --git a/learnings/failures.yaml b/learnings/failures.yaml",
+  "+++ b/learnings/failures.yaml",
+  "@@",
+  "+- id: internal-only-thing",
+  "+  subsystem: reviewer",
+  "+  lifecycle: active",
+  "+  files: [src/lib/review.ts]",
+  '+  fact: "an internal-only detail"',
+  "+  src: PR#999",
+].join("\n");
+
+// An EXISTING entry gains a field (operator_impact: true) — the `- id:` line
+// itself is unchanged CONTEXT, not an add, so this is a MODIFICATION, not a new
+// entry, and must never trip the item.
+const EXISTING_FAILURE_GAINS_FLAG_DIFF = [
+  "diff --git a/learnings/failures.yaml b/learnings/failures.yaml",
+  "+++ b/learnings/failures.yaml",
+  "@@",
+  " - id: reviewer-floor-casing-blind",
+  "   subsystem: reviewer",
+  "   lifecycle: active",
+  "+  operator_impact: true",
+  "   files: [src/lib/review.ts]",
+].join("\n");
+
 // A diff that ADDS a satisfied_by line to plan/tasks.yaml.
 const SATISFIED_BY_DIFF = [
   "diff --git a/plan/tasks.yaml b/plan/tasks.yaml",
@@ -538,6 +592,31 @@ test("rubric docs-awareness (W1-T30): a gate-surface change with no docs update 
   assert.equal(checkDocsAwareness(CLEAN_DIFF, "").pass, true);
 });
 
+test("rubric troubleshooting-coverage (W1-T50): a new operator_impact:true failure with no docs/troubleshooting.md entry FAILS; adding the entry PASSES; a stated reason PASSES", () => {
+  const noDocs = checkTroubleshootingCoverage(NEW_OPERATOR_FAILURE_NO_DOCS_DIFF, "Added a new failure learning.");
+  assert.equal(noDocs.pass, false);
+  assert.match(noDocs.reason, /new-operator-visible-bug/);
+  // The identical new entry, with docs/troubleshooting.md naming its id, passes.
+  assert.equal(
+    checkTroubleshootingCoverage(NEW_OPERATOR_FAILURE_WITH_DOCS_DIFF, "Added a new failure learning.").pass,
+    true,
+  );
+  // No docs/ touched, but the report STATES why not — also passes.
+  assert.equal(
+    checkTroubleshootingCoverage(
+      NEW_OPERATOR_FAILURE_NO_DOCS_DIFF,
+      "Added a new failure learning. no troubleshooting entry because it only affects an internal test harness.",
+    ).pass,
+    true,
+  );
+  // A new failures entry WITHOUT operator_impact: true never trips the item.
+  assert.equal(checkTroubleshootingCoverage(NEW_NON_OPERATOR_FAILURE_DIFF, "").pass, true);
+  // Adding operator_impact: true to an EXISTING entry (not a new one) never trips it.
+  assert.equal(checkTroubleshootingCoverage(EXISTING_FAILURE_GAINS_FLAG_DIFF, "").pass, true);
+  // A diff touching neither learnings/failures.yaml nor docs never trips it.
+  assert.equal(checkTroubleshootingCoverage(CLEAN_DIFF, "").pass, true);
+});
+
 test("rubric satisfied_by guard: a worker-authored satisfied_by FAILS; a plan-only human PR PASSES", () => {
   // A worker (non-plan-only) adding satisfied_by to its own criterion = editing the criteria.
   const worker = checkSatisfiedByGuard(SATISFIED_BY_DIFF, { planOnly: false, humanAuthored: false });
@@ -549,12 +628,20 @@ test("rubric satisfied_by guard: a worker-authored satisfied_by FAILS; a plan-on
   assert.equal(checkSatisfiedByGuard(CLEAN_DIFF).pass, true);
 });
 
-test("judgeRubric: a clean single-concern diff passes ALL FIVE items + the guard", () => {
+test("judgeRubric: a clean single-concern diff passes ALL SIX items + the guard", () => {
   const r = judgeRubric({ diff: CLEAN_DIFF, report: CLEAN_REPORT });
   assert.equal(r.pass, true, JSON.stringify(r.failures));
   assert.deepEqual(
     r.items.map((i) => i.key).sort(),
-    ["callers-audited", "docs-awareness", "one-concern", "refactor-honesty", "satisfied-by-guard", "test-theater"],
+    [
+      "callers-audited",
+      "docs-awareness",
+      "one-concern",
+      "refactor-honesty",
+      "satisfied-by-guard",
+      "test-theater",
+      "troubleshooting-coverage",
+    ],
   );
   assert.ok(r.items.every((i) => i.pass));
 });
@@ -575,6 +662,12 @@ test("judgeRubric: each falsifier trips its own item and fails the whole rubric"
 
   const noAwareness = judgeRubric({ diff: SURFACE_NO_DOCS_DIFF, report: "added a new gate item" });
   assert.ok(noAwareness.failures.some((f) => f.key === "docs-awareness"));
+
+  const noTroubleshooting = judgeRubric({
+    diff: NEW_OPERATOR_FAILURE_NO_DOCS_DIFF,
+    report: "added a new failure learning",
+  });
+  assert.ok(noTroubleshooting.failures.some((f) => f.key === "troubleshooting-coverage"));
 
   const sneaky = judgeRubric({ diff: SATISFIED_BY_DIFF, report: "unblock myself" });
   assert.ok(sneaky.failures.some((f) => f.key === "satisfied-by-guard"));

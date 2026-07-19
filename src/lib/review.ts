@@ -864,6 +864,12 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
  * update `docs/` OR state why not in the REPORT — this is the Tier-B half of
  * "docs are not evidence unless CI proves they match the code"; Tier A (generated
  * docs, byte-equality in CI) is a separate, later mechanism (W1-T47/T48).
+ * plus a sixth item, TROUBLESHOOTING COVERAGE (§12A Tier B, W1-T50): a diff that
+ * ADDS a new `operator_impact: true` entry to `learnings/failures.yaml` must also
+ * touch `docs/troubleshooting.md` with that entry's id, OR state why not in the
+ * REPORT — the same awareness-layer pattern as DOCS AWARENESS, narrowed to the
+ * failures corpus so an operator-impacting incident always gets a symptom/cause/
+ * fix write-up, not just an internal learning.
  * plus the GUARD: no worker-authored `satisfied_by` (a diff that ADDS a
  * `satisfied_by` line to plan/tasks.yaml FAILS unless the PR is plan-only AND
  * human-authored — `satisfied_by` is Architect-only; a worker adding it to its own
@@ -881,6 +887,7 @@ export type RubricKey =
   | "test-theater"
   | "refactor-honesty"
   | "docs-awareness"
+  | "troubleshooting-coverage"
   | "satisfied-by-guard";
 
 /** One rubric item's verdict over a (diff, report). */
@@ -1182,6 +1189,96 @@ export function checkDocsAwareness(diff: string, report?: string): RubricItemRes
   };
 }
 
+// ── Item 6: TROUBLESHOOTING COVERAGE (§12A Tier B, W1-T50) ─────────────────
+
+const FAILURES_LEARNINGS_PATH = "learnings/failures.yaml";
+const TROUBLESHOOTING_DOC_PATH = "docs/troubleshooting.md";
+
+/** One `- id: <id>` list-item start line in a learnings shard. */
+const LEARNING_ID_LINE_RE = /^-\s*id:\s*(\S+)\s*$/;
+
+/**
+ * The ids of entries NEWLY ADDED (not merely edited) to `learnings/failures.yaml`
+ * that carry `operator_impact: true`. "Newly added" is diff-scoped exactly like
+ * {@link checkCallersAudited}'s add/del pairing: a `- id: <id>` line that appears
+ * only on an ADD line (never as an unchanged context line, and never on a DEL
+ * line) starts a brand-new entry; a field added to an EXISTING entry leaves the
+ * `- id:` line itself on a context line. Each new entry's span runs from its
+ * `- id:` add-line to the next `- id:` add-line (or end of the file's lines).
+ */
+function newOperatorImpactfulFailureIds(lines: DiffLine[]): string[] {
+  const failureLines = lines.filter((l) => l.file === FAILURES_LEARNINGS_PATH);
+  const ids: string[] = [];
+  let current: { id: string; operatorImpact: boolean } | null = null;
+  const flush = () => {
+    if (current?.operatorImpact) ids.push(current.id);
+    current = null;
+  };
+  for (const l of failureLines) {
+    if (l.kind !== "add") continue;
+    const idMatch = l.text.match(LEARNING_ID_LINE_RE);
+    if (idMatch) {
+      flush();
+      current = { id: idMatch[1], operatorImpact: false };
+      continue;
+    }
+    if (current && /^\s*operator_impact:\s*true\s*$/.test(l.text)) {
+      current.operatorImpact = true;
+    }
+  }
+  flush();
+  return ids;
+}
+
+/**
+ * A reason the report STATES for why a new operator-impacting failure has no
+ * troubleshooting entry — same shape as {@link STATED_REASON_RE}, scoped to this
+ * item's own excuse phrase so the two items' excuses can't be confused for each
+ * other.
+ */
+const TROUBLESHOOTING_STATED_REASON_RE =
+  /\bno\s+troubleshooting\s+entry\b[^.\n]{0,6}(?:because|:|-|—)\s*\S/i;
+
+/**
+ * TROUBLESHOOTING COVERAGE: a diff that adds a new `operator_impact: true` entry
+ * to `learnings/failures.yaml` must also touch `docs/troubleshooting.md` naming
+ * that entry's id, or the report must state why not. Mirrors DOCS AWARENESS
+ * (Item 5) one level narrower: the failures corpus specifically, so an
+ * operator-visible incident always gets a symptom/cause/fix write-up.
+ */
+export function checkTroubleshootingCoverage(diff: string, report?: string): RubricItemResult {
+  const lines = walkDiff(diff);
+  const newIds = newOperatorImpactfulFailureIds(lines);
+  if (newIds.length === 0) {
+    return {
+      key: "troubleshooting-coverage",
+      pass: true,
+      reason: "no new operator_impact:true entry added to learnings/failures.yaml",
+    };
+  }
+  const docsLines = lines.filter((l) => l.file === TROUBLESHOOTING_DOC_PATH && l.kind === "add");
+  const missing = newIds.filter((id) => !docsLines.some((l) => l.text.includes(id)));
+  if (missing.length === 0) {
+    return {
+      key: "troubleshooting-coverage",
+      pass: true,
+      reason: `docs/troubleshooting.md updated for ${newIds.join(", ")}`,
+    };
+  }
+  if (TROUBLESHOOTING_STATED_REASON_RE.test(report ?? "")) {
+    return {
+      key: "troubleshooting-coverage",
+      pass: true,
+      reason: "report states why no troubleshooting entry was needed",
+    };
+  }
+  return {
+    key: "troubleshooting-coverage",
+    pass: false,
+    reason: `new operator-impacting failure(s) with no docs/troubleshooting.md entry and no stated reason: ${missing.join(", ")}`,
+  };
+}
+
 // ── The GUARD: no worker-authored satisfied_by ─────────────────────────────
 
 /**
@@ -1213,9 +1310,10 @@ export function checkSatisfiedByGuard(diff: string, meta: RubricPrMeta = {}): Ru
 }
 
 /**
- * Run the full rubric — the four §5 layer-2 judgment items plus the satisfied_by
- * guard — over a (diff, report) and PR-level facts. ADVISORY: `pass` rolls up all
- * items, but the binding gate is layer 1. `failures` names exactly which items tripped.
+ * Run the full rubric — the four §5 layer-2 judgment items plus DOCS AWARENESS,
+ * TROUBLESHOOTING COVERAGE, and the satisfied_by guard — over a (diff, report)
+ * and PR-level facts. ADVISORY: `pass` rolls up all items, but the binding gate
+ * is layer 1. `failures` names exactly which items tripped.
  */
 export function judgeRubric(input: RubricInput): RubricResult {
   const items: RubricItemResult[] = [
@@ -1224,6 +1322,7 @@ export function judgeRubric(input: RubricInput): RubricResult {
     checkTestTheater(input.diff),
     checkRefactorHonesty(input.diff, input.report),
     checkDocsAwareness(input.diff, input.report),
+    checkTroubleshootingCoverage(input.diff, input.report),
     checkSatisfiedByGuard(input.diff, { planOnly: input.planOnly, humanAuthored: input.humanAuthored }),
   ];
   const failures = items.filter((i) => !i.pass);
