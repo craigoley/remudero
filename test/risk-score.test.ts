@@ -3,14 +3,18 @@ import { test } from "node:test";
 import {
   blastRadiusFactor,
   confidenceFactor,
+  decisionHasExplicitReversibilityCaveat,
+  decisionRiskBand,
   isAutoChooseAllowed,
   noveltyFactor,
   planRiskGate,
   reversibilityFactor,
   scoreRisk,
+  shouldRecordDecision,
   type DiffSummary,
   type RiskTaskMetadata,
 } from "../src/lib/risk-score.js";
+import { parseDecisionRequest } from "../src/lib/worker.js";
 
 function diffOf(...paths: string[]): DiffSummary {
   return { files: paths.map((path) => ({ path, additions: 1, deletions: 0 })) };
@@ -178,4 +182,74 @@ test("scoreRisk: overall band is the WORST of the four factors, not an average",
   assert.equal(verdict.band, "critical");
   const blastRadius = verdict.factors.find((f) => f.factor === "blast_radius");
   assert.equal(blastRadius?.band, "low"); // the OTHER factor stays low; folding takes the worst, not a blend
+});
+
+// ── shouldRecordDecision (W1-T32) — DECISIONS.md hygiene ──────────────────
+// Acceptance: a trivial filename auto-choice is ledgered but NOT appended to
+// DECISIONS.md; a medium+ (or reversibility-noted) decision IS appended —
+// over recorded decision fixtures. Nothing is ever silently dropped, only
+// promoted-or-not to the durable record (the caller always logs
+// decision.autochoose regardless of this verdict).
+
+const TRIVIAL_FILENAME_DECISION = [
+  "DECISION_REQUEST",
+  "- docs/spike.md",
+  "- docs/spike-hello.md (RECOMMENDED)",
+  "Reversibility: single new file, revert the sandbox PR to undo.",
+].join("\n");
+
+test("shouldRecordDecision: a trivial filename pick (the real WS-0 fixture) is low-risk and NOT recorded", () => {
+  const decision = parseDecisionRequest(TRIVIAL_FILENAME_DECISION);
+  assert.ok(decision);
+  assert.equal(decisionRiskBand(decision!), "low");
+  assert.equal(decisionHasExplicitReversibilityCaveat(decision!), false);
+  const verdict = shouldRecordDecision(decision!);
+  assert.equal(verdict.record, false);
+  assert.equal(verdict.band, "low");
+});
+
+const MEDIUM_RISK_DECISION = [
+  "DECISION_REQUEST",
+  "- gate the PreToolUse hook on a config flag",
+  "- rewrite the hook entirely (RECOMMENDED)",
+  "Reversibility: revert the PR.",
+].join("\n");
+
+test("shouldRecordDecision: a decision touching a hook (blast-radius keyword) is medium-risk and IS recorded", () => {
+  const decision = parseDecisionRequest(MEDIUM_RISK_DECISION);
+  assert.ok(decision);
+  assert.equal(decisionRiskBand(decision!), "medium");
+  const verdict = shouldRecordDecision(decision!);
+  assert.equal(verdict.record, true);
+  assert.equal(verdict.band, "medium");
+});
+
+const IRREVERSIBLE_CAVEAT_DECISION = [
+  "DECISION_REQUEST",
+  "- keep the duplicate rows",
+  "- delete the duplicate rows (RECOMMENDED)",
+  "Reversibility: this is NOT reversible — the rows cannot be undone once deleted.",
+].join("\n");
+
+test("shouldRecordDecision: an explicit irreversibility caveat IS recorded even independent of keyword band", () => {
+  const decision = parseDecisionRequest(IRREVERSIBLE_CAVEAT_DECISION);
+  assert.ok(decision);
+  assert.equal(decisionHasExplicitReversibilityCaveat(decision!), true);
+  const verdict = shouldRecordDecision(decision!);
+  assert.equal(verdict.record, true);
+  assert.equal(verdict.band, "high");
+});
+
+test("shouldRecordDecision: the routine 'revert the PR' boilerplate alone is NOT an explicit caveat", () => {
+  const decision = parseDecisionRequest(TRIVIAL_FILENAME_DECISION);
+  assert.ok(decision);
+  assert.equal(decisionHasExplicitReversibilityCaveat(decision!), false);
+});
+
+test("shouldRecordDecision: is a pure, deterministic function of the decision text", () => {
+  const decision = parseDecisionRequest(MEDIUM_RISK_DECISION);
+  assert.ok(decision);
+  const first = shouldRecordDecision(decision!);
+  const second = shouldRecordDecision(decision!);
+  assert.deepEqual(first, second);
 });

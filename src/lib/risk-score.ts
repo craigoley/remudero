@@ -1,5 +1,6 @@
 import { DIAGNOSE_AT_STRIKES } from "./classify.js";
 import type { JudgeState } from "./flight-judge.js";
+import type { DecisionRequest } from "./worker.js";
 
 /**
  * Risk scoring (Layer 3) — MASTER-PLAN §4B, W1-T22.
@@ -338,4 +339,118 @@ export function planRiskGate(verdict: RiskScoreVerdict): RiskGateAction {
 /** Convenience predicate a caller can use without re-deriving the gate action. */
 export function isAutoChooseAllowed(verdict: RiskScoreVerdict): boolean {
   return verdict.band === "low";
+}
+
+// ── Decision-record risk (W1-T32) — DECISIONS.md hygiene ──────────────────
+//
+// Auto-choose (§4) resolves EVERY DECISION_REQUEST to its RECOMMENDED option;
+// appending each one to DECISIONS.md — including trivial filename picks —
+// buries the decisions that actually matter under noise. This is a THIRD,
+// distinct risk read from {@link scoreRisk} (which grades a DIFF the worker
+// already produced): at auto-choose time there is no diff yet, only the
+// DECISION_REQUEST text itself, so the signals are keyword-based over that
+// text — same shape (deterministic, no clock/random/LLM call), different
+// inputs. {@link shouldRecordDecision} is the pure gate the auto-choose path
+// (run-task.ts) calls before appending: LOW-banded with no explicit
+// reversibility caveat -> ledger only (the `decision.autochoose` line still
+// fires — nothing is ever silently dropped); medium+ OR an EXPLICIT
+// reversibility caveat -> DECISIONS.md.
+
+/**
+ * Keyword classes that make a decision worth a human's future attention even
+ * though the diff doesn't exist yet to scan (mirrors blastRadiusFactor's
+ * CRITICAL touched-path list above, but read from decision TEXT, not paths):
+ * credentials/secrets, schema/migration/data-destructive operations, and the
+ * mechanisms the other gates depend on (hooks, sandbox, CI, branch
+ * protection, dependencies/network egress).
+ */
+const DECISION_MEDIUM_RISK_SIGNAL = new RegExp(
+  [
+    "credential",
+    "secret",
+    "token",
+    "api[-_ ]?key",
+    "migration",
+    "schema",
+    "destructive",
+    "\\bdelete\\b",
+    "\\bdrop\\b",
+    "production",
+    "branch protection",
+    "permission",
+    "\\bhook",
+    // NOT bare "sandbox" — every decision's boilerplate rollback note reads
+    // "revert the sandbox PR" (every worker runs in a sandboxed worktree), so
+    // that alone must never trip this signal. Only an ACTUAL sandbox/permission
+    // mechanism change counts.
+    "sandbox\\s+(?:setting|permission|config|escape|policy)",
+    "\\bci\\b",
+    "workflow",
+    "\\.github",
+    "settings\\.json",
+    "network egress",
+    "dependenc", // dependency / dependencies
+  ].join("|"),
+  "i",
+);
+
+/**
+ * An EXPLICIT irreversibility caveat — not the routine "revert the PR"
+ * boilerplate every well-formed DECISION_REQUEST already carries (the
+ * OUTPUT CONTRACT requires *a* reversibility note on every decision, so bare
+ * presence of one can't be the signal), but language that flags the change
+ * is NOT a clean revert. Mirrors risk-score.ts's `metadata.irreversible`
+ * above: explicit, stated by the text, never inferred from keyword-guessing.
+ */
+const EXPLICIT_IRREVERSIBILITY_CAVEAT = new RegExp(
+  [
+    "not\\s+(?:easily\\s+|cleanly\\s+)?reversible",
+    "irreversible",
+    "cannot\\s+be\\s+(?:undone|reverted)",
+    "no\\s+clean\\s+revert",
+    "one-way\\s+door",
+    "\\bpermanent\\b",
+  ].join("|"),
+  "i",
+);
+
+/**
+ * Deterministic risk band read from a DECISION_REQUEST's own text — no diff
+ * exists yet at auto-choose time, so this scans options + recommendation +
+ * surrounding prose (the parser's `raw` field) instead of touched paths.
+ */
+export function decisionRiskBand(decision: Pick<DecisionRequest, "raw">): RiskBand {
+  if (EXPLICIT_IRREVERSIBILITY_CAVEAT.test(decision.raw)) return "high";
+  if (DECISION_MEDIUM_RISK_SIGNAL.test(decision.raw)) return "medium";
+  return "low";
+}
+
+/** Whether the decision's own text carries an EXPLICIT (not boilerplate) reversibility caveat. */
+export function decisionHasExplicitReversibilityCaveat(decision: Pick<DecisionRequest, "raw">): boolean {
+  return EXPLICIT_IRREVERSIBILITY_CAVEAT.test(decision.raw);
+}
+
+export interface DecisionRecordVerdict {
+  /** true -> append to DECISIONS.md; false -> ledger-only (decision.autochoose still fires). */
+  record: boolean;
+  band: RiskBand;
+  reason: string;
+}
+
+/**
+ * The pure gate the auto-choose path (run-task.ts) calls before appending to
+ * DECISIONS.md (W1-T32 acceptance): a decision lands in the durable record
+ * ONLY if its risk is >= medium OR it carries an explicit reversibility
+ * caveat; everything else is ledger-only, never silently dropped.
+ */
+export function shouldRecordDecision(decision: Pick<DecisionRequest, "raw">): DecisionRecordVerdict {
+  const band = decisionRiskBand(decision);
+  const explicitCaveat = decisionHasExplicitReversibilityCaveat(decision);
+  const record = band !== "low" || explicitCaveat;
+  const reason = explicitCaveat
+    ? "explicit reversibility caveat in the decision text"
+    : band !== "low"
+      ? `${band}-risk signal in the decision text`
+      : "low-risk, no explicit reversibility caveat — ledger only";
+  return { record, band, reason };
 }

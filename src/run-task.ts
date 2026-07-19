@@ -131,6 +131,7 @@ import {
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "./lib/drain-lock.js";
 import { acquireInflightLock, InflightLockError } from "./lib/inflight-lock.js";
 import { classifyFailure, MAX_TRANSIENT_RETRIES, type FailureSignal } from "./lib/classify.js";
+import { shouldRecordDecision } from "./lib/risk-score.js";
 import {
   consumeStop,
   pauseDetail,
@@ -1742,15 +1743,26 @@ async function runTask(
     const decision = parseDecisionRequest(fullText(impl));
     if (decision && !parseReport(fullText(impl))?.prUrl) {
       const chosen = decision.recommended ?? decision.options[0] ?? "(first option)";
-      appendFileSync(
-        join(repoRoot, "DECISIONS.md"),
-        `\n## ${new Date().toISOString()} — ${taskId} (${runId})\n` +
-          `- Options: ${decision.options.join(" | ")}\n` +
-          `- Chosen (RECOMMENDED, auto): ${chosen}\n` +
-          `- Rollback: revert the PR.\n`,
+      // W1-T32: DECISIONS.md hygiene. Every DECISION_REQUEST is auto-chosen and
+      // ledgered — that never changes — but only decisions worth a human's
+      // future attention (risk >= medium, or an explicit reversibility
+      // caveat) get PROMOTED to the durable, human-read record. A trivial
+      // filename pick stays ledger-only instead of burying real decisions.
+      const recordVerdict = shouldRecordDecision(decision);
+      if (recordVerdict.record) {
+        appendFileSync(
+          join(repoRoot, "DECISIONS.md"),
+          `\n## ${new Date().toISOString()} — ${taskId} (${runId})\n` +
+            `- Options: ${decision.options.join(" | ")}\n` +
+            `- Chosen (RECOMMENDED, auto): ${chosen}\n` +
+            `- Risk: ${recordVerdict.band} (${recordVerdict.reason})\n` +
+            `- Rollback: revert the PR.\n`,
+        );
+      }
+      log("decision.autochoose", { chosen, recorded: recordVerdict.record, risk_band: recordVerdict.band });
+      say(
+        `DECISION_REQUEST auto-chose: ${chosen} (${recordVerdict.record ? "recorded in DECISIONS.md" : "ledger-only, " + recordVerdict.band + " risk"})`,
       );
-      log("decision.autochoose", { chosen });
-      say(`DECISION_REQUEST auto-chose: ${chosen}`);
       impl = account(
         await spawnWorker({
           cwd: worktreePath,
