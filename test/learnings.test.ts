@@ -285,6 +285,29 @@ test("loadLearnings rejects an invalid lifecycle value", () => {
   assert.throws(() => loadLearnings(path), /'lifecycle' must be 'active', 'superseded', or 'quarantined'/);
 });
 
+// ── operator_impact (W1-T50): a failures entry obligating a troubleshooting entry ──
+
+test("a bare entry (no operator_impact:) defaults to false", () => {
+  const path = writeCorpus("- id: bare\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n");
+  const [entry] = loadLearnings(path);
+  assert.equal(entry.operatorImpact, false);
+});
+
+test("loadLearnings accepts operator_impact: true", () => {
+  const path = writeCorpus(
+    "- id: x\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  operator_impact: true\n",
+  );
+  const [entry] = loadLearnings(path);
+  assert.equal(entry.operatorImpact, true);
+});
+
+test("loadLearnings rejects a non-boolean operator_impact", () => {
+  const path = writeCorpus(
+    "- id: bad\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  operator_impact: yes-please\n",
+  );
+  assert.throws(() => loadLearnings(path), /'operator_impact' must be a boolean/);
+});
+
 test("loadLearnings rejects superseded_by set without lifecycle: superseded", () => {
   const path = writeCorpus(
     "- id: bad\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  superseded_by: other\n",
