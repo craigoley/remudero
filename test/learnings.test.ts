@@ -12,7 +12,9 @@ import {
   loadLearningsCorpus,
   loadLearningsForTaskFiles,
   loadLearningsIndex,
+  renderDoctrinePreamble,
   renderLearningsContext,
+  renderMatchedLearnings,
   selectLearnings,
   type LearningEntry,
 } from "../src/lib/learnings.js";
@@ -113,7 +115,7 @@ test("renderLearningsContext always injects the distrust rule and the autonomy c
 
 test("a rendered prompt carries the distrust string, the autonomy string, and a matched LEARNINGS line", () => {
   const { selected } = selectLearnings(CORPUS, ["src/lib/worker.ts"]);
-  const prompt = renderImplementPrompt(task({ files: ["src/lib/worker.ts"] }), "", "RUN-1", renderLearningsContext(selected));
+  const prompt = renderImplementPrompt(task({ files: ["src/lib/worker.ts"] }), "", "RUN-1", renderMatchedLearnings(selected));
   assert.ok(prompt.includes(DISTRUST_RULE), "distrust rule injected");
   assert.ok(prompt.includes(AUTONOMY_CLAUSE), "autonomy clause injected");
   assert.match(prompt, /ZDOTDIR is IGNORED.*\[src: learnings#shell-isolation\]/, "a provenance-tagged learning line");
@@ -123,9 +125,62 @@ test("a rendered prompt carries the distrust string, the autonomy string, and a 
 
 test("injected LEARNINGS context passes the provenance linter", () => {
   const { selected } = selectLearnings(CORPUS, ["src/lib/worker.ts"]);
-  const prompt = renderImplementPrompt(task({ files: ["src/lib/worker.ts"] }), "", "RUN-1", renderLearningsContext(selected));
+  const prompt = renderImplementPrompt(task({ files: ["src/lib/worker.ts"] }), "", "RUN-1", renderMatchedLearnings(selected));
   assert.doesNotThrow(() => assertProvenance(prompt));
   assert.equal(lintPrompt(prompt).ok, true);
+});
+
+// ── CACHE-AWARE ASSEMBLY: stable Tier-0 preamble first, volatile Tier-1
+// matched learnings last (MASTER-PLAN §8A / W1-T35) ─────────────────────────
+
+test("the rendered prompt places the doctrine preamble BEFORE the matched-learnings block", () => {
+  const { selected } = selectLearnings(CORPUS, ["src/lib/worker.ts"]);
+  const prompt = renderImplementPrompt(
+    task({ files: ["src/lib/worker.ts"] }),
+    "some recon observation",
+    "RUN-1",
+    renderMatchedLearnings(selected),
+  );
+  const doctrineIdx = prompt.indexOf(DISTRUST_RULE);
+  const learningIdx = prompt.indexOf("ZDOTDIR is IGNORED");
+  assert.ok(doctrineIdx >= 0, "doctrine preamble must be present");
+  assert.ok(learningIdx >= 0, "matched-learnings block must be present");
+  assert.ok(doctrineIdx < learningIdx, "the invariant preamble must precede the matched-learnings block");
+});
+
+test("the stable prefix (# CONTEXT + doctrine preamble) is BYTE-IDENTICAL across two different tasks/recon/matched-learnings — the cacheable prefix", () => {
+  const promptA = renderImplementPrompt(
+    task({ id: "T-A", files: ["a.ts"], prompt: "task A body" }),
+    "recon observation for A",
+    "RUN-1",
+    "",
+  );
+  const promptB = renderImplementPrompt(
+    task({ id: "T-B", files: ["b.ts"], prompt: "an entirely different task B body" }),
+    "a totally different recon observation for B",
+    "RUN-2",
+    renderMatchedLearnings(selectLearnings(CORPUS, ["src/lib/worker.ts"]).selected),
+  );
+  const stablePrefix = ["# CONTEXT", renderDoctrinePreamble()].join("\n");
+  assert.equal(promptA.slice(0, stablePrefix.length), stablePrefix);
+  assert.equal(promptB.slice(0, stablePrefix.length), stablePrefix);
+  assert.equal(
+    promptA.slice(0, stablePrefix.length),
+    promptB.slice(0, stablePrefix.length),
+    "an early edit to per-task content must never move/alter the stable doctrine prefix",
+  );
+});
+
+test("renderMatchedLearnings carries ONLY the matched facts, never the doctrine lines", () => {
+  const { selected } = selectLearnings(CORPUS, ["src/lib/worker.ts"]);
+  const matched = renderMatchedLearnings(selected);
+  assert.ok(!matched.includes(DISTRUST_RULE), "doctrine must not leak into the matched-learnings block");
+  assert.ok(!matched.includes(AUTONOMY_CLAUSE), "doctrine must not leak into the matched-learnings block");
+  assert.match(matched, /ZDOTDIR is IGNORED/);
+});
+
+test("renderMatchedLearnings([]) is empty — an empty selection injects no matched-learnings block", () => {
+  assert.equal(renderMatchedLearnings([]), "");
 });
 
 test("every injected line — doctrine and facts — carries a [src: ...]", () => {
