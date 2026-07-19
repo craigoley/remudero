@@ -1,0 +1,19 @@
+# Fixture shard for test/learnings-assert-check.test.ts — no drift: every asserted entry's
+# committed lifecycle already matches what a fresh re-verification would produce.
+
+- id: fixture-clean-active
+  subsystem: fixture
+  lifecycle: active
+  files: [fixture.ts]
+  fact: an active entry whose assertion holds.
+  src: fixture
+  assertion: "exit 0"
+
+- id: fixture-clean-quarantined
+  subsystem: fixture
+  lifecycle: quarantined
+  quarantined_reason: "assertion failed (exit 1): exit 1"
+  files: [fixture.ts]
+  fact: a quarantined entry whose assertion still fails.
+  src: fixture
+  assertion: "exit 1"
