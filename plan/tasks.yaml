@@ -5926,3 +5926,135 @@
   - MASTER-PLAN#9
   files:
   - src/lib/correct.ts
+- id: W1-T131
+  title: REVIEW-PATH TEMP HYGIENE — the reviewer cwd is created and never removed on ANY exit path
+    (the orphaned rmd-review-* class)
+  repo: remudero
+  depends_on:
+  - W1-T115
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: 'SIBLING OF W1-T115, filed separately per Rule 19 rather than folded into it. W1-T115
+    declares files [src/lib/ledger.ts, src/lib/daemon.ts], but BOTH mkdtemp sites in this codebase
+    live in src/run-task.ts — so the review path sits outside T115 blast radius BY CONSTRUCTION, and
+    no amount of T115 succeeding closes this one.
+
+
+    THE ASYMMETRY, read at the source. run-task.ts:225 creates rmd-plan- and wraps it in a correct
+    try/finally rmSync — the pattern is already present and already right. run-task.ts:558 creates
+    rmd-review- as a throwaway reviewer cwd and has NO cleanup on ANY path. The surrounding try/catch
+    exists only to log a reviewer spawn failure as advisory and swallow it. There is no finally.
+    Every review spawn — pass, fail, or spawn-error — leaks its cwd permanently, and review runs on
+    every substantive PR, so the leak rate tracks PR throughput.
+
+
+    EVIDENCE AND ITS LIMIT, stated honestly. Roughly 1.4G of orphaned rmd-review-* directories were
+    observed under /private/tmp/claude-502 during the 2026-07-19 ENOSPC incident. That fixture
+    evidence was CLEARED before this task diff existed and CANNOT be re-demonstrated empirically.
+    The cited proof is therefore the CODE READING at run-task.ts:558 — a mkdtempSync with no
+    corresponding rmSync reachable on any exit path — not a live measurement. The measurement is
+    corroborating history, the code reading is the claim.'
+  design: '(i) MIRROR the :225 pattern exactly — wrap the reviewer cwd in try/finally rmSync
+    (recursive, force). Do not invent a second hygiene mechanism where a correct one already exists
+    ten lines up.
+
+    (ii) Cleanup must hold when the reviewer spawn THROWS, when it returns a downgrade, and when it
+    succeeds. The existing advisory catch must not swallow the cleanup with it.
+
+    (iii) NO behaviour change to the advisory reviewer itself — the deterministic floor still binds
+    and still posts. This task is hygiene only, and a review verdict changing is a regression.
+
+    (iv) If W1-T115 lands a generic rmd-owned temp helper, ADOPT it here rather than duplicating —
+    the two tasks converge, they do not compete.'
+  acceptance:
+  - claim: a review invocation whose reviewer spawn SUCCEEDS leaves zero rmd-review-* dirs under the
+      temp root
+    proof: 'unit test: test/review-temp-hygiene.test.ts'
+  - claim: a review invocation whose reviewer spawn THROWS also leaves zero rmd-review-* dirs — the
+      error path is the one that actually leaked
+    proof: 'unit test: test/review-temp-hygiene.test.ts'
+  - claim: the review VERDICT is byte-identical before and after the change, proving hygiene was added
+      without perturbing the deterministic floor
+    proof: 'unit test: test/review-temp-hygiene.test.ts'
+  risk: medium
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#9
+  files:
+  - src/run-task.ts
+- id: W1-T132
+  title: WIRE shippedSince INTO THE RETRO — the gather credits merges from the ledger alone, which is
+    structurally empty in the gate-side-merge era
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: 'RETRO-BLOCKING. The durable record cannot be written until this lands, so it jumps the
+    queue on the W1-T102/W1-T108 precedent.
+
+
+    MEASURED, 2026-07-19 ops sweep, read-only gather over the live ledger since marker
+    2026-07-18T14:10:27Z: 193 runs, verdicts blocked_ci 21, incomplete 110, no_pr 42,
+    pr_attribution_failed 12, blocked 4, blocked_containment 2, blocked_isolation 2 — and ZERO
+    merged. mergedSince returned 0 and shipped returned 0 on a day when roughly 28 pull requests
+    actually merged. A retro run in that state would have written a durable record asserting that
+    nothing shipped since the previous day.
+
+
+    MECHANISM, located exactly. retroCommand at src/run-task.ts:2397 calls buildGather WITHOUT a
+    github gateway. buildGather then falls back to ledgerOnlyShipped(merged), and merged comes from
+    mergedSince, which filters on ledger verdict === merged. No run ends verdict === merged any more:
+    merges land GATE-SIDE, after the run has already terminated blocked_review or incomplete, via the
+    sweep fix rung and auto-merge. The predicate is not wrong so much as extinct.
+
+
+    THE DRIFT STORY, which is the point of filing this. shippedSince — the ledger-union-GitHub
+    credit path built by W1-T51 for exactly this gap, complete with ownership assertion and
+    gate-side annotation — is FULLY IMPLEMENTED in src/lib/retro.ts and was NEVER PLUGGED IN. The
+    ledger-only fallback was correct in the runner-merges era and has been silently false ever
+    since. An UNWIRED FIX IS INDISTINGUISHABLE FROM AN UNBUILT ONE: W1-T51 reads as shipped in the
+    plan, its tests pass, and the defect it was written to prevent went on happening in production
+    for weeks. Landing this is also the falsifier for any other W1-T51-shaped claim.'
+  design: '(i) Wire a github gateway into retroCommand buildGather — reuse the SAME gateway shape
+    already implemented for lib/status.ts findMergedByTrailer and headRefName rather than minting a
+    third.
+
+    (ii) DEGRADE LOUDLY, the W1-T130 polarity applied to the read layer: a gather whose gateway is
+    throttled, errored or absent must SAY SO BY NAME in the rendered report and refuse to present a
+    ledger-only count as a complete one. Silently reporting none is the exact failure being fixed,
+    and a fix that can fail the same way quietly is not a fix.
+
+    (iii) NOT-OBSERVABLE IS NOT NOT-SHIPPED — the same distinction W1-T119 draws for the dispatch
+    read, drawn here for the credit read. This task does not depend on W1-T119 and must not wait for
+    it, but the two must agree in polarity.
+
+    (iv) shippedSince discrepancy lines are SURFACED, not swallowed — a gate-side merge is exactly
+    the case the operator needs to see named.'
+  acceptance:
+  - claim: a gather over the 2026-07-19 ledger with a live gateway credits the roughly 28 gate-side
+      merges that the ledger-only path reports as zero
+    proof: 'unit test: test/retro-shipped-wiring.test.ts'
+  - claim: a gather whose gateway is THROTTLED names the throttle in the rendered report and does NOT
+      report zero merges — degrade loudly, never silently
+    proof: 'unit test: test/retro-shipped-wiring.test.ts'
+  - claim: a run that ended blocked_review but whose PR merged gate-side is credited with its
+      gate-side annotation, and a foreign-branch trailer is still REJECTED — the W1-T51 ownership
+      assert survives wiring
+    proof: 'unit test: test/retro-shipped-wiring.test.ts'
+  - claim: replaying the ledger-only path over the same fixture still yields zero, pinning the
+      regression this task closes
+    proof: 'unit test: test/retro-shipped-wiring.test.ts'
+  risk: high
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#9
+  - MASTER-PLAN#4B
+  files:
+  - src/run-task.ts
+  - src/lib/retro.ts
