@@ -16,6 +16,7 @@ import {
   type Config,
 } from "./lib/config.js";
 import { buildWorkerEnv } from "./lib/env.js";
+import { outputContractLines, renderAnchorBlock } from "./lib/compaction.js";
 import type { RunResult } from "./lib/run-result.js";
 export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
@@ -1323,15 +1324,11 @@ export function renderImplementPrompt(
     "# TASK",
     body,
     "",
-    "# OUTPUT CONTRACT",
-    "- Make ONLY the change described in TASK; one concern.",
-    "- If a filename/approach choice is needed, FIRST emit a DECISION_REQUEST",
-    "  (exactly two options, one marked RECOMMENDED, a reversibility note) and STOP.",
-    "- Otherwise: stage the changed file(s), commit with a concise message, then run",
-    "  `git push origin HEAD` (NOT `-u` — the shared .git/config is outside the sandbox",
-    "  write scope, WS-0 FF10f), and open a PR with `gh pr create --fill --base main`.",
-    `- Include this exact trailer as the LAST line of the PR body: Remudero-Task: ${task.id}`,
-    "- End with a REPORT whose LAST line is exactly: PR_URL: <the pull request url>",
+    // Shared verbatim with the post-compaction ANCHOR (compaction.ts,
+    // MASTER-PLAN §8B / W1-T36) — ONE source of literal text so the anchor
+    // re-injected after a compaction is provably byte-identical to what the
+    // worker was told at turn 0, never a re-derived/paraphrased copy.
+    ...outputContractLines(task.id),
   ].join("\n");
 }
 
@@ -1702,6 +1699,16 @@ async function runTask(
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     log("prompt.linted", { provenance: "clean" });
     say("prompt provenance-linted: clean");
+
+    // ── COMPACTION ANCHOR (MASTER-PLAN §8B / W1-T36): the goal + acceptance
+    // criteria + hard constraints, built ONCE and ledgered here so the anchor
+    // this run WOULD re-inject verbatim after a compaction is a matter of
+    // repo-state fact, not a claim in a possibly-lossy REPORT. Live mid-stream
+    // re-injection (a real compaction firing during THIS spawn) is W1-T12e's
+    // operator-golden drill — this run-level wiring records the anchor that
+    // drill will send.
+    const anchor = renderAnchorBlock(task, runId);
+    log("anchor.built", { anchor });
 
     // ── Implement. A TRANSIENT (an Anthropic-side server_error mid-response, or a
     // network/5xx/CI-infra blip) is Anthropic's fault, NOT the task's — W1-T7's classifier
