@@ -4598,3 +4598,35 @@
   note: "Harvested by hand from the #193 worker's merge note — the W1-T105 class, once more before it
     builds. Ceiling-raising rejected: it would slacken the fast-gate discipline for every check to
     accommodate one slow one."
+
+- id: W1-T109
+  title: "daemon-plist passes through --allow-self-target — explicit consent bakes into the unit; a self-target plist without it is refused at GENERATION (the commissioning crash-loop near-miss)"
+  repo: remudero
+  depends_on: [W1-T12b]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE NEAR-MISS (2026-07-18 commissioning): daemon-plist --repo remudero generated a unit
+    WITHOUT --allow-self-target for a self-repo target — loaded as-is, the daemon refuses (by design),
+    exits non-zero, and KeepAlive/SuccessfulExit=false restart-loops it forever. The operator hand-added
+    the flag via PlistBuddy. The runtime consent gate is CORRECT; the generator must honor and require
+    the same consent: explicitly given -> baked into ProgramArguments; a self-target generation WITHOUT
+    the flag should refuse with the reason at generation time, not produce a unit that crash-loops at
+    boot (fail at the cheapest layer)."
+  design: |
+    daemon-plist accepts --allow-self-target and appends it to ProgramArguments. Self-target detection
+    (the target repo IS the harness source repo) without the flag -> non-zero refusal naming the flag,
+    generating nothing (--write included). Non-self targets: flag neither required nor baked. The
+    generated-unit golden fixtures gain the self-target variant.
+  acceptance:
+    - claim: "self-target + flag bakes the flag; self-target without it refuses at generation"
+      proof: "unit tests: args fixture with the flag -> ProgramArguments contains --allow-self-target; without -> non-zero, no plist emitted, message names the flag"
+    - claim: "non-self targets are unchanged"
+      proof: "unit test: --repo remudero-sandbox fixture -> byte-identical to today's output (regression lock)"
+  risk: medium
+  origin: architect
+  plan_refs: ["§9", "§4B"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
