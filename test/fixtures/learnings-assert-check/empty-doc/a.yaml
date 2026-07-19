@@ -1,0 +1,2 @@
+# Fixture for test/learnings-assert-check.test.ts — an entirely empty shard (parses to
+# `undefined`, not a list). loadShardEntries must treat this as zero entries, not an error.

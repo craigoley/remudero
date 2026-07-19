@@ -1,0 +1,2 @@
+# Fixture for test/learnings-assert-check.test.ts — the shard is a YAML mapping, not a list.
+id: not-a-list

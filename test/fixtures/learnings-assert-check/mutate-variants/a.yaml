@@ -1,0 +1,18 @@
+# Fixture for test/learnings-assert-check.test.ts — exercises the two text-surgery insertion
+# fallbacks in quarantineEntryInText besides the common "replace an existing lifecycle: line"
+# path: an entry with a 'subsystem:' line but no explicit 'lifecycle:' line (defaults to active),
+# and a fully bare entry with neither 'subsystem:' nor 'lifecycle:' lines at all. The bare entry
+# is also the LAST entry in the file, so its block runs to EOF (no following "- id:").
+
+- id: variant-subsystem-only
+  subsystem: fixture
+  files: [fixture.ts]
+  fact: an entry with a subsystem line but no explicit lifecycle line -- defaults to active.
+  src: fixture
+  assertion: "exit 1"
+
+- id: variant-bare
+  files: [fixture.ts]
+  fact: an entry with neither a subsystem nor a lifecycle line at all -- defaults to active.
+  src: fixture
+  assertion: "exit 1"

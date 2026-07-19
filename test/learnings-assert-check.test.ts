@@ -189,3 +189,111 @@ test("the real corpus carries at least one seeded self-verifying entry (shell-is
   const raw = readFileSync(join(REPO_ROOT, "learnings", "platform.yaml"), "utf8");
   assert.match(raw, /- id: shell-isolation[\s\S]*?assertion: /);
 });
+
+// ── loadShardEntries validation: every malformed-shard branch names the failure and blocks ──────
+
+test("an empty shard (parses to `undefined`, not a list) is zero entries, not an error", () => {
+  const result = runCheck(join(FIXTURES, "empty-doc"));
+  const output = result.stdout + result.stderr;
+  assert.equal(result.status, 0, output);
+  assert.match(output, /OK -- every asserted entry's lifecycle matches a fresh re-verification/);
+});
+
+test("a shard that is a YAML mapping, not a list, is rejected (main() surfaces the error and exits non-zero)", () => {
+  const result = runCheck(join(FIXTURES, "malformed-not-list"));
+  const output = result.stdout + result.stderr;
+  assert.notEqual(result.status, 0, output);
+  assert.match(output, /must be a YAML list of entries/);
+});
+
+test("a list entry that is not a mapping is rejected", () => {
+  const result = runCheck(join(FIXTURES, "malformed-entry-not-object"));
+  const output = result.stdout + result.stderr;
+  assert.notEqual(result.status, 0, output);
+  assert.match(output, /entry 0 must be a mapping/);
+});
+
+test("an entry missing the required 'id' field is rejected", () => {
+  const result = runCheck(join(FIXTURES, "malformed-missing-id"));
+  const output = result.stdout + result.stderr;
+  assert.notEqual(result.status, 0, output);
+  assert.match(output, /missing string 'id'/);
+});
+
+test("an entry with an invalid 'lifecycle' value is rejected", () => {
+  const result = runCheck(join(FIXTURES, "malformed-invalid-lifecycle"));
+  const output = result.stdout + result.stderr;
+  assert.notEqual(result.status, 0, output);
+  assert.match(output, /has invalid lifecycle 'retired'/);
+});
+
+test("an entry with an empty-string 'assertion' is rejected", () => {
+  const result = runCheck(join(FIXTURES, "malformed-invalid-assertion"));
+  const output = result.stdout + result.stderr;
+  assert.notEqual(result.status, 0, output);
+  assert.match(output, /'assertion' must be a non-empty string/);
+});
+
+test("an entry whose 'assertion' is not a string at all is rejected", () => {
+  const result = runCheck(join(FIXTURES, "malformed-non-string-assertion"));
+  const output = result.stdout + result.stderr;
+  assert.notEqual(result.status, 0, output);
+  assert.match(output, /'assertion' must be a non-empty string/);
+});
+
+// ── text-surgery insertion fallbacks: subsystem-only and fully-bare entry blocks ────────────────
+
+test("quarantining an entry with a 'subsystem:' line but no 'lifecycle:' line inserts lifecycle right after subsystem", () => {
+  const dir = copyFixture("mutate-variants");
+  try {
+    const result = runMutate(dir);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const after = readFileSync(join(dir, "a.yaml"), "utf8");
+    assert.match(
+      after,
+      /- id: variant-subsystem-only\n  subsystem: fixture\n  lifecycle: quarantined\n  quarantined_reason:/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("quarantining a fully-bare entry (no subsystem, no lifecycle) -- also the LAST entry, block runs to EOF -- inserts lifecycle right after '- id:'", () => {
+  const dir = copyFixture("mutate-variants");
+  try {
+    const result = runMutate(dir);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const after = readFileSync(join(dir, "a.yaml"), "utf8");
+    assert.match(after, /- id: variant-bare\n  lifecycle: quarantined\n  quarantined_reason:/);
+    // variant-bare is the LAST entry in the file -- its block has no following "- id:" line, so
+    // findEntryBlock's range runs to EOF (the ternary's `: text.length` branch).
+    assert.ok(after.trimEnd().endsWith('assertion: "exit 1"'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── CLI default --cwd (omitted -> process.cwd()) and a broken assertion cwd ─────────────────────
+
+test("--cwd is optional: omitted, assertions run from the CLI's own process.cwd()", () => {
+  const result = spawnSync(process.execPath, [SCRIPT, "--dir", ".", "--check"], {
+    cwd: join(FIXTURES, "clean"),
+    encoding: "utf8",
+  });
+  const output = result.stdout + result.stderr;
+  assert.equal(result.status, 0, output);
+  assert.match(output, /OK -- every asserted entry's lifecycle matches a fresh re-verification/);
+});
+
+test("an assertion run from a nonexistent --cwd fails to spawn, and is treated as a failing (non-ok) verdict", () => {
+  const result = spawnSync(
+    process.execPath,
+    [SCRIPT, "--dir", join(FIXTURES, "clean"), "--check", "--cwd", join(FIXTURES, "does-not-exist-dir")],
+    { cwd: REPO_ROOT, encoding: "utf8" },
+  );
+  const output = result.stdout + result.stderr;
+  // fixture-clean-active's assertion ("exit 0") can no longer run from a missing cwd -> spawn
+  // fails -> verdict.ok is false -> the committed "active" lifecycle is now STALE.
+  assert.notEqual(result.status, 0, output);
+  assert.match(output, /\[fixture-clean-active\].*lifecycle is 'active' but should be 'quarantined'/);
+});

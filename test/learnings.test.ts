@@ -389,3 +389,62 @@ test("loadLearningsForTaskFiles: falls back to a full scan when the index is abs
   const entries = loadLearningsForTaskFiles(dir, ["a.ts"]);
   assert.deepEqual(entries.map((e) => e.id), ["from-a"]);
 });
+
+// ── Further parseLearningsDoc validation branches ────────────────────────────
+
+test("loadLearnings: an empty file (parses to `undefined`, not a list) is zero entries, not an error", () => {
+  const path = writeCorpus("");
+  assert.deepEqual(loadLearnings(path), []);
+});
+
+test("loadLearnings rejects a YAML document that is not a list", () => {
+  const path = writeCorpus("id: not-a-list\n");
+  assert.throws(() => loadLearnings(path), /must be a YAML list of entries/);
+});
+
+test("loadLearnings rejects a list entry that is not a mapping", () => {
+  const path = writeCorpus("- just-a-string\n");
+  assert.throws(() => loadLearnings(path), /must be a mapping/);
+});
+
+test("loadLearnings rejects an entry missing string 'id' specifically", () => {
+  const path = writeCorpus("- files: [a.ts]\n  fact: a fact\n  src: PR#1\n");
+  assert.throws(() => loadLearnings(path), /missing string 'id'/);
+});
+
+test("loadLearnings rejects an entry missing 'src' specifically", () => {
+  const path = writeCorpus("- id: x\n  files: [a.ts]\n  fact: a fact\n");
+  assert.throws(() => loadLearnings(path), /missing string 'src'/);
+});
+
+test("loadLearnings rejects an entry whose 'files' is not a list of strings", () => {
+  const path = writeCorpus("- id: x\n  files: not-a-list\n  fact: a fact\n  src: PR#1\n");
+  assert.throws(() => loadLearnings(path), /'files' must be a list of globs/);
+});
+
+test("loadLearnings rejects an entry whose 'files' list contains a non-string glob", () => {
+  const path = writeCorpus("- id: x\n  files: [a.ts, 5]\n  fact: a fact\n  src: PR#1\n");
+  assert.throws(() => loadLearnings(path), /'files' must be a list of globs/);
+});
+
+test("loadLearnings rejects malformed YAML (not valid syntax at all)", () => {
+  const path = writeCorpus("- id: x\n  files: [a.ts\n  fact: unterminated flow sequence\n");
+  assert.throws(() => loadLearnings(path), /is not valid YAML/);
+});
+
+test("loadLearningsCorpus rejects malformed YAML in one shard, naming that shard's path", () => {
+  const dir = mkdtempSync(join(tmpdir(), "learnings-corpus-badyaml-"));
+  writeFileSync(join(dir, "a.yaml"), "- id: x\n  files: [a.ts\n  fact: unterminated\n");
+  assert.throws(() => loadLearningsCorpus(dir), /is not valid YAML/);
+});
+
+test("candidateShardFiles: an explicit empty taskFiles array is treated the same as repo-wide (every shard candidates)", () => {
+  const index = {
+    files: {
+      "a.yaml": { entries: ["x"], globs: ["src/a.ts"] },
+      "b.yaml": { entries: ["y"], globs: ["src/b.ts"] },
+    },
+    bySubsystem: {},
+  };
+  assert.deepEqual(candidateShardFiles(index, []), ["a.yaml", "b.yaml"]);
+});
