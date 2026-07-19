@@ -4646,10 +4646,10 @@
     verified-merged credit; it is dedup evidence only. Keep it ranked above unsettled rungs so an
     in-flight run is still deduped. (iii) The yaml still supplies only a POINTER — GitHub supplies
     the truth; an unmerged or unresolvable pr: field credits nothing. Doctrine intact.
-    (iv) Rate-limit honesty: a rung that fails to resolve because the gateway errored must be
-    distinguishable from a rung that resolved to nothing, so a throttled read can never again be
-    read as evidence of absence. (v) AUDIT in the build report: every task on main carrying pr:
-    whose derived status is not merged.
+    (iv) NOT IN SCOPE — split to W1-T119: making a THROTTLED read distinguishable from a
+    resolved-to-nothing read (the false source=none that mis-filed this task) is a read-layer/gateway
+    concern, not a precedence one. Serialize: land this precedence reorder first, then W1-T119.
+    (v) AUDIT in the build report: every task on main carrying pr: whose derived status is not merged.
   acceptance:
     - claim: "a verified-merged credit outranks a ledger row claiming an open PR — the live W1-T1 fixture settles"
       proof: "unit test over the live shape: task pr: 2 with #2 fixture MERGED, plus a pr.opened ledger row for #258 fixture OPEN -> status=merged, merged=true; and the dispatcher does NOT dispatch it"
