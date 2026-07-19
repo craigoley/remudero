@@ -34,3 +34,21 @@ decision reversible.
   this task's one-concern scope (this task is the extraction, not the dispatcher) and is left for a
   separate task against the dispatch/drain path.
 - Rollback: revert this PR (removes only this DECISIONS.md entry; no runtime code touched).
+
+## 2026-07-19T00:00:00.000Z — W1-T1 re-dispatch (fourth occurrence): already-satisfied, no-op close
+- Options: (A) close as already-satisfied, no functional code change (RECOMMENDED) | (B) force a
+  cosmetic edit to `src/run-task.ts` or `src/spike.ts` just to produce a non-empty diff
+- Chosen (RECOMMENDED, auto): Option A — no functional code change.
+- Rationale: same conclusion as the prior (third-occurrence) closure in commit `bca5cd0` (#255), one
+  re-dispatch cycle earlier. At this dispatch, `HEAD` again equals `origin/main` (`bca5cd0`) with a
+  clean tree; `src/run-task.ts` (4,343 lines) remains the already-extracted proto-runner from
+  `src/spike.ts` (308 lines, unchanged, still only the sandbox smoke-test) per merged `remudero` PR
+  #2, and `plan/tasks.yaml`'s W1-T1 entry still carries `pr: 2`. There is nothing new to extract,
+  diff, or PR. This re-dispatch happening a fourth time (after the third-occurrence entry already
+  named the root cause) confirms the diagnosis rather than changing it: the dispatcher is keying off
+  `tasks.yaml`'s decorative `status: queued` field instead of GitHub-derived merge state, so it
+  re-queues an already-merged task on every drain cycle. That dispatcher fix remains out of scope for
+  this one-concern task (the extraction, not the dispatcher) and is left for a separate task against
+  the dispatch/drain path — repeated no-op closures here are a symptom, not something this task can
+  self-resolve by editing its own acceptance criteria (Standing rule 15).
+- Rollback: revert this PR (removes only this DECISIONS.md entry; no runtime code touched).
