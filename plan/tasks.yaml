@@ -4598,3 +4598,43 @@
   note: "Harvested by hand from the #193 worker's merge note — the W1-T105 class, once more before it
     builds. Ceiling-raising rejected: it would slacken the fast-gate discipline for every check to
     accommodate one slow one."
+
+- id: W1-T115
+  title: "rmd temp hygiene — stop copying the ledger per invocation, always clean up, sweep stale dirs at boot (the 26,711-dir ENOSPC incident)"
+  repo: remudero
+  depends_on: [W1-T1D]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (2026-07-19 ops sweep): 26,711 leaked temp dirs under /tmp/claude-502 —
+    every rmd invocation (status 3423, drain 2881, daemon 2546, sweep, correct, fleet-control) copies
+    the ENTIRE 5.8MB ledger.ndjson into a fresh temp dir and never removes it. Self-reinforcing: the
+    ledger grows with activity, the copies grow with the ledger, and the 149x W1-T1 crash loop poured
+    fuel on it. Result: /System/Volumes/Data at 526Mi free of 228Gi — ENOSPC corrupted validation runs
+    (bare exit 1), broke Bash tool output, and plausibly caused the '$0 binary exists but failed to
+    launch' worker faults. One CC auto-update install_failed event is recorded in the same window
+    (~/.claude/.last-update-result.json, 2026-07-19T17:13:53Z, npm-global, 2.1.209 -> 2.1.215);
+    correlation only — the disk was first OBSERVED full at ~17:37, so causation is unproven and a
+    second such event was looked for and NOT found. A full disk fails everything downstream in
+    illegible ways; hygiene is infrastructure."
+  design: |
+    (i) READ IN PLACE: find why the ledger is copied per invocation (grep the temp-dir creation path);
+    replace with direct read or streaming — the ledger is append-only NDJSON, no copy is needed for
+    reads. (ii) ALWAYS CLEAN: any temp dir rmd does create is removed on exit via finally/trap,
+    including error paths. (iii) BOOT SWEEP: daemon boot removes rmd-owned temp dirs older than a
+    data-driven ceiling, logging the count. (iv) Regression: a metric/test asserting zero surviving
+    temp dirs after a completed invocation.
+  acceptance:
+    - claim: "a completed rmd invocation leaves zero temp dirs"
+      proof: "unit test: run a status/derivation entrypoint against fixtures, assert the temp root is empty after exit, including a thrown-error path"
+    - claim: "ledger reads no longer copy the file"
+      proof: "unit test: read path consumes the fixture ledger with no write syscalls to a temp copy (assert via injected fs) and returns identical parse results"
+    - claim: "boot sweep removes stale dirs and reports"
+      proof: "unit test: seeded stale + fresh dirs -> stale removed, fresh kept, count logged"
+  risk: high
+  origin: architect
+  plan_refs: ["§9", "§4B"]
+  files: [src/lib/ledger.ts, src/lib/daemon.ts]
+  status: queued
+  attempts: 0
