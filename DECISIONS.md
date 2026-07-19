@@ -34,3 +34,22 @@ decision reversible.
   this task's one-concern scope (this task is the extraction, not the dispatcher) and is left for a
   separate task against the dispatch/drain path.
 - Rollback: revert this PR (removes only this DECISIONS.md entry; no runtime code touched).
+
+## 2026-07-19T13:23:00.000Z — W1-T1 re-dispatch (fourth occurrence): already-satisfied, no-op close
+- Options: (A) close as already-satisfied, no functional code change (RECOMMENDED) | (B) force a
+  cosmetic edit to `src/run-task.ts` or `src/spike.ts` just to produce a non-empty diff
+- Chosen (RECOMMENDED, auto): Option A — no functional code change.
+- Rationale: re-verified from a fresh worktree (`run-W1-T1-1784481756467`) at dispatch time:
+  `src/run-task.ts` (4,343 lines, with `test/run-task.test.ts`, 1,381 lines) already exists and was
+  extracted from the WS-0 spike in commit `83ff9a8` ("WS-1 T1: rmd run-task — the proto-runner").
+  `src/spike.ts` (308 lines, unchanged) still holds only the sandbox smoke-test proto-runner —
+  worker spawn/probe/implement steps against `craigoley/remudero-sandbox` via `src/lib/worker.ts`
+  — with no proto-runner logic left to extract into `run-task.ts`. `git status` showed a clean
+  tree and local `HEAD` matched `origin/main` (`bca5cd0`) before this entry was appended, so there
+  was nothing to extract, diff, or PR. This is the FOURTH re-dispatch of this exact task; the third
+  (`bca5cd0`, PR #255) already closed as no-op and named the likely root cause (a dispatcher keying
+  off `tasks.yaml`'s decorative `status` field instead of GitHub-derived merge status re-queues an
+  already-merged task — see `lib/status.ts`). That dispatcher fix remains outside this task's
+  one-concern scope and is still owed as a separate task against the dispatch/drain path; every
+  re-dispatch until it lands will keep reaching this same conclusion.
+- Rollback: revert this PR (removes only this DECISIONS.md entry; no runtime code touched).
