@@ -34,3 +34,22 @@ decision reversible.
   this task's one-concern scope (this task is the extraction, not the dispatcher) and is left for a
   separate task against the dispatch/drain path.
 - Rollback: revert this PR (removes only this DECISIONS.md entry; no runtime code touched).
+
+## 2026-07-19T17:34:33.000Z — W1-T1 re-dispatch (next occurrence after merged closure `bca5cd0`): already-satisfied, no-op close
+- Options: (A) close as already-satisfied, no functional code change (RECOMMENDED) | (B) force a
+  cosmetic edit to `src/run-task.ts` or `src/spike.ts` just to produce a non-empty diff
+- Chosen (RECOMMENDED, auto): Option A — no functional code change.
+- Rationale: at dispatch time for this run, `git status --short --branch` showed the worktree
+  branch tracking `origin/main` with a clean tree and no modified/untracked files — nothing to
+  extract or diff. `src/run-task.ts` (4,343 lines) remains extracted from the WS-0 spike
+  (`src/spike.ts`, 308 lines, still holding only the sandbox smoke-test proto-runner) since
+  `83ff9a8` (merged `remudero` PR #2), and `git log --oneline -5` at dispatch showed `bca5cd0`
+  ("docs: close W1-T1 re-dispatch as already-satisfied (no-op) (#255)") as the tip of `main`,
+  itself the third such closure. This dispatch is therefore at least the fourth re-dispatch of an
+  already-merged task. As `bca5cd0` already noted, the likely root cause is unchanged and out of
+  this task's one-concern scope: `plan/tasks.yaml`'s `status: queued` field is decorative (real
+  merge-state is derived from GitHub per the file header and `lib/status.ts`), so a dispatcher
+  keying off that field instead of GitHub-derived status keeps re-queuing a task whose PR already
+  merged. Fixing the dispatcher belongs to a separate task against the dispatch/drain path, not
+  this extraction task.
+- Rollback: revert this PR (removes only this DECISIONS.md entry; no runtime code touched).
