@@ -29,10 +29,12 @@
 // possibly move src/lib/classify.ts's mutation score, so there is nothing to falsify). The
 // caller (ci.yml's mutation-ratchet job) reads the `matched` $GITHUB_OUTPUT this mode writes and
 // gates the actual `npx stryker run` step on it -- same always-registers-but-internally-scoped
-// shape as `containment-probe` (see ci.yml). `--relevant-paths` optionally overrides the
-// built-in MUTATION_RELEVANT_PATHS list with a JSON array read from a file, purely so a test can
-// prove the filter is driven by DATA (add a row to a seeded list, decision flips) without
-// touching this script's logic; CI itself never passes it.
+// shape as `containment-probe` (see ci.yml). The paths list itself is DATA:
+// scripts/mutation-relevant-paths.json, a plain JSON array read by loadRelevantPaths() -- not a
+// literal embedded in this script. `--relevant-paths <json-file>` optionally points path-filter
+// mode at a DIFFERENT json file instead of the production default, purely so a test can prove the
+// filter is driven by that external data (swap in a seeded list, decision flips) without touching
+// this script's logic OR the production data file; CI itself never passes it.
 //
 // The pure functions below (parseMutationTotals, evaluateRatchet, evaluatePathFilter) are
 // exported so the falsifier fixture test can exercise the CLI process directly (spawn + exit
@@ -40,22 +42,32 @@
 
 import { appendFileSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
-import { pathToFileURL } from 'node:url';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-// DATA, not control flow (W1-T108): the exhaustive set of paths that can move
-// src/lib/classify.ts's mutation score -- the mutated file itself, its test, and this gate's own
-// machinery (Stryker config, this script, the recorded baseline). Kept in sync BY HAND with
-// stryker.conf.json's `mutate` glob; widening that glob later means widening this list too (the
-// "one-line glob change" the ci.yml mutation-ratchet comment already calls out). Exported so a
-// test can extend a COPY of this list and prove a seeded fixture flips skip -> run purely from
-// the added data, with zero changes to evaluatePathFilter itself.
-export const MUTATION_RELEVANT_PATHS = [
-  'src/lib/classify.ts',
-  'test/classify.test.ts',
-  'stryker.conf.json',
-  'scripts/mutation-ratchet.mjs',
-  'scripts/mutation-baseline.json',
-];
+// DATA, not control flow, and not even embedded in THIS script (W1-T108): the exhaustive set of
+// paths that can move src/lib/classify.ts's mutation score -- the mutated file itself, its test,
+// and this gate's own machinery (Stryker config, this script, the recorded baseline) -- lives in
+// scripts/mutation-relevant-paths.json, a plain JSON array, not a JS literal in this file. That
+// means "adding a path row" is purely a data-file edit: zero changes to this script, zero changes
+// to evaluatePathFilter's logic, and (unlike an array literal embedded here) it is not even
+// possible to conflate "editing the paths list" with "editing the script" -- they are different
+// files. Kept in sync BY HAND with stryker.conf.json's `mutate` glob; widening that glob later
+// means widening this JSON array too (the "one-line glob change" the ci.yml mutation-ratchet
+// comment already calls out).
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_RELEVANT_PATHS_FILE = join(__dirname, 'mutation-relevant-paths.json');
+
+/** Read the paths-list JSON data file at the given path (default: the real production list). */
+export function loadRelevantPaths(filePath = DEFAULT_RELEVANT_PATHS_FILE) {
+  return JSON.parse(readFileSync(filePath, 'utf8'));
+}
+
+// The production list, read once at import time from the JSON data file above. Exported (as
+// before) so a test can prove the default itself is sourced from data; --relevant-paths lets a
+// test point at an isolated seeded fixture COPY instead, without ever touching this file or
+// scripts/mutation-relevant-paths.json.
+export const MUTATION_RELEVANT_PATHS = loadRelevantPaths();
 
 /**
  * Decide whether a diff's changed files can move src/lib/classify.ts's mutation score.
@@ -156,7 +168,7 @@ function main(argv) {
       .map((line) => line.trim())
       .filter(Boolean);
     const relevantPaths = values['relevant-paths']
-      ? JSON.parse(readFileSync(values['relevant-paths'], 'utf8'))
+      ? loadRelevantPaths(values['relevant-paths'])
       : MUTATION_RELEVANT_PATHS;
     const { run, reason } = evaluatePathFilter(changedFiles, relevantPaths);
 

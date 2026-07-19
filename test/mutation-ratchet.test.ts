@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -26,6 +26,7 @@ import { dirname, join } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(__dirname, "..", "scripts", "mutation-ratchet.mjs");
+const RELEVANT_PATHS_FILE = join(__dirname, "..", "scripts", "mutation-relevant-paths.json");
 const FIXTURES = join(__dirname, "fixtures", "mutation-ratchet");
 const BASELINE = join(FIXTURES, "baseline.json");
 
@@ -168,4 +169,33 @@ test("mutation-ratchet CLI --changed-files --relevant-paths: the paths list is D
   assert.equal(after.status, 0, after.stdout?.toString() + after.stderr?.toString());
   assert.match(after.stdout.toString(), /mutation-ratchet: REQUIRED/);
   assert.match(after.stdout.toString(), /diff touches fixtures\/seeded-mutation-scope\.ts/);
+});
+
+test("mutation-ratchet CLI --changed-files (NO --relevant-paths, i.e. production default): the matched path is read from scripts/mutation-relevant-paths.json's live content, not a literal baked into mutation-ratchet.mjs", () => {
+  // This test never hardcodes an entry from the paths list -- it reads scripts/mutation-
+  // relevant-paths.json itself at test time and asserts the CLI's DEFAULT (no --relevant-paths
+  // flag at all) names exactly the row it read. If the production list were an array literal
+  // embedded in mutation-ratchet.mjs, this round trip would still pass -- but if someone edits
+  // scripts/mutation-relevant-paths.json's row wording (e.g. reorders/renames an entry) with
+  // ZERO changes to mutation-ratchet.mjs, this test proves the CLI's decision follows the DATA
+  // FILE, because the assertion itself is derived from that same file's content, not a copy of it
+  // pasted into this test.
+  const relevantPaths: string[] = JSON.parse(readFileSync(RELEVANT_PATHS_FILE, "utf8"));
+  assert.ok(relevantPaths.length > 0, "scripts/mutation-relevant-paths.json must not be empty");
+  const [firstRelevantPath] = relevantPaths;
+
+  const scratchChangedFiles = join(FIXTURES, ".changed-files-default-list-scratch.txt");
+  writeFileSync(scratchChangedFiles, `README.md\n${firstRelevantPath}\n`);
+  try {
+    const result = spawnSync(process.execPath, [SCRIPT, "--changed-files", scratchChangedFiles]);
+    assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+    assert.match(result.stdout.toString(), /mutation-ratchet: REQUIRED/);
+    assert.equal(
+      result.stdout.toString().includes(`diff touches ${firstRelevantPath}`),
+      true,
+      result.stdout.toString(),
+    );
+  } finally {
+    rmSync(scratchChangedFiles);
+  }
 });
