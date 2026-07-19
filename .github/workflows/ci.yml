@@ -103,10 +103,12 @@ jobs:
     #  1. DIFF-SCOPED, the containment-probe shape (see that job's comment below): this job's
     #     check run still registers UNCONDITIONALLY (no path filter, no job `if:`) so it can
     #     never go silently absent and deadlock merge — but the `trigger` step below runs
-    #     `.github/scripts/mutation-diff-trigger.ts` against this PR's changed files, and the
-    #     expensive Stryker run + ratchet comparison only execute `if:` that diff can actually
-    #     move src/lib/classify.ts's score (the file itself, its test, or the gate's own
-    #     config/script/baseline). Every other PR still gets a green, near-instant check run.
+    #     `scripts/mutation-ratchet.mjs --changed-files` (that script's OWN path-filter mode, so
+    #     the "what counts as mutate-scope" list lives in exactly one place — see that script's
+    #     usage comment) against this PR's changed files, and the expensive Stryker run + ratchet
+    #     comparison only execute `if:` that diff can actually move src/lib/classify.ts's score
+    #     (the file itself, its test, or the gate's own config/script/baseline). Every other PR
+    #     still gets a green, near-instant check run — proven in test/mutation-ratchet.test.ts.
     #  2. Stryker's own INCREMENTAL MODE (`incremental`/`incrementalFile` in stryker.conf.json):
     #     when the run does happen, mutants whose covering code + tests are unchanged since the
     #     last run are reused from the incremental report instead of re-executed. The cache step
@@ -139,7 +141,7 @@ jobs:
           set -euo pipefail
           git diff --name-only "${BASE_SHA}"...HEAD > changed-files.txt
           cat changed-files.txt
-          node --import tsx .github/scripts/mutation-diff-trigger.ts changed-files.txt
+          node scripts/mutation-ratchet.mjs --changed-files changed-files.txt
       - name: Restore Stryker incremental cache
         if: steps.trigger.outputs.matched == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

@@ -13,18 +13,67 @@
 // the baseline is a test-suite-weakening change -- this script exits non-zero. A run AT or ABOVE
 // baseline exits zero.
 //
-// Usage:
+// Usage (ratchet mode -- compares a completed Stryker run against the baseline):
 //   node scripts/mutation-ratchet.mjs [--report <path>] [--baseline <path>]
 //
 // Defaults: --report reports/mutation/mutation.json, --baseline scripts/mutation-baseline.json
 //
-// The pure functions below (parseMutationTotals, evaluateRatchet) are exported so the falsifier
-// fixture test can exercise the CLI process directly (spawn + exit code) as well as the
-// parsing/comparison logic in isolation.
+// Usage (path-filter mode -- W1-T108, MASTER-PLAN §5C/§5A, decides whether the CI job needs to
+// run Stryker at all for THIS diff):
+//   node scripts/mutation-ratchet.mjs --changed-files <path> [--relevant-paths <json-file>]
+//
+// `--changed-files` points at a newline-delimited list of this PR's changed paths (e.g. the
+// output of `git diff --name-only <base>...HEAD`). This mode NEVER reads --report/--baseline
+// and NEVER shells out to Stryker -- it only decides and prints a reason, then exits 0
+// regardless of the decision (a "skip" verdict is not a failure; it means this diff cannot
+// possibly move src/lib/classify.ts's mutation score, so there is nothing to falsify). The
+// caller (ci.yml's mutation-ratchet job) reads the `matched` $GITHUB_OUTPUT this mode writes and
+// gates the actual `npx stryker run` step on it -- same always-registers-but-internally-scoped
+// shape as `containment-probe` (see ci.yml). `--relevant-paths` optionally overrides the
+// built-in MUTATION_RELEVANT_PATHS list with a JSON array read from a file, purely so a test can
+// prove the filter is driven by DATA (add a row to a seeded list, decision flips) without
+// touching this script's logic; CI itself never passes it.
+//
+// The pure functions below (parseMutationTotals, evaluateRatchet, evaluatePathFilter) are
+// exported so the falsifier fixture test can exercise the CLI process directly (spawn + exit
+// code) as well as the parsing/comparison logic in isolation.
 
-import { readFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
+
+// DATA, not control flow (W1-T108): the exhaustive set of paths that can move
+// src/lib/classify.ts's mutation score -- the mutated file itself, its test, and this gate's own
+// machinery (Stryker config, this script, the recorded baseline). Kept in sync BY HAND with
+// stryker.conf.json's `mutate` glob; widening that glob later means widening this list too (the
+// "one-line glob change" the ci.yml mutation-ratchet comment already calls out). Exported so a
+// test can extend a COPY of this list and prove a seeded fixture flips skip -> run purely from
+// the added data, with zero changes to evaluatePathFilter itself.
+export const MUTATION_RELEVANT_PATHS = [
+  'src/lib/classify.ts',
+  'test/classify.test.ts',
+  'stryker.conf.json',
+  'scripts/mutation-ratchet.mjs',
+  'scripts/mutation-baseline.json',
+];
+
+/**
+ * Decide whether a diff's changed files can move src/lib/classify.ts's mutation score.
+ * @param {readonly string[]} changedFiles
+ * @param {readonly string[]} relevantPaths
+ * @returns {{run: boolean, reason: string}}
+ */
+export function evaluatePathFilter(changedFiles, relevantPaths = MUTATION_RELEVANT_PATHS) {
+  const relevant = new Set(relevantPaths);
+  const matchedPath = changedFiles.find((path) => relevant.has(path));
+  if (matchedPath !== undefined) {
+    return { run: true, reason: `diff touches ${matchedPath}` };
+  }
+  return {
+    run: false,
+    reason: "no changed path can move src/lib/classify.ts's mutation score",
+  };
+}
 
 /**
  * Sum mutant statuses across every file in a Stryker JSON report and derive the overall
@@ -93,8 +142,38 @@ function main(argv) {
     options: {
       report: { type: 'string', default: 'reports/mutation/mutation.json' },
       baseline: { type: 'string', default: 'scripts/mutation-baseline.json' },
+      'changed-files': { type: 'string' },
+      'relevant-paths': { type: 'string' },
     },
   });
+
+  // Path-filter mode (W1-T108): decide, print, write $GITHUB_OUTPUT, exit 0 -- never touches
+  // --report/--baseline, never shells out to Stryker, in EITHER branch. See the usage comment
+  // at the top of this file.
+  if (values['changed-files'] !== undefined) {
+    const changedFiles = readFileSync(values['changed-files'], 'utf8')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const relevantPaths = values['relevant-paths']
+      ? JSON.parse(readFileSync(values['relevant-paths'], 'utf8'))
+      : MUTATION_RELEVANT_PATHS;
+    const { run, reason } = evaluatePathFilter(changedFiles, relevantPaths);
+
+    if (run) {
+      console.log(`mutation-ratchet: REQUIRED -- ${reason}`);
+    } else {
+      console.log(`mutation-ratchet: skip -- ${reason}`);
+    }
+
+    const out = process.env.GITHUB_OUTPUT;
+    if (out) {
+      appendFileSync(out, `matched=${run}\n`);
+    }
+
+    process.exitCode = 0;
+    return;
+  }
 
   const report = JSON.parse(readFileSync(values.report, 'utf8'));
   const baseline = JSON.parse(readFileSync(values.baseline, 'utf8'));
