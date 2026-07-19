@@ -93,9 +93,28 @@ jobs:
     # reruns the WHOLE suite per mutant). Mutating this project's full ~15k-line src/** tree was
     # measured at ~4 hours in that mode — that blows through ci-gate.yml's 15-minute
     # required-check wait ceiling and would deadlock every PR. `stryker.conf.json`'s `mutate`
-    # glob is therefore deliberately scoped to one pure-logic module (src/lib/classify.ts) today,
-    # keeping this job to ~5 minutes. Widening scope later is a one-line glob change plus a
-    # baseline recapture in scripts/mutation-baseline.json — no script or CI-wiring change.
+    # glob is therefore deliberately scoped to one pure-logic module (src/lib/classify.ts) today.
+    # Widening scope later is a one-line glob change plus a baseline recapture in
+    # scripts/mutation-baseline.json — no script or CI-wiring change.
+    #
+    # LATENCY (W1-T108): even scoped to one module, a real `npx stryker run` was still costing
+    # ~13 minutes on every PR, including PRs that never touched src/lib/classify.ts and so could
+    # not possibly move its mutation score. Two independent fixes, same job:
+    #  1. DIFF-SCOPED, the containment-probe shape (see that job's comment below): this job's
+    #     check run still registers UNCONDITIONALLY (no path filter, no job `if:`) so it can
+    #     never go silently absent and deadlock merge — but the `trigger` step below runs
+    #     `.github/scripts/mutation-diff-trigger.ts` against this PR's changed files, and the
+    #     expensive Stryker run + ratchet comparison only execute `if:` that diff can actually
+    #     move src/lib/classify.ts's score (the file itself, its test, or the gate's own
+    #     config/script/baseline). Every other PR still gets a green, near-instant check run.
+    #  2. Stryker's own INCREMENTAL MODE (`incremental`/`incrementalFile` in stryker.conf.json):
+    #     when the run does happen, mutants whose covering code + tests are unchanged since the
+    #     last run are reused from the incremental report instead of re-executed. The cache step
+    #     below persists that report across runs via actions/cache (key includes the run id so
+    #     every run saves a fresh entry; `restore-keys` falls back to the most recent one) — the
+    #     underlying diff is a pure text comparison against the PREVIOUS report, so restoring a
+    #     report captured on a different branch is still correct, just possibly less of a
+    #     shortcut, never an incorrect one.
     #
     # scripts/mutation-ratchet.mjs compares this run's Stryker JSON report against the recorded
     # floor in scripts/mutation-baseline.json and exits non-zero on any test-suite-weakening PR;
@@ -105,14 +124,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
       - name: Install (clean, from lockfile)
         run: npm ci
-      - name: Stryker mutation run (scoped target — see stryker.conf.json)
+      - name: Determine whether this diff can move src/lib/classify.ts's mutation score
+        id: trigger
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git diff --name-only "${BASE_SHA}"...HEAD > changed-files.txt
+          cat changed-files.txt
+          node --import tsx .github/scripts/mutation-diff-trigger.ts changed-files.txt
+      - name: Restore Stryker incremental cache
+        if: steps.trigger.outputs.matched == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: reports/stryker-incremental.json
+          key: mutation-incremental-${{ github.run_id }}
+          restore-keys: |
+            mutation-incremental-
+      - name: Stryker mutation run (scoped target — see stryker.conf.json; this diff touches it, see trigger step)
+        if: steps.trigger.outputs.matched == 'true'
         run: npx stryker run
       - name: Mutation ratchet (blocks a test-suite-weakening PR)
+        if: steps.trigger.outputs.matched == 'true'
         run: node scripts/mutation-ratchet.mjs --report reports/mutation/mutation.json --baseline scripts/mutation-baseline.json
 
   jscpd-gate:

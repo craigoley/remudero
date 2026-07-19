@@ -15,5 +15,7 @@
   "tempDirName": ".stryker-tmp",
   "cleanTempDir": true,
   "concurrency": 4,
-  "timeoutMS": 15000
+  "timeoutMS": 15000,
+  "incremental": true,
+  "incrementalFile": "reports/stryker-incremental.json"
 }
