@@ -34,3 +34,26 @@ decision reversible.
   this task's one-concern scope (this task is the extraction, not the dispatcher) and is left for a
   separate task against the dispatch/drain path.
 - Rollback: revert this PR (removes only this DECISIONS.md entry; no runtime code touched).
+
+## 2026-07-19T12:38:59.000Z — W1-T1 re-dispatch: already-satisfied, no-op close
+- Options: (A) close as already-satisfied, no functional code change (RECOMMENDED) | (B) force a
+  cosmetic edit to `src/run-task.ts` or `src/spike.ts` just to produce a non-empty diff
+- Chosen (RECOMMENDED, auto): Option A — no functional code change.
+- Rationale: reconfirmed from scratch, same finding as the last MERGED closure (`bca5cd0`, `remudero`
+  PR #255): `src/run-task.ts` (4,344 lines, header comment "The proto-runner (WS-1 T1)") was already
+  extracted from the WS-0 spike (`src/spike.ts`, 308 lines — today holds only the sandbox smoke-test
+  proto-runner, `## One-shot WS-0 spike. Uses lib only; no orchestration logic leaks into lib`, with
+  no proto-runner logic left to lift) in commit `83ff9a8`, merged as `remudero` PR #2; ~250+ PRs have
+  built on `run-task.ts` since. At dispatch time this worktree's `HEAD` equaled `origin/main`
+  (`bca5cd0`) with a clean tree — nothing to extract, diff, or PR. Between `bca5cd0` and this
+  dispatch, at least nine further `run-W1-T1-*` branches were pushed and abandoned without merging
+  (none reached `main`), on top of the two earlier no-op closures (`d61c66e`, `83272b1`) that
+  preceded `bca5cd0` itself — so this task has now been re-dispatched roughly a dozen times against
+  work that finished at PR #2. The root cause named in `bca5cd0` remains unfixed:
+  `plan/tasks.yaml`'s `status: queued` field is documented in the same file as "decorative —
+  real merge-state is DERIVED FROM GITHUB" (see file header + `lib/status.ts`), so whatever
+  dispatches this task is keying off that decorative field instead of GitHub-derived status and
+  keeps re-queuing an already-merged task. Fixing the dispatcher is outside this task's one-concern
+  scope (this task is the extraction, not the dispatcher) and is escalated again here, more urgently
+  given the now double-digit recurrence count.
+- Rollback: revert this PR (removes only this DECISIONS.md entry; no runtime code touched).
