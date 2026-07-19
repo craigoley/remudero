@@ -31,6 +31,15 @@ jobs:
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Typecheck
+        # §5 TIER 2, quality gate 4/4 (W1-T98): this step is TS-strict's actual enforcement --
+        # tsconfig.json has `strict: true`, and a strict-mode violation anywhere in src/**/test/**
+        # fails this step and blocks merge via ci-gate. That "0 violations" reads identically
+        # whether strict is genuinely wired or silently inert (the neon-drift `_probe(x)` lesson)
+        # is why it isn't taken on faith: test/strict-probe.test.ts drives the real `tsc` binary
+        # against a permanently-broken, deliberately-excluded probe file
+        # (scripts/strict-probe.ts, outside this step's `-p tsconfig.json` scope) and asserts
+        # strict mode rejects it while strict-off accepts the same file unchanged -- that test
+        # runs as part of `npm test` below and is the falsifier proof this step is ACTIVE.
         run: npx tsc -p tsconfig.json --noEmit
       - name: Test
         run: npm test
