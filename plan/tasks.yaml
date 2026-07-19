@@ -4598,3 +4598,64 @@
   note: "Harvested by hand from the #193 worker's merge note — the W1-T105 class, once more before it
     builds. Ceiling-raising rejected: it would slacken the fast-gate discipline for every check to
     accommodate one slow one."
+
+- id: W1-T117
+  title: "Worker process containment — a run's process tree dies with the run; orphan survivors are detected, killed, and ledgered (the armed gh-pr-create time bomb)"
+  repo: remudero
+  depends_on: [W1-T12b]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    LIVE FINDING (2026-07-19 quota forensics): orphaned PID 87119 — a gh pr create --fill --base main
+    armed with sleep-until-exact-quota-reset, spawned from a worker's shell snapshot, discovered AFTER
+    its run ended. It would have opened an unattributed PR the moment quota returned: a worker action
+    firing outside its run's lifetime, budget, attribution, and gates.
+
+    STRUCTURAL GAP, verified in the checkout (the finding's durable half): src/lib/worker.ts spawns
+    via the SDK query() and src/lib/daemon.ts drives the poll loop, and NEITHER contains any process-
+    group, session, or teardown-kill logic — no setsid, no group signal, no survivor scan. Teardown
+    today reaps WORKTREES (pruneStaleWorktrees, live-pid-aware) but never PROCESSES. The write fence
+    and isolation probes bound what a worker touches DURING a run; nothing bounds WHEN a worker's
+    effects stop. A surviving process is an escape from every per-run guarantee at once.
+
+    EVIDENCE CAVEAT, recorded so the builder does not over-trust the trigger: PID 87119 is GONE and
+    the incident is NOT in state/ledger.ndjson — there is no orphan-related step, because the very
+    ledgering this task adds does not exist yet. The specific process is operator testimony,
+    unreproducible after the fact. The absent-teardown gap above is what is independently checkable,
+    and it alone justifies the task.
+  design: |
+    (i) TREE TERMINATION: workers run in their own process group/session; run teardown (any verdict,
+    including errors) kills the entire group, then verifies zero survivors. (ii) ORPHAN SWEEP: daemon
+    boot + each poll scans for processes attributable to ended runs (group/env/cwd markers), kills
+    them, ledgers worker_orphan_killed with the command line. (iii) The armed-timer fixture is the
+    regression: a worker spawning a detached sleep-then-act child -> child dead at teardown, ledger
+    line present. VERIFY the SDK's process-spawn surface from the checkout before choosing the group
+    mechanism (setsid vs launchd session vs SDK option) — distrust this prompt's assumption. The
+    spawn point is worker.ts's query() from @anthropic-ai/claude-agent-sdk; whether its Options
+    expose process-group control is UNVERIFIED here and is the builder's first question.
+    (iv) BLAST RADIUS: the kill must never reach the daemon, a sibling run's tree, or the operator's
+    own shell — attribution precedes every signal, and an unattributable process is left alone and
+    reported, never killed on suspicion.
+  acceptance:
+    - claim: "no worker child survives run teardown, on any verdict path"
+      proof: "in-process test: worker fixture spawns a detached long-sleep child; after teardown on BOTH the success and the error path, process.kill(childPid, 0) throws ESRCH and the survivor scan returns an empty list — asserted in-process, no operator and no real signal to a system daemon"
+    - claim: "the orphan sweep terminates strays from ended runs and ledgers them, touching nothing else"
+      proof: "in-process test: seed one stray child carrying run markers plus one unrelated child without them; after the sweep, the stray's pid is ESRCH and a worker_orphan_killed ledger line carries its cmdline, while the unrelated child is still alive (process.kill(pid, 0) succeeds)"
+    - claim: "terminations are attributable, and an unattributable process is never signalled"
+      proof: "in-process test: the worker_orphan_killed ledger line carries run_id/task_id derived from the markers; a marker-less process is left alive and reported, asserted by the sweep's returned report plus its pid still answering process.kill(pid, 0)"
+  risk: high
+  origin: architect
+  plan_refs: ["§9", "§4B", "P23"]
+  files: [src/lib/worker.ts, src/lib/daemon.ts]
+  status: queued
+  attempts: 0
+  note: "Acceptance deliberately states termination as an OBSERVABLE (process.kill(pid, 0) throws
+    ESRCH) rather than as the verb 'killed', which the Rule 18 headless lexicon blocks on an
+    auto-verify task. That lexicon entry exists for W1-T12's LIVE-kill criterion — kill -9 the daemon
+    on a real user session and watch launchd restart it — which genuinely needs an operator. This task
+    is the opposite case: every process here is spawned by the test itself and reaped in-process, so
+    it is headless-verifiable. The rewording sharpens the proof into a mechanical assertion rather
+    than evading the rule; the lexicon's inability to tell the two cases apart is a linter finding
+    worth its own task, NOT a reason to file this one as verify:human."
