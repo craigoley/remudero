@@ -1,0 +1,35 @@
+# .remudero/skills/design-review.yaml — NEW (MASTER-PLAN §5B/§7C, W3-T7): the
+# ONLY skill permitted browser egress, under its OWN hardened sandbox profile
+# (allowedDomains explicitly widened for the browser/target domains it needs;
+# every other skill/worker keeps the locked github.com/npm-only list).
+# Accessibility-tree snapshots first (10-100x cheaper than screenshots);
+# screenshots only for artifacts a human must eyeball. `browser_run_code_unsafe`
+# is HARD-DENIED — it is simply never in `tools`, the same allowlist-by-
+# omission mechanism src/lib/worker.ts's `tools` option already enforces
+# (unset/omitted = never in the model's context, isolation.ts's preflight
+# probe, W1-T17).
+tools:
+  - Read
+  - Grep
+  - Glob
+  - WebSearch
+  - mcp__playwright__browser_snapshot
+  - mcp__playwright__browser_navigate
+  - mcp__playwright__browser_click
+  - mcp__playwright__browser_take_screenshot
+  - mcp__playwright__browser_resize
+
+permission_profile: architect-browser
+
+output_contract: >
+  a design-review report + screenshots attached as PR artifacts, proposing
+  concrete UI/UX diffs against WCAG/a11y + responsive-breakpoint findings;
+  PROPOSES, never merges — gated by ci-gate+remudero-review like any other
+  skill's output. Findings that need a human to LOOK route to verify: human,
+  never auto-verified.
+
+grounding_sources:
+  - MASTER-PLAN.md#7C
+
+gate: ci-gate+remudero-review
+tier: architect

@@ -1,0 +1,26 @@
+# .remudero/skills/refactor.yaml — PROMOTED to a first-class skill + campaign
+# with teeth (MASTER-PLAN §3A, §5B, W2-T3). The same ground->research->propose
+# primitive as every other skill, fanned out fleet-wide by a campaign selector
+# when a gate/pattern improvement lands.
+tools:
+  - Read
+  - Grep
+  - Glob
+  - Bash
+  - Write
+  - Edit
+
+permission_profile: architect
+
+output_contract: >
+  a refactor PR scoped to one campaign-selector item (one repo/file/pattern
+  instance), gated by ci-gate+remudero-review; a campaign run opens one such
+  PR per selector match, each with its own independent green-PR proof.
+
+grounding_sources:
+  - MASTER-PLAN.md#3A
+  - plan/tasks.yaml
+  - LEARNINGS.md
+
+gate: ci-gate+remudero-review
+tier: architect

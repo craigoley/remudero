@@ -58,6 +58,7 @@ import {
 } from "./lib/plan.js";
 import { assertLintClean, changedTaskIds, lintTask, TaskLintError } from "./lib/task-linter.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./lib/mounts.js";
+import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
 import { ContainmentError, probeContainment } from "./lib/containment.js";
 import { IsolationError, probeIsolation } from "./lib/isolation.js";
 import {
@@ -4057,6 +4058,42 @@ async function projectCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
+/**
+ * `rmd skill list` — the §5B skill-registry reader (W1-T44). Setup, Plan,
+ * Feedback/triage, Retro, Review, Refactor, and Design Review are ALL the same
+ * ground->research->grill-or-produce primitive, differing only by a
+ * declarative profile; this prints every `.remudero/skills/<name>.yaml`
+ * resolved, so a skill added by CONFIG ALONE (no source change) shows up here
+ * with zero code touched. `skill` is the only subcommand today — `list` — kept
+ * as an explicit subcommand (not bare `rmd skill`) so a future write verb
+ * (e.g. an `add`/`run`) has room without a breaking reshape.
+ */
+async function skillCommand(rest: string[]): Promise<number> {
+  const sub = rest[0];
+  if (sub !== "list") {
+    console.error(`rmd skill: unknown subcommand '${sub ?? ""}' — usage: rmd skill list\n` + USAGE);
+    return 2;
+  }
+  const badArg = unknownArgError("skill list", rest.slice(1), [], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+
+  let skills;
+  try {
+    skills = loadSkillRegistry(skillsDir(repoRoot));
+  } catch (e) {
+    const message = e instanceof SkillError ? e.message : String((e as Error)?.message ?? e);
+    console.error(`rmd skill list: ${message}`);
+    return 1;
+  }
+
+  console.log(`### rmd skill list — ${skills.length} registered (.remudero/skills/)`);
+  console.log(renderSkillList(skills));
+  return 0;
+}
+
 /** `before`/`after` line for `rmd correct` — the operator-facing flip. */
 function describeProjection(label: string, proj: StatusProjection): string {
   const pr = proj.prUrl ? `${proj.prUrl}${proj.prState ? ` (${proj.prState})` : ""}` : "none";
@@ -4204,6 +4241,11 @@ const COMMANDS: readonly CommandSpec[] = [
     usage:
       "rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>   # fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps, does not push/PR/arm protection itself",
   },
+  {
+    name: "skill",
+    usage:
+      "rmd skill list   # §5B skill-registry reader (W1-T44): resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); adding a skill is a config entry, no source change",
+  },
 ] as const;
 
 const USAGE_FOOTER =
@@ -4319,6 +4361,9 @@ async function main(): Promise<void> {
   }
   if (cmd === "project") {
     process.exit(await projectCommand(rest));
+  }
+  if (cmd === "skill") {
+    process.exit(await skillCommand(rest));
   }
   console.error(USAGE);
   process.exit(2);

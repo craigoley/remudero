@@ -1,0 +1,30 @@
+# .remudero/skills/feedback.yaml — feedback capture + triage (MASTER-PLAN §7B),
+# folded into ONE skill per §5B ("feedback / triage -> §7B, folded in").
+# `rmd feedback` (W1-T40) captures plan/feedback/<id> entries async; the same
+# skill's triage loop (`rmd triage`, W1-T41) grounds -> researches ->
+# grills-or-proposes against them.
+tools:
+  - Read
+  - Write
+  - Grep
+  - Glob
+  - WebSearch
+  - AskUserQuestion
+
+permission_profile: architect
+
+output_contract: >
+  captures async intake as plan/feedback/<id> ({id, ts, raw text,
+  attachments[], origin, status, proposal_pr}); AMBIGUOUS items grill via
+  AskUserQuestion (interactive) or a needs-human issue (async, reusing §4's
+  escalation machinery); CLEAR items propose a plan-only PR carrying
+  origin: feedback#<id> provenance, gated by ci-gate+remudero-review.
+
+grounding_sources:
+  - MASTER-PLAN.md#7B
+  - plan/feedback
+  - LEARNINGS.md
+  - DECISIONS.md
+
+gate: ci-gate+remudero-review
+tier: architect

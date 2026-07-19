@@ -1,0 +1,24 @@
+# .remudero/skills/review.yaml — the DETERMINISTIC-gated reviewer
+# (MASTER-PLAN §5B: "review -> the DETERMINISTIC-gated reviewer ... folded
+# in"). Standing rule 2 / §7A: the judge is CODE, the LLM layer is advisory
+# only — parseReviewerVerdicts + judgeReview decide, never a bare model
+# opinion.
+tools:
+  - Read
+  - Grep
+  - Glob
+  - Bash
+
+permission_profile: architect
+
+output_contract: >
+  the remudero-review commit status (PASS/FAIL) posted to the PR head sha
+  (src/lib/review.ts's REVIEW_CONTEXT), fail-closed on empty criteria, any
+  unmet criterion, or test theater; NEVER edits code itself.
+
+grounding_sources:
+  - plan/tasks.yaml
+  - DECISIONS.md
+
+gate: ci-gate+remudero-review
+tier: architect
