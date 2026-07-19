@@ -10,6 +10,7 @@ import {
   DEFAULT_MODEL_LABEL,
   DENY_FLOOR_FALLBACK_MODE,
   appendQuestion,
+  cacheTokenLedgerFields,
   collectWorkerResult,
   evaluateDenyFloor,
   parseDecisionRequest,
@@ -129,6 +130,86 @@ async function* apiErrorMidResponseStream(): AsyncGenerator<unknown> {
   };
 }
 
+/**
+ * A RECORDED stream fixture carrying a `compact_boundary` system message
+ * (MASTER-PLAN §8B / W1-T36 acceptance — sdk.d.ts 0.3.210 ground truth:
+ * `SDKCompactBoundaryMessage`, `{type:"system", subtype:"compact_boundary"}`).
+ */
+async function* compactionStream(): AsyncGenerator<unknown> {
+  yield { type: "assistant", message: { content: [{ type: "text", text: "working…" }] } };
+  yield {
+    type: "system",
+    subtype: "compact_boundary",
+    compact_metadata: { trigger: "auto", pre_tokens: 190000, post_tokens: 18000, duration_ms: 3900 },
+    uuid: "boundary-1",
+    session_id: "sess-compact",
+  };
+  yield { type: "assistant", message: { content: [{ type: "text", text: "continuing…" }] } };
+  yield {
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "PR_URL: https://github.com/x/y/pull/3",
+    session_id: "sess-compact",
+    total_cost_usd: 2.71,
+    num_turns: 38,
+    permission_denials: [],
+  };
+}
+
+// ── MASTER-PLAN §8B / W1-T36: detect + ledger a compaction event, flag the
+// call quality-suspect. Proof: a unit test over a RECORDED stream fixture
+// containing a compact_boundary message — the detector emits the compaction
+// event on the ledger-line-shaped `workerLedgerFields` object, alongside
+// `quality_suspect=true` on that same object as `verdict`.
+
+test("collectWorkerResult: a compact_boundary message in the stream is DETECTED and recorded on the result", async () => {
+  const r = await collectWorkerResult(compactionStream(), { childEnvKeys: [] });
+  assert.deepEqual(r.compactionEvents, [{ trigger: "auto", preTokens: 190000, postTokens: 18000, durationMs: 3900 }]);
+  assert.equal(r.qualitySuspect, true);
+});
+
+test("collectWorkerResult: a clean stream with NO compact_boundary message is never flagged quality-suspect", async () => {
+  const r = await collectWorkerResult(successStream(), { childEnvKeys: [] });
+  assert.deepEqual(r.compactionEvents, []);
+  assert.equal(r.qualitySuspect, false);
+});
+
+test("workerLedgerFields: a compacted call's ledger line carries the compaction event AND quality_suspect=true alongside its verdict", async () => {
+  const r = await collectWorkerResult(compactionStream(), { childEnvKeys: [] });
+  const fields = workerLedgerFields(r);
+  assert.equal(fields.verdict, "success");
+  assert.equal(fields.quality_suspect, true, "quality_suspect rides the SAME ledger line as verdict");
+  assert.deepEqual(fields.compaction_events, [
+    { trigger: "auto", preTokens: 190000, postTokens: 18000, durationMs: 3900 },
+  ]);
+});
+
+test("collectWorkerResult: an ERROR call (error_max_turns) that ALSO compacted is still flagged quality-suspect on the swallowed-throw path", async () => {
+  const stream = (async function* (): AsyncGenerator<unknown> {
+    yield { type: "assistant", message: { content: [{ type: "text", text: "working…" }] } };
+    yield {
+      type: "system",
+      subtype: "compact_boundary",
+      compact_metadata: { trigger: "auto", pre_tokens: 200000 },
+    };
+    yield {
+      type: "result",
+      subtype: "error_max_turns",
+      is_error: true,
+      session_id: "sess-err-compact",
+      total_cost_usd: 4.2,
+      num_turns: 60,
+      permission_denials: [],
+    };
+    throw new Error("Claude Code returned an error result: error_max_turns");
+  })();
+  const r = await collectWorkerResult(stream, { childEnvKeys: [] });
+  assert.equal(r.isError, true);
+  assert.equal(r.qualitySuspect, true);
+  assert.deepEqual(r.compactionEvents, [{ trigger: "auto", preTokens: 200000 }]);
+});
+
 test("collectWorkerResult: an Anthropic-side server_error mid-response is flagged apiError, even though the envelope reports success", async () => {
   const r = await collectWorkerResult(apiErrorMidResponseStream(), { childEnvKeys: ["PATH"] });
   assert.equal(r.apiError, true, "the <synthetic>/isApiErrorMessage message must set apiError");
@@ -223,7 +304,7 @@ test("collectWorkerResult: tokens zero out (never crash) when a synthetic/older 
   assert.deepEqual(r.modelUsage, {});
 });
 
-test("workerLedgerFields: success call ⇒ {model, effort, tokens, total_cost_usd, billing_mode, verdict} with billing_mode='subscription' and verdict='success'", async () => {
+test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_input_tokens, cache_creation_input_tokens, total_cost_usd, billing_mode, verdict, quality_suspect, compaction_events} with billing_mode='subscription', verdict='success', quality_suspect=false", async () => {
   const r = await collectWorkerResult(usageStream(), {
     childEnvKeys: [],
     model: "claude-opus-4",
@@ -234,11 +315,41 @@ test("workerLedgerFields: success call ⇒ {model, effort, tokens, total_cost_us
     model: "claude-opus-4",
     effort: "high",
     tokens: { input: 1000, output: 200, cacheRead: 500, cacheCreation: 50 },
+    cache_read_input_tokens: 500,
+    cache_creation_input_tokens: 50,
     total_cost_usd: 1.23,
     billing_mode: "subscription",
     verdict: "success",
+    quality_suspect: false,
+    compaction_events: [],
   });
   assert.equal(BILLING_MODE, "subscription");
+});
+
+// ── W1-T35: cache tokens ledgered as NAMED COLUMNS (flat, snake_case — matching
+// the SDK envelope's own field names) so the cache-reuse signal (MASTER-PLAN
+// §8A: "near-zero cache reads on the second worker of a run means the ordering
+// is wrong") is directly grep/jq-able on a ledger line, not buried in `tokens`.
+
+test("cacheTokenLedgerFields: mirrors tokens.cacheRead/cacheCreation as flat cache_read_input_tokens/cache_creation_input_tokens", () => {
+  assert.deepEqual(
+    cacheTokenLedgerFields({ input: 1000, output: 200, cacheRead: 500, cacheCreation: 50 }),
+    { cache_read_input_tokens: 500, cache_creation_input_tokens: 50 },
+  );
+});
+
+test("cacheTokenLedgerFields: zero cache tokens ledger as zero columns, not omitted", () => {
+  assert.deepEqual(
+    cacheTokenLedgerFields({ input: 10, output: 5, cacheRead: 0, cacheCreation: 0 }),
+    { cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  );
+});
+
+test("workerLedgerFields: a result envelope carrying cache_read_input_tokens + cache_creation_input_tokens is ledgered into named columns on the worker line", async () => {
+  const r = await collectWorkerResult(usageStream(), { childEnvKeys: [] });
+  const fields = workerLedgerFields(r);
+  assert.equal(fields.cache_read_input_tokens, 500);
+  assert.equal(fields.cache_creation_input_tokens, 50);
 });
 
 test("workerLedgerFields: an ERROR call's verdict is the SDK's error subtype, not the string 'success'", async () => {

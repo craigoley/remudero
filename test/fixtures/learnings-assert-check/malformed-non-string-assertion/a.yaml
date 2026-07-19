@@ -1,0 +1,8 @@
+# Fixture for test/learnings-assert-check.test.ts — an entry whose 'assertion' is not a string.
+- id: fixture-non-string-assertion
+  subsystem: fixture
+  lifecycle: active
+  files: [fixture.ts]
+  fact: an entry whose assertion field is a number, not a string.
+  src: fixture
+  assertion: 123

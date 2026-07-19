@@ -1,0 +1,5 @@
+- id: fixture-b-one
+  subsystem: ci
+  files: [".github/**", src/shared.ts]
+  fact: fixture fact three.
+  src: PR#2

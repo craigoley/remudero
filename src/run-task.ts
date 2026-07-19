@@ -16,6 +16,7 @@ import {
   type Config,
 } from "./lib/config.js";
 import { buildWorkerEnv } from "./lib/env.js";
+import { outputContractLines, renderAnchorBlock } from "./lib/compaction.js";
 import type { RunResult } from "./lib/run-result.js";
 export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
@@ -61,8 +62,9 @@ import { ContainmentError, probeContainment } from "./lib/containment.js";
 import { IsolationError, probeIsolation } from "./lib/isolation.js";
 import {
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-  loadLearnings,
-  renderLearningsContext,
+  loadLearningsForTaskFiles,
+  renderDoctrinePreamble,
+  renderMatchedLearnings,
   selectLearnings,
 } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
@@ -120,6 +122,7 @@ import {
   removeRunLock,
   renderWorkerSettings,
   spawnWorker,
+  cacheTokenLedgerFields,
   workerLedgerFields,
   worktreeAdd,
   worktreeRemove,
@@ -131,6 +134,7 @@ import {
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "./lib/drain-lock.js";
 import { acquireInflightLock, InflightLockError } from "./lib/inflight-lock.js";
 import { classifyFailure, MAX_TRANSIENT_RETRIES, type FailureSignal } from "./lib/classify.js";
+import { shouldRecordDecision } from "./lib/risk-score.js";
 import {
   consumeStop,
   pauseDetail,
@@ -1127,6 +1131,9 @@ export interface WorkerErrorVerdict {
     model: string;
     effort: string;
     tokens: WorkerResult["tokens"];
+    /** W1-T35 named columns — see {@link cacheTokenLedgerFields}. */
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
   };
 }
 
@@ -1170,6 +1177,7 @@ export function workerErrorVerdict(
       model: r.model,
       effort: r.effort,
       tokens: r.tokens,
+      ...cacheTokenLedgerFields(r.tokens),
     },
   };
 }
@@ -1188,6 +1196,9 @@ export interface NoPrVerdict {
     model: string;
     effort: string;
     tokens: WorkerResult["tokens"];
+    /** W1-T35 named columns — see {@link cacheTokenLedgerFields}. */
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
   };
 }
 
@@ -1219,6 +1230,7 @@ export function noPrVerdict(r: WorkerResult, costUsd: number, stage: string): No
       model: r.model,
       effort: r.effort,
       tokens: r.tokens,
+      ...cacheTokenLedgerFields(r.tokens),
     },
   };
 }
@@ -1273,15 +1285,27 @@ function reconObservedToContext(recon: WorkerResult, taskId: string): string {
 /**
  * Render the implement prompt: cited CONTEXT + TASK + explicit output contract.
  *
- * `learningsContext` is the Promptsmith READ side (W1-T19): the distrust rule,
- * the autonomy clause, and the task-matched LEARNINGS facts — each already
- * provenance-tagged, so the whole CONTEXT block still lints clean.
+ * CACHE-AWARE ASSEMBLY (MASTER-PLAN §8A / W1-T35): the Anthropic prompt cache
+ * keys on EXACT PREFIX BYTES — any early edit invalidates the cache for
+ * everything after it, and a cache READ prices at ~1/10th of fresh input. So
+ * the CONTEXT block is ordered STABLE-FIRST, VOLATILE-LAST:
+ *   1. `renderDoctrinePreamble()` — Tier 0, the distrust rule + the autonomy
+ *      clause. Invariant; changes rarely (MASTER-PLAN §8A: "line-capped
+ *      ~150, must change RARELY"). This is the cacheable prefix.
+ *   2. `contextClaims` / `reconContext` — per-task, fixed for the life of a
+ *      run once recon has completed (recon never re-runs mid-run).
+ *   3. `matchedLearnings` (Tier 1, W1-T19/W1-T33) — the task-matched LEARNINGS
+ *      facts. VOLATILE: the corpus grows every retro, so it goes LAST, never
+ *      ahead of the stable prefix — a corpus edit can never bust the cache for
+ *      the doctrine/task/recon bytes that precede it.
+ * Every line is already provenance-tagged, so the whole CONTEXT block still
+ * lints clean regardless of ordering.
  */
 export function renderImplementPrompt(
   task: Task,
   reconContext: string,
   runId: string,
-  learningsContext = "",
+  matchedLearnings = "",
 ): string {
   const contextClaims = (task.context ?? [])
     .map((c) => `- ${c.claim} ${citation(c.src)}`)
@@ -1292,22 +1316,19 @@ export function renderImplementPrompt(
 
   return [
     "# CONTEXT",
-    learningsContext,
+    renderDoctrinePreamble(),
     contextClaims,
     reconContext,
+    matchedLearnings,
     "",
     "# TASK",
     body,
     "",
-    "# OUTPUT CONTRACT",
-    "- Make ONLY the change described in TASK; one concern.",
-    "- If a filename/approach choice is needed, FIRST emit a DECISION_REQUEST",
-    "  (exactly two options, one marked RECOMMENDED, a reversibility note) and STOP.",
-    "- Otherwise: stage the changed file(s), commit with a concise message, then run",
-    "  `git push origin HEAD` (NOT `-u` — the shared .git/config is outside the sandbox",
-    "  write scope, WS-0 FF10f), and open a PR with `gh pr create --fill --base main`.",
-    `- Include this exact trailer as the LAST line of the PR body: Remudero-Task: ${task.id}`,
-    "- End with a REPORT whose LAST line is exactly: PR_URL: <the pull request url>",
+    // Shared verbatim with the post-compaction ANCHOR (compaction.ts,
+    // MASTER-PLAN §8B / W1-T36) — ONE source of literal text so the anchor
+    // re-injected after a compaction is provably byte-identical to what the
+    // worker was told at turn 0, never a re-derived/paraphrased copy.
+    ...outputContractLines(task.id),
   ].join("\n");
 }
 
@@ -1649,13 +1670,23 @@ async function runTask(
     const reconFail = failOnWorkerError(recon, "recon");
     if (reconFail) return reconFail;
 
-    // ── Promptsmith READ side (W1-T19): inject the distrust rule, the autonomy
-    // clause, and the task-matched LEARNINGS facts. Matching is deterministic by
-    // file-glob; the KNOWLEDGE BUDGET caps the injected facts and DROPPED entries
-    // are logged so a growing corpus never becomes an unbounded context tax.
-    const learnings = loadLearnings(join(dirname(planPath), "learnings.yaml"));
+    // ── Promptsmith READ side (W1-T19; SPLIT + INDEX + SUPERSESSION, W1-T33):
+    // inject the distrust rule, the autonomy clause, and the task-matched
+    // LEARNINGS facts. `loadLearningsForTaskFiles` is a LOOKUP (via the
+    // generated learnings/index.json), not a scan: it parses only the corpus
+    // shards task.files could match. `selectLearnings` then matches by file-glob
+    // and filters out any `lifecycle: superseded` entry before ranking, so a
+    // decayed fact can never be injected; the KNOWLEDGE BUDGET caps the
+    // injected facts and DROPPED entries are logged so a growing corpus never
+    // becomes an unbounded context tax.
+    const learningsDir = join(dirname(planPath), "..", "learnings");
+    const learnings = loadLearningsForTaskFiles(learningsDir, task.files);
     const { selected, dropped } = selectLearnings(learnings, task.files, DEFAULT_KNOWLEDGE_BUDGET_CHARS);
-    const learningsContext = renderLearningsContext(selected);
+    // VOLATILE (Tier 1) — deliberately NOT combined with the stable doctrine
+    // preamble here: renderImplementPrompt places this LAST in the CONTEXT
+    // block (cache-aware ordering, W1-T35) so a growing corpus can never bust
+    // the cache for the stable/per-task bytes that precede it.
+    const matchedLearnings = renderMatchedLearnings(selected);
     log("learnings.injected", {
       matched: selected.length,
       dropped: dropped.map((d) => d.id),
@@ -1664,10 +1695,20 @@ async function runTask(
 
     // ── Render + provenance-lint the prompt.
     const reconContext = reconObservedToContext(recon, taskId);
-    const prompt = renderImplementPrompt(task, reconContext, runId, learningsContext);
+    const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     log("prompt.linted", { provenance: "clean" });
     say("prompt provenance-linted: clean");
+
+    // ── COMPACTION ANCHOR (MASTER-PLAN §8B / W1-T36): the goal + acceptance
+    // criteria + hard constraints, built ONCE and ledgered here so the anchor
+    // this run WOULD re-inject verbatim after a compaction is a matter of
+    // repo-state fact, not a claim in a possibly-lossy REPORT. Live mid-stream
+    // re-injection (a real compaction firing during THIS spawn) is W1-T12e's
+    // operator-golden drill — this run-level wiring records the anchor that
+    // drill will send.
+    const anchor = renderAnchorBlock(task, runId);
+    log("anchor.built", { anchor });
 
     // ── Implement. A TRANSIENT (an Anthropic-side server_error mid-response, or a
     // network/5xx/CI-infra blip) is Anthropic's fault, NOT the task's — W1-T7's classifier
@@ -1742,15 +1783,26 @@ async function runTask(
     const decision = parseDecisionRequest(fullText(impl));
     if (decision && !parseReport(fullText(impl))?.prUrl) {
       const chosen = decision.recommended ?? decision.options[0] ?? "(first option)";
-      appendFileSync(
-        join(repoRoot, "DECISIONS.md"),
-        `\n## ${new Date().toISOString()} — ${taskId} (${runId})\n` +
-          `- Options: ${decision.options.join(" | ")}\n` +
-          `- Chosen (RECOMMENDED, auto): ${chosen}\n` +
-          `- Rollback: revert the PR.\n`,
+      // W1-T32: DECISIONS.md hygiene. Every DECISION_REQUEST is auto-chosen and
+      // ledgered — that never changes — but only decisions worth a human's
+      // future attention (risk >= medium, or an explicit reversibility
+      // caveat) get PROMOTED to the durable, human-read record. A trivial
+      // filename pick stays ledger-only instead of burying real decisions.
+      const recordVerdict = shouldRecordDecision(decision);
+      if (recordVerdict.record) {
+        appendFileSync(
+          join(repoRoot, "DECISIONS.md"),
+          `\n## ${new Date().toISOString()} — ${taskId} (${runId})\n` +
+            `- Options: ${decision.options.join(" | ")}\n` +
+            `- Chosen (RECOMMENDED, auto): ${chosen}\n` +
+            `- Risk: ${recordVerdict.band} (${recordVerdict.reason})\n` +
+            `- Rollback: revert the PR.\n`,
+        );
+      }
+      log("decision.autochoose", { chosen, recorded: recordVerdict.record, risk_band: recordVerdict.band });
+      say(
+        `DECISION_REQUEST auto-chose: ${chosen} (${recordVerdict.record ? "recorded in DECISIONS.md" : "ledger-only, " + recordVerdict.band + " risk"})`,
       );
-      log("decision.autochoose", { chosen });
-      say(`DECISION_REQUEST auto-chose: ${chosen}`);
       impl = account(
         await spawnWorker({
           cwd: worktreePath,
@@ -3522,7 +3574,7 @@ async function fixCommand(rest: string[]): Promise<number> {
   }
   const prNumber = Number(prArg);
   if (!prArg || !Number.isInteger(prNumber) || prNumber <= 0) {
-    console.error(`rmd fix: '${prArg ?? ""}' is not a valid PR number — usage: rmd fix <pr-number> [--repo <name>]\n` + USAGE);
+    console.error(`rmd fix: '${prArg ?? ""}' is not a valid PR number — usage: ${commandSyntax("fix")}\n` + USAGE);
     return 2;
   }
 
@@ -3796,9 +3848,7 @@ async function escalateCommand(rest: string[]): Promise<number> {
   const taskId = flagValue(rest, "--task");
   const summary = flagValue(rest, "--summary");
   if (!cls || !ESCALATION_CLASSES.includes(cls as EscalationClass) || !taskId || !summary) {
-    console.error(
-      'usage: rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option "label|detail"]...',
-    );
+    console.error(`usage: ${commandSyntax("escalate")}`);
     return 2;
   }
   const config = loadConfig();
@@ -3833,7 +3883,7 @@ async function escalateCommand(rest: string[]): Promise<number> {
 async function notifyCommand(rest: string[]): Promise<number> {
   const message = rest.join(" ");
   if (!message) {
-    console.error("usage: rmd notify <message>");
+    console.error(`usage: ${commandSyntax("notify")}`);
     return 2;
   }
   const config = loadConfig();
@@ -3963,10 +4013,7 @@ async function initCommand(rest: string[]): Promise<number> {
 async function projectCommand(rest: string[]): Promise<number> {
   const sub = rest[0];
   if (sub !== "init") {
-    console.error(
-      `rmd project: unknown subcommand '${sub ?? ""}' — usage: rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>\n` +
-        USAGE,
-    );
+    console.error(`rmd project: unknown subcommand '${sub ?? ""}' — usage: ${commandSyntax("project")}\n` + USAGE);
     return 2;
   }
 
@@ -4032,7 +4079,7 @@ async function correctCommand(rest: string[]): Promise<number> {
   }
   const prFlag = flagValue(rest, "--pr");
   if (!prFlag) {
-    console.error("rmd correct: --pr <n> is required — usage: rmd correct <task-id> --pr <n> [--reason <text>]\n" + USAGE);
+    console.error(`rmd correct: --pr <n> is required — usage: ${commandSyntax("correct")}\n` + USAGE);
     return 2;
   }
 
@@ -4066,8 +4113,132 @@ async function correctCommand(rest: string[]): Promise<number> {
 }
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
-const USAGE =
-  "usage:\n  rmd run-task <task-id> [--allow-stale]   # dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing\n  rmd review <pr-number>   # post remudero-review on a hand-opened PR\n  rmd dep-review <pr-number> [--repo <name>]   # deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse\n  rmd lint-plan [--plan <path>] [--base <git-ref>]   # §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing\n  rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)\n  rmd drain [--until <id>] [--max <n>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60)\n  rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.\n  rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)\n  rmd sweep [--repo <name>] [--dry-run]   # level-triggered PR-pipeline reconciler (W1-T77, P22): re-derive EVERY open PR's disposition from observed state and take the ONE gated action — mergeable->arm auto-merge; blocked-fixable->W1-T76 fix rung; stale/superseded->close-with-reason; blocked-ambiguous->the W1-T78 clarification-question rung (a specific, decidable operator question to the §2 backlog + escalate() as transport, never a generic needs-human). Idempotent (a second sweep over unchanged state acts on nothing). The daemon runs this every poll; --dry-run previews dispositions and takes nothing.\n  rmd fix <pr-number> [--repo <name>]   # operator verb for the W1-T76 fix rung (W1-T95, bootstrap/manual-override — drives a block on the sweep/drain delivery ITSELF, e.g. #160): dispatches the SAME rung sweep uses; refuses (zero spawns) when the PR is merged, closed, or has no block evidence; strikes-at-cap routes to escalate naming the count, never bypassing the cap.\n  rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.\n  rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.\n  rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume\n  rmd correct <task-id> --pr <n> [--reason <text>]   # sanctioned operator-correction writer (P9/W1-T75): appends a correction.provenance ledger line naming the task's TRUE merged PR, SUPREME over every deriveStatus rung; prints derived status before/after\n  rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...\n  rmd notify <message>     # real-time iMessage ping (osascript)\n  rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message\n  rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard\n  rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>   # fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps, does not push/PR/arm protection itself\n\nAn UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
+//
+// COMMAND REGISTRY — the ONE source of truth for every `rmd <cmd>` name and its usage
+// line. `rmd --help` (top-level) and `rmd <cmd> --help` (per-command) are BOTH generated
+// from this array — neither is hand-maintained prose, so they cannot drift from each
+// other. bin/rmd's header comment is documentation for humans reading the script; this
+// array is what the running binary actually prints and dispatches against.
+interface CommandSpec {
+  /** Exact token matched against argv[2] in main()'s dispatch below. */
+  readonly name: string;
+  /** One-line "rmd <name> ... # description" — printed verbatim in both help forms. */
+  readonly usage: string;
+}
+
+const COMMANDS: readonly CommandSpec[] = [
+  {
+    name: "run-task",
+    usage:
+      "rmd run-task <task-id> [--allow-stale]   # dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing",
+  },
+  { name: "review", usage: "rmd review <pr-number>   # post remudero-review on a hand-opened PR" },
+  {
+    name: "dep-review",
+    usage:
+      "rmd dep-review <pr-number> [--repo <name>]   # deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse",
+  },
+  {
+    name: "lint-plan",
+    usage:
+      "rmd lint-plan [--plan <path>] [--base <git-ref>]   # §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing",
+  },
+  { name: "retro", usage: "rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)" },
+  {
+    name: "drain",
+    usage:
+      "rmd drain [--until <id>] [--max <n>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60)",
+  },
+  {
+    name: "daemon",
+    usage:
+      "rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.",
+  },
+  {
+    name: "daemon-plist",
+    usage:
+      "rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)",
+  },
+  {
+    name: "sweep",
+    usage:
+      "rmd sweep [--repo <name>] [--dry-run]   # level-triggered PR-pipeline reconciler (W1-T77, P22): re-derive EVERY open PR's disposition from observed state and take the ONE gated action — mergeable->arm auto-merge; blocked-fixable->W1-T76 fix rung; stale/superseded->close-with-reason; blocked-ambiguous->the W1-T78 clarification-question rung (a specific, decidable operator question to the §2 backlog + escalate() as transport, never a generic needs-human). Idempotent (a second sweep over unchanged state acts on nothing). The daemon runs this every poll; --dry-run previews dispositions and takes nothing.",
+  },
+  {
+    name: "fix",
+    usage:
+      "rmd fix <pr-number> [--repo <name>]   # operator verb for the W1-T76 fix rung (W1-T95, bootstrap/manual-override — drives a block on the sweep/drain delivery ITSELF, e.g. #160): dispatches the SAME rung sweep uses; refuses (zero spawns) when the PR is merged, closed, or has no block evidence; strikes-at-cap routes to escalate naming the count, never bypassing the cap.",
+  },
+  {
+    name: "stop",
+    usage:
+      "rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.",
+  },
+  {
+    name: "pause",
+    usage:
+      "rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.",
+  },
+  { name: "resume", usage: "rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume" },
+  {
+    name: "correct",
+    usage:
+      "rmd correct <task-id> --pr <n> [--reason <text>]   # sanctioned operator-correction writer (P9/W1-T75): appends a correction.provenance ledger line naming the task's TRUE merged PR, SUPREME over every deriveStatus rung; prints derived status before/after",
+  },
+  {
+    name: "escalate",
+    usage:
+      'rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option "label|detail"]...   # open a needs-human labeled GitHub issue; MANUAL/HARD_STOP also fire a real-time iMessage ping (BLOCKED collapses to digest)',
+  },
+  { name: "notify", usage: "rmd notify <message>     # real-time iMessage ping (osascript)" },
+  {
+    name: "digest",
+    usage: "rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message",
+  },
+  {
+    name: "init",
+    usage: "rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard",
+  },
+  {
+    name: "project",
+    usage:
+      "rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>   # fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps, does not push/PR/arm protection itself",
+  },
+] as const;
+
+const USAGE_FOOTER =
+  "An UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits\nNON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.";
+
+/** Full `rmd --help` text — every command's usage line, generated from COMMANDS. */
+const USAGE = `usage:\n${COMMANDS.map((c) => `  ${c.usage}`).join("\n")}\n\n${USAGE_FOOTER}`;
+
+/** `rmd <cmd> --help` text — the single matching command's line, same registry as USAGE. */
+function commandHelp(spec: CommandSpec): string {
+  return `usage:\n  ${spec.usage}\n\nSee \`rmd --help\` for the full command list.`;
+}
+
+/**
+ * Look up a COMMANDS entry by name — throws if absent, which can only happen if a
+ * command handler calls this with a name the registry doesn't have (a bug in THIS file,
+ * caught by test/help-registry.test.ts's dispatch<->registry coverage check, never a
+ * user-facing failure mode).
+ */
+function commandSpec(name: string): CommandSpec {
+  const spec = COMMANDS.find((c) => c.name === name);
+  if (!spec) throw new Error(`commandSpec: no COMMANDS entry for "${name}" — registry/dispatch are out of sync`);
+  return spec;
+}
+
+/**
+ * Just the invocation shape of one command ("rmd <name> ...", no trailing "# description"
+ * comment) — for inline error-usage hints (`rmd fix: '<x>' is not a valid PR number —
+ * usage: ...`) that need one command's syntax, not its full prose. Derived from the SAME
+ * COMMANDS entry `rmd --help`/`rmd <cmd> --help` render from, so these hints cannot drift
+ * from the registry the way hand-typed duplicates of this text used to.
+ */
+function commandSyntax(name: string): string {
+  return commandSpec(name).usage.split(/\s{2,}#/)[0].trimEnd();
+}
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(): Promise<void> {
@@ -4075,6 +4246,14 @@ async function main(): Promise<void> {
   const arg = rest[0];
   if (cmd === "--help" || cmd === "-h" || cmd === "help") {
     console.log(USAGE);
+    process.exit(0);
+  }
+  // Per-command help — checked BEFORE any dispatch below so `rmd <cmd> --help` never
+  // reaches a command's business logic (e.g. `rmd notify --help` must not send a
+  // notification whose message is the literal string "--help").
+  const helpSpec = COMMANDS.find((c) => c.name === cmd);
+  if (helpSpec && (rest.includes("--help") || rest.includes("-h"))) {
+    console.log(commandHelp(helpSpec));
     process.exit(0);
   }
   if (cmd === "run-task" && arg) {
@@ -4157,3 +4336,8 @@ export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, re
 // Exported for a behavioral test of the retro no-op guard (W1-T64): commitsAhead is the predicate the
 // retro/implement no-op path branches on (=== 0 ⇒ nothing to PR). Logic UNCHANGED — export only.
 export { commitsAhead };
+// Exported for W1-T47's help-registry test: COMMANDS is the ONE source of truth both USAGE
+// (`rmd --help`) and commandHelp (`rmd <cmd> --help`) generate from — export only, logic unchanged.
+// commandSyntax/commandSpec are the same lookup individual command handlers use for their
+// inline usage hints (fix/escalate/notify/project/correct) — no hand-written duplicate text.
+export { COMMANDS, USAGE, commandHelp, commandSpec, commandSyntax, type CommandSpec };

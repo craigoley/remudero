@@ -65,15 +65,22 @@ jobs:
       # `coverage-ratchet` (W1-T25, §5 TIER 2 quality gate 1/4) added: UNCONDITIONAL (no path
       # filter, no `if:`), same safety property as `ci`/`lint-plan` above.
       # `mutation-ratchet` (W1-T96, §5 TIER 2 quality gate 2/4) added: same UNCONDITIONAL shape —
-      # no path filter, runs every PR (scoped internally to one module — see ci.yml's comment).
+      # no path filter, runs every PR (scoped internally to one module, and — as of W1-T108 —
+      # diff-scoped the same way as `containment-probe` above: the check run always registers,
+      # the expensive Stryker run inside it only fires when the diff can move the score — see
+      # ci.yml's comment).
       # `jscpd-gate` (W1-T97, §5 TIER 2 quality gate 3/4) added: same UNCONDITIONAL shape — no
       # path filter, runs every PR; jscpd's own --threshold flag enforces the ceiling natively.
       # `claims` (W1-T29, §12A the AWARENESS LAYER for prose) added: same UNCONDITIONAL shape —
       # no path filter, runs every PR; a red claim means THE PLAN IS LYING ABOUT THE SYSTEM.
       # `commitlint` (W1-T31, §6A Conventional Commits) added: same UNCONDITIONAL shape — no path
       # filter, runs every PR; lints only this PR's own base..head commit range.
+      # `refactor-campaign` (W2-T3, §3A/§5 the refactor campaign's measurable gate-delta formula)
+      # added: same UNCONDITIONAL shape — no path filter, runs every PR; internally scoped to
+      # PRs carrying the `refactor-campaign` label (mirrors containment-probe's diff-scoping — a
+      # non-matching PR still completes the job successfully, so it never blocks).
       REQUIRED: >-
-        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet", "jscpd-gate", "claims", "commitlint"]
+        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet", "jscpd-gate", "claims", "commitlint", "refactor-campaign"]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
       IGNORE: >-

@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { loadConfig, workerHomeDir, workerShell, workerZdotdir, type Config } from "./config.js";
+import { detectCompactionEvents, isQualitySuspect, type CompactionEvent } from "./compaction.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { buildWorkerEnv } from "./env.js";
 import { validateWorkerSettingsFile } from "./settings.js";
@@ -80,6 +81,19 @@ export interface WorkerResult {
   tokens: TokenUsage;
   /** Per-model breakdown off the envelope's `modelUsage` map (`{}` if none seen). */
   modelUsage: Record<string, ModelUsageEntry>;
+  /**
+   * Compaction events observed in this call's stream (MASTER-PLAN §8B),
+   * detected LIVE off `type:"system", subtype:"compact_boundary"` messages
+   * (`detectCompactionEvents`, compaction.ts) — `[]` when the call never
+   * compacted.
+   */
+  compactionEvents: CompactionEvent[];
+  /**
+   * `true` the moment ONE compaction fired (`compactionEvents.length > 0`,
+   * MASTER-PLAN §8B) — this call's acceptance proofs must be re-verified
+   * against repo state (W1-T3F), never trusted from a possibly-lossy REPORT.
+   */
+  qualitySuspect: boolean;
 }
 
 /** `model`/`effort` label logged when a call rides no explicit mount override
@@ -94,31 +108,66 @@ export const DEFAULT_EFFORT_LABEL = "default";
 export const BILLING_MODE = "subscription" as const;
 
 /**
+ * Cache-token NAMED COLUMNS (MASTER-PLAN §8A / W1-T35): the aggregate
+ * `tokens.cacheRead`/`cacheCreation` (camelCase, nested inside `tokens`)
+ * mirrored as FLAT, snake_case columns matching the SDK result envelope's own
+ * field names (`cache_read_input_tokens`/`cache_creation_input_tokens`). A
+ * ledger line's other telemetry (`cost_usd`, `num_turns`, …) is already flat
+ * snake_case — the nested `tokens` object was the odd one out and not
+ * grep/jq-able as a "column". This makes the cache-reuse signal MASTER-PLAN
+ * §8A calls for ("near-zero cache reads on the second worker of a run means
+ * the ordering is wrong") directly queryable off a worker's ledger line
+ * without reaching into a nested object.
+ */
+export function cacheTokenLedgerFields(tokens: TokenUsage): {
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+} {
+  return {
+    cache_read_input_tokens: tokens.cacheRead,
+    cache_creation_input_tokens: tokens.cacheCreation,
+  };
+}
+
+/**
  * The standard per-call ledger telemetry (W1-T6 acceptance): every worker AND
  * brain-plane (architect/reviewer) call logs `{model, effort, tokens,
- * total_cost_usd, billing_mode, verdict}`. Extracted so every call site in
- * run-task.ts spreads the SAME shape rather than hand-rolling it — one
- * definition, so the fields can never drift between recon/implement/review/retro.
+ * cache_read_input_tokens, cache_creation_input_tokens, total_cost_usd,
+ * billing_mode, verdict}`. Extracted so every call site in run-task.ts spreads
+ * the SAME shape rather than hand-rolling it — one definition, so the fields
+ * can never drift between recon/implement/review/retro.
  *
  * `verdict` here is this CALL's own outcome (`"success"` or the SDK's error
  * subtype) — distinct from the RUN-level `verdict` ledger line (merged /
  * blocked_* / failed), which judges the whole run, not one worker spawn.
+ *
+ * `quality_suspect`/`compaction_events` (MASTER-PLAN §8B / W1-T36) ride the
+ * SAME line as `verdict` — a compacted call's ledger line is directly
+ * queryable/grep-able for both its outcome and whether that outcome should
+ * be trusted, with no join against a separate compaction event stream.
  */
 export function workerLedgerFields(r: WorkerResult): {
   model: string;
   effort: string;
   tokens: TokenUsage;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
   total_cost_usd: number;
   billing_mode: typeof BILLING_MODE;
   verdict: string;
+  quality_suspect: boolean;
+  compaction_events: CompactionEvent[];
 } {
   return {
     model: r.model,
     effort: r.effort,
     tokens: r.tokens,
+    ...cacheTokenLedgerFields(r.tokens),
     total_cost_usd: r.costUsd,
     billing_mode: BILLING_MODE,
     verdict: r.isError ? r.subtype : "success",
+    quality_suspect: r.qualitySuspect,
+    compaction_events: r.compactionEvents,
   };
 }
 
@@ -266,11 +315,18 @@ export async function collectWorkerResult(
   let sawResult = false;
   let tokens: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
   let modelUsage: Record<string, ModelUsageEntry> = {};
+  const compactionEvents: CompactionEvent[] = [];
 
   try {
     for await (const raw of messages) {
       const msg = raw as { type?: string; message?: unknown };
-      if (msg.type === "assistant") {
+      if (msg.type === "system") {
+        // MASTER-PLAN §8B / W1-T36: detect + ledger a compaction event LIVE,
+        // off the SDK's own `compact_boundary` system message — reuses the
+        // same detector a fixture-driven unit test exercises (compaction.ts),
+        // so "detected in a test" and "detected live" can never drift apart.
+        compactionEvents.push(...detectCompactionEvents([raw]));
+      } else if (msg.type === "assistant") {
         // Anthropic-side api error mid-stream (server_error / <synthetic> model /
         // isApiErrorMessage). A TRANSIENT — the envelope may still report success.
         const rawAny = raw as { isApiErrorMessage?: boolean; error?: unknown };
@@ -361,6 +417,8 @@ export async function collectWorkerResult(
     effort: opts.effort ?? DEFAULT_EFFORT_LABEL,
     tokens,
     modelUsage,
+    compactionEvents,
+    qualitySuspect: isQualitySuspect(compactionEvents),
   };
 }
 

@@ -859,6 +859,11 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
  *      and orphans the rest)
  *   3. TEST THEATER (assertions that assert nothing)
  *   4. REFACTOR-PHASE HONESTY (a "refactor" that changes behavior)
+ * plus a fifth item, DOCS AWARENESS (§12A — the anti-rot mechanism, W1-T30): a
+ * diff changing user-visible behavior (CLI surface, config, gate, verdicts) must
+ * update `docs/` OR state why not in the REPORT — this is the Tier-B half of
+ * "docs are not evidence unless CI proves they match the code"; Tier A (generated
+ * docs, byte-equality in CI) is a separate, later mechanism (W1-T47/T48).
  * plus the GUARD: no worker-authored `satisfied_by` (a diff that ADDS a
  * `satisfied_by` line to plan/tasks.yaml FAILS unless the PR is plan-only AND
  * human-authored — `satisfied_by` is Architect-only; a worker adding it to its own
@@ -875,6 +880,7 @@ export type RubricKey =
   | "callers-audited"
   | "test-theater"
   | "refactor-honesty"
+  | "docs-awareness"
   | "satisfied-by-guard";
 
 /** One rubric item's verdict over a (diff, report). */
@@ -1115,6 +1121,67 @@ export function checkRefactorHonesty(diff: string, report?: string): RubricItemR
   return { key: "refactor-honesty", pass: true, reason: "labelled a refactor; no behavior-bearing line changed" };
 }
 
+// ── Item 5: DOCS AWARENESS (§12A anti-rot mechanism, W1-T30) ───────────────
+
+/**
+ * Modules that constitute "user-visible behavior" in the §12A sense — CLI
+ * surface, config, gate, or verdicts. Diff-scoped path heuristic, same spirit
+ * as {@link concernStem}: coarse, not a semantic understanding of the change.
+ */
+const USER_VISIBLE_SURFACE_RE = new RegExp(
+  [
+    "^bin/", // the CLI entry point
+    "^src/run-task\\.ts$", // CLI dispatcher / orchestrator
+    "^src/spike\\.ts$", // CLI entry (spike mode)
+    "^src/lib/(config|settings|mounts)\\.ts$", // config surface
+    "^src/lib/(review|task-linter)\\.ts$", // gate surface
+    "^src/lib/(run-result|status|ledger|flight-judge)\\.ts$", // verdict surface
+  ].join("|"),
+);
+
+/** True when a changed path is anywhere under a `docs/` directory. */
+function isDocsPath(path: string): boolean {
+  return /(^|\/)docs\//.test(path);
+}
+
+/**
+ * A reason the report STATES for why no doc update accompanies a surface
+ * change — the report's own words, not inferred. Requires the "no doc(s)
+ * change/update" phrase to be followed by an actual reason (a `because`/`:`/
+ * dash then more text) — a bare "no docs update" with nothing after it has not
+ * stated why, so it does not count as an excuse.
+ */
+const STATED_REASON_RE = /\bno\s+docs?\s+(?:change|update)\b[^.\n]{0,6}(?:because|:|-|—)\s*\S/i;
+
+/**
+ * DOCS AWARENESS: a diff touching a CLI/config/gate/verdict surface must also
+ * touch `docs/`, or the report must state why not. Silence is a fail — exactly
+ * the drift the awareness layer exists to catch (a behavior-changing diff with
+ * no doc update and no stated reason).
+ */
+export function checkDocsAwareness(diff: string, report?: string): RubricItemResult {
+  const files = changedFiles(walkDiff(diff));
+  const surfaceTouched = files.filter((f) => USER_VISIBLE_SURFACE_RE.test(f));
+  if (surfaceTouched.length === 0) {
+    return { key: "docs-awareness", pass: true, reason: "no CLI/config/gate/verdict surface changed" };
+  }
+  if (files.some(isDocsPath)) {
+    return {
+      key: "docs-awareness",
+      pass: true,
+      reason: `docs/ updated alongside surface change (${surfaceTouched.join(", ")})`,
+    };
+  }
+  if (STATED_REASON_RE.test(report ?? "")) {
+    return { key: "docs-awareness", pass: true, reason: "report states why no doc update was needed" };
+  }
+  return {
+    key: "docs-awareness",
+    pass: false,
+    reason: `user-visible surface changed (${surfaceTouched.join(", ")}) with no docs/ update and no stated reason`,
+  };
+}
+
 // ── The GUARD: no worker-authored satisfied_by ─────────────────────────────
 
 /**
@@ -1156,6 +1223,7 @@ export function judgeRubric(input: RubricInput): RubricResult {
     checkCallersAudited(input.diff),
     checkTestTheater(input.diff),
     checkRefactorHonesty(input.diff, input.report),
+    checkDocsAwareness(input.diff, input.report),
     checkSatisfiedByGuard(input.diff, { planOnly: input.planOnly, humanAuthored: input.humanAuthored }),
   ];
   const failures = items.filter((i) => !i.pass);

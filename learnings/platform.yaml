@@ -1,0 +1,234 @@
+# learnings/platform.yaml — PLATFORM-subsystem shard of the learnings corpus (W1-T33).
+#
+# This is one of five subsystem shards — learnings/{platform,architecture,ci,testing,failures}.yaml
+# — that replace the single flat plan/learnings.yaml (W1-T19) so Promptsmith (src/lib/learnings.ts)
+# does a LOOKUP against the generated learnings/index.json, not a full scan of every entry in every
+# shard. Regenerate the index with `npm run learnings-index` after editing any shard; `npm run
+# learnings-index:check` (wired into test/learnings-index.test.ts, which runs under `npm test`) FAILS
+# when the committed index.json is stale.
+#
+# PLATFORM = facts about the Claude Code CLI/SDK, the OS/shell, and the tools/services a worker
+# process runs on top of (shell isolation, SDK result shapes, tier detection, Playwright, launchd).
+#
+# Schema per entry:
+#   id:                stable slug → the injected citation `[src: learnings#<id>]`
+#   subsystem:         human grouping (advisory; matching is by `files:`, not this)
+#   lifecycle:         active | superseded | quarantined (default active if omitted). A
+#                      SUPERSEDED or QUARANTINED entry is NEVER injected (src/lib/learnings.ts
+#                      filters both out before ranking) — it stays in this file for PROVENANCE
+#                      ONLY. Provenance decays two ways: a human corrects a fact (superseded — see
+#                      `zdotdir-alone-isolates-shells` below for the live example), or a fact stops
+#                      proving itself (quarantined — see `assertion` below).
+#   superseded_by:     (superseded entries only) the id of the entry that replaced this one.
+#   assertion:         (W1-T34, optional) a shell command (`sh -c`, run from the repo root) that
+#                      must exit 0 for this entry's `fact` to still be considered true — e.g. a
+#                      fact pinned to a specific file/SDK shape must not keep being injected once
+#                      that shape changes. `npm run learnings-assert` runs every entry's assertion
+#                      and flips `lifecycle: quarantined` (recording why in `quarantined_reason`)
+#                      the moment one fails; `npm run learnings-assert:check` (wired into `npm
+#                      test` via test/learnings-assert-check.test.ts) FAILS CI when the committed
+#                      corpus doesn't match a fresh re-verification — a STALE quarantine state,
+#                      same shape as the `learnings-index:check` staleness gate above. Re-running
+#                      `learnings-assert` after the underlying fact is fixed restores `active`.
+#   quarantined_reason: (quarantined entries only) why the assertion failed — set by
+#                      `learnings-assert-check.mjs`, not by hand.
+#   files:             repo-relative globs; entry injects iff one glob hits a task file
+#   fact:              one line — the thing a worker inherits
+#   src:               provenance of the fact (recorded lineage)
+#   cited:             optional ISO date last cited (recent entries win a budget tie)
+
+- id: shell-isolation
+  subsystem: containment
+  lifecycle: active
+  files: [src/lib/worker.ts, src/lib/containment.ts, src/lib/settings.ts, src/lib/env.ts]
+  fact: >-
+    Claude Code's Bash-tool snapshot sources $HOME/.zshrc via os.homedir(); ZDOTDIR is IGNORED —
+    worker shell isolation must set CLAUDE_CODE_SHELL (rc filename follows the shell), never ZDOTDIR.
+  src: PR#8
+  cited: "2026-07-14"
+  # W1-T34 seed: the fact is pinned to src/lib/env.ts actually granting CLAUDE_CODE_SHELL — if a
+  # future refactor drops that env var, this assertion (not a human noticing months later) is what
+  # auto-quarantines the entry.
+  assertion: 'grep -q "CLAUDE_CODE_SHELL" src/lib/env.ts'
+
+# SUPERSEDED — the live example for the W1-T33 acceptance proof. This was the pre-PR#8 working
+# assumption (ZDOTDIR "obviously" isolates a spawned shell); disassembling the installed Claude Code
+# binary proved the Bash tool's snapshot resolves the rc file from $HOME, NOT $ZDOTDIR, so this claim
+# is FALSE. It is kept here, marked superseded, for provenance only — the injector must NEVER select
+# it. `shell-isolation` above is the corrected, active fact for the same files.
+- id: zdotdir-alone-isolates-shells
+  subsystem: containment
+  lifecycle: superseded
+  superseded_by: shell-isolation
+  files: [src/lib/worker.ts, src/lib/containment.ts, src/lib/env.ts]
+  fact: >-
+    Setting ZDOTDIR on a spawned shell is sufficient to isolate it from the operator's dotfiles.
+  src: "pre-PR#8 assumption, DISPROVEN by disassembling the installed Claude Code binary — see shell-isolation"
+  cited: "2026-07-14"
+
+- id: bashrc-accident
+  subsystem: containment
+  lifecycle: active
+  files: [src/lib/worker.ts, src/lib/containment.ts]
+  fact: >-
+    CLAUDE_CODE_SHELL=/bin/bash isolation works only because ~/.bashrc is ABSENT on this host — an
+    accident, not construction; isolation must be PROVEN per run by probe, never assumed from config.
+  src: PR#8
+  cited: "2026-07-14"
+
+- id: settings-silent-drop
+  subsystem: settings
+  lifecycle: active
+  files: [src/lib/settings.ts, src/lib/worker.ts]
+  fact: >-
+    Worker settings that fail schema validation are SILENTLY IGNORED under `claude -p`; the SDK's
+    SandboxSettingsSchema is $loose and strips unknown keys — validate shape explicitly before spawn.
+  src: WS-0
+  cited: "2026-07-14"
+
+- id: sdk-result-envelope
+  subsystem: ledger
+  lifecycle: active
+  files: [src/lib/ledger.ts, src/lib/worker.ts, src/run-task.ts]
+  fact: >-
+    The Agent SDK yields the type:"result" envelope (num_turns, total_cost_usd, subtype) and THEN
+    throws from the iterator on an error subtype — read the envelope before the catch or a failure looks free.
+  src: PR#8
+  cited: "2026-07-14"
+
+- id: maxbudget-between-turns
+  subsystem: budget
+  lifecycle: active
+  files: [src/run-task.ts]
+  fact: >-
+    maxBudgetUsd is checked BETWEEN turns (a $0.01 budget produced $0.21 of spend): a circuit breaker
+    with up to one turn of overshoot, NOT a hard cap — set budgets with headroom.
+  src: PR#8
+  cited: "2026-07-14"
+
+# ── Agent SDK tools & the feedback front door (§7B) [research 2026-07-14] ──
+- id: sdk-builtin-tools-are-the-boundary
+  subsystem: sdk-tools
+  lifecycle: active
+  files: [src/lib/worker.ts, src/run-task.ts]
+  fact: >-
+    The Agent SDK ships built-in tools (Read/Write/Edit/Bash/Glob/Grep/WebSearch/WebFetch/AskUserQuestion/
+    Monitor/Agent); allowedTools is enough to enable them AND doubles as a security boundary — the agent
+    cannot use a tool you do not list.
+  src: research#agent-sdk-tools
+  cited: "2026-07-14"
+- id: askuserquestion-headless-unverified
+  subsystem: feedback
+  lifecycle: active
+  files: [src/run-task.ts]
+  fact: >-
+    AskUserQuestion is a built-in tool (the grill mechanism, natively). UNVERIFIED whether it works
+    headlessly or only with a human at the terminal — verify before wiring the grill.
+  src: research#agent-sdk-tools
+  cited: "2026-07-14"
+- id: websearch-serverside-webfetch-unverified
+  subsystem: sdk-tools
+  lifecycle: active
+  files: [src/lib/worker.ts, src/run-task.ts]
+  fact: >-
+    WebSearch is SERVER-SIDE (Anthropic's) so it researches without opening the sandbox allowedDomains;
+    whether WebFetch is likewise server-side or a LOCAL fetch is UNVERIFIED and decides if it touches
+    containment.
+  src: research#agent-sdk-tools
+  cited: "2026-07-14"
+- id: webtools-are-injection-surface
+  subsystem: sdk-tools
+  lifecycle: active
+  files: [src/lib/worker.ts, settings/worker.json]
+  fact: >-
+    claude-code-action DISABLES WebSearch/WebFetch by default — fetched content is a prompt-injection
+    surface. Grant web tools to the Architect only; implement workers never get them.
+  src: research#claude-code-action
+  cited: "2026-07-14"
+
+# ── Browser automation & the design-review profile (§7C) [research 2026-07-14] ──
+- id: playwright-mcp-accessibility-tree
+  subsystem: design-review
+  lifecycle: active
+  files: [settings/worker.json, src/lib/containment.ts]
+  fact: >-
+    Playwright MCP uses accessibility-tree snapshots (2-5KB structured YAML), 10-100x cheaper than
+    screenshots (500KB-2MB images) for structural work. MCP is the sandboxed-client path; the CLI is
+    cheaper still but requires shell access.
+  src: research#playwright
+  cited: "2026-07-14"
+- id: playwright-run-code-unsafe-is-rce
+  subsystem: design-review
+  lifecycle: active
+  files: [settings/worker.json]
+  fact: >-
+    Playwright browser_run_code_unsafe runs arbitrary JS in the Playwright server — RCE-equivalent, only
+    for trusted MCP clients. A bypass-mode worker is not that: HARD-DENY it in every worker profile.
+  src: research#playwright
+  cited: "2026-07-14"
+- id: browser-egress-needs-dedicated-profile
+  subsystem: design-review
+  lifecycle: active
+  files: [settings/worker.json, src/lib/containment.ts]
+  fact: >-
+    Playwright needs a real browser with network egress, incompatible with the locked worker allowedDomains
+    unless a dedicated design-review profile explicitly allowlists the browser/target domains. Browser
+    egress is a per-skill grant, never global.
+  src: research#playwright
+  cited: "2026-07-14"
+- id: screenshots-are-token-expensive
+  subsystem: design-review
+  lifecycle: active
+  files: [src/lib/containment.ts]
+  fact: >-
+    Screenshots blow up token usage (500KB-2MB each) — request only when necessary, for artifacts a human
+    must eyeball; use accessibility-tree snapshots for everything structural.
+  src: research#playwright
+  cited: "2026-07-14"
+
+# ── SDK result-envelope FIELD LOCATIONS (kills the W1-T6 exploration tax) — verified from the installed
+# sdk.d.ts (SDK 0.3.209), not the prompt. This is the ground truth ~33 turns were spent re-discovering. ──
+- id: sdk-result-fields
+  subsystem: ledger
+  lifecycle: active
+  files: [src/lib/worker.ts, src/lib/ledger.ts, src/run-task.ts]
+  fact: >-
+    The SDK type:"result" envelope carries the telemetry to log: num_turns, total_cost_usd, usage
+    (NonNullableUsage aggregate), and modelUsage: Record<MODEL_NAME, ModelUsage> — the MODEL(S) used are
+    the map KEYS; each ModelUsage has inputTokens, outputTokens, cacheReadInputTokens (camelCase),
+    cacheCreationInputTokens, costUSD, contextWindow. EFFORT is NOT in the envelope — it is an INPUT
+    (Options.effort / the mount), so log the configured effort, not a read-back.
+  src: SDK 0.3.209 (installed sdk.d.ts)
+  cited: "2026-07-15"
+
+# ── Tier-detection input keys — the weak-residue learning so tier detection isn't first-time-discovered
+# again (W1-T9 spent ~29 discovery turns; the /usage shape is W1-T4/headroom.ts, the keys were nowhere). ──
+- id: claude-json-tier-keys
+  subsystem: platform
+  lifecycle: active
+  files: [src/lib/tier.ts, src/lib/init.ts, src/lib/headroom.ts]
+  fact: >-
+    ~/.claude.json exposes tier-relevant KEYS locally, with NO network call: hasAvailableSubscription,
+    cachedUsageUtilization, modelAccessCache, oauthAccount (tier discovery rung 2). The /usage output
+    (rung 1) is parsed by headroom.ts (W1-T4) and is machine-readable headless. Feed BOTH as pure INPUTS
+    to detectTier so detection is unit-testable over fixtures (max5x/max20x/ambiguous) with no live calls.
+  src: MASTER-PLAN FIELD FINDINGS §9(h), DIAGNOSIS.md (diag/w1t9-max-turns)
+  cited: "2026-07-15"
+
+# ── Daemon commissioning gotchas, observed in the W1-T12d drill (chore/t12d-commissioning-record). ──
+- id: daemon-launchd-keepalive-restart
+  subsystem: platform
+  lifecycle: active
+  files: [src/lib/launchd.ts, src/lib/daemon.ts]
+  fact: >-
+    The launchd unit runs the daemon with KeepAlive, so launchd restarts it on ANY exit — a kill-9
+    (this is the crash-recovery path: restart re-derives merged state from GitHub and goes idle,
+    reconstructOrphan W1-T12c handles a real in-flight orphan, NO duplicate task run) AND a clean
+    exit. GOTCHA: a `--max N`-bounded daemon under KeepAlive RESTART-LOOPS — it drains N tasks,
+    exits max_reached, launchd restarts it, it finds nothing runnable and logs daemon.idle, exits,
+    restarts… (observed in commissioning: 3 daemon.start lines, the 2nd/3rd immediately idle). For a
+    real unattended daemon run WITHOUT --max (persistent poll loop); use --max/--dry-run only for a
+    bounded manual drill, and expect KeepAlive to bring it back. Plist path:
+    ~/Library/LaunchAgents/com.remudero.daemon.plist; commission with `launchctl load <path>`.
+  src: chore/t12d-commissioning-record (W1-T12d, 2026-07-15)
+  cited: "2026-07-15"
