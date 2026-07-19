@@ -1,0 +1,4 @@
+{
+  "_comment": "alpha's injectable line is 41 chars -- one over this cap, so the ratchet must BLOCK.",
+  "capChars": 40
+}

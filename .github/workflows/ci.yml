@@ -183,6 +183,37 @@ jobs:
         if: steps.trigger.outputs.matched == 'true'
         run: node scripts/mutation-ratchet.mjs --report reports/mutation/mutation.json --baseline scripts/mutation-baseline.json
 
+  learnings-budget-ratchet:
+    # §5 TIER 2 (W1-T38, MASTER-PLAN §8A) — "compression is a deliverable" ENFORCED, not
+    # aspirational, the same ratchet shape as coverage-ratchet/mutation-ratchet above except this
+    # one is a CEILING: the total INJECTABLE weight of the ACTIVE learnings corpus (every
+    # learnings/*.yaml shard, lifecycle: active entries only, rendered exactly as
+    # src/lib/learnings.ts's selectLearnings would inject them) is compared against the recorded
+    # cap in scripts/learnings-budget-baseline.json. Runs UNCONDITIONALLY (no path filter, no
+    # `if:`) so it always registers a check run, same fail-closed shape as `ci`/`coverage-ratchet`/
+    # `mutation-ratchet` above — a conditionally-skipped required check deadlocks merge forever
+    # (LEARNINGS: the #102-class skipped-check deadlock).
+    #
+    # SUPERSEDED/QUARANTINED entries contribute ZERO chars — src/lib/learnings.ts's
+    # selectLearnings never injects them (W1-T33 supersession, W1-T34 quarantine), so only
+    # INJECTABLE weight is capped, not raw corpus bytes; test/learnings-budget-ratchet.test.ts
+    # proves that exclusion with a same-bytes-active-vs-superseded falsifier fixture.
+    #
+    # scripts/learnings-budget-ratchet.mjs names the overage on a corpus-growing PR that pushes
+    # past the cap; that cap only ever ratchets UP (a deliberate, reviewed bump when a compression
+    # pass genuinely needs more room), never down to make a red PR pass.
+    name: learnings-budget-ratchet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Knowledge budget ratchet (blocks a PR that pushes the active learnings corpus over the recorded cap)
+        run: npm run --silent learnings-budget-ratchet
+
   jscpd-gate:
     # §5 TIER 2, quality gate 3/4 (W1-T97) — a duplication CEILING: copy-pasted code rots
     # independently and silently. Runs UNCONDITIONALLY (no path filter, no `if:`) so it always

@@ -1,0 +1,4 @@
+- id: gamma
+  fact: "Short fact one."
+  src: test
+  files: [x]

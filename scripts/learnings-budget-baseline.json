@@ -1,0 +1,7 @@
+{
+  "_comment": "Knowledge budget ratchet CEILING (W1-T38, MASTER-PLAN §8A). Captured from the real active-lifecycle learnings/*.yaml corpus via `node scripts/learnings-budget-ratchet.mjs` -- the sum of every ACTIVE entry's injectable line (`- <fact> [src: learnings#<id>]`), superseded/quarantined entries excluded (they carry zero injection weight; see learnings/platform.yaml's header). capChars carries headroom over the measured figure for near-term retro growth. Never raise this to paper over an unreviewed dump of learnings -- raising the cap is a deliberate, reviewed change (like the coverage floor); a corpus-growing PR that blows through it must go CI-red on scripts/learnings-budget-ratchet.mjs until a compression pass (tighter facts, dedup, supersession) or a reviewed cap bump brings it back in budget.",
+  "capturedAt": "2026-07-18",
+  "measuredChars": 12691,
+  "measuredActiveEntries": 34,
+  "capChars": 20000
+}
