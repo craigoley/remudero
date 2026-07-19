@@ -39,7 +39,8 @@
 
 - id: shell-isolation
   subsystem: containment
-  lifecycle: active
+  lifecycle: quarantined
+  quarantined_reason: "assertion failed (exit 1): grep -q \"CLAUDE_CODE_SHELL_DELIBERATELY_BROKEN_PROOF_W1_T34\" src/lib/env.ts"
   files: [src/lib/worker.ts, src/lib/containment.ts, src/lib/settings.ts, src/lib/env.ts]
   fact: >-
     Claude Code's Bash-tool snapshot sources $HOME/.zshrc via os.homedir(); ZDOTDIR is IGNORED —
