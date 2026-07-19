@@ -4555,3 +4555,46 @@
   files: [.github/workflows/ci-gate.yml]
   status: queued
   attempts: 0
+
+- id: W1-T108
+  title: "Mutation gate latency — diff-scoped (the containment-probe shape) + Stryker incremental cache; the required check stops costing 13 minutes per PR"
+  repo: remudero
+  depends_on: [W1-T96]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE MEASUREMENT (#193, the first PR through the newly-required mutation-ratchet): ~13
+    minutes of Stryker on a plan-only MASTER-PLAN.md edit, two minutes under ci-gate's 15-minute wait
+    ceiling — every PR pays it, and a slower runner tips required-check latency into a ci-gate timeout
+    (a false-red class on the whole merge pipeline). The W1-T96 auto-choose estimated ~5 minutes; reality
+    is 2.6x that. The repo's own established pattern is the fix: always-registers, internally diff-scoped
+    (lint-plan, depcruise, containment-probe — the same shape the W1-T28 DECISION_REQUEST cited)."
+  design: |
+    (i) DIFF-SCOPE: the mutation-ratchet job always registers (required-check satisfiable on every PR)
+    but computes changed paths first and runs Stryker ONLY when the diff touches the mutate scope or its
+    tests (src/lib/classify.ts, its test file, stryker config, the baseline, the ratchet script — a
+    paths list as data); otherwise it no-ops green in seconds with a stated skip reason.
+    (ii) INCREMENTAL: when it does run, use Stryker's incremental mode with the incremental file
+    persisted via actions/cache keyed on the mutate-scope content hash — a warm run mutates only changed
+    code. VERIFY Stryker's incremental flag semantics against its docs from the checkout (do not trust
+    this prompt's memory of the flag name).
+    (iii) The falsifier doctrine survives scoping: a PR that DOES touch classify.ts and lowers the
+    mutation score still goes red (the ratchet unchanged) — scoping changes WHEN the gate runs, never
+    what it enforces.
+  acceptance:
+    - claim: "a plan-only diff passes the required check in seconds with a stated skip"
+      proof: "unit test over the path-filter: a MASTER-PLAN.md-only changed-paths fixture -> skip decision with reason; the job script exits 0 without invoking stryker"
+    - claim: "a mutate-scope diff runs the real gate and the ratchet still falsifies"
+      proof: "unit test: a classify.ts-touching fixture -> run decision; the existing 8 mutation-ratchet falsifier tests pass unchanged (below-baseline still rejects)"
+    - claim: "the paths list is data"
+      proof: "unit test: adding a path row flips a seeded fixture from skip to run with zero script changes"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§5A"]
+  files: [.github/workflows/ci.yml, scripts/mutation-ratchet.mjs]
+  status: queued
+  attempts: 0
+  note: "Harvested by hand from the #193 worker's merge note — the W1-T105 class, once more before it
+    builds. Ceiling-raising rejected: it would slacken the fast-gate discipline for every check to
+    accommodate one slow one."
