@@ -341,6 +341,112 @@ test("stop-on-block: a blocked task HALTS the daemon and does NOT run its depend
   assert.ok(!ran.includes("C"), "the blocked task's dependent must not run");
 });
 
+// ── W1-T46: block-REASONING supersedes v1's blunt stop-on-block ────────────
+
+test("W1-T46 GENUINE BLOCKER: escalateBlock is invoked once, naming the real dependents", async () => {
+  const plan = fixturePlan(); // A -> B -> C (chain); B blocking means C is the dependent it protects.
+  const merged = new Set<string>();
+  const escalations: Array<{ task: Task; result: RunResult; dependents: string[] }> = [];
+  const clock = fakeClock();
+  const s = await runDaemon(plan, {
+    refreshMerged: () => (id) => merged.has(id),
+    runOne: async (id) => {
+      if (id === "B") return blockedResult(id);
+      merged.add(id);
+      return okResult(id);
+    },
+    escalateBlock: async (info) => { escalations.push(info); },
+    sleep: clock.sleep,
+  });
+  assert.equal(s.stopReason, "blocked");
+  assert.match(s.stopDetail ?? "", /B → blocked_review/);
+  assert.match(s.stopDetail ?? "", /blocks C/);
+  assert.equal(escalations.length, 1, "escalateBlock is called exactly once");
+  assert.equal(escalations[0].task.id, "B");
+  assert.deepEqual(escalations[0].dependents, ["C"]);
+  assert.equal(escalations[0].result.verdict, "blocked_review");
+});
+
+test("W1-T46 TRANSIENT: a blocked_transient verdict retries with NO strike, and the drain continues", async () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const clock = fakeClock();
+  let aAttempts = 0;
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id): Promise<RunResult> => {
+        ran.push(id);
+        if (id === "A") {
+          aAttempts++;
+          if (aAttempts === 1) {
+            return { taskId: id, runId: id + "-run", merged: false, costUsd: 0.1, verdict: "blocked_transient" };
+          }
+        }
+        merged.add(id);
+        return okResult(id);
+      },
+      sleep: clock.sleep,
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 5 },
+  );
+  assert.deepEqual(ran, ["A", "A", "B", "C", "D"], "A retries once (transient) before B/C/D proceed");
+  assert.deepEqual(s.merged, ["A", "B", "C", "D"]);
+  assert.equal(s.stopReason, "max_reached", "a transient block never halts the daemon");
+  const retryLine = lines.find((l) => l.step === "daemon.block.transient_retry");
+  assert.ok(retryLine, "a daemon.block.transient_retry ledger line was emitted");
+  assert.deepEqual(retryLine?.extra, { task: "A", verdict: "blocked_transient", transient_retries: 1 });
+  assert.ok(!lines.some((l) => l.step === "daemon.blocked"), "a transient retry is never escalated");
+});
+
+test("W1-T46 INDEPENDENT-FAILURE: a block on a task with NO transitive dependents is flagged + skipped — unrelated runnable tasks still run", async () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const clock = fakeClock();
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id): Promise<RunResult> => {
+        ran.push(id);
+        if (id === "D") {
+          return {
+            taskId: id,
+            runId: id + "-run",
+            merged: false,
+            costUsd: 0.2,
+            verdict: "blocked_review",
+            prUrl: "https://github.com/o/r/pull/11",
+          };
+        }
+        merged.add(id);
+        return okResult(id);
+      },
+      sleep: clock.sleep,
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 4 },
+  );
+  assert.deepEqual(ran, ["A", "B", "C", "D"]);
+  assert.deepEqual(s.merged, ["A", "B", "C"], "D never merges — it is flagged, not silently counted as done");
+  assert.equal(s.stopReason, "max_reached", "a self-contained (dependent-less) failure never halts the daemon");
+  const flagLine = lines.find((l) => l.step === "daemon.block.independent_failure");
+  assert.ok(flagLine, "a daemon.block.independent_failure ledger line was emitted");
+  assert.deepEqual(flagLine?.extra, {
+    task: "D",
+    verdict: "blocked_review",
+    pr_url: "https://github.com/o/r/pull/11",
+  });
+  assert.equal(plan.byId.get("D")?.status, "blocked", "D is flagged in-memory — nextRunnable never reconsiders it this run");
+  assert.ok(!lines.some((l) => l.step === "daemon.blocked"), "an independent failure never triggers a genuine-blocker halt");
+});
+
 // ── the PERSISTENT difference from `rmd drain`: it polls instead of stopping ─
 
 test("no runnable task right now: the daemon PACES itself (injected clock) and keeps polling instead of stopping", async () => {

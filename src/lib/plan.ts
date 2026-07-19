@@ -228,6 +228,43 @@ export function unmetDependencies(
   });
 }
 
+/**
+ * Every task that transitively depends on `taskId` (directly, or through a
+ * chain of `depends_on`) — computed over the WHOLE plan, never scoped to
+ * `isMerged`, since this answers a structural DAG question ("does anything
+ * need this task to exist at all"), not a runnability one.
+ *
+ * Backs W1-T46's block-reasoning (drain/daemon v2): a blocked task with an
+ * EMPTY result here is self-contained — nothing in the plan needs it, so its
+ * failure is only that task's problem and can be skipped without leaving any
+ * dependent to "continue into the gap". A NON-EMPTY result means real
+ * downstream work genuinely needs it merged, and the block must never be
+ * silently skipped.
+ */
+export function transitiveDependents(plan: Plan, taskId: string): Set<string> {
+  // Build the reverse edge map once: task id -> the task ids that declare it
+  // as a dependency.
+  const reverse = new Map<string, string[]>();
+  for (const t of plan.tasks) {
+    for (const dep of t.depends_on) {
+      const list = reverse.get(dep);
+      if (list) list.push(t.id);
+      else reverse.set(dep, [t.id]);
+    }
+  }
+  const out = new Set<string>();
+  const queue = [...(reverse.get(taskId) ?? [])];
+  while (queue.length > 0) {
+    const id = queue.shift() as string;
+    if (out.has(id)) continue;
+    out.add(id);
+    for (const next of reverse.get(id) ?? []) {
+      if (!out.has(next)) queue.push(next);
+    }
+  }
+  return out;
+}
+
 /** Throw unless every dependency has merged (per `isMerged`, derived from GitHub). */
 export function assertRunnable(
   plan: Plan,

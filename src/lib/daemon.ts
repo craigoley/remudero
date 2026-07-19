@@ -11,13 +11,18 @@
  * `rmd drain` (drain.ts) is a bounded, one-shot pass a human kicks off by hand:
  * DAG-select → dispatch → repeat, until `--max`/`--until`/a block/no more work.
  * This is that SAME machinery — `nextRunnable`, the fleet-control gates (W1-T11
- * STOP/PAUSE), the HeadroomTracker (W1-T4), stop-on-block v1 (block-REASONING
- * is W1-T46, built ON this core, not this task) — reused wholesale, never
+ * STOP/PAUSE), the HeadroomTracker (W1-T4) — reused wholesale, never
  * reimplemented, wired into a PERSISTENT loop instead of a bounded one: where
  * drain.ts's `no_runnable` is a terminal stop, this loop PACES itself with an
  * injected clock and keeps polling — new work can land later (a plan edit
  * merges, a dependency's PR lands out of band), and being there when it does is
  * the entire point of a daemon.
+ *
+ * Blocks are no longer blunt stop-on-block (W1-T46, superseding v1): each
+ * non-merged verdict is REASONED about via `block-reason.ts`'s
+ * `reasonAboutBlock` — transient (retry, no strike), independent-failure (skip
+ * only that task, flag it, keep draining everything else), or genuine blocker
+ * (halt + escalate — never continue into the gap). See `runDaemon`, below.
  *
  * Single-instance + per-task locking (drain-lock.ts / inflight-lock.ts) are
  * real side effects the CLI wiring (run-task.ts) owns, exactly as `rmd drain`
@@ -26,10 +31,11 @@
 
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
+import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import { nextRunnable, type MergedSet, type OpenPrCheck } from "./drain.js";
 import { headroomExhausted } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
-import type { Plan } from "./plan.js";
+import type { Plan, Task } from "./plan.js";
 import type { StatusProjection } from "./status.js";
 
 /** Reason the scheduler loop returned — every terminal state is one of these. */
@@ -115,6 +121,16 @@ export interface DaemonDeps {
    * scheduler. Called alongside dispatch, NOT a replacement for it.
    */
   sweep?: () => Promise<void> | void;
+  /**
+   * W1-T46 block-reasoning: called exactly once, when a block classifies
+   * GENUINE BLOCKER (`reasonAboutBlock` in block-reason.ts — one or more
+   * tasks transitively depend on the blocked task). The real command wires
+   * escalate.ts's `escalate()` (BLOCKED class, W1-T8's GitHub-issue
+   * taxonomy) naming the dependents; tests inject a fake collecting the call.
+   * Optional — omitted, a genuine blocker still HALTS the loop (never
+   * silently continues), it just has no issue opened.
+   */
+  escalateBlock?: (info: { task: Task; result: RunResult; dependents: string[] }) => void | Promise<void>;
 }
 
 /**
@@ -140,9 +156,12 @@ export function daemonBoot(
  * The daemon's scheduler loop. Deterministic; no LLM decisions. Each tick:
  * check STOP → check PAUSE → check headroom → pick the next runnable (DAG
  * order, reusing drain.ts's `nextRunnable` — never reimplemented) → run it →
- * STOP on any non-merged verdict (v1 stop-on-block, same as `rmd drain`).
- * When nothing is runnable, sleep via the injected clock and poll again — the
- * loop is PERSISTENT by default (no `max`), unlike a bounded drain.
+ * REASON about any non-merged verdict (W1-T46, superseding v1's blunt
+ * stop-on-block): transient retries (no strike), an independent failure is
+ * flagged + skipped while the rest of the drain continues, a genuine blocker
+ * halts + escalates. When nothing is runnable, sleep via the injected clock
+ * and poll again — the loop is PERSISTENT by default (no `max`), unlike a
+ * bounded drain.
  */
 export async function runDaemon(
   plan: Plan,
@@ -155,6 +174,11 @@ export async function runDaemon(
   const merged: string[] = [];
   let costUsd = 0;
   let ticks = 0;
+  // W1-T46: per-task TRANSIENT retry state, threaded across ticks for the
+  // SAME task id — bounds `blocked_transient` retries via classify.ts's
+  // MAX_TRANSIENT_RETRIES (reasonAboutBlock). Dropped once a task's
+  // disposition is no longer `retry_transient` (merged, flagged, or escalated).
+  const blockRetryStates = new Map<string, RetryState>();
 
   const summary = (stopReason: DaemonStopReason, stopDetail?: string): DaemonSummary => {
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
@@ -232,12 +256,57 @@ export async function runDaemon(
     costUsd += result.costUsd;
 
     if (!result.merged) {
-      // STOP-ON-BLOCK v1 (same semantics as drain.ts): a blocked task's
-      // dependents would build on missing work. Block-REASONING (retry a
-      // transient, skip an independent-failure's subtree, escalate a genuine
-      // blocker) is W1-T46, a successor built ON this daemon core.
-      log("daemon.blocked", { task: next.id, verdict: result.verdict, pr_url: result.prUrl });
-      return summary("blocked", `${next.id} → ${result.verdict}${result.prUrl ? ` (${result.prUrl})` : ""}`);
+      // BLOCK-REASONING (W1-T46, supersedes v1's blunt stop-on-block): reuse
+      // W1-T7's transient/strike taxonomy + the plan's DAG (block-reason.ts)
+      // instead of halting on ANY non-merged verdict.
+      const state = blockRetryStates.get(next.id) ?? INITIAL_RETRY_STATE;
+      const disposition = reasonAboutBlock(plan, next.id, result.verdict, state);
+
+      if (disposition.kind === "retry_transient") {
+        // TRANSIENT: no strike. `nextRunnable` naturally retries the SAME
+        // task next tick (it is still un-merged and its deps are unchanged) —
+        // no separate re-dispatch mechanism needed.
+        blockRetryStates.set(next.id, disposition.state);
+        log("daemon.block.transient_retry", {
+          task: next.id,
+          verdict: result.verdict,
+          transient_retries: disposition.state.transientRetries,
+        });
+        continue;
+      }
+      blockRetryStates.delete(next.id); // resolved one way or another below
+
+      if (disposition.kind === "independent_failure") {
+        // INDEPENDENT-FAILURE: nothing in the plan transitively depends on
+        // this task, so skipping it cannot leave a dependent building on a
+        // gap. Flag it — flip the in-memory `status` so `nextRunnable` never
+        // reconsiders it this run — and keep draining everything else.
+        next.status = "blocked";
+        log("daemon.block.independent_failure", {
+          task: next.id,
+          verdict: result.verdict,
+          pr_url: result.prUrl,
+        });
+        continue;
+      }
+
+      // GENUINE BLOCKER: real downstream work transitively needs this task
+      // merged — "never continue into the gap" is absolute here. Halt and
+      // escalate, exactly as v1's stop-on-block halted, but now the
+      // dependents it protects are named.
+      log("daemon.blocked", {
+        task: next.id,
+        verdict: result.verdict,
+        pr_url: result.prUrl,
+        dependents: disposition.dependents,
+      });
+      if (deps.escalateBlock) {
+        await deps.escalateBlock({ task: next, result, dependents: disposition.dependents });
+      }
+      return summary(
+        "blocked",
+        `${next.id} → ${result.verdict}${result.prUrl ? ` (${result.prUrl})` : ""} — blocks ${disposition.dependents.join(", ")}`,
+      );
     }
     merged.push(next.id);
   }
