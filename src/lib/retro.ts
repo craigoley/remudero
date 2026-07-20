@@ -9,6 +9,7 @@
  * governance that stops the harness shipping garbage at the speed of light [research].
  */
 
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import type { Task } from "./plan.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
@@ -182,6 +183,38 @@ export function ownBranchOf(runId: string): string {
   return `run-${runId}`;
 }
 
+/**
+ * ONE cheap `gh api rate_limit` probe (W1-T132 design ii) — meant to back a
+ * real `ShippedGithub.unavailable()` for `retroCommand`'s production gateway.
+ * Checked ONCE per retro, BEFORE any merge is credited, so a quota exhaustion
+ * (or any other `gh` CLI failure — auth expiry, network outage) is NAMED
+ * rather than silently read through `findMergedByTrailer`/`headRefName`
+ * returning null/undefined for every query, which looks identical to "GitHub
+ * genuinely has no evidence". Self-contained: does not touch lib/status.ts's
+ * `ghGateway` or its fail-soft `tryJson`, and does not depend on (or wait for)
+ * W1-T119's future three-valued `deriveStatus` read — but agrees with its
+ * polarity, unavailable is never silently absent. Never throws; a probe that
+ * itself crashes the retro over a transient CLI hiccup would be worse than the
+ * silent-zero bug this task fixes.
+ */
+export function probeGithubThrottle(): string | undefined {
+  try {
+    const out = execFileSync("gh", ["api", "rate_limit", "--jq", ".rate.remaining"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    const remaining = Number(out);
+    if (Number.isFinite(remaining) && remaining <= 0) {
+      return "GitHub API rate limit exhausted (0 remaining)";
+    }
+    return undefined;
+  } catch (e) {
+    const err = e as { stderr?: Buffer | string; message?: string };
+    const stderr = String(err.stderr ?? err.message ?? "").trim();
+    return `gh rate_limit probe failed: ${stderr || "unknown error"}`;
+  }
+}
+
 /** One credited SHIPPED entry — either a ledger-native merge or a GitHub-discovered gate-side merge. */
 export interface ShippedRecord {
   taskId: string;
@@ -207,6 +240,22 @@ export interface ShippedGithub {
   findMergedByTrailer(taskId: string): { number: number; url: string } | null;
   /** The PR's head branch name, or undefined if it cannot be resolved. */
   headRefName(prUrl: string): string | undefined;
+  /**
+   * W1-T132 DEGRADE LOUDLY (design ii): when the gateway itself is known to be
+   * throttled, erroring, or otherwise unavailable (rate-limited, auth expired,
+   * transport/network failure), return a human-readable reason NAMING it.
+   * Returns undefined when the gateway is healthy — including for a caller that
+   * never wires this optional method at all, so an untouched implementer sees
+   * no behavior change. Checked ONCE per {@link buildGather} call, BEFORE any
+   * credit is rendered: `RetroGather.githubUnavailable` carries the reason, and
+   * `renderGather` surfaces it prominently instead of letting a zero-merge read
+   * (every `findMergedByTrailer`/`headRefName` call failing silently under a
+   * throttle) pass as a confirmed "nothing shipped" — the exact silent-zero
+   * failure this task exists to close. Self-contained: does not depend on (or
+   * wait for) W1-T119's future three-valued `deriveStatus` read, but agrees
+   * with its polarity — unavailable is never silently read as absent.
+   */
+  unavailable?(): string | undefined;
 }
 
 /** The result of the SHIPPED union: what got credited, and every named discrepancy. */
@@ -364,6 +413,14 @@ export interface RetroGather {
   discrepancies: string[];
   learningsNow: number;
   learningsAtMarker: number;
+  /**
+   * W1-T132: present ONLY when `opts.github.unavailable()` named a reason (a
+   * throttle, an error, or any other confirmed outage) — never set for a
+   * healthy gateway or for the ledger-only fallback (which carries no opinion
+   * on GitHub's health at all). `renderGather` refuses to present `shipped`
+   * as a complete/confirmed count while this is set.
+   */
+  githubUnavailable?: string;
 }
 
 /**
@@ -386,6 +443,10 @@ export function buildGather(opts: {
   const { shipped, discrepancies } = opts.github
     ? shippedSince(runs, opts.sinceTs, opts.github)
     : { shipped: ledgerOnlyShipped(merged), discrepancies: [] as string[] };
+  // W1-T132 (design ii): checked ONCE, after the union runs (so a healthy union
+  // still gets full credit) — a reason here means the read layer itself is not
+  // trustworthy, regardless of what shippedSince managed to resolve anyway.
+  const githubUnavailable = opts.github?.unavailable?.();
   return {
     sinceTs: opts.sinceTs,
     totalRuns: scoped.length,
@@ -396,6 +457,7 @@ export function buildGather(opts: {
     discrepancies,
     learningsNow: learningsCount(opts.learningsMd),
     learningsAtMarker: opts.learningsAtMarker ?? 0,
+    ...(githubUnavailable ? { githubUnavailable } : {}),
   };
 }
 
@@ -413,9 +475,30 @@ export function calibrationTable(byType: TypeCalibration[]): string {
 
 /** Render the full gather as a human/Architect-readable report. */
 export function renderGather(g: RetroGather): string {
+  // W1-T132 (design ii): a throttled/errored/absent gateway must SAY SO BY NAME
+  // and must NEVER let the SHIPPED section read as a confirmed zero — an empty
+  // list gets an explicit INDETERMINATE line instead of the ordinary "(none)".
+  const shippedLines = g.shipped.length
+    ? g.shipped.map(
+        (s) =>
+          `- ${s.taskId} → ${s.prUrl} · $${s.costUsd.toFixed(3)} · ${s.numTurns} turns` +
+          (s.annotation ? ` · (${s.annotation})` : ""),
+      )
+    : g.githubUnavailable
+      ? [`- INDETERMINATE — GitHub gateway unavailable (${g.githubUnavailable}); this is NOT a confirmed zero, never read it as "nothing shipped"`]
+      : ["- (none)"];
   return [
     `# Retro gather${g.sinceTs ? ` (since ${g.sinceTs})` : " (all-time — first retro)"}`,
     "",
+    ...(g.githubUnavailable
+      ? [
+          `## ⚠ GITHUB GATEWAY UNAVAILABLE — ${g.githubUnavailable}`,
+          "The SHIPPED count below is INCOMPLETE — degrading LOUDLY (W1-T132) rather than silently " +
+            "presenting a ledger-only read as a complete one. Gate-side merges may exist that this " +
+            "gather could not observe; do not treat this run's SHIPPED list as authoritative.",
+          "",
+        ]
+      : []),
     `Runs in scope: ${g.totalRuns}`,
     `Verdicts: ${JSON.stringify(g.verdicts)}`,
     `LEARNINGS entries: ${g.learningsNow} now (${g.learningsNow - g.learningsAtMarker} added since marker)`,
@@ -429,13 +512,7 @@ export function renderGather(g: RetroGather): string {
       : ["- (none)"]),
     "",
     "## SHIPPED since marker (W1-T51 — ledger ∪ GitHub-derived trailered merges, ownership-asserted)",
-    ...(g.shipped.length
-      ? g.shipped.map(
-          (s) =>
-            `- ${s.taskId} → ${s.prUrl} · $${s.costUsd.toFixed(3)} · ${s.numTurns} turns` +
-            (s.annotation ? ` · (${s.annotation})` : ""),
-        )
-      : ["- (none)"]),
+    ...shippedLines,
     ...(g.discrepancies.length
       ? ["", "## Discrepancies (ledger vs GitHub — every gate-side addition and rejected foreign trailer)", ...g.discrepancies.map((d) => `- ${d}`)]
       : []),
