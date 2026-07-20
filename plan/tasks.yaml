@@ -7130,3 +7130,44 @@
   attempts: 0
   note: "The GLANCE layer (interaction layer 4). spend-today is governor-aware once W1-T148 lands (a dep). Counts
     from W1-T155's taxonomy. Every number traceable to a source — no decorative estimates."
+
+- id: W1-T160
+  title: "retro cadence — the retro runs on a TRIGGER, not an operator: fire on merges-since-marker >= N OR days-since-marker >= D (policy data), evaluated at the daemon poll, integrity-gated"
+  repo: remudero
+  depends_on: [W1-T136]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The retro runs on an OPERATOR today (someone types `rmd retro`). Make it a LOOP. Fire on
+    (merges-since-marker >= N, N a policy-data row, suggest 25) OR (days-since-marker >= D, suggest 7), whichever
+    first, evaluated by the daemon's poll; ledger retro_triggered with the reason. The INTEGRITY GATE — the gather
+    credits the window's merges, or the retro REFUSES to write — is a HARD precondition INSIDE the automated path,
+    because an unattended retro that writes on a zero-credit gather is the R8-class silent under-count with no human
+    to catch it. Depends on W1-T136 (the retro emits a mergeable PR unattended — the precondition for automating it)."
+  design: |
+    A retro-trigger PREDICATE (policy-as-data, rule 2): N = merges-since-marker threshold (default 25), D =
+    days-since-marker threshold (default 7), both data rows. The daemon's poll evaluates it against the marker
+    (state/last-retro.json); on fire it ledgers retro_triggered {reason: merges>=N | days>=D} and runs the retro
+    through the INTEGRITY GATE: the gather must credit the window's merges (nonzero on a nonzero window) or the
+    automated retro ABORTS with a loud retro_aborted_integrity ledger line and writes NOTHING (no PR, no marker
+    advance). A passing retro runs end to end via W1-T136's mergeable-PR path and advances the marker. VERIFY the
+    marker shape (state/last-retro.json), the daemon poll loop, the gather's merge-credit (W1-T51 shippedSince /
+    T132), and the retro command from source first (distrust this note).
+  acceptance:
+    - claim: "the retro fires on merges-since-marker >= N OR days-since-marker >= D (policy data), whichever first, at the daemon poll, with a retro_triggered ledger line naming the reason"
+      proof: "unit test over the trigger predicate + policy: a marker with merges >= N (default 25) fires reason=merges; a marker with days >= D (default 7) fires reason=days; whichever crosses first fires; below both, NO fire; a fire writes a retro_triggered line naming the reason; N and D are policy-data rows (changing the value changes the threshold with no code edit)"
+    - claim: "the integrity gate is a HARD precondition: a gather crediting ZERO merges on a NONZERO window ABORTS the automated retro (loud ledger line), never writes"
+      proof: "unit test: an automated retro whose gather credits 0 merges while merges-since-marker > 0 ABORTS with a loud retro_aborted_integrity ledger line and writes NOTHING (no PR, no marker advance) — the falsifier being an automated retro that writes on a zero-credit gather (the R8 silent under-count, now fail-closed)"
+    - claim: "a fired, integrity-passing retro runs end to end via W1-T136's mergeable-PR path and advances the marker; a second poll does not re-fire"
+      proof: "integration test: a fired trigger with an integrity-passing gather runs the retro to a mergeable plan-sync PR (W1-T136 path) and advances the marker (state/last-retro.json); an immediately-following poll does NOT re-fire (the marker moved past the threshold)"
+  risk: high
+  origin: architect
+  plan_refs: ["§9", "§5C"]
+  files: [src/lib/daemon.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Makes the retro a LOOP (trigger-fired, not operator-run). Depends on W1-T136 (retro emits a mergeable PR
+    unattended — the hard precondition). The integrity gate is fail-closed INSIDE the automated path: the R8-class
+    zero-credit gather must ABORT, never write, since no human is watching. Thresholds N=25 merges / D=7 days are
+    policy-data defaults."
