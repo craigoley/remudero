@@ -1,0 +1,16 @@
+{
+  "name": "@remudero/desktop",
+  "version": "0.1.0",
+  "description": "Tauri macOS shell (shell 1, MASTER-PLAN §7 W3-T3): wraps the SAME shell-0 web build (apps/dashboard) in a native shell -- menu-bar presence, launch-at-login, native notifications, a global hotkey, and deep links. Never forks the web code; see scripts/build-desktop-web.mjs and its --check drift gate for the byte-identity proof. See README.md for what this ships as a scaffold vs. what a local signed build still needs (Rust toolchain, Xcode, Apple Developer signing -- none available in the CI/agent sandbox that authored this).",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:web": "node ../../scripts/build-desktop-web.mjs",
+    "verify:web": "node ../../scripts/build-desktop-web.mjs --check",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4"
+  }
+}

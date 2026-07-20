@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capabilities for the Remudero desktop shell's main window (W3-T3, MASTER-PLAN §7 shell 1): the native affordances this shell adds over shell 0 (tray, autostart, global hotkey, notifications, deep links). No filesystem/shell/http permissions -- this window still talks to the daemon ONLY via the unmodified web build's own @remudero/api-client calls (MASTER-PLAN §7A), never a native bridge around it.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-close",
+    "core:tray:default",
+    "autostart:default",
+    "notification:default",
+    "global-shortcut:default",
+    "deep-link:default"
+  ]
+}
