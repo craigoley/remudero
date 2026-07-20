@@ -292,6 +292,38 @@ test("W1-T177 runDrain integration: a task whose cached in-flight PR has actuall
   assert.equal(stoodDownLine?.extra.state, "MERGED");
 });
 
+test("W1-T177 runDrain integration: a FAILED/INDETERMINATE live-state read at the in-flight guard does NOT overturn the skip — A stays skipped exactly as today, AND the indeterminate read is ledgered distinctly from an ordinary dispatch.skipped", async () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      isOpenPr: (id) => (id === "A" ? 143 : undefined),
+      // A genuine read failure (rate-limited/network/auth) — undefined.
+      readLiveState: () => undefined,
+      runOne: async (id) => {
+        ran.push(id);
+        merged.add(id);
+        return okResult(id);
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1 },
+  );
+  assert.deepEqual(ran, ["D"], "A stays skipped — an unreadable state is never treated as terminal, fail OPEN toward the pre-existing skip");
+  assert.equal(s.stopReason, "max_reached");
+  assert.ok(!lines.some((l) => l.step === "dispatch.stood_down"), "no false stand-down on an unreadable state");
+  const skipLine = lines.find((l) => l.step === "dispatch.skipped");
+  assert.ok(skipLine, "A is still reported dispatch.skipped, exactly as before this check existed");
+  const indeterminateLine = lines.find((l) => l.step === "dispatch.live_state_indeterminate");
+  assert.ok(indeterminateLine, "the failed/indeterminate read is LEDGERED — never a silent swallow");
+  assert.equal(indeterminateLine?.extra.task, "A");
+  assert.equal(indeterminateLine?.extra.pr_number, 143);
+});
+
 // ── P29(ii): the per-task dispatch CIRCUIT BREAKER — the backstop that makes
 // P29(i)'s sibling-credit fix safe to get wrong (MASTER-PLAN P29).
 

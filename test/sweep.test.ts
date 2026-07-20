@@ -500,11 +500,19 @@ test("runSweep: readLiveState omitted ⇒ behaves EXACTLY as before this check e
   assert.equal(summary.actionsTaken, 1);
 });
 
-test("runSweep: a FAILED/INDETERMINATE live-state read does NOT stand down — dispatch proceeds exactly as today (fail OPEN)", async () => {
-  const deps = fakeDeps({ readLiveState: async () => ({ ok: false }) });
+test("runSweep: a FAILED/INDETERMINATE live-state read does NOT stand down — dispatch proceeds exactly as today (fail OPEN), AND the indeterminate read is ledgered, never a silent swallow", async () => {
+  const indeterminateLogs: unknown[] = [];
+  const deps = fakeDeps({
+    readLiveState: async () => ({ ok: false }),
+    log: (step, extra) => {
+      if (step === "sweep.dispose.indeterminate") indeterminateLogs.push(extra);
+    },
+  });
   const summary = await runSweep([blockedFixablePr()], deps);
   assert.equal(deps.fixed.length, 1, "an unreadable state is never treated as terminal — the strike still fires");
   assert.equal(summary.actionsTaken, 1);
+  assert.equal(indeterminateLogs.length, 1, "the failed/indeterminate read is LEDGERED — never a silent swallow");
+  assert.deepEqual(indeterminateLogs[0], { pr_number: blockedFixablePr().prNumber });
 });
 
 test("runSweep: an OPEN live read proceeds to dispatch normally — the check is a stand-down predicate, never a second gate on the ordinary path", async () => {

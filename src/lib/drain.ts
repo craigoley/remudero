@@ -560,7 +560,19 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       // proceeds to the next runnable task — an open PR must not halt the drain
       // the way a block does.
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
-      readLiveState: deps.readLiveState,
+      // W1-T177: wrap the injected reader so a FAILED/INDETERMINATE live read
+      // (returns `undefined`) is LEDGERED here — distinct from an ordinary
+      // un-wired site, which never calls this at all. Still resolves to
+      // `undefined` either way, so nextRunnable's own fail-OPEN contract
+      // (treat as still in-flight, skip it) is completely unchanged — an
+      // unreadable state never overturns the skip, it is just made legible.
+      readLiveState: deps.readLiveState
+        ? (taskId, prNumber) => {
+            const state = deps.readLiveState!(taskId, prNumber);
+            if (state === undefined) log("dispatch.live_state_indeterminate", { task: taskId, pr_number: prNumber });
+            return state;
+          }
+        : undefined,
       // W1-T177: the cached in-flight snapshot was stale — this task is NOT
       // actually blocked. Ledgered distinctly from `dispatch.skipped`, naming
       // the freshly observed terminal state rather than the misleading

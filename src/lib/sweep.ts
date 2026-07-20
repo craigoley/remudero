@@ -926,7 +926,19 @@ export async function runSweep(
           // behaves exactly as before — dispatch proceeds (fail OPEN, never
           // fail-closed-to-stand-down; see `readLiveState`'s own doc).
           const live = await deps.readLiveState?.(pr);
-          const terminal = live?.ok ? terminalStateReason(live.state) : undefined;
+          let terminal: string | undefined;
+          if (live) {
+            if (live.ok) {
+              terminal = terminalStateReason(live.state);
+            } else {
+              // FAIL OPEN, ledgered: the read failed/was indeterminate — this
+              // must never be treated as terminal (that would silently halt
+              // every blocked-fixable dispatch on a gh outage). Proceed to
+              // dispatchFix exactly as before this check existed; the failed
+              // read is still legible on the ledger.
+              log("sweep.dispose.indeterminate", { pr_number: pr.prNumber });
+            }
+          }
           if (terminal) {
             acted = false;
             standDownReason = terminal;

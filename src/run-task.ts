@@ -1031,15 +1031,29 @@ function ghLiveState(prUrl: string): LiveStateResult {
  * before the exhaustion escalate()) so both read via the SAME fail-open
  * contract. `undefined` (no reader wired, or a failed/indeterminate read)
  * means "proceed exactly as before this check existed" — standing down fires
- * ONLY on a positive, freshly-observed terminal reading.
+ * ONLY on a positive, freshly-observed terminal reading. A FAILED/
+ * INDETERMINATE read (`ok:false`) is explicitly LEDGERED here (never a
+ * silent swallow) so an unreadable state is legible on the ledger even
+ * though it never halts anything — the read failure itself is observable,
+ * distinct from an ordinary un-wired site (which never calls `log` at all).
  */
 async function fixRungStandDownReason(
   readLiveState: ((prUrl: string) => LiveStateResult | Promise<LiveStateResult>) | undefined,
   prUrl: string,
+  site: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
 ): Promise<string | undefined> {
   if (!readLiveState) return undefined;
   const live = await readLiveState(prUrl);
-  if (!live.ok) return undefined;
+  if (!live.ok) {
+    // FAIL OPEN: the read failed/was indeterminate — proceed exactly as
+    // before this check existed. Ledgered so the failure is visible, never
+    // treated as a terminal reading (that would be fail-CLOSED, the far
+    // worse failure this contract exists to prevent — a gh outage must
+    // never silently halt every fix/disposition/dispatch fleet-wide).
+    log("fix.live_state_indeterminate", { site });
+    return undefined;
+  }
   return terminalStateReason(live.state);
 }
 
@@ -1192,7 +1206,7 @@ export async function runFixRung(opts: {
     // point that stops a strike being SPENT on a PR that went terminal
     // (merged/closed) since the previous round. Read FRESH every round —
     // never the caller's snapshot.
-    const preStrikeStandDown = await fixRungStandDownReason(deps.readLiveState, opts.prUrl);
+    const preStrikeStandDown = await fixRungStandDownReason(deps.readLiveState, opts.prUrl, "rung.strike", deps.log);
     if (preStrikeStandDown) {
       deps.log("fix.stood_down", { site: "rung.strike", strike: strikes + 1, reason: preStrikeStandDown });
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown}`);
@@ -1304,7 +1318,7 @@ export async function runFixRung(opts: {
   // the last round's strike-top check, before this escalate) never files a
   // BLOCKED "fix rung exhausted" needs-human issue on a PR that no longer
   // carries a live block.
-  const preEscalateStandDown = await fixRungStandDownReason(deps.readLiveState, opts.prUrl);
+  const preEscalateStandDown = await fixRungStandDownReason(deps.readLiveState, opts.prUrl, "rung.exhaustion", deps.log);
   if (preEscalateStandDown) {
     deps.log("fix.stood_down", { site: "rung.exhaustion", strikes, reason: preEscalateStandDown });
     deps.say(`fix rung: standing down before escalation — ${preEscalateStandDown}`);
