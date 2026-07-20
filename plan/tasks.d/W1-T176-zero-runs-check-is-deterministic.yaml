@@ -1,0 +1,63 @@
+- id: W1-T176
+  title: "the clarification rung must not call a required check with ZERO check runs 'ambiguous' — an absent required check is a DETERMINISTIC-ACTION state (post the review), and escalating it spends an operator round-trip on a decision the machine can already make"
+  repo: remudero
+  depends_on: [W1-T78, W1-T77]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "FIXTURE (real): 2026-07-20 20:11:58Z, run DAEMON-1784578236497 escalated issue #393 against PR #391 —
+    'not positively mergeable — checks green, review none — escalating' — and offered the operator TWO options,
+    re-dispatch-with-constraint or revise-spec. BOTH were mis-framed. The observed state was: every other check
+    SUCCESS, and `remudero-review` — a REQUIRED context on main (branch protection
+    required_status_checks.contexts = [remudero-review, ci-gate]) — with NO CHECK RUN AT ALL. Not a failing review.
+    An ABSENT one. The remedy was a single deterministic command, `rmd review 391`, which posted the missing check
+    and let the already-armed auto-merge fire — PR #391 merged at 20:16:09Z. Neither offered option was the
+    remedy, and neither would have found it: one re-dispatches a worker against a branch that needed no code
+    change, the other proposes editing an acceptance spec that was never the blocker.
+    THE DEFECT IS THE CONFLATION. 'blocked_review' currently collapses two states the rung can already tell apart
+    from observed data: (a) a required check that RAN and returned failure — genuinely ambiguous, an operator
+    round-trip may be warranted; (b) a required check with ZERO check runs — mechanically decidable, because the
+    action is 'post the missing check', full stop. Escalating (b) costs an operator round-trip on a decision the
+    machine already has the facts to make, and — worse — frames it as a SPEC question, which invites a spec edit
+    against a task whose spec was fine. SIBLING of W1-T174: that one is the drain halting on a fixable block
+    (no-attempt); this one is the clarification rung ASKING on a decidable block (needless-ask). Same calibration
+    axis, opposite end from W1-T168's futile-attempt."
+  design: |
+    Give the W1-T78 clarification rung a discriminator it applies BEFORE composing a question: for each REQUIRED
+    context on the base branch (read branch protection's required_status_checks.contexts — do not hardcode the
+    list, it has grown), compare against the check runs observed on the PR head. A required context with ZERO
+    observed runs is classified DETERMINISTIC-ACTION, not blocked-ambiguous, and routes to the action that posts
+    it (the same deterministic reviewer path `rmd review` drives) rather than to escalate().
+    Blocked-ambiguous NARROWS to what it was always meant to cover: a required check that RAN and came back
+    failure or neutral with no single nameable unmet criterion. That is still an operator question and still
+    escalates — this task removes a false-positive, it does not remove the rung.
+    FAIL-CLOSED BOUNDARIES, both mandatory: (i) posting a missing review is an ACTION with a verdict — if the
+    deterministic reviewer posts FAILURE, that is now a ran-and-failed check and the NEXT pass may legitimately
+    treat it as ambiguous. It must not loop: posting the check is attempted at most once per head sha, and a
+    second absence at the same sha escalates rather than re-posting. (ii) if branch protection cannot be read,
+    classify AMBIGUOUS and escalate as today — an unreadable gate must never be assumed permissive.
+    VERIFY the rung's current disposition vocabulary in sweep.ts (deriveDisposition / DISPOSITION_RULES) and the
+    W1-T78 clarification path from source before building — distrust the line references in this note, they are a
+    2026-07-20 survey and drift.
+  acceptance:
+    - claim: "a required check with ZERO observed check runs classifies DETERMINISTIC-ACTION, not blocked-ambiguous, and opens no clarification issue"
+      proof: "unit test over the clarification rung: a PR whose every observed check is SUCCESS but whose required context has no check run routes to the post-the-check action and escalates NOTHING. FALSIFIER: issue #393 (2026-07-20 20:11:58Z, DAEMON-1784578236497) — PR #391 in exactly that state was escalated with two options, neither of which was the actual remedy, while `rmd review 391` resolved it and the PR merged at 20:16:09Z"
+    - claim: "a required check that RAN and FAILED still classifies ambiguous and still escalates — the rung is narrowed, not removed"
+      proof: "unit test: a PR with a required check present and concluding failure, with no single nameable unmet criterion, still routes to the clarification-question rung as today. FALSIFIER: a change that swallows a genuine review failure into an auto-post-and-continue, which would let a real block merge unexamined"
+    - claim: "the required-context list is READ from branch protection, not hardcoded, and an unreadable gate fails CLOSED"
+      proof: "unit test: the discriminator derives required contexts from required_status_checks.contexts (today [remudero-review, ci-gate], a list that has grown over time), and a seeded protection-read FAILURE classifies AMBIGUOUS and escalates rather than assuming no required checks. FALSIFIER: a hardcoded single-context check, which silently stops discriminating the moment a new required context is added"
+    - claim: "posting the missing check cannot loop — at most one attempt per head sha"
+      proof: "unit test: a second pass over the SAME head sha whose required check is still absent after one post attempt escalates instead of re-posting. FALSIFIER: an unbounded post-retry, which would spin the rung against a reviewer that cannot post at all"
+  risk: high
+  origin: architect
+  plan_refs: ["§4", "§9"]
+  files: [src/lib/sweep.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "SIBLING of W1-T174 (drain no-attempt) and W1-T168 (rung futile-attempt) on the same calibration axis —
+    this is the NEEDLESS-ASK end: the rung asks the operator for a decision the observed facts already settle.
+    Fixture #393/#391, 2026-07-20. risk:high — it changes when the fleet escalates versus acts autonomously, and
+    the failure direction is asymmetric: a false DETERMINISTIC-ACTION posts a gate check without an operator
+    looking, so the fail-closed boundaries (one attempt per sha, unreadable-protection escalates) are load-bearing
+    criteria, not defensive extras."

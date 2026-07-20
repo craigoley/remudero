@@ -56,6 +56,36 @@
       proof: "unit test asserting the reap rung is invoked from the sweep path AND from buildSweepHook's per-poll path (the seam W1-T150's credit-backfill rung uses), so an idle fleet still reaps. FALSIFIER: pruneStaleRuns is called only from run-start sites (run-task.ts:1795/:2635/:4583/:4812/:5044/:5188) — with no run dispatched, nothing reaps and the directory grows unbounded"
     - claim: "a widowed .lock whose worktree directory is already gone is swept"
       proof: "unit test: a `<name>.lock` sibling with no `<name>/` directory is removed. FALSIFIER: removeRunLock (worker.ts:855) fires only inside a SUCCESSFUL worktree removal, so a lock orphaned by any other path persists indefinitely and makes a dead run read as live"
+  fixture_forensics: |
+    CAPTURED 2026-07-20T20:29:22Z, immediately before both entries were hand-reaped. The FACTS below are the
+    durable evidence — the 906M of bytes were not kept, and W1-T175's regression must recreate this shape
+    SYNTHETICALLY (an injected root with fabricated entries), never by depending on these directories existing.
+
+    ~/Remudero/worktrees/ total: 906M, 3 filesystem entries (2 dirs + 1 orphan lock).
+
+    ENTRY 1 — run-W1-T156-1784574954974/ (453M, mtime 2026-07-20 15:36:33)
+      The REAPABLE-BUT-INVISIBLE case, and the hole-(1) proof.
+      - `git worktree list --porcelain | grep -c T156` => 0. Git does not register it. pruneStaleRuns enumerates
+        that registry, so no invocation of it could EVER reap this directory, regardless of age or liveness.
+      - sibling lock run-W1-T156-1784574954974.lock (98 bytes, mtime 15:17:23) contained verbatim:
+        {"pid": 97514, "run_id": "W1-T156-1784574954974", "startedAt": "2026-07-20T19:17:23.863Z"}
+      - `ps -p 97514` => DEAD. The run was killed by the host restart, and the lock outlived it, so the dead run
+        still read as live to anything trusting the lock.
+      - upstream branch run-W1-T156-1784574954974: `gh api repos/craigoley/remudero/branches/<b>` => 404 Branch
+        not found. DELETED UPSTREAM. Terminal by every available signal — dead pid, gone branch, git-unregistered
+        — and still 453M on disk.
+
+    ENTRY 2 — sweep-W1-T154-1784578318525/ (453M, mtime 2026-07-20 16:12:13)
+      The MUST-NOT-REAP control, captured while it was still live.
+      - `git worktree list --porcelain | grep -c T154` => 2. Properly registered, checked out at 1fbea36 on
+        branch run-W1-T154-1784573313900.
+      - At capture time that branch was the head of OPEN PR #388. It merged at 20:24:44Z — AFTER this snapshot.
+      - Significance: for most of the window these two 453M directories were indistinguishable by size, age, and
+        parent directory. Only liveness signals (git registration, pid, branch/PR state) separated a reapable
+        orphan from in-flight work. An age-or-size-only sweep would have destroyed ENTRY 2.
+
+    REAPED 2026-07-20 after this capture: both directories plus the orphan lock, ~906M recovered. ENTRY 2 was
+    reaped only once PR #388 had merged, making it terminal by the same predicate this task will implement.
   risk: high
   origin: architect
   plan_refs: ["§9"]

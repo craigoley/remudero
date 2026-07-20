@@ -517,6 +517,124 @@
   note: "UI+TRUST half of layer 1; DATA half is W1-T155. Liveness-honesty is the W1-T130 polarity family (never lie
     about your own state). Sibling of the overhaul (W1-T153)."
 
+- id: W1-T128
+  title: THE DEAD PROOF FLOOR — 101 of 126 runnable-dialect proofs (80%) can never execute, so proof_exec
+    has read 0/N since W1-T72 and the anti-theater gate performs theater
+  repo: remudero
+  queue_note: |
+    MOVED 2026-07-20 from ~line 6566 to here — directly behind the console arc — and given
+    depends_on: [W1-T156, W1-T154]. DO NOT re-sort this block back down the file without
+    reading why.
+    MECHANISM: the drain has NO priority field. nextRunnable (lib/drain.ts) is a linear first-match
+    scan over the merged task array in FILE ORDER, deps only GATE, they never SORT — and the merged
+    view appends every tasks.d/ shard AFTER all of tasks.yaml (lib/plan.ts). So file position IS the
+    priority mechanism, and this task's own 'RETRO PRIORITY 1' rationale text is prose that nothing
+    greps, nothing sorts on, and nothing enforces. That marker created the illusion of prioritization
+    while the drain skipped past ~90 unblocked tasks ahead of it for weeks. Moving the block IS the
+    prioritization. (Corollary: filing this as a tasks.d/ shard would DEMOTE it to the very bottom.)
+    FRESHNESS EVIDENCE, 2026-07-20 — three-for-three proof_exec 0/N in a single session, on reviews
+    that now gate RATIFICATIONS and machine-emitted plan PRs: PR #391 PASS at 0/3 with an explicit
+    'FLOOR DEGRADED: 0/3 proofs executed; keyword floor was binding', PR #394 PASS at 0/4, and #391's
+    earlier round at 0/3. Every one rendered 'no test theater' on keyword overlap alone. The floor's
+    empirical leg is dead weight at exactly the moment its judgments started gating ratification.
+    TRADEOFF ACCEPTED KNOWINGLY: depends_on is a HARD gate, so the deps are deliberately the MINIMAL
+    pair that means 'behind the console arc' — W1-T156 (the arc's last active member, currently the
+    drain's next dispatch) and W1-T154 (already merged via PR #388). W1-T152 was CONSIDERED and
+    REJECTED as a third dep: a 30-deep dry-run preview of current main never reaches W1-T152 at all
+    (it is itself dep-blocked behind W1-T139's W3-* chain), so hitching this task to it would have
+    stranded RETRO PRIORITY 1 indefinitely behind the very stall it was pulled forward to escape.
+    The no-deps alternative was also rejected: at this file position it would dispatch AHEAD of the
+    arc, since the arc members are themselves dep-gated further down the file.
+    NOTE for whoever verifies this: `rmd drain --dry-run` reads the ORIGIN/MAIN plan blob (W1-T60),
+    not the working tree, so this reordering is INVISIBLE to a preview until it merges. Verify the
+    new position with a dry-run AFTER merge, not before.
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: 'RETRO PRIORITY 1, filed from #271 holding-note item 9. It re-scores the reliability of every
+
+    review verdict on record.
+
+
+    MEASURED 2026-07-19 over plan/tasks.yaml: 381 acceptance proofs, of which 126 carry a runnable
+
+    house-dialect prefix (''unit test:'' / ''grep:'') and only 25 can EVER execute. 101 (80%) are
+
+    REFUSED. Mechanism: UNSAFE_FENCE_CHARS_RE in src/lib/review.ts rejects any dialect body
+
+    containing ; & backtick $ < > unless it is a literal test path. Nearly every refusal is a
+
+    single SEMICOLON in ordinary prose — W1-T38''s own proof reads ''unit test: marking an entry
+
+    superseded reduces the counted size; the same bytes as an active entry would exceed the cap''.
+
+    The semicolon alone refuses it.
+
+
+    CONSEQUENCE: proof_exec has read 0/N on essentially every review since W1-T72 shipped, and
+
+    every FLOOR DEGRADED line traces to this one cause. The floor was designed to catch test
+
+    theater and instead PERFORMS it — green from keyword overlap, rendered as ''no test theater''.
+
+    Confirmed on the four PRs that PASSED on 2026-07-19 (#232/#240/#238/#220): all four report
+
+    proof_exec 0/2 alongside ''PASS - 2 criteria substantiated, no test theater''.
+
+
+    SUB-FINDING, cheap and independently useful: the floor reads the PR BODY ONLY. On #234 the
+
+    identical proof text posted as a PR COMMENT changed nothing; moved into the body it flipped
+
+    FAIL to PASS. Substantiation written to a comment is invisible to the gate.
+
+
+    FIX DIRECTION: execute proofs in the EXISTING WORKER SANDBOX — containment already bounds
+
+    them, and the character blocklist was standing in for isolation the harness already has.
+
+    Alternatively a structured proof format (cmd plus expect fields) needing no fence-parsing.'
+  design: '(i) Replace character-blocklist REFUSAL with EXECUTION IN THE EXISTING SANDBOX, or adopt a
+
+    structured proof format with explicit cmd/expect fields. The blocklist substituted for
+
+    isolation that containment already provides.
+
+    (ii) The gate must not merely start passing — a genuinely failing proof must still FAIL the
+
+    review. This is the load-bearing constraint: a fix that makes proof_exec non-zero by relaxing
+
+    judgment would deepen the exact defect being fixed.
+
+    (iii) Make the body-only read explicit and documented, or extend substantiation to comments —
+
+    either is acceptable, silently reading one and not the other is not.
+
+    (iv) Report proof_exec honestly: a refused or unexecutable proof must be visibly distinct from
+
+    an executed-and-passed one in the verdict line.'
+  acceptance:
+  - claim: the 101 currently-refused dialect proofs measurably become executable — proof_exec reads N
+      greater than 0 on a standard filing, against the recorded 2026-07-19 baseline of 25 of 126
+    proof: 'unit test: test/proof-execution.test.ts'
+  - claim: a genuinely failing proof still FAILS the review — the falsifier proving the floor was repaired
+      rather than merely relaxed into passing
+    proof: 'unit test: test/proof-execution.test.ts'
+  - claim: 'the W1-T38 over-cap fixture executes end-to-end: a bulk active corpus goes RED naming the
+      overage, reverts, and the same bytes marked superseded go green'
+    proof: 'unit test: test/proof-execution.test.ts'
+  - claim: 'a proof whose body contains a semicolon executes rather than being refused — the #234 regression
+      fixture, the single character that disabled 80 percent of the floor'
+    proof: 'unit test: test/proof-execution.test.ts'
+  risk: high
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#12A
+  files:
+  - src/lib/review.ts
+  depends_on: [W1-T156, W1-T154]
 - id: W1-T157
   title: "FIND layer — instant client-side fuzzy search + faceted filters with live counts + sortable columns + cmd+K palette + URL-persisted (shareable) view state"
   repo: remudero
@@ -6563,97 +6681,6 @@
   files:
   - src/lib/ledger.ts
   depends_on: []
-- id: W1-T128
-  title: THE DEAD PROOF FLOOR — 101 of 126 runnable-dialect proofs (80%) can never execute, so proof_exec
-    has read 0/N since W1-T72 and the anti-theater gate performs theater
-  repo: remudero
-  type: implement
-  verify: auto
-  principles:
-    tdd: strict
-  budget_usd: 100.0
-  rationale: 'RETRO PRIORITY 1, filed from #271 holding-note item 9. It re-scores the reliability of every
-
-    review verdict on record.
-
-
-    MEASURED 2026-07-19 over plan/tasks.yaml: 381 acceptance proofs, of which 126 carry a runnable
-
-    house-dialect prefix (''unit test:'' / ''grep:'') and only 25 can EVER execute. 101 (80%) are
-
-    REFUSED. Mechanism: UNSAFE_FENCE_CHARS_RE in src/lib/review.ts rejects any dialect body
-
-    containing ; & backtick $ < > unless it is a literal test path. Nearly every refusal is a
-
-    single SEMICOLON in ordinary prose — W1-T38''s own proof reads ''unit test: marking an entry
-
-    superseded reduces the counted size; the same bytes as an active entry would exceed the cap''.
-
-    The semicolon alone refuses it.
-
-
-    CONSEQUENCE: proof_exec has read 0/N on essentially every review since W1-T72 shipped, and
-
-    every FLOOR DEGRADED line traces to this one cause. The floor was designed to catch test
-
-    theater and instead PERFORMS it — green from keyword overlap, rendered as ''no test theater''.
-
-    Confirmed on the four PRs that PASSED on 2026-07-19 (#232/#240/#238/#220): all four report
-
-    proof_exec 0/2 alongside ''PASS - 2 criteria substantiated, no test theater''.
-
-
-    SUB-FINDING, cheap and independently useful: the floor reads the PR BODY ONLY. On #234 the
-
-    identical proof text posted as a PR COMMENT changed nothing; moved into the body it flipped
-
-    FAIL to PASS. Substantiation written to a comment is invisible to the gate.
-
-
-    FIX DIRECTION: execute proofs in the EXISTING WORKER SANDBOX — containment already bounds
-
-    them, and the character blocklist was standing in for isolation the harness already has.
-
-    Alternatively a structured proof format (cmd plus expect fields) needing no fence-parsing.'
-  design: '(i) Replace character-blocklist REFUSAL with EXECUTION IN THE EXISTING SANDBOX, or adopt a
-
-    structured proof format with explicit cmd/expect fields. The blocklist substituted for
-
-    isolation that containment already provides.
-
-    (ii) The gate must not merely start passing — a genuinely failing proof must still FAIL the
-
-    review. This is the load-bearing constraint: a fix that makes proof_exec non-zero by relaxing
-
-    judgment would deepen the exact defect being fixed.
-
-    (iii) Make the body-only read explicit and documented, or extend substantiation to comments —
-
-    either is acceptable, silently reading one and not the other is not.
-
-    (iv) Report proof_exec honestly: a refused or unexecutable proof must be visibly distinct from
-
-    an executed-and-passed one in the verdict line.'
-  acceptance:
-  - claim: the 101 currently-refused dialect proofs measurably become executable — proof_exec reads N
-      greater than 0 on a standard filing, against the recorded 2026-07-19 baseline of 25 of 126
-    proof: 'unit test: test/proof-execution.test.ts'
-  - claim: a genuinely failing proof still FAILS the review — the falsifier proving the floor was repaired
-      rather than merely relaxed into passing
-    proof: 'unit test: test/proof-execution.test.ts'
-  - claim: 'the W1-T38 over-cap fixture executes end-to-end: a bulk active corpus goes RED naming the
-      overage, reverts, and the same bytes marked superseded go green'
-    proof: 'unit test: test/proof-execution.test.ts'
-  - claim: 'a proof whose body contains a semicolon executes rather than being refused — the #234 regression
-      fixture, the single character that disabled 80 percent of the floor'
-    proof: 'unit test: test/proof-execution.test.ts'
-  risk: high
-  origin: architect
-  plan_refs:
-  - MASTER-PLAN#12A
-  files:
-  - src/lib/review.ts
-  depends_on: []
 - id: W1-T129
   title: COMMITLINT LINTS THE ARTIFACT THAT PERSISTS — the repo squash-merges, so branch commits that
     never reach main must not gate the PR
@@ -6937,7 +6964,17 @@
         header-max-length, and EVERY BODY LINE wrapped to <= body-max-line-length (the #387 body-line lesson — a long
         stamp/summary line is wrapped or moved out of the body, never emitted verbatim);
     (iii) renders the PR BODY with a judgeable Acceptance section (grep/lint-checkable criteria), so remudero-review
-        has criteria to judge and never fails closed (the #387 no-Acceptance lesson).
+        has criteria to judge and never fails closed (the #387 no-Acceptance lesson). For a plan-FILING PR (one that
+        introduces a NEW task) the emitter must AUTO-AUTHOR that block about the FILING ITSELF — lint-clean, diff
+        scoped to the shard, fixture measured — because the filed task's own criteria are structurally unreachable:
+        remudero-review resolves via loadPlan against the WORKING CHECKOUT, and a task introduced by the PR is not
+        there. Shape matters and is unforgiving (parseAcceptanceBlock, review.ts): a header ALONE on its line
+        matching 'Acceptance' — '## Acceptance criteria for W1-T175' does NOT match — followed by CONTIGUOUS
+        '- <claim> | <proof>' bullets, where any blank or non-bullet line terminates the block;
+    (iv) MUST NOT emit a 'Remudero-Task: <id>' trailer on a plan-FILING PR. This is a CORRECTNESS rule, not style:
+        findMergedByTrailer (status.ts) would credit that task DONE on merge of its mere filing, marking unbuilt
+        work complete and letting the drain skip it forever. The trailer is legitimate only on a PR that IMPLEMENTS
+        the task. #389/#392 omit it deliberately, which is why the convention survived undocumented until #394.
     Callers pass their per-emitter specifics (retro: 'retro R<n>'; approve: 'ratify P<n>' + the ratified-tasks
     Acceptance). Design note (not a hard criterion here): emitters should prefer writing tasks.d/ shards over
     appending to tasks.yaml, so concurrent emissions stay conflict-free (W1-T122) — #387 appended to tasks.yaml.
@@ -6949,6 +6986,10 @@
       proof: "unit test: the rendered commit message (for retro 'chore(plan): retro R<n>' and approve 'chore(plan): ratify P<n>') passes commitlint against the repo config — type in enum, subject lower-case, header <= header-max-length, AND no body line exceeds body-max-line-length even when a caller supplies a long stamp/summary. FALSIFIERS: the pre-fix 'plan:'/'rmd retro:' type is REJECTED; the #387 fixture — a 681-char stamp line emitted verbatim into the body — is REJECTED by body-max-line-length"
     - claim: "the shared emitter's PR body carries a judgeable Acceptance section — remudero-review has criteria and never fails closed"
       proof: "unit/integration test: the emitted PR body (for approve AND retro) contains an Acceptance section whose criteria remudero-review parses and judges (proof_exec sees >0 criteria). FALSIFIER: the #387 fixture — an approve PR body with NO Acceptance section, which remudero-review fails CLOSED on ('no acceptance criteria to judge')"
+    - claim: "a plan-FILING PR gets an AUTO-AUTHORED Acceptance block about the filing itself, in the exact shape parseAcceptanceBlock accepts — a filing PR is never emitted unjudgeable"
+      proof: "unit test: the emitted body for a filing PR contains a header ALONE on its line matching the Acceptance regex followed by CONTIGUOUS '- <claim> | <proof>' bullets, and parseAcceptanceBlock returns >0 criteria from it. FALSIFIERS, both from #394 (2026-07-20): a body whose only header was '## Acceptance criteria and how each is proved' resolved NONE and self-posted a RED remudero-review, blocking the PR — the header must be bare; and a body whose bullets are interrupted by a blank or prose line truncates the block, since any non-bullet line after bullets start terminates it"
+    - claim: "a plan-FILING PR carries NO Remudero-Task: trailer — the emitter cannot credit a task done on merge of its own filing"
+      proof: "unit test: the emitted filing-PR body contains no 'Remudero-Task:' trailer, and an integration check that findMergedByTrailer does NOT credit the newly-filed task from that merge. FALSIFIER: adding the trailer, which makes the filed task read DONE the moment the filing merges — unbuilt work marked complete and permanently skipped by the drain. This is why #389/#392 omit it"
     - claim: "an emitter dry-run is zero-hand-intervention end to end — commitlint-clean commit + byte-current plan-index + a review-judgeable body"
       proof: "integration test: 'rmd retro --dry-run' and an approve dry-run over seeded fixtures each produce a staged commit whose message passes 'npx commitlint', a plan/plan-index.json matching the generator, and a PR body with judgeable Acceptance — all green with no hand edits (the #287 + #387 regressions, closed)"
   risk: high
@@ -6965,7 +7006,15 @@
     W1-T137 already names this the 'W1-T136 class' at the worker/fix-rung site (commit header cap). Companion to
     W1-T134/W1-T135 and the plan-index-check / commitlint / remudero-review gates that made the hole visible.
     Design note carried: emitters should write tasks.d/ shards (W1-T122) rather than append tasks.yaml so concurrent
-    emissions stay conflict-free — #387 appended to tasks.yaml."
+    emissions stay conflict-free — #387 appended to tasks.yaml.
+    EXTENDED 2026-07-20 with the plan-FILING case, after the class fired a THIRD time on #394 — a HAND-authored
+    filing PR that self-posted a RED remudero-review because its Acceptance header was not bare. Two additions,
+    both folded here rather than filed standalone because they ARE this emitter's contract: (a) auto-author the
+    judgeable Acceptance block for filing PRs, whose filed task's own criteria are structurally unreachable
+    (loadPlan reads the working checkout, so a task introduced by the PR is absent — verified: re-running the
+    reviewer from the PR's OWN worktree still resolved NONE); (b) enforce NO Remudero-Task: trailer on a filing,
+    which is a correctness rule — the trailer would credit the task DONE on merge of its mere filing. The #389/#392
+    convention was correct but undocumented, so every future plan PR steps on it until the emitter encodes it."
 
 - id: W1-T137
   title: "worker fix-rung commit headers must satisfy commitlint header-max-length (<=100) — verbose round-N headers blew the cap and blocked #303/#305 by construction"
