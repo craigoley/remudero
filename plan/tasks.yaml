@@ -6642,3 +6642,76 @@
   attempts: 0
   note: "P32 second task (promotion judge + scrub gate + per-layer budget). REQUIRED planted probes: project-specific
     does-not-promote (judge), secret-bearing blocked-at-scrub (scrub), provenance-survives-redacted. Extends W1-T38."
+
+- id: W1-T147
+  title: "overnight chaos drill — unattended multi-hour drill with injected kill-9, forced ENOSPC, and a GitHub-outage stub; each injection MUST produce its designed recovery ledger line (WS-7 debt)"
+  repo: remudero
+  depends_on: [W1-T12d]
+  type: implement
+  verify: human
+  principles: {tdd: encouraged}
+  budget_usd: 100.00
+  rationale: "WS-7 debt. NET STATE admits the WS-1 drill was BOUNDED — --max 3, not overnight, and the kill was
+    POST-drain. This is the real unattended multi-hour resilience drill: inject kill-9 mid-run, force ENOSPC (a
+    bounded scratch volume or quota), and simulate a GitHub outage (a gateway stub). The drill carries its OWN
+    falsifiers: each injection MUST produce its designed recovery ledger line — a MISSING recovery is a drill FAIL,
+    not silence. verify:human because it is an operator-run drill (like W1-T12d), not a headless auto-dispatch."
+  design: |
+    Build a fault-injection harness around the daemon: (a) a kill-9 injector that terminates a worker/daemon
+    mid-run; (b) an ENOSPC forcer using a BOUNDED scratch volume or disk quota (never the real root volume); (c) a
+    GitHub-outage stub (the ghGateway returns outage errors). Run it unattended for multiple hours and assert, per
+    injection, the DESIGNED recovery ledger line. Operator-run (verify:human). VERIFY the daemon restart/resume
+    path, the disk-hygiene prune (W1-T115/T131), and the degrade-don't-die transport (W1-T113) from source first.
+  acceptance:
+    - claim: "an injected kill-9 mid-run produces the designed restart-recovery ledger line, with NO duplicate run"
+      proof: "during the drill a kill-9 of a worker/daemon mid-run is followed by a recovery ledger line (restart + resume, no-duplicate per the launchd KeepAlive guard); the ABSENCE of that line is a drill FAIL, not silence"
+    - claim: "a forced ENOSPC produces the designed disk-recovery ledger line + hygiene, no leak"
+      proof: "a bounded scratch volume/quota driven to ENOSPC produces the designed disk-pressure/recovery ledger line (prune + continue, W1-T115/T131); 0 temp leaks after; a MISSING recovery line = drill FAIL"
+    - claim: "a GitHub-outage stub produces the designed degrade-don't-die ledger line, no crash"
+      proof: "the gateway stub returning outage errors produces the designed WAIT/degrade ledger line (retry/backoff then ledger-and-continue, W1-T113); the run survives to the drill's end; a crash OR a missing recovery line = drill FAIL"
+  risk: high
+  origin: architect
+  plan_refs: ["§9"]
+  files: [src/run-task.ts, src/lib/daemon.ts]
+  status: queued
+  attempts: 0
+  note: "WS-7 debt (NET STATE: the WS-1 drill was bounded — --max 3, not overnight, kill POST-drain). verify:human,
+    operator-run (headless-lexicon exempt). Each injection's recovery ledger line IS the falsifier; a missing line is
+    a drill FAIL, never silence. Extends W1-T12d (live commissioning)."
+
+- id: W1-T148
+  title: "cost governor — a daily spend ceiling as policy data; new DISPATCH waits (ledgered dispatch_deferred_budget) when the day's ledgered cost exceeds it; drainage (sweep/heal/merge) never throttles"
+  repo: remudero
+  depends_on: [W1-T130]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The $206 / 60-run W1-T1 incident: a spin loop burned ~$206 over ~60 runs with no daily ceiling. A cost
+    governor holds a daily spend ceiling as POLICY DATA (rule 2); when the ledgered day-cost exceeds it, new DISPATCH
+    WAITS (a dispatch_deferred_budget ledger line) — but SWEEP / HEAL / MERGE are UNAFFECTED: drainage never
+    throttles (a half-finished PR must still merge; a block must still escalate; stranding in-flight work to save
+    money is a worse failure). Pairs with W1-T130's CANNOT-OBSERVE-MEANS-WAIT polarity — the same 'when in doubt,
+    WAIT not spend' doctrine, here applied to budget rather than observability."
+  design: |
+    A policy-as-data daily ceiling (a config/policy surface, rule 2). The DISPATCH gate sums the ledger's day-cost;
+    if it is at/over the ceiling, it DEFERS new dispatch and writes a dispatch_deferred_budget ledger line naming
+    the day-cost + ceiling. The sweep/fix/merge reconciler path is NEVER gated by the ceiling — drainage completes
+    in-flight work, arms mergeable PRs, runs the fix rung, and escalates blocks regardless. VERIFY the dispatch
+    site, the ledger day-cost derivation, and the existing maxBudgetUsd per-run backstop from source before wiring
+    (distrust this note) — this is a DAILY, cross-run ceiling, distinct from the per-run backstop.
+  acceptance:
+    - claim: "when the day's ledgered cost >= the ceiling, new DISPATCH waits and ledgers dispatch_deferred_budget"
+      proof: "unit test over an injected ledger + policy ceiling: with day-cost at/over the ceiling the dispatch gate DEFERS (no new worker spawn) and writes a dispatch_deferred_budget line; below the ceiling it dispatches — seeded with the $206/60-run W1-T1 shape, the over-ceiling dispatch defers"
+    - claim: "drainage (sweep/heal/merge) is NEVER throttled by the ceiling (the falsifier)"
+      proof: "unit test: at/over the ceiling, the sweep/fix/merge path STILL arms a mergeable PR, STILL runs the fix rung, STILL escalates a block — asserted to fire while new dispatch is deferred; a governor that also blocked drainage (stranding in-flight PRs) FAILS this test"
+    - claim: "the ceiling is policy data, not a hardcoded constant"
+      proof: "unit test: the ceiling is read from the policy/config surface (rule 2); changing the policy value moves the defer threshold with no code edit; an absent policy falls back to a SAFE default (fail-safe, never unbounded)"
+  risk: high
+  origin: architect
+  plan_refs: ["§9", "§5C"]
+  files: [src/lib/drain.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Fixture = the $206/60-run W1-T1 incident. Budget-polarity dual of W1-T130 (cannot-observe->WAIT). Drainage
+    NEVER throttles — only new DISPATCH defers; the falsifier is a governor that strands in-flight work."
