@@ -24,6 +24,12 @@
 // with a streamed response body lets subscribeStatus send the SAME bearer header as
 // getStatus and parse the `event:`/`data:` SSE framing (src/lib/service.ts's `openSse`) by
 // hand over the byte stream.
+//
+// W3-T6 (MASTER-PLAN §7B) adds the plan→task→PR graph + interactive plan adjustment: the
+// feedback inbox (`listFeedback`/`submitFeedback`), the provenance graph (`getTrace`, W1-T43),
+// and the accept/reject bit (`decideProposal`) — one typed method per route
+// src/lib/panel-graph.ts registers, over the SAME `getJson`/`postJson` helpers W3-T2/W3-T5
+// already established.
 import type { components } from "./schema.js";
 
 export type StatusProjection = components["schemas"]["StatusProjection"];
@@ -34,6 +40,12 @@ export type StopResult = components["schemas"]["StopResult"];
 export type QuietHoursResult = components["schemas"]["QuietHoursResult"];
 export type AnswerQuestionResult = components["schemas"]["AnswerQuestionResult"];
 export type ApproveManualResult = components["schemas"]["ApproveManualResult"];
+export type FeedbackEntry = components["schemas"]["FeedbackEntry"];
+export type FeedbackInboxResult = components["schemas"]["FeedbackInboxResult"];
+export type SubmitFeedbackResult = components["schemas"]["SubmitFeedbackResult"];
+export type TraceChain = components["schemas"]["TraceChain"];
+export type TraceResult = components["schemas"]["TraceResult"];
+export type ProposalDecisionResult = components["schemas"]["ProposalDecisionResult"];
 
 export interface DaemonClientOptions {
   /** The daemon's base URL, e.g. `https://<tailnet-host>`. No trailing slash required. */
@@ -65,6 +77,18 @@ export interface DaemonClient {
   answerQuestion(taskId: string, answer: string): Promise<AnswerQuestionResult>;
   /** POST /v1/manual/approve — check off a MANUAL-queue item (write-scoped, W3-T5). */
   approveManualItem(taskId: string, issueUrl: string): Promise<ApproveManualResult>;
+  /** GET /v1/feedback[?status=] — the feedback inbox (read-scoped, W3-T6). */
+  listFeedback(status?: FeedbackEntry["status"]): Promise<FeedbackInboxResult>;
+  /**
+   * POST /v1/feedback — submit feedback from the panel, ALWAYS captured with origin=ui
+   * (write-scoped, W3-T6). `replyTo`, if given, must name an existing entry parked
+   * `grilling` — this is "answer a grill" (see src/lib/panel-graph.ts's header for why).
+   */
+  submitFeedback(text: string, opts?: { attachments?: string[]; replyTo?: string }): Promise<SubmitFeedbackResult>;
+  /** GET /v1/trace?id= — the plan→task→PR provenance graph for a task or feedback id (read-scoped, W3-T6, W1-T43). */
+  getTrace(id: string): Promise<TraceResult>;
+  /** POST /v1/feedback/decision — accept or reject a `proposed` feedback entry (write-scoped, W3-T6). */
+  decideProposal(id: string, decision: "accept" | "reject"): Promise<ProposalDecisionResult>;
 }
 
 function authHeaders(token: string): Record<string, string> {
@@ -111,6 +135,29 @@ export function createDaemonClient(opts: DaemonClientOptions): DaemonClient {
     return (await res.json()) as T;
   }
 
+  /**
+   * The GET-side counterpart to `postJson` — used by every W3-T6 read route (`listFeedback`,
+   * `getTrace`) that isn't `getStatus`'s own hand-rolled fetch. Same non-2xx handling: throw
+   * with the daemon's best-effort error detail rather than returning an error envelope as if
+   * it were a result.
+   */
+  async function getJson<T>(path: string, query?: Record<string, string | undefined>): Promise<T> {
+    const url = new URL(`${baseUrl}${path}`);
+    for (const [key, value] of Object.entries(query ?? {})) {
+      if (value !== undefined) url.searchParams.set(key, value);
+    }
+    const res = await fetchImpl(url.toString(), { headers: authHeaders(opts.token) });
+    if (!res.ok) {
+      const detail = await res
+        .clone()
+        .json()
+        .then((b: unknown) => (b && typeof b === "object" ? JSON.stringify(b) : undefined))
+        .catch(() => undefined);
+      throw new Error(`${path}: daemon returned ${res.status}${detail ? ` — ${detail}` : ""}`);
+    }
+    return (await res.json()) as T;
+  }
+
   return {
     async getStatus() {
       const res = await fetchImpl(`${baseUrl}/v1/status`, { headers: authHeaders(opts.token) });
@@ -140,6 +187,26 @@ export function createDaemonClient(opts: DaemonClientOptions): DaemonClient {
 
     approveManualItem(taskId, issueUrl) {
       return postJson<ApproveManualResult>("/v1/manual/approve", { taskId, issueUrl });
+    },
+
+    listFeedback(status) {
+      return getJson<FeedbackInboxResult>("/v1/feedback", { status });
+    },
+
+    submitFeedback(text, subOpts) {
+      return postJson<SubmitFeedbackResult>("/v1/feedback", {
+        text,
+        ...(subOpts?.attachments !== undefined ? { attachments: subOpts.attachments } : {}),
+        ...(subOpts?.replyTo !== undefined ? { replyTo: subOpts.replyTo } : {}),
+      });
+    },
+
+    getTrace(id) {
+      return getJson<TraceResult>("/v1/trace", { id });
+    },
+
+    decideProposal(id, decision) {
+      return postJson<ProposalDecisionResult>("/v1/feedback/decision", { id, decision });
     },
 
     subscribeStatus(onEvent) {

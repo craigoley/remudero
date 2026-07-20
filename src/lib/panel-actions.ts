@@ -61,7 +61,8 @@ export interface PanelActionDeps {
   issues: IssueCloser;
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
+/** Shared with lib/panel-graph.ts (W3-T6, the plan->task->PR graph + feedback/decision routes) -- one JSON-envelope writer for every panel route, never a second copy. */
+export function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
 }
@@ -101,7 +102,8 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
   });
 }
 
-function isRecord(v: unknown): v is Record<string, unknown> {
+/** Shared with lib/panel-graph.ts -- every panel route's body-validation entry point. */
+export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
@@ -116,18 +118,29 @@ function validateOptionalReason(body: unknown): { error: string } | OptionalReas
   return { reason: body.reason as string | undefined };
 }
 
+/**
+ * Ledger one panel action, keyed by `ledgerPath` alone (not the full `PanelActionDeps`) so
+ * lib/panel-graph.ts's feedback/trace/decision routes -- which have no `issues` gateway to
+ * satisfy `PanelActionDeps` -- can ledger through the SAME primitive rather than re-deriving
+ * the `run_id`/shape convention a second time.
+ */
+export function appendPanelLedger(ledgerPath: string, step: string, taskId: string, origin: string, extra: Record<string, unknown> = {}): void {
+  appendLedger(ledgerPath, { run_id: `PANEL-${Date.now()}`, task_id: taskId, step, origin, ...extra });
+}
+
 /** Ledger one panel action. Every route below funnels through this so the shape is uniform: step name, the caller's `origin`, plus whatever fields that action names. */
 function ledgerPanelAction(deps: PanelActionDeps, step: string, taskId: string, origin: string, extra: Record<string, unknown>): void {
-  appendLedger(deps.ledgerPath, { run_id: `PANEL-${Date.now()}`, task_id: taskId, step, origin, ...extra });
+  appendPanelLedger(deps.ledgerPath, step, taskId, origin, extra);
 }
 
 /**
  * Wrap a route body: parse JSON, run `validate` (return an error string to FAIL LOUD with a
  * 400 before any side effect, or the validated input to proceed), then run `act`. Centralizes
  * the parse-validate-act-respond shape every handler below shares, so each route definition is
- * just its own validation + effect, not a rebuilt copy of this plumbing.
+ * just its own validation + effect, not a rebuilt copy of this plumbing. Shared with
+ * lib/panel-graph.ts (W3-T6) -- same discipline, same helper, never a second copy.
  */
-function jsonAction<T extends object>(
+export function jsonAction<T extends object>(
   validate: (body: unknown) => { error: string } | T,
   act: (input: T, req: IncomingMessage, res: ServerResponse) => void | Promise<void>,
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {

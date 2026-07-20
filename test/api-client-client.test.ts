@@ -12,7 +12,10 @@ import {
   buildStopRoute,
   type IssueCloser,
 } from "../src/lib/panel-actions.js";
-import { mkdtempSync } from "node:fs";
+import { buildPanelGraphRoutes, type PanelGraphDeps } from "../src/lib/panel-graph.js";
+import { setFeedbackStatus } from "../src/lib/feedback.js";
+import type { TraceGithub } from "../src/lib/trace.js";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -251,5 +254,93 @@ test("createDaemonClient.subscribeStatus(): the returned unsubscribe aborts the 
     unsubscribe();
     await waitFor(() => fixture.wasUnsubscribed());
     assert.equal(fixture.wasUnsubscribed(), true);
+  });
+});
+
+// ── W3-T6: the plan→task→PR graph + interactive plan adjustment (MASTER-PLAN §7B) ──────────
+//
+// Same discipline: drive createDaemonClient against a REAL createService()-backed server
+// registering the real src/lib/panel-graph.ts routes, never a mock of fetch.
+
+function graphTmpRoot(): string {
+  return mkdtempSync(join(tmpdir(), "rmd-api-client-graph-"));
+}
+
+function fakeGithub(): TraceGithub {
+  return { prView: () => null };
+}
+
+function buildGraphFixtureService(root: string) {
+  mkdirSync(join(root, "plan"), { recursive: true });
+  const planPath = join(root, "plan", "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const deps: PanelGraphDeps = { root, planPath, ledgerPath: join(root, "state", "ledger.ndjson"), github: fakeGithub() };
+  return { server: createService({ tokens: { read: READ_TOKEN, write: WRITE_TOKEN }, routes: buildPanelGraphRoutes(deps) }), deps };
+}
+
+async function withGraphFixture<T>(fn: (baseUrl: string, deps: PanelGraphDeps) => Promise<T>): Promise<T> {
+  const { server, deps } = buildGraphFixtureService(graphTmpRoot());
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    return await fn(`http://127.0.0.1:${port}`, deps);
+  } finally {
+    server.close();
+  }
+}
+
+test("createDaemonClient.submitFeedback(): POSTs /v1/feedback, returns the captured entry with origin=ui", async () => {
+  await withGraphFixture(async (baseUrl) => {
+    const client = createDaemonClient({ baseUrl, token: WRITE_TOKEN });
+    const result = await client.submitFeedback("the retry banner overlaps the status pill");
+    assert.equal(result.ok, true);
+    assert.equal(result.entry.origin, "ui");
+    assert.equal(result.entry.raw, "the retry banner overlaps the status pill");
+  });
+});
+
+test("createDaemonClient.listFeedback(): GETs /v1/feedback, returns entries the client itself just submitted", async () => {
+  await withGraphFixture(async (baseUrl) => {
+    const client = createDaemonClient({ baseUrl, token: WRITE_TOKEN });
+    await client.submitFeedback("one");
+    const result = await client.listFeedback();
+    assert.equal(result.entries.length, 1);
+    assert.equal(result.entries[0].raw, "one");
+  });
+});
+
+test("createDaemonClient.getTrace(): GETs /v1/trace?id=, returns the chain for a feedback id", async () => {
+  await withGraphFixture(async (baseUrl) => {
+    // write is a superset of read (src/lib/service.ts) -- one client submits AND traces.
+    const client = createDaemonClient({ baseUrl, token: WRITE_TOKEN });
+    const submitted = await client.submitFeedback("x", undefined);
+    const result = await client.getTrace(submitted.entry.id);
+    assert.equal(result.chain.direction, "forward");
+    assert.equal(result.chain.feedback?.id, submitted.entry.id);
+  });
+});
+
+test("createDaemonClient.getTrace(): an unresolvable id throws with a 404, never a bogus empty chain", async () => {
+  await withGraphFixture(async (baseUrl) => {
+    const client = createDaemonClient({ baseUrl, token: READ_TOKEN });
+    await assert.rejects(() => client.getTrace("nope"), /404/);
+  });
+});
+
+test("createDaemonClient.decideProposal(): POSTs /v1/feedback/decision, returns the updated status", async () => {
+  await withGraphFixture(async (baseUrl, deps) => {
+    const client = createDaemonClient({ baseUrl, token: WRITE_TOKEN });
+    const submitted = await client.submitFeedback("x");
+    setFeedbackStatus(deps.root, submitted.entry.id, "proposed", { proposalPr: "https://github.com/o/r/pull/1" });
+    const result = await client.decideProposal(submitted.entry.id, "accept");
+    assert.deepEqual(result, { ok: true, id: submitted.entry.id, status: "accepted", proposalPr: "https://github.com/o/r/pull/1" });
+  });
+});
+
+test("createDaemonClient graph write methods: a read-only token gets a thrown 403, never a silent no-op", async () => {
+  await withGraphFixture(async (baseUrl) => {
+    const client = createDaemonClient({ baseUrl, token: READ_TOKEN });
+    await assert.rejects(() => client.submitFeedback("x"), /403/);
+    await assert.rejects(() => client.decideProposal("fb-x", "accept"), /403/);
   });
 });

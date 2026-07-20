@@ -84,6 +84,79 @@ export interface components {
       taskId: string;
       issueUrl: string;
     };
+    /** One `plan/feedback/<id>.yaml` entry (src/lib/feedback.ts's `FeedbackEntry` -- the §7B schema shape: capture -> triage -> gate). */
+    FeedbackEntry: {
+      id: string;
+      ts: string;
+      raw: string;
+      attachments: (string)[];
+      origin: "cli" | "ui" | "issue";
+      status: "new" | "grilling" | "proposed" | "accepted" | "rejected";
+      /** Set once `rmd triage` opens a proposal PR for this entry; null until then. */
+      proposal_pr: string | null;
+    };
+    /** GET /v1/feedback's body -- every captured feedback entry, oldest first. */
+    FeedbackInboxResult: {
+      entries: (FeedbackEntry)[];
+    };
+    /** POST /v1/feedback's body -- submit feedback from the panel (ALWAYS captured with origin: ui, never taken from this body). `replyTo`, if given, must name an existing entry parked `grilling` -- this is "answer a grill" v1 (src/lib/panel-graph.ts's header explains why): the answer is captured as a fresh feedback entry that re-enters triage, rather than a second, parallel answer-delivery primitive ahead of the still-unbuilt W1-T42 grill mechanics. */
+    SubmitFeedbackRequest: {
+      text: string;
+      /** http(s) links ONLY -- a local file path would resolve against the daemon's own filesystem, not the operator's. */
+      attachments?: (string)[];
+      /** The `grilling` feedback id this submission answers, if any. */
+      replyTo?: string;
+    };
+    SubmitFeedbackResult: {
+      ok: boolean;
+      entry: FeedbackEntry;
+    };
+    /** One run named on a task's ledger lines (src/lib/trace.ts's `TraceRun`). */
+    TraceRun: {
+      runId: string;
+      verdict?: string;
+      prUrl?: string;
+      prState?: string;
+      mergeSha?: string;
+    };
+    TraceTaskNode: {
+      id: string;
+      title: string;
+      origin?: string;
+      runs: (TraceRun)[];
+    };
+    TraceFeedbackNode: {
+      id: string;
+      raw: string;
+      ts: string;
+      origin: string;
+      status: string;
+      proposalPr?: string;
+      proposalPrState?: string;
+      proposalMergeSha?: string;
+    };
+    /** The plan->task->PR provenance chain the panel renders as a graph (src/lib/trace.ts's `TraceChain`, W1-T43): a feedback -> proposal PR -> task(s) -> run(s) -> PR(s) -> sha, entered either FORWARD (from a feedback id) or REVERSE (from a task id). */
+    TraceChain: {
+      direction: "forward" | "reverse";
+      feedback?: TraceFeedbackNode;
+      tasks: (TraceTaskNode)[];
+    };
+    /** GET /v1/trace's body -- the structured chain (for the graph render) plus the pre-rendered plain-text tree (`rmd trace`'s own output). */
+    TraceResult: {
+      chain: TraceChain;
+      rendered: string;
+    };
+    /** POST /v1/feedback/decision's body -- accept or reject a `proposed` entry. */
+    ProposalDecisionRequest: {
+      id: string;
+      decision: "accept" | "reject";
+    };
+    ProposalDecisionResult: {
+      ok: boolean;
+      id: string;
+      status: string;
+      proposalPr: string | null;
+    };
   };
   securitySchemes: {
     /** Read-scoped bearer token. Grants GET access to read-scoped routes and SSE streams. A write-scoped token also satisfies this scope (write is a superset of read). */
@@ -162,6 +235,48 @@ export interface paths {
     post: {
       responses: {
           "200": ApproveManualResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/feedback": {
+    get: {
+      responses: {
+          "200": FeedbackInboxResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+    post: {
+      responses: {
+          "200": SubmitFeedbackResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/trace": {
+    get: {
+      responses: {
+          "200": TraceResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/feedback/decision": {
+    post: {
+      responses: {
+          "200": ProposalDecisionResult;
           "400": Error;
           "401": Error;
           "403": Error;

@@ -1,7 +1,9 @@
 <!DOCTYPE html>
 <!--
   Dashboard v0 (shell 0, MASTER-PLAN §7 WS-5a -> W3-T2): read-only live board, plus the
-  human-in-the-loop panel actions (W3-T5): answer/approve/Pause-Resume-STOP/quiet-hours.
+  human-in-the-loop panel actions (W3-T5): answer/approve/Pause-Resume-STOP/quiet-hours,
+  plus the plan→task→PR graph + interactive plan adjustment (W3-T6, MASTER-PLAN §7B):
+  submit feedback, answer grills, accept/reject a proposal.
 
   No bundler by design (the W3-T2 decision): src/main.ts is plain TypeScript, typechecked
   and compiled by the repo's existing `tsc -p tsconfig.json` build alongside every other
@@ -53,6 +55,38 @@
         <label>issue url <input id="approve-issue-url" type="url" required /></label>
         <button type="submit">Approve</button>
       </form>
+    </section>
+
+    <!--
+      W3-T6 (MASTER-PLAN §7B): the plan→task→PR graph + interactive plan adjustment -- the
+      panel's front door onto the feedback inbox (plan/feedback/, W1-T40) and the provenance
+      graph (rmd trace, W1-T43). Submitting feedback here is ALWAYS captured with origin=ui
+      (src/lib/panel-graph.ts); answering a grill reuses the SAME submit form via the
+      "answering" hidden replyTo field, wired by #inbox-list's per-entry "Answer" button.
+    -->
+    <section id="feedback" aria-label="Feedback inbox + plan→task→PR graph">
+      <h2>Feedback inbox</h2>
+      <p id="feedback-status" role="status"></p>
+
+      <h3>Submit feedback</h3>
+      <form id="submit-feedback-form">
+        <input id="submit-feedback-reply-to" type="hidden" />
+        <p id="submit-feedback-reply-banner" hidden></p>
+        <label>text <input id="submit-feedback-text" type="text" required /></label>
+        <label>attachment url (optional) <input id="submit-feedback-attachment" type="url" /></label>
+        <button type="submit">Submit</button>
+        <button id="submit-feedback-cancel-reply" type="button" hidden>Cancel reply</button>
+      </form>
+
+      <h3>Inbox</h3>
+      <div id="inbox-list">Loading…</div>
+
+      <h3>Plan→task→PR graph</h3>
+      <form id="trace-form">
+        <label>task or feedback id <input id="trace-id" type="text" required /></label>
+        <button type="submit">Trace</button>
+      </form>
+      <div id="trace-graph"></div>
     </section>
 
     <script type="module" src="./main.js"></script>
