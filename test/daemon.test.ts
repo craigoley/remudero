@@ -120,6 +120,55 @@ test("daemonBoot: defaults to checking process.env when no env is injected", () 
   }
 });
 
+// ── daemonBoot: the injected temp-dir sweep (W1-T115, the 26,711-dir ENOSPC
+// incident's structural backstop) — "boot sweep removes stale dirs and reports":
+// seeded stale + fresh dirs -> stale removed, fresh kept, count logged. The
+// seeded-stale/fresh/removed/kept mechanics themselves are proven directly
+// against real dirs on disk in test/tmp.test.ts's `sweepStaleTempDirs` suite;
+// this pins the OTHER half of the claim — that daemonBoot actually calls the
+// injected sweep once at boot and logs the removed/kept COUNT (not the raw
+// summary) on a dedicated `daemon.tmp_sweep` ledger step.
+
+test("daemonBoot: calls the injected sweepTmp once and logs daemon.tmp_sweep with the removed/kept COUNT", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const cleanEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op" };
+  let sweepCalls = 0;
+  const sweepTmp = () => {
+    sweepCalls += 1;
+    // Seeded as if two stale rmd- dirs were reaped and one fresh one kept —
+    // the exact seeded-stale/seeded-fresh shape tmp.test.ts proves against a
+    // real filesystem; daemonBoot only needs to log the COUNT of each.
+    return { removed: ["rmd-review-stale-1", "rmd-review-stale-2"], kept: ["rmd-plan-fresh-1"] };
+  };
+  daemonBoot((step, extra = {}) => lines.push({ step, extra }), cleanEnv, sweepTmp);
+
+  assert.equal(sweepCalls, 1, "the sweep runs exactly once at boot");
+  const sweepLine = lines.find((l) => l.step === "daemon.tmp_sweep");
+  assert.ok(sweepLine, "daemon.tmp_sweep is logged");
+  assert.equal(sweepLine!.extra.removed, 2, "the removed COUNT is logged (2 stale dirs), not the raw array");
+  assert.equal(sweepLine!.extra.kept, 1, "the kept COUNT is logged (1 fresh dir), not the raw array");
+});
+
+test("daemonBoot: an empty sweep result still logs daemon.tmp_sweep with zero counts (a clean boot is legible too)", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const cleanEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op" };
+  const sweepTmp = () => ({ removed: [], kept: [] });
+  daemonBoot((step, extra = {}) => lines.push({ step, extra }), cleanEnv, sweepTmp);
+
+  const sweepLine = lines.find((l) => l.step === "daemon.tmp_sweep");
+  assert.ok(sweepLine);
+  assert.equal(sweepLine!.extra.removed, 0);
+  assert.equal(sweepLine!.extra.kept, 0);
+});
+
+test("daemonBoot: no sweepTmp injected -> no daemon.tmp_sweep line at all (pre-W1-T115 behavior unchanged)", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const cleanEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op" };
+  daemonBoot((step, extra = {}) => lines.push({ step, extra }), cleanEnv);
+  assert.equal(lines.length, 1, "only daemon.boot — no sweep attempted when the dependency is omitted");
+  assert.equal(lines[0].step, "daemon.boot");
+});
+
 // ── dispatch order: reuses drain.ts's DAG selection, never reimplements it ──
 
 test("dispatches in dependency order (DAG), skipping verify:human and merged tasks", async () => {

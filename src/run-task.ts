@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -34,6 +34,7 @@ import {
   type OpenPrCheck,
 } from "./lib/drain.js";
 import { DEFAULT_POLL_INTERVAL_MS, daemonBoot, runDaemon, type DaemonOpts, type DaemonSummary } from "./lib/daemon.js";
+import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
 import { generateLaunchdPlist, launchdPlistPath } from "./lib/launchd.js";
 import { buildDigest, sendDigest } from "./lib/digest.js";
 import { escalate, ghIssueGateway, type EscalationClass, type EscalationOption, type IssueGateway } from "./lib/escalate.js";
@@ -222,7 +223,7 @@ export function syncPlanFromOrigin(
   } catch (err) {
     throw new GitFetchError(`git show origin/main:${relPath} failed in ${repoDir}: ${String(err)}`);
   }
-  const tmpDir = mkdtempSync(join(tmpdir(), "rmd-plan-"));
+  const tmpDir = makeTempDir("plan"); // W1-T115: shared rmd- prefix (lib/tmp.ts), same try/finally as before
   try {
     const tmpFile = join(tmpDir, "tasks.yaml");
     writeFileSync(tmpFile, blob, "utf8");
@@ -555,41 +556,47 @@ async function runReview(args: {
   let reviewerSpawnFailed = false;
   if (attemptReviewer) {
     try {
-      const reviewCwd = mkdtempSync(join(tmpdir(), "rmd-review-"));
-      const prompt =
-        buildReviewPrompt({ task: { id: task.id, acceptance: criteria }, prUrl, owner, repo, headSha }) +
-        "\n" +
-        reviewerVerdictContract(criteria.length);
-      const reviewer = args.account(
-        await spawnWorker({
-          cwd: reviewCwd,
-          permissionMode: "bypassPermissions",
-          settingsFile: args.settingsFile,
-          // MOUNT-GOVERNED (§9, W1-T63/P10): model/effort/max_turns come from the
-          // resolved "reviewer" mount, never a hardcoded literal. Before this, an
-          // undeclared 12-turn cap with no model/effort override walled
-          // `error_max_turns` on every substantive code PR — a floor-only PASS silently masquerading
-          // as a completed review (P10-a; reviewerOutcome below makes it legible).
-          model: args.reviewerMount.model,
-          effort: args.reviewerMount.effort,
-          maxTurns: args.reviewerMount.maxTurns,
-          maxBudgetUsd: args.budgetUsd,
-          config: args.config,
-          prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
-        }),
-      );
-      semantic = parseReviewerVerdicts(
-        [reviewer.text, reviewer.blocks.join("\n")].join("\n"),
-        criteria.length,
-      );
-      reviewerSubtype = reviewer.subtype;
-      log("review.reviewer", {
-        session_id: reviewer.sessionId,
-        subtype: reviewer.subtype,
-        downgrades: semantic.filter((s) => s === false).length,
-        // W1-T6: the advisory reviewer is a BRAIN-PLANE call — same telemetry
-        // shape as a worker call, so ledger lines are queryable uniformly.
-        ...workerLedgerFields(reviewer),
+      // W1-T115: routed through withTempDir so this throwaway cwd is ALWAYS
+      // removed on exit — success or thrown error — instead of the bare
+      // mkdtempSync this used to be, which never cleaned up on any path and
+      // leaked one `rmd-review-*` dir per PR review (a major contributor to
+      // the 26,711-dir ENOSPC incident: this runs on every gate check).
+      await withTempDir("review", async (reviewCwd) => {
+        const prompt =
+          buildReviewPrompt({ task: { id: task.id, acceptance: criteria }, prUrl, owner, repo, headSha }) +
+          "\n" +
+          reviewerVerdictContract(criteria.length);
+        const reviewer = args.account(
+          await spawnWorker({
+            cwd: reviewCwd,
+            permissionMode: "bypassPermissions",
+            settingsFile: args.settingsFile,
+            // MOUNT-GOVERNED (§9, W1-T63/P10): model/effort/max_turns come from the
+            // resolved "reviewer" mount, never a hardcoded literal. Before this, an
+            // undeclared 12-turn cap with no model/effort override walled
+            // `error_max_turns` on every substantive code PR — a floor-only PASS silently masquerading
+            // as a completed review (P10-a; reviewerOutcome below makes it legible).
+            model: args.reviewerMount.model,
+            effort: args.reviewerMount.effort,
+            maxTurns: args.reviewerMount.maxTurns,
+            maxBudgetUsd: args.budgetUsd,
+            config: args.config,
+            prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
+          }),
+        );
+        semantic = parseReviewerVerdicts(
+          [reviewer.text, reviewer.blocks.join("\n")].join("\n"),
+          criteria.length,
+        );
+        reviewerSubtype = reviewer.subtype;
+        log("review.reviewer", {
+          session_id: reviewer.sessionId,
+          subtype: reviewer.subtype,
+          downgrades: semantic.filter((s) => s === false).length,
+          // W1-T6: the advisory reviewer is a BRAIN-PLANE call — same telemetry
+          // shape as a worker call, so ledger lines are queryable uniformly.
+          ...workerLedgerFields(reviewer),
+        });
       });
     } catch (e) {
       // Advisory only — the deterministic floor still binds and posts below.
@@ -2982,7 +2989,9 @@ async function daemonCommand(rest: string[]): Promise<number> {
   // ANTHROPIC-clean-env boot assertion (W1-T12b): checked once, before the loop
   // starts, over the daemon process's OWN live env — belt-and-suspenders atop
   // the launchd unit's own closed EnvironmentVariables allowlist (lib/launchd.ts).
-  daemonBoot(log);
+  // Also runs the W1-T115 boot sweep of stale rmd-owned temp dirs (the
+  // 26,711-dir ENOSPC incident's backstop) and logs the count via daemon.tmp_sweep.
+  daemonBoot(log, process.env, () => sweepStaleTempDirs());
 
   try {
     const summary = await runDaemon(
