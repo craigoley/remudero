@@ -7430,3 +7430,44 @@
   note: "Mount model/effort as policy-data keyed on risk/class (cheaper for docs/plan-lint; default for risk:high
     src). Per-class cost/outcome ledgered so the retro evaluates the table. Evidence: flat sonnet/high pricing, the
     $12 W1-T115 run. Falsifiers: a routing change needing code fails; a class with no row falls back LOUDLY."
+
+- id: W1-T168
+  title: "the fix-rung must ESCAPE a review false-block it cannot fix — no-progress across strikes (unchanged diff / same criterion re-blocked while the deterministic floor passes) escalates for re-judgment, never silent strike-exhaustion (the #349/#360 stuck class)"
+  repo: remudero
+  depends_on: [W1-T76, W1-T161]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "TWICE now (#349, #360) a daemon PR with CORRECT, test-passing code sat blocked because the reviewer
+    false-blocked a criterion (a semantic downgrade / keyword-floor shortfall / proof-exec mismatch) and the fix-rung
+    CANNOT fix a false-block — the work is already there. So it burned both strikes re-attempting a fix that changes
+    nothing, hit verdict=blocked, and stuck until a HUMAN re-reviewed (each time the deterministic floor PASSED on
+    re-review). Striking-to-exhaustion is the wrong response to a block the rung structurally cannot resolve. Detect
+    NO-PROGRESS and escalate for re-judgment instead of a second silent strike."
+  design: |
+    In the fix-rung (run-task.ts / sweep.ts), track per-strike PROGRESS. Signal a FALSE-BLOCK when: (a) a fix round
+    produces NO diff change (the worker could not add work) AND the review re-fails the SAME criterion; the SHARPEST
+    signal is (b) the DETERMINISTIC floor (rmd review, spawnReviewer:false) PASSES while the spawned reviewer blocks.
+    On that signal, ESCALATE naming the specific false-block ("review false-block: same criterion re-blocked on
+    unchanged code / deterministic floor passes" — a decidable operator question), instead of decrementing toward
+    strike-exhaustion. A GENUINE deficiency (changed diff still failing, floor also fails) strikes normally. VERIFY
+    the fix-rung strike/dispatch loop, diff-change detection, and the deterministic-floor invocation from source
+    first (distrust this note). Do NOT weaken the strike cap for real deficiencies.
+  acceptance:
+    - claim: "a fix round with NO diff change that re-fails the SAME criterion escalates as a false-block, not another silent strike"
+      proof: "unit test: a fix-rung round whose worker diff is UNCHANGED and whose review re-fails the same criterion is detected as no-progress and ESCALATES (a needs-human naming the false-block), NOT a strike toward exhaustion; a fix-rung that strikes to exhaustion on unchanged code FAILS (the falsifier)"
+    - claim: "when the DETERMINISTIC floor passes but the spawned reviewer blocks, the disagreement is surfaced, not exhausted"
+      proof: "unit test: a run whose deterministic floor PASSES (rmd review) while the spawned reviewer blocked ESCALATES naming the floor-vs-reviewer disagreement — the #349/#360 shape (correct code, floor passes, reviewer blocks) resolves without a human, instead of strike-exhaustion"
+    - claim: "a GENUINE deficiency still strikes + escalates normally (the escape does not weaken the rung)"
+      proof: "unit test: a fix round that ADDS work (changed diff) and still fails a criterion whose deterministic floor ALSO fails strikes NORMALLY toward the cap — the escape fires ONLY on no-progress + floor-passes, never on a real deficiency (the falsifier: a real deficiency mis-escaped as a false-block)"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§4B"]
+  files: [src/run-task.ts, src/lib/sweep.ts]
+  status: queued
+  attempts: 0
+  note: "TWICE stuck (#349, #360): correct code, false review-block, fix-rung strikes-to-exhaustion, human
+    re-reviews (the floor passed each time). Companion to W1-T161 (the REVIEWER side — don't manufacture a false
+    FAIL); this is the FIX-RUNG side — don't strike-exhaust on a false-block you cannot fix, escalate for re-judgment.
+    The deterministic-floor-passes-but-reviewer-blocks disagreement is the sharpest false-block signal."
