@@ -1,0 +1,13 @@
+name: "remudero CodeQL config"
+
+# CodeQL analyzes the SHIPPED attack surface (src/), NOT test fixtures. Test files legitimately
+# create temp dirs (mkdtempSync), build synthetic URL/regex assertions, and construct adversarial
+# inputs — patterns the `security-and-quality` queries flag as production-code risks but which are
+# FALSE POSITIVES in a test context and cannot be traced as sanitized across test-helper boundaries:
+#   - js/insecure-temporary-file        (PR #360 — mkdtempSync IS used; taint lost across helpers)
+#   - js/incomplete-url-substring-sanitization / js/regex/missing-regexp-anchor  (PRs #292 / #315)
+# These recurred three times, each blocking a PR whose tests PASS. Excluding test/ keeps EVERY rule
+# on src/ (the real attack surface) while stopping the recurring test-fixture false-flags. Tests are
+# never imported by src and never ship, so they are not an analysis-relevant attack surface.
+paths-ignore:
+  - "test/**"
