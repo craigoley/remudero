@@ -4909,6 +4909,19 @@ async function planCommand(rest: string[]): Promise<number> {
  *  committed), so unlike `rmd triage`/`rmd plan` this worker never touches a file. */
 const INBOX_DRAFT_WORKER_TOOLS = ["Read", "Grep", "Glob"];
 
+/** Read a file's contents, or `undefined` if it doesn't exist — a single `readFileSync`
+ *  guarded by `catch`, NOT a separate `existsSync` check-then-read (the latter is a
+ *  TOCTOU race CodeQL flags: `js/file-system-race`, real here because `inboxCommand`
+ *  later writes back to this same state path). */
+function readFileIfExists(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (e: unknown) {
+    if (e && typeof e === "object" && "code" in e && (e as { code: unknown }).code === "ENOENT") return undefined;
+    throw e;
+  }
+}
+
 /**
  * `rmd inbox [--dry-run]` — the ratification inbox's deterministic core, wired live
  * (MASTER-PLAN P25(i), W1-T110). The actual readiness predicate ({@link
@@ -4951,14 +4964,14 @@ async function inboxCommand(rest: string[]): Promise<number> {
   const { owner, repo } = resolveOwnerRepo();
 
   const registryPath = join(config.root, "state", "inbox-proposals.json");
-  const proposals: Proposal[] = parseProposalRegistry(existsSync(registryPath) ? readFileSync(registryPath, "utf8") : undefined);
+  const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
   if (proposals.length === 0) {
     console.log(renderInbox([]));
     return 0;
   }
 
   const draftsPath = join(config.root, "state", "inbox-drafts.json");
-  const drafts: DraftCache = parseDraftCache(existsSync(draftsPath) ? readFileSync(draftsPath, "utf8") : undefined);
+  const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
 
   const needsDraft = proposals.filter((p) => {
     if (p.trigger && !p.trigger.fired) return false; // never drafted for a dead-consumer proposal
