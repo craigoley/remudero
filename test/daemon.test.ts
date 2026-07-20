@@ -236,6 +236,51 @@ test("W1-T80: no isOpenPr wired ⇒ the daemon dispatches exactly as before this
   assert.equal(s.stopReason, "max_reached");
 });
 
+// ── P29(ii): the per-task dispatch CIRCUIT BREAKER — the backstop that makes
+// P29(i)'s sibling-credit fix (status.ts) safe to get wrong.
+
+test("P29(ii): a circuit-broken task is never (re-)dispatched — the daemon skips it (dispatch.circuit_broken) and picks the next runnable task instead of halting", async () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const broken: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const clock = fakeClock();
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      isCircuitTripped: (id) => id === "A",
+      onCircuitBreak: (t) => broken.push(t.id),
+      runOne: async (id) => { ran.push(id); merged.add(id); return okResult(id); },
+      sleep: clock.sleep,
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1 },
+  );
+  assert.ok(!ran.includes("A"), "A (circuit-broken) was never dispatched");
+  assert.deepEqual(ran, ["D"]); // B/C still depend on the un-merged A; D is the only other candidate
+  assert.deepEqual(broken, ["A"], "the daemon's own onCircuitBreak fired exactly once for A");
+  assert.equal(s.stopReason, "max_reached");
+  const brokenLine = lines.find((l) => l.step === "dispatch.circuit_broken");
+  assert.ok(brokenLine, "a dispatch.circuit_broken ledger line was emitted");
+  assert.equal(brokenLine?.extra.task, "A");
+});
+
+test("P29(ii): no isCircuitTripped wired ⇒ the daemon dispatches exactly as before this breaker existed", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const clock = fakeClock();
+  const s = await runDaemon(
+    plan,
+    { refreshMerged: () => (id) => merged.has(id), runOne: async (id) => { ran.push(id); merged.add(id); return okResult(id); }, sleep: clock.sleep },
+    { max: 4 },
+  );
+  assert.deepEqual(ran, ["A", "B", "C", "D"]);
+  assert.equal(s.stopReason, "max_reached");
+});
+
 // ── STOP / PAUSE (W1-T11) ───────────────────────────────────────────────────
 
 test("STOP: checked first, every tick — halts within one tick, no subsequent spawns", async () => {

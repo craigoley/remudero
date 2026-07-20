@@ -182,6 +182,66 @@ function lastPrOpened(
   return url;
 }
 
+/**
+ * PER-TASK DISPATCH CIRCUIT BREAKER (MASTER-PLAN P29(ii)) — policy-as-data
+ * (rule 2), never a hardcoded literal buried in a caller: how many times the
+ * SAME task may be dispatched with no NEW owned PR opened since, before the
+ * breaker trips. This is §9's per-WORKER runaway tripwire's per-TASK dual — the
+ * W1-T1 storm (~130 dispatches / ~$130 / ~10h) tripped no per-run budget cap
+ * because no single RUN ran away; the whole TASK did, across many independent
+ * runs, and nothing bounded that. This is the BACKSTOP that makes P29(i)'s
+ * sibling-credit fix safe to get wrong — even if a future bug reopens the
+ * masking hole (i) closes, dispatch of one task cannot spin unbounded again.
+ */
+export const DEFAULT_MAX_TASK_DISPATCHES = 5;
+
+/**
+ * How many `run.start` ledger lines exist for `taskId` SINCE its most recent
+ * `pr.opened` line (or in total, if it has never opened one) — "dispatches
+ * with no NEW owned PR" (P29(ii)'s own phrasing). Every `pr.opened` line is
+ * inherently OWNED by construction: run-task.ts logs it only after ITS OWN
+ * worker pushes ITS OWN `run-<taskId>-<epochMs>` branch (worker.ts), so no
+ * separate ownership check is needed here the way rung (c)'s trailer search
+ * needs one — a `pr.opened` line can only ever name this task's own work.
+ * A fresh PR (even one that does not merge, e.g. blocked_ci) resets the count
+ * to 0 — genuine forward progress is not what this breaker guards against;
+ * the W1-T1/W1-T29 shape is dispatch after dispatch producing NOTHING new.
+ */
+export function dispatchesWithoutNewOwnedPr(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+): number {
+  let count = 0;
+  for (const line of lines) {
+    if (line.task_id !== taskId) continue;
+    if (line.step === "pr.opened") {
+      count = 0; // forward progress — a new PR resets the streak
+    } else if (line.step === "run.start") {
+      count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * True once `taskId` has been dispatched {@link DEFAULT_MAX_TASK_DISPATCHES}
+ * (or `maxDispatches`) times with no new owned PR since — the caller (drain.ts
+ * / daemon.ts's `nextRunnable` wiring) must dispatch NOTHING further and
+ * escalate exactly once (P29(ii)). Re-derived FRESH from the ledger on every
+ * call — unlike daemon.ts's in-memory per-tick `next.status = "blocked"` flip
+ * (block-reason.ts's independent-failure path), this PERSISTS across process
+ * restarts, which is exactly what the W1-T1 storm needed: the redispatch
+ * spanned many separate daemon/drain invocations over ~10 hours, and an
+ * in-memory-only flag resets every time a fresh process starts.
+ */
+export function isDispatchBreakerTripped(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  maxDispatches: number = DEFAULT_MAX_TASK_DISPATCHES,
+): boolean {
+  return dispatchesWithoutNewOwnedPr(lines, taskId) >= maxDispatches;
+}
+
 /** Escape a string for literal use inside a `RegExp` (dot/hyphen-safe task ids). */
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -295,20 +355,37 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
     return { taskId: task.id, status: "queued", merged: false, source: "correction" };
   }
 
-  // (a) ledger `pr.opened` for this task -> query that PR.
+  // (a) ledger `pr.opened` for this task -> query that PR. A MERGED resolution
+  // returns immediately, as always. A NON-merged resolution (OPEN/CLOSED) is
+  // stashed as `ownResult` rather than returned immediately — SIBLING CREDIT
+  // (MASTER-PLAN P29(i)): a LATER redispatch's own closed/open PR must never
+  // permanently mask an EARLIER sibling run's already-merged, trailer-owned
+  // credit found below at rung (c). This was the W1-T1 spin's actual mechanism:
+  // PR #255 (an earlier run) merged, but every LATER run's ledger `pr.opened`
+  // line (its own, different, unmerged/absent PR) kept resolving here FIRST and
+  // returning unconditionally, so rung (c)'s trailer search — which WOULD have
+  // found #255 — was never even reached again.
+  let ownResult: StatusProjection | undefined;
   const openedUrl = lastPrOpened(ledgerLines, task.id);
   if (openedUrl) {
     const pr = deps.github.prByRef(openedUrl);
     if (pr) {
-      return { taskId: task.id, source: "ledger", ...fromPrState(pr.state), prNumber: pr.number, prUrl: pr.url, prState: pr.state };
+      const result: StatusProjection = { taskId: task.id, source: "ledger", ...fromPrState(pr.state), prNumber: pr.number, prUrl: pr.url, prState: pr.state };
+      if (result.merged) return result;
+      ownResult = result;
     }
   }
 
-  // (b) explicit `pr:` field (hand-executed, pre-ledger).
-  if (task.pr !== undefined) {
+  // (b) explicit `pr:` field (hand-executed, pre-ledger) — precedence UNCHANGED:
+  // only consulted when (a) resolved NOTHING at all (no `openedUrl`, or GitHub
+  // could not resolve it) — an `ownResult` already captured from (a), merged or
+  // not, still means (b) is never tried, exactly as before this fix.
+  if (!ownResult && task.pr !== undefined) {
     const pr = deps.github.prByRef(task.pr);
     if (pr) {
-      return { taskId: task.id, source: "pr-field", ...fromPrState(pr.state), prNumber: pr.number, prUrl: pr.url, prState: pr.state };
+      const result: StatusProjection = { taskId: task.id, source: "pr-field", ...fromPrState(pr.state), prNumber: pr.number, prUrl: pr.url, prState: pr.state };
+      if (result.merged) return result;
+      ownResult = result;
     }
   }
 
@@ -317,6 +394,16 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   // deriveStatus GATES DISPATCH, so a false/foreign credit here is worse than
   // the same attribution class W1-T51 fixed in the retro gather (which only
   // mis-reports); a bad credit here makes the daemon BUILD against an unmet dep.
+  //
+  // SIBLING CREDIT (P29(i)): this rung is now reached even when (a)/(b) already
+  // captured a NON-merged `ownResult` above — the ownership-assert itself is
+  // UNCHANGED (`ownsBranch` has always matched `run-<taskId>-*` for ANY run of
+  // this task, never just "this run's own branch"; a foreign PR still fails
+  // below exactly as before). What changes is that a merged, owned, anchored
+  // trailer PR is no longer masked by a DIFFERENT (non-merged) PR that (a)/(b)
+  // happened to reference — the assert is strictly narrower than trusting the
+  // trailer outright (a foreign PR still fails), strictly wider than "only
+  // (a)/(b)'s own reference can credit" (a sibling's merge now credits).
   const trailerPr = deps.github.findMergedByTrailer(task.id);
   if (trailerPr && !debunkedTrailerUrls(ledgerLines, task.id).has(trailerPr.url)) {
     const head = deps.github.headRefName(trailerPr.url);
@@ -325,17 +412,24 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
       return { taskId: task.id, source: "trailer", ...fromPrState(trailerPr.state), prNumber: trailerPr.number, prUrl: trailerPr.url, prState: trailerPr.state };
     }
     // Rejected: foreign/unresolved head branch or an unanchored search hit — never
-    // credited. Surface WHY (legibility, W1-T69): a false trailer in the wild is
-    // visible on the projection, not silently dropped. Falls through to "none".
-    const reason = !ownsBranch(head, task.id) ? "head-branch-not-owned" : "trailer-not-anchored";
-    return {
-      taskId: task.id,
-      status: "queued",
-      merged: false,
-      source: "none",
-      rejected_candidates: [{ pr: trailerPr.url, reason }],
-    };
+    // credited. Surface WHY (legibility, W1-T69) ONLY when (a)/(b) found nothing to
+    // report either — an `ownResult` (this run's own OPEN/CLOSED PR) remains the
+    // more informative status to return than a bare rejection of an unrelated hit.
+    if (!ownResult) {
+      const reason = !ownsBranch(head, task.id) ? "head-branch-not-owned" : "trailer-not-anchored";
+      return {
+        taskId: task.id,
+        status: "queued",
+        merged: false,
+        source: "none",
+        rejected_candidates: [{ pr: trailerPr.url, reason }],
+      };
+    }
   }
+
+  // No merged sibling credit found: fall back to (a)/(b)'s own (non-merged)
+  // resolution, unchanged from before this fix.
+  if (ownResult) return ownResult;
 
   // No GitHub evidence: not merged. The yaml `status:` is decorative, not trusted.
   return { taskId: task.id, status: "queued", merged: false, source: "none" };

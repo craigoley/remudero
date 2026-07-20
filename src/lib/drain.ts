@@ -38,6 +38,20 @@ export interface NextRunnableOpts {
   isOpenPr?: OpenPrCheck;
   /** Called once per task excluded because of an open PR — for ledger/console legibility. */
   onSkip?: (task: Task, prNumber: number) => void;
+  /**
+   * The per-task dispatch CIRCUIT BREAKER (MASTER-PLAN P29(ii)): true when this
+   * task has been dispatched the policy-capped number of times with no new
+   * owned PR since (status.ts's `isDispatchBreakerTripped`, ledger-derived —
+   * persists across process restarts, unlike an in-memory block flag).
+   * Optional — omitted, dispatch behaves exactly as before this breaker existed.
+   */
+  isCircuitTripped?: (taskId: string) => boolean;
+  /**
+   * Called once per task whose circuit breaker is tripped, in place of
+   * dispatching it — the real wiring logs it and escalates ONE (deduped)
+   * needs-human issue naming the loop; dispatch never proceeds for that task.
+   */
+  onCircuitBreak?: (task: Task) => void;
 }
 
 /**
@@ -59,6 +73,14 @@ export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnable
     if (t.verify !== "auto") continue;
     if (t.status === "blocked") continue;
     if (unmetDependencies(plan, t, merged).length > 0) continue;
+    // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)) — checked BEFORE the in-flight
+    // guard below: a tripped task halts regardless of whatever its latest PR's
+    // state happens to be; it is the backstop that bounds (i)'s sibling-credit
+    // fix even if that fix is somehow wrong.
+    if (opts.isCircuitTripped?.(t.id)) {
+      opts.onCircuitBreak?.(t);
+      continue;
+    }
     const openPrNumber = opts.isOpenPr?.(t.id);
     if (openPrNumber !== undefined) {
       opts.onSkip?.(t, openPrNumber);
@@ -249,6 +271,13 @@ function nextCurated(
     if (isMerged(id)) continue;
     const t = plan.byId.get(id);
     if (!t) continue;
+    // Same circuit-breaker semantics as the natural path (P29(ii)) — a
+    // curation-panel selection is still dispatch, and must not spin a tripped
+    // task any more than the DAG scan would.
+    if (opts.isCircuitTripped?.(id)) {
+      opts.onCircuitBreak?.(t);
+      continue;
+    }
     const openPrNumber = opts.isOpenPr?.(id);
     if (openPrNumber !== undefined) {
       opts.onSkip?.(t, openPrNumber);
@@ -348,6 +377,18 @@ export interface DrainDeps {
    * this guard existed.
    */
   isOpenPr?: OpenPrCheck;
+  /**
+   * The per-task dispatch CIRCUIT BREAKER (P29(ii)), re-derived from the
+   * ledger each call — same freshness contract as `refreshMerged`/`isOpenPr`.
+   * Optional — omitted, dispatch behaves exactly as before this breaker
+   * existed.
+   */
+  isCircuitTripped?: (taskId: string) => boolean;
+  /**
+   * Called once per task whose circuit breaker trips this tick — the real
+   * wiring escalates ONE (deduped) needs-human issue naming the loop.
+   */
+  onCircuitBreak?: (task: Task) => void;
   /** Run ONE task through the existing run-task path (default = runTask). */
   runOne: (taskId: string) => Promise<RunResult>;
   /** Read current /usage; `undefined` ⇒ unavailable (headroom check is skipped). */
@@ -429,6 +470,14 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       // proceeds to the next runnable task — an open PR must not halt the drain
       // the way a block does.
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
+      isCircuitTripped: deps.isCircuitTripped,
+      // CIRCUIT BREAKER (P29(ii)): a legible ledger line every tick it is
+      // consulted (mirrors dispatch.skipped), PLUS the caller's own escalation
+      // hook — the drain proceeds to the next runnable task rather than halting.
+      onCircuitBreak: (t) => {
+        log("dispatch.circuit_broken", { task: t.id });
+        deps.onCircuitBreak?.(t);
+      },
     };
     // CURATION (W1-T140): a curated selection overrides the natural DAG scan
     // entirely — dispatch honors EXACTLY the operator's list and order, never
