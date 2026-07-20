@@ -7577,3 +7577,161 @@
     process-stopper, ledger reader) — not process babysitters; after T152 they become thin wrappers over the OS
     service manager + the report. The actual load/unload/start is the operator's environment; the DECISION LOGIC and
     the REPORT are what this task builds and proves auto (why verify:auto, not human)."
+- id: W1-T170
+  title: "per-run isolated worker HOMES — worker-home-<runId> with its own rc + keychain/.claude/.config/gh symlinks; the singleton home does not survive concurrency (the hard prerequisite for parallel dispatch)"
+  repo: remudero
+  depends_on: [W1-T18]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "WS-2 states this constraint by name and it is load-bearing for P19: 'the singleton
+    <root>/worker-home (W1-T18/#100/#102) does NOT survive concurrency; every concurrent worker needs its own
+    worker-home-<runId> with its own empty rc + its own login.keychain-db / .claude / .config/gh symlinks. A
+    shared home races on rc materialization and the keychain grant.' The #100 incident is the evidence that
+    this is not theoretical: HOME redirection hid the HOME-relative login keychain and every worker exited
+    'Not logged in' at $0 before a single turn — a spawn-auth failure whose signature (zero cost, zero writes)
+    is indistinguishable from a containment refusal. Two lanes sharing one home re-open that class as a RACE,
+    which is strictly harder to diagnose than the deterministic version was. This lands BEFORE any lane
+    scheduler: a concurrency feature built on a shared home would fail intermittently in the auth path."
+  design: |
+    Materialize the worker home PER RUN (worker-home-<runId>) instead of once per root: its own empty rc files
+    and its own symlink set, reusing the EXISTING allowlist from W1-T18/#102 verbatim (the login.keychain-db
+    entry is the #100 fix and must be carried per home, not shared). Teardown reaps the per-run home on every
+    exit path including errors (the W1-T115/W1-T131 withTempDir discipline), and the daemon's boot sweep reaps
+    homes orphaned by ended runs. VERIFY worker-home.ts's current singleton construction, the exact symlink
+    allowlist, and the spawn-time HOME wiring in worker.ts from source before editing (distrust this note).
+    NOT IN SCOPE: changing WHAT is symlinked — only how many homes exist and who owns each.
+  acceptance:
+    - claim: "two concurrent runs receive DISTINCT home directories, each with its own rc files and its own complete symlink allowlist — a shared or singleton home serving two concurrent runs FAILS (the falsifier)"
+      proof: "unit test: test/worker-home-per-run.test.ts"
+    - claim: "each per-run home reproduces the singleton's isolation guarantee — a home materialized against an injected operator-dotfile fixture yields zero inherited aliases and zero operator functions, per home"
+      proof: "unit test: test/worker-home-per-run.test.ts"
+    - claim: "a per-run home is reaped on every exit path including the error path, and a home orphaned by an ended run is reaped by the boot sweep — no home debris accumulates across runs"
+      proof: "unit test: test/worker-home-per-run.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["P19", "§4A"]
+  files: [src/lib/worker-home.ts, src/lib/worker.ts]
+  status: queued
+  attempts: 0
+  note: "Ratifies the WS-2 per-worker-HOME constraint as P19's first rung. The LIVE confirmation — two REAL
+    concurrent workers both authenticating against the one shared login.keychain-db without serializing on
+    keychain lock contention (the WS-2 'VALIDATE at build' question) — is structurally unfit for a headless
+    worker (CI has no subscription OAuth; the #100 lesson is that this path is unprovable on fixtures alone).
+    It belongs on W1-T12e alongside the existing spawn-under-redirect auth drill, and should be added there at
+    ratification. Until that drill runs, N is capped at 2 by W1-T172's policy row — deliberate."
+
+- id: W1-T171
+  title: "PRE-DISPATCH OVERLAP CHECK (P19 rung 1) — concurrently-runnable tasks whose files: globs intersect are SERIALIZED, never parallel-dispatched (dispatch.serialized reason=file-overlap)"
+  repo: remudero
+  depends_on: [W1-T122]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "P19's original argument, preserved: DAG INDEPENDENCE IS DECLARED, NEVER VERIFIED. Rule 4 says
+    claims need proofs, and the concurrent drainer (W1-T172) is about to trust this one. The #103 doctrine is
+    right that hierarchical decomposition — not worktrees — is what makes parallelism safe, but depends_on
+    independence is an ARCHITECT CLAIM: two tasks the DAG calls independent can still declare overlapping
+    files:, producing exactly the integration-surfacing semantic conflicts #103 warns about. The finer-grained
+    field answer locks SYMBOLS via Tree-sitter AST parsing rather than files, because file-level isolation
+    misses function-level collisions [research: wit-symbol-locks, field-survey-2026-07-16] — that is rung 2,
+    BANKED until a rung-1 escape is observed in the ledger (build on evidence, not anticipation; W1-T172
+    ledgers the evidence that would trigger it).
+    HONESTY BOUND, binding on how this is described anywhere: files: is ADVISORY metadata a worker can exceed.
+    This check REDUCES collision probability; it does not eliminate it, and it must never be documented as a
+    guarantee. Merge-time serialization remains the backstop — server-side auto-merge lands one PR at a time
+    and a loser goes DIRTY into W1-T106's CONFLICTED disposition."
+  design: |
+    A PURE predicate over the merged plan view (plan/tasks.yaml + plan/tasks.d/*.yaml per W1-T122): given the
+    set of concurrently-runnable candidates, expand each task's files: globs and partition the set — any pair
+    with a non-empty intersection may not occupy lanes in the same pass; the later-declared task defers to a
+    subsequent pass. Every deferral ledgers dispatch.serialized carrying BOTH task ids and the intersecting
+    paths, so the decision is legible rather than an invisible ordering effect. NO LLM on this path.
+    FAIL-CLOSED ON UNDECLARED SCOPE: a task with an absent or empty files: list is treated as overlapping
+    EVERYTHING — an undeclared scope cannot be proven disjoint, and guessing it disjoint is the one error mode
+    that produces the semantic conflicts this check exists to avoid. VERIFY loadPlan's merged-view shape and
+    the glob-expansion helper the linter already uses (subsystemsOf / moduleIdFromPath) from source first.
+  acceptance:
+    - claim: "P19's golden, verbatim: two seeded tasks with overlapping files: globs are NEVER placed in the same dispatch pass — they SERIALIZE, and a dispatch.serialized line carries both task ids and the intersecting paths"
+      proof: "unit test: test/dispatch-overlap.test.ts"
+    - claim: "two seeded tasks with DISJOINT globs are eligible for the same pass — the falsifier proving the check partitions on real overlap rather than serializing everything (a blanket serializer would silently make concurrency a no-op)"
+      proof: "unit test: test/dispatch-overlap.test.ts"
+    - claim: "a task with an absent or empty files: list is treated as overlapping every candidate — an undeclared scope is never proven disjoint (fail-closed)"
+      proof: "unit test: test/dispatch-overlap.test.ts"
+    - claim: "the partition is deterministic and LLM-free — the same candidate set yields the same partition across repeated calls, and no model is invoked on the path"
+      proof: "unit test: test/dispatch-overlap.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["P19", "§4B"]
+  files: [src/lib/dispatch-overlap.ts, src/lib/drain.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high is deliberate and not sizing-driven (the W1-T119 precedent): this is a fail-closed guard on
+    the path that GATES DISPATCH, so a defect here either stalls the drain or admits the collisions it exists
+    to prevent. Rung 2 (Tree-sitter symbol-touch intersection for tasks whose globs are disjoint but whose
+    criteria name the same exported symbols) stays BANKED — W1-T172's dispatch.concurrent_set ledger line is
+    what makes its evidence trigger answerable."
+
+- id: W1-T172
+  title: "PARALLEL DISPATCH — N concurrent lanes bounded by the queue-governor WIP limit (N=2, policy data), over the sharded plan; W1-T80 dedup + W1-T149 circuit-breaker as per-task guards; one lane's block never halts its siblings"
+  repo: remudero
+  depends_on: [W1-T121, W1-T122, W1-T170, W1-T171, W1-T80, W1-T149]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P19's dispatch half, on the operator's recorded direction (DECISIONS.md 2026-07-21):
+    a second checkout + a second `rmd daemon` was considered for throughput and REJECTED, because two
+    UN-governed dispatchers recreate the 23-open-PR runaway class and concurrent plan appends without sharding
+    recreate the DIRTY-cascade class. The recorded resolution is this task, verbatim: 'N parallel dispatch
+    lanes bounded by the governor's WIP limit (start N=2), with T80 dedup + T149 circuit-breaker as the
+    per-task guards.' Both named prerequisites are now built — W1-T121 (#385) put the WIP limit in
+    SweepPolicy as policy data, W1-T122 (#386) made concurrent filings conflict-free by construction — so the
+    fast path and the safe path are the same path. THE GOVERNOR IS THE CEILING, NOT A SUGGESTION: lanes
+    increase the RATE at which the governor's bounded WIP is filled; they never raise the bound. Little's law
+    is still the argument, one layer up."
+  design: |
+    A bounded lane pool over the existing drain loop. (i) N is a ROW IN THE SAME SweepPolicy/
+    DEFAULT_SWEEP_POLICY table W1-T121 gave the WIP limit — one threshold home, never a second (start N=2).
+    (ii) The governor is a HARD CEILING: a pass dispatches min(N, observed WIP headroom) tasks, so at or above
+    the limit the lane count collapses to zero exactly as the single-lane governor already behaves.
+    (iii) Per-task guards run per candidate, unchanged and reused (never reimplemented): W1-T80's open-PR
+    dedup and W1-T149's circuit breaker, plus W1-T171's overlap partition ACROSS the co-dispatched set.
+    (iv) Each lane gets its own worktree and its own per-run home (W1-T170).
+    (v) LANE-LOCAL BLOCK SEMANTICS: a block in one lane terminates that lane's task by its normal blocked
+    path and NEVER halts sibling lanes. This is the WS-2 requirement ('one blocked task doesn't stall the
+    independent others') satisfied at lane granularity. W1-T46's block reasoner is the smarter successor and
+    is deliberately NOT a hard dep — a hard edge would gate this whole family behind W1-T7 + W1-T12a for a
+    property lane isolation already provides structurally; when W1-T46 lands it upgrades WHAT happens to the
+    blocked lane, not whether siblings survive.
+    (vi) Each pass ledgers dispatch.concurrent_set naming the tasks dispatched together, so if a
+    concurrently-dispatched pair later conflicts, the question 'did rung 1 escape?' is answerable FROM THE
+    LEDGER — that line is the evidence trigger for P19's banked rung 2, which is otherwise unreachable.
+    (vii) N=1 must be byte-identical to today's serial drain — both the regression lock and the off switch.
+    VERIFY nextRunnable/drainCommand's current loop, the SweepPolicy row shape, and the W1-T80/W1-T149 guard
+    call sites from source before wiring (distrust this note).
+  acceptance:
+    - claim: "with WIP headroom and disjoint candidates, exactly min(N, headroom) tasks dispatch in one pass, each in its own worktree and its own per-run home; a pass that dispatches beyond the governor's WIP limit FAILS (the falsifier — lanes raise the fill RATE, never the bound)"
+      proof: "unit test: test/parallel-dispatch.test.ts"
+    - claim: "the per-task guards hold under concurrency: a task with an OPEN PR (W1-T80) and a circuit-broken task (W1-T149) are each excluded from EVERY lane — concurrency never double-dispatches and never spins a task"
+      proof: "unit test: test/parallel-dispatch.test.ts"
+    - claim: "a block in one lane does not halt its siblings — sibling lanes run their tasks to completion in the same pass while the blocked task takes its normal blocked path"
+      proof: "unit test: test/parallel-dispatch.test.ts"
+    - claim: "N=1 reproduces the serial drain exactly — the same dispatch sequence and the same ledger lines as the pre-change loop over a seeded plan (the regression lock and the off switch)"
+      proof: "unit test: test/parallel-dispatch.test.ts"
+    - claim: "each pass ledgers dispatch.concurrent_set naming the co-dispatched task ids, so a later conflict between a concurrently-dispatched pair is attributable from the ledger alone — the evidence trigger for the banked rung 2"
+      proof: "unit test: test/parallel-dispatch.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["P19", "§4B"]
+  files: [src/lib/drain.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Ratifies P19's dispatch half; W1-T171 ratifies its overlap-check half and W1-T170 supplies the WS-2
+    per-worker-HOME prerequisite. START AT N=2 and do not raise it here: the WS-2 concurrent-keychain question
+    is unvalidated (W1-T170's note) and per-repo merge serialization is currently server-side auto-merge plus
+    W1-T106's CONFLICTED disposition rather than a Bors-style queue of our own — both are reasons to earn N
+    on evidence. Raising N is a policy-data row edit once the ledger supports it, which is the point of
+    holding the threshold in SweepPolicy rather than in code."
