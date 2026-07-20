@@ -43,7 +43,13 @@ export interface BoardDeps extends DeriveDeps {
   plan: Plan;
 }
 
-/** The board snapshot, reusing {@link projectPlan} verbatim — no new derivation logic. */
+/**
+ * The board snapshot, reusing {@link projectPlan} verbatim — no new derivation logic.
+ * W1-T155's full status taxonomy (in-flight `phase`, `startedAt`/`elapsedMs`,
+ * `needsHuman`, `armedAwaitingMerge`) is carried on {@link StatusProjection} itself, so
+ * every task in the snapshot gets it for free through this SAME pass-through — this
+ * module needed no logic change, only this note.
+ */
 export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
   const byId = projectPlan(deps.plan, deps);
   return { generated_at: new Date().toISOString(), tasks: [...byId.values()] };

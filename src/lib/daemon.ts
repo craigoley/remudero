@@ -448,7 +448,14 @@ export function reconstructOrphan(
   deriveTaskStatus: (taskId: string) => StatusProjection,
 ): RecoveredTask {
   const projection = deriveTaskStatus(orphan.taskId);
-  if (projection.status === "running") {
+  // W1-T155: `status: "running"` no longer implies a PR exists — deriveStatus now also
+  // reports "running" for a ledger-in-flight run that has not opened a PR yet (recon/
+  // implement phase). Only an actual OPEN PR is resumable; the `&& projection.prUrl`
+  // guard is a no-op for every PRE-EXISTING "running" case (that always carried a
+  // prUrl already) and correctly falls through to the "clean" branch below — the SAME
+  // "no surviving GitHub artifact" outcome this orphan would have gotten pre-W1-T155 —
+  // for the new no-PR-yet in-flight case.
+  if (projection.status === "running" && projection.prUrl) {
     return {
       ...orphan,
       action: "resume",
