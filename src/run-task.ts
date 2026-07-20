@@ -24,9 +24,11 @@ import type { Tier, TierDetection } from "./lib/tier.js";
 import { buildProjectInit, parseProjectInitArgs } from "./lib/project-init.js";
 import {
   applyCuratedSelection,
+  buildRundown,
   DEFAULT_MAX as DRAIN_DEFAULT_MAX,
   nextRunnable,
   plannedSequence,
+  renderRundown,
   renderSummary,
   resumeCommand,
   runDrain,
@@ -3001,6 +3003,11 @@ async function drainCommand(
       opts,
     );
     console.log("\n" + renderSummary(summary));
+    // POST-DRAIN RUNDOWN (W1-T141): one classified merged/blocked/escalated line per attempted
+    // task — "what happened" at task grain, not just the aggregate summary above. Re-reads the
+    // ledger fresh so a same-run escalation (BLOCKED class, two-strikes-exhausted) is visible to
+    // the classifier — the SAME ledger file `log` above just finished writing into.
+    console.log("\n" + renderRundown(buildRundown(summary, readLedgerLines(ledgerPath))));
     // Exit 0 only on a clean drain (target reached / max reached / nothing left);
     // a block/headroom/error stop is a non-zero exit so an unattended wrapper notices.
     return summary.stopReason === "blocked" || summary.stopReason === "error" ? 1 : 0;
