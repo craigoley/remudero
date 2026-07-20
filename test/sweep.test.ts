@@ -831,7 +831,18 @@ test("credit backfill acceptance 2 — idempotence: a second sweep over the now-
   assert.equal(corrections.length, 1, "still exactly one correction total — not doubled");
 });
 
-test("credit backfill acceptance 3 — an uncredited run whose PR is still OPEN yields NO correction (the falsifier)", async () => {
+// NAMED to literally satisfy the acceptance criterion's own `unit test:` dialect
+// proof text (plan/tasks.yaml, W1-T150 acceptance 3) — the review gate's
+// proof-exec compiles that proof string into a `--test-name-pattern` REGEX and
+// runs it for real (W1-T65). Regex, not substring: the criterion's own
+// "(not merged)" parenthetical compiles to a NON-literal capture group, so a
+// test name that reproduces the literal parens around "not merged" breaks
+// contiguity with the surrounding words and paradoxically FAILS to match
+// itself (confirmed: `new RegExp(proof).test(identicalProofText) === false`).
+// This name matches the compiled regex (verified against the exact proof
+// string) — never rename without re-checking against plan/tasks.yaml's exact
+// proof text.
+test("credit backfill acceptance 3 — a seeded uncredited run whose owned PR is OPEN not merged yields zero corrections — credit backfill fires only on MERGED owned PRs (the falsifier)", async () => {
   const shared = ledgerPath();
   appendLedger(shared, { run_id: "W1-T1-1", task_id: "W1-T1", step: "verdict", verdict: "blocked_ci" });
 
