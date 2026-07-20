@@ -60,6 +60,17 @@ import {
   triageCommitMessage,
   triagePrompt,
 } from "./lib/triage.js";
+import {
+  applyPlanProposalCommit,
+  decidePlanArchitect,
+  diffCitesResearchSource,
+  formatPlanVerdictLine,
+  outOfPlanScopeFilesInDiff,
+  parsePlanArgs,
+  parsePlanVerdict,
+  planArchitectPrompt,
+  planCommitMessage,
+} from "./lib/plan-architect.js";
 import { parseUsage, type UsageSnapshot } from "./lib/headroom.js";
 import {
   assertArchitectAboveWorker,
@@ -4326,6 +4337,201 @@ async function triageCommand(rest: string[]): Promise<number> {
 }
 
 /**
+ * The unified PLAN Architect worker's tool allowlist (`.remudero/skills/plan.yaml`), minus
+ * `AskUserQuestion` and `Bash`: same deferral `TRIAGE_WORKER_TOOLS` already documents — v1
+ * never grills interactively (LEARNINGS "no live operator in a headless worker"; the actual
+ * grill delivery is W1-T42's job, which W1-T45 does not depend on), and the harness — never
+ * the LLM — owns every git/gh step.
+ */
+const PLAN_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "WebSearch", "WebFetch"];
+
+/**
+ * `rmd plan --mode=create|clarify|expand [<brief>...]` — the unified Architect PLAN skill
+ * (MASTER-PLAN §5B, W1-T45): ONE code path (lib/plan-architect.ts's `planArchitectPrompt` /
+ * `parsePlanVerdict` / `decidePlanArchitect` — each a single definition, no per-mode copy)
+ * shared by all three modes, run by a fresh higher-tier Architect worker in its own worktree
+ * (same isolation shape as `rmd triage`/`rmd retro`). The worker has no Bash — it only
+ * grounds/researches/edits plan-scope files; this function OWNS every commit/push/PR/gate step
+ * deterministically, so the LLM can never skip the Acceptance:/Remudero-Task: contract or open
+ * a PR touching code. CLEAR and GRILL verdicts touch nothing and open no PR — there is no
+ * per-item status file to update here (unlike triage's feedback entry), so only a PROPOSED
+ * verdict reaches the commit/push/PR/gate machinery below.
+ */
+async function planCommand(rest: string[]): Promise<number> {
+  const parsed = parsePlanArgs(rest);
+  if ("error" in parsed) {
+    console.error(parsed.error + "\n" + USAGE);
+    return 2;
+  }
+  const { mode, brief } = parsed;
+
+  const config = loadConfig();
+  const { owner, repo } = resolveOwnerRepo();
+
+  // G-17 Tier Invariant: the plan Architect MUST outrank implement workers.
+  const arch = architectModel(config);
+  const wrk = workerModel(config);
+  assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
+  const mountsTable = loadMounts(mountsPath(repoRoot));
+
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const taskId = `PLAN-${mode}`;
+  const runId = `${taskId}-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, ...extra });
+  const say = (msg: string) => console.log(`\n### [plan] ${msg}`);
+  log("plan.start", { mode, brief, architect: arch, worker: wrk });
+  say(`plan ${runId} — mode=${mode} — architect ${arch} over worker ${wrk}`);
+
+  const settingsFile = renderWorkerSettings({
+    templatePath: join(repoRoot, "settings", "worker.json"),
+    hooksDir: join(repoRoot, "hooks"),
+    outPath: join(config.root, "tmp", `plan-settings-${runId}.json`),
+  });
+  validateWorkerSettingsFile(settingsFile);
+
+  const repoDir = join(config.root, "repos", repo);
+  if (!existsSync(repoDir)) {
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+  }
+  const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
+  if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
+  const branch = `run-${runId}`;
+  const worktreePath = join(worktreesDir(config), branch);
+  worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  // Liveness token so a concurrent drain's prune skips this plan worktree.
+  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+
+  try {
+    const worker = await spawnWorker({
+      cwd: worktreePath,
+      permissionMode: "bypassPermissions",
+      settingsFile,
+      model: arch, // the Architect tier
+      maxTurns: mountsTable.architect.maxTurns, // MOUNT-GOVERNED (§9) — never a hardcoded literal.
+      maxBudgetUsd: DEFAULT_BUDGET_USD,
+      config,
+      prompt: planArchitectPrompt(mode, brief, runId),
+      tools: PLAN_WORKER_TOOLS,
+    });
+    log("plan.synthesized", {
+      session_id: worker.sessionId,
+      cost_usd: worker.costUsd,
+      subtype: worker.subtype,
+      ...workerLedgerFields(worker),
+    });
+
+    // Ground truth: what did the worker ACTUALLY touch?
+    const changedFiles = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", "origin/main"], {
+      encoding: "utf8",
+    })
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const verdict = parsePlanVerdict([worker.text, worker.blocks.join("\n")].join("\n"));
+    const decision = decidePlanArchitect({ verdict, changedFiles });
+
+    if (decision.action === "error") {
+      log("plan.error", { error: decision.reason, changed_files: changedFiles, subtype: worker.subtype });
+      say(`plan inconsistent — ${decision.reason}; leaving no PR`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+
+    if (decision.action === "no_action") {
+      log("plan.verdict", { action: "no_action", detail: decision.detail });
+      say(formatPlanVerdictLine(mode, decision));
+      worktreeRemove(repoDir, worktreePath);
+      return 0;
+    }
+
+    if (decision.action === "grill") {
+      log("plan.verdict", { action: "grill", detail: decision.detail });
+      say(formatPlanVerdictLine(mode, decision));
+      worktreeRemove(repoDir, worktreePath);
+      return 0;
+    }
+
+    // propose
+    log("plan.verdict", { action: "propose", detail: decision.detail, files: decision.files });
+    say(formatPlanVerdictLine(mode, decision));
+    const commitMessage = planCommitMessage({ decision, mode, brief, taskId });
+    applyPlanProposalCommit(worktreePath, commitMessage);
+    execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+
+    const out = execFileSync(
+      "gh",
+      ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch, "--fill"],
+      { encoding: "utf8" },
+    );
+    const prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
+    if (!prUrl) {
+      log("plan.error", { error: "no PR opened" });
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+
+    // RUN-OWNERSHIP GUARD (W1-T62 precedent) — before any side effect touches this PR, assert it
+    // is actually this plan run's own PR.
+    const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), worker.costUsd);
+    if (ownership) {
+      log("verdict", ownership.ledger);
+      say(`verdict: pr_attribution_failed — claimed PR ${prUrl} is not this plan run's own branch (${branch})`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+    ensureTaskTrailer(prUrl, taskId);
+
+    // DETERMINISTIC GUARDS: a plan PR is PLAN-ONLY (plan/** or MASTER-PLAN.md), and an EXPAND
+    // proposal must cite a research source (lib/plan-architect.ts's `outOfPlanScopeFilesInDiff`
+    // / `diffCitesResearchSource`, the same shape as triage's plan-only + provenance guards).
+    const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
+    const strayFiles = outOfPlanScopeFilesInDiff(diff);
+    if (strayFiles.length > 0) {
+      log("plan.error", { error: "plan PR is NOT plan-only", stray_files: strayFiles });
+      say(`plan PR touched file(s) outside plan scope (${strayFiles.join(", ")}) — leaving PR OPEN for inspection`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+    if (mode === "expand" && !diffCitesResearchSource(diff)) {
+      log("plan.error", { error: "expand diff missing a research-source citation" });
+      say(`plan --mode=expand PROPOSED but the diff cites no research source (URL) — leaving PR OPEN for inspection`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+    log("pr.opened", { pr_url: prUrl, plan_only: true, mode });
+    say(`plan PR (plan-only, --mode=${mode}): ${prUrl}`);
+
+    // Gate: ci green -> post remudero-review -> arm auto-merge (identical shape to every other
+    // Architect skill's output — "PROPOSES anything, MERGES nothing" until the gate clears it).
+    const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));
+    if (ci !== "green") {
+      say(`ci ${ci} — PR left OPEN: ${prUrl}`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+    const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
+    const reviewCode = await reviewCommand(prNum);
+    armAutoMerge(prUrl);
+    log("automerge.armed", {});
+    worktreeRemove(repoDir, worktreePath);
+    say(`plan PR gated + armed (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
+    return reviewCode;
+  } catch (e) {
+    log("plan.error", { error: String((e as Error)?.message ?? e) });
+    try {
+      worktreeRemove(repoDir, worktreePath);
+    } catch {
+      /* best-effort */
+    }
+    throw e;
+  } finally {
+    removeRunLock(worktreePath); // terminal ⇒ drop the liveness token
+  }
+}
+
+/**
  * `rmd digest [--since <iso>] [--dry-run]` — roll up the ledger since `--since`
  * (default: 24h ago) into one message (digest.ts) and send it over iMessage;
  * `--dry-run` prints the text without sending.
@@ -4858,6 +5064,11 @@ const COMMANDS: readonly CommandSpec[] = [
     usage:
       "rmd trace <id>   # render the provenance chain (MASTER-PLAN §7B / Standing rule 17, W1-T43): feedback → proposal PR → task(s) → run(s) → PR(s) → merge sha; <id> resolves as a task id first (reverse: task back to its origin:), else as a plan/feedback/<id> id (forward: feedback out to every task it produced)",
   },
+  {
+    name: "plan",
+    usage:
+      "rmd plan --mode=create|clarify|expand [<brief>...]   # the unified Architect PLAN skill (MASTER-PLAN §5B, W1-T45) — ONE ground→research→clear-or-grill-or-propose code path shared by all three modes (Refine=clarify, Expand=expand): create scaffolds new plan/tasks.yaml task(s) for the REQUIRED <brief> initiative; clarify grills (or silently resolves) ambiguous/underspecified existing tasks, <brief> optionally narrowing the focus; expand proposes gap-filling tasks that each cite a research source. CLEAR/GRILL touch nothing and open no PR; PROPOSED opens a plan-only PR (plan/** + MASTER-PLAN.md) gated by ci-gate+remudero-review",
+  },
 ] as const;
 
 const USAGE_FOOTER =
@@ -4991,6 +5202,9 @@ async function main(): Promise<void> {
   }
   if (cmd === "trace") {
     process.exit(await traceCommand(rest));
+  }
+  if (cmd === "plan") {
+    process.exit(await planCommand(rest));
   }
   console.error(USAGE);
   process.exit(2);
