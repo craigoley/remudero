@@ -10,16 +10,16 @@ info:
     the daemon.
 
 
-    v0 (W3-T1a, src/lib/service.ts) ships the generic mechanism only: bearer
+    v0 (W3-T1a, src/lib/service.ts) shipped the generic mechanism only: bearer
     read/write scope enforcement, a shared JSON error envelope, and SSE
-    framing. It does not yet wire a single business route -- concrete routes
-    (plan state, fleet control, question/answer) are registered by a later
-    task's real `rmd serve` wiring on top of that mechanism. Until then
-    `paths` below is intentionally empty; this document still fully
-    describes the live contract (auth + error shape), and the generate +
-    drift-check pipeline (`npm run api-client:generate` / `api-client:check`)
-    is exercised against it today so a later task only has to ADD paths, not
-    build the pipeline.
+    framing, with `paths` intentionally empty -- no business route yet.
+
+    W3-T2 (MASTER-PLAN §7, WS-5a -- the read-only live board) adds the first
+    two: GET /v1/status (task/ledger-state snapshot) and GET /v1/status/stream
+    (its SSE live-update companion), built on that same mechanism via
+    src/lib/board.ts. Every route the daemon's OTHER surfaces need (fleet
+    control, question/answer, plan editing, ...) is registered by later tasks
+    the same way -- this document is additive, never rewritten wholesale.
 
 servers:
   - url: "https://{tailnetHost}"
@@ -72,6 +72,84 @@ components:
             - read
             - write
 
+    StatusProjection:
+      type: object
+      description: >
+        One task's projected merge-state, derived from GitHub (src/lib/status.ts's
+        `StatusProjection` -- never written back to plan/tasks.yaml). This is the
+        per-task "live state" the read-only board (W3-T2) renders.
+      required:
+        - taskId
+        - status
+        - merged
+        - source
+      properties:
+        taskId:
+          type: string
+          description: The plan task id (plan/tasks.yaml's `id`).
+        status:
+          type: string
+          description: Derived status label in the plan's vocabulary (src/lib/plan.ts's TaskStatus).
+          enum:
+            - queued
+            - recon
+            - prompted
+            - running
+            - review
+            - fixing
+            - diagnosing
+            - blocked
+            - merged
+            - done
+        merged:
+          type: boolean
+          description: The single fact dependency-gating cares about -- has this task landed?
+        source:
+          type: string
+          description: Which precedence source resolved this projection (or `none`).
+          enum:
+            - ledger
+            - pr-field
+            - trailer
+            - correction
+            - none
+        prNumber:
+          type: number
+        prUrl:
+          type: string
+        prState:
+          type: string
+        rejected_candidates:
+          type: array
+          description: >
+            Trailer search hits rejected by the ownership/anchor asserts, each with a
+            machine-readable reason. Present only when a candidate was actually rejected.
+          items:
+            type: object
+            required:
+              - pr
+              - reason
+            properties:
+              pr:
+                type: string
+              reason:
+                type: string
+
+    StatusSnapshot:
+      type: object
+      description: >
+        GET /v1/status's body -- one StatusProjection per plan task, as of `generated_at`.
+      required:
+        - generated_at
+        - tasks
+      properties:
+        generated_at:
+          type: string
+        tasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/StatusProjection"
+
   responses:
     Unauthorized:
       description: No or unrecognized bearer token.
@@ -92,7 +170,56 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
 
-# Intentionally empty in v0 (see info.description above) -- a later task adds the
-# daemon's real business routes here, regenerates packages/api-client, and the
-# committed generated output changes accordingly.
-paths: {}
+# W3-T2 (MASTER-PLAN §7, WS-5a): the read-only live board's first real business routes --
+# a task/ledger-state snapshot (REST) and its live-update companion (SSE). Both are built on
+# the v0 mechanism above (src/lib/service.ts) and existing projection logic (src/lib/status.ts)
+# -- see src/lib/board.ts. Every OTHER route the design (plan render, worker stream tails,
+# DECISIONS feed, escalation inbox, question backlog, cost meter) describes is explicit
+# follow-on work, not added here.
+paths:
+  /v1/status:
+    get:
+      summary: The current board snapshot -- one StatusProjection per plan task.
+      description: >
+        Read-only live board (MASTER-PLAN §7, WS-5a -> W3-T2): the task-DAG live-state
+        projection, computed via src/lib/status.ts's `projectPlan` over the current plan +
+        ledger + GitHub (src/lib/board.ts's `computeBoardSnapshot`).
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The current board snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusSnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/status/stream:
+    get:
+      summary: SSE stream of task state flips -- one `status` event per changed StatusProjection.
+      description: >
+        Live companion to GET /v1/status (MASTER-PLAN §7, WS-5a -> W3-T2): the daemon tails
+        state/ledger.ndjson (src/lib/board.ts's `buildStatusStream`) and, for every new line
+        naming a task whose derived StatusProjection actually changed, emits an SSE `status`
+        event carrying that StatusProjection (src/lib/service.ts's SSE framing). Requires a
+        read-scoped bearer token, same as GET /v1/status.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: >
+            An open text/event-stream connection. Event framing is outside this OpenAPI
+            subset's response-body modeling -- each `status` event's `data` payload is a
+            components.schemas.StatusProjection.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"

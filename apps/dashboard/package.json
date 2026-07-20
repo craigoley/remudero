@@ -1,0 +1,11 @@
+{
+  "name": "@remudero/dashboard",
+  "version": "0.1.0",
+  "description": "Dashboard v0 (shell 0, MASTER-PLAN §7 WS-5a -> W3-T2): a read-only live board over the daemon's task/ledger-state surface. Consumes ONLY @remudero/api-client (no hand-rolled fetch, MASTER-PLAN §7A) -- see src/main.ts and scripts/no-hand-rolled-fetch-check.mjs. Browser shell today; the same web build is wrapped by the Tauri macOS (W3-T3) and iOS (W3-T4) shells.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@remudero/api-client": "0.1.0"
+  }
+}

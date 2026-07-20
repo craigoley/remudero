@@ -8,7 +8,8 @@
     "rmd": "bin/rmd"
   },
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "apps/*"
   ],
   "files": [
     "bin",
