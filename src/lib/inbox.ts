@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import type { MergedResolver, Plan } from "./plan.js";
 import { parseTasksFromYaml, PlanError, unmetDependencies } from "./plan.js";
 import { lintPlan } from "./task-linter.js";
+import { appendLedger } from "./ledger.js";
 
 /**
  * `rmd inbox` — the ratification inbox's DETERMINISTIC CORE (MASTER-PLAN P25(i), W1-T110).
@@ -33,6 +34,16 @@ import { lintPlan } from "./task-linter.js";
  * names an unfired trigger (the P19/WS-2 "unbuilt consumer" case), DEFERRED_WITH_TRIGGER,
  * checked FIRST and unconditionally: a proposal whose consumer is not yet real is never
  * surfaced as a recommendation, no matter what the other four predicates say.
+ *
+ * `rmd approve` / `rmd reframe` (MASTER-PLAN P25 ii-iv, W1-T111) — the other half of the
+ * inbox loop, appended below: APPROVE ({@link approveProposal}) is one bit that INITIATES
+ * the plan PR for a READY classification's cached draft (never re-derived) through a
+ * gate-injected {@link RatifyGateway}, refusing anything not READY with zero side effects;
+ * REFRAME ({@link reframeProposal}) captures the operator's feedback verbatim, invalidates
+ * the stale draft, and rides it into the NEXT {@link inboxDraftPrompt}. Both ledger exactly
+ * one `ratify.*` line per call; {@link ratifyTelemetry} reduces those lines into the
+ * approve/reframe rate the retro surfaces — the field's failure mode is a rubber-stamp
+ * queue, so that rate is instrumentation, not decoration.
  */
 
 // ── Evidence anchors + triggers (proposal-level facts, supplied by the registry) ──────────
@@ -55,6 +66,12 @@ export interface ProposalTrigger {
   fired: boolean;
 }
 
+/** One round of `rmd reframe` feedback (P25 iii, W1-T111) — captured VERBATIM, never
+ *  summarized, so the redraft prompt carries the operator's own words. */
+export interface ReframeRecord {
+  feedback: string;
+}
+
 /** One ACTIVE (not-yet-ratified) proposal the inbox tiers. */
 export interface Proposal {
   /** e.g. "P25" */
@@ -65,6 +82,10 @@ export interface Proposal {
   trigger?: ProposalTrigger;
   /** Ids of OTHER proposals this one conflicts with, when they are also open. */
   conflictsWith?: string[];
+  /** Every `rmd reframe` round this proposal has been through, oldest first — "the
+   *  reframe history rides the proposal until resolution" (P25 iii design). Empty/absent
+   *  for a proposal that has never been reframed. */
+  reframeHistory?: ReframeRecord[];
 }
 
 // ── Drafted candidate (the LLM's output — a value from here on, never re-invoked) ─────────
@@ -282,6 +303,13 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     `id: ${proposal.id}`,
     proposal.summary,
     "",
+    ...(proposal.reframeHistory && proposal.reframeHistory.length > 0
+      ? [
+          "=== OPERATOR FEEDBACK (rmd reframe, P25 iii — address EVERY round below in this redraft) ===",
+          ...proposal.reframeHistory.map((r, i) => `${i + 1}. ${r.feedback}`),
+          "",
+        ]
+      : []),
     "=== GROUND ===",
     "Grep/Read MASTER-PLAN.md, LEARNINGS.md, and DECISIONS.md for what is already decided; the",
     "current plan/tasks.yaml is pasted below so you cite REAL existing task ids in depends_on.",
@@ -421,4 +449,212 @@ export function parseDraftCache(text: string | undefined): DraftCache {
   } catch {
     return {};
   }
+}
+
+/** Drop one proposal's cached draft — the invalidation `rmd reframe` applies so the next
+ *  `rmd inbox` pass re-drafts rather than re-surfacing the stale candidate the operator
+ *  just objected to. A no-op (returns an equivalent cache) when nothing is cached for
+ *  `proposalId`. */
+export function invalidateDraft(drafts: DraftCache, proposalId: string): DraftCache {
+  const next: DraftCache = { ...drafts };
+  delete next[proposalId];
+  return next;
+}
+
+// ── rmd approve — one bit ratifies through the gate (MASTER-PLAN P25 ii, W1-T111) ────────
+//
+// APPROVE = one bit: the operator's thumbs-up INITIATES the plan PR carrying the
+// pre-drafted, lint-clean tasks + the RATIFIED stamp (rule 15 preserved — the human's
+// approval initiates every plan edit; the gate still reviews; nothing auto-files without
+// the bit). {@link approveProposal} is the pure DECISION (valid only for READY, one
+// gateway call each, one ledger line); the git/gh SIDE EFFECTS are injected via
+// {@link RatifyGateway} (mirrors lib/escalate.ts's `IssueGateway` split) so this is
+// unit-testable without touching a real repo.
+
+/** The exact fragment + stamp a READY classification carries — what `rmd approve` ships
+ *  into the plan PR VERBATIM, never re-derived from the proposal at approve time (the
+ *  draft the operator is approving is the SAME draft `rmd inbox` showed them). */
+export interface RatificationPayload {
+  proposalId: string;
+  fragmentYaml: string;
+  stampLine: string;
+}
+
+/** Git/GitHub side effects `approveProposal` drives. Each method is called AT MOST ONCE,
+ *  and only when the classification is READY — a non-ready classification never reaches
+ *  either. */
+export interface RatifyGateway {
+  /** Apply the fragment to plan/tasks.yaml + the stamp to MASTER-PLAN.md in ONE branch,
+   *  commit, and push it. Returns the branch name actually pushed. */
+  createRatificationBranch(payload: RatificationPayload): string;
+  /** Open the plan PR for the pushed branch. Returns its URL. */
+  openPlanPr(branch: string, proposalId: string): string;
+}
+
+export type ApproveResult =
+  | { ok: true; proposalId: string; branch: string; prUrl: string; payload: RatificationPayload }
+  | { ok: false; proposalId: string; state: InboxState; refusal: string };
+
+/** Human-readable reason a classification cannot be approved right now — every non-ready
+ *  or deferred state names ITS failing predicate(s)/trigger, never a bare refusal. */
+export function refusalReason(c: InboxClassification): string {
+  if (c.state === "ready") return "";
+  if (c.state === "deferred_with_trigger") {
+    return `${c.proposalId} is DEFERRED-WITH-TRIGGER (trigger not fired: ${c.trigger?.description ?? "unnamed trigger"}) — never approvable`;
+  }
+  const reasons = c.reasons.map((r) => `[${r.predicate}] ${r.detail}`).join("; ");
+  return `${c.proposalId} is NOT READY — ${reasons || "no drafted candidate available yet"}`;
+}
+
+export interface RatifyLedgerDeps {
+  ledgerPath: string;
+  runId: string;
+}
+
+/**
+ * `rmd approve <P##>` — valid ONLY for a READY classification. Approving anything else is
+ * REFUSED, naming the state, with ZERO gateway calls (a bit on a non-ready item initiates
+ * NOTHING — rule 15). On a READY classification, calls {@link RatifyGateway.createRatificationBranch}
+ * then {@link RatifyGateway.openPlanPr} EXACTLY once each, with the payload carrying the
+ * cached draft's fragment + stamp verbatim. Every outcome — approved or refused — ledgers
+ * exactly one `ratify.*` line (`ratify.approved` / `ratify.approve_refused`).
+ */
+export function approveProposal(
+  classification: InboxClassification,
+  gateway: RatifyGateway,
+  deps: RatifyLedgerDeps,
+): ApproveResult {
+  if (classification.state !== "ready" || !classification.draft) {
+    const refusal = refusalReason(classification);
+    appendLedger(deps.ledgerPath, {
+      run_id: deps.runId,
+      task_id: classification.proposalId,
+      step: "ratify.approve_refused",
+      state: classification.state,
+      reason: refusal,
+    });
+    return { ok: false, proposalId: classification.proposalId, state: classification.state, refusal };
+  }
+  const payload: RatificationPayload = {
+    proposalId: classification.proposalId,
+    fragmentYaml: classification.draft.fragmentYaml,
+    stampLine: classification.draft.stampLine,
+  };
+  const branch = gateway.createRatificationBranch(payload);
+  const prUrl = gateway.openPlanPr(branch, classification.proposalId);
+  appendLedger(deps.ledgerPath, {
+    run_id: deps.runId,
+    task_id: classification.proposalId,
+    step: "ratify.approved",
+    pr_url: prUrl,
+    branch,
+  });
+  return { ok: true, proposalId: classification.proposalId, branch, prUrl, payload };
+}
+
+/** The harness-authored commit message for a `rmd approve` ratification branch — never
+ *  the LLM (mirrors lib/plan-architect.ts's `planCommitMessage` discipline: the fragment
+ *  and stamp are the Architect's drafted TEXT, but the commit framing around them is the
+ *  harness's, deterministically). */
+export function approveCommitMessage(payload: RatificationPayload): string {
+  return [
+    `chore(plan): ratify ${payload.proposalId} via rmd approve`,
+    "",
+    payload.stampLine,
+    "",
+    "The operator's one-bit approve initiated this PR (MASTER-PLAN P25 ii, W1-T111),",
+    "carrying the pre-drafted, lint-clean tasks + the RATIFIED stamp verbatim. The gate",
+    "still reviews (ci + remudero-review); nothing auto-merges without it.",
+    "",
+    `Remudero-Task: ${payload.proposalId}`,
+  ].join("\n");
+}
+
+// ── Real-world ratification writers (plain text composition, harness-owned) ──────────────
+
+/** Append a drafted fragment's YAML task entries to the end of `plan/tasks.yaml`'s text.
+ *  The fragment is already a valid top-level sequence (schema v1) sharing the same list,
+ *  so this is pure string composition — never a YAML re-serialization that could reformat
+ *  the rest of the file. */
+export function applyFragmentToPlanYaml(tasksYaml: string, fragmentYaml: string): string {
+  const base = tasksYaml.replace(/\s*$/, "");
+  return `${base}\n${fragmentYaml.trim()}\n`;
+}
+
+/** Splice a proposal's ratification stamp into MASTER-PLAN.md's proposal list: replaces
+ *  an existing `- <id> (...)` bullet in place when the proposal was already captured
+ *  there, otherwise appends the stamp as a new bullet at the end of the file. */
+export function applyStampToMasterPlan(masterPlanMd: string, proposalId: string, stampLine: string): string {
+  const bulletRe = new RegExp(`^- ${proposalId} \\(.*$`, "m");
+  if (bulletRe.test(masterPlanMd)) {
+    return masterPlanMd.replace(bulletRe, stampLine);
+  }
+  const base = masterPlanMd.replace(/\s*$/, "");
+  return `${base}\n${stampLine}\n`;
+}
+
+// ── rmd reframe — feedback redrafts through the ledger (MASTER-PLAN P25 iii, W1-T111) ────
+
+export interface ReframeResult {
+  /** The proposal with `feedback` appended (verbatim) to its reframe history. */
+  proposal: Proposal;
+  /** The draft cache with this proposal's cached draft INVALIDATED (removed). */
+  drafts: DraftCache;
+}
+
+/**
+ * `rmd reframe <P##> --feedback "<text>"` — the operator's objection is captured VERBATIM
+ * (never summarized) and ledgered as `ratify.reframed`; the cached draft is invalidated so
+ * the next `rmd inbox` pass re-drafts rather than re-surfacing the candidate the operator
+ * just objected to; the feedback joins the proposal's `reframeHistory` so
+ * {@link inboxDraftPrompt}'s NEXT invocation carries it into the redraft — "the reframe
+ * history rides the proposal until resolution" (design). Opens NO PR: reframe is feedback,
+ * not a ratification, and is valid for ANY classification state (a READY item the operator
+ * still wants to object to is exactly the "one bit OR feedback" choice P25 promises).
+ */
+export function reframeProposal(proposal: Proposal, feedback: string, drafts: DraftCache, deps: RatifyLedgerDeps): ReframeResult {
+  const reframedProposal: Proposal = {
+    ...proposal,
+    reframeHistory: [...(proposal.reframeHistory ?? []), { feedback }],
+  };
+  appendLedger(deps.ledgerPath, {
+    run_id: deps.runId,
+    task_id: proposal.id,
+    step: "ratify.reframed",
+    feedback,
+  });
+  return { proposal: reframedProposal, drafts: invalidateDraft(drafts, proposal.id) };
+}
+
+// ── Approve/reframe telemetry — the retro's fatigue signal (MASTER-PLAN P25 iv, W1-T111) ─
+//
+// The field's failure mode is the rubber-stamp queue: a sustained approval rate near 100%
+// means the bit has become ceremony for that class [research: hitl-approval-fatigue-2026].
+// This is reduced the SAME way lib/retro.ts's own gather is (pure, over parsed ledger
+// records) and rendered as a standalone section the harness concatenates onto
+// `renderGather`'s output — lib/retro.ts itself stays untouched.
+
+export interface RatifyTelemetry {
+  approved: number;
+  reframed: number;
+  /** approved / (approved + reframed); 0 when there is no ratify activity yet. */
+  rate: number;
+}
+
+/** Reduce parsed ledger records into the approve/reframe counts + rate. */
+export function ratifyTelemetry(records: { step?: unknown }[]): RatifyTelemetry {
+  const approved = records.filter((r) => r.step === "ratify.approved").length;
+  const reframed = records.filter((r) => r.step === "ratify.reframed").length;
+  const total = approved + reframed;
+  return { approved, reframed, rate: total === 0 ? 0 : approved / total };
+}
+
+/** Render {@link ratifyTelemetry}'s result as a retro-report section. */
+export function renderRatifyTelemetry(t: RatifyTelemetry): string {
+  const pct = Math.round(t.rate * 100);
+  const activity = t.approved + t.reframed === 0 ? " (no ratify activity yet)" : "";
+  return [
+    "## Ratification telemetry (rmd approve/reframe — MASTER-PLAN P25 ii-iv, W1-T111)",
+    `Approved: ${t.approved} · Reframed: ${t.reframed} · Approval rate: ${pct}%${activity}`,
+  ].join("\n");
 }
