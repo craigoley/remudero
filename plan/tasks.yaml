@@ -61,6 +61,205 @@
 #   operator-kicked (the daemon drains the sandbox), so this is the authoritative kick guide, NOT a
 #   physical reordering of the entries below (a contiguous block-move can't produce this interleaving).
 
+- id: W1-T139
+  title: "rmd serve — the front door: wire service.ts + board.ts + panel-actions.ts + panel-graph.ts into a launchable command with a minimal HTML shell"
+  repo: remudero
+  depends_on: [W3-T1a, W3-T2, W3-T5, W3-T6]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The pieces are built and proven in isolation but there is NO launchable entry point — Craig cannot
+    open the console. board.ts's header explicitly defers this: 'Real rmd serve CLI wiring (registering these routes
+    on a live createService(...) instance, with a real ghGateway) is a later task's concern' (src/lib/board.ts:20-24;
+    same split service.ts's header names). That later task is now due. This is the FRONT DOOR of the operator console
+    arc (with W1-T140/T141 here and W1-T110/T111 the inbox leg)."
+  design: |
+    Add a `rmd serve [--port <n>]` command (run-task.ts dispatch) backed by a small assembler (src/lib/serve.ts)
+    that: builds a real createService(...) instance (service.ts) with the real ghGateway; registers board.ts's
+    live-board route/SSE stream, panel-actions.ts's action routes, and panel-graph.ts's plan->task->PR graph route;
+    and serves GET / as a minimal HTML shell that mounts the board and links the panel + graph. Port from config/flag.
+    Reuse the EXISTING exported routes — do not reimplement them. VERIFY each module's real export surface
+    (createService signature, board route factory, panel-actions/panel-graph route builders, board.ts
+    DEFAULT_POLL_MS) from source before wiring (distrust this note).
+  acceptance:
+    - claim: "rmd serve starts on a configured port and GET / returns the HTML shell that mounts the live board"
+      proof: "integration test: start serve on an ephemeral port via the injectable createService; GET / returns 200 and the board HTML shell (references the board mount + panel/graph links); the configured --port is honored"
+    - claim: "a ledger status flip appears in the served board within 2s (W3-T2's bar), via board.ts's <=250ms poll"
+      proof: "integration test: with serve running, append a status-flipping line to the ledger; the board stream emits the new projection within 2s (board.ts DEFAULT_POLL_MS=250); assert the flip event content, not merely a tick"
+    - claim: "panel actions and the plan graph are reachable from the served app"
+      proof: "integration test: against the live server, a panel-actions route (e.g. pause/resume/answer) and the panel-graph plan->task->PR route each return their registered payload (200 + expected shape)"
+  risk: high
+  origin: architect
+  plan_refs: ["§7B", "§7"]
+  files: [src/run-task.ts, src/lib/serve.ts]
+  status: queued
+  attempts: 0
+  note: "board.ts:20-24 explicitly defers this wiring; it is now due. Front-door leg of the operator-console arc
+    (W1-T140 drain preview, W1-T141 rundown, W1-T110/T111 inbox). Reuses the proven service/board/panel modules — the
+    task is WIRING + a minimal shell, not new mechanism."
+
+- id: W1-T140
+  title: "drain preview + curation panel — render the would-drain queue as reorderable/unselectable task cards; the curated selection drives dispatch"
+  repo: remudero
+  depends_on: [W1-T139, W3-T6]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Craig's stated pain: he cannot see what will drain without cross-referencing `rmd drain --dry-run`
+    output against the plan BY HAND. The dry-run data already exists — drain.ts's plannedSequence(plan, isMerged, opts)
+    returns the ordered would-run list. This task is its UI (task cards with description/rationale/dependency edges) PLUS
+    a curated-selection input threaded into the drain dispatch path (drainCommand / DrainDeps.runOne), so the operator
+    reorders, unselects, and sets depth before the drain executes exactly that curated selection."
+  design: |
+    Two limbs. (1) PREVIEW: a builder turns plannedSequence(plan, isMerged, opts) into ordered task cards, each
+    carrying {id, title, expandable description/rationale, incoming/outgoing dependency edges} — reuse
+    panel-graph.ts's plan->task->PR edge derivation for the edges; render in the served panel (W1-T139). (2) CURATION:
+    accept a curated selection (an ordered subset + drain depth) and thread it into the drain path so dispatch honors
+    EXACTLY that selection and order; unselected tasks are never dispatched. VERIFY plannedSequence's signature,
+    drainCommand's arg/deps shape, and DrainDeps.runOne from source before wiring (distrust this note). The curated
+    selection is an INPUT to the existing drain loop, not a reimplementation of it.
+  acceptance:
+    - claim: "the would-drain queue renders as ordered task cards (id, title, expandable description/rationale, dependency edges) from the dry-run plan"
+      proof: "unit test: given a plan + merged-set, the preview builder returns plannedSequence(plan, isMerged, opts) as cards, each carrying {id, title, description/rationale, incoming+outgoing dep edges}; card order equals plannedSequence order"
+    - claim: "a curated selection (reordered subset + depth) provably drives which tasks dispatch and in what order"
+      proof: "unit test over an injected DrainDeps.runOne recorder: natural order is [A,B,C]; a curated selection [B,A] (depth 2) makes runOne fire for exactly B then A, in that order — asserted against the recorder"
+    - claim: "unselected tasks are untouched — no dispatch, no ledger mutation"
+      proof: "unit test: with the [B,A] curated selection, the runOne recorder shows C never invoked and no ledger line is written for C; the drain summary's attempted excludes C (the falsifier: pre-fix drain ran the full plannedSequence, ignoring the selection)"
+  risk: high
+  origin: architect
+  plan_refs: ["§7B", "§7"]
+  files: [src/lib/drain.ts, src/lib/panel-graph.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Directly answers Craig's pain (can't see the drain without hand cross-referencing). Second leg of the
+    operator-console arc; builds on W1-T139 (the served panel) and reuses drain.ts's plannedSequence + panel-graph's
+    edge derivation. The curated selection is a new INPUT into the existing drain dispatch — provable via a runOne recorder."
+
+- id: W1-T131
+  title: TEST-FIXTURE TEMP HYGIENE — the suite leaks one temp dir per fixture per run and mutation
+    testing multiplies it (202,830 dirs / 14G measured)
+  repo: remudero
+  depends_on:
+  - W1-T115
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: 'SUPERSEDES this task id''s first draft (review-path hygiene), which W1-T115 already
+    closed generically via lib/tmp.ts withTempDir — refiled against the ACTUAL dominant source after
+    measuring it. Recording the correction rather than quietly reusing the id.
+
+
+    MEASURED, 2026-07-19, os.tmpdir() = /var/folders/sq/.../T: 349,968 entries totalling 14G, of
+    which 202,830 carry the rmd- prefix. By prefix: rmd-status 49,386, rmd-sweep 31,739,
+    rmd-init-test 22,666, rmd-fixrung 14,484, rmd-escalate 13,670, rmd-git-sync 13,462, rmd-plan
+    9,416, rmd-containment-test 9,272, rmd-correct 8,968, rmd-digest 6,840, plus rmd-worker-guard.
+    This — not /private/tmp/claude-502, which holds 936M of Claude Code session dirs rmd does not
+    own — is what drove /System/Volumes/Data to 526Mi free.
+
+
+    THE SOURCE IS THE TEST SUITE, NOT THE RUNNER. Confirmed instance: test/worker.test.ts:373 calls
+    mkdtempSync(join(tmpdir(), "rmd-worker-guard-")) and never removes it, so every suite execution
+    leaks one. The prefix census shows the same pattern replicated across the status, sweep,
+    fixrung, escalate, git-sync, correct, digest and init/containment fixtures. Mutation testing is
+    the multiplier: Stryker re-runs the suite once per mutant (W1-T108), so a single gate run
+    multiplies every un-cleaned fixture by the mutant count. That is how a per-test dir reaches six
+    figures.
+
+
+    THE RATIONALE OF W1-T115 WAS WRONG ABOUT THE CAUSE, and its own worker said so in lib/tmp.ts:
+    status.ts readLedgerLines already reads ledger.ndjson directly via readFileSync with no temp
+    copy, so "every rmd invocation copies the ledger" describes code that does not exist. The
+    26,711-dir figure was real but its attribution was not. This task carries the corrected
+    attribution.
+
+
+    WHAT W1-T115 DOES AND DOES NOT COVER. Its withTempDir fixes the two PRODUCTION sites in
+    run-task.ts — genuinely correct, but the review site leaks one dir per PR review, a rounding
+    error against 202,830. Its sweepStaleTempDirs DOES key on os.tmpdir() with the rmd- prefix and
+    so would reap all of the above, which is the load-bearing part of that fix. But it runs ONLY at
+    daemon boot, and the suite runs where no daemon boots — CI runners and the developer machine,
+    which is precisely where this exploded. A backstop that never fires on the host generating the
+    debris is not a backstop.'
+  design: '(i) Route EVERY test-created temp dir through a single cleanup-guaranteed fixture helper
+    (or an after/teardown hook), the test-side analogue of lib/tmp.ts withTempDir. Do not hand-roll
+    a finally per test file — that is the discipline that already failed at scale.
+
+    (ii) Fix the census, not one file: the prefixes above enumerate the call sites to convert. A fix
+    that only lands test/worker.test.ts leaves 200,000 dirs of headroom on the table.
+
+    (iii) A REGRESSION GATE THAT RUNS WHERE THE DEBRIS IS MADE — assert the suite is net-zero temp
+    dirs across a full run. Relying on the daemon boot sweep is what leaves CI and the dev machine
+    uncovered.
+
+    (iv) Consider invoking sweepStaleTempDirs from more than daemon boot (any rmd entrypoint, cheap
+    and idempotent) so the backstop fires on hosts that never boot a daemon.
+
+    (v) Reclaiming the EXISTING 14G is an operator action, not this task — but the gate must prove
+    the leak cannot regrow.'
+  acceptance:
+  - claim: a full test-suite run leaves ZERO net new rmd- prefixed dirs under the temp root, counted
+      before and after
+    proof: 'unit test: test/temp-hygiene-suite.test.ts'
+  - claim: test/worker.test.ts:373 specifically no longer leaks its rmd-worker-guard- dir, the
+      confirmed instance that anchored the census
+    proof: 'unit test: test/temp-hygiene-suite.test.ts'
+  - claim: a test whose body THROWS still leaves no temp dir behind — the error path is the one that
+      leaks at scale
+    proof: 'unit test: test/temp-hygiene-suite.test.ts'
+  - claim: a mutation-style repeated run of the same fixture N times creates at most a bounded number
+      of dirs, pinning the Stryker multiplier that turned a per-test dir into six figures
+    proof: 'unit test: test/temp-hygiene-suite.test.ts'
+  risk: medium
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#9
+  files:
+  - test/worker.test.ts
+- id: W1-T138
+  title: "fix-rung mis-routes CI-check-only blocks to reviewer-unmet mode — commitlint/CodeQL failures escalate as 'review exhausted' with the real check untouched (W1-T94 ci-log follow-up)"
+  repo: remudero
+  depends_on: [W1-T94]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE (4 of 5 stuck PRs): #303/#305 (commitlint header-max-length) and #292/#315 (CodeQL
+    url-sanitization in worker tests) ALL escalated as 'blocked_review fix rung exhausted (2 strikes)' — the
+    fix-rung never entered W1-T94's ci-log mode. Its mode selector treated a CI-check-only failure as
+    reviewer-unmet, re-attempted the REVIEW twice, burned both strikes, and escalated WITHOUT touching the failing
+    check. The real blockers (a 108/114-char commit header; an unanchored URL regex) were mechanical/local, yet the
+    daemon could not self-heal because it looked in the wrong place. Mode ROUTING, not mode capability, is the hole
+    — W1-T94 built ci-log; the selector just never picks it."
+  design: |
+    Two parts. (1) Mode SELECTION: before classifying a block as reviewer-unmet, inspect the failing REQUIRED
+    checks; if a required CHECK is red for a non-review reason (commitlint, CodeQL/scan, osv, or ci-gate
+    aggregating one of those) route to ci-log mode rather than reviewer-unmet. (2) ci-log COVERAGE: ci-log must
+    handle at least commitlint (header/body length -> cap/reword, the W1-T137 fix), CodeQL alerts (feed rule id +
+    path:line + message.text as an explicit fix criterion), and osv advisories (surface the GHSA/package). When a
+    red check is genuinely not auto-fixable, ESCALATE naming the specific check + verbatim finding, not a generic
+    'review exhausted'. VERIFY the current mode-selection logic + ci-log handler in src/run-task.ts before editing
+    (distrust this note).
+  acceptance:
+    - claim: "a PR whose only red required check is commitlint (review passing/absent) routes to ci-log, not reviewer-unmet"
+      proof: "unit test over an injected check-rollup (commitlint=FAILURE, remudero-review=SUCCESS/absent) -> the mode selector returns ci-log; the pre-fix selector returned reviewer-unmet on the same input (the falsifier)"
+    - claim: "ci-log mode surfaces a CodeQL alert as an actionable fix criterion, not a strike on review"
+      proof: "unit test: an injected block with a CodeQL FAILURE carrying rule id + path:line + message -> the fix-rung's ci-log input contract includes that finding verbatim and the run does NOT decrement the review strike counter"
+    - claim: "an unfixable red check escalates naming the specific check + finding"
+      proof: "unit test: a CodeQL/osv failure the fix-rung cannot auto-resolve -> the escalation body names the check (e.g. 'CodeQL js/incomplete-url-substring-sanitization @ test/...:318') rather than 'blocked_review fix rung exhausted'"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§4B"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from the open-PR sweep. Follow-up to W1-T94 (defined the ci-log mode; its SELECTOR mis-routes CI-only
+    blocks) and W1-T137 (the commitlint-header cap ci-log should invoke). Evidence: #303/#305/#292/#315 all
+    escalated review-exhausted with the real CI check untouched — the daemon's blind spot on this whole sweep."
+
 - id: W1-T1
   title: Extract run-task.ts from the spike lib (the proto-runner)
   repo: remudero
@@ -5926,88 +6125,6 @@
   - MASTER-PLAN#9
   files:
   - src/lib/correct.ts
-- id: W1-T131
-  title: TEST-FIXTURE TEMP HYGIENE — the suite leaks one temp dir per fixture per run and mutation
-    testing multiplies it (202,830 dirs / 14G measured)
-  repo: remudero
-  depends_on:
-  - W1-T115
-  type: implement
-  verify: auto
-  principles:
-    tdd: strict
-  budget_usd: 100.0
-  rationale: 'SUPERSEDES this task id''s first draft (review-path hygiene), which W1-T115 already
-    closed generically via lib/tmp.ts withTempDir — refiled against the ACTUAL dominant source after
-    measuring it. Recording the correction rather than quietly reusing the id.
-
-
-    MEASURED, 2026-07-19, os.tmpdir() = /var/folders/sq/.../T: 349,968 entries totalling 14G, of
-    which 202,830 carry the rmd- prefix. By prefix: rmd-status 49,386, rmd-sweep 31,739,
-    rmd-init-test 22,666, rmd-fixrung 14,484, rmd-escalate 13,670, rmd-git-sync 13,462, rmd-plan
-    9,416, rmd-containment-test 9,272, rmd-correct 8,968, rmd-digest 6,840, plus rmd-worker-guard.
-    This — not /private/tmp/claude-502, which holds 936M of Claude Code session dirs rmd does not
-    own — is what drove /System/Volumes/Data to 526Mi free.
-
-
-    THE SOURCE IS THE TEST SUITE, NOT THE RUNNER. Confirmed instance: test/worker.test.ts:373 calls
-    mkdtempSync(join(tmpdir(), "rmd-worker-guard-")) and never removes it, so every suite execution
-    leaks one. The prefix census shows the same pattern replicated across the status, sweep,
-    fixrung, escalate, git-sync, correct, digest and init/containment fixtures. Mutation testing is
-    the multiplier: Stryker re-runs the suite once per mutant (W1-T108), so a single gate run
-    multiplies every un-cleaned fixture by the mutant count. That is how a per-test dir reaches six
-    figures.
-
-
-    THE RATIONALE OF W1-T115 WAS WRONG ABOUT THE CAUSE, and its own worker said so in lib/tmp.ts:
-    status.ts readLedgerLines already reads ledger.ndjson directly via readFileSync with no temp
-    copy, so "every rmd invocation copies the ledger" describes code that does not exist. The
-    26,711-dir figure was real but its attribution was not. This task carries the corrected
-    attribution.
-
-
-    WHAT W1-T115 DOES AND DOES NOT COVER. Its withTempDir fixes the two PRODUCTION sites in
-    run-task.ts — genuinely correct, but the review site leaks one dir per PR review, a rounding
-    error against 202,830. Its sweepStaleTempDirs DOES key on os.tmpdir() with the rmd- prefix and
-    so would reap all of the above, which is the load-bearing part of that fix. But it runs ONLY at
-    daemon boot, and the suite runs where no daemon boots — CI runners and the developer machine,
-    which is precisely where this exploded. A backstop that never fires on the host generating the
-    debris is not a backstop.'
-  design: '(i) Route EVERY test-created temp dir through a single cleanup-guaranteed fixture helper
-    (or an after/teardown hook), the test-side analogue of lib/tmp.ts withTempDir. Do not hand-roll
-    a finally per test file — that is the discipline that already failed at scale.
-
-    (ii) Fix the census, not one file: the prefixes above enumerate the call sites to convert. A fix
-    that only lands test/worker.test.ts leaves 200,000 dirs of headroom on the table.
-
-    (iii) A REGRESSION GATE THAT RUNS WHERE THE DEBRIS IS MADE — assert the suite is net-zero temp
-    dirs across a full run. Relying on the daemon boot sweep is what leaves CI and the dev machine
-    uncovered.
-
-    (iv) Consider invoking sweepStaleTempDirs from more than daemon boot (any rmd entrypoint, cheap
-    and idempotent) so the backstop fires on hosts that never boot a daemon.
-
-    (v) Reclaiming the EXISTING 14G is an operator action, not this task — but the gate must prove
-    the leak cannot regrow.'
-  acceptance:
-  - claim: a full test-suite run leaves ZERO net new rmd- prefixed dirs under the temp root, counted
-      before and after
-    proof: 'unit test: test/temp-hygiene-suite.test.ts'
-  - claim: test/worker.test.ts:373 specifically no longer leaks its rmd-worker-guard- dir, the
-      confirmed instance that anchored the census
-    proof: 'unit test: test/temp-hygiene-suite.test.ts'
-  - claim: a test whose body THROWS still leaves no temp dir behind — the error path is the one that
-      leaks at scale
-    proof: 'unit test: test/temp-hygiene-suite.test.ts'
-  - claim: a mutation-style repeated run of the same fixture N times creates at most a bounded number
-      of dirs, pinning the Stryker multiplier that turned a per-test dir into six figures
-    proof: 'unit test: test/temp-hygiene-suite.test.ts'
-  risk: medium
-  origin: architect
-  plan_refs:
-  - MASTER-PLAN#9
-  files:
-  - test/worker.test.ts
 - id: W1-T132
   title: WIRE shippedSince INTO THE RETRO — the gather credits merges from the ledger alone, which is
     structurally empty in the gate-side-merge era
@@ -6277,123 +6394,6 @@
   note: "Filed while unsticking #303 (header 108) / #305 (header 114). Sibling of W1-T136 (the retro's version of
     this same PR-emission/commitlint-compliance class). Also surfaced that a commit-message/CI failure is outside
     the review-fix-rung's repertoire, so it escalates without resolving — worth a follow-up on fix-rung scope."
-
-- id: W1-T138
-  title: "fix-rung mis-routes CI-check-only blocks to reviewer-unmet mode — commitlint/CodeQL failures escalate as 'review exhausted' with the real check untouched (W1-T94 ci-log follow-up)"
-  repo: remudero
-  depends_on: [W1-T94]
-  type: implement
-  verify: auto
-  principles: {tdd: strict}
-  budget_usd: 100.00
-  rationale: "LIVE (4 of 5 stuck PRs): #303/#305 (commitlint header-max-length) and #292/#315 (CodeQL
-    url-sanitization in worker tests) ALL escalated as 'blocked_review fix rung exhausted (2 strikes)' — the
-    fix-rung never entered W1-T94's ci-log mode. Its mode selector treated a CI-check-only failure as
-    reviewer-unmet, re-attempted the REVIEW twice, burned both strikes, and escalated WITHOUT touching the failing
-    check. The real blockers (a 108/114-char commit header; an unanchored URL regex) were mechanical/local, yet the
-    daemon could not self-heal because it looked in the wrong place. Mode ROUTING, not mode capability, is the hole
-    — W1-T94 built ci-log; the selector just never picks it."
-  design: |
-    Two parts. (1) Mode SELECTION: before classifying a block as reviewer-unmet, inspect the failing REQUIRED
-    checks; if a required CHECK is red for a non-review reason (commitlint, CodeQL/scan, osv, or ci-gate
-    aggregating one of those) route to ci-log mode rather than reviewer-unmet. (2) ci-log COVERAGE: ci-log must
-    handle at least commitlint (header/body length -> cap/reword, the W1-T137 fix), CodeQL alerts (feed rule id +
-    path:line + message.text as an explicit fix criterion), and osv advisories (surface the GHSA/package). When a
-    red check is genuinely not auto-fixable, ESCALATE naming the specific check + verbatim finding, not a generic
-    'review exhausted'. VERIFY the current mode-selection logic + ci-log handler in src/run-task.ts before editing
-    (distrust this note).
-  acceptance:
-    - claim: "a PR whose only red required check is commitlint (review passing/absent) routes to ci-log, not reviewer-unmet"
-      proof: "unit test over an injected check-rollup (commitlint=FAILURE, remudero-review=SUCCESS/absent) -> the mode selector returns ci-log; the pre-fix selector returned reviewer-unmet on the same input (the falsifier)"
-    - claim: "ci-log mode surfaces a CodeQL alert as an actionable fix criterion, not a strike on review"
-      proof: "unit test: an injected block with a CodeQL FAILURE carrying rule id + path:line + message -> the fix-rung's ci-log input contract includes that finding verbatim and the run does NOT decrement the review strike counter"
-    - claim: "an unfixable red check escalates naming the specific check + finding"
-      proof: "unit test: a CodeQL/osv failure the fix-rung cannot auto-resolve -> the escalation body names the check (e.g. 'CodeQL js/incomplete-url-substring-sanitization @ test/...:318') rather than 'blocked_review fix rung exhausted'"
-  risk: high
-  origin: architect
-  plan_refs: ["§5C", "§4B"]
-  files: [src/run-task.ts]
-  status: queued
-  attempts: 0
-  note: "Filed from the open-PR sweep. Follow-up to W1-T94 (defined the ci-log mode; its SELECTOR mis-routes CI-only
-    blocks) and W1-T137 (the commitlint-header cap ci-log should invoke). Evidence: #303/#305/#292/#315 all
-    escalated review-exhausted with the real CI check untouched — the daemon's blind spot on this whole sweep."
-
-- id: W1-T139
-  title: "rmd serve — the front door: wire service.ts + board.ts + panel-actions.ts + panel-graph.ts into a launchable command with a minimal HTML shell"
-  repo: remudero
-  depends_on: [W3-T1a, W3-T2, W3-T5, W3-T6]
-  type: implement
-  verify: auto
-  principles: {tdd: strict}
-  budget_usd: 100.00
-  rationale: "The pieces are built and proven in isolation but there is NO launchable entry point — Craig cannot
-    open the console. board.ts's header explicitly defers this: 'Real rmd serve CLI wiring (registering these routes
-    on a live createService(...) instance, with a real ghGateway) is a later task's concern' (src/lib/board.ts:20-24;
-    same split service.ts's header names). That later task is now due. This is the FRONT DOOR of the operator console
-    arc (with W1-T140/T141 here and W1-T110/T111 the inbox leg)."
-  design: |
-    Add a `rmd serve [--port <n>]` command (run-task.ts dispatch) backed by a small assembler (src/lib/serve.ts)
-    that: builds a real createService(...) instance (service.ts) with the real ghGateway; registers board.ts's
-    live-board route/SSE stream, panel-actions.ts's action routes, and panel-graph.ts's plan->task->PR graph route;
-    and serves GET / as a minimal HTML shell that mounts the board and links the panel + graph. Port from config/flag.
-    Reuse the EXISTING exported routes — do not reimplement them. VERIFY each module's real export surface
-    (createService signature, board route factory, panel-actions/panel-graph route builders, board.ts
-    DEFAULT_POLL_MS) from source before wiring (distrust this note).
-  acceptance:
-    - claim: "rmd serve starts on a configured port and GET / returns the HTML shell that mounts the live board"
-      proof: "integration test: start serve on an ephemeral port via the injectable createService; GET / returns 200 and the board HTML shell (references the board mount + panel/graph links); the configured --port is honored"
-    - claim: "a ledger status flip appears in the served board within 2s (W3-T2's bar), via board.ts's <=250ms poll"
-      proof: "integration test: with serve running, append a status-flipping line to the ledger; the board stream emits the new projection within 2s (board.ts DEFAULT_POLL_MS=250); assert the flip event content, not merely a tick"
-    - claim: "panel actions and the plan graph are reachable from the served app"
-      proof: "integration test: against the live server, a panel-actions route (e.g. pause/resume/answer) and the panel-graph plan->task->PR route each return their registered payload (200 + expected shape)"
-  risk: high
-  origin: architect
-  plan_refs: ["§7B", "§7"]
-  files: [src/run-task.ts, src/lib/serve.ts]
-  status: queued
-  attempts: 0
-  note: "board.ts:20-24 explicitly defers this wiring; it is now due. Front-door leg of the operator-console arc
-    (W1-T140 drain preview, W1-T141 rundown, W1-T110/T111 inbox). Reuses the proven service/board/panel modules — the
-    task is WIRING + a minimal shell, not new mechanism."
-
-- id: W1-T140
-  title: "drain preview + curation panel — render the would-drain queue as reorderable/unselectable task cards; the curated selection drives dispatch"
-  repo: remudero
-  depends_on: [W1-T139, W3-T6]
-  type: implement
-  verify: auto
-  principles: {tdd: strict}
-  budget_usd: 100.00
-  rationale: "Craig's stated pain: he cannot see what will drain without cross-referencing `rmd drain --dry-run`
-    output against the plan BY HAND. The dry-run data already exists — drain.ts's plannedSequence(plan, isMerged, opts)
-    returns the ordered would-run list. This task is its UI (task cards with description/rationale/dependency edges) PLUS
-    a curated-selection input threaded into the drain dispatch path (drainCommand / DrainDeps.runOne), so the operator
-    reorders, unselects, and sets depth before the drain executes exactly that curated selection."
-  design: |
-    Two limbs. (1) PREVIEW: a builder turns plannedSequence(plan, isMerged, opts) into ordered task cards, each
-    carrying {id, title, expandable description/rationale, incoming/outgoing dependency edges} — reuse
-    panel-graph.ts's plan->task->PR edge derivation for the edges; render in the served panel (W1-T139). (2) CURATION:
-    accept a curated selection (an ordered subset + drain depth) and thread it into the drain path so dispatch honors
-    EXACTLY that selection and order; unselected tasks are never dispatched. VERIFY plannedSequence's signature,
-    drainCommand's arg/deps shape, and DrainDeps.runOne from source before wiring (distrust this note). The curated
-    selection is an INPUT to the existing drain loop, not a reimplementation of it.
-  acceptance:
-    - claim: "the would-drain queue renders as ordered task cards (id, title, expandable description/rationale, dependency edges) from the dry-run plan"
-      proof: "unit test: given a plan + merged-set, the preview builder returns plannedSequence(plan, isMerged, opts) as cards, each carrying {id, title, description/rationale, incoming+outgoing dep edges}; card order equals plannedSequence order"
-    - claim: "a curated selection (reordered subset + depth) provably drives which tasks dispatch and in what order"
-      proof: "unit test over an injected DrainDeps.runOne recorder: natural order is [A,B,C]; a curated selection [B,A] (depth 2) makes runOne fire for exactly B then A, in that order — asserted against the recorder"
-    - claim: "unselected tasks are untouched — no dispatch, no ledger mutation"
-      proof: "unit test: with the [B,A] curated selection, the runOne recorder shows C never invoked and no ledger line is written for C; the drain summary's attempted excludes C (the falsifier: pre-fix drain ran the full plannedSequence, ignoring the selection)"
-  risk: high
-  origin: architect
-  plan_refs: ["§7B", "§7"]
-  files: [src/lib/drain.ts, src/lib/panel-graph.ts, src/run-task.ts]
-  status: queued
-  attempts: 0
-  note: "Directly answers Craig's pain (can't see the drain without hand cross-referencing). Second leg of the
-    operator-console arc; builds on W1-T139 (the served panel) and reuses drain.ts's plannedSequence + panel-graph's
-    edge derivation. The curated selection is a new INPUT into the existing drain dispatch — provable via a runOne recorder."
 
 - id: W1-T141
   title: "post-drain rundown + feedback hook — per-task merged/blocked/escalated outcome lines, each with a one-tap operator verdict written to the ledger as operator_feedback"
