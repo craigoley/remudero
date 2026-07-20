@@ -1075,6 +1075,110 @@
     merged-0/160 fail-open is the monotonic-under-darkness falsifier), so it belongs at the front. GENERAL LESSON
     worth keeping: shards are the right default for conflict-free FILING, and the wrong choice for anything that
     needs PRIORITY. Those two goals are in tension and the tension is invisible until a shard never dispatches."
+- id: W1-T136
+  title: "EVERY machine plan-PR emitter (retro, approve, future inbox writes) must emit a PR mergeable under the full gate stack — a SHARED gate-compliant emitter: plan-index regen, commitlint-clean commit (header AND body <=100), and a judgeable Acceptance body so remudero-review does not fail closed (the #287 retro + #387 approve fixtures)"
+  repo: remudero
+  queue_note: |
+    PULLED FORWARD 2026-07-20 to ride directly behind the W1-T181/W1-T128/W1-T177/W1-T178/W1-T179 train.
+    FRESHEST POSSIBLE EVIDENCE: in ONE evening the operator hand-hit THREE separate commitlint failures while
+    filing tasks ABOUT this exact trap — PR #399 header-max-length (101 chars), PR #403 subject-case, and an
+    earlier footer-max-line-length on a long commit body. A worker hit the same gate the same night on PR #405
+    (124 chars AND an upper-case subject), which redded a REQUIRED check, left the W1-T76 fix rung with no move,
+    and produced a mis-framed spec-question escalation (#406) against a PR whose code was already green.
+    That is the argument for this task stated as plainly as evidence can state it: EVERY plan-PR author, human
+    and machine alike, trips the grown gate stack, because each emission site re-learns commitlint + plan-index +
+    review-body hygiene independently. PR #407 shipped the instructional half (the worker OUTPUT CONTRACT now
+    carries the rule) and a shaping helper for two harness sites — but it did NOT build the shared emitter, so
+    every OTHER emission path still re-learns the same lessons one outage at a time.
+    RESTORED 2026-07-20 to immediately after W1-T179, ahead of W1-T185 and the console pass
+    (W1-T183/W1-T184/W1-T182/W1-T159). Evidence for the restore: FIVE hand-hit commitlint failures in a single
+    evening while filing tasks about this very trap (#399 header-max-length, #403 subject-case, an earlier
+    footer-max-line-length, #409 subject-case, and #418's squash landing at 101 chars because GitHub appends
+    ' (#NNN)' — that last one RED-BLOCKED an unrelated PR, #417, since commitlint lints the whole base..head
+    range). Plus the approaching R10 self-fire: the retro emits its OWN plan PR, so the compliant emitter must
+    exist before the cadence trigger lands or the retro reproduces the same class against itself.
+    NO HARD depends_on ADDED, same judgement as the rest of the train: file order gives the ordering, a hard gate
+    would strand this behind a risk:high task if that task stalls.
+  depends_on: [W1-T51, W1-T110, W1-T111]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE HOLE, now confirmed in TWO machine plan-PR emitters — the defect is not retro-specific, it is
+    that NO machine emitter was taught the grown gate stack, so each fails required checks BY CONSTRUCTION.
+    RETRO (#287, the original fixture): retroCommand (1) edited MASTER-PLAN.md without running the plan-index
+    generator, so plan/plan-index.json went stale and plan-index-check redded; (2) committed a non-conventional
+    message ('plan:'/'rmd retro:' type) that commitlint rejects. #287 needed TWO hand interventions to merge.
+    APPROVE (#387, the second-emitter fixture — the INAUGURAL rmd approve, P25 ii): approveCommand (1) wrote the
+    681-char RATIFIED stamp line verbatim into the COMMIT BODY, tripping commitlint body-max-line-length (<=100);
+    (2) emitted a PR body with NO Acceptance section, so remudero-review FAILED CLOSED ('no acceptance criteria to
+    judge'). #387 needed the same two-hand fix (a commit-body rewrap + a hand-authored Acceptance section). Same
+    class, second site: every emitter that writes a plan PR from code (retro, approve, and future inbox writes)
+    must route through ONE shared gate-compliant emitter, not re-learn commitlint + plan-index + review-body hygiene
+    per site. The gate stack grew (commitlint header AND body, plan-index-check, remudero-review-fail-closed) and
+    the emitters were never taught to satisfy it."
+  design: |
+    Factor a SINGLE gate-compliant plan-PR emitter that retroCommand, approveCommand, AND future inbox writers all
+    call, so the gate contract lives in one place. Before it commits, the shared emitter:
+    (i) runs the plan-index generator when the change touched MASTER-PLAN.md, so plan/plan-index.json is byte-current
+        (invoke the same generator the CI check runs — VERIFY the exact npm script / scripts/generate-plan-index.mjs
+        entry from source, distrust this note), staged alongside the edit;
+    (ii) renders a commitlint-clean commit: an allowed type-enum type + 'plan' scope, lowercase-first subject within
+        header-max-length, and EVERY BODY LINE wrapped to <= body-max-line-length (the #387 body-line lesson — a long
+        stamp/summary line is wrapped or moved out of the body, never emitted verbatim);
+    (iii) renders the PR BODY with a judgeable Acceptance section (grep/lint-checkable criteria), so remudero-review
+        has criteria to judge and never fails closed (the #387 no-Acceptance lesson). For a plan-FILING PR (one that
+        introduces a NEW task) the emitter must AUTO-AUTHOR that block about the FILING ITSELF — lint-clean, diff
+        scoped to the shard, fixture measured — because the filed task's own criteria are structurally unreachable:
+        remudero-review resolves via loadPlan against the WORKING CHECKOUT, and a task introduced by the PR is not
+        there. Shape matters and is unforgiving (parseAcceptanceBlock, review.ts): a header ALONE on its line
+        matching 'Acceptance' — '## Acceptance criteria for W1-T175' does NOT match — followed by CONTIGUOUS
+        '- <claim> | <proof>' bullets, where any blank or non-bullet line terminates the block;
+    (iv) MUST NOT emit a 'Remudero-Task: <id>' trailer on a plan-FILING PR. This is a CORRECTNESS rule, not style:
+        findMergedByTrailer (status.ts) would credit that task DONE on merge of its mere filing, marking unbuilt
+        work complete and letting the drain skip it forever. The trailer is legitimate only on a PR that IMPLEMENTS
+        the task. #389/#392 omit it deliberately, which is why the convention survived undocumented until #394.
+    Callers pass their per-emitter specifics (retro: 'retro R<n>'; approve: 'ratify P<n>' + the ratified-tasks
+    Acceptance). Design note (not a hard criterion here): emitters should prefer writing tasks.d/ shards over
+    appending to tasks.yaml, so concurrent emissions stay conflict-free (W1-T122) — #387 appended to tasks.yaml.
+    No other behavior changes (retro gather/capture/marker, approve's verbatim-fragment + stamp semantics unchanged).
+  acceptance:
+    - claim: "the shared emitter regenerates the plan-index after a MASTER-PLAN edit — plan-index-check passes with no hand step, for BOTH retro and approve"
+      proof: "integration test over a seeded fixture for retroCommand AND approveCommand: after each writes MASTER-PLAN.md via the shared emitter, plan/plan-index.json equals a fresh regeneration (the plan-index:check generator exits zero on the output tree); a variant that suppresses the regen step FAILS the check (the falsifier)"
+    - claim: "the shared emitter's commit passes commitlint in BOTH header AND body — valid type + plan scope within header-max-length, and every body line <= body-max-line-length"
+      proof: "unit test: the rendered commit message (for retro 'chore(plan): retro R<n>' and approve 'chore(plan): ratify P<n>') passes commitlint against the repo config — type in enum, subject lower-case, header <= header-max-length, AND no body line exceeds body-max-line-length even when a caller supplies a long stamp/summary. FALSIFIERS: the pre-fix 'plan:'/'rmd retro:' type is REJECTED; the #387 fixture — a 681-char stamp line emitted verbatim into the body — is REJECTED by body-max-line-length"
+    - claim: "the shared emitter's PR body carries a judgeable Acceptance section — remudero-review has criteria and never fails closed"
+      proof: "unit/integration test: the emitted PR body (for approve AND retro) contains an Acceptance section whose criteria remudero-review parses and judges (proof_exec sees >0 criteria). FALSIFIER: the #387 fixture — an approve PR body with NO Acceptance section, which remudero-review fails CLOSED on ('no acceptance criteria to judge')"
+    - claim: "a plan-FILING PR gets an AUTO-AUTHORED Acceptance block about the filing itself, in the exact shape parseAcceptanceBlock accepts — a filing PR is never emitted unjudgeable"
+      proof: "unit test: the emitted body for a filing PR contains a header ALONE on its line matching the Acceptance regex followed by CONTIGUOUS '- <claim> | <proof>' bullets, and parseAcceptanceBlock returns >0 criteria from it. FALSIFIERS, both from #394 (2026-07-20): a body whose only header was '## Acceptance criteria and how each is proved' resolved NONE and self-posted a RED remudero-review, blocking the PR — the header must be bare; and a body whose bullets are interrupted by a blank or prose line truncates the block, since any non-bullet line after bullets start terminates it"
+    - claim: "a plan-FILING PR carries NO Remudero-Task: trailer — the emitter cannot credit a task done on merge of its own filing"
+      proof: "unit test: the emitted filing-PR body contains no 'Remudero-Task:' trailer, and an integration check that findMergedByTrailer does NOT credit the newly-filed task from that merge. FALSIFIER: adding the trailer, which makes the filed task read DONE the moment the filing merges — unbuilt work marked complete and permanently skipped by the drain. This is why #389/#392 omit it"
+    - claim: "an emitter dry-run is zero-hand-intervention end to end — commitlint-clean commit + byte-current plan-index + a review-judgeable body"
+      proof: "integration test: 'rmd retro --dry-run' and an approve dry-run over seeded fixtures each produce a staged commit whose message passes 'npx commitlint', a plan/plan-index.json matching the generator, and a PR body with judgeable Acceptance — all green with no hand edits (the #287 + #387 regressions, closed)"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§6A"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "GENERALIZED 2026-07-20 from retro-only to ALL machine plan-PR emitters after the class fired a SECOND time.
+    Fixtures: #287 (retro — plan-index stale + non-conventional type, two hand-fixes) and #387 (the inaugural rmd
+    approve P19 — commitlint body-max-line-length on the 681-char stamp line in the commit body, AND remudero-review
+    fail-closed on a body with no Acceptance section; both hand-fixed to unblock the ratification). The fix is a
+    SHARED gate-compliant emitter used by retroCommand + approveCommand + future inbox writers — not per-site hygiene.
+    W1-T137 already names this the 'W1-T136 class' at the worker/fix-rung site (commit header cap). Companion to
+    W1-T134/W1-T135 and the plan-index-check / commitlint / remudero-review gates that made the hole visible.
+    Design note carried: emitters should write tasks.d/ shards (W1-T122) rather than append tasks.yaml so concurrent
+    emissions stay conflict-free — #387 appended to tasks.yaml.
+    EXTENDED 2026-07-20 with the plan-FILING case, after the class fired a THIRD time on #394 — a HAND-authored
+    filing PR that self-posted a RED remudero-review because its Acceptance header was not bare. Two additions,
+    both folded here rather than filed standalone because they ARE this emitter's contract: (a) auto-author the
+    judgeable Acceptance block for filing PRs, whose filed task's own criteria are structurally unreachable
+    (loadPlan reads the working checkout, so a task introduced by the PR is absent — verified: re-running the
+    reviewer from the PR's OWN worktree still resolved NONE); (b) enforce NO Remudero-Task: trailer on a filing,
+    which is a correctness rule — the trailer would credit the task DONE on merge of its mere filing. The #389/#392
+    convention was correct but undocumented, so every future plan PR steps on it until the emitter encodes it."
+
 - id: W1-T185
   title: "FLOOR VERDICT INTEGRITY — two gaps W1-T128's execution engine left open: a verdict with ZERO executed proofs must render a CAPPED/DEGRADED class that cannot arm auto-merge on tdd:strict work, and `rmd review` from the operator checkout must either execute at the PR head or mark its verdict keyword-only"
   repo: remudero
@@ -1467,103 +1571,6 @@
   attempts: 0
   note: "The GLANCE layer (interaction layer 4). spend-today is governor-aware once W1-T148 lands (a dep). Counts
     from W1-T155's taxonomy. Every number traceable to a source — no decorative estimates."
-
-- id: W1-T136
-  title: "EVERY machine plan-PR emitter (retro, approve, future inbox writes) must emit a PR mergeable under the full gate stack — a SHARED gate-compliant emitter: plan-index regen, commitlint-clean commit (header AND body <=100), and a judgeable Acceptance body so remudero-review does not fail closed (the #287 retro + #387 approve fixtures)"
-  repo: remudero
-  queue_note: |
-    PULLED FORWARD 2026-07-20 to ride directly behind the W1-T181/W1-T128/W1-T177/W1-T178/W1-T179 train.
-    FRESHEST POSSIBLE EVIDENCE: in ONE evening the operator hand-hit THREE separate commitlint failures while
-    filing tasks ABOUT this exact trap — PR #399 header-max-length (101 chars), PR #403 subject-case, and an
-    earlier footer-max-line-length on a long commit body. A worker hit the same gate the same night on PR #405
-    (124 chars AND an upper-case subject), which redded a REQUIRED check, left the W1-T76 fix rung with no move,
-    and produced a mis-framed spec-question escalation (#406) against a PR whose code was already green.
-    That is the argument for this task stated as plainly as evidence can state it: EVERY plan-PR author, human
-    and machine alike, trips the grown gate stack, because each emission site re-learns commitlint + plan-index +
-    review-body hygiene independently. PR #407 shipped the instructional half (the worker OUTPUT CONTRACT now
-    carries the rule) and a shaping helper for two harness sites — but it did NOT build the shared emitter, so
-    every OTHER emission path still re-learns the same lessons one outage at a time.
-    NO HARD depends_on ADDED, same judgement as the rest of the train: file order gives the ordering, a hard gate
-    would strand this behind a risk:high task if that task stalls.
-  depends_on: [W1-T51, W1-T110, W1-T111]
-  type: implement
-  verify: auto
-  principles: {tdd: strict}
-  budget_usd: 100.00
-  rationale: "LIVE HOLE, now confirmed in TWO machine plan-PR emitters — the defect is not retro-specific, it is
-    that NO machine emitter was taught the grown gate stack, so each fails required checks BY CONSTRUCTION.
-    RETRO (#287, the original fixture): retroCommand (1) edited MASTER-PLAN.md without running the plan-index
-    generator, so plan/plan-index.json went stale and plan-index-check redded; (2) committed a non-conventional
-    message ('plan:'/'rmd retro:' type) that commitlint rejects. #287 needed TWO hand interventions to merge.
-    APPROVE (#387, the second-emitter fixture — the INAUGURAL rmd approve, P25 ii): approveCommand (1) wrote the
-    681-char RATIFIED stamp line verbatim into the COMMIT BODY, tripping commitlint body-max-line-length (<=100);
-    (2) emitted a PR body with NO Acceptance section, so remudero-review FAILED CLOSED ('no acceptance criteria to
-    judge'). #387 needed the same two-hand fix (a commit-body rewrap + a hand-authored Acceptance section). Same
-    class, second site: every emitter that writes a plan PR from code (retro, approve, and future inbox writes)
-    must route through ONE shared gate-compliant emitter, not re-learn commitlint + plan-index + review-body hygiene
-    per site. The gate stack grew (commitlint header AND body, plan-index-check, remudero-review-fail-closed) and
-    the emitters were never taught to satisfy it."
-  design: |
-    Factor a SINGLE gate-compliant plan-PR emitter that retroCommand, approveCommand, AND future inbox writers all
-    call, so the gate contract lives in one place. Before it commits, the shared emitter:
-    (i) runs the plan-index generator when the change touched MASTER-PLAN.md, so plan/plan-index.json is byte-current
-        (invoke the same generator the CI check runs — VERIFY the exact npm script / scripts/generate-plan-index.mjs
-        entry from source, distrust this note), staged alongside the edit;
-    (ii) renders a commitlint-clean commit: an allowed type-enum type + 'plan' scope, lowercase-first subject within
-        header-max-length, and EVERY BODY LINE wrapped to <= body-max-line-length (the #387 body-line lesson — a long
-        stamp/summary line is wrapped or moved out of the body, never emitted verbatim);
-    (iii) renders the PR BODY with a judgeable Acceptance section (grep/lint-checkable criteria), so remudero-review
-        has criteria to judge and never fails closed (the #387 no-Acceptance lesson). For a plan-FILING PR (one that
-        introduces a NEW task) the emitter must AUTO-AUTHOR that block about the FILING ITSELF — lint-clean, diff
-        scoped to the shard, fixture measured — because the filed task's own criteria are structurally unreachable:
-        remudero-review resolves via loadPlan against the WORKING CHECKOUT, and a task introduced by the PR is not
-        there. Shape matters and is unforgiving (parseAcceptanceBlock, review.ts): a header ALONE on its line
-        matching 'Acceptance' — '## Acceptance criteria for W1-T175' does NOT match — followed by CONTIGUOUS
-        '- <claim> | <proof>' bullets, where any blank or non-bullet line terminates the block;
-    (iv) MUST NOT emit a 'Remudero-Task: <id>' trailer on a plan-FILING PR. This is a CORRECTNESS rule, not style:
-        findMergedByTrailer (status.ts) would credit that task DONE on merge of its mere filing, marking unbuilt
-        work complete and letting the drain skip it forever. The trailer is legitimate only on a PR that IMPLEMENTS
-        the task. #389/#392 omit it deliberately, which is why the convention survived undocumented until #394.
-    Callers pass their per-emitter specifics (retro: 'retro R<n>'; approve: 'ratify P<n>' + the ratified-tasks
-    Acceptance). Design note (not a hard criterion here): emitters should prefer writing tasks.d/ shards over
-    appending to tasks.yaml, so concurrent emissions stay conflict-free (W1-T122) — #387 appended to tasks.yaml.
-    No other behavior changes (retro gather/capture/marker, approve's verbatim-fragment + stamp semantics unchanged).
-  acceptance:
-    - claim: "the shared emitter regenerates the plan-index after a MASTER-PLAN edit — plan-index-check passes with no hand step, for BOTH retro and approve"
-      proof: "integration test over a seeded fixture for retroCommand AND approveCommand: after each writes MASTER-PLAN.md via the shared emitter, plan/plan-index.json equals a fresh regeneration (the plan-index:check generator exits zero on the output tree); a variant that suppresses the regen step FAILS the check (the falsifier)"
-    - claim: "the shared emitter's commit passes commitlint in BOTH header AND body — valid type + plan scope within header-max-length, and every body line <= body-max-line-length"
-      proof: "unit test: the rendered commit message (for retro 'chore(plan): retro R<n>' and approve 'chore(plan): ratify P<n>') passes commitlint against the repo config — type in enum, subject lower-case, header <= header-max-length, AND no body line exceeds body-max-line-length even when a caller supplies a long stamp/summary. FALSIFIERS: the pre-fix 'plan:'/'rmd retro:' type is REJECTED; the #387 fixture — a 681-char stamp line emitted verbatim into the body — is REJECTED by body-max-line-length"
-    - claim: "the shared emitter's PR body carries a judgeable Acceptance section — remudero-review has criteria and never fails closed"
-      proof: "unit/integration test: the emitted PR body (for approve AND retro) contains an Acceptance section whose criteria remudero-review parses and judges (proof_exec sees >0 criteria). FALSIFIER: the #387 fixture — an approve PR body with NO Acceptance section, which remudero-review fails CLOSED on ('no acceptance criteria to judge')"
-    - claim: "a plan-FILING PR gets an AUTO-AUTHORED Acceptance block about the filing itself, in the exact shape parseAcceptanceBlock accepts — a filing PR is never emitted unjudgeable"
-      proof: "unit test: the emitted body for a filing PR contains a header ALONE on its line matching the Acceptance regex followed by CONTIGUOUS '- <claim> | <proof>' bullets, and parseAcceptanceBlock returns >0 criteria from it. FALSIFIERS, both from #394 (2026-07-20): a body whose only header was '## Acceptance criteria and how each is proved' resolved NONE and self-posted a RED remudero-review, blocking the PR — the header must be bare; and a body whose bullets are interrupted by a blank or prose line truncates the block, since any non-bullet line after bullets start terminates it"
-    - claim: "a plan-FILING PR carries NO Remudero-Task: trailer — the emitter cannot credit a task done on merge of its own filing"
-      proof: "unit test: the emitted filing-PR body contains no 'Remudero-Task:' trailer, and an integration check that findMergedByTrailer does NOT credit the newly-filed task from that merge. FALSIFIER: adding the trailer, which makes the filed task read DONE the moment the filing merges — unbuilt work marked complete and permanently skipped by the drain. This is why #389/#392 omit it"
-    - claim: "an emitter dry-run is zero-hand-intervention end to end — commitlint-clean commit + byte-current plan-index + a review-judgeable body"
-      proof: "integration test: 'rmd retro --dry-run' and an approve dry-run over seeded fixtures each produce a staged commit whose message passes 'npx commitlint', a plan/plan-index.json matching the generator, and a PR body with judgeable Acceptance — all green with no hand edits (the #287 + #387 regressions, closed)"
-  risk: high
-  origin: architect
-  plan_refs: ["§5C", "§6A"]
-  files: [src/run-task.ts]
-  status: queued
-  attempts: 0
-  note: "GENERALIZED 2026-07-20 from retro-only to ALL machine plan-PR emitters after the class fired a SECOND time.
-    Fixtures: #287 (retro — plan-index stale + non-conventional type, two hand-fixes) and #387 (the inaugural rmd
-    approve P19 — commitlint body-max-line-length on the 681-char stamp line in the commit body, AND remudero-review
-    fail-closed on a body with no Acceptance section; both hand-fixed to unblock the ratification). The fix is a
-    SHARED gate-compliant emitter used by retroCommand + approveCommand + future inbox writers — not per-site hygiene.
-    W1-T137 already names this the 'W1-T136 class' at the worker/fix-rung site (commit header cap). Companion to
-    W1-T134/W1-T135 and the plan-index-check / commitlint / remudero-review gates that made the hole visible.
-    Design note carried: emitters should write tasks.d/ shards (W1-T122) rather than append tasks.yaml so concurrent
-    emissions stay conflict-free — #387 appended to tasks.yaml.
-    EXTENDED 2026-07-20 with the plan-FILING case, after the class fired a THIRD time on #394 — a HAND-authored
-    filing PR that self-posted a RED remudero-review because its Acceptance header was not bare. Two additions,
-    both folded here rather than filed standalone because they ARE this emitter's contract: (a) auto-author the
-    judgeable Acceptance block for filing PRs, whose filed task's own criteria are structurally unreachable
-    (loadPlan reads the working checkout, so a task introduced by the PR is absent — verified: re-running the
-    reviewer from the PR's OWN worktree still resolved NONE); (b) enforce NO Remudero-Task: trailer on a filing,
-    which is a correctness rule — the trailer would credit the task DONE on merge of its mere filing. The #389/#392
-    convention was correct but undocumented, so every future plan PR steps on it until the emitter encodes it."
 
 - id: W1-T157
   title: "FIND layer — instant client-side fuzzy search + faceted filters with live counts + sortable columns + cmd+K palette + URL-persisted (shareable) view state"
