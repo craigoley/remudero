@@ -6277,3 +6277,44 @@
   note: "Filed while unsticking #303 (header 108) / #305 (header 114). Sibling of W1-T136 (the retro's version of
     this same PR-emission/commitlint-compliance class). Also surfaced that a commit-message/CI failure is outside
     the review-fix-rung's repertoire, so it escalates without resolving — worth a follow-up on fix-rung scope."
+
+- id: W1-T138
+  title: "fix-rung mis-routes CI-check-only blocks to reviewer-unmet mode — commitlint/CodeQL failures escalate as 'review exhausted' with the real check untouched (W1-T94 ci-log follow-up)"
+  repo: remudero
+  depends_on: [W1-T94]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE (4 of 5 stuck PRs): #303/#305 (commitlint header-max-length) and #292/#315 (CodeQL
+    url-sanitization in worker tests) ALL escalated as 'blocked_review fix rung exhausted (2 strikes)' — the
+    fix-rung never entered W1-T94's ci-log mode. Its mode selector treated a CI-check-only failure as
+    reviewer-unmet, re-attempted the REVIEW twice, burned both strikes, and escalated WITHOUT touching the failing
+    check. The real blockers (a 108/114-char commit header; an unanchored URL regex) were mechanical/local, yet the
+    daemon could not self-heal because it looked in the wrong place. Mode ROUTING, not mode capability, is the hole
+    — W1-T94 built ci-log; the selector just never picks it."
+  design: |
+    Two parts. (1) Mode SELECTION: before classifying a block as reviewer-unmet, inspect the failing REQUIRED
+    checks; if a required CHECK is red for a non-review reason (commitlint, CodeQL/scan, osv, or ci-gate
+    aggregating one of those) route to ci-log mode rather than reviewer-unmet. (2) ci-log COVERAGE: ci-log must
+    handle at least commitlint (header/body length -> cap/reword, the W1-T137 fix), CodeQL alerts (feed rule id +
+    path:line + message.text as an explicit fix criterion), and osv advisories (surface the GHSA/package). When a
+    red check is genuinely not auto-fixable, ESCALATE naming the specific check + verbatim finding, not a generic
+    'review exhausted'. VERIFY the current mode-selection logic + ci-log handler in src/run-task.ts before editing
+    (distrust this note).
+  acceptance:
+    - claim: "a PR whose only red required check is commitlint (review passing/absent) routes to ci-log, not reviewer-unmet"
+      proof: "unit test over an injected check-rollup (commitlint=FAILURE, remudero-review=SUCCESS/absent) -> the mode selector returns ci-log; the pre-fix selector returned reviewer-unmet on the same input (the falsifier)"
+    - claim: "ci-log mode surfaces a CodeQL alert as an actionable fix criterion, not a strike on review"
+      proof: "unit test: an injected block with a CodeQL FAILURE carrying rule id + path:line + message -> the fix-rung's ci-log input contract includes that finding verbatim and the run does NOT decrement the review strike counter"
+    - claim: "an unfixable red check escalates naming the specific check + finding"
+      proof: "unit test: a CodeQL/osv failure the fix-rung cannot auto-resolve -> the escalation body names the check (e.g. 'CodeQL js/incomplete-url-substring-sanitization @ test/...:318') rather than 'blocked_review fix rung exhausted'"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§4B"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from the open-PR sweep. Follow-up to W1-T94 (defined the ci-log mode; its SELECTOR mis-routes CI-only
+    blocks) and W1-T137 (the commitlint-header cap ci-log should invoke). Evidence: #303/#305/#292/#315 all
+    escalated review-exhausted with the real CI check untouched — the daemon's blind spot on this whole sweep."
