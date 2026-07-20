@@ -12,11 +12,13 @@ import {
   isBlockedCi,
   renderClarificationQuestion,
   renderSweepSummary,
+  runCreditBackfill,
   runSweep,
   strikeCapForAnswer,
   toQuestionEntry,
   type CiFailure,
   type ClarificationQuestion,
+  type CreditCandidate,
   type FixDispatchEvidence,
   type OpenPrView,
   type RollupCheckEntry,
@@ -26,6 +28,7 @@ import {
 } from "../src/lib/sweep.js";
 import type { CriterionVerdict } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import { appendLedger } from "../src/lib/ledger.js";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -766,4 +769,146 @@ test("W1-T103 acceptance 1 — the #170 fixture (all required success, one non-r
   await runSweep([healedPr], deps);
   assert.equal(deps.armed.length, 1, "arm invoked exactly once");
   assert.equal(deps.armed[0].prNumber, 170);
+});
+
+// ── W1-T150 — the LEVEL-TRIGGERED CREDIT BACKFILL rung (ratifies P30) ────────
+// The fixture MASTER-PLAN names: 0 of 195 runs ledgered a merge while GitHub
+// showed 28 — every one of them a run whose terminal `verdict` line fired
+// BEFORE its owned PR merged (blocked_ci, no_pr, …), so the ledger's credit
+// field never revisited the question. These tests seed exactly that shape.
+
+function creditCandidate(over: Partial<CreditCandidate> = {}): CreditCandidate {
+  return {
+    taskId: "W1-T1",
+    prNumber: 255,
+    prUrl: "https://github.com/o/r/pull/255",
+    merged: true,
+    ...over,
+  };
+}
+
+test("credit backfill acceptance 1 — a run ledgered blocked_ci whose OWNED PR is merged yields exactly ONE verdict.merged correction on the next sweep, naming the PR", async () => {
+  const shared = ledgerPath();
+  appendLedger(shared, {
+    run_id: "W1-T1-1",
+    task_id: "W1-T1",
+    step: "verdict",
+    verdict: "blocked_ci",
+    pr_url: "https://github.com/o/r/pull/255",
+  });
+
+  const summary = await runCreditBackfill([creditCandidate()], { ledgerPath: shared, runId: "SWEEP-1" });
+
+  assert.equal(summary.total, 1);
+  assert.equal(summary.corrected, 1);
+  assert.equal(summary.results[0].corrected, true);
+
+  const lines = readLedgerLines(shared);
+  const corrections = lines.filter((l) => l.step === "verdict.merged" && l.task_id === "W1-T1");
+  assert.equal(corrections.length, 1, "exactly ONE verdict.merged correction");
+  assert.equal(corrections[0].pr_url, "https://github.com/o/r/pull/255", "the correction names the PR");
+  assert.equal(corrections[0].pr_number, 255);
+  assert.equal(corrections[0].verdict, "merged");
+});
+
+test("credit backfill acceptance 2 — idempotence: a second sweep over the now-credited state appends ZERO further corrections", async () => {
+  const shared = ledgerPath();
+  appendLedger(shared, { run_id: "W1-T1-1", task_id: "W1-T1", step: "verdict", verdict: "blocked_ci" });
+
+  const first = await runCreditBackfill([creditCandidate()], { ledgerPath: shared, runId: "SWEEP-1" });
+  assert.equal(first.corrected, 1);
+
+  const second = await runCreditBackfill([creditCandidate()], { ledgerPath: shared, runId: "SWEEP-2" });
+  assert.equal(
+    second.corrected,
+    0,
+    "re-running over now-credited state appends nothing — a rung that re-credited every poll would fail this",
+  );
+  assert.equal(second.results[0].alreadyCredited, true);
+
+  const lines = readLedgerLines(shared);
+  const corrections = lines.filter((l) => l.step === "verdict.merged" && l.task_id === "W1-T1");
+  assert.equal(corrections.length, 1, "still exactly one correction total — not doubled");
+});
+
+// NAMED to literally satisfy the acceptance criterion's own `unit test:` dialect
+// proof text (plan/tasks.yaml, W1-T150 acceptance 3) — the review gate's
+// proof-exec compiles that proof string into a `--test-name-pattern` REGEX and
+// runs it for real (W1-T65). Regex, not substring: the criterion's own
+// "(not merged)" parenthetical compiles to a NON-literal capture group, so a
+// test name that reproduces the literal parens around "not merged" breaks
+// contiguity with the surrounding words and paradoxically FAILS to match
+// itself (confirmed: `new RegExp(proof).test(identicalProofText) === false`).
+// This name matches the compiled regex (verified against the exact proof
+// string) — never rename without re-checking against plan/tasks.yaml's exact
+// proof text.
+test("credit backfill acceptance 3 — a seeded uncredited run whose owned PR is OPEN not merged yields zero corrections — credit backfill fires only on MERGED owned PRs (the falsifier)", async () => {
+  const shared = ledgerPath();
+  appendLedger(shared, { run_id: "W1-T1-1", task_id: "W1-T1", step: "verdict", verdict: "blocked_ci" });
+
+  const summary = await runCreditBackfill([creditCandidate({ merged: false })], { ledgerPath: shared, runId: "SWEEP-1" });
+
+  assert.equal(summary.corrected, 0, "credit backfill fires only on MERGED owned PRs");
+  assert.equal(summary.results[0].corrected, false);
+
+  const lines = readLedgerLines(shared);
+  assert.equal(lines.filter((l) => l.step === "verdict.merged").length, 0, "no correction for a still-open PR");
+});
+
+test("credit backfill: a run that already ledgered verdict:merged itself needs no backfill (the normal write path already credited it)", async () => {
+  const shared = ledgerPath();
+  appendLedger(shared, {
+    run_id: "W1-T1-1",
+    task_id: "W1-T1",
+    step: "verdict",
+    verdict: "merged",
+    pr_url: "https://github.com/o/r/pull/255",
+  });
+
+  const summary = await runCreditBackfill([creditCandidate()], { ledgerPath: shared, runId: "SWEEP-1" });
+
+  assert.equal(summary.corrected, 0);
+  assert.equal(summary.results[0].alreadyCredited, true);
+});
+
+test("credit backfill: two candidates for the SAME task within one pass credit exactly once (same-pass dedup)", async () => {
+  const shared = ledgerPath();
+  appendLedger(shared, { run_id: "W1-T1-1", task_id: "W1-T1", step: "verdict", verdict: "blocked_ci" });
+
+  const summary = await runCreditBackfill([creditCandidate(), creditCandidate()], { ledgerPath: shared, runId: "SWEEP-1" });
+
+  assert.equal(summary.corrected, 1, "the second candidate for the same task sees the first's just-written credit");
+  const lines = readLedgerLines(shared);
+  assert.equal(lines.filter((l) => l.step === "verdict.merged" && l.task_id === "W1-T1").length, 1);
+});
+
+test("credit backfill: dry-run derives outcomes but writes NO ledger line (a later real pass still corrects)", async () => {
+  const shared = ledgerPath();
+  appendLedger(shared, { run_id: "W1-T1-1", task_id: "W1-T1", step: "verdict", verdict: "blocked_ci" });
+
+  const preview = await runCreditBackfill([creditCandidate()], { ledgerPath: shared, runId: "SWEEP-1", dryRun: true });
+  assert.equal(preview.results[0].corrected, false, "dry-run never acts");
+
+  const lines = readLedgerLines(shared);
+  assert.equal(lines.filter((l) => l.step === "verdict.merged").length, 0, "dry-run leaves no ledger trace");
+
+  const real = await runCreditBackfill([creditCandidate()], { ledgerPath: shared, runId: "SWEEP-2" });
+  assert.equal(real.corrected, 1, "a later real pass still corrects — dry-run took no effect");
+});
+
+test("credit backfill: distinct tasks each get their own independent correction", async () => {
+  const shared = ledgerPath();
+  appendLedger(shared, { run_id: "W1-T1-1", task_id: "W1-T1", step: "verdict", verdict: "blocked_ci" });
+  appendLedger(shared, { run_id: "W1-T2-1", task_id: "W1-T2", step: "verdict", verdict: "no_pr" });
+
+  const summary = await runCreditBackfill(
+    [creditCandidate(), creditCandidate({ taskId: "W1-T2", prNumber: 256, prUrl: "https://github.com/o/r/pull/256" })],
+    { ledgerPath: shared, runId: "SWEEP-1" },
+  );
+
+  assert.equal(summary.total, 2);
+  assert.equal(summary.corrected, 2);
+  const lines = readLedgerLines(shared);
+  assert.equal(lines.filter((l) => l.step === "verdict.merged" && l.task_id === "W1-T1").length, 1);
+  assert.equal(lines.filter((l) => l.step === "verdict.merged" && l.task_id === "W1-T2").length, 1);
 });
