@@ -9,12 +9,15 @@ import type { UsageSnapshot } from "../src/lib/headroom.js";
 import {
   applyCuratedSelection,
   buildDrainPreview,
+  buildRundown,
   nextRunnable,
   plannedSequence,
+  renderRundown,
   renderSummary,
   resumeCommand,
   runDrain,
   type CuratedSelection,
+  type DrainSummary,
   type MergedSet,
   type OpenPrCheck,
 } from "../src/lib/drain.js";
@@ -545,6 +548,73 @@ test("applyCuratedSelection: truncates to depth and caps max to the same bound, 
   assert.deepEqual(opts.curated, ["B", "A"]);
   assert.equal(opts.max, 2);
   assert.equal(opts.until, "C", "unrelated opts fields pass through untouched");
+});
+
+// ── W1-T141: post-drain rundown ─────────────────────────────────────────────
+
+test("buildRundown: classifies every attempted task from a DrainSummary — merged tasks 'merged', the halting task 'blocked' carrying stopDetail when nothing escalated it", () => {
+  const summary: DrainSummary = {
+    attempted: ["A", "B", "C"],
+    merged: ["A", "B"],
+    stopReason: "blocked",
+    stopDetail: "C → blocked_review (https://github.com/o/r/pull/9)",
+    costUsd: 0.9,
+    resumeCommand: "rmd drain",
+  };
+  assert.deepEqual(buildRundown(summary), [
+    { taskId: "A", outcome: "merged" },
+    { taskId: "B", outcome: "merged" },
+    { taskId: "C", outcome: "blocked", detail: "C → blocked_review (https://github.com/o/r/pull/9)" },
+  ]);
+});
+
+test("buildRundown: a halting task with an escalation.issue_opened ledger line classifies 'escalated', carrying the issue ref instead of stopDetail", () => {
+  const summary: DrainSummary = {
+    attempted: ["A", "B"],
+    merged: ["A"],
+    stopReason: "blocked",
+    stopDetail: "B → blocked_review",
+    costUsd: 0.5,
+    resumeCommand: "rmd drain",
+  };
+  const ledgerLines = [{ step: "escalation.issue_opened", task_id: "B", issue_url: "https://github.com/o/r/issues/42", class: "BLOCKED" }];
+  assert.deepEqual(buildRundown(summary, ledgerLines), [
+    { taskId: "A", outcome: "merged" },
+    { taskId: "B", outcome: "escalated", escalation: { issueUrl: "https://github.com/o/r/issues/42", class: "BLOCKED" } },
+  ]);
+});
+
+test("buildRundown: an escalation.issue_opened line naming a DIFFERENT task never mislabels the halting task escalated (falsifier)", () => {
+  const summary: DrainSummary = {
+    attempted: ["A"],
+    merged: [],
+    stopReason: "blocked",
+    stopDetail: "A → blocked_ci",
+    costUsd: 0.1,
+    resumeCommand: "rmd drain",
+  };
+  const ledgerLines = [{ step: "escalation.issue_opened", task_id: "Z", issue_url: "https://x/1", class: "MANUAL" }];
+  assert.deepEqual(buildRundown(summary, ledgerLines), [{ taskId: "A", outcome: "blocked", detail: "A → blocked_ci" }]);
+});
+
+test("buildRundown: nothing attempted -> an empty rundown", () => {
+  const summary: DrainSummary = { attempted: [], merged: [], stopReason: "no_runnable", costUsd: 0, resumeCommand: "rmd drain" };
+  assert.deepEqual(buildRundown(summary), []);
+});
+
+test("renderRundown: one line per task — merged, blocked (with detail), escalated (with the issue ref)", () => {
+  const text = renderRundown([
+    { taskId: "A", outcome: "merged" },
+    { taskId: "B", outcome: "blocked", detail: "B → blocked_review" },
+    { taskId: "C", outcome: "escalated", escalation: { issueUrl: "https://github.com/o/r/issues/7", class: "BLOCKED" } },
+  ]);
+  assert.match(text, /merged {5}: A/);
+  assert.match(text, /blocked {4}: B — B → blocked_review/);
+  assert.match(text, /escalated {2}: C — \[BLOCKED\] https:\/\/github\.com\/o\/r\/issues\/7/);
+});
+
+test("renderRundown: no tasks attempted renders a clear empty state, not a blank block", () => {
+  assert.match(renderRundown([]), /\(no tasks attempted\)/);
 });
 
 test("renderSummary + resumeCommand: 'what happened while away' is reconstructable", () => {

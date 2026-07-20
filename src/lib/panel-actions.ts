@@ -328,6 +328,53 @@ export function buildApproveManualRoute(deps: PanelActionDeps): Route {
   };
 }
 
+// ── POST /v1/drain/feedback ─────────────────────────────────────────────────
+
+/** The one-tap verdict a post-drain rundown line (W1-T141, drain.ts's `buildRundown`) takes — the label the learning limb (W1-T87 success-mining, W1-T88 contradiction-detection) reads. */
+export const DRAIN_FEEDBACK_VERDICTS = ["good", "wrong", "needs-follow-up"] as const;
+export type DrainFeedbackVerdict = (typeof DRAIN_FEEDBACK_VERDICTS)[number];
+
+interface DrainFeedbackInput {
+  taskId: string;
+  verdict: DrainFeedbackVerdict;
+  drainRunId: string;
+}
+
+function validateDrainFeedback(body: unknown): { error: string } | DrainFeedbackInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.taskId !== "string" || !body.taskId.trim()) return { error: "taskId is required" };
+  if (typeof body.drainRunId !== "string" || !body.drainRunId.trim()) return { error: "drainRunId is required" };
+  if (typeof body.verdict !== "string" || !(DRAIN_FEEDBACK_VERDICTS as readonly string[]).includes(body.verdict)) {
+    return { error: `verdict must be one of ${DRAIN_FEEDBACK_VERDICTS.join(", ")}` };
+  }
+  return { taskId: body.taskId, verdict: body.verdict as DrainFeedbackVerdict, drainRunId: body.drainRunId };
+}
+
+/**
+ * POST /v1/drain/feedback — the post-drain rundown's one-tap operator verdict (W1-T141),
+ * write-scoped. Tapping a rundown line's good/wrong/needs-follow-up writes an
+ * `operator_feedback` ledger record `{taskId, verdict, drain_run_id, ts}` via
+ * `appendPanelLedger` — the SAME write path every other panel action funnels through, never a
+ * second ledger writer. This is the labeled human signal the learning limb (W1-T87
+ * success-mining, W1-T88 contradiction-detection) consumes: a judged outcome, not just a merge
+ * count.
+ */
+export function buildDrainFeedbackRoute(deps: PanelActionDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/drain/feedback",
+    scope: "write",
+    handler: jsonAction(validateDrainFeedback, (input, req, res) => {
+      const origin = bearerTokenId(req);
+      ledgerPanelAction(deps, "operator_feedback", input.taskId, origin, {
+        verdict: input.verdict,
+        drain_run_id: input.drainRunId,
+      });
+      sendJson(res, 200, { ok: true, taskId: input.taskId, verdict: input.verdict });
+    }),
+  };
+}
+
 /** Every panel write route, for a caller registering the full set at once (`rmd serve` wiring, later work). */
 export function buildPanelActionRoutes(deps: PanelActionDeps): Route[] {
   return [
@@ -337,6 +384,7 @@ export function buildPanelActionRoutes(deps: PanelActionDeps): Route[] {
     buildQuietHoursRoute(deps),
     buildAnswerQuestionRoute(deps),
     buildApproveManualRoute(deps),
+    buildDrainFeedbackRoute(deps),
   ];
 }
 

@@ -280,6 +280,63 @@ export function renderSummary(s: DrainSummary): string {
   ].join("\n");
 }
 
+/** One classified outcome line in the post-drain rundown (W1-T141). */
+export interface RundownLine {
+  taskId: string;
+  outcome: "merged" | "blocked" | "escalated";
+  /** {@link DrainSummary.stopDetail} — set only when `outcome` is `"blocked"`. */
+  detail?: string;
+  /** The needs-human issue this task's block opened (escalate.ts) — set only when `outcome` is `"escalated"`. */
+  escalation?: { issueUrl: string; class: string };
+}
+
+/**
+ * Build the post-drain rundown (W1-T141): one classified outcome line per `summary.attempted`
+ * task, in attempt order — the pull-view counterpart to `digest.ts`'s push summary, read right
+ * after a drain finishes rather than batched into the next daily send.
+ *
+ * `runDrain` STOPS ON THE FIRST non-merged verdict (this module's own header), so every
+ * `attempted` id except possibly the LAST is necessarily in `summary.merged` — classified
+ * `"merged"`. The last id, when not merged, classifies `"escalated"` when the ledger already
+ * carries an `escalation.issue_opened` line naming it (escalate.ts — e.g. the BLOCKED class
+ * opened after two-strikes-exhausted, during the SAME `runOne` call that produced the
+ * non-merged verdict), carrying that issue's URL + class as its ref; otherwise it classifies
+ * `"blocked"`, carrying `summary.stopDetail` as its detail. Escalation lookup is task-id-keyed,
+ * latest-wins — the SAME dedup key `ops.ts`'s alert-escalation guard and `digest.ts`'s
+ * summarizer already use, never a second convention. `ledgerLines` defaults to none, so a
+ * caller with no ledger handy still gets a correct merged/blocked split, just never
+ * `"escalated"` (degrades to the coarser truth, same as `digest.ts`'s own escalations list
+ * when nothing is passed).
+ */
+export function buildRundown(summary: DrainSummary, ledgerLines: ReadonlyArray<Record<string, unknown>> = []): RundownLine[] {
+  const merged = new Set(summary.merged);
+  const escalationByTask = new Map<string, { issueUrl: string; class: string }>();
+  for (const l of ledgerLines) {
+    if (l.step === "escalation.issue_opened" && typeof l.task_id === "string" && typeof l.issue_url === "string") {
+      escalationByTask.set(l.task_id, { issueUrl: l.issue_url, class: String(l.class ?? "?") });
+    }
+  }
+  return summary.attempted.map((taskId): RundownLine => {
+    if (merged.has(taskId)) return { taskId, outcome: "merged" };
+    const escalation = escalationByTask.get(taskId);
+    if (escalation) return { taskId, outcome: "escalated", escalation };
+    return { taskId, outcome: "blocked", detail: summary.stopDetail };
+  });
+}
+
+/** Render a {@link RundownLine} array — "what happened, per task", one line each. */
+export function renderRundown(lines: RundownLine[]): string {
+  const body =
+    lines.length === 0
+      ? ["(no tasks attempted)"]
+      : lines.map((l) => {
+          if (l.outcome === "merged") return `merged     : ${l.taskId}`;
+          if (l.outcome === "escalated") return `escalated  : ${l.taskId} — [${l.escalation!.class}] ${l.escalation!.issueUrl}`;
+          return `blocked    : ${l.taskId}${l.detail ? ` — ${l.detail}` : ""}`;
+        });
+  return ["── post-drain rundown ────────────────────────────────────", ...body, "──────────────────────────────────────────────────────────"].join("\n");
+}
+
 /** Injectable dependencies — the real command wires GitHub/run-task/usage defaults. */
 export interface DrainDeps {
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */

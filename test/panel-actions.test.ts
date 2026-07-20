@@ -10,10 +10,12 @@ import {
   bearerTokenId,
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
+  buildDrainFeedbackRoute,
   buildPauseRoute,
   buildQuietHoursRoute,
   buildResumeRoute,
   buildStopRoute,
+  DRAIN_FEEDBACK_VERDICTS,
   type IssueCloser,
   type PanelActionDeps,
 } from "../src/lib/panel-actions.js";
@@ -81,6 +83,7 @@ async function withService<T>(deps: PanelActionDeps, fn: (baseUrl: string) => Pr
       buildQuietHoursRoute(deps),
       buildAnswerQuestionRoute(deps),
       buildApproveManualRoute(deps),
+      buildDrainFeedbackRoute(deps),
     ],
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -415,6 +418,92 @@ test("POST /v1/manual/approve: missing issueUrl -> 400, issues.close never calle
     assert.equal(res.status, 400);
   });
   assert.deepEqual(issues.closed, []);
+});
+
+// ── POST /v1/drain/feedback (W1-T141: post-drain rundown + feedback hook) ─────────────────
+//
+// Acceptance (plan/tasks.yaml):
+//   "each outcome line's one-tap verdict (good | wrong | needs-follow-up) writes an
+//   operator_feedback ledger record" -- proven by POSTing /v1/drain/feedback and reading the
+//   resulting ledger line back; "an invalid verdict value is rejected (400)" -- proven below.
+//   "the operator_feedback record is in the shape the learning limb (W1-T87/88) consumes"
+//   {taskId, verdict, ts, drain ref} -- asserted field-by-field on the ledger entry.
+
+test("POST /v1/drain/feedback: writes an operator_feedback ledger record {taskId, verdict, drain_run_id, ts, origin}, readable back from the ledger", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root);
+
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/drain/feedback", WRITE_TOKEN, {
+      taskId: "W1-T100",
+      verdict: "wrong",
+      drainRunId: "DRAIN-1730000000000",
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true, taskId: "W1-T100", verdict: "wrong" });
+  });
+
+  const lines = readLedgerLines(deps.ledgerPath);
+  assert.equal(lines.length, 1);
+  const entry = lines[0];
+  assert.equal(entry.step, "operator_feedback");
+  assert.equal(entry.task_id, "W1-T100");
+  assert.equal(entry.verdict, "wrong");
+  assert.equal(entry.drain_run_id, "DRAIN-1730000000000");
+  assert.equal(entry.origin, bearerTokenId({ headers: { authorization: `Bearer ${WRITE_TOKEN}` } } as any));
+  assert.ok(typeof entry.ts === "string" && entry.ts.length > 0);
+});
+
+test("POST /v1/drain/feedback: every verdict in the closed set (good | wrong | needs-follow-up) is accepted", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root);
+  await withService(deps, async (base) => {
+    for (const verdict of DRAIN_FEEDBACK_VERDICTS) {
+      const res = await post(base, "/v1/drain/feedback", WRITE_TOKEN, { taskId: "T", verdict, drainRunId: "DRAIN-1" });
+      assert.equal(res.status, 200, `verdict ${verdict} should be accepted`);
+    }
+  });
+  assert.equal(readLedgerLines(deps.ledgerPath).length, DRAIN_FEEDBACK_VERDICTS.length);
+});
+
+test("POST /v1/drain/feedback: an invalid verdict value is rejected (400), no ledger line (the falsifier)", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root);
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/drain/feedback", WRITE_TOKEN, { taskId: "T", verdict: "meh", drainRunId: "DRAIN-1" });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error: string };
+    assert.equal(body.error, "invalid_request");
+  });
+  assert.equal(readLedgerLines(deps.ledgerPath).length, 0);
+});
+
+test("POST /v1/drain/feedback: missing taskId -> 400, no side effect", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root);
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/drain/feedback", WRITE_TOKEN, { verdict: "good", drainRunId: "DRAIN-1" });
+    assert.equal(res.status, 400);
+  });
+  assert.equal(readLedgerLines(deps.ledgerPath).length, 0);
+});
+
+test("POST /v1/drain/feedback: missing drainRunId -> 400, no side effect", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root);
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/drain/feedback", WRITE_TOKEN, { taskId: "T", verdict: "good" });
+    assert.equal(res.status, 400);
+  });
+  assert.equal(readLedgerLines(deps.ledgerPath).length, 0);
+});
+
+test("POST /v1/drain/feedback: write-scoped -- a read-only token gets 403", async () => {
+  const root = tmpRoot();
+  await withService(depsFor(root), async (base) => {
+    const res = await post(base, "/v1/drain/feedback", READ_TOKEN, { taskId: "T", verdict: "good", drainRunId: "DRAIN-1" });
+    assert.equal(res.status, 403);
+  });
 });
 
 // ── INTEGRATION: "STOP from the panel halts the fleet within one tick" (acceptance 2) ──────
