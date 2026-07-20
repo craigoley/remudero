@@ -161,6 +161,35 @@ test("captureFeedback accepts an explicit id (machine-origin idempotent-dedup ke
   assert.ok(existsSync(feedbackEntryPath(r, "fb-issue-acme-widgets-7")));
 });
 
+// ── W1-T56: machine-origin `alert#<source>-<id>` widening ───────────────────
+
+test("isValidFeedbackOrigin accepts well-formed alert#<source>-<id>, rejects malformed/unknown-source shapes", () => {
+  assert.equal(isValidFeedbackOrigin("alert#code-scanning-5"), true);
+  assert.equal(isValidFeedbackOrigin("alert#dependabot-12"), true);
+  assert.equal(isValidFeedbackOrigin("alert#secret-scanning-3"), true);
+  assert.equal(isValidFeedbackOrigin("alert#5"), false, "bare alert#<n> (no source) is not the W1-T56 shape");
+  assert.equal(isValidFeedbackOrigin("alert#"), false);
+  assert.equal(isValidFeedbackOrigin("alert#carrier-pigeon-1"), false, "unknown alert source is rejected");
+});
+
+test("captureFeedback accepts a machine-origin alert#<source>-<id> origin", () => {
+  const r = root();
+  const entry = captureFeedback(r, { raw: "craigoley/remudero code-scanning alert #5 [critical]: SQL injection", origin: "alert#code-scanning-5" });
+  assert.equal(entry.origin, "alert#code-scanning-5");
+  assert.equal(readFeedbackEntry(r, entry.id).origin, "alert#code-scanning-5");
+});
+
+test("captureFeedback with an explicit alert-derived id round-trips (idempotent-dedup key)", () => {
+  const r = root();
+  const entry = captureFeedback(r, {
+    raw: "x",
+    origin: "alert#secret-scanning-3",
+    id: "fb-alert-craigoley-remudero-secret-scanning-3",
+  });
+  assert.equal(entry.id, "fb-alert-craigoley-remudero-secret-scanning-3");
+  assert.ok(existsSync(feedbackEntryPath(r, "fb-alert-craigoley-remudero-secret-scanning-3")));
+});
+
 // ── read / list / lifecycle ───────────────────────────────────────────────────
 
 test("readFeedbackEntry round-trips what captureFeedback wrote", () => {
