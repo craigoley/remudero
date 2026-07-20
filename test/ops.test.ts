@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  alertFeedbackId,
+  alertOriginId,
   alertTaskId,
   buildAlertEscalation,
   newCriticalAlerts,
@@ -12,16 +14,22 @@ import {
   normalizeSecretScanningAlert,
   pollAlerts,
   priorEscalatedAlertIds,
+  renderAlertRaw,
   renderAlertsSummary,
   summarizeAlerts,
   type AlertGateway,
   type RawAlert,
 } from "../src/lib/ops.js";
 import { summarize as summarizeDigest, renderDigest } from "../src/lib/digest.js";
+import { feedbackEntryPath, listFeedback } from "../src/lib/feedback.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 
+function tmpRoot(prefix: string): string {
+  return mkdtempSync(join(tmpdir(), prefix));
+}
+
 function ledgerPath(): string {
-  return join(mkdtempSync(join(tmpdir(), "rmd-ops-")), "ledger.ndjson");
+  return join(tmpRoot("rmd-ops-"), "ledger.ndjson");
 }
 
 function fakeIssues(): IssueGateway & { calls: Array<{ title: string; body: string; labels: string[] }> } {
@@ -214,6 +222,7 @@ test("pollAlerts escalates exactly one issue per new critical/high alert, and a 
     issues,
     ledgerPath: path,
     runId: "OPS-1",
+    root: tmpRoot("rmd-ops-root-"),
     now: () => NOW,
   };
 
@@ -241,31 +250,37 @@ test("pollAlerts escalates exactly one issue per new critical/high alert, and a 
   assert.equal(opened.length, 3, "exactly one escalation.issue_opened line per new critical, never duplicated");
 });
 
-test("pollAlerts --dry-run previews newCritical but escalates nothing and writes no ledger line", async () => {
+test("pollAlerts --dry-run previews newCritical but escalates nothing, captures no feedback, and writes no ledger line", async () => {
   const path = ledgerPath();
   const issues = fakeIssues();
+  const root = tmpRoot("rmd-ops-root-");
   const result = await pollAlerts("craigoley", "remudero", {
     alerts: seededGateway(),
     issues,
     ledgerPath: path,
     runId: "OPS-DRY",
+    root,
     now: () => NOW,
     dryRun: true,
   });
   assert.equal(result.newCritical.length, 3);
   assert.equal(result.escalated.length, 0);
+  assert.equal(result.feedbackCreated.length, 0);
   assert.equal(issues.calls.length, 0);
+  assert.deepEqual(listFeedback(root), [], "a dry-run poll must capture no feedback entries");
   assert.equal(existsSync(path), false, "a dry-run poll must leave no ledger trace (not even an empty file) — a real poll afterward still acts");
 
-  // A REAL poll after the dry-run still escalates normally (no phantom dedup entry).
+  // A REAL poll after the dry-run still escalates + captures normally (no phantom dedup entry).
   const real = await pollAlerts("craigoley", "remudero", {
     alerts: seededGateway(),
     issues,
     ledgerPath: path,
     runId: "OPS-REAL",
+    root,
     now: () => NOW,
   });
   assert.equal(real.escalated.length, 3);
+  assert.equal(real.feedbackCreated.length, 4, "one feedback entry per OPEN alert, any severity (#13 fixed excluded)");
 });
 
 // ── digest.ts integration: the ops.alerts_polled ledger line surfaces in the digest ──
@@ -278,6 +293,7 @@ test("digest.summarize picks up the latest ops.alerts_polled snapshot inside its
     issues,
     ledgerPath: path,
     runId: "OPS-1",
+    root: tmpRoot("rmd-ops-root-"),
     now: () => NOW,
   });
   const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
@@ -287,6 +303,86 @@ test("digest.summarize picks up the latest ops.alerts_polled snapshot inside its
   const text = renderDigest(s);
   assert.match(text, /alerts: code-scanning 1 critical/);
   assert.match(text, /alerts: .*secret-scanning 1 critical/);
+});
+
+// ── alertOriginId / alertFeedbackId / renderAlertRaw ────────────────────────
+
+test("alertOriginId is '<source>-<id>', the alert# origin payload", () => {
+  const alert = normalizeCodeScanningAlert(CODE_SCANNING_RAW[0]);
+  assert.equal(alertOriginId(alert), "code-scanning-5");
+});
+
+test("alertFeedbackId is deterministic and slugs owner/repo into a safe filename", () => {
+  const alert = normalizeCodeScanningAlert(CODE_SCANNING_RAW[0]);
+  assert.equal(alertFeedbackId("craigoley", "remudero", alert), "fb-alert-craigoley-remudero-code-scanning-5");
+  assert.equal(
+    alertFeedbackId("Acme-Corp", "My.Repo", { source: "dependabot", id: "1" }),
+    "fb-alert-acme-corp-my-repo-dependabot-1",
+  );
+});
+
+test("renderAlertRaw names source/id/severity/summary and carries the alert url", () => {
+  const alert = normalizeCodeScanningAlert(CODE_SCANNING_RAW[0]);
+  const raw = renderAlertRaw("craigoley", "remudero", alert);
+  assert.match(raw, /craigoley\/remudero code-scanning alert #5 \[critical\]: SQL injection/);
+  assert.match(raw, /^https:\/\/github\.com\/craigoley\/remudero\/security\/code-scanning\/5$/m);
+});
+
+// ── pollAlerts feedback capture: the W1-T56 acceptance shape ───────────────
+// "a seeded alert becomes a plan/feedback artifact with origin: alert#<id> and
+// rmd triage proposes a corrective task citing that alert id."
+
+test("pollAlerts captures a plan/feedback entry (origin: alert#<source>-<id>) for EVERY open alert, any severity, not just critical/high", async () => {
+  const root = tmpRoot("rmd-ops-root-");
+  const path = ledgerPath();
+  const issues = fakeIssues();
+  const result = await pollAlerts("craigoley", "remudero", {
+    alerts: seededGateway(),
+    issues,
+    ledgerPath: path,
+    runId: "OPS-1",
+    root,
+    now: () => NOW,
+  });
+
+  // 4 open alerts total: code-scanning #5 (critical), #6 (low); dependabot #12 (high); secret-scanning #3.
+  // #13 (dependabot, fixed) must NOT get a feedback entry.
+  assert.equal(result.feedbackCreated.length, 4);
+  const entries = listFeedback(root);
+  assert.equal(entries.length, 4);
+  const byOrigin = Object.fromEntries(entries.map((e) => [e.origin, e]));
+  assert.ok(byOrigin["alert#code-scanning-5"]);
+  assert.ok(byOrigin["alert#code-scanning-6"], "LOW severity alerts are captured too, not just critical/high");
+  assert.ok(byOrigin["alert#dependabot-12"]);
+  assert.ok(byOrigin["alert#secret-scanning-3"]);
+  assert.equal(byOrigin["alert#code-scanning-6"].status, "new");
+  assert.match(byOrigin["alert#dependabot-12"].raw, /craigoley\/remudero dependabot alert #12 \[high\]/);
+
+  assert.ok(existsSync(feedbackEntryPath(root, "fb-alert-craigoley-remudero-code-scanning-5")));
+  assert.ok(existsSync(feedbackEntryPath(root, "fb-alert-craigoley-remudero-secret-scanning-3")));
+
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const polled = lines.filter((l) => l.step === "ops.alerts_polled");
+  assert.equal(polled[0].feedback_created, 4);
+});
+
+test("pollAlerts re-poll of the SAME open alerts captures NOTHING new (id-keyed dedup)", async () => {
+  const root = tmpRoot("rmd-ops-root-");
+  const path = ledgerPath();
+  const issues = fakeIssues();
+  const deps = { alerts: seededGateway(), issues, ledgerPath: path, root, now: () => NOW };
+
+  const first = await pollAlerts("craigoley", "remudero", { ...deps, runId: "OPS-1" });
+  assert.equal(first.feedbackCreated.length, 4);
+
+  const second = await pollAlerts("craigoley", "remudero", { ...deps, runId: "OPS-2" });
+  assert.equal(second.feedbackCreated.length, 0, "re-poll must capture ZERO new feedback entries");
+  assert.equal(listFeedback(root).length, 4, "no duplicate entries on disk");
+
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const polled = lines.filter((l) => l.step === "ops.alerts_polled");
+  assert.equal(polled[0].feedback_created, 4);
+  assert.equal(polled[1].feedback_created, 0);
 });
 
 test("digest renders '(no poll this window)' when rmd ops never ran inside the window", () => {

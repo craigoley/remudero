@@ -4555,13 +4555,16 @@ async function digestCommand(rest: string[]): Promise<number> {
 }
 
 /**
- * `rmd ops [--dry-run]` — alert intake v0 (W1-T55, MASTER-PLAN §5D lane 2): poll
- * code-scanning/Dependabot/secret-scanning alerts for THIS repo via `gh api`
- * (lib/ops.ts), fold OPEN counts+ages into the next `rmd digest`, and escalate
- * every NEW critical/high alert exactly once via the SHIPPED escalate() path.
- * Dedup is ledger-keyed (escalation.issue_opened task ids) — a re-poll of the
- * SAME open alerts escalates nothing new. --dry-run previews the counts + which
- * alerts WOULD escalate; it opens no issues and writes no ledger line.
+ * `rmd ops [--dry-run]` — alert intake v0+v1 (W1-T55/W1-T56, MASTER-PLAN §5D lane 2, §7B): poll
+ * code-scanning/Dependabot/secret-scanning alerts for THIS repo via `gh api` (lib/ops.ts), fold
+ * OPEN counts+ages into the next `rmd digest`, escalate every NEW critical/high alert exactly
+ * once via the SHIPPED escalate() path, and capture a `plan/feedback/<id>.yaml` entry (origin:
+ * `alert#<source>-<id>`) for every open alert not already captured, ANY severity, for `rmd
+ * triage` (W1-T41) to ground and propose a corrective task from. Escalation dedup is
+ * ledger-keyed (escalation.issue_opened task ids); feedback-capture dedup is id-keyed (a
+ * deterministic `fb-alert-<owner>-<repo>-<source>-<id>` id) — a re-poll of the SAME open alerts
+ * escalates and captures nothing new. --dry-run previews the counts + which alerts WOULD
+ * escalate; it opens no issues, captures no feedback, and writes no ledger line.
  */
 async function opsCommand(rest: string[]): Promise<number> {
   const badArg = unknownArgError("ops", rest, [], ["--dry-run"]);
@@ -4579,6 +4582,7 @@ async function opsCommand(rest: string[]): Promise<number> {
     issues: ghIssueGateway(owner, repo),
     ledgerPath,
     runId,
+    root: repoRoot,
     dryRun,
   });
   console.log(`### rmd ops${dryRun ? " --dry-run" : ""} — ${owner}/${repo}\nalerts: ${renderAlertsSummary(result.summary)}`);
@@ -4595,6 +4599,14 @@ async function opsCommand(rest: string[]): Promise<number> {
     for (const e of result.escalated) console.log(`  ${e.alert.source}#${e.alert.id} [${e.alert.severity}] -> ${e.issueUrl}`);
   } else {
     console.log("no new critical/high alerts to escalate");
+  }
+  if (!dryRun) {
+    if (result.feedbackCreated.length > 0) {
+      console.log(`captured ${result.feedbackCreated.length} new feedback entr${result.feedbackCreated.length === 1 ? "y" : "ies"}:`);
+      for (const e of result.feedbackCreated) console.log(`  ${e.origin} -> plan/feedback/${e.id}.yaml`);
+    } else {
+      console.log("no new alerts to capture as feedback");
+    }
   }
   return 0;
 }
@@ -5028,7 +5040,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "ops",
     usage:
-      "rmd ops [--dry-run]   # alert intake v0 (W1-T55, §5D lane 2): poll code-scanning/Dependabot/secret-scanning alerts for this repo via gh api, fold open counts+ages into the next digest, escalate every NEW critical/high alert exactly once (needs-human, ledger-deduped so a re-poll never double-escalates); --dry-run previews, opens no issues",
+      "rmd ops [--dry-run]   # alert intake v0+v1 (W1-T55/W1-T56, §5D lane 2, §7B): poll code-scanning/Dependabot/secret-scanning alerts for this repo via gh api, fold open counts+ages into the next digest, escalate every NEW critical/high alert exactly once (needs-human, ledger-deduped so a re-poll never double-escalates), and capture a plan/feedback/<id>.yaml entry (origin: alert#<source>-<id>) for every open alert not already captured, any severity, for rmd triage to ground; id-deduped so a re-poll never double-creates; --dry-run previews, opens no issues, creates no feedback",
   },
   {
     name: "issues",

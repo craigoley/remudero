@@ -1,10 +1,12 @@
+import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { appendLedger } from "./ledger.js";
 import { escalate, type Escalation, type IssueGateway } from "./escalate.js";
 import { readLedgerLines } from "./status.js";
+import { captureFeedback, feedbackEntryPath, type FeedbackEntry } from "./feedback.js";
 
 /**
- * Alert intake v0 (W1-T55, MASTER-PLAN §5D lane 2).
+ * Alert intake v0+v1 (W1-T55 / W1-T56, MASTER-PLAN §5D lane 2, §7B).
  *
  * "Provisioning scanners (W1-T23) is one-time; RESPONDING to their alerts is
  * continuous and did not exist." This module is the response loop's read side:
@@ -16,19 +18,32 @@ import { readLedgerLines } from "./status.js";
  * ONE `needs-human` escalation (the SHIPPED escalate() path, lib/escalate.ts)
  * per alert that is BOTH new (never escalated before) AND critical/high.
  *
+ * v1 (W1-T56, §7B): "an alert is MACHINE-ORIGIN FEEDBACK — it flows through
+ * the §7B inbox, not a parallel loop." SURFACING (v0) becomes ACTING — the
+ * SAME poll that already fetches every open alert now ALSO writes a
+ * `plan/feedback/<id>.yaml` entry (origin: `alert#<source>-<id>`, ANY
+ * severity, not just critical/high) for each open alert not already
+ * captured, so `rmd triage` (W1-T41) can ground it and propose a corrective
+ * task citing the alert id. One fetch, one dedup key ({@link alertTaskId}),
+ * two effects (escalate the criticals, capture everything) — deliberately
+ * NOT a second poller re-hitting the same three `gh api` endpoints.
+ *
  * SCOPE FENCE (P20, MASTER-PLAN.md:466 — "the alert loop reviews and triages
- * but never fixes without a human per alert"): this module only reads GitHub
- * and opens issues. It never dismisses an alert, never opens a fix PR, and
- * never edits the repo. Consuming these escalations into a corrective task
- * (rmd triage) is W1-T56; auto-fixing under a ratified policy is W1-T90 —
- * both explicitly out of scope here.
+ * but never fixes without a human per alert"): this module only reads GitHub,
+ * opens issues, and writes `plan/feedback/` entries. It never dismisses an
+ * alert, never opens a fix PR itself, and never edits the repo. Turning a
+ * feedback entry into a corrective task is `rmd triage` (W1-T41, already
+ * shipped and origin-agnostic); auto-fixing under a ratified policy is
+ * W1-T90 — both explicitly out of scope here.
  *
  * DEDUP (mirrors sweep.ts's ledger-keyed idempotence, W1-T77): a re-poll of
- * the SAME open alerts must escalate NOTHING new. Rather than inventing a
- * second dedup store, this reuses the ledger escalate() ALREADY writes — every
+ * the SAME open alerts must escalate NOTHING new AND capture NOTHING new.
+ * Escalation dedup reuses the ledger escalate() ALREADY writes — every
  * escalation.issue_opened line's task_id IS the alert's dedup key
- * ({@link alertTaskId}) — so a prior poll's escalation is directly visible to
- * the next one with no extra ledger step.
+ * ({@link alertTaskId}). Feedback-capture dedup mirrors issues-intake.ts's
+ * discipline instead: each alert's feedback id is DETERMINISTIC
+ * ({@link alertFeedbackId}), so `existsSync` on that one path IS the dedup
+ * check — no second store, no ledger read needed for this half.
  *
  * All GitHub reads go through `gh api` (never Octokit, matching every other
  * gateway in this repo — status.ts, trace.ts, escalate.ts) and are FAIL-SOFT:
@@ -63,6 +78,31 @@ export interface RawAlert {
 /** `${source}-${id}` — the escalation taskId AND the dedup key ({@link alertTaskId}). */
 export function alertTaskId(alert: Pick<RawAlert, "source" | "id">): string {
   return `alert-${alert.source}-${alert.id}`;
+}
+
+/** `${source}-${id}` — the `alert#<...>` feedback origin's payload (W1-T56). */
+export function alertOriginId(alert: Pick<RawAlert, "source" | "id">): string {
+  return `${alert.source}-${alert.id}`;
+}
+
+/**
+ * `fb-alert-<owner>-<repo>-<source>-<id>` — the feedback entry's id AND the dedup key
+ * (mirrors issues-intake.ts's `issueFeedbackId`). Owner/repo are slugged (lowercased,
+ * non-alnum collapsed to `-`) so the id is a safe filename regardless of what characters
+ * GitHub allows in an org/repo name; source+id are already filename-safe.
+ */
+export function alertFeedbackId(owner: string, repo: string, alert: Pick<RawAlert, "source" | "id">): string {
+  const slug = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+  return `fb-alert-${slug(owner)}-${slug(repo)}-${alertOriginId(alert)}`;
+}
+
+/** One `plan/feedback/<id>.yaml` `raw` body per alert (mirrors issues-intake.ts's `renderIssueRaw`). */
+export function renderAlertRaw(owner: string, repo: string, alert: RawAlert): string {
+  return `${owner}/${repo} ${alert.source} alert #${alert.id} [${alert.severity}]: ${alert.summary}\n\n${alert.url}`.trim();
 }
 
 // ── Normalizers: GitHub's three alert-list response shapes → RawAlert ──────
@@ -348,10 +388,12 @@ export interface OpsPollDeps {
   issues: IssueGateway;
   ledgerPath: string;
   runId: string;
+  /** Repo root `plan/feedback/` is written under — the harness's OWN checked-out repo (W1-T56). */
+  root: string;
   /** Injectable ledger reader (dedup source); defaults to readLedgerLines. */
   readLedger?: (path: string) => Array<Record<string, unknown>>;
   now?: () => number;
-  /** Preview only: fetch + summarize, escalate/ledger NOTHING. Mirrors sweep.ts's --dry-run. */
+  /** Preview only: fetch + summarize, escalate/capture/ledger NOTHING. Mirrors sweep.ts's --dry-run. */
   dryRun?: boolean;
 }
 
@@ -361,16 +403,23 @@ export interface OpsPollResult {
   newCritical: RawAlert[];
   /** Alerts actually escalated this poll — always `[]` under --dry-run (no effects, no ledger line). */
   escalated: Array<{ alert: RawAlert; issueUrl: string }>;
+  /**
+   * `plan/feedback/` entries created this poll (origin: `alert#<source>-<id>`), ONE per open
+   * alert not already captured, ANY severity — W1-T56. Always `[]` under --dry-run.
+   */
+  feedbackCreated: FeedbackEntry[];
 }
 
 /**
- * Fetch all three alert sources for `owner/repo`, fold them into the digest
- * block, and escalate every NEW critical/high alert exactly once. Ledgers ONE
- * `ops.alerts_polled` line (digest.ts reads the latest such line inside its
- * window) carrying the full {@link AlertsPollSummary} — skipped under
- * `dryRun`, matching sweep.ts's "a preview must leave no trace" discipline
- * (a real poll afterward must still act, and must not see a phantom dedup
- * entry from a preview that never actually escalated).
+ * Fetch all three alert sources for `owner/repo`, fold them into the digest block, escalate
+ * every NEW critical/high alert exactly once (v0, W1-T55), and capture a `plan/feedback/` entry
+ * (origin: `alert#<source>-<id>`) for every open alert not already captured, ANY severity (v1,
+ * W1-T56) — one `rmd triage` inbox for the whole alert stream, not just the escalated slice.
+ * Ledgers ONE `ops.alerts_polled` line (digest.ts reads the latest such line inside its window)
+ * carrying the full {@link AlertsPollSummary} plus counts of both effects — skipped under
+ * `dryRun`, matching sweep.ts's "a preview must leave no trace" discipline (a real poll
+ * afterward must still act, and must not see a phantom dedup entry from a preview that never
+ * actually escalated/captured).
  */
 export async function pollAlerts(owner: string, repo: string, deps: OpsPollDeps): Promise<OpsPollResult> {
   const readLedger = deps.readLedger ?? readLedgerLines;
@@ -387,6 +436,7 @@ export async function pollAlerts(owner: string, repo: string, deps: OpsPollDeps)
   const newCritical = newCriticalAlerts(open, prior);
 
   const escalated: Array<{ alert: RawAlert; issueUrl: string }> = [];
+  const feedbackCreated: FeedbackEntry[] = [];
   if (!deps.dryRun) {
     for (const alert of newCritical) {
       const issueUrl = escalate(buildAlertEscalation(alert), {
@@ -396,6 +446,17 @@ export async function pollAlerts(owner: string, repo: string, deps: OpsPollDeps)
       });
       escalated.push({ alert, issueUrl });
     }
+    for (const alert of open) {
+      const id = alertFeedbackId(owner, repo, alert);
+      if (existsSync(feedbackEntryPath(deps.root, id))) continue;
+      feedbackCreated.push(
+        captureFeedback(deps.root, {
+          id,
+          raw: renderAlertRaw(owner, repo, alert),
+          origin: `alert#${alertOriginId(alert)}`,
+        }),
+      );
+    }
     appendLedger(deps.ledgerPath, {
       run_id: deps.runId,
       task_id: "OPS",
@@ -404,8 +465,9 @@ export async function pollAlerts(owner: string, repo: string, deps: OpsPollDeps)
       repo,
       alerts: summary,
       new_critical_count: newCritical.length,
+      feedback_created: feedbackCreated.length,
     });
   }
 
-  return { summary, newCritical, escalated };
+  return { summary, newCritical, escalated, feedbackCreated };
 }
