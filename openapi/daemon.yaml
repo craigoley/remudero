@@ -17,9 +17,14 @@ info:
     W3-T2 (MASTER-PLAN §7, WS-5a -- the read-only live board) adds the first
     two: GET /v1/status (task/ledger-state snapshot) and GET /v1/status/stream
     (its SSE live-update companion), built on that same mechanism via
-    src/lib/board.ts. Every route the daemon's OTHER surfaces need (fleet
-    control, question/answer, plan editing, ...) is registered by later tasks
-    the same way -- this document is additive, never rewritten wholesale.
+    src/lib/board.ts.
+
+    W3-T5 (MASTER-PLAN §7 -- human-in-the-loop panel actions) adds the first
+    write routes: POST /v1/control/{pause,resume,stop}, POST /v1/quiet-hours,
+    POST /v1/questions/answer, and POST /v1/manual/approve, all write-scoped
+    and built via src/lib/panel-actions.ts. Every route the daemon's OTHER
+    surfaces still need (plan editing, ...) is registered by later tasks the
+    same way -- this document is additive, never rewritten wholesale.
 
 servers:
   - url: "https://{tailnetHost}"
@@ -58,12 +63,16 @@ components:
           description: >
             `unauthorized` (401, no/unrecognized bearer token), `forbidden`
             (403, recognized token missing the required scope), `not_found`
-            (404, no route registered for this method + path), or
+            (404, no route registered for this method + path),
+            `invalid_request` (400, a write route's JSON body failed
+            validation -- W3-T5's panel-action routes fail loud BEFORE any
+            side effect, src/lib/panel-actions.ts's `jsonAction`), or
             `internal_error` (500, the route handler threw).
           enum:
             - unauthorized
             - forbidden
             - not_found
+            - invalid_request
             - internal_error
         required_scope:
           type: string
@@ -150,6 +159,133 @@ components:
           items:
             $ref: "#/components/schemas/StatusProjection"
 
+    # ── W3-T5 (MASTER-PLAN §7, human-in-the-loop panel actions) -- request/result shapes for
+    # the six write routes src/lib/panel-actions.ts registers. Every one is write-scoped and
+    # ledgered with the caller's bearer as `origin` (src/lib/panel-actions.ts's `bearerTokenId`).
+    PauseRequest:
+      type: object
+      description: POST /v1/control/pause's body -- drain-and-hold, an optional human-readable reason.
+      properties:
+        reason:
+          type: string
+
+    PauseResult:
+      type: object
+      required:
+        - paused
+      properties:
+        paused:
+          type: boolean
+        reason:
+          type:
+            - string
+            - "null"
+
+    ResumeResult:
+      type: object
+      description: POST /v1/control/resume's body -- clears BOTH STOP and PAUSE; reports what it cleared.
+      required:
+        - clearedStop
+        - clearedPause
+      properties:
+        clearedStop:
+          type: boolean
+        clearedPause:
+          type: boolean
+
+    StopRequest:
+      type: object
+      description: POST /v1/control/stop's body -- the hard kill, an optional human-readable reason.
+      properties:
+        reason:
+          type: string
+
+    StopResult:
+      type: object
+      required:
+        - stopped
+      properties:
+        stopped:
+          type: boolean
+        reason:
+          type:
+            - string
+            - "null"
+
+    QuietHoursRequest:
+      type: object
+      description: POST /v1/quiet-hours's body -- the toggle's target state.
+      required:
+        - enabled
+      properties:
+        enabled:
+          type: boolean
+
+    QuietHoursResult:
+      type: object
+      required:
+        - quietHours
+      properties:
+        quietHours:
+          type: boolean
+
+    AnswerQuestionRequest:
+      type: object
+      description: >
+        POST /v1/questions/answer's body -- an operator's answer to a QUESTION-contract entry
+        (worker.ts's plan/questions.ndjson), addressed by the task it was raised on (v0 routing
+        has no path params, src/lib/service.ts).
+      required:
+        - taskId
+        - answer
+      properties:
+        taskId:
+          type: string
+        answer:
+          type: string
+
+    AnswerQuestionResult:
+      type: object
+      required:
+        - ok
+        - taskId
+        - answer
+      properties:
+        ok:
+          type: boolean
+        taskId:
+          type: string
+        answer:
+          type: string
+
+    ApproveManualRequest:
+      type: object
+      description: >
+        POST /v1/manual/approve's body -- check off a MANUAL-queue item (MASTER-PLAN §4): closes
+        the named `escalation-manual`-labeled GitHub issue (src/lib/escalate.ts).
+      required:
+        - taskId
+        - issueUrl
+      properties:
+        taskId:
+          type: string
+        issueUrl:
+          type: string
+
+    ApproveManualResult:
+      type: object
+      required:
+        - ok
+        - taskId
+        - issueUrl
+      properties:
+        ok:
+          type: boolean
+        taskId:
+          type: string
+        issueUrl:
+          type: string
+
   responses:
     Unauthorized:
       description: No or unrecognized bearer token.
@@ -165,6 +301,12 @@ components:
             $ref: "#/components/schemas/Error"
     NotFound:
       description: No route registered for this method + path.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InvalidRequest:
+      description: The JSON body failed validation -- no side effect occurred (src/lib/panel-actions.ts's `jsonAction`).
       content:
         application/json:
           schema:
@@ -193,6 +335,190 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/StatusSnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ── W3-T5 (MASTER-PLAN §7, human-in-the-loop panel actions) -- write routes over the SAME
+  # v0 mechanism (src/lib/service.ts), all write-scoped, all built by src/lib/panel-actions.ts.
+  # Depends on W3-T2's board existing (the panel acts on what the board shows). Every write
+  # is ledgered with the caller's bearer as `origin`, never the raw token (see
+  # src/lib/panel-actions.ts's header). Real `rmd serve` CLI wiring is later work, same split
+  # W3-T2's routes below already document.
+  /v1/control/pause:
+    post:
+      summary: Pause the fleet (drain-and-hold) -- no new spawns; an in-flight task still finishes.
+      description: >
+        MASTER-PLAN §4A/§4B: writes the PAUSE flag (src/lib/fleet-control.ts's `requestPause`),
+        checked at the top of every drain tick. Ledgers `panel.pause_requested`.
+      security:
+        - bearerWrite: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PauseRequest"
+      responses:
+        "200":
+          description: PAUSE is now set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PauseResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/control/resume:
+    post:
+      summary: Resume the fleet -- clears BOTH STOP and PAUSE.
+      description: >
+        MASTER-PLAN §4A: the one command that always means go (src/lib/fleet-control.ts's
+        `resumeFleet`). Does NOT touch quiet hours -- a schedule preference, not an emergency
+        hold. Ledgers `panel.resume_requested`. No request body.
+      security:
+        - bearerWrite: []
+      responses:
+        "200":
+          description: STOP and PAUSE are both cleared (whichever were set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResumeResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/control/stop:
+    post:
+      summary: STOP the fleet -- the hard kill, checked first, every tick.
+      description: >
+        MASTER-PLAN §4A/§4B: writes the STOP flag (src/lib/fleet-control.ts's `requestStop`),
+        checked before PAUSE and before picking up any new task. "STOP from the panel halts the
+        fleet within one tick" (W3-T5 acceptance) -- the SAME predicate drain.ts's loop already
+        checks first. Ledgers `panel.stop_requested`.
+      security:
+        - bearerWrite: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StopRequest"
+      responses:
+        "200":
+          description: STOP is now set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StopResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/quiet-hours:
+    post:
+      summary: Toggle quiet hours -- a scheduler preference (default OFF), independent of STOP/PAUSE.
+      description: >
+        MASTER-PLAN §9: "quiet-hours is now an OPTIONAL wizard toggle, default OFF." Flips
+        src/lib/fleet-control.ts's QUIET_HOURS flag; the scheduler that reads it to throttle
+        spawns is later work (this route ships the mechanism, not the consumer -- same split
+        every route on this surface follows). Ledgers `panel.quiet_hours_toggled`.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QuietHoursRequest"
+      responses:
+        "200":
+          description: The resulting quiet-hours state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuietHoursResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/questions/answer:
+    post:
+      summary: Answer a QUESTION-contract entry (MASTER-PLAN §2), attributed to the panel's bearer.
+      description: >
+        "An escalation answered FROM the panel appears in the ledger with the panel's bearer
+        token as origin; the answer flows to the Architect" (W3-T5 acceptance) -- proof is the
+        resulting `panel.question_answered` ledger line (src/lib/panel-actions.ts).
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnswerQuestionRequest"
+      responses:
+        "200":
+          description: The answer was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnswerQuestionResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/manual/approve:
+    post:
+      summary: Approve (check off) a MANUAL-queue item -- closes its GitHub issue.
+      description: >
+        MASTER-PLAN §4: "the MANUAL queue doubles as the human's to-do list -- rendered in the
+        control panel with check-off (= closing the issue)." Closes the named
+        `escalation-manual`-labeled issue (src/lib/escalate.ts) FIRST, then ledgers
+        `panel.manual_approved` -- a close that fails never produces a false-approved ledger line.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApproveManualRequest"
+      responses:
+        "200":
+          description: The issue was closed and the approval recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApproveManualResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":

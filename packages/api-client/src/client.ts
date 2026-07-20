@@ -6,11 +6,17 @@
 // itself is EXCLUDED from the [no-hand-rolled-fetch] scan -- it is the ONE sanctioned place a
 // future runtime HTTP layer for the generated client is allowed to live."
 //
-// Deliberately narrow (W3-T2 v0, the read-only board's ONE route pair): `getStatus()` (GET
-// /v1/status) and `subscribeStatus()` (GET /v1/status/stream, SSE). Every OTHER daemon route
-// a later task adds gets its own typed method here, never a second ad-hoc fetch call in a
-// consumer — this file is the ONLY place `fetch` may appear outside a test (enforced by
-// scripts/no-hand-rolled-fetch-check.mjs, which excludes packages/api-client by name).
+// W3-T2 v0 shipped the read-only board's ONE route pair: `getStatus()` (GET /v1/status) and
+// `subscribeStatus()` (GET /v1/status/stream, SSE). W3-T5 (MASTER-PLAN §7, human-in-the-loop
+// panel actions) adds the write side over the SAME client: `pauseFleet`/`resumeFleet`/
+// `stopFleet`, `setQuietHours`, `answerQuestion`, `approveManualItem` — one typed method per
+// write route src/lib/panel-actions.ts registers, calling `postJson` (this file's one write
+// helper, mirroring `getStatus`'s GET). Every OTHER daemon route a later task adds gets its
+// own typed method here, never a second ad-hoc fetch call in a consumer — this file is the
+// ONLY place `fetch` may appear outside a test (enforced by scripts/no-hand-rolled-fetch-
+// check.mjs, which excludes packages/api-client by name). A write method needs a WRITE-scoped
+// `token` (service.ts's `Scope`) — passing a read-only token still compiles (the client has no
+// scope type to check against) but the daemon answers 403, same as any other write caller.
 //
 // SSE via `fetch`, not `EventSource`: the browser's native EventSource cannot set an
 // Authorization header, and this daemon's SSE routes are bearer-scoped exactly like its REST
@@ -22,11 +28,17 @@ import type { components } from "./schema.js";
 
 export type StatusProjection = components["schemas"]["StatusProjection"];
 export type StatusSnapshot = components["schemas"]["StatusSnapshot"];
+export type PauseResult = components["schemas"]["PauseResult"];
+export type ResumeResult = components["schemas"]["ResumeResult"];
+export type StopResult = components["schemas"]["StopResult"];
+export type QuietHoursResult = components["schemas"]["QuietHoursResult"];
+export type AnswerQuestionResult = components["schemas"]["AnswerQuestionResult"];
+export type ApproveManualResult = components["schemas"]["ApproveManualResult"];
 
 export interface DaemonClientOptions {
   /** The daemon's base URL, e.g. `https://<tailnet-host>`. No trailing slash required. */
   baseUrl: string;
-  /** Bearer token. A read-scoped token suffices for every method this client exposes today. */
+  /** Bearer token. A read-scoped token suffices for the read methods; the write methods (W3-T5) need a write-scoped token. */
   token: string;
   /** Injectable for tests; defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
@@ -41,6 +53,18 @@ export interface DaemonClient {
    * stream; safe to call more than once.
    */
   subscribeStatus(onEvent: (projection: StatusProjection) => void): () => void;
+  /** POST /v1/control/pause — drain-and-hold (write-scoped, W3-T5). */
+  pauseFleet(reason?: string): Promise<PauseResult>;
+  /** POST /v1/control/resume — clears BOTH STOP and PAUSE (write-scoped, W3-T5). */
+  resumeFleet(): Promise<ResumeResult>;
+  /** POST /v1/control/stop — the hard kill (write-scoped, W3-T5). */
+  stopFleet(reason?: string): Promise<StopResult>;
+  /** POST /v1/quiet-hours — toggle the scheduler's quiet-hours preference (write-scoped, W3-T5). */
+  setQuietHours(enabled: boolean): Promise<QuietHoursResult>;
+  /** POST /v1/questions/answer — answer a QUESTION-contract entry (write-scoped, W3-T5). */
+  answerQuestion(taskId: string, answer: string): Promise<AnswerQuestionResult>;
+  /** POST /v1/manual/approve — check off a MANUAL-queue item (write-scoped, W3-T5). */
+  approveManualItem(taskId: string, issueUrl: string): Promise<ApproveManualResult>;
 }
 
 function authHeaders(token: string): Record<string, string> {
@@ -63,11 +87,59 @@ export function createDaemonClient(opts: DaemonClientOptions): DaemonClient {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const baseUrl = opts.baseUrl.replace(/\/+$/, "");
 
+  /**
+   * The one write helper every W3-T5 method funnels through — POST `body` as JSON with the
+   * SAME bearer header `getStatus` sends, and throw on a non-2xx (mirroring `getStatus`'s own
+   * `!res.ok` check) rather than returning a daemon error envelope as if it were a result.
+   * Best-effort surfaces the daemon's `error`/`detail` fields in the thrown message when the
+   * body parses as JSON — never throws a SECOND time trying to build the first error.
+   */
+  async function postJson<T>(path: string, body: unknown): Promise<T> {
+    const res = await fetchImpl(`${baseUrl}${path}`, {
+      method: "POST",
+      headers: { ...authHeaders(opts.token), "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const detail = await res
+        .clone()
+        .json()
+        .then((b: unknown) => (b && typeof b === "object" ? JSON.stringify(b) : undefined))
+        .catch(() => undefined);
+      throw new Error(`${path}: daemon returned ${res.status}${detail ? ` — ${detail}` : ""}`);
+    }
+    return (await res.json()) as T;
+  }
+
   return {
     async getStatus() {
       const res = await fetchImpl(`${baseUrl}/v1/status`, { headers: authHeaders(opts.token) });
       if (!res.ok) throw new Error(`getStatus: daemon returned ${res.status}`);
       return (await res.json()) as StatusSnapshot;
+    },
+
+    pauseFleet(reason) {
+      return postJson<PauseResult>("/v1/control/pause", reason === undefined ? {} : { reason });
+    },
+
+    resumeFleet() {
+      return postJson<ResumeResult>("/v1/control/resume", {});
+    },
+
+    stopFleet(reason) {
+      return postJson<StopResult>("/v1/control/stop", reason === undefined ? {} : { reason });
+    },
+
+    setQuietHours(enabled) {
+      return postJson<QuietHoursResult>("/v1/quiet-hours", { enabled });
+    },
+
+    answerQuestion(taskId, answer) {
+      return postJson<AnswerQuestionResult>("/v1/questions/answer", { taskId, answer });
+    },
+
+    approveManualItem(taskId, issueUrl) {
+      return postJson<ApproveManualResult>("/v1/manual/approve", { taskId, issueUrl });
     },
 
     subscribeStatus(onEvent) {

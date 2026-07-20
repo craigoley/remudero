@@ -7,8 +7,8 @@ export interface components {
   schemas: {
     /** The JSON error envelope every non-2xx response on the surface returns (src/lib/service.ts's `sendJson` error paths). */
     Error: {
-      /** `unauthorized` (401, no/unrecognized bearer token), `forbidden` (403, recognized token missing the required scope), `not_found` (404, no route registered for this method + path), or `internal_error` (500, the route handler threw). */
-      error: "unauthorized" | "forbidden" | "not_found" | "internal_error";
+      /** `unauthorized` (401, no/unrecognized bearer token), `forbidden` (403, recognized token missing the required scope), `not_found` (404, no route registered for this method + path), `invalid_request` (400, a write route's JSON body failed validation -- W3-T5's panel-action routes fail loud BEFORE any side effect, src/lib/panel-actions.ts's `jsonAction`), or `internal_error` (500, the route handler threw). */
+      error: "unauthorized" | "forbidden" | "not_found" | "invalid_request" | "internal_error";
       /** Present only on a 403 -- the scope the caller's token was missing. */
       required_scope?: "read" | "write";
     };
@@ -36,6 +36,54 @@ export interface components {
       generated_at: string;
       tasks: (StatusProjection)[];
     };
+    /** POST /v1/control/pause's body -- drain-and-hold, an optional human-readable reason. */
+    PauseRequest: {
+      reason?: string;
+    };
+    PauseResult: {
+      paused: boolean;
+      reason?: string | null;
+    };
+    /** POST /v1/control/resume's body -- clears BOTH STOP and PAUSE; reports what it cleared. */
+    ResumeResult: {
+      clearedStop: boolean;
+      clearedPause: boolean;
+    };
+    /** POST /v1/control/stop's body -- the hard kill, an optional human-readable reason. */
+    StopRequest: {
+      reason?: string;
+    };
+    StopResult: {
+      stopped: boolean;
+      reason?: string | null;
+    };
+    /** POST /v1/quiet-hours's body -- the toggle's target state. */
+    QuietHoursRequest: {
+      enabled: boolean;
+    };
+    QuietHoursResult: {
+      quietHours: boolean;
+    };
+    /** POST /v1/questions/answer's body -- an operator's answer to a QUESTION-contract entry (worker.ts's plan/questions.ndjson), addressed by the task it was raised on (v0 routing has no path params, src/lib/service.ts). */
+    AnswerQuestionRequest: {
+      taskId: string;
+      answer: string;
+    };
+    AnswerQuestionResult: {
+      ok: boolean;
+      taskId: string;
+      answer: string;
+    };
+    /** POST /v1/manual/approve's body -- check off a MANUAL-queue item (MASTER-PLAN §4): closes the named `escalation-manual`-labeled GitHub issue (src/lib/escalate.ts). */
+    ApproveManualRequest: {
+      taskId: string;
+      issueUrl: string;
+    };
+    ApproveManualResult: {
+      ok: boolean;
+      taskId: string;
+      issueUrl: string;
+    };
   };
   securitySchemes: {
     /** Read-scoped bearer token. Grants GET access to read-scoped routes and SSE streams. A write-scoped token also satisfies this scope (write is a superset of read). */
@@ -50,6 +98,71 @@ export interface paths {
     get: {
       responses: {
           "200": StatusSnapshot;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/control/pause": {
+    post: {
+      responses: {
+          "200": PauseResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/control/resume": {
+    post: {
+      responses: {
+          "200": ResumeResult;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/control/stop": {
+    post: {
+      responses: {
+          "200": StopResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/quiet-hours": {
+    post: {
+      responses: {
+          "200": QuietHoursResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/questions/answer": {
+    post: {
+      responses: {
+          "200": AnswerQuestionResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/manual/approve": {
+    post: {
+      responses: {
+          "200": ApproveManualResult;
+          "400": Error;
           "401": Error;
           "403": Error;
           "404": Error;
