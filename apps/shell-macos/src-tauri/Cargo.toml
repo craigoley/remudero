@@ -1,0 +1,30 @@
+[package]
+name = "shell-macos"
+version = "0.1.0"
+description = "Remudero -- Tauri v2 macOS shell (shell 1, MASTER-PLAN §7 -> W3-T3): wraps the unmodified shell-0 web build with menu-bar presence, launch-at-login, native notifications, a global hotkey, and deep links."
+authors = ["Remudero"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix avoids a name collision with the bin crate on Windows; see
+# https://github.com/rust-lang/cargo/issues/8519 (the same pattern `create-tauri-app` scaffolds).
+name = "shell_macos_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# Menu-bar presence's four native affordances (MASTER-PLAN §7 design bullet for shell 1):
+# launch-at-login, native notifications, a global hotkey, and deep links. The tray icon + menu
+# itself (also "menu-bar presence") is built from core `tauri::tray` in src/lib.rs, no plugin
+# needed. All four are first-party plugins from the tauri-apps/plugins-workspace repo.
+tauri-plugin-autostart = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-deep-link = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

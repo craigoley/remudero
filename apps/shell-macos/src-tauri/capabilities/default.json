@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window. Every native affordance this shell adds (tray icon/menu, autostart, notifications, global hotkey, deep links) is wired entirely on the Rust side in src/lib.rs's setup() -- the capabilities system only gates commands the WEBVIEW invokes, and the webview here is the unmodified shell-0 web build, which invokes none of them. `core:default` is the baseline every Tauri window needs; nothing else is granted because nothing else is asked for.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

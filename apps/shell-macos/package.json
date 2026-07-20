@@ -1,0 +1,17 @@
+{
+  "name": "@remudero/shell-macos",
+  "version": "0.1.0",
+  "description": "Tauri v2 macOS shell (shell 1, MASTER-PLAN §7 -> W3-T3): wraps the UNMODIFIED shell-0 web build (apps/dashboard) in a native shell -- menu-bar presence (tray icon + Show/Hide/Quit menu), launch-at-login, native notifications, a global hotkey, and deep links. scripts/sync-web-build.mjs copies apps/dashboard's index.html and its compiled main.js byte-for-byte into web-dist/ (git-ignored build output) -- the shell adds native affordances, it never forks the web code. Reads the same tailnet api-client surface as shell 0; no daemon code lives here. See README.md for build prerequisites this sandboxed worker could not satisfy (no Rust/Cargo toolchain, no crates.io network access, no macOS GUI) -- signing and the live-launch acceptance proof are explicit follow-on work for a real macOS dev machine.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:web": "node scripts/sync-web-build.mjs",
+    "tauri": "tauri",
+    "dev": "npm run build:web && tauri dev",
+    "build": "npm run build:web && tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}
