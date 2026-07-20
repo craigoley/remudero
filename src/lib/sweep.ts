@@ -125,13 +125,22 @@ export interface SweepPolicy {
   strikeCap: number;
   /** W1-T78: re-dispatch strike-cap policy once an operator answers a clarification question. */
   clarify: ClarifyPolicy;
+  /**
+   * W1-T121 QUEUE GOVERNOR (the 23-open-PR incident) — a WIP limit on
+   * DISPATCH ONLY: at or above this many open PRs, dispatch of NEW tasks is
+   * deferred; drainage (sweep/heal/arm/merge, at ANY depth) is never gated.
+   * A ROW in this table, not a constant near a call site — see
+   * {@link checkQueueGovernor}, this policy's consumer.
+   */
+  wipLimit: number;
 }
 
-/** The default policy — 14-day stale window, 2 fix strikes (mirrors fixStrikeCap). */
+/** The default policy — 14-day stale window, 2 fix strikes (mirrors fixStrikeCap), 10-PR WIP limit. */
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   staleDays: 14,
   strikeCap: 2,
   clarify: DEFAULT_CLARIFY_POLICY,
+  wipLimit: 10,
 };
 
 /**
@@ -940,6 +949,79 @@ export function renderSweepSummary(s: SweepSummary): string {
     `stale ${b.stale} · blocked-ambiguous ${b["blocked-ambiguous"]}` +
     (s.noneCount > 0 ? ` · ⚠️ ${s.noneCount} UNDISPOSED (invariant violated)` : "")
   );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// W1-T121 — the QUEUE GOVERNOR (the 23-open-PR incident). No backpressure
+// existed anywhere in the pipeline, so authoring rate converted DIRECTLY into
+// queue depth with nothing to arrest it. Little's law is the argument:
+// throughput comes from BOUNDING WIP, not from pushing harder on intake.
+//
+// CORROBORATION, the governor's thesis run by hand: with the dispatcher DOWN
+// and only the sweep loop running, the queue drained 23 -> 14 open PRs in a
+// single pass window; and with dispatch halted again, the remaining ten
+// drained to ZERO. Drainage is demonstrably healthy while intake is zero —
+// the two halves are separable IN PRACTICE, which is exactly what makes a
+// DISPATCH-ONLY throttle safe rather than a stall.
+//
+// ASYMMETRY IS THE WHOLE DESIGN: {@link checkQueueGovernor} is a pure
+// predicate its caller consults ONLY on the NEW-task dispatch path (e.g.
+// drain.ts's `nextRunnable` / the daemon poll loop) — it is NEVER consulted
+// by `runSweep` above, which arms/fixes/closes/escalates already-open PRs at
+// ANY depth, ungated. A governor that also throttled drainage would deepen
+// the very queue it exists to bound.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** {@link checkQueueGovernor}'s verdict for one dispatch-path consultation. */
+export interface QueueGovernorResult {
+  /** true ⇒ the dispatch path MUST defer — do not open a new PR this pass. */
+  deferred: boolean;
+  /** The open-PR count the decision was made against. */
+  observedOpenCount: number;
+  /** The policy limit consulted (`policy.wipLimit`, carried for the ledger line). */
+  wipLimit: number;
+}
+
+/**
+ * The queue governor's pure predicate (design (ii)): at or above
+ * `policy.wipLimit` open PRs, NEW dispatch is deferred; below it, dispatch
+ * proceeds normally. THRESHOLDS ARE POLICY DATA (rule 2) — `policy.wipLimit`
+ * is the ONLY thing that moves this decision; there is no second, ad-hoc
+ * constant anywhere near a real dispatch call site. Never call this from
+ * `runSweep` or any of its deps (arm/dispatchFix/close/escalate) — see the
+ * asymmetry note above.
+ */
+export function checkQueueGovernor(
+  openPrCount: number,
+  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+): QueueGovernorResult {
+  return {
+    deferred: openPrCount >= policy.wipLimit,
+    observedOpenCount: openPrCount,
+    wipLimit: policy.wipLimit,
+  };
+}
+
+/**
+ * A throttled pass is NOT silent (design (iv)): the real dispatch path calls
+ * this exactly when {@link checkQueueGovernor} returns `deferred: true`,
+ * writing one `dispatch_deferred_wip` ledger line carrying the observed open
+ * count — so a quiet daemon (nothing runnable) stays distinguishable from a
+ * THROTTLED one (runnable work exists, held back by the governor).
+ */
+export function logQueueGovernorDeferral(
+  result: QueueGovernorResult,
+  appendLine: (path: string, line: Record<string, unknown> & { run_id: string; task_id: string; step: string }) => void,
+  ledgerPath: string,
+  runId: string,
+): void {
+  appendLine(ledgerPath, {
+    run_id: runId,
+    task_id: "GOVERNOR",
+    step: "dispatch_deferred_wip",
+    observed_open_count: result.observedOpenCount,
+    wip_limit: result.wipLimit,
+  });
 }
 
 // ────────────────────────────────────────────────────────────────────────────
