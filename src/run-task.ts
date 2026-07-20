@@ -80,6 +80,21 @@ import {
   planArchitectPrompt,
   planCommitMessage,
 } from "./lib/plan-architect.js";
+import {
+  anchorFingerprint,
+  classifyProposal,
+  gitGrepAnchorTrue,
+  inboxDraftPrompt,
+  isDraftStale,
+  parseDraftCache,
+  parseDraftedCandidate,
+  parseProposalRegistry,
+  renderInbox,
+  type DraftCache,
+  type DraftedCandidate,
+  type EvidenceAnchor,
+  type Proposal,
+} from "./lib/inbox.js";
 import { parseUsage, type UsageSnapshot } from "./lib/headroom.js";
 import {
   assertArchitectAboveWorker,
@@ -99,6 +114,7 @@ import {
   loadPlanFromYaml,
   selectTask,
   type AcceptanceCriterion,
+  type MergedResolver,
   type Plan,
   type Task,
 } from "./lib/plan.js";
@@ -4906,6 +4922,170 @@ async function planCommand(rest: string[]): Promise<number> {
   }
 }
 
+/** The bounded inbox-draft Architect worker's tool allowlist: Read/Grep/Glob ONLY — no
+ *  Write/Edit/Bash. Drafting is TEXT the harness parses/caches state-side (never
+ *  committed), so unlike `rmd triage`/`rmd plan` this worker never touches a file. */
+const INBOX_DRAFT_WORKER_TOOLS = ["Read", "Grep", "Glob"];
+
+/** Read a file's contents, or `undefined` if it doesn't exist — a single `readFileSync`
+ *  guarded by `catch`, NOT a separate `existsSync` check-then-read (the latter is a
+ *  TOCTOU race CodeQL flags: `js/file-system-race`, real here because `inboxCommand`
+ *  later writes back to this same state path). */
+function readFileIfExists(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (e: unknown) {
+    if (e && typeof e === "object" && "code" in e && (e as { code: unknown }).code === "ENOENT") return undefined;
+    throw e;
+  }
+}
+
+/**
+ * `rmd inbox [--dry-run]` — the ratification inbox's deterministic core, wired live
+ * (MASTER-PLAN P25(i), W1-T110). The actual readiness predicate ({@link
+ * classifyProposal}) is a PURE function, unit-tested exhaustively over fixtures
+ * (test/inbox.test.ts) with the LLM stubbed out entirely — this command is the thin,
+ * real-world GLUE around it, in the same "pure core / harness-owned I/O" split as
+ * `rmd dep-review`/`rmd triage`/`rmd plan`:
+ *
+ *   1. Read the ACTIVE-proposal registry (`<config.root>/state/inbox-proposals.json`
+ *      — state-side, never a repo path; population of this registry — e.g. from
+ *      MASTER-PLAN.md's proposal list — is a separate, later concern). Zero
+ *      proposals ⇒ print "no active proposals" and return immediately (no clone, no
+ *      spend) — the common case on a fresh checkout.
+ *   2. For every proposal that is NOT deferred-by-trigger and whose cached draft
+ *      (`state/inbox-drafts.json`) is missing or stale ({@link isDraftStale}), spawn
+ *      ONE bounded Architect worker ({@link INBOX_DRAFT_WORKER_TOOLS} — read-only,
+ *      never touches a file) to draft a candidate via {@link inboxDraftPrompt}, parse
+ *      it with {@link parseDraftedCandidate}, and cache it — skipped entirely under
+ *      `--dry-run` (classify against whatever is already cached, spend nothing).
+ *   3. Classify every proposal with REAL facts: dependency-merge state via
+ *      `deriveStatus` (GitHub-derived, corrections-supreme — never the decorative
+ *      yaml `status:` field), evidence-anchor truth via a real `git grep` against
+ *      `origin/main` ({@link gitGrepAnchorTrue}), and lint-cleanliness via the SAME
+ *      `rmd lint-plan` checks every other plan PR is gated by (inside
+ *      classifyProposal itself).
+ *   4. Print {@link renderInbox} and ledger-log one `inbox.classified` line per
+ *      proposal (traceable via `rmd trace`).
+ */
+async function inboxCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("inbox", rest, [], ["--dry-run"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const dryRun = rest.includes("--dry-run");
+
+  const config = loadConfig();
+  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const { owner, repo } = resolveOwnerRepo();
+
+  const registryPath = join(config.root, "state", "inbox-proposals.json");
+  const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
+  if (proposals.length === 0) {
+    console.log(renderInbox([]));
+    return 0;
+  }
+
+  const draftsPath = join(config.root, "state", "inbox-drafts.json");
+  const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
+
+  const needsDraft = proposals.filter((p) => {
+    if (p.trigger && !p.trigger.fired) return false; // never drafted for a dead-consumer proposal
+    const cached = drafts[p.id];
+    return !cached || isDraftStale(cached, p.evidenceAnchors);
+  });
+
+  const runId = `INBOX-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: "inbox", step, ...extra });
+
+  if (needsDraft.length > 0 && !dryRun) {
+    const arch = architectModel(config);
+    const wrk = workerModel(config);
+    assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
+    const mountsTable = loadMounts(mountsPath(repoRoot));
+
+    const settingsFile = renderWorkerSettings({
+      templatePath: join(repoRoot, "settings", "worker.json"),
+      hooksDir: join(repoRoot, "hooks"),
+      outPath: join(config.root, "tmp", `inbox-settings-${runId}.json`),
+    });
+    validateWorkerSettingsFile(settingsFile);
+
+    const repoDir = join(config.root, "repos", repo);
+    if (!existsSync(repoDir)) {
+      mkdirSync(dirname(repoDir), { recursive: true });
+      execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+    }
+    const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
+    if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
+    const branch = `run-${runId}`;
+    const worktreePath = join(worktreesDir(config), branch);
+    worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+
+    try {
+      const planText = readFileSync(join(worktreePath, "plan", "tasks.yaml"), "utf8");
+      for (const proposal of needsDraft) {
+        const worker = await spawnWorker({
+          cwd: worktreePath,
+          permissionMode: "bypassPermissions",
+          settingsFile,
+          model: arch,
+          maxTurns: mountsTable.architect.maxTurns,
+          maxBudgetUsd: DEFAULT_BUDGET_USD,
+          config,
+          prompt: inboxDraftPrompt(proposal, planText, runId),
+          tools: INBOX_DRAFT_WORKER_TOOLS,
+        });
+        log("inbox.draft_synthesized", {
+          proposal_id: proposal.id,
+          session_id: worker.sessionId,
+          cost_usd: worker.costUsd,
+          subtype: worker.subtype,
+          ...workerLedgerFields(worker),
+        });
+        const parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"));
+        if (!parsed) {
+          log("inbox.draft_error", { proposal_id: proposal.id, error: "no FRAGMENT/STAMP markers in worker output" });
+          continue;
+        }
+        const candidate: DraftedCandidate = {
+          proposalId: proposal.id,
+          fragmentYaml: parsed.fragmentYaml,
+          stampLine: parsed.stampLine,
+          anchorFingerprint: anchorFingerprint(proposal.evidenceAnchors),
+        };
+        drafts[proposal.id] = candidate;
+        log("inbox.drafted", { proposal_id: proposal.id });
+      }
+      writeFileSync(draftsPath, JSON.stringify(drafts, null, 2), "utf8");
+    } finally {
+      worktreeRemove(repoDir, worktreePath);
+      removeRunLock(worktreePath);
+    }
+  }
+
+  const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
+  const isMerged: MergedResolver = (t) => deriveStatus(t, deriveDeps).merged;
+  const openProposalIds = new Set(proposals.map((p) => p.id));
+
+  const classifications = proposals.map((p) =>
+    classifyProposal(p, drafts[p.id], {
+      plan,
+      isMerged,
+      grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
+      openProposalIds,
+    }),
+  );
+  for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
+
+  const rendered = renderInbox(classifications);
+  console.log(rendered);
+  return 0;
+}
+
 /**
  * `rmd digest [--since <iso>] [--dry-run]` — roll up the ledger since `--since`
  * (default: 24h ago) into one message (digest.ts) and send it over iMessage;
@@ -5461,6 +5641,11 @@ const COMMANDS: readonly CommandSpec[] = [
     usage:
       "rmd plan --mode=create|clarify|expand [<brief>...]   # the unified Architect PLAN skill (MASTER-PLAN §5B, W1-T45) — ONE ground→research→clear-or-grill-or-propose code path shared by all three modes (Refine=clarify, Expand=expand): create scaffolds new plan/tasks.yaml task(s) for the REQUIRED <brief> initiative; clarify grills (or silently resolves) ambiguous/underspecified existing tasks, <brief> optionally narrowing the focus; expand proposes gap-filling tasks that each cite a research source. CLEAR/GRILL touch nothing and open no PR; PROPOSED opens a plan-only PR (plan/** + MASTER-PLAN.md) gated by ci-gate+remudero-review",
   },
+  {
+    name: "inbox",
+    usage:
+      "rmd inbox [--dry-run]   # the ratification inbox's deterministic core (MASTER-PLAN P25(i), W1-T110): tiers the ACTIVE-proposal registry (state/inbox-proposals.json) into READY (drafted tasks' deps merged, evidence anchors grep-true on main, draft lint-plan-clean, no open conflict — carries its drafted plan/tasks.yaml fragment + stamp), not-ready (each failing predicate named), or DEFERRED-WITH-TRIGGER (an unfired named trigger — never recommended); drafts missing/stale candidates via a bounded, read-only Architect worker and caches them state-side (never committed); --dry-run classifies against whatever is already cached and spawns no worker",
+  },
 ] as const;
 
 const USAGE_FOOTER =
@@ -5600,6 +5785,9 @@ async function main(): Promise<void> {
   }
   if (cmd === "plan") {
     process.exit(await planCommand(rest));
+  }
+  if (cmd === "inbox") {
+    process.exit(await inboxCommand(rest));
   }
   console.error(USAGE);
   process.exit(2);

@@ -121,14 +121,19 @@ function req<T>(v: T | undefined, field: string, id: string): T {
 }
 
 /**
- * Parse and validate an already-read plan/tasks.yaml BLOB (schema v1). Split out
- * of {@link loadPlan} so a caller that already has the text some other way (the
- * §5C linter's CI check reads a PAST revision via `git show <ref>:plan/tasks.yaml`,
- * never a second file on disk) can validate it identically — one schema, one
- * source of truth, whether the bytes came from a file or a git ref. Throws
- * {@link PlanError} on any problem; `sourceLabel` names the blob in error text.
+ * Parse + field-validate a YAML task-list BLOB into {@link Task}s (schema v1) — WITHOUT
+ * checking that every `depends_on` id actually resolves. Split out of {@link
+ * loadPlanFromYaml} so a caller validating a PARTIAL blob (a drafted `plan/tasks.yaml`
+ * FRAGMENT that legitimately depends on ids from the rest of the plan it isn't itself
+ * carrying — lib/inbox.ts's ratification-candidate drafts, W1-T110) can get real
+ * per-task schema validation without a false "unknown task" failure on a dep that is
+ * merely OUTSIDE this blob. {@link loadPlanFromYaml} is this function plus the
+ * whole-blob dependency-existence check; a caller checking a fragment's deps against
+ * a wider, already-merged plan (e.g. {@link "./inbox.js".classifyProposal}) gets a
+ * STRONGER check for free — an unresolvable dep there is also necessarily unmerged,
+ * so it is reported as unmet rather than as a separate parse failure.
  */
-export function loadPlanFromYaml(text: string, sourceLabel: string): Plan {
+export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
   let raw: unknown;
   try {
     raw = parseYaml(text);
@@ -138,7 +143,7 @@ export function loadPlanFromYaml(text: string, sourceLabel: string): Plan {
   if (!Array.isArray(raw)) throw new PlanError("plan must be a YAML list of task entries (schema v1).");
 
   const byId = new Map<string, Task>();
-  const tasks: Task[] = raw.map((entry) => {
+  return raw.map((entry) => {
     if (typeof entry !== "object" || entry === null) throw new PlanError("each task must be a mapping.");
     const e = entry as Record<string, unknown>;
     const id = req(e.id as string, "id", String(e.id ?? "<unknown>"));
@@ -175,8 +180,22 @@ export function loadPlanFromYaml(text: string, sourceLabel: string): Plan {
     byId.set(id, task);
     return task;
   });
+}
 
-  // Every declared dependency must reference a real task.
+/**
+ * Parse and validate an already-read plan/tasks.yaml BLOB (schema v1). Split out
+ * of {@link loadPlan} so a caller that already has the text some other way (the
+ * §5C linter's CI check reads a PAST revision via `git show <ref>:plan/tasks.yaml`,
+ * never a second file on disk) can validate it identically — one schema, one
+ * source of truth, whether the bytes came from a file or a git ref. Throws
+ * {@link PlanError} on any problem; `sourceLabel` names the blob in error text.
+ */
+export function loadPlanFromYaml(text: string, sourceLabel: string): Plan {
+  const tasks = parseTasksFromYaml(text, sourceLabel);
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+
+  // Every declared dependency must reference a real task WITHIN THIS BLOB — the
+  // whole-plan-load contract {@link parseTasksFromYaml}'s own callers do not need.
   for (const t of tasks) {
     for (const dep of t.depends_on) {
       if (!byId.has(dep)) throw new PlanError(`task ${t.id}: depends_on unknown task '${dep}'`);
