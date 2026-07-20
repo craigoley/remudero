@@ -109,6 +109,8 @@ paid to discover, tagged with the run/PR that proved it. Rules:
 
 ## Reviewer floor & stale criteria
 
+- An acceptance proof only EXECUTES if it carries the exact house dialect `unit test: <file-or-test-name>` (or `grep: …`) — the text after the prefix is a file or test NAME passed to a name-filter, NOT prose. W1-T181 shipped with criteria 3/5 carrying no prefix and the prefixed ones carrying prose, so every proof read not_executable or executed_fail via an empty name-filter; the floor was working and the PROOFS were unrunnable. Operator authoring error, not a floor defect. `rmd review` from the main checkout ALSO cannot execute at all (no PR-head materialization), so an operator-posted verdict is keyword-only by construction. [PR #411, W1-T181 → W1-T185]
+
 - The reviewer's keyword floor was CASING/SEPARATOR-BLIND: `maxTurns` (criterion) vs `max_turns` (code/report YAML) tokenized as a MISS and false-blocked a correct PR (#42, W1-T5). Normalized in review.ts (split camelCase before lowercasing so maxTurns ≡ max_turns ≡ max-turns); the real fix is W1-T3F (observe repo state, don't match report keywords). [PR #42, W1-T5]
 - A criterion can go STALE when a LATER PR relocates a concept: PR #23 moved budget OFF the mount to per-task `budget_usd`, but W1-T5's criterion still named `maxBudgetUsd` as a mount knob. The Architect corrects a stale criterion via a plan PR; a worker never. Honesty test: nothing dropped or weakened — only realigned to the shipped architecture (Rule 15/16). [PR #42, W1-T5]
 
