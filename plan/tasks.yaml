@@ -6197,3 +6197,43 @@
   attempts: 0
   note: "Filed from the post-retro mutation-ratchet economics audit (measured). Companion to D-10 (the lifetime
     kill/survive accountability question) and W1-T108 (the PR-gate latency fix this builds on, already live)."
+
+- id: W1-T136
+  title: "the retro must emit a PR that is mergeable under the grown gate stack — run plan-index after its MASTER-PLAN edit and commit as chore(plan): retro R<n> (the #287 two-hand-fix lesson)"
+  repo: remudero
+  depends_on: [W1-T51]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE HOLE: retroCommand's output branch fails required checks BY CONSTRUCTION. (1) It edits
+    MASTER-PLAN.md without running the plan-index generator, so plan/plan-index.json goes stale and the now-required
+    plan-index-check gate reds. (2) It commits with a non-conventional message (a 'plan:'/'rmd retro:' type), which
+    the now-required commitlint gate rejects (type not in the config-conventional enum). EVIDENCE: #287 (the R8 retro
+    sync) needed TWO hand interventions to merge — a plan-index regeneration and a rewrite to 'chore(plan):'. The
+    learning limb should not need hands to file its own homework; the gate stack grew (commitlint + plan-index-check
+    joined ci-gate's REQUIRED array) and the retro was never taught to satisfy it."
+  design: |
+    After retroCommand writes its MASTER-PLAN.md edit (and any docs/ORIENTATION regen), and BEFORE it commits:
+    (i) run the plan-index generator so plan/plan-index.json is byte-current against the edited MASTER-PLAN
+        (invoke the same generator the CI check runs — VERIFY the exact npm script / scripts/generate-plan-index.mjs
+        entry from source, distrust this note), and stage it alongside the MASTER-PLAN edit.
+    (ii) render the commit message as a conventional 'chore(plan): retro R<n> - <summary>' — an allowed type-enum
+        type + the 'plan' scope, lowercase-first subject within the commitlint header-max-length, body wrapped.
+    No other retro behavior changes (gather, proposal capture, marker/state, ownership-assert all unchanged).
+  acceptance:
+    - claim: "after the retro's MASTER-PLAN edit the plan-index is byte-current — plan-index-check would pass with no hand step"
+      proof: "integration test over a seeded fixture retro: after retroCommand writes MASTER-PLAN.md, plan/plan-index.json equals a fresh regeneration (the plan-index:check generator exits zero on the retro's output tree); a variant that suppresses the new regen step FAILS the check (the falsifier)"
+    - claim: "the retro's staged commit message passes commitlint — valid conventional type + plan scope, within length"
+      proof: "unit test: the rendered retro commit message parses as 'chore(plan): retro R<n> - ...' and passes commitlint against the repo config (type in enum, subject lower-case, header <= header-max-length); the pre-fix 'plan:'/'rmd retro:'-typed message is REJECTED by the same lint (the falsifier)"
+    - claim: "a retro dry-run's staged commit passes commitlint locally AND the plan-index is byte-current — zero manual intervention"
+      proof: "integration test: 'rmd retro --dry-run' over the seeded fixture produces a staged commit whose message passes 'npx commitlint' and whose plan/plan-index.json matches the generator output; both green with no hand edits (the #287 regression, closed)"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§6A"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from the outage-closeout retro. Both failures were hand-fixed on #287 (plan-index regen + chore(plan):
+    rewrite); this teaches retroCommand to do its own homework. Companion to W1-T134/W1-T135 (the other closeout
+    review-hardening tasks) and the plan-index-check / commitlint gates that made the hole visible."
