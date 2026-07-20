@@ -6874,3 +6874,82 @@
     (W1-T12b / generateLaunchdPlist). Composes W1-T139 (serve), W1-T151 (install-freshness), W1-T143 (line-buffered
     logs). Loading the generated unit is the operator's single step (a --write + a printed load line), not an
     auto-verify criterion — the generator + the two hooks are what this task builds and proves."
+
+- id: W1-T153
+  title: "console shell UX overhaul — replace the flat file-order table with operator-priority sections + a real design system (dark, phone-first, CI-dashboard quality)"
+  repo: remudero
+  depends_on: [W1-T139, W1-T140, W1-T141, W1-T110]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Operator verdict on the v0 shell: functionally correct, experientially POOR. The board is a flat
+    file-order table with browser-default styling. Replace it with an operator-priority INFORMATION ARCHITECTURE and
+    an actual DESIGN SYSTEM — the quality bar of a good CI dashboard, not a debug page. The operator's primary glance
+    device is an iPhone over tailnet, so phone-first responsive + dark theme are load-bearing, not polish."
+  design: |
+    INFORMATION ARCHITECTURE (top to bottom, file order appears NOWHERE): (1) NOW — in-flight runs with live phase
+    (recon/implement/review/fix-rung) + elapsed; (2) NEEDS ME — needs-human escalations + pending inbox items
+    (W1-T110), each a one-line ask + an action affordance; (3) UP NEXT — the drain head (first ~5 runnable tasks in
+    drain order), linking into W1-T140's preview/curation; (4) RECENT — last ~10 merges/blocks with PR links + the
+    W1-T141 rundown; (5) everything else COLLAPSED behind grouped counts (queued: N, merged: N) with expand +
+    filter/search. DESIGN SYSTEM: status color semantics (running/blocked/needs-human/merged/queued), monospace ids,
+    readable density, dark theme (default or auto via prefers-color-scheme), phone-first responsive (390px iPhone ->
+    1440px). Structure the CSS/layout for CHEAP revision — the operator is the design judge and a taste iteration
+    loop is expected. VERIFY where the console frontend actually lives (renderShellHtml in serve.ts vs the
+    apps/dashboard React app) from source before choosing the home (distrust this note). a11y/screenshot mechanism
+    per W3-T7 (design-review skill) / the arcade-fleet Lighthouse pattern.
+  acceptance:
+    - claim: "the five operator-priority sections exist and order top-to-bottom (NOW, NEEDS ME, UP NEXT, RECENT, then everything-else collapsed); file order appears NOWHERE"
+      proof: "a DOM/structure test over the rendered console asserts the five sections in that exact order — NOW (in-flight runs w/ phase+elapsed), NEEDS ME (escalations+inbox w/ one-line ask+action), UP NEXT (first ~5 drain-order runnable, linking W1-T140), RECENT (last ~10 merges/blocks w/ PR links + W1-T141 rundown), rest collapsed as queued:N/merged:N + expand/filter/search; no element renders tasks in raw plan/file order (the falsifier)"
+    - claim: "state colors are distinct and consistent across the shell (running/blocked/needs-human/merged/queued)"
+      proof: "a test asserts each of the five states maps to a DISTINCT, stable color token (CSS custom property/class) reused everywhere that state appears — no two states share a token, and no state uses an ad-hoc inline color (the falsifier being a duplicated/inline color)"
+    - claim: "the shell is responsive at 390px and 1440px with NO horizontal scroll, dark theme default/auto"
+      proof: "a headless-browser check renders the shell at 390px and 1440px and asserts scrollWidth <= clientWidth (no horizontal overflow) at BOTH widths; the dark theme is applied by default or via prefers-color-scheme"
+    - claim: "Lighthouse accessibility >= 90 on the shell (the arcade-fleet house pattern), with screenshot artifacts attached to the PR"
+      proof: "a Lighthouse (or equivalent headless a11y) run on the served shell scores accessibility >= 90 — paste the score; 390px + 1440px screenshot artifacts are attached to the PR for the operator's design review"
+  risk: high
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/serve.ts, apps/dashboard/src]
+  status: queued
+  attempts: 0
+  note: "Operator is the design judge; expect a taste iteration loop — structure CSS/layout for cheap revision.
+    Mechanical proxies (sections+order, distinct state colors, responsive no-hscroll, a11y>=90) are the auto gate;
+    the visual taste is the human loop over the attached screenshots. Sibling W1-T154 (first-paint perf). a11y +
+    screenshot mechanism per W3-T7 / the arcade Lighthouse pattern."
+
+- id: W1-T154
+  title: "console first-paint — pre-warm the batched gateway at boot + skeleton/last-snapshot cache, so the first request is never cold; <2s first-paint-to-data at 183-task scale"
+  repo: remudero
+  depends_on: [W1-T153]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The board-fix batched gateway made GET /v1/status O(1), but the FIRST request still pays the cold
+    fetch, and a cold start shows a blank 'loading…'. First-paint must be instant AND never cold — this is the
+    perceived-performance half of the console overhaul, separable from the shell's IA/design (W1-T153)."
+  design: |
+    (a) PRE-WARM: build + fetch the batched gateway (buildBatchedGithub) at serve BOOT and refresh it in the
+    BACKGROUND on its TTL, so the first request serves from a warm cache and never pays the cold fetch. (b) SKELETON
+    + LAST-SNAPSHOT CACHE: render the previous snapshot INSTANTLY, stamped STALE, and swap to fresh when it arrives;
+    a cold start with no cache shows a skeleton, never a hang. (c) BUDGET: <2s first-paint-to-data measured from the
+    REAL browser client at 183-task scale, extending the existing board-fix regression harness. VERIFY
+    buildBatchedGithub's construction/TTL, the serve boot sequence, and the board-fix regression harness from source
+    first (distrust this note).
+  acceptance:
+    - claim: "the batched gateway is pre-warmed at serve boot + refreshed in the background on its TTL, so the first request never pays the cold fetch"
+      proof: "unit test: at serve boot the gateway fetch fires ONCE (pre-warm) before any request, and a background timer refreshes it on the TTL; the FIRST GET /v1/status serves from the warm cache with ZERO additional fetches on the request path — a first request that triggers the cold fetch FAILS the test (the falsifier)"
+    - claim: "the shell renders a skeleton + last snapshot instantly, stamped STALE, and swaps when fresh data arrives"
+      proof: "a test asserts the shell paints a skeleton/last-snapshot immediately (never a blank 'loading…' block) with a STALE stamp, then swaps to fresh data and drops the stamp on the next snapshot; a cold start with no cache shows the skeleton, never a hang"
+    - claim: "first-paint-to-data is < 2s measured from the REAL browser client at 183-task scale"
+      proof: "extend the board-fix regression harness: a real serve instance over a full 183-task plan, the shell's real fetch client, asserts first-paint-to-data < 2s with the pre-warmed gateway (0 cold fetches on the path); the pre-fix cold-first-request path would exceed it (the falsifier)"
+  risk: high
+  origin: architect
+  plan_refs: ["§7", "§9"]
+  files: [src/lib/serve.ts, src/run-task.ts, src/lib/status.ts]
+  status: queued
+  attempts: 0
+  note: "Builds on the board-fix batched gateway (buildBatchedGithub, PR #342). Sibling W1-T153 (shell IA + design).
+    Reuses the board-fix regression harness for the <2s budget at 183-task scale — the real fetch client, not a stub."
