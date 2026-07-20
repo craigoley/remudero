@@ -7516,3 +7516,64 @@
     re-reviews (the floor passed each time). Companion to W1-T161 (the REVIEWER side — don't manufacture a false
     FAIL); this is the FIX-RUNG side — don't strike-exhaust on a false-block you cannot fix, escalate for re-judgment.
     The deterministic-floor-passes-but-reviewer-blocks disagreement is the sharpest false-block signal."
+
+- id: W1-T169
+  title: "rmd down / rmd up — operator lifecycle verbs: graceful wind-down (unload the daemon service, stop serve by PORT with reap-wait, report in-flight recoverability) + full resume (install-freshness, off-main refuse, load the daemon service, start serve, print daemon PID + console URL-with-token + heads); idempotent both directions"
+  repo: remudero
+  depends_on: [W1-T152, W1-T151, W1-T12b]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "FIXTURE (real): the operator's restart-procedure question today was answered with FOUR manual command
+    blocks and a reap-wait gotcha (kill by PORT, wait for :4317 to release, THEN relaunch — never argv pattern, which
+    misses; the serve-restart-reap-wait class). Restart/maintenance should be TWO verbs, not four fragile blocks. `rmd
+    down` = graceful wind-down for restart/maintenance; `rmd up` = full resume. They are the operator-facing lifecycle
+    layer OVER the plumbing W1-T152 (serve service), W1-T151 (install-freshness), and W1-T12b (the daemon service)
+    already build — reporting/orchestration, NOT process babysitters. Filed as a sibling of W1-T152 (not folded in):
+    T152 is the serve-unit GENERATOR; these verbs orchestrate the WHOLE fleet lifecycle (daemon + serve + freshness +
+    recoverability reporting) and depend on it. After T152, `rmd up` delegates serve to the OS service manager and both
+    verbs become thin wrappers over the service manager + the report — design them that way from the start."
+  design: |
+    Add `rmd down` and `rmd up` to run-task.ts as REPORTING/ORCHESTRATION verbs over injected effects (a
+    service-manager handle, a port-checker, a process-stopper, the ledger/gateway readers) — the testable core is the
+    DECISION LOGIC and the printed REPORT, with the OS calls injected so the whole thing is unit/integration-testable
+    without a live daemon or a real service manager.
+    `rmd down` (graceful wind-down for restart/maintenance): (1) unload the daemon service — wait for the current
+    poll/worker to reach a SAFE boundary, OR if it cannot within a bound, REPORT the in-flight run id and its
+    RECOVERABILITY (has-PR = the sweep recovers it next start; pre-PR = it re-dispatches next start); (2) stop serve by
+    PORT with a reap-wait (poll until :port releases before returning — NEVER an argv/pattern match, which misses; the
+    serve-restart-reap-wait / argv-miss class); (3) print a wind-down summary: in-flight state, open-PR count,
+    needs-human count, and an explicit "safe to restart" line.
+    `rmd up` (full resume): (1) install-freshness FIRST (the W1-T151 hook: a lockfile-changing pull -> npm install
+    BEFORE anything starts); (2) REFUSE off-main without an explicit override (the T152 criterion — never resume a
+    fleet against branch code); (3) load the daemon service; (4) start serve (or, once T152's serve service exists,
+    CONFIRM that service rather than foreground-spawning); (5) print the resume report: daemon PID + next poll time,
+    the console URL WITH its token, the in-flight/queued head, and the needs-human count.
+    IDEMPOTENT both directions: `down` when already down = a no-op with an honest "already down" report (no error, no
+    side effect); `up` when already up = verify the running state and report it (never a double daemon/serve start).
+    VERIFY from source before wiring (distrust this note): the daemon service load/unload path (W1-T12b /
+    generateLaunchdPlist + daemonPlistCommand), resolveServePort + the serve start path (W1-T139/T152), the W1-T151
+    install-freshness hook, the off-main refuse (T152), the run-id/recoverability read (sweep vs re-dispatch, has-PR
+    from status.ts), and the console-URL+token assembly (serveCommand).
+  acceptance:
+    - claim: "rmd down winds down cleanly — no listener remains on the serve port, and an in-flight dispatch is either brought to a safe boundary or REPORTED with its run id + recoverability (has-PR = sweep-recoverable, pre-PR = re-dispatched)"
+      proof: "integration test over injected effects: after `rmd down`, a port-check shows NO listener on the serve port (stopped by PORT with a reap-wait, asserted via the injected port-checker — never an argv/pattern match); an in-flight dispatch either reaches a safe boundary OR the wind-down summary carries its run id + a recoverability verdict (has-PR -> sweep recovers, pre-PR -> re-dispatch). FALSIFIERS: a down that leaves a listener on the serve port FAILS; a down that orphans a mid-poll dispatch WITHOUT reporting its run id + recoverability FAILS"
+    - claim: "rmd up resumes safely — install-freshness runs FIRST (a lockfile-changing pull triggers npm install before anything starts), it REFUSES off-main without an override, and the resume report includes the console URL WITH its token"
+      proof: "integration test over injected effects: given a package-lock hash differing from the persisted one, `rmd up` runs npm install BEFORE starting the daemon/serve (the W1-T151 hook on the up path); given a checkout NOT on main it exits non-zero WITHOUT starting anything unless the override flag is passed (the T152 off-main criterion); the resume report prints daemon PID + next poll, the console URL WITH token, the in-flight/queued head, and needs-human count. FALSIFIERS: an up that starts serve on STALE deps (skips the freshness check) FAILS; an up that resumes off-main without the override FAILS; an up whose report OMITS the console URL FAILS"
+    - claim: "both verbs are idempotent — down-when-down is a no-op with an honest report, up-when-up verifies and reports without a double-start"
+      proof: "unit test over injected effects: `rmd down` when already down (no daemon service loaded, no serve listener) produces a no-op with an honest 'already down' report — no error, no side effect (no spurious stop calls); `rmd up` when already up (daemon service loaded + serve listening) verifies the running state and REPORTS it without issuing a second daemon/serve start. FALSIFIERS: a down-when-down that errors or issues a stop call FAILS; an up-when-up that double-starts the daemon or serve FAILS"
+  risk: high
+  origin: architect
+  plan_refs: ["§7", "§9"]
+  files: [src/run-task.ts, src/lib/launchd.ts]
+  status: queued
+  attempts: 0
+  note: "Sibling of W1-T152 (serve service GENERATOR), not folded into it — these are the operator-facing lifecycle
+    VERBS that orchestrate daemon + serve + freshness + recoverability reporting, and DEPEND on T152. Fixture: the
+    restart-procedure question answered today with four manual blocks + the reap-wait gotcha (serve-restart-reap-wait
+    memory). Composes W1-T152 (serve service + off-main refuse + reap-wait), W1-T151 (install-freshness), W1-T12b (the
+    daemon service). Design as reporting/orchestration over INJECTED effects (service manager, port-checker,
+    process-stopper, ledger reader) — not process babysitters; after T152 they become thin wrappers over the OS
+    service manager + the report. The actual load/unload/start is the operator's environment; the DECISION LOGIC and
+    the REPORT are what this task builds and proves auto (why verify:auto, not human)."
