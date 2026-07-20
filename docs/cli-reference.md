@@ -33,6 +33,7 @@ usage:
   rmd notify <message>     # real-time iMessage ping (osascript)
   rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message
   rmd ops [--dry-run]   # alert intake v0 (W1-T55, §5D lane 2): poll code-scanning/Dependabot/secret-scanning alerts for this repo via gh api, fold open counts+ages into the next digest, escalate every NEW critical/high alert exactly once (needs-human, ledger-deduped so a re-poll never double-escalates); --dry-run previews, opens no issues
+  rmd issues [--dry-run]   # issues intake (W1-T57, §5D lane 3): poll open issues for every repo in .remudero/managed-repos.json via gh api, create a plan/feedback/<id>.yaml entry (origin: issue#<n>) for each one not already captured, fold an issues-reviewed count into the next digest; id-deduped so a re-poll never double-creates; --dry-run previews, creates nothing
   rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard
   rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>   # fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps, does not push/PR/arm protection itself
   rmd feedback <text...> [--attach <path-or-url>]... [--origin cli|ui|issue]   # durable-inbox async capture (MASTER-PLAN §7B, W1-T40): writes plan/feedback/<id>.yaml with status: new; --attach copies a local screenshot/terminal-dump into plan/feedback/attachments/<id>/ or records an http(s) link verbatim; browse the inbox with plain ls/cat/git diff, no bespoke reader
@@ -189,6 +190,14 @@ rmd ops [--dry-run]
 ```
 
 alert intake v0 (W1-T55, §5D lane 2): poll code-scanning/Dependabot/secret-scanning alerts for this repo via gh api, fold open counts+ages into the next digest, escalate every NEW critical/high alert exactly once (needs-human, ledger-deduped so a re-poll never double-escalates); --dry-run previews, opens no issues
+
+### `rmd issues`
+
+```
+rmd issues [--dry-run]
+```
+
+issues intake (W1-T57, §5D lane 3): poll open issues for every repo in .remudero/managed-repos.json via gh api, create a plan/feedback/<id>.yaml entry (origin: issue#<n>) for each one not already captured, fold an issues-reviewed count into the next digest; id-deduped so a re-poll never double-creates; --dry-run previews, creates nothing
 
 ### `rmd init`
 

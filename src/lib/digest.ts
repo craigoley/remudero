@@ -1,6 +1,7 @@
 import { readLedgerLines } from "./status.js";
 import { notify, type NotifyDeps } from "./notify.js";
 import { renderAlertsSummary, type AlertsPollSummary } from "./ops.js";
+import { renderIssuesSummary, type IssuesPollSummary } from "./issues-intake.js";
 
 /**
  * Daily digest (W1-T8 title; assembled here, delivered here, SCHEDULED by the
@@ -33,6 +34,12 @@ export interface DigestSummary {
    * Undefined when `rmd ops` never polled inside this window.
    */
   alerts?: AlertsPollSummary;
+  /**
+   * The LATEST `issues.polled` snapshot inside the window (W1-T57, lib/issues-intake.ts) — the
+   * issues-reviewed count so "issues reviewed regularly" is a ledgered fact, not an intention.
+   * Same "latest wins" rule as `alerts`. Undefined when `rmd issues` never polled inside this window.
+   */
+  issues?: IssuesPollSummary;
 }
 
 /** Reduce the day's ledger lines to the counts a digest reports. Pure over its input. */
@@ -54,6 +61,9 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
     if (l.step === "ops.alerts_polled" && l.alerts && typeof l.alerts === "object") {
       summary.alerts = l.alerts as AlertsPollSummary;
     }
+    if (l.step === "issues.polled" && l.issues && typeof l.issues === "object") {
+      summary.issues = l.issues as IssuesPollSummary;
+    }
   }
   return summary;
 }
@@ -70,6 +80,7 @@ export function renderDigest(s: DigestSummary): string {
       s.escalations.length ? s.escalations.map((e) => `[${e.class}] ${e.taskId} — ${e.issueUrl}`).join(", ") : "(none)"
     }`,
     `alerts: ${s.alerts ? renderAlertsSummary(s.alerts) : "(no poll this window)"}`,
+    `issues reviewed: ${s.issues ? renderIssuesSummary(s.issues) : "(no poll this window)"}`,
     `notional cost: $${s.costUsd.toFixed(2)}`,
   ];
   return lines.join("\n");
