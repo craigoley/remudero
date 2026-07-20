@@ -261,13 +261,21 @@ export function detectTestTheater(diff: string): boolean {
 //       test/**/*.test.ts` (the SAME file glob the project's own `test` script
 //       uses) — the whole suite, filtered.
 // ALL FOUR are executed via execFile (never a shell), so proof TEXT can never
-// inject shell metacharacters into a command line — but a dialect/fenced body is
-// still rejected outright (not_executable, nothing executed) if it contains any of
-// `; & \` $ < >` or a newline, as defense in depth (acceptance: proof execution is
-// bounded to the whitelist). Anything that doesn't match any shape is
-// not_executable — the keyword floor stands alone, unchanged, and (W1-T72,
-// legibility) is flagged `floorDegraded` when it was written to be runnable
-// (see {@link isDialectPrefixed}) but nothing on the review ended up executed.
+// inject shell metacharacters into a command line. The two LEGACY strict shapes
+// ((1)/(2)) still refuse outright on `; & \` $ < >` or a newline as belt-and-braces
+// (they are rare, and both are already unambiguous/fenced). The two HOUSE-DIALECT
+// shapes ((3)/(4)) do NOT apply that blanket blocklist (W1-T128 — THE DEAD PROOF
+// FLOOR): a dialect body is ordinary architect PROSE, and prose routinely contains
+// a semicolon — that single character was refusing 158 of 269 dialect proofs
+// measured live in this plan (101 of 126 at the 2026-07-19 baseline), none of them
+// an actual injection risk, because execFile takes `args` as an array and never
+// hands the string to a shell to interpret. A dialect body is refused ONLY for a
+// hazard that survives execFile: path traversal (`..`) or a literal glob (`*`) in
+// a grep TARGET, both still checked in {@link parseDialectGrep}. Anything that
+// doesn't match any shape is not_executable — the keyword floor stands alone,
+// unchanged, and (W1-T72, legibility) is flagged `floorDegraded` when it was
+// written to be runnable (see {@link isDialectPrefixed}) but nothing on the
+// review ended up executed.
 
 /** A proof shape the floor is willing to mechanically execute. */
 export interface WhitelistedProof {
@@ -345,9 +353,16 @@ function parseDialectGrep(body: string): WhitelistedProof | null {
   const withPath = trimmed.match(DIALECT_GREP_PATH_RE);
   const pattern = (withPath ? withPath[1] : trimmed).trim();
   const path = withPath ? withPath[2] : undefined;
-  if (!pattern || UNSAFE_FENCE_CHARS_RE.test(pattern)) return null; // refuse, not sanitize
+  // W1-T128: no shell-metacharacter check on `pattern` — it becomes a single
+  // argv element passed to execFile (never a shell), so `; & \` $ < >` are inert
+  // here, and refusing prose for containing one was exactly the defect this
+  // task fixes (see the module comment above). `--` (below) already stops a
+  // pattern from being read as a grep FLAG regardless of its content.
+  if (!pattern) return null;
   if (path !== undefined) {
-    if (UNSAFE_FENCE_CHARS_RE.test(path) || path.includes("..")) return null;
+    // The grep TARGET is the one place a real hazard survives execFile: path
+    // traversal out of the checkout, still refused.
+    if (path.includes("..")) return null;
     // No shell here (execFile) ⇒ no glob expansion — a literal '*' target can
     // never resolve to a real file and would always exit non-zero, silently
     // manufacturing a spurious executed_fail. Refuse rather than run it.
@@ -378,7 +393,12 @@ function parseTestTarget(body: string): WhitelistedProof | null {
     if (trimmed.includes("..")) return null; // no path traversal out of the checkout
     return { kind: "test", command: "node", args: ["--test", "--import", "tsx", trimmed], label: trimmed };
   }
-  if (UNSAFE_FENCE_CHARS_RE.test(trimmed)) return null; // refuse, not sanitize
+  // W1-T128: no shell-metacharacter check on a bare TEST NAME — it becomes the
+  // single `--test-name-pattern` argv value passed to execFile (never a shell),
+  // so `; & \` $ < >` are inert here too, and this branch names no file, so
+  // there is no traversal/glob surface to guard either (see the module comment
+  // above). A test name is ordinary prose and routinely contains a semicolon —
+  // refusing it there was the single biggest cause of the dead proof floor.
   return {
     kind: "test",
     command: "node",

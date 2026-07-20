@@ -23,6 +23,7 @@ import {
   reviewerOutcome,
   reviewerVerdictContract,
   type ProofExecutor,
+  type WhitelistedProof,
 } from "../src/lib/review.js";
 
 // ── Recorded fixtures (acceptance #2, the FALSIFIER) ────────────────────────
@@ -925,11 +926,24 @@ test("parseWhitelistedProof: a dialect grep whose pattern happens to look like a
   assert.deepEqual(wp!.args, ["-rn", "--", "TODO", "test/foo.test.ts"]);
 });
 
-test("parseWhitelistedProof: an unsafe dialect body is refused OUTRIGHT — never falls through to a legacy shape that matches a different substring of the same text", () => {
-  // The ';' makes the dialect body unsafe; the same raw string also contains a
-  // literal test-file path substring the OLD (pre-fix) fallthrough would have
-  // picked up and silently executed instead of refusing.
-  assert.equal(parseWhitelistedProof("unit test: test/foo.test.ts; rm -rf /"), null);
+test("parseWhitelistedProof: a dialect body containing a semicolon and a test-path SUBSTRING is NAME-FILTERED over the whole body, never silently reinterpreted as that substring's file (W1-T128 — no legacy fallthrough)", () => {
+  // Pre-W1-T128 this was refused outright for the ';'. W1-T128 makes it EXECUTE
+  // — but as a name-filtered search over the FULL body text (it is not an EXACT
+  // test-file path, since there is trailing content after '.ts'), never silently
+  // narrowed to the 'test/foo.test.ts' substring the legacy TEST_PATH_RE would
+  // have matched inside a different, unrelated shape.
+  const wp = parseWhitelistedProof("unit test: test/foo.test.ts; rm -rf /");
+  assert.ok(wp);
+  assert.equal(wp!.kind, "test");
+  assert.ok(wp!.nameFiltered);
+  assert.deepEqual(wp!.args, [
+    "--test",
+    "--import",
+    "tsx",
+    "--test-name-pattern",
+    "test/foo.test.ts; rm -rf /",
+    "test/**/*.test.ts",
+  ]);
 });
 
 test("parseWhitelistedProof: house-dialect 'unit test: <name>' (not a path) compiles to a name-filtered test shape", () => {
@@ -952,14 +966,35 @@ test("parseWhitelistedProof: house-dialect 'unit test: <path>' reuses the exact-
   assert.deepEqual(wp!.args, ["--test", "--import", "tsx", "test/foo.test.ts"]);
 });
 
-test("parseWhitelistedProof: a dialect grep with shell metacharacters is REFUSED (null), not sanitized", () => {
-  assert.equal(parseWhitelistedProof("grep: foo; rm -rf / in src/lib/config.ts"), null);
-  assert.equal(parseWhitelistedProof("grep: $(whoami)"), null);
+test("parseWhitelistedProof (W1-T128): a dialect grep whose pattern contains prose-style shell metacharacters EXECUTES — execFile passes it as one argv element, never a shell, so it can't be interpreted specially", () => {
+  const withSemicolon = parseWhitelistedProof("grep: foo; rm -rf / in src/lib/config.ts");
+  assert.ok(withSemicolon);
+  assert.equal(withSemicolon!.kind, "grep");
+  assert.deepEqual(withSemicolon!.args, ["-rn", "--", "foo; rm -rf /", "src/lib/config.ts"]);
+
+  const withSubshell = parseWhitelistedProof("grep: $(whoami)");
+  assert.ok(withSubshell);
+  assert.deepEqual(withSubshell!.args, [
+    "-rn",
+    "--exclude-dir=.git",
+    "--exclude-dir=node_modules",
+    "--exclude-dir=plan",
+    "--",
+    "$(whoami)",
+    ".",
+  ]);
 });
 
-test("parseWhitelistedProof: a dialect unit-test name with shell metacharacters is REFUSED (null)", () => {
-  assert.equal(parseWhitelistedProof("unit test: $(whoami)"), null);
-  assert.equal(parseWhitelistedProof("unit test: foo; rm -rf /"), null);
+test("parseWhitelistedProof (W1-T128): a dialect unit-test NAME with prose-style shell metacharacters EXECUTES (name-filtered) — same argv-array reasoning as the grep case", () => {
+  const wp1 = parseWhitelistedProof("unit test: $(whoami)");
+  assert.ok(wp1);
+  assert.ok(wp1!.nameFiltered);
+  assert.ok(wp1!.args.includes("$(whoami)"));
+
+  const wp2 = parseWhitelistedProof("unit test: foo; rm -rf /");
+  assert.ok(wp2);
+  assert.ok(wp2!.nameFiltered);
+  assert.ok(wp2!.args.includes("foo; rm -rf /"));
 });
 
 test("parseWhitelistedProof: a dialect test path with '..' is refused (no traversal out of the checkout)", () => {
@@ -998,9 +1033,11 @@ test("ACCEPTANCE (W1-T72 #2): a house-dialect unit-test proof EXECUTES via the i
   assert.equal(v.criteria[0].proof_exec, "executed_pass");
 });
 
-test("ACCEPTANCE (W1-T72 safety): a dialect-prefixed proof with shell metacharacters is not_executable and the executor is NEVER called", () => {
-  const neverCalled: ProofExecutor = () => {
-    throw new Error("must never be called for an unsafe dialect proof");
+test("ACCEPTANCE (W1-T128 safety): a dialect-prefixed proof with prose-style shell metacharacters now EXECUTES — the injected executor IS called, receiving the pattern as ONE literal argv element (no shell ever sees it, so ';' can't chain a second command)", () => {
+  let received: WhitelistedProof | undefined;
+  const capture: ProofExecutor = (wp) => {
+    received = wp;
+    return "fail"; // the literal pattern won't match; that's fine, just prove it ran
   };
   const criteria: AcceptanceCriterion[] = [
     { claim: "no injection possible", proof: "grep: foo; rm -rf / in src/lib/config.ts" },
@@ -1009,9 +1046,28 @@ test("ACCEPTANCE (W1-T72 safety): a dialect-prefixed proof with shell metacharac
     diff: "",
     report: "grep: foo; rm -rf / in src/lib/config.ts",
     headCheckoutDir: "/fake/head/checkout",
+    execProof: capture,
+  });
+  assert.equal(v.criteria[0].proof_exec, "executed_fail");
+  assert.deepEqual(received!.args, ["-rn", "--", "foo; rm -rf /", "src/lib/config.ts"]);
+});
+
+test("ACCEPTANCE (W1-T128 safety): the REAL remaining hazards — path traversal ('..') and a literal glob ('*') in a grep TARGET — still leave the proof not_executable and the executor NEVER called", () => {
+  const neverCalled: ProofExecutor = () => {
+    throw new Error("must never be called for a refused dialect proof");
+  };
+  const criteria: AcceptanceCriterion[] = [
+    { claim: "traversal is refused", proof: "grep: secret in ../../etc/passwd" },
+    { claim: "glob is refused", proof: "grep: TODO in src/lib/*.ts" },
+  ];
+  const v = judgeReview(criteria, {
+    diff: "",
+    report: "grep: secret in ../../etc/passwd\ngrep: TODO in src/lib/*.ts",
+    headCheckoutDir: "/fake/head/checkout",
     execProof: neverCalled,
   });
   assert.equal(v.criteria[0].proof_exec, "not_executable");
+  assert.equal(v.criteria[1].proof_exec, "not_executable");
 });
 
 // ── W1-T72 (i): floorDegraded — LOUD when execution fell back to keywords on
