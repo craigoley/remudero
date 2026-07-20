@@ -28,10 +28,20 @@ info:
     adjustment) adds GET /v1/feedback (the inbox), POST /v1/feedback (submit
     feedback / answer a grill, origin=ui), GET /v1/trace (the plan->task->PR
     provenance graph, W1-T43), and POST /v1/feedback/decision (accept/reject a
-    proposal), all built via src/lib/panel-graph.ts. Every route the daemon's
-    OTHER surfaces still need (re-prioritize, ...) is registered by later
-    tasks the same way -- this document is additive, never rewritten
-    wholesale.
+    proposal), all built via src/lib/panel-graph.ts.
+
+    W3-T8 (MASTER-PLAN §5B/§7 -- panel skill actions) adds GET /v1/skills: the
+    panel's action-button set, resolved fresh from `.remudero/skills/<name>.yaml`
+    (the SAME registry `rmd skill list` reads, W1-T44) via src/lib/panel-skills.ts
+    -- one button per registry entry, generated, never hard-coded. POST
+    /v1/skills/run (src/lib/panel-skill-run.ts) invokes one: today `{ skill:
+    "plan", mode: "clarify" }` (Refine) is wired, grounding via the real §5C task
+    linter and parking a `grilling` feedback entry the existing GET/POST
+    /v1/feedback (W3-T6) already renders inline and answers.
+
+    Every route the daemon's OTHER surfaces still need (re-prioritize, ...) is
+    registered by later tasks the same way -- this document is additive, never
+    rewritten wholesale.
 
 servers:
   - url: "https://{tailnetHost}"
@@ -515,6 +525,103 @@ components:
             - string
             - "null"
 
+    # ── W3-T8 (MASTER-PLAN §5B/§7 -- panel skill actions) -- the button set
+    # src/lib/panel-skills.ts's ONE route returns, resolved from
+    # `.remudero/skills/<name>.yaml` (lib/skill.ts's `Skill`, W1-T44) the SAME
+    # way `rmd skill list` does.
+    SkillEntry:
+      type: object
+      description: >
+        One `.remudero/skills/<name>.yaml` entry (lib/skill.ts's `Skill`) -- the panel button
+        IS this registry entry (MASTER-PLAN §5B). `name` is the file's basename, never a
+        `name:` field inside the body, so it can never drift from what `rmd skill list`
+        reports it under.
+      required:
+        - name
+        - tools
+        - permission_profile
+        - output_contract
+        - grounding_sources
+        - gate
+        - tier
+      properties:
+        name:
+          type: string
+          description: The skill's identity -- its filename minus `.yaml`.
+        tools:
+          type: array
+          items:
+            type: string
+        permission_profile:
+          type: string
+        output_contract:
+          type: string
+        grounding_sources:
+          type: array
+          items:
+            type: string
+        gate:
+          type: string
+        tier:
+          type: string
+
+    SkillsListResult:
+      type: object
+      description: >
+        GET /v1/skills's body -- one SkillEntry per `.remudero/skills/<name>.yaml`, resolved
+        fresh on every request (src/lib/panel-skills.ts).
+      required:
+        - skills
+      properties:
+        skills:
+          type: array
+          items:
+            $ref: "#/components/schemas/SkillEntry"
+
+    # ── W3-T8 round 2 (MASTER-PLAN §5B/§7) -- invoking a registry skill button. Today ONE
+    # skill+mode is wired: { skill: "plan", mode: "clarify" }, the panel's "Refine" button
+    # (src/lib/panel-skill-run.ts).
+    RunSkillRequest:
+      type: object
+      description: >
+        POST /v1/skills/run's body -- which registry skill to invoke, an optional mode, and
+        (for `plan`/`clarify`, i.e. Refine) the plan task id it targets.
+      required:
+        - skill
+      properties:
+        skill:
+          type: string
+          description: A name present in the `.remudero/skills/<name>.yaml` registry (validated against GET /v1/skills's own source).
+        mode:
+          type: string
+          description: 'The skill mode, e.g. "clarify" for Refine (§5B: plan is ONE skill, THREE MODES).'
+        taskId:
+          type: string
+          description: The plan/tasks.yaml task id this invocation targets. Required for `plan`/`clarify` (Refine).
+
+    RunSkillResult:
+      type: object
+      description: >
+        POST /v1/skills/run's body -- the invoked skill echoed back plus the grill it parked.
+        Today always carries a `grilling` `feedback` entry: Refine is the only wired skill/mode,
+        and Refine always grills (grounds via the real §5C linter, never proposes outright).
+      required:
+        - ok
+        - skill
+        - taskId
+        - feedback
+      properties:
+        ok:
+          type: boolean
+        skill:
+          type: string
+        mode:
+          type: string
+        taskId:
+          type: string
+        feedback:
+          $ref: "#/components/schemas/FeedbackEntry"
+
   responses:
     Unauthorized:
       description: No or unrecognized bearer token.
@@ -863,6 +970,66 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProposalDecisionResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/skills:
+    get:
+      summary: The panel's skill action-button set, resolved from the registry.
+      description: >
+        "each v1 skill appears as a panel button resolved from the registry (not hard-coded
+        UI)... adding a skill yaml adds a button with no UI code change" (W3-T8 acceptance) --
+        the SAME `.remudero/skills/<name>.yaml` registry `rmd skill list` reads (W1-T44,
+        src/lib/skill.ts), via src/lib/panel-skills.ts. Reloaded fresh on every request, so a
+        skill yaml added after the daemon boots appears on the very next request.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The button set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillsListResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/skills/run:
+    post:
+      summary: Invoke a registry skill button -- today, Refine (plan/clarify) only.
+      description: >
+        "invoking Refine from the panel runs the plan --mode=clarify skill and shows the grill
+        inline... the answer flows back" (W3-T8 acceptance) -- src/lib/panel-skill-run.ts.
+        `{ skill: "plan", mode: "clarify" }` (Refine) grounds via the REAL, ALREADY-MERGED §5C
+        linter (src/lib/task-linter.ts) and parks the result as a `grilling`
+        plan/feedback/<id>.yaml entry (src/lib/feedback.ts) -- the SAME entry GET /v1/feedback
+        already renders inline and POST /v1/feedback's `replyTo` already answers (W3-T6). Any
+        other skill/mode is a 400 naming exactly what is not yet wired, never a silent no-op.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunSkillRequest"
+      responses:
+        "200":
+          description: The invoked skill, echoed back with the grill it parked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunSkillResult"
         "400":
           $ref: "#/components/responses/InvalidRequest"
         "401":

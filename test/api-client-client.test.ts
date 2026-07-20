@@ -12,7 +12,10 @@ import {
   buildStopRoute,
   type IssueCloser,
 } from "../src/lib/panel-actions.js";
-import { buildPanelGraphRoutes, type PanelGraphDeps } from "../src/lib/panel-graph.js";
+import { buildFeedbackInboxRoute, buildPanelGraphRoutes, buildSubmitFeedbackRoute, type PanelGraphDeps } from "../src/lib/panel-graph.js";
+import { buildPanelSkillsRoutes, type PanelSkillsDeps } from "../src/lib/panel-skills.js";
+import { buildPanelSkillRunRoutes, type PanelSkillRunDeps } from "../src/lib/panel-skill-run.js";
+import { skillsDir } from "../src/lib/skill.js";
 import { setFeedbackStatus } from "../src/lib/feedback.js";
 import type { TraceGithub } from "../src/lib/trace.js";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -335,6 +338,172 @@ test("createDaemonClient.decideProposal(): POSTs /v1/feedback/decision, returns 
     const result = await client.decideProposal(submitted.entry.id, "accept");
     assert.deepEqual(result, { ok: true, id: submitted.entry.id, status: "accepted", proposalPr: "https://github.com/o/r/pull/1" });
   });
+});
+
+// ── W3-T8: panel skill actions (MASTER-PLAN §5B/§7) ─────────────────────────────────────────
+//
+// Same discipline: drive createDaemonClient against a REAL createService()-backed server
+// registering the real src/lib/panel-skills.ts route, never a mock of fetch.
+
+function skillsTmpRoot(): string {
+  return mkdtempSync(join(tmpdir(), "rmd-api-client-skills-"));
+}
+
+function writeSkillYaml(root: string, name: string): void {
+  const dir = skillsDir(root);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `${name}.yaml`),
+    "tools:\n  - Read\npermission_profile: implement\noutput_contract: a PR\ngrounding_sources:\n  - plan/tasks.yaml\ngate: ci + remudero-review\ntier: G-17\n",
+  );
+}
+
+async function withSkillsFixture<T>(fn: (baseUrl: string) => Promise<T>): Promise<T> {
+  const root = skillsTmpRoot();
+  const deps: PanelSkillsDeps = { root };
+  const server = createService({ tokens: { read: READ_TOKEN, write: WRITE_TOKEN }, routes: buildPanelSkillsRoutes(deps) });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    return await fn(`http://127.0.0.1:${port}`);
+  } finally {
+    server.close();
+  }
+}
+
+test("createDaemonClient.listSkills(): GETs /v1/skills, returns the registry-generated button set", async () => {
+  const root = skillsTmpRoot();
+  writeSkillYaml(root, "plan");
+  writeSkillYaml(root, "refactor");
+  const deps: PanelSkillsDeps = { root };
+  const server = createService({ tokens: { read: READ_TOKEN, write: WRITE_TOKEN }, routes: buildPanelSkillsRoutes(deps) });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const client = createDaemonClient({ baseUrl: `http://127.0.0.1:${port}`, token: READ_TOKEN });
+    const result = await client.listSkills();
+    assert.deepEqual(
+      result.skills.map((s) => s.name).sort(),
+      ["plan", "refactor"],
+    );
+  } finally {
+    server.close();
+  }
+});
+
+test("createDaemonClient.listSkills(): no registered skills -> an empty list, never a throw", async () => {
+  await withSkillsFixture(async (baseUrl) => {
+    const client = createDaemonClient({ baseUrl, token: READ_TOKEN });
+    assert.deepEqual(await client.listSkills(), { skills: [] });
+  });
+});
+
+// ── W3-T8 round 2: runSkill() -- invoking Refine runs plan/clarify and shows the grill inline,
+// the answer flows back (MASTER-PLAN §5B/§7) ────────────────────────────────────────────────
+
+function writePlanWithTask(root: string): string {
+  const planPath = join(root, "plan", "tasks.yaml");
+  mkdirSync(join(root, "plan"), { recursive: true });
+  const task = {
+    id: "W9-T1",
+    title: "Example task",
+    repo: "remudero",
+    depends_on: [],
+    type: "implement",
+    verify: "auto",
+    risk: "medium",
+    status: "queued",
+    attempts: 0,
+    origin: "architect",
+    acceptance: [{ claim: "does the thing", proof: "paste the ledger line" }],
+  };
+  writeFileSync(planPath, JSON.stringify([task]));
+  return planPath;
+}
+
+test("createDaemonClient.runSkill(): invoking Refine (plan/clarify) parks a grilling entry; listSkills/listFeedback/submitFeedback compose the full inline-grill-and-answer loop", async () => {
+  const root = graphTmpRoot();
+  writeSkillYaml(root, "plan");
+  const planPath = writePlanWithTask(root);
+  const skillRunDeps: PanelSkillRunDeps = { root, planPath, ledgerPath: join(root, "state", "ledger.ndjson") };
+  const graphDeps: PanelGraphDeps = { root, planPath, ledgerPath: skillRunDeps.ledgerPath, github: fakeGithub() };
+  const server = createService({
+    tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    routes: [...buildPanelSkillRunRoutes(skillRunDeps), buildFeedbackInboxRoute(graphDeps), buildSubmitFeedbackRoute(graphDeps)],
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const client = createDaemonClient({ baseUrl: `http://127.0.0.1:${port}`, token: WRITE_TOKEN });
+
+    // Click "Refine".
+    const run = await client.runSkill("plan", { mode: "clarify", taskId: "W9-T1" });
+    assert.equal(run.ok, true);
+    assert.equal(run.skill, "plan");
+    assert.equal(run.mode, "clarify");
+    assert.equal(run.feedback.status, "grilling");
+    assert.match(run.feedback.raw, /W9-T1/);
+
+    // The grill renders inline, through the SAME listFeedback() the panel's inbox already uses.
+    const inbox = await client.listFeedback("grilling");
+    assert.equal(inbox.entries.length, 1);
+    assert.equal(inbox.entries[0].id, run.feedback.id);
+
+    // The answer flows back, through the SAME submitFeedback()/replyTo the panel already uses.
+    const answer = await client.submitFeedback("split it up", { replyTo: run.feedback.id });
+    assert.equal(answer.ok, true);
+    assert.match(answer.entry.raw, new RegExp(`answer to feedback#${run.feedback.id}`));
+  } finally {
+    server.close();
+  }
+});
+
+function buildSkillRunFixtureService(root: string) {
+  const planPath = writePlanWithTask(root);
+  const deps: PanelSkillRunDeps = { root, planPath, ledgerPath: join(root, "state", "ledger.ndjson") };
+  return createService({ tokens: { read: READ_TOKEN, write: WRITE_TOKEN }, routes: buildPanelSkillRunRoutes(deps) });
+}
+
+test("createDaemonClient.runSkill(): an unwired skill (not in the registry) throws with a 400, never a bogus success", async () => {
+  const root = skillsTmpRoot();
+  writeSkillYaml(root, "plan"); // "plan" exists but "does-not-exist" does not
+  const server = buildSkillRunFixtureService(root);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const client = createDaemonClient({ baseUrl: `http://127.0.0.1:${port}`, token: WRITE_TOKEN });
+    await assert.rejects(() => client.runSkill("does-not-exist"), /400/);
+  } finally {
+    server.close();
+  }
+});
+
+test("createDaemonClient.runSkill(): a registered skill with no run implementation throws with a 400, never a bogus success", async () => {
+  const root = skillsTmpRoot();
+  writeSkillYaml(root, "retro");
+  const server = buildSkillRunFixtureService(root);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const client = createDaemonClient({ baseUrl: `http://127.0.0.1:${port}`, token: WRITE_TOKEN });
+    await assert.rejects(() => client.runSkill("retro"), /400/);
+  } finally {
+    server.close();
+  }
+});
+
+test("createDaemonClient.runSkill(): a read-only token gets a thrown 403, never a silent no-op", async () => {
+  const root = skillsTmpRoot();
+  writeSkillYaml(root, "plan");
+  const server = buildSkillRunFixtureService(root);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const client = createDaemonClient({ baseUrl: `http://127.0.0.1:${port}`, token: READ_TOKEN });
+    await assert.rejects(() => client.runSkill("plan", { mode: "clarify", taskId: "W9-T1" }), /403/);
+  } finally {
+    server.close();
+  }
 });
 
 test("createDaemonClient graph write methods: a read-only token gets a thrown 403, never a silent no-op", async () => {
