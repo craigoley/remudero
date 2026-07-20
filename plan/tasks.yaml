@@ -6715,3 +6715,78 @@
   attempts: 0
   note: "Fixture = the $206/60-run W1-T1 incident. Budget-polarity dual of W1-T130 (cannot-observe->WAIT). Drainage
     NEVER throttles — only new DISPATCH defers; the falsifier is a governor that strands in-flight work."
+
+- id: W1-T149
+  title: "P29: sibling-run credit liveness — a task whose SIBLING run's PR merged is CREDITED (not re-dispatched); ownership-assert preserved; + a per-task dispatch circuit breaker"
+  repo: remudero
+  depends_on: [W1-T69, W1-T80]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "RATIFIES P29. The integrity guard (W1-T69's ownership-assert) has no LIVENESS counterpart: when a
+    SIBLING run of the same task merged the work, deriveStatus reports the task un-credited, nextRunnable re-selects
+    it, and W1-T80's dedup cannot fire (the merged PR is not OPEN) — W1-T1 spun ~130 times / ~$130 / ~10h AFTER its
+    PR #255 merged; W1-T29 x10. The assert is CORRECT and must NOT be loosened; the fix is (i) SIBLING CREDIT
+    (ownership-preserving) + (ii) a per-task dispatch CIRCUIT BREAKER (the backstop that makes (i) safe to get wrong)."
+  design: |
+    (i) SIBLING CREDIT, ownership-preserving: in deriveStatus (status.ts), a task is CREDITED when a merged PR
+    carries its Remudero-Task trailer AND that PR's head branch matches run-<taskid>-* for ANY run of that task
+    (not only THIS run's branch), with the crediting run named in the ledger line. The assert moves from "this run's
+    branch" to "a branch this TASK owns" — strictly narrower than trusting the trailer (a foreign PR still fails),
+    strictly wider than today (a sibling credits). (ii) PER-TASK CIRCUIT BREAKER (policy-as-data, rule 2): N
+    dispatches of the same task with NO new owned PR => HALT the task, escalate ONE needs-human naming the loop,
+    dispatch nothing further. VERIFY the deriveStatus rungs, ownsBranch, and the dispatch/strike surfaces from source
+    first (distrust this note).
+  acceptance:
+    - claim: "a task with a merged SIBLING-run PR is CREDITED exactly once and dispatches NOTHING further"
+      proof: "unit test over the W1-T1/#255 shape: a seeded task with a merged PR whose head is a run-<taskid>-* branch of a DIFFERENT run is credited once (deriveStatus=merged, source names the crediting run) and nextRunnable never re-selects it"
+    - claim: "a merged FOREIGN-branch PR carrying the task's trailer is NOT credited and DOES escalate (the falsifier)"
+      proof: "unit test: a merged PR whose head branch is NOT run-<taskid>-* (foreign) but carries the trailer is REJECTED by the ownership-assert (not credited) and surfaces — the assert stays strictly narrower than the trailer"
+    - claim: "a task at N+1 dispatches with no owned PR HALTS with exactly one escalation and zero further dispatches"
+      proof: "unit test: a seeded task dispatched N times with no new owned PR trips the per-task circuit breaker at N+1 — exactly one needs-human escalation naming the loop, and zero further dispatches (the W1-T29 x10 spin shape)"
+  risk: high
+  origin: architect
+  plan_refs: ["§9", "§5C"]
+  files: [src/lib/status.ts, src/lib/sweep.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Ratifies P29 (the top R8 item). Sibling of W1-T150 (P30 credit backfill, which reuses this ownership rule).
+    Fixtures: W1-T1 ~130 re-dispatches (5h post-merge), W1-T29 x10. A fail-closed integrity guard needs a liveness
+    counterpart or the system pays for its own correctness forever."
+
+- id: W1-T150
+  title: "P30: level-triggered credit backfill — the sweep appends a verdict.merged correction for any task whose owned PR is merged but uncredited (the verdict writer is blind to gate-side merges)"
+  repo: remudero
+  depends_on: [W1-T77, W1-T149]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "RATIFIES P30. 0 of 195 runs ledgered a merge while GitHub showed 28 — all gate-side. The verdict WRITE
+    side is edge-triggered at run-end: a run that ends before its PR merges never revisits the question, so the
+    ledger's verdict field is wrong 28/28, and every consumer that reads verdict rather than the union — deriveStatus
+    (dispatch!), calibration, rmd trace, the readiness predicate — reads a field that is now usually false. FIX: the
+    same LEVEL-TRIGGERED reconciliation P22 applied to open PRs, applied to CREDIT."
+  design: |
+    Add a rung to the rmd sweep reconciler (W1-T77 family, sweep.ts): per poll, for any task whose OWNED PR is merged
+    (reusing W1-T149's ownership rule) but whose ledger has no merge credit, APPEND exactly one verdict.merged
+    correction event; a second sweep over unchanged state appends NOTHING (idempotence). An uncredited run whose PR
+    is still OPEN yields no correction. VERIFY the sweep rung structure, the ownership rule from W1-T149, and the
+    ledger credit predicate from source first (distrust this note).
+  acceptance:
+    - claim: "a run ledgered blocked_ci whose OWNED PR is merged yields exactly ONE verdict.merged correction on the next sweep"
+      proof: "unit test over the 0/195-vs-28 shape: a seeded run with verdict=blocked_ci whose owned (run-<taskid>-*) PR is merged yields exactly one verdict.merged correction line on the next sweep, naming the PR"
+    - claim: "a second sweep over unchanged state appends ZERO (idempotence — the falsifier)"
+      proof: "unit test: re-running the sweep over the now-credited state appends no further correction (idempotent); a rung that re-credited every poll would fail this test"
+    - claim: "an uncredited run whose PR is still OPEN yields NO correction"
+      proof: "unit test: a seeded uncredited run whose owned PR is OPEN (not merged) yields zero corrections — credit backfill fires only on MERGED owned PRs"
+  risk: high
+  origin: architect
+  plan_refs: ["§9", "§5C"]
+  files: [src/lib/sweep.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Ratifies P30. Reuses W1-T149's (P29(i)) ownership rule. Fixture: 0/195 ledgered-merge on a 28-merge day.
+    Level-triggered credit is P22's doctrine applied to the merge EVENT — edge-triggered crediting at run-end is the
+    exact defect."
