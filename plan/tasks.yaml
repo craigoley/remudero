@@ -7253,3 +7253,180 @@
   note: "Extends the sweep's level-triggered reconciliation (W1-T77 / P22) from PRs to escalation ISSUES. Evidence:
     11 closed by hand, 6 re-accrued in a day. Falsifier: a live-referent escalation must not close. Companion to
     W1-T104 (escalation-dedup) — dedup stops duplicates being opened; this closes them once the referent resolves."
+
+- id: W1-T163
+  title: "since-you-last-checked recap — a per-operator last-seen marker (per token, updated on board view) drives a console recap of everything after it; the digest becomes marker-aware so push and pull tell one story"
+  repo: remudero
+  depends_on: [W1-T112, W1-T144, W1-T158]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The operator opens the console and cannot tell what changed since they last looked. Track a per-operator
+    LAST-SEEN marker (keyed per bearer token, advanced when the board is viewed) and render a 'Since you last checked'
+    section: merges, blocks, escalations, feedback answered, retro runs — everything after the marker, each row
+    expanding into its T158 task card for drill-in. The digest (W1-T112 / W1-T144) becomes marker-aware so the PUSH
+    (digest) and the PULL (console recap) tell ONE story, not two divergent ones."
+  design: |
+    A per-token last-seen marker (advanced on board view / GET /v1/status from that token). A recap builder collects
+    ledger+GitHub events AFTER the marker (merges, blocks, escalations, feedback answered, retro runs), rendered as a
+    console section whose rows expand into the T158 task card. The digest (W1-T112/W1-T144) reads the SAME marker so
+    a pushed digest and the pulled recap cover the same window. VERIFY the token identity (service.ts bearer id), the
+    board-view path, the digest emit surface, and the T158 card address from source first (distrust this note).
+  acceptance:
+    - claim: "the recap renders every event AFTER the per-operator marker (merges/blocks/escalations/feedback/retro), each row drilling into its T158 card"
+      proof: "integration test: with a marker set, events created AFTER it appear in the recap (one row per merge/block/escalation/feedback-answered/retro), each linking to the T158 task card; an event created BEFORE the marker does NOT appear (the falsifier)"
+    - claim: "viewing the board advances the marker — a reload then yields an empty recap"
+      proof: "integration test: viewing the board (from a token) advances that token's marker to now; an immediate reload renders an EMPTY 'Since you last checked' recap (nothing after the just-advanced marker); a recap still showing pre-view events FAILS"
+    - claim: "the digest is marker-aware — push and pull cover the same window"
+      proof: "unit test: the digest (W1-T112/W1-T144) reads the same per-operator marker as the console recap, so the pushed digest's event set equals the pulled recap's for the same marker; a digest computed off a different/stale window FAILS"
+  risk: high
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/serve.ts, src/lib/board.ts, src/lib/digest.ts]
+  status: queued
+  attempts: 0
+  note: "Per-token last-seen marker; recap rows drill into T158 cards; digest (W1-T112/W1-T144) marker-aware so push
+    and pull are one story. Falsifiers: a pre-marker event in the recap fails; view-then-reload yields empty recap."
+
+- id: W1-T164
+  title: "operator guidance notes — a task carries console-editable, provenance-stamped operator_note(s) injected into recon/implement prompts under the provenance rule (feedback INTO a task before it runs)"
+  repo: remudero
+  depends_on: [W1-T19, W1-T141]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The operator can judge a task AFTER it runs (W1-T141 verdicts) but cannot steer it BEFORE. A task may
+    carry operator-authored GUIDANCE — a console-editable, provenance-stamped operator_note (author + timestamp) —
+    injected into the recon/implement prompts under the provenance rule (same discipline as injected learnings,
+    W1-T19). Feedback INTO a task before it runs, complementing the after-the-fact verdicts."
+  design: |
+    A per-task operator_note store (NOT worker-editable tasks.yaml — a separate provenance-stamped artifact keyed by
+    task id, console-editable via a write-scoped route). At prompt assembly (renderImplementPrompt / the recon
+    prompt), inject the task's operator_note(s) verbatim under the provenance rule (author + timestamp rendered, like
+    a learning's [src:] tag), scoped to THAT task only. VERIFY the prompt-assembly site, the provenance-render
+    convention (learnings.ts), and a write-scoped console route from source first (distrust this note).
+  acceptance:
+    - claim: "a stamped operator_note on task A is injected into task A's recon/implement prompt, provenance rendered"
+      proof: "unit test: a provenance-stamped operator_note (author + timestamp) on task A appears VERBATIM in task A's assembled recon/implement prompt with its author+timestamp; the note is scoped to A"
+    - claim: "a note on task A never appears in task B's prompt (the falsifier)"
+      proof: "unit test: an operator_note on task A is NOT present in task B's assembled prompt — cross-task leakage FAILS"
+    - claim: "an UNSTAMPED note is not injected (provenance rule)"
+      proof: "unit test: a note lacking author/timestamp provenance is REFUSED at injection (not rendered into any prompt) — an unstamped note injected FAILS (the falsifier)"
+  risk: high
+  origin: architect
+  plan_refs: ["§8B", "§7"]
+  files: [src/run-task.ts, src/lib/serve.ts]
+  status: queued
+  attempts: 0
+  note: "operator_note = console-editable, provenance-stamped (author+timestamp), injected into recon/implement under
+    the provenance rule (W1-T19 discipline). Complements W1-T141 (verdicts AFTER) with feedback BEFORE. Falsifiers:
+    a note leaking to another task's prompt fails; an unstamped note injected fails."
+
+- id: W1-T165
+  title: "golden-task regression suite — replayable golden tasks from the ledger validate a harness-touching change in sandbox before it ships; the retro reports replay pass-rate (the missing Self-Harness leg)"
+  repo: remudero
+  depends_on: [W1-T12d]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The harness has no self-test: a change to worker prompts / review logic / rung selectors ships unproven
+    against known-good behavior. Curate GOLDEN tasks from the ledger's history — known-good runs spanning the
+    workflow classes (plan filing, src fix, doc task, fix-rung heal) — REPLAYABLE against a candidate harness in
+    sandbox (remudero-sandbox, the proven venue, W1-T12d), so a harness-touching change is validated by replay BEFORE
+    it ships, and the retro's calibration section reports replay pass-rate over time. Start MINIMAL: the replay
+    mechanism + 3 goldens; grow from production failures per the literature's curve."
+  design: |
+    (1) REPLAY MECHANISM: given a golden (a recorded known-good run — task spec + expected terminal disposition/shape)
+    and a candidate harness, replay it in sandbox and compare the outcome to the golden's expected result. (2) 3
+    GOLDENS to start, spanning classes (plan filing, src fix, doc/fix-rung). (3) The retro's calibration section
+    reports the replay pass-rate over time. VERIFY the sandbox venue (W1-T12d), the ledger's run-record shape, and
+    the retro calibration section from source first (distrust this note). Start minimal — do NOT curate all classes now.
+  acceptance:
+    - claim: "the replay mechanism runs a golden against a candidate harness in sandbox and passes an unchanged harness"
+      proof: "integration test (sandbox): replaying the 3 seeded goldens against the CURRENT harness passes all 3 (outcome matches the golden's expected disposition/shape)"
+    - claim: "a deliberately-degraded harness change FAILS replay (the falsifier)"
+      proof: "test: a deliberately-degraded worker-prompt / review-logic change replayed against the goldens FAILS at least one golden (the regression catches it) — a degraded change that passes replay FAILS this test"
+    - claim: "the retro reports replay pass-rate over time"
+      proof: "unit test: the retro's calibration section renders the replay pass-rate (n passed / n goldens) for the cycle, from the replay records; a retro that omits it FAILS"
+  risk: high
+  origin: architect
+  plan_refs: ["§5A", "§9"]
+  files: [src/lib/replay.ts, src/lib/retro.ts]
+  status: queued
+  attempts: 0
+  note: "The missing Self-Harness leg. remudero-sandbox is the proven replay venue (W1-T12d). Start minimal (replay +
+    3 goldens spanning classes); grow from production failures. Falsifier: a degraded prompt/review change must FAIL
+    replay. The retro reports pass-rate over time (calibration)."
+
+- id: W1-T166
+  title: "holdout acceptance criteria — a task may carry holdout criteria visible to the reviewer but excluded from every worker prompt; the review judges visible+holdout and ledgers the gap (the reward-hacking measurement)"
+  repo: remudero
+  depends_on: [W1-T65]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "A worker that sees every acceptance criterion can optimize TO the test (reward-hacking) — the SpecBench
+    finding. A task MAY carry HOLDOUT criteria (schema: holdout: true per criterion) visible to the REVIEWER but
+    EXCLUDED from every worker prompt: prompt assembly provably filters them out. The review judges visible+holdout;
+    the GAP between visible-pass and holdout-pass is ledgered per run — a measurement of reward-hacking, feeding
+    D-10-style calibration."
+  design: |
+    Add holdout:true to the acceptance-criterion schema (plan.ts). Prompt assembly (renderImplementPrompt / recon)
+    FILTERS OUT holdout criteria — a worker never sees them. The reviewer (W1-T65 floor) judges BOTH visible and
+    holdout criteria; the run ledgers the gap (visible-pass rate vs holdout-pass rate). VERIFY the criterion schema,
+    the prompt-assembly filter point, and the reviewer's criteria source from source first (distrust this note).
+  acceptance:
+    - claim: "a holdout:true criterion is EXCLUDED from every worker prompt — provably filtered"
+      proof: "unit test: a task with a holdout:true criterion assembles recon AND implement prompts that do NOT contain the holdout criterion's text; grep the assembled prompts — the holdout string appearing in ANY worker prompt FAILS (the falsifier)"
+    - claim: "the review judges visible + holdout; a worker passing visible-only while failing holdout yields FAIL"
+      proof: "unit test: a run whose diff satisfies the VISIBLE criteria but FAILS a holdout criterion is judged FAIL by the reviewer (holdout counts); a review that passed on visible-only FAILS this test (the falsifier)"
+    - claim: "the visible-vs-holdout gap is ledgered per run (the reward-hacking measurement)"
+      proof: "unit test: a run ledgers the visible-pass vs holdout-pass gap (a reward_hacking_gap field / line) — readable for D-10-style calibration; a run that omits the gap FAILS"
+  risk: high
+  origin: architect
+  plan_refs: ["§5", "§5C"]
+  files: [src/lib/plan.ts, src/run-task.ts, src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "The SpecBench reward-hacking finding. holdout:true criteria are reviewer-visible but worker-hidden (prompt
+    assembly filters them); the review judges both; the gap is ledgered (feeds D-10 calibration). Falsifiers: a
+    holdout string in any worker prompt fails; visible-pass + holdout-fail must yield FAIL."
+
+- id: W1-T167
+  title: "model routing by task class — mount model/effort become policy data keyed on task risk/class (cheaper for docs/plan-lint; current default for risk:high src), with per-class cost/outcome ledgered so the retro can evaluate the routing"
+  repo: remudero
+  depends_on: [W1-T5]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The fleet pays flat sonnet/high pricing across EVERY task class — a doc task and a risk:high src task run
+    the same expensive mount (the $12 W1-T115 run). Make mount model/effort POLICY DATA keyed on task risk/class:
+    cheaper mounts for docs / plan-lint / low-risk, the current default for risk:high src. Ledger per-class
+    cost/outcome so the retro can EVALUATE the routing table (routing is a hypothesis to be measured, not asserted)."
+  design: |
+    Extend the mount table (.remudero/mounts.yaml / lib/mounts.ts) to key model+effort on (task_type × risk / class)
+    as policy-as-data (rule 2) — never a code branch. Route each dispatch through it. Ledger per-class cost + outcome
+    (merge/block) so the retro reads the routing table's effectiveness. A class with NO row falls back to the default
+    LOUDLY (a ledger line naming the missing class), never silently. VERIFY the current mount table + resolveMount,
+    the dispatch mount-resolution site, and the retro calibration read from source first (distrust this note).
+  acceptance:
+    - claim: "model/effort route by task risk/class as POLICY DATA — changing the routing needs no code edit"
+      proof: "unit test: the routing table is data (mounts.yaml rows keyed on task_type/risk/class); a docs/plan-lint class resolves a CHEAPER mount and a risk:high src class the default; changing a row changes the routing with NO code edit — a routing-table change that requires a code change FAILS (the falsifier)"
+    - claim: "a class with NO row falls back to the default LOUDLY"
+      proof: "unit test: a task whose class has no routing row falls back to the default mount AND ledgers a loud line naming the unmatched class; a silent fallback (no line) FAILS (the falsifier)"
+    - claim: "per-class cost/outcome is ledgered so the retro can evaluate the routing"
+      proof: "unit test: each dispatch ledgers its class + mount + cost + outcome; the retro's calibration reads per-class cost/merge-rate so the routing table is measurable (the $12 W1-T115 class visible); a run that omits the class/cost FAILS"
+  risk: high
+  origin: architect
+  plan_refs: ["§9", "§5"]
+  files: [src/lib/mounts.ts, src/run-task.ts, src/lib/retro.ts]
+  status: queued
+  attempts: 0
+  note: "Mount model/effort as policy-data keyed on risk/class (cheaper for docs/plan-lint; default for risk:high
+    src). Per-class cost/outcome ledgered so the retro evaluates the table. Evidence: flat sonnet/high pricing, the
+    $12 W1-T115 run. Falsifiers: a routing change needing code fails; a class with no row falls back LOUDLY."
