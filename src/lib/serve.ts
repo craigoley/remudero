@@ -52,6 +52,7 @@ import {
   type PanelActionDeps,
 } from "./panel-actions.js";
 import { buildPanelGraphRoutes, type PanelGraphDeps } from "./panel-graph.js";
+import { buildTaskCardRoute } from "./task-card.js";
 
 /** Default `rmd serve` port — matches apps/dashboard/src/main.ts's own `?daemon=` default (`http://localhost:4317`), so the shipped dashboard points at a served daemon out of the box. */
 export const DEFAULT_SERVE_PORT = 4317;
@@ -344,6 +345,17 @@ export function renderShellHtml(): string {
   .cmdk-item.active, .cmdk-item:hover { background: var(--bg-elevated); }
   .cmdk-kind { font-size: 0.65rem; font-weight: 700; letter-spacing: 0.03em; color: var(--text-faint); border: 1px solid var(--border); border-radius: 4px; padding: 0 0.3em; }
   .cmdk-empty { padding: 0.6rem; color: var(--text-faint); font-size: 0.875rem; }
+  /* W1-T158: DETAIL + JOURNEY layer. ────────────────────────────────────────────────────── */
+  .row { cursor: pointer; }
+  .row button, .row a, .row input, .row label, .row form { cursor: auto; }
+  .row-journey-btn { margin-left: auto; font-size: 0.75rem; padding: 0.2rem 0.5rem; }
+  h3 { font-size: 0.9rem; margin: 0.75rem 0 0.35rem; color: var(--text-dim); }
+  #task-detail-body ul, #journey-body ul { list-style: none; margin: 0; padding: 0; }
+  #task-detail-body li, #journey-body li { padding: 0.15rem 0; }
+  #journey-body ul ul { padding-left: 1.25rem; }
+  .card-dep-link, .journey-task-link { font-size: 0.85rem; padding: 0.2rem 0.5rem; }
+  /* the failing/blocking step in a journey — the whole point of "walk backwards to the cause". */
+  .journey-fail { color: var(--status-blocked); font-weight: 600; }
   @media (min-width: 900px) {
     main { max-width: 64rem; }
   }
@@ -434,13 +446,34 @@ export function renderShellHtml(): string {
          send the Authorization header, so a bare anchor click 401s (the #339 bootstrap-paradox
          at the LINK layer). These fetch WITH the header the page already carries. -->
     <button id="feedback-btn" type="button">Feedback inbox</button>
-    <button id="graph-btn" type="button">Plan→task→PR graph</button>
   </div>
   <section id="panel" aria-label="Tool panel" hidden>
     <h2 id="panel-title"></h2>
     <div id="panel-controls"></div>
     <pre id="panel-body" class="mono"></pre>
   </section>
+</section>
+
+<!-- W1-T158: the DETAIL + JOURNEY layer. EVERY task row (NOW/NEEDS ME/UP NEXT/RECENT/rest)
+     carries its own one-click "Journey" affordance (.row-journey-btn, keyed on that row's OWN
+     task id) and is itself clickable to expand this card -- never a typed-id lookup. This
+     RETIRES the v0 id-textbox "Plan→task→PR graph" panel (#359's own follow-on debt): the SAME
+     GET /v1/trace route now backs #journey-view instead, reached only by an explicit per-row
+     action or an in-card dependency link, never a free-text form. -->
+<section id="task-detail" class="panel-section" aria-label="Task detail" hidden>
+  <div class="btn-row">
+    <h2 id="task-detail-title">Task</h2>
+    <button id="task-detail-close" type="button">Close</button>
+  </div>
+  <div id="task-detail-body"></div>
+</section>
+
+<section id="journey-view" class="panel-section" aria-label="Journey" hidden>
+  <div class="btn-row">
+    <h2 id="journey-title">Journey</h2>
+    <button id="journey-close" type="button">Close</button>
+  </div>
+  <div id="journey-body"></div>
 </section>
 </main>
 
@@ -546,11 +579,14 @@ export function renderShellHtml(): string {
 
   /**
    * W1-T156 DOM-STABILITY: reconcile \`list\`'s children against \`rows\` (each a precomputed
-   * {key, html} pair) by KEY, not by wholesale innerHTML replacement. An unchanged row's <li> is
-   * the SAME DOM node afterward (never destroyed/recreated) -- its own attributes (and any DOM
-   * state a caller stamped on it, e.g. an active text selection anchored inside it) survive an
-   * update cycle. Only a row whose rendered html actually differs from last time is touched (and
-   * flashed); only keys no longer present are removed; new keys are inserted in order.
+   * {key, html, taskId?} triple) by KEY, not by wholesale innerHTML replacement. An unchanged
+   * row's <li> is the SAME DOM node afterward (never destroyed/recreated) -- its own attributes
+   * (and any DOM state a caller stamped on it, e.g. an active text selection anchored inside it)
+   * survive an update cycle. Only a row whose rendered html actually differs from last time is
+   * touched (and flashed); only keys no longer present are removed; new keys are inserted in
+   * order. W1-T158: \`taskId\`, when present, is stamped as \`data-task-id\` -- the row-click
+   * delegated handler's ONLY way to know which task a click landed on (a task's \`key\` is not
+   * always the bare task id, e.g. NEEDS ME's \`task:<id>\`/\`fbg:<id>\` prefixes).
    */
   function reconcileRows(list, rows, emptyText) {
     if (rows.length === 0) {
@@ -574,6 +610,8 @@ export function renderShellHtml(): string {
         el.className = "row";
         el.dataset.key = row.key;
       }
+      if (row.taskId !== undefined) el.dataset.taskId = row.taskId;
+      else delete el.dataset.taskId;
       if (el.dataset.html !== row.html) {
         el.innerHTML = row.html;
         el.dataset.html = row.html;
@@ -723,17 +761,24 @@ export function renderShellHtml(): string {
     applyControlStatus(snapshot.controlStatus ?? { paused: false, stopped: false, quietHours: false });
   }
 
+  // ── W1-158: an explicit one-click per-row Journey affordance -- keyed on THIS row's own
+  // task id (never a typed id). Retires the v0 id-textbox "Plan→task→PR graph" panel. ──────────
+  function journeyButtonHtml(taskId) {
+    return \`<button type="button" class="row-journey-btn" data-task-id="\${escapeHtml(taskId)}" title="Open the provenance journey for \${escapeHtml(taskId)}">Journey</button>\`;
+  }
+
   // ── NOW — in-flight runs, live phase + LIVE-TICKING elapsed (W1-T156) ───────────────────
   function nowRowHtml(t) {
     const key = statusColorKey(t);
     return (
       \`<span class="task-id">\${escapeHtml(t.taskId)}</span>\${statusBadge(key)}\${liveIndicatorHtml()}\` +
-      \`<span class="detail">phase: \${escapeHtml(t.phase)} · elapsed: <span class="elapsed" data-started="\${escapeHtml(t.startedAt ?? "")}">…</span>\${t.armedAwaitingMerge ? " · auto-merge armed" : ""}</span>\`
+      \`<span class="detail">phase: \${escapeHtml(t.phase)} · elapsed: <span class="elapsed" data-started="\${escapeHtml(t.startedAt ?? "")}">…</span>\${t.armedAwaitingMerge ? " · auto-merge armed" : ""}\${prLink(t)}</span>\` +
+      journeyButtonHtml(t.taskId)
     );
   }
   function renderNow(tasks) {
     const inFlight = tasks.filter((t) => t.phase);
-    const rows = inFlight.map((t) => ({ key: t.taskId, html: nowRowHtml(t) }));
+    const rows = inFlight.map((t) => ({ key: t.taskId, html: nowRowHtml(t), taskId: t.taskId }));
     reconcileRows(document.getElementById("now-list"), rows, "nothing in flight");
     tickElapsed(); // paint newly (re)rendered elapsed spans immediately, not after the next 1s tick
     return new Set(inFlight.map((t) => t.taskId));
@@ -753,7 +798,8 @@ export function renderShellHtml(): string {
   // ── NEEDS ME — escalations + inbox, one-line ask + action ───────────────────────────────
   function needsMeTaskRowHtml(t) {
     return (
-      \`\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(t.taskId)}</span><span class="detail">needs human attention (escalated)</span>\` +
+      \`\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(t.taskId)}</span><span class="detail">needs human attention (escalated)\${prLink(t)}</span>\` +
+      journeyButtonHtml(t.taskId) +
       \`<form class="inline-action needs-me-approve" data-task-id="\${escapeHtml(t.taskId)}">\` +
       \`<label for="issue-\${escapeHtml(t.taskId)}">Issue URL</label>\` +
       \`<input id="issue-\${escapeHtml(t.taskId)}" type="url" placeholder="https://github.com/.../issues/…" required />\` +
@@ -788,7 +834,7 @@ export function renderShellHtml(): string {
     for (const t of tasks) {
       if (!t.needsHuman) continue;
       shown.add(t.taskId);
-      rows.push({ key: \`task:\${t.taskId}\`, html: needsMeTaskRowHtml(t) });
+      rows.push({ key: \`task:\${t.taskId}\`, html: needsMeTaskRowHtml(t), taskId: t.taskId });
     }
     for (const e of feedbackEntries ?? []) {
       if (e.status === "grilling") rows.push({ key: \`fbg:\${e.id}\`, html: needsMeGrillHtml(e) });
@@ -804,7 +850,8 @@ export function renderShellHtml(): string {
     const head = (cards ?? []).slice(0, 5);
     const rows = head.map((c) => ({
       key: c.id,
-      html: \`\${statusBadge("queued")}<span class="task-id">\${escapeHtml(c.id)}</span><span class="detail">\${escapeHtml(c.title)} · \${(c.dependsOn ?? []).length} dep(s)</span>\`,
+      html: \`\${statusBadge("queued")}<span class="task-id">\${escapeHtml(c.id)}</span><span class="detail">\${escapeHtml(c.title)} · \${(c.dependsOn ?? []).length} dep(s)</span>\${journeyButtonHtml(c.id)}\`,
+      taskId: c.id,
     }));
     reconcileRows(document.getElementById("up-next-list"), rows, "drain queue is empty");
     return new Set(head.map((c) => c.id));
@@ -815,7 +862,8 @@ export function renderShellHtml(): string {
     const list = entries ?? [];
     const rows = list.map((e) => ({
       key: e.taskId,
-      html: \`\${statusBadge(e.outcome === "blocked" ? "blocked" : "merged")}<span class="task-id">\${escapeHtml(e.taskId)}</span><span class="detail">\${escapeHtml(e.outcome)}\${prLink(e)}</span>\`,
+      html: \`\${statusBadge(e.outcome === "blocked" ? "blocked" : "merged")}<span class="task-id">\${escapeHtml(e.taskId)}</span><span class="detail">\${escapeHtml(e.outcome)}\${prLink(e)}</span>\${journeyButtonHtml(e.taskId)}\`,
+      taskId: e.taskId,
     }));
     reconcileRows(document.getElementById("recent-list"), rows, "no recent outcomes yet");
     return new Set(list.map((e) => e.taskId));
@@ -1005,7 +1053,11 @@ export function renderShellHtml(): string {
   function findRowHtml(t) {
     return (
       \`\${statusBadge(statusColorKey(t))}<span class="task-id">\${escapeHtml(t.taskId)}</span>\` +
-      \`<span class="detail">\${escapeHtml(t.title ?? "")}\${t.risk ? \` · risk: \${escapeHtml(t.risk)}\` : ""}\${prLink(t)}</span>\`
+      \`<span class="detail">\${escapeHtml(t.title ?? "")}\${t.risk ? \` · risk: \${escapeHtml(t.risk)}\` : ""}\${prLink(t)}</span>\` +
+      // W1-T158: the journey affordance rides on T157's row renderer. The FIND corpus REPLACED the
+      // old rest-list corpus, so this is re-applied here rather than kept on the renderer this
+      // merge dropped.
+      journeyButtonHtml(t.taskId)
     );
   }
   function renderFindView() {
@@ -1013,7 +1065,7 @@ export function renderShellHtml(): string {
     renderSortHeaders();
     const filtered = findFiltered();
     const sorted = sortFindRows(filtered);
-    const rows = sorted.slice(0, 500).map((t) => ({ key: t.taskId, html: findRowHtml(t) }));
+    const rows = sorted.slice(0, 500).map((t) => ({ key: t.taskId, html: findRowHtml(t), taskId: t.taskId }));
     reconcileRows(document.getElementById("rest-list"), rows, "no matching tasks");
     document.getElementById("find-count").textContent =
       \`\${filtered.length} match\${filtered.length === 1 ? "" : "es"} of \${findTasks.length} task\${findTasks.length === 1 ? "" : "s"}\`;
@@ -1293,24 +1345,135 @@ export function renderShellHtml(): string {
       body.textContent = \`panel fetch failed: \${e}\`;
     }
   });
-  document.getElementById("graph-btn").addEventListener("click", () => {
-    openPanel("Plan→task→PR graph");
-    const controls = document.getElementById("panel-controls");
-    controls.innerHTML =
-      '<label for="trace-id">task or feedback id</label><input id="trace-id" type="text" /> <button id="trace-btn" type="button">Trace</button>';
-    const body = document.getElementById("panel-body");
-    body.textContent = "enter an id and click Trace";
-    document.getElementById("trace-btn").addEventListener("click", async () => {
-      const id = document.getElementById("trace-id").value.trim();
-      if (!id) { body.textContent = "an id is required"; return; }
-      body.textContent = "loading…";
-      try {
-        const data = await getJson(\`/v1/trace?id=\${encodeURIComponent(id)}\`);
-        body.textContent = JSON.stringify(data.chain ?? data, null, 2);
-      } catch (e) {
-        body.textContent = \`panel fetch failed: \${e}\`;
-      }
-    });
+  // ── W1-T158 DETAIL layer: the row-click task CARD ───────────────────────────────────────────
+  // title/rationale/acceptance criteria/dependency chain (each dep LINKED)/run history (cost +
+  // verdict)/PR links -- from ONE GET /v1/task?id= fetch, zero further GitHub calls (see
+  // lib/task-card.ts's header). Dep links recurse through openCard, never a page navigation.
+  function costLabel(costUsd) {
+    return typeof costUsd === "number" ? \`$\${costUsd.toFixed(3)}\` : "—";
+  }
+  function runRowHtml(run) {
+    const pr = run.prUrl ? \` · <a href="\${escapeHtml(run.prUrl)}" target="_blank" rel="noreferrer">PR</a>\` : "";
+    return \`<li><code>\${escapeHtml(run.runId)}</code> — \${escapeHtml(run.verdict ?? "no verdict yet")} · \${costLabel(run.costUsd)}\${pr}</li>\`;
+  }
+  function acceptanceRowHtml(c) {
+    return \`<li><strong>\${escapeHtml(c.claim)}</strong><div class="detail">proof: \${escapeHtml(c.proof)}</div></li>\`;
+  }
+  function depChainHtml(deps) {
+    if (!deps.length) return '<p class="empty">no dependencies</p>';
+    return \`<ul class="row-list">\${deps
+      .map((d) => \`<li><button type="button" class="card-dep-link" data-dep-id="\${escapeHtml(d)}">\${escapeHtml(d)}</button></li>\`)
+      .join("")}</ul>\`;
+  }
+  function taskCardHtml(card) {
+    const key = statusColorKey({ status: card.status, needsHuman: false });
+    return (
+      \`<p>\${statusBadge(key)}\${card.merged ? " ✓ merged" : ""}\${prLink({ prUrl: card.prUrl, prNumber: card.prNumber })}</p>\` +
+      (card.rationale ? \`<p class="detail">\${escapeHtml(card.rationale)}</p>\` : '<p class="empty">no rationale recorded</p>') +
+      \`<h3>Acceptance criteria</h3>\${
+        card.acceptance.length ? \`<ul class="row-list">\${card.acceptance.map(acceptanceRowHtml).join("")}</ul>\` : '<p class="empty">none recorded</p>'
+      }\` +
+      \`<h3>Dependency chain</h3>\${depChainHtml(card.dependsOn)}\` +
+      \`<h3>Run history</h3>\${
+        card.runs.length ? \`<ul class="row-list">\${card.runs.map(runRowHtml).join("")}</ul>\` : '<p class="empty">no runs yet</p>'
+      }\` +
+      \`<p><button type="button" id="card-journey-btn" data-task-id="\${escapeHtml(card.id)}">Open journey</button></p>\`
+    );
+  }
+  async function openCard(taskId) {
+    const section = document.getElementById("task-detail");
+    const title = document.getElementById("task-detail-title");
+    const body = document.getElementById("task-detail-body");
+    section.hidden = false;
+    title.textContent = \`Task \${taskId}\`;
+    body.textContent = "loading…";
+    try {
+      const data = await getJson(\`/v1/task?id=\${encodeURIComponent(taskId)}\`);
+      const card = data.card;
+      title.textContent = \`\${card.id} — \${card.title}\`;
+      body.innerHTML = taskCardHtml(card);
+    } catch (e) {
+      body.textContent = \`card fetch failed: \${e}\`;
+    }
+    section.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+  document.getElementById("task-detail-close").addEventListener("click", () => {
+    document.getElementById("task-detail").hidden = true;
+  });
+  document.getElementById("task-detail-body").addEventListener("click", (e) => {
+    const depBtn = e.target.closest(".card-dep-link");
+    if (depBtn) { openCard(depBtn.dataset.depId); return; }
+    const journeyBtn = e.target.closest("#card-journey-btn");
+    if (journeyBtn) openJourney(journeyBtn.dataset.taskId);
+  });
+
+  // ── W1-T158 JOURNEY layer: rmd trace's own provenance chain (W1-T43), reached ONLY via a
+  // per-row action or an in-card link -- never a typed id (the v0 panel this retires). Mirrors
+  // apps/dashboard/src/main.ts's renderTraceGraph shape (the SAME GET /v1/trace response), plus
+  // ONE addition: a run whose verdict starts with "blocked" is marked .journey-fail -- the
+  // FAILING step an operator walks backwards from an outcome to find.
+  function journeyRunHtml(run) {
+    const failing = typeof run.verdict === "string" && run.verdict.startsWith("blocked");
+    const marker = failing ? ' <span class="journey-fail">⛔ BLOCKING STEP</span>' : "";
+    const pr = run.prUrl
+      ? \`<ul><li><a href="\${escapeHtml(run.prUrl)}" target="_blank" rel="noreferrer">PR</a>\${run.prState ? \` [\${escapeHtml(run.prState)}]\` : ""} — sha \${escapeHtml(run.mergeSha ?? "(not merged yet)")}</li></ul>\`
+      : "";
+    // NOTE: the ".journey-fail" class lives ONLY on the marker <span> above, never also on this
+    // wrapping <li> -- a caller counting ".journey-fail" elements must count exactly ONE per
+    // failing run, not two nested matches for the same run.
+    return \`<li>run \${escapeHtml(run.runId)}: \${escapeHtml(run.verdict ?? "no verdict yet")}\${marker}\${pr}</li>\`;
+  }
+  function journeyTaskHtml(t) {
+    const runs = (t.runs ?? []).length ? \`<ul>\${t.runs.map(journeyRunHtml).join("")}</ul>\` : "<ul><li>(no runs yet)</li></ul>";
+    return \`<li>task <button type="button" class="journey-task-link" data-task-id="\${escapeHtml(t.id)}">\${escapeHtml(t.id)}</button>: \${escapeHtml(t.title)}\${
+      t.origin ? \` (origin: \${escapeHtml(t.origin)})\` : ""
+    }\${runs}</li>\`;
+  }
+  function journeyHtml(chain) {
+    const feedback = chain.feedback
+      ? \`<p>feedback#\${escapeHtml(chain.feedback.id)} [\${escapeHtml(chain.feedback.status)}] — \${escapeHtml(chain.feedback.raw)}\${
+          chain.feedback.proposalPr ? \` → <a href="\${escapeHtml(chain.feedback.proposalPr)}" target="_blank" rel="noreferrer">proposal PR</a>\` : ""
+        }</p>\`
+      : "";
+    const tasks = (chain.tasks ?? []).length ? \`<ul>\${chain.tasks.map(journeyTaskHtml).join("")}</ul>\` : "<p>(no tasks yet)</p>";
+    return \`<p>direction: \${escapeHtml(chain.direction)}</p>\${feedback}\${tasks}\`;
+  }
+  async function openJourney(id) {
+    const section = document.getElementById("journey-view");
+    const title = document.getElementById("journey-title");
+    const body = document.getElementById("journey-body");
+    section.hidden = false;
+    title.textContent = \`Journey: \${id}\`;
+    body.textContent = "loading…";
+    try {
+      const data = await getJson(\`/v1/trace?id=\${encodeURIComponent(id)}\`);
+      body.innerHTML = journeyHtml(data.chain);
+    } catch (e) {
+      body.textContent = \`journey fetch failed: \${e}\`;
+    }
+    section.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+  document.getElementById("journey-close").addEventListener("click", () => {
+    document.getElementById("journey-view").hidden = true;
+  });
+  document.getElementById("journey-body").addEventListener("click", (e) => {
+    const btn = e.target.closest(".journey-task-link");
+    if (btn) openCard(btn.dataset.taskId);
+  });
+
+  // ── PER-ROW AFFORDANCE: every task row's own Journey button opens THAT row's journey; a
+  // click anywhere else on a task row (never on an interior <a>/<button>/<input>/<form>/<label>,
+  // so existing NEEDS ME approve/answer controls and PR links keep working unchanged) expands
+  // that row's own card. Both are keyed on the row's OWN data-task-id -- never a typed id. ──────
+  document.querySelector("main").addEventListener("click", (e) => {
+    const journeyBtn = e.target.closest(".row-journey-btn");
+    if (journeyBtn) {
+      openJourney(journeyBtn.dataset.taskId);
+      return;
+    }
+    if (e.target.closest("a, button, input, form, label")) return;
+    const row = e.target.closest(".row[data-task-id]");
+    if (row) openCard(row.dataset.taskId);
   });
 
   // ── W1-T156 TRUST: freshness stamp + the poll's own error-state LIFECYCLE. A fetch failure is
@@ -1571,6 +1734,7 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     buildAnswerQuestionRoute(questionDeps),
     buildApproveManualRoute(fleetControlDeps),
     ...buildPanelGraphRoutes(panelGraphDeps),
+    buildTaskCardRoute(deps.board),
     buildShellRoute(),
   ];
 }
