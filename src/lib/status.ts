@@ -45,8 +45,14 @@ import type { Plan, Task, TaskStatus } from "./plan.js";
  * queries GitHub; the only file it writes is the status.json cache.
  */
 
-/** The three precedence sources, plus `none` when GitHub has no evidence. */
-export type StatusSource = "ledger" | "pr-field" | "trailer" | "correction" | "none";
+/**
+ * The three precedence sources, plus `none` when GitHub has no evidence, plus
+ * `throttled` when GitHub could not be read at all (rate-limited, network error,
+ * or any other failed `gh` call) — W1-T119: an exhausted/errored read must never
+ * be conflated with a genuinely absent result, the false `source: "none"` that
+ * mis-filed W1-T116 as not-merged when GitHub simply hadn't been consulted.
+ */
+export type StatusSource = "ledger" | "pr-field" | "trailer" | "correction" | "none" | "throttled";
 
 /** A PR's identity + GitHub merge state, as seen by the {@link GitHub} gateway. */
 export interface PrRef {
@@ -128,6 +134,18 @@ export interface StatusProjection {
    * the PR is actually armed.
    */
   armedAwaitingMerge?: true;
+  /**
+   * True when this projection is INDETERMINATE (W1-T119): `source: "throttled"`,
+   * because the underlying GitHub read genuinely FAILED rather than resolving to
+   * a clean "no evidence". Distinct from ordinary `queued` (whose `source` is
+   * `"none"`, ordinary absence) — a caller that gates dispatch or a ledger write
+   * off this projection MUST treat `indeterminate` as DO NOT ACT, never as an
+   * ordinary queued task, because the evidence a "not merged" conclusion would
+   * rest on was never actually consulted. Carried as its own sparse field
+   * (mirrors `needsHuman`/`armedAwaitingMerge`) so a caller need not know
+   * `"throttled"`'s meaning to gate on it correctly.
+   */
+  indeterminate?: true;
 }
 
 /**
@@ -159,6 +177,18 @@ export interface GitHub {
    * "unknown/not armed", the same discipline every other method here already follows.
    */
   autoMergeArmed?(prUrl: string): boolean;
+  /**
+   * True if a read this gateway attempted actually FAILED (rate-limited, network
+   * error, auth failure, or any other non-zero `gh` exit / unparseable output) —
+   * as opposed to `gh` succeeding with a genuinely empty/not-found result. W1-T119:
+   * lets {@link derivePrPrecedence} tell "GitHub was consulted and has no evidence"
+   * apart from "GitHub could not be consulted", so a failed read defers rather than
+   * being reported as a confirmed not-merged. OPTIONAL (added after every pre-existing
+   * {@link GitHub} fixture was already written) so no existing implementer breaks —
+   * omitted ⇒ treated as `false` (every prior null/[] result trusted as a real answer),
+   * the same fail-soft discipline every other optional method here already follows.
+   */
+  readFailed?(): boolean;
 }
 
 /** Reader for the append-only ledger; injectable for tests. */
@@ -495,6 +525,12 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   if (ownResult) return ownResult;
 
   // No GitHub evidence: not merged. The yaml `status:` is decorative, not trusted.
+  // EXCEPT (W1-T119) when that "no evidence" is actually "GitHub could not be read" —
+  // an exhausted/errored `gh` call must defer, never be reported as a confirmed
+  // not-merged (the false `source: "none"` that mis-filed W1-T116).
+  if (deps.github.readFailed?.()) {
+    return { taskId: task.id, status: "queued", merged: false, source: "throttled", indeterminate: true };
+  }
   return { taskId: task.id, status: "queued", merged: false, source: "none" };
 }
 
@@ -679,10 +715,18 @@ export function ghRequiredStatusCheckContexts(owner: string, repo: string, branc
  */
 export function ghGateway(owner: string, repo: string): GitHub {
   const slug = `${owner}/${repo}`;
+  // Sticky for this gateway instance's lifetime (W1-T119): once ANY `gh` call fails,
+  // every null/[] result derived since is untrustworthy as "absent", not just the one
+  // that failed — a single short-lived gateway (created per command invocation) has
+  // no cheaper way to know which earlier calls in the same derivation shared the same
+  // outage, so it errs toward "defer everything" rather than risk one still reading
+  // as a confirmed not-merged.
+  let failed = false;
   const tryJson = <T>(args: string[]): T | null => {
     try {
       return JSON.parse(execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })) as T;
     } catch {
+      failed = true;
       return null;
     }
   };
@@ -713,6 +757,9 @@ export function ghGateway(owner: string, repo: string): GitHub {
     autoMergeArmed(prUrl) {
       const view = tryJson<{ autoMergeRequest?: unknown }>(["pr", "view", prUrl, "--json", "autoMergeRequest"]);
       return view?.autoMergeRequest != null;
+    },
+    readFailed() {
+      return failed;
     },
   };
 }
@@ -755,12 +802,17 @@ export function buildBatchedGithub(
 ): GitHub {
   const ttlMs = opts.ttlMs ?? 15_000;
   const now = opts.now ?? (() => Date.now());
+  // W1-T119: reflects only the MOST RECENT fetch attempt (reset on every call, unlike
+  // ghGateway's sticky-for-instance-lifetime flag) — this gateway's single batched fetch
+  // refreshes on its own `ttlMs` cadence, so a stale failure from an earlier TTL window
+  // must not keep shadowing a later fetch that actually succeeded.
+  let lastFetchFailed = false;
   const fetchAll =
     opts.fetchAll ??
     (() => {
       const slug = `${owner}/${repo}`;
       try {
-        return JSON.parse(
+        const result = JSON.parse(
           execFileSync(
             "gh",
             // W1-T155: `autoMergeRequest` rides along on this SAME single fetch — the
@@ -770,7 +822,10 @@ export function buildBatchedGithub(
             { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
           ),
         ) as BatchedPr[];
+        lastFetchFailed = false;
+        return result;
       } catch {
+        lastFetchFailed = true;
         return [];
       }
     });
@@ -821,6 +876,13 @@ export function buildBatchedGithub(
     },
     autoMergeArmed(prUrl) {
       return index().byUrl.get(prUrl)?.autoMergeRequest != null;
+    },
+    readFailed() {
+      // Forces a fetch first if the cache is cold/expired, so `readFailed()` alone
+      // (never preceded by any other method call) still reports accurately instead
+      // of trivially returning the initial `false`.
+      index();
+      return lastFetchFailed;
     },
   };
 }

@@ -246,6 +246,100 @@ test("P29(ii): no isCircuitTripped wired at all ⇒ nextRunnable behaves exactly
   assert.equal(nextRunnable(plan, mergedSetOf("A"))?.id, "B");
 });
 
+// ── W1-T119: an INDETERMINATE read (GitHub could not be consulted — rate
+// limit/network/auth failure) must suppress dispatch, distinct from an
+// ordinary `queued` task (whose read genuinely resolved to "no evidence"),
+// which dispatches normally. This is the dispatch-gating caller half of the
+// task's acceptance criterion; applyCorrection (correct.ts) is the other half.
+
+test("W1-T119: a task whose own GitHub read is INDETERMINATE is excluded from nextRunnable, with a legible callback naming it", () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const indeterminate: string[] = [];
+  const next = nextRunnable(plan, NONE_MERGED, {
+    isIndeterminate: (id) => id === "A",
+    onIndeterminate: (t) => indeterminate.push(t.id),
+  });
+  assert.deepEqual(indeterminate, ["A"]);
+  // D is the next runnable candidate once A is deferred (B/C still depend on
+  // the un-merged, indeterminate A).
+  assert.equal(next?.id, "D");
+});
+
+test("W1-T119: the SAME task dispatches normally when its read is an ordinary queued (not indeterminate) — the two must read as distinct", () => {
+  const plan = fixturePlan();
+  // No isIndeterminate wired at all ⇒ A is ordinary queued, and dispatches.
+  assert.equal(nextRunnable(plan, NONE_MERGED)?.id, "A");
+  // Same task, isIndeterminate explicitly false for it ⇒ still dispatches.
+  assert.equal(nextRunnable(plan, NONE_MERGED, { isIndeterminate: () => false })?.id, "A");
+});
+
+test("W1-T119: indeterminate is checked BEFORE the circuit breaker and the in-flight guard — an indeterminate task halts regardless of either", () => {
+  const plan = fixturePlan();
+  const indeterminate: string[] = [];
+  const broken: string[] = [];
+  const skipped: string[] = [];
+  const next = nextRunnable(plan, NONE_MERGED, {
+    isIndeterminate: (id) => id === "A",
+    onIndeterminate: (t) => indeterminate.push(t.id),
+    isCircuitTripped: (id) => id === "A", // A ALSO looks circuit-broken — indeterminate must still win
+    onCircuitBreak: (t) => broken.push(t.id),
+    isOpenPr: (id) => (id === "A" ? 143 : undefined), // A ALSO looks in-flight — indeterminate must still win
+    onSkip: (t) => skipped.push(t.id),
+  });
+  assert.deepEqual(indeterminate, ["A"]);
+  assert.deepEqual(broken, [], "onCircuitBreak must never fire for a task indeterminate already halted");
+  assert.deepEqual(skipped, [], "onSkip must never fire for a task indeterminate already halted");
+  assert.equal(next?.id, "D");
+});
+
+test("W1-T119: merged and correction-credited tasks are excluded exactly as today, isIndeterminate never even consulted for them", () => {
+  const plan = fixturePlan();
+  const consulted: string[] = [];
+  const next = nextRunnable(plan, mergedSetOf("A"), {
+    isIndeterminate: (id) => {
+      consulted.push(id);
+      return false;
+    },
+  });
+  assert.equal(next?.id, "B");
+  assert.ok(!consulted.includes("A"), "an already-merged task is filtered out before isIndeterminate is ever asked");
+});
+
+test("W1-T119 runDrain integration: an indeterminate task is skipped with a dispatch.indeterminate ledger line, the drain proceeds to the next runnable task, and the caller's onIndeterminate fires", async () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const indeterminate: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      isIndeterminate: (id) => id === "A",
+      onIndeterminate: (t) => indeterminate.push(t.id),
+      runOne: async (id) => {
+        ran.push(id);
+        merged.add(id);
+        return okResult(id);
+      },
+      log: (step, extra) => lines.push({ step, extra: extra ?? {} }),
+    },
+    { max: 3 },
+  );
+  // onIndeterminate carries NO escalation side effect (unlike onCircuitBreak,
+  // which dedupes because it opens a needs-human issue) — it fires every tick
+  // A is consulted, same as onSkip: once dispatching D (tick 1), once more
+  // when A is still indeterminate and nothing else is left to run (tick 2,
+  // "no_runnable").
+  assert.deepEqual(indeterminate, ["A", "A"]);
+  // A is deferred every tick (still un-merged, still indeterminate) — D runs
+  // instead, and the drain never touches B/C (blocked on the deferred A).
+  assert.deepEqual(ran, ["D"]);
+  assert.equal(s.stopReason, "no_runnable");
+  const indeterminateLine = lines.find((l) => l.step === "dispatch.indeterminate");
+  assert.equal(indeterminateLine?.extra.task, "A");
+});
+
 test("P29(ii) runDrain integration: a circuit-broken task is skipped with a dispatch.circuit_broken ledger line, the drain proceeds to the next runnable task, and the caller's onCircuitBreak fires", async () => {
   const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
   const merged = new Set<string>();

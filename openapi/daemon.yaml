@@ -132,13 +132,14 @@ components:
           description: The single fact dependency-gating cares about -- has this task landed?
         source:
           type: string
-          description: Which precedence source resolved this projection (or `none`).
+          description: Which precedence source resolved this projection (`none` if GitHub was read but had no evidence; `throttled` if GitHub could not be read at all).
           enum:
             - ledger
             - pr-field
             - trailer
             - correction
             - none
+            - throttled
         prNumber:
           type: number
         prUrl:

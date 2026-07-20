@@ -25,7 +25,7 @@ function task(over: Partial<Task> = {}): Task {
 }
 
 /** A fake GitHub gateway driven by fixture maps (mirrors test/status.test.ts). */
-function fakeGitHub(opts: { byRef?: Record<string, PrRef> }): GitHub & { calls: string[] } {
+function fakeGitHub(opts: { byRef?: Record<string, PrRef>; readFailed?: boolean }): GitHub & { calls: string[] } {
   const calls: string[] = [];
   return {
     calls,
@@ -41,6 +41,10 @@ function fakeGitHub(opts: { byRef?: Record<string, PrRef> }): GitHub & { calls: 
     },
     prBody() {
       return undefined;
+    },
+    readFailed() {
+      calls.push("readFailed");
+      return opts.readFailed ?? false;
     },
   };
 }
@@ -120,6 +124,25 @@ test("applyCorrection: an unresolvable PR reference writes NOTHING — written=f
   assert.equal(result.after, result.before);
   const lines = readLines(ledgerPath);
   assert.equal(lines.length, 1, "no correction line appended when the PR reference does not resolve");
+});
+
+test("W1-T119: an INDETERMINATE before-read (GitHub could not be consulted) refuses to write — written=false, prByRef never even consulted, nothing appended to the ledger", () => {
+  // readFailed:true ⇒ deriveStatus's `before` comes back with source:"throttled"
+  // / indeterminate:true — the underlying read genuinely FAILED rather than
+  // resolving to a clean "no evidence". applyCorrection must not stand behind
+  // that as a `claimed_pr_url` fact, so it refuses exactly like an
+  // unresolvable PR reference: nothing written, nothing appended.
+  const github = fakeGitHub({ readFailed: true, byRef: { "9": { number: 9, url: "u/9", state: "MERGED" } } });
+  const ledgerPath = ledgerFile([{ step: "run.start", task_id: "W1-TX" }]);
+  const result = applyCorrection(task({ id: "W1-TX" }), "9", { ledgerPath, github });
+
+  assert.equal(result.written, false);
+  assert.equal(result.after, result.before);
+  assert.equal(result.before.indeterminate, true);
+  assert.equal(result.before.source, "throttled");
+  assert.ok(!github.calls.some((c) => c.startsWith("prByRef")), "the PR reference is never even resolved once the before-read is indeterminate");
+  const lines = readLines(ledgerPath);
+  assert.equal(lines.length, 1, "no correction line appended when the before-read is indeterminate");
 });
 
 test("applyCorrection: append-only — a second call adds a second line, never rewrites the first", () => {

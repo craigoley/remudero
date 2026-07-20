@@ -40,6 +40,17 @@ export function applyCorrection(
   const writeLedger = opts.writeLedger ?? appendLedger;
   const before = deriveStatus(task, deps);
 
+  // W1-T119: an INDETERMINATE before-read (the underlying GitHub read genuinely
+  // FAILED — rate-limited, network error, auth failure) must not be stood behind.
+  // `before.prUrl` here would be whatever the LAST successful read happened to
+  // credit, not a fact this read actually re-confirmed — writing a
+  // `claimed_pr_url` off it risks recording a correction the operator cannot
+  // trust. Refuse exactly like an unresolvable PR reference: written=false,
+  // nothing appended.
+  if (before.indeterminate) {
+    return { before, after: before, written: false };
+  }
+
   const pr = deps.github.prByRef(prRef);
   if (!pr) {
     return { before, after: before, written: false };
