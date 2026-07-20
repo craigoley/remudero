@@ -22,9 +22,16 @@ info:
     W3-T5 (MASTER-PLAN §7 -- human-in-the-loop panel actions) adds the first
     write routes: POST /v1/control/{pause,resume,stop}, POST /v1/quiet-hours,
     POST /v1/questions/answer, and POST /v1/manual/approve, all write-scoped
-    and built via src/lib/panel-actions.ts. Every route the daemon's OTHER
-    surfaces still need (plan editing, ...) is registered by later tasks the
-    same way -- this document is additive, never rewritten wholesale.
+    and built via src/lib/panel-actions.ts.
+
+    W3-T6 (MASTER-PLAN §7B -- the plan->task->PR graph + interactive plan
+    adjustment) adds GET /v1/feedback (the inbox), POST /v1/feedback (submit
+    feedback / answer a grill, origin=ui), GET /v1/trace (the plan->task->PR
+    provenance graph, W1-T43), and POST /v1/feedback/decision (accept/reject a
+    proposal), all built via src/lib/panel-graph.ts. Every route the daemon's
+    OTHER surfaces still need (re-prioritize, ...) is registered by later
+    tasks the same way -- this document is additive, never rewritten
+    wholesale.
 
 servers:
   - url: "https://{tailnetHost}"
@@ -286,6 +293,228 @@ components:
         issueUrl:
           type: string
 
+    # ── W3-T6 (MASTER-PLAN §7B) -- the plan->task->PR graph + interactive plan adjustment:
+    # submit feedback, answer grills, accept/reject a proposal. Built over the SAME feedback
+    # inbox (src/lib/feedback.ts) and trace chain (src/lib/trace.ts, W1-T43) already documented
+    # there; the four routes below are src/lib/panel-graph.ts's registrations.
+    FeedbackEntry:
+      type: object
+      description: >
+        One `plan/feedback/<id>.yaml` entry (src/lib/feedback.ts's `FeedbackEntry` -- the
+        §7B schema shape: capture -> triage -> gate).
+      required:
+        - id
+        - ts
+        - raw
+        - attachments
+        - origin
+        - status
+        - proposal_pr
+      properties:
+        id:
+          type: string
+        ts:
+          type: string
+        raw:
+          type: string
+        attachments:
+          type: array
+          items:
+            type: string
+        origin:
+          type: string
+          enum:
+            - cli
+            - ui
+            - issue
+        status:
+          type: string
+          enum:
+            - new
+            - grilling
+            - proposed
+            - accepted
+            - rejected
+        proposal_pr:
+          type:
+            - string
+            - "null"
+          description: Set once `rmd triage` opens a proposal PR for this entry; null until then.
+
+    FeedbackInboxResult:
+      type: object
+      description: GET /v1/feedback's body -- every captured feedback entry, oldest first.
+      required:
+        - entries
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/FeedbackEntry"
+
+    SubmitFeedbackRequest:
+      type: object
+      description: >
+        POST /v1/feedback's body -- submit feedback from the panel (ALWAYS captured with
+        origin: ui, never taken from this body). `replyTo`, if given, must name an existing
+        entry parked `grilling` -- this is "answer a grill" v1 (src/lib/panel-graph.ts's header
+        explains why): the answer is captured as a fresh feedback entry that re-enters triage,
+        rather than a second, parallel answer-delivery primitive ahead of the still-unbuilt
+        W1-T42 grill mechanics.
+      required:
+        - text
+      properties:
+        text:
+          type: string
+        attachments:
+          type: array
+          description: http(s) links ONLY -- a local file path would resolve against the daemon's own filesystem, not the operator's.
+          items:
+            type: string
+        replyTo:
+          type: string
+          description: The `grilling` feedback id this submission answers, if any.
+
+    SubmitFeedbackResult:
+      type: object
+      required:
+        - ok
+        - entry
+      properties:
+        ok:
+          type: boolean
+        entry:
+          $ref: "#/components/schemas/FeedbackEntry"
+
+    TraceRun:
+      type: object
+      description: One run named on a task's ledger lines (src/lib/trace.ts's `TraceRun`).
+      required:
+        - runId
+      properties:
+        runId:
+          type: string
+        verdict:
+          type: string
+        prUrl:
+          type: string
+        prState:
+          type: string
+        mergeSha:
+          type: string
+
+    TraceTaskNode:
+      type: object
+      required:
+        - id
+        - title
+        - runs
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        origin:
+          type: string
+        runs:
+          type: array
+          items:
+            $ref: "#/components/schemas/TraceRun"
+
+    TraceFeedbackNode:
+      type: object
+      required:
+        - id
+        - raw
+        - ts
+        - origin
+        - status
+      properties:
+        id:
+          type: string
+        raw:
+          type: string
+        ts:
+          type: string
+        origin:
+          type: string
+        status:
+          type: string
+        proposalPr:
+          type: string
+        proposalPrState:
+          type: string
+        proposalMergeSha:
+          type: string
+
+    TraceChain:
+      type: object
+      description: >
+        The plan->task->PR provenance chain the panel renders as a graph (src/lib/trace.ts's
+        `TraceChain`, W1-T43): a feedback -> proposal PR -> task(s) -> run(s) -> PR(s) -> sha,
+        entered either FORWARD (from a feedback id) or REVERSE (from a task id).
+      required:
+        - direction
+        - tasks
+      properties:
+        direction:
+          type: string
+          enum:
+            - forward
+            - reverse
+        feedback:
+          $ref: "#/components/schemas/TraceFeedbackNode"
+        tasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/TraceTaskNode"
+
+    TraceResult:
+      type: object
+      description: GET /v1/trace's body -- the structured chain (for the graph render) plus the pre-rendered plain-text tree (`rmd trace`'s own output).
+      required:
+        - chain
+        - rendered
+      properties:
+        chain:
+          $ref: "#/components/schemas/TraceChain"
+        rendered:
+          type: string
+
+    ProposalDecisionRequest:
+      type: object
+      description: POST /v1/feedback/decision's body -- accept or reject a `proposed` entry.
+      required:
+        - id
+        - decision
+      properties:
+        id:
+          type: string
+        decision:
+          type: string
+          enum:
+            - accept
+            - reject
+
+    ProposalDecisionResult:
+      type: object
+      required:
+        - ok
+        - id
+        - status
+        - proposalPr
+      properties:
+        ok:
+          type: boolean
+        id:
+          type: string
+        status:
+          type: string
+        proposalPr:
+          type:
+            - string
+            - "null"
+
   responses:
     Unauthorized:
       description: No or unrecognized bearer token.
@@ -517,6 +746,123 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApproveManualResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ── W3-T6 (MASTER-PLAN §7B) -- the plan->task->PR graph + interactive plan adjustment, over
+  # the SAME v0 mechanism (src/lib/service.ts), built by src/lib/panel-graph.ts. Depends on
+  # W3-T2's board (the panel this extends) and W1-T43's trace chain (src/lib/trace.ts). Every
+  # write is ledgered with the caller's bearer as `origin`, via the SAME `appendPanelLedger`
+  # primitive W3-T5's routes use. Real `rmd serve` CLI wiring is later work, same split every
+  # route on this surface already documents.
+  /v1/feedback:
+    get:
+      summary: The feedback inbox -- every captured entry, oldest first.
+      description: >
+        `plan/feedback/` (MASTER-PLAN §7B, W1-T40), listed via src/lib/feedback.ts's
+        `listFeedback`. Optional `?status=` filters to one lifecycle status.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The inbox.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackInboxResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      summary: Submit feedback from the panel -- ALWAYS captured with origin=ui.
+      description: >
+        "feedback submitted from the panel appears in the inbox with origin=ui and produces a
+        proposal PR" (W3-T6 acceptance) -- captures via src/lib/feedback.ts's `captureFeedback`,
+        ledgers `panel.feedback_submitted`. `replyTo` doubles this route as "answer a grill" v1
+        (src/lib/panel-graph.ts's header).
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitFeedbackRequest"
+      responses:
+        "200":
+          description: The captured entry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmitFeedbackResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/trace:
+    get:
+      summary: The plan->task->PR provenance graph for one task or feedback id.
+      description: >
+        "the panel renders the plan→task→PR graph" (W3-T6 acceptance) -- the SAME two-entry-
+        point chain `rmd trace <id>` renders (W1-T43, src/lib/trace.ts), addressed by
+        `?id=<task-id-or-feedback-id>` (v0 routing has no path params, src/lib/service.ts).
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The provenance chain.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TraceResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/feedback/decision:
+    post:
+      summary: Accept or reject a `proposed` feedback entry.
+      description: >
+        "accepting a proposal from the panel is ledgered with the panel bearer as origin"
+        (W3-T6 acceptance) -- src/lib/feedback.ts's `setFeedbackStatus`, ledgers
+        `panel.proposal_accepted`/`panel.proposal_rejected`. Only a `proposed` entry may be
+        decided (400 otherwise).
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProposalDecisionRequest"
+      responses:
+        "200":
+          description: The decision was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProposalDecisionResult"
         "400":
           $ref: "#/components/responses/InvalidRequest"
         "401":

@@ -16,6 +16,15 @@
 // other MASTER-PLAN §7 design panels (plan-doc render, worker stream tails, DECISIONS feed,
 // cost meter) remain explicit follow-on work.
 //
+// W3-T6 (MASTER-PLAN §7B) adds the plan->task->PR graph + interactive plan adjustment: the
+// feedback inbox (`renderInbox`/`refreshInbox`), submit feedback / answer a grill (the SAME
+// form, via a `replyTo` field a "Answer" button on a `grilling` row populates), accept/reject
+// a `proposed` entry, and the provenance graph for any task or feedback id (`renderTraceGraph`,
+// over `rmd trace`'s own chain, W1-T43). "Re-prioritize" (the design doc's fourth interactive
+// action) has no backing mechanism anywhere in the plan schema yet (lib/plan.ts's `Task` names
+// no priority/ordering field) -- out of scope here, same split lib/panel-graph.ts's own header
+// documents.
+//
 // Connection config (baseUrl/token) has no real UI yet -- read from `?daemon=`/`?token=`
 // query params. This is a placeholder wired for local/tailnet testing, not a production
 // credential story (a bearer token belongs in a query string even less than in
@@ -24,7 +33,14 @@
 // 403 from the daemon, surfaced in `#controls-status` like any other action failure.
 // Wiring the daemon to actually SERVE this static page over Tailscale is itself deferred
 // follow-on work; today the page is opened directly against a daemon reachable at `?daemon=`.
-import { createDaemonClient, type DaemonClient, type StatusProjection, type StatusSnapshot } from "@remudero/api-client/client";
+import {
+  createDaemonClient,
+  type DaemonClient,
+  type FeedbackEntry,
+  type StatusProjection,
+  type StatusSnapshot,
+  type TraceChain,
+} from "@remudero/api-client/client";
 
 function readConfig(): { baseUrl: string; token: string } {
   const params = new URLSearchParams(window.location.search);
@@ -169,10 +185,152 @@ export function wireControls(doc: Document, client: DaemonClient): void {
   });
 }
 
+// ── W3-T6: the plan→task→PR graph + interactive plan adjustment (MASTER-PLAN §7B) ──────────
+//
+// The panel's front door onto the feedback inbox (plan/feedback/, W1-T40) and the provenance
+// graph (`rmd trace`, W1-T43) — submit feedback (always origin=ui), answer a grill (the SAME
+// submit form, via `replyTo`), accept/reject a `proposed` entry, and render the plan→task→PR
+// chain for any task or feedback id. Every write goes through the SAME api-client instance
+// wireControls already uses (DaemonClientOptions carries one token; the daemon's write scope
+// is a superset of read).
+
+/** Escape untrusted text (a feedback entry's own free-form `raw`) before it lands in innerHTML. */
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/** One inbox row: id/status/origin/raw, plus whatever action its status affords. */
+function inboxRowHtml(entry: FeedbackEntry): string {
+  const actions: string[] = [];
+  if (entry.status === "proposed") {
+    actions.push(`<button type="button" class="decide-accept" data-id="${entry.id}">Accept</button>`);
+    actions.push(`<button type="button" class="decide-reject" data-id="${entry.id}">Reject</button>`);
+  }
+  if (entry.status === "grilling") {
+    actions.push(`<button type="button" class="answer-grill" data-id="${entry.id}">Answer</button>`);
+  }
+  return (
+    `<li data-feedback-id="${entry.id}">` +
+    `<strong>${entry.id}</strong> [${entry.status}, origin=${entry.origin}] — ${escapeHtml(entry.raw)}` +
+    (entry.proposal_pr ? ` <a href="${entry.proposal_pr}" target="_blank" rel="noreferrer">proposal PR</a>` : "") +
+    (actions.length ? ` ${actions.join(" ")}` : "") +
+    `</li>`
+  );
+}
+
+/** Full inbox render: one `<li>` per entry, oldest first (the order the daemon already returns them in). */
+export function renderInbox(root: HTMLElement, entries: FeedbackEntry[]): void {
+  root.innerHTML = entries.length ? `<ul>${entries.map(inboxRowHtml).join("")}</ul>` : "<p>(inbox is empty)</p>";
+}
+
+/** One `TraceRun` node — a `<li>`, its PR (if any) nested beneath it. */
+function traceRunHtml(run: TraceChain["tasks"][number]["runs"][number]): string {
+  const verdict = run.verdict ? `verdict=${run.verdict}` : "no verdict yet";
+  const pr = run.prUrl
+    ? `<ul><li><a href="${run.prUrl}" target="_blank" rel="noreferrer">PR</a>${run.prState ? ` [${run.prState}]` : ""} — sha ${run.mergeSha ?? "(not merged yet)"}</li></ul>`
+    : "";
+  return `<li>run ${run.runId}: ${verdict}${pr}</li>`;
+}
+
+/** One `TraceTaskNode` — a `<li>` naming the task, its runs nested beneath it. */
+function traceTaskHtml(task: TraceChain["tasks"][number]): string {
+  const runs = task.runs.length ? `<ul>${task.runs.map(traceRunHtml).join("")}</ul>` : "<ul><li>(no runs yet)</li></ul>";
+  return `<li>task ${task.id}: ${escapeHtml(task.title)}${task.origin ? ` (origin: ${task.origin})` : ""}${runs}</li>`;
+}
+
+/** Render a {@link TraceChain} as a nested `<ul>` — the panel's plan→task→PR graph. */
+export function renderTraceGraph(root: HTMLElement, chain: TraceChain): void {
+  const tasks = chain.tasks.length ? `<ul>${chain.tasks.map(traceTaskHtml).join("")}</ul>` : "<p>(no tasks yet)</p>";
+  const feedback = chain.feedback
+    ? `<p>feedback#${chain.feedback.id} [${chain.feedback.status}] — ${escapeHtml(chain.feedback.raw)}${
+        chain.feedback.proposalPr ? ` → <a href="${chain.feedback.proposalPr}" target="_blank" rel="noreferrer">proposal PR</a>` : ""
+      }</p>`
+    : "";
+  root.innerHTML = `<p>direction: ${chain.direction}</p>${feedback}${tasks}`;
+}
+
+/** Fetch the current inbox and render it into `#inbox-list`, wiring each row's accept/reject/answer buttons. */
+async function refreshInbox(doc: Document, client: DaemonClient, status: HTMLElement): Promise<void> {
+  const inboxRoot = requiredEl<HTMLElement>(doc, "inbox-list");
+  const { entries } = await client.listFeedback();
+  renderInbox(inboxRoot, entries);
+
+  inboxRoot.querySelectorAll<HTMLButtonElement>(".decide-accept, .decide-reject").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.id ?? "";
+      const decision = btn.classList.contains("decide-accept") ? "accept" : "reject";
+      runAction(status, `Decide ${id}`, () => client.decideProposal(id, decision), () => void refreshInbox(doc, client, status));
+    });
+  });
+  inboxRoot.querySelectorAll<HTMLButtonElement>(".answer-grill").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.id ?? "";
+      const replyTo = requiredEl<HTMLInputElement>(doc, "submit-feedback-reply-to");
+      const banner = requiredEl<HTMLElement>(doc, "submit-feedback-reply-banner");
+      const cancel = requiredEl<HTMLButtonElement>(doc, "submit-feedback-cancel-reply");
+      replyTo.value = id;
+      banner.textContent = `Answering feedback#${id} — your text below is submitted as an answer.`;
+      banner.hidden = false;
+      cancel.hidden = false;
+    });
+  });
+}
+
+/** Wire the feedback-inbox + submit-feedback + trace-graph controls in `doc` to `client` (W3-T6). */
+export function wireFeedbackPanel(doc: Document, client: DaemonClient): void {
+  const status = requiredEl<HTMLElement>(doc, "feedback-status");
+  void refreshInbox(doc, client, status);
+
+  requiredEl<HTMLButtonElement>(doc, "submit-feedback-cancel-reply").addEventListener("click", () => {
+    requiredEl<HTMLInputElement>(doc, "submit-feedback-reply-to").value = "";
+    requiredEl<HTMLElement>(doc, "submit-feedback-reply-banner").hidden = true;
+    requiredEl<HTMLButtonElement>(doc, "submit-feedback-cancel-reply").hidden = true;
+  });
+
+  requiredEl<HTMLFormElement>(doc, "submit-feedback-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = requiredEl<HTMLInputElement>(doc, "submit-feedback-text");
+    const attachment = requiredEl<HTMLInputElement>(doc, "submit-feedback-attachment");
+    const replyTo = requiredEl<HTMLInputElement>(doc, "submit-feedback-reply-to");
+    const banner = requiredEl<HTMLElement>(doc, "submit-feedback-reply-banner");
+    const cancel = requiredEl<HTMLButtonElement>(doc, "submit-feedback-cancel-reply");
+    runAction(
+      status,
+      "Submit feedback",
+      () =>
+        client.submitFeedback(text.value, {
+          attachments: attachment.value.trim() ? [attachment.value.trim()] : undefined,
+          replyTo: replyTo.value.trim() || undefined,
+        }),
+      () => {
+        text.value = "";
+        attachment.value = "";
+        replyTo.value = "";
+        banner.hidden = true;
+        cancel.hidden = true;
+        void refreshInbox(doc, client, status);
+      },
+    );
+  });
+
+  requiredEl<HTMLFormElement>(doc, "trace-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const idInput = requiredEl<HTMLInputElement>(doc, "trace-id");
+    const graphRoot = requiredEl<HTMLElement>(doc, "trace-graph");
+    runAction(status, "Trace", async () => {
+      const { chain } = await client.getTrace(idInput.value.trim());
+      renderTraceGraph(graphRoot, chain);
+    });
+  });
+}
+
 if (typeof document !== "undefined") {
   const root = document.getElementById("board");
   if (root) void boot(root);
   if (document.getElementById("controls")) {
     wireControls(document, createDaemonClient(readConfig()));
+  }
+  if (document.getElementById("feedback")) {
+    wireFeedbackPanel(document, createDaemonClient(readConfig()));
   }
 }
