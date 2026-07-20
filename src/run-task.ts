@@ -3483,6 +3483,9 @@ async function serveCommand(rest: string[]): Promise<number> {
   // sequential subprocesses, ~0.4s×N, which hung the board at "loading…" on the full plan (~74s at
   // 183 tasks). buildBatchedGithub fetches all PRs ONCE (TTL-refreshed) and resolves every task
   // in-memory: O(1). ONE shared instance backs the board AND GET /v1/drain/preview's merged-set.
+  // W1-T154: buildServeServer itself pre-warms this gateway (calls its optional `.warm()`)
+  // synchronously before returning, and keeps it warm on a background TTL timer — so the FIRST
+  // real GET /v1/status below never pays the O(1)-but-still-cold first fetch either.
   const boardGithub = buildBatchedGithub(self.owner, self.repo);
   const server = buildServeServer({
     board: { plan, ledgerPath, github: boardGithub },

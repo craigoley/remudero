@@ -221,6 +221,17 @@ export interface GitHub {
    */
   autoMergeArmed?(prUrl: string): boolean;
   /**
+   * OPTIONAL (W1-T154): force this gateway's underlying fetch to happen NOW, rather than lazily
+   * on whichever query method is called first. The serve boot sequence calls this synchronously
+   * BEFORE the server ever accepts a request (lib/serve.ts's `prewarmBoardGithub`), so the FIRST
+   * `GET /v1/status` is never the request that pays {@link buildBatchedGithub}'s cold first fetch
+   * — "pre-warm the batched gateway at boot... so the first request is never cold" (the task's
+   * own design note). A per-task gateway with nothing to pre-warm (e.g. {@link ghGateway}, which
+   * already fetches fresh on every call) simply does not implement it — omitted ⇒ callers treat
+   * warming as a no-op, the same fail-soft discipline every other optional method here follows.
+   */
+  warm?(): void;
+  /**
    * True if a read this gateway attempted actually FAILED (rate-limited, network
    * error, auth failure, or any other non-zero `gh` exit / unparseable output) —
    * as opposed to `gh` succeeding with a genuinely empty/not-found result. W1-T119:
@@ -874,6 +885,11 @@ export interface BatchedPr {
  * Drop-in for `ghGateway`, but `findMergedByTrailer` matches the ANCHORED `Remudero-Task:` line
  * (not a fuzzy substring) so `W1-T1` never mis-selects a `W1-T15` PR — deriveStatus's rung (c)
  * re-verify then confirms it exactly as before.
+ *
+ * The underlying fetch is still LAZY by default (the first query method call triggers it) — W1-
+ * T154's boot-time pre-warm (lib/serve.ts's `prewarmBoardGithub`) is what turns that into "never
+ * cold on the request path", by calling the optional {@link GitHub.warm} this gateway implements
+ * BEFORE the server's first request can arrive, then again on a background timer paced to `ttlMs`.
  */
 export function buildBatchedGithub(
   owner: string,
@@ -963,6 +979,13 @@ export function buildBatchedGithub(
     },
     autoMergeArmed(prUrl) {
       return index().byUrl.get(prUrl)?.autoMergeRequest != null;
+    },
+    // W1-T154: forces `index()` NOW. Boot calls this once (cache is empty -> always fetches);
+    // a background timer paced to `ttlMs` calls it again every tick, and by construction the
+    // cache is always exactly at (or past) its TTL when that fires, so `index()`'s own
+    // `now() - cache.at >= ttlMs` check refetches every time — no separate "force" branch needed.
+    warm() {
+      index();
     },
     readFailed() {
       // Forces a fetch first if the cache is cold/expired, so `readFailed()` alone
