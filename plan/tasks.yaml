@@ -6237,3 +6237,43 @@
   note: "Filed from the outage-closeout retro. Both failures were hand-fixed on #287 (plan-index regen + chore(plan):
     rewrite); this teaches retroCommand to do its own homework. Companion to W1-T134/W1-T135 (the other closeout
     review-hardening tasks) and the plan-index-check / commitlint gates that made the hole visible."
+
+- id: W1-T137
+  title: "worker fix-rung commit headers must satisfy commitlint header-max-length (<=100) — verbose round-N headers blew the cap and blocked #303/#305 by construction"
+  repo: remudero
+  depends_on: [W1-T136]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE HOLE (2 stuck PRs): the worker fix-rung builds a commit header from the round summary —
+    'fix: <task> round N -- <prose> (W1-Tnn round n)' — with no length cap. Those headers ran 108 chars (#303
+    round 1) and 114 (#305 round 3), over commitlint's header-max-length of 100 (now a REQUIRED check).
+    commitlint lints the WHOLE origin/main..HEAD range, so a single long intermediate header reds commitlint ->
+    ci-gate -> BLOCKED, even though the code passed its review rounds. The daemon's review-fix-rung has no move
+    for a commit-message/CI failure, so it burned both strikes and escalated (#304/#306) WITHOUT touching the
+    real blocker. This is the W1-T136 class (a PR-emission path that never learned the grown gate stack) at the
+    worker/fix-rung site instead of the retro."
+  design: |
+    Cap the generated commit HEADER at commitlint's header-max-length while keeping the conventional shape
+    '<type>: <scope> -- <summary> (W1-Tnn round n)': rewrite/truncate the summary so the header is <=100 chars,
+    and push the removed detail into the commit BODY, wrapped so each line is within body-max-line-length.
+    Apply to BOTH the initial worker commit and every fix-rung round commit. VERIFY the exact commit-message
+    build site in src/run-task.ts AND the configured header-max-length / body-max-line-length from the repo
+    commitlint config before editing (distrust this note; do not hard-code 100 if the config differs).
+  acceptance:
+    - claim: "a fix-rung commit whose summary would exceed the cap yields a header <=100 that passes commitlint"
+      proof: "unit test: the commit-message builder, given a long round summary, produces a header <=100 chars that passes commitlint against the repo config (type in enum, subject lower-case); the pre-fix builder's 108/114-char output is REJECTED by the same lint (the falsifier)"
+    - claim: "overflow detail is preserved in the body, wrapped so body-max-line-length also passes"
+      proof: "unit test: the trimmed summary's overflow appears in the commit BODY with every line within body-max-line-length; the full message passes commitlint end to end (neither header-max-length nor body-max-line-length trips)"
+    - claim: "a multi-round branch (initial + two fix rounds, each with a long summary) lints clean over origin/main..HEAD"
+      proof: "integration test: a synthesized 3-commit branch built by the fix-rung path with long summaries, run through commitlint --from origin/main --to HEAD, reports 0 problems; a variant that reverts the cap reproduces the header-max-length failure (the #303/#305 regression, closed)"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§6A"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Filed while unsticking #303 (header 108) / #305 (header 114). Sibling of W1-T136 (the retro's version of
+    this same PR-emission/commitlint-compliance class). Also surfaced that a commit-message/CI failure is outside
+    the review-fix-rung's repertoire, so it escalates without resolving — worth a follow-up on fix-rung scope."
