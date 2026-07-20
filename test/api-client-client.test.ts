@@ -285,6 +285,7 @@ function buildGraphFixtureService(root: string) {
   writeFileSync(planPath, "[]\n");
   const deps: PanelGraphDeps = {
     root,
+    inboxRoot: root,
     planPath,
     ledgerPath: join(root, "state", "ledger.ndjson"),
     github: fakeGithub(),
@@ -440,6 +441,7 @@ test("createDaemonClient.runSkill(): invoking Refine (plan/clarify) parks a gril
   const skillRunDeps: PanelSkillRunDeps = { root, planPath, ledgerPath: join(root, "state", "ledger.ndjson") };
   const graphDeps: PanelGraphDeps = {
     root,
+    inboxRoot: root,
     planPath,
     ledgerPath: skillRunDeps.ledgerPath,
     github: fakeGithub(),

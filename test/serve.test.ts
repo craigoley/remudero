@@ -212,7 +212,7 @@ test("GET /: 200, HTML shell referencing the board mount and panel/graph links",
     assert.equal(res.status, 200);
     assert.match(res.headers.get("content-type") ?? "", /text\/html/);
     const body = await res.text();
-    assert.match(body, /id="board"/); // the board mount
+    assert.match(body, /id="now"/); // the live NOW section (W1-T153's operator-priority IA)
     assert.match(body, /\/v1\/feedback/); // panel-graph inbox link
     assert.match(body, /\/v1\/trace/); // panel-graph trace link
     assert.match(body, /\/v1\/control\/pause/); // panel-actions wiring
@@ -238,7 +238,7 @@ test("GET /?token=<read> with NO Authorization header returns the shell (browser
     const res = await navigate(base, `/?token=${READ_TOKEN}`);
     assert.equal(res.status, 200);
     assert.match(res.headers.get("content-type") ?? "", /text\/html/);
-    assert.match(await res.text(), /id="board"/); // the real shell, not a stub
+    assert.match(await res.text(), /id="now"/); // the real shell, not a stub
   });
 });
 
@@ -261,7 +261,7 @@ test("GET /v1/status with ONLY ?token= (no header) -> 401: query-param auth must
 test("renderShellHtml is pure and matches what GET / serves", () => {
   const html = renderShellHtml();
   assert.match(html, /<!doctype html>/i);
-  assert.match(html, /id="board"/);
+  assert.match(html, /id="now"/);
 });
 
 // ── Board-hang regression (GET /v1/status over the FULL plan) ────────────────────────────────────
@@ -460,5 +460,122 @@ test("the panel data routes are header-only (bare navigation 401s) — the shell
     // shell must emit these as panel buttons + authorized fetch, never as <a href> nav links.
     assert.equal((await navigate(base, "/v1/feedback")).status, 401);
     assert.equal((await navigate(base, "/v1/trace?id=A")).status, 401);
+  });
+});
+
+// ── W1-T153: console shell UX overhaul ──────────────────────────────────────────────────────
+// "replace the flat file-order table with operator-priority sections + a real design system"
+// (plan/tasks.yaml). Acceptance bars proven below (the headless-browser bars — responsive
+// no-hscroll, Lighthouse/axe a11y >= 90, fleet-control read-back RENDERING, STOP confirm
+// interaction — live in test/serve.shell-ux.test.ts, a real browser being the only honest
+// client for "no horizontal scroll"/"computed contrast"/"a click fires no POST until confirmed").
+
+test("the five operator-priority sections exist, in order, top to bottom; the old flat file-order table is GONE", () => {
+  const html = renderShellHtml();
+  const order = ["id=\"now\"", "id=\"needs-me\"", "id=\"up-next\"", "id=\"recent\"", "id=\"rest\""];
+  const indices = order.map((needle) => html.indexOf(needle));
+  for (const [i, idx] of indices.entries()) assert.ok(idx >= 0, `missing section marker ${order[i]}`);
+  for (let i = 1; i < indices.length; i++) {
+    assert.ok(indices[i] > indices[i - 1], `section ${order[i]} does not come after ${order[i - 1]} (NOW, NEEDS ME, UP NEXT, RECENT, rest — top to bottom)`);
+  }
+  // the falsifier: the v0 shell's single flat <table id="board-table"> (file-order rows) is gone —
+  // every task now renders inside one of the five sections above, never a raw plan/file-order dump.
+  assert.doesNotMatch(html, /<table/);
+  assert.doesNotMatch(html, /id="board-table"/);
+});
+
+test("status color tokens: five DISTINCT, stable CSS custom properties, reused everywhere via .status-dot/.status-label classes — never an inline color", () => {
+  const html = renderShellHtml();
+  const keys = ["running", "blocked", "needs-human", "merged", "queued"];
+  const values = new Map<string, string>();
+  for (const key of keys) {
+    const m = new RegExp(`--status-${key}:\\s*(#[0-9a-fA-F]{3,8})`).exec(html);
+    assert.ok(m, `no --status-${key} custom property defined`);
+    values.set(key, m![1].toLowerCase());
+  }
+  // no two states share a token (the falsifier).
+  const distinct = new Set(values.values());
+  assert.equal(distinct.size, keys.length, `expected ${keys.length} distinct status colors, got ${[...values.entries()]}`);
+  // every state's color is reused via its class selector, never re-declared as a second literal hex.
+  for (const key of keys) {
+    assert.match(html, new RegExp(`\\.status-dot\\.status-${key}[^}]*var\\(--status-${key}\\)`), `status-dot for ${key} does not reuse the token`);
+    assert.match(html, new RegExp(`\\.status-label\\.status-${key}[^}]*var\\(--status-${key}\\)`), `status-label for ${key} does not reuse the token`);
+  }
+  // the falsifier: no ad-hoc inline `style="color:` / `style="background` anywhere in the shell.
+  assert.doesNotMatch(html, /style="[^"]*(color|background)\s*:/);
+});
+
+test("dark theme is applied by default (no light-mode flash, no JS branch required)", () => {
+  const html = renderShellHtml();
+  assert.match(html, /:root\s*\{[^}]*color-scheme:\s*dark/);
+  assert.match(html, /<meta name="color-scheme" content="dark"\s*\/>/);
+});
+
+test("fleet-control read-back: the shell reads GET /v1/control/status and derives Pause/Resume/STOP/quiet-hours state from it (never stateless buttons)", () => {
+  const html = renderShellHtml();
+  assert.match(html, /getJson\("\/v1\/control\/status"\)/);
+  assert.match(html, /applyControlStatus/);
+  assert.match(html, /aria-pressed/);
+  assert.match(html, /\.disabled\s*=/); // an active mode disables its own re-trigger, distinct from the others
+});
+
+test("STOP requires an explicit second ('Confirm STOP') click before it POSTs /v1/control/stop — never fires on the first click", () => {
+  const html = renderShellHtml();
+  assert.match(html, /dataset\.confirming/);
+  assert.match(html, /Confirm STOP/);
+  // the POST only appears INSIDE the confirmed branch (after the early-return on the first click) —
+  // structurally: the confirming check `return`s before the postJson("/v1/control/stop", ...) call.
+  const stopHandler = /stop-btn"\)\.addEventListener\("click", \(\) => \{([\s\S]*?)\n\s*\}\);/.exec(html);
+  assert.ok(stopHandler, "no stop-btn click handler found");
+  assert.match(stopHandler![1], /if \(btn\.dataset\.confirming !== "true"\) \{[\s\S]*?return;\s*\}/);
+  assert.match(stopHandler![1], /postJson\("\/v1\/control\/stop"/);
+});
+
+test("GET /v1/control/status (assembled server): reads back the REAL fleet-control tri-state, not a stateless echo", async () => {
+  const root = tmpRoot();
+  await withServeServer(depsFor(root, planOf([task()])), async (base) => {
+    const before = await get(base, "/v1/control/status", READ_TOKEN);
+    assert.equal(before.status, 200);
+    assert.deepEqual(await before.json(), { paused: false, stopped: false, quietHours: false });
+
+    await post(base, "/v1/control/pause", WRITE_TOKEN, { reason: "taste iteration" });
+    const afterPause = (await (await get(base, "/v1/control/status", READ_TOKEN)).json()) as {
+      paused: boolean;
+      pauseDetail?: string;
+      stopped: boolean;
+    };
+    assert.equal(afterPause.paused, true);
+    assert.equal(afterPause.stopped, false);
+    assert.match(afterPause.pauseDetail ?? "", /taste iteration/);
+  });
+});
+
+test("GET /v1/recent (assembled server): last merges/blocks, PR-linked, most-recent-first by ledger order", async () => {
+  const root = tmpRoot();
+  const prUrl = "https://github.com/craigoley/remudero/pull/9";
+  const plan = planOf([task({ id: "OLD", status: "merged" }), task({ id: "NEW", status: "merged" })]);
+  const ledgerPath = ledgerPathFor(root);
+  const github = fakeGitHub({ [prUrl]: { number: 9, url: prUrl, state: "MERGED" } });
+  const deps = depsFor(root, plan, { board: { plan, ledgerPath, github } });
+  // OLD is mentioned first, NEW second — NEW must sort first (most-recent-first).
+  appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "OLD", step: "pr.opened", pr_url: prUrl }) + "\n");
+  appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r2", task_id: "NEW", step: "pr.opened", pr_url: prUrl }) + "\n");
+  await withServeServer(deps, async (base) => {
+    const res = await get(base, "/v1/recent", READ_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { entries: Array<{ taskId: string; outcome: string }> };
+    assert.deepEqual(body.entries.map((e) => e.taskId), ["NEW", "OLD"]);
+    assert.ok(body.entries.every((e) => e.outcome === "merged"));
+  });
+});
+
+test("GET /v1/inbox (assembled server): the W1-T110 ratification inbox's READY tier, reachable and header-only", async () => {
+  const root = tmpRoot();
+  await withServeServer(depsFor(root, planOf([task()])), async (base) => {
+    // no state/inbox-proposals.json yet -> an empty registry, not an error (inbox.ts's own fail-soft convention).
+    const res = await get(base, "/v1/inbox", READ_TOKEN);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ready: [] });
+    assert.equal((await navigate(base, "/v1/inbox")).status, 401); // header-only, same discipline as every other panel route
   });
 });

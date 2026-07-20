@@ -30,6 +30,8 @@ jobs:
           node-version-file: .nvmrc
       - name: Install (clean, from lockfile)
         run: npm ci
+      - name: Install Playwright's Chromium (W1-T153 shell a11y/responsive tests need a real headless browser — Lighthouse-equivalent axe-core scan, 390px/1440px no-hscroll, fleet-control read-back/STOP-confirm interaction)
+        run: npx playwright install --with-deps chromium
       - name: Typecheck
         # §5 TIER 2, quality gate 4/4 (W1-T98): this step is TS-strict's actual enforcement --
         # tsconfig.json has `strict: true`, and a strict-mode violation anywhere in src/**/test/**

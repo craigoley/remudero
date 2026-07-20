@@ -38,10 +38,11 @@ import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { Server } from "node:http";
 import { createService, type Route, type ServiceOptions, type ServiceTokens } from "./service.js";
-import { buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
+import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
+  buildControlStatusRoute,
   buildPauseRoute,
   buildQuietHoursRoute,
   buildResumeRoute,
@@ -56,8 +57,14 @@ export const DEFAULT_SERVE_PORT = 4317;
 
 export interface ServeDeps {
   board: BoardDeps;
-  /** `plan/feedback/` + `plan/tasks.yaml` root and GitHub trace gateway (panel-graph.ts). */
-  panelGraph: PanelGraphDeps;
+  /**
+   * `plan/feedback/` + `plan/tasks.yaml` root and GitHub trace gateway (panel-graph.ts).
+   * Deliberately `Omit<..., "inboxRoot">` — {@link buildServeRoutes} supplies `inboxRoot`
+   * itself (= `fleetControlRoot`, config.root) the SAME way it already splits `fleetControlRoot`
+   * vs `questionsRoot` for panel-actions.ts, so a `ServeDeps` caller names each root exactly
+   * once, never a duplicate that could drift from `fleetControlRoot`.
+   */
+  panelGraph: Omit<PanelGraphDeps, "inboxRoot">;
   /** `<root>/state/ledger.ndjson` — SAME path board.ts tails and every panel route ledgers into. */
   ledgerPath: string;
   /** `gh issue close` gateway shared by every panel-actions write route that needs it. */
@@ -74,70 +81,216 @@ export interface ServeDeps {
 }
 
 /**
- * The minimal operator-console HTML shell (task title: "a minimal HTML shell"). NOT
- * apps/dashboard's full SPA — that page's own header already documents why it stays a
- * separate, later-wired artifact ("Wiring the daemon to actually SERVE this directory as
- * static files... is explicit follow-on work"): its `main.js` is a `tsc`-compiled ES module
- * with no bundler, and serving it verbatim would need its own static-asset route(s) plus a
- * decision on caching/versioning that is out of THIS task's one concern (front-door wiring).
- * This shell instead proves the wiring end-to-end on its own: it mounts the live board
- * (`GET /v1/status`, polled — see the inline comment below for why not SSE here) and links
- * the panel actions + plan→task→PR graph, using bearer auth exactly like every other route on
- * this surface (there is no unauthenticated route in service.ts's model — `GET /` is
- * `scope: "read"` like everything else; the reader must already carry a token, same
- * `?token=` query-param convention apps/dashboard's own `main.ts` uses).
+ * The operator-console HTML shell (W1-T153: "replace the flat file-order table with
+ * operator-priority sections + a real design system"). NOT apps/dashboard's full SPA — that
+ * page's own header already documents why it stays a separate, later-wired artifact ("Wiring
+ * the daemon to actually SERVE this directory as static files... is explicit follow-on work").
+ *
+ * INFORMATION ARCHITECTURE, top to bottom — file order appears NOWHERE (task design note):
+ *   1. NOW        — in-flight runs (a live `phase` + elapsed), from GET /v1/status.
+ *   2. NEEDS ME    — needs-human escalations (StatusProjection.needsHuman) + the feedback
+ *      inbox's actionable entries (grilling/proposed, GET /v1/feedback) + W1-T110's READY
+ *      ratification proposals (GET /v1/inbox) — one-line ask + action affordance each.
+ *   3. UP NEXT     — the drain head, first ~5 of GET /v1/drain/preview (W1-T140), in
+ *      plannedSequence order.
+ *   4. RECENT      — last ~10 merges/blocks with PR links, GET /v1/recent (board.ts, reusing
+ *      W1-T141's `merged`/`blocked` outcome vocabulary — see board.ts's header for why this
+ *      route exists instead of querying a live DrainSummary).
+ *   5. everything else, COLLAPSED behind grouped counts (queued: N, merged: N, other: N) with
+ *      an expand + filter/search over the remaining GET /v1/status tasks.
+ * Fleet control (Pause/Resume/STOP/quiet-hours) and an auxiliary "more tools" panel (submit
+ * feedback, plan→task→PR graph) follow below the five sections.
+ *
+ * SCOPE NOTE (W1-T110/W1-T111 split): a READY inbox proposal's "action" is the exact `rmd
+ * approve`/`rmd reframe` command text, not a button — `approveProposal`/`reframeProposal`
+ * (lib/inbox.ts) need a real git/gh `RatifyGateway`, and wiring that as a WRITE route is its
+ * own concern (a ratification write surface), not this task's one concern (shell IA/design).
+ * See GET /v1/inbox's own doc comment (panel-graph.ts).
+ *
+ * DESIGN SYSTEM: dark theme (default, no light/auto toggle in v0 — "applied by default"
+ * satisfies the acceptance bar without prefers-color-scheme's extra state to keep distinct-
+ * and-consistent across), five distinct CSS-custom-property status color tokens reused
+ * EVERYWHERE a state appears (never an inline color — see `.status-dot`/`.status-label`),
+ * monospace task ids, phone-first responsive (a single fluid column, no fixed-width table —
+ * the v0 shell's `<table>` was exactly what produced horizontal scroll at 390px). Every
+ * interactive control is a real `<button>`/`<input>`/`<label>` (never a clickable `<div>`),
+ * kept for the Lighthouse/axe a11y bar (test/serve.shell-ux.test.ts).
+ *
+ * FLEET-CONTROL READ-BACK (task design note): the shell reads GET /v1/control/status
+ * (panel-actions.ts, this task's own new route — no route exposed the tri-state before) and
+ * renders the ACTIVE mode's control visibly active/disabled — never identical button states
+ * across paused/running/stopped ("should I try clicking start?"). STOP requires an explicit
+ * second click ("Confirm STOP") before it POSTs — never a single click.
+ *
+ * Uses bearer auth exactly like every other route on this surface (there is no unauthenticated
+ * route in service.ts's model — `GET /` is `scope: "read"` like everything else; the reader
+ * must already carry a token, same `?token=` query-param convention apps/dashboard's own
+ * `main.ts` uses).
  */
 export function renderShellHtml(): string {
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Remudero — rmd serve</title>
+<title>Remudero — the operator console</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark" />
 <style>
-  body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 60rem; }
-  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
-  th, td { text-align: left; border-bottom: 1px solid #ccc; padding: 0.25rem 0.5rem; }
-  nav a { margin-right: 1rem; }
-  section { margin: 1.5rem 0; }
-  #status { color: #666; }
+  :root {
+    color-scheme: dark;
+    --bg: #0b0e14;
+    --bg-elevated: #12161f;
+    --bg-card: #171c27;
+    --border: #262c3a;
+    --text: #e6e9ef;
+    --text-dim: #a7b0c2;
+    --text-faint: #8b93a8;
+    --accent: #5b9dff;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --status-running: #4db8ff;
+    --status-blocked: #ff6b6b;
+    --status-needs-human: #ffb84d;
+    --status-merged: #4ade80;
+    --status-queued: #a3acc2;
+    --radius: 10px;
+    --gap: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body { max-width: 100vw; overflow-x: hidden; }
+  body {
+    margin: 0; padding: var(--gap) var(--gap) 3rem;
+    background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.4;
+  }
+  main { max-width: 56rem; margin: 0 auto; display: flex; flex-direction: column; gap: 1.5rem; }
+  h1 { font-size: 1.25rem; margin: 0.5rem 0; }
+  h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); margin: 0 0 0.5rem; }
+  a { color: var(--accent); }
+  code, .mono { font-family: var(--font-mono); }
+  #top-status { color: var(--text-dim); font-size: 0.875rem; margin: 0; }
+  section.panel-section {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 1rem;
+  }
+  .row-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+  .row {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem;
+    background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 8px;
+    padding: 0.5rem 0.75rem; overflow-wrap: anywhere;
+  }
+  .row .task-id { font-family: var(--font-mono); font-weight: 600; }
+  .row .detail { color: var(--text-dim); font-size: 0.875rem; flex-basis: 100%; }
+  .status-dot { display: inline-block; width: 0.6em; height: 0.6em; border-radius: 50%; margin-right: 0.15em; }
+  .status-label { font-size: 0.8rem; font-weight: 600; background: none; }
+  /* the DOT is a filled swatch (background); the LABEL is text colored to match (never a
+     filled background behind it — same-color text-on-background is an invisible-text bug). */
+  .status-dot.status-running { background: var(--status-running); }
+  .status-dot.status-blocked { background: var(--status-blocked); }
+  .status-dot.status-needs-human { background: var(--status-needs-human); }
+  .status-dot.status-merged { background: var(--status-merged); }
+  .status-dot.status-queued { background: var(--status-queued); }
+  .status-label.status-running { color: var(--status-running); }
+  .status-label.status-blocked { color: var(--status-blocked); }
+  .status-label.status-needs-human { color: var(--status-needs-human); }
+  .status-label.status-merged { color: var(--status-merged); }
+  .status-label.status-queued { color: var(--status-queued); }
+  .empty { color: var(--text-faint); font-size: 0.875rem; }
+  button {
+    font: inherit; background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.4rem 0.75rem; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button[aria-pressed="true"], button.active { background: var(--accent); color: #04101f; border-color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.danger { border-color: var(--status-blocked); color: var(--status-blocked); }
+  button.danger.confirming { background: var(--status-blocked); color: #200404; }
+  input[type="text"], input[type="url"] {
+    font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.4rem 0.5rem; width: 100%; max-width: 24rem;
+  }
+  label { display: block; font-size: 0.875rem; color: var(--text-dim); margin: 0.35rem 0; }
+  form.inline-action { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; flex-basis: 100%; }
+  form.inline-action input { flex: 1 1 12rem; width: auto; }
+  .btn-row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+  .counts { color: var(--text-dim); font-size: 0.9rem; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (min-width: 900px) {
+    main { max-width: 64rem; }
+  }
 </style>
 </head>
 <body>
-<h1>Remudero — the operator console front door</h1>
-<nav>
-  <!-- IN-SHELL PANELS, not page hops: a browser NAVIGATION to a header-only /v1 route cannot send
-       the Authorization header, so a bare anchor click 401s and shows raw JSON (the #339
-       bootstrap-paradox recurring at the LINK layer). These are buttons whose handlers fetch WITH the
-       header the page already carries and render the result INSIDE the page — no navigation, no raw
-       JSON, no token in a navigable URL. This is also W1-T153's IA shape (panels, not hops). -->
-  <button id="feedback-btn" type="button">Feedback inbox</button>
-  <button id="graph-btn" type="button">Plan→task→PR graph</button>
-</nav>
-<p id="status">loading…</p>
+<main>
+<header>
+  <h1>Remudero — the operator console</h1>
+  <p id="top-status" role="status" aria-live="polite">loading…</p>
+</header>
 
-<section id="panel" aria-label="Panel" hidden>
-  <h2 id="panel-title"></h2>
-  <div id="panel-controls"></div>
-  <pre id="panel-body"></pre>
+<section id="now" class="panel-section" aria-label="Now">
+  <h2>Now</h2>
+  <ul id="now-list" class="row-list"><li class="empty">loading…</li></ul>
 </section>
 
-<section id="board" aria-label="Live task board">
-  <h2>Board</h2>
-  <table id="board-table">
-    <thead><tr><th>task</th><th>status</th><th>PR</th></tr></thead>
-    <tbody id="board-rows"></tbody>
-  </table>
+<section id="needs-me" class="panel-section" aria-label="Needs me">
+  <h2>Needs me</h2>
+  <ul id="needs-me-list" class="row-list"><li class="empty">loading…</li></ul>
 </section>
 
-<section id="controls" aria-label="Fleet control">
+<section id="up-next" class="panel-section" aria-label="Up next">
+  <h2>Up next</h2>
+  <ul id="up-next-list" class="row-list"><li class="empty">loading…</li></ul>
+</section>
+
+<section id="recent" class="panel-section" aria-label="Recent">
+  <h2>Recent</h2>
+  <ul id="recent-list" class="row-list"><li class="empty">loading…</li></ul>
+</section>
+
+<section id="rest" class="panel-section" aria-label="Everything else">
+  <h2>Everything else</h2>
+  <div class="btn-row">
+    <span id="rest-counts" class="counts">…</span>
+    <button id="rest-toggle" type="button" aria-expanded="false" aria-controls="rest-detail">Expand</button>
+  </div>
+  <div id="rest-detail" hidden>
+    <label for="rest-filter">Filter by task id</label>
+    <input id="rest-filter" type="text" placeholder="e.g. W1-T" />
+    <ul id="rest-list" class="row-list"></ul>
+  </div>
+</section>
+
+<section id="controls" class="panel-section" aria-label="Fleet control">
   <h2>Fleet control</h2>
-  <label>reason (optional) <input id="reason" type="text" /></label>
-  <button id="pause-btn" type="button">Pause</button>
-  <button id="resume-btn" type="button">Resume</button>
-  <button id="stop-btn" type="button">STOP</button>
-  <label><input id="quiet-hours" type="checkbox" /> Quiet hours</label>
+  <label for="reason">Reason (optional, for Pause/STOP)</label>
+  <input id="reason" type="text" />
+  <div class="btn-row">
+    <button id="pause-btn" type="button" aria-pressed="false">Pause</button>
+    <button id="resume-btn" type="button" aria-pressed="false">Resume</button>
+    <button id="stop-btn" type="button" class="danger" aria-pressed="false">STOP</button>
+    <label style="display:flex; align-items:center; gap:0.35rem; margin:0;">
+      <input id="quiet-hours" type="checkbox" /> Quiet hours
+    </label>
+  </div>
+  <p id="controls-status" role="status" aria-live="polite" class="counts"></p>
 </section>
+
+<section id="more" class="panel-section" aria-label="More tools">
+  <h2>More tools</h2>
+  <div class="btn-row">
+    <!-- IN-SHELL PANELS, not page hops: a browser NAVIGATION to a header-only /v1 route cannot
+         send the Authorization header, so a bare anchor click 401s (the #339 bootstrap-paradox
+         at the LINK layer). These fetch WITH the header the page already carries. -->
+    <button id="feedback-btn" type="button">Feedback inbox</button>
+    <button id="graph-btn" type="button">Plan→task→PR graph</button>
+  </div>
+  <section id="panel" aria-label="Tool panel" hidden>
+    <h2 id="panel-title"></h2>
+    <div id="panel-controls"></div>
+    <pre id="panel-body" class="mono"></pre>
+  </section>
+</section>
+</main>
 
 <script type="module">
   // Bootstrap: the SAME \`?token=\` query-param convention apps/dashboard/src/main.ts uses —
@@ -148,34 +301,15 @@ export function renderShellHtml(): string {
   const token = params.get("token") ?? "";
   const authHeaders = { authorization: \`Bearer \${token}\` };
 
-  async function refreshBoard() {
-    try {
-      const res = await fetch("/v1/status", { headers: authHeaders });
-      if (!res.ok) throw new Error(\`GET /v1/status -> \${res.status}\`);
-      const snapshot = await res.json();
-      const rows = document.getElementById("board-rows");
-      rows.innerHTML = "";
-      for (const t of snapshot.tasks) {
-        const tr = document.createElement("tr");
-        const pr = t.prUrl ? \`<a href="\${t.prUrl}" target="_blank" rel="noreferrer">#\${t.prNumber ?? t.prUrl}</a>\` : "";
-        tr.innerHTML = \`<td>\${t.taskId}</td><td>\${t.status}\${t.merged ? " ✓" : ""}</td><td>\${pr}</td>\`;
-        rows.appendChild(tr);
-      }
-      document.getElementById("status").textContent = \`updated \${snapshot.generated_at}\`;
-    } catch (e) {
-      document.getElementById("status").textContent = \`board fetch failed: \${e}\`;
-    }
+  function escapeHtml(text) {
+    return String(text ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
-  // v0: polls rather than opening /v1/status/stream. Real-time consumption over fetch-based
-  // SSE (native EventSource cannot carry an Authorization header — service.ts has no
-  // unauthenticated fallback) is exactly what @remudero/api-client's subscribeStatus already
-  // implements; this inline shell deliberately does not re-implement that a second time. The
-  // stream route itself is proven directly (test/board.test.ts, test/serve.test.ts), not
-  // through this page.
-  refreshBoard();
-  setInterval(refreshBoard, 3000);
-
+  async function getJson(path) {
+    const res = await fetch(path, { headers: authHeaders });
+    if (!res.ok) throw new Error(\`GET \${path} -> \${res.status}\`);
+    return res.json();
+  }
   function postJson(path, body) {
     return fetch(path, {
       method: "POST",
@@ -184,26 +318,229 @@ export function renderShellHtml(): string {
     });
   }
 
-  document.getElementById("pause-btn").addEventListener("click", () => {
-    postJson("/v1/control/pause", { reason: document.getElementById("reason").value || undefined }).then(refreshBoard);
+  // ── the five-state status color taxonomy (W1-T153 design system) — ONE mapping, reused
+  // everywhere a task's state renders (NOW/NEEDS ME/UP NEXT/RECENT/rest), never re-derived. ──
+  function statusColorKey(t) {
+    if (t.needsHuman) return "needs-human";
+    if (t.status === "merged" || t.status === "done") return "merged";
+    if (t.status === "blocked") return "blocked";
+    if (t.status === "queued") return "queued";
+    return "running";
+  }
+  const STATUS_LABELS = { running: "running", blocked: "blocked", "needs-human": "needs human", merged: "merged", queued: "queued" };
+  function statusBadge(key) {
+    return \`<span class="status-dot status-\${key}" aria-hidden="true"></span><span class="status-label status-\${key}">\${STATUS_LABELS[key]}</span>\`;
+  }
+  function formatElapsed(ms) {
+    if (typeof ms !== "number" || !Number.isFinite(ms)) return "";
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const m = Math.floor(s / 60);
+    const h = Math.floor(m / 60);
+    if (h > 0) return \`\${h}h\${m % 60}m\`;
+    if (m > 0) return \`\${m}m\${s % 60}s\`;
+    return \`\${s}s\`;
+  }
+  function prLink(t) {
+    if (!t.prUrl) return "";
+    const label = t.prNumber !== undefined ? \`#\${t.prNumber}\` : t.prUrl;
+    return \` · <a href="\${t.prUrl}" target="_blank" rel="noreferrer">\${label}</a>\`;
+  }
+
+  // ── NOW — in-flight runs, live phase + elapsed ──────────────────────────────────────────
+  function renderNow(tasks) {
+    const inFlight = tasks.filter((t) => t.phase);
+    const list = document.getElementById("now-list");
+    list.innerHTML = inFlight.length
+      ? inFlight
+          .map((t) => {
+            const key = statusColorKey(t);
+            return \`<li class="row"><span class="task-id">\${escapeHtml(t.taskId)}</span>\${statusBadge(key)}<span class="detail">phase: \${escapeHtml(t.phase)} · elapsed: \${formatElapsed(t.elapsedMs)}\${t.armedAwaitingMerge ? " · auto-merge armed" : ""}</span></li>\`;
+          })
+          .join("")
+      : '<li class="empty">nothing in flight</li>';
+    return new Set(inFlight.map((t) => t.taskId));
+  }
+
+  // ── NEEDS ME — escalations + inbox, one-line ask + action ───────────────────────────────
+  function renderNeedsMe(tasks, feedbackEntries, inboxReady) {
+    const rows = [];
+    const shown = new Set();
+    for (const t of tasks) {
+      if (!t.needsHuman) continue;
+      shown.add(t.taskId);
+      rows.push(
+        \`<li class="row">\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(t.taskId)}</span><span class="detail">needs human attention (escalated)</span>\` +
+          \`<form class="inline-action needs-me-approve" data-task-id="\${escapeHtml(t.taskId)}">\` +
+          \`<label for="issue-\${escapeHtml(t.taskId)}">Issue URL</label>\` +
+          \`<input id="issue-\${escapeHtml(t.taskId)}" type="url" placeholder="https://github.com/.../issues/…" required />\` +
+          \`<button type="submit">Approve</button></form></li>\`,
+      );
+    }
+    for (const e of feedbackEntries ?? []) {
+      if (e.status === "grilling") {
+        rows.push(
+          \`<li class="row">\${statusBadge("needs-human")}<span class="task-id">feedback#\${escapeHtml(e.id)}</span><span class="detail">asks: \${escapeHtml(e.raw)}</span>\` +
+            \`<form class="inline-action needs-me-answer" data-reply-to="\${escapeHtml(e.id)}">\` +
+            \`<label for="answer-\${escapeHtml(e.id)}">Answer</label>\` +
+            \`<input id="answer-\${escapeHtml(e.id)}" type="text" required />\` +
+            \`<button type="submit">Answer</button></form></li>\`,
+        );
+      } else if (e.status === "proposed") {
+        rows.push(
+          \`<li class="row">\${statusBadge("needs-human")}<span class="task-id">feedback#\${escapeHtml(e.id)}</span><span class="detail">proposes: \${escapeHtml(e.raw)}</span>\` +
+            \`<span class="btn-row"><button type="button" class="needs-me-decide" data-id="\${escapeHtml(e.id)}" data-decision="accept">Accept</button>\` +
+            \`<button type="button" class="needs-me-decide" data-id="\${escapeHtml(e.id)}" data-decision="reject">Reject</button></span></li>\`,
+        );
+      }
+    }
+    for (const p of inboxReady ?? []) {
+      rows.push(
+        \`<li class="row">\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(p.proposalId)}</span><span class="detail">READY to ratify — \${escapeHtml(p.summary)}</span>\` +
+          \`<span class="detail">run <code>rmd approve \${escapeHtml(p.proposalId)}</code> or <code>rmd reframe \${escapeHtml(p.proposalId)} --feedback "…"</code></span></li>\`,
+      );
+    }
+    document.getElementById("needs-me-list").innerHTML = rows.length ? rows.join("") : '<li class="empty">nothing needs you right now</li>';
+    return shown;
+  }
+
+  // ── UP NEXT — the drain head, first ~5 runnable (W1-T140 preview/curation) ──────────────
+  function renderUpNext(cards) {
+    const list = document.getElementById("up-next-list");
+    const head = (cards ?? []).slice(0, 5);
+    list.innerHTML = head.length
+      ? head
+          .map(
+            (c) =>
+              \`<li class="row">\${statusBadge("queued")}<span class="task-id">\${escapeHtml(c.id)}</span><span class="detail">\${escapeHtml(c.title)} · \${(c.dependsOn ?? []).length} dep(s)</span></li>\`,
+          )
+          .join("")
+      : '<li class="empty">drain queue is empty</li>';
+    return new Set(head.map((c) => c.id));
+  }
+
+  // ── RECENT — last ~10 merges/blocks, PR-linked ───────────────────────────────────────────
+  function renderRecent(entries) {
+    const list = document.getElementById("recent-list");
+    list.innerHTML = (entries ?? []).length
+      ? entries
+          .map(
+            (e) =>
+              \`<li class="row">\${statusBadge(e.outcome === "blocked" ? "blocked" : "merged")}<span class="task-id">\${escapeHtml(e.taskId)}</span><span class="detail">\${escapeHtml(e.outcome)}\${prLink(e)}</span></li>\`,
+          )
+          .join("")
+      : '<li class="empty">no recent outcomes yet</li>';
+    return new Set((entries ?? []).map((e) => e.taskId));
+  }
+
+  // ── everything else — COLLAPSED counts + expand + filter/search ─────────────────────────
+  let restTasks = [];
+  function renderRestList(filterText) {
+    const needle = (filterText ?? "").trim().toLowerCase();
+    const filtered = needle ? restTasks.filter((t) => t.taskId.toLowerCase().includes(needle)) : restTasks;
+    const list = document.getElementById("rest-list");
+    list.innerHTML = filtered.length
+      ? filtered
+          .slice(0, 200)
+          .map((t) => \`<li class="row">\${statusBadge(statusColorKey(t))}<span class="task-id">\${escapeHtml(t.taskId)}</span></li>\`)
+          .join("")
+      : '<li class="empty">no matching tasks</li>';
+  }
+  function renderRest(tasks, shownIds) {
+    restTasks = tasks.filter((t) => !shownIds.has(t.taskId));
+    const queued = restTasks.filter((t) => statusColorKey(t) === "queued").length;
+    const merged = restTasks.filter((t) => statusColorKey(t) === "merged").length;
+    const other = restTasks.length - queued - merged;
+    document.getElementById("rest-counts").textContent = \`queued: \${queued} · merged: \${merged} · other: \${other} (\${restTasks.length} total)\`;
+    if (!document.getElementById("rest-detail").hidden) renderRestList(document.getElementById("rest-filter").value);
+  }
+  document.getElementById("rest-toggle").addEventListener("click", () => {
+    const detail = document.getElementById("rest-detail");
+    const toggle = document.getElementById("rest-toggle");
+    const expanded = !detail.hidden;
+    detail.hidden = expanded;
+    toggle.setAttribute("aria-expanded", String(!expanded));
+    toggle.textContent = expanded ? "Expand" : "Collapse";
+    if (!expanded) renderRestList(document.getElementById("rest-filter").value);
   });
-  document.getElementById("resume-btn").addEventListener("click", () => {
-    postJson("/v1/control/resume").then(refreshBoard);
+  document.getElementById("rest-filter").addEventListener("input", (e) => renderRestList(e.target.value));
+
+  // ── NEEDS ME row actions (event delegation — rows are re-rendered on every refresh) ─────
+  document.getElementById("needs-me-list").addEventListener("submit", async (e) => {
+    const approveForm = e.target.closest(".needs-me-approve");
+    const answerForm = e.target.closest(".needs-me-answer");
+    if (approveForm) {
+      e.preventDefault();
+      const taskId = approveForm.dataset.taskId;
+      const issueUrl = approveForm.querySelector("input").value.trim();
+      await postJson("/v1/manual/approve", { taskId, issueUrl });
+      refreshAll();
+    } else if (answerForm) {
+      e.preventDefault();
+      const replyTo = answerForm.dataset.replyTo;
+      const answer = answerForm.querySelector("input").value.trim();
+      await postJson("/v1/feedback", { text: answer, replyTo });
+      refreshAll();
+    }
   });
-  document.getElementById("stop-btn").addEventListener("click", () => {
-    postJson("/v1/control/stop", { reason: document.getElementById("reason").value || undefined }).then(refreshBoard);
-  });
-  document.getElementById("quiet-hours").addEventListener("change", (e) => {
-    postJson("/v1/quiet-hours", { enabled: e.target.checked });
+  document.getElementById("needs-me-list").addEventListener("click", async (e) => {
+    const btn = e.target.closest(".needs-me-decide");
+    if (!btn) return;
+    await postJson("/v1/feedback/decision", { id: btn.dataset.id, decision: btn.dataset.decision });
+    refreshAll();
   });
 
-  // IN-SHELL PANELS — authorized fetch (the header the page already carries), rendered inline.
-  // NEVER a navigation to a header-only route (that is exactly what 401'd via the old <a href>).
-  async function getJson(path) {
-    const res = await fetch(path, { headers: authHeaders });
-    if (!res.ok) throw new Error(\`GET \${path} -> \${res.status}\`);
-    return res.json();
+  // ── fleet control READ-BACK (W1-T153): render the ACTIVE mode, never stateless buttons ──
+  function applyControlStatus(status) {
+    const pauseBtn = document.getElementById("pause-btn");
+    const resumeBtn = document.getElementById("resume-btn");
+    const stopBtn = document.getElementById("stop-btn");
+    const quietHours = document.getElementById("quiet-hours");
+    pauseBtn.setAttribute("aria-pressed", String(status.paused));
+    pauseBtn.classList.toggle("active", status.paused);
+    pauseBtn.disabled = status.paused || status.stopped;
+    stopBtn.setAttribute("aria-pressed", String(status.stopped));
+    stopBtn.classList.toggle("active", status.stopped);
+    resumeBtn.disabled = !status.paused && !status.stopped;
+    resumeBtn.setAttribute("aria-pressed", String(!status.paused && !status.stopped && false));
+    quietHours.checked = status.quietHours;
+    const detail = status.stopped ? status.stopDetail : status.paused ? status.pauseDetail : "fleet is running";
+    document.getElementById("controls-status").textContent = detail ?? (status.stopped ? "stopped" : status.paused ? "paused" : "running");
   }
+
+  // ── STOP requires an explicit second click ("Confirm STOP") — never a single click ──────
+  let stopConfirmTimer;
+  document.getElementById("stop-btn").addEventListener("click", () => {
+    const btn = document.getElementById("stop-btn");
+    if (btn.dataset.confirming !== "true") {
+      btn.dataset.confirming = "true";
+      btn.classList.add("confirming");
+      btn.textContent = "Confirm STOP?";
+      clearTimeout(stopConfirmTimer);
+      stopConfirmTimer = setTimeout(() => resetStopButton(), 8000);
+      return;
+    }
+    resetStopButton();
+    postJson("/v1/control/stop", { reason: document.getElementById("reason").value || undefined }).then(refreshAll);
+  });
+  function resetStopButton() {
+    const btn = document.getElementById("stop-btn");
+    btn.dataset.confirming = "false";
+    btn.classList.remove("confirming");
+    btn.textContent = "STOP";
+    clearTimeout(stopConfirmTimer);
+  }
+  document.getElementById("pause-btn").addEventListener("click", () => {
+    postJson("/v1/control/pause", { reason: document.getElementById("reason").value || undefined }).then(refreshAll);
+  });
+  document.getElementById("resume-btn").addEventListener("click", () => {
+    postJson("/v1/control/resume").then(refreshAll);
+  });
+  document.getElementById("quiet-hours").addEventListener("change", (e) => {
+    postJson("/v1/quiet-hours", { enabled: e.target.checked }).then(refreshAll);
+  });
+
+  // ── the auxiliary tool panels (unchanged mechanism from the v0 shell — in-shell, never a
+  // navigation to a header-only route) ──────────────────────────────────────────────────────
   function openPanel(title) {
     document.getElementById("panel-title").textContent = title;
     document.getElementById("panel-controls").innerHTML = "";
@@ -217,7 +554,7 @@ export function renderShellHtml(): string {
       const data = await getJson("/v1/feedback");
       const entries = data.entries ?? [];
       body.textContent = entries.length
-        ? entries.map((e) => \`\${e.id ?? "?"} — \${e.status ?? ""}: \${e.summary ?? e.title ?? ""}\`).join("\\n")
+        ? entries.map((e) => \`\${e.id ?? "?"} — \${e.status ?? ""}: \${e.raw ?? ""}\`).join("\\n")
         : "(inbox empty)";
     } catch (e) {
       body.textContent = \`panel fetch failed: \${e}\`;
@@ -227,7 +564,7 @@ export function renderShellHtml(): string {
     openPanel("Plan→task→PR graph");
     const controls = document.getElementById("panel-controls");
     controls.innerHTML =
-      '<label>task or feedback id <input id="trace-id" type="text" /></label> <button id="trace-btn" type="button">Trace</button>';
+      '<label for="trace-id">task or feedback id</label><input id="trace-id" type="text" /> <button id="trace-btn" type="button">Trace</button>';
     const body = document.getElementById("panel-body");
     body.textContent = "enter an id and click Trace";
     document.getElementById("trace-btn").addEventListener("click", async () => {
@@ -242,6 +579,35 @@ export function renderShellHtml(): string {
       }
     });
   });
+
+  // ── the poll loop: one refresh drives NOW/NEEDS ME/UP NEXT/RECENT/rest + fleet-control
+  // read-back. v0: polls (same rationale the original shell documented for GET /v1/status —
+  // native EventSource cannot carry an Authorization header); @remudero/api-client's
+  // subscribeStatus already implements real SSE consumption for a client that wants it. ──────
+  async function refreshAll() {
+    try {
+      const [statusSnap, recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus] = await Promise.all([
+        getJson("/v1/status"),
+        getJson("/v1/recent").catch(() => ({ entries: [] })),
+        getJson("/v1/drain/preview?max=5").catch(() => ({ cards: [] })),
+        getJson("/v1/feedback").catch(() => ({ entries: [] })),
+        getJson("/v1/inbox").catch(() => ({ ready: [] })),
+        getJson("/v1/control/status").catch(() => ({ paused: false, stopped: false, quietHours: false })),
+      ]);
+      const tasks = statusSnap.tasks ?? [];
+      const nowIds = renderNow(tasks);
+      const needsMeIds = renderNeedsMe(tasks, feedbackSnap.entries, inboxSnap.ready);
+      const upNextIds = renderUpNext(upNextSnap.cards);
+      const recentIds = renderRecent(recentSnap.entries);
+      renderRest(tasks, new Set([...nowIds, ...needsMeIds, ...upNextIds, ...recentIds]));
+      applyControlStatus(controlStatus);
+      document.getElementById("top-status").textContent = \`updated \${statusSnap.generated_at ?? new Date().toISOString()}\`;
+    } catch (e) {
+      document.getElementById("top-status").textContent = \`refresh failed: \${e}\`;
+    }
+  }
+  refreshAll();
+  setInterval(refreshAll, 3000);
 </script>
 </body>
 </html>
@@ -273,16 +639,22 @@ function buildShellRoute(): Route {
 export function buildServeRoutes(deps: ServeDeps): Route[] {
   const fleetControlDeps: PanelActionDeps = { root: deps.fleetControlRoot, ledgerPath: deps.ledgerPath, issues: deps.issues };
   const questionDeps: PanelActionDeps = { root: deps.questionsRoot, ledgerPath: deps.ledgerPath, issues: deps.issues };
+  // panel-graph's GET /v1/inbox needs config.root (inbox-proposals.json/inbox-drafts.json live
+  // under state/, same as fleet-control's own flags) -- `fleetControlRoot` IS config.root
+  // (module header), so it is the same root, never a THIRD independently-resolved path.
+  const panelGraphDeps = { ...deps.panelGraph, inboxRoot: deps.fleetControlRoot };
 
   return [
     buildStatusRoute(deps.board),
+    buildRecentRoute(deps.board),
+    buildControlStatusRoute(fleetControlDeps),
     buildPauseRoute(fleetControlDeps),
     buildResumeRoute(fleetControlDeps),
     buildStopRoute(fleetControlDeps),
     buildQuietHoursRoute(fleetControlDeps),
     buildAnswerQuestionRoute(questionDeps),
     buildApproveManualRoute(fleetControlDeps),
-    ...buildPanelGraphRoutes(deps.panelGraph),
+    ...buildPanelGraphRoutes(panelGraphDeps),
     buildShellRoute(),
   ];
 }
