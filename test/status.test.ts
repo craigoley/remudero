@@ -43,10 +43,16 @@ function fakeGitHub(opts: {
   bodyByUrl?: Record<string, string>;
   /** W1-T155: auto-merge-armed per PR url. Absent url ⇒ not armed. */
   autoMergeByUrl?: Record<string, boolean>;
+  /** W1-T119: simulates every underlying `gh` call in this snapshot having failed. */
+  readFailed?: boolean;
 }): GitHub & { calls: string[] } {
   const calls: string[] = [];
   return {
     calls,
+    readFailed() {
+      calls.push("readFailed");
+      return opts.readFailed ?? false;
+    },
     prByRef(ref) {
       calls.push(`prByRef:${ref}`);
       return opts.byRef?.[String(ref)] ?? null;
@@ -317,6 +323,31 @@ test("no GitHub evidence -> not merged, source none (decorative status ignored)"
   const github = fakeGitHub({});
   // yaml says merged, but GitHub has nothing: derivation must NOT trust yaml.
   const proj = deriveStatus(task({ status: "merged" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.source, "none");
+  assert.equal(proj.merged, false);
+});
+
+test("W1-T119: a failed GitHub read defers (source throttled), never a confirmed not-merged", () => {
+  // Same fixture as the "no evidence" case above (every rung resolves nothing) EXCEPT
+  // the gateway reports its reads actually failed (rate-limited/errored), not that
+  // GitHub was consulted and came back empty. The false `source: "none"` here is
+  // exactly what mis-filed W1-T116 as not-merged.
+  const github = fakeGitHub({ readFailed: true });
+  const proj = deriveStatus(task({ status: "merged" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.source, "throttled");
+  assert.equal(proj.merged, false);
+});
+
+test("W1-T119: a gateway with no readFailed method at all (every pre-W1-T119 fixture) degrades fail-soft to source none", () => {
+  // No `readFailed` property whatsoever — mirrors every GitHub fixture written before
+  // this method existed. Must behave exactly as before: `none`, never throw.
+  const bareGithub: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+  };
+  const proj = deriveStatus(task({ status: "merged" }), { ledgerPath: ledgerFile([]), github: bareGithub });
   assert.equal(proj.source, "none");
   assert.equal(proj.merged, false);
 });
