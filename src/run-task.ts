@@ -133,6 +133,7 @@ import {
   buildBatchedGithub,
   ghGateway,
   ghRequiredStatusCheckContexts,
+  isDispatchBreakerTripped,
   projectPlan,
   readLedgerLines,
   type GitHub,
@@ -2802,6 +2803,57 @@ function readUsageSnapshot(config: Config): UsageSnapshot | undefined {
 }
 
 /**
+ * P29(ii)'s escalation side — called once `nextRunnable`'s `isCircuitTripped`
+ * (status.ts's `isDispatchBreakerTripped`) reports a task has been dispatched
+ * the policy-capped number of times with no new owned PR since. DEDUPED: a
+ * task escalates AT MOST ONCE (checked via this module's OWN `dispatch.
+ * circuit_broken.escalated` ledger line — never `escalation.issue_opened`
+ * alone, which a genuine_blocker escalation for the SAME task could also have
+ * written, for an unrelated reason) — mirrors ops.ts's alert-escalation dedup
+ * discipline (a ledger line as the dedup key), never a second store.
+ */
+function escalateCircuitBreak(
+  task: Task,
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string },
+): void {
+  const already = readLedgerLines(ctx.ledgerPath).some(
+    (l) => l.step === "dispatch.circuit_broken.escalated" && l.task_id === task.id,
+  );
+  if (already) return;
+  const issueUrl = escalate(
+    {
+      class: "BLOCKED",
+      taskId: task.id,
+      runId: ctx.runId,
+      summary: `${task.id}: dispatch circuit breaker tripped — repeated dispatch with no new owned PR`,
+      detail:
+        `MASTER-PLAN P29(ii): ${task.id} has been dispatched with no new owned PR appearing since — the ` +
+        `W1-T1/W1-T29 redispatch-storm shape (~130 dispatches / ~$130 / ~10h on one task, five hours of it ` +
+        `AFTER the task's own PR had already merged under a sibling run). Dispatch is now HALTED for this ` +
+        `task until a human resolves the underlying block; this is the backstop, not a diagnosis of WHY.`,
+      options: [
+        {
+          label: "fix and resume",
+          detail: `Resolve ${task.id}'s underlying block (a manual patch or \`rmd fix\`), then \`rmd drain\`/\`rmd daemon\` to continue.`,
+        },
+        {
+          label: "correct the credit",
+          detail: `If ${task.id} actually landed under a PR the ownership-assert rejected, \`rmd correct\` it (P9/W1-T75).`,
+        },
+      ],
+      recommendation: "fix and resume",
+    },
+    { issues: ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: task.id,
+    step: "dispatch.circuit_broken.escalated",
+    issue_url: issueUrl,
+  });
+}
+
+/**
  * `rmd drain [--until <id>] [--max <n>] [--dry-run]` — drain the DAG through the
  * EXISTING run-task path. Thin + deterministic: next-runnable is the plan.ts DAG
  * logic over GitHub-derived status; it STOPS ON ANY BLOCK (v1); it is headroom-aware
@@ -2994,6 +3046,11 @@ async function drainCommand(
       {
         refreshMerged,
         isOpenPr,
+        // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
+        // ledger every call — persists across drain/daemon process restarts,
+        // unlike the daemon's in-memory per-tick block flag.
+        isCircuitTripped: (taskId) => isDispatchBreakerTripped(readLedgerLines(ledgerPath), taskId),
+        onCircuitBreak: (t) => escalateCircuitBreak(t, { owner, repo, ledgerPath, runId }),
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale }),
         readUsage: () => readUsageSnapshot(config),
         checkStop: () => stopDetail(config.root),
@@ -3216,6 +3273,11 @@ async function daemonCommand(rest: string[]): Promise<number> {
       {
         refreshMerged,
         isOpenPr,
+        // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
+        // ledger every call — persists across daemon restarts, unlike this
+        // loop's own in-memory per-tick block-reasoning flag.
+        isCircuitTripped: (taskId) => isDispatchBreakerTripped(readLedgerLines(ledgerPath), taskId),
+        onCircuitBreak: (t) => escalateCircuitBreak(t, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         runOne: (taskId) =>
           runTask(taskId, {
             planPath: target.planPath,

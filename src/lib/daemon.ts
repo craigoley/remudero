@@ -84,6 +84,21 @@ export interface DaemonDeps {
    * dispatch behaves exactly as before this guard existed.
    */
   isOpenPr?: OpenPrCheck;
+  /**
+   * The per-task dispatch CIRCUIT BREAKER (MASTER-PLAN P29(ii)): true when a
+   * task has been dispatched the policy-capped number of times with no new
+   * owned PR since (status.ts's `isDispatchBreakerTripped`, re-derived from the
+   * ledger each call — persists across daemon restarts, unlike this loop's own
+   * in-memory `next.status = "blocked"` flip below). Optional — omitted,
+   * dispatch behaves exactly as before this breaker existed.
+   */
+  isCircuitTripped?: (taskId: string) => boolean;
+  /**
+   * Called once per task whose circuit breaker trips this tick — the real
+   * command escalates ONE (deduped) needs-human issue naming the loop, mirroring
+   * `escalateBlock` below.
+   */
+  onCircuitBreak?: (task: Task) => void;
   /** Run ONE task through the existing run-task path (default = runTask). */
   runOne: (taskId: string) => Promise<RunResult>;
   /** Read current /usage; `undefined` ⇒ unavailable (headroom check is skipped). */
@@ -193,6 +208,16 @@ export async function runDaemon(
   // MAX_TRANSIENT_RETRIES (reasonAboutBlock). Dropped once a task's
   // disposition is no longer `retry_transient` (merged, flagged, or escalated).
   const blockRetryStates = new Map<string, RetryState>();
+  // CIRCUIT BREAKER ESCALATION DEDUP (P29(ii)): the daemon is a PERSISTENT
+  // loop — `nextRunnable` is re-invoked on EVERY tick, forever, so without this
+  // a task that stays tripped would be re-escalated on every idle poll for as
+  // long as the daemon keeps running (unbounded, the very unbounded-noise
+  // shape P29 exists to prevent). This Set bounds the CALLBACK to the
+  // daemon's own first observation of each task id this run; `isCircuitTripped`
+  // itself is still consulted (and still excludes the task from dispatch)
+  // every tick — see drain.ts's `runDrain`, the identical fix for the bounded
+  // one-shot loop.
+  const circuitEscalated = new Set<string>();
 
   const summary = (stopReason: DaemonStopReason, stopDetail?: string): DaemonSummary => {
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
@@ -248,6 +273,19 @@ export async function runDaemon(
       // IN-FLIGHT (W1-T80): a legible skip on console + ledger; the daemon
       // keeps polling rather than treating an open PR as a block.
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
+      isCircuitTripped: deps.isCircuitTripped,
+      // CIRCUIT BREAKER (P29(ii)): a legible ledger line every tick it is
+      // consulted — but the caller's own escalation hook fires AT MOST ONCE
+      // per task id for this daemon run (`circuitEscalated`, above) — the
+      // daemon keeps polling everything else rather than halting the whole
+      // loop, and never re-escalates a task it already escalated.
+      onCircuitBreak: (t) => {
+        log("dispatch.circuit_broken", { task: t.id });
+        if (!circuitEscalated.has(t.id)) {
+          circuitEscalated.add(t.id);
+          deps.onCircuitBreak?.(t);
+        }
+      },
     });
     if (!next) {
       // UNLIKE drain.ts (where `no_runnable` is a terminal stop): the daemon is

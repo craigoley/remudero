@@ -196,6 +196,125 @@ test("W1-T80 runDrain integration: the #143 state is skipped with a dispatch.ski
   assert.equal(skipLine?.extra.reason, "open-pr");
 });
 
+// ── P29(ii): the per-task dispatch CIRCUIT BREAKER — the backstop that makes
+// P29(i)'s sibling-credit fix safe to get wrong (MASTER-PLAN P29).
+
+test("P29(ii): a task whose circuit breaker is tripped is excluded from nextRunnable, with a legible callback naming it", () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const broken: string[] = [];
+  const next = nextRunnable(plan, NONE_MERGED, {
+    isCircuitTripped: (id) => id === "A",
+    onCircuitBreak: (t) => broken.push(t.id),
+  });
+  assert.deepEqual(broken, ["A"]);
+  // D is the next runnable candidate once A is halted (B/C still depend on the
+  // un-merged, circuit-broken A).
+  assert.equal(next?.id, "D");
+});
+
+test("P29(ii): the circuit breaker is checked BEFORE the in-flight (open-PR) guard — a tripped task halts regardless of its latest PR's state", () => {
+  const plan = fixturePlan();
+  const broken: string[] = [];
+  const skipped: string[] = [];
+  const next = nextRunnable(plan, NONE_MERGED, {
+    isCircuitTripped: (id) => id === "A",
+    onCircuitBreak: (t) => broken.push(t.id),
+    isOpenPr: (id) => (id === "A" ? 143 : undefined), // A ALSO looks in-flight — the breaker must still win
+    onSkip: (t) => skipped.push(t.id),
+  });
+  assert.deepEqual(broken, ["A"]);
+  assert.deepEqual(skipped, [], "onSkip must never fire for a task the breaker already halted");
+  assert.equal(next?.id, "D");
+});
+
+test("P29(ii): merged and correction-credited tasks are excluded exactly as today, isCircuitTripped never even consulted for them", () => {
+  const plan = fixturePlan();
+  const consulted: string[] = [];
+  const next = nextRunnable(plan, mergedSetOf("A"), {
+    isCircuitTripped: (id) => {
+      consulted.push(id);
+      return false;
+    },
+  });
+  assert.equal(next?.id, "B");
+  assert.ok(!consulted.includes("A"), "an already-merged task is filtered out before isCircuitTripped is ever asked");
+});
+
+test("P29(ii): no isCircuitTripped wired at all ⇒ nextRunnable behaves exactly as before this breaker existed", () => {
+  const plan = fixturePlan();
+  assert.equal(nextRunnable(plan, NONE_MERGED)?.id, "A");
+  assert.equal(nextRunnable(plan, mergedSetOf("A"))?.id, "B");
+});
+
+test("P29(ii) runDrain integration: a circuit-broken task is skipped with a dispatch.circuit_broken ledger line, the drain proceeds to the next runnable task, and the caller's onCircuitBreak fires", async () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const broken: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      isCircuitTripped: (id) => id === "A",
+      onCircuitBreak: (t) => broken.push(t.id),
+      runOne: async (id) => {
+        ran.push(id);
+        merged.add(id);
+        return okResult(id);
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1 },
+  );
+  assert.ok(!ran.includes("A"), "A (circuit-broken) was never dispatched");
+  assert.deepEqual(ran, ["D"]);
+  assert.deepEqual(broken, ["A"], "the caller's onCircuitBreak fired exactly once for A");
+  assert.equal(s.stopReason, "max_reached");
+  const brokenLine = lines.find((l) => l.step === "dispatch.circuit_broken");
+  assert.ok(brokenLine, "a dispatch.circuit_broken ledger line was emitted");
+  assert.equal(brokenLine?.extra.task, "A");
+});
+
+test("P29(ii) the W1-T29 x10 spin shape: a task at N+1 dispatches with no owned PR HALTS with EXACTLY ONE escalation and ZERO further dispatches, across MULTIPLE ticks of the SAME drain run", async () => {
+  // `nextRunnable` is re-invoked on EVERY tick of the loop — a naive wiring
+  // re-observes (and re-escalates) a still-tripped task on every tick it
+  // remains the only thing left to look at, not just the first. This plan
+  // (A tripped; D independent) forces a SECOND tick after D dispatches
+  // successfully: tick 1 observes A tripped then dispatches D; tick 2 (D is
+  // now merged) observes A tripped AGAIN with nothing else left to run. A
+  // wiring that escalates once per OBSERVATION (rather than once per TASK
+  // for the whole run) fails this — the exact regression this test guards.
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const broken: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      isCircuitTripped: (id) => id === "A",
+      onCircuitBreak: (t) => broken.push(t.id),
+      runOne: async (id) => {
+        ran.push(id);
+        merged.add(id);
+        return okResult(id);
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    // No --max ⇒ DEFAULT_MAX (10): enough headroom for a SECOND tick to occur
+    // after D merges, so the drain runs to "no_runnable" on its own rather
+    // than being cut short at exactly one tick (which would hide this bug).
+  );
+  assert.ok(!ran.includes("A"), "A (circuit-broken) was never dispatched, at N or at N+1");
+  assert.deepEqual(ran, ["D"], "D is the only task ever dispatched — B/C stay unmet-dependency-blocked on the tripped A");
+  assert.equal(s.stopReason, "no_runnable", "the drain ran a SECOND tick (proving A was re-observed, not just observed once)");
+  assert.deepEqual(broken, ["A"], "onCircuitBreak fired EXACTLY ONCE for A, even though nextRunnable re-observed it tripped on a later tick too");
+  const brokenLines = lines.filter((l) => l.step === "dispatch.circuit_broken");
+  assert.ok(brokenLines.length >= 2, "sanity: A really was re-observed tripped on a second tick (the ledger line legibly re-logs every observation)");
+});
+
 test("plannedSequence (--dry-run order): simulates merges forward, honouring deps + --max + --until", () => {
   const plan = fixturePlan();
   assert.deepEqual(plannedSequence(plan, NONE_MERGED), ["A", "B", "C", "D"]);
@@ -541,6 +660,30 @@ test("curated selection: an id already merged or in-flight (open PR) is skipped,
   // concludes — assert every logged skip names B's open PR, never A or C.
   assert.ok(skips.length >= 1, "B's in-flight skip is legible on the ledger, same shape as the natural path's W1-T80 guard");
   assert.ok(skips.every((s) => s.id === "B" && s.prNumber === 77), "every skip logged names B's open PR #77 — never A or C");
+});
+
+test("P29(ii) curated selection: a circuit-broken id is skipped, never re-dispatched, without derailing the rest of the curated order", async () => {
+  const plan = chainAbcPlan();
+  const selection: CuratedSelection = { taskIds: ["A", "B", "C"], depth: 3 };
+  const opts = applyCuratedSelection({}, selection);
+  const ran: string[] = [];
+  const broken: string[] = [];
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      isCircuitTripped: (id) => id === "A",
+      onCircuitBreak: (t) => broken.push(t.id),
+      runOne: async (id) => {
+        ran.push(id);
+        return { taskId: id, runId: id + "-run", merged: true, costUsd: 0.1, verdict: "merged" };
+      },
+    },
+    opts,
+  );
+  assert.ok(!ran.includes("A"), "A (circuit-broken) was never dispatched despite being first in the curated order");
+  assert.ok(broken.length >= 1 && broken.every((id) => id === "A"), "onCircuitBreak fired only for A");
+  assert.deepEqual(s.attempted.filter((id) => id !== "A"), ran.filter((id) => id !== "A"));
 });
 
 test("applyCuratedSelection: truncates to depth and caps max to the same bound, regardless of a larger caller-supplied max", () => {

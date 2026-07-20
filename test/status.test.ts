@@ -5,7 +5,16 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { nextRunnable, type MergedSet } from "../src/lib/drain.js";
-import { buildBatchedGithub, deriveStatus, type BatchedPr, type GitHub, type PrRef } from "../src/lib/status.js";
+import {
+  buildBatchedGithub,
+  deriveStatus,
+  dispatchesWithoutNewOwnedPr,
+  isDispatchBreakerTripped,
+  DEFAULT_MAX_TASK_DISPATCHES,
+  type BatchedPr,
+  type GitHub,
+  type PrRef,
+} from "../src/lib/status.js";
 
 /** A minimal task; fields not under test get sensible defaults. */
 function task(over: Partial<Task> = {}): Task {
@@ -99,6 +108,65 @@ test("source (a): the LAST pr.opened wins when a task was retried", () => {
   const proj = deriveStatus(task(), { ledgerPath, github });
   assert.equal(proj.prNumber, 9);
   assert.equal(proj.merged, true);
+});
+
+// ── P29(i): SIBLING CREDIT — the W1-T1 redispatch-storm shape ──────────────
+// PR #255 (an EARLIER run) merged; every LATER run's own ledger `pr.opened`
+// line (a different, unmerged/closed PR) kept resolving at rung (a) FIRST and
+// returning unconditionally, so rung (c)'s trailer search — which would have
+// found #255 — was never reached again. ~130 dispatches / ~$130 / ~10h, five
+// hours of it AFTER the real merge (MASTER-PLAN P29).
+
+test("P29(i) sibling credit: a LATER run's own CLOSED PR (rung a's last pr.opened) does not mask an EARLIER sibling run's merged, owned, anchored trailer credit", () => {
+  const laterOwnClosedPr = "https://github.com/craigoley/remudero/pull/300"; // this (latest) run's own, failed attempt
+  const fixture = ownedTrailerFixture("W1-T1", "W1-T1-1784460723173"); // the EARLIER sibling run whose PR actually merged
+  const github = fakeGitHub({
+    byRef: { [laterOwnClosedPr]: { number: 300, url: laterOwnClosedPr, state: "CLOSED" } },
+    byTrailer: { "W1-T1": { number: 255, url: "u/255", state: "MERGED" } },
+    headRefByUrl: { "u/255": fixture.headRefName },
+    bodyByUrl: { "u/255": fixture.body },
+  });
+  const ledgerPath = ledgerFile([
+    // Many redispatches' own ledger lines, all AFTER the sibling's #255 merged,
+    // each pointing at a DIFFERENT PR of THIS run's own (never #255 itself) —
+    // the exact "last one wins" masking shape.
+    { step: "pr.opened", task_id: "W1-T1", pr_url: laterOwnClosedPr },
+  ]);
+  const proj = deriveStatus(task({ id: "W1-T1" }), { ledgerPath, github });
+  assert.equal(proj.source, "trailer", "the sibling's merged trailer PR credits the task, not rung (a)'s own closed PR");
+  assert.equal(proj.merged, true);
+  assert.equal(proj.prNumber, 255, "credited via the SIBLING run's PR (#255), never the later run's own #300");
+});
+
+test("P29(i) sibling credit composed with nextRunnable: once credited via a sibling, the task is EXCLUDED and dispatches NOTHING further", () => {
+  const plan: Plan = { tasks: [task({ id: "W1-T1" })], byId: new Map([["W1-T1", task({ id: "W1-T1" })]]) };
+  const fixture = ownedTrailerFixture("W1-T1", "W1-T1-1784460723173");
+  const github = fakeGitHub({
+    byRef: { "u/300": { number: 300, url: "u/300", state: "CLOSED" } },
+    byTrailer: { "W1-T1": { number: 255, url: "u/255", state: "MERGED" } },
+    headRefByUrl: { "u/255": fixture.headRefName },
+    bodyByUrl: { "u/255": fixture.body },
+  });
+  const ledgerPath = ledgerFile([{ step: "pr.opened", task_id: "W1-T1", pr_url: "u/300" }]);
+  const isMerged: MergedSet = (id) => deriveStatus(plan.byId.get(id)!, { ledgerPath, github }).merged;
+  assert.equal(isMerged("W1-T1"), true);
+  assert.equal(nextRunnable(plan, isMerged), undefined, "credited once — nextRunnable never re-selects it");
+});
+
+test("P29(i) falsifier: a FOREIGN branch carrying the trailer is still NOT credited even though rung (a)'s own PR is closed — the ownership-assert is preserved, never loosened", () => {
+  const ownClosedPr = "https://github.com/craigoley/remudero/pull/300";
+  const github = fakeGitHub({
+    byRef: { [ownClosedPr]: { number: 300, url: ownClosedPr, state: "CLOSED" } },
+    byTrailer: { "W1-T1": { number: 999, url: "u/999", state: "MERGED" } },
+    // A real, merged PR carrying the trailer — but from a FOREIGN/unrelated branch,
+    // never this task's own run-<taskId>-* shape.
+    headRefByUrl: { "u/999": "run-W1-T2-1784000000000" },
+    bodyByUrl: { "u/999": "Remudero-Task: W1-T1\n" },
+  });
+  const ledgerPath = ledgerFile([{ step: "pr.opened", task_id: "W1-T1", pr_url: ownClosedPr }]);
+  const proj = deriveStatus(task({ id: "W1-T1" }), { ledgerPath, github });
+  assert.equal(proj.merged, false, "a foreign-branch trailer hit must never credit, even to escape a masked closed PR");
+  assert.equal(proj.source, "ledger", "falls back to rung (a)'s own (non-merged) resolution — the foreign hit is simply rejected, not substituted");
 });
 
 test("source (b): explicit pr: field resolves when there is no ledger entry", () => {
@@ -453,4 +521,41 @@ test("buildBatchedGithub.findMergedByTrailer returns the NEWEST (highest-number)
   ];
   const gh = buildBatchedGithub("o", "r", { fetchAll: () => prs });
   assert.equal(gh.findMergedByTrailer("W1-T3")?.url, "new");
+});
+
+// ── P29(ii): the per-task dispatch CIRCUIT BREAKER — §9's per-WORKER runaway
+// tripwire's per-TASK dual (the W1-T1 storm tripped no per-run budget cap
+// because no single RUN ran away; the whole TASK did, across ~130 runs).
+
+test("P29(ii) dispatchesWithoutNewOwnedPr: counts run.start lines for a task, resetting to 0 on a NEW pr.opened line", () => {
+  const lines = [
+    { task_id: "W1-T29", step: "run.start" },
+    { task_id: "W1-T29", step: "run.start" },
+    { task_id: "OTHER", step: "run.start" }, // a different task must never contribute
+    { task_id: "W1-T29", step: "pr.opened", pr_url: "u/1" }, // forward progress — resets the streak
+    { task_id: "W1-T29", step: "run.start" },
+  ];
+  assert.equal(dispatchesWithoutNewOwnedPr(lines, "W1-T29"), 1, "only the ONE run.start after the reset counts");
+});
+
+test("P29(ii) dispatchesWithoutNewOwnedPr: a task never dispatched at all counts zero", () => {
+  assert.equal(dispatchesWithoutNewOwnedPr([], "W1-T29"), 0);
+});
+
+test("P29(ii) isDispatchBreakerTripped: trips at exactly N dispatches with no new owned PR, not N-1 (the seeded W1-T1/W1-T29 shape)", () => {
+  const runStartsOnly = (taskId: string, n: number) =>
+    Array.from({ length: n }, () => ({ task_id: taskId, step: "run.start" }));
+  const nMinus1 = runStartsOnly("W1-T1", DEFAULT_MAX_TASK_DISPATCHES - 1);
+  const n = runStartsOnly("W1-T1", DEFAULT_MAX_TASK_DISPATCHES);
+  assert.equal(isDispatchBreakerTripped(nMinus1, "W1-T1"), false, "N-1 dispatches must not trip the breaker yet");
+  assert.equal(isDispatchBreakerTripped(n, "W1-T1"), true, "the Nth dispatch with no new owned PR trips it");
+});
+
+test("P29(ii) isDispatchBreakerTripped: a policy-data override (rule 2) changes the cap with zero code changes", () => {
+  const twoDispatches = [
+    { task_id: "W1-T1", step: "run.start" },
+    { task_id: "W1-T1", step: "run.start" },
+  ];
+  assert.equal(isDispatchBreakerTripped(twoDispatches, "W1-T1"), false, "under the DEFAULT cap, 2 dispatches is not tripped");
+  assert.equal(isDispatchBreakerTripped(twoDispatches, "W1-T1", 2), true, "an overridden cap of 2 trips at exactly 2");
 });
