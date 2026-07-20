@@ -6081,3 +6081,75 @@
   files:
   - src/run-task.ts
   - src/lib/retro.ts
+
+- id: W1-T134
+  title: "review's ## Acceptance parser must parse ALL claims, not just the first — plan/doc PRs have been gating on a fraction of their assertions (the #277/#280 fraction-parse)"
+  repo: remudero
+  depends_on: [W1-T65]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE HOLE (observed #277, #280 — 1 of 2+ claims parsed; and every manual plan/doc PR this
+    session, whose reviews reported '1 criteria' for 3-claim bodies). parseAcceptanceBlock (src/lib/review.ts:820)
+    collects consecutive BULLET lines and BREAKS on the first non-bullet line once bullets have begun. But the
+    house body format is a multi-line pair — '- claim: \"...\"' then an INDENTED '  proof: \"...\"' (not a bullet)
+    — so the parser captures ONLY the first claim (with an EMPTY proof) and breaks on the proof line. Every
+    task-less plan/doc PR is therefore reviewed against a FRACTION of its stated assertions: a hole in the gate
+    that reads exactly one claim and passes."
+  design: |
+    Parse the multi-line '- claim:' / '  proof:' shape: an indented 'proof:' continuation attaches to the
+    current criterion; keep collecting subsequent '- claim:' bullets; end the block only at a genuine
+    terminator (a new '## ' heading, the Remudero-Task trailer, or two consecutive blanks) rather than the
+    first indented line. Preserve the existing single-line 'claim | proof' pipe form unchanged. VERIFY the
+    exact current bullet/terminate logic before editing (distrust this note).
+  acceptance:
+    - claim: "a body with N claims yields N criteria, each carrying its own proof — not 1"
+      proof: "unit test: a fixture ## Acceptance block with three '- claim:' / '  proof:' pairs -> parseAcceptanceBlock returns 3 criteria with the correct claim+proof each; the single-line 'claim | proof' pipe form still returns its criterion unchanged"
+    - claim: "a two-claim body whose SECOND claim is deliberately false FAILS review — the parser no longer hides it (planted-probe, the W1-T98 pattern)"
+      proof: "unit test: a two-claim body where claim 2 is unsubstantiated -> judgeReview marks criterion 2 unmet and the review FAILS; the pre-fix parser passed the same body on claim 1 alone (the falsifier for this whole task)"
+    - claim: "genuine block termination is unchanged"
+      proof: "unit test: bullets followed by a new '## ' section or the Remudero-Task trailer end the block; a prose paragraph after the claims is not swallowed into a criterion"
+  risk: high
+  origin: architect
+  plan_refs: ["§5"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from the closeout chain. This gate has been under-reading every task-less plan/doc PR (mine
+    included) all session — the fix's own falsifier is the planted-false-second-claim test (W1-T98 shape)."
+
+- id: W1-T135
+  title: "postReviewStatus must survive a transient GitHub 5xx — retry-with-backoff, then ledger-and-continue on exhaustion (a single 503 crashed a fix-rung mid-run)"
+  repo: remudero
+  depends_on: [W1-T113]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (2026-07-20 outage): postReviewStatus (src/lib/review.ts:~1387) is a bare
+    execFileSync('gh', ['api', ...]) with NO error handling. A single transient 503 posting the STATUS threw and
+    CRASHED run W1-T132-1784508142857 mid-fix-rung — the review was never posted and the whole run died, which
+    is the root cause of escalation #283. A review-posting hiccup must never kill a run: the W1-T113
+    degrade-don't-die class applied at the status-post site."
+  design: |
+    Retry-with-backoff on transient errors (5xx + network/ENOTFOUND) around the gh api status POST; on
+    exhaustion, ledger the unposted verdict (review.post_failed carrying the verdict payload) and RETURN
+    without throwing — the run continues, the verdict is recoverable. A permanent 4xx (404/422) is NOT retried
+    (surfaced once, ledgered). VERIFY the exact gh api invocation + the transient-vs-permanent classification
+    from source (distrust this note).
+  acceptance:
+    - claim: "a transient 5xx is retried and the status eventually posts"
+      proof: "unit test over an injected gh gateway returning 503 twice then 200 -> postReviewStatus posts on the third attempt and the caller completes normally"
+    - claim: "on exhausted retries the verdict is ledgered and the run does NOT crash"
+      proof: "unit test: a gateway returning 503 on every attempt -> a review.post_failed ledger line carries the verdict, postReviewStatus returns without throwing, the caller continues"
+    - claim: "a permanent 4xx is not retried"
+      proof: "unit test: a gateway returning 404/422 -> no retry storm; classified non-transient, surfaced once (ledgered)"
+  risk: high
+  origin: architect
+  plan_refs: ["§5", "§4B"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from the closeout chain; root cause of escalation #283. Companion to W1-T99/W1-T104 (transport
+    resilience in escalate()) and the W1-T113 degrade-don't-die class, applied here at the review-post site."
