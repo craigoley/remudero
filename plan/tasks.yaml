@@ -6566,3 +6566,79 @@
   note: "PUSH counterpart to the PULL console (W1-T139 console, W1-T140 preview, W1-T141 rundown pull-view,
     W1-T110/T111 inbox). Reuses W1-T112's digest channel as the transport; installed-PWA web push deferred to polish
     only if the digest cycle proves insufficient."
+
+- id: W1-T145
+  title: "layered knowledge: ONE entry schema valid at every layer + the layer homes (project / user-overall / rmd-global) — P32 first task"
+  repo: remudero
+  depends_on: [W1-T33, W1-T34]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "P32 (captured 2026-07-20): the learning system is ONE layer (project LEARNINGS, per-repo). This task
+    adds the SCHEMA + HOMES for three layers without the transport. ONE entry format valid at EVERY layer —
+    assertion-carrying (W1-T34), provenance-carrying, budget-counted (W1-T38) — so an entry can move between layers
+    without reshaping. The USER-OVERALL layer lives in a fleet-readable home OUTSIDE any single repo (cross-project);
+    the RMD-GLOBAL layer is a versioned artifact with HASH pinning (bundled into prompt assemblies). Transport (opt-in
+    POST up / pull down) is DEFERRED to §6 and inherits Tier 3's stateless shape — NOT built here."
+  design: |
+    Extend the learnings schema (src/lib/learnings.ts, W1-T33's split/index/supersession + W1-T34's assertions) so a
+    single entry shape carries {assertion, provenance, layer, budget-weight} and is valid at project | user-overall |
+    global. Define the LAYER HOMES: project = the repo's plan/learnings.yaml (exists); user-overall = a fleet-readable
+    path derived from config.root, OUTSIDE any single repo (so every repo's fleet reads it); global = a versioned,
+    HASH-PINNED artifact file. Injection reads project + user + global in precedence. VERIFY the current learnings
+    schema, the index/supersession logic, and config.root derivation from source before editing (distrust this note).
+    No promotion logic here (that is W1-T146); this is schema + homes + layered read.
+  acceptance:
+    - claim: "one entry schema parses and validates identically at all three layers"
+      proof: "unit test: the same entry (assertion + provenance + budget-weight) loads and validates from a project home, a user-overall home, and a global-artifact home; a malformed entry is rejected at every layer by the SAME validator"
+    - claim: "the user-overall home is fleet-readable, outside any single repo"
+      proof: "unit test: the user-layer home resolves to a path derived from config.root that is NOT inside a repo checkout; two different repo checkouts resolve to the SAME user-layer home (cross-project), asserted against injected config"
+    - claim: "the global layer is a versioned, hash-pinned artifact bundled into prompt assemblies"
+      proof: "unit test: the global artifact carries a version + content hash; injection includes global entries only when the artifact's hash matches its pin (a tampered/mismatched artifact is refused, not silently trusted — the falsifier); the assembled prompt includes project+user+global in precedence"
+  risk: high
+  origin: architect
+  plan_refs: ["§6", "§7"]
+  files: [src/lib/learnings.ts, src/lib/config.ts]
+  status: queued
+  attempts: 0
+  note: "P32 first task (schema + homes). Extends W1-T33/T34/T38 (the project layer). Transport DEFERRED to §6
+    (Tier 3 stateless shape, DECISIONS.md). Sibling W1-T146 adds the promotion judge + scrub gate."
+
+- id: W1-T146
+  title: "layered knowledge: promotion = scrub (leak-grep + PII) THEN judge (applicability eval); per-layer budget ratchet — P32 second task"
+  repo: remudero
+  depends_on: [W1-T145, W1-T38]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "P32 (captured 2026-07-20): with the layer schema + homes (W1-T145) in place, this task adds the
+    BOTTOM-UP PROMOTION machinery. Promotion = SCRUB (a leak-grep analog + PII detector) THEN JUDGE (an LLM
+    broader-applicability eval): a project-specific entry stays project; a cross-cutting lesson rises; a
+    secret-bearing entry is BLOCKED at scrub and NEVER reaches the judge (opt-in, error-reporting model — nothing
+    leaves without consent). The per-layer budget ratchet EXTENDS learnings-budget-ratchet (W1-T38) so each layer's
+    injectable weight is independently capped."
+  design: |
+    A promotion pipeline over the W1-T145 schema: (1) SCRUB — deterministic leak-grep (secret patterns) + PII
+    detection; a hit BLOCKS promotion and never calls the judge. (2) JUDGE — an LLM applicability eval decides
+    project-specific (stays) vs broadly-applicable (promotes up one layer); the judge is advisory-to-promote only
+    (fail-closed: uncertain => does NOT promote). (3) PROVENANCE survives promotion in REDACTED form (the origin is
+    kept, project-identifying specifics scrubbed). Extend learnings-budget-ratchet to a PER-LAYER cap. VERIFY the
+    existing scrub/leak-grep utilities, the budget-ratchet script, and the judge-invocation pattern from source
+    before building (distrust this note).
+  acceptance:
+    - claim: "a deliberately PROJECT-SPECIFIC entry does NOT promote (judge falsifier — REQUIRED probe)"
+      proof: "unit test: a planted entry that names repo-specific paths/ids is judged project-specific and stays at the project layer; it does NOT appear at the user-overall layer after a promotion pass (the judge falsifier)"
+    - claim: "a deliberately SECRET-BEARING entry is BLOCKED at scrub, never reaching the judge (scrub falsifier — REQUIRED probe)"
+      proof: "unit test: a planted entry containing a secret/token/PII is BLOCKED by scrub; the judge is never invoked (assert zero judge calls), and the entry does not promote (the scrub falsifier)"
+    - claim: "provenance survives promotion in redacted form; per-layer budget is enforced"
+      proof: "unit test: a promoted entry retains its origin provenance with project-identifying specifics REDACTED; and the per-layer budget ratchet counts each layer's injectable weight independently against its cap (exceeding one layer's cap fails the ratchet, extending W1-T38)"
+  risk: high
+  origin: architect
+  plan_refs: ["§6", "§7"]
+  files: [src/lib/learnings.ts]
+  status: queued
+  attempts: 0
+  note: "P32 second task (promotion judge + scrub gate + per-layer budget). REQUIRED planted probes: project-specific
+    does-not-promote (judge), secret-bearing blocked-at-scrub (scrub), provenance-survives-redacted. Extends W1-T38."
