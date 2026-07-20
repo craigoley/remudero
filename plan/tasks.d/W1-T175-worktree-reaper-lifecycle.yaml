@@ -12,10 +12,11 @@
     rmd-fix-382 orphan needed a HAND-reap. NOTE the premise correction: a lifecycle owner DOES exist —
     pruneStaleRuns (worker.ts:798) force-removes worktrees + sibling locks and prunes branches. This task is NOT
     'add an owner'; it is 'close the owner's coverage holes', which is why the 453M survived every prune that ran.
-    THREE holes, the first one CONFIRMED empirically by the fixture: (1) pruneStaleRuns enumerates ONLY
-    `git worktree list --porcelain` (worker.ts:810-861), so a directory git has already de-registered is invisible
-    to it FOREVER — git's own prune drops the registration and leaves the bytes, which is exactly the 453M orphan's
-    state; (2) it fires only at the START of a run (run-task.ts:1795, :2635, :4583, :4812, :5044, :5188) — never on
+    THREE holes. (1) is DEFENSIVE ONLY — its supporting observation was RETRACTED as a measurement error, see the
+    CORRECTION in fixture_forensics before citing it: pruneStaleRuns enumerates ONLY `git worktree list --porcelain`
+    (worker.ts:810-861), so a directory git does not register would be invisible to it — plausible and cheap to
+    defend against by enumerating the directory instead, but NOT observed. (2) is the hole the fixture actually
+    evidences, and it is the load-bearing one: it fires only at the START of a run (run-task.ts:1795, :2635, :4583, :4812, :5044, :5188) — never on
     a cadence, never at daemon boot, so an idle fleet reaps nothing; (3) its predicate requires a `run-*` BRANCH
     (worker.ts:825), so a sweep-* dir interrupted before `checkout -B` (run-task.ts:3874) sits on a detached HEAD and
     is permanently orphaned, and sweep-* dirs write no lock at all (the :3871 path never calls writeRunLock).
@@ -49,7 +50,7 @@
     2026-07-20 survey and drift.
   acceptance:
     - claim: "a worktree directory that git no longer registers is still reaped — the confirmed hole (1) that stranded 453M"
-      proof: "unit test over reapStaleWorktrees with an injected root: a directory present on disk but ABSENT from `git worktree list --porcelain`, past the age gate, with a stale lock naming a dead pid, is reaped. FALSIFIER: run-W1-T156-1784574954974 — 453M, dead pid 97514, absent from `git worktree list` (verified: grep -c returned 0), and every pruneStaleRuns invocation that ran left it untouched because it enumerates git's registry, not the directory"
+      proof: "unit test over reapStaleWorktrees with an injected root: a directory present on disk but ABSENT from `git worktree list --porcelain` for its OWN parent repo, past the age gate, with a stale lock naming a dead pid, is reaped. NOTE this criterion is now DEFENSIVE, not fixture-backed — see fixture_forensics/CORRECTION: the observation that originally motivated it was a measurement error (the registry was queried against the wrong repo), so no observed orphan is known to have been git-invisible. Keep the criterion because directory-enumeration is strictly more robust than registry-enumeration and costs nothing, but do NOT cite a fixture for it"
     - claim: "a LIVE worktree is never reaped — the reaper is fail-closed"
       proof: "unit test: an entry whose branch backs an OPEN, unmerged PR, and an entry with a live pid, are both KEPT even past the age gate; only merged/deleted-branch or terminal-run entries reap. FALSIFIER: sweep-W1-T154-1784578318525 on branch run-W1-T154-1784573313900 — the head of OPEN PR #388 — sat in the same directory as the 453M orphan on the same day; a blanket age-only sweep would have destroyed in-flight work"
     - claim: "the reaper runs on a cadence, under the daemon and not only at run start"
@@ -64,16 +65,17 @@
     ~/Remudero/worktrees/ total: 906M, 3 filesystem entries (2 dirs + 1 orphan lock).
 
     ENTRY 1 — run-W1-T156-1784574954974/ (453M, mtime 2026-07-20 15:36:33)
-      The REAPABLE-BUT-INVISIBLE case, and the hole-(1) proof.
-      - `git worktree list --porcelain | grep -c T156` => 0. Git does not register it. pruneStaleRuns enumerates
-        that registry, so no invocation of it could EVER reap this directory, regardless of age or liveness.
+      The long-lived-orphan case. (Originally recorded as the hole-(1) "git-invisible" proof — RETRACTED, see
+      CORRECTION at the end of this block. Read that before citing anything here.)
+      - `git worktree list --porcelain | grep -c T156` => 0 — but this query was run from ~/Remudero/remudero,
+        the OPERATOR checkout, which is NOT the repo these worktrees belong to. RETRACTED as evidence.
       - sibling lock run-W1-T156-1784574954974.lock (98 bytes, mtime 15:17:23) contained verbatim:
         {"pid": 97514, "run_id": "W1-T156-1784574954974", "startedAt": "2026-07-20T19:17:23.863Z"}
       - `ps -p 97514` => DEAD. The run was killed by the host restart, and the lock outlived it, so the dead run
         still read as live to anything trusting the lock.
       - upstream branch run-W1-T156-1784574954974: `gh api repos/craigoley/remudero/branches/<b>` => 404 Branch
-        not found. DELETED UPSTREAM. Terminal by every available signal — dead pid, gone branch, git-unregistered
-        — and still 453M on disk.
+        not found. DELETED UPSTREAM. Terminal by every available signal — dead pid, gone branch — and still 453M
+        on disk more than an hour after the run died.
 
     ENTRY 2 — sweep-W1-T154-1784578318525/ (453M, mtime 2026-07-20 16:12:13)
       The MUST-NOT-REAP control, captured while it was still live.
@@ -84,8 +86,32 @@
         parent directory. Only liveness signals (git registration, pid, branch/PR state) separated a reapable
         orphan from in-flight work. An age-or-size-only sweep would have destroyed ENTRY 2.
 
-    REAPED 2026-07-20 after this capture: both directories plus the orphan lock, ~906M recovered. ENTRY 2 was
-    reaped only once PR #388 had merged, making it terminal by the same predicate this task will implement.
+    DISPOSITION: both entries were gone by 21:05, ~906M recovered (906M -> 5.0M). NOT reaped by hand — the
+    operator's `rm -rf` of those paths was a NO-OP because they had already been removed. The most likely reaper
+    is pruneStaleRuns firing at the start of the next run (a daemon dispatched W1-T156 at 20:32:30Z). Recorded
+    this way deliberately: the owner WORKED once a run started, which is evidence for hole (2) — the trigger —
+    and not for a broken predicate.
+
+    CORRECTION, appended 2026-07-20 after filing. HOLE (1) IS RETRACTED — it rested on a measurement error.
+    The `grep -c` above was run from ~/Remudero/remudero (the operator checkout). These worktrees are NOT
+    registered there. Their `.git` files point at ~/Remudero/repos/remudero, a DIFFERENT clone, and
+    `git -C ~/Remudero/repos/remudero worktree list` shows the live run properly registered. So the operator
+    checkout returning 0 says nothing about whether git tracked the orphan — it almost certainly did, and
+    pruneStaleRuns querying its OWN repo would have seen it. No observed orphan is known to have been
+    git-invisible.
+    WHAT SURVIVES, and it is still the substance of this task: (a) HOLE (2), the real one, now better evidenced
+    — the orphan sat from 19:17:23Z (lock mtime, killed by the host restart) until ~20:32 when the next run's
+    prune reaped it, roughly 75 minutes of 453M held purely because pruneStaleRuns is run-start-triggered and
+    nothing ran. On an idle fleet that is unbounded. (b) HOLE (3), read from source, untouched by this error:
+    the `run-*` branch predicate misses detached-HEAD sweep-* dirs, those dirs write no lock, and widowed
+    .lock files are swept only inside a successful removal. (c) The ENTRY 1 / ENTRY 2 contrast still stands as
+    the fail-closed constraint — two 453M dirs, indistinguishable by size and age, one terminal and one live.
+    LESSON, worth more than the retracted hole: a multi-checkout layout (operator checkout at
+    ~/Remudero/remudero, the daemon's actual repo at ~/Remudero/repos/remudero, worktrees at
+    ~/Remudero/worktrees) makes "ask git" ambiguous unless the repo is named explicitly. The implementation
+    MUST resolve each worktree's parent repo from its own .git gitdir pointer rather than assuming a repo, and
+    its tests must cover a worktree whose parent is not the cwd's repo. Sibling of the known trap that rmd's
+    repoRoot is its install path, not the cwd.
   risk: high
   origin: architect
   plan_refs: ["§9"]
