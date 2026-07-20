@@ -1,0 +1,91 @@
+- id: W1-T180
+  title: "§5C LINT: a plan PR that ADDS or CHANGES an acceptance criterion on an ALREADY-MERGED task must FAIL unless the same PR files the follow-up — amended-after-merge criteria are unreachable by every rung and today orphan in total silence"
+  repo: remudero
+  depends_on: [W1-T51]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "THE HOUSE ANSWER EXISTS AS CONVENTION AND IS ENFORCED NOWHERE, so it fails silently. Surveyed
+    2026-07-20 across MASTER-PLAN §12, DECISIONS.md, the linter, the retro sweep and the status layer:
+      - NO standing rule covers amending a task after it merged. Rule 15 is worker-facing (never edit criteria to
+        match a diff), rule 16 is the Architect correcting a MIS-SPECIFIED task pre-merge, and rule 20 is
+        explicitly scoped to 'the OPEN queue' / 'every open task' — none reach a merged one.
+      - rmd lint-plan is STATUS-BLIND. lintTask runs exactly five checks (sizing, headless-fitness, proof-shape,
+        provenance, budget-sanity) and reads neither task.status nor any merge state; task-linter.ts does not
+        import status.ts. An amended merged task IS linted (it lands in changedTaskIds) and passes clean.
+      - the retro's planHealthSweep SKIPS it by design: `if (CLOSED_TASK_STATUSES.has(task.status)) continue;
+        // out of scope — already shipped` (retro.ts:578).
+      - deriveStatus has NO criteria fingerprint, no criteria hash, no amended_at, and no merged_at comparison of
+        any kind. MERGED is terminal (status.ts:696). A repo-wide grep for fingerprint/criteria_hash/amended_at
+        returns one unrelated hit.
+      - rmd correct CANNOT un-credit — it re-points a task to its TRUE merged PR, requires --pr, and has no
+        un-credit operation.
+    So an amendment to a merged task changes NOTHING observable: deriveStatus still says merged, the drain's
+    `if (isMerged(t.id)) continue` (drain.ts:88) skips it, and the criterion is never dispatched, never reviewed,
+    never proven. It sits in the plan looking authoritative.
+    THE CONVENTION IS ALREADY CONSISTENT — it just is not checked. The corpus files a FOLLOW-UP task every time:
+    W1-T161 is the cleanest ('#349 itself is already merged; this prevents recurrence'), with W1-T97
+    ('W1-T94 ci-log follow-up'), the W1-T65 follow-up pair, and the W1-T76 follow-up all the same shape.
+    LIVE FIXTURE, and the reason this is not a tidiness task: PR #374 amended W1-T155 at 2026-07-20T17:35:20Z,
+    one hour forty-five minutes AFTER PR #365 credited it merged at 15:50:08Z, adding the monotonic-under-darkness
+    and liveness-bound criteria. Nothing dispatched them and nothing ever would have. Criterion 4 IS the fix for
+    the regression-to-queued-on-read-failure bug, so that bug survived the evening wearing a 'merged' badge while
+    W1-T156 shipped a render-layer honesty banner over a data layer that still lies. The orphan was found by
+    hand, not by any gate. W1-T179 now gives those criteria a home; this task stops the next one silently."
+  design: |
+    Add a SIXTH LintCheck — 'post-merge-amendment' — to the §5C Layer A linter, joining sizing/headless-fitness/
+    proof-shape/provenance/budget-sanity (the LintCheck union, task-linter.ts:25, wired in lintTask at :239).
+    PREDICATE: for each task in the PR's changed set, if its acceptance criteria differ from the base ref AND the
+    task's derived status is MERGED, that is a violation — UNLESS the same PR also introduces a task that carries
+    the amended criteria (the follow-up). The escape hatch is what makes this a workable gate rather than a wall:
+    the correct action is filing the follow-up, so a PR that does BOTH passes, and only a bare amendment fails.
+    Reword-only changes to an EXISTING criterion should not trip it — compare criteria SETS (claim+proof pairs)
+    for additions and semantic changes, and be explicit in the message about which criterion tripped it.
+    THE INJECTION PROBLEM, which is the real design constraint: lintTask is documented as 'a PURE function over a
+    loaded Task/Plan, no I/O' (task-linter.ts:3-4), and merge state is I/O. Do NOT make the linter fetch. Merge
+    state must arrive through the existing LintOpts injection channel (the same one mountMaxTurns/calibration
+    already use, task-linter.ts:239-247), populated by the CALLER from deriveStatus. lintPlanCommand
+    (run-task.ts:2488-2542) already does git I/O for --base (`git show <base>:plan/tasks.yaml`, :2516-2520), so it
+    is the natural place to resolve both the base criteria set and the derived status. Keep the purity invariant.
+    FAIL-OPEN ON UNREADABLE STATUS, deliberately: if the derived status cannot be resolved (gh unavailable, CI
+    without a token — note the known trap that loadConfig shells `which claude` and fails in CI), the check must
+    PASS rather than fail. A linter that reds every plan PR during a GitHub outage would block the one lane
+    (plan-only PRs) that still works during an outage. This mirrors W1-T177's fail-open-on-unreadable boundary
+    and is the same reasoning.
+    ALSO RECORD THE RULE: this task ships alongside standing rule 21 in MASTER-PLAN §12, which states the house
+    answer in prose. The rule without the check is what already failed — the convention was consistent across
+    four precedents and still orphaned W1-T155's criteria. The check is the enforcement, the rule is the why.
+    NOT IN SCOPE, and explicitly rejected as the remedy: teaching deriveStatus to un-credit a merged task whose
+    criteria grew (a criteria fingerprint compared against the crediting PR). That was considered and rejected —
+    it would put a new invalidation axis into the status layer that every rung, the drain, the sweep and the
+    board all read, for a problem a lint gate catches at authoring time. If the orphan class recurs in a form
+    lint cannot see, revisit it then.
+  acceptance:
+    - claim: "a plan PR that ADDS an acceptance criterion to an already-merged task FAILS the linter, naming the task and the criterion"
+      proof: "unit test over the new check with injected merge state: a task whose derived status is merged and whose criteria set gained an entry vs the base ref produces a blocking violation naming the task id and the added claim. FALSIFIER: PR #374, which added two criteria to W1-T155 at 17:35:20Z — one hour forty-five minutes after PR #365 credited it merged at 15:50:08Z — and passed every gate clean, leaving both criteria unreachable by the drain (drain.ts:88 skips merged) and by the retro sweep (retro.ts:578 skips merged/done)"
+    - claim: "the same PR filing a FOLLOW-UP task carrying the amended criteria PASSES — the check gates the orphaning, not the amending"
+      proof: "unit test: a changed-set containing BOTH the amended merged task AND a new task carrying those criteria produces no violation. FALSIFIER: a check with no escape hatch, which would make the correct action (amend for the record, file the follow-up) impossible and push authors to skip the record entirely"
+    - claim: "an UNREADABLE derived status fails OPEN — a status-read failure never reds an otherwise-valid plan PR"
+      proof: "unit test: a seeded status-resolution failure yields no violation. FALSIFIER: a fail-closed implementation, which during a GitHub outage would red every plan PR — blocking the plan-only lane that remains usable precisely when the fleet cannot observe GitHub"
+    - claim: "the linter stays PURE — merge state arrives by injection, the check performs no I/O"
+      proof: "unit/structural test: the new check is reachable with merge state supplied through LintOpts and task-linter.ts imports neither status.ts nor any gh/exec surface, preserving the documented 'PURE function over a loaded Task/Plan, no I/O' contract at task-linter.ts:3-4. FALSIFIER: a check that fetches merge state itself, which makes every linter unit test require network or heavy mocking and breaks the CI-safe purity the linter depends on"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§12"]
+  files: [src/lib/task-linter.ts, src/run-task.ts, test/task-linter.test.ts]
+  status: queued
+  attempts: 0
+  note: "Ships WITH standing rule 21 (MASTER-PLAN §12), which records the house answer in prose: an amendment to
+    an already-merged task does not re-queue it and does not auto-spawn anything — the AMENDER owns filing the
+    follow-up. That answer is not invented here, it is the convention the corpus already follows (W1-T161, W1-T97,
+    the W1-T65 pair, the W1-T76 follow-up); what is new is that it becomes checkable.
+    Chosen over the two alternatives deliberately. RE-QUEUE-ON-AMEND was rejected because MERGED is terminal in
+    the status layer (status.ts:696) and un-crediting would require a criteria-fingerprint invalidation axis read
+    by every rung, the drain, the sweep and the board. AUTO-SPAWN-A-FOLLOW-UP was rejected because machine-written
+    tasks cut against rules 15/16 (plan edits are Architect-only, and a rung never self-edits tasks.yaml).
+    Companion W1-T179 rehomes the criteria this gap already orphaned. risk:high — graded UP from an initial medium
+    after rmd lint-plan flagged the task-linter/run-task span under Rule 19. Recorded as a regrade rather than a
+    workaround: adding a BLOCKING check to the plan lane can red every plan PR if it misfires, which is why the
+    fail-open-on-unreadable boundary and the follow-up escape hatch are load-bearing criteria rather than
+    defensive extras."

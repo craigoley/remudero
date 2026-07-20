@@ -168,22 +168,22 @@
     },
     {
       "heading": "12A. Documentation as a gated artifact, in tiers",
-      "line": 1967,
+      "line": 1984,
       "summary": "Docs are scattered (W1-T30 skeleton, W1-T39 ORIENTATION, WS-12 website) with no coherence and no anti-rot"
     },
     {
       "heading": "13. Plan-sync: the in-repo PR flow (never scp again)",
-      "line": 2001,
+      "line": 2018,
       "summary": "`MASTER-PLAN.md` and `plan/tasks.yaml` were once copied into the tree"
     },
     {
       "heading": "14. Immediate queue",
-      "line": 2011,
+      "line": 2028,
       "summary": "SETUP COMPLETE (2026-07-14) — the full inventory (repos, org settings, workspace, auth, deny-floor)"
     },
     {
       "heading": "Banked queue",
-      "line": 2049,
+      "line": 2066,
       "summary": "- Grill-me protocol as in-harness interactive intake (`rmd chat`) — post-WS-4."
     }
   ]
