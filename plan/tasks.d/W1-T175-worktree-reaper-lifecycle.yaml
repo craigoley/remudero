@@ -1,0 +1,74 @@
+- id: W1-T175
+  title: "worktree reaper — close pruneStaleRuns' coverage holes so ~/Remudero/worktrees/ cannot strand orphans: reap on a cadence (not only at run start), reap dirs git no longer registers, reap widowed .lock files; age-gated, ledgered worktree.reaped"
+  repo: remudero
+  depends_on: [W1-T77, W1-T115]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "FIXTURE (real, measured 2026-07-20 post-restart): ~/Remudero/worktrees/ held 909M across 3 entries.
+    run-W1-T156-1784574954974 was a 453M ORPHAN carrying a stale sibling .lock naming pid 97514 (dead — the restart
+    killed it), and `git worktree list --porcelain` did NOT list it at all. Today's ENOSPC hit mid-commit and the
+    rmd-fix-382 orphan needed a HAND-reap. NOTE the premise correction: a lifecycle owner DOES exist —
+    pruneStaleRuns (worker.ts:798) force-removes worktrees + sibling locks and prunes branches. This task is NOT
+    'add an owner'; it is 'close the owner's coverage holes', which is why the 453M survived every prune that ran.
+    THREE holes, the first one CONFIRMED empirically by the fixture: (1) pruneStaleRuns enumerates ONLY
+    `git worktree list --porcelain` (worker.ts:810-861), so a directory git has already de-registered is invisible
+    to it FOREVER — git's own prune drops the registration and leaves the bytes, which is exactly the 453M orphan's
+    state; (2) it fires only at the START of a run (run-task.ts:1795, :2635, :4583, :4812, :5044, :5188) — never on
+    a cadence, never at daemon boot, so an idle fleet reaps nothing; (3) its predicate requires a `run-*` BRANCH
+    (worker.ts:825), so a sweep-* dir interrupted before `checkout -B` (run-task.ts:3874) sits on a detached HEAD and
+    is permanently orphaned, and sweep-* dirs write no lock at all (the :3871 path never calls writeRunLock).
+    Widowed .lock files whose dir is already gone are likewise never swept (removeRunLock only runs INSIDE a
+    successful removal, worker.ts:855). SIBLING of the tmp-hygiene family W1-T115 (rmd temp hygiene, the 26,711-dir
+    ENOSPC incident) and W1-T131 (test-fixture temp hygiene): same leak class — an unowned directory that grows
+    until the disk fills — different directory."
+  design: |
+    Mirror the W1-T115 shape (src/lib/tmp.ts) rather than inventing one: a pure, injectable sweep with an explicit
+    age gate and an injected clock/root so it is testable without touching the real ~/Remudero/worktrees/. Concretely
+    a `reapStaleWorktrees(opts)` alongside pruneStaleRuns, returning `{ reaped, kept, skipped }` name arrays the way
+    sweepStaleTempDirs returns `{ removed, kept }` (tmp.ts:74-77, :109).
+    ENUMERATE THE DIRECTORY, NOT git's registry — that inversion is the whole point of hole (1). For each entry under
+    worktreesDir(config), decide from OBSERVED state: reap when the entry's branch is merged-or-deleted upstream, OR
+    its run is terminal (dead pid / no live lock), AND it is older than the age gate. KEEP OTHERWISE — fail-closed,
+    because a wrong reap destroys in-flight work. Sweep widowed `.lock` siblings whose worktree dir no longer exists.
+    RETAIN pruneStaleRuns' existing liveness guards — do not weaken them: the live-pid skip (worker.ts:827-833) and
+    the lockless-age grace (worker.ts:834-846) exist because a lockless sweep-* dir can otherwise be force-removed
+    mid-fix by a concurrent run's prune. tmp.ts:99-104 says this explicitly: temp dirs need no pid check "the way
+    worker.ts's pruneStaleRuns needs one for worktrees" — so the worktree reaper keeps the pid check AND adds the
+    age gate, it does not trade one for the other.
+    CADENCE (hole 2): plug in as a rung in `rmd sweep` after runSweep, mirroring the W1-T150 credit-backfill rung
+    (run-task.ts:4053-4055) — that is the established second-rung seam — AND in buildSweepHook (run-task.ts:4076-4082)
+    so the daemon gets it every poll, not just at boot. A rung added to the CLI path only will silently never run
+    under the daemon.
+    LEDGER: emit `worktree.reaped` with counts (and `worktree.reap.error` for the failure arm), sitting in the same
+    namespace as the existing `worktree.prune` / `worktree.add` / `worktree.remove` lines. NOTE this deliberately
+    corrects the originally-requested `worktree_reaped`, which is off-convention: `step` is dot-delimited
+    `<subsystem>.<event>` (ledger.ts:17-21), so an underscore top-level event would be the only one of its kind.
+    VERIFY every line reference above from source before building — distrust this note; the file/line anchors are a
+    2026-07-20 survey and drift.
+  acceptance:
+    - claim: "a worktree directory that git no longer registers is still reaped — the confirmed hole (1) that stranded 453M"
+      proof: "unit test over reapStaleWorktrees with an injected root: a directory present on disk but ABSENT from `git worktree list --porcelain`, past the age gate, with a stale lock naming a dead pid, is reaped. FALSIFIER: run-W1-T156-1784574954974 — 453M, dead pid 97514, absent from `git worktree list` (verified: grep -c returned 0), and every pruneStaleRuns invocation that ran left it untouched because it enumerates git's registry, not the directory"
+    - claim: "a LIVE worktree is never reaped — the reaper is fail-closed"
+      proof: "unit test: an entry whose branch backs an OPEN, unmerged PR, and an entry with a live pid, are both KEPT even past the age gate; only merged/deleted-branch or terminal-run entries reap. FALSIFIER: sweep-W1-T154-1784578318525 on branch run-W1-T154-1784573313900 — the head of OPEN PR #388 — sat in the same directory as the 453M orphan on the same day; a blanket age-only sweep would have destroyed in-flight work"
+    - claim: "the reaper runs on a cadence, under the daemon and not only at run start"
+      proof: "unit test asserting the reap rung is invoked from the sweep path AND from buildSweepHook's per-poll path (the seam W1-T150's credit-backfill rung uses), so an idle fleet still reaps. FALSIFIER: pruneStaleRuns is called only from run-start sites (run-task.ts:1795/:2635/:4583/:4812/:5044/:5188) — with no run dispatched, nothing reaps and the directory grows unbounded"
+    - claim: "a widowed .lock whose worktree directory is already gone is swept"
+      proof: "unit test: a `<name>.lock` sibling with no `<name>/` directory is removed. FALSIFIER: removeRunLock (worker.ts:855) fires only inside a SUCCESSFUL worktree removal, so a lock orphaned by any other path persists indefinitely and makes a dead run read as live"
+  risk: high
+  origin: architect
+  plan_refs: ["§9"]
+  files: [src/lib/worker.ts, src/run-task.ts, test/prune-liveness.test.ts]
+  status: queued
+  attempts: 0
+  note: "SIBLING of W1-T115/W1-T131 (tmp hygiene) — same leak class, different directory. NOT a duplicate of
+    pruneStaleRuns: that owner exists and works on what it can SEE; this closes what it cannot see (git-deregistered
+    dirs), when it runs (run-start only, never on a cadence), and what it leaves behind (widowed .lock files,
+    detached-HEAD sweep-* dirs). risk:high (Rule 19, graded UP from an initial medium after `rmd lint-plan` flagged
+    the span — not a linter workaround: the honest grade for autonomous DELETION of work directories across
+    worker.ts + its run-task.ts cadence wiring, at least the risk of W1-T174's two-subsystem block-handling change)
+    — it DELETES developer work directories, so the fail-closed direction
+    matters more than the reap rate: keeping a stale 453M dir costs disk, reaping a live one costs in-flight work.
+    Empirical fixture measured 2026-07-20 post-restart: 909M/3 entries, one 453M orphan (dead pid 97514,
+    git-invisible) beside one genuinely-live sweep dir backing open PR #388."
