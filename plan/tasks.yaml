@@ -267,6 +267,60 @@
   note: "Builds on the board-fix batched gateway (buildBatchedGithub, PR #342). Sibling W1-T153 (shell IA + design).
     Reuses the board-fix regression harness for the <2s budget at 183-task scale — the real fetch client, not a stub."
 
+- id: W1-T152
+  title: "rmd serve-plist — a launchd-unit generator for the console (mirrors rmd daemon-plist): KeepAlive, logs to state/serve.log, port from config, so serve is a background service and never a foreground terminal"
+  repo: remudero
+  depends_on: [W1-T139, W1-T12b, W1-T151, W1-T143]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "FIXTURE (real): the operator ctrl+C'd `rmd serve` to get his shell back TWICE in one morning —
+    the console only runs as a FOREGROUND process, so every terminal reclaim kills it and the board goes dark. A
+    serve-plist generator, mirroring `rmd daemon-plist` (generateLaunchdPlist, W1-T12b), makes the console a
+    background SERVICE: KeepAlive so it comes back on exit, logs to state/serve.log (line-buffered per W1-T143 so it
+    is observable, not empty-until-exit), port baked from config. The operator never runs serve in a foreground
+    terminal again. EVIDENCE SET (one day, verbatim): (i) three STALE-CODE incidents — a serve launched off a branch
+    keeps serving that branch's code after the checkout returns to main (tsx loads once); (ii) one OUTAGE with a
+    silent-failed-relaunch: kill + immediate relaunch RACED (no reap wait) -> the new process died EADDRINUSE into an
+    unread log -> the OLD process kept serving stale code -> the old process eventually exited -> console down with
+    nothing listening. A KeepAlive'd launchd service + the install-freshness hook + the reap-safe restart retires
+    EVERY class here: stale code, argv-kill misses, bind races, silent launch failures, zombie deaths."
+  design: |
+    Add `rmd serve-plist [--port <n>] [--write]` mirroring daemonPlistCommand, and generalize generateLaunchdPlist
+    (or add a serve variant) to emit: ProgramArguments = [rmdBin, "serve", "--port", <resolved port>]; a distinct
+    serve Label; KeepAlive (SuccessfulExit=false) + RunAtLoad; StandardOutPath/StandardErrorPath under state/ (a
+    single state/serve.log, line-buffered per W1-T143); the SAME closed PATH+HOME env allowlist (no ANTHROPIC keys).
+    The service serve path runs the W1-T151 install-freshness check BEFORE binding (a lockfile-changing pull triggers
+    npm install first). Port from config via resolveServePort. `--write` installs to ~/Library/LaunchAgents and
+    prints the load line for the operator (loading the unit is the operator's one step, not an auto criterion).
+    BELT-AND-SUSPENDERS: the service serve path checks the checkout's current branch and REFUSES to bind when it
+    is not main (exit non-zero, name the branch) unless an explicit override flag is passed — a console serving
+    branch code lies to the operator (the ctrl+C-off-a-branch / serve-off-main incident). VERIFY generateLaunchdPlist's
+    current shape, resolveServePort, the W1-T151 freshness hook, W1-T143's line-buffer mechanism, and the git
+    current-branch read from source before wiring (distrust this note).
+  acceptance:
+    - claim: "the generated plist runs `rmd serve` as a KeepAlive background service, port baked from config, logging to state/serve.log"
+      proof: "unit test over the PURE generator: the emitted plist string has ProgramArguments = [rmdBin, serve, --port, <resolved port>], KeepAlive present + RunAtLoad, StandardOutPath/StandardErrorPath pointing at state/serve.log, and the closed PATH+HOME env allowlist (no ANTHROPIC key) — asserted against the string alone, no OS service-manager runtime"
+    - claim: "the service serve path runs the W1-T151 install-freshness check before binding"
+      proof: "unit test: the service serve path, given a package-lock.json hash that differs from the persisted one, runs npm install BEFORE the server binds; a matching hash binds directly (the W1-T151 hook exercised on the service path, the falsifier being a service path that skips the check)"
+    - claim: "serve's logs are line-buffered (W1-T143) so state/serve.log is readable while running, not only at exit"
+      proof: "integration test: serve run with stdout directed to a non-TTY pipe/file emits a startup log LINE readable BEFORE the process exits (W1-T143's line-buffer/flush); a fully-buffered stdout that only flushes at exit FAILS the assertion (the falsifier)"
+    - claim: "belt-and-suspenders — the service serve path REFUSES to bind when the checkout is not on main, unless an explicit override flag is given (a console must never silently serve branch code)"
+      proof: "unit test over the service serve path: given a checkout whose current branch is NOT main, it exits non-zero WITHOUT binding, naming the off-main branch; with the override flag it binds; on main it binds normally — the falsifier being a serve that binds off-main and quietly serves un-shipped code (the exact way an operator gets lied to; the ctrl+C-off-a-branch incident)"
+    - claim: "the restart path cannot EADDRINUSE-race — it WAITS for port release (or binds SO_REUSEADDR-safely) so a kill->relaunch does not silently fail to bind"
+      proof: "unit/integration test: a kill->immediate-relaunch sequence where the OLD process has not yet released the port does NOT fail with EADDRINUSE — the restart path either WAITS for the port to be released before binding OR binds SO_REUSEADDR-safely and takes over; a relaunch that EADDRINUSE-races into a silent death FAILS (the falsifier — today's sequence: kill+immediate-relaunch raced with no reap wait -> the NEW process died EADDRINUSE into an unread log -> the OLD process kept serving stale code -> the old process eventually exited -> console down with nothing listening)"
+  risk: high
+  origin: architect
+  plan_refs: ["§7", "§9"]
+  files: [src/run-task.ts, src/lib/launchd.ts]
+  status: queued
+  attempts: 0
+  note: "Fixture: the operator ctrl+C'd serve to reclaim his shell twice in one morning. Mirrors rmd daemon-plist
+    (W1-T12b / generateLaunchdPlist). Composes W1-T139 (serve), W1-T151 (install-freshness), W1-T143 (line-buffered
+    logs). Loading the generated unit is the operator's single step (a --write + a printed load line), not an
+    auto-verify criterion — the generator + the two hooks are what this task builds and proves."
+
 - id: W1-T156
   title: "live-state UI + TRUST — in-flight rows animate with live elapsed + phase, SSE flips transition in place, and the console never lies about its own liveness (freshness + connection indicators)"
   repo: remudero
@@ -283,8 +337,14 @@
     (b) UI: in-flight rows get an animated indicator + a live-ticking elapsed + the current phase; an SSE flip
     transitions the row IN PLACE with a brief highlight on change; status changes emit aria-live announcements;
     prefers-reduced-motion swaps the animation for a STATIC badge. (c) TRUST: a freshness stamp ("updated Xs ago") +
-    an explicit SSE connection indicator; disconnected/stale states are VISIBLY marked, never silent. VERIFY the SSE
-    stream (buildStatusStream), the reduced-motion + aria-live patterns, and W1-T155's taxonomy fields from source.
+    an explicit SSE connection indicator; disconnected/stale states are VISIBLY marked, never silent. ERROR-STATE
+    LIFECYCLE (operator-observed: a transient board-fetch failure during a serve-restart gap left a persistent
+    "board fetch failed: TypeError: Failed to fetch" banner that survived subsequent SUCCESSFUL polls — a stale error
+    beside live data): a fetch failure shows a TRANSIENT "reconnecting" indicator with the last-success timestamp;
+    the next successful poll CLEARS it; only N consecutive failures escalate to the stale/disconnected state (data
+    stamped stale, never silently old). The banner is DERIVED from current poll state, never a latched string.
+    VERIFY the SSE stream (buildStatusStream), the poll/fetch error path (refreshBoard), the reduced-motion +
+    aria-live patterns, and W1-T155's taxonomy fields from source.
   acceptance:
     - claim: "a dispatched fixture run renders in-flight-with-phase within one SSE tick, with live-ticking elapsed and an in-place highlight on flip"
       proof: "integration test: a dispatched fixture run appears as in-flight WITH its phase within one SSE tick; elapsed ticks live; an SSE flip transitions the row IN PLACE with a brief highlight (asserted on the DOM/state)"
@@ -292,6 +352,8 @@
       proof: "integration test: with the SSE stream severed, the freshness stamp goes stale and the connection indicator flips to disconnected VISIBLY (asserted); a console that keeps showing 'live' after the stream drops FAILS (the falsifier; the W1-T130 don't-lie-about-liveness polarity)"
     - claim: "prefers-reduced-motion swaps animation for a static badge; changes are announced via aria-live"
       proof: "a test asserts that under prefers-reduced-motion the animated indicator is replaced by a static badge (no animation), and status changes emit aria-live announcements"
+    - claim: "the error state has a LIFECYCLE: a fetch failure shows a 'reconnecting' indicator with the last-success timestamp, a next successful poll CLEARS it, and only N consecutive failures escalate to the stale/disconnected state (data visibly stamped stale, never silently old)"
+      proof: "integration test over an injected poll sequence: a transient fetch failure renders a 'reconnecting' indicator carrying the last-success time (NOT a terminal error banner); the NEXT successful poll CLEARS it and shows fresh data; N consecutive failures escalate to the stale/disconnected state with the data visibly STAMPED stale. FALSIFIERS: an error/reconnecting banner still rendered AFTER a successful poll FAILS; a page showing FRESH data and a failure banner SIMULTANEOUSLY FAILS (the operator-observed 'board fetch failed: TypeError: Failed to fetch' banner that survived successful polls beside live data)"
   risk: high
   origin: architect
   plan_refs: ["§7", "§7B"]
@@ -7083,53 +7145,6 @@
   note: "Fixture = the workspace conversion that broke operator builds while CI stayed green (CI installs fresh).
     Extends W1-T126 (daemon self-freshness) with INSTALL-freshness. Cheap detection = hash package-lock.json at
     install, compare on boot/build; a matching hash is a no-op (no redundant install)."
-
-- id: W1-T152
-  title: "rmd serve-plist — a launchd-unit generator for the console (mirrors rmd daemon-plist): KeepAlive, logs to state/serve.log, port from config, so serve is a background service and never a foreground terminal"
-  repo: remudero
-  depends_on: [W1-T139, W1-T12b, W1-T151, W1-T143]
-  type: implement
-  verify: auto
-  principles: {tdd: strict}
-  budget_usd: 100.00
-  rationale: "FIXTURE (real): the operator ctrl+C'd `rmd serve` to get his shell back TWICE in one morning —
-    the console only runs as a FOREGROUND process, so every terminal reclaim kills it and the board goes dark. A
-    serve-plist generator, mirroring `rmd daemon-plist` (generateLaunchdPlist, W1-T12b), makes the console a
-    background SERVICE: KeepAlive so it comes back on exit, logs to state/serve.log (line-buffered per W1-T143 so it
-    is observable, not empty-until-exit), port baked from config. The operator never runs serve in a foreground
-    terminal again."
-  design: |
-    Add `rmd serve-plist [--port <n>] [--write]` mirroring daemonPlistCommand, and generalize generateLaunchdPlist
-    (or add a serve variant) to emit: ProgramArguments = [rmdBin, "serve", "--port", <resolved port>]; a distinct
-    serve Label; KeepAlive (SuccessfulExit=false) + RunAtLoad; StandardOutPath/StandardErrorPath under state/ (a
-    single state/serve.log, line-buffered per W1-T143); the SAME closed PATH+HOME env allowlist (no ANTHROPIC keys).
-    The service serve path runs the W1-T151 install-freshness check BEFORE binding (a lockfile-changing pull triggers
-    npm install first). Port from config via resolveServePort. `--write` installs to ~/Library/LaunchAgents and
-    prints the load line for the operator (loading the unit is the operator's one step, not an auto criterion).
-    BELT-AND-SUSPENDERS: the service serve path checks the checkout's current branch and REFUSES to bind when it
-    is not main (exit non-zero, name the branch) unless an explicit override flag is passed — a console serving
-    branch code lies to the operator (the ctrl+C-off-a-branch / serve-off-main incident). VERIFY generateLaunchdPlist's
-    current shape, resolveServePort, the W1-T151 freshness hook, W1-T143's line-buffer mechanism, and the git
-    current-branch read from source before wiring (distrust this note).
-  acceptance:
-    - claim: "the generated plist runs `rmd serve` as a KeepAlive background service, port baked from config, logging to state/serve.log"
-      proof: "unit test over the PURE generator: the emitted plist string has ProgramArguments = [rmdBin, serve, --port, <resolved port>], KeepAlive present + RunAtLoad, StandardOutPath/StandardErrorPath pointing at state/serve.log, and the closed PATH+HOME env allowlist (no ANTHROPIC key) — asserted against the string alone, no OS service-manager runtime"
-    - claim: "the service serve path runs the W1-T151 install-freshness check before binding"
-      proof: "unit test: the service serve path, given a package-lock.json hash that differs from the persisted one, runs npm install BEFORE the server binds; a matching hash binds directly (the W1-T151 hook exercised on the service path, the falsifier being a service path that skips the check)"
-    - claim: "serve's logs are line-buffered (W1-T143) so state/serve.log is readable while running, not only at exit"
-      proof: "integration test: serve run with stdout directed to a non-TTY pipe/file emits a startup log LINE readable BEFORE the process exits (W1-T143's line-buffer/flush); a fully-buffered stdout that only flushes at exit FAILS the assertion (the falsifier)"
-    - claim: "belt-and-suspenders — the service serve path REFUSES to bind when the checkout is not on main, unless an explicit override flag is given (a console must never silently serve branch code)"
-      proof: "unit test over the service serve path: given a checkout whose current branch is NOT main, it exits non-zero WITHOUT binding, naming the off-main branch; with the override flag it binds; on main it binds normally — the falsifier being a serve that binds off-main and quietly serves un-shipped code (the exact way an operator gets lied to; the ctrl+C-off-a-branch incident)"
-  risk: high
-  origin: architect
-  plan_refs: ["§7", "§9"]
-  files: [src/run-task.ts, src/lib/launchd.ts]
-  status: queued
-  attempts: 0
-  note: "Fixture: the operator ctrl+C'd serve to reclaim his shell twice in one morning. Mirrors rmd daemon-plist
-    (W1-T12b / generateLaunchdPlist). Composes W1-T139 (serve), W1-T151 (install-freshness), W1-T143 (line-buffered
-    logs). Loading the generated unit is the operator's single step (a --write + a printed load line), not an
-    auto-verify criterion — the generator + the two hooks are what this task builds and proves."
 
 - id: W1-T160
   title: "retro cadence — the retro runs on a TRIGGER, not an operator: fire on merges-since-marker >= N OR days-since-marker >= D (policy data), evaluated at the daemon poll, integrity-gated"
