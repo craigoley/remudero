@@ -7215,3 +7215,41 @@
     re-review. Refines W1-T72's nameFiltered guard: keep it catching test theater (named non-existent test = fail),
     stop it false-blocking prose proofs of tests that pass under a different name. #349 itself is already merged;
     this prevents recurrence. Related: the fix-rung strikes indefinitely on a false-failure it cannot fix."
+
+- id: W1-T162
+  title: "escalation lifecycle auto-close — the sweep closes an open escalation once its referenced PR/task reaches a terminal resolved state (merged / closed-with-reason / task credited or retired), naming the resolution"
+  repo: remudero
+  depends_on: [W1-T77]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "EVIDENCE (measured): 11 stale escalations closed BY HAND yesterday, 6 re-accrued within a day — the
+    pile misleads the operator AND the needs-me count (a resolved referent should not still read as a live decision).
+    An open escalation whose referent has RESOLVED (PR merged, PR closed-with-reason, task credited, task retired) is
+    dead weight. The sweep already re-derives PR/task disposition each poll (W1-T77, level-triggered); extend that
+    reconciliation to the ESCALATION ISSUES themselves — close one whose referent is terminal, naming the resolution.
+    FALSIFIER: an escalation whose referent is still LIVE must NOT close."
+  design: |
+    A sweep rung (W1-T77 family): per poll, read each open needs-human escalation, resolve its referenced PR/task
+    (the link escalate.ts writes into the issue), and if the referent is in a TERMINAL resolved state — PR merged |
+    PR closed-with-reason | task credited (deriveStatus) | task retired — close the issue with the resolution NAMED
+    in the close comment. Idempotent (a second pass over closed state closes nothing). A referent still live (PR
+    open/blocked, task queued/in-flight) is NOT closed. VERIFY the escalation-issue shape + referent link
+    (escalate.ts), the sweep loop (W1-T77), and deriveStatus's terminal states from source first (distrust this note).
+  acceptance:
+    - claim: "an open escalation whose referenced PR/task is terminal (merged / closed-with-reason / credited / retired) is auto-closed by the sweep, naming the resolution"
+      proof: "unit test over injected escalations + state: an escalation referencing a MERGED PR (and one referencing a credited/retired task) is closed by the sweep with the resolution named in the close comment; a second sweep over the now-closed state closes NOTHING (idempotent)"
+    - claim: "an escalation whose referent is still LIVE must NOT close (the falsifier)"
+      proof: "unit test: an escalation whose referenced PR is OPEN/blocked (not terminal), or whose task is still queued/in-flight, is NOT closed by the sweep — a live decision stays on the board"
+    - claim: "one sweep drives a batch of resolved-referent escalations to zero, keeping the needs-me count honest"
+      proof: "unit/integration test: the 11-closed-6-reaccrued shape (a batch of escalations whose referents have ALL resolved) is closed to zero by ONE sweep pass (not by hand), so the needs-human count reflects only live decisions"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§4B"]
+  files: [src/lib/sweep.ts, src/lib/escalate.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Extends the sweep's level-triggered reconciliation (W1-T77 / P22) from PRs to escalation ISSUES. Evidence:
+    11 closed by hand, 6 re-accrued in a day. Falsifier: a live-referent escalation must not close. Companion to
+    W1-T104 (escalation-dedup) — dedup stops duplicates being opened; this closes them once the referent resolves."
