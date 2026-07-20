@@ -87,8 +87,15 @@ jobs:
       # committed client and the surface is caught in CI") added: same UNCONDITIONAL shape — no
       # path filter, runs every PR; a stale/hand-edited packages/api-client/src/schema.d.ts goes
       # red against a fresh regeneration from openapi/daemon.yaml.
+      # `no-hand-rolled-fetch` (W3-T1c, §7A "No client may hand-roll a fetch to the daemon -- a
+      # grep gate fails the build") added: same UNCONDITIONAL shape — no path filter, runs every
+      # PR; a direct fetch/axios/XHR call anywhere under apps/** or packages/** (except the
+      # sanctioned packages/api-client) goes red. The companion consumer-typecheck half of W3-T1c
+      # (packages/daemon-client-smoke) needs no new required check here: it typechecks for free
+      # under the already-required `ci` job (tsconfig.json's `include` covers
+      # `packages/*/src/**/*.ts`).
       REQUIRED: >-
-        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet", "jscpd-gate", "claims", "learnings-budget-ratchet", "refactor-campaign", "commitlint", "api-client-drift"]
+        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet", "jscpd-gate", "claims", "learnings-budget-ratchet", "refactor-campaign", "commitlint", "api-client-drift", "no-hand-rolled-fetch"]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
       IGNORE: >-

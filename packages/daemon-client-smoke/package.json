@@ -1,0 +1,11 @@
+{
+  "name": "@remudero/daemon-client-smoke",
+  "version": "0.1.0",
+  "description": "A minimal internal CONSUMER of the GENERATED @remudero/api-client (MASTER-PLAN §7A). Exists so a breaking daemon surface change fails a real consumer package's typecheck in the SAME PR, before any real client (apps/dashboard, W3-T2+) exists. See scripts/no-hand-rolled-fetch-check.mjs and test/consumer-breaking-change.test.ts.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@remudero/api-client": "0.1.0"
+  }
+}

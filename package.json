@@ -37,6 +37,7 @@
     "plan-index:check": "node scripts/generate-plan-index.mjs --check",
     "api-client:generate": "node scripts/generate-api-client.mjs",
     "api-client:check": "node scripts/generate-api-client.mjs --check",
+    "no-hand-rolled-fetch:check": "node scripts/no-hand-rolled-fetch-check.mjs",
     "learnings-assert": "node scripts/learnings-assert-check.mjs",
     "learnings-assert:check": "node scripts/learnings-assert-check.mjs --check",
     "cli-reference": "tsx scripts/generate-cli-reference.mjs",
