@@ -1075,6 +1075,301 @@
     merged-0/160 fail-open is the monotonic-under-darkness falsifier), so it belongs at the front. GENERAL LESSON
     worth keeping: shards are the right default for conflict-free FILING, and the wrong choice for anything that
     needs PRIORITY. Those two goals are in tension and the tension is invisible until a shard never dispatches."
+- id: W1-T183
+  title: "CONSOLE DENSITY + IA v2 — sections render DENSE single-line rows (id · status · phase · elapsed · spend · PR/issue link), one task per line, with W1-T158's card as the click-drill target; timestamps render local + relative, never raw ISO-millis; anomalous elapsed is visually flagged"
+  repo: remudero
+  depends_on: [W1-T158, W1-T153]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  queue_note: |
+    Filed 2026-07-20 from an operator screenshot review of console v2, positioned directly behind the
+    W1-T177/W1-T178/W1-T179 train. File order IS drain priority (no priority field exists), and a tasks.d
+    shard would sort BELOW every tasks.yaml task — hence filed into tasks.yaml, not as a shard.
+    NOTE the hard dep on W1-T158, which had an OPEN PR (#410) at filing time. This is a genuine dependency —
+    W1-T158's card is this task's click-drill target, so building the drill before the card exists is not
+    possible. But depends_on is a HARD gate: if #410 stalls, this task stalls with it. That is accepted
+    knowingly rather than worked around, because a density pass that cannot drill anywhere is not the
+    deliverable. If W1-T158 stalls for an extended period, drop the dep and ship density alone.
+  rationale: "OPERATOR FIXTURE (console v2 screenshots, 2026-07-20): the board is not scannable at the fleet's
+    actual scale. With 214 tasks in the plan, the console renders card-shaped rows that fit only a handful of
+    tasks on a first screen, so the operator scrolls to find anything and cannot form a picture of the whole
+    fleet at a glance. The FIND layer (W1-T157, merged #405) makes the board searchable — but search answers
+    'where is X', not 'what is the fleet doing', and the second question is the one an operator opens the
+    console to answer.
+    TIMESTAMPS ARE UNREADABLE AS RENDERED: raw ISO-millisecond strings force the reader to do arithmetic to
+    answer 'is this recent'. Humans read elapsed time relatively ('8s ago', '3m ago') and absolute time locally;
+    a UTC millisecond stamp serves neither. This is a rendering defect, not a data one — the projection already
+    carries startedAt/elapsedMs (W1-T155).
+    ANOMALY IS INVISIBLE: a row that has been in one phase far longer than that phase normally takes reads
+    identically to a healthy one. Tonight's fixture is on the operator's screen — W1-T1 rendering in NOW at
+    27h21m, indistinguishable from a run that started a minute ago. The liveness BOUND is W1-T179's job (that
+    row should not say 'running' at all); the visual FLAG is this task's, and the two are complementary: even
+    with a correct liveness verdict, a genuinely-running task past its phase threshold must be visible without
+    reading a number.
+    THE CARD IS NOT THE PROBLEM — the card is W1-T158's DETAIL layer and it is the right destination. The defect
+    is using detail-shaped rendering as the LIST. List and detail are different jobs: the list answers 'what is
+    the state of everything', the card answers 'what is going on with this one'."
+  design: |
+    DENSE SINGLE-LINE ROWS as the list rendering for every section. One task per line, carrying id, status,
+    phase, elapsed, spend, and a direct PR/issue link. The row is the click target for W1-T158's task card —
+    ONE click from any row to its detail, no intermediate view, no expand-then-click.
+    Reuse what already exists rather than re-deriving: the projection carries status/phase/startedAt/elapsedMs
+    (W1-T155), W1-T157 shipped the FIND layer over the same rows, and W1-T156 shipped DOM-stable in-place
+    patching that must be PRESERVED — a density rewrite that re-creates rows on each update would silently
+    regress W1-T156's node-identity and text-selection criteria. VERIFY those from source before rewriting the
+    row template.
+    TIME RENDERING: local + relative together ('14:23:05 · 8s ago'), never a raw ISO-millisecond string anywhere
+    in the UI. Relative text must keep ticking (W1-T156 already ships live-ticking elapsed — reuse it).
+    ANOMALY FLAG: a per-phase elapsed threshold, exceeded => the row is visually marked. The thresholds are DATA,
+    not hard-coded constants scattered through the template, so they can be tuned without a code change. Do NOT
+    invent a liveness verdict here — W1-T179 owns 'is this actually running'; this task owns 'this one is taking
+    unusually long, look at it'.
+    ACCESSIBILITY IS NOT OPTIONAL AT DENSITY: colour alone must not carry the anomaly signal, and the reduced-
+    motion + aria-live behaviour W1-T156 shipped must survive the rewrite.
+  acceptance:
+    - claim: "a first screen at 1440px shows at least ~15 tasks — the list is dense enough to read the fleet, not scroll it"
+      proof: "unit test: at a viewport height of 1440px the rendered rows-above-the-fold count is >= 15. FALSIFIER: the 2026-07-20 console v2 screenshot, where card-shaped rows put only a handful of tasks on a first screen against a 214-task plan, so the operator scrolls to find anything"
+    - claim: "no raw ISO-millisecond timestamp is rendered anywhere — every time is local plus relative"
+      proof: "unit test over the rendered DOM: no text node matches an ISO-8601-with-milliseconds pattern, and time cells carry BOTH a local clock rendering and a relative one ('8s ago'). FALSIFIER: a raw UTC millisecond stamp rendered in any cell fails, since it forces the reader to do arithmetic to answer 'is this recent'"
+    - claim: "task detail is reachable in ONE click from any row"
+      proof: "unit test: a click on a row in any section opens W1-T158's task card directly, with no intermediate view and no expand-then-click. FALSIFIER: any path to detail requiring two or more interactions fails"
+    - claim: "a row past its per-phase elapsed threshold is VISUALLY flagged, and the threshold is data rather than a hard-coded constant"
+      proof: "unit test: a row whose elapsed exceeds its phase threshold renders the anomaly marking while a row under it does not, and the thresholds are read from a data source a test can override. FALSIFIER: W1-T1 rendering in NOW at 27h21m on the 2026-07-20 console, visually identical to a run started a minute ago"
+    - claim: "the density rewrite PRESERVES W1-T156's DOM stability and accessibility — it is not a regression dressed as a redesign"
+      proof: "the existing W1-T156 tests in test/serve.live-state.test.ts continue to pass unmodified: an unchanged row keeps DOM identity across an update, an active text selection survives, and the reduced-motion/aria-live behaviour holds. Additionally the anomaly signal is not carried by colour alone. FALSIFIER: a row template that re-creates nodes each update silently breaks node identity and selection, which those tests already encode as falsifiers"
+  risk: high
+  origin: architect
+  plan_refs: ["§7"]
+  files: [src/lib/serve.ts, test/serve.live-state.test.ts]
+  status: queued
+  attempts: 0
+  note: "CONSOLE DESIGN PASS v2, task 1 of 2 filed together (sibling W1-T184, ledger-first rendering). Applies
+    the CLAIMED-vs-EVIDENCED doctrine (standing rule 22) at the LIST layer: a dense row shows what is claimed,
+    and the anomaly flag is the first place the console admits that a claim looks wrong.
+    Complementary to W1-T179, not overlapping: W1-T179 fixes whether 'running' is TRUE (the liveness bound);
+    this makes an unusually-long run VISIBLE even when the verdict is correct. Both are needed — a correct
+    verdict the operator has to compute by hand is not an answer.
+    risk:high — it rewrites the row template every section shares, and W1-T156's DOM-stability and accessibility
+    criteria are easy to regress silently while 'only changing the layout'. Those existing tests passing
+    unmodified is a load-bearing criterion, not a formality."
+- id: W1-T184
+  title: "LEDGER-FIRST RENDERING — RECENT becomes an activity feed sourced from the LOCAL ledger (merges, verdicts, fix outcomes, escalations, spend), NOW rows carry live per-run spend and turns, and GitHub DECORATES rather than gates: the feed reads identically during a GitHub outage"
+  repo: remudero
+  depends_on: [W1-T153, W1-T181]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  queue_note: |
+    Filed 2026-07-20 from an operator screenshot review of console v2, positioned directly behind the
+    W1-T177/W1-T178/W1-T179 train alongside its sibling W1-T183. Filed into tasks.yaml rather than as a
+    tasks.d shard because shards sort BELOW every tasks.yaml task and file order IS drain priority.
+    Depends on W1-T181 (merged) for the marked-failure signal: this task's whole premise is that the feed
+    survives GitHub darkness, which requires being able to TELL that GitHub is dark rather than empty.
+  rationale: "TWO OPERATOR FIXTURES, both from 2026-07-20, both showing the console reporting nothing while the
+    fleet was busy.
+    FIXTURE 1 — 'no recent outcomes yet' rendered over a week containing ~100 merges. RECENT is sourced from
+    GitHub, so when the batched gateway failed (the W1-T181 ENOBUFS outage: every read returned an empty set for
+    hours) the section had nothing to show and said so, in the same words it would use on a genuinely quiet day.
+    The local ledger held every one of those merges the entire time.
+    FIXTURE 2 — tonight's post-merge burn was INVISIBLE on an open console. Two fix rungs spent 1.24 USD/38 turns
+    (PR #388) and 1.30 USD/38 turns (PR #398) on PRs that had already merged, plus a third rung started on top —
+    about 2.54 USD and 76 worker turns. Every one of those events was in the ledger as it happened. The operator,
+    watching the console, could not see money being spent.
+    THE STRUCTURAL POINT: the ledger is LOCAL, append-only, and complete — it is the fleet's own record of what it
+    did. GitHub is a REMOTE, rate-limited, occasionally-unreachable decoration on top of it. The console currently
+    has that dependency inverted, so a remote outage empties a local truth. Sourcing the feed from the ledger is
+    not a performance optimisation, it is putting the authority in the right place.
+    THIS IS THE SAME LESSON AS W1-T181 ONE LAYER UP. There, a failed read returned [] and the board rendered
+    'zero PRs exist'. Here, a failed read empties RECENT and the console renders 'nothing has happened'. Both are
+    cannot-read presented as nothing-to-see. W1-T181 shipped the marked-failure signal (readFailed /
+    readFailureReason, classified reasons including buffer_overflow); this task CONSUMES it to say 'GitHub is
+    dark, here is what the ledger knows' instead of falling silent."
+  design: |
+    RECENT becomes an activity feed over the LOCAL ledger (state/ledger.ndjson). Event classes to surface, all of
+    which the ledger already records: merges, review verdicts, fix-rung outcomes (dispatch/done/exhausted),
+    escalations opened, and spend events (`cost_usd` is already on implement.done / fix.done lines).
+    GITHUB DECORATES, NEVER GATES. A GitHub read enriches a feed row (PR title, check state) and its ABSENCE must
+    degrade that row to ledger-only detail, never remove it. Consume W1-T181's marked-failure signal to render an
+    explicit 'GitHub unreachable' decoration rather than an empty section — the console says what it cannot see
+    instead of implying there is nothing to see.
+    NOW ROWS CARRY LIVE SPEND + TURNS, accumulated from the ledger for the current run, ticking as the run
+    proceeds. The data exists: run lines carry cost_usd and num_turns. VERIFY the exact ledger step names and
+    field shapes from source (lib/ledger.ts, and the run/fix step names in run-task.ts) before building —
+    distrust the names in this note.
+    PERFORMANCE IS A REAL CONSTRAINT, not an afterthought: the ledger is append-only and grows without bound, so a
+    naive full re-read per render will not hold. Tail or index it. W1-T154's board snapshot cache and the
+    existing ledger tail in lib/board.ts (which already polls the ledger to know when to recompute) are the
+    precedents to reuse rather than reinvent.
+    DO NOT DUPLICATE W1-T159's GLANCE STRIP. That task owns the aggregate counters and spend totals; this task
+    owns the per-event feed and per-run figures. If both need the same ledger reduction, factor it once and let
+    both consume it.
+  acceptance:
+    - claim: "RECENT renders from the LOCAL ledger and is IDENTICAL during a GitHub outage — an outage never empties it"
+      proof: "integration test: with the GitHub gateway seeded to FAIL (W1-T181's marked-failure signal set), the feed renders the same ledger-sourced events it renders on a healthy read, with GitHub-derived fields degraded to ledger-only detail and an explicit unreachable decoration. FALSIFIER: the 2026-07-20 console rendered 'no recent outcomes yet' across a week containing ~100 merges, because the section was GitHub-sourced and the batched gateway was returning an empty set for hours while the ledger held every merge"
+    - claim: "a running task renders its ACCUMULATED spend and turns, live from the ledger"
+      proof: "unit test: a NOW row for an in-flight run shows spend and turn count summed from that run's ledger lines, and both advance as further lines are appended. FALSIFIER: tonight's post-merge burn — 1.24 USD/38 turns on PR #388 and 1.30 USD/38 turns on PR #398, roughly 2.54 USD and 76 turns total — was invisible on an open console while every event sat in the ledger as it happened"
+    - claim: "GitHub DECORATES and never GATES — an absent GitHub field degrades a row, never removes it"
+      proof: "unit test: a feed row whose GitHub enrichment is unavailable still renders with its ledger-sourced content and a marked-unavailable decoration, rather than being dropped from the feed. FALSIFIER: any implementation where a failed GitHub read reduces the feed's row count, which reproduces the empty-RECENT fixture"
+    - claim: "the feed does not re-read the whole ledger per render — it holds at a ledger that grows without bound"
+      proof: "unit test asserting the feed is served from a tail/index rather than a full file re-read per render, reusing the existing ledger-tail precedent in lib/board.ts. FALSIFIER: a full re-read per render, which degrades continuously as the append-only ledger grows and turns a console refresh into an O(history) operation"
+  risk: high
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/serve.ts, src/lib/board.ts, test/serve.test.ts]
+  status: queued
+  attempts: 0
+  note: "CONSOLE DESIGN PASS v2, task 2 of 2 filed together (sibling W1-T183, density/IA). Directly applies the
+    CLAIMED-vs-EVIDENCED doctrine (standing rule 22): the ledger is the fleet's own RECEIPT of what it did, and
+    GitHub is a claim about the same events from a remote that can be unreachable. Sourcing the feed from the
+    receipt is the doctrine made concrete.
+    CONSUMER of W1-T181's marked-failure signal (merged, PR #411) — that task is the producer. Also a sibling of
+    W1-T179, which applies the same read-failure discipline to the projection: T179 keeps the last-good STATUS
+    under darkness, this keeps the ACTIVITY FEED under darkness.
+    Boundary with W1-T159: that task owns the aggregate glance strip (counts, spend totals); this owns the
+    per-event feed and per-run figures. Factor any shared ledger reduction once.
+    risk:high — it re-sources a primary console section and adds a per-render ledger read path, where the naive
+    implementation degrades continuously as the ledger grows."
+- id: W1-T182
+  title: "NEEDS ME must join LIVE escalation STATE and render the affordance the item type actually supports — today it renders ledger HISTORY (a closed issue never leaves the section) and puts an Approve button on escalations, which is an undefined action"
+  repo: remudero
+  queue_note: |
+    PROMOTED 2026-07-20 from plan/tasks.d/ into tasks.yaml and positioned with the console design pass, directly
+    behind the W1-T177/W1-T178/W1-T179 train. Shards append AFTER every tasks.yaml task and the drain scans in
+    FILE ORDER, so a sharded task cannot reach the front regardless of urgency — the same promotion W1-T179,
+    W1-T177 and W1-T178 each needed.
+    AMENDED at the same time with the ACTUAL-ASK criterion: a NEEDS ME row must render the escalation's real
+    one-line ask plus a direct link, never an input soliciting a URL the ledger already holds.
+  depends_on: [W1-T153]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR FIXTURE (console v2 screenshot, 2026-07-20 ~21:30): the NEEDS ME section rendered roughly
+    44 escalated rows, each carrying an Approve button. Measured against GitHub at the same moment: needs-human
+    issues OPEN = 0, needs-human issues TOTAL (all states) = 30. So the section is showing more rows than there
+    are issues in existence, and every issue it claims needs attention is CLOSED.
+    DEFECT 1 — NEEDS ME JOINS HISTORY, NOT STATE. The predicate is hasOpenEscalation (status.ts:672), and despite
+    its name it never reads an issue's state. It scans the ledger and returns true when the task's MOST RECENT
+    line was `escalation.issue_opened` rather than `run.start`:
+      let last: 'run' | 'escalation' | undefined;
+      for (const line of lines) { ... if (step==='run.start') last='run'; else if (step==='escalation.issue_opened') last='escalation'; }
+      return last === 'escalation';
+    The ledger is append-only and immutable, so CLOSING the GitHub issue cannot change the answer — the row is
+    stuck until some future run.start for that task. Verified live tonight: issues #393, #395 and #401 were each
+    closed by hand after being confirmed terminal, and each remains needsHuman by this predicate. The name is
+    actively misleading — 'hasOpenEscalation' implies openness is checked, and it is not; it means 'the last thing
+    that happened to this task was an escalation being opened'. Resolution is invisible to the console, so the
+    section only ever grows and an operator who works the queue sees no progress.
+    DEFECT 2 — WRONG AFFORDANCE. Every row carries an Approve button. Approve is the RATIFICATION-INBOX action for
+    a P## proposal (rmd approve, P25(ii) — one bit ratifies a READY proposal through the gate). It has NO defined
+    meaning for an escalation: there is no approve verb for a needs-human issue, and the escalation's own issue
+    body says so ('Closing this issue does not resolve the underlying block by itself — act on it, then resume via
+    rmd drain'). A control that cannot map to a real action is worse than no control: it invites a click that
+    either does nothing or does something the operator did not intend, on a surface whose entire premise (W1-T156,
+    'the console never lies') is that it tells the truth about state.
+    WHY THIS COMPOUNDS TONIGHT'S OTHER FINDINGS: the same board is simultaneously showing merged 0/160 (the
+    W1-T181 ENOBUFS outage) and W1-T1 as running at 27h21m (the unbuilt liveness bound, W1-T179). An operator
+    looking at this console currently cannot trust the merged count, the in-flight rows, OR the needs-attention
+    queue. NEEDS ME is the one section whose whole job is to be the operator's work list."
+  design: |
+    JOIN LIVE STATE, DO NOT PATCH THE HISTORY SCAN. The ledger correctly records that an escalation was OPENED —
+    that event is true and immutable, and it is the right provenance. What is missing is the CURRENT state of the
+    thing it points at. The escalation ledger line already carries `issue_url` (verified: escalation.issue_opened
+    lines record `{class, issue_url, labels}`), so the resolution is to read that issue's state rather than to
+    infer liveness from event ordering.
+    Read it through the SAME batched-gateway discipline the board already uses (buildBatchedGithub, one fetch,
+    TTL-refreshed) rather than one gh call per escalated row — the board-fix O(1) invariant is explicit in
+    status.ts and a per-row fetch would regress it at exactly the scale (44 rows) that exposed the bug.
+    RENAME hasOpenEscalation or give it a state parameter, so the name cannot lie again. A predicate called
+    hasOpenEscalation that does not check openness is how this survived review.
+    AFFORDANCE BY ITEM TYPE — the section is heterogeneous and must dispatch on type, not render one row template:
+      - ESCALATION -> 'view issue' (link to issue_url) and 'mark handled'. Mark-handled must be honest about what
+        it does: the issue body already states that closing does not resolve the underlying block, so this control
+        closes/acknowledges the ESCALATION and must not imply the block is fixed.
+      - INBOX PROPOSAL (P##) -> Approve, which is the existing, defined rmd approve action.
+    An Approve control MUST NOT render on a non-proposal. Prefer a shape where an unknown item type renders NO
+    action control rather than a default one — a missing button is recoverable, a wrong button is not.
+    FAIL-CLOSED ON AN UNREADABLE ISSUE STATE, matching W1-T177's boundary: if the issue's state cannot be read,
+    KEEP the row (an escalation that might still be open must not silently vanish from the operator's work list)
+    and mark it unverified. The fail-safe direction here is the opposite of the merged-count case, because the
+    cost of hiding live work exceeds the cost of showing a stale row.
+    VERIFY hasOpenEscalation, the escalation ledger line shape, and the T153 shell's NEEDS ME row template from
+    source before building — distrust this note, it is a 2026-07-20 survey.
+  acceptance:
+    - claim: "a CLOSED escalation does not render in NEEDS ME — the section reflects live state, not ledger history"
+      proof: "unit test over the projection: a task whose most recent ledger line is escalation.issue_opened but whose referenced issue reads CLOSED is NOT needsHuman and does not render in NEEDS ME. FALSIFIER: the 2026-07-20 console — ~44 escalated rows against 0 OPEN needs-human issues (30 total, all closed), including #393, #395 and #401 which were each closed by hand after being confirmed terminal and each still render, because hasOpenEscalation (status.ts:672) returns `last === 'escalation'` from an append-only ledger and never reads issue state"
+    - claim: "an OPEN escalation still renders — the fix removes stale rows without hiding live work"
+      proof: "unit test: a task whose escalation issue reads OPEN remains needsHuman and renders. FALSIFIER: a change that keys the section off anything that also drops genuinely open escalations, which would silently empty the operator's work list — the more dangerous direction of this bug"
+    - claim: "an UNREADABLE issue state KEEPS the row, marked unverified — fail-closed toward showing work"
+      proof: "unit test: a seeded issue-state read failure retains the row and flags it unverified rather than dropping it. FALSIFIER: dropping rows on a read failure, which during a GitHub outage would show an empty NEEDS ME section and tell the operator there is nothing to do"
+    - claim: "each escalation row renders the escalation's ACTUAL one-line ask, with a direct link — never an input soliciting data the ledger already holds"
+      proof: "unit/DOM test: an escalation row shows the ask text derived from the issue title/body plus a direct link to the issue, and renders NO free-text or URL input. FALSIFIER: a row rendering an empty URL input fails — the escalation's ledger line already carries issue_url (escalation.issue_opened records {class, issue_url, labels}), so soliciting a URL the system already holds is both redundant and an invitation to paste the wrong one"
+    - claim: "an Approve control NEVER renders on a non-proposal item"
+      proof: "unit/DOM test over the NEEDS ME row template: an escalation row renders 'view issue' and 'mark handled' and contains NO Approve control, while a P## inbox-proposal row renders Approve. FALSIFIER: the 2026-07-20 console, where every one of ~44 escalation rows carried an Approve button — an action with no defined meaning for an escalation, whose own issue body states that closing it does not resolve the underlying block"
+    - claim: "the join costs no per-row GitHub call — the board-fix O(1) invariant holds at 44+ rows"
+      proof: "unit test asserting issue states resolve through ONE batched fetch (the buildBatchedGithub discipline the board already uses), not one gh call per escalated row. FALSIFIER: a per-row fetch, which regresses the explicit O(1) board invariant at exactly the row count that exposed this defect"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/status.ts, test/status.test.ts]
+  status: queued
+  attempts: 0
+  note: "Fixture is an operator screenshot of console v2, 2026-07-20 ~21:30: ~44 escalated rows each with an
+    Approve button, against 0 OPEN needs-human issues (30 total, all closed). Two independent defects in one
+    section — a history-vs-state join and a wrong affordance — filed together because they share the row template
+    and the same fix pass.
+    THIRD SIBLING of tonight's console-honesty findings, all on the same screen: W1-T181 (merged 0/160, the
+    batched-gateway ENOBUFS outage) and W1-T179 (W1-T1 rendering running at 27h21m, the unbuilt liveness bound).
+    Each independently breaks the W1-T156 premise that the console never lies about its own state.
+    Note the fail-safe direction here INVERTS W1-T181's: an unreadable merged-count should degrade visibly, but an
+    unreadable escalation state must KEEP the row — hiding live work from the operator's queue is the worse
+    failure. Do not unify the two behind one 'unreadable' policy."
+- id: W1-T159
+  title: "GLANCE layer — a pinned summary strip (running/needs-me/blocked/queued/merged-today/spend-today), a daemon-health widget, and a browser-tab needs-me badge"
+  repo: remudero
+  queue_note: |
+    REPOSITIONED 2026-07-20 with the console design pass, directly behind the W1-T177/W1-T178/W1-T179 train.
+    AMENDED with two criteria: spend-THIS-WEEK beside the existing spend-today (already named in this task's
+    title), and ANOMALY EMPHASIS so the strip answers 'is everything okay?' rather than only reporting counts.
+    Boundary with W1-T184 (ledger-first rendering): this task owns the AGGREGATE strip (counts, spend totals);
+    W1-T184 owns the per-event feed and per-run figures. If both need the same ledger reduction, factor it once.
+  depends_on: [W1-T153, W1-T155, W1-T148]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The operator's primary device is a phone glance. A pinned summary strip + a daemon-health widget + a
+    tab-title badge answer 'what needs me / is the fleet healthy / what has it cost' in one look, without opening
+    the console — every number traceable to a real source, never a decorative estimate."
+  design: |
+    A summary strip pinned to the top: running N / needs-me N / blocked N / queued N / merged-today N / spend-today $
+    (governor-aware once W1-T148 lands). A daemon-health widget: last poll, a live next-poll countdown, disk free,
+    rate-limit remaining. The browser TAB TITLE carries the needs-me count. Every number traces to a ledger/API
+    source. VERIFY the taxonomy counts (W1-T155), the spend-today source (W1-T148's day-cost), the daemon-health
+    data (last poll / disk / rate-limit), and the SSE needs-human event from source first (distrust this note).
+  acceptance:
+    - claim: "every summary number is TRACEABLE to a named ledger/API source"
+      proof: "a test: each strip number (running/needs-me/blocked/queued/merged-today/spend-today) derives from a named source (the W1-T155 taxonomy counts; spend-today from W1-T148's day-cost); a hardcoded/untraceable number FAILS (the falsifier)"
+    - claim: "the strip carries spend-THIS-WEEK beside spend-today, both traceable to ledger cost_usd lines"
+      proof: "unit test: the strip renders a week-to-date spend figure alongside the existing spend-today, each summed from ledger cost_usd fields and each traceable to its named source per this task's first criterion. FALSIFIER: a strip showing only a daily figure cannot answer whether today is normal — tonight ~2.54 USD burned post-merge across two rungs looked unremarkable in isolation and is only legible against a weekly baseline"
+    - claim: "the strip EMPHASISES anomaly — any NOW row past its phase threshold, and any needs-me older than 24h, are surfaced in the strip itself"
+      proof: "unit test: with a seeded in-flight run past its phase threshold, and separately a seeded needs-human escalation older than 24h, the strip renders an explicit anomaly emphasis rather than only a count. FALSIFIER: the 2026-07-20 console — W1-T1 sat in NOW at 27h21m and ~44 escalation rows were rendered, while the strip showed only ordinary counts, so nothing on it answered 'is everything okay'"
+    - claim: "the browser tab badge updates on an SSE needs-human event"
+      proof: "integration test: an SSE needs-human event updates the tab-title needs-me count to match the NEEDS ME set; a tab badge that ignores the event FAILS"
+    - claim: "the daemon-health widget shows last poll, a next-poll countdown, disk free, and rate-limit remaining, each from its source"
+      proof: "a test: the widget renders last-poll (ledger/daemon), a live next-poll countdown, disk-free, and rate-limit-remaining, each from its named source; a widget with a placeholder value FAILS"
+  risk: high
+  origin: architect
+  plan_refs: ["§7", "§9"]
+  files: [src/lib/serve.ts, apps/dashboard/src]
+  status: queued
+  attempts: 0
+  note: "The GLANCE layer (interaction layer 4). spend-today is governor-aware once W1-T148 lands (a dep). Counts
+    from W1-T155's taxonomy. Every number traceable to a source — no decorative estimates."
+
 - id: W1-T136
   title: "EVERY machine plan-PR emitter (retro, approve, future inbox writes) must emit a PR mergeable under the full gate stack — a SHARED gate-compliant emitter: plan-index regen, commitlint-clean commit (header AND body <=100), and a judgeable Acceptance body so remudero-review does not fail closed (the #287 retro + #387 approve fixtures)"
   repo: remudero
@@ -1243,39 +1538,6 @@
   attempts: 0
   note: "The DETAIL+JOURNEY layer (interaction layer 3). Journey = rmd trace (W1-T43). Card is O(0) extra GitHub
     calls (batched gateway) — the board-fix invariant."
-
-- id: W1-T159
-  title: "GLANCE layer — a pinned summary strip (running/needs-me/blocked/queued/merged-today/spend-today), a daemon-health widget, and a browser-tab needs-me badge"
-  repo: remudero
-  depends_on: [W1-T153, W1-T155, W1-T148]
-  type: implement
-  verify: auto
-  principles: {tdd: strict}
-  budget_usd: 100.00
-  rationale: "The operator's primary device is a phone glance. A pinned summary strip + a daemon-health widget + a
-    tab-title badge answer 'what needs me / is the fleet healthy / what has it cost' in one look, without opening
-    the console — every number traceable to a real source, never a decorative estimate."
-  design: |
-    A summary strip pinned to the top: running N / needs-me N / blocked N / queued N / merged-today N / spend-today $
-    (governor-aware once W1-T148 lands). A daemon-health widget: last poll, a live next-poll countdown, disk free,
-    rate-limit remaining. The browser TAB TITLE carries the needs-me count. Every number traces to a ledger/API
-    source. VERIFY the taxonomy counts (W1-T155), the spend-today source (W1-T148's day-cost), the daemon-health
-    data (last poll / disk / rate-limit), and the SSE needs-human event from source first (distrust this note).
-  acceptance:
-    - claim: "every summary number is TRACEABLE to a named ledger/API source"
-      proof: "a test: each strip number (running/needs-me/blocked/queued/merged-today/spend-today) derives from a named source (the W1-T155 taxonomy counts; spend-today from W1-T148's day-cost); a hardcoded/untraceable number FAILS (the falsifier)"
-    - claim: "the browser tab badge updates on an SSE needs-human event"
-      proof: "integration test: an SSE needs-human event updates the tab-title needs-me count to match the NEEDS ME set; a tab badge that ignores the event FAILS"
-    - claim: "the daemon-health widget shows last poll, a next-poll countdown, disk free, and rate-limit remaining, each from its source"
-      proof: "a test: the widget renders last-poll (ledger/daemon), a live next-poll countdown, disk-free, and rate-limit-remaining, each from its named source; a widget with a placeholder value FAILS"
-  risk: high
-  origin: architect
-  plan_refs: ["§7", "§9"]
-  files: [src/lib/serve.ts, apps/dashboard/src]
-  status: queued
-  attempts: 0
-  note: "The GLANCE layer (interaction layer 4). spend-today is governor-aware once W1-T148 lands (a dep). Counts
-    from W1-T155's taxonomy. Every number traceable to a source — no decorative estimates."
 
 - id: W1-T119
   title: "GitHub reads distinguish THROTTLED from ABSENT — an exhausted or errored read defers, never concludes not-merged (the false source=none that mis-filed W1-T116)"
