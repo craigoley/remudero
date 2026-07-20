@@ -315,7 +315,7 @@ test("triageCommitMessage: grill carries the open question, the grilling status,
   assert.match(msg, /flag or config\?/);
   assert.match(msg, /grilling/);
   assert.match(msg, /needs-human/);
-  assert.ok(msg.includes("https://github.com/craigoley/remudero/issues/321"));
+  assert.match(msg, /(^|\s)https:\/\/github\.com\/craigoley\/remudero\/issues\/321(\s|$)/m);
   assert.match(msg, /2 options/);
   assert.match(msg, /recommends "cli-flag"/);
 });
