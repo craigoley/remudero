@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { shapeCommitMessage } from "./commit-message.js";
 
 /**
  * `rmd plan --mode=create|clarify|expand` — the unified Architect PLAN skill (MASTER-PLAN
@@ -353,8 +354,12 @@ export function planCommitMessage(opts: {
   taskId: string;
 }): string {
   const { decision, mode, brief, taskId } = opts;
+  // W1-T136 class: `decision.detail` is LLM free text, so this header could exceed
+  // commitlint's header-max-length (100) — a red REQUIRED check on an already-open PR.
+  // shapeCommitMessage caps it and preserves the overflow in the body.
+  const shapedHeader = shapeCommitMessage(`chore(plan)`, `--mode=${mode} — ${decision.detail}`).header;
   return [
-    `chore(plan): --mode=${mode} — ${decision.detail}`,
+    shapedHeader,
     "",
     brief.length > 0 ? `Brief: ${brief}` : "Brief: (none — whole-plan scope)",
     "",
