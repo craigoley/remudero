@@ -79,8 +79,15 @@
     startedAt/elapsed: derive the in-flight PHASE from the ledger run-state events (run.start + phase markers
     recon/implement/review/fix-rung), armed-awaiting-merge from the PR auto-merge state the batched gateway already
     holds, needs-human from the open escalation, blocked from the derived block. Preserve the board-fix invariant:
-    ZERO extra GitHub calls (the batched gateway serves it). VERIFY StatusProjection's current shape, the ledger
-    phase/run-state events, and how the batched gateway exposes armed/merge state from source first (distrust note).
+    ZERO extra GitHub calls (the batched gateway serves it). DARKNESS IS MARKED, NEVER A SILENT DOWNGRADE (console
+    regression 12:58: a gateway rate-limit failed the fetch and the projection FAIL-OPENED — every task read queued,
+    PR cells empty — the W1-T119/W1-T130 throttled-vs-absent polarity bug in the board): on a gateway-fetch FAILURE
+    the projection KEEPS each task's last-good status marked github_unobservable(since <t>); statuses are MONOTONIC
+    under darkness (never regress credited->queued on an observation failure). LIVENESS BOUND on in-flight: 'running'
+    requires a recent ledger heartbeat (within N minutes) OR an open PR — a dispatched row with no terminal verdict
+    and no recent activity is 'unknown/orphaned' (the W1-T1 crash-era ledger-only orphans), never running. VERIFY
+    StatusProjection's current shape, the ledger phase/run-state events, the gateway's failure signal, and how the
+    batched gateway exposes armed/merge state from source first (distrust note).
   acceptance:
     - claim: "the projection exposes the FULL status taxonomy per task, not just merged/queued"
       proof: "unit test: a projection over a fixture where tasks are in-flight (phase recon/implement/review/fix-rung), blocked, needs-human, armed-awaiting-merge, merged, and queued yields the correct DISTINCT status for EACH; a task collapsed to merged/queued when it is actually in-flight-with-phase FAILS (the falsifier)"
@@ -88,6 +95,10 @@
       proof: "unit test: an in-flight fixture with a run.start + phase events yields startedAt (the run.start ts) and the LATEST phase; elapsed derives from startedAt; a stale/earlier phase is not reported"
     - claim: "the taxonomy is derived with ZERO extra GitHub calls (the batched gateway serves it)"
       proof: "unit test over an injected counting gateway: computing the full-taxonomy projection over N tasks makes O(1) gateway fetches, not per-task — the board-fix (buildBatchedGithub) invariant preserved (the falsifier being O(N) calls)"
+    - claim: "GitHub-unobservable is a MARKED state, never a silent downgrade — a gateway-fetch FAILURE never regresses a credited task to queued (statuses are MONOTONIC under darkness); it keeps the last-good status marked unobservable"
+      proof: "unit test: with the batched gateway's fetch FAILING (throttled/errored — distinguished from genuinely ABSENT per W1-T119/W1-T130's cannot-observe polarity), the projection KEEPS each task's LAST-GOOD status and marks it github_unobservable (since <t>); a merged/credited task does NOT regress to queued on the fetch failure — statuses only move FORWARD across an observation gap. FALSIFIER: a merged/credited task rendered queued during a gateway outage FAILS (the 12:58 fail-open where every task read queued with empty PR cells)"
+    - claim: "in-flight 'running' has a LIVENESS bound — a dispatched row with no terminal verdict AND no recent activity is unknown/orphaned, never running"
+      proof: "unit test: 'running' requires recent ledger activity (a heartbeat within N minutes, N a data threshold) OR an open PR; a dispatched row with no terminal verdict AND no recent activity renders 'unknown/orphaned', NOT running — the W1-T1 crash-era spin-loop orphan rows (dispatched, no terminal verdict, ledger-only join) classify as unknown, not in-flight (the falsifier: an orphaned dispatch rendered as running, the 12:58 W1-T1='running' reading)"
   risk: high
   origin: architect
   plan_refs: ["§7", "§9"]
@@ -247,8 +258,10 @@
     (a) PRE-WARM: build + fetch the batched gateway (buildBatchedGithub) at serve BOOT and refresh it in the
     BACKGROUND on its TTL, so the first request serves from a warm cache and never pays the cold fetch. (b) SKELETON
     + LAST-SNAPSHOT CACHE: render the previous snapshot INSTANTLY, stamped STALE, and swap to fresh when it arrives;
-    a cold start with no cache shows a skeleton, never a hang. (c) BUDGET: <2s first-paint-to-data measured from the
-    REAL browser client at 183-task scale, extending the existing board-fix regression harness. VERIFY
+    a cold start with no cache shows a skeleton, never a hang. (c) PROGRESSIVE LOAD (operator ask): render
+    INCREMENTALLY — the summary + first-screen rows immediately from the snapshot cache, the remainder lazily —
+    NEVER one blocking full-board fetch that shows nothing until all N rows are ready. (d) BUDGET: <2s
+    first-paint-to-data measured from the REAL browser client at 183-task scale, extending the board-fix harness. VERIFY
     buildBatchedGithub's construction/TTL, the serve boot sequence, and the board-fix regression harness from source
     first (distrust this note).
   acceptance:
@@ -258,6 +271,8 @@
       proof: "a test asserts the shell paints a skeleton/last-snapshot immediately (never a blank 'loading…' block) with a STALE stamp, then swaps to fresh data and drops the stamp on the next snapshot; a cold start with no cache shows the skeleton, never a hang"
     - claim: "first-paint-to-data is < 2s measured from the REAL browser client at 183-task scale"
       proof: "extend the board-fix regression harness: a real serve instance over a full 183-task plan, the shell's real fetch client, asserts first-paint-to-data < 2s with the pre-warmed gateway (0 cold fetches on the path); the pre-fix cold-first-request path would exceed it (the falsifier)"
+    - claim: "the board loads PROGRESSIVELY — summary + first-screen rows render immediately from the snapshot cache, the remainder lazily — never one blocking full-board fetch"
+      proof: "a test: first paint renders the summary + the first-screen rows immediately from the snapshot cache, and the remaining rows load lazily (incrementally) AFTER first paint; a single blocking full-board fetch that renders nothing until all N rows are ready FAILS (the falsifier — the operator's progressive-load ask)"
   risk: high
   origin: architect
   plan_refs: ["§7", "§9"]
@@ -361,6 +376,8 @@
       proof: "integration test over an injected poll sequence: a transient fetch failure renders a 'reconnecting' indicator carrying the last-success time (NOT a terminal error banner); the NEXT successful poll CLEARS it and shows fresh data; N consecutive failures escalate to the stale/disconnected state with the data visibly STAMPED stale. FALSIFIERS: an error/reconnecting banner still rendered AFTER a successful poll FAILS; a page showing FRESH data and a failure banner SIMULTANEOUSLY FAILS (the operator-observed 'board fetch failed: TypeError: Failed to fetch' banner that survived successful polls beside live data)"
     - claim: "updates patch ONLY changed nodes — unchanged rows keep DOM IDENTITY across polls/SSE events, and an active text selection survives an update cycle"
       proof: "a test over an update cycle: an UNCHANGED row's DOM node is the SAME node afterward (identity preserved, not re-created), and only the CHANGED node(s) are patched; an active text selection spanning unchanged content SURVIVES a background update. FALSIFIERS: an unchanged row's node REPLACED on refresh FAILS; a background update that DESTROYS the selection FAILS (the operator cannot copy/paste from the live board today — a wholesale innerHTML re-render per poll blows away DOM identity and selection)"
+    - claim: "during a GitHub-gateway outage the board is VISIBLY STAMPED 'GitHub unreachable since <t> — statuses may be stale', never an unmarked board"
+      proof: "integration test: when the projection signals github_unobservable (W1-T155's marked state), the board renders a VISIBLE 'GitHub unreachable since <t> — statuses may be stale' stamp AND retains the last-good snapshot (no task regressed to queued); the NEXT successful gateway read clears the stamp. FALSIFIERS: an UNMARKED board during a gateway outage FAILS; a merged task rendering queued during the outage FAILS (the 12:24->12:58 regression: merged✓+PR links became every-task-queued + empty PR cells, silently)"
   risk: high
   origin: architect
   plan_refs: ["§7", "§7B"]
