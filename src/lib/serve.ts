@@ -259,6 +259,43 @@ export function renderShellHtml(): string {
     display: inline-block; margin: 0.25rem 0 0; padding: 0.15rem 0.5rem; border-radius: 999px;
     font-size: 0.75rem; font-weight: 600; background: var(--status-needs-human); color: #241a02;
   }
+  /* W1-T156: TRUST — the console must never lie about its own liveness. ─────────────────── */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+  #trust-row { margin-top: 0.35rem; }
+  .conn-badge {
+    display: inline-flex; align-items: center; gap: 0.35em; padding: 0.15rem 0.55rem;
+    border-radius: 999px; font-size: 0.75rem; font-weight: 600;
+  }
+  .conn-badge .dot { width: 0.5em; height: 0.5em; border-radius: 50%; background: currentColor; display: inline-block; }
+  .conn-badge[data-state="connected"] { background: rgba(74, 222, 128, 0.15); color: var(--status-merged); }
+  .conn-badge[data-state="connecting"] { background: rgba(163, 172, 194, 0.15); color: var(--text-dim); }
+  .conn-badge[data-state="disconnected"] { background: rgba(255, 107, 107, 0.15); color: var(--status-blocked); }
+  .conn-badge[data-state="connected"] .dot { animation: live-pulse 1.4s ease-in-out infinite; }
+  @keyframes live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .gh-banner {
+    background: rgba(255, 184, 77, 0.12); border: 1px solid var(--status-needs-human);
+    color: var(--status-needs-human); padding: 0.5rem 0.75rem; border-radius: 8px; font-size: 0.85rem;
+  }
+  .live-indicator {
+    width: 0.5em; height: 0.5em; border-radius: 50%; background: var(--status-running);
+    display: inline-block; animation: live-pulse 1.2s ease-in-out infinite;
+  }
+  .live-badge-static {
+    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.03em; color: var(--status-running);
+    border: 1px solid var(--status-running); border-radius: 4px; padding: 0 0.3em;
+  }
+  .row.flash { animation: row-flash 1.1s ease; }
+  @keyframes row-flash { 0% { background: rgba(91, 157, 255, 0.35); } 100% { background: var(--bg-elevated); } }
+  .row.flash-static { box-shadow: inset 3px 0 0 var(--accent); }
+  @media (prefers-reduced-motion: reduce) {
+    .conn-badge[data-state="connected"] .dot { animation: none; }
+    .live-indicator { animation: none; }
+    .row.flash { animation: none; background: var(--bg-elevated); }
+    .skeleton-bar { animation: none; }
+  }
   button {
     font: inherit; background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 0.4rem 0.75rem; cursor: pointer;
@@ -289,7 +326,17 @@ export function renderShellHtml(): string {
   <h1>Remudero — the operator console</h1>
   <p id="top-status" role="status" aria-live="polite">loading…</p>
   <p id="summary" class="counts" aria-live="polite"></p>
+  <div class="btn-row" id="trust-row">
+    <span id="connection-indicator" class="conn-badge" data-state="connecting" role="status" aria-live="polite">
+      <span class="dot" aria-hidden="true"></span> connecting…
+    </span>
+    <span id="freshness" class="counts" aria-live="off"></span>
+  </div>
   <span id="stale-badge" hidden>STALE — showing last known data</span>
+  <div id="gh-unreachable-banner" class="gh-banner" hidden role="status" aria-live="polite"></div>
+  <!-- W1-T156: a single dedicated aria-live region for status-change announcements -- screen
+       reader users get "task flipped" news without a sighted user's visual flash/highlight. -->
+  <div id="aria-announcer" class="sr-only" role="status" aria-live="polite"></div>
 </header>
 
 <section id="now" class="panel-section" aria-label="Now">
@@ -366,6 +413,11 @@ export function renderShellHtml(): string {
   const token = params.get("token") ?? "";
   const authHeaders = { authorization: \`Bearer \${token}\` };
 
+  // W1-T156: read ONCE at load -- prefers-reduced-motion does not need live-tracking mid-
+  // session for this shell's purposes, and a stable value keeps a row's rendered HTML (which
+  // embeds the live-indicator markup) stable across re-renders instead of flapping.
+  const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
   function escapeHtml(text) {
     return String(text ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
@@ -411,6 +463,81 @@ export function renderShellHtml(): string {
     return \` · <a href="\${t.prUrl}" target="_blank" rel="noreferrer">\${label}</a>\`;
   }
 
+  // ── W1-T156 UI+TRUST: an animated per-row "in flight" indicator, replaced by a STATIC badge
+  // (no animation at all -- not merely a slower one) under prefers-reduced-motion. ────────────
+  function liveIndicatorHtml() {
+    return REDUCED_MOTION
+      ? '<span class="live-badge-static" aria-hidden="true">LIVE</span>'
+      : '<span class="live-indicator" aria-hidden="true"></span>';
+  }
+
+  // ── a single aria-live region for status-change announcements (screen-reader parity with
+  // the sighted in-place flash below) ─────────────────────────────────────────────────────────
+  function announce(message) {
+    document.getElementById("aria-announcer").textContent = message;
+  }
+
+  /**
+   * Briefly highlight a row that just changed IN PLACE (an SSE/poll flip) -- never a re-created
+   * node, just a transient visual cue on the SAME element. Under prefers-reduced-motion this is
+   * a static, non-animated marker (a left accent bar) instead of the pulsing background animation.
+   */
+  function flashRow(el) {
+    if (REDUCED_MOTION) {
+      el.classList.add("flash-static");
+      setTimeout(() => el.classList.remove("flash-static"), 1500);
+    } else {
+      el.classList.remove("flash");
+      void el.offsetWidth; // force reflow so re-adding the class restarts the animation
+      el.classList.add("flash");
+      setTimeout(() => el.classList.remove("flash"), 1200);
+    }
+  }
+
+  /**
+   * W1-T156 DOM-STABILITY: reconcile \`list\`'s children against \`rows\` (each a precomputed
+   * {key, html} pair) by KEY, not by wholesale innerHTML replacement. An unchanged row's <li> is
+   * the SAME DOM node afterward (never destroyed/recreated) -- its own attributes (and any DOM
+   * state a caller stamped on it, e.g. an active text selection anchored inside it) survive an
+   * update cycle. Only a row whose rendered html actually differs from last time is touched (and
+   * flashed); only keys no longer present are removed; new keys are inserted in order.
+   */
+  function reconcileRows(list, rows, emptyText) {
+    if (rows.length === 0) {
+      if (list.children.length !== 1 || !list.firstElementChild || !list.firstElementChild.classList.contains("empty")) {
+        list.innerHTML = \`<li class="empty">\${escapeHtml(emptyText)}</li>\`;
+      }
+      return;
+    }
+    const existing = new Map();
+    for (const child of Array.from(list.children)) {
+      if (child.dataset && child.dataset.key !== undefined) existing.set(child.dataset.key, child);
+    }
+    let prev = null;
+    const seen = new Set();
+    for (const row of rows) {
+      seen.add(row.key);
+      let el = existing.get(row.key);
+      const isNew = !el;
+      if (!el) {
+        el = document.createElement("li");
+        el.className = "row";
+        el.dataset.key = row.key;
+      }
+      if (el.dataset.html !== row.html) {
+        el.innerHTML = row.html;
+        el.dataset.html = row.html;
+        if (!isNew) flashRow(el); // a genuine content CHANGE on an already-known row -- not a fresh insert.
+      }
+      const anchor = prev ? prev.nextSibling : list.firstChild;
+      if (anchor !== el) list.insertBefore(el, anchor); // a no-op when el is already positioned correctly.
+      prev = el;
+    }
+    for (const [key, el] of existing) {
+      if (!seen.has(key)) el.remove();
+    }
+  }
+
   // ── W1-T154: first-paint-is-never-cold — a last-snapshot cache (localStorage, survives a
   // reload/relaunch of THIS browser) painted INSTANTLY, before any network round trip, stamped
   // STALE; the static skeleton above already covers the true cold-start case (no cache at all).
@@ -450,104 +577,184 @@ export function renderShellHtml(): string {
     return \`\${total} tasks · \${running} running · \${merged} merged · \${queued} queued\`;
   }
 
-  /** Repaints EVERY section from one composite snapshot — the single function the cache-restore
-   *  path and a completed live refresh both funnel through, so "instant paint from cache" and
-   *  "a live refresh" can never drift into two different rendering codepaths. */
-  function paintSnapshot(snapshot) {
-    const tasks = snapshot.tasks ?? [];
+  // ── W1-T156: the live task-status truth this shell renders from. SSE deltas AND poll
+  // snapshots both funnel through ingestProjection -> tasksById, so every section render below
+  // is driven from ONE source of truth regardless of which transport last updated a task. ─────
+  const tasksById = new Map();
+  let latestFeedbackEntries = [];
+  let latestInboxReady = [];
+  let latestUpNextCards = [];
+  let latestRecentEntries = [];
+
+  /** A projection minus elapsedMs -- elapsed changes every second and is rendered by the
+   *  separate ticking timer below, never as part of a row's diffed/announced content. A row
+   *  whose ONLY difference is elapsedMs must not "flip" (re-render/flash/announce) every tick. */
+  function withoutElapsed(p) {
+    const { elapsedMs, ...rest } = p;
+    return rest;
+  }
+
+  /**
+   * Absorb one StatusProjection (an SSE \`status\` event, or one entry of a GET /v1/status poll)
+   * into \`tasksById\`. Returns whether this is a GENUINE flip vs. the task's prior known state
+   * (ignoring elapsed) -- and, when it is, announces it via the aria-live region. First sighting
+   * of a task (no prior entry) is never announced -- that is a paint, not a flip.
+   */
+  function ingestProjection(p) {
+    const prev = tasksById.get(p.taskId);
+    tasksById.set(p.taskId, p);
+    const changed = !prev || JSON.stringify(withoutElapsed(prev)) !== JSON.stringify(withoutElapsed(p));
+    if (changed && prev) {
+      const key = statusColorKey(p);
+      announce(\`\${p.taskId} is now \${STATUS_LABELS[key]}\${p.phase ? \` (phase \${p.phase})\` : ""}\`);
+    }
+    return changed;
+  }
+
+  // ── TRUST: "GitHub unreachable since <t>" -- DERIVED from the CURRENT snapshot's own
+  // per-task \`indeterminate\`/source:"throttled" signal (W1-T119) every render, never a latched
+  // string a later success forgets to clear (the operator-observed stale-banner-beside-live-data
+  // bug this task's error-lifecycle section names). Clears the instant no task reports it. ─────
+  let githubUnreachableSince = null;
+  function updateGithubBanner(tasks) {
+    const unreachable = tasks.some((t) => t.indeterminate);
+    const banner = document.getElementById("gh-unreachable-banner");
+    if (unreachable) {
+      if (!githubUnreachableSince) githubUnreachableSince = new Date();
+      banner.hidden = false;
+      banner.textContent = \`GitHub unreachable since \${githubUnreachableSince.toISOString()} — statuses may be stale\`;
+    } else {
+      githubUnreachableSince = null;
+      banner.hidden = true;
+      banner.textContent = "";
+    }
+  }
+
+  /** Repaints the task-driven sections (NOW/NEEDS ME/UP NEXT/RECENT/rest) from \`tasksById\` +
+   *  the latest cached feedback/inbox/up-next/recent data -- the ONE function an SSE delta, a
+   *  poll snapshot, AND the cache-restore path all funnel through, so they can never drift into
+   *  different rendering codepaths. Every section render below is keyed/reconciled (never a
+   *  wholesale innerHTML replace), so calling this on every SSE tick costs only the rows that
+   *  actually changed. */
+  function paintFromTasksById() {
+    const tasks = Array.from(tasksById.values());
     const nowIds = renderNow(tasks);
-    const needsMeIds = renderNeedsMe(tasks, snapshot.feedbackEntries ?? [], snapshot.inboxReady ?? []);
-    const upNextIds = renderUpNext(snapshot.upNextCards ?? []);
-    const recentIds = renderRecent(snapshot.recentEntries ?? []);
+    const needsMeIds = renderNeedsMe(tasks, latestFeedbackEntries, latestInboxReady);
+    const upNextIds = renderUpNext(latestUpNextCards);
+    const recentIds = renderRecent(latestRecentEntries);
     renderRest(tasks, new Set([...nowIds, ...needsMeIds, ...upNextIds, ...recentIds]));
-    applyControlStatus(snapshot.controlStatus ?? { paused: false, stopped: false, quietHours: false });
+    updateGithubBanner(tasks);
     document.getElementById("summary").textContent = summaryText(tasks);
   }
 
-  // ── NOW — in-flight runs, live phase + elapsed ──────────────────────────────────────────
+  /** The cache-restore path (W1-T154): ingest the cached snapshot's tasks/side-data and paint
+   *  through the SAME \`paintFromTasksById\` a live update uses. */
+  function paintSnapshot(snapshot) {
+    for (const t of snapshot.tasks ?? []) ingestProjection(t);
+    latestFeedbackEntries = snapshot.feedbackEntries ?? [];
+    latestInboxReady = snapshot.inboxReady ?? [];
+    latestUpNextCards = snapshot.upNextCards ?? [];
+    latestRecentEntries = snapshot.recentEntries ?? [];
+    paintFromTasksById();
+    applyControlStatus(snapshot.controlStatus ?? { paused: false, stopped: false, quietHours: false });
+  }
+
+  // ── NOW — in-flight runs, live phase + LIVE-TICKING elapsed (W1-T156) ───────────────────
+  function nowRowHtml(t) {
+    const key = statusColorKey(t);
+    return (
+      \`<span class="task-id">\${escapeHtml(t.taskId)}</span>\${statusBadge(key)}\${liveIndicatorHtml()}\` +
+      \`<span class="detail">phase: \${escapeHtml(t.phase)} · elapsed: <span class="elapsed" data-started="\${escapeHtml(t.startedAt ?? "")}">…</span>\${t.armedAwaitingMerge ? " · auto-merge armed" : ""}</span>\`
+    );
+  }
   function renderNow(tasks) {
     const inFlight = tasks.filter((t) => t.phase);
-    const list = document.getElementById("now-list");
-    list.innerHTML = inFlight.length
-      ? inFlight
-          .map((t) => {
-            const key = statusColorKey(t);
-            return \`<li class="row"><span class="task-id">\${escapeHtml(t.taskId)}</span>\${statusBadge(key)}<span class="detail">phase: \${escapeHtml(t.phase)} · elapsed: \${formatElapsed(t.elapsedMs)}\${t.armedAwaitingMerge ? " · auto-merge armed" : ""}</span></li>\`;
-          })
-          .join("")
-      : '<li class="empty">nothing in flight</li>';
+    const rows = inFlight.map((t) => ({ key: t.taskId, html: nowRowHtml(t) }));
+    reconcileRows(document.getElementById("now-list"), rows, "nothing in flight");
+    tickElapsed(); // paint newly (re)rendered elapsed spans immediately, not after the next 1s tick
     return new Set(inFlight.map((t) => t.taskId));
   }
 
+  /** Every \`.elapsed[data-started]\` span, wherever it lives, ticks off wall-clock time -- this
+   *  runs independently of any row re-render, so elapsed advancing every second never counts as
+   *  a "flip" (no flash, no aria announcement, no DOM node touched beyond this one text node). */
+  function tickElapsed() {
+    const now = Date.now();
+    document.querySelectorAll(".elapsed[data-started]").forEach((el) => {
+      const started = el.getAttribute("data-started");
+      el.textContent = started ? formatElapsed(now - Date.parse(started)) : "";
+    });
+  }
+
   // ── NEEDS ME — escalations + inbox, one-line ask + action ───────────────────────────────
+  function needsMeTaskRowHtml(t) {
+    return (
+      \`\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(t.taskId)}</span><span class="detail">needs human attention (escalated)</span>\` +
+      \`<form class="inline-action needs-me-approve" data-task-id="\${escapeHtml(t.taskId)}">\` +
+      \`<label for="issue-\${escapeHtml(t.taskId)}">Issue URL</label>\` +
+      \`<input id="issue-\${escapeHtml(t.taskId)}" type="url" placeholder="https://github.com/.../issues/…" required />\` +
+      \`<button type="submit">Approve</button></form>\`
+    );
+  }
+  function needsMeGrillHtml(e) {
+    return (
+      \`\${statusBadge("needs-human")}<span class="task-id">feedback#\${escapeHtml(e.id)}</span><span class="detail">asks: \${escapeHtml(e.raw)}</span>\` +
+      \`<form class="inline-action needs-me-answer" data-reply-to="\${escapeHtml(e.id)}">\` +
+      \`<label for="answer-\${escapeHtml(e.id)}">Answer</label>\` +
+      \`<input id="answer-\${escapeHtml(e.id)}" type="text" required />\` +
+      \`<button type="submit">Answer</button></form>\`
+    );
+  }
+  function needsMeProposedHtml(e) {
+    return (
+      \`\${statusBadge("needs-human")}<span class="task-id">feedback#\${escapeHtml(e.id)}</span><span class="detail">proposes: \${escapeHtml(e.raw)}</span>\` +
+      \`<span class="btn-row"><button type="button" class="needs-me-decide" data-id="\${escapeHtml(e.id)}" data-decision="accept">Accept</button>\` +
+      \`<button type="button" class="needs-me-decide" data-id="\${escapeHtml(e.id)}" data-decision="reject">Reject</button></span>\`
+    );
+  }
+  function needsMeInboxHtml(p) {
+    return (
+      \`\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(p.proposalId)}</span><span class="detail">READY to ratify — \${escapeHtml(p.summary)}</span>\` +
+      \`<span class="detail">run <code>rmd approve \${escapeHtml(p.proposalId)}</code> or <code>rmd reframe \${escapeHtml(p.proposalId)} --feedback "…"</code></span>\`
+    );
+  }
   function renderNeedsMe(tasks, feedbackEntries, inboxReady) {
     const rows = [];
     const shown = new Set();
     for (const t of tasks) {
       if (!t.needsHuman) continue;
       shown.add(t.taskId);
-      rows.push(
-        \`<li class="row">\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(t.taskId)}</span><span class="detail">needs human attention (escalated)</span>\` +
-          \`<form class="inline-action needs-me-approve" data-task-id="\${escapeHtml(t.taskId)}">\` +
-          \`<label for="issue-\${escapeHtml(t.taskId)}">Issue URL</label>\` +
-          \`<input id="issue-\${escapeHtml(t.taskId)}" type="url" placeholder="https://github.com/.../issues/…" required />\` +
-          \`<button type="submit">Approve</button></form></li>\`,
-      );
+      rows.push({ key: \`task:\${t.taskId}\`, html: needsMeTaskRowHtml(t) });
     }
     for (const e of feedbackEntries ?? []) {
-      if (e.status === "grilling") {
-        rows.push(
-          \`<li class="row">\${statusBadge("needs-human")}<span class="task-id">feedback#\${escapeHtml(e.id)}</span><span class="detail">asks: \${escapeHtml(e.raw)}</span>\` +
-            \`<form class="inline-action needs-me-answer" data-reply-to="\${escapeHtml(e.id)}">\` +
-            \`<label for="answer-\${escapeHtml(e.id)}">Answer</label>\` +
-            \`<input id="answer-\${escapeHtml(e.id)}" type="text" required />\` +
-            \`<button type="submit">Answer</button></form></li>\`,
-        );
-      } else if (e.status === "proposed") {
-        rows.push(
-          \`<li class="row">\${statusBadge("needs-human")}<span class="task-id">feedback#\${escapeHtml(e.id)}</span><span class="detail">proposes: \${escapeHtml(e.raw)}</span>\` +
-            \`<span class="btn-row"><button type="button" class="needs-me-decide" data-id="\${escapeHtml(e.id)}" data-decision="accept">Accept</button>\` +
-            \`<button type="button" class="needs-me-decide" data-id="\${escapeHtml(e.id)}" data-decision="reject">Reject</button></span></li>\`,
-        );
-      }
+      if (e.status === "grilling") rows.push({ key: \`fbg:\${e.id}\`, html: needsMeGrillHtml(e) });
+      else if (e.status === "proposed") rows.push({ key: \`fbp:\${e.id}\`, html: needsMeProposedHtml(e) });
     }
-    for (const p of inboxReady ?? []) {
-      rows.push(
-        \`<li class="row">\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(p.proposalId)}</span><span class="detail">READY to ratify — \${escapeHtml(p.summary)}</span>\` +
-          \`<span class="detail">run <code>rmd approve \${escapeHtml(p.proposalId)}</code> or <code>rmd reframe \${escapeHtml(p.proposalId)} --feedback "…"</code></span></li>\`,
-      );
-    }
-    document.getElementById("needs-me-list").innerHTML = rows.length ? rows.join("") : '<li class="empty">nothing needs you right now</li>';
+    for (const p of inboxReady ?? []) rows.push({ key: \`inbox:\${p.proposalId}\`, html: needsMeInboxHtml(p) });
+    reconcileRows(document.getElementById("needs-me-list"), rows, "nothing needs you right now");
     return shown;
   }
 
   // ── UP NEXT — the drain head, first ~5 runnable (W1-T140 preview/curation) ──────────────
   function renderUpNext(cards) {
-    const list = document.getElementById("up-next-list");
     const head = (cards ?? []).slice(0, 5);
-    list.innerHTML = head.length
-      ? head
-          .map(
-            (c) =>
-              \`<li class="row">\${statusBadge("queued")}<span class="task-id">\${escapeHtml(c.id)}</span><span class="detail">\${escapeHtml(c.title)} · \${(c.dependsOn ?? []).length} dep(s)</span></li>\`,
-          )
-          .join("")
-      : '<li class="empty">drain queue is empty</li>';
+    const rows = head.map((c) => ({
+      key: c.id,
+      html: \`\${statusBadge("queued")}<span class="task-id">\${escapeHtml(c.id)}</span><span class="detail">\${escapeHtml(c.title)} · \${(c.dependsOn ?? []).length} dep(s)</span>\`,
+    }));
+    reconcileRows(document.getElementById("up-next-list"), rows, "drain queue is empty");
     return new Set(head.map((c) => c.id));
   }
 
   // ── RECENT — last ~10 merges/blocks, PR-linked ───────────────────────────────────────────
   function renderRecent(entries) {
-    const list = document.getElementById("recent-list");
-    list.innerHTML = (entries ?? []).length
-      ? entries
-          .map(
-            (e) =>
-              \`<li class="row">\${statusBadge(e.outcome === "blocked" ? "blocked" : "merged")}<span class="task-id">\${escapeHtml(e.taskId)}</span><span class="detail">\${escapeHtml(e.outcome)}\${prLink(e)}</span></li>\`,
-          )
-          .join("")
-      : '<li class="empty">no recent outcomes yet</li>';
-    return new Set((entries ?? []).map((e) => e.taskId));
+    const list = entries ?? [];
+    const rows = list.map((e) => ({
+      key: e.taskId,
+      html: \`\${statusBadge(e.outcome === "blocked" ? "blocked" : "merged")}<span class="task-id">\${escapeHtml(e.taskId)}</span><span class="detail">\${escapeHtml(e.outcome)}\${prLink(e)}</span>\`,
+    }));
+    reconcileRows(document.getElementById("recent-list"), rows, "no recent outcomes yet");
+    return new Set(list.map((e) => e.taskId));
   }
 
   // ── everything else — COLLAPSED counts + expand + filter/search ─────────────────────────
@@ -555,13 +762,10 @@ export function renderShellHtml(): string {
   function renderRestList(filterText) {
     const needle = (filterText ?? "").trim().toLowerCase();
     const filtered = needle ? restTasks.filter((t) => t.taskId.toLowerCase().includes(needle)) : restTasks;
-    const list = document.getElementById("rest-list");
-    list.innerHTML = filtered.length
-      ? filtered
-          .slice(0, 200)
-          .map((t) => \`<li class="row">\${statusBadge(statusColorKey(t))}<span class="task-id">\${escapeHtml(t.taskId)}</span></li>\`)
-          .join("")
-      : '<li class="empty">no matching tasks</li>';
+    const rows = filtered
+      .slice(0, 200)
+      .map((t) => ({ key: t.taskId, html: \`\${statusBadge(statusColorKey(t))}<span class="task-id">\${escapeHtml(t.taskId)}</span>\` }));
+    reconcileRows(document.getElementById("rest-list"), rows, "no matching tasks");
   }
   function renderRest(tasks, shownIds) {
     restTasks = tasks.filter((t) => !shownIds.has(t.taskId));
@@ -698,10 +902,56 @@ export function renderShellHtml(): string {
     });
   });
 
-  // ── the poll loop: one refresh drives NOW/NEEDS ME/UP NEXT/RECENT/rest + fleet-control
-  // read-back. v0: polls (same rationale the original shell documented for GET /v1/status —
-  // native EventSource cannot carry an Authorization header); @remudero/api-client's
-  // subscribeStatus already implements real SSE consumption for a client that wants it.
+  // ── W1-T156 TRUST: freshness stamp + the poll's own error-state LIFECYCLE. A fetch failure is
+  // TRANSIENT ("reconnecting…", the last-success time named) until \${STALE_ESCALATE_AFTER}
+  // CONSECUTIVE failures — only then does the board escalate to the stale/disconnected state
+  // (reusing the SAME stale-badge/data-stale mechanism W1-T154's cache-restore already
+  // established, so "data may be stale" has exactly ONE visual vocabulary regardless of WHICH
+  // staleness caused it). The banner is DERIVED from poll state on every call, never a latched
+  // string a later success forgets to clear — the falsifier this fixes: an operator-observed
+  // "board fetch failed" banner that survived subsequent SUCCESSFUL polls beside live data. ────
+  const STALE_ESCALATE_AFTER = 3;
+  let pollFailures = 0;
+  let lastSuccessAt = null;
+  let lastLiveAt = null; // last successful data of ANY kind -- a poll success OR an SSE event.
+
+  function touchFreshness() {
+    lastLiveAt = Date.now();
+  }
+  function tickFreshness() {
+    const el = document.getElementById("freshness");
+    if (!lastLiveAt) {
+      el.textContent = "";
+      return;
+    }
+    const secs = Math.max(0, Math.round((Date.now() - lastLiveAt) / 1000));
+    el.textContent = secs < 2 ? "updated just now" : \`updated \${secs}s ago\`;
+  }
+
+  function handlePollFailure() {
+    pollFailures += 1;
+    const topStatus = document.getElementById("top-status");
+    if (pollFailures < STALE_ESCALATE_AFTER) {
+      // TRANSIENT: last-known-good data stays on screen, UNMARKED -- only the top-status line
+      // itself says "reconnecting", carrying the last-success time. Never a persistent error
+      // banner; the very next successful poll below clears this unconditionally.
+      topStatus.textContent = \`reconnecting… (last success \${lastSuccessAt ? \`\${formatElapsed(Date.now() - lastSuccessAt)} ago\` : "never"})\`;
+      topStatus.dataset.pollState = "reconnecting";
+    } else {
+      // ESCALATED: N consecutive failures -- the board itself is now visibly stamped stale,
+      // never silently old (reuses the cache-restore path's own stale-badge mechanism).
+      topStatus.dataset.pollState = "stale";
+      markStale(lastSuccessAt ? new Date(lastSuccessAt).toISOString() : undefined);
+    }
+  }
+
+  // ── the poll loop: the fallback/resync transport, driving UP NEXT/RECENT/feedback/inbox/
+  // fleet-control read-back (none of which the SSE stream below carries) plus a periodic
+  // full-snapshot resync of the task-status truth. W1-T156 DELTA-DRIVEN: task-status ROW
+  // updates are primarily driven by the SSE subscription below (subscribeStatusStream), which
+  // patches ONE row in place per flip via the SAME ingestProjection/paintFromTasksById this poll
+  // also funnels through -- so a poll landing on already-current data is a cheap no-op
+  // (reconcileRows content-diffs), never a wholesale re-render.
   //
   // W1-T154 PROGRESSIVE LOAD: /v1/status is fetched ALONE first, and NOW + the summary line
   // render off it IMMEDIATELY — never gated behind the other five endpoints below. A single
@@ -715,13 +965,15 @@ export function renderShellHtml(): string {
     try {
       statusSnap = await getJson("/v1/status");
     } catch (e) {
-      document.getElementById("top-status").textContent = \`refresh failed: \${e}\`;
+      handlePollFailure();
       return;
     }
+    pollFailures = 0;
+    lastSuccessAt = Date.now();
+    touchFreshness();
     const tasks = statusSnap.tasks ?? [];
-    const nowIds = renderNow(tasks);
-    renderNeedsMe(tasks, [], []); // tasks-only pass now; the full pass (below) adds feedback/inbox rows
-    document.getElementById("summary").textContent = summaryText(tasks);
+    for (const t of tasks) ingestProjection(t);
+    paintFromTasksById();
 
     try {
       const [recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus] = await Promise.all([
@@ -731,26 +983,114 @@ export function renderShellHtml(): string {
         getJson("/v1/inbox").catch(() => ({ ready: [] })),
         getJson("/v1/control/status").catch(() => ({ paused: false, stopped: false, quietHours: false })),
       ]);
-      const needsMeIds = renderNeedsMe(tasks, feedbackSnap.entries, inboxSnap.ready);
-      const upNextIds = renderUpNext(upNextSnap.cards);
-      const recentIds = renderRecent(recentSnap.entries);
-      renderRest(tasks, new Set([...nowIds, ...needsMeIds, ...upNextIds, ...recentIds]));
+      latestFeedbackEntries = feedbackSnap.entries ?? [];
+      latestInboxReady = inboxSnap.ready ?? [];
+      latestUpNextCards = upNextSnap.cards ?? [];
+      latestRecentEntries = recentSnap.entries ?? [];
+      paintFromTasksById(); // re-run NOW/NEEDS ME/rest now that feedback/inbox/up-next/recent are current
       applyControlStatus(controlStatus);
       document.getElementById("top-status").textContent = \`updated \${statusSnap.generated_at ?? new Date().toISOString()}\`;
-      clearStale(); // a completed live refresh always supersedes whatever the cache painted
+      document.getElementById("top-status").dataset.pollState = "ok";
+      clearStale(); // a completed live refresh always supersedes whatever the cache/failure-escalation painted
 
       writeSnapshotCache({
         generated_at: statusSnap.generated_at,
         tasks,
-        recentEntries: recentSnap.entries,
-        upNextCards: upNextSnap.cards,
-        feedbackEntries: feedbackSnap.entries,
-        inboxReady: inboxSnap.ready,
+        recentEntries: latestRecentEntries,
+        upNextCards: latestUpNextCards,
+        feedbackEntries: latestFeedbackEntries,
+        inboxReady: latestInboxReady,
         controlStatus,
       });
     } catch (e) {
-      document.getElementById("top-status").textContent = \`refresh failed: \${e}\`;
+      handlePollFailure();
     }
+  }
+
+  // ── W1-T156 DELTA-DRIVEN SSE: consume GET /v1/status/stream via \`fetch\`, NOT the browser's
+  // native EventSource -- EventSource cannot set an Authorization header, and this stream is
+  // bearer-scoped exactly like every other /v1/* route (no query-token fallback; service.ts's
+  // header only). Mirrors packages/api-client's own \`subscribeStatus\` byte-stream SSE parser
+  // (the SAME \`event:\`/\`data:\` framing service.ts's openSse sends) rather than re-implementing
+  // a second parser — this shell has no bundler to import that package from, so the same
+  // technique is inlined here. Auto-reconnects with a short backoff on drop, and reports its
+  // OWN connection lifecycle via \`onState\` ("connecting" | "connected" | "disconnected") so the
+  // console can say so — never silently keep claiming "live" once the stream is gone. */
+  function parseSseFrame(frame) {
+    let event;
+    const dataLines = [];
+    for (const line of frame.split("\\n")) {
+      if (line.startsWith("event:")) event = line.slice("event:".length).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice("data:".length).trim());
+    }
+    if (!event || dataLines.length === 0) return undefined;
+    return { event, data: dataLines.join("\\n") };
+  }
+
+  function subscribeStatusStream(onEvent, onState) {
+    let stopped = false;
+    let controller;
+
+    async function connectOnce() {
+      controller = new AbortController();
+      onState("connecting");
+      let res;
+      try {
+        res = await fetch("/v1/status/stream", { headers: authHeaders, signal: controller.signal });
+      } catch {
+        if (!stopped) onState("disconnected");
+        return;
+      }
+      if (!res.ok || !res.body) {
+        onState("disconnected");
+        return;
+      }
+      onState("connected");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let sep;
+          while ((sep = buffer.indexOf("\\n\\n")) !== -1) {
+            const frame = buffer.slice(0, sep);
+            buffer = buffer.slice(sep + 2);
+            const parsed = parseSseFrame(frame);
+            if (parsed && parsed.event === "status") onEvent(JSON.parse(parsed.data));
+          }
+        }
+      } catch {
+        // aborted (unsubscribe) or the connection dropped -- either way, fall through below.
+      }
+      if (!stopped) onState("disconnected");
+    }
+
+    (async function loop() {
+      while (!stopped) {
+        await connectOnce();
+        if (stopped) break;
+        await new Promise((resolve) => setTimeout(resolve, 1500)); // brief backoff before reconnecting
+      }
+    })();
+
+    return () => {
+      stopped = true;
+      controller?.abort();
+    };
+  }
+
+  function setConnectionState(state) {
+    const el = document.getElementById("connection-indicator");
+    el.dataset.state = state;
+    el.innerHTML =
+      state === "connected"
+        ? '<span class="dot" aria-hidden="true"></span> live'
+        : state === "connecting"
+          ? '<span class="dot" aria-hidden="true"></span> connecting…'
+          : '<span class="dot" aria-hidden="true"></span> disconnected — reconnecting…';
   }
 
   // FIRST PAINT, before any network round trip completes (W1-T154): a last-snapshot cache from
@@ -763,6 +1103,16 @@ export function renderShellHtml(): string {
   }
   refreshAll();
   setInterval(refreshAll, 3000);
+  setInterval(tickElapsed, 1000);
+  setInterval(tickFreshness, 1000);
+  subscribeStatusStream(
+    (projection) => {
+      ingestProjection(projection);
+      paintFromTasksById();
+      touchFreshness();
+    },
+    (state) => setConnectionState(state),
+  );
 </script>
 </body>
 </html>
