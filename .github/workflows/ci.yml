@@ -452,3 +452,29 @@ jobs:
         run: npm ci
       - name: api-client drift check (committed client must match a fresh regeneration from openapi/daemon.yaml)
         run: npm run --silent api-client:check
+
+  no-hand-rolled-fetch:
+    # §7A "No client may hand-roll a `fetch` to the daemon -- a grep gate fails the build" (W3-T1c).
+    # scripts/no-hand-rolled-fetch-check.mjs walks `apps` (the future dashboard/desktop/mobile
+    # shells, MASTER-PLAN §7) and `packages` (excluding `packages/api-client` itself, the one
+    # sanctioned place a future runtime HTTP layer for the generated client may live) and fails on
+    # any direct `fetch(`/`axios(...)`/`new XMLHttpRequest` call -- every client must talk to the
+    # daemon only via `@remudero/api-client`. See test/no-hand-rolled-fetch-check.test.ts for the
+    # falsifier proof this is ACTIVE (a planted fetch/axios/XHR call in a fixture client directory
+    # is REJECTED, a clean one is ACCEPTED, and packages/api-client is correctly excluded), driving
+    # the real CLI as a subprocess.
+    #
+    # Runs UNCONDITIONALLY on every PR (no path filter, no job `if:`) -- same fail-closed shape as
+    # `claims`/`jscpd-gate`/`api-client-drift` above: a path-filtered REQUIRED check that can go
+    # silently absent is the synthwatch #102 deadlock class ci-gate.yml exists to avoid.
+    name: no-hand-rolled-fetch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: No-hand-rolled-fetch grep gate (apps/**, packages/** except packages/api-client)
+        run: npm run --silent no-hand-rolled-fetch:check
