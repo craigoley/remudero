@@ -1,0 +1,85 @@
+- id: W1-T186
+  title: "AN ESCALATION MUST NAME THE OBSERVED BLOCKER, NOT AN INFERRED SYMPTOM — the emitter carries mergeable/mergeable_state, the failing check NAME + sha (or 'zero check runs'), and distinguishes CONFLICTED / PENDING / FAILING / ABSENT as separate named states"
+  repo: remudero
+  depends_on: [W1-T77, W1-T176]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "THREE ESCALATIONS IN ONE EVENING, each naming a symptom the operator then had to diagnose by hand,
+    and in every case the ACTUAL blocker was something the escalation never mentioned.
+      #406 (W1-T157/PR #405) — 'not positively mergeable — checks pending, review none — escalating', offered as
+        a choice between re-dispatch-with-constraint and revise-spec. The real blocker was a commit MESSAGE:
+        header 124 chars and an upper-case subject. Neither option addressed it, and the PR's code was green.
+      #420 (W1-T177/PR #417) — 'blocked_ci fix rung exhausted (2 strikes, checks never went green)'. The failing
+        commit was NOT in the PR: its own three commits measure 92/90/76 chars. A 101-char squash on MAIN
+        (0e63429) was in range, because commitlint lints base..head. The PR was red for a defect it did not
+        contain, and nothing in the escalation could have revealed that.
+      #412/#413 (W1-T158/PR #410) — reported 'blocked_ci' and 'checks pending, review none'. The PR was
+        `mergeable: false, mergeable_state: \"dirty\"` — CONFLICTED. A conflicted PR registers ZERO check runs, so
+        there was no failing CI and no pending CI. There were no checks at all, BY CONSTRUCTION.
+    THE STRUCTURAL CAUSE, verified from source: OpenPrView (sweep.ts:151-171) carries prNumber, prUrl, taskId,
+    reviewState, checksState, unmetCriteria, priorStrikes, supersededBy, lastActivityAt, headSha and
+    autoMergeArmed — and NO mergeable / mergeableState field of any kind. The emitter therefore CANNOT name a
+    conflict: it is not among the facts it is given. The terminal disposition rule (sweep.ts:487-494) renders
+    `not positively mergeable — checks ${pr.checksState}, review ${pr.reviewState}` from the only two state
+    fields it has, which is why every conflicted PR reads as a checks/review problem.
+    COMPOUNDING IT, `checksState: \"none\"` (sweep.ts:159) is overloaded: zero check runs because the PR is
+    CONFLICTED and zero check runs because CI has not started yet are the same value, though they demand opposite
+    actions — resolve a conflict versus wait. That conflation is why #413 read 'pending' for a PR that would
+    never receive a check until someone merged main into it.
+    THIS IS THE THIRD FACE OF ONE FAMILY, and the kinship is worth stating precisely: W1-T176 fixed WHEN to
+    escalate (an absent required check is decidable, not ambiguous). W1-T177 fixed WHETHER to spend (do not
+    strike or escalate against a terminal PR). This fixes WHAT THE ESCALATION SAYS. All three are the rung
+    reasoning from an impoverished view of observed state — but the first two change behaviour, and this one
+    changes the message a human reads at 2am. Tonight it cost three separate investigations, each ending in a
+    one-line fix that the escalation could have named outright."
+  design: |
+    EXTEND THE OBSERVED VIEW FIRST — the message cannot improve while the facts are missing. Add mergeable and
+    mergeableState to OpenPrView (sweep.ts:151) and populate them from the same `gh` read that already builds it,
+    so this costs no extra round trip. VERIFY the current fetch site from source before adding a call.
+    SPLIT THE OVERLOADED STATE. `checksState: \"none\"` must stop meaning two things. Distinguish, as separate
+    named states:
+      CONFLICTED — mergeable false / mergeable_state dirty. Zero checks is EXPECTED here, not a signal. The
+        action is 'merge main into the branch'.
+      ABSENT — a REQUIRED context with zero check runs on a mergeable PR (the W1-T176 case: post the check).
+      PENDING — checks exist and are running. The action is wait, not escalate.
+      FAILING — a check ran and concluded failure. The action names the check.
+    NAME THE FAILING CHECK AND ITS SHA. 'checks red' is not actionable; `commitlint failed on <sha>` is. And
+    because commitlint lints the whole base..head RANGE, the failing commit may not belong to the PR at all —
+    when the emitter can tell, it must say so, since '#420 was red for a commit on main' is the difference
+    between a one-line fix and an investigation.
+    FALSIFIER-SHAPED CONSTRAINT ON THE PROSE: an escalation about a CONFLICTED PR must not contain the word 'CI'
+    or the token 'blocked_ci' anywhere, because both are false. This is testable on the rendered string and is a
+    stronger guarantee than 'the message should be clearer'.
+    DO NOT WIDEN THIS INTO AUTO-REMEDIATION. Naming the blocker is this task's whole scope. Whether the fleet
+    should auto-merge-main-into-a-conflicted-branch is a separate decision with its own blast radius (it rewrites
+    someone's branch) and must not be smuggled in behind a diagnostics change.
+  acceptance:
+    - claim: "an escalation on a CONFLICTED PR names the conflict and never says CI"
+      proof: "unit test over the escalation renderer: given an OpenPrView with mergeable false / mergeableState dirty, the rendered message names the conflicted state and the merge-main remedy, and the string contains neither 'CI' nor 'blocked_ci'. FALSIFIERS: #412 rendered 'W1-T158 blocked (blocked_ci)' and #413 rendered 'checks pending, review none' for PR #410, which was mergeable false / dirty with ZERO check runs — there was no failing CI and no pending CI to report"
+    - claim: "every escalation carries the observed mergeable state — omitting it fails"
+      proof: "unit test: the rendered escalation for each disposition includes the mergeable/mergeableState it observed. FALSIFIER: OpenPrView (sweep.ts:151-171) today has no mergeable field at all, so the emitter is structurally unable to report it — which is why all three of tonight's escalations omitted the single fact that would have diagnosed two of them"
+    - claim: "CONFLICTED, ABSENT, PENDING and FAILING are distinct named states — zero-checks is no longer overloaded"
+      proof: "unit test: a conflicted PR with zero checks, a mergeable PR with a required context having zero check runs, a PR with running checks, and a PR with a concluded failure each yield a DIFFERENT named state and a different recommended action. FALSIFIER: checksState 'none' (sweep.ts:159) today covers both conflicted-so-no-checks and not-started-yet, which demand opposite actions — resolve versus wait"
+    - claim: "a FAILING escalation names the check and the sha, and says so when the failing commit is not the PR's own"
+      proof: "unit test: a failing-check escalation renders the check NAME and the head sha, and when the offending commit is outside the PR's own commit range it says so. FALSIFIER: #420 reported 'checks never went green' for PR #417, whose own commits measure 92/90/76 chars, while the 101-char header that actually failed commitlint was 0e63429 on MAIN — the escalation could not have revealed this and the operator had to read the CI log to find it"
+    - claim: "the extended view costs no additional GitHub round trip"
+      proof: "unit/structural test: mergeable and mergeableState are populated from the SAME fetch that already builds OpenPrView, with no second gh call added. FALSIFIER: a per-PR extra fetch, which regresses the O(1)-per-sweep budget the batched gateway exists to protect and would make a diagnostics improvement cost throughput"
+  risk: medium
+  origin: architect
+  plan_refs: ["§4", "§7B"]
+  files: [src/lib/sweep.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: "THIRD FACE of the impoverished-observed-state family, and deliberately the narrowest: W1-T176 fixed WHEN
+    to escalate, W1-T177 fixed WHETHER to spend, this fixes WHAT THE ESCALATION SAYS. The first two change fleet
+    behaviour; this one changes the message a human reads, which is why it is risk:medium rather than high.
+    Three fixtures, all 2026-07-20, each costing a separate hand investigation that ended in a one-line fix:
+    #406 (a commit-message failure offered as a spec question), #420 (a range-lint red from a commit on MAIN,
+    reported as the PR's own CI never going green), and #412/#413 (a conflicted PR with zero checks by
+    construction, reported as blocked_ci and checks-pending).
+    NOT auto-remediation. Merging main into a conflicted branch rewrites someone's work and is a separate
+    decision with its own blast radius — this task names the blocker and stops there.
+    FILED as a tasks.d shard per instruction. NOTE the consequence: loadPlan appends shards AFTER every
+    tasks.yaml task and the drain scans in file order, so this sits at the BOTTOM of the queue until promoted."
