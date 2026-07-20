@@ -1,5 +1,6 @@
 import { readLedgerLines } from "./status.js";
 import { notify, type NotifyDeps } from "./notify.js";
+import { renderAlertsSummary, type AlertsPollSummary } from "./ops.js";
 
 /**
  * Daily digest (W1-T8 title; assembled here, delivered here, SCHEDULED by the
@@ -25,6 +26,13 @@ export interface DigestSummary {
   blocked: Array<{ taskId: string; verdict: string; prUrl?: string }>;
   escalations: Array<{ taskId: string; class: string; issueUrl: string }>;
   costUsd: number;
+  /**
+   * The LATEST `ops.alerts_polled` snapshot inside the window (W1-T55, lib/ops.ts)
+   * — a snapshot of OPEN alert counts+ages, not an additive event count like
+   * `merged`/`blocked`, so "latest wins" rather than summing repeated polls.
+   * Undefined when `rmd ops` never polled inside this window.
+   */
+  alerts?: AlertsPollSummary;
 }
 
 /** Reduce the day's ledger lines to the counts a digest reports. Pure over its input. */
@@ -43,6 +51,9 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
     if (l.step === "escalation.issue_opened" && typeof l.task_id === "string" && typeof l.issue_url === "string") {
       summary.escalations.push({ taskId: l.task_id, class: String(l.class ?? "?"), issueUrl: l.issue_url });
     }
+    if (l.step === "ops.alerts_polled" && l.alerts && typeof l.alerts === "object") {
+      summary.alerts = l.alerts as AlertsPollSummary;
+    }
   }
   return summary;
 }
@@ -58,6 +69,7 @@ export function renderDigest(s: DigestSummary): string {
     `escalations: ${
       s.escalations.length ? s.escalations.map((e) => `[${e.class}] ${e.taskId} — ${e.issueUrl}`).join(", ") : "(none)"
     }`,
+    `alerts: ${s.alerts ? renderAlertsSummary(s.alerts) : "(no poll this window)"}`,
     `notional cost: $${s.costUsd.toFixed(2)}`,
   ];
   return lines.join("\n");
