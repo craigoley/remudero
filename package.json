@@ -27,7 +27,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --test --import tsx \"test/**/*.test.ts\"",
+    "test": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts \"test/**/*.test.ts\"",
     "lint-plan": "tsx src/run-task.ts lint-plan",
     "depcruise": "depcruise src --config .dependency-cruiser.cjs",
     "jscpd": "jscpd src --config .jscpd.json",
