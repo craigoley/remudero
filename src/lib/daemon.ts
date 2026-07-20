@@ -99,6 +99,16 @@ export interface DaemonDeps {
    * `escalateBlock` below.
    */
   onCircuitBreak?: (task: Task) => void;
+  /**
+   * W1-T119: true when a task's own GitHub read is INDETERMINATE (a genuine
+   * read failure — rate-limited, network error, auth failure — rather than a
+   * clean "no evidence"), re-derived from the SAME projection `refreshMerged`
+   * just built. Optional — omitted, dispatch behaves exactly as before this
+   * guard existed.
+   */
+  isIndeterminate?: (taskId: string) => boolean;
+  /** Called once per task excluded because its own read is indeterminate. */
+  onIndeterminate?: (task: Task) => void;
   /** Run ONE task through the existing run-task path (default = runTask). */
   runOne: (taskId: string) => Promise<RunResult>;
   /** Read current /usage; `undefined` ⇒ unavailable (headroom check is skipped). */
@@ -273,6 +283,14 @@ export async function runDaemon(
       // IN-FLIGHT (W1-T80): a legible skip on console + ledger; the daemon
       // keeps polling rather than treating an open PR as a block.
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
+      isIndeterminate: deps.isIndeterminate,
+      // INDETERMINATE (W1-T119): a legible ledger line every tick it is
+      // consulted — the daemon keeps polling everything else rather than
+      // halting, same discipline as `dispatch.skipped`/`dispatch.circuit_broken`.
+      onIndeterminate: (t) => {
+        log("dispatch.indeterminate", { task: t.id });
+        deps.onIndeterminate?.(t);
+      },
       isCircuitTripped: deps.isCircuitTripped,
       // CIRCUIT BREAKER (P29(ii)): a legible ledger line every tick it is
       // consulted — but the caller's own escalation hook fires AT MOST ONCE

@@ -134,6 +134,18 @@ export interface StatusProjection {
    * the PR is actually armed.
    */
   armedAwaitingMerge?: true;
+  /**
+   * True when this projection is INDETERMINATE (W1-T119): `source: "throttled"`,
+   * because the underlying GitHub read genuinely FAILED rather than resolving to
+   * a clean "no evidence". Distinct from ordinary `queued` (whose `source` is
+   * `"none"`, ordinary absence) — a caller that gates dispatch or a ledger write
+   * off this projection MUST treat `indeterminate` as DO NOT ACT, never as an
+   * ordinary queued task, because the evidence a "not merged" conclusion would
+   * rest on was never actually consulted. Carried as its own sparse field
+   * (mirrors `needsHuman`/`armedAwaitingMerge`) so a caller need not know
+   * `"throttled"`'s meaning to gate on it correctly.
+   */
+  indeterminate?: true;
 }
 
 /**
@@ -517,7 +529,7 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   // an exhausted/errored `gh` call must defer, never be reported as a confirmed
   // not-merged (the false `source: "none"` that mis-filed W1-T116).
   if (deps.github.readFailed?.()) {
-    return { taskId: task.id, status: "queued", merged: false, source: "throttled" };
+    return { taskId: task.id, status: "queued", merged: false, source: "throttled", indeterminate: true };
   }
   return { taskId: task.id, status: "queued", merged: false, source: "none" };
 }
