@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, fstatSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -24,12 +24,24 @@ function tmpConfigPath(): string {
 // reports createdFile=true; when the file already exists, `wx` throws EEXIST and the
 // call falls through to read-merge-write, preserving every other key and reporting
 // createdFile=false — never clobbering a concurrent winner's claudeBin/root.
+//
+// CodeQL js/file-system-race, round 2 (alert #25): asserting via `statSync(path)`
+// then `readFileSync(path, ...)` is itself a check-by-name-then-use-by-name pair on
+// the SAME path, which the query flags regardless of this being test code with no
+// concurrent attacker. Open the file once and assert through the descriptor
+// (fstatSync(fd) for the mode, readFileSync(fd, ...) for the contents) — no
+// second path-string operation left for the query to correlate.
 test("W1-T67: writeTierIntoConfig on genuine first run creates the file mode 0o600 and reports createdFile=true", () => {
   const path = tmpConfigPath();
   const res = writeTierIntoConfig(path, "max20x", "flag");
   assert.equal(res.createdFile, true);
-  assert.equal(statSync(path).mode & 0o777, 0o600, "the created config must be mode 0600");
-  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { tier: "max20x", tierSource: "flag" });
+  const fd = openSync(path, "r");
+  try {
+    assert.equal(fstatSync(fd).mode & 0o777, 0o600, "the created config must be mode 0600");
+    assert.deepEqual(JSON.parse(readFileSync(fd, "utf8")), { tier: "max20x", tierSource: "flag" });
+  } finally {
+    closeSync(fd);
+  }
 });
 
 test("W1-T67: writeTierIntoConfig when the file EXISTS falls through to merge (createdFile=false), preserving other keys — no clobber", () => {

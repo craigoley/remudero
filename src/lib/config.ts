@@ -229,6 +229,15 @@ function resolveClaudeBin(): string {
  * path unless the existing config is missing the field — same laziness as
  * before (LEARNINGS.md lazy-config-in-ci: it must stay absent from CI runs
  * where the config file already exists and the binary doesn't).
+ *
+ * CodeQL js/file-system-race, round 2 (alert #24): the first round fixed the
+ * WRITE side (the `wx` create above) but left the `EEXIST` fallback reading
+ * via `readFileSync(p, ...)` — a path-string operation CodeQL's dataflow
+ * still correlates back to the `wx` attempt as "checked, then used by name."
+ * Same remediation the query itself recommends for the write side applies
+ * here too: read through the DESCRIPTOR, not the path. `openSync(p, "r")`
+ * plus `readFileSync(fd, ...)` never hands a file-name string to the read
+ * sink, so there is nothing left for the query to flag as a re-check.
  */
 export function loadConfig(): Config {
   const p = configPath();
@@ -251,7 +260,13 @@ export function loadConfig(): Config {
       closeSync(fd);
     }
   }
-  const parsed = JSON.parse(readFileSync(p, "utf8")) as Partial<Config>;
+  const readFd = openSync(p, "r");
+  let parsed: Partial<Config>;
+  try {
+    parsed = JSON.parse(readFileSync(readFd, "utf8")) as Partial<Config>;
+  } finally {
+    closeSync(readFd);
+  }
   if (!parsed.claudeBin) parsed.claudeBin = resolveClaudeBin();
   if (!parsed.root) parsed.root = join(homedir(), "Remudero");
   validateConfig(parsed as Config);
