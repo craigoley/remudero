@@ -6878,7 +6878,7 @@
 - id: W1-T153
   title: "console shell UX overhaul — replace the flat file-order table with operator-priority sections + a real design system (dark, phone-first, CI-dashboard quality)"
   repo: remudero
-  depends_on: [W1-T139, W1-T140, W1-T141, W1-T110]
+  depends_on: [W1-T139, W1-T140, W1-T141, W1-T110, W1-T155]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -6953,3 +6953,172 @@
   attempts: 0
   note: "Builds on the board-fix batched gateway (buildBatchedGithub, PR #342). Sibling W1-T153 (shell IA + design).
     Reuses the board-fix regression harness for the <2s budget at 183-task scale — the real fetch client, not a stub."
+
+- id: W1-T155
+  title: "live-state DATA — the board projection exposes the FULL status taxonomy (in-flight+phase, blocked, needs-human, armed-awaiting-merge) + startedAt/elapsed, joined from the ledger run state"
+  repo: remudero
+  depends_on: [W1-T139]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The board projection today collapses to merged/queued. The overhaul's NOW section (W1-T153) needs the
+    FULL status taxonomy — in-flight WITH phase (recon/implement/review/fix-rung), blocked, needs-human,
+    armed-awaiting-merge — plus startedAt/elapsed joined from the ledger run state. DATA BEFORE PIXELS: this is the
+    prerequisite DATA half of the live-state layer; the UI half is W1-T156. It is the prerequisite for W1-T153's NOW
+    (this task is added to W1-T153's depends_on)."
+  design: |
+    Extend StatusProjection (status.ts) / computeBoardSnapshot (board.ts) to expose the full taxonomy per task +
+    startedAt/elapsed: derive the in-flight PHASE from the ledger run-state events (run.start + phase markers
+    recon/implement/review/fix-rung), armed-awaiting-merge from the PR auto-merge state the batched gateway already
+    holds, needs-human from the open escalation, blocked from the derived block. Preserve the board-fix invariant:
+    ZERO extra GitHub calls (the batched gateway serves it). VERIFY StatusProjection's current shape, the ledger
+    phase/run-state events, and how the batched gateway exposes armed/merge state from source first (distrust note).
+  acceptance:
+    - claim: "the projection exposes the FULL status taxonomy per task, not just merged/queued"
+      proof: "unit test: a projection over a fixture where tasks are in-flight (phase recon/implement/review/fix-rung), blocked, needs-human, armed-awaiting-merge, merged, and queued yields the correct DISTINCT status for EACH; a task collapsed to merged/queued when it is actually in-flight-with-phase FAILS (the falsifier)"
+    - claim: "in-flight tasks carry startedAt + elapsed from the ledger run state, and the phase is the CURRENT one"
+      proof: "unit test: an in-flight fixture with a run.start + phase events yields startedAt (the run.start ts) and the LATEST phase; elapsed derives from startedAt; a stale/earlier phase is not reported"
+    - claim: "the taxonomy is derived with ZERO extra GitHub calls (the batched gateway serves it)"
+      proof: "unit test over an injected counting gateway: computing the full-taxonomy projection over N tasks makes O(1) gateway fetches, not per-task — the board-fix (buildBatchedGithub) invariant preserved (the falsifier being O(N) calls)"
+  risk: high
+  origin: architect
+  plan_refs: ["§7", "§9"]
+  files: [src/lib/status.ts, src/lib/board.ts]
+  status: queued
+  attempts: 0
+  note: "DATA half of the live-state layer (layer 1). Prerequisite for W1-T153's NOW section — added to W1-T153's
+    depends_on so the DAG orders it first. Sibling W1-T156 (UI+trust half). Preserves the board-fix O(1) invariant."
+
+- id: W1-T156
+  title: "live-state UI + TRUST — in-flight rows animate with live elapsed + phase, SSE flips transition in place, and the console never lies about its own liveness (freshness + connection indicators)"
+  repo: remudero
+  depends_on: [W1-T155, W1-T153]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The UI + TRUST half of the live-state layer. With the taxonomy data (W1-T155) and the shell (W1-T153),
+    render in-flight rows live AND make the console HONEST about its own liveness — a stale or disconnected console
+    must SAY so, never keep showing 'live' (the W1-T130 cannot-observe-means-wait polarity family, applied to the UI:
+    the console must not lie about its own freshness)."
+  design: |
+    (b) UI: in-flight rows get an animated indicator + a live-ticking elapsed + the current phase; an SSE flip
+    transitions the row IN PLACE with a brief highlight on change; status changes emit aria-live announcements;
+    prefers-reduced-motion swaps the animation for a STATIC badge. (c) TRUST: a freshness stamp ("updated Xs ago") +
+    an explicit SSE connection indicator; disconnected/stale states are VISIBLY marked, never silent. VERIFY the SSE
+    stream (buildStatusStream), the reduced-motion + aria-live patterns, and W1-T155's taxonomy fields from source.
+  acceptance:
+    - claim: "a dispatched fixture run renders in-flight-with-phase within one SSE tick, with live-ticking elapsed and an in-place highlight on flip"
+      proof: "integration test: a dispatched fixture run appears as in-flight WITH its phase within one SSE tick; elapsed ticks live; an SSE flip transitions the row IN PLACE with a brief highlight (asserted on the DOM/state)"
+    - claim: "when the SSE stream is dropped the staleness + connection indicators flip VISIBLY — the console never lies about liveness"
+      proof: "integration test: with the SSE stream severed, the freshness stamp goes stale and the connection indicator flips to disconnected VISIBLY (asserted); a console that keeps showing 'live' after the stream drops FAILS (the falsifier; the W1-T130 don't-lie-about-liveness polarity)"
+    - claim: "prefers-reduced-motion swaps animation for a static badge; changes are announced via aria-live"
+      proof: "a test asserts that under prefers-reduced-motion the animated indicator is replaced by a static badge (no animation), and status changes emit aria-live announcements"
+  risk: high
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/serve.ts, apps/dashboard/src]
+  status: queued
+  attempts: 0
+  note: "UI+TRUST half of layer 1; DATA half is W1-T155. Liveness-honesty is the W1-T130 polarity family (never lie
+    about your own state). Sibling of the overhaul (W1-T153)."
+
+- id: W1-T157
+  title: "FIND layer — instant client-side fuzzy search + faceted filters with live counts + sortable columns + cmd+K palette + URL-persisted (shareable) view state"
+  repo: remudero
+  depends_on: [W1-T153, W1-T155]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "At 183+ tasks the operator cannot find anything by scrolling. The FIND layer makes the console
+    navigable: instant search, faceted filters, sortable columns, a command palette, and a view state that lives in
+    the URL so a view is shareable, bookmarkable, and survives reload."
+  design: |
+    Instant CLIENT-SIDE fuzzy search over id + title; faceted filters with LIVE counts (status [the W1-T155
+    taxonomy], workstream, risk, has-PR, needs-me); sortable columns (id, status, recency, age); a cmd+K command
+    palette (jump to a task/PR, trigger a panel action); and filter/sort/search state PERSISTED in the URL
+    (shareable, bookmarkable, survives reload). VERIFY the projection fields (W1-T155), the panel-action routes, and
+    a URL-state serialization pattern from source first (distrust this note).
+  acceptance:
+    - claim: "each facet provably NARROWS the set, with a live count"
+      proof: "a test: applying each facet (status/workstream/risk/has-PR/needs-me) narrows the rendered set to exactly the matching tasks and updates its live count; a facet that leaves the full set unchanged FAILS (the falsifier)"
+    - claim: "the URL round-trips: filter/sort/search state restores the EXACT view on reload"
+      proof: "a test: set a non-trivial filter + sort + search, read the URL, reload from that URL, and assert the IDENTICAL rendered view (same rows, order, active facets); a reload that loses state FAILS"
+    - claim: "the cmd+K palette is reachable from every view and jumps/triggers"
+      proof: "a test: cmd+K opens the palette on every view; selecting a task/PR jumps to it, and a panel action fires via the palette (asserted against the action route)"
+  risk: high
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/serve.ts, apps/dashboard/src]
+  status: queued
+  attempts: 0
+  note: "The FIND layer (interaction layer 2). Needs W1-T155's taxonomy for the status facet + W1-T153's shell. URL
+    state = shareable/bookmarkable/survives-reload."
+
+- id: W1-T158
+  title: "DETAIL + JOURNEY layer — row-click task card (rationale, criteria, dep chain, run history w/ cost+verdict, PR/issue links) + a journey view rendering rmd trace's provenance chain (W1-T43)"
+  repo: remudero
+  depends_on: [W1-T153, W1-T43]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The operator needs to walk from an outcome BACK to the step that produced it — the debugging pattern
+    the whole ecosystem converged on. A row-click card gives the task's full detail; a journey view renders rmd
+    trace's provenance chain (W1-T43) so a blocked outcome traces back to its cause."
+  design: |
+    Row click expands a task CARD — title, rationale, acceptance criteria, dependency chain (each dep LINKED), run
+    history with per-run cost + verdict, PR/issue links. From any run, a JOURNEY view renders rmd trace's provenance
+    chain (W1-T43: feedback -> proposal -> task -> run -> PR) so the operator walks BACKWARDS from an outcome to the
+    producing step. The card renders from the plan + ledger with ZERO extra GitHub calls (the batched gateway serves
+    it). VERIFY rmd trace's output shape (W1-T43), the plan/ledger fields, and the batched gateway from source first.
+  acceptance:
+    - claim: "the task card renders from the plan + ledger with ZERO extra GitHub calls (the batched gateway serves it)"
+      proof: "integration test over a counting gateway: expanding a card renders title/rationale/criteria/dep-chain/run-history(cost+verdict)/PR-links with O(0) additional GitHub calls beyond the batched snapshot (the falsifier being a card that fires a per-open GitHub fetch)"
+    - claim: "a blocked fixture's journey view shows the FAILING step (walk backwards from outcome to cause)"
+      proof: "integration test: a blocked fixture's journey renders rmd trace's provenance chain (W1-T43) and surfaces the FAILING step (the block's cause), linking outcome -> ... -> the producing step; a journey that omits the failing step FAILS"
+    - claim: "the dependency chain is LINKED and navigable"
+      proof: "a test: each dep in the card's dependency chain renders as a link that navigates to that task's card; an unlinked/broken dep FAILS"
+  risk: high
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/serve.ts, apps/dashboard/src]
+  status: queued
+  attempts: 0
+  note: "The DETAIL+JOURNEY layer (interaction layer 3). Journey = rmd trace (W1-T43). Card is O(0) extra GitHub
+    calls (batched gateway) — the board-fix invariant."
+
+- id: W1-T159
+  title: "GLANCE layer — a pinned summary strip (running/needs-me/blocked/queued/merged-today/spend-today), a daemon-health widget, and a browser-tab needs-me badge"
+  repo: remudero
+  depends_on: [W1-T153, W1-T155, W1-T148]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The operator's primary device is a phone glance. A pinned summary strip + a daemon-health widget + a
+    tab-title badge answer 'what needs me / is the fleet healthy / what has it cost' in one look, without opening
+    the console — every number traceable to a real source, never a decorative estimate."
+  design: |
+    A summary strip pinned to the top: running N / needs-me N / blocked N / queued N / merged-today N / spend-today $
+    (governor-aware once W1-T148 lands). A daemon-health widget: last poll, a live next-poll countdown, disk free,
+    rate-limit remaining. The browser TAB TITLE carries the needs-me count. Every number traces to a ledger/API
+    source. VERIFY the taxonomy counts (W1-T155), the spend-today source (W1-T148's day-cost), the daemon-health
+    data (last poll / disk / rate-limit), and the SSE needs-human event from source first (distrust this note).
+  acceptance:
+    - claim: "every summary number is TRACEABLE to a named ledger/API source"
+      proof: "a test: each strip number (running/needs-me/blocked/queued/merged-today/spend-today) derives from a named source (the W1-T155 taxonomy counts; spend-today from W1-T148's day-cost); a hardcoded/untraceable number FAILS (the falsifier)"
+    - claim: "the browser tab badge updates on an SSE needs-human event"
+      proof: "integration test: an SSE needs-human event updates the tab-title needs-me count to match the NEEDS ME set; a tab badge that ignores the event FAILS"
+    - claim: "the daemon-health widget shows last poll, a next-poll countdown, disk free, and rate-limit remaining, each from its source"
+      proof: "a test: the widget renders last-poll (ledger/daemon), a live next-poll countdown, disk-free, and rate-limit-remaining, each from its named source; a widget with a placeholder value FAILS"
+  risk: high
+  origin: architect
+  plan_refs: ["§7", "§9"]
+  files: [src/lib/serve.ts, apps/dashboard/src]
+  status: queued
+  attempts: 0
+  note: "The GLANCE layer (interaction layer 4). spend-today is governor-aware once W1-T148 lands (a dep). Counts
+    from W1-T155's taxonomy. Every number traceable to a source — no decorative estimates."
