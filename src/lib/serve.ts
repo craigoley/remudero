@@ -315,6 +315,35 @@ export function renderShellHtml(): string {
   .btn-row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
   .counts { color: var(--text-dim); font-size: 0.9rem; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* W1-T157 FIND layer: faceted filters, sort headers, live counts ─────────────────────────── */
+  .find-facets { display: flex; flex-wrap: wrap; gap: 0.75rem 1rem; margin: 0.5rem 0; }
+  .facet-group { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
+  .facet-group-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); margin-right: 0.15rem; }
+  .facet-btn, .sort-header { font-size: 0.8rem; padding: 0.25rem 0.55rem; }
+  .facet-count { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+  button[aria-pressed="true"] .facet-count { color: inherit; }
+  .find-sort { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin: 0.35rem 0; }
+  #find-count { margin: 0.25rem 0; }
+  /* W1-T157 cmd+K command palette overlay ──────────────────────────────────────────────────── */
+  .cmdk-overlay {
+    position: fixed; inset: 0; z-index: 50; background: rgba(4, 7, 12, 0.6);
+    display: flex; align-items: flex-start; justify-content: center; padding: 12vh 1rem 1rem;
+  }
+  .cmdk-overlay[hidden] { display: none; }
+  #cmdk-dialog {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    width: min(92vw, 40rem); max-height: 70vh; display: flex; flex-direction: column;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+  }
+  #cmdk-input { margin: 0.75rem; width: auto; max-width: none; }
+  .cmdk-results { list-style: none; margin: 0; padding: 0 0.5rem 0.5rem; overflow-y: auto; }
+  .cmdk-item {
+    padding: 0.5rem 0.6rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem;
+    display: flex; align-items: center; gap: 0.5rem; overflow-wrap: anywhere;
+  }
+  .cmdk-item.active, .cmdk-item:hover { background: var(--bg-elevated); }
+  .cmdk-kind { font-size: 0.65rem; font-weight: 700; letter-spacing: 0.03em; color: var(--text-faint); border: 1px solid var(--border); border-radius: 4px; padding: 0 0.3em; }
+  .cmdk-empty { padding: 0.6rem; color: var(--text-faint); font-size: 0.875rem; }
   @media (min-width: 900px) {
     main { max-width: 64rem; }
   }
@@ -366,8 +395,19 @@ export function renderShellHtml(): string {
     <button id="rest-toggle" type="button" aria-expanded="false" aria-controls="rest-detail">Expand</button>
   </div>
   <div id="rest-detail" hidden>
-    <label for="rest-filter">Filter by task id</label>
-    <input id="rest-filter" type="text" placeholder="e.g. W1-T" />
+    <!-- W1-T157 FIND layer: instant client-side fuzzy search (id + title), faceted filters with
+         LIVE counts, sortable columns, all persisted to the URL (shareable / survives reload). -->
+    <label for="find-search">Search id or title</label>
+    <input id="find-search" type="text" role="searchbox" aria-controls="rest-list" placeholder="fuzzy — e.g. W1-T157 or words from the title" />
+    <div id="find-facets" class="find-facets" role="group" aria-label="Filters (live counts)"></div>
+    <div id="find-sort" class="find-sort" role="group" aria-label="Sort">
+      <span class="counts">Sort:</span>
+      <button type="button" class="sort-header" data-sort="id" aria-pressed="false">id</button>
+      <button type="button" class="sort-header" data-sort="status" aria-pressed="false">status</button>
+      <button type="button" class="sort-header" data-sort="recency" aria-pressed="false">recency</button>
+      <button type="button" class="sort-header" data-sort="age" aria-pressed="false">age</button>
+    </div>
+    <p id="find-count" class="counts" aria-live="polite"></p>
     <ul id="rest-list" class="row-list"></ul>
   </div>
 </section>
@@ -403,6 +443,16 @@ export function renderShellHtml(): string {
   </section>
 </section>
 </main>
+
+<!-- W1-T157 cmd+K command palette: a global, additive modal (NOT a sixth section — the five-section
+     order invariant stays intact). Opened by Cmd/Ctrl+K from ANY view via one document-level keydown
+     listener; jumps to a task/PR or fires a fleet/panel action through the EXACT existing button. -->
+<div id="cmdk-overlay" class="cmdk-overlay" hidden>
+  <div id="cmdk-dialog" role="dialog" aria-modal="true" aria-label="Command palette">
+    <input id="cmdk-input" type="text" autocomplete="off" aria-controls="cmdk-results" aria-label="Command palette search" placeholder="Jump to a task or PR, or run an action… (Esc to close)" />
+    <ul id="cmdk-results" class="cmdk-results" role="listbox" aria-label="Command palette results"></ul>
+  </div>
+</div>
 
 <script type="module">
   // Bootstrap: the SAME \`?token=\` query-param convention apps/dashboard/src/main.ts uses —
@@ -586,27 +636,41 @@ export function renderShellHtml(): string {
   let latestUpNextCards = [];
   let latestRecentEntries = [];
 
-  /** A projection minus elapsedMs -- elapsed changes every second and is rendered by the
-   *  separate ticking timer below, never as part of a row's diffed/announced content. A row
-   *  whose ONLY difference is elapsedMs must not "flip" (re-render/flash/announce) every tick. */
-  function withoutElapsed(p) {
-    const { elapsedMs, ...rest } = p;
+  /** A projection minus its VOLATILE, non-status fields -- \`elapsedMs\` (changes every second,
+   *  rendered by the separate ticking timer below) and \`lastActivityAt\` (a board-only ledger
+   *  timestamp, not part of the status taxonomy the operator is announced about). A row whose
+   *  ONLY difference is one of these must not "flip" (re-render/flash/announce). */
+  function withoutVolatile(p) {
+    const { elapsedMs, lastActivityAt, ...rest } = p;
     return rest;
   }
 
   /**
-   * Absorb one StatusProjection (an SSE \`status\` event, or one entry of a GET /v1/status poll)
-   * into \`tasksById\`. Returns whether this is a GENUINE flip vs. the task's prior known state
-   * (ignoring elapsed) -- and, when it is, announces it via the aria-live region. First sighting
-   * of a task (no prior entry) is never announced -- that is a paint, not a flip.
+   * Absorb one projection into \`tasksById\`. TWO transports feed this: the GET /v1/status poll
+   * (a BoardRow -- carries \`title\`/\`risk\`/\`lastActivityAt\`) and the SSE \`status\` stream (a bare
+   * StatusProjection -- does NOT). So we take \`p\` as the AUTHORITATIVE status taxonomy, but
+   * BACKFILL only the three stable board-enrichment fields from the prior row when \`p\` lacks them
+   * -- otherwise an SSE delta arriving after a poll would silently DROP a task's known title/risk
+   * (and spuriously look like a content "flip", flashing/announcing every tick, purely because the
+   * stringified before/after differ by the missing fields). We deliberately do NOT do a blanket
+   * \`{...prev, ...p}\` merge: the SPARSE status fields (\`phase\`/\`needsHuman\`/\`armedAwaitingMerge\`/
+   * \`indeterminate\`) must be able to CLEAR when a delta drops them, so \`p\` owns all of those.
+   * Returns whether this is a GENUINE status flip vs. the prior known state (ignoring the volatile
+   * fields); a first sighting (no prior entry) is never announced -- that is a paint, not a flip.
    */
   function ingestProjection(p) {
     const prev = tasksById.get(p.taskId);
-    tasksById.set(p.taskId, p);
-    const changed = !prev || JSON.stringify(withoutElapsed(prev)) !== JSON.stringify(withoutElapsed(p));
+    const merged = { ...p };
+    if (prev) {
+      if (merged.title === undefined) merged.title = prev.title;
+      if (merged.risk === undefined) merged.risk = prev.risk;
+      if (merged.lastActivityAt === undefined) merged.lastActivityAt = prev.lastActivityAt;
+    }
+    tasksById.set(p.taskId, merged);
+    const changed = !prev || JSON.stringify(withoutVolatile(prev)) !== JSON.stringify(withoutVolatile(merged));
     if (changed && prev) {
-      const key = statusColorKey(p);
-      announce(\`\${p.taskId} is now \${STATUS_LABELS[key]}\${p.phase ? \` (phase \${p.phase})\` : ""}\`);
+      const key = statusColorKey(merged);
+      announce(\`\${merged.taskId} is now \${STATUS_LABELS[key]}\${merged.phase ? \` (phase \${merged.phase})\` : ""}\`);
     }
     return changed;
   }
@@ -757,23 +821,229 @@ export function renderShellHtml(): string {
     return new Set(list.map((e) => e.taskId));
   }
 
-  // ── everything else — COLLAPSED counts + expand + filter/search ─────────────────────────
-  let restTasks = [];
-  function renderRestList(filterText) {
-    const needle = (filterText ?? "").trim().toLowerCase();
-    const filtered = needle ? restTasks.filter((t) => t.taskId.toLowerCase().includes(needle)) : restTasks;
-    const rows = filtered
-      .slice(0, 200)
-      .map((t) => ({ key: t.taskId, html: \`\${statusBadge(statusColorKey(t))}<span class="task-id">\${escapeHtml(t.taskId)}</span>\` }));
-    reconcileRows(document.getElementById("rest-list"), rows, "no matching tasks");
+  // ── everything else — the FIND layer (W1-T157): fuzzy search + faceted filters + sort ─────
+  //
+  // Client-side, instant, and URL-persisted. The FIND corpus is the WHOLE board (\`findTasks\`),
+  // NOT just the "everything else" complement — the acceptance bar's facets (\`needs-me\`, plus
+  // \`status\` values like running/merged that the priority sections above route away) must be able
+  // to narrow to those tasks, and cmd+K must reach ANY task. The collapsed grouped-count line
+  // still summarizes the complement (what is hidden below the four priority sections). The whole
+  // view (search text + one value per facet + sort column/direction) round-trips through the URL
+  // via history.replaceState, so a view is shareable/bookmarkable and survives reload.
+
+  let findTasks = []; // the whole board — the searchable/filterable/sortable corpus
+
+  // ── the ONE fuzzy scorer, shared by the FIND search bar AND the cmd+K palette ──────────────
+  // Case-insensitive SUBSEQUENCE match over the haystack; returns null when the query is not a
+  // subsequence (row hidden), else a score (higher = tighter, consecutive-run-weighted). An empty
+  // query is a neutral match (score 0) — every row passes, natural order preserved.
+  function fuzzyScore(query, text) {
+    const q = String(query ?? "").trim().toLowerCase();
+    if (!q) return 0;
+    const s = String(text ?? "").toLowerCase();
+    let qi = 0, score = 0, lastHit = -2;
+    for (let si = 0; si < s.length && qi < q.length; si++) {
+      if (s[si] === q[qi]) {
+        score += si === lastHit + 1 ? 3 : 1; // reward adjacent matches (a tighter run scores higher)
+        lastHit = si;
+        qi++;
+      }
+    }
+    return qi === q.length ? score : null;
   }
+
+  // ── FIND view state (mirrored to/from the URL) ────────────────────────────────────────────
+  const FIND_FACET_GROUPS = ["status", "workstream", "risk", "hasPr", "needsMe"];
+  const findState = {
+    q: "",
+    facets: { status: null, workstream: null, risk: null, hasPr: false, needsMe: false },
+    sort: "id",
+    dir: "asc",
+  };
+
+  /** Workstream = the id prefix before \`-T\` (verified convention: W1/W2/W3/W12) — pure string parse. */
+  function taskWorkstream(id) {
+    const i = String(id).indexOf("-T");
+    return i > 0 ? id.slice(0, i) : id;
+  }
+  function searchHaystack(t) {
+    return \`\${t.taskId} \${t.title ?? ""}\`;
+  }
+  function passesSearch(t) {
+    return fuzzyScore(findState.q, searchHaystack(t)) !== null;
+  }
+  /** Does task \`t\` match facet GROUP's value \`value\` (independent of what is currently selected)? */
+  function facetValueMatches(t, group, value) {
+    if (group === "status") return statusColorKey(t) === value;
+    if (group === "workstream") return taskWorkstream(t.taskId) === value;
+    if (group === "risk") return (t.risk ?? "") === value;
+    if (group === "hasPr") return !!t.prUrl;
+    if (group === "needsMe") return !!t.needsHuman;
+    return true;
+  }
+  /** Does \`t\` satisfy a group's CURRENTLY-ACTIVE selection? (An unselected group matches everything.) */
+  function facetActiveMatches(t, group) {
+    const sel = findState.facets[group];
+    if (group === "hasPr" || group === "needsMe") return sel ? facetValueMatches(t, group, true) : true;
+    return sel ? facetValueMatches(t, group, sel) : true;
+  }
+  /** All active facets EXCEPT \`exceptGroup\` (used for a group's own live counts). */
+  function matchesAllFacets(t, exceptGroup) {
+    for (const g of FIND_FACET_GROUPS) {
+      if (g === exceptGroup) continue;
+      if (!facetActiveMatches(t, g)) return false;
+    }
+    return true;
+  }
+  /** The rendered set: findTasks passing the search AND every active facet. */
+  function findFiltered() {
+    return findTasks.filter((t) => passesSearch(t) && matchesAllFacets(t, null));
+  }
+
+  // ── sort comparators — the client-side MIRROR of board.ts's exported, unit-tested spec
+  // (compareById/compareByStatus/compareByRecency/compareByAge/sortBoardRows). Kept structurally
+  // identical; a missing recency/age value sorts LAST in BOTH directions. ─────────────────────
+  const TASK_STATUSES = ["queued", "recon", "prompted", "running", "review", "fixing", "diagnosing", "blocked", "merged", "done"];
+  function cmpMissingLast(av, bv, dir) {
+    if (av === undefined && bv === undefined) return 0;
+    if (av === undefined) return 1;
+    if (bv === undefined) return -1;
+    return dir === "desc" ? bv - av : av - bv;
+  }
+  function cmpById(a, b, dir) {
+    const base = a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0;
+    return dir === "desc" ? -base : base;
+  }
+  function cmpByStatus(a, b, dir) {
+    const base = TASK_STATUSES.indexOf(a.status) - TASK_STATUSES.indexOf(b.status);
+    return dir === "desc" ? -base : base;
+  }
+  function cmpByRecency(a, b, dir) {
+    const av = a.lastActivityAt ? Date.parse(a.lastActivityAt) : undefined;
+    const bv = b.lastActivityAt ? Date.parse(b.lastActivityAt) : undefined;
+    return cmpMissingLast(av, bv, dir);
+  }
+  function cmpByAge(a, b, dir) {
+    return cmpMissingLast(a.elapsedMs, b.elapsedMs, dir);
+  }
+  const FIND_COMPARATORS = { id: cmpById, status: cmpByStatus, recency: cmpByRecency, age: cmpByAge };
+  function sortFindRows(rows) {
+    const cmp = FIND_COMPARATORS[findState.sort] ?? cmpById;
+    return rows.slice().sort((a, b) => cmp(a, b, findState.dir) || cmpById(a, b, "asc"));
+  }
+
+  // ── URL round-trip: own a small key set, ALWAYS preserving \`token\` (+ any other params) ────
+  function findHasUrlState() {
+    const p = new URLSearchParams(window.location.search);
+    return ["q", "status", "workstream", "risk", "hasPr", "needsMe", "sort", "dir"].some((k) => p.has(k));
+  }
+  function readFindStateFromUrl() {
+    const p = new URLSearchParams(window.location.search);
+    findState.q = p.get("q") ?? "";
+    findState.facets.status = p.get("status") || null;
+    findState.facets.workstream = p.get("workstream") || null;
+    findState.facets.risk = p.get("risk") || null;
+    findState.facets.hasPr = p.get("hasPr") === "1";
+    findState.facets.needsMe = p.get("needsMe") === "1";
+    findState.sort = p.get("sort") || "id";
+    findState.dir = p.get("dir") === "desc" ? "desc" : "asc";
+  }
+  function writeFindStateToUrl() {
+    const p = new URLSearchParams(window.location.search); // preserve token + anything else already there
+    const set = (k, v) => { if (v) p.set(k, v); else p.delete(k); };
+    set("q", findState.q.trim());
+    set("status", findState.facets.status);
+    set("workstream", findState.facets.workstream);
+    set("risk", findState.facets.risk);
+    set("hasPr", findState.facets.hasPr ? "1" : "");
+    set("needsMe", findState.facets.needsMe ? "1" : "");
+    set("sort", findState.sort !== "id" ? findState.sort : ""); // omit defaults -> cleaner URLs that still round-trip
+    set("dir", findState.dir !== "asc" ? findState.dir : "");
+    const qs = p.toString();
+    history.replaceState(null, "", (qs ? "?" + qs : window.location.pathname) + window.location.hash);
+  }
+
+  // ── faceted filter controls with LIVE counts ──────────────────────────────────────────────
+  function facetOptions(group) {
+    const seen = new Set();
+    for (const t of findTasks) {
+      if (group === "status") seen.add(statusColorKey(t));
+      else if (group === "workstream") seen.add(taskWorkstream(t.taskId));
+      else if (group === "risk") seen.add(t.risk ?? "");
+    }
+    return [...seen].filter(Boolean).sort();
+  }
+  /** How many rows WOULD remain if this facet value were the group's selection (search + OTHER facets + this value). */
+  function facetCount(group, value) {
+    return findTasks.filter((t) => passesSearch(t) && matchesAllFacets(t, group) && facetValueMatches(t, group, value)).length;
+  }
+  function facetBtnHtml(group, value, label, active) {
+    return \`<button type="button" class="facet-btn" data-group="\${group}" data-value="\${escapeHtml(value)}" aria-pressed="\${active ? "true" : "false"}">\${escapeHtml(label)} <span class="facet-count">(\${facetCount(group, value === "" ? true : value)})</span></button>\`;
+  }
+  function renderFacets() {
+    const groups = [];
+    for (const g of ["status", "workstream", "risk"]) {
+      const opts = facetOptions(g);
+      if (opts.length === 0) continue;
+      const btns = opts.map((v) => facetBtnHtml(g, v, v, findState.facets[g] === v)).join("");
+      groups.push(\`<span class="facet-group"><span class="facet-group-label">\${g}</span>\${btns}</span>\`);
+    }
+    // has-PR / needs-me are boolean toggles (a single value each).
+    groups.push(\`<span class="facet-group"><span class="facet-group-label">flags</span>\${facetBtnHtml("hasPr", "", "has PR", findState.facets.hasPr)}\${facetBtnHtml("needsMe", "", "needs me", findState.facets.needsMe)}</span>\`);
+    document.getElementById("find-facets").innerHTML = groups.join("");
+  }
+
+  function renderSortHeaders() {
+    for (const btn of document.querySelectorAll("#find-sort .sort-header")) {
+      const active = btn.dataset.sort === findState.sort;
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+      const arrow = active ? (findState.dir === "desc" ? " ▼" : " ▲") : "";
+      btn.textContent = btn.dataset.sort + arrow;
+    }
+  }
+
+  function findRowHtml(t) {
+    return (
+      \`\${statusBadge(statusColorKey(t))}<span class="task-id">\${escapeHtml(t.taskId)}</span>\` +
+      \`<span class="detail">\${escapeHtml(t.title ?? "")}\${t.risk ? \` · risk: \${escapeHtml(t.risk)}\` : ""}\${prLink(t)}</span>\`
+    );
+  }
+  function renderFindView() {
+    renderFacets();
+    renderSortHeaders();
+    const filtered = findFiltered();
+    const sorted = sortFindRows(filtered);
+    const rows = sorted.slice(0, 500).map((t) => ({ key: t.taskId, html: findRowHtml(t) }));
+    reconcileRows(document.getElementById("rest-list"), rows, "no matching tasks");
+    document.getElementById("find-count").textContent =
+      \`\${filtered.length} match\${filtered.length === 1 ? "" : "es"} of \${findTasks.length} task\${findTasks.length === 1 ? "" : "s"}\`;
+  }
+  /** Re-render the FIND view AND persist the new state to the URL (one call per interaction). */
+  function applyFindState() {
+    if (!document.getElementById("rest-detail").hidden) renderFindView();
+    writeFindStateToUrl();
+  }
+
   function renderRest(tasks, shownIds) {
-    restTasks = tasks.filter((t) => !shownIds.has(t.taskId));
-    const queued = restTasks.filter((t) => statusColorKey(t) === "queued").length;
-    const merged = restTasks.filter((t) => statusColorKey(t) === "merged").length;
-    const other = restTasks.length - queued - merged;
-    document.getElementById("rest-counts").textContent = \`queued: \${queued} · merged: \${merged} · other: \${other} (\${restTasks.length} total)\`;
-    if (!document.getElementById("rest-detail").hidden) renderRestList(document.getElementById("rest-filter").value);
+    findTasks = tasks; // the FIND corpus is the whole board (see the section header note)
+    // The collapsed grouped-count line still summarizes the COMPLEMENT — "everything else" not
+    // already surfaced in one of the four priority sections above.
+    const complement = tasks.filter((t) => !shownIds.has(t.taskId));
+    const queued = complement.filter((t) => statusColorKey(t) === "queued").length;
+    const merged = complement.filter((t) => statusColorKey(t) === "merged").length;
+    const other = complement.length - queued - merged;
+    document.getElementById("rest-counts").textContent = \`queued: \${queued} · merged: \${merged} · other: \${other} (\${complement.length} total)\`;
+    if (!document.getElementById("rest-detail").hidden) renderFindView();
+  }
+
+  function expandRest() {
+    const detail = document.getElementById("rest-detail");
+    if (!detail.hidden) return;
+    detail.hidden = false;
+    const toggle = document.getElementById("rest-toggle");
+    toggle.setAttribute("aria-expanded", "true");
+    toggle.textContent = "Collapse";
+    renderFindView();
   }
   document.getElementById("rest-toggle").addEventListener("click", () => {
     const detail = document.getElementById("rest-detail");
@@ -782,9 +1052,150 @@ export function renderShellHtml(): string {
     detail.hidden = expanded;
     toggle.setAttribute("aria-expanded", String(!expanded));
     toggle.textContent = expanded ? "Expand" : "Collapse";
-    if (!expanded) renderRestList(document.getElementById("rest-filter").value);
+    if (!expanded) renderFindView();
   });
-  document.getElementById("rest-filter").addEventListener("input", (e) => renderRestList(e.target.value));
+  document.getElementById("find-search").addEventListener("input", (e) => {
+    findState.q = e.target.value;
+    applyFindState();
+  });
+  document.getElementById("find-facets").addEventListener("click", (e) => {
+    const btn = e.target.closest(".facet-btn");
+    if (!btn) return;
+    const g = btn.dataset.group;
+    const v = btn.dataset.value;
+    if (g === "hasPr" || g === "needsMe") findState.facets[g] = !findState.facets[g];
+    else findState.facets[g] = findState.facets[g] === v ? null : v; // single-select: click again to clear
+    applyFindState();
+  });
+  document.getElementById("find-sort").addEventListener("click", (e) => {
+    const btn = e.target.closest(".sort-header");
+    if (!btn) return;
+    const key = btn.dataset.sort;
+    if (findState.sort === key) findState.dir = findState.dir === "asc" ? "desc" : "asc";
+    else { findState.sort = key; findState.dir = key === "recency" || key === "age" ? "desc" : "asc"; }
+    applyFindState();
+  });
+
+  // Restore FIND state from the URL BEFORE first paint, so a fresh navigation to a shared URL
+  // renders that exact view with no interaction (and auto-expands the section so its rows show).
+  readFindStateFromUrl();
+  document.getElementById("find-search").value = findState.q;
+  renderSortHeaders();
+  if (findHasUrlState()) expandRest();
+
+  // ── cmd+K COMMAND PALETTE — global, reachable from every view ──────────────────────────────
+  // Each action fires through the EXACT existing button (one implementation of each action, never
+  // a copy) — including STOP's two-click confirm, which is NOT bypassed (a single palette STOP
+  // only arms the confirm, exactly like a single click on the STOP button).
+  const CMDK_ACTIONS = [
+    { id: "pause", label: "Pause fleet", run: () => document.getElementById("pause-btn").click() },
+    { id: "resume", label: "Resume fleet", run: () => document.getElementById("resume-btn").click() },
+    { id: "stop", label: "STOP fleet", run: () => document.getElementById("stop-btn").click() },
+    { id: "feedback", label: "Feedback inbox", run: () => document.getElementById("feedback-btn").click() },
+    { id: "graph", label: "Plan→task→PR graph", run: () => document.getElementById("graph-btn").click() },
+  ];
+  let cmdkData = [];
+  let cmdkActive = 0;
+
+  function cmdkBuildResults(query) {
+    const out = [];
+    for (const a of CMDK_ACTIONS) {
+      const sc = fuzzyScore(query, \`\${a.label} action\`);
+      if (sc !== null) out.push({ type: "action", id: a.id, label: a.label, score: sc });
+    }
+    for (const t of tasksById.values()) {
+      const sc = fuzzyScore(query, searchHaystack(t));
+      if (sc !== null) out.push({ type: "task", taskId: t.taskId, label: \`\${t.taskId} — \${t.title ?? ""}\`, score: sc + 1 });
+      if (t.prUrl) {
+        const psc = fuzzyScore(query, \`\${t.taskId} pr \${t.prNumber ?? ""}\`);
+        if (psc !== null) out.push({ type: "pr", taskId: t.taskId, prUrl: t.prUrl, label: \`Open PR \${t.prNumber !== undefined ? "#" + t.prNumber : t.prUrl} · \${t.taskId}\`, score: psc });
+      }
+    }
+    out.sort((a, b) => b.score - a.score || String(a.label).localeCompare(String(b.label)));
+    return out.slice(0, 40);
+  }
+  function cmdkRender(query) {
+    cmdkData = cmdkBuildResults(query);
+    cmdkActive = 0;
+    const ul = document.getElementById("cmdk-results");
+    if (cmdkData.length === 0) { ul.innerHTML = '<li class="cmdk-empty">no matches</li>'; return; }
+    ul.innerHTML = cmdkData
+      .map((r, i) => \`<li class="cmdk-item\${i === cmdkActive ? " active" : ""}" role="option" aria-selected="\${i === cmdkActive}" data-i="\${i}"><span class="cmdk-kind">\${r.type === "action" ? "ACTION" : r.type === "pr" ? "PR" : "TASK"}</span> \${escapeHtml(r.label)}</li>\`)
+      .join("");
+  }
+  function cmdkMove(delta) {
+    if (cmdkData.length === 0) return;
+    cmdkActive = (cmdkActive + delta + cmdkData.length) % cmdkData.length;
+    const items = document.querySelectorAll("#cmdk-results .cmdk-item");
+    items.forEach((el, i) => {
+      el.classList.toggle("active", i === cmdkActive);
+      el.setAttribute("aria-selected", String(i === cmdkActive));
+      if (i === cmdkActive) el.scrollIntoView({ block: "nearest" });
+    });
+  }
+  function cmdkOpen() {
+    const overlay = document.getElementById("cmdk-overlay");
+    overlay.hidden = false;
+    const input = document.getElementById("cmdk-input");
+    input.value = "";
+    cmdkRender("");
+    input.focus();
+  }
+  function cmdkClose() {
+    document.getElementById("cmdk-overlay").hidden = true;
+  }
+  function cmdkActivate(i) {
+    const r = cmdkData[i];
+    if (!r) return;
+    if (r.type === "action") {
+      const a = CMDK_ACTIONS.find((x) => x.id === r.id);
+      cmdkClose();
+      a.run();
+    } else if (r.type === "pr") {
+      cmdkClose();
+      window.open(r.prUrl, "_blank", "noreferrer");
+    } else {
+      jumpToTask(r.taskId);
+    }
+  }
+  /** "Jump to" a task: expand the section, filter the FIND search to its id, scroll + highlight. */
+  function jumpToTask(taskId) {
+    cmdkClose();
+    expandRest();
+    findState.q = taskId;
+    document.getElementById("find-search").value = taskId;
+    applyFindState();
+    requestAnimationFrame(() => {
+      const li = [...document.getElementById("rest-list").children].find((el) => el.dataset && el.dataset.key === taskId);
+      if (li) {
+        li.scrollIntoView({ block: "center" });
+        flashRow(li);
+      }
+    });
+  }
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+      e.preventDefault(); // never let the browser's own Cmd/Ctrl+K (address bar) swallow it
+      if (document.getElementById("cmdk-overlay").hidden) cmdkOpen();
+      else cmdkClose();
+      return;
+    }
+    if (e.key === "Escape" && !document.getElementById("cmdk-overlay").hidden) cmdkClose();
+  });
+  document.getElementById("cmdk-input").addEventListener("input", (e) => cmdkRender(e.target.value));
+  document.getElementById("cmdk-input").addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); cmdkMove(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); cmdkMove(-1); }
+    else if (e.key === "Enter") { e.preventDefault(); cmdkActivate(cmdkActive); }
+  });
+  document.getElementById("cmdk-results").addEventListener("click", (e) => {
+    const li = e.target.closest(".cmdk-item");
+    if (!li) return;
+    cmdkActivate(Number(li.dataset.i));
+  });
+  document.getElementById("cmdk-overlay").addEventListener("click", (e) => {
+    if (e.target.id === "cmdk-overlay") cmdkClose(); // click the backdrop to dismiss
+  });
 
   // ── NEEDS ME row actions (event delegation — rows are re-rendered on every refresh) ─────
   document.getElementById("needs-me-list").addEventListener("submit", async (e) => {

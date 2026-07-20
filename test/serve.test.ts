@@ -647,3 +647,72 @@ test("GET /v1/inbox (assembled server): the W1-T110 ratification inbox's READY t
     assert.equal((await navigate(base, "/v1/inbox")).status, 401); // header-only, same discipline as every other panel route
   });
 });
+
+// ── W1-T157: FIND layer — structural markup (behavioral/DOM proof lives in serve.find.test.ts) ──
+// A regex-over-the-HTML-string can only prove the CONTROLS + wiring exist; whether a facet click
+// actually narrows the rendered set, the URL round-trips a reload, and cmd+K opens + jumps/fires
+// are all real-browser facts proven in test/serve.find.test.ts (per the "exercise the real
+// consuming client" house rule). The five-section-order test above still passes UNMODIFIED — the
+// FIND layer is an in-place enhancement of #rest, never a sixth section.
+
+test("W1-T157: the FIND layer's search bar, faceted filters, and sortable columns live inside the #rest section", () => {
+  const html = renderShellHtml();
+  // the fuzzy search input (over id + title), inside #rest-detail
+  assert.match(html, /<input id="find-search"[^>]*role="searchbox"/);
+  // the live-count facet container + a sort control per column (id/status/recency/age)
+  assert.match(html, /id="find-facets"/);
+  assert.match(html, /data-sort="id"/);
+  assert.match(html, /data-sort="status"/);
+  assert.match(html, /data-sort="recency"/);
+  assert.match(html, /data-sort="age"/);
+  // the FIND UI is an enhancement of #rest, not a new section — #rest is still the LAST section.
+  assert.ok(html.indexOf('id="find-search"') > html.indexOf('id="rest"'));
+});
+
+test("W1-T157: exactly ONE shared fuzzy scorer backs both the FIND search and the cmd+K palette", () => {
+  const html = renderShellHtml();
+  assert.match(html, /function fuzzyScore\(/);
+  assert.equal((html.match(/function fuzzyScore\(/g) ?? []).length, 1, "fuzzyScore must be defined once (shared), not duplicated");
+});
+
+test("W1-T157: the five facets each have live-count support and derive workstream client-side from the id prefix", () => {
+  const html = renderShellHtml();
+  assert.match(html, /function facetCount\(/); // live per-value counts
+  assert.match(html, /function taskWorkstream\(/); // workstream derived from id (no server field)
+  for (const g of ["status", "workstream", "risk", "hasPr", "needsMe"]) {
+    assert.ok(html.includes(`"${g}"`), `facet group ${g} missing from FIND state`);
+  }
+});
+
+test("W1-T157: view state round-trips through the URL via history.replaceState, preserving the existing token param", () => {
+  const html = renderShellHtml();
+  assert.match(html, /history\.replaceState/);
+  assert.doesNotMatch(html, /history\.pushState/); // never spam browser history on a keystroke/toggle
+  // writeFindStateToUrl seeds URLSearchParams from window.location.search (preserving ?token=…),
+  // and the load path restores BEFORE first paint.
+  assert.match(html, /function writeFindStateToUrl\(/);
+  assert.match(html, /function readFindStateFromUrl\(/);
+  assert.match(html, /new URLSearchParams\(window\.location\.search\)/);
+});
+
+test("W1-T157: cmd+K opens a global, accessible command palette bound on metaKey AND ctrlKey", () => {
+  const html = renderShellHtml();
+  assert.match(html, /id="cmdk-overlay"/);
+  assert.match(html, /role="dialog"/);
+  assert.match(html, /aria-modal="true"/);
+  // one document-level keydown listener, bound on both Meta (Mac) and Ctrl (Win/Linux) + "k",
+  // with preventDefault so the browser's own Cmd/Ctrl+K never swallows it.
+  assert.match(html, /document\.addEventListener\("keydown"/);
+  assert.match(html, /e\.metaKey \|\| e\.ctrlKey/);
+  assert.match(html, /e\.preventDefault\(\)/);
+});
+
+test("W1-T157: palette actions fire through the EXISTING buttons (one implementation each), never a second copy", () => {
+  const html = renderShellHtml();
+  // each palette action clicks the real fleet/panel button — so STOP's two-click confirm etc. is reused, never bypassed.
+  assert.match(html, /getElementById\("pause-btn"\)\.click\(\)/);
+  assert.match(html, /getElementById\("resume-btn"\)\.click\(\)/);
+  assert.match(html, /getElementById\("stop-btn"\)\.click\(\)/);
+  assert.match(html, /getElementById\("feedback-btn"\)\.click\(\)/);
+  assert.match(html, /getElementById\("graph-btn"\)\.click\(\)/);
+});
