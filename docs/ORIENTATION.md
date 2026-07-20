@@ -1,30 +1,49 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-07-18 (bootstrap seed — see note below; not yet produced by a live `rmd retro` run). Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-07-20T02:06:20.637Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
-**Bootstrap note:** this seed was generated (W1-T39) by running the SAME deterministic renderer
-`rmd retro` now calls every time — `renderOrientation`/`extractStandingRules` in
-`src/lib/retro.ts` — directly against the live GitHub-derived plan projection, but with no access
-to the runtime ledger (`state/ledger.ndjson` is instance-local, never checked into git). "Current
-state" below therefore reads as zero runs; "Next runnable task" and "Never-do invariants" ARE the
-real, live-derived values. The first real `rmd retro` run overwrites this file with the true
-calibration/shipped numbers too.
-
 ## Current state
 
-0 run(s) since the last retro marker. Verdicts: {}.
+195 run(s) since the last retro marker. Verdicts: {"blocked":5,"blocked_ci":21,"blocked_containment":2,"blocked_isolation":2,"incomplete":111,"no_pr":42,"pr_attribution_failed":12}.
 
 ### Shipped since marker
-- (none since the last retro marker)
+- W1-T1 → https://github.com/craigoley/remudero/pull/255 (gate-side merge; run ended pr_attribution_failed)
+- W1-T102 → https://github.com/craigoley/remudero/pull/194 (gate-side merge; run ended blocked)
+- W1-T103 → https://github.com/craigoley/remudero/pull/196 (gate-side merge; run ended blocked_ci)
+- W1-T108 → https://github.com/craigoley/remudero/pull/274 (gate-side merge; run ended blocked)
+- W1-T115 → https://github.com/craigoley/remudero/pull/279 (gate-side merge; run ended blocked)
+- W1-T132 → https://github.com/craigoley/remudero/pull/282 (gate-side merge; run ended incomplete)
+- W1-T27 → https://github.com/craigoley/remudero/pull/204 (gate-side merge; run ended blocked_ci)
+- W1-T29 → https://github.com/craigoley/remudero/pull/216 (gate-side merge; run ended blocked_ci)
+- W1-T30 → https://github.com/craigoley/remudero/pull/218 (gate-side merge; run ended blocked_ci)
+- W1-T31 → https://github.com/craigoley/remudero/pull/220 (gate-side merge; run ended blocked_ci)
+- W1-T32 → https://github.com/craigoley/remudero/pull/222 (gate-side merge; run ended blocked_ci)
+- W1-T33 → https://github.com/craigoley/remudero/pull/224 (gate-side merge; run ended blocked_ci)
+- W1-T34 → https://github.com/craigoley/remudero/pull/228 (gate-side merge; run ended blocked_ci)
+- W1-T35 → https://github.com/craigoley/remudero/pull/226 (gate-side merge; run ended blocked_ci)
+- W1-T36 → https://github.com/craigoley/remudero/pull/230 (gate-side merge; run ended blocked_ci)
+- W1-T37 → https://github.com/craigoley/remudero/pull/232 (gate-side merge; run ended blocked_ci)
+- W1-T38 → https://github.com/craigoley/remudero/pull/234 (gate-side merge; run ended blocked_ci)
+- W1-T39 → https://github.com/craigoley/remudero/pull/236 (gate-side merge; run ended blocked_ci)
+- W1-T40 → https://github.com/craigoley/remudero/pull/238 (gate-side merge; run ended blocked_ci)
+- W1-T44 → https://github.com/craigoley/remudero/pull/240 (gate-side merge; run ended blocked_ci)
+- W1-T46 → https://github.com/craigoley/remudero/pull/245 (gate-side merge; run ended blocked_ci)
+- W1-T47 → https://github.com/craigoley/remudero/pull/247 (gate-side merge; run ended blocked_ci)
+- W1-T48 → https://github.com/craigoley/remudero/pull/251 (gate-side merge; run ended blocked_ci)
+- W1-T50 → https://github.com/craigoley/remudero/pull/249 (gate-side merge; run ended blocked_ci)
+- W1-T97 → https://github.com/craigoley/remudero/pull/197 (gate-side merge; run ended blocked_ci)
+- W1-T98 → https://github.com/craigoley/remudero/pull/199 (gate-side merge; run ended blocked_ci)
+- W2-T3 → https://github.com/craigoley/remudero/pull/242 (gate-side merge; run ended blocked)
+- W3-T1a → https://github.com/craigoley/remudero/pull/212 (gate-side merge; run ended incomplete)
 
 ## Next runnable task
 
-**W1-T7** — Transient-vs-strike classifier + diagnose-then-retry
+**W1-T41** — rmd triage — the Architect intake worker (ground → research → grill-or-propose)
 
-- risk: medium · depends_on: W1-T3, W1-T6
+- risk: medium · depends_on: W1-T40
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 
