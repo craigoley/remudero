@@ -172,3 +172,19 @@ against a felt need — NOT now. The PWA console (W1-T139) covers the surface; a
 affordance to add ONLY if the web console proves insufficient for at-a-glance status. Recorded so it is not
 re-proposed as new; it is a known, deferred option.
 - Rollback: revert this record.
+
+## 2026-07-20T11:52:09.590Z — W1-T131 (W1-T131-1784548049093)
+- Options: Task: Test fixtures leak one temp dir per fixture per run (mkdtempSync(join(tmpdir(), "<prefix>-")) in ~32 test files / ~60 call sites, none paired with cleanup — confirmed via comm diff against files containing rmSync). Mutation testing (Stryker) re-runs the suite per mutant, multiplying this into the reported 202,830 dirs / 14G. This is a different leak from the one src/lib/tmp.ts (W1-T115) already fixed — that module hardens rmd's own production runtime temp-dir usage; nothing in it touches test fixtures, which each hand-roll their own mkdtempSync call with no cleanup at all. | Option 1 — Global per-process sweep at exit | Reversibility: trivial — delete the one setup file and drop the one --import flag; no other file touched. | Option 2 — Explicit shared helper + touch every fixture | Reversibility: reversible but heavier — a single large mechanical commit touching 32 files; any new fixture added later that forgets the helper silently reintroduces the leak (no backstop).
+- Chosen (RECOMMENDED, auto): Option 1 — Global per-process sweep at exit
+- Risk: high (explicit reversibility caveat in the decision text)
+- Rollback: revert the PR.
+
+## 2026-07-21 — REJECTED: an ad-hoc second checkout / daemon (~/Remudero/remudero-2)
+Operator direction record. To raise throughput, a second checkout + a second `rmd daemon` was
+considered and REJECTED. Two UN-governed dispatchers recreate the 23-PR runaway class (the W1-T1
+storm), and concurrent plan appends WITHOUT sharding recreate the DIRTY-cascade class (plan-file
+conflicts). The fast path IS the safe path here, and it's two small builds away: W1-T121 (WIP
+governor — bound dispatch) + W1-T122 (plan sharding — conflict-free concurrent filings), then P19's
+N parallel dispatch lanes bounded by the governor's WIP limit (start N=2), with T80 dedup + T149
+circuit-breaker as the per-task guards. Both prerequisites pulled to the immediate drain front.
+- Rollback: n/a (a direction record; no runtime is bound to it).
