@@ -941,3 +941,139 @@ export function renderSweepSummary(s: SweepSummary): string {
     (s.noneCount > 0 ? ` · ⚠️ ${s.noneCount} UNDISPOSED (invariant violated)` : "")
   );
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// W1-T150 — the LEVEL-TRIGGERED CREDIT BACKFILL rung (ratifies P30, the
+// identical P22 argument applied to the MERGE EVENT rather than open-PR
+// pipeline state — MASTER-PLAN's "0 of 195 runs ledgered a merge while GitHub
+// showed 28" fixture). A run's terminal `verdict` line is EDGE-TRIGGERED at
+// run-end: a run that ends (blocked_ci, blocked, no_pr, …) before its OWNED PR
+// merges never revisits the question, so the ledger's per-task credit can sit
+// wrong forever even though GitHub's own state has since moved on. Every
+// consumer that reads the `verdict` field directly rather than the
+// GitHub-derived union (deriveStatus/status.ts already gets this right via
+// its sibling-credit rung, MASTER-PLAN P29(i)/W1-T149) inherits the stale
+// answer. This rung closes that gap the SAME way `runSweep` above closes the
+// open-PR one: re-derive fresh every poll, act once, do nothing on a repeat
+// pass over unchanged state.
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One task's observed merge-credit candidacy — the input to the credit
+ * backfill rung. `merged` is the CALLER's ownership-asserted, trailer-anchored
+ * verdict (reusing W1-T149's ownership rule via status.ts's `deriveStatus` —
+ * this module never talks to GitHub directly, exactly like {@link OpenPrView}
+ * above): true only when a MERGED PR is owned by this task's own
+ * `run-<taskId>-*` branch and carries its anchored `Remudero-Task:` trailer
+ * (any run of the task — sibling credit). `false` covers every other observed
+ * state (open, closed, no owned PR at all) — the backfill must NEVER fire on
+ * anything short of an observed merge (acceptance 3, the falsifier).
+ */
+export interface CreditCandidate {
+  taskId: string;
+  prNumber: number;
+  prUrl: string;
+  merged: boolean;
+}
+
+/** One task's credit-backfill outcome this pass. */
+export interface CreditBackfillResult {
+  taskId: string;
+  prNumber: number;
+  prUrl: string;
+  /** True ⇒ a NEW `verdict.merged` correction was appended this pass. */
+  corrected: boolean;
+  /** True ⇒ the ledger already carried merge credit for this task (dedup). */
+  alreadyCredited: boolean;
+}
+
+/** The whole credit-backfill pass's outcome. */
+export interface CreditBackfillSummary {
+  total: number;
+  corrected: number;
+  results: CreditBackfillResult[];
+}
+
+/**
+ * Has this task's merge already been CREDITED on the ledger — either a live
+ * run's own terminal `verdict: "merged"` line, or a PRIOR `verdict.merged`
+ * backfill correction from this same rung (IDEMPOTENCE: acceptance 2 — a
+ * second pass over unchanged state must see its own prior correction and
+ * append nothing further)? Scoped to `task_id` only, never `run_id` — sibling
+ * credit (P29(i)/W1-T149) means ANY run of this task recording a merge
+ * counts, not only the run whose candidate is being reconciled this pass.
+ */
+function hasMergeCredit(lines: Array<Record<string, unknown>>, taskId: string): boolean {
+  return lines.some(
+    (l) => l.task_id === taskId && (l.step === "verdict.merged" || (l.step === "verdict" && l.verdict === "merged")),
+  );
+}
+
+/**
+ * THE CREDIT-BACKFILL RUNG (W1-T150). For every candidate whose OWNED PR is
+ * `merged` but whose ledger carries no merge credit yet, append EXACTLY ONE
+ * `verdict.merged` correction line naming the PR (acceptance 1). A candidate
+ * whose PR is not merged is always a no-op (acceptance 3). A repeat pass over
+ * unchanged state — including one that only sees THIS pass's own just-written
+ * corrections — appends nothing further (acceptance 2): `alreadyCredited` is
+ * (re-)computed per candidate against the ledger snapshot PLUS every
+ * correction this same pass has already appended, so two candidates naming
+ * the same task within one pass still credit exactly once.
+ *
+ * Mirrors {@link runSweep}'s shape deliberately (same injected ledger
+ * reader/appender, same `dryRun` leaves-no-trace contract) so both rungs of
+ * the one reconciler behave identically — but is a SEPARATE entry point: its
+ * input domain (one credit candidate per TASK, sourced from `deriveStatus`)
+ * is disjoint from `runSweep`'s (one {@link OpenPrView} per OPEN PR) — a
+ * merged PR is no longer open and would never appear in `openPrs`.
+ */
+export async function runCreditBackfill(
+  candidates: CreditCandidate[],
+  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "readLedger" | "appendLine" | "log" | "dryRun">,
+): Promise<CreditBackfillSummary> {
+  const readLedger = deps.readLedger ?? readLedgerLines;
+  const appendLine = deps.appendLine ?? appendLedger;
+  const log = deps.log ?? (() => {});
+  const lines = readLedger(deps.ledgerPath);
+
+  const results: CreditBackfillResult[] = [];
+  let corrected = 0;
+
+  for (const c of candidates) {
+    const alreadyCredited = hasMergeCredit(lines, c.taskId);
+    const shouldCorrect = c.merged && !alreadyCredited;
+    const acted = shouldCorrect && !deps.dryRun;
+
+    if (acted) {
+      appendLine(deps.ledgerPath, {
+        run_id: deps.runId,
+        task_id: c.taskId,
+        step: "verdict.merged",
+        verdict: "merged",
+        pr_number: c.prNumber,
+        pr_url: c.prUrl,
+        source: "sweep.credit_backfill",
+      });
+      // Reflected into THIS pass's own snapshot (not just re-read from disk on
+      // the NEXT sweep) so a second candidate naming the same task later in
+      // this same array — e.g. a duplicate produced by the caller — is
+      // credited exactly once, never twice, without waiting on a fresh poll.
+      lines.push({ task_id: c.taskId, step: "verdict.merged" });
+      corrected++;
+    }
+
+    log("sweep.credit_backfill", {
+      task_id: c.taskId,
+      pr_number: c.prNumber,
+      pr_url: c.prUrl,
+      corrected: acted,
+      already_credited: alreadyCredited,
+    });
+
+    results.push({ taskId: c.taskId, prNumber: c.prNumber, prUrl: c.prUrl, corrected: acted, alreadyCredited });
+  }
+
+  const summary: CreditBackfillSummary = { total: candidates.length, corrected, results };
+  log("sweep.credit_backfill.summary", { total: summary.total, corrected: summary.corrected });
+  return summary;
+}

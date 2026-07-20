@@ -131,11 +131,13 @@ import { buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import {
   buildBatchedGithub,
+  deriveStatus,
   ghGateway,
   ghRequiredStatusCheckContexts,
   isDispatchBreakerTripped,
   projectPlan,
   readLedgerLines,
+  type DeriveDeps,
   type GitHub,
   type StatusProjection,
 } from "./lib/status.js";
@@ -146,11 +148,13 @@ import {
   isBlockedCi,
   renderClarificationQuestion,
   renderSweepSummary,
+  runCreditBackfill,
   runSweep,
   strikeCapForAnswer,
   toQuestionEntry,
   type CiFailure,
   type ClarificationQuestion,
+  type CreditCandidate,
   type FixDispatchEvidence,
   type OpenPrView,
   type StrikeAttempt,
@@ -3695,6 +3699,31 @@ function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): Open
 }
 
 /**
+ * Build the credit-backfill rung's input (W1-T150, ratifies P30): one
+ * {@link CreditCandidate} per task in `plan` whose merge state — derived via
+ * the SAME `deriveStatus` ownership rule dispatch and calibration already
+ * trust (P29(i)/W1-T149 sibling credit: ANY run of the task owning the merged,
+ * trailer-anchored PR counts, not just the run the ledger happens to name) —
+ * is currently MERGED on GitHub. Uses the BATCHED gateway (one `gh pr list`
+ * for the whole repo, not one per task — the same O(N)-avoidance
+ * `buildBatchedGithub`'s own doc motivates for the board) since this walks
+ * every task in the plan on every sweep/daemon poll. Best-effort: a
+ * plan-unavailable repo (already logged by the caller) simply yields plan.tasks
+ * === [] here, never a hard failure of its own.
+ */
+function buildCreditCandidates(owner: string, repo: string, plan: Plan, ledgerPath: string): CreditCandidate[] {
+  const deps: DeriveDeps = { ledgerPath, github: buildBatchedGithub(owner, repo) };
+  const candidates: CreditCandidate[] = [];
+  for (const task of plan.tasks) {
+    const proj = deriveStatus(task, deps);
+    if (proj.merged && proj.prNumber !== undefined && proj.prUrl !== undefined) {
+      candidates.push({ taskId: task.id, prNumber: proj.prNumber, prUrl: proj.prUrl, merged: true });
+    }
+  }
+  return candidates;
+}
+
+/**
  * Wire the four gated effects to their real implementations. dispatchFix
  * reconstructs a W1-T76 `runFixRung` invocation for a PR discovered COLD (no live
  * run/session): it checks the PR head branch out into a scratch worktree, seeds a
@@ -3957,7 +3986,19 @@ async function sweepCommand(rest: string[]): Promise<number> {
     { ...effects, ledgerPath, runId, log, dryRun },
     DEFAULT_SWEEP_POLICY,
   );
-  console.log(`### rmd sweep${dryRun ? " --dry-run" : ""} — ${owner}/${repo}\n` + renderSweepSummary(summary));
+
+  // W1-T150 — the credit-backfill rung (ratifies P30): level-triggered, like
+  // the open-PR reconciliation above, but over every task's OWNED merge state
+  // rather than open-PR pipeline state — the gate-side-merge fixture (0 of 195
+  // runs ledgered a merge while GitHub showed 28) this rung exists to close.
+  const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath);
+  const creditSummary = await runCreditBackfill(creditCandidates, { ledgerPath, runId, log, dryRun });
+
+  console.log(
+    `### rmd sweep${dryRun ? " --dry-run" : ""} — ${owner}/${repo}\n` +
+      renderSweepSummary(summary) +
+      `\ncredit backfill: ${creditSummary.total} candidate(s) reconciled · ${creditSummary.corrected} corrected`,
+  );
   return 0;
 }
 
@@ -3980,6 +4021,10 @@ function buildSweepHook(
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath);
       const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
       await runSweep(openPrs, { ...effects, ledgerPath, runId, log }, DEFAULT_SWEEP_POLICY);
+      // W1-T150: the SAME credit-backfill rung `rmd sweep` runs, on the
+      // daemon's own poll cadence — never a second, separately-scheduled loop.
+      const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath);
+      await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
     } catch (e) {
       log("sweep.error", { error: String((e as Error)?.message ?? e) });
     }
