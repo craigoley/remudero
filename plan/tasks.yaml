@@ -7432,21 +7432,41 @@
     convention was correct but undocumented, so every future plan PR steps on it until the emitter encodes it."
 
 - id: W1-T137
-  title: "worker fix-rung commit headers must satisfy commitlint header-max-length (<=100) — verbose round-N headers blew the cap and blocked #303/#305 by construction"
+  title: "ENFORCE the commit-message contract on WORKER-AUTHORED commits — the instructional half and the harness-built shaping shipped in PR #407, but nothing yet STOPS a worker committing a malformed message in its own worktree"
   repo: remudero
   depends_on: [W1-T136]
   type: implement
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  rationale: "LIVE HOLE (2 stuck PRs): the worker fix-rung builds a commit header from the round summary —
-    'fix: <task> round N -- <prose> (W1-Tnn round n)' — with no length cap. Those headers ran 108 chars (#303
-    round 1) and 114 (#305 round 3), over commitlint's header-max-length of 100 (now a REQUIRED check).
-    commitlint lints the WHOLE origin/main..HEAD range, so a single long intermediate header reds commitlint ->
-    ci-gate -> BLOCKED, even though the code passed its review rounds. The daemon's review-fix-rung has no move
-    for a commit-message/CI failure, so it burned both strikes and escalated (#304/#306) WITHOUT touching the
-    real blocker. This is the W1-T136 class (a PR-emission path that never learned the grown gate stack) at the
-    worker/fix-rung site instead of the retro."
+  rationale: "PREMISE CORRECTED 2026-07-20 — READ THIS BEFORE BUILDING. The original filing said the worker
+    fix-rung BUILDS a commit header from the round summary (a 'fix: <task> round N -- <prose>' template) with no
+    length cap, and pointed the implementer at that builder. THAT BUILDER DOES NOT EXIST. A source survey found no
+    such template anywhere in run-task.ts or src/lib: the worker LLM authors its own commit message and runs
+    `git commit` itself, on the implement path, the fix-rung path and the retro path alike. The rung only pushes
+    whatever the worker committed (run-task.ts:1163, 'Push whatever the fix worker committed'). This task's own
+    design note said to VERIFY the exact commit-message build site and distrust the note — it was right to.
+    THE REAL CAUSE, and it is simpler: NO PROMPT anywhere in src/ mentioned Conventional Commits, a type prefix,
+    or any length limit. The whole instruction was 'commit with a concise message' (the compaction.ts OUTPUT
+    CONTRACT), and renderFixPrompt said nothing about the message at all. The convention lived only in
+    CONTRIBUTING.md, and there is no root CLAUDE.md, so a worker never read it. The worker was not disobeying a
+    rule — it was never given one. Compounding it, commitlint runs ONLY in CI (no husky, no core.hooksPath, no
+    commit-msg hook), so the first signal is a red REQUIRED check on an already-open PR, where the W1-T76 fix rung
+    has no move for a CI-check failure and escalates a SPEC question instead (#304, #306, and #406 on 2026-07-20).
+    ALREADY SHIPPED in PR #407 — do NOT rebuild these: (a) the worker OUTPUT CONTRACT now states the convention,
+    the 100-CHARACTER header cap, the characters-not-bytes caveat, the lower-case subject rule and body wrapping,
+    with a legal example that a test lints against the real CLI; (b) src/lib/commit-message.ts shapes
+    harness-built messages (header capped in characters, subject case normalized, trimmed overflow preserved in a
+    wrapped body) and is applied to the two sites that interpolate LLM free text into a header,
+    plan-architect.ts and triage.ts. Measured finding pinned by a test there: there is NO acronym exemption —
+    'SSE stream severed' and 'URL round-trips' are both REJECTED by the real gate, so a leading acronym is
+    lower-cased like any other leading capital.
+    WHAT REMAINS IS THIS TASK: a prompt is not a guarantee. Nothing STOPS a worker committing a malformed message
+    inside its own worktree — the instructional half raises compliance, it cannot enforce it. ORIGINAL EVIDENCE,
+    still valid and still the falsifier set: headers of 108 chars (#303 round 1), 114 (#305 round 3), and 124
+    chars with an upper-case subject (#405). commitlint lints the WHOLE origin/main..HEAD range, so ONE bad
+    intermediate commit reds the job even when the final message is clean — which is why a fix that only shapes
+    the last commit is insufficient."
   design: |
     Cap the generated commit HEADER at commitlint's header-max-length while keeping the conventional shape
     '<type>: <scope> -- <summary> (W1-Tnn round n)': rewrite/truncate the summary so the header is <=100 chars,
@@ -7455,12 +7475,14 @@
     build site in src/run-task.ts AND the configured header-max-length / body-max-line-length from the repo
     commitlint config before editing (distrust this note; do not hard-code 100 if the config differs).
   acceptance:
-    - claim: "a fix-rung commit whose summary would exceed the cap yields a header <=100 that passes commitlint"
-      proof: "unit test: the commit-message builder, given a long round summary, produces a header <=100 chars that passes commitlint against the repo config (type in enum, subject lower-case); the pre-fix builder's 108/114-char output is REJECTED by the same lint (the falsifier)"
-    - claim: "overflow detail is preserved in the body, wrapped so body-max-line-length also passes"
-      proof: "unit test: the trimmed summary's overflow appears in the commit BODY with every line within body-max-line-length; the full message passes commitlint end to end (neither header-max-length nor body-max-line-length trips)"
+    - claim: "a worker-authored malformed commit is caught BEFORE the PR exists — not by a red required check after the push"
+      proof: "integration test over the worker commit path with an injected malformed message (a 124-char header with an upper-case subject, the verbatim #405 shape): the enforcement point either shapes it to a legal message or fails the run with the violation NAMED, and in neither case does a PR open carrying a message commitlint would reject. FALSIFIERS, all real: #303 round 1 at 108 chars, #305 round 3 at 114, #405 at 124 with an upper-case subject — each reached an OPEN PR and redded the required commitlint check, where the W1-T76 fix rung had no move and escalated a spec question (#304, #306, #406)"
+    - claim: "enforcement covers the WHOLE origin/main..HEAD range, not just the tip commit"
+      proof: "integration test: a synthesized multi-commit branch whose FIRST commit is malformed and whose LAST is clean is still caught. FALSIFIER: commitlint runs `--from <base> --to HEAD` over the entire range (.github/workflows/ci.yml), so one bad intermediate message reds the job — an enforcement point that only inspects or amends HEAD passes locally and still fails CI, which is the failure this task exists to end"
+    - claim: "enforcement never destroys work — it does not force-push, and it does not silently rewrite a range of authored history"
+      proof: "unit test asserting the enforcement point performs no history rewrite beyond, at most, a message-only amend of a commit it is about to create, and never invokes force-push (the hooks/deny-floor.sh boundary already forbids force-push to a default branch, and this must not route around it). FALSIFIER: an implementation that rebases or force-pushes a worker branch to fix messages, which risks the squash-phantom-revert class where a forged merge-base silently reverts newer merged PRs"
     - claim: "a multi-round branch (initial + two fix rounds, each with a long summary) lints clean over origin/main..HEAD"
-      proof: "integration test: a synthesized 3-commit branch built by the fix-rung path with long summaries, run through commitlint --from origin/main --to HEAD, reports 0 problems; a variant that reverts the cap reproduces the header-max-length failure (the #303/#305 regression, closed)"
+      proof: "integration test: a synthesized 3-commit branch produced through the enforced worker path with long summaries, run through `commitlint --from origin/main --to HEAD`, reports 0 problems; a variant with enforcement disabled reproduces the header-max-length failure (the #303/#305 regression, closed)"
   risk: high
   origin: architect
   plan_refs: ["§5C", "§6A"]
