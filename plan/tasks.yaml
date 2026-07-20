@@ -7171,3 +7171,47 @@
     unattended — the hard precondition). The integrity gate is fail-closed INSIDE the automated path: the R8-class
     zero-credit gather must ABORT, never write, since no human is watching. Thresholds N=25 merges / D=7 days are
     policy-data defaults."
+
+- id: W1-T161
+  title: "review proof-exec must not FALSE-BLOCK a green-code PR — a `unit test:` PROSE proof matching zero test-names is not_executable (keyword fallback), not executed_fail (the #349 stuck class)"
+  repo: remudero
+  depends_on: [W1-T72]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (#349, W1-T149): the PR had CORRECT, test-passing code (daemon 34/34 incl. the
+    'P29(ii) ... W1-T29 x10 spin shape' test) yet sat blocked on remudero-review=FAILURE and needed a HUMAN to
+    re-review. Root cause: the reviewer executes a `unit test:` proof by compiling its body to `--test-name-pattern`
+    (review.ts parseTestTarget); the house convention writes proofs as PROSE DESCRIPTIONS ('unit test: a seeded task
+    dispatched N times ... (the W1-T29 x10 spin shape)'), NOT the exact test name, so the pattern matches ZERO tests,
+    and the W1-T72 nameFiltered guard classifies a zero-match as executed_fail (a false block). The guard's INTENT is
+    right — a proof NAMING a non-existent test is theater and must fail — but it MIS-FIRES on a prose proof of a test
+    that DOES exist under a different name. The fix-rung then cannot resolve a false-failure (the code is already
+    correct), burns its strikes, and the PR sticks."
+  design: |
+    In review.ts's proof-exec classification, distinguish two zero-match cases: (A) a proof body that looks like a
+    concrete TEST NAME (short, a plausible title) matching zero tests -> executed_fail (test theater — a named test
+    that does not exist; the W1-T72 guard, PRESERVED); (B) a proof body that is a long PROSE DESCRIPTION (sentence
+    punctuation, length beyond a plausible test title, or otherwise not a bare test-name) matching zero tests ->
+    not_executable (the keyword floor stands, flagged floorDegraded), NOT executed_fail. The anti-theater guard must
+    NOT be weakened: a proof that names a fabricated concrete test still fails. VERIFY parseTestTarget, the
+    nameFiltered/executed_fail path, and isDialectPrefixed/floorDegraded from source before editing (distrust this
+    note). The whole point: a false review block on green, test-passing code must never be manufacturable.
+  acceptance:
+    - claim: "a `unit test:` PROSE proof matching zero test-names is not_executable (keyword fallback), NOT executed_fail — a green-code PR whose real test passes under a different name is not false-blocked"
+      proof: "unit test: a `unit test: <long prose description>` proof whose --test-name-pattern matches zero tests, WHILE a real test with that behavior exists and passes, is classified not_executable (keyword floor stands, floorDegraded), not executed_fail; the #349 fixture (W1-T149 criterion-3 prose vs the passing 'P29(ii) ... spin shape' test) yields NO block (the falsifier: the pre-fix path returns executed_fail on the same input)"
+    - claim: "the anti-theater guard is PRESERVED: a proof naming a specific non-existent test still FAILS"
+      proof: "unit test: a proof whose body is a concrete test NAME that does NOT exist on the head is still executed_fail (never a silent pass) — the W1-T72 test-theater guard is not weakened (the falsifier: a proof naming a fabricated test must not be re-classified not_executable)"
+    - claim: "the two cases are told apart deterministically, not by an LLM"
+      proof: "unit test: the prose-vs-test-name discriminator is a pure deterministic predicate (length / punctuation / bare-name shape) over the proof body — the same body always classifies the same way, no model call; a fixture table of {prose->not_executable, bare-name->executed_fail} passes"
+  risk: high
+  origin: architect
+  plan_refs: ["§5", "§5C"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from #349's stuck state (W1-T149): correct code, false review block, no self-heal — a human had to
+    re-review. Refines W1-T72's nameFiltered guard: keep it catching test theater (named non-existent test = fail),
+    stop it false-blocking prose proofs of tests that pass under a different name. #349 itself is already merged;
+    this prevents recurrence. Related: the fix-rung strikes indefinitely on a false-failure it cannot fix."
