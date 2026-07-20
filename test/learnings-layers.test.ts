@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,12 +10,23 @@ import {
   LearningsError,
   loadGlobalArtifact,
   loadLayeredLearnings,
+  loadLayeredLearningsForTaskFiles,
   loadLearningsCorpus,
   projectLearningsHome,
+  renderMatchedLearnings,
+  selectLearnings,
   type GlobalArtifact,
   type LearningEntry,
 } from "../src/lib/learnings.js";
-import { globalLearningsHome, userOverallLearningsHome, type Config } from "../src/lib/config.js";
+import {
+  globalArtifactPath,
+  globalLearningsHome,
+  userOverallLearningsHome,
+  type Config,
+} from "../src/lib/config.js";
+import { assertProvenance } from "../src/lib/provenance.js";
+import { renderImplementPrompt } from "../src/run-task.js";
+import type { Task } from "../src/lib/plan.js";
 
 // P32/W1-T145 — layered knowledge: ONE entry schema valid at every layer + the layer homes.
 // These tests exercise the three acceptance criteria named in plan/tasks.yaml W1-T145 directly.
@@ -250,4 +261,124 @@ test("W1-T145: the global home is also derived from config.root, distinct from t
   const config = baseConfig({ root: "/tmp/rmd-root" });
   assert.equal(globalLearningsHome(config), "/tmp/rmd-root/learnings-global");
   assert.notEqual(globalLearningsHome(config), userOverallLearningsHome(config));
+});
+
+// ── "bundled into prompt assemblies": the ASSEMBLED PROMPT itself, not just the merged entry
+// list, must carry project+user+global in precedence (the reviewer's non-responsive gap). ──────
+
+/** Minimal implement Task fixture, matching test/learnings.test.ts's shape. */
+function task(over: Partial<Task> = {}): Task {
+  return {
+    id: "T-LAYERED",
+    title: "layered-knowledge fixture task",
+    repo: "remudero",
+    depends_on: [],
+    type: "implement",
+    risk: "medium",
+    verify: "auto",
+    status: "queued",
+    attempts: 0,
+    prompt: "do the layered thing",
+    files: ["src/lib/learnings.ts"],
+    ...over,
+  };
+}
+
+test("W1-T145: the ASSEMBLED PROMPT bundles project + user-overall + global facts, in precedence, provenance-clean", () => {
+  const root = mkdtempSync(join(tmpdir(), "layered-prompt-root-"));
+  const projectDir = join(root, "repos", "remudero", "learnings");
+  mkdirSync(projectDir, { recursive: true });
+  const userDir = userOverallLearningsHome(baseConfig({ root }));
+  mkdirSync(userDir, { recursive: true });
+  const globalDir = globalLearningsHome(baseConfig({ root }));
+  mkdirSync(globalDir, { recursive: true });
+
+  writeShard(projectDir, "shard.yaml", [
+    entry({ id: "p-fact", layer: "project", fact: "PROJECT-LAYER FACT", files: ["src/lib/learnings.ts"] }),
+  ]);
+  writeShard(userDir, "shard.yaml", [
+    entry({ id: "u-fact", layer: "user-overall", fact: "USER-OVERALL-LAYER FACT", files: ["src/lib/learnings.ts"] }),
+  ]);
+  const globalEntries = [
+    entry({ id: "g-fact", layer: "global", fact: "GLOBAL-LAYER FACT", files: ["src/lib/learnings.ts"] }),
+  ];
+  const path = globalArtifactPath(baseConfig({ root }));
+  writeFileSync(path, JSON.stringify({ version: "v1", hash: computeArtifactHash(globalEntries), entries: globalEntries }));
+
+  const t = task();
+  const { entries, globalRefusedReason } = loadLayeredLearningsForTaskFiles(
+    { projectDir, userOverallDir: userDir, globalArtifactPath: path },
+    t.files,
+  );
+  assert.equal(globalRefusedReason, undefined);
+  assert.deepEqual(
+    entries.map((e) => e.id),
+    ["p-fact", "u-fact", "g-fact"],
+    "project, then user-overall, then global — the merge precedence order",
+  );
+
+  const { selected } = selectLearnings(entries, t.files);
+  const matchedLearnings = renderMatchedLearnings(selected);
+  const prompt = renderImplementPrompt(t, "", "run-1", matchedLearnings);
+
+  // The ASSEMBLED PROMPT — not just the merged entry list — carries all three layers' facts.
+  const pIdx = prompt.indexOf("PROJECT-LAYER FACT");
+  const uIdx = prompt.indexOf("USER-OVERALL-LAYER FACT");
+  const gIdx = prompt.indexOf("GLOBAL-LAYER FACT");
+  assert.ok(pIdx !== -1, "assembled prompt must include the project-layer fact");
+  assert.ok(uIdx !== -1, "assembled prompt must include the user-overall-layer fact");
+  assert.ok(gIdx !== -1, "assembled prompt must include the global-layer fact");
+  assert.ok(pIdx < uIdx && uIdx < gIdx, "assembled prompt preserves project -> user-overall -> global precedence");
+
+  // Every injected fact is cited (provenance linter passes on the full assembled prompt).
+  assert.match(prompt, /PROJECT-LAYER FACT.*\[src: learnings#p-fact\]/);
+  assert.match(prompt, /USER-OVERALL-LAYER FACT.*\[src: learnings#u-fact\]/);
+  assert.match(prompt, /GLOBAL-LAYER FACT.*\[src: learnings#g-fact\]/);
+  assert.doesNotThrow(() => assertProvenance(prompt), "the assembled prompt must pass the provenance gate");
+});
+
+test("W1-T145: a TAMPERED global artifact is excluded from the assembled prompt — project+user still bundle (the falsifier)", () => {
+  const root = mkdtempSync(join(tmpdir(), "layered-prompt-tamper-root-"));
+  const projectDir = join(root, "repos", "remudero", "learnings");
+  mkdirSync(projectDir, { recursive: true });
+  const userDir = userOverallLearningsHome(baseConfig({ root }));
+  mkdirSync(userDir, { recursive: true });
+  const globalDir = globalLearningsHome(baseConfig({ root }));
+  mkdirSync(globalDir, { recursive: true });
+
+  writeShard(projectDir, "shard.yaml", [
+    entry({ id: "p-fact", layer: "project", fact: "PROJECT-LAYER FACT", files: ["src/lib/learnings.ts"] }),
+  ]);
+  writeShard(userDir, "shard.yaml", [
+    entry({ id: "u-fact", layer: "user-overall", fact: "USER-OVERALL-LAYER FACT", files: ["src/lib/learnings.ts"] }),
+  ]);
+  const goodGlobalEntries = [
+    entry({ id: "g-fact", layer: "global", fact: "GLOBAL-LAYER FACT", files: ["src/lib/learnings.ts"] }),
+  ];
+  const correctHash = computeArtifactHash(goodGlobalEntries);
+  // Tamper AFTER hashing, keeping the stale (now-mismatched) hash — a corrupted/forged pull.
+  const tamperedEntries = [{ ...goodGlobalEntries[0], fact: "INJECTED GLOBAL FACT (should never inject)" }];
+  const path = globalArtifactPath(baseConfig({ root }));
+  writeFileSync(path, JSON.stringify({ version: "v1", hash: correctHash, entries: tamperedEntries }));
+
+  const t = task();
+  const { entries, globalRefusedReason } = loadLayeredLearningsForTaskFiles(
+    { projectDir, userOverallDir: userDir, globalArtifactPath: path },
+    t.files,
+  );
+  assert.match(globalRefusedReason ?? "", /hash mismatch/);
+  assert.deepEqual(entries.map((e) => e.id), ["p-fact", "u-fact"], "tampered global never reaches the merged corpus");
+
+  const { selected } = selectLearnings(entries, t.files);
+  const matchedLearnings = renderMatchedLearnings(selected);
+  const prompt = renderImplementPrompt(t, "", "run-1", matchedLearnings);
+
+  assert.ok(prompt.includes("PROJECT-LAYER FACT"), "project layer still bundles into the assembled prompt");
+  assert.ok(prompt.includes("USER-OVERALL-LAYER FACT"), "user-overall layer still bundles into the assembled prompt");
+  assert.ok(!prompt.includes("GLOBAL-LAYER FACT"), "a tampered global fact must never reach the assembled prompt");
+  assert.ok(
+    !prompt.includes("INJECTED GLOBAL FACT"),
+    "the falsifier: a hash-mismatched artifact's content must never be silently trusted into a prompt",
+  );
+  assert.doesNotThrow(() => assertProvenance(prompt), "the assembled prompt (minus the refused layer) is still provenance-clean");
 });

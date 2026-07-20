@@ -232,6 +232,20 @@ export function globalLearningsHome(config: Config): string {
   return join(config.root, "learnings-global");
 }
 
+/** Canonical filename of the pulled RMD-GLOBAL artifact inside {@link globalLearningsHome}. */
+const GLOBAL_ARTIFACT_FILENAME = "artifact.yaml";
+
+/**
+ * Full path to the RMD-GLOBAL artifact file this instance reads (P32/W1-T145)
+ * — `<globalLearningsHome>/artifact.yaml`. A missing file (nothing pulled
+ * yet, e.g. before §6 transport exists) is handled by
+ * `learnings.ts`'s `loadGlobalArtifact` the same as any other refusal: zero
+ * entries, never a crash.
+ */
+export function globalArtifactPath(config: Config): string {
+  return join(globalLearningsHome(config), GLOBAL_ARTIFACT_FILENAME);
+}
+
 /**
  * Resolve the real `claude` binary in a NON-shell context.
  *

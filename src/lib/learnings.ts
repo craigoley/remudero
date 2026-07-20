@@ -508,8 +508,33 @@ export interface LayeredLearningsResult {
  * exists at each home; deciding what MOVES between layers is W1-T146.
  */
 export function loadLayeredLearnings(homes: LayeredLearningsHomes): LayeredLearningsResult {
-  const entries: LearningEntry[] = [];
-  entries.push(...loadLearningsCorpus(homes.projectDir));
+  return mergeLayers(loadLearningsCorpus(homes.projectDir), homes);
+}
+
+/**
+ * The PROMPT-ASSEMBLY entry point (P32/W1-T145): identical to
+ * {@link loadLayeredLearnings} except the PROJECT layer is read via the
+ * INDEX-based {@link loadLearningsForTaskFiles} lookup (W1-T33) instead of a
+ * full corpus scan — the same lookup-not-scan property the project layer
+ * already had is preserved once user-overall/global are merged in, so
+ * layering never regresses the project corpus's O(matching shards) cost.
+ * This is what a real prompt assembly (`run-task.ts`'s implement dispatch)
+ * calls: project (index lookup, file-matched) + user-overall (full corpus,
+ * expected small/cross-project) + global (hash-verified artifact), merged in
+ * PRECEDENCE ORDER, ready to hand to {@link selectLearnings} /
+ * {@link renderMatchedLearnings} exactly like the project-only corpus was
+ * before this task.
+ */
+export function loadLayeredLearningsForTaskFiles(
+  homes: LayeredLearningsHomes,
+  taskFiles: string[] | undefined,
+): LayeredLearningsResult {
+  return mergeLayers(loadLearningsForTaskFiles(homes.projectDir, taskFiles), homes);
+}
+
+/** Shared merge step behind {@link loadLayeredLearnings}/{@link loadLayeredLearningsForTaskFiles}: append user-overall then verified-global onto an already-loaded project corpus, in PRECEDENCE ORDER. */
+function mergeLayers(projectEntries: LearningEntry[], homes: LayeredLearningsHomes): LayeredLearningsResult {
+  const entries: LearningEntry[] = [...projectEntries];
   if (homes.userOverallDir) {
     entries.push(...loadLearningsCorpus(homes.userOverallDir));
   }
@@ -610,9 +635,15 @@ export function loadLearningsForTaskFiles(learningsDir: string, taskFiles: strin
  * repo-wide, so EVERY (non-superseded) entry is a candidate (the budget still
  * bounds the tax).
  *
- * Ordering (highest first): concrete match count → most-recently-cited → id.
- * Then fill up to `budgetChars` of rendered fact lines; the remainder is
- * `dropped` (returned for logging), so the injected corpus is bounded.
+ * Ordering (highest first): concrete match count → LAYER PRECEDENCE
+ * (project → user-overall → global, P32/W1-T145 — the most repo-specific
+ * fact wins a tie before recency does) → most-recently-cited → id. Then fill
+ * up to `budgetChars` of rendered fact lines; the remainder is `dropped`
+ * (returned for logging), so the injected corpus is bounded. Every entry
+ * pre-W1-T145 has no `layer` set, which defaults to `"project"` — so the
+ * layer tiebreak is a no-op for the pre-existing project-only corpus and
+ * only distinguishes entries once a user-overall/global layer is actually
+ * populated.
  */
 export function selectLearnings(
   entries: LearningEntry[],
@@ -627,6 +658,8 @@ export function selectLearnings(
     .filter((r) => repoWide || r.count > 0)
     .sort((a, b) => {
       if (b.count !== a.count) return b.count - a.count;
+      const layerDiff = LAYERS.indexOf(entryLayer(a.entry)) - LAYERS.indexOf(entryLayer(b.entry));
+      if (layerDiff !== 0) return layerDiff;
       const ac = a.entry.cited ?? "";
       const bc = b.entry.cited ?? "";
       if (ac !== bc) return bc < ac ? -1 : 1; // recent (larger ISO) first
