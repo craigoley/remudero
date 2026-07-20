@@ -343,6 +343,11 @@
     beside live data): a fetch failure shows a TRANSIENT "reconnecting" indicator with the last-success timestamp;
     the next successful poll CLEARS it; only N consecutive failures escalate to the stale/disconnected state (data
     stamped stale, never silently old). The banner is DERIVED from current poll state, never a latched string.
+    DELTA-DRIVEN (confirming what the code already anticipates): the shell CONSUMES /v1/status/stream
+    (buildStatusStream's per-flip SSE deltas) instead of WHOLESALE polling; each delta patches ONLY the changed
+    row IN PLACE, so unchanged rows keep DOM identity and an active text selection survives — no per-poll innerHTML
+    re-render. This is BOTH the efficiency fix AND the mechanism that makes the DOM-stability + selection-preservation
+    above natural (the operator cannot copy/paste from the live board today because it re-renders wholesale per poll).
     VERIFY the SSE stream (buildStatusStream), the poll/fetch error path (refreshBoard), the reduced-motion +
     aria-live patterns, and W1-T155's taxonomy fields from source.
   acceptance:
@@ -354,6 +359,8 @@
       proof: "a test asserts that under prefers-reduced-motion the animated indicator is replaced by a static badge (no animation), and status changes emit aria-live announcements"
     - claim: "the error state has a LIFECYCLE: a fetch failure shows a 'reconnecting' indicator with the last-success timestamp, a next successful poll CLEARS it, and only N consecutive failures escalate to the stale/disconnected state (data visibly stamped stale, never silently old)"
       proof: "integration test over an injected poll sequence: a transient fetch failure renders a 'reconnecting' indicator carrying the last-success time (NOT a terminal error banner); the NEXT successful poll CLEARS it and shows fresh data; N consecutive failures escalate to the stale/disconnected state with the data visibly STAMPED stale. FALSIFIERS: an error/reconnecting banner still rendered AFTER a successful poll FAILS; a page showing FRESH data and a failure banner SIMULTANEOUSLY FAILS (the operator-observed 'board fetch failed: TypeError: Failed to fetch' banner that survived successful polls beside live data)"
+    - claim: "updates patch ONLY changed nodes — unchanged rows keep DOM IDENTITY across polls/SSE events, and an active text selection survives an update cycle"
+      proof: "a test over an update cycle: an UNCHANGED row's DOM node is the SAME node afterward (identity preserved, not re-created), and only the CHANGED node(s) are patched; an active text selection spanning unchanged content SURVIVES a background update. FALSIFIERS: an unchanged row's node REPLACED on refresh FAILS; a background update that DESTROYS the selection FAILS (the operator cannot copy/paste from the live board today — a wholesale innerHTML re-render per poll blows away DOM identity and selection)"
   risk: high
   origin: architect
   plan_refs: ["§7", "§7B"]
@@ -412,7 +419,11 @@
     history with per-run cost + verdict, PR/issue links. From any run, a JOURNEY view renders rmd trace's provenance
     chain (W1-T43: feedback -> proposal -> task -> run -> PR) so the operator walks BACKWARDS from an outcome to the
     producing step. The card renders from the plan + ledger with ZERO extra GitHub calls (the batched gateway serves
-    it). VERIFY rmd trace's output shape (W1-T43), the plan/ledger fields, and the batched gateway from source first.
+    it). PER-ROW AFFORDANCE (operator feedback on the live board): every task row carries an EXPLICIT one-click
+    journey/trace action opening THAT row's journey (keyed on the row's own id — never a typed id), and the PR cell
+    deep-links to the PR; this RETIRES the v0 id-textbox trace panel from the shell-nav-panel fix (#359). VERIFY rmd
+    trace's output shape (W1-T43), the plan/ledger fields, the shell's board-row render, and the batched gateway from
+    source first.
   acceptance:
     - claim: "the task card renders from the plan + ledger with ZERO extra GitHub calls (the batched gateway serves it)"
       proof: "integration test over a counting gateway: expanding a card renders title/rationale/criteria/dep-chain/run-history(cost+verdict)/PR-links with O(0) additional GitHub calls beyond the batched snapshot (the falsifier being a card that fires a per-open GitHub fetch)"
@@ -420,6 +431,8 @@
       proof: "integration test: a blocked fixture's journey renders rmd trace's provenance chain (W1-T43) and surfaces the FAILING step (the block's cause), linking outcome -> ... -> the producing step; a journey that omits the failing step FAILS"
     - claim: "the dependency chain is LINKED and navigable"
       proof: "a test: each dep in the card's dependency chain renders as a link that navigates to that task's card; an unlinked/broken dep FAILS"
+    - claim: "EVERY task row carries an EXPLICIT one-click journey/trace affordance (and the PR cell deep-links) — the v0 id-textbox trace panel is RETIRED"
+      proof: "a test: each rendered board row exposes a one-click trace/journey action that opens THAT row's task journey directly (keyed on the row's own task id, no manual entry), and the PR cell deep-links to the PR; reaching a task's trace by TYPING an id into a textbox FAILS (the falsifier — the v0 graph id-textbox from the shell-nav-panel fix is removed in favor of per-row affordances)"
   risk: high
   origin: architect
   plan_refs: ["§7", "§7B"]
