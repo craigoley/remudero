@@ -6153,3 +6153,47 @@
   attempts: 0
   note: "Filed from the closeout chain; root cause of escalation #283. Companion to W1-T99/W1-T104 (transport
     resilience in escalate()) and the W1-T113 degrade-don't-die class, applied here at the review-post site."
+
+- id: W1-T133
+  title: "Mutation testing: a nightly full-scope run owns the global score; the PR gate stays the fast diff-only classify.ts check (the coverage gap the audit exposed)"
+  repo: remudero
+  depends_on: [W1-T108]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "ECONOMICS AUDIT (2026-07-20, MEASURED from GitHub check-run timings, not assumed): mutation-ratchet
+    durations — #193 (plan-only, PRE-W1-T108) 13m11s; #279 (src, non-classify, collapse + FORCE-PUSHED) 24s;
+    #282 (src, non-classify) 18s. W1-T108's diff-scope skip + Stryker incremental + actions/cache restore-keys
+    (most-recent, cross-branch-safe) already make the PR gate cheap (~18-24s for any PR not touching classify.ts;
+    #279's force-push did NOT cold-start it — the per-branch-cache hypothesis is REFUTED by the data). The REAL
+    gap the numbers expose: the gate mutates ONLY src/lib/classify.ts (261 lines) — the other ~15k lines of
+    src/** have ZERO mutation coverage, and every sampled run since it went live concluded SUCCESS. A gate that
+    only ever tests one module the queue rarely touches earns almost nothing (D-10: it justifies itself with
+    lifetime kill/survive data or gets its scope cut)."
+  design: |
+    (i) NIGHTLY FULL-SCOPE: a scheduled workflow runs Stryker over the WHOLE src/** tree (the ~4-hour
+    command-runner cost the PR gate cannot pay) OFF the PR critical path, OWNS the global mutation score, and
+    ratchets scripts/mutation-baseline.json. (ii) PR GATE UNCHANGED: the required mutation-ratchet PR check keeps
+    W1-T108's shape exactly — diff-scoped to classify.ts (+ its config/script/baseline), near-instant otherwise;
+    zero latency added to any PR. (iii) EXCLUDE TEST FILES: the mutate glob (both scopes) must never target
+    test/** — mutating a test is meaningless; VERIFY the current glob excludes it too. (iv) MUTANT BUDGET on the
+    wide nightly scope: a deterministic per-run mutant sample/cap keeps the nightly bounded, the sample rotates
+    so the whole tree is covered over N nights, and a below-baseline SAMPLE still fails LOUDLY (never a silent
+    skip — the W1-T130 degrade-loudly polarity). (v) The lifetime kill-vs-survive number (D-10) is this task's
+    own falsifier: the nightly-owns-global + PR-diff-only split is what justifies keeping a mutation gate at all.
+  acceptance:
+    - claim: "a nightly full-scope Stryker run over src/** (excluding test/**) records/ratchets the global mutation score OFF the PR critical path, and the PR mutation-ratchet check keeps W1-T108's diff-only classify.ts shape unchanged"
+      proof: "unit/integration test: the nightly workflow's mutate scope covers src/** and yields zero test/** targets; the PR job's diff-scope trigger is unchanged (test/mutation-ratchet.test.ts stays green); a fixture asserts the nightly and PR paths resolve DISTINCT scopes"
+    - claim: "the nightly wide scope is bounded by a deterministic mutant budget/sample, and a below-baseline sample fails LOUDLY, never a silent skip"
+      proof: "unit test: an over-budget mutate set is sampled to the cap deterministically (same seed -> same sample); a below-baseline sampled score exits non-zero; an absent/errored nightly report degrades loudly (named), never a silent pass"
+    - claim: "test files are never mutation targets in either scope"
+      proof: "unit test: glob resolution over a fixture tree of src + test files yields zero test/** entries for both the PR and nightly scopes"
+  risk: high
+  origin: architect
+  plan_refs: ["§5", "MASTER-PLAN#11"]
+  files: [.github/workflows/mutation-nightly.yml, stryker.conf.json, scripts/mutation-ratchet.mjs]
+  status: queued
+  attempts: 0
+  note: "Filed from the post-retro mutation-ratchet economics audit (measured). Companion to D-10 (the lifetime
+    kill/survive accountability question) and W1-T108 (the PR-gate latency fix this builds on, already live)."

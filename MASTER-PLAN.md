@@ -1733,6 +1733,18 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
 - **D-8 Monetization**: open-core per §6 stance (rec); shape/pricing decided post-WS-6 traction,
   never earlier — premature paywalling kills the community the differentiation depends on.
 
+- **D-10 Mutation gate — does it earn its scope? — OPEN, pending lifetime data (economics audit 2026-07-20, measured).**
+  The `mutation-ratchet` required check mutation-tests ONLY `src/lib/classify.ts` (261 lines); the other
+  ~15k lines of `src/**` have ZERO mutation coverage, and every sampled run since it went live concluded
+  SUCCESS. THE RETRO MUST REPORT, WITH DATA: mutants killed vs survived over the gate's LIFETIME, and
+  whether it has EVER caught a real escape (blocked a genuine test-weakening PR). If it never has, the gate
+  justifies itself with data or gets its scope cut — folded into the nightly full-scope run (W1-T133) that
+  owns the global score while the PR gate stays the fast diff-only check. Measured, not assumed: the PR
+  gate's warm/diff-scoped cost is ~18-24s (W1-T108's diff-scope skip + Stryker incremental + restore-keys,
+  cross-branch-safe — #279's collapse+force-push paid 24s, refuting any per-branch cold-start); the
+  13-minute figure was the pre-W1-T108 every-PR tax and is gone.
+
+
 ## 12. Standing rules
 
 1. PROVENANCE OR IT DOESN'T GO IN A PROMPT.
