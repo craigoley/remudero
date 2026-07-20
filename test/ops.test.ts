@@ -325,7 +325,7 @@ test("renderAlertRaw names source/id/severity/summary and carries the alert url"
   const alert = normalizeCodeScanningAlert(CODE_SCANNING_RAW[0]);
   const raw = renderAlertRaw("craigoley", "remudero", alert);
   assert.match(raw, /craigoley\/remudero code-scanning alert #5 \[critical\]: SQL injection/);
-  assert.match(raw, /https:\/\/github\.com\/craigoley\/remudero\/security\/code-scanning\/5/);
+  assert.match(raw, /^https:\/\/github\.com\/craigoley\/remudero\/security\/code-scanning\/5$/m);
 });
 
 // ── pollAlerts feedback capture: the W1-T56 acceptance shape ───────────────
