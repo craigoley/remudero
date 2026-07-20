@@ -66,6 +66,8 @@
       proof: "unit test over the new check with injected merge state: a task whose derived status is merged and whose criteria set gained an entry vs the base ref produces a blocking violation naming the task id and the added claim. FALSIFIER: PR #374, which added two criteria to W1-T155 at 17:35:20Z — one hour forty-five minutes after PR #365 credited it merged at 15:50:08Z — and passed every gate clean, leaving both criteria unreachable by the drain (drain.ts:88 skips merged) and by the retro sweep (retro.ts:578 skips merged/done)"
     - claim: "the same PR filing a FOLLOW-UP task carrying the amended criteria PASSES — the check gates the orphaning, not the amending"
       proof: "unit test: a changed-set containing BOTH the amended merged task AND a new task carrying those criteria produces no violation. FALSIFIER: a check with no escape hatch, which would make the correct action (amend for the record, file the follow-up) impossible and push authors to skip the record entirely"
+    - claim: "the linter WARNS on an acceptance proof the executor cannot parse — a proof that can never run is caught at authoring time, not discovered as a 0/N verdict"
+      proof: "unit test: a criterion whose proof lacks the `unit test:`/`grep:` dialect prefix, or whose prefixed body is prose where a file-or-test NAME belongs, yields a WARNING (not a blocking violation — an unrunnable proof is a quality problem, not a merge-stopper). FALSIFIER: W1-T181 shipped with criteria 3 and 5 carrying no dialect prefix at all and the prefixed ones carrying prose, so all five read not_executable/executed_fail via an empty name-filter and nothing warned before dispatch — an operator authoring error the linter was positioned to catch and did not"
     - claim: "an UNREADABLE derived status fails OPEN — a status-read failure never reds an otherwise-valid plan PR"
       proof: "unit test: a seeded status-resolution failure yields no violation. FALSIFIER: a fail-closed implementation, which during a GitHub outage would red every plan PR — blocking the plan-only lane that remains usable precisely when the fleet cannot observe GitHub"
     - claim: "the linter stays PURE — merge state arrives by injection, the check performs no I/O"
@@ -76,7 +78,10 @@
   files: [src/lib/task-linter.ts, src/run-task.ts, test/task-linter.test.ts]
   status: queued
   attempts: 0
-  note: "Ships WITH standing rule 21 (MASTER-PLAN §12), which records the house answer in prose: an amendment to
+  note: "EXTENDED 2026-07-20 with a proof-parseability WARNING (see acceptance): the same linter pass that
+    catches a post-merge amendment is the cheapest place to catch a proof the executor can never run. Folded
+    here rather than filed standalone because it is one more check in an already-planned linter change.
+    Ships WITH standing rule 21 (MASTER-PLAN §12), which records the house answer in prose: an amendment to
     an already-merged task does not re-queue it and does not auto-spawn anything — the AMENDER owns filing the
     follow-up. That answer is not invented here, it is the convention the corpus already follows (W1-T161, W1-T97,
     the W1-T65 pair, the W1-T76 follow-up); what is new is that it becomes checkable.

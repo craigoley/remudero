@@ -1075,6 +1075,104 @@
     merged-0/160 fail-open is the monotonic-under-darkness falsifier), so it belongs at the front. GENERAL LESSON
     worth keeping: shards are the right default for conflict-free FILING, and the wrong choice for anything that
     needs PRIORITY. Those two goals are in tension and the tension is invisible until a shard never dispatches."
+- id: W1-T185
+  title: "FLOOR VERDICT INTEGRITY — two gaps W1-T128's execution engine left open: a verdict with ZERO executed proofs must render a CAPPED/DEGRADED class that cannot arm auto-merge on tdd:strict work, and `rmd review` from the operator checkout must either execute at the PR head or mark its verdict keyword-only"
+  repo: remudero
+  queue_note: |
+    Filed 2026-07-20 and PROMOTED from plan/tasks.d/ into tasks.yaml in the same change, positioned directly
+    behind the W1-T177/W1-T178/W1-T179 train. Shards append AFTER every tasks.yaml task and the drain scans in
+    FILE ORDER, so a shard cannot reach the front regardless of urgency — filing-then-promoting in one PR is the
+    only shape that gets a task both conflict-free filing and a real queue position.
+    PLACED AHEAD OF the console design pass (W1-T183/W1-T184/W1-T182/W1-T159), which previously held this slot.
+    Rationale for the ordering, so it can be argued with: this task governs what the gate is allowed to CERTIFY,
+    and every task behind it — console work included — will be merged through that gate. A verdict that certifies
+    unexecuted work is a defect in the instrument the rest of the queue is measured by.
+  depends_on: [W1-T128, W1-T72]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "W1-T128 (merged, PR #414) fixed EXECUTABILITY — it stopped refusing dialect proofs for ordinary
+    prose characters, and it worked: measured across reviews posted after that merge, executed proofs went from
+    1-in-135 to 4-in-15. This task closes the two gaps it did not address, both observed the same night.
+    GAP 1 — A DEGRADED FLOOR STILL CERTIFIES. The verdict class does not depend on whether any proof ran, so a
+    review with ZERO executed proofs renders the same uncapped PASS as one with every proof green. FIXTURE,
+    verbatim: PR #411 posted 'remudero-review: PASS — 5 criteria substantiated, no test theater' at
+    `proof_exec: 0/5` — DIRECTLY UNDER its own 'FLOOR DEGRADED: 0/5 proofs executed; keyword floor was binding'
+    banner — over a diff that at that moment satisfied ONE of five criteria and shipped ZERO tests on a task
+    whose principles are `{tdd: strict}`. The banner and the verdict contradicted each other in the same
+    message, and the VERDICT is what gates the merge. The words 'no test theater' were rendered over a change
+    with no tests at all. Auto-merge was not armed only because a human read the diff.
+    GAP 2 — THE OPERATOR PATH CANNOT EXECUTE AT ALL. `rmd review <n>` run from the main checkout has no
+    materialization of the PR head, so the executor reports 'nothing was observed on the PR head' and EVERY
+    proof classifies not_executable, no matter how well the proof is written. FIXTURE: every review hand-posted
+    on 2026-07-20 was keyword-only BY CONSTRUCTION, not by defect — #391 0/3, #394 0/4, #397 0/4, #399 0/5,
+    #403 0/5, #407 0/6, #408 0/5, #411 0/5, #418 0/5. The automated rung, which HAS a worktree at the head, did
+    execute on the same PR and the same proofs (#411 recorded `executed_fail` on criteria 2 and 4). So the two
+    paths silently disagree about what a verdict means, and the operator path is the weaker one while looking
+    identical on the PR.
+    TAKEN TOGETHER the two gaps compound: the path that cannot execute also renders the verdict class that
+    hides the fact. An operator posting a review believes they are re-judging a PR empirically, and the PR shows
+    a green required check that says 'substantiated'."
+  design: |
+    GAP 1 — VERDICT CLASSES, not a boolean. Introduce an explicit degraded/capped verdict class derived from the
+    EXECUTED set, not from keyword coverage alone. Shape (verify the existing verdict/judge types from source
+    before adding to them):
+      - proofs executed and passing -> full PASS, as today
+      - ZERO executed proofs (or an empty executed set) -> CAPPED. It may still report keyword coverage, but it
+        MUST NOT render as 'substantiated' / 'no test theater', because neither claim was measured.
+      - on a task whose principles are `{tdd: strict}`, a CAPPED verdict cannot arm auto-merge without either
+        executed proofs or an EXPLICIT operator override that is recorded in the ledger — an override is a
+        decision someone made, and it must be attributable.
+    Do NOT make CAPPED simply equal FAIL. A capped verdict that reds every PR would stop the fleet the moment any
+    proof is unparseable, which is a worse failure than the one being fixed, and would punish authors for the
+    dialect gap rather than surfacing it. CAPPED means 'not certified', not 'rejected'.
+    The banner already exists and is already correct — 'FLOOR DEGRADED: 0/N proofs executed'. This task makes the
+    VERDICT agree with the banner instead of contradicting it in the same message.
+    GAP 2 — MATERIALIZE, OR MARK. Preferred: `rmd review` materializes a temporary worktree at the PR head and
+    executes there. The pattern is already proven — the fix rung does exactly this, and its `dispatchFix` path
+    creates a worktree checked out at the PR's branch (run-task.ts, the sweep-* worktree creation), so this is
+    REUSE, not new machinery. Clean up the temp worktree on every exit path, including failure, or this becomes
+    a W1-T175 leak (that task exists because worktrees already strand).
+    FALLBACK, and it must exist even when materialization is chosen: if a worktree cannot be materialized
+    (network, disk, a detached/deleted head), the verdict is posted with an EXPLICIT keyword-only marking, both
+    in the posted status description and in the ledger line, and it takes the CAPPED class from Gap 1. Silent
+    keyword-only posting is exactly the current defect and must not remain reachable.
+    VERIFY from source before building: the verdict/description shape in lib/review.ts, the `proof_exec` ledger
+    field written by the review path, and the fix rung's worktree creation + teardown. Distrust the references
+    in this note — they are a 2026-07-20 survey.
+  acceptance:
+    - claim: "a review with ZERO executed proofs renders a CAPPED verdict — never an uncapped PASS, and never the words 'substantiated' or 'no test theater'"
+      proof: "unit test: a judged review whose proof_exec set is entirely not_executable yields the capped verdict class, and its rendered description contains neither 'substantiated' nor 'no test theater'. FALSIFIER, verbatim: PR #411 posted 'remudero-review: PASS — 5 criteria substantiated, no test theater' at proof_exec 0/5, directly beneath its own 'FLOOR DEGRADED: 0/5 proofs executed' banner, over a diff satisfying 1 of 5 criteria with zero tests on a tdd:strict task"
+    - claim: "a CAPPED verdict cannot arm auto-merge on tdd:strict work without executed proofs or a LEDGERED operator override"
+      proof: "unit test: with a capped verdict on a task whose principles are {tdd: strict}, the auto-merge arming path refuses; supplying an explicit operator override permits it AND writes an attributable ledger line naming the overrider. FALSIFIER: an implementation where a 0/N-executed review arms auto-merge unattended, which is the #411 shape with no human reading the diff"
+    - claim: "CAPPED is not FAIL — an unparseable proof degrades the verdict without redding the PR"
+      proof: "unit test: a capped verdict does not render as a failing check and does not block a non-tdd:strict PR from proceeding. FALSIFIER: mapping capped to failure would red every PR the moment one proof is unparseable, halting the fleet — a worse failure than the uncertified-PASS it replaces, and it would punish authors for the dialect gap instead of surfacing it"
+    - claim: "`rmd review` from the operator checkout EXECUTES proofs by materializing a worktree at the PR head"
+      proof: "integration test: an operator-path review over a PR whose proofs are executable reports a non-empty executed set, matching what the automated rung reports for the same PR and proofs. FALSIFIER: every review hand-posted on 2026-07-20 read proof_exec 0/N — #391 0/3, #394 0/4, #397 0/4, #407 0/6, #411 0/5, #418 0/5 — while the rung, which has a worktree at the head, recorded executed_fail on the SAME proofs of #411; the operator path was keyword-only by construction"
+    - claim: "when materialization is impossible the verdict is EXPLICITLY marked keyword-only, in both the posted status and the ledger — silent keyword-only posting is unreachable"
+      proof: "unit test: a seeded materialization failure posts a verdict whose description names it keyword-only and whose ledger line records the same, and that verdict takes the capped class. FALSIFIER: a review that silently posts without execution and without the marking fails — that is the current behaviour this task removes"
+    - claim: "a materialized worktree is torn down on EVERY exit path, including failure"
+      proof: "unit test: after a review that throws mid-execution, no worktree remains under the worktrees root. FALSIFIER: a teardown only on the success path reproduces the W1-T175 leak class, which exists precisely because run worktrees already strand on disk"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§4"]
+  files: [src/lib/review.ts, src/run-task.ts, test/review.test.ts]
+  status: queued
+  attempts: 0
+  note: "SUCCESSOR to W1-T128 (merged #414), not a duplicate: T128 made proofs EXECUTABLE and demonstrably worked
+    (executed proofs went from 1-in-135 to 4-in-15 after it merged). This makes the VERDICT depend on whether
+    they ran, and makes the operator path able to run them at all.
+    Applies standing rule 22 (CLAIMED vs EVIDENCED) to the gate itself rather than to the console: 'substantiated'
+    is a CLAIM, an executed proof is EVIDENCE, and the current verdict renders the first as though it were the
+    second. Rule 22's third fixture is this task's first fixture.
+    risk:high — it changes what can merge. Both directions are dangerous, which is why CAPPED-is-not-FAIL is a
+    load-bearing criterion: too permissive and incomplete work ships certified, too strict and one unparseable
+    proof halts the fleet.
+    AUTHORING NOTE, recorded in LEARNINGS.md and folded into W1-T180's linter check: a proof must carry the exact
+    `unit test: <file-or-test-name>` dialect. W1-T181's criteria 3 and 5 lacked the prefix entirely and the
+    prefixed ones carried prose where a test NAME belongs, so they read executed_fail via an empty name-filter —
+    an operator authoring error, not a floor defect, and the linter should warn on it before dispatch."
 - id: W1-T183
   title: "CONSOLE DENSITY + IA v2 — sections render DENSE single-line rows (id · status · phase · elapsed · spend · PR/issue link), one task per line, with W1-T158's card as the click-drill target; timestamps render local + relative, never raw ISO-millis; anomalous elapsed is visually flagged"
   repo: remudero
