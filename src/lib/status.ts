@@ -918,8 +918,10 @@ export function buildBatchedGithub(
             ["pr", "list", "--repo", slug, "--state", "all", "--json", "number,url,state,headRefName,body,autoMergeRequest", "--limit", "1000"],
             // 3rd fd is `pipe` (W1-T119), not `ignore` — same stderr-capture fix as
             // ghGateway, so this gateway's `readFailureReason()` is real too, not
-            // always "unknown".
-            { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+            // always "unknown". maxBuffer is raised to 64 MiB — Node's 1 MiB default
+            // throws ENOBUFS once the repo's PR JSON crosses it, which the catch below
+            // silently turns into an empty [] fetch (every task reads merged 0/N).
+            { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26 },
           ),
         ) as BatchedPr[];
         lastFetchFailed = false;
