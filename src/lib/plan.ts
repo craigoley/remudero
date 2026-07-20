@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 /**
@@ -204,7 +205,38 @@ export function loadPlanFromYaml(text: string, sourceLabel: string): Plan {
   return { tasks, byId };
 }
 
-/** Parse and validate plan/tasks.yaml from disk. Throws {@link PlanError} on any problem. */
+/**
+ * List the shard files under `plan/tasks.d/` (sorted, deterministic order) next to
+ * `planPath`. Returns `[]` when the directory does not exist — the back-compat case
+ * for every plan that has not migrated to sharding yet (W1-T122 design note (iv):
+ * migrating the existing single-file entries is a separate, later codemod).
+ */
+function listShardFiles(shardDir: string): string[] {
+  let entries: string[];
+  try {
+    entries = readdirSync(shardDir);
+  } catch {
+    return [];
+  }
+  return entries.filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort();
+}
+
+/**
+ * Load plan/tasks.yaml from disk AND merge in any shards under the sibling
+ * `plan/tasks.d/*.yaml` directory (W1-T122: PLAN SHARDING). One task per shard
+ * file means two concurrent filings each add a DIFFERENT file — they no longer
+ * share an EOF to textually conflict on, which is the whole point (the
+ * nine-PR appender train #271 was 437 lines of pure appends to one shared EOF).
+ *
+ * Every consumer of {@link loadPlan} sees the MERGED view — sharding is invisible
+ * above this function. Duplicate ids across `tasks.yaml` and any shard (or across
+ * two shards) FAIL LOUD: the uniqueness guarantee the single-file format gave for
+ * free must not be lost in the split. When `plan/tasks.d/` does not exist (every
+ * plan that has not migrated yet), this is byte-for-byte the old single-file
+ * behavior — back-compat is load-bearing so migration can be staged separately.
+ *
+ * Throws {@link PlanError} on any problem.
+ */
 export function loadPlan(path: string): Plan {
   let text: string;
   try {
@@ -212,7 +244,35 @@ export function loadPlan(path: string): Plan {
   } catch (err) {
     throw new PlanError(`cannot read plan file (${path}): ${String(err)}`);
   }
-  return loadPlanFromYaml(text, path);
+  const tasks = parseTasksFromYaml(text, path);
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+
+  const shardDir = join(dirname(path), "tasks.d");
+  for (const file of listShardFiles(shardDir)) {
+    const shardPath = join(shardDir, file);
+    let shardText: string;
+    try {
+      shardText = readFileSync(shardPath, "utf8");
+    } catch (err) {
+      throw new PlanError(`cannot read plan shard (${shardPath}): ${String(err)}`);
+    }
+    for (const t of parseTasksFromYaml(shardText, shardPath)) {
+      if (byId.has(t.id)) {
+        throw new PlanError(`duplicate task id '${t.id}' (shard ${shardPath} collides with an earlier plan entry)`);
+      }
+      byId.set(t.id, t);
+      tasks.push(t);
+    }
+  }
+
+  // Every declared dependency must resolve WITHIN THE MERGED VIEW (tasks.yaml + all
+  // shards) — same contract loadPlanFromYaml enforces for a single blob.
+  for (const t of tasks) {
+    for (const dep of t.depends_on) {
+      if (!byId.has(dep)) throw new PlanError(`task ${t.id}: depends_on unknown task '${dep}'`);
+    }
+  }
+  return { tasks, byId };
 }
 
 /** Select one task by id. Throws if absent. */
