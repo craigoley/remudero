@@ -151,6 +151,6 @@ test("the REAL committed packages/api-client/src/schema.d.ts is NOT stale (this 
 test("the real generated client's components.schemas.Error mirrors src/lib/service.ts's error envelope", () => {
   const generated = readFileSync(join(REPO_ROOT, "packages", "api-client", "src", "schema.d.ts"), "utf8");
   assert.match(generated, /Error: \{/);
-  assert.match(generated, /error: "unauthorized" \| "forbidden" \| "not_found" \| "internal_error";/);
+  assert.match(generated, /error: "unauthorized" \| "forbidden" \| "not_found" \| "invalid_request" \| "internal_error";/);
   assert.match(generated, /required_scope\?: "read" \| "write";/);
 });

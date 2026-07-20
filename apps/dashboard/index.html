@@ -1,15 +1,19 @@
 <!DOCTYPE html>
 <!--
-  Dashboard v0 (shell 0, MASTER-PLAN §7 WS-5a -> W3-T2): read-only live board.
+  Dashboard v0 (shell 0, MASTER-PLAN §7 WS-5a -> W3-T2): read-only live board, plus the
+  human-in-the-loop panel actions (W3-T5): answer/approve/Pause-Resume-STOP/quiet-hours.
 
   No bundler by design (the W3-T2 decision): src/main.ts is plain TypeScript, typechecked
   and compiled by the repo's existing `tsc -p tsconfig.json` build alongside every other
   package -- no new build tooling. This page loads its compiled output as a plain ES module.
 
   Wiring the daemon to actually SERVE this directory as static files over Tailscale (the
-  "browser" half of shell 0) is explicit follow-on work, same as the other five design
-  panels this v0 slice defers -- see this task's PR body. Until then, open this file against
-  a `tsc`-built `main.js` next to it, pointed at a reachable daemon via `?daemon=<url>`.
+  "browser" half of shell 0) is explicit follow-on work, same as the other design panels
+  this v0 slice defers (plan-doc render, worker stream tails, DECISIONS feed, a rendered
+  question/MANUAL backlog -- see this task's PR body). Until then, open this file against a
+  `tsc`-built `main.js` next to it, pointed at a reachable daemon via `?daemon=<url>` with a
+  WRITE-scoped `?token=` (the same query-param placeholder W3-T2 shipped -- a bearer token
+  belongs in a query string even less than in localStorage; a real auth UX is later work).
 -->
 <html lang="en">
   <head>
@@ -18,8 +22,39 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
   </head>
   <body>
-    <h1>Remudero — task board (read-only)</h1>
+    <h1>Remudero — task board</h1>
     <div id="board">Loading…</div>
+
+    <section id="controls" aria-label="Human-in-the-loop panel actions">
+      <h2>Fleet control</h2>
+      <p id="controls-status" role="status"></p>
+
+      <div>
+        <label>reason (optional) <input id="control-reason" type="text" /></label>
+        <button id="pause-btn" type="button">Pause</button>
+        <button id="resume-btn" type="button">Resume</button>
+        <button id="stop-btn" type="button">STOP</button>
+      </div>
+
+      <div>
+        <label><input id="quiet-hours-toggle" type="checkbox" /> Quiet hours</label>
+      </div>
+
+      <h3>Answer a question</h3>
+      <form id="answer-question-form">
+        <label>task id <input id="answer-task-id" type="text" required /></label>
+        <label>answer <input id="answer-text" type="text" required /></label>
+        <button type="submit">Answer</button>
+      </form>
+
+      <h3>Approve a MANUAL item</h3>
+      <form id="approve-manual-form">
+        <label>task id <input id="approve-task-id" type="text" required /></label>
+        <label>issue url <input id="approve-issue-url" type="url" required /></label>
+        <button type="submit">Approve</button>
+      </form>
+    </section>
+
     <script type="module" src="./main.js"></script>
   </body>
 </html>

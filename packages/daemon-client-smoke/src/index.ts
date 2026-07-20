@@ -34,6 +34,8 @@ function describeErrorCode(code: DaemonError["error"]): string {
       return "token missing the required scope";
     case "not_found":
       return "no route registered for this method + path";
+    case "invalid_request":
+      return "the request body failed validation";
     case "internal_error":
       return "the route handler threw";
     default: {

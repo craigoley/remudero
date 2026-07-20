@@ -6,12 +6,15 @@ import { join } from "node:path";
 import {
   consumeStop,
   isPaused,
+  isQuietHours,
   isStopped,
   pauseDetail,
   pauseFilePath,
+  quietHoursFilePath,
   requestPause,
   requestStop,
   resumeFleet,
+  setQuietHours,
   stopDetail,
   stopFilePath,
 } from "../src/lib/fleet-control.js";
@@ -124,4 +127,52 @@ test("PAUSE still requires resume — it is NOT consumed by consumeStop and surv
   const r = resumeFleet(root);
   assert.equal(r.clearedPause, true);
   assert.equal(isPaused(root), false, "only resume clears PAUSE");
+});
+
+// ── QUIET HOURS (W3-T5): a THIRD, independent flag — a schedule preference, not an
+// emergency hold, so `rmd resume` must never touch it. ─────────────────────────────
+
+test("setQuietHours(true) writes the QUIET_HOURS flag; isQuietHours flips true; returns the new state", () => {
+  const root = tmpRoot();
+  assert.equal(isQuietHours(root), false);
+
+  const result = setQuietHours(root, true);
+  assert.equal(result, true);
+  assert.equal(isQuietHours(root), true);
+});
+
+test("setQuietHours(false) clears the QUIET_HOURS flag; returns the new state", () => {
+  const root = tmpRoot();
+  setQuietHours(root, true);
+  assert.equal(isQuietHours(root), true);
+
+  const result = setQuietHours(root, false);
+  assert.equal(result, false);
+  assert.equal(isQuietHours(root), false);
+});
+
+test("setQuietHours(false) with nothing set is a no-op, not an error", () => {
+  const root = tmpRoot();
+  assert.equal(setQuietHours(root, false), false);
+  assert.equal(isQuietHours(root), false);
+});
+
+test("quietHoursFilePath is distinct from stopFilePath/pauseFilePath, under <root>/state", () => {
+  const root = tmpRoot();
+  assert.notEqual(quietHoursFilePath(root), stopFilePath(root));
+  assert.notEqual(quietHoursFilePath(root), pauseFilePath(root));
+  assert.match(quietHoursFilePath(root), /state[\\/]QUIET_HOURS$/);
+});
+
+test("resumeFleet does NOT touch quiet hours — it is a schedule preference, not an emergency hold", () => {
+  const root = tmpRoot();
+  setQuietHours(root, true);
+  requestStop(root, "a");
+  requestPause(root, "b");
+
+  resumeFleet(root);
+
+  assert.equal(isStopped(root), false);
+  assert.equal(isPaused(root), false);
+  assert.equal(isQuietHours(root), true, "resumeFleet must leave quiet hours untouched");
 });
