@@ -1058,6 +1058,42 @@ async function fixRungStandDownReason(
 }
 
 /**
+ * W1-T177 SITE (v): the cold/sweep `dispatchFix` pre-flight's terminal-state
+ * check — a REQUIRED, always-mandatory `readLiveState` call (unlike sites
+ * (i)/(ii)/(iii)/(iv), whose reader is optional), because this is the only
+ * site whose real wiring is `buildSweepEffects`'s own closure, never a
+ * caller-supplied dep. Deliberately an INDEPENDENT read from the headRefName
+ * fetch this site also needs (that fetch predates W1-T177 and is unrelated to
+ * the terminal-state contract) — folding `state` into that SAME round trip
+ * previously meant a `gh` hiccup on the read threw BEFORE the fail-open
+ * `ok:false` branch ever ran, surfacing as `sweep.fix.error` (a silent
+ * fleet-wide stand-down on a gh outage — exactly the fail-closed regression
+ * this contract forbids). Splitting the read in two means a state-read
+ * failure ALWAYS reports `ok:false` (never throws past this function) and is
+ * handled by the SAME fail-open contract as every other site: ledgered via
+ * `sweep.fix.indeterminate`, dispatch proceeds to resolve headRefName exactly
+ * as it did before this check existed. Only a positive, freshly-observed
+ * terminal reading (`sweep.fix.not_open`, naming the state) stands the
+ * dispatch down, BEFORE any worktree/git side effect ever touches the PR.
+ */
+export async function dispatchFixPreflightStandDown(
+  readLiveState: (prUrl: string) => LiveStateResult | Promise<LiveStateResult>,
+  pr: { prUrl: string; prNumber: number },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<string | undefined> {
+  const live = await readLiveState(pr.prUrl);
+  if (!live.ok) {
+    log("sweep.fix.indeterminate", { pr_number: pr.prNumber });
+    return undefined;
+  }
+  const reason = terminalStateReason(live.state);
+  if (reason) {
+    log("sweep.fix.not_open", { pr_number: pr.prNumber, state: live.state, reason });
+  }
+  return reason;
+}
+
+/**
  * W1-T177 SITE (iv): the real live-state reader `rmd drain`/`rmd daemon` wire
  * for `nextRunnable`'s in-flight guard — CONFIRMS a candidate in-flight PR
  * number with a fresh `gh pr view` read, never the `lastProj` snapshot
@@ -3999,22 +4035,21 @@ function buildSweepEffects(
       }
       let worktreePath = "";
       try {
+        // W1-T177 SITE (v): an INDEPENDENT fresh live-state read, via the
+        // SAME `readLiveState`/`ghLiveState` fail-open contract every other
+        // spending site uses (see {@link dispatchFixPreflightStandDown}) —
+        // BEFORE any worktree/git side effect (fetch/add/checkout) ever
+        // touches this PR. A failed/indeterminate read is ledgered and never
+        // stands the dispatch down; only a positive terminal reading does.
+        const preflightStandDown = await dispatchFixPreflightStandDown(ghLiveState, pr, log);
+        if (preflightStandDown) return;
+
         // Creditability is load-bearing (status.ts ownsBranch): a fix must amend
         // THIS task's own run-branch (run-<id>-<epochMs>), never a foreign/fix-*
         // head — a fix on an uncreditable head loops forever + strands dependents.
-        // W1-T177 SITE (v): `state` rides along on this SAME existing round trip
-        // (zero extra `gh` calls) — a cold/sweep pre-flight terminal-state check
-        // sitting beside the uncreditable-head refusal below, BEFORE any
-        // worktree/git side effect (fetch/add/checkout) ever touches this PR.
-        const headRef = ghJson(["pr", "view", pr.prUrl, "--json", "headRefName,state"]) as {
+        const headRef = ghJson(["pr", "view", pr.prUrl, "--json", "headRefName"]) as {
           headRefName?: string;
-          state?: string;
         };
-        const preflightTerminal = terminalStateReason(headRef.state);
-        if (preflightTerminal) {
-          log("sweep.fix.not_open", { pr_number: pr.prNumber, state: headRef.state, reason: preflightTerminal });
-          return;
-        }
         const realBranch = headRef.headRefName;
         if (!realBranch || !new RegExp(`^run-${task.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d+$`).test(realBranch)) {
           log("sweep.fix.uncreditable_head", { pr_number: pr.prNumber, head: realBranch });

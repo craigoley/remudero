@@ -13,6 +13,7 @@ import {
   commitsAhead,
   deriveFixMode,
   deriveStrikeHistory,
+  dispatchFixPreflightStandDown,
   drainCommand,
   FIX_MODE_RULES,
   isTransientResult,
@@ -1613,6 +1614,65 @@ test("runFixRung: a FAILED/INDETERMINATE live-state read does NOT stand down —
   assert.equal(outcome.outcome, "fixed");
   assert.equal(indeterminateLogs.length, 1, "the failed/indeterminate read is LEDGERED — never a silent swallow");
   assert.deepEqual(indeterminateLogs[0], { site: "rung.strike" });
+});
+
+// ── Round-2 fix, W1-T177 SITE (v): the cold/sweep `dispatchFix` pre-flight
+// previously folded its terminal-state read into the SAME `gh pr view` round
+// trip it also used to resolve `headRefName` — so a read failure there threw
+// straight past the `ok:false` fail-open branch entirely (it never got to run)
+// and the caller's own outer try/catch logged `sweep.fix.error` with NO
+// dispatch — a silent fail-CLOSED-to-stand-down on a `gh` hiccup, exactly the
+// falsifier the reviewer's proof harness seeded. `dispatchFixPreflightStandDown`
+// is now the ONE place this site's read happens, decoupled from the
+// headRefName fetch, so it is unit-testable in isolation with a fake
+// `readLiveState` that never throws (mirroring sites i/ii's `LiveStateResult`
+// contract) — proving the SAME fail-open behavior every other site already had. ──
+
+test("dispatchFixPreflightStandDown: a seeded state-read ERROR (ok:false) does NOT stand down — proceeds exactly as today, AND ledgers the indeterminate read via sweep.fix.indeterminate, never treating unreadable as terminal", async () => {
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+
+  const reason = await dispatchFixPreflightStandDown(
+    async () => ({ ok: false }), // a genuine gh outage/rate-limit/auth failure
+    { prUrl: "https://github.com/o/r/pull/9", prNumber: 9 },
+    (step, extra) => logs.push({ step, extra }),
+  );
+
+  assert.equal(reason, undefined, "an unreadable state must NEVER stand the dispatch down — it must proceed exactly as before this check existed");
+  const indeterminate = logs.filter((l) => l.step === "sweep.fix.indeterminate");
+  assert.equal(indeterminate.length, 1, "the failed/indeterminate read is LEDGERED — never a silent swallow");
+  assert.deepEqual(indeterminate[0].extra, { pr_number: 9 });
+  assert.equal(logs.some((l) => l.step === "sweep.fix.not_open"), false, "an indeterminate read must never ALSO log a terminal stand-down");
+});
+
+for (const terminalState of ["MERGED", "CLOSED"]) {
+  test(`dispatchFixPreflightStandDown: a seeded ${terminalState} PR stands down naming the state via sweep.fix.not_open — the SAME terminalStateReason predicate every other site shares`, async () => {
+    const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+
+    const reason = await dispatchFixPreflightStandDown(
+      async () => ({ ok: true, state: terminalState }),
+      { prUrl: "https://github.com/o/r/pull/9", prNumber: 9 },
+      (step, extra) => logs.push({ step, extra }),
+    );
+
+    const expected = terminalStateReason(terminalState);
+    assert.equal(reason, expected, "the stand-down reason must come from the ONE shared predicate, not a re-derived copy");
+    const notOpen = logs.filter((l) => l.step === "sweep.fix.not_open");
+    assert.equal(notOpen.length, 1);
+    assert.deepEqual(notOpen[0].extra, { pr_number: 9, state: terminalState, reason: expected });
+  });
+}
+
+test("dispatchFixPreflightStandDown: a live OPEN read does NOT stand down and logs nothing — dispatch proceeds to resolve headRefName exactly as today", async () => {
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+
+  const reason = await dispatchFixPreflightStandDown(
+    async () => ({ ok: true, state: "OPEN" }),
+    { prUrl: "https://github.com/o/r/pull/9", prNumber: 9 },
+    (step, extra) => logs.push({ step, extra }),
+  );
+
+  assert.equal(reason, undefined);
+  assert.equal(logs.length, 0, "an OPEN PR is the ordinary path — it must not ledger anything at this preflight");
 });
 
 // ── Wiring: ONE call site, both entry points (drain + manual `rmd run-task`
