@@ -57,25 +57,41 @@ export type StatusSource = "ledger" | "pr-field" | "trailer" | "correction" | "n
 /**
  * The CLASSIFIED reason a `gh` read actually failed (W1-T119 design (i)) —
  * `"rate_limit"` (quota/secondary-rate-limit exhausted), `"auth"` (expired or
- * missing credentials), `"transport"` (network/DNS/timeout), and `"unknown"`
- * for anything else UNCLASSIFIABLE. `"unknown"` still counts as UNAVAILABLE,
- * never as absent — the fail-closed direction design (i) calls for, because
- * absence is the conclusion that costs money.
+ * missing credentials), `"transport"` (network/DNS/timeout), `"buffer_overflow"`
+ * (W1-T181: the child process's stdout exceeded `maxBuffer` before `gh` ever
+ * got a chance to exit or write to stderr — detected from the error's `code`,
+ * never from `stderr` text, since there is none), and `"unknown"` for anything
+ * else UNCLASSIFIABLE. `"unknown"` still counts as UNAVAILABLE, never as
+ * absent — the fail-closed direction design (i) calls for, because absence is
+ * the conclusion that costs money.
  */
-export type GhFailureReason = "rate_limit" | "auth" | "transport" | "unknown";
+export type GhFailureReason = "rate_limit" | "auth" | "transport" | "buffer_overflow" | "unknown";
 
 /**
- * Classify a failed `gh` invocation's exit status + stderr into a {@link
- * GhFailureReason} (W1-T119 design (i)). Pure and exported so {@link ghGateway}
- * / {@link buildBatchedGithub} and unit tests share the exact same
+ * Classify a failed `gh` invocation's exit status + stderr (+ optionally the
+ * underlying Node error `code`, W1-T181) into a {@link GhFailureReason}
+ * (W1-T119 design (i)). Pure and exported so {@link ghGateway} /
+ * {@link buildBatchedGithub} and unit tests share the exact same
  * classification rather than each re-implementing the string matching — an
  * injected gateway in a test can construct the identical reason a real `gh`
  * failure would produce. `status` is accepted for future refinement (some
- * failure classes may one day be distinguishable by exit code alone) but
- * today the classification is driven entirely by `stderr`, the one place a
- * rate-limit/auth/transport message actually appears.
+ * failure classes may one day be distinguishable by exit code alone).
+ *
+ * MOST failure classes are driven by `stderr`, the one place a rate-limit/
+ * auth/transport message actually appears — EXCEPT a `maxBuffer` overflow,
+ * which Node raises itself (killing the child before `gh` writes anything):
+ * reproduced live (W1-T181), that error has `status: null` and `stderr: ""`,
+ * so stderr text can never classify it. It is detected from `code ===
+ * "ENOBUFS"` instead, checked FIRST so an overflow is never misread as
+ * "unknown" (which is exactly what silently swallowed the 2026-07-20 outage
+ * for hours — see the module's W1-T181 note on {@link buildBatchedGithub}).
  */
-export function classifyGhFailure(status: number | null | undefined, stderr: string | null | undefined): GhFailureReason {
+export function classifyGhFailure(
+  status: number | null | undefined,
+  stderr: string | null | undefined,
+  code?: string | null,
+): GhFailureReason {
+  if (code === "ENOBUFS") return "buffer_overflow";
   const text = String(stderr ?? "");
   if (/rate limit|quota|secondary rate limit/i.test(text)) return "rate_limit";
   if (/bad credentials|authentication|not logged in|gh auth login|401 unauthorized|unauthorized/i.test(text)) return "auth";
@@ -814,7 +830,7 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
     } catch (err) {
       failed = true;
       const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: string | Buffer };
-      failureReason = classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined);
+      failureReason = classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined, e?.code);
       return null;
     }
   };
@@ -890,47 +906,89 @@ export interface BatchedPr {
  * T154's boot-time pre-warm (lib/serve.ts's `prewarmBoardGithub`) is what turns that into "never
  * cold on the request path", by calling the optional {@link GitHub.warm} this gateway implements
  * BEFORE the server's first request can arrive, then again on a background timer paced to `ttlMs`.
+ *
+ * W1-T181 (the LIVE OUTAGE this repo's PR JSON crossing 1 MiB caused): the default fetch's
+ * `execFileSync` now sets `maxBuffer: 1 << 26` (64 MiB headroom, not a value tuned to today's
+ * payload — orientation.ts:72's `1 << 24` is the in-repo precedent for this class of fix). That
+ * alone removes today's TRIGGER, but a THROWING fetch — a network blip, an auth expiry, a `gh`
+ * upgrade, or simply outgrowing 64 MiB later — is the deeper, still-live defect: the pre-fix catch
+ * did `lastFetchFailed = true; return []`, converting "I could not read GitHub" into "GitHub says
+ * there are zero PRs", a bare `[]` a caller cannot tell apart from a genuinely empty repo. Fixed
+ * here two ways: (1) the catch now lives in {@link index} itself, wrapping the call to `fetchAll`
+ * — so an INJECTED `fetchAll` (every unit-test fixture, and any future caller-supplied
+ * implementation) that throws is classified and marked exactly like a real `gh` failure, not just
+ * the default execFileSync path; (2) `lastFetchFailed`/`lastFetchFailureReason` back this
+ * gateway's `readFailed()`/`readFailureReason()`, which `derivePrPrecedence` (below, ~line 596)
+ * already consults BEFORE trusting an empty result — the exact `github_unobservable`-shaped signal
+ * W1-T179's monotonic-under-darkness criterion is designed to consume (this task is the producer,
+ * W1-T179 the consumer; see plan/tasks.yaml W1-T181 design (v)). A failure is also now LOUD: see
+ * {@link index}'s catch for the `console.error` + injectable `opts.log` calls, and
+ * {@link classifyGhFailure}'s new `"buffer_overflow"` branch — ENOBUFS carries no `gh` stderr and
+ * no exit status, so without that branch this exact failure classified `"unknown"` and the
+ * 2026-07-20 outage ran for hours with zero error lines anywhere.
  */
 export function buildBatchedGithub(
   owner: string,
   repo: string,
-  opts: { ttlMs?: number; now?: () => number; fetchAll?: () => BatchedPr[] } = {},
+  opts: {
+    ttlMs?: number;
+    now?: () => number;
+    fetchAll?: () => BatchedPr[];
+    /**
+     * INJECTABLE stand-in for the raw `gh pr list` invocation (W1-T181, mirrors {@link ghGateway}'s
+     * own `opts.exec`) — real callers omit it and get the actual `execFileSync("gh", args, ...)`
+     * call; unit tests inject a fake that returns a large seeded JSON string (proving the fetch
+     * survives a payload over Node's 1 MiB default) or throws an ENOBUFS/rate-limit/auth/transport-
+     * shaped error (proving the failure is classified and marked), all without shelling out AND
+     * without bypassing the default's JSON-parse + byte-size-log wrapper the way overriding
+     * `fetchAll` entirely would.
+     */
+    exec?: (args: string[]) => string;
+    /**
+     * Observability hook (W1-T181 design (ii)/(vi)) — called on every fetch attempt:
+     * `"board_gateway.fetch_bytes"` (payload size right after a successful default `exec`),
+     * `"board_gateway.fetch_ok"` / `"board_gateway.fetch_failed"` (from {@link index}, for EVERY
+     * `fetchAll`, default or injected). Defaults to a no-op; real callers (`rmd serve`) wire this to
+     * the ledger `log` closure so the NEXT approach to whatever ceiling exists is observable in
+     * advance, and a failure is ledgered with its classified reason — never silent the way the
+     * 2026-07-20 outage was for hours.
+     */
+    log?: (event: string, extra?: Record<string, unknown>) => void;
+  } = {},
 ): GitHub {
   const ttlMs = opts.ttlMs ?? 15_000;
   const now = opts.now ?? (() => Date.now());
+  const log = opts.log ?? (() => {});
+  const slug = `${owner}/${repo}`;
   // W1-T119: reflects only the MOST RECENT fetch attempt (reset on every call, unlike
   // ghGateway's sticky-for-instance-lifetime flag) — this gateway's single batched fetch
   // refreshes on its own `ttlMs` cadence, so a stale failure from an earlier TTL window
   // must not keep shadowing a later fetch that actually succeeded.
   let lastFetchFailed = false;
   let lastFetchFailureReason: GhFailureReason | undefined;
+  const run =
+    opts.exec ??
+    // 3rd fd is `pipe` (W1-T119), not `ignore` — same stderr-capture fix as ghGateway, so this
+    // gateway's `readFailureReason()` is real too, not always "unknown". maxBuffer is 64 MiB
+    // (W1-T181) — Node's 1 MiB default threw ENOBUFS once this repo's PR JSON (all states, up to
+    // 1000 PRs, `body` included) crossed it; classifyGhFailure's "buffer_overflow" branch is how
+    // that specific failure is now classified instead of "unknown".
+    ((args: string[]) =>
+      execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26 }));
   const fetchAll =
     opts.fetchAll ??
     (() => {
-      const slug = `${owner}/${repo}`;
-      try {
-        const result = JSON.parse(
-          execFileSync(
-            "gh",
-            // W1-T155: `autoMergeRequest` rides along on this SAME single fetch — the
-            // armed-awaiting-merge taxonomy costs zero extra `gh` calls, preserving the
-            // board-fix O(1) invariant this gateway exists for.
-            ["pr", "list", "--repo", slug, "--state", "all", "--json", "number,url,state,headRefName,body,autoMergeRequest", "--limit", "1000"],
-            // 3rd fd is `pipe` (W1-T119), not `ignore` — same stderr-capture fix as
-            // ghGateway, so this gateway's `readFailureReason()` is real too, not
-            // always "unknown".
-            { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-          ),
-        ) as BatchedPr[];
-        lastFetchFailed = false;
-        lastFetchFailureReason = undefined;
-        return result;
-      } catch (err) {
-        lastFetchFailed = true;
-        const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: string | Buffer };
-        lastFetchFailureReason = classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined);
-        return [];
-      }
+      const raw = run([
+        // W1-T155: `autoMergeRequest` rides along on this SAME single fetch — the
+        // armed-awaiting-merge taxonomy costs zero extra `gh` calls, preserving the
+        // board-fix O(1) invariant this gateway exists for.
+        "pr", "list", "--repo", slug, "--state", "all", "--json", "number,url,state,headRefName,body,autoMergeRequest", "--limit", "1000",
+      ]);
+      // W1-T181 design (vi): log the payload size on every SUCCESSFUL fetch, so the next
+      // approach to whatever ceiling is set above is observable in advance instead of arriving
+      // as a silent outage the way tonight's did.
+      log("board_gateway.fetch_bytes", { bytes: Buffer.byteLength(raw, "utf8") });
+      return JSON.parse(raw) as BatchedPr[];
     });
 
   interface Index {
@@ -942,7 +1000,39 @@ export function buildBatchedGithub(
   let cache: Index | undefined;
   const index = (): Index => {
     if (!cache || now() - cache.at >= ttlMs) {
-      const all = fetchAll();
+      // W1-T181: the catch lives HERE, wrapping `fetchAll()` itself — not only inside the
+      // default `run`-based implementation above — so an INJECTED `fetchAll` (every unit-test
+      // fixture, and any future caller-supplied implementation) that throws is classified and
+      // marked exactly like a real `gh` failure, instead of propagating uncaught out of every
+      // GitHub method this gateway returns. Before this fix, a throwing `fetchAll` crashed the
+      // caller; only the default execFileSync path degraded softly.
+      let all: BatchedPr[];
+      try {
+        all = fetchAll();
+        lastFetchFailed = false;
+        lastFetchFailureReason = undefined;
+        log("board_gateway.fetch_ok", { prCount: all.length });
+      } catch (err) {
+        lastFetchFailed = true;
+        const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: string | Buffer };
+        lastFetchFailureReason = classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined, e?.code);
+        // LOUD (W1-T181 design (ii)/(v)): the pre-fix catch was silent for hours — `lastFetchFailed
+        // = true; return []` — with zero serve.log error lines, because ENOBUFS classified
+        // "unknown" and nothing ever surfaced it. console.error guarantees this reaches
+        // stdout/stderr (and therefore whatever log `rmd serve`'s process is redirected into) even
+        // if a caller never wires `opts.log`; the injectable `log` ALSO fires so a caller with a
+        // ledger can key an alert off the classified reason without scraping console output.
+        console.error(`board gateway: batched PR fetch failed (${lastFetchFailureReason}): ${e?.message ?? String(err)}`);
+        log("board_gateway.fetch_failed", { reason: lastFetchFailureReason, message: e?.message ?? String(err) });
+        // W1-T181 design (v): a bare [] here is what converted "I could not read GitHub" into
+        // "GitHub says there are zero PRs" — every task then silently derived not-merged from an
+        // outage that had nothing to do with the repo's actual PRs. The [] below is now always
+        // PAIRED with `lastFetchFailed`/`lastFetchFailureReason`, which `readFailed()`/
+        // `readFailureReason()` (below) surface to derivePrPrecedence (~line 596): a caller that
+        // consults those BEFORE trusting an empty result sees a MARKED failure, never a bare
+        // absence — the signal W1-T179's github_unobservable marking is designed to consume.
+        all = [];
+      }
       cache = {
         at: now(),
         byUrl: new Map(all.map((p) => [p.url, p])),

@@ -1018,3 +1018,132 @@ test("W1-T155: the full-taxonomy projection over N tasks still makes O(1) gatewa
   assert.equal(byId.get("W1-T1")?.armedAwaitingMerge, undefined);
   assert.equal(fetchCalls, 1, "ONE batched fetch backs the entire N-task projection, not O(N)");
 });
+
+// ── W1-T181: the LIVE OUTAGE fix — maxBuffer, a MARKED failure (never a bare []), and
+//    observability (classified reason + logging) on the batched board gateway ────────────────
+
+test("classifyGhFailure: an ENOBUFS code classifies as buffer_overflow even with a null status and empty stderr — the EXACT shape execFileSync throws once stdout crosses maxBuffer", () => {
+  // Reproduced live (W1-T181): a maxBuffer overflow is raised by Node itself, which kills the
+  // child BEFORE `gh` gets a chance to write to stderr or exit normally — status is null and
+  // stderr is "". Before this branch existed, that shape fell through every stderr-text regex
+  // and classified "unknown", which is exactly why the 2026-07-20 outage surfaced nowhere.
+  assert.equal(classifyGhFailure(null, "", "ENOBUFS"), "buffer_overflow");
+  assert.equal(classifyGhFailure(undefined, undefined, "ENOBUFS"), "buffer_overflow");
+  // A real rate-limit/auth/transport failure must still classify as before when code is absent.
+  assert.equal(classifyGhFailure(1, "gh: API rate limit exceeded for user ID 123456. (HTTP 403)"), "rate_limit");
+});
+
+test("W1-T181: the batched fetch survives a payload larger than Node's 1 MiB execFileSync default and resolves merged state — reproduces the outage's exact trigger (a body-heavy, N-PRs-wide payload) via an injected exec", () => {
+  const PR_COUNT = 700;
+  const prs: BatchedPr[] = Array.from({ length: PR_COUNT }, (_, i) => ({
+    number: i,
+    url: `u${i}`,
+    state: i % 2 === 0 ? "MERGED" : "OPEN",
+    headRefName: `run-W1-T${i}-1`,
+    body: "x".repeat(2000) + `\nRemudero-Task: W1-T${i}\n`,
+  }));
+  const raw = JSON.stringify(prs);
+  assert.ok(
+    Buffer.byteLength(raw, "utf8") > 1_048_576,
+    "sanity: the seeded payload must actually exceed Node's 1 MiB execFileSync default — the outage's exact trigger",
+  );
+  const gh = buildBatchedGithub("o", "r", { exec: () => raw });
+  // FALSIFIER: pre-W1-T181, execFileSync's default maxBuffer would have thrown ENOBUFS on a
+  // payload this size, the catch would have swallowed it and returned [], and both assertions
+  // below would fail (findMergedByTrailer -> null, readFailed() -> true).
+  assert.equal(gh.findMergedByTrailer("W1-T350")?.number, 350);
+  assert.equal(gh.readFailed?.(), false);
+});
+
+test("W1-T181: a FAILED batched fetch surfaces a MARKED failure (readFailed/readFailureReason), distinguishable from a genuinely empty PR set — never a bare []", () => {
+  // A genuinely empty repo: fetchAll succeeds with zero PRs. Must NOT read as failed.
+  const emptyRepo = buildBatchedGithub("o", "r", { fetchAll: () => [] });
+  assert.equal(emptyRepo.findMergedByTrailer("W1-T1"), null);
+  assert.equal(emptyRepo.readFailed?.(), false, "a real zero-PR repo must never be marked as a failed read");
+  assert.equal(emptyRepo.readFailureReason?.(), undefined);
+
+  // The SAME bare-[] outward shape (findMergedByTrailer -> null), but produced by a THROWING
+  // fetch — an ENOBUFS-shaped error from the injected `exec`, the real default codepath. This
+  // must be TELLABLE APART from the empty-repo case above via readFailed()/readFailureReason().
+  const enobufsError = Object.assign(new Error("spawnSync gh ENOBUFS"), { code: "ENOBUFS", status: null, stderr: "" });
+  const outage = buildBatchedGithub("o", "r", { exec: () => { throw enobufsError; } });
+  assert.equal(outage.findMergedByTrailer("W1-T1"), null);
+  assert.equal(outage.readFailed?.(), true, "a thrown fetch must mark the read as failed");
+  assert.equal(outage.readFailureReason?.(), "buffer_overflow");
+});
+
+test("W1-T181: an INJECTED fetchAll that throws (not just the default execFileSync path) is caught and marked, never crashes the caller — the catch now wraps fetchAll() itself, not only the default implementation", () => {
+  // FALSIFIER (pre-W1-T181): the try/catch lived ONLY inside the default execFileSync-based
+  // fetchAll. An injected fetchAll — every unit-test fixture, and any future caller-supplied
+  // implementation — that throws propagated UNCAUGHT out of index() and therefore every GitHub
+  // method this gateway returns, crashing the caller instead of degrading to a marked failure.
+  const rateLimitError = Object.assign(new Error("Command failed: gh pr list"), {
+    status: 1,
+    stderr: "gh: API rate limit exceeded for user ID 123456. (HTTP 403)",
+  });
+  const gh = buildBatchedGithub("o", "r", {
+    fetchAll: () => {
+      throw rateLimitError;
+    },
+  });
+  assert.doesNotThrow(() => gh.findMergedByTrailer("W1-T1"));
+  assert.equal(gh.findMergedByTrailer("W1-T1"), null);
+  assert.equal(gh.readFailed?.(), true);
+  assert.equal(gh.readFailureReason?.(), "rate_limit");
+});
+
+test("W1-T181: a batched-gateway fetch FAILURE projects indeterminate/throttled through deriveStatus — never the bare merged=false/source=none shape a genuine absence produces (the signal W1-T179's github_unobservable marking is designed to consume)", () => {
+  // FALSIFIER, measured live on 2026-07-20: with the pre-fix catch, the batched gateway read
+  // merged 0/212 with 207 indeterminate and the board reported every task queued, while the
+  // repo actually had 290 merged PRs — because the failure collapsed to the SAME shape as a
+  // genuinely empty result. This proves the fix end-to-end through the real precedence chain.
+  const enobufsError = Object.assign(new Error("spawnSync gh ENOBUFS"), { code: "ENOBUFS", status: null, stderr: "" });
+  const github = buildBatchedGithub("o", "r", { exec: () => { throw enobufsError; } });
+  const proj = deriveStatus(task({ id: "W1-T1", status: "merged" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.source, "throttled");
+  assert.equal(proj.indeterminate, true);
+  assert.equal(proj.unavailableReason, "buffer_overflow");
+  assert.equal(proj.merged, false);
+  assert.notEqual(
+    proj.source,
+    "none",
+    "a gateway failure must never collapse to the ordinary-absence shape — that is the exact bug that produced merged 0/212 on 2026-07-20",
+  );
+});
+
+test("W1-T181: a successful batched fetch logs its payload byte size and PR count via the injectable log hook", () => {
+  const events: Array<[string, Record<string, unknown> | undefined]> = [];
+  const prs: BatchedPr[] = [{ number: 1, url: "u1", state: "OPEN" }];
+  const raw = JSON.stringify(prs);
+  const gh = buildBatchedGithub("o", "r", {
+    exec: () => raw,
+    log: (event, extra) => events.push([event, extra]),
+  });
+  gh.warm?.();
+  const bytesEvent = events.find(([e]) => e === "board_gateway.fetch_bytes");
+  assert.ok(bytesEvent, "a successful fetch must log its payload byte size — the ceiling must be observable before it is crossed");
+  assert.equal(bytesEvent?.[1]?.bytes, Buffer.byteLength(raw, "utf8"));
+  const okEvent = events.find(([e]) => e === "board_gateway.fetch_ok");
+  assert.ok(okEvent, "a successful fetch must also log fetch_ok");
+  assert.equal(okEvent?.[1]?.prCount, 1);
+});
+
+test("W1-T181: a FAILED batched fetch logs LOUDLY — console.error fires AND the injectable log hook names the classified reason", (t) => {
+  const errorSpy = t.mock.method(console, "error", () => {});
+  const events: Array<[string, Record<string, unknown> | undefined]> = [];
+  const enobufsError = Object.assign(new Error("spawnSync gh ENOBUFS"), { code: "ENOBUFS", status: null, stderr: "" });
+  const gh = buildBatchedGithub("o", "r", {
+    exec: () => {
+      throw enobufsError;
+    },
+    log: (event, extra) => events.push([event, extra]),
+  });
+  gh.warm?.();
+  const failEvent = events.find(([e]) => e === "board_gateway.fetch_failed");
+  assert.ok(failEvent, "a failed fetch must log fetch_failed");
+  assert.equal(failEvent?.[1]?.reason, "buffer_overflow");
+  // FALSIFIER: the 2026-07-20 outage ran for HOURS with serve.log containing ZERO error lines —
+  // console.error must fire independently of whether a caller ever wires `opts.log`.
+  assert.ok(errorSpy.mock.calls.length >= 1, "a failed fetch must ALSO be loud on console.error, independent of the injectable log hook");
+  assert.match(String(errorSpy.mock.calls[0].arguments[0]), /buffer_overflow/);
+});

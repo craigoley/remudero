@@ -891,8 +891,19 @@ export function pruneStaleRuns(
 
 // ── gh helpers (run outside the sandbox; TLS fails under Seatbelt) ─────────
 
+/**
+ * Shared `gh ... --json` invocation + parse, used by ~13 call sites across run-task.ts (mostly
+ * single-PR `pr view` reads, O(1) regardless of repo size). W1-T181's sibling-audit named exactly
+ * ONE of those callers as repo-size-SCALING: run-task.ts's `buildOpenPrViews` (`pr list --state
+ * open --limit 100 --json ...,body,...,statusCheckRollup`) — up to 100 open PRs' full bodies +
+ * check rollups in one payload, the same shape (body-heavy, N-PRs-wide) that crossed Node's 1 MiB
+ * `execFileSync` default and caused status.ts's batched-board-gateway outage. `maxBuffer` is
+ * therefore set here, on the ONE shared codepath, rather than duplicated per call site — it is
+ * strictly headroom (`1 << 24` = 16 MiB, the orientation.ts:72 in-repo precedent) for every other
+ * O(1) caller, since a larger ceiling costs nothing unless it is actually approached.
+ */
 export function ghJson(args: string[]): unknown {
-  const out = execFileSync("gh", args, { encoding: "utf8" });
+  const out = execFileSync("gh", args, { encoding: "utf8", maxBuffer: 1 << 24 });
   return JSON.parse(out);
 }
 
