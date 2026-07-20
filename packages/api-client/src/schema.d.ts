@@ -157,6 +157,38 @@ export interface components {
       status: string;
       proposalPr: string | null;
     };
+    /** One `.remudero/skills/<name>.yaml` entry (lib/skill.ts's `Skill`) -- the panel button IS this registry entry (MASTER-PLAN §5B). `name` is the file's basename, never a `name:` field inside the body, so it can never drift from what `rmd skill list` reports it under. */
+    SkillEntry: {
+      /** The skill's identity -- its filename minus `.yaml`. */
+      name: string;
+      tools: (string)[];
+      permission_profile: string;
+      output_contract: string;
+      grounding_sources: (string)[];
+      gate: string;
+      tier: string;
+    };
+    /** GET /v1/skills's body -- one SkillEntry per `.remudero/skills/<name>.yaml`, resolved fresh on every request (src/lib/panel-skills.ts). */
+    SkillsListResult: {
+      skills: (SkillEntry)[];
+    };
+    /** POST /v1/skills/run's body -- which registry skill to invoke, an optional mode, and (for `plan`/`clarify`, i.e. Refine) the plan task id it targets. */
+    RunSkillRequest: {
+      /** A name present in the `.remudero/skills/<name>.yaml` registry (validated against GET /v1/skills's own source). */
+      skill: string;
+      /** The skill mode, e.g. "clarify" for Refine (§5B: plan is ONE skill, THREE MODES). */
+      mode?: string;
+      /** The plan/tasks.yaml task id this invocation targets. Required for `plan`/`clarify` (Refine). */
+      taskId?: string;
+    };
+    /** POST /v1/skills/run's body -- the invoked skill echoed back plus the grill it parked. Today always carries a `grilling` `feedback` entry: Refine is the only wired skill/mode, and Refine always grills (grounds via the real §5C linter, never proposes outright). */
+    RunSkillResult: {
+      ok: boolean;
+      skill: string;
+      mode?: string;
+      taskId: string;
+      feedback: FeedbackEntry;
+    };
   };
   securitySchemes: {
     /** Read-scoped bearer token. Grants GET access to read-scoped routes and SSE streams. A write-scoped token also satisfies this scope (write is a superset of read). */
@@ -277,6 +309,27 @@ export interface paths {
     post: {
       responses: {
           "200": ProposalDecisionResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/skills": {
+    get: {
+      responses: {
+          "200": SkillsListResult;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/skills/run": {
+    post: {
+      responses: {
+          "200": RunSkillResult;
           "400": Error;
           "401": Error;
           "403": Error;

@@ -30,6 +30,14 @@
 // and the accept/reject bit (`decideProposal`) — one typed method per route
 // src/lib/panel-graph.ts registers, over the SAME `getJson`/`postJson` helpers W3-T2/W3-T5
 // already established.
+//
+// W3-T8 (MASTER-PLAN §5B/§7) adds the panel's skill action-button set: `listSkills()` (GET
+// /v1/skills, read-scoped) — one typed method over the SAME `getJson` helper, resolving
+// `.remudero/skills/<name>.yaml` fresh on every call (src/lib/panel-skills.ts, W1-T44's
+// registry). W3-T8 round 2 adds `runSkill()` (POST /v1/skills/run, write-scoped) — invoking a
+// button, today wired for `{ skill: "plan", mode: "clarify" }` (Refine) only
+// (src/lib/panel-skill-run.ts); its grill renders via the SAME `listFeedback`/`submitFeedback`
+// methods W3-T6 already added, never a second inline-render primitive.
 import type { components } from "./schema.js";
 
 export type StatusProjection = components["schemas"]["StatusProjection"];
@@ -46,6 +54,9 @@ export type SubmitFeedbackResult = components["schemas"]["SubmitFeedbackResult"]
 export type TraceChain = components["schemas"]["TraceChain"];
 export type TraceResult = components["schemas"]["TraceResult"];
 export type ProposalDecisionResult = components["schemas"]["ProposalDecisionResult"];
+export type SkillEntry = components["schemas"]["SkillEntry"];
+export type SkillsListResult = components["schemas"]["SkillsListResult"];
+export type RunSkillResult = components["schemas"]["RunSkillResult"];
 
 export interface DaemonClientOptions {
   /** The daemon's base URL, e.g. `https://<tailnet-host>`. No trailing slash required. */
@@ -89,6 +100,20 @@ export interface DaemonClient {
   getTrace(id: string): Promise<TraceResult>;
   /** POST /v1/feedback/decision — accept or reject a `proposed` feedback entry (write-scoped, W3-T6). */
   decideProposal(id: string, decision: "accept" | "reject"): Promise<ProposalDecisionResult>;
+  /**
+   * GET /v1/skills — the panel's skill action-button set, resolved fresh from
+   * `.remudero/skills/<name>.yaml` on every call (read-scoped, W3-T8, W1-T44). One entry per
+   * registry file — a new skill yaml appears here with no client code change.
+   */
+  listSkills(): Promise<SkillsListResult>;
+  /**
+   * POST /v1/skills/run — invoke a registry skill button (write-scoped, W3-T8 round 2). Today
+   * wired for `{ skill: "plan", mode: "clarify" }` (the panel's "Refine" button) only — grounds
+   * via the real §5C task linter and parks the result as a `grilling` feedback entry, rendered
+   * inline via `listFeedback` and answered via `submitFeedback`'s `replyTo`. Any other
+   * skill/mode throws with a 400 naming exactly what is not yet wired.
+   */
+  runSkill(skill: string, opts?: { mode?: string; taskId?: string }): Promise<RunSkillResult>;
 }
 
 function authHeaders(token: string): Record<string, string> {
@@ -207,6 +232,18 @@ export function createDaemonClient(opts: DaemonClientOptions): DaemonClient {
 
     decideProposal(id, decision) {
       return postJson<ProposalDecisionResult>("/v1/feedback/decision", { id, decision });
+    },
+
+    listSkills() {
+      return getJson<SkillsListResult>("/v1/skills");
+    },
+
+    runSkill(skill, opts) {
+      return postJson<RunSkillResult>("/v1/skills/run", {
+        skill,
+        ...(opts?.mode !== undefined ? { mode: opts.mode } : {}),
+        ...(opts?.taskId !== undefined ? { taskId: opts.taskId } : {}),
+      });
     },
 
     subscribeStatus(onEvent) {
