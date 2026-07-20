@@ -66,9 +66,10 @@ test("strict-probe: tsconfig.json's include globs never reach scripts/**, so thi
   const { readFile } = await import("node:fs/promises");
   const tsconfig = JSON.parse(await readFile(join(REPO_ROOT, "tsconfig.json"), "utf8"));
   assert.ok(Array.isArray(tsconfig.include), "tsconfig.json must declare an include array");
+  const KNOWN_SAFE_GLOBS = ["src/**/*.ts", "test/**/*.ts", "packages/*/src/**/*.ts"];
   for (const pattern of tsconfig.include) {
     assert.ok(
-      pattern === "src/**/*.ts" || pattern === "test/**/*.ts",
+      KNOWN_SAFE_GLOBS.includes(pattern),
       `tsconfig.json include pattern "${pattern}" is not one of the known-safe globs -- verify it still excludes scripts/**`,
     );
   }

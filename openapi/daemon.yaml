@@ -1,0 +1,98 @@
+openapi: 3.1.0
+info:
+  title: Remudero Daemon Service Surface
+  version: 0.1.0
+  description: >
+    The daemon's ONE tailnet service surface (MASTER-PLAN §7A): REST + SSE,
+    single port, bearer-scoped (read vs. write). No client gets a private
+    backdoor -- packages/api-client is GENERATED from this document (see
+    scripts/generate-api-client.mjs) and is the ONLY way any client talks to
+    the daemon.
+
+
+    v0 (W3-T1a, src/lib/service.ts) ships the generic mechanism only: bearer
+    read/write scope enforcement, a shared JSON error envelope, and SSE
+    framing. It does not yet wire a single business route -- concrete routes
+    (plan state, fleet control, question/answer) are registered by a later
+    task's real `rmd serve` wiring on top of that mechanism. Until then
+    `paths` below is intentionally empty; this document still fully
+    describes the live contract (auth + error shape), and the generate +
+    drift-check pipeline (`npm run api-client:generate` / `api-client:check`)
+    is exercised against it today so a later task only has to ADD paths, not
+    build the pipeline.
+
+servers:
+  - url: "https://{tailnetHost}"
+    description: The daemon over Tailscale, one port for REST and SSE alike.
+    variables:
+      tailnetHost:
+        default: localhost:4317
+
+components:
+  securitySchemes:
+    bearerRead:
+      type: http
+      scheme: bearer
+      description: >
+        Read-scoped bearer token. Grants GET access to read-scoped routes and
+        SSE streams. A write-scoped token also satisfies this scope (write is
+        a superset of read).
+    bearerWrite:
+      type: http
+      scheme: bearer
+      description: >
+        Write-scoped bearer token. Required for any route whose `scope` is
+        `write` (src/lib/service.ts's `Scope`).
+
+  schemas:
+    Error:
+      type: object
+      description: >
+        The JSON error envelope every non-2xx response on the surface
+        returns (src/lib/service.ts's `sendJson` error paths).
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: >
+            `unauthorized` (401, no/unrecognized bearer token), `forbidden`
+            (403, recognized token missing the required scope), `not_found`
+            (404, no route registered for this method + path), or
+            `internal_error` (500, the route handler threw).
+          enum:
+            - unauthorized
+            - forbidden
+            - not_found
+            - internal_error
+        required_scope:
+          type: string
+          description: Present only on a 403 -- the scope the caller's token was missing.
+          enum:
+            - read
+            - write
+
+  responses:
+    Unauthorized:
+      description: No or unrecognized bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: A recognized token whose granted scope does not cover this route.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: No route registered for this method + path.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+# Intentionally empty in v0 (see info.description above) -- a later task adds the
+# daemon's real business routes here, regenerates packages/api-client, and the
+# committed generated output changes accordingly.
+paths: {}

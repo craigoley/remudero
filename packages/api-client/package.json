@@ -1,0 +1,17 @@
+{
+  "name": "@remudero/api-client",
+  "version": "0.1.0",
+  "description": "GENERATED TypeScript client types for the remudero daemon's service surface (MASTER-PLAN §7A). Do not hand-edit src/schema.d.ts -- see scripts/generate-api-client.mjs at the repo root.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "types": "./src/schema.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/schema.d.ts"
+    }
+  },
+  "files": [
+    "src"
+  ]
+}
