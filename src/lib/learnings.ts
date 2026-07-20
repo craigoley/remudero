@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -50,6 +51,24 @@ import { citation } from "./provenance.js";
  * module never itself executes an assertion, keeping injection a pure, fast,
  * non-shelling lookup. Re-verification (the assertion passing again) is what
  * lets a subsequent `npm run learnings-assert` restore `lifecycle: active`.
+ *
+ * LAYERS (P32/W1-T145): the corpus this file parses is the PROJECT layer —
+ * repo-scoped, everything above. P32 proposes two more: USER-OVERALL
+ * (cross-project, one fleet-readable home outside any single repo checkout,
+ * `userOverallLearningsHome` in config.ts) and RMD-GLOBAL (cross-user,
+ * opt-in, a versioned HASH-PINNED artifact, `globalLearningsHome` in
+ * config.ts / {@link loadGlobalArtifact} here). ONE entry shape
+ * ({@link LearningEntry}, unchanged except for the new optional `layer`
+ * field) is valid at every layer — the SAME `parseLearningsDoc` validates a
+ * project shard, a user-overall shard, and a global artifact's `entries`
+ * identically, so an entry can move between layers without reshaping.
+ * {@link loadLayeredLearnings} reads all three homes in precedence order
+ * (project, then user-overall, then global) into one merged corpus.
+ * PROMOTION (deciding when an entry should rise a layer) and the SCRUB gate
+ * are explicitly OUT of scope here — that is W1-T146. So is the transport
+ * that actually populates a user-overall/global home on this machine (§6,
+ * DECISIONS.md distribution-architecture Tier 3) — this module only defines
+ * the shape and reads whatever already exists at each home.
  */
 
 /** Standing rule 7 — empirically the highest-value line in the template. */
@@ -83,6 +102,18 @@ export const DEFAULT_KNOWLEDGE_BUDGET_CHARS = 1800;
  */
 export type Lifecycle = "active" | "superseded" | "quarantined";
 
+/**
+ * Which knowledge layer an entry lives at (P32/W1-T145): `project`
+ * (repo-scoped, the default), `user-overall` (cross-project, one operator's
+ * fleet), or `global` (cross-user, opt-in, hash-pinned). Layer is ORTHOGONAL
+ * to lifecycle — it says WHERE an entry is read from, not whether it is
+ * injectable.
+ */
+export type Layer = "project" | "user-overall" | "global";
+
+/** Every valid {@link Layer}, in promotion order (bottom-up: project -> user-overall -> global). */
+export const LAYERS: readonly Layer[] = ["project", "user-overall", "global"];
+
 /** One durable, provenance-tagged fact, tagged for deterministic matching. */
 export interface LearningEntry {
   /** Stable slug used in the injected citation `[src: learnings#<id>]`. */
@@ -114,6 +145,14 @@ export interface LearningEntry {
    * (src/lib/review.ts) enforces that at review time from the diff alone.
    */
   operatorImpact?: boolean;
+  /**
+   * (P32/W1-T145) Which knowledge layer this entry lives at. Optional;
+   * DEFAULTS TO `"project"` when omitted — every pre-existing shard entry
+   * (written before this field existed) is a project entry with no edit
+   * required. Use {@link entryLayer} to read the defaulted value rather than
+   * this raw (possibly-`undefined`) field directly.
+   */
+  layer?: Layer;
   /** Repo-relative globs; an entry matches a task iff one glob hits a task file. */
   files: string[];
   /** The fact itself — one line, the thing a worker inherits. */
@@ -223,6 +262,15 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
       throw new LearningsError(`learnings '${id}': 'operator_impact' must be a boolean (${sourceLabel}).`);
     }
     const operatorImpact = e.operator_impact === true;
+    let layer: Layer | undefined;
+    if (e.layer !== undefined) {
+      if (e.layer !== "project" && e.layer !== "user-overall" && e.layer !== "global") {
+        throw new LearningsError(
+          `learnings '${id}': 'layer' must be 'project', 'user-overall', or 'global', got ${JSON.stringify(e.layer)} (${sourceLabel}).`,
+        );
+      }
+      layer = e.layer;
+    }
     return {
       id,
       subsystem: typeof e.subsystem === "string" ? e.subsystem : "",
@@ -231,12 +279,30 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
       assertion,
       quarantinedReason,
       operatorImpact,
+      layer,
       files: e.files as string[],
       fact: e.fact,
       src: e.src,
       cited: typeof e.cited === "string" ? e.cited : undefined,
     };
   });
+}
+
+/** Read an entry's {@link Layer}, applying the `"project"` default when `layer` is omitted. */
+export function entryLayer(entry: LearningEntry): Layer {
+  return entry.layer ?? "project";
+}
+
+/**
+ * The PROJECT layer's home (P32/W1-T145): the repo-relative directory
+ * `loadLearningsCorpus`/`loadLearningsForTaskFiles` already read (W1-T33's
+ * shard split — `run-task.ts` derives this same path inline today as
+ * `join(dirname(planPath), "..", "learnings")`; this helper names it so
+ * project, {@link userOverallLearningsHome}, and {@link globalLearningsHome}
+ * (config.ts) read as one symmetric set of layer-home functions).
+ */
+export function projectLearningsHome(repoRoot: string): string {
+  return join(repoRoot, "learnings");
 }
 
 /** Parse one learnings YAML file. A MISSING file is not an error — returns `[]`. */
@@ -289,6 +355,174 @@ export function loadLearningsCorpus(dir: string): LearningEntry[] {
     entries.push(...parseLearningsDoc(raw, path, seen));
   }
   return entries;
+}
+
+/**
+ * Compute a per-entry char weight that budget accounting counts against —
+ * the RENDERED injectable line length (P32/W1-T145; the shape
+ * `selectLearnings` already used inline, now named/exported so it is the ONE
+ * definition every layer/caller — including the future per-layer ratchet,
+ * W1-T146 — measures "budget-counted" against, rather than each re-deriving
+ * its own render).
+ */
+export function entryBudgetWeight(entry: LearningEntry): number {
+  return renderLearningLine(entry).length;
+}
+
+/**
+ * The RMD-GLOBAL layer's artifact shape (P32/W1-T145): a VERSIONED,
+ * content-addressed bundle of {@link LearningEntry} records. `hash` pins the
+ * artifact's own content — {@link computeArtifactHash} recomputed over
+ * `entries` must equal it, or the artifact is a forgery/corruption and
+ * {@link loadGlobalArtifact} refuses it. The transport that produces/pulls
+ * this file (opt-in POST up / hash-pinned pull down, §6, DECISIONS.md
+ * distribution-architecture Tier 3) is DEFERRED — this is only the shape a
+ * pulled artifact must satisfy to be trusted.
+ */
+export interface GlobalArtifact {
+  /** Human-facing artifact version (e.g. a date or semver-ish tag); advisory. */
+  version: string;
+  /** sha256 hex digest of `entries`, per {@link computeArtifactHash}. */
+  hash: string;
+  entries: LearningEntry[];
+}
+
+/**
+ * Deterministic sha256 content hash of a set of layered-learnings entries
+ * (P32/W1-T145). Sorted by `id` first so ENTRY ORDER never changes the hash —
+ * only content does — then hashed over each field the schema defines
+ * (`undefined` optionals normalized to `null` so an omitted field hashes
+ * identically regardless of which code path produced the in-memory object).
+ */
+export function computeArtifactHash(entries: LearningEntry[]): string {
+  const canonical = [...entries]
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map((e) => ({
+      id: e.id,
+      subsystem: e.subsystem,
+      lifecycle: e.lifecycle,
+      supersededBy: e.supersededBy ?? null,
+      assertion: e.assertion ?? null,
+      quarantinedReason: e.quarantinedReason ?? null,
+      operatorImpact: e.operatorImpact ?? false,
+      layer: entryLayer(e),
+      files: e.files,
+      fact: e.fact,
+      src: e.src,
+      cited: e.cited ?? null,
+    }));
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+/** The result of loading + verifying a {@link GlobalArtifact}. */
+export type GlobalArtifactResult =
+  | { ok: true; artifact: GlobalArtifact; entries: LearningEntry[] }
+  | { ok: false; reason: string };
+
+/**
+ * Load and VERIFY the RMD-GLOBAL artifact at `path` (P32/W1-T145).
+ *
+ * `entries` is parsed through the exact same {@link parseLearningsDoc} every
+ * other layer uses — a malformed global entry is rejected with the same
+ * {@link LearningsError} shape a malformed project or user-overall entry
+ * would produce; ONE validator, every layer. The content hash is then
+ * recomputed via {@link computeArtifactHash} and compared to the artifact's
+ * own `hash` field: a MISMATCH (tampering, corruption, or a hand-edited
+ * `entries` list that forgot to re-pin) means the artifact is REFUSED —
+ * `{ ok: false }`, contributing zero entries — never silently trusted. A
+ * missing file is refused the same way (nothing pulled yet reads identically
+ * to "refuse silently", which is the correct default for an opt-in layer
+ * nothing has to populate).
+ */
+export function loadGlobalArtifact(path: string): GlobalArtifactResult {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return { ok: false, reason: `global artifact not found: ${path}` };
+  }
+  let raw: unknown;
+  try {
+    raw = parseYaml(text);
+  } catch (err) {
+    return { ok: false, reason: `global artifact is not valid YAML (${path}): ${String(err)}` };
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { ok: false, reason: `global artifact must be a mapping with 'version', 'hash', 'entries' (${path})` };
+  }
+  const r = raw as Record<string, unknown>;
+  if (typeof r.version !== "string" || r.version.length === 0) {
+    return { ok: false, reason: `global artifact missing string 'version' (${path})` };
+  }
+  if (typeof r.hash !== "string" || r.hash.length === 0) {
+    return { ok: false, reason: `global artifact missing string 'hash' (${path})` };
+  }
+  let entries: LearningEntry[];
+  try {
+    entries = parseLearningsDoc(r.entries, path, new Set());
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+  const actualHash = computeArtifactHash(entries);
+  if (actualHash !== r.hash) {
+    return {
+      ok: false,
+      reason: `global artifact hash mismatch (${path}): pinned ${r.hash}, computed ${actualHash} — refused, not trusted`,
+    };
+  }
+  return { ok: true, artifact: { version: r.version, hash: r.hash, entries }, entries };
+}
+
+/** Where to read each P32 layer from for one {@link loadLayeredLearnings} call. */
+export interface LayeredLearningsHomes {
+  /** Project layer directory, e.g. {@link projectLearningsHome}'s return value. Required — always read. */
+  projectDir: string;
+  /** User-overall layer directory, e.g. `userOverallLearningsHome(config)` (config.ts). Optional: omitted = not read. */
+  userOverallDir?: string;
+  /** Global layer artifact file, e.g. inside `globalLearningsHome(config)` (config.ts). Optional: omitted = not read. */
+  globalArtifactPath?: string;
+}
+
+/** The result of one layered read: the merged corpus, plus why the global layer was excluded (if it was). */
+export interface LayeredLearningsResult {
+  entries: LearningEntry[];
+  /** Set iff a `globalArtifactPath` was given but {@link loadGlobalArtifact} refused it (missing/malformed/hash mismatch). */
+  globalRefusedReason?: string;
+}
+
+/**
+ * Read all three P32 layers into ONE merged corpus, in PRECEDENCE ORDER:
+ * project first, user-overall second, global last (bottom-up promotion's
+ * read-side mirror — the most repo-specific facts are listed first).
+ * Downstream ranking ({@link selectLearnings}) still applies its own
+ * match-count/recency ordering on top of this list; "precedence" here only
+ * fixes the merge order, not the final injected order.
+ *
+ * Missing project/user-overall directories are non-fatal, same convention as
+ * {@link loadLearningsCorpus} (no corpus at that layer yet -> contributes
+ * nothing). A global artifact that fails verification contributes ZERO
+ * entries and its reason is surfaced via `globalRefusedReason` for the
+ * caller to log — excluded, never silently trusted (the W1-T145 falsifier).
+ *
+ * No PROMOTION or SCRUB gate lives here — this only reads what already
+ * exists at each home; deciding what MOVES between layers is W1-T146.
+ */
+export function loadLayeredLearnings(homes: LayeredLearningsHomes): LayeredLearningsResult {
+  const entries: LearningEntry[] = [];
+  entries.push(...loadLearningsCorpus(homes.projectDir));
+  if (homes.userOverallDir) {
+    entries.push(...loadLearningsCorpus(homes.userOverallDir));
+  }
+  let globalRefusedReason: string | undefined;
+  if (homes.globalArtifactPath) {
+    const result = loadGlobalArtifact(homes.globalArtifactPath);
+    if (result.ok) {
+      entries.push(...result.entries);
+    } else {
+      globalRefusedReason = result.reason;
+    }
+  }
+  return { entries, globalRefusedReason };
 }
 
 /**
@@ -404,7 +638,7 @@ export function selectLearnings(
   const dropped: LearningEntry[] = [];
   let used = 0;
   for (const entry of ranked) {
-    const cost = renderLearningLine(entry).length + 1; // +1 for the joining "\n"
+    const cost = entryBudgetWeight(entry) + 1; // +1 for the joining "\n"
     if (used + cost > budgetChars && selected.length > 0) {
       dropped.push(entry);
       continue;

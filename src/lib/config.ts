@@ -200,6 +200,39 @@ export function configPath(): string {
 }
 
 /**
+ * The USER-OVERALL learnings home (P32/W1-T145, layered knowledge): a
+ * fleet-readable directory OUTSIDE any single repo checkout, so every
+ * project's fleet on this instance reads the SAME cross-project corpus.
+ *
+ * Derived from `config.root`, NEVER a hardcoded absolute path (public-repo
+ * hygiene): default `<root>/learnings-user`. Because it depends ONLY on
+ * `config.root` — never on a repo path, cwd, or which checkout is asking —
+ * two different repo checkouts under the same instance always resolve to the
+ * identical path, which is what makes this layer cross-project by
+ * construction (same pattern as {@link workerZdotdir}/{@link workerHomeDir}
+ * deriving off `config.root` rather than a per-repo path).
+ */
+export function userOverallLearningsHome(config: Config): string {
+  return join(config.root, "learnings-user");
+}
+
+/**
+ * The RMD-GLOBAL learnings home (P32/W1-T145, layered knowledge): where the
+ * versioned, hash-pinned, cross-user artifact lives once pulled onto this
+ * machine (see `learnings.ts`'s `GlobalArtifact`/`loadGlobalArtifact` for the
+ * artifact shape and its integrity check). The PULL itself — opt-in POST up
+ * / hash-pinned artifact down, no persistent connection — is §6/Tier 3
+ * (DECISIONS.md distribution-architecture) and is DEFERRED; this only names
+ * where a pulled artifact is read from.
+ *
+ * Derived from `config.root`, never a hardcoded absolute path: default
+ * `<root>/learnings-global`.
+ */
+export function globalLearningsHome(config: Config): string {
+  return join(config.root, "learnings-global");
+}
+
+/**
  * Resolve the real `claude` binary in a NON-shell context.
  *
  * `execFileSync('which', ...)` runs the `which` binary directly, so it never

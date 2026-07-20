@@ -32,6 +32,11 @@
 #                      `learnings-assert` after the underlying fact is fixed restores `active`.
 #   quarantined_reason: (quarantined entries only) why the assertion failed — set by
 #                      `learnings-assert-check.mjs`, not by hand.
+#   layer:             (P32/W1-T145, optional) project | user-overall | global — which knowledge
+#                      layer this entry lives at. Defaults to `project` when omitted, so every
+#                      entry in this file (all written before this field existed) is unaffected.
+#                      See src/lib/learnings.ts's LAYERS doc for the user-overall/global homes and
+#                      the (deferred) promotion path between them.
 #   files:             repo-relative globs; entry injects iff one glob hits a task file
 #   fact:              one line — the thing a worker inherits
 #   src:               provenance of the fact (recorded lineage)
