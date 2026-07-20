@@ -82,6 +82,10 @@ import {
 } from "./lib/plan-architect.js";
 import {
   anchorFingerprint,
+  applyFragmentToPlanYaml,
+  applyStampToMasterPlan,
+  approveCommitMessage,
+  approveProposal,
   classifyProposal,
   gitGrepAnchorTrue,
   inboxDraftPrompt,
@@ -89,11 +93,17 @@ import {
   parseDraftCache,
   parseDraftedCandidate,
   parseProposalRegistry,
+  ratifyTelemetry,
+  reframeProposal,
   renderInbox,
+  renderRatifyTelemetry,
   type DraftCache,
   type DraftedCandidate,
   type EvidenceAnchor,
+  type InboxClassification,
   type Proposal,
+  type ReadinessContext,
+  type RatifyGateway,
 } from "./lib/inbox.js";
 import { parseUsage, type UsageSnapshot } from "./lib/headroom.js";
 import {
@@ -102,6 +112,7 @@ import {
   calibrationTable,
   codeFilesInDiff,
   loadMarker,
+  parseLedger,
   probeGithubThrottle,
   renderGather,
   type ShippedGithub,
@@ -2578,7 +2589,11 @@ async function retroCommand(rest: string[]): Promise<number> {
     learningsAtMarker: marker?.learnings_count,
     github,
   });
-  const report = renderGather(gather);
+  // W1-T111 (P25 iv): the approve/reframe rate is telemetry, not decoration — the field's
+  // failure mode is the rubber-stamp queue, so it rides EVERY retro (cumulative, all-time,
+  // never scoped to `sinceTs` — a fatigue signal needs the whole history to be trustworthy).
+  // lib/retro.ts itself stays untouched; this is a standalone section concatenated on.
+  const report = [renderGather(gather), "", renderRatifyTelemetry(ratifyTelemetry(parseLedger(ledgerNdjson)))].join("\n");
 
   if (dryRun) {
     console.log(report);
@@ -5086,6 +5101,217 @@ async function inboxCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
+/** Load the ACTIVE-proposal registry + draft cache and classify ONE proposal against REAL
+ *  facts (deriveStatus-derived merge state, real `git grep`, the whole registry as the
+ *  conflict set) — the SAME readiness context `inboxCommand` classifies every proposal
+ *  with, factored out so `rmd approve`/`rmd reframe` never diverge from what `rmd inbox`
+ *  showed the operator. Returns `undefined` proposal when `proposalId` is not in the
+ *  registry — the caller turns that into a fail-loud usage error. */
+function loadProposalForRatify(
+  proposalId: string,
+  plan: Plan,
+  ledgerPath: string,
+  owner: string,
+  repo: string,
+  config: Config,
+): { proposal: Proposal | undefined; proposals: Proposal[]; drafts: DraftCache; draftsPath: string; classification?: InboxClassification } {
+  const registryPath = join(config.root, "state", "inbox-proposals.json");
+  const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
+  const proposal = proposals.find((p) => p.id === proposalId);
+
+  const draftsPath = join(config.root, "state", "inbox-drafts.json");
+  const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
+
+  if (!proposal) return { proposal: undefined, proposals, drafts, draftsPath };
+
+  const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
+  const isMerged: MergedResolver = (t) => deriveStatus(t, deriveDeps).merged;
+  const ctx: ReadinessContext = {
+    plan,
+    isMerged,
+    grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
+    openProposalIds: new Set(proposals.map((p) => p.id)),
+  };
+  const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
+  return { proposal, proposals, drafts, draftsPath, classification };
+}
+
+/**
+ * `rmd approve <P##>` — the operator's ONE BIT (MASTER-PLAN P25 ii, W1-T111). Refuses
+ * anything not currently READY (re-classified live, against the SAME facts `rmd inbox`
+ * would show right now — never a stale cached verdict), naming the state; a READY
+ * proposal's cached draft is shipped VERBATIM into a plan PR that rides the full gate
+ * (ci-gate + remudero-review) before auto-merge is armed — rule 15: the bit INITIATES,
+ * it never merges anything itself. The pure decision + gateway-call-counting live in
+ * {@link approveProposal}; this command is the thin real-world glue (mirrors
+ * `inboxCommand`/`planCommand`'s split).
+ */
+async function approveCommand(rest: string[]): Promise<number> {
+  const proposalId = rest[0];
+  const badArg = unknownArgError("approve", rest.slice(1), [], []);
+  if (!proposalId || badArg) {
+    console.error((badArg ?? `rmd approve: <P##> is required — usage: ${commandSyntax("approve")}`) + "\n" + USAGE);
+    return 2;
+  }
+
+  const config = loadConfig();
+  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const { owner, repo } = resolveOwnerRepo();
+
+  const { proposal, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
+  if (!proposal || !classification) {
+    console.error(`rmd approve: unknown proposal '${proposalId}' — not in the ACTIVE registry (state/inbox-proposals.json)`);
+    return 2;
+  }
+
+  const runId = `APPROVE-${proposalId}-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: proposalId, step, ...extra });
+
+  let repoDir: string | undefined;
+  let worktreePath: string | undefined;
+  const gateway: RatifyGateway = {
+    createRatificationBranch(payload) {
+      repoDir = join(config.root, "repos", repo);
+      if (!existsSync(repoDir)) {
+        mkdirSync(dirname(repoDir), { recursive: true });
+        execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+      }
+      const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
+      if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
+      const branch = `run-${runId}`;
+      worktreePath = join(worktreesDir(config), branch);
+      worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+      writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+
+      const tasksPath = join(worktreePath, "plan", "tasks.yaml");
+      writeFileSync(tasksPath, applyFragmentToPlanYaml(readFileSync(tasksPath, "utf8"), payload.fragmentYaml), "utf8");
+      const masterPlanPath = join(worktreePath, "MASTER-PLAN.md");
+      writeFileSync(masterPlanPath, applyStampToMasterPlan(readFileSync(masterPlanPath, "utf8"), payload.proposalId, payload.stampLine), "utf8");
+
+      execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
+      execFileSync("git", ["-C", worktreePath, "commit", "-m", approveCommitMessage(payload)], { stdio: "inherit" });
+      execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+      return branch;
+    },
+    openPlanPr(branch, id) {
+      const body = [
+        classification.draft?.stampLine ?? "",
+        "",
+        "The operator's one-bit approve initiated this PR (MASTER-PLAN P25 ii, W1-T111). The",
+        "gate still reviews (ci + remudero-review); nothing auto-merges without it.",
+        "",
+        `Remudero-Task: ${id}`,
+      ].join("\n");
+      const out = execFileSync(
+        "gh",
+        ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch, "--title", `chore(plan): ratify ${id} via rmd approve`, "--body", body],
+        { encoding: "utf8" },
+      );
+      const prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
+      if (!prUrl) throw new Error("rmd approve: `gh pr create` produced no PR url");
+      return prUrl;
+    },
+  };
+
+  const result = approveProposal(classification, gateway, { ledgerPath, runId });
+  if (!result.ok) {
+    console.error(`rmd approve: ${result.refusal}`);
+    return 1;
+  }
+  if (!repoDir || !worktreePath) {
+    // Unreachable in practice — the gateway above always sets these before returning a
+    // branch — but fail LOUD rather than silently skip cleanup/gate if it ever were.
+    throw new Error("rmd approve: gateway reported success but never created a ratification branch");
+  }
+  const ownedRepoDir = repoDir;
+  const ownedWorktreePath = worktreePath;
+
+  try {
+    // RUN-OWNERSHIP GUARD (W1-T62 precedent) — never trailer/gate/arm a PR that is not
+    // actually this run's own branch.
+    const ownership = checkPrOwnership(result.prUrl, result.branch, ghPrHeadGateway(), 0);
+    if (ownership) {
+      log("verdict", ownership.ledger);
+      console.error(`rmd approve: claimed PR ${result.prUrl} is not this run's own branch (${result.branch})`);
+      worktreeRemove(ownedRepoDir, ownedWorktreePath);
+      return 1;
+    }
+    ensureTaskTrailer(result.prUrl, proposalId);
+    log("pr.opened", { pr_url: result.prUrl, branch: result.branch });
+    console.log(`rmd approve: ${proposalId} — plan PR opened: ${result.prUrl}`);
+
+    const ci = await waitForCiGreen(result.prUrl, (s, extra) => log(s, extra));
+    if (ci !== "green") {
+      console.log(`ci ${ci} — PR left OPEN: ${result.prUrl}`);
+      worktreeRemove(ownedRepoDir, ownedWorktreePath);
+      return 1;
+    }
+    const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
+    const reviewCode = await reviewCommand(prNum);
+    armAutoMerge(result.prUrl);
+    log("automerge.armed", {});
+    worktreeRemove(ownedRepoDir, ownedWorktreePath);
+    console.log(`rmd approve: ${proposalId} gated + armed (review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`);
+    return reviewCode;
+  } catch (e) {
+    log("approve.error", { error: String((e as Error)?.message ?? e) });
+    try {
+      worktreeRemove(ownedRepoDir, ownedWorktreePath);
+    } catch {
+      /* best-effort */
+    }
+    throw e;
+  } finally {
+    removeRunLock(ownedWorktreePath);
+  }
+}
+
+/**
+ * `rmd reframe <P##> --feedback "<text>"` — the operator's OBJECTION path (MASTER-PLAN P25
+ * iii, W1-T111): captures the feedback verbatim, ledgers `ratify.reframed`, and invalidates
+ * the proposal's cached draft so the NEXT `rmd inbox` pass redrafts WITH the feedback in the
+ * Architect prompt ({@link inboxDraftPrompt}). Valid for ANY proposal already in the
+ * registry, whatever its current classification — reframe is feedback, never a
+ * ratification, and opens no PR. State-side only (registry + draft cache + ledger); no
+ * clone, no worktree, no `gh` call.
+ */
+async function reframeCommand(rest: string[]): Promise<number> {
+  const proposalId = rest[0];
+  const badArg = unknownArgError("reframe", rest.slice(1), ["--feedback"], []);
+  if (!proposalId || badArg) {
+    console.error((badArg ?? `rmd reframe: <P##> is required — usage: ${commandSyntax("reframe")}`) + "\n" + USAGE);
+    return 2;
+  }
+  const feedback = flagValue(rest, "--feedback");
+  if (!feedback) {
+    console.error(`rmd reframe: --feedback "<text>" is required — usage: ${commandSyntax("reframe")}\n` + USAGE);
+    return 2;
+  }
+
+  const config = loadConfig();
+  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const { owner, repo } = resolveOwnerRepo();
+
+  const registryPath = join(config.root, "state", "inbox-proposals.json");
+  const { proposal, proposals, drafts, draftsPath } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
+  if (!proposal) {
+    console.error(`rmd reframe: unknown proposal '${proposalId}' — not in the ACTIVE registry (${registryPath})`);
+    return 2;
+  }
+
+  const runId = `REFRAME-${proposalId}-${Date.now()}`;
+  const result = reframeProposal(proposal, feedback, drafts, { ledgerPath, runId });
+
+  const nextProposals = proposals.map((p) => (p.id === proposalId ? result.proposal : p));
+  writeFileSync(registryPath, JSON.stringify({ proposals: nextProposals }, null, 2), "utf8");
+  writeFileSync(draftsPath, JSON.stringify(result.drafts, null, 2), "utf8");
+
+  console.log(`rmd reframe: ${proposalId} — feedback ledgered, draft invalidated; the next \`rmd inbox\` pass will redraft with it.`);
+  return 0;
+}
+
 /**
  * `rmd digest [--since <iso>] [--dry-run]` — roll up the ledger since `--since`
  * (default: 24h ago) into one message (digest.ts) and send it over iMessage;
@@ -5646,6 +5872,16 @@ const COMMANDS: readonly CommandSpec[] = [
     usage:
       "rmd inbox [--dry-run]   # the ratification inbox's deterministic core (MASTER-PLAN P25(i), W1-T110): tiers the ACTIVE-proposal registry (state/inbox-proposals.json) into READY (drafted tasks' deps merged, evidence anchors grep-true on main, draft lint-plan-clean, no open conflict — carries its drafted plan/tasks.yaml fragment + stamp), not-ready (each failing predicate named), or DEFERRED-WITH-TRIGGER (an unfired named trigger — never recommended); drafts missing/stale candidates via a bounded, read-only Architect worker and caches them state-side (never committed); --dry-run classifies against whatever is already cached and spawns no worker",
   },
+  {
+    name: "approve",
+    usage:
+      "rmd approve <P##>   # one bit ratifies through the gate (MASTER-PLAN P25(ii), W1-T111): re-classifies <P##> live against the SAME facts `rmd inbox` would show; valid ONLY for a currently-READY proposal, refused (naming the state) with zero git/gh side effects otherwise; on READY, ships the cached draft's fragment + stamp VERBATIM into a plan PR (one branch, one PR) that rides the full gate (ci-gate + remudero-review) before auto-merge is armed — nothing auto-files without the bit; ledgers exactly one ratify.approved/ratify.approve_refused line",
+  },
+  {
+    name: "reframe",
+    usage:
+      'rmd reframe <P##> --feedback "<text>"   # the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>\'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger)',
+  },
 ] as const;
 
 const USAGE_FOOTER =
@@ -5788,6 +6024,12 @@ async function main(): Promise<void> {
   }
   if (cmd === "inbox") {
     process.exit(await inboxCommand(rest));
+  }
+  if (cmd === "approve" && arg) {
+    process.exit(await approveCommand(rest));
+  }
+  if (cmd === "reframe" && arg) {
+    process.exit(await reframeCommand(rest));
   }
   console.error(USAGE);
   process.exit(2);
