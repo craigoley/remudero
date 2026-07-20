@@ -128,6 +128,7 @@ import {
 import { buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import {
+  buildBatchedGithub,
   ghGateway,
   ghRequiredStatusCheckContexts,
   projectPlan,
@@ -3276,18 +3277,24 @@ async function serveCommand(rest: string[]): Promise<number> {
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "SERVE", step, ...extra });
 
+  // BATCHED gateway (not per-task ghGateway): the board's GET /v1/status derives EVERY task via
+  // projectPlan, and ghGateway shells `gh` per task (findMergedByTrailer is a search each) — O(N)
+  // sequential subprocesses, ~0.4s×N, which hung the board at "loading…" on the full plan (~74s at
+  // 183 tasks). buildBatchedGithub fetches all PRs ONCE (TTL-refreshed) and resolves every task
+  // in-memory: O(1). ONE shared instance backs the board AND GET /v1/drain/preview's merged-set.
+  const boardGithub = buildBatchedGithub(self.owner, self.repo);
   const server = buildServeServer({
-    board: { plan, ledgerPath, github: ghGateway(self.owner, self.repo) },
+    board: { plan, ledgerPath, github: boardGithub },
     // panel-graph.ts reloads plan/tasks.yaml fresh on every GET /v1/trace (its own header) --
     // planPath alone is enough, no snapshot needed here the way board.ts's does.
     // `statusGithub` backs GET /v1/drain/preview's (W1-T140) merged-set derivation --
-    // the SAME ghGateway instance the board route above uses, never a second gateway type.
+    // the SAME batched gateway the board route above uses, never a second gateway type.
     panelGraph: {
       root: repoRoot,
       planPath,
       ledgerPath,
       github: ghTraceGateway(self.owner, self.repo),
-      statusGithub: ghGateway(self.owner, self.repo),
+      statusGithub: boardGithub,
     },
     ledgerPath,
     issues: ghIssueCloser(),

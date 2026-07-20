@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { nextRunnable, type MergedSet } from "../src/lib/drain.js";
-import { deriveStatus, type GitHub, type PrRef } from "../src/lib/status.js";
+import { buildBatchedGithub, deriveStatus, type BatchedPr, type GitHub, type PrRef } from "../src/lib/status.js";
 
 /** A minimal task; fields not under test get sensible defaults. */
 function task(over: Partial<Task> = {}): Task {
@@ -397,4 +397,60 @@ test("W1-T75: a correction beats rung (b)'s explicit pr: field", () => {
   assert.equal(proj.source, "correction");
   assert.equal(proj.prNumber, 61);
   assert.ok(!github.calls.includes("prByRef:60"), "rung (b) must never even be queried once a correction exists");
+});
+
+// ── buildBatchedGithub: one fetch backs all methods (the board-hang fix) ──────────────────────────
+
+test("buildBatchedGithub: N method calls trigger ONE fetch (O(1)), refreshing only after the TTL", () => {
+  let fetchCalls = 0;
+  let clock = 1000;
+  const gh = buildBatchedGithub("o", "r", {
+    ttlMs: 100,
+    now: () => clock,
+    fetchAll: () => {
+      fetchCalls++;
+      return [];
+    },
+  });
+  // 200 method calls within the TTL window -> exactly ONE fetch (the pre-fix gateway made one gh
+  // subprocess PER call — this is the O(N)->O(1) proof at the gateway level).
+  for (let i = 0; i < 200; i++) gh.findMergedByTrailer(`W1-T${i}`);
+  assert.equal(fetchCalls, 1);
+  clock += 150; // past the 100ms TTL
+  gh.findMergedByTrailer("W1-T0");
+  assert.equal(fetchCalls, 2); // refreshed -> the board stays live
+});
+
+test("buildBatchedGithub.findMergedByTrailer matches the ANCHORED trailer line, never a substring", () => {
+  const prs: BatchedPr[] = [
+    { number: 10, url: "u10", state: "MERGED", headRefName: "run-W1-T15-x", body: "work\nRemudero-Task: W1-T15\n" },
+    { number: 20, url: "u20", state: "MERGED", headRefName: "run-W1-T1-y", body: "work\nRemudero-Task: W1-T1\n" },
+  ];
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => prs });
+  // "W1-T1" must NOT mis-select the "W1-T15" PR (a naive .includes("Remudero-Task: W1-T1") would).
+  assert.equal(gh.findMergedByTrailer("W1-T1")?.number, 20);
+  assert.equal(gh.findMergedByTrailer("W1-T15")?.number, 10);
+  assert.equal(gh.findMergedByTrailer("W1-T999"), null);
+});
+
+test("buildBatchedGithub.prByRef resolves by url and by number; headRefName/prBody read the index", () => {
+  const prs: BatchedPr[] = [
+    { number: 42, url: "https://github.com/o/r/pull/42", state: "OPEN", headRefName: "run-W1-T7-z", body: "b42" },
+  ];
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => prs });
+  assert.equal(gh.prByRef("https://github.com/o/r/pull/42")?.state, "OPEN");
+  assert.equal(gh.prByRef(42)?.number, 42);
+  assert.equal(gh.prByRef(999), null);
+  assert.equal(gh.headRefName("https://github.com/o/r/pull/42"), "run-W1-T7-z");
+  assert.equal(gh.prBody("https://github.com/o/r/pull/42"), "b42");
+});
+
+test("buildBatchedGithub.findMergedByTrailer returns the NEWEST (highest-number) merged PR on a duplicate trailer", () => {
+  const prs: BatchedPr[] = [
+    { number: 5, url: "old", state: "MERGED", body: "Remudero-Task: W1-T3\n" },
+    { number: 9, url: "new", state: "MERGED", body: "Remudero-Task: W1-T3\n" },
+    { number: 7, url: "openone", state: "OPEN", body: "Remudero-Task: W1-T3\n" }, // OPEN is not "merged"
+  ];
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => prs });
+  assert.equal(gh.findMergedByTrailer("W1-T3")?.url, "new");
 });
