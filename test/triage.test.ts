@@ -224,3 +224,164 @@ test("triageCommitMessage: propose cites origin: feedback#<id> and the proposed 
   assert.match(msg, /proposed/);
   assert.match(msg, /^chore\(plan\):/);
 });
+
+// ── SEEDED END-TO-END SCENARIOS ──────────────────────────────────────────────
+// W1-T41 acceptance proof. `rmd triage`'s only non-deterministic step is the Architect
+// worker's GROUND/RESEARCH judgment call (an LLM); everything downstream of its verdict —
+// the three-way decision, the PLAN-ONLY + provenance guards, and the harness-authored
+// commit/PR body — is the pure, deterministic code these two tests seed with a REALISTIC
+// worker verdict (grounded in facts that are actually true of this repo: rmd feedback's
+// --attach flag really shipped in W1-T40) and run for real. `console.log` prints the
+// resulting artifacts (the triage output / the PR diff) so a reviewer can read them
+// straight off a `node --test` run, not just trust an assertion.
+
+test("SEEDED: an ALREADY-DECIDED feedback item yields 'already decided, see §X' and NO redundant task", () => {
+  const entry: FeedbackEntry = {
+    id: "fb-1700000100000-seed01",
+    ts: "2026-07-19T00:01:00.000Z",
+    raw: "can we capture operator feedback asynchronously with a screenshot attached, without blocking on chat?",
+    attachments: [],
+    origin: "cli",
+    status: "new",
+    proposal_pr: null,
+  };
+  // A realistic Architect verdict after grounding against MASTER-PLAN.md/LEARNINGS.md: this
+  // exact capability already shipped as `rmd feedback --attach` (W1-T40, merged #238) — see
+  // MASTER-PLAN.md §7B and src/lib/feedback.ts's module doc.
+  const workerOutputText = [
+    "GROUND: grepped MASTER-PLAN.md §7B and LEARNINGS.md.",
+    "MASTER-PLAN.md §7B: \"plan/feedback/ is a durable, diffable inbox ... captured async by",
+    "`rmd feedback` (W1-T40) ... never lost in a chat scrollback.\" `rmd feedback <text> --attach",
+    "<path>` (merged PR #238, LEARNINGS.md \"Agent SDK tools & the feedback front door\") already",
+    "captures async, multimodal (screenshot) feedback with no chat round-trip required.",
+    "RESEARCH: not needed — grounding already answers this.",
+    "ALREADY_DECIDED: MASTER-PLAN.md §7B / rmd feedback --attach (W1-T40, PR #238) already ships async, multimodal capture",
+  ].join("\n");
+
+  const changedFiles: string[] = []; // the worker touched NOTHING — the ground truth signal
+  const verdict = parseTriageVerdict(workerOutputText);
+  const decision = decideTriage({ verdict, changedFiles });
+  assert.equal(decision.action, "no_task");
+  assert.equal((decision as { status: string }).status, "rejected");
+
+  const taskId = `TRIAGE-${entry.id}`;
+  const commitMessage = triageCommitMessage({
+    decision: decision as Exclude<TriageDecision, { action: "error" }>,
+    feedbackId: entry.id,
+    taskId,
+  });
+  // No plan/tasks.yaml entry is ever mentioned/added — the whole point of grounding.
+  assert.doesNotMatch(commitMessage, /plan\/tasks\.yaml.*(add|new task)/i);
+  assert.match(commitMessage, /adds NO redundant task/);
+  assert.match(commitMessage, /rejected/);
+
+  const triageOutput = [
+    "=== TRIAGE OUTPUT (seeded: already-decided) ===",
+    `feedback#${entry.id}: "${entry.raw}"`,
+    "",
+    "--- worker verdict ---",
+    workerOutputText,
+    "",
+    `--- deterministic decision (lib/triage.ts decideTriage) ---`,
+    JSON.stringify(decision, null, 2),
+    "",
+    "--- harness-authored PR body (lib/triage.ts triageCommitMessage) ---",
+    commitMessage,
+  ].join("\n");
+  console.log(triageOutput);
+});
+
+test("SEEDED: a NOVEL feedback item produces a plan-only PR diff citing feedback#<id> as origin", () => {
+  const entry: FeedbackEntry = {
+    id: "fb-1700000200000-seed02",
+    ts: "2026-07-19T00:02:00.000Z",
+    raw: "add a --dry-run flag to rmd triage so an operator can preview the ground/research verdict without spawning a worker or opening a PR",
+    attachments: [],
+    origin: "cli",
+    status: "new",
+    proposal_pr: null,
+  };
+  const workerOutputText = [
+    "GROUND: grepped MASTER-PLAN.md §7B, plan/tasks.yaml, LEARNINGS.md, DECISIONS.md — no existing",
+    "task covers a preview-only / --dry-run mode for `rmd triage`.",
+    "RESEARCH: not needed — this is a local CLI ergonomics ask, no platform fact turns on it.",
+    "This is clear and novel: adding a new plan/tasks.yaml task, origin: feedback#" + entry.id + ".",
+    `PROPOSED: add W1-T210 (origin: feedback#${entry.id}) — a --dry-run mode for rmd triage`,
+  ].join("\n");
+
+  // The synthetic PR diff a real `gh pr diff` would show for this proposal — touches ONLY
+  // plan/tasks.yaml, and the new task carries the origin: feedback#<id> provenance token.
+  const prDiff = [
+    "diff --git a/plan/tasks.yaml b/plan/tasks.yaml",
+    "index 1111111..2222222 100644",
+    "--- a/plan/tasks.yaml",
+    "+++ b/plan/tasks.yaml",
+    "@@ -1920,6 +1920,22 @@",
+    "+",
+    "+- id: W1-T210",
+    "+  title: rmd triage --dry-run — preview the ground/research verdict, no worker spawn, no PR",
+    "+  repo: remudero",
+    "+  depends_on: [W1-T41]",
+    "+  type: implement",
+    "+  verify: auto",
+    "+  principles: {tdd: strict}",
+    "+  budget_usd: 100.00",
+    "+  risk: low",
+    `+  origin: feedback#${entry.id}`,
+    '+  plan_refs: ["§7B"]',
+    "+  rationale: \"Operators want to see what the triage Architect WOULD decide before it commits/",
+    '+    pushes/opens a PR."',
+    "+  design: |",
+    "+    `--dry-run` runs GROUND+RESEARCH+the verdict step and prints the would-be decision without",
+    "+    spawning the commit/push/PR machinery.",
+    "+  acceptance:",
+    "+    - claim: \"--dry-run prints a verdict and writes nothing\"",
+    '+      proof: "a seeded feedback run with --dry-run prints ALREADY_DECIDED/AMBIGUOUS/PROPOSED and',
+    '        leaves the working tree clean — paste the output + `git status --porcelain`"',
+    "+  status: queued",
+    "+  attempts: 0",
+  ].join("\n");
+
+  const changedFiles = ["plan/tasks.yaml"]; // the worker's own diff --name-only
+  const verdict = parseTriageVerdict(workerOutputText);
+  const decision = decideTriage({ verdict, changedFiles });
+  assert.equal(decision.action, "propose");
+  assert.equal((decision as { status: string }).status, "proposed");
+
+  // The two deterministic guards `triageCommand` runs against the REAL `gh pr diff` output.
+  const strayFiles = nonPlanFilesInDiff(prDiff);
+  assert.deepEqual(strayFiles, []); // touches ONLY plan/ — never src/ or test/
+  assert.equal(diffCitesFeedback(prDiff, entry.id), true); // carries origin: feedback#<id>
+
+  const taskId = `TRIAGE-${entry.id}`;
+  const commitMessage = triageCommitMessage({
+    decision: decision as Exclude<TriageDecision, { action: "error" }>,
+    feedbackId: entry.id,
+    taskId,
+  });
+  assert.match(commitMessage, new RegExp(`origin: feedback#${entry.id}`));
+
+  const output = [
+    "=== TRIAGE PR DIFF (seeded: novel/proposed) ===",
+    `feedback#${entry.id}: "${entry.raw}"`,
+    "",
+    "--- worker verdict ---",
+    workerOutputText,
+    "",
+    "--- deterministic decision (lib/triage.ts decideTriage) ---",
+    JSON.stringify(decision, null, 2),
+    "",
+    "--- plan-only guard (lib/triage.ts nonPlanFilesInDiff) ---",
+    `stray non-plan files: ${JSON.stringify(strayFiles)}`,
+    "",
+    "--- provenance guard (lib/triage.ts diffCitesFeedback) ---",
+    `cites feedback#${entry.id}: ${diffCitesFeedback(prDiff, entry.id)}`,
+    "",
+    "--- the PR diff itself ---",
+    prDiff,
+    "",
+    "--- harness-authored PR body (lib/triage.ts triageCommitMessage) ---",
+    commitMessage,
+  ].join("\n");
+  console.log(output);
+});
