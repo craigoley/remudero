@@ -649,6 +649,40 @@ export function appendQuestion(repoRoot: string, entry: QuestionEntry): boolean 
   }
 }
 
+/**
+ * One durable ANSWER entry — a line of `plan/questions.ndjson` (W3-T5, MASTER-PLAN §7: "the
+ * question backlog... answers flow to the Architect"). Shares the QUESTION contract's own
+ * store (never a second file) so an answer lands in the SAME diffable, append-only channel
+ * every future question consumer (the Architect's triage/retro loop, the daily digest) already
+ * watches — distinguished from a {@link QuestionEntry} by carrying `answer` instead of
+ * `question`, so a reader can tell the two apart without a separate `kind` discriminator.
+ */
+export interface QuestionAnswerEntry {
+  ts: string;
+  task: string;
+  answer: string;
+  /** Non-reversible id of the bearer token that submitted the answer — never the raw token (see lib/panel-actions.ts's `bearerTokenId`). */
+  origin: string;
+}
+
+/**
+ * Append an operator's ANSWER to the SAME durable side-channel store `appendQuestion` writes
+ * to, `plan/questions.ndjson` — the panel's write action (W3-T5) is this function's only
+ * caller today (lib/panel-actions.ts's `buildAnswerQuestionRoute`). NON-BLOCKING by the same
+ * contract as `appendQuestion`: a write failure is caught and reported as `false`, never
+ * thrown — an unwritable store must not turn an operator's answer into an unhandled crash.
+ */
+export function appendQuestionAnswer(repoRoot: string, entry: QuestionAnswerEntry): boolean {
+  try {
+    const dir = join(repoRoot, "plan");
+    mkdirSync(dir, { recursive: true });
+    appendFileSync(join(dir, "questions.ndjson"), JSON.stringify(entry) + "\n");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ── Worktree lifecycle (under config.root/worktrees) ──────────────────────
 
 export function worktreesDir(config: Config): string {

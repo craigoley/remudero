@@ -6,10 +6,18 @@
  * (drain-and-hold)/STOP, quiet-hours toggle — writes go through the api-client's write
  * scope, ledgered with the panel's bearer." This module is that write-scope business
  * logic, built the SAME way lib/board.ts built the read side (W3-T2): a thin Route layer
- * over EXISTING mechanism (lib/service.ts's Route, lib/fleet-control.ts's flag files) plus
- * one new primitive this task actually owns — the `panel.*` ledger lines that make every
- * action attributable. Real `rmd serve` CLI wiring (registering these routes on a live
- * createService() instance) is later work, same split board.ts's header documents.
+ * over EXISTING mechanism (lib/service.ts's Route, lib/fleet-control.ts's flag files,
+ * worker.ts's plan/questions.ndjson store) plus one new primitive this task actually owns
+ * — the `panel.*` ledger lines that make every action attributable. Real `rmd serve` CLI
+ * wiring (registering these routes on a live createService() instance) is later work, same
+ * split board.ts's header documents.
+ *
+ * "THE ANSWER FLOWS TO THE ARCHITECT" (§7). `buildAnswerQuestionRoute` writes the operator's
+ * answer to TWO places, both durable: `plan/questions.ndjson` (worker.ts's
+ * `appendQuestionAnswer` — the SAME store the QUESTION contract already writes into, so an
+ * answer is never a side channel only this route knows about) and the `panel.*` ledger line
+ * below (the SAME provenance stream retro.ts's Architect already reads for corrective-task
+ * filing). See `buildAnswerQuestionRoute`'s own doc comment for the full walk-through.
  *
  * ROUTING IS EXACT-MATCH ONLY (service.ts v0 — no path params), so every route below takes
  * its target (a task id, an issue URL) in the POST body rather than the URL path.
@@ -37,6 +45,7 @@ import { execFileSync } from "node:child_process";
 import type { Route } from "./service.js";
 import { appendLedger } from "./ledger.js";
 import { requestPause, requestStop, resumeFleet, setQuietHours } from "./fleet-control.js";
+import { appendQuestionAnswer } from "./worker.js";
 
 /** Non-task-scoped panel actions (pause/resume/stop/quiet-hours) ledger under this sentinel — mirrors run-task.ts's drainCommand, which ledgers its own fleet-wide lines as `task_id: "DRAIN"`. */
 export const PANEL_TASK_ID = "PANEL";
@@ -237,12 +246,20 @@ function validateAnswerQuestion(body: unknown): { error: string } | AnswerQuesti
 }
 
 /**
- * POST /v1/questions/answer — answer a QUESTION-contract entry (worker.ts's
- * `plan/questions.ndjson`), write-scoped. The ledger line IS the durable record a future
- * gateway consumes into sweep.ts's `pendingAnswer` (currently always undefined in the real
- * gateway — see sweep.ts's header note); this task ships the write action + its ledger
- * attribution, the same "mechanism now, consumer later" split every panel-facing route here
- * follows.
+ * POST /v1/questions/answer — answer a QUESTION-contract entry, write-scoped. THE ANSWER
+ * FLOWS TO THE ARCHITECT two ways, both written before the 200 response:
+ *   1. `appendQuestionAnswer` (worker.ts) writes the answer into `plan/questions.ndjson` —
+ *      the SAME durable, diffable, append-only store `appendQuestion` already writes the
+ *      QUESTION into (MASTER-PLAN §7: "Question store: plan/questions.ndjson (durable,
+ *      diffable), surfaced in clients + the daily digest count") — so the answer lands in
+ *      the one channel every future question consumer (the Architect's triage/retro loop) is
+ *      already scoped to watch, not a side record only this route knows about.
+ *   2. The `panel.question_answered` ledger line below is the SAME provenance stream the
+ *      Architect's retro (retro.ts) already reads for corrective-task filing — durable,
+ *      queryable, and carrying the caller's `origin` for accountability.
+ * The `plan/questions.ndjson` write is BEST-EFFORT non-blocking (worker.ts's contract — a
+ * write failure there never throws); ledgering still records the answer either way, so a
+ * degraded filesystem never silently drops the operator's action.
  */
 export function buildAnswerQuestionRoute(deps: PanelActionDeps): Route {
   return {
@@ -251,7 +268,13 @@ export function buildAnswerQuestionRoute(deps: PanelActionDeps): Route {
     scope: "write",
     handler: jsonAction(validateAnswerQuestion, (input, req, res) => {
       const origin = bearerTokenId(req);
-      ledgerPanelAction(deps, "panel.question_answered", input.taskId, origin, { answer: input.answer });
+      const ts = new Date().toISOString();
+      const recordedToQuestionStore = appendQuestionAnswer(deps.root, { ts, task: input.taskId, answer: input.answer, origin });
+      ledgerPanelAction(deps, "panel.question_answered", input.taskId, origin, {
+        answer: input.answer,
+        flows_to: "plan/questions.ndjson",
+        recorded_to_question_store: recordedToQuestionStore,
+      });
       sendJson(res, 200, { ok: true, taskId: input.taskId, answer: input.answer });
     }),
   };

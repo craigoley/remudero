@@ -18,6 +18,10 @@ import {
   type PanelActionDeps,
 } from "../src/lib/panel-actions.js";
 import { isPaused, isQuietHours, isStopped, pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
+import { runDrain, type DrainDeps } from "../src/lib/drain.js";
+import type { Plan, Task } from "../src/lib/plan.js";
+import type { RunResult } from "../src/lib/run-result.js";
+import { appendLedger } from "../src/lib/ledger.js";
 
 // ── W3-T5: human-in-the-loop panel actions (MASTER-PLAN §7) ────────────────────────────────
 //
@@ -318,7 +322,31 @@ test("POST /v1/questions/answer: ledgers panel.question_answered against the tas
   assert.equal(entry.task_id, "W1-T78");
   assert.equal(entry.answer, "use approach X");
   assert.equal(entry.origin, bearerTokenId({ headers: { authorization: `Bearer ${WRITE_TOKEN}` } } as any));
+  assert.equal(entry.flows_to, "plan/questions.ndjson");
+  assert.equal(entry.recorded_to_question_store, true);
   assert.ok(typeof entry.ts === "string" && entry.ts.length > 0);
+});
+
+test("POST /v1/questions/answer: THE ANSWER FLOWS TO THE ARCHITECT -- recorded into plan/questions.ndjson, the SAME durable store the QUESTION contract writes into", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root);
+
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/questions/answer", WRITE_TOKEN, {
+      taskId: "W1-T78",
+      answer: "use approach X",
+    });
+    assert.equal(res.status, 200);
+  });
+
+  const questionsPath = join(root, "plan", "questions.ndjson");
+  assert.ok(existsSync(questionsPath), "plan/questions.ndjson must exist after an answer is submitted");
+  const stored = readFileSync(questionsPath, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].task, "W1-T78");
+  assert.equal(stored[0].answer, "use approach X");
+  assert.equal(stored[0].origin, bearerTokenId({ headers: { authorization: `Bearer ${WRITE_TOKEN}` } } as any));
+  assert.ok(typeof stored[0].ts === "string" && (stored[0].ts as string).length > 0);
 });
 
 test("POST /v1/questions/answer: missing taskId -> 400, no ledger line", async () => {
@@ -387,4 +415,90 @@ test("POST /v1/manual/approve: missing issueUrl -> 400, issues.close never calle
     assert.equal(res.status, 400);
   });
   assert.deepEqual(issues.closed, []);
+});
+
+// ── INTEGRATION: "STOP from the panel halts the fleet within one tick" (acceptance 2) ──────
+//
+// Drives the REAL drain loop (src/lib/drain.ts's `runDrain`) wired to the REAL fleet-control
+// predicate (`stopDetail`) drain.ts's own header documents as "checked FIRST, every tick" --
+// the SAME gate `rmd drain`/the daemon use. A two-task plan (A then B, both runnable
+// immediately, no interdependency): while task A is "running" (inside its `runOne`), the
+// PANEL issues a real HTTP POST /v1/control/stop, mirroring an operator hitting STOP mid-run.
+// A still finishes (drain-and-hold -- an in-flight task always reaches its verdict), but the
+// very NEXT loop tick sees the panel's STOP and returns before task B is ever attempted --
+// "no further spawns" literally means no second `drain.iteration`/`attempted` entry for B.
+
+function planTask(id: string): Task {
+  return {
+    id,
+    title: id,
+    repo: "remudero",
+    depends_on: [],
+    type: "implement",
+    risk: "medium",
+    verify: "auto",
+    status: "queued",
+    attempts: 0,
+  };
+}
+
+function twoTaskPlan(): Plan {
+  const tasks = [planTask("A"), planTask("B")];
+  return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+}
+
+test("INTEGRATION: a panel STOP mid-run halts the drain within one tick -- ledger shows panel.stop_requested then drain.stop, and NO further dispatch", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root);
+  const merged = new Set<string>();
+
+  await withService(deps, async (base) => {
+    const runOne = async (taskId: string): Promise<RunResult> => {
+      if (taskId === "A") {
+        // The operator, watching the panel while A runs, hits STOP -- a REAL HTTP call
+        // through the SAME route the panel's UI calls, not a direct fleet-control write.
+        const res = await post(base, "/v1/control/stop", WRITE_TOKEN, { reason: "panel STOP mid-run" });
+        assert.equal(res.status, 200);
+      }
+      merged.add(taskId);
+      return { taskId, runId: `r-${taskId}`, merged: true, costUsd: 0.01, verdict: "merged" };
+    };
+
+    const drainLedgerPath = join(root, "state", "drain-ledger.ndjson");
+    const drainLog = (step: string, extra: Record<string, unknown> = {}) => {
+      appendLedger(drainLedgerPath, { run_id: "DRAIN-test", task_id: "DRAIN", step, ...extra });
+    };
+    const drainDeps: DrainDeps = {
+      refreshMerged: () => (id: string) => merged.has(id),
+      runOne,
+      checkStop: () => stopDetail(root), // the SAME predicate rmd drain / the daemon check first, every tick
+      checkPause: () => undefined,
+      log: drainLog,
+    };
+
+    const summary = await runDrain(twoTaskPlan(), drainDeps);
+
+    // Drain-and-hold: A (already in flight when STOP landed) reaches its verdict; B is NEVER
+    // attempted -- the very next tick after A returns sees STOP and halts first.
+    assert.deepEqual(summary.attempted, ["A"]);
+    assert.deepEqual(summary.merged, ["A"]);
+    assert.equal(summary.stopReason, "stopped");
+    assert.match(summary.stopDetail ?? "", /panel STOP mid-run/);
+  });
+
+  // ── Ledger evidence: the panel-originated STOP, immediately followed by no further spawn ──
+  const panelLines = readLedgerLines(deps.ledgerPath);
+  assert.equal(panelLines.length, 1);
+  assert.equal(panelLines[0].step, "panel.stop_requested");
+  assert.equal(panelLines[0].task_id, "PANEL");
+  assert.equal(panelLines[0].reason, "panel STOP mid-run");
+  assert.ok(typeof panelLines[0].origin === "string" && (panelLines[0].origin as string).length > 0);
+
+  const drainLines = readLedgerLines(join(root, "state", "drain-ledger.ndjson"));
+  const steps = drainLines.map((l) => l.step);
+  // Exactly ONE drain.iteration (A's dispatch) -- B is never spawned; drain.stop is the very
+  // next tick's entry (drain.summary is just runDrain's own terminal bookkeeping line, logged
+  // AFTER drain.stop as it returns), proving the halt happened on the FIRST tick after the
+  // panel's STOP landed -- "no further spawns" is literal: no second drain.iteration exists.
+  assert.deepEqual(steps, ["drain.iteration", "drain.stop", "drain.summary"]);
 });

@@ -10,6 +10,7 @@ import {
   DEFAULT_MODEL_LABEL,
   DENY_FLOOR_FALLBACK_MODE,
   appendQuestion,
+  appendQuestionAnswer,
   cacheTokenLedgerFields,
   collectWorkerResult,
   evaluateDenyFloor,
@@ -630,5 +631,45 @@ test("appendQuestion: NON-BLOCKING — an unwritable store returns false, never 
     threw = true;
   }
   assert.equal(threw, false, "a failed side-channel write must NEVER throw (§2 non-blocking)");
+  assert.equal(result, false, "the failure is reported as false, not swallowed silently");
+});
+
+// ── appendQuestionAnswer (W3-T5): the panel's answer write lands in the SAME durable store ──
+
+test("appendQuestionAnswer: appends into the SAME plan/questions.ndjson a QUESTION was written to (\"the answer flows to the Architect\")", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "remudero-qa-"));
+  appendQuestion(repoRoot, { ts: "2026-07-14T00:00:00.000Z", task: "W1-T78", question: "Which approach?" });
+  const ok = appendQuestionAnswer(repoRoot, {
+    ts: "2026-07-14T00:05:00.000Z",
+    task: "W1-T78",
+    answer: "use approach X",
+    origin: "abc123def456",
+  });
+  assert.equal(ok, true);
+
+  const lines = readFileSync(join(repoRoot, "plan", "questions.ndjson"), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l));
+  assert.equal(lines.length, 2, "the question AND its answer live in the same append-only store");
+  assert.equal(lines[0].question, "Which approach?");
+  assert.equal(lines[1].task, "W1-T78");
+  assert.equal(lines[1].answer, "use approach X");
+  assert.equal(lines[1].origin, "abc123def456");
+});
+
+test("appendQuestionAnswer: NON-BLOCKING -- an unwritable store returns false, never throws", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "remudero-qa-")), "not-a-dir");
+  writeFileSync(file, "x");
+  const repoRoot = join(file, "nested");
+
+  let threw = false;
+  let result: boolean | undefined;
+  try {
+    result = appendQuestionAnswer(repoRoot, { ts: "t", task: "W1-T78", answer: "x", origin: "o" });
+  } catch {
+    threw = true;
+  }
+  assert.equal(threw, false, "a failed answer write must NEVER throw (mirrors appendQuestion's §2 non-blocking contract)");
   assert.equal(result, false, "the failure is reported as false, not swallowed silently");
 });
