@@ -56,10 +56,29 @@ export interface PrRef {
   state: string;
 }
 
+/**
+ * The four IN-FLIGHT run phases the ledger's own `step` names already distinguish
+ * (MASTER-PLAN §7/§9, W1-T155 "the board projection exposes the FULL status taxonomy").
+ * Never invented vocabulary — each maps 1:1 onto real run-task.ts ledger steps: `recon`
+ * (since `run.start`), `implement` (since `recon.done`/`implement.resumed`), `review`
+ * (since `implement.done`/`pr.opened`, or again after `fix.resolved`), `fix-rung`
+ * (since `fix.dispatch`/`fix.review`).
+ */
+export type Phase = "recon" | "implement" | "review" | "fix-rung";
+
 /** One task's projected merge-state, derived from GitHub (never from yaml). */
 export interface StatusProjection {
   taskId: string;
-  /** Derived status label in the plan's vocabulary. */
+  /**
+   * Derived status label in the plan's vocabulary. DELIBERATELY stays within
+   * {@link TaskStatus}'s closed set (never a new enum value) even after W1-T155's
+   * taxonomy work below — two real consumers are load-bearing on that: daemon.ts's
+   * `reconstructOrphan` pattern-matches `=== "running"`, and openapi/daemon.yaml's
+   * `StatusProjection.status` enum mirrors {@link TaskStatus} exactly. The FINER
+   * taxonomy (in-flight phase, needs-human, armed-awaiting-merge) is carried on the
+   * additive fields below instead, so every existing `.status` consumer keeps working
+   * unchanged while a caller that wants the full picture reads the extra fields too.
+   */
   status: TaskStatus;
   /** The single fact dependency-gating cares about: has this task landed? */
   merged: boolean;
@@ -76,6 +95,39 @@ export interface StatusProjection {
    * Present (and non-empty) ONLY when a candidate was actually rejected.
    */
   rejected_candidates?: Array<{ pr: string; reason: string }>;
+  /**
+   * CURRENT phase of an in-flight (non-terminal) run (W1-T155), derived from the
+   * ledger's own `run.start` + phase-marker events for the task's LATEST run. Present
+   * ONLY while a run is genuinely in flight — a `run.start` with no `verdict` since —
+   * and `status` is not already a definitive terminal signal (`blocked`); a stale or
+   * concluded EARLIER run's phase never leaks in, because a fresh `run.start` always
+   * resets the scan back to `recon` (the falsifier the task's acceptance names: "a
+   * stale/earlier phase is not reported").
+   */
+  phase?: Phase;
+  /** ISO-8601 timestamp of the in-flight run's `run.start` ledger line. Present iff `phase` is. */
+  startedAt?: string;
+  /**
+   * Milliseconds elapsed since `startedAt`, as of THIS derivation (`deps.now()`,
+   * default `Date.now`) — re-derived fresh on every call, never cached. Present iff
+   * `phase`/`startedAt` are.
+   */
+  elapsedMs?: number;
+  /**
+   * True when the task has an OPEN escalation (escalate.ts's `escalation.issue_opened`)
+   * that no LATER `run.start` has superseded — a human has not yet acted, or the task
+   * was never redispatched since. Omitted (not `false`) once superseded by a newer run
+   * or once merged — same sparse-field convention as {@link rejected_candidates}.
+   */
+  needsHuman?: true;
+  /**
+   * True when the projection's current OPEN PR already has GitHub auto-merge armed,
+   * observed via the SAME batched gateway fetch {@link buildBatchedGithub} already
+   * makes for every other {@link GitHub} method — W1-T155 preserves the board-fix O(1)
+   * invariant (zero extra `gh` calls). Present only when `status === "running"` and
+   * the PR is actually armed.
+   */
+  armedAwaitingMerge?: true;
 }
 
 /**
@@ -100,6 +152,13 @@ export interface GitHub {
    * EXACT `Remudero-Task: <id>` line before it may be credited.
    */
   prBody(prUrl: string): string | undefined;
+  /**
+   * Is GitHub auto-merge already armed on this PR? OPTIONAL (added W1-T155, after every
+   * pre-existing {@link GitHub} fixture across the test suite was already written) so no
+   * existing literal implementer breaks — omitted ⇒ deriveStatus treats it as fail-soft
+   * "unknown/not armed", the same discipline every other method here already follows.
+   */
+  autoMergeArmed?(prUrl: string): boolean;
 }
 
 /** Reader for the append-only ledger; injectable for tests. */
@@ -112,6 +171,11 @@ export interface DeriveDeps {
   github: GitHub;
   /** Ledger reader; defaults to reading + parsing NDJSON from disk. */
   readLedger?: LedgerReader;
+  /**
+   * Clock for {@link StatusProjection.elapsedMs} (W1-T155); defaults to `Date.now`.
+   * Injectable so a test can assert an exact elapsed value without a real sleep.
+   */
+  now?: () => number;
 }
 
 /**
@@ -325,13 +389,12 @@ function hasAnchoredTrailer(body: string | undefined, taskId: string): boolean {
 }
 
 /**
- * Derive one task's merge-state from GitHub, in the fixed precedence.
- * Pure over its injected deps — no writes, no tasks.yaml access.
+ * Derive one task's PR-precedence merge-state from GitHub (the correction/ledger/
+ * pr-field/trailer rungs), in the fixed precedence — the logic `deriveStatus` carried
+ * before W1-T155. Takes the ledger already read (its caller reads it once and reuses
+ * it for the taxonomy layering below, rather than re-reading the file a second time).
  */
-export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
-  const readLedger = deps.readLedger ?? readLedgerLines;
-  const ledgerLines = readLedger(deps.ledgerPath);
-
+function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Record<string, unknown>>): StatusProjection {
   // SUPREMACY (MASTER-PLAN P9 / W1-T75, ratifying the W1-T20c/#134 stranding): an
   // operator correction is checked FIRST, above rungs (a)/(b)/(c) — not merely
   // inside rung (c) ahead of the trailer search. A correction is DECLARED credit
@@ -435,6 +498,126 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   return { taskId: task.id, status: "queued", merged: false, source: "none" };
 }
 
+/** {@link derivePrPrecedence}'s scan of a task's LATEST run, for the in-flight taxonomy. */
+interface RunState {
+  /** A `run.start` for this task with no `verdict` line since — still executing. */
+  inFlight: boolean;
+  phase?: Phase;
+  /** The in-flight run's `run.start` `ts`. */
+  startedAt?: string;
+}
+
+/**
+ * Scan `taskId`'s ledger lines (chronological, append-only — every line already carries
+ * `run_id`/`task_id`, run-task.ts's `log` wrapper stamps both on every call) for the state
+ * of its LATEST run: is it still in flight, and — while in flight — the CURRENT phase and
+ * when it started (W1-T155). A `run.start` always resets every field back to `recon`, so an
+ * EARLIER run's stale phase/conclusion never leaks into a later run's state — the falsifier
+ * the task's acceptance criteria name explicitly ("a stale/earlier phase is not reported").
+ * Every step name here is a REAL run-task.ts ledger step (verified against source, not
+ * guessed): `run.start`, `recon.done`, `implement.done`/`implement.resumed`, `pr.opened`,
+ * `fix.dispatch`/`fix.review`, `fix.resolved`, `verdict`.
+ */
+function deriveRunState(lines: ReadonlyArray<Record<string, unknown>>, taskId: string): RunState {
+  let inFlight = false;
+  let phase: Phase | undefined;
+  let startedAt: string | undefined;
+  for (const line of lines) {
+    if (line.task_id !== taskId) continue;
+    switch (line.step) {
+      case "run.start":
+        inFlight = true;
+        phase = "recon";
+        startedAt = typeof line.ts === "string" ? line.ts : undefined;
+        break;
+      case "recon.done":
+      case "implement.resumed":
+        if (inFlight) phase = "implement";
+        break;
+      case "implement.done":
+      case "pr.opened":
+        if (inFlight) phase = "review";
+        break;
+      case "fix.dispatch":
+      case "fix.review":
+        if (inFlight) phase = "fix-rung";
+        break;
+      case "fix.resolved":
+        if (inFlight) phase = "review";
+        break;
+      case "verdict":
+        inFlight = false;
+        break;
+    }
+  }
+  return { inFlight, phase, startedAt };
+}
+
+/**
+ * True iff the LATEST signal for `taskId`, among `run.start` (a (re)dispatch) and
+ * `escalation.issue_opened` (escalate.ts's needs-human issue), is the escalation — a
+ * human has not yet acted, or the task was never redispatched since (W1-T155, "needs-
+ * human from the open escalation"). Mirrors the "last one wins" scanning idiom every
+ * other precedence helper in this module already uses ({@link lastPrOpened},
+ * {@link debunkedTrailerUrls}, {@link latestActualPrUrl}) rather than inventing a second.
+ */
+function hasOpenEscalation(lines: ReadonlyArray<Record<string, unknown>>, taskId: string): boolean {
+  let last: "run" | "escalation" | undefined;
+  for (const line of lines) {
+    if (line.task_id !== taskId) continue;
+    if (line.step === "run.start") last = "run";
+    else if (line.step === "escalation.issue_opened") last = "escalation";
+  }
+  return last === "escalation";
+}
+
+/**
+ * Derive one task's FULL status taxonomy (W1-T155, MASTER-PLAN §7/§9): the PR-precedence
+ * merge-state {@link derivePrPrecedence} always computed, layered with the in-flight phase
+ * + startedAt/elapsed (from the ledger run state), the needs-human flag (from the open
+ * escalation), and armed-awaiting-merge (from the PR auto-merge state the batched gateway's
+ * single fetch also carries — {@link buildBatchedGithub}, zero extra GitHub calls). Pure
+ * over its injected deps — no writes, no tasks.yaml access.
+ */
+export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
+  const readLedger = deps.readLedger ?? readLedgerLines;
+  const ledgerLines = readLedger(deps.ledgerPath);
+  const base = derivePrPrecedence(task, deps, ledgerLines);
+
+  // MERGED is terminal — nothing below can add anything more useful than "it landed".
+  if (base.merged) return base;
+
+  const now = deps.now ?? (() => Date.now());
+  const projection: StatusProjection = { ...base };
+
+  // IN-FLIGHT + PHASE: never overrides an already-definitive `blocked` (a closed PR is
+  // stronger GitHub evidence than an unresolved ledger scan reaching a stale run.start).
+  if (base.status !== "blocked") {
+    const runState = deriveRunState(ledgerLines, task.id);
+    if (runState.inFlight && runState.phase) {
+      projection.status = "running";
+      projection.phase = runState.phase;
+      if (runState.startedAt) {
+        projection.startedAt = runState.startedAt;
+        projection.elapsedMs = Math.max(0, now() - Date.parse(runState.startedAt));
+      }
+    }
+  }
+
+  if (hasOpenEscalation(ledgerLines, task.id)) {
+    projection.needsHuman = true;
+  }
+
+  // ARMED-AWAITING-MERGE: only meaningful for a currently OPEN PR — reuses the exact
+  // prUrl the precedence rungs above already resolved, so this is never a second,
+  // independently-resolved PR reference.
+  if (projection.status === "running" && projection.prUrl && deps.github.autoMergeArmed?.(projection.prUrl)) {
+    projection.armedAwaitingMerge = true;
+  }
+
+  return projection;
+}
+
 /**
  * Derive every task in a plan and cache the projection to `cachePath`
  * (state/status.json). Returns a taskId -> projection map. Writes ONLY the cache.
@@ -527,6 +710,10 @@ export function ghGateway(owner: string, repo: string): GitHub {
       const view = tryJson<{ body?: string }>(["pr", "view", prUrl, "--json", "body"]);
       return view?.body;
     },
+    autoMergeArmed(prUrl) {
+      const view = tryJson<{ autoMergeRequest?: unknown }>(["pr", "view", prUrl, "--json", "autoMergeRequest"]);
+      return view?.autoMergeRequest != null;
+    },
   };
 }
 
@@ -537,6 +724,13 @@ export interface BatchedPr {
   state: string;
   headRefName?: string;
   body?: string;
+  /**
+   * GitHub's raw `autoMergeRequest` field (W1-T155): `null`/absent when auto-merge is not
+   * armed, an object when it is. Carried verbatim (never pre-reduced to a boolean) so the
+   * gateway's `autoMergeArmed` method applies the SAME `!= null` test `ghGateway` and
+   * run-task.ts's `buildOpenPrViews`/`buildOpenPrView` already use for this exact field.
+   */
+  autoMergeRequest?: unknown;
 }
 
 /**
@@ -569,7 +763,10 @@ export function buildBatchedGithub(
         return JSON.parse(
           execFileSync(
             "gh",
-            ["pr", "list", "--repo", slug, "--state", "all", "--json", "number,url,state,headRefName,body", "--limit", "1000"],
+            // W1-T155: `autoMergeRequest` rides along on this SAME single fetch — the
+            // armed-awaiting-merge taxonomy costs zero extra `gh` calls, preserving the
+            // board-fix O(1) invariant this gateway exists for.
+            ["pr", "list", "--repo", slug, "--state", "all", "--json", "number,url,state,headRefName,body,autoMergeRequest", "--limit", "1000"],
             { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
           ),
         ) as BatchedPr[];
@@ -621,6 +818,9 @@ export function buildBatchedGithub(
     },
     prBody(prUrl) {
       return index().byUrl.get(prUrl)?.body;
+    },
+    autoMergeArmed(prUrl) {
+      return index().byUrl.get(prUrl)?.autoMergeRequest != null;
     },
   };
 }

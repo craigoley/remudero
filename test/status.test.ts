@@ -10,6 +10,7 @@ import {
   deriveStatus,
   dispatchesWithoutNewOwnedPr,
   isDispatchBreakerTripped,
+  projectPlan,
   DEFAULT_MAX_TASK_DISPATCHES,
   type BatchedPr,
   type GitHub,
@@ -40,6 +41,8 @@ function fakeGitHub(opts: {
   headRefByUrl?: Record<string, string>;
   /** raw PR body per PR url — rung (c)'s anchored-trailer verify. */
   bodyByUrl?: Record<string, string>;
+  /** W1-T155: auto-merge-armed per PR url. Absent url ⇒ not armed. */
+  autoMergeByUrl?: Record<string, boolean>;
 }): GitHub & { calls: string[] } {
   const calls: string[] = [];
   return {
@@ -59,6 +62,10 @@ function fakeGitHub(opts: {
     prBody(prUrl) {
       calls.push(`prBody:${prUrl}`);
       return opts.bodyByUrl?.[prUrl];
+    },
+    autoMergeArmed(prUrl) {
+      calls.push(`autoMergeArmed:${prUrl}`);
+      return opts.autoMergeByUrl?.[prUrl] ?? false;
     },
   };
 }
@@ -558,4 +565,309 @@ test("P29(ii) isDispatchBreakerTripped: a policy-data override (rule 2) changes 
   ];
   assert.equal(isDispatchBreakerTripped(twoDispatches, "W1-T1"), false, "under the DEFAULT cap, 2 dispatches is not tripped");
   assert.equal(isDispatchBreakerTripped(twoDispatches, "W1-T1", 2), true, "an overridden cap of 2 trips at exactly 2");
+});
+
+// ── W1-T155: the board projection's FULL status taxonomy (in-flight+phase, blocked,
+// needs-human, armed-awaiting-merge) + startedAt/elapsed, joined from the ledger run state ──
+
+test("W1-T155: in-flight recon phase — a bare run.start yields status=running, phase=recon, startedAt from the run.start ts", () => {
+  const github = fakeGitHub({});
+  const ledgerPath = ledgerFile([{ ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "W1-TX", step: "run.start" }]);
+  const proj = deriveStatus(task(), { ledgerPath, github, now: () => Date.parse("2026-07-20T10:00:05.000Z") });
+  assert.equal(proj.merged, false);
+  assert.equal(proj.status, "running");
+  assert.equal(proj.phase, "recon");
+  assert.equal(proj.startedAt, "2026-07-20T10:00:00.000Z");
+  assert.equal(proj.elapsedMs, 5000);
+});
+
+test("W1-T155: in-flight implement phase — recon.done advances the phase past recon", () => {
+  const github = fakeGitHub({});
+  const ledgerPath = ledgerFile([
+    { ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { ts: "2026-07-20T10:01:00.000Z", run_id: "r1", task_id: "W1-TX", step: "recon.done" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.status, "running");
+  assert.equal(proj.phase, "implement");
+});
+
+test("W1-T155: in-flight review phase — implement.done (PR not yet opened) advances the phase to review", () => {
+  const github = fakeGitHub({});
+  const ledgerPath = ledgerFile([
+    { ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { ts: "2026-07-20T10:01:00.000Z", run_id: "r1", task_id: "W1-TX", step: "recon.done" },
+    { ts: "2026-07-20T10:02:00.000Z", run_id: "r1", task_id: "W1-TX", step: "implement.done" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.status, "running");
+  assert.equal(proj.phase, "review");
+});
+
+test("W1-T155: in-flight review phase — an OPEN pr.opened also puts a task in review, WITH the resolved PR attached", () => {
+  const url = "https://github.com/craigoley/remudero/pull/50";
+  const github = fakeGitHub({ byRef: { [url]: { number: 50, url, state: "OPEN" } } });
+  const ledgerPath = ledgerFile([
+    { ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "pr.opened", pr_url: url },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.status, "running");
+  assert.equal(proj.phase, "review");
+  assert.equal(proj.prUrl, url);
+});
+
+test("W1-T155: in-flight fix-rung phase — fix.dispatch advances the phase to fix-rung", () => {
+  const url = "https://github.com/craigoley/remudero/pull/51";
+  const github = fakeGitHub({ byRef: { [url]: { number: 51, url, state: "OPEN" } } });
+  const ledgerPath = ledgerFile([
+    { ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "pr.opened", pr_url: url },
+    { run_id: "r1", task_id: "W1-TX", step: "fix.dispatch" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.status, "running");
+  assert.equal(proj.phase, "fix-rung");
+});
+
+test("W1-T155: fix.resolved returns the phase to review (post-fix re-check), not back to fix-rung", () => {
+  const github = fakeGitHub({});
+  const ledgerPath = ledgerFile([
+    { ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "fix.dispatch" },
+    { run_id: "r1", task_id: "W1-TX", step: "fix.resolved" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.phase, "review");
+});
+
+test("W1-T155: a stale/earlier phase is NEVER reported — a NEW run.start resets to recon, even though the OLDER run reached fix-rung", () => {
+  const github = fakeGitHub({});
+  const ledgerPath = ledgerFile([
+    // Run 1: reached fix-rung, then concluded (verdict) — stale history.
+    { ts: "2026-07-20T09:00:00.000Z", run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "fix.dispatch" },
+    { run_id: "r1", task_id: "W1-TX", step: "verdict", verdict: "blocked_review" },
+    // Run 2: a fresh redispatch, only just started.
+    { ts: "2026-07-20T11:00:00.000Z", run_id: "r2", task_id: "W1-TX", step: "run.start" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github, now: () => Date.parse("2026-07-20T11:00:30.000Z") });
+  assert.equal(proj.phase, "recon", "the CURRENT run's phase, not the stale/earlier run's fix-rung");
+  assert.equal(proj.startedAt, "2026-07-20T11:00:00.000Z", "the CURRENT run's own start, not the earlier run's");
+  assert.equal(proj.elapsedMs, 30_000);
+});
+
+test("W1-T155: a verdict line ends the in-flight run — no phase/startedAt/elapsed once concluded (and no GitHub evidence follows)", () => {
+  const github = fakeGitHub({});
+  const ledgerPath = ledgerFile([
+    { ts: "2026-07-20T09:00:00.000Z", run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "recon.done" },
+    { run_id: "r1", task_id: "W1-TX", step: "verdict", verdict: "blocked_transient" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.status, "queued");
+  assert.equal(proj.phase, undefined);
+  assert.equal(proj.startedAt, undefined);
+  assert.equal(proj.elapsedMs, undefined);
+});
+
+test("W1-T155: blocked (a CLOSED PR) is never overridden by a phase, even if the ledger also shows an unresolved run.start", () => {
+  const url = "https://github.com/craigoley/remudero/pull/52";
+  const github = fakeGitHub({ byRef: { [url]: { number: 52, url, state: "CLOSED" } } });
+  const ledgerPath = ledgerFile([
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "pr.opened", pr_url: url },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.status, "blocked");
+  assert.equal(proj.phase, undefined);
+});
+
+test("W1-T155: merged is terminal — phase/needsHuman/armedAwaitingMerge never attach even when the ledger has an escalation and an unresolved run.start", () => {
+  const url = "https://github.com/craigoley/remudero/pull/53";
+  const github = fakeGitHub({ byRef: { [url]: { number: 53, url, state: "MERGED" } }, autoMergeByUrl: { [url]: true } });
+  const ledgerPath = ledgerFile([
+    { run_id: "r0", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: "https://github.com/o/r/issues/1" },
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "pr.opened", pr_url: url },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.status, "merged");
+  assert.equal(proj.merged, true);
+  assert.equal(proj.phase, undefined);
+  assert.equal(proj.needsHuman, undefined);
+  assert.equal(proj.armedAwaitingMerge, undefined);
+});
+
+test("W1-T155: needs-human — an escalation.issue_opened with no LATER run.start", () => {
+  const github = fakeGitHub({});
+  const ledgerPath = ledgerFile([
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "fix.dispatch" },
+    { run_id: "r1", task_id: "W1-TX", step: "fix.exhausted" },
+    { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: "https://github.com/o/r/issues/9", class: "BLOCKED" },
+    { run_id: "r1", task_id: "W1-TX", step: "verdict", verdict: "blocked_review" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.needsHuman, true);
+});
+
+test("W1-T155: needs-human is superseded by a NEW run.start since the escalation — the task was redispatched", () => {
+  const github = fakeGitHub({});
+  const ledgerPath = ledgerFile([
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: "https://github.com/o/r/issues/9", class: "BLOCKED" },
+    { run_id: "r1", task_id: "W1-TX", step: "verdict", verdict: "blocked_review" },
+    { ts: "2026-07-20T12:00:00.000Z", run_id: "r2", task_id: "W1-TX", step: "run.start" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.needsHuman, undefined, "a redispatch since the escalation supersedes it");
+  assert.equal(proj.phase, "recon", "and the task is genuinely back in flight");
+});
+
+test("W1-T155: armed-awaiting-merge — an OPEN PR the batched gateway reports as auto-merge-armed", () => {
+  const url = "https://github.com/craigoley/remudero/pull/60";
+  const github = fakeGitHub({ byRef: { [url]: { number: 60, url, state: "OPEN" } }, autoMergeByUrl: { [url]: true } });
+  const ledgerPath = ledgerFile([
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "pr.opened", pr_url: url },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.status, "running");
+  assert.equal(proj.armedAwaitingMerge, true);
+});
+
+test("W1-T155: an OPEN PR NOT armed for auto-merge never sets armedAwaitingMerge", () => {
+  const url = "https://github.com/craigoley/remudero/pull/61";
+  const github = fakeGitHub({ byRef: { [url]: { number: 61, url, state: "OPEN" } } }); // autoMergeByUrl omitted
+  const ledgerPath = ledgerFile([
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "pr.opened", pr_url: url },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.status, "running");
+  assert.equal(proj.armedAwaitingMerge, undefined);
+});
+
+test("W1-T155: a GitHub gateway with no autoMergeArmed method at all (every pre-W1-T155 fixture) degrades fail-soft — never armed, never throws", () => {
+  const url = "https://github.com/craigoley/remudero/pull/62";
+  const bareGithub: GitHub = {
+    prByRef: (ref) => (String(ref) === url ? { number: 62, url, state: "OPEN" } : null),
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+  };
+  const ledgerPath = ledgerFile([
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "pr.opened", pr_url: url },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github: bareGithub });
+  assert.equal(proj.status, "running");
+  assert.equal(proj.armedAwaitingMerge, undefined);
+});
+
+test("W1-T155: a full-taxonomy projection over a mixed fixture yields a DISTINCT outcome for every state — in-flight (each phase), blocked, needs-human, armed-awaiting-merge, merged, queued", () => {
+  const openUrl = "https://github.com/craigoley/remudero/pull/70";
+  const armedUrl = "https://github.com/craigoley/remudero/pull/71";
+  const closedUrl = "https://github.com/craigoley/remudero/pull/72";
+  const mergedUrl = "https://github.com/craigoley/remudero/pull/73";
+  const github = fakeGitHub({
+    byRef: {
+      [openUrl]: { number: 70, url: openUrl, state: "OPEN" },
+      [armedUrl]: { number: 71, url: armedUrl, state: "OPEN" },
+      [closedUrl]: { number: 72, url: closedUrl, state: "CLOSED" },
+      [mergedUrl]: { number: 73, url: mergedUrl, state: "MERGED" },
+    },
+    autoMergeByUrl: { [armedUrl]: true },
+  });
+
+  const projections: Record<string, ReturnType<typeof deriveStatus>> = {};
+  const scenarios: Array<[string, Array<Record<string, unknown>>]> = [
+    ["recon", [{ task_id: "recon", step: "run.start" }]],
+    ["implement", [{ task_id: "implement", step: "run.start" }, { task_id: "implement", step: "recon.done" }]],
+    ["review", [{ task_id: "review", step: "run.start" }, { task_id: "review", step: "pr.opened", pr_url: openUrl }]],
+    [
+      "fixrung",
+      [
+        { task_id: "fixrung", step: "run.start" },
+        { task_id: "fixrung", step: "pr.opened", pr_url: openUrl },
+        { task_id: "fixrung", step: "fix.dispatch" },
+      ],
+    ],
+    ["blocked", [{ task_id: "blocked", step: "pr.opened", pr_url: closedUrl }]],
+    [
+      "needshuman",
+      [
+        { task_id: "needshuman", step: "run.start" },
+        { task_id: "needshuman", step: "escalation.issue_opened", issue_url: "https://github.com/o/r/issues/1" },
+        { task_id: "needshuman", step: "verdict", verdict: "blocked_review" },
+      ],
+    ],
+    ["armed", [{ task_id: "armed", step: "run.start" }, { task_id: "armed", step: "pr.opened", pr_url: armedUrl }]],
+    ["merged", [{ task_id: "merged", step: "pr.opened", pr_url: mergedUrl }]],
+    ["queued", []],
+  ];
+  const ledgerPath = ledgerFile(scenarios.flatMap(([, lines]) => lines));
+  for (const [id] of scenarios) {
+    projections[id] = deriveStatus(task({ id }), { ledgerPath, github });
+  }
+
+  assert.deepEqual(
+    { status: projections.recon.status, phase: projections.recon.phase },
+    { status: "running", phase: "recon" },
+  );
+  assert.deepEqual(
+    { status: projections.implement.status, phase: projections.implement.phase },
+    { status: "running", phase: "implement" },
+  );
+  assert.deepEqual(
+    { status: projections.review.status, phase: projections.review.phase },
+    { status: "running", phase: "review" },
+  );
+  assert.deepEqual(
+    { status: projections.fixrung.status, phase: projections.fixrung.phase },
+    { status: "running", phase: "fix-rung" },
+  );
+  assert.equal(projections.blocked.status, "blocked");
+  assert.equal(projections.needshuman.needsHuman, true);
+  assert.equal(projections.armed.armedAwaitingMerge, true);
+  assert.equal(projections.merged.status, "merged");
+  assert.equal(projections.queued.status, "queued");
+
+  // Every one of these nine is a genuinely DISTINCT combination — never two collapsing
+  // onto the exact same (status, phase, needsHuman, armedAwaitingMerge, merged) tuple.
+  const keyOf = (p: (typeof projections)[string]) =>
+    JSON.stringify([p.status, p.phase ?? null, p.needsHuman ?? false, p.armedAwaitingMerge ?? false, p.merged]);
+  const keys = Object.values(projections).map(keyOf);
+  assert.equal(new Set(keys).size, keys.length, "every scenario must project to a DISTINCT taxonomy tuple");
+});
+
+test("W1-T155: the full-taxonomy projection over N tasks still makes O(1) gateway fetches (the board-fix invariant, preserved)", () => {
+  let fetchCalls = 0;
+  const prs: BatchedPr[] = Array.from({ length: 20 }, (_, i) => ({
+    number: i,
+    url: `u${i}`,
+    state: "OPEN",
+    autoMergeRequest: i % 2 === 0 ? { enabledAt: "x" } : null,
+  }));
+  const github = buildBatchedGithub("o", "r", {
+    fetchAll: () => {
+      fetchCalls++;
+      return prs;
+    },
+  });
+  const tasks: Task[] = Array.from({ length: 20 }, (_, i) =>
+    task({ id: `W1-T${i}`, pr: i }),
+  );
+  const plan: Plan = { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+  const ledgerPath = ledgerFile(
+    tasks.map((t, i) => ({ task_id: t.id, step: "run.start", run_id: `r${i}` })),
+  );
+  const byId = projectPlan(plan, { ledgerPath, github });
+  assert.equal(byId.size, 20);
+  // Every even-indexed task's `pr:` field resolves an OPEN PR with autoMergeRequest set —
+  // armedAwaitingMerge must be derivable WITHOUT a second `gh` call per task.
+  assert.equal(byId.get("W1-T0")?.armedAwaitingMerge, true);
+  assert.equal(byId.get("W1-T1")?.armedAwaitingMerge, undefined);
+  assert.equal(fetchCalls, 1, "ONE batched fetch backs the entire N-task projection, not O(N)");
 });

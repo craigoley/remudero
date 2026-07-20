@@ -141,6 +141,25 @@ test("computeBoardSnapshot: one StatusProjection per plan task, reusing projectP
   }
 });
 
+test("W1-T155: computeBoardSnapshot carries the full status taxonomy through for free — an in-flight task's phase/startedAt/elapsedMs pass through projectPlan unchanged", () => {
+  const ledgerPath = tmpLedgerPath();
+  appendFileSync(
+    ledgerPath,
+    JSON.stringify({ ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "A", step: "run.start" }) + "\n",
+  );
+  const plan = planOf([task({ id: "A" })]);
+  const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub(), now: () => Date.parse("2026-07-20T10:00:10.000Z") };
+
+  const snapshot = computeBoardSnapshot(deps);
+
+  assert.equal(snapshot.tasks.length, 1);
+  const [proj] = snapshot.tasks;
+  assert.equal(proj.status, "running");
+  assert.equal(proj.phase, "recon");
+  assert.equal(proj.startedAt, "2026-07-20T10:00:00.000Z");
+  assert.equal(proj.elapsedMs, 10_000);
+});
+
 test("GET /v1/status: read-scoped snapshot, matches computeBoardSnapshot", async () => {
   const ledgerPath = tmpLedgerPath();
   const plan = planOf([task({ id: "A" })]);
