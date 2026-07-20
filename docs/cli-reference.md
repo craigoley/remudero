@@ -37,6 +37,7 @@ usage:
   rmd feedback <text...> [--attach <path-or-url>]... [--origin cli|ui|issue]   # durable-inbox async capture (MASTER-PLAN §7B, W1-T40): writes plan/feedback/<id>.yaml with status: new; --attach copies a local screenshot/terminal-dump into plan/feedback/attachments/<id>/ or records an http(s) link verbatim; browse the inbox with plain ls/cat/git diff, no bespoke reader
   rmd triage <feedback-id>   # the Architect intake worker (MASTER-PLAN §7B, W1-T41): GROUNDS a plan/feedback/<id> entry against MASTER-PLAN/plan/LEARNINGS/DECISIONS, RESEARCHES via server-side WebSearch, then either reports 'already decided' (no task), parks it 'grilling' (ambiguous — W1-T42), or opens a plan-only PR carrying origin: feedback#<id> provenance, gated by ci-gate+remudero-review like everything else
   rmd skill list   # §5B skill-registry reader (W1-T44): resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); adding a skill is a config entry, no source change
+  rmd trace <id>   # render the provenance chain (MASTER-PLAN §7B / Standing rule 17, W1-T43): feedback → proposal PR → task(s) → run(s) → PR(s) → merge sha; <id> resolves as a task id first (reverse: task back to its origin:), else as a plan/feedback/<id> id (forward: feedback out to every task it produced)
 
 An UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits
 NON-ZERO, spawning nothing — the control surface never falls through to a drain on bad input.
@@ -219,3 +220,11 @@ rmd skill list
 ```
 
 §5B skill-registry reader (W1-T44): resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); adding a skill is a config entry, no source change
+
+### `rmd trace`
+
+```
+rmd trace <id>
+```
+
+render the provenance chain (MASTER-PLAN §7B / Standing rule 17, W1-T43): feedback → proposal PR → task(s) → run(s) → PR(s) → merge sha; <id> resolves as a task id first (reverse: task back to its origin:), else as a plan/feedback/<id> id (forward: feedback out to every task it produced)
