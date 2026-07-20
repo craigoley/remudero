@@ -1,4 +1,5 @@
 import type { Escalation, EscalationOption } from "./escalate.js";
+import { shapeCommitMessage } from "./commit-message.js";
 import type { FeedbackEntry, FeedbackStatus } from "./feedback.js";
 
 /**
@@ -354,8 +355,11 @@ export function triageCommitMessage(opts: {
     ].join("\n");
   }
   // propose
+  // W1-T136 class — see plan-architect.ts: `decision.detail` is LLM free text and can
+  // blow commitlint's header-max-length, which reds a REQUIRED check post-push.
+  const shapedHeader = shapeCommitMessage(`chore(plan)`, `triage feedback#${feedbackId} — ${decision.detail}`).header;
   return [
-    `chore(plan): triage feedback#${feedbackId} — ${decision.detail}`,
+    shapedHeader,
     "",
     `Proposed by the intake triage: ${decision.detail}`,
     "",
