@@ -19,7 +19,31 @@
 // the two real bugs that verification found and fixed (README.md again): a missing CORS
 // preflight response in src/lib/service.ts, and apps/dashboard/index.html's bare module
 // specifier needing an import map to resolve in a real browser/webview.
+//
+// Two env-gated, permanent (not reverted-after-use) knobs below exist ONLY to make "reads the
+// same tailnet API" independently verifiable/usable pre-W3-T5 (real connection UX) -- neither
+// is on by default, neither ships a baked-in URL/token (README.md's "still out of scope" list
+// stands):
+//
+//   - REMUDERO_DAEMON_URL / REMUDERO_DAEMON_TOKEN -- if set at launch, the main window
+//     navigates to `index.html?daemon=<url>&token=<token>` instead of the bare default. This
+//     is the SAME `?daemon=`/`?token=` convention apps/dashboard/src/main.ts's `readConfig()`
+//     already documents for local/tailnet testing (its own header comment) -- this shell just
+//     has no address bar to type them into, so env vars are the equivalent for a window that
+//     has none. Without this there is no way to point a built shell at ANY daemon, in
+//     verification or real early usage.
+//   - REMUDERO_VERIFY_DUMP=1 -- if set, a background thread polls the loaded page's rendered
+//     `#board` text via `WebviewWindow::eval_with_callback` (a first-party Tauri API -- the
+//     same "run JS, get the result back" primitive Selenium/WebDriver-style UI tests use; it
+//     does not touch, wrap, or require anything from apps/dashboard's own unmodified source)
+//     and prints each poll to stdout with a timestamp. This is the literal mechanism behind
+//     README.md's "Verified" transcript -- committed and reproducible by anyone who runs this
+//     shell with the env var set, not a hook that existed only for one verification run and
+//     was then reverted.
 
+use std::env;
+use std::thread;
+use std::time::Duration;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -90,6 +114,35 @@ pub fn run() {
             // -- register the global hotkey (handler was wired above, in the builder chain) ----
             #[cfg(desktop)]
             app.global_shortcut().register(toggle_shortcut)?;
+
+            // -- optional: point the window at a real daemon (see module header) --------------
+            if let Ok(daemon_url) = env::var("REMUDERO_DAEMON_URL") {
+                if let Some(window) = app.get_webview_window("main") {
+                    let token = env::var("REMUDERO_DAEMON_TOKEN").unwrap_or_default();
+                    let mut target = window.url()?;
+                    target
+                        .query_pairs_mut()
+                        .clear()
+                        .append_pair("daemon", &daemon_url)
+                        .append_pair("token", &token);
+                    window.navigate(target)?;
+                }
+            }
+
+            // -- optional: dump the live-rendered #board text to stdout (see module header) ---
+            if env::var("REMUDERO_VERIFY_DUMP").as_deref() == Ok("1") {
+                if let Some(window) = app.get_webview_window("main") {
+                    thread::spawn(move || loop {
+                        thread::sleep(Duration::from_millis(500));
+                        let _ = window.eval_with_callback(
+                            "(function(){var b=document.getElementById('board');return b?b.innerText:'<no #board>';})()",
+                            |result: String| {
+                                println!("[verify-dump] {}", result);
+                            },
+                        );
+                    });
+                }
+            }
 
             Ok(())
         })

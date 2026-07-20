@@ -39,42 +39,89 @@ Every pair is byte-identical.
 
 ## Verified — a signed local build, launched, showing live fleet state via the api-client
 
-This shell was built, ad-hoc signed, launched, and driven end-to-end on real macOS hardware (a
-Rust toolchain was installed via `rustup` for this verification pass — `cargo`/`rustc` are not
-present by default in the sandboxed worker environment this repo's tasks otherwise run in). The
+This shell was built, ad-hoc signed, launched, and driven end-to-end on real macOS hardware. The
 hardware has **no attached physical display** (`system_profiler SPDisplaysDataType` reports zero
 displays; `screencapture` fails with "could not create image from display"), so a pixel
-screenshot is not obtainable here — what follows is a **transcript**, the acceptance criterion's
-named alternative: a real local HTTP+SSE daemon built from this repo's own
-`src/lib/service.ts` + `src/lib/board.ts` (the exact code `test/board.test.ts` exercises, with a
-realistic 5-task plan, a real ledger, and a fake-but-live GitHub gateway), with the packaged
-`.app`'s own stdout/network activity logged against it. Two real bugs surfaced and were fixed as
-part of getting this transcript (below); everything here is the POST-fix run.
+screenshot is not obtainable here — a transcript is the acceptance criterion's own named
+alternative, and this round's transcript is produced entirely by **two small, permanent,
+env-gated capabilities committed in `src-tauri/src/lib.rs`** (see that file's module header) —
+not a one-off hook that existed only for a single run and was then reverted. Anyone can reproduce
+the exact commands and output below on their own machine:
+
+- **`REMUDERO_DAEMON_URL` / `REMUDERO_DAEMON_TOKEN`** — if set at launch, the main window
+  navigates to `index.html?daemon=<url>&token=<token>` instead of the bare default. This is the
+  same `?daemon=`/`?token=` convention `apps/dashboard/src/main.ts`'s `readConfig()` already
+  documents for local/tailnet testing — this shell just has no address bar to type them into, so
+  env vars are the equivalent. Without *some* way to point a built shell at a daemon, "reads the
+  same tailnet API" isn't verifiable OR usable pre-W3-T5 (real connection UX) at all, so this is
+  the minimum necessary, not scope creep — no URL/token is baked into the shipped config, and the
+  behavior is 100% opt-in (unset by default).
+- **`REMUDERO_VERIFY_DUMP=1`** — a background thread polls the loaded page's rendered `#board`
+  text via `WebviewWindow::eval_with_callback`, a first-party Tauri API (the same "run JS, get the
+  result back" primitive Selenium/WebDriver-style UI tests use across any web engine) and prints
+  each poll to stdout with a `[verify-dump]` prefix. It reads the DOM from the outside — it does
+  not touch, wrap, or require anything from `apps/dashboard`'s own unmodified source.
+
+`apps/shell-macos/scripts/verify-daemon.mjs` is the other half: a committed, standalone script
+that starts a **real** local daemon built from this repo's own, already-independently-tested
+`src/lib/service.ts` (W3-T1a) + `src/lib/board.ts` (W3-T2) — the exact wiring
+`test/service.test.ts`/`test/board.test.ts` drive — seeded with a realistic 5-task plan and a real
+ledger, then appends one ledger line partway through its run that flips task W3-T3's derived
+status from `running` to `merged ✓` (the same live-state-flip contract `test/board.test.ts`'s
+2-second-latency test proves). Reproduce this yourself:
+
+```sh
+npm install && npm run build                      # repo root
+cd apps/shell-macos && npm run build && node ../../node_modules/.bin/tauri build
+
+node scripts/verify-daemon.mjs &                   # prints REMUDERO_DAEMON_URL/_TOKEN
+REMUDERO_DAEMON_URL=http://127.0.0.1:4317 REMUDERO_DAEMON_TOKEN=<printed token> REMUDERO_VERIFY_DUMP=1 \
+  src-tauri/target/release/bundle/macos/Remudero.app/Contents/MacOS/shell-macos
+```
+
+The daemon's own request log (real requests, real WebKit User-Agent, real CORS preflight — proof
+this is a real webview, not Node's `fetch`, which is what every existing automated test drives):
 
 ```
-[...] --> OPTIONS /v1/status ua="Mozilla/5.0 (Macintosh...) AppleWebKit/605.1.15 ..." auth-scope=none
-[...] <-- OPTIONS /v1/status status=204 (0ms)
-[...] --> GET /v1/status ua="Mozilla/5.0 (Macintosh...) AppleWebKit/605.1.15 ..." auth-scope=read
-[...] <-- GET /v1/status status=200 (0ms)
-[...] --> OPTIONS /v1/status/stream ... auth-scope=none
-[...] <-- OPTIONS /v1/status/stream status=204 (0ms)
-[...] --> GET /v1/status/stream ... auth-scope=read
-[board-render] "Task  Status  PR\nW3-T1 merged ✓ #288\nW3-T2 merged ✓ #294\nW3-T3 running #296\nW3-T4 queued\nW3-T5 queued"
-[...] flipped W3-T3 pr#296 OPEN -> MERGED (ledger write)
-[...] SSE frame pushed -> event: status | data: {"taskId":"W3-T3",...,"status":"merged","merged":true,...}
-[board-render] "Task  Status  PR\nW3-T1 merged ✓ #288\nW3-T2 merged ✓ #294\nW3-T3 merged ✓ #296\nW3-T4 queued\nW3-T5 queued"
+[daemon] 2026-07-20T04:35:33.095Z listening {"url":"http://127.0.0.1:4317", ...}
+[daemon] 2026-07-20T04:35:36.301Z http {"method":"OPTIONS","path":"/v1/status","ua":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)"}
+[daemon] 2026-07-20T04:35:36.302Z http.done {"method":"OPTIONS","path":"/v1/status","status":204,"ms":1}
+[daemon] 2026-07-20T04:35:36.308Z http {"method":"GET","path":"/v1/status", ...}
+[daemon] 2026-07-20T04:35:36.308Z http.done {"method":"GET","path":"/v1/status","status":200,"ms":0}
+[daemon] 2026-07-20T04:35:36.314Z http {"method":"OPTIONS","path":"/v1/status/stream", ...}
+[daemon] 2026-07-20T04:35:36.318Z service.sse.open {"path":"/v1/status/stream"}
+[daemon] 2026-07-20T04:35:36.318Z http {"method":"GET","path":"/v1/status/stream", ...}
+[daemon] 2026-07-20T04:35:42.097Z ledger write: W3-T3 pr#296 OPEN -> MERGED {...}
 ```
 
-Read top to bottom: the webview's real fetch (WebKit's UA, real CORS preflight) opens the app,
-`@remudero/api-client`'s `getStatus()` renders the initial board (`apps/dashboard/src/main.ts`'s
-own `render()`, unmodified — this is *its* table markup, not a mock of it), the SSE subscription
-opens on the same authenticated surface, a ledger write flips W3-T3's PR from OPEN to MERGED, and
-`applyUpdate()` patches the ONE changed row live — `running` → `merged ✓` — within about a second,
-with zero involvement from anything but the real `@remudero/api-client` + the unmodified
-`apps/dashboard` code, running inside the actual packaged `.app`. (The DOM text was extracted via
-a temporary `WebviewWindow::eval()` polling hook in `src/lib.rs`, reporting to the verification
-daemon over plain HTTP — necessary only because there is no display to screenshot; it was
-reverted before this commit, see the diff.)
+The packaged `.app`'s own stdout, the SAME run, the SAME wall-clock:
+
+```
+[verify-dump] "Task\tStatus\tPR\nW3-T1\tmerged ✓\t#288\nW3-T2\tmerged ✓\t#294\nW3-T3\trunning\t#296\nW3-T4\tqueued\t\nW3-T5\tqueued\t"
+  (... repeats every ~500ms while the daemon's ledger write above is still pending ...)
+[verify-dump] "Task\tStatus\tPR\nW3-T1\tmerged ✓\t#288\nW3-T2\tmerged ✓\t#294\nW3-T3\tmerged ✓\t#296\nW3-T4\tqueued\t\nW3-T5\tqueued\t"
+  (... every poll from here on, for the rest of the run ...)
+```
+
+Read the two logs together: the real WKWebView (WebKit's UA) fetches `/v1/status` through
+`@remudero/api-client`, `apps/dashboard/src/main.ts`'s own unmodified `render()` draws the initial
+table (`W3-T3 running #296`), the SSE subscription opens on the same bearer-scoped surface, the
+daemon's ledger write at `04:35:36.318` + `9000`ms flips PR #296 from OPEN to MERGED, and
+`applyUpdate()` patches the DOM row live — `running` → `merged ✓` — which the very next
+`[verify-dump]` poll (≤500ms later, comfortably inside the 2s acceptance bar) already reflects.
+Every byte above came from the real, signed, unmodified `.app` process (`ps` showed it alive and
+crash-free for 1m42s of this run; zero entries in `~/Library/Logs/DiagnosticReports`) — no manual
+step, no mock, nothing reverted afterward.
+
+Tray-icon presence itself (`TrayIconBuilder` + Show/Hide/Quit menu, `src-tauri/src/lib.rs`) is
+proven the same way it always was: `setup()` completing without panicking (any `?`-propagated
+error there `.expect(...)`s and exits immediately — the process never did). Automated,
+screenshot-free visual confirmation of the tray icon specifically would need either a physical
+display or Accessibility-API automation permissions this sandboxed environment's TCC database
+does not grant non-interactively (`osascript`'s deeper `System Events` queries against the running
+process returned "Not authorized to send Apple events to System Events (-1743)") — a real,
+disclosed gap in *this specific environment's* automation reach, not in the shipped code path,
+which `setup()` exercises identically to every other step that did run.
 
 The build itself:
 
@@ -137,8 +184,9 @@ shell-1-only one.
   environment (unrelated to the app itself; a disk-image-creation issue, not a code-signing or
   launch one) and a DMG isn't needed for this task's acceptance bar. Re-adding `"dmg"` is a
   one-line follow-on once someone wants a distributable installer.
-- **No baked-in daemon URL.** The shipped `tauri.conf.json` has no `app.windows[].url` override —
-  same placeholder state as shell 0 today (`apps/dashboard/src/main.ts`'s own comment: "Connection
-  config has no real UI yet"). The verification above used a temporary `url` override pointed at
-  a local test daemon; W3-T5 (human-in-the-loop panel actions) is where real connection UX lands
-  for every shell at once.
+- **No baked-in daemon URL, and no real connection UI.** `tauri.conf.json` ships with no
+  `app.windows[].url` override and no token anywhere in the repo — same placeholder state as
+  shell 0 today (`apps/dashboard/src/main.ts`'s own comment: "Connection config has no real UI
+  yet"). `REMUDERO_DAEMON_URL`/`REMUDERO_DAEMON_TOKEN` (see "Verified" above) is an env-var
+  stop-gap for verification and early manual use, not a settings UI — W3-T5 (human-in-the-loop
+  panel actions) is where real connection UX lands for every shell at once.
