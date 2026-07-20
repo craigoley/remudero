@@ -7,9 +7,11 @@ import {
   architectModel,
   configPath as instanceConfigPath,
   fixStrikeCap,
+  globalArtifactPath,
   loadConfig,
   notifyRecipient,
   softBudgetThreshold,
+  userOverallLearningsHome,
   workerModel,
   workerShell,
   workerZdotdir,
@@ -107,7 +109,7 @@ import { ContainmentError, probeContainment } from "./lib/containment.js";
 import { IsolationError, probeIsolation } from "./lib/isolation.js";
 import {
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-  loadLearningsForTaskFiles,
+  loadLayeredLearningsForTaskFiles,
   renderDoctrinePreamble,
   renderMatchedLearnings,
   selectLearnings,
@@ -1814,17 +1816,32 @@ async function runTask(
     const reconFail = failOnWorkerError(recon, "recon");
     if (reconFail) return reconFail;
 
-    // ── Promptsmith READ side (W1-T19; SPLIT + INDEX + SUPERSESSION, W1-T33):
-    // inject the distrust rule, the autonomy clause, and the task-matched
-    // LEARNINGS facts. `loadLearningsForTaskFiles` is a LOOKUP (via the
-    // generated learnings/index.json), not a scan: it parses only the corpus
-    // shards task.files could match. `selectLearnings` then matches by file-glob
-    // and filters out any `lifecycle: superseded` entry before ranking, so a
+    // ── Promptsmith READ side (W1-T19; SPLIT + INDEX + SUPERSESSION, W1-T33;
+    // LAYERED — project + user-overall + global, P32/W1-T145): inject the
+    // distrust rule, the autonomy clause, and the task-matched LEARNINGS
+    // facts. `loadLayeredLearningsForTaskFiles` reads the PROJECT layer via
+    // the index-based LOOKUP (W1-T33's `learnings/index.json`, not a scan —
+    // it parses only the corpus shards task.files could match), then merges
+    // in the USER-OVERALL layer (a fleet-readable home outside this repo)
+    // and the RMD-GLOBAL layer (a hash-pinned artifact — a tampered/missing
+    // one contributes zero entries and is logged, never silently trusted) in
+    // PRECEDENCE order. `selectLearnings` then matches by file-glob and
+    // filters out any `lifecycle: superseded` entry before ranking, so a
     // decayed fact can never be injected; the KNOWLEDGE BUDGET caps the
     // injected facts and DROPPED entries are logged so a growing corpus never
-    // becomes an unbounded context tax.
+    // becomes an unbounded context tax. On a fresh instance the user-overall
+    // directory and global artifact don't exist yet (§6 transport is
+    // deferred) — both layers are non-fatal absences, so this is a pure
+    // superset of the project-only injection that shipped before.
     const learningsDir = join(dirname(planPath), "..", "learnings");
-    const learnings = loadLearningsForTaskFiles(learningsDir, task.files);
+    const { entries: learnings, globalRefusedReason } = loadLayeredLearningsForTaskFiles(
+      {
+        projectDir: learningsDir,
+        userOverallDir: userOverallLearningsHome(config),
+        globalArtifactPath: globalArtifactPath(config),
+      },
+      task.files,
+    );
     const { selected, dropped } = selectLearnings(learnings, task.files, DEFAULT_KNOWLEDGE_BUDGET_CHARS);
     // VOLATILE (Tier 1) — deliberately NOT combined with the stable doctrine
     // preamble here: renderImplementPrompt places this LAST in the CONTEXT
@@ -1835,6 +1852,7 @@ async function runTask(
       matched: selected.length,
       dropped: dropped.map((d) => d.id),
       budget_chars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+      global_refused_reason: globalRefusedReason,
     });
 
     // ── Render + provenance-lint the prompt.
