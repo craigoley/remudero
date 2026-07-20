@@ -4,16 +4,22 @@ import { appendLedger } from "./ledger.js";
 /**
  * Escalations as GitHub issues (W1-T8, MASTER-PLAN §4 "Escalation taxonomy").
  *
- * The loop never waits on a human except for three classes: BLOCKED (post-diagnose,
+ * The loop never waits on a human except for four classes: BLOCKED (post-diagnose,
  * two-strikes exhausted), MANUAL (secrets, repo creation, deploys, eyeball/playtest
- * gates), and HARD_STOP (the deterministic hard-stop list — destructive ops, spend
- * beyond cap, force-push, secret handling). Every one of these opens a `needs-human`
- * labeled issue carrying the OPTIONS available and the machine's RECOMMENDATION, so
- * the issue itself is actionable rather than a bare alert. (DECISION/DIRECTION
- * classes are absorbed elsewhere — auto-choose and idle-groom respectively — and
- * ASYNC-QUESTION deliberately never escalates; see §2/§4.)
+ * gates), HARD_STOP (the deterministic hard-stop list — destructive ops, spend
+ * beyond cap, force-push, secret handling), and GRILL (an ambiguous feedback item
+ * the intake triage cannot decide alone — MASTER-PLAN §7B, W1-T42; reuses this SAME
+ * machinery rather than a second one, per the task's own directive). Every one of
+ * these opens a `needs-human` labeled issue carrying the OPTIONS available and the
+ * machine's RECOMMENDATION, so the issue itself is actionable rather than a bare
+ * alert. (DECISION/DIRECTION classes are absorbed elsewhere — auto-choose and
+ * idle-groom respectively — and ASYNC-QUESTION deliberately never escalates; see
+ * §2/§4. GRILL does not block the loop either — like BLOCKED it collapses to the
+ * digest, never a real-time ping — but it IS a needs-human issue, unlike
+ * ASYNC-QUESTION, because MASTER-PLAN §7B names this specific case as reusing §4's
+ * escalation taxonomy verbatim.)
  */
-export type EscalationClass = "BLOCKED" | "MANUAL" | "HARD_STOP";
+export type EscalationClass = "BLOCKED" | "MANUAL" | "HARD_STOP" | "GRILL";
 
 /** One choice a human can make to resolve the escalation. */
 export interface EscalationOption {
@@ -46,6 +52,7 @@ const CLASS_LABEL: Record<EscalationClass, string> = {
   BLOCKED: "escalation-blocked",
   MANUAL: "escalation-manual",
   HARD_STOP: "escalation-hard-stop",
+  GRILL: "escalation-grill",
 };
 
 /** The label every escalation issue carries — the queue the control panel reads (§4). */

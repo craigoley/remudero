@@ -1,3 +1,4 @@
+import type { Escalation, EscalationOption } from "./escalate.js";
 import type { FeedbackEntry, FeedbackStatus } from "./feedback.js";
 
 /**
@@ -14,11 +15,16 @@ import type { FeedbackEntry, FeedbackStatus } from "./feedback.js";
  *     plan/learnings/DECISIONS. No plan files change. NO redundant task is created — the whole
  *     point of grounding (re-deciding a settled question is a failure mode, not a feature).
  *   - AMBIGUOUS        — the item needs a human's judgment call. No plan files change. Status
- *     parks at `grilling`; the actual grill mechanics (AskUserQuestion / a needs-human issue,
- *     reusing §4's escalation machinery) are W1-T42's job, not this task's — `.remudero/skills/
- *     feedback.yaml` lists `AskUserQuestion` in its tools for that later wiring, but this module
- *     does not hand the worker that tool yet (LEARNINGS "no live operator in a headless worker":
- *     an interactive prompt with no TTY just hangs / burns turns).
+ *     parks at `grilling`, and the harness (run-task.ts's `triageCommand`) opens a `needs-human`
+ *     GitHub issue reusing §4's escalation machinery (W1-T42) — the ONLY viable grill mechanism.
+ *     ★ VERIFIED (LEARNINGS.md "AskUserQuestion neither works headlessly nor stalls"):
+ *     AskUserQuestion silently auto-resolves EMPTY with no TTY (~37ms, no error, nothing
+ *     collected) rather than hanging, and this worker always runs via spawnWorker — a subprocess
+ *     with no TTY BY CONSTRUCTION, regardless of the invoking shell — so the interactive branch
+ *     MASTER-PLAN §7B names is structurally unreachable here; `.remudero/skills/feedback.yaml`
+ *     no longer lists `AskUserQuestion` in its tools. Because the async issue is the only path,
+ *     the AMBIGUOUS verdict below must always carry actionable OPTION:/RECOMMENDATION: lines —
+ *     `escalate()` refuses a bare-alert issue with no options.
  *   - PROPOSED         — a plan-only PR naming the §sections/tasks changed, with `origin:
  *     feedback#<id>` provenance on every new/rewired task.
  *
@@ -97,10 +103,21 @@ export function triagePrompt(entry: FeedbackEntry, runId: string): string {
     "  output with a line starting exactly `ALREADY_DECIDED:` naming the deciding section/PR/entry,",
     "  e.g. `ALREADY_DECIDED: MASTER-PLAN.md §7B / PR #238`.",
     "",
-    "  AMBIGUOUS — this needs a human call this triage pass cannot safely make alone (the actual",
-    "  grill — AskUserQuestion / a needs-human issue — is a separate, later capability). Touch NO",
-    "  files. End your output with a line starting exactly `AMBIGUOUS:` naming the open question,",
-    "  e.g. `AMBIGUOUS: does this want a CLI flag or a config default?`.",
+    "  AMBIGUOUS — this needs a human call this triage pass cannot safely make alone. Touch NO",
+    "  files. This triage runs HEADLESSLY (no terminal, no live operator) — the grill is an async",
+    "  `needs-human` GitHub issue, never an interactive prompt. End your output with:",
+    "    OPTION: <short label>|<what choosing it means>",
+    "    OPTION: <short label>|<what choosing it means>",
+    "  at least TWO `OPTION:` lines (add more only if there are genuinely more than two live",
+    "  choices) — these become the issue's actionable choices (MASTER-PLAN §4: an escalation with",
+    "  no options is refused as a bare alert) — then:",
+    "    RECOMMENDATION: <the exact label of the option you'd pick if forced to guess>",
+    "    AMBIGUOUS: <the open question, one line>",
+    "  e.g.:",
+    "    OPTION: cli-flag|add a --foo flag to the relevant command",
+    "    OPTION: config-default|add a config default instead, no new flag",
+    "    RECOMMENDATION: cli-flag",
+    "    AMBIGUOUS: does this want a CLI flag or a config default?",
     "",
     "  PROPOSED — the ask is CLEAR and NOVEL. Edit ONLY plan files in this working directory",
     "  (plan/tasks.yaml and/or MASTER-PLAN.md — NEVER src/ or test/) to add or rewire whatever the",
@@ -121,8 +138,31 @@ export function triagePrompt(entry: FeedbackEntry, runId: string): string {
 
 export type TriageVerdict =
   | { kind: "already_decided"; citation: string }
-  | { kind: "ambiguous"; question: string }
+  | { kind: "ambiguous"; question: string; options: EscalationOption[]; recommendation: string }
   | { kind: "proposed"; summary: string };
+
+/**
+ * `OPTION: <label>|<detail>` lines anywhere in the worker's output — the grill's actionable
+ * choices (escalate.ts's `EscalationOption[]` shape), mirroring `rmd escalate --option`'s CLI
+ * parsing (run-task.ts's `parseOptionFlags`). Only meaningful when the verdict resolves to
+ * AMBIGUOUS (decideTriage validates count/shape there); harmless if unused otherwise.
+ */
+function parseGrillOptions(text: string): EscalationOption[] {
+  return [...text.matchAll(/^[ \t]*OPTION[ \t]*:[ \t]*(.+)$/gim)].map((m) => {
+    const raw = m[1].trim();
+    const sep = raw.indexOf("|");
+    return sep >= 0
+      ? { label: raw.slice(0, sep).trim(), detail: raw.slice(sep + 1).trim() }
+      : { label: raw, detail: "" };
+  });
+}
+
+/** The LAST `RECOMMENDATION: <label>` line — {@link decideTriage} fails loud unless it matches
+ * one of the parsed OPTION labels exactly. `""` when no such line appears. */
+function parseGrillRecommendation(text: string): string {
+  const hits = [...text.matchAll(/^[ \t]*RECOMMENDATION[ \t]*:[ \t]*(.+)$/gim)];
+  return hits.length ? hits[hits.length - 1][1].trim() : "";
+}
 
 /**
  * Extract the worker's terminal verdict off its concatenated output text. Anchored to a line
@@ -143,7 +183,15 @@ export function parseTriageVerdict(text: string): TriageVerdict | null {
   }
   if (ambiguous.length) {
     const m = ambiguous[ambiguous.length - 1];
-    hits.push({ at: m.index ?? 0, verdict: { kind: "ambiguous", question: m[1].trim() } });
+    hits.push({
+      at: m.index ?? 0,
+      verdict: {
+        kind: "ambiguous",
+        question: m[1].trim(),
+        options: parseGrillOptions(text),
+        recommendation: parseGrillRecommendation(text),
+      },
+    });
   }
   if (proposed.length) {
     const m = proposed[proposed.length - 1];
@@ -165,7 +213,17 @@ export interface DecideTriageInput {
 
 export type TriageDecision =
   | { action: "no_task"; status: Extract<FeedbackStatus, "rejected">; detail: string }
-  | { action: "grill"; status: Extract<FeedbackStatus, "grilling">; detail: string }
+  | {
+      action: "grill";
+      status: Extract<FeedbackStatus, "grilling">;
+      detail: string;
+      /** The grill's actionable choices — always >= 2, {@link decideTriage} enforces it (the
+       * async needs-human issue is the ONLY grill mechanism, W1-T42, and escalate() refuses a
+       * bare alert with no options). */
+      options: EscalationOption[];
+      /** Must exactly match one of `options[].label` — {@link decideTriage} enforces it. */
+      recommendation: string;
+    }
   | { action: "propose"; status: Extract<FeedbackStatus, "proposed">; detail: string; files: string[] }
   | { action: "error"; reason: string };
 
@@ -193,10 +251,34 @@ export function decideTriage(input: DecideTriageInput): TriageDecision {
     return { action: "no_task", status: "rejected", detail: input.verdict.citation };
   }
   if (input.verdict.kind === "ambiguous") {
+    const verdict = input.verdict; // narrowed local — property-access narrowing doesn't survive into a closure below
     if (input.changedFiles.length > 0) {
       return { action: "error", reason: `AMBIGUOUS but files were changed: ${input.changedFiles.join(", ")}` };
     }
-    return { action: "grill", status: "grilling", detail: input.verdict.question };
+    // The async needs-human issue is the ONLY grill mechanism (W1-T42, LEARNINGS.md
+    // "AskUserQuestion neither works headlessly nor stalls") — an AMBIGUOUS verdict with fewer
+    // than 2 OPTION: lines, or a RECOMMENDATION: that doesn't name one of them, is not an
+    // actionable escalation; fail loud rather than let escalate() throw deeper in the pipeline
+    // (or worse, silently drop the recommendation).
+    if (verdict.options.length < 2) {
+      return {
+        action: "error",
+        reason: `AMBIGUOUS verdict carries ${verdict.options.length} OPTION: line(s) — a grill needs at least 2 actionable choices`,
+      };
+    }
+    if (!verdict.options.some((o) => o.label === verdict.recommendation)) {
+      return {
+        action: "error",
+        reason: `AMBIGUOUS verdict's RECOMMENDATION (${JSON.stringify(verdict.recommendation)}) does not match any OPTION label (${verdict.options.map((o) => o.label).join(", ")})`,
+      };
+    }
+    return {
+      action: "grill",
+      status: "grilling",
+      detail: verdict.question,
+      options: verdict.options,
+      recommendation: verdict.recommendation,
+    };
   }
   // proposed
   if (input.changedFiles.length === 0) {
@@ -240,8 +322,11 @@ export function triageCommitMessage(opts: {
   decision: Exclude<TriageDecision, { action: "error" }>;
   feedbackId: string;
   taskId: string;
+  /** The needs-human issue URL {@link buildGrillEscalation}/`escalate()` opened for a `grill`
+   * decision (W1-T42) — undefined only when `decision.action !== "grill"`. */
+  grillIssueUrl?: string;
 }): string {
-  const { decision, feedbackId, taskId } = opts;
+  const { decision, feedbackId, taskId, grillIssueUrl } = opts;
   if (decision.action === "no_task") {
     return [
       `chore(triage): feedback#${feedbackId} — already decided, no task`,
@@ -260,8 +345,10 @@ export function triageCommitMessage(opts: {
       "",
       `Open question: ${decision.detail}`,
       "",
+      `Grill (needs-human, ${decision.options.length} options, recommends "${decision.recommendation}"): ${grillIssueUrl ?? "(see run ledger — issue open failed to record here)"}`,
+      "",
       "Acceptance:",
-      `- feedback#${feedbackId} is ambiguous and adds NO redundant task | plan/feedback/${feedbackId}.yaml status is set to grilling; this diff touches only that file`,
+      `- feedback#${feedbackId} is ambiguous, opens a needs-human issue with options + a recommendation, and adds NO redundant task | the grill issue (${grillIssueUrl ?? "see run ledger"}) carries ${decision.options.length} OPTION lines and recommends "${decision.recommendation}"; plan/feedback/${feedbackId}.yaml status is set to grilling; this diff touches only that file`,
       "",
       `Remudero-Task: ${taskId}`,
     ].join("\n");
@@ -277,4 +364,33 @@ export function triageCommitMessage(opts: {
     "",
     `Remudero-Task: ${taskId}`,
   ].join("\n");
+}
+
+// ── THE GRILL: the needs-human escalation payload (W1-T42) ──────────────────────────────────
+
+/**
+ * Build the `Escalation` (lib/escalate.ts) for an AMBIGUOUS feedback item — the async
+ * needs-human GitHub issue that IS the grill (★ VERIFIED the only viable mechanism: see this
+ * module's header doc and LEARNINGS.md "AskUserQuestion neither works headlessly nor stalls").
+ * Pure — `run-task.ts`'s `triageCommand` is the only caller that hands this to the real
+ * `escalate()`/`ghIssueGateway()` I/O, mirroring how `triageCommitMessage` stays pure while the
+ * caller owns git/gh. `class: "GRILL"` reuses escalate.ts's SAME machinery (labels, ledger line,
+ * digest-only — no real-time ping) rather than inventing a second one, per this task's directive.
+ */
+export function buildGrillEscalation(opts: {
+  entry: FeedbackEntry;
+  decision: Extract<TriageDecision, { action: "grill" }>;
+  taskId: string;
+  runId: string;
+}): Escalation {
+  const { entry, decision, taskId, runId } = opts;
+  return {
+    class: "GRILL",
+    taskId,
+    runId,
+    summary: `feedback#${entry.id} needs a human call: ${decision.detail}`,
+    detail: [`Feedback: ${entry.raw}`, "", `Open question: ${decision.detail}`].join("\n"),
+    options: decision.options,
+    recommendation: decision.recommendation,
+  };
 }

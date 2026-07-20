@@ -52,6 +52,7 @@ import {
 } from "./lib/feedback.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
 import {
+  buildGrillEscalation,
   decideTriage,
   diffCitesFeedback,
   nonPlanFilesInDiff,
@@ -4127,10 +4128,13 @@ async function feedbackCommand(rest: string[]): Promise<number> {
 
 /**
  * The Architect intake worker's tool allowlist (MASTER-PLAN §7B / `.remudero/skills/feedback.yaml`),
- * minus `AskUserQuestion`: v1 triage never grills interactively — LEARNINGS "no live operator in a
- * headless worker" (W1-T9 burned its last turns trying to conjure a TTY that isn't there). The
- * AMBIGUOUS verdict parks the entry at `grilling`; wiring an actual grill (interactive
- * AskUserQuestion, or an async needs-human issue reusing §4's escalation machinery) is W1-T42's job.
+ * minus `AskUserQuestion`: ★ VERIFIED (W1-T42, LEARNINGS.md "AskUserQuestion neither works
+ * headlessly nor stalls") it silently auto-resolves with an EMPTY answer with no TTY, and this
+ * worker always runs via `spawnWorker` — a subprocess with no TTY BY CONSTRUCTION, regardless of
+ * the invoking shell — so an interactive grill is structurally unreachable here, not a fallback
+ * choice. The AMBIGUOUS verdict parks the entry at `grilling` AND `triageCommand` below opens a
+ * `needs-human` GitHub issue (escalate.ts, MASTER-PLAN §4) carrying options + a recommendation —
+ * the grill's one and only mechanism.
  */
 const TRIAGE_WORKER_TOOLS = ["Read", "Write", "Grep", "Glob", "WebSearch"];
 
@@ -4244,11 +4248,27 @@ async function triageCommand(rest: string[]): Promise<number> {
       return 1;
     }
 
+    // THE GRILL (W1-T42): the ONLY viable mechanism is the async needs-human issue — ★ VERIFIED
+    // AskUserQuestion silently auto-resolves EMPTY with no TTY rather than stalling, and this
+    // worker always runs headless via spawnWorker (LEARNINGS.md "AskUserQuestion neither works
+    // headlessly nor stalls"; TRIAGE_WORKER_TOOLS above). Opened BEFORE the bookkeeping commit
+    // below so the commit/PR body can cite the real issue URL.
+    let grillIssueUrl: string | undefined;
+    if (decision.action === "grill") {
+      grillIssueUrl = escalate(buildGrillEscalation({ entry, decision, taskId, runId }), {
+        issues: ghIssueGateway(owner, repo),
+        ledgerPath,
+        runId,
+      });
+      log("triage.grill_opened", { issue_url: grillIssueUrl, options: decision.options.length, recommendation: decision.recommendation });
+      say(`grill opened (needs-human, ${decision.options.length} options + a recommendation): ${grillIssueUrl}`);
+    }
+
     // Harness-owned deterministic status write (never LLM-authored) — folded into the SAME diff
     // the worker produced, mirroring regenerateOrientation's post-worker deterministic commit.
     setFeedbackStatus(worktreePath, feedbackId, decision.status);
     execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/"], { stdio: "inherit" });
-    const commitMessage = triageCommitMessage({ decision, feedbackId, taskId });
+    const commitMessage = triageCommitMessage({ decision, feedbackId, taskId, grillIssueUrl });
     execFileSync("git", ["-C", worktreePath, "commit", "-m", commitMessage], { stdio: "inherit" });
     execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
 
@@ -5064,7 +5084,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "triage",
     usage:
-      "rmd triage <feedback-id>   # the Architect intake worker (MASTER-PLAN \u00a77B, W1-T41): GROUNDS a plan/feedback/<id> entry against MASTER-PLAN/plan/LEARNINGS/DECISIONS, RESEARCHES via server-side WebSearch, then either reports 'already decided' (no task), parks it 'grilling' (ambiguous \u2014 W1-T42), or opens a plan-only PR carrying origin: feedback#<id> provenance, gated by ci-gate+remudero-review like everything else",
+      "rmd triage <feedback-id>   # the Architect intake worker (MASTER-PLAN \u00a77B, W1-T41): GROUNDS a plan/feedback/<id> entry against MASTER-PLAN/plan/LEARNINGS/DECISIONS, RESEARCHES via server-side WebSearch, then either reports 'already decided' (no task), GRILLS an ambiguous item by opening a needs-human GitHub issue with options + a recommendation (W1-T42, parks status 'grilling'), or opens a plan-only PR carrying origin: feedback#<id> provenance, gated by ci-gate+remudero-review like everything else",
   },
   {
     name: "skill",

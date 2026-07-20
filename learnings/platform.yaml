@@ -119,13 +119,29 @@
   cited: "2026-07-14"
 - id: askuserquestion-headless-unverified
   subsystem: feedback
-  lifecycle: active
+  lifecycle: superseded
+  superseded_by: askuserquestion-auto-resolves-empty-headless
   files: [src/run-task.ts]
   fact: >-
     AskUserQuestion is a built-in tool (the grill mechanism, natively). UNVERIFIED whether it works
     headlessly or only with a human at the terminal — verify before wiring the grill.
   src: research#agent-sdk-tools
   cited: "2026-07-14"
+
+- id: askuserquestion-auto-resolves-empty-headless
+  subsystem: feedback
+  lifecycle: active
+  files: [src/run-task.ts, src/lib/triage.ts, src/lib/escalate.ts]
+  fact: >-
+    AskUserQuestion neither works headlessly nor stalls: with no TTY it silently AUTO-RESOLVES with
+    an EMPTY answer in ~37ms (Claude Code runs as a subprocess with no terminal to render the
+    question UI on; canUseTool/PreToolUse do not help — the SDK resolves the tool before either is
+    awaited). rmd triage's Architect always runs via spawnWorker (a subprocess, no TTY, regardless
+    of the invoking shell), so the interactive grill branch is structurally unreachable; the async
+    needs-human-issue branch (lib/escalate.ts, MASTER-PLAN §4) is the only viable mechanism,
+    unconditionally, not a no-TTY fallback.
+  src: "research 2026-07-19, github.com/anthropics/claude-code issues #50728 #30983, github.com/anthropics/claude-agent-sdk-python#327"
+  cited: "2026-07-19"
 - id: websearch-serverside-webfetch-unverified
   subsystem: sdk-tools
   lifecycle: active

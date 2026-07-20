@@ -52,6 +52,7 @@
     },
     "platform.yaml": {
       "entries": [
+        "askuserquestion-auto-resolves-empty-headless",
         "askuserquestion-headless-unverified",
         "bashrc-accident",
         "browser-egress-needs-dedicated-profile",
@@ -75,12 +76,14 @@
         "src/lib/containment.ts",
         "src/lib/daemon.ts",
         "src/lib/env.ts",
+        "src/lib/escalate.ts",
         "src/lib/headroom.ts",
         "src/lib/init.ts",
         "src/lib/launchd.ts",
         "src/lib/ledger.ts",
         "src/lib/settings.ts",
         "src/lib/tier.ts",
+        "src/lib/triage.ts",
         "src/lib/worker.ts",
         "src/run-task.ts"
       ]
