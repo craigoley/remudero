@@ -2717,7 +2717,7 @@ function readUsageSnapshot(config: Config): UsageSnapshot | undefined {
 async function drainCommand(rest: string[]): Promise<number> {
   // FAIL LOUD on junk args BEFORE touching config/locks/spawns (a malformed control command
   // must spawn NOTHING — the daemon-install hazard). drain takes only these flags.
-  const badArg = unknownArgError("drain", rest, ["--until", "--max"], ["--dry-run", "--allow-stale"]);
+  const badArg = unknownArgError("drain", rest, ["--until", "--max", "--repo"], ["--dry-run", "--allow-stale"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -2734,7 +2734,14 @@ async function drainCommand(rest: string[]): Promise<number> {
   const planPath = join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const statusPath = join(config.root, "state", "status.json");
-  const { owner } = resolveOwnerRepo();
+  const self = resolveOwnerRepo();
+  const { owner } = self;
+  // Gateway repo, parameterized like the daemon path (fix/daemon-repo-targeting): defaults to
+  // THIS checkout's own repo rather than a hardcoded literal, so a checkout whose origin isn't
+  // `remudero` (e.g. a sandbox) doesn't silently project merged-status against the wrong repo.
+  // --repo overrides it explicitly. The plan itself is unaffected — drain always dispatches
+  // from THIS checkout's origin/main (git self-sync below); only the status gateway moves.
+  const repo = flagValue(rest, "--repo") ?? self.repo;
 
   const runId = `DRAIN-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -2751,9 +2758,9 @@ async function drainCommand(rest: string[]): Promise<number> {
   if ("error" in synced) return 1;
   const plan = synced.plan;
 
-  // Merged predicate, re-derived from GitHub each call (status.ts). The plan is
-  // stewarded in `remudero`, so the gateway targets it; cross-repo tasks resolve
-  // via the ledger's full pr_url (deriveStatus source (a)) or are verify:human.
+  // Merged predicate, re-derived from GitHub each call (status.ts), scoped to the resolved
+  // gateway repo (owner/repo, above) — cross-repo tasks resolve via the ledger's full pr_url
+  // (deriveStatus source (a)) or are verify:human.
   //
   // `lastProj` also backs `isOpenPr` (W1-T80, the in-flight dispatch-dedup
   // guard) — the SAME projection `refreshMerged` just derived, never a second
@@ -2763,7 +2770,7 @@ async function drainCommand(rest: string[]): Promise<number> {
   const refreshMerged: () => MergedSet = () => {
     const proj = projectPlan(
       plan,
-      { ledgerPath, github: ghGateway(owner, "remudero") },
+      { ledgerPath, github: ghGateway(owner, repo) },
       statusPath,
     );
     lastProj = proj;
@@ -2812,7 +2819,12 @@ async function drainCommand(rest: string[]): Promise<number> {
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
 
-  log("drain.start", { until: opts.until ?? null, max: opts.max, lock_pid: drainLock.info.pid });
+  log("drain.start", {
+    until: opts.until ?? null,
+    max: opts.max,
+    gateway: `${owner}/${repo}`,
+    lock_pid: drainLock.info.pid,
+  });
 
   try {
     const summary = await runDrain(
@@ -4634,7 +4646,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "drain",
     usage:
-      "rmd drain [--until <id>] [--max <n>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60)",
+      "rmd drain [--until <id>] [--max <n>] [--repo <name>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60); --repo scopes the merged-status gateway to <owner>/<name> (defaults to this checkout's own repo, like the daemon path) — the plan itself is always read from THIS checkout",
   },
   {
     name: "daemon",
