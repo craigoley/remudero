@@ -47,9 +47,13 @@
     that matters is a browser NAVIGATION, which cannot send a header, so GET /?token= returned 401 and the
     shell never loaded (a bootstrap paradox satisfied against the wrong client). When a criterion names a
     client class (browser navigation, CLI, daemon, mobile), its probe MUST use that class, or it verifies
-    nothing that ships.
-  src: W1-T139 console-auth fix — browser-navigation bootstrap paradox
-  cited: "2026-07-20"
+    nothing that ships. ADDENDUM (4th catch): EVERY navigable href the UI emits is ITSELF a consuming-client
+    surface — the shell's <a href> nav links pointed at header-only /v1 routes and 401'd on click (the #339
+    bootstrap-paradox recurring at the LINK layer). LINK-CRAWL the shell in the probe: every href it emits
+    must be in-page, external (target=_blank), or an allowQueryToken HTML route — never a header-only API
+    route a bare navigation would 401 on.
+  src: W1-T139 console-auth fixes — browser-navigation bootstrap paradox (auth, then nav links)
+  cited: "2026-07-21"
 
 # ── A live-operator criterion is UNFIT for a headless worker (a NEW error class, W1-T9). Design
 # interactive steps for no-TTY: flags + TTY-absent default; test via injected input. (DIAGNOSIS.md) ──

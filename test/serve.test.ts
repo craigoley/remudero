@@ -421,3 +421,44 @@ test("GET /v1/feedback and GET /v1/trace (assembled server): the plan graph is r
     assert.deepEqual(body.chain.tasks.map((t) => t.id), ["A"]);
   });
 });
+
+// ── #339 link-layer regression: shell nav links must not bare-navigate to header-only routes ──────
+// The shell emitted <a href="/v1/feedback"> and <a href="/v1/trace"> — a browser click NAVIGATES
+// there with no Authorization header, so it 401s (service.unauthorized) and shows raw JSON: the #339
+// bootstrap-paradox recurring at the LINK layer (the 4th catch for probe-must-exercise-real-consuming
+// -client — every navigable href is itself a consuming-client surface). Fix: in-shell panels.
+
+test("shell nav uses in-shell PANELS (buttons + authorized fetch), not <a href> hops to header-only /v1/* routes", () => {
+  const html = renderShellHtml();
+  // the two nav items are buttons whose JS fetches WITH the header, not navigable links
+  assert.match(html, /<button id="feedback-btn"/);
+  assert.match(html, /<button id="graph-btn"/);
+  assert.match(html, /fetch\("\/v1\/feedback", \{ headers: authHeaders \}\)|getJson\("\/v1\/feedback"\)/);
+  // LINK-CRAWL: every <a href> the shell emits is in-page, external (target=_blank PR link), or the
+  // allowQueryToken GET / route — NEVER a header-only /v1/* route (a bare navigation there 401s).
+  const hrefs = [...html.matchAll(/<a\s[^>]*href=["']([^"']+)["']/g)].map((m) => m[1]);
+  for (const href of hrefs) {
+    assert.doesNotMatch(
+      href,
+      /^\/v1\//,
+      `shell emits <a href="${href}"> at a header-only API route — a bare navigation 401s; use an in-shell panel`,
+    );
+    const inPage = href.startsWith("#");
+    const external = /^https?:\/\//.test(href) || href.includes("${"); // runtime PR link (github, target=_blank)
+    const shellDoc = href === "/" || href.startsWith("/?"); // the allowQueryToken HTML route
+    assert.ok(inPage || external || shellDoc, `shell emits an unclassifiable <a href="${href}">`);
+  }
+});
+
+test("the panel data routes are header-only (bare navigation 401s) — the shell must fetch, never link them", async () => {
+  const root = tmpRoot();
+  await withServeServer(depsFor(root, planOf([task({ id: "A" })])), async (base) => {
+    // the panel's authorized fetch (the header the page already carries) works — the panel renders:
+    assert.equal((await get(base, "/v1/feedback", READ_TOKEN)).status, 200);
+    assert.equal((await get(base, "/v1/trace?id=A", READ_TOKEN)).status, 200);
+    // a BARE navigation (a browser clicking an <a href>, no header) 401s — which is exactly why the
+    // shell must emit these as panel buttons + authorized fetch, never as <a href> nav links.
+    assert.equal((await navigate(base, "/v1/feedback")).status, 401);
+    assert.equal((await navigate(base, "/v1/trace?id=A")).status, 401);
+  });
+});

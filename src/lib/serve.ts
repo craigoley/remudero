@@ -106,10 +106,21 @@ export function renderShellHtml(): string {
 <body>
 <h1>Remudero — the operator console front door</h1>
 <nav>
-  <a href="/v1/feedback">Feedback inbox (panel)</a>
-  <a href="/v1/trace">Plan→task→PR graph</a>
+  <!-- IN-SHELL PANELS, not page hops: a browser NAVIGATION to a header-only /v1 route cannot send
+       the Authorization header, so a bare anchor click 401s and shows raw JSON (the #339
+       bootstrap-paradox recurring at the LINK layer). These are buttons whose handlers fetch WITH the
+       header the page already carries and render the result INSIDE the page — no navigation, no raw
+       JSON, no token in a navigable URL. This is also W1-T153's IA shape (panels, not hops). -->
+  <button id="feedback-btn" type="button">Feedback inbox</button>
+  <button id="graph-btn" type="button">Plan→task→PR graph</button>
 </nav>
 <p id="status">loading…</p>
+
+<section id="panel" aria-label="Panel" hidden>
+  <h2 id="panel-title"></h2>
+  <div id="panel-controls"></div>
+  <pre id="panel-body"></pre>
+</section>
 
 <section id="board" aria-label="Live task board">
   <h2>Board</h2>
@@ -184,6 +195,52 @@ export function renderShellHtml(): string {
   });
   document.getElementById("quiet-hours").addEventListener("change", (e) => {
     postJson("/v1/quiet-hours", { enabled: e.target.checked });
+  });
+
+  // IN-SHELL PANELS — authorized fetch (the header the page already carries), rendered inline.
+  // NEVER a navigation to a header-only route (that is exactly what 401'd via the old <a href>).
+  async function getJson(path) {
+    const res = await fetch(path, { headers: authHeaders });
+    if (!res.ok) throw new Error(\`GET \${path} -> \${res.status}\`);
+    return res.json();
+  }
+  function openPanel(title) {
+    document.getElementById("panel-title").textContent = title;
+    document.getElementById("panel-controls").innerHTML = "";
+    document.getElementById("panel").hidden = false;
+    document.getElementById("panel-body").textContent = "loading…";
+  }
+  document.getElementById("feedback-btn").addEventListener("click", async () => {
+    openPanel("Feedback inbox");
+    const body = document.getElementById("panel-body");
+    try {
+      const data = await getJson("/v1/feedback");
+      const entries = data.entries ?? [];
+      body.textContent = entries.length
+        ? entries.map((e) => \`\${e.id ?? "?"} — \${e.status ?? ""}: \${e.summary ?? e.title ?? ""}\`).join("\\n")
+        : "(inbox empty)";
+    } catch (e) {
+      body.textContent = \`panel fetch failed: \${e}\`;
+    }
+  });
+  document.getElementById("graph-btn").addEventListener("click", () => {
+    openPanel("Plan→task→PR graph");
+    const controls = document.getElementById("panel-controls");
+    controls.innerHTML =
+      '<label>task or feedback id <input id="trace-id" type="text" /></label> <button id="trace-btn" type="button">Trace</button>';
+    const body = document.getElementById("panel-body");
+    body.textContent = "enter an id and click Trace";
+    document.getElementById("trace-btn").addEventListener("click", async () => {
+      const id = document.getElementById("trace-id").value.trim();
+      if (!id) { body.textContent = "an id is required"; return; }
+      body.textContent = "loading…";
+      try {
+        const data = await getJson(\`/v1/trace?id=\${encodeURIComponent(id)}\`);
+        body.textContent = JSON.stringify(data.chain ?? data, null, 2);
+      } catch (e) {
+        body.textContent = \`panel fetch failed: \${e}\`;
+      }
+    });
   });
 </script>
 </body>
