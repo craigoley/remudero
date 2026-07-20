@@ -12,10 +12,11 @@ on:
     - cron: "43 4 * * 1"
   workflow_dispatch:
 
+# Least privilege at the top level (Scorecard TokenPermissions: a topLevel write
+# permission scores worse than the same permission scoped to job level — W1-T66);
+# the job below passes its own, full permissions block to the reusable workflow.
 permissions:
-  security-events: write
   contents: read
-  actions: read
 
 jobs:
   scan:

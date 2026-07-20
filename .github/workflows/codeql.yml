@@ -14,17 +14,22 @@ on:
 # repo level (code-scanning/default-setup) because running both conflicts
 # and leaves each unreliable (fleet lesson, MASTER-PLAN §5).
 #
-# Least privilege: only what CodeQL analysis needs.
+# Least privilege at the top level (Scorecard TokenPermissions: a topLevel write
+# permission scores worse than the identical permission scoped to job level, even
+# though this workflow has only one job — W1-T66); the job below elevates only
+# what it needs.
 permissions:
-  security-events: write
-  packages: read
-  actions: read
   contents: read
 
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
     # Cancel superseded runs of the same ref + language, but never cancel
     # in-flight runs of a different language.
     concurrency:
