@@ -39,6 +39,7 @@ import { generateLaunchdPlist, launchdPlistPath } from "./lib/launchd.js";
 import { buildDigest, sendDigest } from "./lib/digest.js";
 import { escalate, ghIssueGateway, type EscalationClass, type EscalationOption, type IssueGateway } from "./lib/escalate.js";
 import { imessageChannel, notify } from "./lib/notify.js";
+import { ghAlertGateway, pollAlerts, renderAlertsSummary } from "./lib/ops.js";
 import {
   captureFeedback,
   parseFeedbackAddArgs,
@@ -4346,6 +4347,51 @@ async function digestCommand(rest: string[]): Promise<number> {
 }
 
 /**
+ * `rmd ops [--dry-run]` — alert intake v0 (W1-T55, MASTER-PLAN §5D lane 2): poll
+ * code-scanning/Dependabot/secret-scanning alerts for THIS repo via `gh api`
+ * (lib/ops.ts), fold OPEN counts+ages into the next `rmd digest`, and escalate
+ * every NEW critical/high alert exactly once via the SHIPPED escalate() path.
+ * Dedup is ledger-keyed (escalation.issue_opened task ids) — a re-poll of the
+ * SAME open alerts escalates nothing new. --dry-run previews the counts + which
+ * alerts WOULD escalate; it opens no issues and writes no ledger line.
+ */
+async function opsCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("ops", rest, [], ["--dry-run"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const dryRun = rest.includes("--dry-run");
+  const config = loadConfig();
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const { owner, repo } = resolveOwnerRepo();
+  const runId = `OPS-${Date.now()}`;
+  const result = await pollAlerts(owner, repo, {
+    alerts: ghAlertGateway(),
+    issues: ghIssueGateway(owner, repo),
+    ledgerPath,
+    runId,
+    dryRun,
+  });
+  console.log(`### rmd ops${dryRun ? " --dry-run" : ""} — ${owner}/${repo}\nalerts: ${renderAlertsSummary(result.summary)}`);
+  if (dryRun) {
+    console.log(
+      result.newCritical.length
+        ? `would escalate ${result.newCritical.length} new critical/high alert(s): ${result.newCritical
+            .map((a) => `${a.source}#${a.id} [${a.severity}]`)
+            .join(", ")}`
+        : "no new critical/high alerts to escalate",
+    );
+  } else if (result.escalated.length > 0) {
+    console.log(`escalated ${result.escalated.length} new critical/high alert(s):`);
+    for (const e of result.escalated) console.log(`  ${e.alert.source}#${e.alert.id} [${e.alert.severity}] -> ${e.issueUrl}`);
+  } else {
+    console.log("no new critical/high alerts to escalate");
+  }
+  return 0;
+}
+
+/**
  * Interactive `--tier` confirm prompt (readline/promises). ONLY ever wired up
  * (and only ever called) when `process.stdin.isTTY` is true — a headless run
  * never reaches this function (Standing rule 18 / init.ts). Blank input accepts
@@ -4718,6 +4764,11 @@ const COMMANDS: readonly CommandSpec[] = [
     usage: "rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message",
   },
   {
+    name: "ops",
+    usage:
+      "rmd ops [--dry-run]   # alert intake v0 (W1-T55, §5D lane 2): poll code-scanning/Dependabot/secret-scanning alerts for this repo via gh api, fold open counts+ages into the next digest, escalate every NEW critical/high alert exactly once (needs-human, ledger-deduped so a re-poll never double-escalates); --dry-run previews, opens no issues",
+  },
+  {
     name: "init",
     usage: "rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard",
   },
@@ -4861,6 +4912,9 @@ async function main(): Promise<void> {
   }
   if (cmd === "digest") {
     process.exit(await digestCommand(rest));
+  }
+  if (cmd === "ops") {
+    process.exit(await opsCommand(rest));
   }
   if (cmd === "init") {
     process.exit(await initCommand(rest));
