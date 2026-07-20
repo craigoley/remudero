@@ -4834,7 +4834,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "ops",
     usage:
-      "rmd ops [--dry-run]   # alert intake v0 (W1-T55, §5D lane 2): poll code-scanning/Dependabot/secret-scanning alerts for this repo via gh api, fold open counts+ages into the next digest, escalate every NEW critical/high alert exactly once (needs-human, ledger-deduped so a re-poll never double-escalates); --dry-run previews, opens no issues",
+      "rmd ops [--dry-run]   # alert intake v0+v1 (W1-T55/W1-T56, §5D lane 2, §7B): poll code-scanning/Dependabot/secret-scanning alerts for this repo via gh api, fold open counts+ages into the next digest, escalate every NEW critical/high alert exactly once (needs-human, ledger-deduped so a re-poll never double-escalates), and capture a plan/feedback/<id>.yaml entry (origin: alert#<source>-<id>) for every open alert not already captured, any severity, for rmd triage to ground; id-deduped so a re-poll never double-creates; --dry-run previews, opens no issues, creates no feedback",
   },
   {
     name: "issues",
