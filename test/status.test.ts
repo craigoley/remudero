@@ -169,6 +169,33 @@ test("P29(i) falsifier: a FOREIGN branch carrying the trailer is still NOT credi
   assert.equal(proj.source, "ledger", "falls back to rung (a)'s own (non-merged) resolution — the foreign hit is simply rejected, not substituted");
 });
 
+test("P29(i) falsifier: a FOREIGN branch carrying the trailer with NO rung (a)/(b) evidence at all is REJECTED and SURFACES via rejected_candidates — the ownership-assert stays strictly narrower than the trailer", () => {
+  // The exact acceptance-criteria proof: "a merged PR whose head branch is NOT
+  // run-<taskid>-* (foreign) but carries the trailer is REJECTED by the
+  // ownership-assert (not credited) and surfaces". The falsifier test above
+  // seeds an own (a) ownResult (a closed PR), so it exercises the "falls back
+  // to ownResult" branch, not the "surfaces" branch — deriveStatus only
+  // populates `rejected_candidates` when there is NO more-informative
+  // ownResult to fall back to (status.ts's `if (!ownResult)` guard). This test
+  // exercises exactly THAT branch: nothing from rung (a)/(b) at all, so the
+  // rejection is not silently dropped — it is named, legibly, in the output.
+  const github = fakeGitHub({
+    byTrailer: { "W1-T1": { number: 999, url: "u/999", state: "MERGED" } },
+    // Foreign: W1-T2's run branch, not W1-T1's own run-W1-T1-* shape.
+    headRefByUrl: { "u/999": "run-W1-T2-1784000000000" },
+    bodyByUrl: { "u/999": "Remudero-Task: W1-T1\n" },
+  });
+  const ledgerPath = ledgerFile([]); // no pr.opened, no pr: field — nothing else to report
+  const proj = deriveStatus(task({ id: "W1-T1" }), { ledgerPath, github });
+  assert.equal(proj.merged, false, "a foreign-branch trailer hit must never credit");
+  assert.equal(proj.source, "none");
+  assert.deepEqual(
+    proj.rejected_candidates,
+    [{ pr: "u/999", reason: "head-branch-not-owned" }],
+    "the rejection SURFACES — legible via rejected_candidates, never a silent drop",
+  );
+});
+
 test("source (b): explicit pr: field resolves when there is no ledger entry", () => {
   const github = fakeGitHub({ byRef: { "3": { number: 3, url: "u/3", state: "MERGED" } } });
   const ledgerPath = ledgerFile([{ step: "run.start", task_id: "OTHER" }]);

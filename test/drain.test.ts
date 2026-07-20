@@ -4,8 +4,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import type { RunResult } from "../src/run-task.js";
+import { escalateCircuitBreak, type RunResult } from "../src/run-task.js";
 import type { UsageSnapshot } from "../src/lib/headroom.js";
+import type { IssueGateway } from "../src/lib/escalate.js";
 import {
   applyCuratedSelection,
   buildDrainPreview,
@@ -22,7 +23,23 @@ import {
   type OpenPrCheck,
 } from "../src/lib/drain.js";
 import { pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
-import { deriveStatus, type GitHub } from "../src/lib/status.js";
+import {
+  deriveStatus,
+  DEFAULT_MAX_TASK_DISPATCHES,
+  isDispatchBreakerTripped,
+  readLedgerLines,
+  type GitHub,
+} from "../src/lib/status.js";
+
+/** A fake {@link IssueGateway} — captures escalate()'s issue creation, no `gh` exec. */
+function fakeIssues(calls: Array<{ title: string; body: string; labels: string[] }>): IssueGateway {
+  return {
+    create(title, body, labels) {
+      calls.push({ title, body, labels });
+      return "https://github.com/acme/remudero/issues/9";
+    },
+  };
+}
 
 // A small linear-ish plan: A → B → C (chain) + D (independent), all auto.
 const YAML = `
@@ -313,6 +330,57 @@ test("P29(ii) the W1-T29 x10 spin shape: a task at N+1 dispatches with no owned 
   assert.deepEqual(broken, ["A"], "onCircuitBreak fired EXACTLY ONCE for A, even though nextRunnable re-observed it tripped on a later tick too");
   const brokenLines = lines.filter((l) => l.step === "dispatch.circuit_broken");
   assert.ok(brokenLines.length >= 2, "sanity: A really was re-observed tripped on a second tick (the ledger line legibly re-logs every observation)");
+});
+
+test("P29(ii) composed proof (the W1-T29 x10 spin shape, end to end): a task SEEDED with exactly N real dispatches and no owned PR trips the REAL isDispatchBreakerTripped at N+1, and wiring it + the REAL escalateCircuitBreak into runDrain halts it with EXACTLY ONE needs-human issue naming the task while an independent task still dispatches", async () => {
+  // Every other circuit-breaker test above wires a FAKE `isCircuitTripped: (id)
+  // => id === "A"` predicate and a FAKE `onCircuitBreak` callback that merely
+  // pushes to an array. Neither proves the ACTUAL production mechanism: a real
+  // ledger accumulating real `run.start` lines with no new `pr.opened` since,
+  // read by the real status.ts `isDispatchBreakerTripped`, wired to the real
+  // run-task.ts `escalateCircuitBreak` that opens an actual needs-human GitHub
+  // issue (labels + title naming the task) — only the GitHub call itself is
+  // faked. This is that proof.
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const ledgerDir = mkdtempSync(join(tmpdir(), "drain-circuit-"));
+  const ledgerPath = join(ledgerDir, "ledger.ndjson");
+  // Seed EXACTLY DEFAULT_MAX_TASK_DISPATCHES `run.start` lines for A and NO
+  // `pr.opened` line at all — dispatch after dispatch producing nothing new,
+  // the exact W1-T1/W1-T29 redispatch-storm shape this breaker guards against.
+  const seeded = Array.from({ length: DEFAULT_MAX_TASK_DISPATCHES }, () => ({ step: "run.start", task_id: "A" }));
+  writeFileSync(ledgerPath, seeded.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  assert.equal(
+    isDispatchBreakerTripped(readLedgerLines(ledgerPath), "A"),
+    true,
+    "sanity: N seeded dispatches with no owned PR since trips the REAL breaker function — this is the N+1st look, not N-1",
+  );
+
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const s = await runDrain(plan, {
+    refreshMerged: () => (id) => merged.has(id),
+    // The REAL status.ts function, fed by the REAL seeded ledger.
+    isCircuitTripped: (id) => isDispatchBreakerTripped(readLedgerLines(ledgerPath), id),
+    // The REAL run-task.ts escalation path — only its GitHub issue creation is faked.
+    onCircuitBreak: (t) =>
+      escalateCircuitBreak(t, { owner: "acme", repo: "remudero", ledgerPath, runId: "run-1", issues: fakeIssues(issueCalls) }),
+    runOne: async (id) => {
+      ran.push(id);
+      merged.add(id);
+      return okResult(id);
+    },
+  });
+  assert.ok(!ran.includes("A"), "A is never dispatched again — zero further dispatches at N+1 or beyond");
+  assert.deepEqual(ran, ["D"], "only the independent D dispatches — A's loop is halted, not the whole drain");
+  assert.equal(s.stopReason, "no_runnable");
+  assert.equal(issueCalls.length, 1, "EXACTLY ONE needs-human escalation is opened, no matter how many ticks re-observe A tripped");
+  assert.match(issueCalls[0].title, /\bA\b/, "the escalation issue names the looping task");
+  assert.ok(issueCalls[0].labels.includes("needs-human"), "a REAL needs-human issue, never a bare log line");
+  assert.ok(
+    readLedgerLines(ledgerPath).some((l) => l.step === "dispatch.circuit_broken.escalated" && l.task_id === "A"),
+    "the real escalation dedup ledger line was written",
+  );
 });
 
 test("plannedSequence (--dry-run order): simulates merges forward, honouring deps + --max + --until", () => {
