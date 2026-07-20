@@ -40,6 +40,8 @@ import { buildDigest, sendDigest } from "./lib/digest.js";
 import { escalate, ghIssueGateway, type EscalationClass, type EscalationOption, type IssueGateway } from "./lib/escalate.js";
 import { imessageChannel, notify } from "./lib/notify.js";
 import { ghAlertGateway, pollAlerts, renderAlertsSummary } from "./lib/ops.js";
+import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
+import { loadManagedRepos, ManagedReposError } from "./lib/managed-repos.js";
 import {
   captureFeedback,
   parseFeedbackAddArgs,
@@ -4392,6 +4394,60 @@ async function opsCommand(rest: string[]): Promise<number> {
 }
 
 /**
+ * `rmd issues [--dry-run]` — issues intake (W1-T57, MASTER-PLAN §5D lane 3): poll open issues
+ * for every repo in `.remudero/managed-repos.json` via `gh api` (lib/issues-intake.ts), create a
+ * `plan/feedback/<id>.yaml` entry (origin: `issue#<n>`) for each one not already captured, and
+ * fold an issues-reviewed count into the next `rmd digest`. Dedup is id-keyed (a deterministic
+ * `fb-issue-<owner>-<repo>-<n>` id) — a re-poll of the SAME open issues creates nothing new.
+ * --dry-run previews the reviewed count + which issues WOULD create a new entry; it creates none
+ * and writes no ledger line. An empty/missing managed-repos.json is a safe no-op, not an error.
+ */
+async function issuesCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("issues", rest, [], ["--dry-run"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const dryRun = rest.includes("--dry-run");
+  let managed;
+  try {
+    managed = loadManagedRepos(repoRoot);
+  } catch (err) {
+    if (err instanceof ManagedReposError) {
+      console.error(`rmd issues: ${err.message}`);
+      return 1;
+    }
+    throw err;
+  }
+  const config = loadConfig();
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const runId = `ISSUES-${Date.now()}`;
+  const result = await pollIssues(managed, {
+    issues: ghIssueListGateway(),
+    root: repoRoot,
+    ledgerPath,
+    runId,
+    dryRun,
+  });
+  console.log(`### rmd issues${dryRun ? " --dry-run" : ""}\nissues reviewed: ${renderIssuesSummary(result.summary)}`);
+  if (dryRun) {
+    console.log(
+      result.newIssues.length
+        ? `would create ${result.newIssues.length} new feedback entr${result.newIssues.length === 1 ? "y" : "ies"}: ${result.newIssues
+            .map((i) => `${i.owner}/${i.repo}#${i.number}`)
+            .join(", ")}`
+        : "no new issues to capture",
+    );
+  } else if (result.created.length > 0) {
+    console.log(`created ${result.created.length} new feedback entr${result.created.length === 1 ? "y" : "ies"}:`);
+    for (const e of result.created) console.log(`  ${e.origin} -> plan/feedback/${e.id}.yaml`);
+  } else {
+    console.log("no new issues to capture");
+  }
+  return 0;
+}
+
+/**
  * Interactive `--tier` confirm prompt (readline/promises). ONLY ever wired up
  * (and only ever called) when `process.stdin.isTTY` is true — a headless run
  * never reaches this function (Standing rule 18 / init.ts). Blank input accepts
@@ -4769,6 +4825,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd ops [--dry-run]   # alert intake v0 (W1-T55, §5D lane 2): poll code-scanning/Dependabot/secret-scanning alerts for this repo via gh api, fold open counts+ages into the next digest, escalate every NEW critical/high alert exactly once (needs-human, ledger-deduped so a re-poll never double-escalates); --dry-run previews, opens no issues",
   },
   {
+    name: "issues",
+    usage:
+      "rmd issues [--dry-run]   # issues intake (W1-T57, §5D lane 3): poll open issues for every repo in .remudero/managed-repos.json via gh api, create a plan/feedback/<id>.yaml entry (origin: issue#<n>) for each one not already captured, fold an issues-reviewed count into the next digest; id-deduped so a re-poll never double-creates; --dry-run previews, creates nothing",
+  },
+  {
     name: "init",
     usage: "rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard",
   },
@@ -4915,6 +4976,9 @@ async function main(): Promise<void> {
   }
   if (cmd === "ops") {
     process.exit(await opsCommand(rest));
+  }
+  if (cmd === "issues") {
+    process.exit(await issuesCommand(rest));
   }
   if (cmd === "init") {
     process.exit(await initCommand(rest));

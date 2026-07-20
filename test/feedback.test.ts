@@ -11,6 +11,7 @@ import {
   captureFeedback,
   feedbackAttachmentsDir,
   feedbackEntryPath,
+  isValidFeedbackOrigin,
   listFeedback,
   parseFeedbackAddArgs,
   readFeedbackEntry,
@@ -132,6 +133,32 @@ test("captureFeedback rejects an origin outside the closed enum", () => {
   const r = root();
   // @ts-expect-error deliberately invalid at the type level, guarded at runtime too
   assert.throws(() => captureFeedback(r, { raw: "x", origin: "carrier-pigeon" }), FeedbackError);
+});
+
+// ── W1-T57: machine-origin `issue#<n>` widening ─────────────────────────────
+
+test("isValidFeedbackOrigin accepts the named enum plus well-formed issue#<n>, rejects everything else", () => {
+  for (const origin of FEEDBACK_ORIGINS) assert.equal(isValidFeedbackOrigin(origin), true);
+  assert.equal(isValidFeedbackOrigin("issue#42"), true);
+  assert.equal(isValidFeedbackOrigin("issue#0"), true);
+  assert.equal(isValidFeedbackOrigin("issue#"), false);
+  assert.equal(isValidFeedbackOrigin("issue#abc"), false);
+  assert.equal(isValidFeedbackOrigin("alert#5"), false);
+  assert.equal(isValidFeedbackOrigin("carrier-pigeon"), false);
+});
+
+test("captureFeedback accepts a machine-origin issue#<n> origin", () => {
+  const r = root();
+  const entry = captureFeedback(r, { raw: "owner/repo#42: title\n\nbody", origin: "issue#42" });
+  assert.equal(entry.origin, "issue#42");
+  assert.equal(readFeedbackEntry(r, entry.id).origin, "issue#42");
+});
+
+test("captureFeedback accepts an explicit id (machine-origin idempotent-dedup key), overriding the random default", () => {
+  const r = root();
+  const entry = captureFeedback(r, { raw: "x", origin: "issue#7", id: "fb-issue-acme-widgets-7" });
+  assert.equal(entry.id, "fb-issue-acme-widgets-7");
+  assert.ok(existsSync(feedbackEntryPath(r, "fb-issue-acme-widgets-7")));
 });
 
 // ── read / list / lifecycle ───────────────────────────────────────────────────

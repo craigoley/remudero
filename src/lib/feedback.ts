@@ -32,9 +32,26 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
  * "terminal dump" attachment is plain text and needed no such probe.
  */
 
-/** Where feedback originated — a closed enum per the §7B schema. */
+/** Where feedback originated — a closed enum per the §7B schema (human capture methods). */
 export const FEEDBACK_ORIGINS = ["cli", "ui", "issue"] as const;
-export type FeedbackOrigin = (typeof FEEDBACK_ORIGINS)[number];
+export type NamedFeedbackOrigin = (typeof FEEDBACK_ORIGINS)[number];
+
+/**
+ * `FeedbackOrigin` is the named closed enum above PLUS `issue#<n>` — machine-origin provenance
+ * for one specific managed-repo GitHub issue (W1-T57, MASTER-PLAN §5D/§7B: "machine-origin
+ * feedback... flows through the §7B feedback inbox (`origin: alert#<id>` / `origin: issue#<n>`)").
+ * This is a DIFFERENT axis than the named enum's "issue" value (a human capturing feedback
+ * that references remudero's own tracker) — `issue#<n>` instead names WHICH managed-repo issue
+ * produced this entry, so `rmd trace` (W1-T43) can point straight back at it.
+ */
+export type FeedbackOrigin = NamedFeedbackOrigin | `issue#${number}`;
+
+const MACHINE_ORIGIN_ISSUE = /^issue#\d+$/;
+
+/** True for any valid {@link FeedbackOrigin} — the named enum or a well-formed `issue#<n>`. */
+export function isValidFeedbackOrigin(origin: string): origin is FeedbackOrigin {
+  return (FEEDBACK_ORIGINS as readonly string[]).includes(origin) || MACHINE_ORIGIN_ISSUE.test(origin);
+}
 
 /** The status lifecycle a feedback entry moves through (§7B: capture -> triage -> gate). */
 export const FEEDBACK_STATUSES = ["new", "grilling", "proposed", "accepted", "rejected"] as const;
@@ -160,6 +177,12 @@ export interface CaptureFeedbackOptions {
   raw: string;
   attachments?: string[];
   origin?: FeedbackOrigin;
+  /**
+   * Explicit id, overriding the default random `fb-<epoch>-<hex>` id. Machine-origin intake
+   * (issues, W1-T57; alerts, W1-T56) passes a DETERMINISTIC id derived from the source item so a
+   * re-run's `existsSync` check on that exact path is the whole dedup mechanism — no second store.
+   */
+  id?: string;
 }
 
 /**
@@ -172,10 +195,12 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
   const raw = opts.raw.trim();
   if (!raw) throw new FeedbackError("feedback text must not be empty");
   const origin = opts.origin ?? "cli";
-  if (!(FEEDBACK_ORIGINS as readonly string[]).includes(origin)) {
-    throw new FeedbackError(`invalid origin "${origin}" — must be one of ${FEEDBACK_ORIGINS.join(", ")}`);
+  if (!isValidFeedbackOrigin(origin)) {
+    throw new FeedbackError(
+      `invalid origin "${origin}" — must be one of ${FEEDBACK_ORIGINS.join(", ")}, or "issue#<n>" (machine-origin, W1-T57)`,
+    );
   }
-  const id = generateFeedbackId();
+  const id = opts.id ?? generateFeedbackId();
   mkdirSync(feedbackDir(root), { recursive: true });
   const attachments = resolveAttachments(root, id, opts.attachments ?? []);
   const entry: FeedbackEntry = {
