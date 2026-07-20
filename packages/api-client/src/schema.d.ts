@@ -20,8 +20,8 @@ export interface components {
       status: "queued" | "recon" | "prompted" | "running" | "review" | "fixing" | "diagnosing" | "blocked" | "merged" | "done";
       /** The single fact dependency-gating cares about -- has this task landed? */
       merged: boolean;
-      /** Which precedence source resolved this projection (or `none`). */
-      source: "ledger" | "pr-field" | "trailer" | "correction" | "none";
+      /** Which precedence source resolved this projection (`none` if GitHub was read but had no evidence; `throttled` if GitHub could not be read at all). */
+      source: "ledger" | "pr-field" | "trailer" | "correction" | "none" | "throttled";
       prNumber?: number;
       prUrl?: string;
       prState?: string;

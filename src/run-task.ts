@@ -3035,6 +3035,9 @@ async function drainCommand(
     const p = lastProj?.get(id);
     return p?.prState === "OPEN" ? p.prNumber : undefined;
   };
+  // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
+  // `refreshMerged` just derived, never a second GitHub read path.
+  const isIndeterminate = (id: string) => lastProj?.get(id)?.indeterminate === true;
 
   if (dryRun) {
     const merged = refreshMerged();
@@ -3099,6 +3102,7 @@ async function drainCommand(
       {
         refreshMerged,
         isOpenPr,
+        isIndeterminate,
         // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
         // ledger every call — persists across drain/daemon process restarts,
         // unlike the daemon's in-memory per-tick block flag.
@@ -3265,6 +3269,9 @@ async function daemonCommand(rest: string[]): Promise<number> {
     const p = lastProj?.get(id);
     return p?.prState === "OPEN" ? p.prNumber : undefined;
   };
+  // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
+  // `refreshMerged` just derived, never a second GitHub read path.
+  const isIndeterminate = (id: string) => lastProj?.get(id)?.indeterminate === true;
 
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
@@ -3326,6 +3333,7 @@ async function daemonCommand(rest: string[]): Promise<number> {
       {
         refreshMerged,
         isOpenPr,
+        isIndeterminate,
         // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
         // ledger every call — persists across daemon restarts, unlike this
         // loop's own in-memory per-tick block-reasoning flag.

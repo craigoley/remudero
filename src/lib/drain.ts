@@ -39,6 +39,22 @@ export interface NextRunnableOpts {
   /** Called once per task excluded because of an open PR — for ledger/console legibility. */
   onSkip?: (task: Task, prNumber: number) => void;
   /**
+   * W1-T119: true when this task's own GitHub read is INDETERMINATE — a genuine
+   * read failure (rate-limited, network error, auth failure), not a clean "no
+   * evidence" — so its `merged` reading cannot be trusted as an ordinary
+   * `queued`/not-merged. Dispatching now risks re-running work that may
+   * already be merged, the exact throttle-reads-as-not-merged spend event this
+   * task exists to prevent. Optional — omitted, dispatch behaves exactly as
+   * before this guard existed.
+   */
+  isIndeterminate?: (taskId: string) => boolean;
+  /**
+   * Called once per task excluded because its own read is indeterminate, in
+   * place of dispatching it — mirrors `onSkip`/`onCircuitBreak`'s legibility
+   * contract.
+   */
+  onIndeterminate?: (task: Task) => void;
+  /**
    * The per-task dispatch CIRCUIT BREAKER (MASTER-PLAN P29(ii)): true when this
    * task has been dispatched the policy-capped number of times with no new
    * owned PR since (status.ts's `isDispatchBreakerTripped`, ledger-derived —
@@ -73,6 +89,15 @@ export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnable
     if (t.verify !== "auto") continue;
     if (t.status === "blocked") continue;
     if (unmetDependencies(plan, t, merged).length > 0) continue;
+    // INDETERMINATE (W1-T119) — checked BEFORE the circuit breaker and the
+    // in-flight guard: an indeterminate read says nothing about either of
+    // those, and dispatching now risks re-running work that may already be
+    // merged (the throttle-reads-as-not-merged spend event this task exists
+    // to prevent). NEVER treated as an ordinary queued task.
+    if (opts.isIndeterminate?.(t.id)) {
+      opts.onIndeterminate?.(t);
+      continue;
+    }
     // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)) — checked BEFORE the in-flight
     // guard below: a tripped task halts regardless of whatever its latest PR's
     // state happens to be; it is the backstop that bounds (i)'s sibling-credit
@@ -271,6 +296,13 @@ function nextCurated(
     if (isMerged(id)) continue;
     const t = plan.byId.get(id);
     if (!t) continue;
+    // Same indeterminate-read semantics as the natural path (W1-T119) — a
+    // curation-panel selection is still dispatch, and must not re-run work
+    // whose own GitHub read failed any more than the DAG scan would.
+    if (opts.isIndeterminate?.(id)) {
+      opts.onIndeterminate?.(t);
+      continue;
+    }
     // Same circuit-breaker semantics as the natural path (P29(ii)) — a
     // curation-panel selection is still dispatch, and must not spin a tripped
     // task any more than the DAG scan would.
@@ -389,6 +421,15 @@ export interface DrainDeps {
    * wiring escalates ONE (deduped) needs-human issue naming the loop.
    */
   onCircuitBreak?: (task: Task) => void;
+  /**
+   * W1-T119: true when a task's own GitHub read is INDETERMINATE (a genuine
+   * read failure), re-derived from the SAME projection `refreshMerged` just
+   * built — same freshness contract as `isOpenPr`/`isCircuitTripped`. Optional
+   * — omitted, dispatch behaves exactly as before this guard existed.
+   */
+  isIndeterminate?: (taskId: string) => boolean;
+  /** Called once per task excluded because its own read is indeterminate. */
+  onIndeterminate?: (task: Task) => void;
   /** Run ONE task through the existing run-task path (default = runTask). */
   runOne: (taskId: string) => Promise<RunResult>;
   /** Read current /usage; `undefined` ⇒ unavailable (headroom check is skipped). */
@@ -480,6 +521,15 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       // proceeds to the next runnable task — an open PR must not halt the drain
       // the way a block does.
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
+      isIndeterminate: deps.isIndeterminate,
+      // INDETERMINATE (W1-T119): a legible ledger line every tick it is
+      // consulted, then the drain proceeds to the next runnable task rather
+      // than halting — a throttled/errored read on one task must not stall
+      // everything else still dispatchable.
+      onIndeterminate: (t) => {
+        log("dispatch.indeterminate", { task: t.id });
+        deps.onIndeterminate?.(t);
+      },
       isCircuitTripped: deps.isCircuitTripped,
       // CIRCUIT BREAKER (P29(ii)): a legible ledger line every tick it is
       // consulted (mirrors dispatch.skipped) — but the caller's own escalation
