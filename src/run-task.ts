@@ -39,7 +39,22 @@ import { generateLaunchdPlist, launchdPlistPath } from "./lib/launchd.js";
 import { buildDigest, sendDigest } from "./lib/digest.js";
 import { escalate, ghIssueGateway, type EscalationClass, type EscalationOption, type IssueGateway } from "./lib/escalate.js";
 import { imessageChannel, notify } from "./lib/notify.js";
-import { captureFeedback, parseFeedbackAddArgs, FeedbackError } from "./lib/feedback.js";
+import {
+  captureFeedback,
+  parseFeedbackAddArgs,
+  readFeedbackEntry,
+  setFeedbackStatus,
+  FeedbackError,
+} from "./lib/feedback.js";
+import {
+  decideTriage,
+  diffCitesFeedback,
+  nonPlanFilesInDiff,
+  parseTriageArgs,
+  parseTriageVerdict,
+  triageCommitMessage,
+  triagePrompt,
+} from "./lib/triage.js";
 import { parseUsage, type UsageSnapshot } from "./lib/headroom.js";
 import {
   assertArchitectAboveWorker,
@@ -4060,6 +4075,217 @@ async function feedbackCommand(rest: string[]): Promise<number> {
 }
 
 /**
+ * The Architect intake worker's tool allowlist (MASTER-PLAN §7B / `.remudero/skills/feedback.yaml`),
+ * minus `AskUserQuestion`: v1 triage never grills interactively — LEARNINGS "no live operator in a
+ * headless worker" (W1-T9 burned its last turns trying to conjure a TTY that isn't there). The
+ * AMBIGUOUS verdict parks the entry at `grilling`; wiring an actual grill (interactive
+ * AskUserQuestion, or an async needs-human issue reusing §4's escalation machinery) is W1-T42's job.
+ */
+const TRIAGE_WORKER_TOOLS = ["Read", "Write", "Grep", "Glob", "WebSearch"];
+
+/**
+ * `rmd triage <feedback-id>` — the Architect intake worker (MASTER-PLAN §7B, W1-T41).
+ *
+ * GROUND -> RESEARCH -> GRILL-OR-PROPOSE, run by a fresh higher-tier Architect worker
+ * (lib/triage.ts's `triagePrompt`) over ONE `plan/feedback/<id>.yaml` entry, in its own worktree
+ * (same isolation shape as `rmd retro`). The worker has no Bash — it only grounds/researches/edits
+ * plan files; this function OWNS every commit/push/PR/gate step deterministically (same "the
+ * harness eats first" split `regenerateOrientation` established for the retro's docs write), so
+ * the LLM can never skip the Acceptance:/Remudero-Task: contract or open a PR touching code.
+ */
+async function triageCommand(rest: string[]): Promise<number> {
+  const parsed = parseTriageArgs(rest);
+  if ("error" in parsed) {
+    console.error(parsed.error + "\n" + USAGE);
+    return 2;
+  }
+  const { feedbackId } = parsed;
+
+  const config = loadConfig();
+  const { owner, repo } = resolveOwnerRepo();
+
+  // G-17 Tier Invariant: the triage Architect MUST outrank implement workers.
+  const arch = architectModel(config);
+  const wrk = workerModel(config);
+  assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
+  const mountsTable = loadMounts(mountsPath(repoRoot));
+
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const taskId = `TRIAGE-${feedbackId}`;
+  const runId = `${taskId}-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, ...extra });
+  const say = (msg: string) => console.log(`\n### [triage] ${msg}`);
+  log("triage.start", { feedback_id: feedbackId, architect: arch, worker: wrk });
+  say(`triage ${runId} — architect ${arch} over worker ${wrk} — feedback#${feedbackId}`);
+
+  const settingsFile = renderWorkerSettings({
+    templatePath: join(repoRoot, "settings", "worker.json"),
+    hooksDir: join(repoRoot, "hooks"),
+    outPath: join(config.root, "tmp", `triage-settings-${runId}.json`),
+  });
+  validateWorkerSettingsFile(settingsFile);
+
+  const repoDir = join(config.root, "repos", repo);
+  if (!existsSync(repoDir)) {
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+  }
+  const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
+  if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
+  const branch = `run-${runId}`;
+  const worktreePath = join(worktreesDir(config), branch);
+  worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  // Liveness token so a concurrent drain's prune skips this triage worktree.
+  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+
+  try {
+    // Read the entry from the FRESH worktree (origin/main snapshot), not repoRoot, which may be
+    // a stale checkout — same discipline retro's next-task read follows.
+    let entry;
+    try {
+      entry = readFeedbackEntry(worktreePath, feedbackId);
+    } catch (e) {
+      log("triage.error", { error: String((e as Error)?.message ?? e) });
+      say(`no such feedback entry: ${feedbackId}`);
+      worktreeRemove(repoDir, worktreePath);
+      return 2;
+    }
+    if (entry.status !== "new") {
+      log("triage.error", { error: `feedback#${feedbackId} is not status:new (already ${entry.status})` });
+      say(`feedback#${feedbackId} is already ${entry.status} — refusing to re-triage; nothing to do`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+
+    const worker = await spawnWorker({
+      cwd: worktreePath,
+      permissionMode: "bypassPermissions",
+      settingsFile,
+      model: arch, // the Architect tier
+      maxTurns: mountsTable.architect.maxTurns, // MOUNT-GOVERNED (§9) — never a hardcoded literal.
+      maxBudgetUsd: DEFAULT_BUDGET_USD,
+      config,
+      prompt: triagePrompt(entry, runId),
+      tools: TRIAGE_WORKER_TOOLS,
+    });
+    log("triage.synthesized", {
+      session_id: worker.sessionId,
+      cost_usd: worker.costUsd,
+      subtype: worker.subtype,
+      ...workerLedgerFields(worker),
+    });
+
+    // Ground truth: what did the worker ACTUALLY touch (before the harness's own status write)?
+    const changedFiles = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", "origin/main"], {
+      encoding: "utf8",
+    })
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const verdict = parseTriageVerdict([worker.text, worker.blocks.join("\n")].join("\n"));
+    const decision = decideTriage({ verdict, changedFiles });
+
+    if (decision.action === "error") {
+      log("triage.error", { error: decision.reason, changed_files: changedFiles, subtype: worker.subtype });
+      say(`triage inconsistent — ${decision.reason}; leaving no PR`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+
+    // Harness-owned deterministic status write (never LLM-authored) — folded into the SAME diff
+    // the worker produced, mirroring regenerateOrientation's post-worker deterministic commit.
+    setFeedbackStatus(worktreePath, feedbackId, decision.status);
+    execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/"], { stdio: "inherit" });
+    const commitMessage = triageCommitMessage({ decision, feedbackId, taskId });
+    execFileSync("git", ["-C", worktreePath, "commit", "-m", commitMessage], { stdio: "inherit" });
+    execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+
+    const out = execFileSync(
+      "gh",
+      ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch, "--fill"],
+      { encoding: "utf8" },
+    );
+    const prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
+    if (!prUrl) {
+      log("triage.error", { error: "no PR opened" });
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+
+    // RUN-OWNERSHIP GUARD (W1-T62 precedent) — before any side effect touches this PR, assert it
+    // is actually this triage run's own PR.
+    const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), worker.costUsd);
+    if (ownership) {
+      log("verdict", ownership.ledger);
+      say(`verdict: pr_attribution_failed — claimed PR ${prUrl} is not this triage's own branch (${branch})`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+    ensureTaskTrailer(prUrl, taskId);
+
+    // Record the proposal_pr back onto the entry for the propose path (chicken-and-egg: the PR
+    // URL only exists after the first push) — a second small commit onto the SAME open PR,
+    // exactly the pattern retro's post-worker orientation commit already established.
+    if (decision.action === "propose") {
+      setFeedbackStatus(worktreePath, feedbackId, "proposed", { proposalPr: prUrl });
+      execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/feedback/"], { stdio: "inherit" });
+      execFileSync(
+        "git",
+        ["-C", worktreePath, "commit", "-m", `chore(triage): record proposal_pr for feedback#${feedbackId}`],
+        { stdio: "inherit" },
+      );
+      execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+    }
+
+    // DETERMINISTIC GUARD: a triage PR is PLAN-ONLY. Fail closed if the diff touches anything
+    // outside plan/ (lib/triage.ts's `nonPlanFilesInDiff`, the same shape as retro's guard).
+    const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
+    const strayFiles = nonPlanFilesInDiff(diff);
+    if (strayFiles.length > 0) {
+      log("triage.error", { error: "triage PR is NOT plan-only", stray_files: strayFiles });
+      say(`triage PR touched non-plan file(s) (${strayFiles.join(", ")}) — leaving PR OPEN for inspection`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+    if (decision.action === "propose" && !diffCitesFeedback(diff, feedbackId)) {
+      log("triage.error", { error: "proposed diff missing feedback# provenance" });
+      say(`triage PROPOSED but the diff never cites feedback#${feedbackId} — leaving PR OPEN for inspection`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+    log("pr.opened", { pr_url: prUrl, plan_only: true, action: decision.action });
+    say(`triage PR (plan-only, ${decision.action}): ${prUrl}`);
+
+    // Gate: ci green -> post remudero-review -> arm auto-merge (identical shape to every other
+    // Architect skill's output — "PROPOSES anything, MERGES nothing" until the gate clears it).
+    const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra));
+    if (ci !== "green") {
+      say(`ci ${ci} — PR left OPEN: ${prUrl}`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
+    const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
+    const reviewCode = await reviewCommand(prNum);
+    armAutoMerge(prUrl);
+    log("automerge.armed", {});
+    worktreeRemove(repoDir, worktreePath);
+    say(`triage PR gated + armed (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
+    return reviewCode;
+  } catch (e) {
+    log("triage.error", { error: String((e as Error)?.message ?? e) });
+    try {
+      worktreeRemove(repoDir, worktreePath);
+    } catch {
+      /* best-effort */
+    }
+    throw e;
+  } finally {
+    removeRunLock(worktreePath); // terminal ⇒ drop the liveness token
+  }
+}
+
+/**
  * `rmd digest [--since <iso>] [--dry-run]` — roll up the ledger since `--since`
  * (default: 24h ago) into one message (digest.ts) and send it over iMessage;
  * `--dry-run` prints the text without sending.
@@ -4408,6 +4634,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd feedback <text...> [--attach <path-or-url>]... [--origin cli|ui|issue]   # durable-inbox async capture (MASTER-PLAN \u00a77B, W1-T40): writes plan/feedback/<id>.yaml with status: new; --attach copies a local screenshot/terminal-dump into plan/feedback/attachments/<id>/ or records an http(s) link verbatim; browse the inbox with plain ls/cat/git diff, no bespoke reader",
   },
   {
+    name: "triage",
+    usage:
+      "rmd triage <feedback-id>   # the Architect intake worker (MASTER-PLAN \u00a77B, W1-T41): GROUNDS a plan/feedback/<id> entry against MASTER-PLAN/plan/LEARNINGS/DECISIONS, RESEARCHES via server-side WebSearch, then either reports 'already decided' (no task), parks it 'grilling' (ambiguous \u2014 W1-T42), or opens a plan-only PR carrying origin: feedback#<id> provenance, gated by ci-gate+remudero-review like everything else",
+  },
+  {
     name: "skill",
     usage:
       "rmd skill list   # §5B skill-registry reader (W1-T44): resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); adding a skill is a config entry, no source change",
@@ -4521,6 +4752,9 @@ async function main(): Promise<void> {
   }
   if (cmd === "feedback") {
     process.exit(await feedbackCommand(rest));
+  }
+  if (cmd === "triage") {
+    process.exit(await triageCommand(rest));
   }
   if (cmd === "digest") {
     process.exit(await digestCommand(rest));
