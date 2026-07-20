@@ -1,0 +1,40 @@
+- id: W1-T173
+  title: "inbox draft rung strips markdown code fences (or constrains the Architect to raw YAML) — a ```yaml-fenced draft fragment must parse, never falsely fail lint_clean"
+  repo: remudero
+  depends_on: [W1-T110]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE FIXTURE: P19 — the ratification inbox's INAUGURAL item (surfaced when W1-T121 #385 + W1-T122
+    #386 both merged) — classified falsely NOT-READY on the lint_clean predicate because its Architect draft arrived
+    wrapped in a markdown ```yaml … ``` code fence. safeParseFragment -> parseTasksFromYaml choked on the fence
+    ('YAMLParseError: Implicit keys need to be on a single line at line 1' — the leading ``` ). The draft CONTENT was
+    correct (three well-formed tasks + a proper stamp line); only the fence made it unparseable. The inbox's first
+    ratification should not have needed a hand-assist (the fence was stripped state-side to unblock). Every FUTURE
+    inbox draft dead-ends identically unless the rung strips fences or the Architect is constrained to raw YAML — an
+    LLM emitting fenced YAML is the overwhelmingly common case, so this is not an edge case, it is the default path."
+  design: |
+    Strip a leading ```lang (or bare ```) fence line and its trailing ``` from the Architect's fragment where the
+    draft is captured — parseDraftedCandidate in lib/inbox.ts (the harness parses the worker's text there; the worker
+    itself is read-only, no Write/Edit/Bash), BEFORE the fragment reaches safeParseFragment/parseTasksFromYaml and
+    the draft cache. Belt-and-suspenders: ALSO tighten inboxDraftPrompt to instruct raw-YAML-only output (no fence),
+    so the strip is a safety net, not the sole guard. The strip must be a NO-OP on already-clean YAML (byte-identical
+    out) and must FAIL LOUD on a malformed fence (an opening ``` with no close, or stray backticks mid-document) —
+    never silently truncate a partial task set. VERIFY parseDraftedCandidate's current capture path, safeParseFragment,
+    and inboxDraftPrompt from source before editing (distrust this note).
+  acceptance:
+    - claim: "a fenced Architect fragment parses to the SAME tasks as the unfenced form — the inbox no longer falsely fails lint_clean on a ```yaml wrapper"
+      proof: "unit test over the draft-capture path (parseDraftedCandidate / the fence-strip helper): a fragmentYaml that begins with a ```yaml (and a bare ```) fence and ends with ``` is stripped to raw YAML and parses via parseTasksFromYaml to the SAME task set as the unfenced fragment, so classifyProposal reaches ready instead of not_ready[lint_clean]. FALSIFIER: the exact P19 live fixture — a fenced draft that safeParseFragment rejects as not-valid-YAML, classifying a genuinely-ready proposal falsely not-ready"
+    - claim: "the strip is a no-op on clean YAML and fails LOUD on a malformed fence — it never silently drops tasks"
+      proof: "unit test: an UNFENCED fragment is byte-identical after the strip (no-op, no spurious edits); a malformed fence (opening ``` with no close, or backticks mid-document) does NOT silently truncate — it parses the real YAML or fails loud with a named error. FALSIFIER: a strip that emits a partial task set from a malformed fence (a silent drop is worse than a loud fail)"
+  risk: medium
+  origin: architect
+  plan_refs: ["§2", "§11"]
+  files: [src/lib/inbox.ts]
+  status: queued
+  attempts: 0
+  note: "Fixture = P19, the inbox's inaugural ratification item, falsely not-ready because its draft arrived
+    markdown-fenced; hand-stripped state-side (state/inbox-drafts.json) to unblock. Single-subsystem (the W1-T110
+    inbox draft rung), hence risk:medium. Companion to the inbox's own honesty discipline: a draft the harness cannot
+    parse must never read as 'proposal not ready' — that misattributes an output-format defect to the proposal."
