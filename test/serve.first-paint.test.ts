@@ -189,12 +189,21 @@ test("last-snapshot cache: a reload paints the CACHED snapshot instantly (stampe
     assert.equal(staleState.stale, "true", "the stale cache-paint must be stamped via data-stale");
     assert.equal(staleState.badgeHidden, false, "the STALE badge must be visible while showing cached data");
 
-    // Now let the delayed live fetch land and confirm the swap to fresh data.
-    await page.waitForFunction(() => document.querySelector("#now-list .detail")?.textContent?.includes("implement"), null, { timeout: 5000 });
+    // Now let the delayed live fetch land and confirm the swap to fresh data. Wait for the FULL
+    // refresh to finish -- top-status's "updated ..." text is set only after EVERY section has
+    // repainted, including clearStale() (see refreshAll() in serve.ts) -- rather than racing on
+    // the phase text alone: renderNow() paints the phase synchronously off /v1/status BEFORE the
+    // later Promise.all(...)-gated clearStale() runs (progressive load, W1-T154), so polling for
+    // "implement" in the NOW row could observe a window where fresh data has painted but the stale
+    // stamp has not yet been dropped -- a flake this fix removes by waiting on the later, ordered
+    // signal instead.
+    await page.waitForFunction(() => document.getElementById("top-status")?.textContent?.includes("updated"), null, { timeout: 5000 });
     const freshState = await page.evaluate(() => ({
+      phase: document.querySelector("#now-list .detail")?.textContent ?? "",
       stale: document.getElementById("top-status")?.getAttribute("data-stale"),
       badgeHidden: (document.getElementById("stale-badge") as HTMLElement)?.hidden,
     }));
+    assert.match(freshState.phase, /phase: implement/, "the NOW row must reflect the fresh (implement) phase by the time the refresh is done");
     assert.equal(freshState.stale, null, "the stale stamp must be DROPPED once fresh data lands");
     assert.equal(freshState.badgeHidden, true, "the STALE badge must hide again once fresh data lands");
 
