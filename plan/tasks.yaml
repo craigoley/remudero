@@ -61,6 +61,136 @@
 #   operator-kicked (the daemon drains the sandbox), so this is the authoritative kick guide, NOT a
 #   physical reordering of the entries below (a contiguous block-move can't produce this interleaving).
 
+- id: W1-T121
+  title: QUEUE GOVERNOR — a WIP limit on DISPATCH only; flow control throttles intake, never drainage
+    (the 23-open-PR incident)
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: 'Filed from #271 holding-note item 3. No backpressure exists anywhere in the pipeline, so
+
+    authoring rate converts DIRECTLY into queue depth with nothing to arrest it — the 23-open-PR
+
+    incident. Little''s law is the argument: throughput comes from bounding WIP, not from pushing
+
+    harder on intake.
+
+
+    CORROBORATION, the governor''s thesis run by hand: with the dispatcher DOWN and only the sweep
+
+    loop running, the queue drained 23 -> 14 open PRs in a single pass window; and on 2026-07-19,
+
+    with dispatch again halted, the remaining ten drained to ZERO. Drainage is demonstrably
+
+    healthy while intake is zero — the two halves are separable IN PRACTICE, not just in
+
+    principle, which is exactly what makes a dispatch-only throttle safe rather than a stall.
+
+
+    THRESHOLDS ARE POLICY DATA, NOT CONSTANTS, and the home already exists: SweepPolicy /
+
+    DEFAULT_SWEEP_POLICY (src/lib/sweep.ts) is the repo''s declarative threshold table, whose own
+
+    doc comment insists disposition is a function of observed PR state plus an exported
+
+    SweepPolicy table and NEVER an ad-hoc check. The governor''s limit belongs in that table.'
+  design: '(i) Add the WIP limit as a ROW in SweepPolicy/DEFAULT_SWEEP_POLICY — not a constant, not a
+
+    flag read at a call site.
+
+    (ii) The dispatch path consults it: at or above the limit, dispatch of NEW tasks is deferred.
+
+    (iii) sweep / heal / arm / merge are UNGATED at any depth — the governor bounds what ENTERS
+
+    the system and never what LEAVES it. This asymmetry is the whole design; a governor that also
+
+    throttled drainage would deepen the very queue it exists to bound.
+
+    (iv) A throttled pass is NOT silent: ledger `dispatch_deferred_wip` carrying the observed open
+
+    count, so a quiet daemon is distinguishable from a throttled one.'
+  acceptance:
+  - claim: 'at the limit: zero dispatches, a dispatch_deferred_wip ledger line carrying the observed count,
+      and sweep/heal/arm/merge in the SAME pass unaffected — proving the throttle hits intake only'
+    proof: 'unit test: test/queue-governor.test.ts'
+  - claim: 'below the limit: dispatch proceeds normally — the falsifier proving the governor is not simply
+      off or always-on'
+    proof: 'unit test: test/queue-governor.test.ts'
+  - claim: changing the limit is a policy-data row edit with zero code change, the falsifier for whether
+      this is really policy-data
+    proof: 'unit test: test/queue-governor.test.ts'
+  risk: high
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#5C
+  files:
+  - src/lib/sweep.ts
+  depends_on: []
+- id: W1-T122
+  title: PLAN SHARDING (plan/tasks.d/) — concurrent filings become conflict-free BY CONSTRUCTION, not
+    by a wider merge window
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 100.0
+  rationale: 'Filed from #271 holding-note item 4. One file per task: plan/tasks.d/<id>.yaml. Two concurrent
+
+    filings no longer share an EOF to collide on, so they CANNOT textually conflict.
+
+
+    MEASURED EVIDENCE: the nine-PR appender train consolidated by #271. All 437 consolidated lines
+
+    are pure appends to the SINGLE EOF of one file — exactly the collision surface. #206 and #214
+
+    had auto-merge ARMED yet sat DIRTY, i.e. conflict-blocked on that shared EOF where auto-merge
+
+    could never fire. Under sharding those two would have merged untouched and #271 would not have
+
+    needed to exist.
+
+
+    W1-T107 already solved this exact class ONE LINE AT A TIME (ci-gate REQUIRED array, one entry
+
+    per line, so concurrent gate additions merge instead of conflicting). Sharding is the same
+
+    insight at FILE granularity: it deletes the class rather than widening the window.'
+  design: '(i) loadPlan globs plan/tasks.d/*.yaml and merges with plan/tasks.yaml during migration.
+
+    (ii) FAIL on duplicate ids across shards — the uniqueness guard the single-file format gave
+
+    for free must not be lost in the split.
+
+    (iii) Every consumer (lint-plan, claims, status derivation) operates over the MERGED VIEW, so
+
+    the change is invisible above loadPlan.
+
+    (iv) NOT IN SCOPE: migrating the existing entries. That is a one-time codemod filed
+
+    separately; this task must leave the current single-file plan loading unchanged so migration
+
+    can be staged.'
+  acceptance:
+  - claim: two branches each adding a DIFFERENT shard merge with zero textual conflict — the whole point,
+      proven by a real two-branch merge rather than asserted
+    proof: 'unit test: test/plan-sharding.test.ts'
+  - claim: a duplicate id across two shards fails loadPlan, preserving the uniqueness guard the single-file
+      format gave for free
+    proof: 'unit test: test/plan-sharding.test.ts'
+  - claim: the existing single-file plan/tasks.yaml still loads unchanged — the back-compat lock that
+      lets migration be staged
+    proof: 'unit test: test/plan-sharding.test.ts'
+  risk: high
+  origin: architect
+  plan_refs:
+  - MASTER-PLAN#5C
+  files:
+  - src/lib/plan.ts
+  depends_on: []
 - id: W1-T155
   title: "live-state DATA — the board projection exposes the FULL status taxonomy (in-flight+phase, blocked, needs-human, armed-awaiting-merge) + startedAt/elapsed, joined from the ledger run state"
   repo: remudero
@@ -660,6 +790,41 @@
   - MASTER-PLAN#9
   files:
   - src/lib/correct.ts
+- id: W1-T86
+  title: "rmd wipe-test — the learning-utility A/B harness (ratifies P12: injected learnings must be shown to help, or pruned)"
+  repo: remudero
+  depends_on: [W1-T19, W1-T12a]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P12. W1-T19 injects matched learnings; nothing measures whether they change
+    outcomes, so the learning system cannot be SHOWN to compound — the claim 'memory helps' is currently
+    unfalsifiable, which rule 4 does not permit for a load-bearing subsystem. The wipe test is the
+    falsifier: paired runs with the store present vs masked, deltas measured."
+  design: |
+    rmd wipe-test <task-id> [--repo remudero-sandbox]: runs the SAME task twice on the sandbox — arm A
+    with normal learnings injection, arm B with the store MASKED for that run (injection returns empty;
+    the store itself is never touched — masking, not deletion) — and reports deltas: num_turns, notional
+    cost, verdict, strike count, proof_exec. Pairing discipline stated in the module doc: single pairs
+    are anecdotes; the report accumulates pairs per ledger (wipetest.pair lines) and only aggregate
+    deltas are treated as signal. The HARNESS is this task; running the experiment is operator-scheduled.
+  acceptance:
+    - claim: "arm B runs with injection masked and the store untouched"
+      proof: "unit test over injected deps: arm B's rendered prompt contains zero learning blocks; a store-write spy records nothing; arm A's prompt carries the matched learnings"
+    - claim: "paired deltas are computed and ledgered"
+      proof: "unit test: fixture pair of run results -> a wipetest.pair ledger line with turn/cost/verdict deltas; the report aggregates two seeded pairs correctly"
+    - claim: "the harness refuses non-sandbox targets by default"
+      proof: "unit test: target=remudero without an explicit override flag -> refusal naming the sandbox default (experiments never burn the primary repo unflagged)"
+  risk: high
+  origin: architect
+  plan_refs: ["P12", "§Self-improvement"]
+  files: [src/lib/wipe-test.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Live experiment (Rule 18): operator schedules pairs on the sandbox; the aggregate report is the
+    publishable learning-utility number (the WS-12 receipts thesis applied to memory)."
+
 - id: W1-T145
   title: "layered knowledge: ONE entry schema valid at every layer + the layer homes (project / user-overall / rmd-global) — P32 first task"
   repo: remudero
@@ -4891,41 +5056,6 @@
   note: "Live confirmation (Rule 18): the first real onboarding target is operator-chosen; the fleet
     dry-run (W2-T2) is the natural candidate — onboard it, ratify its drafted plan, drain it."
 
-- id: W1-T86
-  title: "rmd wipe-test — the learning-utility A/B harness (ratifies P12: injected learnings must be shown to help, or pruned)"
-  repo: remudero
-  depends_on: [W1-T19, W1-T12a]
-  type: implement
-  verify: auto
-  principles: {tdd: strict}
-  budget_usd: 100.00
-  rationale: "Ratifies P12. W1-T19 injects matched learnings; nothing measures whether they change
-    outcomes, so the learning system cannot be SHOWN to compound — the claim 'memory helps' is currently
-    unfalsifiable, which rule 4 does not permit for a load-bearing subsystem. The wipe test is the
-    falsifier: paired runs with the store present vs masked, deltas measured."
-  design: |
-    rmd wipe-test <task-id> [--repo remudero-sandbox]: runs the SAME task twice on the sandbox — arm A
-    with normal learnings injection, arm B with the store MASKED for that run (injection returns empty;
-    the store itself is never touched — masking, not deletion) — and reports deltas: num_turns, notional
-    cost, verdict, strike count, proof_exec. Pairing discipline stated in the module doc: single pairs
-    are anecdotes; the report accumulates pairs per ledger (wipetest.pair lines) and only aggregate
-    deltas are treated as signal. The HARNESS is this task; running the experiment is operator-scheduled.
-  acceptance:
-    - claim: "arm B runs with injection masked and the store untouched"
-      proof: "unit test over injected deps: arm B's rendered prompt contains zero learning blocks; a store-write spy records nothing; arm A's prompt carries the matched learnings"
-    - claim: "paired deltas are computed and ledgered"
-      proof: "unit test: fixture pair of run results -> a wipetest.pair ledger line with turn/cost/verdict deltas; the report aggregates two seeded pairs correctly"
-    - claim: "the harness refuses non-sandbox targets by default"
-      proof: "unit test: target=remudero without an explicit override flag -> refusal naming the sandbox default (experiments never burn the primary repo unflagged)"
-  risk: high
-  origin: architect
-  plan_refs: ["P12", "§Self-improvement"]
-  files: [src/lib/wipe-test.ts, src/run-task.ts]
-  status: queued
-  attempts: 0
-  note: "Live experiment (Rule 18): operator schedules pairs on the sandbox; the aggregate report is the
-    publishable learning-utility number (the WS-12 receipts thesis applied to memory)."
-
 - id: W1-T87
   title: "Retro mines SUCCESS — procedural learnings from merged runs (ratifies P13: half the flywheel)"
   repo: remudero
@@ -6094,136 +6224,6 @@
   files:
   - src/run-task.ts
   - src/lib/task-linter.ts
-  depends_on: []
-- id: W1-T121
-  title: QUEUE GOVERNOR — a WIP limit on DISPATCH only; flow control throttles intake, never drainage
-    (the 23-open-PR incident)
-  repo: remudero
-  type: implement
-  verify: auto
-  principles:
-    tdd: strict
-  budget_usd: 100.0
-  rationale: 'Filed from #271 holding-note item 3. No backpressure exists anywhere in the pipeline, so
-
-    authoring rate converts DIRECTLY into queue depth with nothing to arrest it — the 23-open-PR
-
-    incident. Little''s law is the argument: throughput comes from bounding WIP, not from pushing
-
-    harder on intake.
-
-
-    CORROBORATION, the governor''s thesis run by hand: with the dispatcher DOWN and only the sweep
-
-    loop running, the queue drained 23 -> 14 open PRs in a single pass window; and on 2026-07-19,
-
-    with dispatch again halted, the remaining ten drained to ZERO. Drainage is demonstrably
-
-    healthy while intake is zero — the two halves are separable IN PRACTICE, not just in
-
-    principle, which is exactly what makes a dispatch-only throttle safe rather than a stall.
-
-
-    THRESHOLDS ARE POLICY DATA, NOT CONSTANTS, and the home already exists: SweepPolicy /
-
-    DEFAULT_SWEEP_POLICY (src/lib/sweep.ts) is the repo''s declarative threshold table, whose own
-
-    doc comment insists disposition is a function of observed PR state plus an exported
-
-    SweepPolicy table and NEVER an ad-hoc check. The governor''s limit belongs in that table.'
-  design: '(i) Add the WIP limit as a ROW in SweepPolicy/DEFAULT_SWEEP_POLICY — not a constant, not a
-
-    flag read at a call site.
-
-    (ii) The dispatch path consults it: at or above the limit, dispatch of NEW tasks is deferred.
-
-    (iii) sweep / heal / arm / merge are UNGATED at any depth — the governor bounds what ENTERS
-
-    the system and never what LEAVES it. This asymmetry is the whole design; a governor that also
-
-    throttled drainage would deepen the very queue it exists to bound.
-
-    (iv) A throttled pass is NOT silent: ledger `dispatch_deferred_wip` carrying the observed open
-
-    count, so a quiet daemon is distinguishable from a throttled one.'
-  acceptance:
-  - claim: 'at the limit: zero dispatches, a dispatch_deferred_wip ledger line carrying the observed count,
-      and sweep/heal/arm/merge in the SAME pass unaffected — proving the throttle hits intake only'
-    proof: 'unit test: test/queue-governor.test.ts'
-  - claim: 'below the limit: dispatch proceeds normally — the falsifier proving the governor is not simply
-      off or always-on'
-    proof: 'unit test: test/queue-governor.test.ts'
-  - claim: changing the limit is a policy-data row edit with zero code change, the falsifier for whether
-      this is really policy-data
-    proof: 'unit test: test/queue-governor.test.ts'
-  risk: high
-  origin: architect
-  plan_refs:
-  - MASTER-PLAN#5C
-  files:
-  - src/lib/sweep.ts
-  depends_on: []
-- id: W1-T122
-  title: PLAN SHARDING (plan/tasks.d/) — concurrent filings become conflict-free BY CONSTRUCTION, not
-    by a wider merge window
-  repo: remudero
-  type: implement
-  verify: auto
-  principles:
-    tdd: strict
-  budget_usd: 100.0
-  rationale: 'Filed from #271 holding-note item 4. One file per task: plan/tasks.d/<id>.yaml. Two concurrent
-
-    filings no longer share an EOF to collide on, so they CANNOT textually conflict.
-
-
-    MEASURED EVIDENCE: the nine-PR appender train consolidated by #271. All 437 consolidated lines
-
-    are pure appends to the SINGLE EOF of one file — exactly the collision surface. #206 and #214
-
-    had auto-merge ARMED yet sat DIRTY, i.e. conflict-blocked on that shared EOF where auto-merge
-
-    could never fire. Under sharding those two would have merged untouched and #271 would not have
-
-    needed to exist.
-
-
-    W1-T107 already solved this exact class ONE LINE AT A TIME (ci-gate REQUIRED array, one entry
-
-    per line, so concurrent gate additions merge instead of conflicting). Sharding is the same
-
-    insight at FILE granularity: it deletes the class rather than widening the window.'
-  design: '(i) loadPlan globs plan/tasks.d/*.yaml and merges with plan/tasks.yaml during migration.
-
-    (ii) FAIL on duplicate ids across shards — the uniqueness guard the single-file format gave
-
-    for free must not be lost in the split.
-
-    (iii) Every consumer (lint-plan, claims, status derivation) operates over the MERGED VIEW, so
-
-    the change is invisible above loadPlan.
-
-    (iv) NOT IN SCOPE: migrating the existing entries. That is a one-time codemod filed
-
-    separately; this task must leave the current single-file plan loading unchanged so migration
-
-    can be staged.'
-  acceptance:
-  - claim: two branches each adding a DIFFERENT shard merge with zero textual conflict — the whole point,
-      proven by a real two-branch merge rather than asserted
-    proof: 'unit test: test/plan-sharding.test.ts'
-  - claim: a duplicate id across two shards fails loadPlan, preserving the uniqueness guard the single-file
-      format gave for free
-    proof: 'unit test: test/plan-sharding.test.ts'
-  - claim: the existing single-file plan/tasks.yaml still loads unchanged — the back-compat lock that
-      lets migration be staged
-    proof: 'unit test: test/plan-sharding.test.ts'
-  risk: high
-  origin: architect
-  plan_refs:
-  - MASTER-PLAN#5C
-  files:
-  - src/lib/plan.ts
   depends_on: []
 - id: W1-T123
   title: ci-gate dedupes check-runs BY NAME and evaluates only the LATEST attempt — today a stale red
