@@ -2714,10 +2714,25 @@ function readUsageSnapshot(config: Config): UsageSnapshot | undefined {
  * logic over GitHub-derived status; it STOPS ON ANY BLOCK (v1); it is headroom-aware
  * and bounded. See lib/drain.ts for the loop; this only wires the real defaults.
  */
-async function drainCommand(rest: string[]): Promise<number> {
+async function drainCommand(
+  rest: string[],
+  deps: {
+    config?: Config;
+    planPath?: string;
+    /** Bypass git self-sync and read the plan literally — behavioral tests only, mirroring
+     *  runTask's identical `skipGitSync` escape hatch. */
+    skipGitSync?: boolean;
+    /** Injectable GitHub-gateway constructor for the merged-status projection. Defaults to the
+     *  real {@link ghGateway}. Lets a behavioral test prove which (owner, repo) `rmd drain`
+     *  actually derives its gateway from — e.g. that `--repo remudero-sandbox` builds the
+     *  gateway for `remudero-sandbox`, not a hardcoded literal (W1-T53) — without a network
+     *  round-trip. */
+    githubFactory?: (owner: string, repo: string) => GitHub;
+  } = {},
+): Promise<number> {
   // FAIL LOUD on junk args BEFORE touching config/locks/spawns (a malformed control command
   // must spawn NOTHING — the daemon-install hazard). drain takes only these flags.
-  const badArg = unknownArgError("drain", rest, ["--until", "--max"], ["--dry-run", "--allow-stale"]);
+  const badArg = unknownArgError("drain", rest, ["--until", "--max", "--repo"], ["--dry-run", "--allow-stale"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -2730,11 +2745,19 @@ async function drainCommand(rest: string[]): Promise<number> {
     until: untilIdx >= 0 ? rest[untilIdx + 1] : undefined,
     max: maxIdx >= 0 ? Number(rest[maxIdx + 1]) : DRAIN_DEFAULT_MAX,
   };
-  const config = loadConfig();
-  const planPath = join(repoRoot, "plan", "tasks.yaml");
+  const config = deps.config ?? loadConfig();
+  const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const statusPath = join(config.root, "state", "status.json");
-  const { owner } = resolveOwnerRepo();
+  const self = resolveOwnerRepo();
+  const { owner } = self;
+  // Gateway repo, parameterized like the daemon path (fix/daemon-repo-targeting): defaults to
+  // THIS checkout's own repo rather than a hardcoded literal, so a checkout whose origin isn't
+  // `remudero` (e.g. a sandbox) doesn't silently project merged-status against the wrong repo.
+  // --repo overrides it explicitly. The plan itself is unaffected — drain always dispatches
+  // from THIS checkout's origin/main (git self-sync below); only the status gateway moves.
+  const repo = flagValue(rest, "--repo") ?? self.repo;
+  const githubFactory = deps.githubFactory ?? ghGateway;
 
   const runId = `DRAIN-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -2742,18 +2765,25 @@ async function drainCommand(rest: string[]): Promise<number> {
 
   // ── GIT SELF-SYNC (W1-T60): dispatch from the origin/main plan blob, never the operator's
   // working tree — see runTask's identical gate for the full rationale. FAILS CLOSED (no
-  // lock taken, no spawn) on a fetch failure unless --allow-stale.
-  const synced = syncPlanOrRefuse(planPath, {
-    allowStale,
-    log,
-    say: (msg) => console.error(`### rmd drain — ${msg}`),
-  });
-  if ("error" in synced) return 1;
-  const plan = synced.plan;
+  // lock taken, no spawn) on a fetch failure unless --allow-stale. `skipGitSync` (behavioral
+  // tests only) reads the plan literally instead, exactly like runTask's escape hatch.
+  let plan: Plan;
+  if (deps.skipGitSync) {
+    plan = loadPlan(planPath);
+  } else {
+    const synced = syncPlanOrRefuse(planPath, {
+      allowStale,
+      log,
+      say: (msg) => console.error(`### rmd drain — ${msg}`),
+    });
+    if ("error" in synced) return 1;
+    plan = synced.plan;
+  }
 
-  // Merged predicate, re-derived from GitHub each call (status.ts). The plan is
-  // stewarded in `remudero`, so the gateway targets it; cross-repo tasks resolve
-  // via the ledger's full pr_url (deriveStatus source (a)) or are verify:human.
+  // Merged predicate, re-derived from GitHub each call (status.ts), scoped to the resolved
+  // gateway repo (owner/repo, above) via `githubFactory` (the real {@link ghGateway} unless a
+  // test injects a stub) — cross-repo tasks resolve via the ledger's full pr_url (deriveStatus
+  // source (a)) or are verify:human.
   //
   // `lastProj` also backs `isOpenPr` (W1-T80, the in-flight dispatch-dedup
   // guard) — the SAME projection `refreshMerged` just derived, never a second
@@ -2763,7 +2793,7 @@ async function drainCommand(rest: string[]): Promise<number> {
   const refreshMerged: () => MergedSet = () => {
     const proj = projectPlan(
       plan,
-      { ledgerPath, github: ghGateway(owner, "remudero") },
+      { ledgerPath, github: githubFactory(owner, repo) },
       statusPath,
     );
     lastProj = proj;
@@ -2812,7 +2842,12 @@ async function drainCommand(rest: string[]): Promise<number> {
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
 
-  log("drain.start", { until: opts.until ?? null, max: opts.max, lock_pid: drainLock.info.pid });
+  log("drain.start", {
+    until: opts.until ?? null,
+    max: opts.max,
+    gateway: `${owner}/${repo}`,
+    lock_pid: drainLock.info.pid,
+  });
 
   try {
     const summary = await runDrain(
@@ -4634,7 +4669,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "drain",
     usage:
-      "rmd drain [--until <id>] [--max <n>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60)",
+      "rmd drain [--until <id>] [--max <n>] [--repo <name>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60); --repo scopes the merged-status gateway to <owner>/<name> (defaults to this checkout's own repo, like the daemon path) — the plan itself is always read from THIS checkout",
   },
   {
     name: "daemon",
@@ -4852,6 +4887,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 }
 
 export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, retroCommand, initCommand, projectCommand };
+// Exported for a behavioral test of the drain gateway-targeting fix (W1-T53): drainCommand's
+// injectable deps (config/planPath/skipGitSync/githubFactory) let a test prove `--repo` scopes
+// the merged-status gateway to the NAMED repo, not a hardcoded literal — logic unchanged, export
+// + injectable seams only (mirrors runTask's identical opts.github/skipGitSync escape hatch).
+export { drainCommand };
 // Exported for a behavioral test of the retro no-op guard (W1-T64): commitsAhead is the predicate the
 // retro/implement no-op path branches on (=== 0 ⇒ nothing to PR). Logic UNCHANGED — export only.
 export { commitsAhead };

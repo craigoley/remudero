@@ -13,6 +13,7 @@ import {
   commitsAhead,
   deriveFixMode,
   deriveStrikeHistory,
+  drainCommand,
   FIX_MODE_RULES,
   isTransientResult,
   renderFixPrompt,
@@ -33,6 +34,7 @@ import {
 } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
+import type { GitHub } from "../src/lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
   strikeCapForAnswer,
@@ -373,6 +375,74 @@ test("resolveDaemonTarget: --dry-run against self is allowed (harmless preview, 
 test("resolveDaemonTarget: --plan <path> overrides the plan source", () => {
   const r = resolveDaemonTarget(dEnv, ["--repo", "remudero-sandbox", "--plan", "/tmp/sbx.yaml"]) as { target: any };
   assert.equal(r.target.planPath, "/tmp/sbx.yaml");
+});
+
+// ── W1-T53 CRITERION 1 (BEHAVIORAL, injected-gateway): `rmd drain --repo` must scope the
+// merged-status gateway to the NAMED repo, not the hardcoded "remudero" literal drainCommand
+// used to carry (the same self-target hazard fix/daemon-repo-targeting already fixed for the
+// daemon). This drives the REAL drainCommand dispatch path through injected seams
+// (skipGitSync + githubFactory) — not a source grep — proving which (owner, repo) it actually
+// builds its gateway for.
+
+/** An offline GitHub gateway: projectPlan runs with zero network round-trips. */
+const OFFLINE_GITHUB: GitHub = {
+  prByRef: () => null,
+  findMergedByTrailer: () => null,
+  headRefName: () => undefined,
+  prBody: () => undefined,
+};
+
+function drainFixtureConfig(): Config {
+  return { claudeBin: "/bin/true", root: mkdtempSync(join(tmpdir(), "rmd-drain-gw-root-")) };
+}
+
+function drainFixturePlanPath(): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-drain-gw-plan-"));
+  const planPath = join(dir, "tasks.yaml");
+  writeFileSync(planPath, "[]\n"); // empty plan: refreshMerged still builds the gateway eagerly
+  return planPath;
+}
+
+test("drainCommand: `--repo remudero-sandbox --dry-run` builds the merged-status gateway for remudero-sandbox, not 'remudero'", async () => {
+  const calls: Array<{ owner: string; repo: string }> = [];
+  const githubFactory = (owner: string, repo: string): GitHub => {
+    calls.push({ owner, repo });
+    return OFFLINE_GITHUB;
+  };
+
+  const code = await drainCommand(["--repo", "remudero-sandbox", "--dry-run"], {
+    config: drainFixtureConfig(),
+    planPath: drainFixturePlanPath(),
+    skipGitSync: true, // fixture plan read literally, no git fetch (mirrors runTask's escape hatch)
+    githubFactory,
+  });
+
+  assert.equal(code, 0);
+  assert.equal(calls.length, 1, "the gateway is built exactly once for a --dry-run preview");
+  assert.equal(calls[0].repo, "remudero-sandbox", "the gateway targets the --repo flag's value");
+  assert.notEqual(calls[0].repo, "remudero", "never the hardcoded literal, regardless of --repo");
+});
+
+test("drainCommand: no --repo flag defaults the gateway to THIS checkout's own repo (not a hardcoded literal)", async () => {
+  const calls: Array<{ owner: string; repo: string }> = [];
+  const githubFactory = (owner: string, repo: string): GitHub => {
+    calls.push({ owner, repo });
+    return OFFLINE_GITHUB;
+  };
+
+  const code = await drainCommand(["--dry-run"], {
+    config: drainFixtureConfig(),
+    planPath: drainFixturePlanPath(),
+    skipGitSync: true,
+    githubFactory,
+  });
+
+  assert.equal(code, 0);
+  assert.equal(calls.length, 1);
+  // This checkout's own origin is craigoley/remudero (see resolveOwnerRepo) — the default,
+  // not an independent hardcoded literal that would silently diverge from it.
+  assert.equal(calls[0].owner, "craigoley");
+  assert.equal(calls[0].repo, "remudero");
 });
 
 // ── W1-T60: the runner self-syncs git state — fetch origin + dispatch from origin/main,
