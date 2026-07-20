@@ -86,6 +86,14 @@ export interface Task {
   acceptance?: AcceptanceCriterion[];
   hand_built?: boolean;
   note?: string;
+  /**
+   * WHY this task exists (the operator-facing prose every task in plan/tasks.yaml already
+   * carries — tasks.yaml's own header calls `origin:`/`plan_refs:` "DECLARATIVE metadata";
+   * `rationale:` is the same kind of field, just not previously typed here). Read-only,
+   * same as every other narrative field on this interface — lib/task-card.ts (W1-T158) is
+   * the first real consumer, rendering it on the row-click task card.
+   */
+  rationale?: string;
   /** Provenance (Rules 16/17): where this task came from — `architect`, `feedback#…`,
    *  `alert#…`, `issue#…`. Never defaulted (unlike `risk`) — its absence is itself
    *  the fact the §5C linter's provenance check reports. */
@@ -173,6 +181,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
       hand_built: e.hand_built as boolean | undefined,
       pr: typeof e.pr === "number" ? e.pr : undefined,
       note: e.note as string | undefined,
+      rationale: e.rationale as string | undefined,
       origin: e.origin as string | undefined,
       prompt: e.prompt as string | undefined,
       context: e.context as ContextClaim[] | undefined,

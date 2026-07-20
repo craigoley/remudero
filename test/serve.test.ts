@@ -498,9 +498,10 @@ test("GET /v1/feedback and GET /v1/trace (assembled server): the plan graph is r
 
 test("shell nav uses in-shell PANELS (buttons + authorized fetch), not <a href> hops to header-only /v1/* routes", () => {
   const html = renderShellHtml();
-  // the two nav items are buttons whose JS fetches WITH the header, not navigable links
+  // the feedback nav item is a button whose JS fetches WITH the header, not a navigable link.
+  // The v0 "Plan→task→PR graph" id-textbox panel (#359) is RETIRED by W1-T158 in favor of a
+  // per-row Journey affordance — see the dedicated retirement test below.
   assert.match(html, /<button id="feedback-btn"/);
-  assert.match(html, /<button id="graph-btn"/);
   assert.match(html, /fetch\("\/v1\/feedback", \{ headers: authHeaders \}\)|getJson\("\/v1\/feedback"\)/);
   // LINK-CRAWL: every <a href> the shell emits is in-page, external (target=_blank PR link), or the
   // allowQueryToken GET / route — NEVER a header-only /v1/* route (a bare navigation there 401s).
@@ -516,6 +517,20 @@ test("shell nav uses in-shell PANELS (buttons + authorized fetch), not <a href> 
     const shellDoc = href === "/" || href.startsWith("/?"); // the allowQueryToken HTML route
     assert.ok(inPage || external || shellDoc, `shell emits an unclassifiable <a href="${href}">`);
   }
+});
+
+// ── W1-T158: the v0 id-textbox trace panel is RETIRED; every task row instead carries its own
+// explicit Journey affordance, and GET /v1/task backs a new row-click card. ────────────────────
+
+test("W1-T158: the v0 'Plan→task→PR graph' id-textbox panel is retired — no graph-btn/trace-id/trace-btn in the shell", () => {
+  const html = renderShellHtml();
+  assert.doesNotMatch(html, /id="graph-btn"/);
+  assert.doesNotMatch(html, /id="trace-id"/);
+  assert.doesNotMatch(html, /id="trace-btn"/);
+  // its replacement: a per-row journey button + a card/journey panel pair, keyed on data-task-id.
+  assert.match(html, /class="row-journey-btn" data-task-id=/);
+  assert.match(html, /id="task-detail"/);
+  assert.match(html, /id="journey-view"/);
 });
 
 test("the panel data routes are header-only (bare navigation 401s) — the shell must fetch, never link them", async () => {
