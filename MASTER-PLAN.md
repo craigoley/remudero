@@ -1955,6 +1955,23 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    `rmd retro` re-grades every open task against every standing rule and files a corrective task for each
    violation (the executable duty is W1-T20d). A rule the queue is never swept against protects only the
    tasks written after it. [DIAGNOSIS.md diag/w1t12-max-turns, W1-T12]
+21. **AMENDING AN ALREADY-MERGED TASK DOES NOT RE-QUEUE IT AND SPAWNS NOTHING — THE AMENDER OWNS FILING THE
+   FOLLOW-UP.** A criterion added to a task that has already merged is unreachable by every rung: `deriveStatus`
+   treats MERGED as terminal, the drain's first filter is `if (isMerged(t.id)) continue`, the retro's
+   `planHealthSweep` skips merged/done as "already shipped", the linter is status-blind, and `rmd correct`
+   re-points credit but cannot un-credit. So the criterion sits in the plan looking authoritative while nothing
+   can ever dispatch, review or prove it. This is not a gap to be closed by making merge reversible — it is the
+   correct behaviour of a derived-status system, and the duty sits with the author of the amendment: amend for
+   the record if the task's spec was genuinely incomplete, and in the SAME PR file a follow-up task carrying the
+   new criteria VERBATIM (rule 16 — nothing dropped or weakened, only redistributed). This was already the
+   consistent convention (W1-T161, W1-T97, the W1-T65 pair, the W1-T76 follow-up) and it still failed, because
+   convention is not a gate: PR #374 amended W1-T155 at 17:35:20Z, 1h45m after PR #365 credited it merged at
+   15:50:08Z, adding the monotonic-under-darkness and liveness-bound criteria — and passed every check clean.
+   Both orphaned. One of them WAS the fix for the regression-to-queued-on-read-failure bug, which therefore
+   survived wearing a "merged ✓" badge while the console shipped a render-layer honesty banner over a data layer
+   that still lied. Found by hand, by nothing else. The executable duty is W1-T180 (a §5C lint check that fails a
+   bare post-merge amendment and passes one accompanied by its follow-up); the rehoming of what this already
+   orphaned is W1-T179. [W1-T155/PR #374 vs PR #365, 2026-07-20]
 
 - Lives at repo root. Header carries sync date + focus, his-house style.
 - Humans and agents edit via commits/PRs; the Architect does narrative syncs at workstream

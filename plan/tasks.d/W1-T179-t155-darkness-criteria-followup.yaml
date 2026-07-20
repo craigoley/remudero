@@ -1,0 +1,74 @@
+- id: W1-T179
+  title: "W1-T155 DARKNESS FOLLOW-UP — monotonic-under-darkness (a gateway-fetch failure never regresses a credited task to queued, marked github_unobservable) + the in-flight liveness bound; both criteria were amended onto W1-T155 AFTER it merged, so nothing can ever dispatch them"
+  repo: remudero
+  depends_on: [W1-T155, W1-T119]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "ORPHANED CRITERIA, mechanically unreachable — this task exists to give them a dispatchable home.
+    TIMELINE (exact): PR #365 ('feat(W1-T155): board projection exposes the full status taxonomy') merged
+    2026-07-20T15:50:08Z and CREDITED W1-T155. PR #374 ('chore(plan): amend T155/T156 darkness-marked + T155
+    liveness bound + T154 progressive load') merged 2026-07-20T17:35:20Z — one hour forty-five minutes LATER —
+    and ADDED two acceptance criteria to W1-T155: the monotonic-under-darkness/github_unobservable marking, and
+    the in-flight liveness bound.
+    WHY NOTHING WILL EVER BUILD THEM: deriveStatus reads W1-T155 as merged (verified live: merged=true, source
+    PR #365), and MERGED IS TERMINAL in the status layer ('MERGED is terminal — nothing below can add anything
+    more useful than \"it landed\"', status.ts:696). The drain's first filter is `if (isMerged(t.id)) continue`
+    (drain.ts:88), so a merged task is skipped before any criterion is examined — VERIFIED: W1-T155 does not
+    appear in a 40-deep `rmd drain --dry-run` at all. The retro's planHealthSweep explicitly skips it too
+    (`if (CLOSED_TASK_STATUSES.has(task.status)) continue; // out of scope — already shipped`, retro.ts:578).
+    And rmd correct cannot un-credit — it re-points a task to its TRUE merged PR and requires --pr, with no
+    un-credit operation. So the criteria sit in the plan, look authoritative, and are unreachable by every rung.
+    THIS IS NOT ACADEMIC — IT IS THE BUG THAT SURVIVED TONIGHT. Criterion 4 IS the fix for the
+    regression-to-queued-on-read-failure defect (the 12:24->12:58 fail-open where merged✓ tasks with PR links
+    became every-task-queued with empty PR cells). PR #398's own body records the consequence in writing: 'W1-T155
+    (the DATA half, listed as this task's dependency) is not actually implemented in status.ts/board.ts as of this
+    PR — the GitHub-unreachable banner therefore reflects whatever the projection reports today, including the
+    not-yet-fixed regression-to-queued-on-read-failure bug.' So W1-T156's darkness banner is satisfied at the
+    RENDER layer over a DATA layer that still lies. The console can now honestly stamp 'GitHub unreachable' while
+    the projection underneath it still regresses credited tasks to queued.
+    HOUSE ANSWER APPLIED (see W1-T180, which makes it enforceable): the amender owns filing the follow-up. Per
+    rule 16 no criterion is dropped or weakened — only REDISTRIBUTED — so both criteria are carried below
+    VERBATIM from W1-T155, character for character, including their falsifiers."
+  design: |
+    Implement the two criteria against the projection, exactly as W1-T155 would have had it done. Both live in
+    the DATA layer (src/lib/status.ts), not the render layer — W1-T156 already shipped the render half, and it
+    is currently stamping honesty over a projection that does not yet provide it. board.ts needs no change: it
+    declares 'Zero new business logic' and consumes projectPlan/deriveStatus verbatim.
+    (i) MONOTONIC UNDER DARKNESS. When the batched gateway's fetch FAILS, the projection must KEEP each task's
+        last-good status and mark it github_unobservable(since <t>) rather than recomputing it as absent. The
+        distinction between a FAILED read and a genuinely ABSENT one already exists — W1-T119 shipped it
+        (PRs #382 and #391 this evening), so this criterion CONSUMES that polarity rather than re-deriving it.
+        Statuses move only FORWARD across an observation gap.
+    (ii) LIVENESS BOUND. 'running' must require recent ledger activity (a heartbeat within N minutes, N a data
+         threshold) OR an open PR. A dispatched row with no terminal verdict AND no recent activity renders
+         unknown/orphaned.
+    NOTE THE RENDER HALF IS ALREADY DONE and must not be rebuilt: W1-T156 (PR #398, merged) ships the visible
+    'GitHub unreachable since <t> — statuses may be stale' stamp keyed off the projection's signal. This task
+    supplies the signal that stamp is keyed off. VERIFY from source which of github_unobservable's plumbing
+    already exists after #398 before writing any of it — distrust this note.
+    DO NOT amend W1-T155 to remove these criteria. It is merged and terminal, and per rule 16 nothing is dropped.
+    The correct end state is that W1-T155 retains them for the record and this task delivers them.
+  acceptance:
+    - claim: "GitHub-unobservable is a MARKED state, never a silent downgrade — a gateway-fetch FAILURE never regresses a credited task to queued (statuses are MONOTONIC under darkness); it keeps the last-good status marked unobservable"
+      proof: "unit test: with the batched gateway's fetch FAILING (throttled/errored — distinguished from genuinely ABSENT per W1-T119/W1-T130's cannot-observe polarity), the projection KEEPS each task's LAST-GOOD status and marks it github_unobservable (since <t>); a merged/credited task does NOT regress to queued on the fetch failure — statuses only move FORWARD across an observation gap. FALSIFIER: a merged/credited task rendered queued during a gateway outage FAILS (the 12:58 fail-open where every task read queued with empty PR cells)"
+    - claim: "in-flight 'running' has a LIVENESS bound — a dispatched row with no terminal verdict AND no recent activity is unknown/orphaned, never running"
+      proof: "unit test: 'running' requires recent ledger activity (a heartbeat within N minutes, N a data threshold) OR an open PR; a dispatched row with no terminal verdict AND no recent activity renders 'unknown/orphaned', NOT running — the W1-T1 crash-era spin-loop orphan rows (dispatched, no terminal verdict, ledger-only join) classify as unknown, not in-flight (the falsifier: an orphaned dispatch rendered as running, the 12:58 W1-T1='running' reading)"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§9"]
+  files: [src/lib/status.ts, test/status.test.ts]
+  status: queued
+  attempts: 0
+  note: "Both acceptance criteria are carried VERBATIM from W1-T155 (added there by PR #374 at 17:35:20Z, after
+    PR #365 credited the task at 15:50:08Z). Rule 16: no criterion dropped or weakened, only redistributed.
+    W1-T155 KEEPS them for the historical record — it is merged and terminal, and editing a merged task to
+    remove criteria would be the goalpost-moving rule 15 forbids.
+    Companion W1-T180 turns the house answer that produced this task (the amender owns filing the follow-up)
+    into an ENFORCED lint check, so the next post-merge amendment cannot orphan silently the way this one did.
+    Delivers the DATA half that W1-T156's shipped render half is currently stamping honesty over.
+    SCOPE NARROWED at filing to src/lib/status.ts alone (an earlier draft also listed board.ts). board.ts states
+    'Zero new business logic: this module only wires those two together' and consumes projectPlan/deriveStatus
+    from status.ts verbatim, so both criteria land wholly in the projection. The narrowing is a correction, not a
+    dodge of Rule 19 — the work genuinely has one home."
