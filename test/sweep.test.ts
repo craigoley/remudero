@@ -9,6 +9,7 @@ import {
   DISPOSITION_RULES,
   checksStateFromRollup,
   deriveDisposition,
+  isBlockedCi,
   renderClarificationQuestion,
   renderSweepSummary,
   runSweep,
@@ -73,10 +74,57 @@ function blockedFixablePr(): OpenPrView {
     prUrl: "url/11",
     taskId: "W1-B",
     reviewState: "failure",
-    checksState: "red",
+    // W1-T138: a PURE review-only block — checks are GREEN (review only ever
+    // runs once CI is green in the first place). A checks-red variant of this
+    // exact shape is its own dedicated fixture below (`checksRedReviewFailingPr`)
+    // — it now routes to ci-log evidence instead, never reviewer-unmet (the
+    // #303/#305/#292/#315 fix); this fixture stays a clean reviewer-unmet
+    // regression lock so it is never conflated with that case again.
+    checksState: "green",
     priorStrikes: 0,
     unmetCriteria: [criterion({ claim: "criterion one" }), criterion({ claim: "criterion two" })],
     reviewSummary: "two criteria unmet",
+  });
+}
+
+// W1-T138 (the #303/#305/#292/#315 fix): a required check (commitlint,
+// CodeQL, osv, ...) is red WHILE a review verdict — success OR failure — also
+// sits on the same head. Either a slower required check settled red AFTER
+// review posted (ciGateFromRollup only waits for a check literally named
+// `ci`), or a fix-rung strike's own push broke a required check while a STALE
+// review verdict from before that push is still in the rollup. Either way the
+// checks-red state must win the EVIDENCE-shape selection — ci-log, never
+// reviewer-unmet — because GitHub will not merge past the red check no matter
+// what the review says, and re-litigating the (possibly stale) review verdict
+// leaves the actual blocker untouched.
+function checksRedReviewFailingPr(): OpenPrView {
+  return pr({
+    prNumber: 303,
+    prUrl: "url/303",
+    taskId: "W1-G",
+    reviewState: "failure",
+    checksState: "red",
+    priorStrikes: 0,
+    unmetCriteria: [criterion({ claim: "criterion one" })],
+    reviewSummary: "one criterion unmet",
+    ciFailures: [{ name: "commitlint", logTail: "header-max-length: 108 chars exceeds the 100 cap" }],
+  });
+}
+function checksRedReviewSuccessPr(): OpenPrView {
+  return pr({
+    prNumber: 292,
+    prUrl: "url/292",
+    taskId: "W1-H",
+    reviewState: "success",
+    checksState: "red",
+    priorStrikes: 0,
+    unmetCriteria: [],
+    ciFailures: [
+      {
+        name: "CodeQL",
+        logTail: "js/incomplete-url-substring-sanitization @ test/worker.test.ts:318 — Incomplete URL substring sanitization",
+      },
+    ],
   });
 }
 function supersededOrphanPr(): OpenPrView {
@@ -259,12 +307,71 @@ test("W1-T100 acceptance 2 — a strike-exhausted ci-red PR routes to the questi
   assert.equal(deps.escalated[0].question.prNumber, seeded.prNumber);
 });
 
-test("W1-T100 acceptance 3 — review-failure routing is unchanged: a review-failure fixture still dispatches reviewer-unmet-shaped evidence", async () => {
+test("W1-T100 acceptance 3 — review-failure routing is unchanged when checks are GREEN: dispatches reviewer-unmet-shaped evidence", async () => {
   const deps = fakeDeps();
   await runSweep([blockedFixablePr()], deps);
   assert.equal(deps.fixed.length, 1);
   assert.equal(deps.fixed[0].evidence.unmetCriteria.length, 2, "the FULL unmet set, unchanged");
   assert.equal(deps.fixed[0].evidence.ciFailures, undefined, "a review-mode dispatch never carries ci-log evidence");
+});
+
+// ── W1-T138 (the #303/#305/#292/#315 fix): a required check red ALWAYS wins
+// the evidence-shape selection over a review verdict sitting beside it — the
+// mode selector no longer treats a CI-check-only failure as reviewer-unmet
+// just because a review verdict (success OR failure) also exists on the same
+// head. Before this fix, the LIVE incident: commitlint/CodeQL failures burned
+// both fix-rung strikes re-litigating stale/unrelated review criteria and
+// escalated as "blocked_review fix rung exhausted", never touching the
+// actually-failing check. ───────────────────────────────────────────────────
+
+test("W1-T138 acceptance 1 — a red required check (commitlint) with a FAILING review verdict on the same head routes to ci-log, not reviewer-unmet (the #303/#305 fix)", async () => {
+  const deps = fakeDeps();
+  const seeded = checksRedReviewFailingPr();
+
+  const summary = await runSweep([seeded], deps);
+
+  assert.equal(summary.byDisposition["blocked-fixable"], 1);
+  assert.equal(deps.fixed.length, 1, "fix FIRST — the checks-red block dispatches exactly one worker");
+  assert.deepEqual(deps.fixed[0].evidence.unmetCriteria, [], "the review's unmet criteria are NOT the dispatched evidence — they may be stale");
+  assert.deepEqual(deps.fixed[0].evidence.ciFailures, seeded.ciFailures, "the failing check (commitlint) rides the dispatch instead");
+});
+
+test("W1-T138 acceptance 1b — a red required check (CodeQL) with a PASSING review verdict on the same head ALSO routes to ci-log fixable, never straight to escalate (the #292/#315 fix)", async () => {
+  const deps = fakeDeps();
+  const seeded = checksRedReviewSuccessPr();
+
+  const summary = await runSweep([seeded], deps);
+
+  assert.equal(summary.byDisposition["blocked-fixable"], 1, "a checks-red PR is POSITIVELY fixable even with review already SUCCESS — never the terminal escalate");
+  assert.equal(deps.fixed.length, 1);
+  assert.equal(deps.escalated.length, 0);
+  assert.deepEqual(deps.fixed[0].evidence.unmetCriteria, []);
+  assert.deepEqual(deps.fixed[0].evidence.ciFailures, seeded.ciFailures);
+});
+
+test("W1-T138 — isBlockedCi is checks-red alone now; a failing review no longer excludes it (BROADENED from W1-T100's reviewState===\"none\"-only check)", () => {
+  assert.equal(isBlockedCi(checksRedReviewFailingPr()), true);
+  assert.equal(isBlockedCi(checksRedReviewSuccessPr()), true);
+  assert.equal(isBlockedCi(blockedCiPr()), true, "the original checks-red/review-none shape (W1-T100) still matches");
+  assert.equal(isBlockedCi(blockedFixablePr()), false, "checks GREEN is never blocked_ci, review state notwithstanding");
+});
+
+test("W1-T138 — deriveDisposition: checks-red beats a failing review's reason text too — never claims 'no review posted yet' when one plainly has", () => {
+  const r = deriveDisposition(checksRedReviewFailingPr(), DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-fixable");
+  assert.match(r.reason, /checks red/);
+  assert.doesNotMatch(r.reason, /no review posted yet/, "misleading once a review verdict genuinely exists");
+});
+
+test("W1-T138 — a checks-red PR with strikes exhausted still escalates (the shared ladder honors the broadened predicate too), regardless of the review verdict beside it", async () => {
+  const deps = fakeDeps();
+  const exhausted: OpenPrView = { ...checksRedReviewFailingPr(), prNumber: 999, priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap };
+
+  const summary = await runSweep([exhausted], deps);
+
+  assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
+  assert.equal(deps.fixed.length, 0, "exhausted — never a further fix dispatch");
+  assert.equal(deps.escalated.length, 1);
 });
 
 // ── ACCEPTANCE 1: the P22 golden, verbatim ────────────────────────────────────
