@@ -6,7 +6,9 @@ import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import {
   buildServeServer,
+  DEFAULT_BOARD_PREWARM_MS,
   DEFAULT_SERVE_PORT,
+  prewarmBoardGithub,
   renderShellHtml,
   resolveServePort,
   resolveServiceTokens,
@@ -313,6 +315,72 @@ test("GET /v1/status over a full 183-task plan: first-paint-to-data under budget
     assert.ok(ms < 2000, `first-paint-to-data ${ms.toFixed(0)}ms exceeded the 2000ms budget`);
     assert.equal(fetchCalls, 1, `expected O(1) GitHub fetch for the snapshot, got ${fetchCalls} for ${N} tasks`);
   });
+});
+
+// ── W1-T154: the batched gateway is PRE-WARMED at serve boot, not lazily on the first request ──
+//
+// Acceptance: "at serve boot the gateway fetch fires ONCE (pre-warm) before any request, and a
+// background timer refreshes it on the TTL; the FIRST GET /v1/status serves from the warm cache
+// with ZERO additional fetches on the request path — a first request that triggers the cold
+// fetch FAILS the test (the falsifier)".
+
+test("buildServeServer pre-warms board.github at construction — BEFORE listen() and before any request", async () => {
+  const root = tmpRoot();
+  let fetchCalls = 0;
+  const github = buildBatchedGithub("craigoley", "remudero", { fetchAll: () => { fetchCalls++; return []; } });
+  const deps = depsFor(root, planOf([task({ id: "A" })]), { board: { plan: planOf([task({ id: "A" })]), ledgerPath: ledgerPathFor(root), github } });
+
+  assert.equal(fetchCalls, 0, "sanity: nothing has fetched yet");
+  const server = buildServeServer(deps);
+  try {
+    // The pre-warm fetch already happened INSIDE buildServeServer, before .listen() was even
+    // called — no request, no .listen(), and yet the gateway is already warm.
+    assert.equal(fetchCalls, 1, "buildServeServer must pre-warm board.github synchronously at construction (boot), not lazily");
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const res = await get(`http://127.0.0.1:${port}`, "/v1/status", READ_TOKEN);
+    assert.equal(res.status, 200);
+    // The FIRST real request must serve from the already-warm cache: zero ADDITIONAL fetches.
+    assert.equal(fetchCalls, 1, "the first GET /v1/status must add ZERO fetches — it must never be the cold-fetch request");
+  } finally {
+    server.close();
+  }
+});
+
+test("prewarmBoardGithub: a background timer re-warms on the TTL, with NO request ever made", async () => {
+  let fetchCalls = 0;
+  const github: GitHub = buildBatchedGithub("o", "r", {
+    ttlMs: 20,
+    fetchAll: () => { fetchCalls++; return []; },
+  });
+  const stop = prewarmBoardGithub(github, 20); // background refresh every 20ms, matching the gateway's own TTL
+  try {
+    assert.equal(fetchCalls, 1, "prewarmBoardGithub must warm synchronously and immediately");
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.ok(fetchCalls >= 3, `expected multiple BACKGROUND refreshes with zero requests, got ${fetchCalls}`);
+  } finally {
+    stop();
+  }
+});
+
+test("buildServeServer wires the prewarm timer's lifecycle to the server's own close() (no leaked interval)", async () => {
+  const root = tmpRoot();
+  let fetchCalls = 0;
+  const github = buildBatchedGithub("o", "r", { ttlMs: 10, fetchAll: () => { fetchCalls++; return []; } });
+  const deps = depsFor(root, planOf([task()]), { board: { plan: planOf([task()]), ledgerPath: ledgerPathFor(root), github }, boardGithubRefreshMs: 10 });
+  const server = buildServeServer(deps);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  const callsBeforeClose = fetchCalls;
+  assert.ok(callsBeforeClose >= 2, "the background timer must have fired at least once before close()");
+  server.close();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(fetchCalls, callsBeforeClose, "closing the server must stop the background prewarm timer — no further fetches after close()");
+});
+
+test("DEFAULT_BOARD_PREWARM_MS matches buildBatchedGithub's own default TTL (15s) — the background refresh lands right as the cache would go stale", () => {
+  assert.equal(DEFAULT_BOARD_PREWARM_MS, 15_000);
 });
 
 // ── port + token resolution (CLI glue, unit-tested directly) ────────────────────────────────

@@ -530,6 +530,54 @@ test("buildBatchedGithub.findMergedByTrailer returns the NEWEST (highest-number)
   assert.equal(gh.findMergedByTrailer("W1-T3")?.url, "new");
 });
 
+// ── buildBatchedGithub.warm (W1-T154): the pre-warm hook lib/serve.ts's boot sequence calls ────
+//
+// "PRE-WARM: build + fetch the batched gateway at serve BOOT and refresh it in the BACKGROUND on
+// its TTL, so the first request serves from a warm cache and never pays the cold fetch" — proven
+// here at the gateway level (lib/serve.ts's prewarmBoardGithub is proven separately, against the
+// assembled server, in test/serve.test.ts): `.warm()` forces the SAME lazy fetch every OTHER
+// method already triggers, so a caller (boot) can force it BEFORE any request/method call, and a
+// periodic caller (a background timer) re-forces it once the TTL has actually elapsed — exactly
+// {@link buildBatchedGithub}'s existing `now()`-driven TTL check, no separate "force" branch.
+
+test("buildBatchedGithub.warm(): forces the fetch immediately, with NO query method called first", () => {
+  let fetchCalls = 0;
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => { fetchCalls++; return []; } });
+  assert.equal(fetchCalls, 0, "sanity: the fetch is still lazy until warm()/a query forces it");
+  gh.warm?.();
+  assert.equal(fetchCalls, 1, "warm() must force the fetch NOW — the whole point of a boot-time pre-warm");
+});
+
+test("buildBatchedGithub.warm(): a SECOND warm() within the TTL does not refetch; past the TTL it does (background-refresh semantics)", () => {
+  let fetchCalls = 0;
+  let clock = 1000;
+  const gh = buildBatchedGithub("o", "r", {
+    ttlMs: 100,
+    now: () => clock,
+    fetchAll: () => { fetchCalls++; return []; },
+  });
+  gh.warm?.();
+  assert.equal(fetchCalls, 1);
+  gh.warm?.(); // still within the TTL -- a background timer ticking faster than the TTL must not spam `gh`
+  assert.equal(fetchCalls, 1);
+  clock += 150; // past the 100ms TTL -- the NEXT background tick's warm() call
+  gh.warm?.();
+  assert.equal(fetchCalls, 2, "a warm() call past the TTL must refresh — this backs the background-refresh timer");
+});
+
+test("buildBatchedGithub.warm(): after warming, the FIRST query method resolves with ZERO additional fetches (the request path is never cold)", () => {
+  let fetchCalls = 0;
+  const prs: BatchedPr[] = [{ number: 1, url: "u1", state: "MERGED", body: "Remudero-Task: W1-T9\n" }];
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => { fetchCalls++; return prs; } });
+  gh.warm?.();
+  assert.equal(fetchCalls, 1);
+  // The first real "request" (a query method) after warm() -- must serve from the already-warm
+  // cache, not trigger its own fetch (the falsifier: "a first request that triggers the cold
+  // fetch FAILS").
+  assert.equal(gh.findMergedByTrailer("W1-T9")?.number, 1);
+  assert.equal(fetchCalls, 1, "the first query after warm() must add ZERO fetches");
+});
+
 // ── P29(ii): the per-task dispatch CIRCUIT BREAKER — §9's per-WORKER runaway
 // tripwire's per-TASK dual (the W1-T1 storm tripped no per-run budget cap
 // because no single RUN ran away; the whole TASK did, across ~130 runs).

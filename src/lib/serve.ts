@@ -39,6 +39,7 @@ import { dirname, join } from "node:path";
 import type { Server } from "node:http";
 import { createService, type Route, type ServiceOptions, type ServiceTokens } from "./service.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
+import type { GitHub } from "./status.js";
 import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
@@ -76,8 +77,38 @@ export interface ServeDeps {
   tokens: ServiceTokens;
   /** Board SSE poll pace; defaults to board.ts's own `DEFAULT_POLL_MS` (250ms, the W3-T2 2s acceptance bar). */
   pollMs?: number;
+  /**
+   * W1-T154: how often {@link prewarmBoardGithub}'s background timer re-warms `board.github`.
+   * Defaults to {@link DEFAULT_BOARD_PREWARM_MS} (matches `buildBatchedGithub`'s own default TTL
+   * in status.ts, so the background refresh lands right as the gateway's cache would otherwise
+   * go stale). Only meaningful for a gateway implementing {@link GitHub.warm}; a no-op otherwise.
+   */
+  boardGithubRefreshMs?: number;
   /** Forwarded to `createService` — one ledger line per auth decision/SSE lifecycle/handler error. */
   log?: ServiceOptions["log"];
+}
+
+/** Matches {@link buildBatchedGithub}'s own default `ttlMs` (status.ts) — kept as one named
+ *  constant here rather than a bare literal so the two stay visibly the same number. */
+export const DEFAULT_BOARD_PREWARM_MS = 15_000;
+
+/**
+ * PRE-WARM (W1-T154, MASTER-PLAN §7/§7B): call `github.warm()` (if it has one — status.ts's
+ * `buildBatchedGithub` does) SYNCHRONOUSLY, before {@link buildServeServer}'s caller ever
+ * `.listen()`s — so the board's underlying `gh pr list` fetch has already happened by BOOT,
+ * and the FIRST `GET /v1/status` a real client sends resolves against an already-warm in-memory
+ * index with zero additional GitHub fetches on the request path (the task's own falsifier: "a
+ * first request that triggers the cold fetch FAILS"). Then schedules a background timer that
+ * calls `warm()` again every `refreshMs` — the gateway never goes cold again waiting on a
+ * request to trigger its own refetch. `.unref()`'d so this never keeps a short-lived process
+ * (a test, a one-shot script) alive; {@link buildServeServer} wires the returned `stop` function
+ * to the server's own `close` event so the timer doesn't outlive it.
+ */
+export function prewarmBoardGithub(github: GitHub, refreshMs: number = DEFAULT_BOARD_PREWARM_MS): () => void {
+  github.warm?.();
+  const timer = setInterval(() => github.warm?.(), refreshMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 
 /**
@@ -126,7 +157,27 @@ export interface ServeDeps {
  * route in service.ts's model — `GET /` is `scope: "read"` like everything else; the reader
  * must already carry a token, same `?token=` query-param convention apps/dashboard's own
  * `main.ts` uses).
+ *
+ * W1-T154 ADDENDUM (first-paint perf, separable from the above IA/design work): the initial
+ * markup below ships a SKELETON (see `skeletonRows`) in every row-list, never a bare "loading…"
+ * text block. The page's own script then paints, in order: (1) a last-snapshot cache from
+ * localStorage if one exists, stamped STALE via `#stale-badge`/`top-status`'s `data-stale`
+ * attribute, swapped for live data the instant it arrives; (2) `GET /v1/status` ALONE, painting
+ * NOW + the `#summary` line immediately — never gated behind the other five endpoints
+ * (progressive load); (3) those other five, completing the picture. See `refreshAll`'s own
+ * comment for the full sequencing.
  */
+/**
+ * W1-T154: the initial-paint placeholder for a row list with no data yet — a REAL skeleton (a
+ * distinct, visually-pulsing "content is coming" marker), never the bare "loading…" text a
+ * screen-reader-silent, visually-empty-looking block the acceptance bar's falsifier names
+ * ("never a blank 'loading…' block"). `aria-hidden` because the page's `#top-status` (aria-live)
+ * is the one accessible loading announcement — these rows are a purely visual placeholder.
+ */
+function skeletonRows(n: number): string {
+  return Array.from({ length: n }, () => '<li class="row skeleton" aria-hidden="true"><span class="skeleton-bar"></span></li>').join("");
+}
+
 export function renderShellHtml(): string {
   return `<!doctype html>
 <html lang="en">
@@ -196,6 +247,18 @@ export function renderShellHtml(): string {
   .status-label.status-merged { color: var(--status-merged); }
   .status-label.status-queued { color: var(--status-queued); }
   .empty { color: var(--text-faint); font-size: 0.875rem; }
+  /* W1-T154: first-paint skeleton — a pulsing placeholder bar, never a blank/empty block. */
+  .row.skeleton { opacity: 0.7; }
+  .skeleton-bar {
+    display: inline-block; width: 100%; height: 0.9rem; border-radius: 4px;
+    background: linear-gradient(90deg, var(--bg-elevated) 25%, var(--border) 37%, var(--bg-elevated) 63%);
+    background-size: 400% 100%; animation: skeleton-pulse 1.4s ease infinite;
+  }
+  @keyframes skeleton-pulse { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+  #stale-badge {
+    display: inline-block; margin: 0.25rem 0 0; padding: 0.15rem 0.5rem; border-radius: 999px;
+    font-size: 0.75rem; font-weight: 600; background: var(--status-needs-human); color: #241a02;
+  }
   button {
     font: inherit; background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 0.4rem 0.75rem; cursor: pointer;
@@ -225,26 +288,28 @@ export function renderShellHtml(): string {
 <header>
   <h1>Remudero — the operator console</h1>
   <p id="top-status" role="status" aria-live="polite">loading…</p>
+  <p id="summary" class="counts" aria-live="polite"></p>
+  <span id="stale-badge" hidden>STALE — showing last known data</span>
 </header>
 
 <section id="now" class="panel-section" aria-label="Now">
   <h2>Now</h2>
-  <ul id="now-list" class="row-list"><li class="empty">loading…</li></ul>
+  <ul id="now-list" class="row-list">${skeletonRows(2)}</ul>
 </section>
 
 <section id="needs-me" class="panel-section" aria-label="Needs me">
   <h2>Needs me</h2>
-  <ul id="needs-me-list" class="row-list"><li class="empty">loading…</li></ul>
+  <ul id="needs-me-list" class="row-list">${skeletonRows(2)}</ul>
 </section>
 
 <section id="up-next" class="panel-section" aria-label="Up next">
   <h2>Up next</h2>
-  <ul id="up-next-list" class="row-list"><li class="empty">loading…</li></ul>
+  <ul id="up-next-list" class="row-list">${skeletonRows(3)}</ul>
 </section>
 
 <section id="recent" class="panel-section" aria-label="Recent">
   <h2>Recent</h2>
-  <ul id="recent-list" class="row-list"><li class="empty">loading…</li></ul>
+  <ul id="recent-list" class="row-list">${skeletonRows(3)}</ul>
 </section>
 
 <section id="rest" class="panel-section" aria-label="Everything else">
@@ -344,6 +409,59 @@ export function renderShellHtml(): string {
     if (!t.prUrl) return "";
     const label = t.prNumber !== undefined ? \`#\${t.prNumber}\` : t.prUrl;
     return \` · <a href="\${t.prUrl}" target="_blank" rel="noreferrer">\${label}</a>\`;
+  }
+
+  // ── W1-T154: first-paint-is-never-cold — a last-snapshot cache (localStorage, survives a
+  // reload/relaunch of THIS browser) painted INSTANTLY, before any network round trip, stamped
+  // STALE; the static skeleton above already covers the true cold-start case (no cache at all).
+  const SNAPSHOT_CACHE_KEY = "rmd-console-snapshot-v1";
+
+  function readSnapshotCache() {
+    try {
+      const raw = localStorage.getItem(SNAPSHOT_CACHE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null; // storage disabled/corrupt — the cache is a nicety, never load-bearing.
+    }
+  }
+  function writeSnapshotCache(snapshot) {
+    try {
+      localStorage.setItem(SNAPSHOT_CACHE_KEY, JSON.stringify(snapshot));
+    } catch {
+      // quota exceeded/disabled — silently skip; next reload just sees the skeleton instead.
+    }
+  }
+  function markStale(asOf) {
+    const badge = document.getElementById("stale-badge");
+    badge.hidden = false;
+    badge.textContent = \`STALE — showing last known data as of \${asOf ?? "an earlier load"}\`;
+    document.getElementById("top-status").dataset.stale = "true";
+  }
+  function clearStale() {
+    document.getElementById("stale-badge").hidden = true;
+    delete document.getElementById("top-status").dataset.stale;
+  }
+
+  function summaryText(tasks) {
+    const total = tasks.length;
+    const merged = tasks.filter((t) => t.status === "merged" || t.status === "done").length;
+    const running = tasks.filter((t) => t.status === "running").length;
+    const queued = tasks.filter((t) => t.status === "queued").length;
+    return \`\${total} tasks · \${running} running · \${merged} merged · \${queued} queued\`;
+  }
+
+  /** Repaints EVERY section from one composite snapshot — the single function the cache-restore
+   *  path and a completed live refresh both funnel through, so "instant paint from cache" and
+   *  "a live refresh" can never drift into two different rendering codepaths. */
+  function paintSnapshot(snapshot) {
+    const tasks = snapshot.tasks ?? [];
+    const nowIds = renderNow(tasks);
+    const needsMeIds = renderNeedsMe(tasks, snapshot.feedbackEntries ?? [], snapshot.inboxReady ?? []);
+    const upNextIds = renderUpNext(snapshot.upNextCards ?? []);
+    const recentIds = renderRecent(snapshot.recentEntries ?? []);
+    renderRest(tasks, new Set([...nowIds, ...needsMeIds, ...upNextIds, ...recentIds]));
+    applyControlStatus(snapshot.controlStatus ?? { paused: false, stopped: false, quietHours: false });
+    document.getElementById("summary").textContent = summaryText(tasks);
   }
 
   // ── NOW — in-flight runs, live phase + elapsed ──────────────────────────────────────────
@@ -583,28 +701,65 @@ export function renderShellHtml(): string {
   // ── the poll loop: one refresh drives NOW/NEEDS ME/UP NEXT/RECENT/rest + fleet-control
   // read-back. v0: polls (same rationale the original shell documented for GET /v1/status —
   // native EventSource cannot carry an Authorization header); @remudero/api-client's
-  // subscribeStatus already implements real SSE consumption for a client that wants it. ──────
+  // subscribeStatus already implements real SSE consumption for a client that wants it.
+  //
+  // W1-T154 PROGRESSIVE LOAD: /v1/status is fetched ALONE first, and NOW + the summary line
+  // render off it IMMEDIATELY — never gated behind the other five endpoints below. A single
+  // fetch-everything-then-render-anything pattern is exactly the falsifier the task's own
+  // acceptance text names ("a single blocking full-board fetch that renders nothing until all N
+  // rows are ready FAILS"). top-status's final "updated" text (and the stale-cache swap it
+  // implies) still lands only once every section has repainted — unchanged from before this
+  // task, and load-bearing for callers that wait on it as "the refresh is fully done". ─────────
   async function refreshAll() {
+    let statusSnap;
     try {
-      const [statusSnap, recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus] = await Promise.all([
-        getJson("/v1/status"),
+      statusSnap = await getJson("/v1/status");
+    } catch (e) {
+      document.getElementById("top-status").textContent = \`refresh failed: \${e}\`;
+      return;
+    }
+    const tasks = statusSnap.tasks ?? [];
+    const nowIds = renderNow(tasks);
+    renderNeedsMe(tasks, [], []); // tasks-only pass now; the full pass (below) adds feedback/inbox rows
+    document.getElementById("summary").textContent = summaryText(tasks);
+
+    try {
+      const [recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus] = await Promise.all([
         getJson("/v1/recent").catch(() => ({ entries: [] })),
         getJson("/v1/drain/preview?max=5").catch(() => ({ cards: [] })),
         getJson("/v1/feedback").catch(() => ({ entries: [] })),
         getJson("/v1/inbox").catch(() => ({ ready: [] })),
         getJson("/v1/control/status").catch(() => ({ paused: false, stopped: false, quietHours: false })),
       ]);
-      const tasks = statusSnap.tasks ?? [];
-      const nowIds = renderNow(tasks);
       const needsMeIds = renderNeedsMe(tasks, feedbackSnap.entries, inboxSnap.ready);
       const upNextIds = renderUpNext(upNextSnap.cards);
       const recentIds = renderRecent(recentSnap.entries);
       renderRest(tasks, new Set([...nowIds, ...needsMeIds, ...upNextIds, ...recentIds]));
       applyControlStatus(controlStatus);
       document.getElementById("top-status").textContent = \`updated \${statusSnap.generated_at ?? new Date().toISOString()}\`;
+      clearStale(); // a completed live refresh always supersedes whatever the cache painted
+
+      writeSnapshotCache({
+        generated_at: statusSnap.generated_at,
+        tasks,
+        recentEntries: recentSnap.entries,
+        upNextCards: upNextSnap.cards,
+        feedbackEntries: feedbackSnap.entries,
+        inboxReady: inboxSnap.ready,
+        controlStatus,
+      });
     } catch (e) {
       document.getElementById("top-status").textContent = \`refresh failed: \${e}\`;
     }
+  }
+
+  // FIRST PAINT, before any network round trip completes (W1-T154): a last-snapshot cache from
+  // a previous load, stamped STALE — or, with no cache at all (a true cold start), the skeleton
+  // the static HTML above already ships. Either way, never a blank page.
+  const cachedSnapshot = readSnapshotCache();
+  if (cachedSnapshot) {
+    paintSnapshot(cachedSnapshot);
+    markStale(cachedSnapshot.generated_at);
   }
   refreshAll();
   setInterval(refreshAll, 3000);
@@ -659,14 +814,21 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
   ];
 }
 
-/** Build (but do not `.listen()`) the full `rmd serve` HTTP server — one call, every route wired. */
+/**
+ * Build (but do not `.listen()`) the full `rmd serve` HTTP server — one call, every route wired.
+ * ALSO pre-warms `deps.board.github` (W1-T154) — synchronously, before this function returns —
+ * and starts its background TTL refresh, stopped when the returned server `close`s.
+ */
 export function buildServeServer(deps: ServeDeps): Server {
-  return createService({
+  const server = createService({
     tokens: deps.tokens,
     routes: buildServeRoutes(deps),
     sse: [buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS)],
     log: deps.log,
   });
+  const stopPrewarm = prewarmBoardGithub(deps.board.github, deps.boardGithubRefreshMs ?? DEFAULT_BOARD_PREWARM_MS);
+  server.on("close", stopPrewarm);
+  return server;
 }
 
 // ── CLI glue: port + token resolution (kept here, not run-task.ts, so both are unit-testable
