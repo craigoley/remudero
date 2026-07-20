@@ -208,6 +208,16 @@ export async function runDaemon(
   // MAX_TRANSIENT_RETRIES (reasonAboutBlock). Dropped once a task's
   // disposition is no longer `retry_transient` (merged, flagged, or escalated).
   const blockRetryStates = new Map<string, RetryState>();
+  // CIRCUIT BREAKER ESCALATION DEDUP (P29(ii)): the daemon is a PERSISTENT
+  // loop — `nextRunnable` is re-invoked on EVERY tick, forever, so without this
+  // a task that stays tripped would be re-escalated on every idle poll for as
+  // long as the daemon keeps running (unbounded, the very unbounded-noise
+  // shape P29 exists to prevent). This Set bounds the CALLBACK to the
+  // daemon's own first observation of each task id this run; `isCircuitTripped`
+  // itself is still consulted (and still excludes the task from dispatch)
+  // every tick — see drain.ts's `runDrain`, the identical fix for the bounded
+  // one-shot loop.
+  const circuitEscalated = new Set<string>();
 
   const summary = (stopReason: DaemonStopReason, stopDetail?: string): DaemonSummary => {
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
@@ -265,11 +275,16 @@ export async function runDaemon(
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
       isCircuitTripped: deps.isCircuitTripped,
       // CIRCUIT BREAKER (P29(ii)): a legible ledger line every tick it is
-      // consulted, PLUS the caller's own escalation hook — the daemon keeps
-      // polling everything else rather than halting the whole loop.
+      // consulted — but the caller's own escalation hook fires AT MOST ONCE
+      // per task id for this daemon run (`circuitEscalated`, above) — the
+      // daemon keeps polling everything else rather than halting the whole
+      // loop, and never re-escalates a task it already escalated.
       onCircuitBreak: (t) => {
         log("dispatch.circuit_broken", { task: t.id });
-        deps.onCircuitBreak?.(t);
+        if (!circuitEscalated.has(t.id)) {
+          circuitEscalated.add(t.id);
+          deps.onCircuitBreak?.(t);
+        }
       },
     });
     if (!next) {

@@ -276,6 +276,45 @@ test("P29(ii) runDrain integration: a circuit-broken task is skipped with a disp
   assert.equal(brokenLine?.extra.task, "A");
 });
 
+test("P29(ii) the W1-T29 x10 spin shape: a task at N+1 dispatches with no owned PR HALTS with EXACTLY ONE escalation and ZERO further dispatches, across MULTIPLE ticks of the SAME drain run", async () => {
+  // `nextRunnable` is re-invoked on EVERY tick of the loop — a naive wiring
+  // re-observes (and re-escalates) a still-tripped task on every tick it
+  // remains the only thing left to look at, not just the first. This plan
+  // (A tripped; D independent) forces a SECOND tick after D dispatches
+  // successfully: tick 1 observes A tripped then dispatches D; tick 2 (D is
+  // now merged) observes A tripped AGAIN with nothing else left to run. A
+  // wiring that escalates once per OBSERVATION (rather than once per TASK
+  // for the whole run) fails this — the exact regression this test guards.
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const broken: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      isCircuitTripped: (id) => id === "A",
+      onCircuitBreak: (t) => broken.push(t.id),
+      runOne: async (id) => {
+        ran.push(id);
+        merged.add(id);
+        return okResult(id);
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    // No --max ⇒ DEFAULT_MAX (10): enough headroom for a SECOND tick to occur
+    // after D merges, so the drain runs to "no_runnable" on its own rather
+    // than being cut short at exactly one tick (which would hide this bug).
+  );
+  assert.ok(!ran.includes("A"), "A (circuit-broken) was never dispatched, at N or at N+1");
+  assert.deepEqual(ran, ["D"], "D is the only task ever dispatched — B/C stay unmet-dependency-blocked on the tripped A");
+  assert.equal(s.stopReason, "no_runnable", "the drain ran a SECOND tick (proving A was re-observed, not just observed once)");
+  assert.deepEqual(broken, ["A"], "onCircuitBreak fired EXACTLY ONCE for A, even though nextRunnable re-observed it tripped on a later tick too");
+  const brokenLines = lines.filter((l) => l.step === "dispatch.circuit_broken");
+  assert.ok(brokenLines.length >= 2, "sanity: A really was re-observed tripped on a second tick (the ledger line legibly re-logs every observation)");
+});
+
 test("plannedSequence (--dry-run order): simulates merges forward, honouring deps + --max + --until", () => {
   const plan = fixturePlan();
   assert.deepEqual(plannedSequence(plan, NONE_MERGED), ["A", "B", "C", "D"]);

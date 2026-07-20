@@ -281,6 +281,49 @@ test("P29(ii): no isCircuitTripped wired ⇒ the daemon dispatches exactly as be
   assert.equal(s.stopReason, "max_reached");
 });
 
+test("P29(ii) the W1-T29 x10 spin shape: a circuit-broken task is escalated EXACTLY ONCE across MANY idle polls of the PERSISTENT daemon loop, never re-escalated tick after tick", async () => {
+  // Unlike `rmd drain` (a bounded one-shot loop), the daemon POLLS FOREVER —
+  // `nextRunnable` is re-invoked on every idle tick, so a naive wiring that
+  // escalates once per OBSERVATION (rather than once per TASK for the whole
+  // daemon run) would open — or attempt to open — a fresh escalation on every
+  // single poll, unboundedly, for as long as the daemon keeps running. That is
+  // the exact unbounded-noise shape P29 exists to prevent; this proves the
+  // daemon's own dedup, independent of whatever dedup the CLI-layer escalation
+  // callback itself does.
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const broken: string[] = [];
+  const root = mkdtempSync(join(tmpdir(), "daemon-circuit-spin-"));
+  let calls = 0;
+  const sleep = async (_ms: number) => {
+    calls++;
+    // D dispatches+merges on tick 1; every tick after that is idle (A stays
+    // tripped forever; B/C stay unmet-dependency-blocked on A). After several
+    // such idle polls, the "test operator" issues STOP so the test terminates
+    // — proving the loop genuinely kept polling (re-observing A tripped each
+    // time), not that it happened to stop after one look.
+    if (calls >= 5) requestStop(root, "test done polling");
+  };
+  const s = await runDaemon(plan, {
+    refreshMerged: () => (id) => merged.has(id),
+    isCircuitTripped: (id) => id === "A",
+    onCircuitBreak: (t) => broken.push(t.id),
+    runOne: async (id) => {
+      ran.push(id);
+      merged.add(id);
+      return okResult(id);
+    },
+    checkStop: () => stopDetail(root),
+    sleep,
+  });
+  assert.equal(s.stopReason, "stopped");
+  assert.ok(calls >= 5, "the loop really did idle-poll multiple times before the test stopped it");
+  assert.ok(!ran.includes("A"), "A (circuit-broken) was never dispatched, no matter how many polls observed it tripped");
+  assert.deepEqual(ran, ["D"], "D is the only task ever dispatched");
+  assert.deepEqual(broken, ["A"], "onCircuitBreak fired EXACTLY ONCE for A across the WHOLE daemon run, despite 5+ re-observations");
+});
+
 // ── STOP / PAUSE (W1-T11) ───────────────────────────────────────────────────
 
 test("STOP: checked first, every tick — halts within one tick, no subsequent spawns", async () => {

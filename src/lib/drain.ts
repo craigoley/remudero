@@ -422,6 +422,16 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   const attempted: string[] = [];
   const merged: string[] = [];
   let costUsd = 0;
+  // CIRCUIT BREAKER ESCALATION DEDUP (P29(ii)): `nextRunnable`/`nextCurated` are
+  // re-invoked every tick, so a task that stays tripped (never dispatched, never
+  // resolved) would otherwise be re-observed — and re-escalated — on EVERY
+  // subsequent tick for as long as the drain keeps running (e.g. an unrelated
+  // independent task still dispatches successfully first, so the drain does not
+  // stop at "no_runnable" the very first time the breaker is consulted). That
+  // violates "exactly one escalation" — this Set bounds the CALLBACK to the
+  // drain's own first observation of each task id; `isCircuitTripped` itself is
+  // still consulted (and still excludes the task from dispatch) every tick.
+  const circuitEscalated = new Set<string>();
 
   const summary = (stopReason: StopReason, stopDetail?: string): DrainSummary => {
     const s: DrainSummary = { attempted, merged, stopReason, stopDetail, costUsd, resumeCommand: resumeCommand(opts) };
@@ -472,11 +482,16 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
       isCircuitTripped: deps.isCircuitTripped,
       // CIRCUIT BREAKER (P29(ii)): a legible ledger line every tick it is
-      // consulted (mirrors dispatch.skipped), PLUS the caller's own escalation
-      // hook — the drain proceeds to the next runnable task rather than halting.
+      // consulted (mirrors dispatch.skipped) — but the caller's own escalation
+      // hook fires AT MOST ONCE per task id per drain run (`circuitEscalated`,
+      // above) — the drain proceeds to the next runnable task rather than
+      // halting, and never re-escalates a task it already escalated this run.
       onCircuitBreak: (t) => {
         log("dispatch.circuit_broken", { task: t.id });
-        deps.onCircuitBreak?.(t);
+        if (!circuitEscalated.has(t.id)) {
+          circuitEscalated.add(t.id);
+          deps.onCircuitBreak?.(t);
+        }
       },
     };
     // CURATION (W1-T140): a curated selection overrides the natural DAG scan
