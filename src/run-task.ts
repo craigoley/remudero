@@ -47,7 +47,9 @@ import {
   calibrationTable,
   codeFilesInDiff,
   loadMarker,
+  probeGithubThrottle,
   renderGather,
+  type ShippedGithub,
 } from "./lib/retro.js";
 import { regenerateOrientation } from "./lib/orientation.js";
 import { appendLedger } from "./lib/ledger.js";
@@ -2401,11 +2403,31 @@ async function retroCommand(rest: string[]): Promise<number> {
   const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
   const learningsMd = existsSync(learningsPath) ? readFileSync(learningsPath, "utf8") : "";
   const marker = loadMarker(markerPath);
+  // W1-T132: resolved EARLY (a pure git-config read, no spawn) so the SHIPPED
+  // union (W1-T51's shippedSince) can be wired into the gather from the start —
+  // omitting `github` here degrades `shipped` to the ledger-only list, which is
+  // structurally EMPTY in the gate-side-merge era (every merge now lands via the
+  // gate, never a ledger verdict=merged write).
+  const { owner, repo } = resolveOwnerRepo();
+  const baseGithub = ghGateway(owner, repo);
+  // DEGRADE LOUDLY (design ii): `unavailable` is checked ONCE per gather via a
+  // real `gh api rate_limit` probe — an exhausted quota or a `gh` CLI failure is
+  // NAMED in the rendered report rather than silently read as "nothing shipped"
+  // (every findMergedByTrailer/headRefName call would otherwise fail the same
+  // way a genuine absence does). This exact object literal (not a spread) keeps
+  // it structurally matched to ShippedGithub — no excess properties leaking in
+  // from GitHub's wider surface (prByRef/prBody).
+  const github: ShippedGithub = {
+    findMergedByTrailer: (taskId) => baseGithub.findMergedByTrailer(taskId),
+    headRefName: (prUrl) => baseGithub.headRefName(prUrl),
+    unavailable: () => probeGithubThrottle(),
+  };
   const gather = buildGather({
     ledgerNdjson,
     learningsMd,
     sinceTs: marker?.ts,
     learningsAtMarker: marker?.learnings_count,
+    github,
   });
   const report = renderGather(gather);
 
@@ -2427,7 +2449,6 @@ async function retroCommand(rest: string[]): Promise<number> {
   // crashed `gh pr create --fill` (no diff to fill).
   const mountsTable = loadMounts(mountsPath(repoRoot));
 
-  const { owner, repo } = resolveOwnerRepo();
   const runId = `RETRO-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, ...extra });
