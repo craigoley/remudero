@@ -15,7 +15,7 @@ import {
 } from "../src/lib/serve.js";
 import { isPaused, pauseDetail } from "../src/lib/fleet-control.js";
 import type { Plan, Task } from "../src/lib/plan.js";
-import type { GitHub, PrRef } from "../src/lib/status.js";
+import { buildBatchedGithub, type GitHub, type PrRef } from "../src/lib/status.js";
 import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
 
@@ -262,6 +262,57 @@ test("renderShellHtml is pure and matches what GET / serves", () => {
   const html = renderShellHtml();
   assert.match(html, /<!doctype html>/i);
   assert.match(html, /id="board"/);
+});
+
+// ── Board-hang regression (GET /v1/status over the FULL plan) ────────────────────────────────────
+// The board hung at "loading…" because computeBoardSnapshot -> projectPlan -> deriveStatus PER TASK,
+// and the per-task ghGateway shells `gh` each call (findMergedByTrailer is a search) — O(N) sequential
+// subprocesses (~0.4s×N ≈ 74s at 183 tasks) on the request path. This exercises the REAL consuming
+// client (the shell's board fetch of /v1/status, header-carried) against a REAL serve instance with a
+// FULL-size plan, asserting first-paint-to-data under a budget AND O(1) GitHub fetches — not a
+// stubbed two-task fixture. buildBatchedGithub is the fix: one fetch, all tasks resolved in-memory.
+
+test("GET /v1/status over a full 183-task plan: first-paint-to-data under budget with O(1) GitHub fetches (not O(N) per-task)", async () => {
+  const root = tmpRoot();
+  const N = 183;
+  const tasks = Array.from({ length: N }, (_, i) => task({ id: `W9-T${i}` }));
+  const plan = planOf(tasks);
+  const ledgerPath = ledgerPathFor(root);
+  const planPath = writePlan(root, planYaml(plan));
+
+  // A batched board gateway whose SINGLE underlying fetch is counted — the pre-fix per-task
+  // ghGateway would have made one findMergedByTrailer search PER task (O(N) subprocesses).
+  let fetchCalls = 0;
+  const github = buildBatchedGithub("craigoley", "remudero", {
+    fetchAll: () => {
+      fetchCalls++;
+      return []; // no PRs -> every task derives to queued; the point is the CALL COUNT, not the data
+    },
+  });
+
+  const deps: ServeDeps = {
+    board: { plan, ledgerPath, github },
+    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github },
+    ledgerPath,
+    issues: fakeIssueCloser(),
+    fleetControlRoot: root,
+    questionsRoot: root,
+    tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    pollMs: 50,
+  };
+
+  await withServeServer(deps, async (base) => {
+    const t0 = performance.now();
+    // The real consuming client for /v1/status: the shell's board JS fetch, header-carried
+    // (the shell already read ?token= from the URL). Full-plan first-paint-to-data.
+    const res = await get(base, "/v1/status", READ_TOKEN);
+    const ms = performance.now() - t0;
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { tasks: Array<{ taskId: string }> };
+    assert.equal(body.tasks.length, N); // the WHOLE plan reached the client, not a partial/hung snapshot
+    assert.ok(ms < 2000, `first-paint-to-data ${ms.toFixed(0)}ms exceeded the 2000ms budget`);
+    assert.equal(fetchCalls, 1, `expected O(1) GitHub fetch for the snapshot, got ${fetchCalls} for ${N} tasks`);
+  });
 });
 
 // ── port + token resolution (CLI glue, unit-tested directly) ────────────────────────────────

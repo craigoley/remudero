@@ -435,3 +435,98 @@ export function ghGateway(owner: string, repo: string): GitHub {
     },
   };
 }
+
+/** One PR row from the single batched `gh pr list` fetch that backs {@link buildBatchedGithub}. */
+export interface BatchedPr {
+  number: number;
+  url: string;
+  state: string;
+  headRefName?: string;
+  body?: string;
+}
+
+/**
+ * A GitHub gateway that answers ALL of {@link GitHub}'s methods from ONE batched fetch of the
+ * repo's PRs, held in memory (with a short TTL), instead of shelling `gh` PER call.
+ *
+ * WHY: {@link ghGateway}'s `findMergedByTrailer` runs a `gh pr list --search` PER task, so
+ * `projectPlan` over an N-task plan makes O(N) sequential `gh` subprocesses. On the board's
+ * `GET /v1/status` request path that is ~0.4s × N — at 183 tasks, ~74s, and the browser hangs at
+ * "loading…". This gateway makes it O(1): the first method call fetches every PR once
+ * (`number,url,state,headRefName,body`), and all N tasks in a snapshot resolve against the shared
+ * in-memory index. The index refreshes after `ttlMs`, so the board stays live.
+ *
+ * Drop-in for `ghGateway`, but `findMergedByTrailer` matches the ANCHORED `Remudero-Task:` line
+ * (not a fuzzy substring) so `W1-T1` never mis-selects a `W1-T15` PR — deriveStatus's rung (c)
+ * re-verify then confirms it exactly as before.
+ */
+export function buildBatchedGithub(
+  owner: string,
+  repo: string,
+  opts: { ttlMs?: number; now?: () => number; fetchAll?: () => BatchedPr[] } = {},
+): GitHub {
+  const ttlMs = opts.ttlMs ?? 15_000;
+  const now = opts.now ?? (() => Date.now());
+  const fetchAll =
+    opts.fetchAll ??
+    (() => {
+      const slug = `${owner}/${repo}`;
+      try {
+        return JSON.parse(
+          execFileSync(
+            "gh",
+            ["pr", "list", "--repo", slug, "--state", "all", "--json", "number,url,state,headRefName,body", "--limit", "1000"],
+            { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+          ),
+        ) as BatchedPr[];
+      } catch {
+        return [];
+      }
+    });
+
+  interface Index {
+    at: number;
+    byUrl: Map<string, BatchedPr>;
+    byNum: Map<string, BatchedPr>;
+    mergedNewestFirst: BatchedPr[];
+  }
+  let cache: Index | undefined;
+  const index = (): Index => {
+    if (!cache || now() - cache.at >= ttlMs) {
+      const all = fetchAll();
+      cache = {
+        at: now(),
+        byUrl: new Map(all.map((p) => [p.url, p])),
+        byNum: new Map(all.map((p) => [String(p.number), p])),
+        // Higher PR number = more recent; mirrors ghGateway's search "newest first".
+        mergedNewestFirst: all.filter((p) => p.state === "MERGED").sort((a, b) => b.number - a.number),
+      };
+    }
+    return cache;
+  };
+
+  const asRef = (p: BatchedPr): PrRef => ({ number: p.number, url: p.url, state: p.state });
+  const lookup = (ref: string | number): BatchedPr | undefined => {
+    const idx = index();
+    const s = String(ref);
+    return idx.byUrl.get(s) ?? idx.byNum.get(s) ?? idx.byNum.get(s.replace(/^.*\/(\d+)$/, "$1"));
+  };
+
+  return {
+    prByRef(ref) {
+      const p = lookup(ref);
+      return p && typeof p.number === "number" ? asRef(p) : null;
+    },
+    findMergedByTrailer(taskId) {
+      const anchored = new RegExp(`^Remudero-Task:\\s*${escapeRegExp(taskId)}\\s*$`, "m");
+      const hit = index().mergedNewestFirst.find((p) => anchored.test(p.body ?? ""));
+      return hit ? asRef(hit) : null;
+    },
+    headRefName(prUrl) {
+      return index().byUrl.get(prUrl)?.headRefName;
+    },
+    prBody(prUrl) {
+      return index().byUrl.get(prUrl)?.body;
+    },
+  };
+}
