@@ -6907,44 +6907,65 @@
     kill/survive accountability question) and W1-T108 (the PR-gate latency fix this builds on, already live)."
 
 - id: W1-T136
-  title: "the retro must emit a PR that is mergeable under the grown gate stack — run plan-index after its MASTER-PLAN edit and commit as chore(plan): retro R<n> (the #287 two-hand-fix lesson)"
+  title: "EVERY machine plan-PR emitter (retro, approve, future inbox writes) must emit a PR mergeable under the full gate stack — a SHARED gate-compliant emitter: plan-index regen, commitlint-clean commit (header AND body <=100), and a judgeable Acceptance body so remudero-review does not fail closed (the #287 retro + #387 approve fixtures)"
   repo: remudero
-  depends_on: [W1-T51]
+  depends_on: [W1-T51, W1-T110, W1-T111]
   type: implement
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  rationale: "LIVE HOLE: retroCommand's output branch fails required checks BY CONSTRUCTION. (1) It edits
-    MASTER-PLAN.md without running the plan-index generator, so plan/plan-index.json goes stale and the now-required
-    plan-index-check gate reds. (2) It commits with a non-conventional message (a 'plan:'/'rmd retro:' type), which
-    the now-required commitlint gate rejects (type not in the config-conventional enum). EVIDENCE: #287 (the R8 retro
-    sync) needed TWO hand interventions to merge — a plan-index regeneration and a rewrite to 'chore(plan):'. The
-    learning limb should not need hands to file its own homework; the gate stack grew (commitlint + plan-index-check
-    joined ci-gate's REQUIRED array) and the retro was never taught to satisfy it."
+  rationale: "LIVE HOLE, now confirmed in TWO machine plan-PR emitters — the defect is not retro-specific, it is
+    that NO machine emitter was taught the grown gate stack, so each fails required checks BY CONSTRUCTION.
+    RETRO (#287, the original fixture): retroCommand (1) edited MASTER-PLAN.md without running the plan-index
+    generator, so plan/plan-index.json went stale and plan-index-check redded; (2) committed a non-conventional
+    message ('plan:'/'rmd retro:' type) that commitlint rejects. #287 needed TWO hand interventions to merge.
+    APPROVE (#387, the second-emitter fixture — the INAUGURAL rmd approve, P25 ii): approveCommand (1) wrote the
+    681-char RATIFIED stamp line verbatim into the COMMIT BODY, tripping commitlint body-max-line-length (<=100);
+    (2) emitted a PR body with NO Acceptance section, so remudero-review FAILED CLOSED ('no acceptance criteria to
+    judge'). #387 needed the same two-hand fix (a commit-body rewrap + a hand-authored Acceptance section). Same
+    class, second site: every emitter that writes a plan PR from code (retro, approve, and future inbox writes)
+    must route through ONE shared gate-compliant emitter, not re-learn commitlint + plan-index + review-body hygiene
+    per site. The gate stack grew (commitlint header AND body, plan-index-check, remudero-review-fail-closed) and
+    the emitters were never taught to satisfy it."
   design: |
-    After retroCommand writes its MASTER-PLAN.md edit (and any docs/ORIENTATION regen), and BEFORE it commits:
-    (i) run the plan-index generator so plan/plan-index.json is byte-current against the edited MASTER-PLAN
+    Factor a SINGLE gate-compliant plan-PR emitter that retroCommand, approveCommand, AND future inbox writers all
+    call, so the gate contract lives in one place. Before it commits, the shared emitter:
+    (i) runs the plan-index generator when the change touched MASTER-PLAN.md, so plan/plan-index.json is byte-current
         (invoke the same generator the CI check runs — VERIFY the exact npm script / scripts/generate-plan-index.mjs
-        entry from source, distrust this note), and stage it alongside the MASTER-PLAN edit.
-    (ii) render the commit message as a conventional 'chore(plan): retro R<n> - <summary>' — an allowed type-enum
-        type + the 'plan' scope, lowercase-first subject within the commitlint header-max-length, body wrapped.
-    No other retro behavior changes (gather, proposal capture, marker/state, ownership-assert all unchanged).
+        entry from source, distrust this note), staged alongside the edit;
+    (ii) renders a commitlint-clean commit: an allowed type-enum type + 'plan' scope, lowercase-first subject within
+        header-max-length, and EVERY BODY LINE wrapped to <= body-max-line-length (the #387 body-line lesson — a long
+        stamp/summary line is wrapped or moved out of the body, never emitted verbatim);
+    (iii) renders the PR BODY with a judgeable Acceptance section (grep/lint-checkable criteria), so remudero-review
+        has criteria to judge and never fails closed (the #387 no-Acceptance lesson).
+    Callers pass their per-emitter specifics (retro: 'retro R<n>'; approve: 'ratify P<n>' + the ratified-tasks
+    Acceptance). Design note (not a hard criterion here): emitters should prefer writing tasks.d/ shards over
+    appending to tasks.yaml, so concurrent emissions stay conflict-free (W1-T122) — #387 appended to tasks.yaml.
+    No other behavior changes (retro gather/capture/marker, approve's verbatim-fragment + stamp semantics unchanged).
   acceptance:
-    - claim: "after the retro's MASTER-PLAN edit the plan-index is byte-current — plan-index-check would pass with no hand step"
-      proof: "integration test over a seeded fixture retro: after retroCommand writes MASTER-PLAN.md, plan/plan-index.json equals a fresh regeneration (the plan-index:check generator exits zero on the retro's output tree); a variant that suppresses the new regen step FAILS the check (the falsifier)"
-    - claim: "the retro's staged commit message passes commitlint — valid conventional type + plan scope, within length"
-      proof: "unit test: the rendered retro commit message parses as 'chore(plan): retro R<n> - ...' and passes commitlint against the repo config (type in enum, subject lower-case, header <= header-max-length); the pre-fix 'plan:'/'rmd retro:'-typed message is REJECTED by the same lint (the falsifier)"
-    - claim: "a retro dry-run's staged commit passes commitlint locally AND the plan-index is byte-current — zero manual intervention"
-      proof: "integration test: 'rmd retro --dry-run' over the seeded fixture produces a staged commit whose message passes 'npx commitlint' and whose plan/plan-index.json matches the generator output; both green with no hand edits (the #287 regression, closed)"
+    - claim: "the shared emitter regenerates the plan-index after a MASTER-PLAN edit — plan-index-check passes with no hand step, for BOTH retro and approve"
+      proof: "integration test over a seeded fixture for retroCommand AND approveCommand: after each writes MASTER-PLAN.md via the shared emitter, plan/plan-index.json equals a fresh regeneration (the plan-index:check generator exits zero on the output tree); a variant that suppresses the regen step FAILS the check (the falsifier)"
+    - claim: "the shared emitter's commit passes commitlint in BOTH header AND body — valid type + plan scope within header-max-length, and every body line <= body-max-line-length"
+      proof: "unit test: the rendered commit message (for retro 'chore(plan): retro R<n>' and approve 'chore(plan): ratify P<n>') passes commitlint against the repo config — type in enum, subject lower-case, header <= header-max-length, AND no body line exceeds body-max-line-length even when a caller supplies a long stamp/summary. FALSIFIERS: the pre-fix 'plan:'/'rmd retro:' type is REJECTED; the #387 fixture — a 681-char stamp line emitted verbatim into the body — is REJECTED by body-max-line-length"
+    - claim: "the shared emitter's PR body carries a judgeable Acceptance section — remudero-review has criteria and never fails closed"
+      proof: "unit/integration test: the emitted PR body (for approve AND retro) contains an Acceptance section whose criteria remudero-review parses and judges (proof_exec sees >0 criteria). FALSIFIER: the #387 fixture — an approve PR body with NO Acceptance section, which remudero-review fails CLOSED on ('no acceptance criteria to judge')"
+    - claim: "an emitter dry-run is zero-hand-intervention end to end — commitlint-clean commit + byte-current plan-index + a review-judgeable body"
+      proof: "integration test: 'rmd retro --dry-run' and an approve dry-run over seeded fixtures each produce a staged commit whose message passes 'npx commitlint', a plan/plan-index.json matching the generator, and a PR body with judgeable Acceptance — all green with no hand edits (the #287 + #387 regressions, closed)"
   risk: high
   origin: architect
   plan_refs: ["§5C", "§6A"]
   files: [src/run-task.ts]
   status: queued
   attempts: 0
-  note: "Filed from the outage-closeout retro. Both failures were hand-fixed on #287 (plan-index regen + chore(plan):
-    rewrite); this teaches retroCommand to do its own homework. Companion to W1-T134/W1-T135 (the other closeout
-    review-hardening tasks) and the plan-index-check / commitlint gates that made the hole visible."
+  note: "GENERALIZED 2026-07-20 from retro-only to ALL machine plan-PR emitters after the class fired a SECOND time.
+    Fixtures: #287 (retro — plan-index stale + non-conventional type, two hand-fixes) and #387 (the inaugural rmd
+    approve P19 — commitlint body-max-line-length on the 681-char stamp line in the commit body, AND remudero-review
+    fail-closed on a body with no Acceptance section; both hand-fixed to unblock the ratification). The fix is a
+    SHARED gate-compliant emitter used by retroCommand + approveCommand + future inbox writers — not per-site hygiene.
+    W1-T137 already names this the 'W1-T136 class' at the worker/fix-rung site (commit header cap). Companion to
+    W1-T134/W1-T135 and the plan-index-check / commitlint / remudero-review gates that made the hole visible.
+    Design note carried: emitters should write tasks.d/ shards (W1-T122) rather than append tasks.yaml so concurrent
+    emissions stay conflict-free — #387 appended to tasks.yaml."
 
 - id: W1-T137
   title: "worker fix-rung commit headers must satisfy commitlint header-max-length (<=100) — verbose round-N headers blew the cap and blocked #303/#305 by construction"
