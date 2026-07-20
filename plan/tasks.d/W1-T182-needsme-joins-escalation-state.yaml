@@ -1,0 +1,86 @@
+- id: W1-T182
+  title: "NEEDS ME must join LIVE escalation STATE and render the affordance the item type actually supports — today it renders ledger HISTORY (a closed issue never leaves the section) and puts an Approve button on escalations, which is an undefined action"
+  repo: remudero
+  depends_on: [W1-T153]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR FIXTURE (console v2 screenshot, 2026-07-20 ~21:30): the NEEDS ME section rendered roughly
+    44 escalated rows, each carrying an Approve button. Measured against GitHub at the same moment: needs-human
+    issues OPEN = 0, needs-human issues TOTAL (all states) = 30. So the section is showing more rows than there
+    are issues in existence, and every issue it claims needs attention is CLOSED.
+    DEFECT 1 — NEEDS ME JOINS HISTORY, NOT STATE. The predicate is hasOpenEscalation (status.ts:672), and despite
+    its name it never reads an issue's state. It scans the ledger and returns true when the task's MOST RECENT
+    line was `escalation.issue_opened` rather than `run.start`:
+      let last: 'run' | 'escalation' | undefined;
+      for (const line of lines) { ... if (step==='run.start') last='run'; else if (step==='escalation.issue_opened') last='escalation'; }
+      return last === 'escalation';
+    The ledger is append-only and immutable, so CLOSING the GitHub issue cannot change the answer — the row is
+    stuck until some future run.start for that task. Verified live tonight: issues #393, #395 and #401 were each
+    closed by hand after being confirmed terminal, and each remains needsHuman by this predicate. The name is
+    actively misleading — 'hasOpenEscalation' implies openness is checked, and it is not; it means 'the last thing
+    that happened to this task was an escalation being opened'. Resolution is invisible to the console, so the
+    section only ever grows and an operator who works the queue sees no progress.
+    DEFECT 2 — WRONG AFFORDANCE. Every row carries an Approve button. Approve is the RATIFICATION-INBOX action for
+    a P## proposal (rmd approve, P25(ii) — one bit ratifies a READY proposal through the gate). It has NO defined
+    meaning for an escalation: there is no approve verb for a needs-human issue, and the escalation's own issue
+    body says so ('Closing this issue does not resolve the underlying block by itself — act on it, then resume via
+    rmd drain'). A control that cannot map to a real action is worse than no control: it invites a click that
+    either does nothing or does something the operator did not intend, on a surface whose entire premise (W1-T156,
+    'the console never lies') is that it tells the truth about state.
+    WHY THIS COMPOUNDS TONIGHT'S OTHER FINDINGS: the same board is simultaneously showing merged 0/160 (the
+    W1-T181 ENOBUFS outage) and W1-T1 as running at 27h21m (the unbuilt liveness bound, W1-T179). An operator
+    looking at this console currently cannot trust the merged count, the in-flight rows, OR the needs-attention
+    queue. NEEDS ME is the one section whose whole job is to be the operator's work list."
+  design: |
+    JOIN LIVE STATE, DO NOT PATCH THE HISTORY SCAN. The ledger correctly records that an escalation was OPENED —
+    that event is true and immutable, and it is the right provenance. What is missing is the CURRENT state of the
+    thing it points at. The escalation ledger line already carries `issue_url` (verified: escalation.issue_opened
+    lines record `{class, issue_url, labels}`), so the resolution is to read that issue's state rather than to
+    infer liveness from event ordering.
+    Read it through the SAME batched-gateway discipline the board already uses (buildBatchedGithub, one fetch,
+    TTL-refreshed) rather than one gh call per escalated row — the board-fix O(1) invariant is explicit in
+    status.ts and a per-row fetch would regress it at exactly the scale (44 rows) that exposed the bug.
+    RENAME hasOpenEscalation or give it a state parameter, so the name cannot lie again. A predicate called
+    hasOpenEscalation that does not check openness is how this survived review.
+    AFFORDANCE BY ITEM TYPE — the section is heterogeneous and must dispatch on type, not render one row template:
+      - ESCALATION -> 'view issue' (link to issue_url) and 'mark handled'. Mark-handled must be honest about what
+        it does: the issue body already states that closing does not resolve the underlying block, so this control
+        closes/acknowledges the ESCALATION and must not imply the block is fixed.
+      - INBOX PROPOSAL (P##) -> Approve, which is the existing, defined rmd approve action.
+    An Approve control MUST NOT render on a non-proposal. Prefer a shape where an unknown item type renders NO
+    action control rather than a default one — a missing button is recoverable, a wrong button is not.
+    FAIL-CLOSED ON AN UNREADABLE ISSUE STATE, matching W1-T177's boundary: if the issue's state cannot be read,
+    KEEP the row (an escalation that might still be open must not silently vanish from the operator's work list)
+    and mark it unverified. The fail-safe direction here is the opposite of the merged-count case, because the
+    cost of hiding live work exceeds the cost of showing a stale row.
+    VERIFY hasOpenEscalation, the escalation ledger line shape, and the T153 shell's NEEDS ME row template from
+    source before building — distrust this note, it is a 2026-07-20 survey.
+  acceptance:
+    - claim: "a CLOSED escalation does not render in NEEDS ME — the section reflects live state, not ledger history"
+      proof: "unit test over the projection: a task whose most recent ledger line is escalation.issue_opened but whose referenced issue reads CLOSED is NOT needsHuman and does not render in NEEDS ME. FALSIFIER: the 2026-07-20 console — ~44 escalated rows against 0 OPEN needs-human issues (30 total, all closed), including #393, #395 and #401 which were each closed by hand after being confirmed terminal and each still render, because hasOpenEscalation (status.ts:672) returns `last === 'escalation'` from an append-only ledger and never reads issue state"
+    - claim: "an OPEN escalation still renders — the fix removes stale rows without hiding live work"
+      proof: "unit test: a task whose escalation issue reads OPEN remains needsHuman and renders. FALSIFIER: a change that keys the section off anything that also drops genuinely open escalations, which would silently empty the operator's work list — the more dangerous direction of this bug"
+    - claim: "an UNREADABLE issue state KEEPS the row, marked unverified — fail-closed toward showing work"
+      proof: "unit test: a seeded issue-state read failure retains the row and flags it unverified rather than dropping it. FALSIFIER: dropping rows on a read failure, which during a GitHub outage would show an empty NEEDS ME section and tell the operator there is nothing to do"
+    - claim: "an Approve control NEVER renders on a non-proposal item"
+      proof: "unit/DOM test over the NEEDS ME row template: an escalation row renders 'view issue' and 'mark handled' and contains NO Approve control, while a P## inbox-proposal row renders Approve. FALSIFIER: the 2026-07-20 console, where every one of ~44 escalation rows carried an Approve button — an action with no defined meaning for an escalation, whose own issue body states that closing it does not resolve the underlying block"
+    - claim: "the join costs no per-row GitHub call — the board-fix O(1) invariant holds at 44+ rows"
+      proof: "unit test asserting issue states resolve through ONE batched fetch (the buildBatchedGithub discipline the board already uses), not one gh call per escalated row. FALSIFIER: a per-row fetch, which regresses the explicit O(1) board invariant at exactly the row count that exposed this defect"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/status.ts, test/status.test.ts]
+  status: queued
+  attempts: 0
+  note: "Fixture is an operator screenshot of console v2, 2026-07-20 ~21:30: ~44 escalated rows each with an
+    Approve button, against 0 OPEN needs-human issues (30 total, all closed). Two independent defects in one
+    section — a history-vs-state join and a wrong affordance — filed together because they share the row template
+    and the same fix pass.
+    THIRD SIBLING of tonight's console-honesty findings, all on the same screen: W1-T181 (merged 0/160, the
+    batched-gateway ENOBUFS outage) and W1-T179 (W1-T1 rendering running at 27h21m, the unbuilt liveness bound).
+    Each independently breaks the W1-T156 premise that the console never lies about its own state.
+    Note the fail-safe direction here INVERTS W1-T181's: an unreadable merged-count should degrade visibly, but an
+    unreadable escalation state must KEEP the row — hiding live work from the operator's queue is the worse
+    failure. Do not unify the two behind one 'unreadable' policy."

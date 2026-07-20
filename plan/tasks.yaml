@@ -517,6 +517,89 @@
   note: "UI+TRUST half of layer 1; DATA half is W1-T155. Liveness-honesty is the W1-T130 polarity family (never lie
     about your own state). Sibling of the overhaul (W1-T153)."
 
+- id: W1-T181
+  title: "LIVE OUTAGE — the batched board gateway has been silently failing on every read since the repo's PR JSON crossed 1 MiB: execFileSync omits maxBuffer, Node's 1 MiB default throws ENOBUFS, the catch returns [], and the whole board reads merged 0/N"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  queue_note: |
+    PLACED AT THE DRAIN FRONT, ahead of W1-T128, deliberately. This is a CURRENTLY-FIRING outage that makes the
+    operator console actively misleading (it reports every task queued and zero merged), the fix is small and
+    well-bounded, and it blocks trusting anything the console says about any other task — including the ones
+    ahead of it in the queue. File order IS drain priority (no priority field exists), so front placement is the
+    only mechanism. Reorder it back down once it lands.
+  rationale: "DIAGNOSED FROM AN OPERATOR SCREENSHOT, 2026-07-20 ~21:30: the console showed merged 0/160 with every
+    task queued. Both of the obvious hypotheses were WRONG and were ruled out by measurement before this was filed:
+      NOT THROTTLING — `gh api rate_limit` at the same moment read core 4858/5000 remaining, graphql 3388/5000,
+        search 30/30. Nowhere near a limit.
+      NOT A SHELL-WIRING GAP — the T153 shell's sections are not bypassing the gateway. GET /v1/status itself,
+        queried directly with a read token, returned 206 tasks with merged=0 and 202 queued. The API is the source
+        of the lie, not the render layer.
+    ROOT CAUSE, PROVEN BY DIRECT REPRODUCTION. buildBatchedGithub (status.ts:894) fetches every PR in ONE call:
+      execFileSync('gh', ['pr','list','--repo',slug,'--state','all','--json',
+        'number,url,state,headRefName,body,autoMergeRequest','--limit','1000'],
+        { encoding:'utf8', stdio:['ignore','pipe','pipe'] })
+    There is NO maxBuffer option, so Node's default of 1 MiB (1,048,576 bytes) applies. That command's output is
+    now 1,152,387 bytes across 325 PRs — 103,811 bytes OVER the cap. Reproduced with the identical argv:
+      default maxBuffer -> THREW ENOBUFS
+      maxBuffer raised  -> OK, 1,142,979 bytes, 325 PRs parsed
+    The catch swallows it (`lastFetchFailed = true; return []`), so projectPlan derives EVERY task from an empty
+    PR set: measured live on current main, the batched gateway yields merged 0/212 with 207 INDETERMINATE, while
+    the non-batched ghGateway resolves correctly because its per-task `--limit 1` queries are tiny.
+    THIS IS A THRESHOLD BUG THAT ALREADY CROSSED. It worked until the repo's PR JSON grew past 1 MiB, and it gets
+    monotonically worse — 325 PRs today, and every merged PR adds to the payload. Nothing alerts: serve.log
+    contains ZERO error lines, because classifyGhFailure (status.ts:78) has no ENOBUFS branch and an ENOBUFS error
+    carries no gh stderr and no exit status, so the failure classifies 'unknown' and is never surfaced.
+    PRECEDENT EXISTS IN-REPO — this is an omission, not an unknown. orientation.ts:72 already passes
+    maxBuffer: 1 << 24 for the same reason. status.ts has FOUR execFileSync calls and ZERO maxBuffer settings;
+    run-task.ts has 53 calls with only 6 setting it. So the sibling-audit is part of the work, not optional."
+  design: |
+    (i) Set an explicit maxBuffer on buildBatchedGithub's execFileSync. Follow the in-repo precedent
+        (orientation.ts:72, `1 << 24` = 16 MiB) rather than inventing a number, and treat it as headroom over a
+        payload that grows with every merged PR — not a value tuned to today's 1.14 MB.
+    (ii) MAKE THE FAILURE OBSERVABLE, which is the half that let this run silently. Give classifyGhFailure
+         (status.ts:78) an ENOBUFS/buffer-overflow branch so it stops classifying as 'unknown', and make a failed
+         batched fetch LOG. A gateway that fails every read for hours while serve.log stays empty is the actual
+         severity multiplier here — the outage is cheap to fix, the silence is what made it expensive.
+    (iii) AUDIT THE SIBLINGS, bounded and enumerable: status.ts's other three execFileSync calls, then the
+          run-task.ts calls whose output scales with repo size (PR lists, issue lists, check rollups). A call whose
+          output is O(1) per invocation needs nothing. Do not blanket-add maxBuffer to all 94 exec sites — name the
+          ones whose payload grows and fix those.
+    (iv) CONSIDER, do not assume: `--limit 1000` on a repo with 325 PRs means the payload is not yet limit-bounded,
+         so raising maxBuffer is the correct primary fix. Whether the batched fetch should ALSO narrow its --json
+         field set (the `body` field is the bulk of the payload and is used only for trailer matching) is a real
+         option worth measuring — a narrower fetch would push the threshold out much further than a bigger buffer.
+         VERIFY from source which fields are actually consumed before narrowing anything.
+    RELATED BUT DISTINCT, and must not be conflated: W1-T179's monotonic-under-darkness criterion would have made
+    this outage VISIBLE (last-good status retained, board stamped unobservable) instead of silently wrong. That is
+    the containment; this is the cause. Both are needed — fixing only T179 would leave the gateway broken but
+    honestly labelled, and fixing only this leaves the next gateway failure silent again.
+  acceptance:
+    - claim: "the batched gateway's fetch survives a PR payload larger than Node's 1 MiB default — the board resolves merged counts correctly at current repo size"
+      proof: "unit test with a seeded fetch payload exceeding 1 MiB: buildBatchedGithub parses it and resolves merged state, rather than catching and returning []. FALSIFIER, reproduced 2026-07-20 with the exact argv from status.ts:894 — `gh pr list --repo craigoley/remudero --state all --json number,url,state,headRefName,body,autoMergeRequest --limit 1000` emits 1,152,387 bytes over 325 PRs, THREW ENOBUFS under the default maxBuffer, and parsed 325 PRs cleanly with maxBuffer raised; live projectPlan through this gateway read merged 0/212 with 207 indeterminate"
+    - claim: "a failed batched fetch is OBSERVABLE — it classifies as a buffer-overflow reason, not 'unknown', and it is logged"
+      proof: "unit test: an ENOBUFS-shaped error yields a distinct classifyGhFailure reason (not 'unknown') and emits a log line. FALSIFIER: the 2026-07-20 outage ran for hours with serve.log containing ZERO error lines, because ENOBUFS carries no gh stderr and no exit status and classifyGhFailure (status.ts:78) has no branch for it"
+    - claim: "sibling exec sites whose output scales with repo size are audited and named"
+      proof: "the change enumerates status.ts's four execFileSync calls and the repo-size-scaling run-task.ts calls, fixing those whose payload grows and explicitly leaving O(1)-output calls alone. FALSIFIER: status.ts today has 4 execFileSync calls and 0 maxBuffer settings while orientation.ts:72 already sets maxBuffer 1<<24 for this exact reason — the precedent existed and was not applied"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§9"]
+  files: [src/lib/status.ts, test/status.test.ts]
+  status: queued
+  attempts: 0
+  note: "LIVE OUTAGE at filing time — the operator console reports merged 0/160 and every task queued, and has done
+    since the repo's PR JSON crossed 1 MiB. Placed at the drain front ahead of W1-T128 because it is small,
+    currently firing, and undermines trust in every other row on the board.
+    Diagnosis ruled out both operator hypotheses by measurement: rate limit healthy (4858/5000 core), and GET
+    /v1/status itself returns merged=0, so the T153 shell is NOT bypassing the gateway.
+    ONE OF THREE console-honesty defects on the same screenshot: this one (merged 0/160), W1-T179 (W1-T1 rendering
+    running at 27h21m — the unbuilt liveness bound), and W1-T182 (~44 escalation rows against 0 open issues, with
+    Approve buttons that have no defined action). Each independently breaks W1-T156's premise that the console
+    never lies about its own state.
+    Containment vs cause: W1-T179 would have made this outage VISIBLE rather than silent. It is not a substitute."
 - id: W1-T128
   title: THE DEAD PROOF FLOOR — 101 of 126 runnable-dialect proofs (80%) can never execute, so proof_exec
     has read 0/N since W1-T72 and the anti-theater gate performs theater
@@ -660,6 +743,88 @@
   files:
   - src/lib/review.ts
   depends_on: [W1-T156, W1-T154]
+- id: W1-T179
+  title: "W1-T155 DARKNESS FOLLOW-UP — monotonic-under-darkness (a gateway-fetch failure never regresses a credited task to queued, marked github_unobservable) + the in-flight liveness bound; both criteria were amended onto W1-T155 AFTER it merged, so nothing can ever dispatch them"
+  repo: remudero
+  depends_on: [W1-T155, W1-T119]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "ORPHANED CRITERIA, mechanically unreachable — this task exists to give them a dispatchable home.
+    TIMELINE (exact): PR #365 ('feat(W1-T155): board projection exposes the full status taxonomy') merged
+    2026-07-20T15:50:08Z and CREDITED W1-T155. PR #374 ('chore(plan): amend T155/T156 darkness-marked + T155
+    liveness bound + T154 progressive load') merged 2026-07-20T17:35:20Z — one hour forty-five minutes LATER —
+    and ADDED two acceptance criteria to W1-T155: the monotonic-under-darkness/github_unobservable marking, and
+    the in-flight liveness bound.
+    WHY NOTHING WILL EVER BUILD THEM: deriveStatus reads W1-T155 as merged (verified live: merged=true, source
+    PR #365), and MERGED IS TERMINAL in the status layer ('MERGED is terminal — nothing below can add anything
+    more useful than \"it landed\"', status.ts:696). The drain's first filter is `if (isMerged(t.id)) continue`
+    (drain.ts:88), so a merged task is skipped before any criterion is examined — VERIFIED: W1-T155 does not
+    appear in a 40-deep `rmd drain --dry-run` at all. The retro's planHealthSweep explicitly skips it too
+    (`if (CLOSED_TASK_STATUSES.has(task.status)) continue; // out of scope — already shipped`, retro.ts:578).
+    And rmd correct cannot un-credit — it re-points a task to its TRUE merged PR and requires --pr, with no
+    un-credit operation. So the criteria sit in the plan, look authoritative, and are unreachable by every rung.
+    THIS IS NOT ACADEMIC — IT IS THE BUG THAT SURVIVED TONIGHT. Criterion 4 IS the fix for the
+    regression-to-queued-on-read-failure defect (the 12:24->12:58 fail-open where merged✓ tasks with PR links
+    became every-task-queued with empty PR cells). PR #398's own body records the consequence in writing: 'W1-T155
+    (the DATA half, listed as this task's dependency) is not actually implemented in status.ts/board.ts as of this
+    PR — the GitHub-unreachable banner therefore reflects whatever the projection reports today, including the
+    not-yet-fixed regression-to-queued-on-read-failure bug.' So W1-T156's darkness banner is satisfied at the
+    RENDER layer over a DATA layer that still lies. The console can now honestly stamp 'GitHub unreachable' while
+    the projection underneath it still regresses credited tasks to queued.
+    HOUSE ANSWER APPLIED (see W1-T180, which makes it enforceable): the amender owns filing the follow-up. Per
+    rule 16 no criterion is dropped or weakened — only REDISTRIBUTED — so both criteria are carried below
+    VERBATIM from W1-T155, character for character, including their falsifiers."
+  design: |
+    Implement the two criteria against the projection, exactly as W1-T155 would have had it done. Both live in
+    the DATA layer (src/lib/status.ts), not the render layer — W1-T156 already shipped the render half, and it
+    is currently stamping honesty over a projection that does not yet provide it. board.ts needs no change: it
+    declares 'Zero new business logic' and consumes projectPlan/deriveStatus verbatim.
+    (i) MONOTONIC UNDER DARKNESS. When the batched gateway's fetch FAILS, the projection must KEEP each task's
+        last-good status and mark it github_unobservable(since <t>) rather than recomputing it as absent. The
+        distinction between a FAILED read and a genuinely ABSENT one already exists — W1-T119 shipped it
+        (PRs #382 and #391 this evening), so this criterion CONSUMES that polarity rather than re-deriving it.
+        Statuses move only FORWARD across an observation gap.
+    (ii) LIVENESS BOUND. 'running' must require recent ledger activity (a heartbeat within N minutes, N a data
+         threshold) OR an open PR. A dispatched row with no terminal verdict AND no recent activity renders
+         unknown/orphaned.
+    NOTE THE RENDER HALF IS ALREADY DONE and must not be rebuilt: W1-T156 (PR #398, merged) ships the visible
+    'GitHub unreachable since <t> — statuses may be stale' stamp keyed off the projection's signal. This task
+    supplies the signal that stamp is keyed off. VERIFY from source which of github_unobservable's plumbing
+    already exists after #398 before writing any of it — distrust this note.
+    DO NOT amend W1-T155 to remove these criteria. It is merged and terminal, and per rule 16 nothing is dropped.
+    The correct end state is that W1-T155 retains them for the record and this task delivers them.
+  acceptance:
+    - claim: "GitHub-unobservable is a MARKED state, never a silent downgrade — a gateway-fetch FAILURE never regresses a credited task to queued (statuses are MONOTONIC under darkness); it keeps the last-good status marked unobservable"
+      proof: "unit test: with the batched gateway's fetch FAILING (throttled/errored — distinguished from genuinely ABSENT per W1-T119/W1-T130's cannot-observe polarity), the projection KEEPS each task's LAST-GOOD status and marks it github_unobservable (since <t>); a merged/credited task does NOT regress to queued on the fetch failure — statuses only move FORWARD across an observation gap. FALSIFIER: a merged/credited task rendered queued during a gateway outage FAILS (the 12:58 fail-open where every task read queued with empty PR cells)"
+    - claim: "in-flight 'running' has a LIVENESS bound — a dispatched row with no terminal verdict AND no recent activity is unknown/orphaned, never running"
+      proof: "unit test: 'running' requires recent ledger activity (a heartbeat within N minutes, N a data threshold) OR an open PR; a dispatched row with no terminal verdict AND no recent activity renders 'unknown/orphaned', NOT running — the W1-T1 crash-era spin-loop orphan rows (dispatched, no terminal verdict, ledger-only join) classify as unknown, not in-flight (the falsifier: an orphaned dispatch rendered as running, the 12:58 W1-T1='running' reading)"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§9"]
+  files: [src/lib/status.ts, test/status.test.ts]
+  status: queued
+  attempts: 0
+  note: "Both acceptance criteria are carried VERBATIM from W1-T155 (added there by PR #374 at 17:35:20Z, after
+    PR #365 credited the task at 15:50:08Z). Rule 16: no criterion dropped or weakened, only redistributed.
+    W1-T155 KEEPS them for the historical record — it is merged and terminal, and editing a merged task to
+    remove criteria would be the goalpost-moving rule 15 forbids.
+    Companion W1-T180 turns the house answer that produced this task (the amender owns filing the follow-up)
+    into an ENFORCED lint check, so the next post-merge amendment cannot orphan silently the way this one did.
+    Delivers the DATA half that W1-T156's shipped render half is currently stamping honesty over.
+    SCOPE NARROWED at filing to src/lib/status.ts alone (an earlier draft also listed board.ts). board.ts states
+    'Zero new business logic: this module only wires those two together' and consumes projectPlan/deriveStatus
+    from status.ts verbatim, so both criteria land wholly in the projection. The narrowing is a correction, not a
+    dodge of Rule 19 — the work genuinely has one home.
+    PROMOTED 2026-07-20 from plan/tasks.d/ into tasks.yaml, positioned directly behind W1-T128. Filing it as a
+    shard (the conflict-free-by-construction default, W1-T122) had an unintended cost: loadPlan APPENDS every
+    tasks.d shard AFTER all of tasks.yaml, and the drain scans in FILE ORDER, so a sharded task sits at the very
+    BOTTOM of the queue regardless of urgency — verified, it did not appear in a 40-deep dry-run. Its fixtures are
+    now on the operator's screen (W1-T1 rendering 'running' at 27h21m is the liveness-bound falsifier; the
+    merged-0/160 fail-open is the monotonic-under-darkness falsifier), so it belongs at the front. GENERAL LESSON
+    worth keeping: shards are the right default for conflict-free FILING, and the wrong choice for anything that
+    needs PRIORITY. Those two goals are in tension and the tension is invisible until a shard never dispatches."
 - id: W1-T157
   title: "FIND layer — instant client-side fuzzy search + faceted filters with live counts + sortable columns + cmd+K palette + URL-persisted (shareable) view state"
   repo: remudero
