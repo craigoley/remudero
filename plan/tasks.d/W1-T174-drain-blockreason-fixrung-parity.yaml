@@ -1,0 +1,44 @@
+- id: W1-T174
+  title: "drain/sweep parity — the drain's W1-T46 block-reasoning delegates a FIXABLE genuine blocker to the fix rung (as the sweep does) instead of halting-and-escalating; halt narrows to the truly-stuck"
+  repo: remudero
+  depends_on: [W1-T46, W1-T76, W1-T77, W1-T168]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "FIXTURE (real): 2026-07-20 18:03, run DAEMON-1784570007163 — the drain's W1-T46 block-reasoning
+    (reasonAboutBlock, block-reason.ts) classified W1-T119/#382 a GENUINE BLOCKER and HALTED+escalated (#383, 'W1-T46
+    block-reasoning: W1-T119 did not merge (blocked_ci) … the daemon halted rather than continue into the gap'). But
+    the block was EMINENTLY FIXABLE — a stale generated api-client (a regeneration + one bounded fix worker cleared
+    every red check and the PR merged). The SWEEP (W1-T77) already routes a blocked-fixable PR to the W1-T76 fix rung;
+    the DRAIN's block-reasoning halts on the SAME class. That asymmetry is the gap: progress was AVAILABLE and the
+    drain did not attempt it. SIBLING of W1-T168 — W1-T168 is the fix-rung's FUTILE-ATTEMPT (strike-exhaustion on a
+    false-block it cannot win); THIS is the drain's NO-ATTEMPT (a fixable block halted before any fix is tried).
+    Distinct calibration failures on one axis: no-attempt/drain-side vs futile-attempt/rung-side."
+  design: |
+    Give reasonAboutBlock's GENUINE-BLOCKER branch the sweep's disposition vocabulary: a genuine blocker that is
+    FIXABLE (a red CI check, or a blocked_review with a nameable unmet criterion — the exact signals the W1-T77 sweep
+    reads for blocked-fixable) routes to the W1-T76 fix rung (a bounded fix attempt, strike-capped) BEFORE halt, so
+    the drain and the sweep dispose the same block the same way. Halt+escalate NARROWS to the truly-stuck: a genuine
+    blocker with NO fixable signal (ambiguous, no red check, no nameable criterion) still halts and never continues
+    into a real gap. Must NOT regress into W1-T168's class — the fix attempt is strike-capped and a strike-exhausted
+    false-block escalates for re-judgment, it does not fix-loop forever. VERIFY reasonAboutBlock/block-reason.ts, the
+    sweep's blocked-fixable disposition in sweep.ts (W1-T77), and the W1-T76 fix-rung entry from source (distrust this
+    note) — reuse the sweep's fixable-signal predicate rather than re-deriving it, so parity is structural not copied.
+  acceptance:
+    - claim: "a FIXABLE genuine blocker is delegated to the fix rung (the same W1-T76 rung the sweep uses), not halted-and-escalated"
+      proof: "unit test over reasonAboutBlock's genuine-blocker branch: a block whose evidence is a fixable red check (blocked_ci) or a blocked_review with a nameable unmet criterion routes to the fix-rung disposition (a bounded fix attempt), NOT straight to halt+escalate. FALSIFIER: the #383 fixture — DAEMON-1784570007163 at 18:03 halted on W1-T119/#382 (blocked_ci, red checks a regeneration fixed) instead of attempting the fix"
+    - claim: "an UNFIXABLE / ambiguous genuine blocker still halts + escalates — halt narrows to the truly-stuck, it is not removed"
+      proof: "unit test: a genuine blocker with NO fixable signal (no red check, no nameable unmet criterion) still halts + escalates as today; the drain never continues into a real gap. FALSIFIER: a change that fix-loops on an unfixable block (the inverse failure — this must NOT regress into W1-T168's strike-exhaustion class; the fix attempt stays strike-capped and escalates for re-judgment on exhaustion)"
+  risk: high
+  origin: architect
+  plan_refs: ["§4", "§9"]
+  files: [src/lib/block-reason.ts, src/lib/daemon.ts]
+  status: queued
+  attempts: 0
+  note: "SIBLING of W1-T168 (not a fixture of it): no-attempt/drain-side vs futile-attempt/rung-side are distinct
+    calibration failures. Drain/sweep PARITY — the W1-T77 sweep routes blocked-fixable->fix rung; the drain's W1-T46
+    reasonAboutBlock halts on the same class. Fixture: #383 (DAEMON-1784570007163, 2026-07-20 18:03) halted on
+    W1-T119/#382 blocked_ci; the block was a stale generated client (regeneration + one fix worker cleared it and the
+    PR merged) — eminently fixable, yet the drain halted rather than attempting the fix rung. risk:high — it changes
+    autonomous block-handling (block-reason.ts + daemon.ts), two subsystems."
