@@ -3659,7 +3659,10 @@ async function serveCommand(rest: string[]): Promise<number> {
   // W1-T154: buildServeServer itself pre-warms this gateway (calls its optional `.warm()`)
   // synchronously before returning, and keeps it warm on a background TTL timer — so the FIRST
   // real GET /v1/status below never pays the O(1)-but-still-cold first fetch either.
-  const boardGithub = buildBatchedGithub(self.owner, self.repo);
+  // W1-T181: `log` wires the gateway's fetch-size/fetch-failure observability into the SAME
+  // ledger every other SERVE step writes to — the pre-fix silence (hours of outage, zero
+  // serve.log error lines) is why this exists; see buildBatchedGithub's own doc for detail.
+  const boardGithub = buildBatchedGithub(self.owner, self.repo, { log });
   const server = buildServeServer({
     board: { plan, ledgerPath, github: boardGithub },
     // panel-graph.ts reloads plan/tasks.yaml fresh on every GET /v1/trace (its own header) --
@@ -3944,8 +3947,16 @@ function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): Open
  * plan-unavailable repo (already logged by the caller) simply yields plan.tasks
  * === [] here, never a hard failure of its own.
  */
-function buildCreditCandidates(owner: string, repo: string, plan: Plan, ledgerPath: string): CreditCandidate[] {
-  const deps: DeriveDeps = { ledgerPath, github: buildBatchedGithub(owner, repo) };
+function buildCreditCandidates(
+  owner: string,
+  repo: string,
+  plan: Plan,
+  ledgerPath: string,
+  log?: (step: string, extra?: Record<string, unknown>) => void,
+): CreditCandidate[] {
+  // W1-T181: wires the same fetch-size/fetch-failure observability the SERVE board gateway gets —
+  // this sweep/daemon-poll gateway shells the identical `gh pr list` this outage's fix targeted.
+  const deps: DeriveDeps = { ledgerPath, github: buildBatchedGithub(owner, repo, { log }) };
   const candidates: CreditCandidate[] = [];
   for (const task of plan.tasks) {
     const proj = deriveStatus(task, deps);
@@ -4244,7 +4255,7 @@ async function sweepCommand(rest: string[]): Promise<number> {
   // the open-PR reconciliation above, but over every task's OWNED merge state
   // rather than open-PR pipeline state — the gate-side-merge fixture (0 of 195
   // runs ledgered a merge while GitHub showed 28) this rung exists to close.
-  const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath);
+  const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
   const creditSummary = await runCreditBackfill(creditCandidates, { ledgerPath, runId, log, dryRun });
 
   console.log(
@@ -4276,7 +4287,7 @@ function buildSweepHook(
       await runSweep(openPrs, { ...effects, ledgerPath, runId, log }, DEFAULT_SWEEP_POLICY);
       // W1-T150: the SAME credit-backfill rung `rmd sweep` runs, on the
       // daemon's own poll cadence — never a second, separately-scheduled loop.
-      const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath);
+      const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
       await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
     } catch (e) {
       log("sweep.error", { error: String((e as Error)?.message ?? e) });

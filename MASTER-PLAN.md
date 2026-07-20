@@ -1972,6 +1972,24 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    that still lied. Found by hand, by nothing else. The executable duty is W1-T180 (a §5C lint check that fails a
    bare post-merge amendment and passes one accompanied by its follow-up); the rehoming of what this already
    orphaned is W1-T179. [W1-T155/PR #374 vs PR #365, 2026-07-20]
+22. **THE CONSOLE MUST DISTINGUISH CLAIMED STATE FROM EVIDENCED STATE — THE W1-T128 DOCTRINE, APPLIED TO
+   PIXELS.** A CLAIM is what a remote or a judge ASSERTS: merged-per-GitHub, review-passed. EVIDENCE is what the
+   fleet can SHOW: a ledger receipt of the merge, proofs that actually executed. They are not the same fact, and
+   the console must never render them as one. Every surface owes the reader which it is showing, and a surface
+   that cannot obtain evidence SAYS SO rather than silently downgrading to the claim — or worse, to nothing.
+   Three fixtures from 2026-07-20 make the cost concrete. (i) The board rendered `merged 0/160` with every task
+   queued, because a failed GitHub read returned an empty set and cannot-read was presented as nothing-exists
+   (W1-T181). (ii) RECENT rendered "no recent outcomes yet" across a week containing ~100 merges, because the
+   section was GitHub-sourced while the LOCAL ledger held every one of them (W1-T184). (iii) `remudero-review`
+   posted "PASS — 5 criteria substantiated, no test theater" at `proof_exec: 0/5`, directly beneath its own
+   FLOOR DEGRADED banner, over a diff satisfying one criterion in five with zero tests on a `tdd: strict` task —
+   a CLAIM of substantiation rendered as though it were EVIDENCE of it.
+   The rule follows from where authority actually sits: the ledger is LOCAL, append-only and complete — the
+   fleet's own receipt of what it did. GitHub is a REMOTE, rate-limited, occasionally-unreachable claim about the
+   same events. A console that inverts that dependency lets a remote outage empty a local truth.
+   Executable duties: W1-T183 (density/IA — anomaly visible at the list layer), W1-T184 (ledger-first rendering
+   — GitHub decorates, never gates), W1-T179 (last-good status under darkness), W1-T182 (NEEDS ME joins live
+   escalation state, not ledger history). [console design pass, 2026-07-20]
 
 - Lives at repo root. Header carries sync date + focus, his-house style.
 - Humans and agents edit via commits/PRs; the Architect does narrative syncs at workstream
