@@ -36,6 +36,20 @@
     stale criterion via a plan PR; a worker never — nothing dropped, only realigned to the architecture.
   src: PR#42
   cited: "2026-07-14"
+- id: probe-must-exercise-the-real-consuming-client
+  subsystem: acceptance
+  lifecycle: active
+  operator_impact: true
+  files: [plan/tasks.yaml, src/lib/service.ts, src/lib/serve.ts]
+  fact: >-
+    A proof must exercise the ACTUAL consuming client, not a convenient stand-in. W1-T139's
+    console-auth criterion was proved with fetch-and-an-Authorization-header and PASSED — but the client
+    that matters is a browser NAVIGATION, which cannot send a header, so GET /?token= returned 401 and the
+    shell never loaded (a bootstrap paradox satisfied against the wrong client). When a criterion names a
+    client class (browser navigation, CLI, daemon, mobile), its probe MUST use that class, or it verifies
+    nothing that ships.
+  src: W1-T139 console-auth fix — browser-navigation bootstrap paradox
+  cited: "2026-07-20"
 
 # ── A live-operator criterion is UNFIT for a headless worker (a NEW error class, W1-T9). Design
 # interactive steps for no-TTY: flags + TTY-absent default; test via injected input. (DIAGNOSIS.md) ──

@@ -68,6 +68,14 @@ export interface Route {
   path: string;
   scope: Scope;
   handler: RouteHandler;
+  /**
+   * If true, this route ALSO accepts the bearer credential via a `?token=` query param, not only
+   * the `Authorization` header. Set this ONLY on the static HTML document (`GET /`): a browser
+   * NAVIGATION cannot send an `Authorization` header, so the shell the operator opens by URL would
+   * otherwise 401 and never load (the W1-T139 bootstrap paradox). NEVER set it on an API/data route
+   * (`/v1/*`) — a token in the URL leaks via `Referer` and access logs; those stay header-only.
+   */
+  allowQueryToken?: boolean;
 }
 
 /** Push one SSE event to a subscribed client (`event:`/`data:` framing, owned by this module). */
@@ -119,9 +127,28 @@ function bearerToken(req: IncomingMessage): string | undefined {
   return match?.[1];
 }
 
-/** Scopes granted by the request's bearer token; `undefined` = missing/unrecognized (401, not 403). */
-function grantedScopes(tokens: ServiceTokens, req: IncomingMessage): ReadonlySet<Scope> | undefined {
-  const token = bearerToken(req);
+/**
+ * The `?token=` query-param credential — read ONLY for a route that opts into `allowQueryToken`
+ * (the HTML shell, reached by a browser NAVIGATION that cannot set an `Authorization` header). It
+ * must never be honored on an API/data route: a token in the URL leaks via `Referer` and logs.
+ */
+function queryToken(req: IncomingMessage): string | undefined {
+  const raw = new URL(req.url ?? "/", "http://localhost").searchParams.get("token");
+  return raw && raw.length > 0 ? raw : undefined;
+}
+
+/**
+ * Scopes granted by the request's bearer token; `undefined` = missing/unrecognized (401, not 403).
+ * The header is the ONLY credential source unless `allowQuery` is set (true only for the shell
+ * document route), in which case a `?token=` query param is accepted as a fallback for a client
+ * that cannot send headers (browser navigation) — never for `/v1/*`.
+ */
+function grantedScopes(
+  tokens: ServiceTokens,
+  req: IncomingMessage,
+  allowQuery: boolean,
+): ReadonlySet<Scope> | undefined {
+  const token = bearerToken(req) ?? (allowQuery ? queryToken(req) : undefined);
   if (!token) return undefined;
   if (safeEqual(token, tokens.write)) return READ_WRITE;
   if (safeEqual(token, tokens.read)) return READ_ONLY;
@@ -179,7 +206,10 @@ export function createService(opts: ServiceOptions): Server {
       }
       const requiredScope: Scope = (sseRoute ?? route)!.scope;
 
-      const granted = grantedScopes(opts.tokens, req);
+      // Query-param auth is honored ONLY for a plain route that opted in (the HTML shell) — never
+      // for an SSE stream or an API route, where a `?token=` would leak via Referer/logs.
+      const allowQuery = !sseRoute && (route?.allowQueryToken ?? false);
+      const granted = grantedScopes(opts.tokens, req, allowQuery);
       if (!granted) {
         log("service.unauthorized", { method, path });
         sendJson(res, 401, { error: "unauthorized" });
