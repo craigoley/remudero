@@ -83,8 +83,12 @@ jobs:
       # added: same UNCONDITIONAL shape — no path filter, runs every PR; internally scoped to
       # PRs carrying the `refactor-campaign` label (mirrors containment-probe's diff-scoping — a
       # non-matching PR still completes the job successfully, so it never blocks).
+      # `api-client-drift` (W3-T1b, §7A "packages/api-client is GENERATED... drift between the
+      # committed client and the surface is caught in CI") added: same UNCONDITIONAL shape — no
+      # path filter, runs every PR; a stale/hand-edited packages/api-client/src/schema.d.ts goes
+      # red against a fresh regeneration from openapi/daemon.yaml.
       REQUIRED: >-
-        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet", "jscpd-gate", "claims", "learnings-budget-ratchet", "refactor-campaign", "commitlint"]
+        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet", "jscpd-gate", "claims", "learnings-budget-ratchet", "refactor-campaign", "commitlint", "api-client-drift"]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
       IGNORE: >-

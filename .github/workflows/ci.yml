@@ -426,3 +426,29 @@ jobs:
       - name: Containment probe (test/containment.test.ts — required, this diff touches a containment-relevant path)
         if: steps.trigger.outputs.matched == 'true'
         run: node --test --import tsx test/containment.test.ts
+
+  api-client-drift:
+    # §7A packages/api-client GENERATOR + stale-client drift check (W3-T1b). "packages/api-client is
+    # GENERATED from that surface [openapi/daemon.yaml]... drift between the committed client and
+    # the surface is caught in CI." scripts/generate-api-client.mjs regenerates
+    # packages/api-client/src/schema.d.ts from openapi/daemon.yaml; `--check` (npm run
+    # api-client:check) fails the moment the committed file no longer matches a fresh regeneration
+    # -- a hand-edited or forgotten-to-regenerate client goes RED here instead of silently drifting
+    # from the daemon it's meant to describe. See test/api-client-drift-check.test.ts for the
+    # falsifier proof this is ACTIVE (a planted stale/missing/unresolvable-$ref spec is REJECTED; a
+    # freshly regenerated one is ACCEPTED), driving the real CLI as a subprocess.
+    #
+    # Runs UNCONDITIONALLY on every PR (no path filter, no job `if:`) — same fail-closed shape as
+    # `claims`/`jscpd-gate`/`lint-plan` above: a path-filtered REQUIRED check that can go silently
+    # absent is the synthwatch #102 deadlock class ci-gate.yml exists to avoid.
+    name: api-client-drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: api-client drift check (committed client must match a fresh regeneration from openapi/daemon.yaml)
+        run: npm run --silent api-client:check
