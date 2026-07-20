@@ -6850,8 +6850,11 @@
     The service serve path runs the W1-T151 install-freshness check BEFORE binding (a lockfile-changing pull triggers
     npm install first). Port from config via resolveServePort. `--write` installs to ~/Library/LaunchAgents and
     prints the load line for the operator (loading the unit is the operator's one step, not an auto criterion).
-    VERIFY generateLaunchdPlist's current shape, resolveServePort, the W1-T151 freshness hook, and W1-T143's
-    line-buffer mechanism from source before wiring (distrust this note).
+    BELT-AND-SUSPENDERS: the service serve path checks the checkout's current branch and REFUSES to bind when it
+    is not main (exit non-zero, name the branch) unless an explicit override flag is passed — a console serving
+    branch code lies to the operator (the ctrl+C-off-a-branch / serve-off-main incident). VERIFY generateLaunchdPlist's
+    current shape, resolveServePort, the W1-T151 freshness hook, W1-T143's line-buffer mechanism, and the git
+    current-branch read from source before wiring (distrust this note).
   acceptance:
     - claim: "the generated plist runs `rmd serve` as a KeepAlive background service, port baked from config, logging to state/serve.log"
       proof: "unit test over the PURE generator: the emitted plist string has ProgramArguments = [rmdBin, serve, --port, <resolved port>], KeepAlive present + RunAtLoad, StandardOutPath/StandardErrorPath pointing at state/serve.log, and the closed PATH+HOME env allowlist (no ANTHROPIC key) — asserted against the string alone, no OS service-manager runtime"
@@ -6859,6 +6862,8 @@
       proof: "unit test: the service serve path, given a package-lock.json hash that differs from the persisted one, runs npm install BEFORE the server binds; a matching hash binds directly (the W1-T151 hook exercised on the service path, the falsifier being a service path that skips the check)"
     - claim: "serve's logs are line-buffered (W1-T143) so state/serve.log is readable while running, not only at exit"
       proof: "integration test: serve run with stdout directed to a non-TTY pipe/file emits a startup log LINE readable BEFORE the process exits (W1-T143's line-buffer/flush); a fully-buffered stdout that only flushes at exit FAILS the assertion (the falsifier)"
+    - claim: "belt-and-suspenders — the service serve path REFUSES to bind when the checkout is not on main, unless an explicit override flag is given (a console must never silently serve branch code)"
+      proof: "unit test over the service serve path: given a checkout whose current branch is NOT main, it exits non-zero WITHOUT binding, naming the off-main branch; with the override flag it binds; on main it binds normally — the falsifier being a serve that binds off-main and quietly serves un-shipped code (the exact way an operator gets lied to; the ctrl+C-off-a-branch incident)"
   risk: high
   origin: architect
   plan_refs: ["§7", "§9"]
