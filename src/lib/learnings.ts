@@ -64,11 +64,36 @@ import { citation } from "./provenance.js";
  * identically, so an entry can move between layers without reshaping.
  * {@link loadLayeredLearnings} reads all three homes in precedence order
  * (project, then user-overall, then global) into one merged corpus.
- * PROMOTION (deciding when an entry should rise a layer) and the SCRUB gate
- * are explicitly OUT of scope here — that is W1-T146. So is the transport
- * that actually populates a user-overall/global home on this machine (§6,
- * DECISIONS.md distribution-architecture Tier 3) — this module only defines
- * the shape and reads whatever already exists at each home.
+ *
+ * PROMOTION (P32/W1-T146): {@link promoteEntry} decides whether ONE entry
+ * rises a layer. Promotion is a strict two-stage pipeline, SCRUB then JUDGE,
+ * never the reverse: (1) {@link scrubEntry} is a DETERMINISTIC leak-grep
+ * analog (secret-pattern regexes) plus a PII detector; a hit BLOCKS
+ * promotion and the judge is NEVER invoked (the opt-in, error-reporting
+ * model — nothing project-identifying reaches an LLM call without first
+ * clearing scrub). (2) only once scrub passes does {@link
+ * PromotionJudgeDeps.judge} — an injected, advisory LLM applicability
+ * eval, mirroring flight-judge.ts's `deps.judge` shape so promotion stays
+ * unit-testable without a real spawn — decide project-specific (stays) vs
+ * broadly-applicable (promotes one layer up, via {@link
+ * planPromotionFromVerdict}). The judge is FAIL-CLOSED: a parse failure, a
+ * missing verdict, or a confidence below {@link
+ * planPromotionFromVerdict}'s threshold all resolve to "does not promote" —
+ * uncertainty never promotes. A promoted entry's `src` provenance survives
+ * REDACTED ({@link redactProvenance} strips repo-identifying specifics —
+ * task ids, PR/issue numbers — while keeping the origin's shape), never
+ * dropped outright. {@link runPromotionPass} batches {@link promoteEntry}
+ * over a corpus. The PER-LAYER BUDGET RATCHET ({@link
+ * computeLayerBudgetUsage} / {@link evaluateLayerBudgetRatchet}) extends
+ * learnings-budget-ratchet's (W1-T38, scripts/learnings-budget-ratchet.mjs)
+ * injectable-weight measurement so each layer's active corpus is capped
+ * INDEPENDENTLY, rather than one global ceiling across all three layers.
+ *
+ * The transport that actually MOVES a promoted entry onto a populated
+ * user-overall/global home on this machine (§6, DECISIONS.md
+ * distribution-architecture Tier 3) is still deferred — this module decides
+ * WHETHER an entry promotes and produces its next-layer shape; writing that
+ * shape to a real home is the transport's job.
  */
 
 /** Standing rule 7 — empirically the highest-value line in the template. */
@@ -548,6 +573,376 @@ function mergeLayers(projectEntries: LearningEntry[], homes: LayeredLearningsHom
     }
   }
   return { entries, globalRefusedReason };
+}
+
+// ── PROMOTION (P32/W1-T146): SCRUB THEN JUDGE ──────────────────────────────
+
+/** One deterministic scrub pattern: a name (surfaced in a block reason) + regex it matches against. */
+interface ScrubPattern {
+  name: string;
+  pattern: RegExp;
+}
+
+/**
+ * Leak-grep analog: deterministic secret-shaped patterns. Deliberately
+ * conservative (specific token shapes, not "any long string") so scrub does
+ * not blanket-block ordinary facts — the acceptance bar is "a deliberately
+ * secret-bearing entry is BLOCKED," not "every entry with a long word is."
+ */
+const SECRET_PATTERNS: ScrubPattern[] = [
+  { name: "aws-access-key-id", pattern: /\bAKIA[0-9A-Z]{16}\b/ },
+  { name: "github-token", pattern: /\bgh[opsu]_[A-Za-z0-9]{20,}\b/ },
+  { name: "slack-token", pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/ },
+  { name: "private-key-block", pattern: /-----BEGIN[ A-Z]*PRIVATE KEY-----/ },
+  { name: "bearer-token", pattern: /\bBearer\s+[A-Za-z0-9._-]{20,}\b/i },
+  {
+    name: "generic-credential-assignment",
+    pattern: /\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*['"]?[A-Za-z0-9/+_.-]{12,}['"]?/i,
+  },
+];
+
+/** PII detector patterns: the shapes a fact/provenance line should never carry. */
+const PII_PATTERNS: ScrubPattern[] = [
+  { name: "email-address", pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/ },
+  { name: "ssn", pattern: /\b\d{3}-\d{2}-\d{4}\b/ },
+  { name: "phone-number", pattern: /\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/ },
+];
+
+/** The result of running {@link scrubEntry}: whether it blocks promotion, and every pattern name that hit. */
+export interface ScrubResult {
+  blocked: boolean;
+  reasons: string[];
+}
+
+/** Every free-text field of an entry a leaked secret/PII value could hide in. `files` (globs) is excluded — not free text. */
+function scrubbableFields(entry: LearningEntry): (string | undefined)[] {
+  return [entry.fact, entry.src, entry.assertion, entry.quarantinedReason];
+}
+
+/**
+ * The SCRUB gate (P32/W1-T146, stage 1 of {@link promoteEntry}): a
+ * DETERMINISTIC leak-grep analog (secret-pattern regexes) plus a PII
+ * detector, run over every free-text field of `entry`. Pure and synchronous
+ * — no LLM call, no network, no I/O — so a caller can run it before ever
+ * paying for (or risking) a judge invocation. `blocked: true` means
+ * promotion must stop HERE; {@link promoteEntry} never calls the judge when
+ * this returns blocked.
+ */
+export function scrubEntry(entry: LearningEntry): ScrubResult {
+  const reasons = new Set<string>();
+  for (const field of scrubbableFields(entry)) {
+    if (!field) continue;
+    for (const p of SECRET_PATTERNS) if (p.pattern.test(field)) reasons.add(p.name);
+    for (const p of PII_PATTERNS) if (p.pattern.test(field)) reasons.add(p.name);
+  }
+  return { blocked: reasons.size > 0, reasons: [...reasons].sort() };
+}
+
+/** Applicability classes the promotion judge chooses between — see {@link buildPromotionJudgePrompt}. */
+export type PromotionApplicability = "project-specific" | "broadly-applicable";
+
+/** What the promotion judge returns. ADVISORY — {@link planPromotionFromVerdict} is the deterministic actor (Standing rule 12, same split as flight-judge.ts). */
+export interface PromotionJudgeVerdict {
+  applicability: PromotionApplicability;
+  /** 0..1 — how confident the judge is in `applicability`. */
+  confidence: number;
+  /** One-sentence concrete reason, surfaced in logs/results for a human to audit. */
+  rationale: string;
+}
+
+/**
+ * Build the promotion judge's prompt for ONE entry (P32/W1-T146). The judge
+ * sees ONLY this entry's fields (id, subsystem, fact, src, files) — never
+ * sibling entries, never the corpus it would join — so its verdict is about
+ * this fact's own shape, not comparative. Mirrors flight-judge.ts's
+ * `buildJudgePrompt`: prose framing + a fixed MACHINE-READABLE OUTPUT
+ * contract a caller can parse without an LLM round-trip to re-ask.
+ */
+export function buildPromotionJudgePrompt(entry: LearningEntry): string {
+  return [
+    `You are the PROMOTION JUDGE (P32/W1-T146) — a broader-applicability`,
+    `evaluator for ONE knowledge-layer entry that has ALREADY PASSED the`,
+    `deterministic scrub gate (no secret/PII pattern matched its text). You`,
+    `decide ONLY whether the fact below GENERALIZES beyond this one repo — you`,
+    `never edit the entry, never write to any layer, and never see any other`,
+    `entry. A deterministic caller acts on your verdict (fail-closed:`,
+    `anything short of a confident BROADLY-APPLICABLE call keeps the entry at`,
+    `its current layer).`,
+    ``,
+    `ENTRY:`,
+    `  id: ${entry.id}`,
+    `  subsystem: ${entry.subsystem}`,
+    `  fact: ${entry.fact}`,
+    `  src: ${entry.src}`,
+    `  files: ${entry.files.join(", ") || "(none)"}`,
+    ``,
+    `Classify the entry's APPLICABILITY — exactly one of:`,
+    `  project-specific    — names/depends on THIS repo's paths, ids, tasks,`,
+    `                        PRs, tools, or architecture; would not transfer`,
+    `                        to a worker in a different repo`,
+    `  broadly-applicable  — a cross-cutting lesson that holds regardless of`,
+    `                        which repo/project a worker is in`,
+    ``,
+    `MACHINE-READABLE OUTPUT (required, in addition to any prose): emit`,
+    `exactly one of each of these lines, and nothing else on the line:`,
+    `  PROMOTION_APPLICABILITY: <project-specific|broadly-applicable>`,
+    `  PROMOTION_CONFIDENCE: <0.0-1.0>`,
+    `  PROMOTION_RATIONALE: <one sentence, the concrete reason>`,
+  ].join("\n");
+}
+
+/**
+ * FAIL-CLOSED default when the judge's output carries no parseable verdict
+ * (same doctrine as flight-judge.ts's `FAIL_CLOSED_VERDICT`): an unreadable
+ * judge is evidence the entry should NOT move, not a reason to wave it
+ * through. `applicability: "project-specific"` at `confidence: 0` can never
+ * satisfy {@link planPromotionFromVerdict}'s threshold.
+ */
+const FAIL_CLOSED_PROMOTION_VERDICT: PromotionJudgeVerdict = {
+  applicability: "project-specific",
+  confidence: 0,
+  rationale: "judge output carried no parseable PROMOTION_APPLICABILITY verdict — failing closed (stays at current layer)",
+};
+
+/**
+ * Parse the promotion judge's `PROMOTION_APPLICABILITY`/`PROMOTION_CONFIDENCE`/
+ * `PROMOTION_RATIONALE` lines into a {@link PromotionJudgeVerdict}. Missing or
+ * unrecognized applicability fails closed ({@link FAIL_CLOSED_PROMOTION_VERDICT});
+ * a missing/invalid confidence defaults to 0. Case-insensitive; tolerant of
+ * surrounding prose (same tolerance as flight-judge.ts's `parseJudgeVerdict`).
+ */
+export function parsePromotionJudgeVerdict(text: string): PromotionJudgeVerdict {
+  const applicabilityMatch = text.match(/PROMOTION_APPLICABILITY:\s*([\w-]+)/i);
+  const confidenceMatch = text.match(/PROMOTION_CONFIDENCE:\s*([\d.]+)/i);
+  const rationaleMatch = text.match(/PROMOTION_RATIONALE:\s*(.+)/i);
+
+  const applicability = applicabilityMatch?.[1]?.toLowerCase();
+  if (applicability !== "project-specific" && applicability !== "broadly-applicable") {
+    return { ...FAIL_CLOSED_PROMOTION_VERDICT };
+  }
+
+  let confidence = confidenceMatch ? Number(confidenceMatch[1]) : 0;
+  if (!Number.isFinite(confidence)) confidence = 0;
+  confidence = Math.min(1, Math.max(0, confidence));
+
+  return { applicability, confidence, rationale: rationaleMatch?.[1]?.trim() ?? "" };
+}
+
+/** Below this confidence, a `broadly-applicable` verdict still does NOT promote (fail-closed default). */
+export const DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD = 0.7;
+
+/**
+ * The deterministic actor on a {@link PromotionJudgeVerdict} (Standing rule
+ * 12 — judgment is advisory, the decision to act is a pure function of it).
+ * Promotes iff the judge said `broadly-applicable` AND its confidence meets
+ * `confidenceThreshold` — anything else (including a `project-specific`
+ * call, a low-confidence `broadly-applicable` call, or the fail-closed
+ * default) does not promote.
+ */
+export function planPromotionFromVerdict(
+  verdict: PromotionJudgeVerdict,
+  confidenceThreshold: number = DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD,
+): boolean {
+  return verdict.applicability === "broadly-applicable" && verdict.confidence >= confidenceThreshold;
+}
+
+/** The layer immediately above `layer` in {@link LAYERS}' bottom-up order, or `undefined` if `layer` is already the top (`global`). */
+export function nextLayer(layer: Layer): Layer | undefined {
+  const idx = LAYERS.indexOf(layer);
+  if (idx === -1 || idx === LAYERS.length - 1) return undefined;
+  return LAYERS[idx + 1];
+}
+
+/**
+ * Redact repo-identifying SPECIFICS out of a provenance `src` string while
+ * keeping its origin shape (P32/W1-T146: "provenance survives promotion in
+ * REDACTED form" — the origin is kept, project-identifying specifics
+ * scrubbed). Strips task ids (`W1-T146`), PR numbers, issue numbers, and any
+ * other bare `#<digits>` reference; anything else in `src` (e.g. a
+ * subsystem/team name) survives untouched.
+ */
+export function redactProvenance(src: string): string {
+  return src
+    .replace(/\bW\d+-T\d+[a-zA-Z]?\b/g, "[task]")
+    .replace(/\bPR ?#\d+\b/gi, "PR#[redacted]")
+    .replace(/\bissue ?#\d+\b/gi, "issue#[redacted]")
+    .replace(/#\d+\b/g, "#[redacted]");
+}
+
+/** Dependencies {@link promoteEntry}/{@link runPromotionPass} need injected — mirrors flight-judge.ts's `FlightJudgeDeps.judge` so promotion is unit-testable without a real spawn. */
+export interface PromotionJudgeDeps {
+  /** The advisory LLM applicability eval. NEVER invoked when {@link scrubEntry} blocks (the scrub falsifier). */
+  judge: (entry: LearningEntry) => Promise<PromotionJudgeVerdict>;
+  /** Optional structured-event sink (same shape as flight-judge.ts's `deps.log`); no-op if omitted. */
+  log?: (event: string, data: Record<string, unknown>) => void;
+  /** Overrides {@link DEFAULT_PROMOTION_CONFIDENCE_THRESHOLD} for this call. */
+  confidenceThreshold?: number;
+}
+
+/** Which stage {@link promoteEntry} stopped at. `"scrub"` and `"top-layer"` never reach the judge. */
+export type PromotionStage = "scrub" | "top-layer" | "judge" | "promoted";
+
+/** The full, auditable outcome of one {@link promoteEntry} call. */
+export interface PromotionResult {
+  entryId: string;
+  promoted: boolean;
+  stage: PromotionStage;
+  scrub: ScrubResult;
+  /** Set iff the judge was actually invoked (i.e. scrub passed and the entry was below the top layer). */
+  verdict?: PromotionJudgeVerdict;
+  /** Set iff `promoted`: the entry's next-layer shape, with `layer` bumped and `src` redacted. Not yet written to any home — see the module doc's transport note. */
+  promotedEntry?: LearningEntry;
+  reason: string;
+}
+
+/**
+ * The PROMOTION PIPELINE for ONE entry (P32/W1-T146): SCRUB, then JUDGE,
+ * strictly in that order and never the reverse.
+ *
+ * 1. {@link scrubEntry}. A block returns immediately with `stage: "scrub"` —
+ *    `deps.judge` is NEVER called (assert zero judge invocations in a test
+ *    fixture; that is the scrub falsifier).
+ * 2. If `entry` is already at the top layer (`global`), there is nothing
+ *    above it to promote to — returns `stage: "top-layer"` without invoking
+ *    the judge either (a judge call would be meaningless with no target).
+ * 3. Otherwise `deps.judge(entry)` runs and {@link planPromotionFromVerdict}
+ *    decides. A non-promoting verdict (including the fail-closed default)
+ *    returns `stage: "judge"`, `promoted: false` — the entry stays exactly
+ *    where it was (the judge falsifier: a project-specific entry never
+ *    appears at the next layer after a pass).
+ * 4. A promoting verdict returns `stage: "promoted"` with `promotedEntry`:
+ *    the SAME entry, `layer` set to the next layer up and `src` run through
+ *    {@link redactProvenance}. `promoteEntry` does not mutate `entry` and
+ *    does not write `promotedEntry` anywhere — persisting it to a real
+ *    user-overall/global home is the deferred transport's job.
+ */
+export async function promoteEntry(entry: LearningEntry, deps: PromotionJudgeDeps): Promise<PromotionResult> {
+  const log = deps.log ?? (() => {});
+  const scrub = scrubEntry(entry);
+  log("promotion.scrub", { id: entry.id, blocked: scrub.blocked, reasons: scrub.reasons });
+  if (scrub.blocked) {
+    return {
+      entryId: entry.id,
+      promoted: false,
+      stage: "scrub",
+      scrub,
+      reason: `blocked at scrub (never reached the judge): ${scrub.reasons.join(", ")}`,
+    };
+  }
+
+  const from = entryLayer(entry);
+  const to = nextLayer(from);
+  if (!to) {
+    return {
+      entryId: entry.id,
+      promoted: false,
+      stage: "top-layer",
+      scrub,
+      reason: `already at the top layer (${from}) — nothing above it to promote to`,
+    };
+  }
+
+  const verdict = await deps.judge(entry);
+  log("promotion.verdict", { id: entry.id, applicability: verdict.applicability, confidence: verdict.confidence });
+
+  if (!planPromotionFromVerdict(verdict, deps.confidenceThreshold)) {
+    return {
+      entryId: entry.id,
+      promoted: false,
+      stage: "judge",
+      scrub,
+      verdict,
+      reason: `judge did not promote: applicability=${verdict.applicability} confidence=${verdict.confidence}`,
+    };
+  }
+
+  const promotedEntry: LearningEntry = { ...entry, layer: to, src: redactProvenance(entry.src) };
+  log("promotion.promoted", { id: entry.id, from, to });
+  return { entryId: entry.id, promoted: true, stage: "promoted", scrub, verdict, promotedEntry, reason: `promoted ${from} -> ${to}` };
+}
+
+/** The batched outcome of {@link runPromotionPass}: every entry's individual result, plus the flat list of new next-layer entries produced. */
+export interface PromotionPassResult {
+  results: PromotionResult[];
+  promotedEntries: LearningEntry[];
+}
+
+/**
+ * Run {@link promoteEntry} over a whole corpus (P32/W1-T146) — "a promotion
+ * pass." `superseded`/`quarantined` entries are skipped (never promotion
+ * candidates — same lifecycle filter {@link selectLearnings} applies before
+ * injection; a decayed fact should not rise a layer either). Returns every
+ * entry's individual {@link PromotionResult} plus the flat `promotedEntries`
+ * list a caller would merge into the next layer's home — a project-specific
+ * entry's result has `promoted: false` and contributes nothing to that list,
+ * which is the shape the judge-falsifier test asserts against.
+ */
+export async function runPromotionPass(entries: LearningEntry[], deps: PromotionJudgeDeps): Promise<PromotionPassResult> {
+  const results: PromotionResult[] = [];
+  const promotedEntries: LearningEntry[] = [];
+  for (const entry of entries) {
+    if (entry.lifecycle !== "active") continue;
+    const result = await promoteEntry(entry, deps);
+    results.push(result);
+    if (result.promoted && result.promotedEntry) promotedEntries.push(result.promotedEntry);
+  }
+  return { results, promotedEntries };
+}
+
+// ── PER-LAYER BUDGET RATCHET (P32/W1-T146, extends W1-T38) ─────────────────
+
+/** Optional per-layer char caps for {@link evaluateLayerBudgetRatchet}; an omitted layer is uncapped. */
+export type LayerBudgetCaps = Partial<Record<Layer, number>>;
+
+/** One layer's measured active-corpus injectable weight, mirroring `computeActiveChars`' shape in scripts/learnings-budget-ratchet.mjs. */
+export interface LayerBudgetUsage {
+  layer: Layer;
+  chars: number;
+  activeCount: number;
+}
+
+/**
+ * Measure each layer's injectable weight INDEPENDENTLY (P32/W1-T146):
+ * same formula scripts/learnings-budget-ratchet.mjs's `computeActiveChars`
+ * uses (rendered `- <fact> [src: learnings#<id>]` line length, +1 per entry
+ * for the joining newline, `lifecycle: active` only — `superseded`/
+ * `quarantined` entries carry zero weight because {@link selectLearnings}
+ * never injects them) via {@link entryBudgetWeight}, but bucketed by {@link
+ * entryLayer} instead of summed across the whole corpus. Always returns one
+ * entry per {@link LAYERS}, in that order, even when a layer has zero
+ * entries (`chars: 0`).
+ */
+export function computeLayerBudgetUsage(entries: LearningEntry[]): LayerBudgetUsage[] {
+  const usage = new Map<Layer, LayerBudgetUsage>(LAYERS.map((layer) => [layer, { layer, chars: 0, activeCount: 0 }]));
+  for (const entry of entries) {
+    if (entry.lifecycle !== "active") continue;
+    const u = usage.get(entryLayer(entry));
+    if (!u) continue;
+    u.chars += entryBudgetWeight(entry) + 1;
+    u.activeCount += 1;
+  }
+  return LAYERS.map((layer) => usage.get(layer) as LayerBudgetUsage);
+}
+
+/**
+ * The per-layer ratchet check (P32/W1-T146, extends learnings-budget-ratchet
+ * W1-T38 from a single global ceiling to one INDEPENDENT cap per layer): a
+ * layer whose measured {@link computeLayerBudgetUsage} exceeds its `caps`
+ * entry is a violation, named in the returned string; a layer with no cap
+ * set is never a violation. Exceeding ONE layer's cap does not affect
+ * another layer's evaluation — each is judged solely against its own cap,
+ * same as the acceptance bar names ("exceeding one layer's cap fails the
+ * ratchet"). Empty array means every capped layer is at or under budget.
+ */
+export function evaluateLayerBudgetRatchet(entries: LearningEntry[], caps: LayerBudgetCaps): string[] {
+  const violations: string[] = [];
+  for (const usage of computeLayerBudgetUsage(entries)) {
+    const cap = caps[usage.layer];
+    if (typeof cap === "number" && usage.chars > cap) {
+      violations.push(`${usage.layer} layer active corpus ${usage.chars} chars > cap ${cap} chars`);
+    }
+  }
+  return violations;
 }
 
 /**
