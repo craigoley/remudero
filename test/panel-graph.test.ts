@@ -7,6 +7,7 @@ import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { createService } from "../src/lib/service.js";
 import {
+  buildDrainPreviewRoute,
   buildFeedbackInboxRoute,
   buildPanelGraphRoutes,
   buildProposalDecisionRoute,
@@ -17,6 +18,7 @@ import {
 import { bearerTokenId } from "../src/lib/panel-actions.js";
 import { captureFeedback, feedbackEntryPath, readFeedbackEntry, setFeedbackStatus, type FeedbackEntry } from "../src/lib/feedback.js";
 import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
+import type { GitHub } from "../src/lib/status.js";
 import {
   decideTriage,
   diffCitesFeedback,
@@ -75,6 +77,16 @@ function fakeGithub(byRef: Record<string, TracePrView> = {}): TraceGithub {
   return { prView: (ref) => byRef[String(ref)] ?? null };
 }
 
+/** Offline status.ts `GitHub` stub for `PanelGraphDeps.statusGithub` (GET /v1/drain/preview's merged-set derivation) — distinct shape from `fakeGithub`'s `TraceGithub` above (verified from source, not assumed). */
+function fakeStatusGithub(): GitHub {
+  return {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+  };
+}
+
 /** Writes a minimal plan/tasks.yaml with the given task lines and returns its path. */
 function writePlan(root: string, yamlBody: string): string {
   const planPath = join(root, "plan", "tasks.yaml");
@@ -88,7 +100,7 @@ function emptyPlanPath(root: string): string {
 }
 
 function depsFor(root: string, planPath: string, github: TraceGithub = fakeGithub()): PanelGraphDeps {
-  return { root, planPath, ledgerPath: ledgerPathFor(root), github };
+  return { root, planPath, ledgerPath: ledgerPathFor(root), github, statusGithub: fakeStatusGithub() };
 }
 
 async function withService<T>(deps: PanelGraphDeps, fn: (baseUrl: string) => Promise<T>): Promise<T> {
@@ -415,7 +427,7 @@ test("GET /v1/trace?id=<feedback-id>: FORWARD chain -- feedback -> proposal PR -
     "https://github.com/o/r/pull/51": { number: 51, url: "https://github.com/o/r/pull/51", state: "OPEN" },
   });
   const ledgerPath = ledgerPathFor(root);
-  const deps: PanelGraphDeps = { root, planPath, ledgerPath, github };
+  const deps: PanelGraphDeps = { root, planPath, ledgerPath, github, statusGithub: fakeStatusGithub() };
   // seed the run's ledger lines directly (mirrors test/board.test.ts's convention).
   const { appendLedger } = await import("../src/lib/ledger.js");
   appendLedger(ledgerPath, { run_id: "W9-T1-1000", task_id: "W9-T1", step: "pr.opened", pr_url: "https://github.com/o/r/pull/51" });
@@ -537,6 +549,103 @@ test("individual route builders each return their own exact-match route", () => 
   assert.equal(buildSubmitFeedbackRoute(deps).method, "POST");
   assert.equal(buildTraceRoute(deps).path, "/v1/trace");
   assert.equal(buildProposalDecisionRoute(deps).path, "/v1/feedback/decision");
+  assert.equal(buildDrainPreviewRoute(deps).path, "/v1/drain/preview");
+  assert.equal(buildDrainPreviewRoute(deps).method, "GET");
+});
+
+// ── GET /v1/drain/preview (W1-T140: the drain preview + curation panel) ─────
+
+function drainPreviewPlanPath(root: string): string {
+  return writePlan(
+    root,
+    [
+      "- id: A",
+      "  title: a",
+      "  repo: remudero",
+      "  type: implement",
+      "  depends_on: []",
+      "- id: B",
+      "  title: b",
+      "  repo: remudero",
+      "  type: implement",
+      "  depends_on: [A]",
+      '  note: "b needs A first"',
+      "- id: C",
+      "  title: c",
+      "  repo: remudero",
+      "  type: implement",
+      "  depends_on: [B]",
+      "",
+    ].join("\n"),
+  );
+}
+
+test("GET /v1/drain/preview: renders the would-drain queue as ordered task cards, each carrying dependency edges both ways", async () => {
+  const root = tmpRoot();
+  const planPath = drainPreviewPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await get(base, "/v1/drain/preview", READ_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { cards: Array<Record<string, unknown>> };
+    assert.deepEqual(
+      body.cards.map((c) => c.id),
+      ["A", "B", "C"],
+      "card order equals plannedSequence's natural DAG order",
+    );
+    const b = body.cards[1];
+    assert.equal(b.title, "b");
+    assert.equal(b.description, "b needs A first");
+    assert.deepEqual(b.dependsOn, [{ id: "A", title: "a" }]);
+    assert.deepEqual(b.dependents, [{ id: "C", title: "c" }]);
+  });
+});
+
+test("GET /v1/drain/preview: re-derives merged status from GitHub (statusGithub) rather than trusting yaml -- a trailer-credited task drops off the queue", async () => {
+  const root = tmpRoot();
+  const planPath = drainPreviewPlanPath(root);
+  const github: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: (taskId) => (taskId === "A" ? { number: 9, url: "https://github.com/o/r/pull/9", state: "MERGED" } : null),
+    headRefName: (prUrl) => (prUrl === "https://github.com/o/r/pull/9" ? "run-A-1730000000000" : undefined),
+    prBody: (prUrl) => (prUrl === "https://github.com/o/r/pull/9" ? "Remudero-Task: A\n" : undefined),
+  };
+  await withService({ ...depsFor(root, planPath), statusGithub: github }, async (base) => {
+    const res = await get(base, "/v1/drain/preview", READ_TOKEN);
+    const body = (await res.json()) as { cards: Array<{ id: string }> };
+    assert.deepEqual(body.cards.map((c) => c.id), ["B", "C"], "A is merged (GitHub-derived) -- it drops off the queue, unlike the yaml's decorative status");
+  });
+});
+
+test("GET /v1/drain/preview: ?max and ?until bound the queue exactly like `rmd drain`'s own flags", async () => {
+  const root = tmpRoot();
+  const planPath = drainPreviewPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const maxed = (await (await get(base, "/v1/drain/preview?max=1", READ_TOKEN)).json()) as { cards: Array<{ id: string }> };
+    assert.deepEqual(maxed.cards.map((c) => c.id), ["A"]);
+
+    const until = (await (await get(base, "/v1/drain/preview?until=B", READ_TOKEN)).json()) as { cards: Array<{ id: string }> };
+    assert.deepEqual(until.cards.map((c) => c.id), ["A", "B"]);
+  });
+});
+
+test("GET /v1/drain/preview: a non-numeric or non-positive ?max -> 400, never a silent fallback", async () => {
+  const root = tmpRoot();
+  const planPath = drainPreviewPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    assert.equal((await get(base, "/v1/drain/preview?max=bogus", READ_TOKEN)).status, 400);
+    assert.equal((await get(base, "/v1/drain/preview?max=0", READ_TOKEN)).status, 400);
+    assert.equal((await get(base, "/v1/drain/preview?max=-1", READ_TOKEN)).status, 400);
+  });
+});
+
+test("GET /v1/drain/preview: an empty plan -> an empty card list, not an error", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await get(base, "/v1/drain/preview", READ_TOKEN);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { cards: [] });
+  });
 });
 
 // bearerTokenId parity check (never the raw secret leaked as ledger origin).

@@ -13,7 +13,7 @@
  * createService() instance) is later work, same split every prior W3-T* panel task's header
  * documents.
  *
- * FOUR ROUTES:
+ * FIVE ROUTES:
  *   - GET  /v1/feedback           — the inbox list (read-scoped).
  *   - POST /v1/feedback           — submit feedback, ALWAYS origin=ui (write-scoped). See
  *     `buildSubmitFeedbackRoute`'s doc comment for how this doubles as "answer a grill".
@@ -21,6 +21,12 @@
  *     feedback (read-scoped). Mirrors `rmd trace <id>`'s own two-entry-point resolution
  *     (run-task.ts's `traceCommand`) exactly, over the SAME lib/trace.ts primitives.
  *   - POST /v1/feedback/decision  — accept or reject a `proposed` entry (write-scoped).
+ *   - GET  /v1/drain/preview      — the would-drain queue as ordered task cards (W1-T140,
+ *     read-scoped). Reloads the plan fresh (same "never stale" discipline as `/v1/trace`),
+ *     re-derives merged status from GitHub via the SAME `projectPlan`/`DeriveDeps` board.ts's
+ *     `GET /v1/status` route already uses (zero new derivation logic), and renders
+ *     `drain.ts`'s `buildDrainPreview` — the SAME builder `rmd drain --dry-run` will grow to
+ *     share, never a second preview implementation.
  *
  * ANSWERING A GRILL (v1 scope). The actual interactive grill DELIVERY mechanism (AskUserQuestion
  * / a needs-human issue, reusing §4's escalation machinery) is explicitly OUT of this task's
@@ -46,7 +52,8 @@
  */
 
 import { loadPlan } from "./plan.js";
-import { readLedgerLines } from "./status.js";
+import { projectPlan, readLedgerLines, type GitHub } from "./status.js";
+import { buildDrainPreview, type DrainOpts } from "./drain.js";
 import {
   captureFeedback,
   FEEDBACK_STATUSES,
@@ -74,6 +81,14 @@ export interface PanelGraphDeps {
   ledgerPath: string;
   /** GitHub PR lookups the trace chain needs (lib/trace.ts's `TraceGithub`) — injected so tests never touch the network, same split every other `github`-shaped dep in this codebase follows. */
   github: TraceGithub;
+  /**
+   * The status-derivation GitHub gateway (status.ts's `GitHub`, DIFFERENT from
+   * `github`/`TraceGithub` above — verified from source, not assumed: `projectPlan`'s
+   * `DeriveDeps` needs `prByRef`/`findMergedByTrailer`/`headRefName`/`prBody`, a
+   * distinct shape from `TraceGithub`'s single `prView`). Backs GET /v1/drain/preview's
+   * merged-set derivation — the SAME projection board.ts's GET /v1/status already uses.
+   */
+  statusGithub: GitHub;
 }
 
 // ── GET /v1/feedback — the inbox list ───────────────────────────────────────
@@ -289,7 +304,55 @@ export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
   };
 }
 
-/** Every panel graph route, for a caller registering the full set at once (`rmd serve` wiring, later work). */
+// ── GET /v1/drain/preview — the would-drain queue as ordered task cards ────
+
+/** Parse `?max=<n>` off a request URL — a positive integer, or an error string. `undefined` when the param is absent (the natural {@link DrainOpts.max} default applies downstream). */
+function parseMaxParam(url: URL): { max?: number } | { error: string } {
+  const raw = url.searchParams.get("max");
+  if (raw === null) return {};
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return { error: "max must be a positive number" };
+  return { max: n };
+}
+
+/**
+ * GET /v1/drain/preview[?max=<n>][&until=<id>] — read-scoped. The would-drain queue
+ * (W1-T140 limb 1) as ordered task cards: reloads the plan fresh (same "never stale"
+ * discipline {@link buildTraceRoute} follows), re-derives merged status from GitHub
+ * via `projectPlan` (status.ts) — the SAME projection board.ts's `GET /v1/status`
+ * already uses, no second derivation path — and renders `drain.ts`'s
+ * `buildDrainPreview` in `plannedSequence` order.
+ */
+export function buildDrainPreviewRoute(deps: PanelGraphDeps): Route {
+  return {
+    method: "GET",
+    path: "/v1/drain/preview",
+    scope: "read",
+    handler: (req, res) => {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const parsedMax = parseMaxParam(url);
+      if ("error" in parsedMax) {
+        sendJson(res, 400, { error: "invalid_request", detail: parsedMax.error });
+        return;
+      }
+      const opts: DrainOpts = { max: parsedMax.max, until: url.searchParams.get("until") ?? undefined };
+
+      const plan = loadPlan(deps.planPath);
+      const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
+      const isMerged = (id: string) => projection.get(id)?.merged ?? false;
+      const cards = buildDrainPreview(plan, isMerged, opts);
+      sendJson(res, 200, { cards });
+    },
+  };
+}
+
+/** Every panel graph route, for a caller registering the full set at once (`rmd serve` wiring). */
 export function buildPanelGraphRoutes(deps: PanelGraphDeps): Route[] {
-  return [buildFeedbackInboxRoute(deps), buildSubmitFeedbackRoute(deps), buildTraceRoute(deps), buildProposalDecisionRoute(deps)];
+  return [
+    buildFeedbackInboxRoute(deps),
+    buildSubmitFeedbackRoute(deps),
+    buildTraceRoute(deps),
+    buildProposalDecisionRoute(deps),
+    buildDrainPreviewRoute(deps),
+  ];
 }

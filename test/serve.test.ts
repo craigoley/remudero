@@ -115,7 +115,7 @@ function depsFor(root: string, plan: Plan, over: Partial<ServeDeps> = {}): Serve
   const planPath = writePlan(root, planYaml(plan));
   return {
     board: { plan, ledgerPath, github: fakeGitHub() },
-    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub() },
+    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: fakeGitHub() },
     ledgerPath,
     issues: fakeIssueCloser(),
     fleetControlRoot: root,
