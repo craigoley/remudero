@@ -537,6 +537,31 @@
     'FLOOR DEGRADED: 0/3 proofs executed; keyword floor was binding', PR #394 PASS at 0/4, and #391's
     earlier round at 0/3. Every one rendered 'no test theater' on keyword overlap alone. The floor's
     empirical leg is dead weight at exactly the moment its judgments started gating ratification.
+    FINAL EVIDENCE SET, measured from the ledger over the whole 2026-07-20 evening session (all
+    review.posted lines at or after 19:00Z). BUILD AGAINST THESE FIXTURES — they are the closing
+    measurement of the defect, superseding the four-greens figure above:
+      22 verdicts posted (13 success, 9 failure)
+      76 proofs across them
+      75 NOT_EXECUTABLE — 98%
+      1 proof actually executed, all session
+    Note the shape: this is not a sampling artifact and not confined to passes. NINE of those verdicts
+    were FAILURES, and their unmet reasons read 'proof unmet: report does not substantiate it (matched
+    N/M proof keywords)' — so the floor is not merely failing to confirm work, it is actively BLOCKING
+    work on lexical overlap while executing nothing. Both polarities of the gate now run on keywords.
+    THE CLOSING FIXTURE, and the one that should shape the fix — PR #398 (W1-T156, the console's own
+    trust layer): the automated review blocked it with all SIX criteria unmet at proof_exec 0/6 and
+    test_theater FALSE, every reason a keyword-coverage miss (4/26, 3/18, 5/48, 3/39, 7/44). The work
+    was fully delivered: five falsifier-encoding tests in test/serve.live-state.test.ts mapping 1:1 to
+    the criteria, CI green, including assertions written as the criteria's own falsifiers
+    (doesNotMatch(text, /^\\s*live\\s*$/) for 'never keeps claiming live'). It was unblocked by
+    REWRITING THE PR BODY to carry more of the criteria vocabulary — not one additional line of source,
+    not one additional test. The gate then passed 6/6 at proof_exec STILL 0/6. A gate that can be moved
+    from FAIL to PASS by better prose, on unchanged code, is measuring authorship rather than
+    substantiation. That is the defect stated in its sharpest observed form.
+    CONSEQUENCE FOR SEQUENCING, now realised rather than predicted: this defect cost the CONSOLE ARC's
+    own delivery on the same night this task was pulled forward behind that arc. W1-T156 is delivered
+    and its position as this task's dependency is satisfied — the arc is clear and this task is now the
+    drain head.
     TRADEOFF ACCEPTED KNOWINGLY: depends_on is a HARD gate, so the deps are deliberately the MINIMAL
     pair that means 'behind the console arc' — W1-T156 (the arc's last active member, currently the
     drain's next dispatch) and W1-T154 (already merged via PR #388). W1-T152 was CONSIDERED and
