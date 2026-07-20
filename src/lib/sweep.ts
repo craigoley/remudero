@@ -32,14 +32,19 @@ import type { QuestionEntry } from "./worker.js";
  *                        to this row's old unconditional catch-all, arming a PR
  *                        GitHub's required-CI gate would then stall FOREVER —
  *                        never fixed, never escalated, invisible.
- *   - BLOCKED-FIXABLE  — EITHER (a) a failing review with actionable unmet criteria
- *                        and strikes left -> dispatch the W1-T76 fix rung (reused,
- *                        not reimplemented) carrying the FULL unmet set at once; OR
- *                        (b) required checks red with NO review posted yet — the
- *                        blocked_ci shape, the #170 fix (W1-T100) — and strikes
- *                        left -> dispatch the SAME rung in ci-log mode (W1-T94),
- *                        carrying the failing check names + log tails instead of a
- *                        reviewer verdict. FIX FIRST, ask after exhaustion: a
+ *   - BLOCKED-FIXABLE  — EITHER (a) a required check is red — the blocked_ci shape,
+ *                        the #170 fix (W1-T100), BROADENED by W1-T138 (the
+ *                        #303/#305/#292/#315 fix) to fire regardless of the review
+ *                        verdict sitting beside it (a review can post, then a
+ *                        slower required check settle red; a fix strike's own
+ *                        push can newly break one) — and strikes left -> dispatch
+ *                        the W1-T76 fix rung in ci-log mode (W1-T94), carrying the
+ *                        failing check names + log tails, CHECKED FIRST, before a
+ *                        review verdict is ever classified as the block; OR (b) —
+ *                        only once checks are NOT red — a failing review with
+ *                        actionable unmet criteria and strikes left -> dispatch
+ *                        the SAME rung (reused, not reimplemented) carrying the
+ *                        FULL unmet set at once. FIX FIRST, ask after exhaustion: a
  *                        checks-red PR reaches the question rung only THROUGH the
  *                        strike ladder below, never straight there.
  *   - STALE/SUPERSEDED — a newer PR credits the same task, or no activity in N days
@@ -284,17 +289,34 @@ export function checksStateFromRollup(
 const MS_PER_DAY = 86_400_000;
 
 /**
- * The blocked_ci shape (the #170 fix, W1-T100): required checks are red and NO
- * review has been posted yet — the failing signal IS the CI log, never a
- * reviewer verdict (a review only runs once CI is green). EXPORTED (not just
- * shared across this table's own rows) so every OTHER caller that needs the
- * same classification — `routeFix`'s strike-cap-honored escalate check and its
- * evidence-shape selection, `runSweep`'s evidence-shape selection — imports
- * this ONE definition rather than hand-copying the two-field check, which
- * would silently drift the moment this predicate is refined.
+ * The blocked_ci shape (the #170 fix, W1-T100; BROADENED by W1-T138, the
+ * #303/#305/#292/#315 fix): a required check is red — the failing signal IS
+ * the CI log, never a reviewer verdict, and it takes PRECEDENCE over any
+ * review verdict sitting beside it, because GitHub will not merge past a red
+ * required check no matter what the review says. W1-T100 originally required
+ * `reviewState === "none"` too (only "no review has posted at all" counted),
+ * but that is provably too narrow: a review can post (success OR failure)
+ * and a required check can STILL be, or subsequently go, red — (1)
+ * `ciGateFromRollup` (the live gate `waitForCiGreen` polls) only waits for a
+ * check literally named `ci` plus "nothing red YET"; a slower required check
+ * (commitlint, CodeQL, osv) can still be pending when it fires green and let
+ * review run BEFORE that slower check settles red; (2) a fix-rung strike's
+ * OWN commit can newly break a required check (a too-long commit header trips
+ * commitlint; an edited regex trips CodeQL) while leaving a STALE review
+ * verdict computed before that push sitting in the rollup. Both produced the
+ * live incident this fix closes: `unmetCriteria`-shaped (reviewer-unmet)
+ * dispatches burned every strike re-litigating a review verdict while the
+ * ACTUAL merge-blocking check sat untouched, then escalated as "blocked_review
+ * fix rung exhausted" naming criteria instead of the check. EXPORTED (not
+ * just shared across this table's own rows) so every OTHER caller that needs
+ * the same classification — `routeFix`'s strike-cap-honored escalate check
+ * and its evidence-shape selection, `runSweep`'s evidence-shape selection,
+ * `runFixRung`'s own mid-rung mode re-check — imports this ONE definition
+ * rather than hand-copying the check, which would silently drift the moment
+ * this predicate is refined again.
  */
 export function isBlockedCi(pr: OpenPrView): boolean {
-  return pr.checksState === "red" && pr.reviewState === "none";
+  return pr.checksState === "red";
 }
 
 /**
@@ -330,31 +352,41 @@ interface DispositionRule {
  *      re-arm the rung instead of landing straight back on row 4's escalate.
  *   4. FAILING + strikes exhausted (>= cap)              -> blocked-ambiguous (escalate).
  *      GENERALIZED (W1-T100, the #170 fix): "strikes exhausted" also covers the
- *      blocked_ci shape (checks red, no review yet) — ci-log strikes share the
- *      SAME counter and cap as review strikes, one ladder, one exhaustion route
- *      (design note iv). Ordered ahead of row 6b below so an exhausted blocked_ci
- *      PR escalates rather than re-matching the positive fixable row forever.
- *   5. FAILING + actionable unmet criteria, strikes left -> blocked-fixable (fix rung).
- *   6. FAILING + no actionable criteria (contradictory)  -> blocked-ambiguous (escalate).
- *   6b. blocked_ci (W1-T100, the #170 fix): checks red, NO review posted yet,
- *      strikes left (row 4 above already routed the exhausted case) ->
- *      blocked-fixable, dispatching the SAME W1-T76 rung in ci-log mode
- *      (W1-T94) — failing check names + log tails, never a reviewer verdict.
- *      FIX FIRST: this PR reaches the question rung (row 8) only by exhausting
- *      the ladder through row 4, never straight from here.
- *   7. CI GREEN + REVIEW SUCCESS (POSITIVE match only)   -> mergeable (arm).
- *   8. TERMINAL catch-all (the #161 fix, W1-T93): anything not positively
+ *      blocked_ci shape (checks red) — ci-log strikes share the SAME counter and
+ *      cap as review strikes, one ladder, one exhaustion route (design note iv).
+ *      Ordered ahead of row 5 below so an exhausted blocked_ci PR escalates
+ *      rather than re-matching the positive fixable row forever.
+ *   5. blocked_ci (W1-T100, the #170 fix; BROADENED by W1-T138, the
+ *      #303/#305/#292/#315 fix): a required check is red, strikes left (row 4
+ *      above already routed the exhausted case) -> blocked-fixable, dispatching
+ *      the SAME W1-T76 rung in ci-log mode (W1-T94) — failing check names + log
+ *      tails, never a reviewer verdict. ORDERED BEFORE rows 6/7 (review-shaped)
+ *      DELIBERATELY (the W1-T138 fix): a red required check is checked FIRST,
+ *      before ever classifying a block as reviewer-unmet — GitHub will not merge
+ *      past a red required check no matter what the review says, and a review
+ *      verdict sitting beside a red check may be STALE (computed before the
+ *      push that broke the check, or before a slower required check settled) —
+ *      so it is never the right thing to re-litigate first. This also means a PR
+ *      can be BOTH checks-red AND review-failing at once; ci-log wins, and once
+ *      the check goes green a fresh review runs and rows 6/7 take over from
+ *      there if IT still fails. FIX FIRST: this PR reaches the question rung
+ *      (row 9) only by exhausting the ladder through row 4, never straight here.
+ *   6. FAILING + actionable unmet criteria, strikes left -> blocked-fixable (fix rung).
+ *      Only reached with checks NOT red (row 5 above already claimed that case).
+ *   7. FAILING + no actionable criteria (contradictory)  -> blocked-ambiguous (escalate).
+ *   8. CI GREEN + REVIEW SUCCESS (POSITIVE match only)   -> mergeable (arm).
+ *   9. TERMINAL catch-all (the #161 fix, W1-T93): anything not positively
  *      mergeable, not already failure-shaped, and not the blocked_ci shape
  *      above (e.g. checks still pending, review still pending) ->
  *      blocked-ambiguous (the CLARIFICATION-QUESTION rung, W1-T78), naming the
  *      observed checks/review state. The catch-all is the LEAST permissive
  *      disposition, never the most permissive one; mergeable is ONLY ever
- *      positively matched (row 7), never a fallback.
+ *      positively matched (row 8), never a fallback.
  *
  * Stale/superseded rows precede the failing/mergeable rows so tightening the
  * stale threshold flips an otherwise-mergeable PR to a close. Row 3 (answered)
  * precedes row 4 (strikes exhausted) so an answer's extended allowance actually
- * overrides exhaustion; rows 4-6b (review FAILING / blocked_ci) precede row 7 so
+ * overrides exhaustion; rows 4-7 (blocked_ci / review FAILING) precede row 8 so
  * a CI-green-but-review-failing (or checks-red) PR still routes to fix/escalate,
  * not mergeable.
  */
@@ -375,7 +407,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // rung — but only within its own (config-policy) strike allowance, never
     // unconditionally, so a bad answer still eventually escalates rather than
     // looping forever. W1-T100: generalized to the blocked_ci shape too (via
-    // the SAME `isBlockedCi` row 4/6b share) — without this, a strike-exhausted
+    // the SAME `isBlockedCi` row 4/5 share) — without this, a strike-exhausted
     // blocked_ci PR could never be re-armed by an answer once `pendingAnswer`
     // production wiring lands, and would loop on the question rung forever.
     disposition: "blocked-fixable",
@@ -398,13 +430,28 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
   },
   {
     // W1-T100: the exhaustion check now covers BOTH failure shapes — a failing
-    // review AND a blocked_ci PR (checks red, no review yet) — off the SAME
-    // strike counter/cap (design note iv: one ladder, one exhaustion route).
+    // review AND a blocked_ci PR (checks red) — off the SAME strike counter/cap
+    // (design note iv: one ladder, one exhaustion route).
     disposition: "blocked-ambiguous",
     when: (pr, policy) => (pr.reviewState === "failure" || isBlockedCi(pr)) && pr.priorStrikes >= policy.strikeCap,
     reason: (pr, policy) => `fix strikes exhausted (${pr.priorStrikes}/${policy.strikeCap}) — escalating`,
   },
   {
+    // W1-T100 (the #170 fix); BROADENED + PROMOTED ahead of the review-failing
+    // rows by W1-T138 (the #303/#305/#292/#315 fix — see the table doc above):
+    // blocked_ci is POSITIVELY fixable — never the terminal catch-all's
+    // escalate, and never re-litigated as a review-unmet block just because a
+    // (possibly stale) review verdict also sits on this head. The exhausted
+    // case already matched row 4 above (this row is ordered after it), so only
+    // a non-exhausted checks-red PR reaches here — fix FIRST, ask only after
+    // exhaustion.
+    disposition: "blocked-fixable",
+    when: (pr) => isBlockedCi(pr),
+    reason: (pr, policy) => `required checks red — ci-log fix, strike ${pr.priorStrikes + 1}/${policy.strikeCap}`,
+  },
+  {
+    // Reached only when checks are NOT red (row 5 above already claimed that
+    // case) — a pure review-shaped block.
     disposition: "blocked-fixable",
     when: (pr) => pr.reviewState === "failure" && pr.unmetCriteria.length > 0,
     reason: (pr, policy) =>
@@ -414,16 +461,6 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     disposition: "blocked-ambiguous",
     when: (pr) => pr.reviewState === "failure",
     reason: () => "review failing with no actionable unmet criteria (contradictory) — escalating",
-  },
-  {
-    // W1-T100 (the #170 fix): blocked_ci is POSITIVELY fixable — never the
-    // terminal catch-all's escalate. The exhausted case already matched row 4
-    // above (this row is ordered after it), so only a non-exhausted checks-red/
-    // review-none PR reaches here — fix FIRST, ask only after exhaustion.
-    disposition: "blocked-fixable",
-    when: (pr) => isBlockedCi(pr),
-    reason: (pr, policy) =>
-      `required checks red, no review posted yet — ci-log fix, strike ${pr.priorStrikes + 1}/${policy.strikeCap}`,
   },
   {
     // POSITIVE MATCH ONLY (the #161 fix, W1-T93): mergeable is NEVER inferred
@@ -436,9 +473,9 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
   },
   {
     // TERMINAL rule (matches unconditionally) — the LEAST permissive disposition
-    // (the #161 fix, W1-T93), not the most permissive one. A checks-red PR with
-    // NO review yet is the blocked_ci shape and is caught by row 6b above (W1-T100)
-    // — never lands here. Anything ELSE not positively mergeable and not
+    // (the #161 fix, W1-T93), not the most permissive one. A checks-red PR is
+    // the blocked_ci shape and is caught by row 5 above (W1-T100/W1-T138) —
+    // never lands here. Anything ELSE not positively mergeable and not
     // failure-shaped (e.g. checks/review still pending) matches no earlier rule
     // and no longer falls through to mergeable by default: it lands here and
     // ESCALATES, naming the observed state, so it is never silent and never armed.
@@ -637,12 +674,13 @@ export function strikeCapForAnswer(originalCap: number, policy: ClarifyPolicy = 
 /**
  * The block evidence `dispatchFix` carries — GENERALIZED (W1-T100, the #170
  * fix) from a bare reviewer-unmet array to the W1-T94 mode-evidence shape, so
- * a checks-red/review-none PR's dispatch carries ci-log input instead of an
- * always-empty unmet array. Exactly one field is meaningful per disposition
- * (mirrors run-task.ts's `FixEvidence`, the fix rung's own mode-input shape):
- * `unmetCriteria` for a failing review (blocked-fixable via review, W1-T76
- * unchanged), `ciFailures` for a checks-red/review-none PR (blocked-fixable
- * via ci-log, W1-T94/W1-T100).
+ * a checks-red PR's dispatch carries ci-log input instead of an always-empty
+ * unmet array. Exactly one field is meaningful per disposition (mirrors
+ * run-task.ts's `FixEvidence`, the fix rung's own mode-input shape):
+ * `unmetCriteria` for a failing review with checks NOT red (blocked-fixable
+ * via review, W1-T76 unchanged), `ciFailures` for a checks-red PR — REGARDLESS
+ * of what the review verdict beside it says, even a failing one (blocked-fixable
+ * via ci-log, W1-T94/W1-T100, broadened by W1-T138 — see {@link isBlockedCi}).
  */
 export interface FixDispatchEvidence {
   unmetCriteria: CriterionVerdict[];

@@ -1287,6 +1287,149 @@ test("runFixRung: a blocked_ci dispatch that exhausts its strikes without CI EVE
   assert.doesNotMatch(issueCalls[0].body, /Unmet criteria:/, "never the review-mode framing for a dispatch that never had a review");
 });
 
+// ── W1-T138 (the #303/#305/#292/#315 fix): a fix-rung strike that started in
+// reviewer-unmet mode but whose OWN push leaves a required check red (the
+// strike's commit broke commitlint/CodeQL, or a required check was already
+// red and the review verdict beside it is now stale) must route the NEXT
+// strike to ci-log mode against the check that is ACTUALLY still failing —
+// never keep re-dispatching the same stale review criteria while the real
+// merge-blocker sits untouched. Before this fix `noReviewYet` only ever went
+// false, never back to true, so every remaining strike stayed reviewer-unmet
+// no matter what CI did. ──────────────────────────────────────────────────
+
+test("runFixRung: a strike whose OWN push leaves a required check red routes the NEXT strike to ci-log mode against the check that is ACTUALLY still failing, not the stale review criteria (the #303/#305 fix)", async () => {
+  const prompts: string[] = [];
+  const modes: unknown[] = [];
+  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
+  const commitlintFailure = { name: "commitlint", logTail: "header-max-length: 108 chars exceeds the 100 cap" };
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: failing, // strike 1 starts in reviewer-unmet mode — no ciFailures at dispatch time
+    deps: {
+      spawn: async (args) => {
+        prompts.push(args.prompt);
+        return result({ sessionId: `fix-session-${prompts.length}` });
+      },
+      // Strike 1's fix pushes a commit that breaks commitlint — CI never
+      // reaches green, so no fresh review can run for strike 2 either.
+      waitForCiGreen: async () => "red",
+      fetchCiFailures: async () => [commitlintFailure],
+      runReview: async () => {
+        throw new Error("runReview must never be called — CI never went green");
+      },
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: (step, extra) => {
+        if (step === "fix.dispatch") modes.push(extra?.mode);
+      },
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(prompts.length, 2, "strikeCap spawns — the rung never stalls");
+  assert.equal(outcome.outcome, "escalated", "CI never went green — strikes exhaust");
+
+  // Strike 1: reviewer-unmet, carrying the ORIGINAL criterion (checks were
+  // GREEN at dispatch time — no ciFailures were seeded).
+  assert.equal(modes[0], "reviewer-unmet");
+  assert.match(prompts[0], /MODE: reviewer-unmet/);
+  assert.match(prompts[0], /criterion A merges cleanly/);
+
+  // Strike 2: the strike's OWN push left commitlint red — the NEXT strike
+  // must target THAT check, never re-litigate strike 1's (now-stale) criterion.
+  assert.equal(modes[1], "ci-log");
+  assert.match(prompts[1], /MODE: ci-log/);
+  assert.match(prompts[1], /commitlint/);
+  assert.match(prompts[1], /header-max-length: 108 chars exceeds the 100 cap/);
+  assert.doesNotMatch(
+    prompts[1],
+    /criterion A merges cleanly/,
+    "strike 2 must NOT re-dispatch the stale review criterion — the real blocker is the red check",
+  );
+});
+
+test("runFixRung: the same mid-rung regression escalates naming the SPECIFIC check + finding, never the generic 'blocked_review fix rung exhausted' framing (the #292/#315 fix)", async () => {
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
+  const codeqlFailure = {
+    name: "CodeQL",
+    logTail: "js/incomplete-url-substring-sanitization @ test/worker.test.ts:318 — Incomplete URL substring sanitization",
+  };
+  let call = 0;
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: failing,
+    deps: {
+      spawn: async () => result({ sessionId: "fix-session" }),
+      waitForCiGreen: async () => "red",
+      fetchCiFailures: async () => {
+        call++;
+        // Strike 1's push introduces the CodeQL finding; it is still unresolved
+        // going into strike 2 — the SAME finding, fetched fresh each time.
+        return [codeqlFailure];
+      },
+      runReview: async () => {
+        throw new Error("runReview must never be called — CI never went green");
+      },
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(call, 2, "the failing checks are refreshed on every non-green strike");
+  assert.equal(outcome.outcome, "escalated");
+  assert.equal(issueCalls.length, 1);
+  assert.match(issueCalls[0].title, /blocked_ci/, "names blocked_ci, never 'blocked_review fix rung exhausted'");
+  assert.doesNotMatch(issueCalls[0].title, /blocked_review/);
+  assert.match(
+    issueCalls[0].body,
+    /CodeQL — js\/incomplete-url-substring-sanitization @ test\/worker\.test\.ts:318/,
+    "the escalation names the SPECIFIC check + finding, not just the bare check name",
+  );
+  assert.doesNotMatch(issueCalls[0].body, /Unmet criteria:/, "never the stale review-mode framing once ci-log took over");
+});
+
+test("runFixRung: fetchCiFailures is optional — a strike that goes non-green still corrects its MODE even when the caller cannot refresh failing-check content", async () => {
+  const modes: unknown[] = [];
+  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: failing,
+    deps: {
+      spawn: async () => result({ sessionId: "fix-session" }),
+      waitForCiGreen: async () => "red",
+      // fetchCiFailures deliberately omitted.
+      runReview: async () => {
+        throw new Error("runReview must never be called — CI never went green");
+      },
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: (step, extra) => {
+        if (step === "fix.dispatch") modes.push(extra?.mode);
+      },
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(outcome.outcome, "escalated");
+  assert.equal(modes[0], "reviewer-unmet");
+  assert.equal(modes[1], "ci-log", "the mode still corrects itself without a fetchCiFailures dep — content just stays unrefreshed");
+});
+
 // ── Wiring: ONE call site, both entry points (drain + manual `rmd run-task`
 // both call the SAME `runTask`, so there is exactly one place to gate) ──────
 

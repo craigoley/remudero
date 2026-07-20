@@ -936,6 +936,24 @@ export function renderFixPrompt(opts: {
   ].join("\n");
 }
 
+/**
+ * W1-T138 (the #303/#305/#292/#315 fix): render ONE ci-log failure as a
+ * single, specific line — the check NAME plus (when the log tail carries one)
+ * its own first non-blank line of detail, e.g. `CodeQL — js/incomplete-url-
+ * substring-sanitization @ test/worker.test.ts:318 — Incomplete URL substring
+ * sanitization`. An escalation that names only the bare check ("CodeQL")
+ * leaves the operator to go re-fetch the log by hand; this line is what a
+ * `gh run view --log-failed` tail (or an injected test fixture) already
+ * carries, verbatim, never re-derived or guessed.
+ */
+function summarizeCiFailure(f: CiFailure): string {
+  const firstLine = (f.logTail ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  return firstLine ? `${f.name} — ${firstLine}` : f.name;
+}
+
 /** Outcome of one full pass through the fix rung. */
 export interface FixRungOutcome {
   outcome: "fixed" | "escalated";
@@ -1010,6 +1028,20 @@ export async function runFixRung(opts: {
       prUrl: string,
       log: (step: string, extra?: Record<string, unknown>) => void,
     ) => Promise<"green" | "red" | "timeout">;
+    /**
+     * W1-T138 (the #303/#305/#292/#315 fix): fetch the CURRENTLY failing
+     * required check(s) + log tails for THIS pr, called whenever a strike's
+     * push leaves CI non-green — refreshes the NEXT strike's ci-log evidence
+     * so it targets what is ACTUALLY still broken right now, never a stale
+     * `opts.ciFailures` snapshot from before this push (or, for a dispatch
+     * that started in reviewer-unmet mode, the STALE review criteria from
+     * before a strike's own commit newly broke a required check like
+     * commitlint/CodeQL). Optional + best-effort: when omitted (or it throws),
+     * the rung degrades to keeping whatever ci-log evidence it already had —
+     * the MODE still corrects itself (see `noReviewYet` below), only the
+     * failing-check CONTENT stays stale.
+     */
+    fetchCiFailures?: (prUrl: string) => Promise<CiFailure[]>;
     runReview: (args: Parameters<typeof runReview>[0]) => ReturnType<typeof runReview>;
     /** Push whatever the fix worker committed. Best-effort — a worker that
      * already pushed leaves nothing new, which is not an error. */
@@ -1025,20 +1057,30 @@ export async function runFixRung(opts: {
   let review = opts.initialReview;
   let strikes = 0;
   let sessionToResume: string | undefined = opts.initialSessionId;
-  // W1-T100: true until a REAL review has run. A blocked_ci dispatch
-  // (opts.ciFailures set) has no reviewer verdict at all yet, so its evidence
-  // is ci-log-shaped rather than review-shaped. Flips false the moment
-  // deps.runReview actually executes (only reached once CI is green) — from
-  // then on a real verdict exists, so every later strike is review-mode again,
-  // even if that review itself still fails.
+  // W1-T100: true until a REAL review has run FOR THE CURRENT head. A
+  // blocked_ci dispatch (opts.ciFailures set) has no reviewer verdict at all
+  // yet, so its evidence is ci-log-shaped rather than review-shaped. Flips
+  // false the moment deps.runReview actually executes (only reached once CI
+  // is green) — from then on a real verdict exists, so every later strike is
+  // review-mode again, even if that review itself still fails. W1-T138 (the
+  // #303/#305/#292/#315 fix): it flips back to TRUE whenever a LATER strike's
+  // push leaves CI non-green again — that push means NO review ran for ITS
+  // head either (review only ever runs once CI is green), so the invariant
+  // this variable's name states must keep holding across every strike, not
+  // just the first one. Before this fix it only ever went false→never-true-
+  // again, so a strike that regressed CI (or a mode that started
+  // reviewer-unmet and only THEN broke a required check) kept re-dispatching
+  // stale/irrelevant review-mode evidence for every remaining strike instead
+  // of targeting the check that is actually still red.
   let noReviewYet = opts.ciFailures !== undefined;
+  let currentCiFailures = opts.ciFailures;
 
   while (review.state !== "success" && strikes < opts.strikeCap) {
     strikes++;
     const round: "resume" | "fresh" = strikes === 1 ? "resume" : "fresh";
     const unmet = review.criteria.filter((c) => !c.met);
     const evidence: FixEvidence = noReviewYet
-      ? { ciFailures: opts.ciFailures, constraint: opts.constraint }
+      ? { ciFailures: currentCiFailures, constraint: opts.constraint }
       : { review: { unmetCriteria: unmet, summary: review.summary }, constraint: opts.constraint };
     const prompt = renderFixPrompt({
       task: opts.task,
@@ -1050,7 +1092,7 @@ export async function runFixRung(opts: {
     deps.say(
       noReviewYet
         ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE ci-log fix worker for ` +
-          `${(opts.ciFailures ?? []).length} failing check(s)`
+          `${(currentCiFailures ?? []).length} failing check(s)`
         : `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE fix worker for ` +
           `${unmet.length} unmet criteri${unmet.length === 1 ? "on" : "a"}`,
     );
@@ -1084,6 +1126,22 @@ export async function runFixRung(opts: {
     const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
     if (ci !== "green") {
       deps.log("fix.ci_not_green", { strike: strikes, ci });
+      // W1-T138 (the #303/#305/#292/#315 fix): no review ran for THIS push
+      // either (review only ever runs once CI is green) — the NEXT strike
+      // must target whatever is ACTUALLY still red now, never keep
+      // re-dispatching the review-mode prompt this strike started with (its
+      // unmet criteria may already be fixed; the check still failing today,
+      // possibly one this very strike's own commit newly broke, is the real
+      // blocker). Refresh the failing-check content best-effort; a missing/
+      // throwing fetchCiFailures still corrects the MODE via `noReviewYet`.
+      noReviewYet = true;
+      if (deps.fetchCiFailures) {
+        try {
+          currentCiFailures = await deps.fetchCiFailures(opts.prUrl);
+        } catch (e) {
+          deps.log("fix.ci_failures_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
+        }
+      }
       continue; // still failing — loop to the next strike (or exhaust below)
     }
 
@@ -1102,7 +1160,10 @@ export async function runFixRung(opts: {
       reviewerMount: opts.reviewBase.reviewerMount,
       headCheckoutDir: opts.reviewBase.headCheckoutDir,
     });
-    noReviewYet = false; // W1-T100: a real review verdict now exists — never ci-log again.
+    // W1-T100: a real review verdict now exists for THIS head — the CURRENT
+    // strike stays review-mode from here. W1-T138: this can still flip back
+    // to true on a LATER strike if ITS push regresses CI again (see above).
+    noReviewYet = false;
     deps.log("fix.review", {
       strike: strikes,
       state: review.state,
@@ -1119,11 +1180,12 @@ export async function runFixRung(opts: {
   // Strikes exhausted — escalate (BLOCKED class, W1-T8) rather than loop
   // forever; the clarification rung (W1-T78) upgrades this route when it lands.
   const unmet = review.criteria.filter((c) => !c.met);
-  // W1-T100: `noReviewYet` is still true only when EVERY strike stayed ci-log
-  // mode — required checks never went green across the whole strikeCap, so no
-  // review ever ran. The escalation names the failing checks it actually
-  // tried to fix, never an empty "Unmet criteria:" list (which would be
-  // misleading — a blocked_ci PR never had reviewer criteria to begin with).
+  // `noReviewYet` reflects whether the LAST strike ran with a real review
+  // verdict for its own head (W1-T100, extended by W1-T138 to keep re-checking
+  // every strike, not just the first — see the loop above). true here means
+  // no review ran for the FINAL push either, so the escalation names the
+  // failing checks it actually tried to fix (`currentCiFailures`, refreshed
+  // each non-green strike) rather than an empty/stale "Unmet criteria:" list.
   const issueUrl = escalate(
     {
       class: "BLOCKED",
@@ -1133,9 +1195,9 @@ export async function runFixRung(opts: {
         ? `blocked_ci fix rung exhausted (${strikes} strike(s), checks never went green) — ${opts.prUrl}`
         : `blocked_review fix rung exhausted (${strikes} strike(s)) — ${opts.prUrl}`,
       detail: noReviewYet
-        ? `The blocked_ci FIX RUNG (ci-log mode, W1-T94/W1-T100) dispatched ${strikes} bounded fix worker(s) on ` +
-          `${opts.branch} and required checks are STILL red — no review has run yet. Failing check(s):\n\n` +
-          (opts.ciFailures ?? []).map((f) => `- ${f.name}`).join("\n")
+        ? `The blocked_ci FIX RUNG (ci-log mode, W1-T94/W1-T100/W1-T138) dispatched ${strikes} bounded fix worker(s) ` +
+          `on ${opts.branch} and required checks are STILL red — no review has run yet. Failing check(s):\n\n` +
+          (currentCiFailures ?? []).map((f) => `- ${summarizeCiFailure(f)}`).join("\n")
         : `The blocked_review FIX RUNG (W1-T76) dispatched ${strikes} bounded fix worker(s) on ` +
           `${opts.branch} and the review gate is STILL failing. Unmet criteria:\n\n` +
           unmet.map((c) => `- ${c.claim}\n  reason: ${c.reason}`).join("\n"),
@@ -2053,6 +2115,15 @@ async function runTask(
         deps: {
           spawn,
           waitForCiGreen,
+          // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
+          // non-green — see runFixRung's own doc for why this must happen on
+          // every strike, not just the first.
+          fetchCiFailures: async (prUrlArg) => {
+            const v = ghJson(["pr", "view", prUrlArg, "--json", "statusCheckRollup"]) as {
+              statusCheckRollup?: RollupCheck[];
+            };
+            return fetchCiFailures(owner, task.repo, v.statusCheckRollup);
+          },
           runReview,
           push: (wt) => {
             try {
@@ -3658,16 +3729,18 @@ function buildSweepEffects(
         const budgetUsd = task.budget_usd ?? DEFAULT_BUDGET_USD;
 
         // A failing verdict seeded from the ledger's unmet criteria (review mode)
-        // — OR, for a blocked_ci dispatch (W1-T100), a placeholder verdict naming
-        // that NO review has run yet (ci-log mode's own precondition: a review
-        // only runs once CI is green). Either way, the fix rung re-derives the
-        // AUTHORITATIVE verdict via runReview after each strike.
+        // — OR, for a blocked_ci dispatch (W1-T100, broadened by W1-T138 to fire
+        // regardless of the review verdict beside it), a placeholder verdict:
+        // `criteria: []` so the rung never re-litigates a review verdict that may
+        // be stale or simply irrelevant until the red check goes green (a FRESH
+        // review only ever runs once CI is green). Either way, the fix rung
+        // re-derives the AUTHORITATIVE verdict via runReview after each strike.
         const initialReview: ReviewVerdict & { headSha: string; reviewerOutcome: string } = isCiLog
           ? {
               state: "failure",
               criteria: [],
               testTheater: false,
-              summary: `sweep-reconstructed: required checks red, no review posted yet (${(evidence.ciFailures ?? []).length} failing check(s))`,
+              summary: `sweep-reconstructed: required checks red (${(evidence.ciFailures ?? []).length} failing check(s)) — ci-log dispatch, any review verdict on this head is disregarded until checks are green`,
               floorDegraded: false,
               headSha: pr.headSha,
               reviewerOutcome: "sweep-reconstructed-ci-log",
@@ -3720,6 +3793,15 @@ function buildSweepEffects(
             // fresh spawn rather than an attempt to resume a session that doesn't exist.
             spawn: (args) => spawnWorker({ ...args, resumeSessionId: args.resumeSessionId || undefined }),
             waitForCiGreen,
+            // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
+            // non-green — see runFixRung's own doc for why this must happen on
+            // every strike, not just the first.
+            fetchCiFailures: async (prUrlArg) => {
+              const v = ghJson(["pr", "view", prUrlArg, "--json", "statusCheckRollup"]) as {
+                statusCheckRollup?: RollupCheck[];
+              };
+              return fetchCiFailures(owner, repo, v.statusCheckRollup);
+            },
             runReview,
             push: (wt) => {
               try {
@@ -3880,9 +3962,10 @@ export async function routeFix(
     return { outcome: "fixed", reason };
   }
   // Strike cap honored: the SAME rule the sweep policy uses to route to escalate
-  // (failing review OR blocked_ci — checks red, no review yet — with strikes
-  // already at/over cap; W1-T100 generalizes this from review-only, one ladder,
-  // one exhaustion route) — rmd fix never bypasses it.
+  // (failing review OR blocked_ci — a required check red, W1-T138 broadened this
+  // to fire regardless of the review verdict beside it — with strikes already
+  // at/over cap; W1-T100 generalizes this from review-only, one ladder, one
+  // exhaustion route) — rmd fix never bypasses it.
   if ((pr.reviewState === "failure" || isBlockedCi(pr)) && pr.priorStrikes >= policy.strikeCap) {
     // W1-T78: the SAME clarification-question rendering the sweep uses — one
     // rung, one implementation, three callers now (drain live / sweep cold /
