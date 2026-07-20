@@ -45,7 +45,9 @@ import {
   readFeedbackEntry,
   setFeedbackStatus,
   FeedbackError,
+  type FeedbackEntry,
 } from "./lib/feedback.js";
+import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
 import {
   decideTriage,
   diffCitesFeedback,
@@ -4536,6 +4538,67 @@ async function correctCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
+/**
+ * `rmd trace <id>` — render the provenance chain (MASTER-PLAN §7B / Standing rule 17,
+ * W1-T43): feedback → proposal PR → task(s) → run(s) → PR(s) → merge sha. `<id>` is
+ * resolved as a TASK id first (an exact `plan/tasks.yaml` id — reverse direction, task
+ * back to its origin); only if that fails is it read as a FEEDBACK id
+ * (`plan/feedback/<id>.yaml` — forward direction, feedback out to every task it
+ * produced). Neither resolving is a fail-loud usage error, not a silent empty chain.
+ */
+async function traceCommand(rest: string[]): Promise<number> {
+  const id = rest[0];
+  const badArg = unknownArgError("trace", rest.slice(1), [], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  if (!id) {
+    console.error(`rmd trace: <id> is required — usage: ${commandSyntax("trace")}\n` + USAGE);
+    return 2;
+  }
+
+  const planPath = join(repoRoot, "plan", "tasks.yaml");
+  const plan = loadPlan(planPath);
+  const config = loadConfig();
+  const { owner, repo: defaultRepo } = resolveOwnerRepo();
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerLines = readLedgerLines(ledgerPath);
+
+  const task = plan.byId.get(id);
+  if (task) {
+    const github = ghTraceGateway(owner, task.repo || defaultRepo);
+    let feedbackEntry: FeedbackEntry | undefined;
+    if (task.origin?.startsWith("feedback#")) {
+      const feedbackId = task.origin.slice("feedback#".length);
+      try {
+        feedbackEntry = readFeedbackEntry(repoRoot, feedbackId);
+      } catch (e) {
+        console.error(`### rmd trace — note: ${task.id} names origin: ${task.origin}, but ${String((e as Error)?.message ?? e)}`);
+      }
+    }
+    const chain = traceReverse(task, { plan, ledgerLines, github }, feedbackEntry);
+    console.log(`### rmd trace ${id} (reverse — task back to its origin)`);
+    console.log(renderTraceChain(chain));
+    return 0;
+  }
+
+  let entry: FeedbackEntry;
+  try {
+    entry = readFeedbackEntry(repoRoot, id);
+  } catch {
+    console.error(
+      `rmd trace: '${id}' is neither a known task id (${planPath}) nor a feedback entry (plan/feedback/${id}.yaml)`,
+    );
+    return 2;
+  }
+  const github = ghTraceGateway(owner, defaultRepo);
+  const chain = traceForward(entry, { plan, ledgerLines, github });
+  console.log(`### rmd trace ${id} (forward — feedback out to its task(s))`);
+  console.log(renderTraceChain(chain));
+  return 0;
+}
+
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 //
 // COMMAND REGISTRY — the ONE source of truth for every `rmd <cmd>` name and its usage
@@ -4642,6 +4705,11 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "skill",
     usage:
       "rmd skill list   # §5B skill-registry reader (W1-T44): resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); adding a skill is a config entry, no source change",
+  },
+  {
+    name: "trace",
+    usage:
+      "rmd trace <id>   # render the provenance chain (MASTER-PLAN §7B / Standing rule 17, W1-T43): feedback → proposal PR → task(s) → run(s) → PR(s) → merge sha; <id> resolves as a task id first (reverse: task back to its origin:), else as a plan/feedback/<id> id (forward: feedback out to every task it produced)",
   },
 ] as const;
 
@@ -4767,6 +4835,9 @@ async function main(): Promise<void> {
   }
   if (cmd === "skill") {
     process.exit(await skillCommand(rest));
+  }
+  if (cmd === "trace") {
+    process.exit(await traceCommand(rest));
   }
   console.error(USAGE);
   process.exit(2);
