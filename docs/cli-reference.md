@@ -23,6 +23,7 @@ usage:
   rmd drain [--until <id>] [--max <n>] [--repo <name>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60); --repo scopes the merged-status gateway to <owner>/<name> (defaults to this checkout's own repo, like the daemon path) — the plan itself is always read from THIS checkout
   rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.
   rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)
+  rmd serve [--port <n>]   # the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted under <config.root>/state/service-tokens.json; --port defaults to 4317 (matches apps/dashboard's own default); blocks until SIGINT/SIGTERM
   rmd sweep [--repo <name>] [--dry-run]   # level-triggered PR-pipeline reconciler (W1-T77, P22): re-derive EVERY open PR's disposition from observed state and take the ONE gated action — mergeable->arm auto-merge; blocked-fixable->W1-T76 fix rung; stale/superseded->close-with-reason; blocked-ambiguous->the W1-T78 clarification-question rung (a specific, decidable operator question to the §2 backlog + escalate() as transport, never a generic needs-human). Idempotent (a second sweep over unchanged state acts on nothing). The daemon runs this every poll; --dry-run previews dispositions and takes nothing.
   rmd fix <pr-number> [--repo <name>]   # operator verb for the W1-T76 fix rung (W1-T95, bootstrap/manual-override — drives a block on the sweep/drain delivery ITSELF, e.g. #160): dispatches the SAME rung sweep uses; refuses (zero spawns) when the PR is merged, closed, or has no block evidence; strikes-at-cap routes to escalate naming the count, never bypassing the cap.
   rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.
@@ -111,6 +112,14 @@ rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]
 ```
 
 generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)
+
+### `rmd serve`
+
+```
+rmd serve [--port <n>]
+```
+
+the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted under <config.root>/state/service-tokens.json; --port defaults to 4317 (matches apps/dashboard's own default); blocks until SIGINT/SIGTERM
 
 ### `rmd sweep`
 

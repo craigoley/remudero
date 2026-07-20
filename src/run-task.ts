@@ -51,6 +51,8 @@ import {
   type FeedbackEntry,
 } from "./lib/feedback.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
+import { ghIssueCloser } from "./lib/panel-actions.js";
+import { buildServeServer, resolveServePort, resolveServiceTokens } from "./lib/serve.js";
 import {
   buildGrillEscalation,
   decideTriage,
@@ -3194,6 +3196,81 @@ async function daemonPlistCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
+// ── rmd serve — the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B) ──
+//
+// Real business logic lives entirely in the four already-proven modules lib/serve.ts
+// assembles (service.ts, board.ts, panel-actions.ts, panel-graph.ts); this command is CLI
+// glue only — resolve the port, load/generate the bearer tokens, build the real deps (the
+// real ghGateway/ghTraceGateway/ghIssueCloser, the real plan, the real ledger path), bind,
+// print the console URL, and block until SIGINT/SIGTERM.
+async function serveCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("serve", rest, ["--port"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  let port: number;
+  try {
+    port = resolveServePort(rest);
+  } catch (e) {
+    console.error(`### rmd serve — ${(e as Error).message}\n${USAGE}`);
+    return 2;
+  }
+
+  const config = loadConfig();
+  const self = resolveOwnerRepo();
+  const planPath = join(repoRoot, "plan", "tasks.yaml");
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const plan = loadPlan(planPath);
+  const tokens = resolveServiceTokens(config.root);
+
+  const runId = `SERVE-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "SERVE", step, ...extra });
+
+  const server = buildServeServer({
+    board: { plan, ledgerPath, github: ghGateway(self.owner, self.repo) },
+    // panel-graph.ts reloads plan/tasks.yaml fresh on every GET /v1/trace (its own header) --
+    // planPath alone is enough, no snapshot needed here the way board.ts's does.
+    panelGraph: { root: repoRoot, planPath, ledgerPath, github: ghTraceGateway(self.owner, self.repo) },
+    ledgerPath,
+    issues: ghIssueCloser(),
+    // See lib/serve.ts's module header ("TWO ROOTS, ONE PanelActionDeps SHAPE") for why these
+    // differ: fleet-control flag files must match what `rmd daemon`/`rmd drain` check
+    // (config.root); plan/questions.ndjson must match where `appendQuestion` writes (repoRoot).
+    fleetControlRoot: config.root,
+    questionsRoot: repoRoot,
+    tokens,
+    log,
+  });
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(port, resolve);
+    });
+  } catch (e) {
+    console.error(`### rmd serve — failed to listen on port ${port}: ${(e as Error).message}`);
+    return 1;
+  }
+
+  log("serve.start", { port, repo: `${self.owner}/${self.repo}` });
+  console.log(`### rmd serve — listening on http://localhost:${port} (repo ${self.owner}/${self.repo})`);
+  console.log(`    console:     http://localhost:${port}/?token=${tokens.write}`);
+  console.log(`    read token:  ${tokens.read}`);
+  console.log(`    write token: ${tokens.write}`);
+
+  await new Promise<void>((resolve) => {
+    const shutdown = () => {
+      log("serve.stop", {});
+      server.close(() => resolve());
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+  });
+  return 0;
+}
+
 // ── rmd sweep — the level-triggered PR-pipeline reconciler (W1-T77, P22 core) ──
 //
 // The deterministic core (predicate + orchestration + idempotence) lives in
@@ -5022,6 +5099,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)",
   },
   {
+    name: "serve",
+    usage:
+      "rmd serve [--port <n>]   # the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted under <config.root>/state/service-tokens.json; --port defaults to 4317 (matches apps/dashboard's own default); blocks until SIGINT/SIGTERM",
+  },
+  {
     name: "sweep",
     usage:
       "rmd sweep [--repo <name>] [--dry-run]   # level-triggered PR-pipeline reconciler (W1-T77, P22): re-derive EVERY open PR's disposition from observed state and take the ONE gated action — mergeable->arm auto-merge; blocked-fixable->W1-T76 fix rung; stale/superseded->close-with-reason; blocked-ambiguous->the W1-T78 clarification-question rung (a specific, decidable operator question to the §2 backlog + escalate() as transport, never a generic needs-human). Idempotent (a second sweep over unchanged state acts on nothing). The daemon runs this every poll; --dry-run previews dispositions and takes nothing.",
@@ -5183,6 +5265,9 @@ async function main(): Promise<void> {
   }
   if (cmd === "daemon-plist") {
     process.exit(await daemonPlistCommand(rest));
+  }
+  if (cmd === "serve") {
+    process.exit(await serveCommand(rest));
   }
   if (cmd === "sweep") {
     process.exit(await sweepCommand(rest));
