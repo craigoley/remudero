@@ -743,6 +743,231 @@
   files:
   - src/lib/review.ts
   depends_on: [W1-T156, W1-T154]
+- id: W1-T177
+  title: "TERMINAL-STATE CHECK AT EVERY SPENDING SITE — before any action that spends money or acts on a PR (a fix-rung strike, a sweep disposition, a dispatch decision, a review post) the PR's terminal state is re-read FRESH, never from cached/snapshot state; terminal means stand down with a ledger line naming the site and the state"
+  repo: remudero
+  queue_note: |
+    PROMOTED 2026-07-20 from plan/tasks.d/ into tasks.yaml, positioned directly behind W1-T128 and ahead of
+    W1-T178 and W1-T179. THE REPAIR IS ONE WOUND IN THREE PARTS and should land as a train: W1-T128 grounds the
+    verdicts (the proof floor executes nothing, so every verdict is keyword-derived), THIS task stops the spend
+    that a wrong verdict causes, and W1-T178 stops the flap that produces the wrong verdict. Fixing any one alone
+    leaves the loop intact.
+    WHY THE FRONT, in measured terms: the leak fires PER MERGE, not once. Two occurrences in a single evening,
+    46 minutes apart — PR #388 (a fix worker at $1.24/38 turns post-merge, both strikes, issue #395, plus a fresh
+    sweep rung on top) and PR #398 ($1.30/38 turns post-merge, issue #401, again a fresh sweep rung). Combined
+    ~$2.54 and 76 worker turns spent on PRs that no longer existed as live blocks, in one evening, and the trigger
+    is still live.
+    NO HARD depends_on ON W1-T128 — deliberate, and the same judgement made when W1-T128 itself was pulled forward.
+    depends_on is a HARD gate: hitching this task to W1-T128 (large, risk:high) would strand an active money leak
+    behind it if it stalls. All of this task's real deps (W1-T76, W1-T77, W1-T80) are already merged, so file
+    order gives the train ORDERING while leaving it dispatchable if the task ahead stalls. Soft ordering by
+    position, not a hard chain.
+  depends_on: [W1-T76, W1-T77, W1-T80]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "FIXTURE (real, ledger-exact): PR #388 (task W1-T154) MERGED at 2026-07-20T20:24:44Z. Every line below
+    is from the ledger and happened AFTER that instant, against an already-merged, green PR:
+      20:25:04 fix.dispatch strike 2 of cap 2 — a REAL worker, round=fresh, mode=body-coverage
+      20:29:05 fix.done strike 2 — cost_usd 1.2405, num_turns 38
+      20:30:48 escalation.issue_opened #395 (needs-human) + fix.exhausted strikes=2
+      20:30:50 sweep.disposed pr 388 disposition=blocked-fixable acted=TRUE reason='required checks red — ci-log
+                fix, strike 1/2' — the SWEEP started a FRESH rung on the merged PR
+      20:31:00 dispatch.skipped reason='open-pr' pr 388 — the DRAIN still read it as OPEN, 6+ minutes post-merge
+    Cost of the gap: one full fix worker (USD 1.24, 38 turns), both strikes, one needs-human issue an operator had
+    to read and close, and a second rung started on top. W1-T154's ledger total for the day is USD 18.59.
+    THE GAP IS NOT ONE SITE, IT IS A MISSING INVARIANT AT FOUR. Each site independently decides to act without ever
+    asking whether its target still exists:
+      (a) THE STRIKE — runFixRung's strikes++ (run-task.ts:1115) fires immediately and unconditionally at the top
+          of the round loop, before any state is re-read. None of the rung's three per-round reads request PR
+          state: waitForCiGreen fetches ONLY statusCheckRollup (run-task.ts:559-561), as does fetchCiFailures
+          (:3959-3964, :2174-2179), and runReview (:1190) judges the head with no merge gate. A merged PR returns
+          its last rollup, ciGateFromRollup reports green, and the rung sails into a full reviewer spawn.
+      (b) THE DISPOSITION — runSweep dispatches on disposition==='blocked-fixable' (sweep.ts:876-882) with no
+          terminal-state predicate, which is how sweep.disposed acted=true fired on a merged PR.
+      (c) THE DISPATCH DECISION — the drain's in-flight guard (drain.ts:109-113) reads isOpenPr and skipped #388
+          as 'open-pr' six minutes after it merged.
+      (d) THE ESCALATION — the exhaustion escalate() (run-task.ts:1226) files a needs-human issue with no check
+          that the PR it is escalating still exists as a live block.
+    THE GUARD ALREADY EXISTS, ON THE ONE PATH THAT DID NOT NEED IT. routeFix (run-task.ts:4121-4123) opens with
+    `if (prState !== \"OPEN\") return { outcome: \"refused\", reason: `state is ${prState} (only an OPEN PR carries a
+    live block)` }`, fed by fixCommand which explicitly appends `state` to its --json list (run-task.ts:4196). But
+    routeFix is reached ONLY from fixCommand (run-task.ts:4243) — it is the OPERATOR verb's decision core. The
+    unattended path enters via runSweep (sweep.ts:876-882) -> buildSweepEffects.dispatchFix (run-task.ts:3852) ->
+    runFixRung (run-task.ts:3932), and routeFix appears nowhere in it. So the INTERACTIVE path an operator is
+    watching stands down, and the UNATTENDED path that spends money on a stale snapshot does not. routeFix's own
+    doc comment (run-task.ts:4110) advertises the refusal as though it were a property of the rung. It is not.
+    FRESHNESS IS THE CRUX, NOT AN ASIDE. The sweep's PR list is one `gh pr list --state open` taken at sweep start
+    (run-task.ts:3715), so every PR dispatched later in that sweep acts on a possibly-stale OPEN. The 20:31:00
+    dispatch.skipped 'open-pr' line is that staleness observed directly. A stand-down that consulted the same
+    cached snapshot would not have fired on ANY of these four sites."
+  design: |
+    ONE shared terminal-state predicate, called at every spending site, reading LIVE — not the sweep snapshot,
+    not a cached OpenPrView. Factor routeFix's existing condition (`state !== "OPEN"`, covering MERGED and CLOSED
+    alike) out of routeFix so the operator verb and every automated site call the SAME function. Parity must be
+    structural, not copied, or the paths drift again exactly as they have.
+    Insertion points, load-bearing first:
+    (i)   run-task.ts:1115 — top of the round loop, BEFORE strikes++. The only point that stops a strike being
+          SPENT on a PR that merged since the previous round.
+    (ii)  run-task.ts:1217 — immediately before the exhaustion escalate() at :1226, so a PR that merged mid-rung
+          never files a BLOCKED 'fix rung exhausted' issue. That is exactly #395.
+    (iii) sweep.ts:876-882 — the blocked-fixable dispatch, so a disposition is never ACTED on a terminal PR.
+    (iv)  drain.ts:109-113 — the in-flight guard, so a terminal PR is not reported as 'open-pr'. NOTE this site
+          differs in KIND from the others: it does not spend, it SKIPS, and a stale OPEN there wrongly BLOCKS a
+          task from dispatching rather than wrongly spending on it. Fix it for correctness of the signal, but do
+          not treat a skip as equivalent to a spend.
+    (v)   run-task.ts:3866 — the cold/sweep pre-flight. dispatchFix ALREADY runs
+          ghJson(["pr","view",pr.prUrl,"--json","headRefName"]) here for the creditability check, so adding
+          "state" to that existing field list is a ZERO-EXTRA-ROUND-TRIP guard, sitting beside the existing
+          sweep.fix.uncreditable_head refusal at :3871 — the natural precedent for a stand-down.
+    BOUND THE COST HONESTLY: a live read per spending site is more gh calls. It is NOT one read per PR per sweep —
+    it is one read at the moment of spending, which is the only moment the answer must be current. Reuse the
+    existing pr view where one is already being made (site v) rather than adding a call.
+    FAIL-CLOSED DIRECTION, and it is the opposite of the obvious one: if the state read FAILS or is
+    INDETERMINATE, do NOT stand down — proceed as today. A read error must not become a silent fleet-wide halt on
+    every fix and disposition. Standing down is correct only on a POSITIVE terminal reading. This mirrors the
+    W1-T119 indeterminate-read discipline and is the single most important boundary in this task.
+    LEDGER: one event per site naming BOTH the site and the observed state — `fix.stood_down` (rung-internal,
+    naming the strike NOT spent), `sweep.fix.not_open` (cold pre-flight, matching sweep.fix.uncreditable_head's
+    shape), `sweep.dispose.not_open`, and the drain's skip reason corrected from 'open-pr' to a terminal-naming
+    reason. status.ts:649-653 switches on fix.dispatch/fix.resolved for phase derivation and likely wants a case
+    for the new terminal events. Note run-task.test.ts:1436 asserts 'runFixRung is REUSED, never reimplemented'
+    and counts call sites, so a new early-return path likely needs that invariant test updated.
+    VERIFY every line reference from source before building — distrust this note, it is a 2026-07-20 survey.
+  acceptance:
+    - claim: "a seeded MERGED PR produces ZERO fix-rung strikes — no strike is spent, no worker spawned"
+      proof: "unit test over runFixRung with an injected live state reader returning OPEN for round 1 and MERGED for round 2: the rung stands down, strikes stays at 1, spawn is called zero times, and fix.stood_down names the state. FALSIFIER: the #388 ledger — merged 20:24:44Z, yet fix.dispatch strike 2 fired at 20:25:04 and fix.done at 20:29:05 recorded cost_usd 1.2405 over 38 turns"
+    - claim: "a seeded MERGED PR produces ZERO dispositions ACTED — the sweep never starts a rung on a terminal PR"
+      proof: "unit test over runSweep: a PR whose live state reads MERGED yields acted=false and dispatchFix is called zero times, ledgering a terminal stand-down. FALSIFIER: the 20:30:50 line — sweep.disposed pr_number 388 disposition=blocked-fixable acted=TRUE, reason 'required checks red — ci-log fix, strike 1/2', starting a fresh rung on a PR merged six minutes earlier"
+    - claim: "a seeded MERGED PR produces ZERO dispatch decisions based on a stale OPEN — the in-flight guard reads live"
+      proof: "unit test over nextRunnable's in-flight guard: a task whose PR has merged is NOT reported as in-flight from a cached snapshot, and the skip reason names the terminal state rather than 'open-pr'. FALSIFIER: the 20:31:00 dispatch.skipped line reporting reason='open-pr' for PR #388 more than six minutes after it merged"
+    - claim: "the automated paths stand down exactly as the operator verb does, via ONE shared predicate"
+      proof: "unit tests at the sweep-driven entry mirroring the EXISTING operator-verb tests run-task.test.ts:1672 (a MERGED PR refuses naming the state — zero spawns) and :1684 (CLOSED), plus an assertion that both paths call the same extracted predicate rather than two conditions. FALSIFIER: those two tests exist today for routeFix and have NO automated-path counterpart, because routeFix is reached only from fixCommand (run-task.ts:4243) while the sweep path calls runFixRung directly (run-task.ts:3932)"
+    - claim: "a FAILED or INDETERMINATE state read does NOT stand down — an unreadable state never becomes a silent fleet halt"
+      proof: "unit test: a seeded state-read error at each site proceeds as today and ledgers the indeterminate read, rather than treating unreadable as terminal. FALSIFIER: a fail-closed-to-stand-down implementation, which on a gh outage would silently stop every fix, disposition and dispatch fleet-wide — a far worse failure than the waste this task prevents"
+  risk: high
+  origin: architect
+  plan_refs: ["§4", "§9"]
+  files: [src/run-task.ts, src/lib/sweep.ts, src/lib/drain.ts, test/run-task.test.ts]
+  status: queued
+  attempts: 0
+  note: "UPGRADED at filing time from a fix-rung-only merged-check to a TERMINAL-STATE INVARIANT AT EVERY SPENDING
+    SITE, because the #388 forensics showed the same missing check firing at four independent sites within seven
+    minutes — the rung, the sweep disposition, the escalation, and the drain's in-flight read. A per-site patch
+    would have closed one and left three.
+    SIBLING of W1-T176 (absent required check -> deterministic action): same machinery acting on state it never
+    checked, different state and remedy — T176 is a check that never RAN, this is a target that is TERMINAL.
+    Adjacent to W1-T174 (drain no-attempt) and W1-T168 (futile attempt) on the calibration axis — this is the
+    WASTED-attempt end, where the target stopped existing mid-flight.
+    risk:high — it adds early-returns to the autonomous spend loop, and the failure direction is asymmetric: a
+    stand-down that misfires on a genuinely OPEN blocked PR silently stops the fleet from fixing it. Hence the
+    live-read criterion AND the explicit fail-OPEN-on-unreadable boundary, which is the inverse of this codebase's
+    usual fail-closed default and is deliberate.
+    Companion: W1-T178 (verdict stability on unchanged input) — the SAME #388 trace, different defect. This task
+    would have made that fixture harmless without making the reviewer stable."
+- id: W1-T178
+  title: "VERDICT STABILITY ON UNCHANGED INPUT — a re-review of an unchanged head that previously PASSED must not be downgraded by semantic-lane noise alone; a legitimate downgrade must cite what changed, or the deterministic floor's pass stands"
+  repo: remudero
+  queue_note: |
+    PROMOTED 2026-07-20 from plan/tasks.d/ into tasks.yaml, positioned directly behind W1-T177 and ahead of
+    W1-T179. Third car of the one-wound train (W1-T128 grounds the verdicts, W1-T177 stops the spend, THIS stops
+    the flap). The flip that triggers the spend is LIVE and was observed twice tonight on unchanged input:
+    PR #388 posted success 20:28:27Z then failure 20:30:47Z on head 1fbea36 with no new commit, and PR #398 posted
+    failure/failure/SUCCESS/failure across 21:04:46, 21:07:35, 21:08:35 and 21:16:24 — all four against the
+    identical head sha 7c20877c. In both cases the reversal is what burned the strike and opened the escalation.
+    ORDERED AFTER W1-T128 ON PURPOSE, though not hard-gated on it: this task's rule anchors on the DETERMINISTIC
+    FLOOR ('if the floor passes and nothing changed, semantic noise alone cannot flip the verdict'). That anchor
+    is only load-bearing once the floor actually executes proofs, which is W1-T128's job — every one of the 22
+    verdicts measured tonight ran at proof_exec all-not_executable. Building the anchor first would bolt it to a
+    floor that measures keywords. Ordering, not a hard dep, for the same stall-risk reason recorded on W1-T177.
+  depends_on: [W1-T102, W1-T72]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "FIXTURE (real, ledger-exact): on PR #388, remudero-review posted state=SUCCESS at 2026-07-20T20:28:27Z
+    and state=FAILURE at 20:30:47Z against the IDENTICAL head sha 1fbea36631160fc2e99a58baf8017de9deab32a2, with no
+    new commit between them and no change to the PR body. Two minutes apart, same input, opposite verdicts. The
+    second verdict is what recorded fix.review strike 2 at 20:30:47 and drove fix.exhausted + escalation #395 at
+    20:30:48. So the flip was not cosmetic: it was the PROXIMATE CAUSE of the strike-out.
+    WHY THIS IS THE SYMMETRIC HAZARD OF W1-T102, and why that task does not already cover it. W1-T102 ('Every fix
+    strike ends with a FRESH verdict — re-judge and re-post after body-only fixes too, the #177 stale-status
+    exhaustion') exists because a PINNED verdict was too STICKY: the rung never re-judged after body-only fixes, so
+    two CORRECT fixes exhausted against a stale 7/28 FAILURE while post-fix measurement scored 28/28 ALL MET. T102
+    correctly made every strike re-judge. But making the verdict fresh made it UNPINNED, and an unpinned verdict
+    over a non-deterministic judge can flap in the other direction — an earned SUCCESS silently becoming a FAILURE
+    on unchanged input. T102 removed sticky-FAILURE; this task bounds flapping-SUCCESS. They are the two ends of one
+    axis, and the fix must not reintroduce T102's hazard: the answer is NOT to re-pin verdicts.
+    A THIRD SHOWING OF THE SAME LANE'S COST, cited precisely: PR #212 / task W3-T1a (plan/questions.ndjson,
+    2026-07-18) burned a fix strike on a purely SEMANTIC downgrade — 'the reviewer judged the proof non-responsive
+    (semantic downgrade)' — against an acceptance criterion whose own recorded proof text was EMPTY. Strike spent,
+    operator question opened, on a criterion with nothing to judge.
+    TWO CROSS-REFERENCES CORRECTED at filing, so they are not carried forward wrong: (1) PR #274 is NOT a
+    semantic-strike-burner — it is 'ci: diff-scope mutation-ratchet + Stryker incremental cache (W1-T108)', and its
+    recorded question (plan/questions.ndjson, 2026-07-19) reads 'checks pending, review none — escalating — no
+    fix-rung strike is recorded for this PR'. That is REVIEW-ABSENT, the W1-T176 class, not a semantic downgrade,
+    and no strike was spent. The genuine semantic-strike-burner fixture is #212/W3-T1a above. (2) A
+    'tiebreak-sooner' retro question could not be located anywhere in plan/, MASTER-PLAN.md, LEARNINGS.md,
+    DECISIONS.md or plan/questions.ndjson — it is NOT cited here rather than cited unverified. If it exists
+    elsewhere, fold it in when found."
+  design: |
+    ANCHOR ON THE DETERMINISTIC FLOOR, which is the part of the judge that is reproducible. The rule: for a
+    re-review whose head sha is UNCHANGED since a prior verdict, and whose deterministic floor PASSES, the semantic
+    lane may NOT by itself render a worse verdict than its predecessor. A downgrade on unchanged input is legitimate
+    ONLY when it cites NEW INFORMATION — a changed head, a changed PR body, a changed criteria set, a
+    newly-observed proof execution, or an operator correction. Absent such a citation, the prior SUCCESS stands and
+    the re-review is a no-op.
+    ASYMMETRY IS DELIBERATE AND MUST BE PRESERVED: this constrains DOWNGRADES on unchanged input only. An UPGRADE
+    (failure -> success) on unchanged input stays permitted, because that is exactly the path W1-T102 opened for
+    body-only fixes to be recognised, and closing it would re-create the #177 stale-status exhaustion this
+    codebase already paid for. Do NOT implement this as a general 'verdicts are pinned to a sha' rule — that is
+    precisely T102's defect.
+    IMPLEMENTATION SHAPE (verify from source, distrust this note): the prior verdict is already recoverable from
+    the ledger's review.posted lines, which carry head_sha and state — unmetFromLedger (run-task.ts:3633-3649)
+    already replays exactly these. So the comparison needs no new storage: on re-review, look back for the most
+    recent review.posted for this PR, and if its head_sha matches the current head and its state was success while
+    the new semantic verdict is failure, hold the success and ledger the suppressed downgrade rather than posting
+    it. The deterministic floor's own result must be consulted directly — if the FLOOR fails, the downgrade is
+    legitimate and posts normally, because that is not semantic noise.
+    OBSERVABILITY IS PART OF THE DELIVERABLE, not optional: every suppressed downgrade ledgers an event naming the
+    sha, both verdicts, and the floor result. A rule that silently swallows real regressions would be worse than
+    the flapping. The suppression count is the signal that tells whether the semantic lane is getting better or
+    worse over time, and it must be visible in the digest.
+    OUT OF SCOPE: making the semantic reviewer itself deterministic (temperature, prompt pinning, model choice).
+    That is a bigger question about the lane's design. This task bounds the BLAST RADIUS of its non-determinism —
+    it stops a coin-flip from burning strikes and dollars — without claiming to fix the coin.
+    RELATED, and the reason this matters more than it looks: every review in the 2026-07-20 session posted at
+    proof_exec 0/N (#391 0/3, #394 0/4, #397 0/4). With the empirical floor dead (W1-T128), the semantic lane is
+    carrying more of the verdict than it was designed to, so its noise costs more. W1-T128 and this task compound.
+  acceptance:
+    - claim: "an unchanged-SHA re-review with a PASSING deterministic floor cannot render a verdict worse than its predecessor"
+      proof: "unit test: given a prior review.posted success on sha X and a semantic lane returning failure on a re-review of the SAME sha X with the floor passing, the posted verdict remains success and a suppression event is ledgered naming both verdicts. FALSIFIER: the #388 trace — success at 20:28:27Z and failure at 20:30:47Z on identical head 1fbea36 with no new commit, where the second verdict recorded fix.review strike 2 and drove fix.exhausted plus escalation #395 one second later"
+    - claim: "a downgrade citing NEW INFORMATION still posts — the rule constrains noise, not genuine regressions"
+      proof: "unit test: a re-review whose head sha CHANGED, or whose deterministic FLOOR fails, downgrades and posts normally. FALSIFIER: an implementation that pins a success to a PR regardless of new commits, which would let a real regression ride a stale green into merge"
+    - claim: "an UPGRADE on unchanged input remains permitted — W1-T102's body-only-fix path is not re-broken"
+      proof: "unit test: a prior failure on sha X followed by a success on the SAME sha X posts the success. FALSIFIER: the #177/W1-T102 incident — body-coverage fixes changed no commit, so a rule pinning verdicts to a sha would re-create the stale-status exhaustion where two CORRECT fixes exhausted against a stale 7/28 verdict that post-fix measurement scored 28/28 ALL MET"
+    - claim: "every suppressed downgrade is VISIBLE — the rule never silently swallows a verdict"
+      proof: "unit test: each suppression ledgers an event carrying the sha, the predecessor verdict, the suppressed verdict and the floor result, and the count surfaces in the digest. FALSIFIER: a silent suppression, which would hide a genuine reviewer regression behind a rule meant only to damp noise"
+  risk: high
+  origin: architect
+  plan_refs: ["§4", "§5C"]
+  files: [src/lib/review.ts, src/run-task.ts, test/review.test.ts]
+  status: queued
+  attempts: 0
+  note: "DISTINCT from W1-T177 (terminal-state check at every spending site) though both come from the SAME #388
+    trace: T177 stops spending on a PR that no longer exists, this stops a coin-flip verdict from burning the
+    strikes in the first place. T177 would have made THIS fixture harmless — the merged check would have stood the
+    rung down before the flip mattered — but it would not make the reviewer stable, and the next flip on an OPEN
+    PR would cost the same.
+    SYMMETRIC HAZARD of W1-T102, which this must not undo: T102 removed sticky-FAILURE by making every strike
+    re-judge, and that unpinning is what allows SUCCESS to flap. The fix is asymmetric-by-construction (constrain
+    downgrades only) precisely so T102's #177 fixture stays fixed.
+    COMPOUNDS with W1-T128 (dead proof floor): with proof_exec reading 0/N on every review in the 2026-07-20
+    session, the semantic lane carries more of the verdict than designed, so its noise is more expensive.
+    risk:high — it changes what verdict gets POSTED to a required status check, i.e. what can merge. The
+    fail-direction that matters is suppressing a genuine regression, which is why the citation rule and the
+    always-ledgered suppression event are load-bearing criteria rather than nice-to-haves."
 - id: W1-T179
   title: "W1-T155 DARKNESS FOLLOW-UP — monotonic-under-darkness (a gateway-fetch failure never regresses a credited task to queued, marked github_unobservable) + the in-flight liveness bound; both criteria were amended onto W1-T155 AFTER it merged, so nothing can ever dispatch them"
   repo: remudero
