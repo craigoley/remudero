@@ -6431,3 +6431,83 @@
   note: "Pull-view sibling of W1-T112 (digest push). Feeds the learning limb W1-T86/T87/T88 the labeled human signal
     they consume. Third leg of the operator-console arc (front door W1-T139, preview W1-T140, inbox W1-T110/T111).
     Reuses panel-actions.appendPanelLedger — operator_feedback is a new ledger event, not a new write path."
+
+- id: W1-T142
+  title: "scope-guarded branch refresh — a refresh/collapse/squash whose staged diff touches files outside the task's declared files must REFUSE and report (the reset --soft phantom-revert near-miss)"
+  repo: remudero
+  depends_on: [W1-T80]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "NEAR-MISS (this session): collapsing a stale worker branch with `git reset --soft origin/main`
+    forged a false merge-base — the flattened single commit's diff vs main REVERTED files that #310/#314 had merged
+    (issues-intake.ts, digest.ts, feedback.ts), and because main had not re-touched those files GitHub showed the PR
+    as CLEANLY MERGEABLE — the phantom revert would have merged silently. It was caught only by hand-inspecting the
+    changed-file list. A refresh/collapse/squash of a task's branch must be GUARDED: its staged diff may only touch
+    the task's own declared `files` — anything outside is a phantom revert or scope creep and must REFUSE, loud, with
+    the offending paths named."
+  design: |
+    A PURE guard: given the set of files a refreshed branch's diff touches (git diff --name-only base..HEAD) and the
+    task's declared `files` scope, return the out-of-scope paths (empty = clean). Wire it as a FAIL-CLOSED gate at
+    the branch push/refresh site (runTask's git push, ~run-task.ts:1953, which already holds the `task` object and so
+    task.files): if the staged diff touches any path outside task.files, REFUSE the push and report the offending
+    paths + the likely cause (forged merge-base / phantom revert), rather than pushing. VERIFY the exact push site,
+    the diff-base used, and the task.files shape from source before wiring (distrust this note). Allow an explicit
+    escape only for a task whose declared files legitimately include the touched paths.
+  acceptance:
+    - claim: "a forged refresh whose diff touches files outside the task's declared files is REFUSED with the offending paths named"
+      proof: "unit test: the guard, given diff-files [test/foo.ts, src/lib/issues-intake.ts] and declared files [test/foo.ts], returns the out-of-scope path [src/lib/issues-intake.ts] and the push site refuses (non-zero / throws) naming it; a fixture branch reproducing the reset --soft phantom-revert (touching an unrelated merged-PR file) is refused"
+    - claim: "a clean refresh whose diff stays within the declared files passes"
+      proof: "unit test: the guard, given diff-files within declared files, returns empty and the push proceeds — a squash that legitimately touches only the task's own files is NOT blocked (no false positive)"
+    - claim: "the guard is fail-closed and pure"
+      proof: "unit test: the guard is a pure function (no git/network calls — diff-file list injected) and an empty/undefined declared-files scope refuses a non-empty diff rather than waving it through (fail-closed)"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§4B"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from the open-PR-sweep near-miss (documented in memory squash-phantom-revert-trap). Sibling of the
+    other worker-push-hygiene guards W1-T137 (commit header cap) and W1-T80 (in-flight dispatch). The failure mode is
+    invisible to GitHub's mergeability check — only a declared-files scope check catches it."
+
+- id: W1-T143
+  title: "daemon observability — flush/line-buffer the daemon's logs (empty under launchd's non-TTY stdout) and make the ledger location deterministic + documented"
+  repo: remudero
+  depends_on: [W1-T12a]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The running daemon is a black box. Its StandardOut/StandardErrorPath files (state/logs/daemon.out.log,
+    daemon.err.log) are EMPTY because it logs via console.log/console.error (run-task.ts:3003/3033/3139) and Node
+    fully-buffers stdout when it is not a TTY — which it never is under launchd — so nothing flushes until the process
+    exits. Meanwhile the real activity ledger IS being written (16k+ lines) but at config.root/state/ledger.ndjson,
+    and config.root defaults to os.homedir()/Remudero (config.ts:246) — the PARENT of the repo checkout, NOT where the
+    operator looks (inside the repo). Result: the operator cannot see what the daemon is doing without knowing an
+    undocumented path. The daemon must be observable within one poll."
+  design: |
+    Two fixes. (1) FLUSH/LINE-BUFFER: make the daemon's log writes observable under a non-TTY launchd stdout — either
+    force line-buffered/unbuffered stdout+stderr, write log lines synchronously, or route the daemon's operational
+    log through the ledger append (which already fsyncs) rather than console.* alone. A poll's activity must appear in
+    an operator-readable file WITHIN one poll interval, not only at process exit. (2) DETERMINISTIC + DOCUMENTED
+    LEDGER: state one canonical ledger path derived from config.root, and DOCUMENT it (docs + the daemon's own
+    startup line printing where it logs), so the path isn't folklore. VERIFY the exact console.* sites, the launchd
+    plist StandardOutPath, config.root derivation, and the ledger path from source before editing (distrust this note).
+  acceptance:
+    - claim: "a daemon poll under a non-TTY (launchd-like) stdout produces operator-readable log lines within one poll interval, not only at exit"
+      proof: "integration test: run one daemon poll with stdout redirected to a non-TTY pipe/file (the launchd condition); assert log lines for that poll are readable from the operator-facing log/ledger BEFORE the process exits — a pre-fix run leaves the file empty until exit (the falsifier)"
+    - claim: "the ledger location is deterministic and surfaced, not folklore"
+      proof: "unit test: the ledger path is a pure function of config.root (asserted), and the daemon's startup emits a line naming the absolute ledger + log path it will write; a docs reference names the same canonical path"
+    - claim: "no behavior change beyond observability"
+      proof: "unit test: the daemon's dispatch/sweep/escalate decisions are unchanged by the logging fix (the same summary/verdicts on a fixture poll) — only the flush/location changes"
+  risk: high
+  origin: architect
+  plan_refs: ["§9", "§7"]
+  files: [src/lib/daemon.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from the open-PR sweep: the daemon is alive and correct (merged PRs, escalated blocks) but INVISIBLE —
+    out/err logs empty (non-TTY buffering) and the ledger at ~/Remudero/state/ledger.ndjson (config.root = repo
+    PARENT) is undocumented. Observability only; decisions unchanged."
