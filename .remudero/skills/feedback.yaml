@@ -9,16 +9,21 @@ tools:
   - Grep
   - Glob
   - WebSearch
-  - AskUserQuestion
+
+# AskUserQuestion is deliberately NOT granted (W1-T42): verified it auto-resolves EMPTY with no
+# TTY rather than stalling (LEARNINGS.md "AskUserQuestion neither works headlessly nor stalls"),
+# and this skill's worker always runs headless via spawnWorker regardless of the invoking shell —
+# so the interactive grill branch is structurally unreachable, not merely a no-TTY fallback.
 
 permission_profile: architect
 
 output_contract: >
   captures async intake as plan/feedback/<id> ({id, ts, raw text,
-  attachments[], origin, status, proposal_pr}); AMBIGUOUS items grill via
-  AskUserQuestion (interactive) or a needs-human issue (async, reusing §4's
-  escalation machinery); CLEAR items propose a plan-only PR carrying
-  origin: feedback#<id> provenance, gated by ci-gate+remudero-review.
+  attachments[], origin, status, proposal_pr}); AMBIGUOUS items grill via a
+  needs-human GitHub issue carrying options + a recommendation (async,
+  reusing §4's escalation machinery — verified the only viable mechanism,
+  W1-T42); CLEAR items propose a plan-only PR carrying origin: feedback#<id>
+  provenance, gated by ci-gate+remudero-review.
 
 grounding_sources:
   - MASTER-PLAN.md#7B

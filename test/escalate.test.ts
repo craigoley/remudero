@@ -65,8 +65,31 @@ test("each escalation class maps to its own label alongside needs-human", () => 
   const issues = fakeIssues();
   escalate(escalation({ class: "MANUAL" }), { issues, ledgerPath: ledgerPath(), runId: "RUN-1" });
   escalate(escalation({ class: "HARD_STOP" }), { issues, ledgerPath: ledgerPath(), runId: "RUN-1" });
+  escalate(escalation({ class: "GRILL" }), { issues, ledgerPath: ledgerPath(), runId: "RUN-1" });
   assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-manual"]);
   assert.deepEqual(issues.calls[1].labels, [NEEDS_HUMAN_LABEL, "escalation-hard-stop"]);
+  assert.deepEqual(issues.calls[2].labels, [NEEDS_HUMAN_LABEL, "escalation-grill"]);
+});
+
+test("GRILL (the intake triage's async grill, W1-T42) opens a needs-human issue exactly like every other class — no second mechanism", () => {
+  const issues = fakeIssues();
+  const url = escalate(
+    escalation({
+      class: "GRILL",
+      taskId: "TRIAGE-fb-1",
+      summary: "feedback#fb-1 needs a human call: cli flag or config default?",
+      options: [
+        { label: "cli-flag", detail: "add a --foo flag" },
+        { label: "config-default", detail: "add a config default instead" },
+      ],
+      recommendation: "cli-flag",
+    }),
+    { issues, ledgerPath: ledgerPath(), runId: "RUN-1" },
+  );
+  assert.equal(url, "https://github.com/craigoley/remudero/issues/99");
+  assert.match(issues.calls[0].title, /^\[GRILL\] TRIAGE-fb-1: /);
+  assert.match(issues.calls[0].body, /\*\*cli-flag\*\* — add a --foo flag/);
+  assert.match(issues.calls[0].body, /## Recommendation\ncli-flag/);
 });
 
 test("an escalation with no options is refused — a bare alert is not actionable", () => {

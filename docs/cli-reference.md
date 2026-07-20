@@ -35,7 +35,7 @@ usage:
   rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard
   rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>   # fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps, does not push/PR/arm protection itself
   rmd feedback <text...> [--attach <path-or-url>]... [--origin cli|ui|issue]   # durable-inbox async capture (MASTER-PLAN §7B, W1-T40): writes plan/feedback/<id>.yaml with status: new; --attach copies a local screenshot/terminal-dump into plan/feedback/attachments/<id>/ or records an http(s) link verbatim; browse the inbox with plain ls/cat/git diff, no bespoke reader
-  rmd triage <feedback-id>   # the Architect intake worker (MASTER-PLAN §7B, W1-T41): GROUNDS a plan/feedback/<id> entry against MASTER-PLAN/plan/LEARNINGS/DECISIONS, RESEARCHES via server-side WebSearch, then either reports 'already decided' (no task), parks it 'grilling' (ambiguous — W1-T42), or opens a plan-only PR carrying origin: feedback#<id> provenance, gated by ci-gate+remudero-review like everything else
+  rmd triage <feedback-id>   # the Architect intake worker (MASTER-PLAN §7B, W1-T41): GROUNDS a plan/feedback/<id> entry against MASTER-PLAN/plan/LEARNINGS/DECISIONS, RESEARCHES via server-side WebSearch, then either reports 'already decided' (no task), GRILLS an ambiguous item by opening a needs-human GitHub issue with options + a recommendation (W1-T42, parks status 'grilling'), or opens a plan-only PR carrying origin: feedback#<id> provenance, gated by ci-gate+remudero-review like everything else
   rmd skill list   # §5B skill-registry reader (W1-T44): resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); adding a skill is a config entry, no source change
 
 An UNKNOWN command, or an unrecognized argument to a command, prints this usage and exits
@@ -210,7 +210,7 @@ durable-inbox async capture (MASTER-PLAN §7B, W1-T40): writes plan/feedback/<id
 rmd triage <feedback-id>
 ```
 
-the Architect intake worker (MASTER-PLAN §7B, W1-T41): GROUNDS a plan/feedback/<id> entry against MASTER-PLAN/plan/LEARNINGS/DECISIONS, RESEARCHES via server-side WebSearch, then either reports 'already decided' (no task), parks it 'grilling' (ambiguous — W1-T42), or opens a plan-only PR carrying origin: feedback#<id> provenance, gated by ci-gate+remudero-review like everything else
+the Architect intake worker (MASTER-PLAN §7B, W1-T41): GROUNDS a plan/feedback/<id> entry against MASTER-PLAN/plan/LEARNINGS/DECISIONS, RESEARCHES via server-side WebSearch, then either reports 'already decided' (no task), GRILLS an ambiguous item by opening a needs-human GitHub issue with options + a recommendation (W1-T42, parks status 'grilling'), or opens a plan-only PR carrying origin: feedback#<id> provenance, gated by ci-gate+remudero-review like everything else
 
 ### `rmd skill`
 
