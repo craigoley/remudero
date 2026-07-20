@@ -6790,3 +6790,40 @@
   attempts: 0
   note: "Fixture = the $206/60-run W1-T1 incident. Budget-polarity dual of W1-T130 (cannot-observe->WAIT). Drainage
     NEVER throttles — only new DISPATCH defers; the falsifier is a governor that strands in-flight work."
+
+- id: W1-T151
+  title: "install-freshness — a git pull that changes package.json/package-lock.json (or adds workspaces) triggers npm install before build/serve, in BOTH the operator path and W1-T126's daemon self-restart"
+  repo: remudero
+  depends_on: [W1-T126]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "FIXTURE (real incident): the workspace conversion broke operator builds while CI stayed GREEN — CI
+    installs fresh every run, so it never saw the staleness; a local checkout that pulls a package.json /
+    package-lock.json change (or a new workspaces layout) runs STALE node_modules against NEW code. W1-T126's daemon
+    self-restart pulls origin/main and re-execs WITHOUT reinstalling, so it inherits the exact same staleness. FIX:
+    after any git pull that changes package.json / package-lock.json, run npm install BEFORE build/serve — in both
+    the operator path and the daemon self-restart path."
+  design: |
+    Cheap detection: HASH package-lock.json (+ package.json) at install time and PERSIST the hash; on boot / build /
+    serve, re-hash and if it DIFFERS, run npm install (npm ci) BEFORE proceeding. Wire the check into (i) the
+    operator build/serve entry and (ii) W1-T126's daemon self-restart — after the pull, BEFORE the re-exec. A
+    matching hash does nothing (no redundant install). VERIFY the install-time hash-persistence location, the
+    build/serve entry point, and W1-T126's pull->re-exec sequence from source before wiring (distrust this note).
+  acceptance:
+    - claim: "a pull that changes package-lock.json triggers npm install before build/serve; a matching hash does NOT"
+      proof: "unit test over an injected install-runner: a persisted lock-hash that DIFFERS from the current package-lock.json triggers exactly ONE install BEFORE build/serve proceeds; a MATCHING hash triggers NO install (the no-redundant-install falsifier)"
+    - claim: "the daemon self-restart (W1-T126) reinstalls on a lock change before re-exec, not just re-pulls"
+      proof: "unit test: W1-T126's pull->re-exec path, given a package-lock.json change between the boot sha and the new sha, runs npm install BEFORE re-exec; with no lock change it re-execs WITHOUT installing"
+    - claim: "the workspace-conversion fixture (CI-green, operator-broke) is caught"
+      proof: "unit test: a fixture converting to workspaces (package.json workspaces added + lock changed) makes the freshness check detect the change and install; the pre-fix path (no install) would run stale node_modules against new code — asserted as the caught regression"
+  risk: high
+  origin: architect
+  plan_refs: ["§9", "§5A"]
+  files: [src/run-task.ts, src/lib/daemon.ts]
+  status: queued
+  attempts: 0
+  note: "Fixture = the workspace conversion that broke operator builds while CI stayed green (CI installs fresh).
+    Extends W1-T126 (daemon self-freshness) with INSTALL-freshness. Cheap detection = hash package-lock.json at
+    install, compare on boot/build; a matching hash is a no-op (no redundant install)."
