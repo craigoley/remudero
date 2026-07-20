@@ -44,7 +44,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import type { Route } from "./service.js";
 import { appendLedger } from "./ledger.js";
-import { requestPause, requestStop, resumeFleet, setQuietHours } from "./fleet-control.js";
+import { isPaused, isQuietHours, isStopped, pauseDetail, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail } from "./fleet-control.js";
 import { appendQuestionAnswer } from "./worker.js";
 
 /** Non-task-scoped panel actions (pause/resume/stop/quiet-hours) ledger under this sentinel — mirrors run-task.ts's drainCommand, which ledgers its own fleet-wide lines as `task_id: "DRAIN"`. */
@@ -158,6 +158,43 @@ export function jsonAction<T extends object>(
       return;
     }
     await act(validated, req, res);
+  };
+}
+
+// ── GET /v1/control/status ──────────────────────────────────────────────────
+
+/** GET /v1/control/status's body — the CURRENT fleet-control tri-state, read-scoped. */
+export interface FleetControlStatus {
+  paused: boolean;
+  pauseDetail?: string;
+  stopped: boolean;
+  stopDetail?: string;
+  quietHours: boolean;
+}
+
+/**
+ * GET /v1/control/status — read-scoped. W1-T153's fleet-control READ-BACK: the shell must
+ * derive its Pause/Resume/STOP/quiet-hours button states from the ACTUAL fleet-control flag
+ * files (fleet-control.ts's isPaused/isStopped/isQuietHours), never render stateless buttons
+ * that invite discovery-by-actuation ("should I try clicking start?" on a STOP'd fleet). No
+ * route on this surface exposed the tri-state before this task — every prior panel-actions.ts
+ * route only ever returned the flag ITS OWN write just flipped, never the full current state.
+ */
+export function buildControlStatusRoute(deps: Pick<PanelActionDeps, "root">): Route {
+  return {
+    method: "GET",
+    path: "/v1/control/status",
+    scope: "read",
+    handler: (_req, res) => {
+      const status: FleetControlStatus = {
+        paused: isPaused(deps.root),
+        pauseDetail: pauseDetail(deps.root),
+        stopped: isStopped(deps.root),
+        stopDetail: stopDetail(deps.root),
+        quietHours: isQuietHours(deps.root),
+      };
+      sendJson(res, 200, status);
+    },
   };
 }
 
@@ -378,6 +415,7 @@ export function buildDrainFeedbackRoute(deps: PanelActionDeps): Route {
 /** Every panel write route, for a caller registering the full set at once (`rmd serve` wiring, later work). */
 export function buildPanelActionRoutes(deps: PanelActionDeps): Route[] {
   return [
+    buildControlStatusRoute(deps),
     buildPauseRoute(deps),
     buildResumeRoute(deps),
     buildStopRoute(deps),

@@ -359,6 +359,7 @@ test("end to end: Refine's grill renders inline via GET /v1/feedback, then POST 
   const skillRunDeps = depsFor(root, planPath);
   const graphDeps: PanelGraphDeps = {
     root,
+    inboxRoot: root,
     planPath,
     ledgerPath: skillRunDeps.ledgerPath,
     github: { prView: () => null },

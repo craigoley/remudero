@@ -100,7 +100,7 @@ function emptyPlanPath(root: string): string {
 }
 
 function depsFor(root: string, planPath: string, github: TraceGithub = fakeGithub()): PanelGraphDeps {
-  return { root, planPath, ledgerPath: ledgerPathFor(root), github, statusGithub: fakeStatusGithub() };
+  return { root, inboxRoot: root, planPath, ledgerPath: ledgerPathFor(root), github, statusGithub: fakeStatusGithub() };
 }
 
 async function withService<T>(deps: PanelGraphDeps, fn: (baseUrl: string) => Promise<T>): Promise<T> {
@@ -427,7 +427,7 @@ test("GET /v1/trace?id=<feedback-id>: FORWARD chain -- feedback -> proposal PR -
     "https://github.com/o/r/pull/51": { number: 51, url: "https://github.com/o/r/pull/51", state: "OPEN" },
   });
   const ledgerPath = ledgerPathFor(root);
-  const deps: PanelGraphDeps = { root, planPath, ledgerPath, github, statusGithub: fakeStatusGithub() };
+  const deps: PanelGraphDeps = { root, inboxRoot: root, planPath, ledgerPath, github, statusGithub: fakeStatusGithub() };
   // seed the run's ledger lines directly (mirrors test/board.test.ts's convention).
   const { appendLedger } = await import("../src/lib/ledger.js");
   appendLedger(ledgerPath, { run_id: "W9-T1-1000", task_id: "W9-T1", step: "pr.opened", pr_url: "https://github.com/o/r/pull/51" });

@@ -72,6 +72,66 @@ export function buildStatusRoute(deps: BoardDeps): Route {
   };
 }
 
+// ── GET /v1/recent — the last ~10 merges/blocks, PR-linked (W1-T153's RECENT section) ──────
+//
+// W1-T141's `buildRundown` (drain.ts) renders a rundown ONLY from a just-completed
+// `DrainSummary` — a live in-memory value a single drain run produces, never persisted or
+// queryable after the fact (verified from source, not assumed). RECENT needs a rundown-shaped
+// answer to "what happened lately" from a COLD HTTP request, with no live drain run to ask, so
+// this reuses W1-T141's own outcome vocabulary (`merged`/`blocked`) over data this module
+// already owns: `computeBoardSnapshot`'s per-task terminal status/PR fields, ordered by RECENCY
+// via the ledger's own append order (the last ledger line naming a task is the most recent
+// thing that happened to it) rather than re-deriving a second timeline.
+
+export type RecentOutcome = "merged" | "blocked";
+
+/** One RECENT row — a terminal task, PR-linked, in the vocabulary W1-T141's rundown already established. */
+export interface RecentEntry {
+  taskId: string;
+  outcome: RecentOutcome;
+  prNumber?: number;
+  prUrl?: string;
+}
+
+/**
+ * The last `max` merged/blocked tasks, most-recent-first. "Most recent" = the LAST ledger line
+ * mentioning that task id (any step) — a task with no ledger line at all (e.g. a yaml-decorated
+ * `status: blocked` with no run ever attempted) sorts after every task the ledger has actually
+ * seen, never crowding out a task the operator watched happen.
+ */
+export function computeRecentOutcomes(deps: BoardDeps, max = 10): RecentEntry[] {
+  const snapshot = computeBoardSnapshot(deps);
+  const readLedger = deps.readLedger ?? readLedgerLines;
+  const lines = readLedger(deps.ledgerPath);
+  const lastIndex = new Map<string, number>();
+  lines.forEach((line, i) => {
+    if (typeof line.task_id === "string") lastIndex.set(line.task_id, i);
+  });
+  const terminal = snapshot.tasks.filter((t) => t.status === "merged" || t.status === "done" || t.status === "blocked");
+  return terminal
+    .map((t) => ({ t, idx: lastIndex.get(t.taskId) ?? -1 }))
+    .sort((a, b) => b.idx - a.idx)
+    .slice(0, max)
+    .map(({ t }) => ({
+      taskId: t.taskId,
+      outcome: (t.status === "blocked" ? "blocked" : "merged") as RecentOutcome,
+      prNumber: t.prNumber,
+      prUrl: t.prUrl,
+    }));
+}
+
+/** GET /v1/recent — the RECENT section's data, read-scoped. */
+export function buildRecentRoute(deps: BoardDeps): Route {
+  return {
+    method: "GET",
+    path: "/v1/recent",
+    scope: "read",
+    handler: (_req, res) => {
+      sendJson(res, 200, { entries: computeRecentOutcomes(deps) });
+    },
+  };
+}
+
 /** Every distinct `task_id` named on a ledger line, in first-seen order. */
 function taskIdsOf(lines: Array<Record<string, unknown>>): string[] {
   const seen = new Set<string>();

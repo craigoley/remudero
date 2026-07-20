@@ -51,7 +51,9 @@
  * deferred siblings (lib/triage.ts's grill mechanics, lib/board.ts's un-rendered design panels).
  */
 
-import { loadPlan } from "./plan.js";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { loadPlan, type MergedResolver } from "./plan.js";
 import { projectPlan, readLedgerLines, type GitHub } from "./status.js";
 import { buildDrainPreview, type DrainOpts } from "./drain.js";
 import {
@@ -66,6 +68,7 @@ import {
 import { renderTraceChain, traceForward, traceReverse, type TraceChain, type TraceGithub } from "./trace.js";
 import type { Route } from "./service.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
+import { classifyProposal, gitGrepAnchorTrue, parseDraftCache, parseProposalRegistry } from "./inbox.js";
 
 export interface PanelGraphDeps {
   /** Repo root — where plan/feedback/ lives (lib/feedback.ts's `feedbackDir`). */
@@ -89,6 +92,15 @@ export interface PanelGraphDeps {
    * merged-set derivation — the SAME projection board.ts's GET /v1/status already uses.
    */
   statusGithub: GitHub;
+  /**
+   * config.root — where `state/inbox-proposals.json` + `state/inbox-drafts.json` live
+   * (W1-T110's ACTIVE-proposal registry + draft cache, `rmd inbox`'s own paths, run-task.ts's
+   * `inboxCommand`). This is `config.root`, NOT `root` above (`root` is the REPO checkout
+   * plan/feedback/ lives under) — the SAME config-vs-repo split lib/serve.ts's own header
+   * documents for `fleetControlRoot`/`questionsRoot`; `rmd serve` wires this to the SAME
+   * `fleetControlRoot` it already resolves as config.root.
+   */
+  inboxRoot: string;
 }
 
 // ── GET /v1/feedback — the inbox list ───────────────────────────────────────
@@ -346,6 +358,72 @@ export function buildDrainPreviewRoute(deps: PanelGraphDeps): Route {
   };
 }
 
+// ── GET /v1/inbox — W1-T110's READY ratification proposals (NEEDS ME section) ──────────────
+
+/** Best-effort read; a missing/unreadable file is `undefined` — an inbox with no registry yet is the normal pre-population state (mirrors inbox.ts's own `parseProposalRegistry(undefined) -> []`). */
+function readFileIfExists(path: string): string | undefined {
+  try {
+    return existsSync(path) ? readFileSync(path, "utf8") : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One READY-to-ratify proposal, as the panel renders it — the reasoning (drafted fragment/stamp) stays server-side; the panel gets the one-line ask. */
+export interface InboxReadyItem {
+  proposalId: string;
+  summary: string;
+  stampLine?: string;
+}
+
+/**
+ * GET /v1/inbox — read-scoped. The ratification inbox's (W1-T110, lib/inbox.ts) READY tier
+ * ONLY — the same tiering `rmd inbox` prints, computed the SAME way (classifyProposal, a pure
+ * function, over the ACTIVE-proposal registry + draft cache + a real ReadinessContext), but
+ * over HTTP for the shell's NEEDS ME section. NOT-READY / DEFERRED-WITH-TRIGGER proposals are
+ * deliberately never returned here (inbox.ts's whole point: only what is genuinely actionable
+ * is ever surfaced, "the cure for approval fatigue").
+ *
+ * `rmd approve <id>` / `rmd reframe <id>` (W1-T111) stay CLI-only here — approveProposal needs
+ * a real `RatifyGateway` (git branch + PR side effects), and wiring THAT as a web write route is
+ * its own concern (a ratification write surface), not this task's one concern (shell IA/design).
+ * A READY item's "action" in the panel is therefore the exact CLI command to run, not a button —
+ * an honest affordance over one this PR cannot respond to. See W1-T153's PR body for this scope
+ * note.
+ */
+export function buildInboxRoute(deps: PanelGraphDeps): Route {
+  return {
+    method: "GET",
+    path: "/v1/inbox",
+    scope: "read",
+    handler: (_req, res) => {
+      const registryPath = join(deps.inboxRoot, "state", "inbox-proposals.json");
+      const draftsPath = join(deps.inboxRoot, "state", "inbox-drafts.json");
+      const proposals = parseProposalRegistry(readFileIfExists(registryPath));
+      const drafts = parseDraftCache(readFileIfExists(draftsPath));
+
+      const plan = loadPlan(deps.planPath);
+      const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
+      const isMerged: MergedResolver = (t) => projection.get(t.id)?.merged ?? false;
+      const allIds = new Set(proposals.map((p) => p.id));
+
+      const ready: InboxReadyItem[] = [];
+      for (const proposal of proposals) {
+        const classification = classifyProposal(proposal, drafts[proposal.id], {
+          plan,
+          isMerged,
+          grepAnchorTrue: (anchor) => gitGrepAnchorTrue(deps.root, "origin/main", anchor),
+          openProposalIds: new Set([...allIds].filter((id) => id !== proposal.id)),
+        });
+        if (classification.state === "ready") {
+          ready.push({ proposalId: proposal.id, summary: proposal.summary, stampLine: classification.draft?.stampLine });
+        }
+      }
+      sendJson(res, 200, { ready });
+    },
+  };
+}
+
 /** Every panel graph route, for a caller registering the full set at once (`rmd serve` wiring). */
 export function buildPanelGraphRoutes(deps: PanelGraphDeps): Route[] {
   return [
@@ -354,5 +432,6 @@ export function buildPanelGraphRoutes(deps: PanelGraphDeps): Route[] {
     buildTraceRoute(deps),
     buildProposalDecisionRoute(deps),
     buildDrainPreviewRoute(deps),
+    buildInboxRoute(deps),
   ];
 }
