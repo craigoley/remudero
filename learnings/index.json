@@ -38,6 +38,7 @@
         "control-surface-fail-loud-stop-one-shot",
         "criteria-go-stale-on-relocation",
         "no-live-operator-in-headless-worker",
+        "probe-must-exercise-the-real-consuming-client",
         "reviewer-floor-casing-blind",
         "rules-must-sweep-the-existing-queue"
       ],
@@ -47,6 +48,8 @@
         "src/lib/fleet-control.ts",
         "src/lib/init.ts",
         "src/lib/review.ts",
+        "src/lib/serve.ts",
+        "src/lib/service.ts",
         "src/run-task.ts"
       ]
     },

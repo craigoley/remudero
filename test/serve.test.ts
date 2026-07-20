@@ -149,6 +149,15 @@ function post(base: string, path: string, token: string, body: unknown) {
   });
 }
 
+/**
+ * A browser NAVIGATION: a bare GET with NO `Authorization` header — the client class the original
+ * W1-T139 auth probe missed (it used `get()`, which always sends the header). This is the client
+ * that actually opens the console by URL, and the one the shell-auth fix must serve.
+ */
+function navigate(base: string, path: string) {
+  return fetch(`${base}${path}`);
+}
+
 interface SseEvent {
   event: string;
   data: unknown;
@@ -215,6 +224,37 @@ test("GET /: no bearer token -> 401, same as every other route on this surface",
   await withServeServer(depsFor(root, planOf([task()])), async (base) => {
     const res = await fetch(`${base}/`);
     assert.equal(res.status, 401);
+  });
+});
+
+// ── W1-T139 bootstrap-paradox regression: the shell must load for a browser NAVIGATION ──────────
+// The original auth probe used `get()` (always sends the Authorization header) and so never
+// exercised the one client that matters — a browser opening `/?token=...` by URL, which CANNOT
+// send a header. These three use `navigate()` (header-less) to pin the fix.
+
+test("GET /?token=<read> with NO Authorization header returns the shell (browser-navigation fixture)", async () => {
+  const root = tmpRoot();
+  await withServeServer(depsFor(root, planOf([task({ id: "A" })])), async (base) => {
+    const res = await navigate(base, `/?token=${READ_TOKEN}`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+    assert.match(await res.text(), /id="board"/); // the real shell, not a stub
+  });
+});
+
+test("GET / with neither header nor ?token= -> 401 (the shell stays authenticated, never served open)", async () => {
+  const root = tmpRoot();
+  await withServeServer(depsFor(root, planOf([task()])), async (base) => {
+    const res = await navigate(base, "/");
+    assert.equal(res.status, 401);
+  });
+});
+
+test("GET /v1/status with ONLY ?token= (no header) -> 401: query-param auth must NOT leak to API routes", async () => {
+  const root = tmpRoot();
+  await withServeServer(depsFor(root, planOf([task()])), async (base) => {
+    const res = await navigate(base, `/v1/status?token=${READ_TOKEN}`);
+    assert.equal(res.status, 401); // Referer/log-exposure risk lives here — header-only, always
   });
 });
 

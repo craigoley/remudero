@@ -191,12 +191,20 @@ export function renderShellHtml(): string {
 `;
 }
 
-/** `GET /` — the shell above, read-scoped like every other route on this surface. */
+/**
+ * `GET /` — the shell above, read-scoped like every other route on this surface, but ALSO
+ * accepting the token via `?token=` (allowQueryToken). A browser NAVIGATION to `/?token=<read>`
+ * cannot set an `Authorization` header, so without this the shell would 401 and never load — the
+ * page's OWN follow-up `/v1/*` fetches then carry the header (those routes stay header-only). This
+ * closes the W1-T139 bootstrap paradox: the auth spec was satisfied against header-sending fetch
+ * clients and unreachable by the one client that matters, the browser opening the URL.
+ */
 function buildShellRoute(): Route {
   return {
     method: "GET",
     path: "/",
     scope: "read",
+    allowQueryToken: true,
     handler: (_req, res) => {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(renderShellHtml());
