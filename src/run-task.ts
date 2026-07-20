@@ -23,12 +23,14 @@ import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
 import type { Tier, TierDetection } from "./lib/tier.js";
 import { buildProjectInit, parseProjectInitArgs } from "./lib/project-init.js";
 import {
+  applyCuratedSelection,
   DEFAULT_MAX as DRAIN_DEFAULT_MAX,
   nextRunnable,
   plannedSequence,
   renderSummary,
   resumeCommand,
   runDrain,
+  type CuratedSelection,
   type DrainOpts,
   type MergedSet,
   type OpenPrCheck,
@@ -2749,7 +2751,7 @@ async function drainCommand(
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE touching config/locks/spawns (a malformed control command
   // must spawn NOTHING — the daemon-install hazard). drain takes only these flags.
-  const badArg = unknownArgError("drain", rest, ["--until", "--max", "--repo"], ["--dry-run", "--allow-stale"]);
+  const badArg = unknownArgError("drain", rest, ["--until", "--max", "--repo", "--curated"], ["--dry-run", "--allow-stale"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -2758,10 +2760,44 @@ async function drainCommand(
   const allowStale = rest.includes("--allow-stale");
   const untilIdx = rest.indexOf("--until");
   const maxIdx = rest.indexOf("--max");
-  const opts: DrainOpts = {
+
+  // ── CURATION (W1-T140 limb 2): `--curated <path>` names a JSON {taskIds, depth}
+  // file — the drain preview panel's curated selection, exported for the operator
+  // to hand to the CLI. Validated FULLY before any config/lock/spawn (same FAIL
+  // LOUD discipline as `unknownArgError` above): a missing file, bad JSON, or a
+  // malformed shape refuses with exit 2 and touches nothing.
+  const curatedPath = flagValue(rest, "--curated");
+  let curatedSelection: CuratedSelection | undefined;
+  if (curatedPath !== undefined) {
+    let raw: string;
+    try {
+      raw = readFileSync(curatedPath, "utf8");
+    } catch (e) {
+      console.error(`### rmd drain — cannot read --curated file '${curatedPath}': ${String((e as Error)?.message ?? e)}`);
+      return 2;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      console.error(`### rmd drain — --curated file '${curatedPath}' is not valid JSON: ${String((e as Error)?.message ?? e)}`);
+      return 2;
+    }
+    const rec = parsed as Record<string, unknown> | null;
+    const taskIdsValid = rec !== null && typeof rec === "object" && Array.isArray(rec.taskIds) && rec.taskIds.every((x) => typeof x === "string");
+    const depthValid = rec !== null && typeof rec === "object" && typeof rec.depth === "number";
+    if (!taskIdsValid || !depthValid) {
+      console.error(`### rmd drain — --curated file '${curatedPath}' must be {"taskIds": string[], "depth": number}`);
+      return 2;
+    }
+    curatedSelection = { taskIds: rec!.taskIds as string[], depth: rec!.depth as number };
+  }
+
+  const baseOpts: DrainOpts = {
     until: untilIdx >= 0 ? rest[untilIdx + 1] : undefined,
     max: maxIdx >= 0 ? Number(rest[maxIdx + 1]) : DRAIN_DEFAULT_MAX,
   };
+  const opts: DrainOpts = curatedSelection ? applyCuratedSelection(baseOpts, curatedSelection) : baseOpts;
   const config = deps.config ?? loadConfig();
   const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
@@ -2822,10 +2858,22 @@ async function drainCommand(
   };
 
   if (dryRun) {
-    const seq = plannedSequence(plan, refreshMerged(), opts);
-    console.log(`### rmd drain --dry-run — ${seq.length} task(s) would run, in order:`);
-    seq.forEach((id, i) => console.log(`  ${i + 1}. ${id}`));
-    if (seq.length === 0) console.log("  (nothing runnable — deps unmet, all merged, or --until already satisfied)");
+    const merged = refreshMerged();
+    if (opts.curated) {
+      // CURATION (W1-T140): a curated selection overrides the natural DAG scan, so the
+      // preview must show what --curated will actually dispatch, never the unrelated
+      // natural plannedSequence — a silent mismatch here is exactly the "flag ignored"
+      // hazard class (see unknownArgError's own header).
+      const seq = opts.curated.filter((id) => !merged(id));
+      console.log(`### rmd drain --dry-run --curated — ${seq.length} task(s) would run, in curated order:`);
+      seq.forEach((id, i) => console.log(`  ${i + 1}. ${id}`));
+      if (seq.length === 0) console.log("  (nothing to run — every curated id is already merged, or the selection is empty)");
+    } else {
+      const seq = plannedSequence(plan, merged, opts);
+      console.log(`### rmd drain --dry-run — ${seq.length} task(s) would run, in order:`);
+      seq.forEach((id, i) => console.log(`  ${i + 1}. ${id}`));
+      if (seq.length === 0) console.log("  (nothing runnable — deps unmet, all merged, or --until already satisfied)");
+    }
     console.log(`\nresume: ${resumeCommand(opts)}`);
     return 0;
   }
@@ -3232,7 +3280,15 @@ async function serveCommand(rest: string[]): Promise<number> {
     board: { plan, ledgerPath, github: ghGateway(self.owner, self.repo) },
     // panel-graph.ts reloads plan/tasks.yaml fresh on every GET /v1/trace (its own header) --
     // planPath alone is enough, no snapshot needed here the way board.ts's does.
-    panelGraph: { root: repoRoot, planPath, ledgerPath, github: ghTraceGateway(self.owner, self.repo) },
+    // `statusGithub` backs GET /v1/drain/preview's (W1-T140) merged-set derivation --
+    // the SAME ghGateway instance the board route above uses, never a second gateway type.
+    panelGraph: {
+      root: repoRoot,
+      planPath,
+      ledgerPath,
+      github: ghTraceGateway(self.owner, self.repo),
+      statusGithub: ghGateway(self.owner, self.repo),
+    },
     ledgerPath,
     issues: ghIssueCloser(),
     // See lib/serve.ts's module header ("TWO ROOTS, ONE PanelActionDeps SHAPE") for why these
@@ -5086,7 +5142,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "drain",
     usage:
-      "rmd drain [--until <id>] [--max <n>] [--repo <name>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60); --repo scopes the merged-status gateway to <owner>/<name> (defaults to this checkout's own repo, like the daemon path) — the plan itself is always read from THIS checkout",
+      "rmd drain [--until <id>] [--max <n>] [--repo <name>] [--curated <path>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60); --repo scopes the merged-status gateway to <owner>/<name> (defaults to this checkout's own repo, like the daemon path) — the plan itself is always read from THIS checkout; --curated <path> names a JSON {taskIds, depth} file (the drain preview panel's curated selection, W1-T140) that overrides the natural DAG order entirely — dispatch honors EXACTLY that reordered/unselected subset, and --dry-run --curated previews it",
   },
   {
     name: "daemon",

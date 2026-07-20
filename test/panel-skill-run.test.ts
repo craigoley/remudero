@@ -362,6 +362,7 @@ test("end to end: Refine's grill renders inline via GET /v1/feedback, then POST 
     planPath,
     ledgerPath: skillRunDeps.ledgerPath,
     github: { prView: () => null },
+    statusGithub: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
   };
   const routes = [...buildPanelSkillRunRoutes(skillRunDeps), buildFeedbackInboxRoute(graphDeps), buildSubmitFeedbackRoute(graphDeps)];
 

@@ -445,6 +445,101 @@ test("drainCommand: no --repo flag defaults the gateway to THIS checkout's own r
   assert.equal(calls[0].repo, "remudero");
 });
 
+// ── W1-T140: drain preview + curation panel — `--curated <path>` threading ─────────────────
+// The curated dispatch mechanics themselves (order, unselected-never-dispatched, skip-merged/
+// in-flight) are proven at the drain.ts level (test/drain.test.ts, over a runOne recorder, per
+// this task's own acceptance bar). These tests prove the CLI EDGE: a malformed --curated input
+// fails loud BEFORE any config/lock/spawn (the daemon-install hazard class), and a valid one
+// actually reaches `runDrain` via `applyCuratedSelection` — proven through --dry-run's own
+// curated-order rendering, since drainCommand has no injectable runOne for a live dispatch.
+
+function drainChainPlanPath(): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-drain-curated-plan-"));
+  const planPath = join(dir, "tasks.yaml");
+  writeFileSync(
+    planPath,
+    [
+      "- id: A",
+      "  title: a",
+      "  repo: remudero",
+      "  type: implement",
+      "  depends_on: []",
+      "- id: B",
+      "  title: b",
+      "  repo: remudero",
+      "  type: implement",
+      "  depends_on: [A]",
+      "- id: C",
+      "  title: c",
+      "  repo: remudero",
+      "  type: implement",
+      "  depends_on: [B]",
+      "",
+    ].join("\n"),
+  );
+  return planPath;
+}
+
+function curatedFile(dir: string, body: unknown): string {
+  const p = join(dir, "curated.json");
+  writeFileSync(p, typeof body === "string" ? body : JSON.stringify(body));
+  return p;
+}
+
+test("drainCommand: --curated naming a missing file fails loud (exit 2) BEFORE any config/lock/spawn", async () => {
+  const code = await drainCommand(["--curated", "/no/such/file.json", "--dry-run"], {
+    config: drainFixtureConfig(),
+    planPath: drainChainPlanPath(),
+    skipGitSync: true,
+    githubFactory: () => OFFLINE_GITHUB,
+  });
+  assert.equal(code, 2);
+});
+
+test("drainCommand: --curated naming a file that is not valid JSON fails loud (exit 2)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-drain-curated-bad-"));
+  const badJsonPath = curatedFile(dir, "{ not json");
+  const code = await drainCommand(["--curated", badJsonPath, "--dry-run"], {
+    config: drainFixtureConfig(),
+    planPath: drainChainPlanPath(),
+    skipGitSync: true,
+    githubFactory: () => OFFLINE_GITHUB,
+  });
+  assert.equal(code, 2);
+});
+
+test("drainCommand: --curated naming a JSON file with the wrong shape fails loud (exit 2)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-drain-curated-shape-"));
+  const wrongShapePath = curatedFile(dir, { taskIds: "not-an-array", depth: 2 });
+  const code = await drainCommand(["--curated", wrongShapePath, "--dry-run"], {
+    config: drainFixtureConfig(),
+    planPath: drainChainPlanPath(),
+    skipGitSync: true,
+    githubFactory: () => OFFLINE_GITHUB,
+  });
+  assert.equal(code, 2);
+});
+
+test("drainCommand: `--dry-run --curated <file>` previews EXACTLY the curated order, never the natural DAG order it overrides", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-drain-curated-ok-"));
+  const selectionPath = curatedFile(dir, { taskIds: ["B", "A"], depth: 2 });
+  const logSpy = t.mock.method(console, "log", () => {});
+
+  const code = await drainCommand(["--curated", selectionPath, "--dry-run"], {
+    config: drainFixtureConfig(),
+    planPath: drainChainPlanPath(),
+    skipGitSync: true,
+    githubFactory: () => OFFLINE_GITHUB,
+  });
+
+  assert.equal(code, 0);
+  const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
+  assert.match(printed, /--dry-run --curated/);
+  assert.match(printed, /1\. B/);
+  assert.match(printed, /2\. A/);
+  assert.doesNotMatch(printed, /1\. A/, "the natural DAG order (A first) must NOT appear -- --curated overrides it entirely");
+});
+
 // ── W1-T60: the runner self-syncs git state — fetch origin + dispatch from origin/main,
 // never the operator's working tree. Real, throwaway git repos (no mocking) so the
 // fetch/show plumbing is genuinely exercised.

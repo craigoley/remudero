@@ -18,6 +18,7 @@ import { buildPanelSkillRunRoutes, type PanelSkillRunDeps } from "../src/lib/pan
 import { skillsDir } from "../src/lib/skill.js";
 import { setFeedbackStatus } from "../src/lib/feedback.js";
 import type { TraceGithub } from "../src/lib/trace.js";
+import type { GitHub } from "../src/lib/status.js";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -273,11 +274,22 @@ function fakeGithub(): TraceGithub {
   return { prView: () => null };
 }
 
+/** Offline status.ts `GitHub` stub for `PanelGraphDeps.statusGithub` (distinct shape from `fakeGithub`'s `TraceGithub` above — verified from source, not assumed). */
+function fakeStatusGithub(): GitHub {
+  return { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
+}
+
 function buildGraphFixtureService(root: string) {
   mkdirSync(join(root, "plan"), { recursive: true });
   const planPath = join(root, "plan", "tasks.yaml");
   writeFileSync(planPath, "[]\n");
-  const deps: PanelGraphDeps = { root, planPath, ledgerPath: join(root, "state", "ledger.ndjson"), github: fakeGithub() };
+  const deps: PanelGraphDeps = {
+    root,
+    planPath,
+    ledgerPath: join(root, "state", "ledger.ndjson"),
+    github: fakeGithub(),
+    statusGithub: fakeStatusGithub(),
+  };
   return { server: createService({ tokens: { read: READ_TOKEN, write: WRITE_TOKEN }, routes: buildPanelGraphRoutes(deps) }), deps };
 }
 
@@ -426,7 +438,13 @@ test("createDaemonClient.runSkill(): invoking Refine (plan/clarify) parks a gril
   writeSkillYaml(root, "plan");
   const planPath = writePlanWithTask(root);
   const skillRunDeps: PanelSkillRunDeps = { root, planPath, ledgerPath: join(root, "state", "ledger.ndjson") };
-  const graphDeps: PanelGraphDeps = { root, planPath, ledgerPath: skillRunDeps.ledgerPath, github: fakeGithub() };
+  const graphDeps: PanelGraphDeps = {
+    root,
+    planPath,
+    ledgerPath: skillRunDeps.ledgerPath,
+    github: fakeGithub(),
+    statusGithub: fakeStatusGithub(),
+  };
   const server = createService({
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
     routes: [...buildPanelSkillRunRoutes(skillRunDeps), buildFeedbackInboxRoute(graphDeps), buildSubmitFeedbackRoute(graphDeps)],

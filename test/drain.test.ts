@@ -7,11 +7,14 @@ import { loadPlan, type Plan } from "../src/lib/plan.js";
 import type { RunResult } from "../src/run-task.js";
 import type { UsageSnapshot } from "../src/lib/headroom.js";
 import {
+  applyCuratedSelection,
+  buildDrainPreview,
   nextRunnable,
   plannedSequence,
   renderSummary,
   resumeCommand,
   runDrain,
+  type CuratedSelection,
   type MergedSet,
   type OpenPrCheck,
 } from "../src/lib/drain.js";
@@ -32,6 +35,7 @@ const YAML = `
   type: implement
   depends_on: [A]
   status: queued
+  note: "b's rationale"
 - id: C
   title: c
   repo: remudero
@@ -396,6 +400,151 @@ test("STOP takes precedence over PAUSE when both flags are set", async () => {
     },
   );
   assert.equal(s.stopReason, "stopped");
+});
+
+// ── W1-T140: drain preview + curation panel ─────────────────────────────────
+
+test("buildDrainPreview: renders plannedSequence's order as task cards, each carrying id/title/description + direct dependency edges both ways", () => {
+  const plan = fixturePlan(); // A -> B -> C (chain, B carries a note), D independent, H human-only
+  const cards = buildDrainPreview(plan, NONE_MERGED);
+
+  assert.deepEqual(cards.map((c) => c.id), plannedSequence(plan, NONE_MERGED), "card order equals plannedSequence's order exactly");
+
+  const [a, b, c, d] = cards;
+  assert.equal(a.title, "a");
+  assert.equal(a.description, "", "no note on A -> empty description, never undefined");
+  assert.deepEqual(a.dependsOn, [], "A has no incoming edges");
+  assert.deepEqual(a.dependents, [{ id: "B", title: "b" }], "A's only direct dependent is B");
+
+  assert.equal(b.description, "b's rationale", "B's note surfaces as its card description");
+  assert.deepEqual(b.dependsOn, [{ id: "A", title: "a" }]);
+  assert.deepEqual(b.dependents, [{ id: "C", title: "c" }]);
+
+  assert.deepEqual(c.dependsOn, [{ id: "B", title: "b" }]);
+  assert.deepEqual(c.dependents, [], "nothing in the plan depends on C");
+
+  assert.deepEqual(d.dependsOn, [], "D is independent");
+  assert.deepEqual(d.dependents, [], "nothing depends on D either");
+});
+
+test("buildDrainPreview: honors --max/--until exactly like plannedSequence (it IS plannedSequence, resolved to cards)", () => {
+  const plan = fixturePlan();
+  assert.deepEqual(buildDrainPreview(plan, NONE_MERGED, { max: 2 }).map((c) => c.id), ["A", "B"]);
+  assert.deepEqual(buildDrainPreview(plan, NONE_MERGED, { until: "B" }).map((c) => c.id), ["A", "B"]);
+  assert.deepEqual(buildDrainPreview(plan, mergedSetOf("A", "B"), { until: "B" }), [], "--until already satisfied -> no cards");
+});
+
+// A dedicated 3-node chain (A -> B -> C, no independent siblings) so the curated-
+// selection tests below match the acceptance bar's own language exactly: "natural
+// order is [A, B, C]".
+const CHAIN_ABC = `
+- id: A
+  title: a
+  repo: remudero
+  type: implement
+  depends_on: []
+  status: queued
+- id: B
+  title: b
+  repo: remudero
+  type: implement
+  depends_on: [A]
+  status: queued
+- id: C
+  title: c
+  repo: remudero
+  type: implement
+  depends_on: [B]
+  status: queued
+`;
+
+function chainAbcPlan(): Plan {
+  const dir = mkdtempSync(join(tmpdir(), "drain-curated-"));
+  const f = join(dir, "tasks.yaml");
+  writeFileSync(f, CHAIN_ABC);
+  return loadPlan(f);
+}
+
+test("curated selection: [B, A] (depth 2) drives runOne to fire for exactly B then A, in that order — the natural order (A, B, C) is overridden entirely", async () => {
+  const plan = chainAbcPlan();
+  assert.deepEqual(plannedSequence(plan, NONE_MERGED), ["A", "B", "C"], "sanity: the natural order is A, B, C");
+
+  const selection: CuratedSelection = { taskIds: ["B", "A"], depth: 2 };
+  const opts = applyCuratedSelection({}, selection);
+  const ran: string[] = [];
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => {
+        ran.push(id);
+        return { taskId: id, runId: id + "-run", merged: true, costUsd: 0.1, verdict: "merged" };
+      },
+    },
+    opts,
+  );
+  assert.deepEqual(ran, ["B", "A"], "runOne fired for exactly B then A, in the curated order");
+  assert.equal(s.stopReason, "max_reached");
+});
+
+test("curated selection: unselected tasks are never dispatched — no runOne call, no ledger line, and the summary's attempted excludes them", async () => {
+  const plan = chainAbcPlan();
+  const selection: CuratedSelection = { taskIds: ["B", "A"], depth: 2 };
+  const opts = applyCuratedSelection({}, selection);
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => {
+        ran.push(id);
+        return { taskId: id, runId: id + "-run", merged: true, costUsd: 0.1, verdict: "merged" };
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    opts,
+  );
+  assert.ok(!ran.includes("C"), "C was never passed to runOne — the falsifier: pre-fix drain ran the full plannedSequence, ignoring the selection");
+  assert.ok(!s.attempted.includes("C"), "the drain summary's attempted excludes the unselected task");
+  assert.ok(!lines.some((l) => l.extra.task === "C" || l.extra.id === "C"), "no ledger line names the unselected task");
+  assert.deepEqual(s.attempted, ["B", "A"]);
+});
+
+test("curated selection: an id already merged or in-flight (open PR) is skipped, never re-dispatched, without derailing the rest of the curated order", async () => {
+  const plan = chainAbcPlan();
+  const selection: CuratedSelection = { taskIds: ["A", "B", "C"], depth: 3 };
+  const opts = applyCuratedSelection({}, selection);
+  const ran: string[] = [];
+  const skips: Array<{ id: string; prNumber: number }> = [];
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => mergedSetOf("A"), // A already landed before this drain started
+      isOpenPr: (id) => (id === "B" ? 77 : undefined), // B is in-flight under an open PR
+      runOne: async (id) => {
+        ran.push(id);
+        return { taskId: id, runId: id + "-run", merged: true, costUsd: 0.1, verdict: "merged" };
+      },
+      log: (step, extra = {}) => {
+        if (step === "dispatch.skipped") skips.push({ id: String(extra.task), prNumber: Number(extra.pr_number) });
+      },
+    },
+    opts,
+  );
+  assert.deepEqual(ran, ["C"], "A is already merged (skipped) and B is in-flight (skipped) — only C actually dispatches");
+  // The loop re-evaluates the curated list fresh every tick (same as the natural
+  // path), so a still-open B is re-logged on each subsequent tick until the drain
+  // concludes — assert every logged skip names B's open PR, never A or C.
+  assert.ok(skips.length >= 1, "B's in-flight skip is legible on the ledger, same shape as the natural path's W1-T80 guard");
+  assert.ok(skips.every((s) => s.id === "B" && s.prNumber === 77), "every skip logged names B's open PR #77 — never A or C");
+});
+
+test("applyCuratedSelection: truncates to depth and caps max to the same bound, regardless of a larger caller-supplied max", () => {
+  const opts = applyCuratedSelection({ max: 10, until: "C" }, { taskIds: ["B", "A", "D"], depth: 2 });
+  assert.deepEqual(opts.curated, ["B", "A"]);
+  assert.equal(opts.max, 2);
+  assert.equal(opts.until, "C", "unrelated opts fields pass through untouched");
 });
 
 test("renderSummary + resumeCommand: 'what happened while away' is reconstructable", () => {

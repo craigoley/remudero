@@ -85,6 +85,47 @@ export interface DrainOpts {
   max?: number;
   /** ≥ this % on any window ⇒ headroom_exhausted (default HEADROOM_LIMIT_PCT). */
   headroomLimitPct?: number;
+  /**
+   * A CURATED selection (W1-T140, the drain preview + curation panel): an explicit
+   * ordered list of task ids. When present, dispatch iterates EXACTLY this list, in
+   * this order, in place of the natural DAG scan ({@link nextRunnable}'s plan-file-
+   * order walk) — the operator's curation-panel choice (reorder / unselect / set
+   * depth) drives exactly which tasks run and in what sequence. An id already merged
+   * or currently in-flight (an open PR, the same W1-T80 guard the natural path uses)
+   * is skipped, never re-dispatched; an id this list OMITS is never dispatched at
+   * all, regardless of what the natural DAG scan would otherwise pick next. This is
+   * an INPUT to the existing loop, not a reimplementation of it — every other
+   * `runDrain` mechanic (stop/pause/headroom/max) is unchanged. Build this field with
+   * {@link applyCuratedSelection} rather than setting it directly, so `max` stays
+   * consistent with the selection's `depth`.
+   */
+  curated?: string[];
+}
+
+/**
+ * A curated selection from the drain preview panel (W1-T140 limb 2): an ordered
+ * subset of the would-drain queue, plus how many of them to actually dispatch this
+ * drain (the panel's "depth" control).
+ */
+export interface CuratedSelection {
+  /** Ordered subset of task ids — EXACTLY this order; ids not listed here never dispatch. */
+  taskIds: string[];
+  /** How many of `taskIds`, from the front, this drain should actually attempt. */
+  depth: number;
+}
+
+/**
+ * Fold a {@link CuratedSelection} into {@link DrainOpts}: `curated` becomes the
+ * selection's `taskIds` truncated to `depth`, and `max` is capped to the same bound
+ * so the natural `max_reached` stop fires exactly at the curated boundary rather
+ * than a stale caller-supplied `max` letting the loop run past — or short of — the
+ * operator's chosen depth. Any other `opts` field (`until`, `headroomLimitPct`)
+ * passes through untouched.
+ */
+export function applyCuratedSelection(opts: DrainOpts, selection: CuratedSelection): DrainOpts {
+  const curated = selection.taskIds.slice(0, Math.max(0, selection.depth));
+  const max = opts.max !== undefined ? Math.min(opts.max, curated.length) : curated.length;
+  return { ...opts, curated, max };
 }
 
 /** Default iteration cap — a sane bound, never infinite (an unattended loop). */
@@ -119,6 +160,103 @@ export function plannedSequence(plan: Plan, isMerged: MergedSet, opts: DrainOpts
     if (opts.until && next.id === opts.until) break;
   }
   return seq;
+}
+
+/** One dependency edge in a task card's graph, rendered for the curation panel. */
+export interface DependencyEdge {
+  id: string;
+  title: string;
+}
+
+/**
+ * One task in the drain PREVIEW (W1-T140 limb 1): the would-drain queue rendered as
+ * a task card. `description` reuses {@link Task.note} — plan/tasks.yaml's per-task
+ * `rationale:` prose is Architect-only narrative that `loadPlanFromYaml` (plan.ts)
+ * deliberately never parses onto `Task` (VERIFIED against plan.ts before wiring, per
+ * this task's own "distrust this note" instruction — `note` is the one free-text
+ * field a `Task` actually carries through to runtime, so it stands in for the
+ * design doc's "description/rationale").
+ */
+export interface DrainPreviewCard {
+  id: string;
+  title: string;
+  description: string;
+  /** Incoming edges — this task's own `depends_on`. */
+  dependsOn: DependencyEdge[];
+  /**
+   * Outgoing edges — tasks that DIRECTLY declare this task as a dependency.
+   * Direct, not transitive: {@link transitiveDependents} answers a different
+   * question ("does anything in the whole plan need this at all"); a card's
+   * dependents are the immediate next hop only, matching `dependsOn`'s own
+   * direct-edge shape.
+   */
+  dependents: DependencyEdge[];
+}
+
+/**
+ * The would-drain queue as ordered task cards (W1-T140 limb 1): {@link
+ * plannedSequence}'s ordered id list, each resolved to a card carrying its title,
+ * description, and direct dependency edges both ways — everything the curation
+ * panel needs to render without a second query. Card order equals
+ * `plannedSequence`'s order exactly.
+ */
+export function buildDrainPreview(plan: Plan, isMerged: MergedSet, opts: DrainOpts = {}): DrainPreviewCard[] {
+  const seq = plannedSequence(plan, isMerged, opts);
+
+  // Direct reverse edges (taskId -> the task ids that declare it as a dependency),
+  // built once over the WHOLE plan — mirrors plan.ts's transitiveDependents reverse
+  // map, but this one stays one hop deep on purpose (see DrainPreviewCard.dependents).
+  const reverse = new Map<string, string[]>();
+  for (const t of plan.tasks) {
+    for (const dep of t.depends_on) {
+      const list = reverse.get(dep);
+      if (list) list.push(t.id);
+      else reverse.set(dep, [t.id]);
+    }
+  }
+  const edge = (id: string): DependencyEdge => ({ id, title: plan.byId.get(id)?.title ?? id });
+
+  return seq.map((id) => {
+    const t = plan.byId.get(id) as Task; // plannedSequence only ever emits ids nextRunnable found in plan.byId
+    return {
+      id: t.id,
+      title: t.title,
+      description: t.note ?? "",
+      dependsOn: t.depends_on.map(edge),
+      dependents: (reverse.get(t.id) ?? []).map(edge),
+    };
+  });
+}
+
+/**
+ * The next task to dispatch from a CURATED selection (W1-T140), in the caller's
+ * exact order: the first id in `curated` not yet attempted this drain, not already
+ * merged, and not in-flight under an open PR (same skip semantics as {@link
+ * nextRunnable}, including the `onSkip` legibility callback). An id the plan
+ * doesn't know is skipped rather than thrown — the curation input is validated at
+ * its own edge (the panel/CLI layer that built it), not re-validated here.
+ */
+function nextCurated(
+  plan: Plan,
+  curated: readonly string[],
+  attempted: readonly string[],
+  isMerged: MergedSet,
+  opts: NextRunnableOpts,
+): Task | undefined {
+  const done = new Set(attempted);
+  for (const id of curated) {
+    if (done.has(id)) continue;
+    if (isMerged(id)) continue;
+    const t = plan.byId.get(id);
+    if (!t) continue;
+    const openPrNumber = opts.isOpenPr?.(id);
+    if (openPrNumber !== undefined) {
+      opts.onSkip?.(t, openPrNumber);
+      continue; // IN-FLIGHT — never a duplicate fresh build, same as the natural path.
+    }
+    return t;
+  }
+  return undefined;
 }
 
 /** Build the exact command to resume a drain from where it stopped. */
@@ -228,13 +366,19 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       if (!snap) log("drain.headroom.unavailable", { note: "usage unreadable — continuing (best-effort)" });
     }
 
-    const next = nextRunnable(plan, isMerged, {
+    const skipOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
       // IN-FLIGHT (W1-T80): a legible skip on console + ledger, then the drain
       // proceeds to the next runnable task — an open PR must not halt the drain
       // the way a block does.
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
-    });
+    };
+    // CURATION (W1-T140): a curated selection overrides the natural DAG scan
+    // entirely — dispatch honors EXACTLY the operator's list and order, never
+    // falling back to nextRunnable's plan-file-order walk.
+    const next = opts.curated
+      ? nextCurated(plan, opts.curated, attempted, isMerged, skipOpts)
+      : nextRunnable(plan, isMerged, skipOpts);
     if (!next) return summary("no_runnable");
 
     log("drain.iteration", { task: next.id, attempted: attempted.length + 1, max });
