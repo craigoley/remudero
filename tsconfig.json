@@ -3,7 +3,7 @@
     "target": "ES2022",
     "module": "nodenext",
     "moduleResolution": "nodenext",
-    "lib": ["ES2023"],
+    "lib": ["ES2023", "DOM"],
     "types": ["node"],
     "strict": true,
     "esModuleInterop": true,
@@ -13,6 +13,6 @@
     "outDir": "dist",
     "rootDir": "."
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "packages/*/src/**/*.ts"],
+  "include": ["src/**/*.ts", "test/**/*.ts", "packages/*/src/**/*.ts", "apps/*/src/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<!--
+  Dashboard v0 (shell 0, MASTER-PLAN §7 WS-5a -> W3-T2): read-only live board.
+
+  No bundler by design (the W3-T2 decision): src/main.ts is plain TypeScript, typechecked
+  and compiled by the repo's existing `tsc -p tsconfig.json` build alongside every other
+  package -- no new build tooling. This page loads its compiled output as a plain ES module.
+
+  Wiring the daemon to actually SERVE this directory as static files over Tailscale (the
+  "browser" half of shell 0) is explicit follow-on work, same as the other five design
+  panels this v0 slice defers -- see this task's PR body. Until then, open this file against
+  a `tsc`-built `main.js` next to it, pointed at a reachable daemon via `?daemon=<url>`.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Remudero — Dashboard v0</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+  </head>
+  <body>
+    <h1>Remudero — task board (read-only)</h1>
+    <div id="board">Loading…</div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
