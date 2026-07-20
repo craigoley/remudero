@@ -1,5 +1,18 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+// Imported as the module's DEFAULT export (a plain, mutable object), not as named
+// bindings (`import { existsSync } from "node:fs"`) — deliberately, and load-bearing
+// for W1-T115's "assert via injected fs" proof shape. ESM named-export bindings off
+// `node:fs` are non-configurable (`Object.defineProperty`/mock.method on them throws
+// "Cannot redefine property"), so a test that tries to spy on the real module — the
+// generic, DI-agnostic way to prove "no write syscalls happened" — cannot intercept a
+// call already bound to a named import at load time, whether or not it goes through
+// this module's own {@link LedgerFsDeps} injection. Calling `fs.existsSync(...)` as a
+// property access AT CALL TIME (never destructured to a local const) keeps every call
+// a live lookup on this same mutable object, so an external spy on `fs.existsSync`/
+// `fs.readFileSync`/`fs.writeFileSync` (via `node:test`'s `mock.method`) actually
+// observes it — the same guarantee {@link LedgerFsDeps} gives a caller that injects
+// its own fake, extended to a caller that only has the real `node:fs` module to spy on.
+import fs from "node:fs";
 import { dirname } from "node:path";
 import type { Plan, Task, TaskStatus } from "./plan.js";
 
@@ -101,10 +114,34 @@ export interface DeriveDeps {
   readLedger?: LedgerReader;
 }
 
-/** Default NDJSON ledger reader: one JSON object per non-blank line. */
-export function readLedgerLines(path: string): Array<Record<string, unknown>> {
-  if (!existsSync(path)) return [];
-  return readFileSync(path, "utf8")
+/**
+ * The minimal fs surface {@link readLedgerLines} needs to read the ledger — deliberately
+ * exposes ONLY `existsSync`/`readFileSync`, no write/copy capability at all (W1-T115: the
+ * 26,711-dir ENOSPC incident's rationale suspected every read copies the ledger into a
+ * temp dir first; that was never true, and this injectable surface is what lets a test
+ * prove it STRUCTURALLY — an injected fake that only implements these two methods cannot
+ * possibly be made to create a temp copy, rather than merely asserting-by-inspection that
+ * the real fs module happened not to be called this way).
+ */
+export interface LedgerFsDeps {
+  existsSync: (path: string) => boolean;
+  readFileSync: (path: string, encoding: "utf8") => string;
+}
+
+// Property access at call time (see the import comment above), not `{ existsSync,
+// readFileSync }` captured once — that would silently reintroduce the
+// non-interceptable-named-binding problem one indirection later.
+const realLedgerFs: LedgerFsDeps = {
+  existsSync: (path) => fs.existsSync(path),
+  readFileSync: (path, encoding) => fs.readFileSync(path, encoding),
+};
+
+/** Default NDJSON ledger reader: one JSON object per non-blank line. Reads the ledger
+ * file directly via the injected (real, by default) fs — never copies it anywhere first. */
+export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedgerFs): Array<Record<string, unknown>> {
+  if (!ledgerFs.existsSync(path)) return [];
+  return ledgerFs
+    .readFileSync(path, "utf8")
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.length > 0)
@@ -316,13 +353,13 @@ export function projectPlan(
   const byId = new Map<string, StatusProjection>();
   for (const task of plan.tasks) byId.set(task.id, deriveStatus(task, deps));
   if (cachePath) {
-    mkdirSync(dirname(cachePath), { recursive: true });
+    fs.mkdirSync(dirname(cachePath), { recursive: true });
     const projection = {
       generated_at: new Date().toISOString(),
       note: "Machine-owned projection derived from GitHub. tasks.yaml is never rewritten.",
       tasks: Object.fromEntries([...byId].map(([id, p]) => [id, p])),
     };
-    writeFileSync(cachePath, JSON.stringify(projection, null, 2) + "\n");
+    fs.writeFileSync(cachePath, JSON.stringify(projection, null, 2) + "\n");
   }
   return byId;
 }
