@@ -10,10 +10,12 @@ on:
     - cron: "23 5 * * 1"
   workflow_dispatch:
 
+# Least privilege at the top level (Scorecard TokenPermissions: a topLevel write
+# permission scores worse than the identical permission scoped to job level, even
+# though this workflow has only one job — W1-T66); the job below elevates only
+# what it needs.
 permissions:
-  security-events: write
   contents: read
-  actions: read
 
 concurrency:
   group: semgrep-${{ github.ref }}
@@ -23,18 +25,22 @@ jobs:
   semgrep:
     name: Scan
     runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    # Standalone / community edition, run from the official pinned image — no pip
+    # install (Scorecard PinnedDependencies flagged the old `pip install
+    # semgrep==1.167.0` as unpinned; pip has no single-line hash-pin for a package
+    # plus its full transitive dependency set without also hash-locking every
+    # transitive dep, so W1-T66 switched to the vendor image instead, pinned by
+    # digest like every other action reference in this repo), no SEMGREP_APP_TOKEN,
+    # no Semgrep Cloud.
+    container:
+      image: semgrep/semgrep@sha256:4095860d71cc40d42617b92b0b420711736ada7d67fdb254c5ef4f37dd8fc3ec # 1.167.0
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.12"
-
-      - name: Install Semgrep CE
-        # Standalone / community edition — no SEMGREP_APP_TOKEN, no Semgrep Cloud.
-        run: pip install "semgrep==1.167.0"
 
       - name: Run Semgrep
         # Never fail the build here; findings surface in the Security tab via SARIF.
