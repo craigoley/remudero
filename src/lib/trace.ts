@@ -88,6 +88,20 @@ export interface TraceRun {
  * grouped by `run_id`. `pr.opened`/`verdict` are read exactly as lib/status.ts's
  * deriveStatus reads them — same field names, same "last one wins" precedent for
  * a run that logged more than one (a retry within the same run_id).
+ *
+ * A `task_id` match ALONE is not enough to credit a `run_id` as one of this
+ * task's own runs. `task_id` on a ledger line means "this line concerns this
+ * task" — the daemon/sweep/retro/drain/fix control loops (run-task.ts:
+ * `runId = \`DAEMON-${Date.now()}\`` etc.) legitimately stamp a swept task's id
+ * onto lines like `sweep.disposed`/`escalation.issue_opened` while ACTING ON
+ * it, but their own `run_id` is scoped to the daemon loop, not the task — a
+ * task that's ever been polled by a sweep (i.e. every task with an open PR)
+ * would otherwise drag in every `DAEMON-*`/`SWEEP-*` tick as a spurious
+ * "no verdict yet" run, burying the real chain (caught by actually running
+ * `rmd trace W1-T40` against the live ledger, W1-T43 review round 2). Only a
+ * `run_id` actually MINTED for this task — `taskId` itself, or run-task.ts's own
+ * `runId = \`${taskId}-${Date.now()}\`` convention (the per-task implement
+ * runner, the ONE place that opens this task's PR) — is one of its runs.
  */
 export function runsForTask(
   lines: Array<Record<string, unknown>>,
@@ -100,6 +114,7 @@ export function runsForTask(
     if (line.task_id !== taskId) continue;
     const runId = line.run_id;
     if (typeof runId !== "string") continue;
+    if (runId !== taskId && !runId.startsWith(`${taskId}-`)) continue;
     let bucket = byRun.get(runId);
     if (!bucket) {
       bucket = [];

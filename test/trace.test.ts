@@ -90,6 +90,29 @@ test("runsForTask: a run with no verdict/pr.opened line still surfaces (verdict/
   assert.equal(runs[0].prUrl, undefined);
 });
 
+test("runsForTask: a daemon/sweep tick that merely STAMPS this task_id on an unrelated control-loop line (its own run_id belongs to the daemon, not the task) is NOT credited as one of the task's runs", () => {
+  // Reproduces the live-ledger shape found tracing W1-T40 (W1-T43 review round 2): the
+  // daemon's sweep loop logs `sweep.disposed`/`escalation.issue_opened` lines against
+  // EVERY open PR it polls, stamping that PR's owning task_id onto a `run_id` that is
+  // actually the daemon's own tick (`DAEMON-<epoch>`) — not a run of the task at all.
+  // Before the fix this dragged every daemon tick into the task's run list as a bogus
+  // "no verdict yet" entry, one per poll, burying the task's real run/PR/sha.
+  const github = fakeGithub({});
+  const lines = [
+    { run_id: "W1-T40-1784432542469", task_id: "W1-T40", step: "run.start" },
+    { run_id: "W1-T40-1784432542469", task_id: "W1-T40", step: "verdict", verdict: "blocked_ci" },
+    { run_id: "DAEMON-1784434332059", task_id: "DAEMON", step: "daemon.start" },
+    { run_id: "DAEMON-1784434332059", task_id: "W1-T40", step: "escalation.issue_opened", class: "BLOCKED" },
+    { run_id: "DAEMON-1784434332059", task_id: "W1-T40", step: "sweep.disposed", pr_number: 238 },
+    { run_id: "SWEEP-1784492451495", task_id: "W1-T40", step: "sweep.disposed", pr_number: 238 },
+    { run_id: "review-PR238-1784493155772", task_id: "W1-T40", step: "review.start" },
+  ];
+  const runs = runsForTask(lines, "W1-T40", github);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].runId, "W1-T40-1784432542469");
+  assert.equal(runs[0].verdict, "blocked_ci");
+});
+
 test("runsForTask: an unresolvable pr_url (gh returns nothing) leaves prState/mergeSha undefined, never throws", () => {
   const github = fakeGithub({});
   const lines = [{ run_id: "W1-T1-1", task_id: "W1-T1", step: "pr.opened", pr_url: "https://github.com/o/r/pull/404" }];
