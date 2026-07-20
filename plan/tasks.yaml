@@ -6896,9 +6896,13 @@
     filter/search. DESIGN SYSTEM: status color semantics (running/blocked/needs-human/merged/queued), monospace ids,
     readable density, dark theme (default or auto via prefers-color-scheme), phone-first responsive (390px iPhone ->
     1440px). Structure the CSS/layout for CHEAP revision — the operator is the design judge and a taste iteration
-    loop is expected. VERIFY where the console frontend actually lives (renderShellHtml in serve.ts vs the
-    apps/dashboard React app) from source before choosing the home (distrust this note). a11y/screenshot mechanism
-    per W3-T7 (design-review skill) / the arcade-fleet Lighthouse pattern.
+    loop is expected. FLEET-CONTROL READ-BACK: the control panel READS the current fleet mode from the fleet-control
+    state (isPaused/isStopped/isQuietHours) and renders the active mode's control active/disabled so controls reflect
+    state (not stateless buttons that invite discovery-by-actuation — the operator asked "should I try clicking
+    start?", which on STOP is destructive); STOP carries an explicit confirm step. VERIFY where the console frontend
+    actually lives (renderShellHtml in serve.ts vs the apps/dashboard React app) and the fleet-control read predicates
+    from source before choosing the home (distrust this note). a11y/screenshot mechanism per W3-T7 (design-review
+    skill) / the arcade-fleet Lighthouse pattern.
   acceptance:
     - claim: "the five operator-priority sections exist and order top-to-bottom (NOW, NEEDS ME, UP NEXT, RECENT, then everything-else collapsed); file order appears NOWHERE"
       proof: "a DOM/structure test over the rendered console asserts the five sections in that exact order — NOW (in-flight runs w/ phase+elapsed), NEEDS ME (escalations+inbox w/ one-line ask+action), UP NEXT (first ~5 drain-order runnable, linking W1-T140), RECENT (last ~10 merges/blocks w/ PR links + W1-T141 rundown), rest collapsed as queued:N/merged:N + expand/filter/search; no element renders tasks in raw plan/file order (the falsifier)"
@@ -6908,6 +6912,10 @@
       proof: "a headless-browser check renders the shell at 390px and 1440px and asserts scrollWidth <= clientWidth (no horizontal overflow) at BOTH widths; the dark theme is applied by default or via prefers-color-scheme"
     - claim: "Lighthouse accessibility >= 90 on the shell (the arcade-fleet house pattern), with screenshot artifacts attached to the PR"
       proof: "a Lighthouse (or equivalent headless a11y) run on the served shell scores accessibility >= 90 — paste the score; 390px + 1440px screenshot artifacts are attached to the PR for the operator's design review"
+    - claim: "the control panel reads back the CURRENT fleet mode (running/paused/stopped/quiet-hours) and the active mode's button renders active/disabled — controls reflect state, never invite discovery-by-actuation"
+      proof: "a test asserts the panel derives the mode from the fleet-control state (isPaused/isStopped/isQuietHours) and renders the active mode's control as active/disabled, visibly distinct from the others; a panel that renders IDENTICAL button states in paused vs running modes FAILS (the falsifier — the operator's 'should I try clicking start?' ambiguity)"
+    - claim: "STOP requires an explicit confirm step — a destructive control is never a single click"
+      proof: "a test asserts STOP requires an explicit confirmation before it POSTs /v1/control/stop; a single-click STOP that fires without a confirm step FAILS (the falsifier)"
   risk: high
   origin: architect
   plan_refs: ["§7", "§7B"]
