@@ -164,6 +164,69 @@ test("W1-T80: no isOpenPr wired at all ⇒ nextRunnable behaves exactly as befor
   assert.equal(nextRunnable(plan, mergedSetOf("A"))?.id, "B");
 });
 
+// ── W1-T177: TERMINAL-STATE CHECK — the in-flight guard CONFIRMS a candidate
+// open PR with a fresh live read before skipping it, rather than trusting the
+// cached `isOpenPr` snapshot forever. FIXTURE: PR #388 merged at 20:24:44Z;
+// `dispatch.skipped reason='open-pr' pr_number 388` still fired at 20:31:00,
+// more than six minutes later — the cached in-flight read never re-checked. ──
+
+test("W1-T177: a task whose cached in-flight PR has actually MERGED (fresh live read) is NOT skipped — the stale snapshot is overturned, and onStoodDown names the state rather than 'open-pr' (the #388 falsifier)", () => {
+  const plan = fixturePlan();
+  const isOpenPr: OpenPrCheck = (id) => (id === "A" ? 388 : undefined);
+  const skips: Array<{ id: string; prNumber: number }> = [];
+  const stoodDown: Array<{ id: string; prNumber: number; state: string }> = [];
+  const next = nextRunnable(plan, NONE_MERGED, {
+    isOpenPr,
+    onSkip: (t, prNumber) => skips.push({ id: t.id, prNumber }),
+    readLiveState: (id, prNumber) => (id === "A" && prNumber === 388 ? "MERGED" : "OPEN"),
+    onStoodDown: (t, prNumber, state) => stoodDown.push({ id: t.id, prNumber, state }),
+  });
+  assert.deepEqual(skips, [], "A must NOT be reported as in-flight from a cached snapshot");
+  assert.deepEqual(stoodDown, [{ id: "A", prNumber: 388, state: "MERGED" }]);
+  assert.equal(next?.id, "A", "A is actually runnable — its cached in-flight PR already merged");
+});
+
+test("W1-T177: readLiveState CONFIRMS a genuinely still-open PR — the task is skipped exactly as before, onStoodDown never fires", () => {
+  const plan = fixturePlan();
+  const isOpenPr: OpenPrCheck = (id) => (id === "A" ? 143 : undefined);
+  const skips: Array<{ id: string; prNumber: number }> = [];
+  const next = nextRunnable(plan, NONE_MERGED, {
+    isOpenPr,
+    onSkip: (t, prNumber) => skips.push({ id: t.id, prNumber }),
+    readLiveState: () => "OPEN",
+    onStoodDown: () => assert.fail("onStoodDown must not fire on a genuinely still-open PR"),
+  });
+  assert.deepEqual(skips, [{ id: "A", prNumber: 143 }]);
+  assert.equal(next?.id, "D");
+});
+
+test("W1-T177: a FAILED/INDETERMINATE live-state read (undefined) does NOT overturn the skip — fail OPEN, never a false dispatch on an unreadable state", () => {
+  const plan = fixturePlan();
+  const isOpenPr: OpenPrCheck = (id) => (id === "A" ? 143 : undefined);
+  const skips: Array<{ id: string; prNumber: number }> = [];
+  const next = nextRunnable(plan, NONE_MERGED, {
+    isOpenPr,
+    onSkip: (t, prNumber) => skips.push({ id: t.id, prNumber }),
+    readLiveState: () => undefined,
+    onStoodDown: () => assert.fail("onStoodDown must not fire on an indeterminate read"),
+  });
+  assert.deepEqual(skips, [{ id: "A", prNumber: 143 }]);
+  assert.equal(next?.id, "D");
+});
+
+test("W1-T177: readLiveState omitted ⇒ nextRunnable behaves EXACTLY as before this check existed", () => {
+  const plan = fixturePlan();
+  const isOpenPr: OpenPrCheck = (id) => (id === "A" ? 143 : undefined);
+  const skips: Array<{ id: string; prNumber: number }> = [];
+  const next = nextRunnable(plan, NONE_MERGED, {
+    isOpenPr,
+    onSkip: (t, prNumber) => skips.push({ id: t.id, prNumber }),
+    // readLiveState deliberately omitted.
+  });
+  assert.deepEqual(skips, [{ id: "A", prNumber: 143 }]);
+  assert.equal(next?.id, "D");
+});
+
 test("W1-T80 runDrain integration: the #143 state is skipped with a dispatch.skipped ledger line (task + PR number), and the drain proceeds to the next runnable task instead of halting", async () => {
   const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
   const merged = new Set<string>();
@@ -194,6 +257,39 @@ test("W1-T80 runDrain integration: the #143 state is skipped with a dispatch.ski
   assert.equal(skipLine?.extra.task, "A");
   assert.equal(skipLine?.extra.pr_number, 143);
   assert.equal(skipLine?.extra.reason, "open-pr");
+});
+
+test("W1-T177 runDrain integration: a task whose cached in-flight PR has actually MERGED dispatches instead of being skipped, ledgering dispatch.stood_down rather than a misleading dispatch.skipped 'open-pr' (the #388 falsifier)", async () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      // The cached in-flight snapshot still reports A's PR #388 as open, but a
+      // fresh live read shows it already merged (the exact #388 fixture shape:
+      // `dispatch.skipped reason='open-pr'` six-plus minutes post-merge).
+      isOpenPr: (id) => (id === "A" ? 388 : undefined),
+      readLiveState: (id, prNumber) => (id === "A" && prNumber === 388 ? "MERGED" : "OPEN"),
+      runOne: async (id) => {
+        ran.push(id);
+        merged.add(id);
+        return okResult(id);
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1 },
+  );
+  assert.deepEqual(ran, ["A"], "A dispatches — the cached 'in-flight' snapshot was stale, the live read overturned it");
+  assert.equal(s.stopReason, "max_reached");
+  assert.ok(!lines.some((l) => l.step === "dispatch.skipped"), "no misleading dispatch.skipped 'open-pr' line");
+  const stoodDownLine = lines.find((l) => l.step === "dispatch.stood_down");
+  assert.ok(stoodDownLine, "a dispatch.stood_down ledger line was emitted, naming the corrected state");
+  assert.equal(stoodDownLine?.extra.task, "A");
+  assert.equal(stoodDownLine?.extra.pr_number, 388);
+  assert.equal(stoodDownLine?.extra.state, "MERGED");
 });
 
 // ── P29(ii): the per-task dispatch CIRCUIT BREAKER — the backstop that makes
