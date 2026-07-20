@@ -5,7 +5,18 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { createService } from "../src/lib/service.js";
-import { buildStatusRoute, buildStatusStream, computeBoardSnapshot, type BoardDeps } from "../src/lib/board.js";
+import {
+  buildStatusRoute,
+  buildStatusStream,
+  compareByAge,
+  compareById,
+  compareByRecency,
+  compareByStatus,
+  computeBoardSnapshot,
+  sortBoardRows,
+  type BoardDeps,
+  type BoardRow,
+} from "../src/lib/board.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 
@@ -186,6 +197,94 @@ test("GET /v1/status: no bearer token -> 401", async () => {
     const res = await fetch(`${base}/v1/status`);
     assert.equal(res.status, 401);
   });
+});
+
+// ── W1-T157: the BoardRow title/risk/lastActivityAt join + the FIND-layer sort comparators ──
+
+test("W1-T157: computeBoardSnapshot joins each row with its plan Task's title + risk (the FIND search/facet fields StatusProjection does not carry)", () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([
+    task({ id: "W1-T1", title: "shell IA overhaul", risk: "high" }),
+    task({ id: "W2-T2", title: "drain preview", risk: "low" }),
+  ]);
+  const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub() };
+
+  const rows = computeBoardSnapshot(deps).tasks;
+  const byId = new Map(rows.map((r) => [r.taskId, r]));
+  assert.equal(byId.get("W1-T1")!.title, "shell IA overhaul");
+  assert.equal(byId.get("W1-T1")!.risk, "high");
+  assert.equal(byId.get("W2-T2")!.title, "drain preview");
+  assert.equal(byId.get("W2-T2")!.risk, "low");
+});
+
+test("W1-T157: computeBoardSnapshot sets lastActivityAt to the ts of the LAST ledger line naming the task; a task with no ledger line has none", () => {
+  const ledgerPath = tmpLedgerPath();
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "A", step: "run.start" }) + "\n");
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T10:05:00.000Z", run_id: "r1", task_id: "A", step: "recon.done" }) + "\n");
+  const plan = planOf([task({ id: "A" }), task({ id: "B" })]);
+  const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub() };
+
+  const byId = new Map(computeBoardSnapshot(deps).tasks.map((r) => [r.taskId, r]));
+  assert.equal(byId.get("A")!.lastActivityAt, "2026-07-20T10:05:00.000Z"); // the LAST line, not the first
+  assert.equal(byId.get("B")!.lastActivityAt, undefined); // no ledger line at all
+});
+
+function row(over: Partial<BoardRow>): BoardRow {
+  return { taskId: "X", status: "queued", merged: false, source: "none", title: "t", risk: "medium", ...over };
+}
+
+test("W1-T157: compareById is lexicographic; dir flips it", () => {
+  const a = row({ taskId: "W1-T1" });
+  const b = row({ taskId: "W1-T2" });
+  assert.ok(compareById(a, b, "asc") < 0);
+  assert.ok(compareById(a, b, "desc") > 0);
+});
+
+test("W1-T157: compareByStatus orders by TASK_STATUSES index (queued before running before merged)", () => {
+  const queued = row({ status: "queued" });
+  const running = row({ status: "running" });
+  const merged = row({ status: "merged" });
+  assert.ok(compareByStatus(queued, running, "asc") < 0);
+  assert.ok(compareByStatus(running, merged, "asc") < 0);
+  assert.ok(compareByStatus(merged, queued, "asc") > 0);
+  assert.ok(compareByStatus(queued, merged, "desc") > 0);
+});
+
+test("W1-T157: compareByRecency orders by lastActivityAt; a task with NONE sorts last in BOTH directions", () => {
+  const older = row({ taskId: "OLD", lastActivityAt: "2026-07-20T10:00:00.000Z" });
+  const newer = row({ taskId: "NEW", lastActivityAt: "2026-07-20T12:00:00.000Z" });
+  const none = row({ taskId: "NONE" });
+  assert.ok(compareByRecency(older, newer, "asc") < 0); // older first ascending
+  assert.ok(compareByRecency(newer, older, "desc") < 0); // newer first descending
+  // "none" (no activity) always sorts AFTER a task that has activity, whichever direction:
+  assert.ok(compareByRecency(none, newer, "asc") > 0);
+  assert.ok(compareByRecency(none, newer, "desc") > 0);
+  assert.ok(compareByRecency(none, older, "asc") > 0);
+  assert.ok(compareByRecency(none, older, "desc") > 0);
+});
+
+test("W1-T157: compareByAge orders by elapsedMs; a task with none sorts last in BOTH directions", () => {
+  const young = row({ taskId: "Y", elapsedMs: 1000 });
+  const old = row({ taskId: "O", elapsedMs: 9000 });
+  const noAge = row({ taskId: "N" });
+  assert.ok(compareByAge(young, old, "asc") < 0);
+  assert.ok(compareByAge(old, young, "desc") < 0);
+  assert.ok(compareByAge(noAge, young, "asc") > 0);
+  assert.ok(compareByAge(noAge, young, "desc") > 0);
+});
+
+test("W1-T157: sortBoardRows applies the chosen column/dir with a stable id-ascending tiebreak", () => {
+  const rows = [
+    row({ taskId: "W1-T3", status: "merged", lastActivityAt: "2026-07-20T10:00:00.000Z" }),
+    row({ taskId: "W1-T1", status: "queued" }),
+    row({ taskId: "W1-T2", status: "merged", lastActivityAt: "2026-07-20T11:00:00.000Z" }),
+  ];
+  assert.deepEqual(sortBoardRows(rows, "id", "asc").map((r) => r.taskId), ["W1-T1", "W1-T2", "W1-T3"]);
+  assert.deepEqual(sortBoardRows(rows, "id", "desc").map((r) => r.taskId), ["W1-T3", "W1-T2", "W1-T1"]);
+  // recency desc: most-recent first, then the no-activity task (W1-T1) last:
+  assert.deepEqual(sortBoardRows(rows, "recency", "desc").map((r) => r.taskId), ["W1-T2", "W1-T3", "W1-T1"]);
+  // status asc: queued (W1-T1) first, then the two merged tie broken by id ascending:
+  assert.deepEqual(sortBoardRows(rows, "status", "asc").map((r) => r.taskId), ["W1-T1", "W1-T2", "W1-T3"]);
 });
 
 test("GET /v1/status/stream: a ledger state flip arrives as an SSE `status` event within 2s of the write", async () => {

@@ -26,17 +26,39 @@
  */
 
 import type { ServerResponse } from "node:http";
-import type { Plan } from "./plan.js";
+import type { Plan, TaskRisk } from "./plan.js";
+import { TASK_STATUSES } from "./plan.js";
 import { deriveStatus, projectPlan, readLedgerLines, type DeriveDeps, type StatusProjection } from "./status.js";
 import type { Route, SseRoute, SseSend } from "./service.js";
 
 /** Ledger poll pace for the SSE stream — comfortably under the 2s acceptance budget. */
 export const DEFAULT_POLL_MS = 250;
 
-/** GET /v1/status's body — one StatusProjection per plan task, as of `generated_at`. */
+/**
+ * One board row: a {@link StatusProjection} enriched with the two plan-`Task` fields the FIND
+ * layer (W1-T157) needs but {@link StatusProjection} deliberately does not carry — `title`
+ * (the search bar is over id + title) and `risk` (the risk facet) — plus `lastActivityAt`, the
+ * ISO timestamp of the LAST ledger line naming this task (the `recency` sort key).
+ *
+ * WHY enrich HERE and not on {@link StatusProjection} itself: that interface is MIRRORED by
+ * openapi/daemon.yaml's `StatusProjection` schema and consumed by src/lib/daemon.ts +
+ * packages/api-client — widening it is a far larger blast radius than this one wire payload
+ * needs. `title`/`risk` are a pure in-memory join off `deps.plan.byId` (already held), never a
+ * new GitHub/ledger derivation. The SSE `status` stream keeps emitting the bare
+ * {@link StatusProjection} (see {@link buildStatusStream}); ONLY this REST snapshot carries the
+ * enrichment, and the shell backfills title/risk across subsequent SSE deltas (src/lib/serve.ts).
+ */
+export interface BoardRow extends StatusProjection {
+  title: string;
+  risk: TaskRisk;
+  /** ISO-8601 `ts` of the last ledger line naming this task; absent when the task has no ledger line at all. */
+  lastActivityAt?: string;
+}
+
+/** GET /v1/status's body — one {@link BoardRow} per plan task, as of `generated_at`. */
 export interface BoardSnapshot {
   generated_at: string;
-  tasks: StatusProjection[];
+  tasks: BoardRow[];
 }
 
 export interface BoardDeps extends DeriveDeps {
@@ -44,15 +66,47 @@ export interface BoardDeps extends DeriveDeps {
 }
 
 /**
- * The board snapshot, reusing {@link projectPlan} verbatim — no new derivation logic.
- * W1-T155's full status taxonomy (in-flight `phase`, `startedAt`/`elapsedMs`,
- * `needsHuman`, `armedAwaitingMerge`) is carried on {@link StatusProjection} itself, so
- * every task in the snapshot gets it for free through this SAME pass-through — this
- * module needed no logic change, only this note.
+ * The last ledger line naming each task id — its append INDEX (recency ordering) and `ts`
+ * (the board's `lastActivityAt`). ONE scan, shared by {@link computeBoardSnapshot} (which wants
+ * the timestamp) and {@link computeRecentOutcomes} (which wants the index), rather than
+ * duplicating the ledger walk in each — factored out per W1-T157's design note.
+ */
+interface LedgerActivity {
+  idx: number;
+  ts?: string;
+}
+function lastActivityByTask(lines: Array<Record<string, unknown>>): Map<string, LedgerActivity> {
+  const out = new Map<string, LedgerActivity>();
+  lines.forEach((line, i) => {
+    if (typeof line.task_id === "string") {
+      out.set(line.task_id, { idx: i, ts: typeof line.ts === "string" ? line.ts : undefined });
+    }
+  });
+  return out;
+}
+
+/**
+ * The board snapshot, reusing {@link projectPlan} verbatim for the merge-state — no new
+ * derivation logic. W1-T155's full status taxonomy (in-flight `phase`, `startedAt`/`elapsedMs`,
+ * `needsHuman`, `armedAwaitingMerge`) is carried on {@link StatusProjection} itself, so every
+ * task gets it for free through that SAME pass-through. W1-T157 additionally joins each
+ * projection with its plan `Task`'s `title`/`risk` and the ledger's `lastActivityAt` to produce
+ * a {@link BoardRow} (see that interface's note for why the join lives here, not on the shared type).
  */
 export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
   const byId = projectPlan(deps.plan, deps);
-  return { generated_at: new Date().toISOString(), tasks: [...byId.values()] };
+  const readLedger = deps.readLedger ?? readLedgerLines;
+  const lastActivity = lastActivityByTask(readLedger(deps.ledgerPath));
+  const tasks: BoardRow[] = [...byId.values()].map((p) => {
+    // Every projection's taskId is one of the plan's own tasks (projectPlan derives from
+    // deps.plan.tasks), so this lookup is always present — the join is total, never partial.
+    const task = deps.plan.byId.get(p.taskId)!;
+    const row: BoardRow = { ...p, title: task.title, risk: task.risk };
+    const ts = lastActivity.get(p.taskId)?.ts;
+    if (ts) row.lastActivityAt = ts;
+    return row;
+  });
+  return { generated_at: new Date().toISOString(), tasks };
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -102,14 +156,10 @@ export interface RecentEntry {
 export function computeRecentOutcomes(deps: BoardDeps, max = 10): RecentEntry[] {
   const snapshot = computeBoardSnapshot(deps);
   const readLedger = deps.readLedger ?? readLedgerLines;
-  const lines = readLedger(deps.ledgerPath);
-  const lastIndex = new Map<string, number>();
-  lines.forEach((line, i) => {
-    if (typeof line.task_id === "string") lastIndex.set(line.task_id, i);
-  });
+  const lastActivity = lastActivityByTask(readLedger(deps.ledgerPath));
   const terminal = snapshot.tasks.filter((t) => t.status === "merged" || t.status === "done" || t.status === "blocked");
   return terminal
-    .map((t) => ({ t, idx: lastIndex.get(t.taskId) ?? -1 }))
+    .map((t) => ({ t, idx: lastActivity.get(t.taskId)?.idx ?? -1 }))
     .sort((a, b) => b.idx - a.idx)
     .slice(0, max)
     .map(({ t }) => ({
@@ -181,4 +231,67 @@ export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): Ss
       return () => clearInterval(timer);
     },
   };
+}
+
+// ── FIND-layer sort comparators (W1-T157) ──────────────────────────────────────────────────
+//
+// Pure comparators over {@link BoardRow}, one per sortable column (id, status, recency, age).
+// The operator console's inline script (src/lib/serve.ts) MIRRORS these for its own client-side
+// sort — that script is a bundler-less template literal and cannot import this module — so these
+// exported functions are the canonical, unit-tested SPEC of the ordering (test/board.test.ts),
+// kept structurally identical to the inline copies. Each takes an explicit direction so the
+// "a missing value always sorts LAST, in BOTH directions" rule (recency/age) is expressed HERE,
+// once, rather than by a caller that merely reverses the sorted array (which would flip it).
+
+export type BoardSortKey = "id" | "status" | "recency" | "age";
+export type SortDir = "asc" | "desc";
+
+/** `av`/`bv` compared numerically; `undefined` (no value) always sorts AFTER any value, whatever `dir`. */
+function compareMissingLast(av: number | undefined, bv: number | undefined, dir: SortDir): number {
+  if (av === undefined && bv === undefined) return 0;
+  if (av === undefined) return 1; // a has no value -> a after b, regardless of direction
+  if (bv === undefined) return -1;
+  return dir === "desc" ? bv - av : av - bv;
+}
+
+/** Lexicographic by taskId. */
+export function compareById(a: BoardRow, b: BoardRow, dir: SortDir): number {
+  const base = a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0;
+  return dir === "desc" ? -base : base;
+}
+
+/** By index within {@link TASK_STATUSES} (queued … done). An unknown status sorts as -1 (before queued). */
+export function compareByStatus(a: BoardRow, b: BoardRow, dir: SortDir): number {
+  const base = TASK_STATUSES.indexOf(a.status) - TASK_STATUSES.indexOf(b.status);
+  return dir === "desc" ? -base : base;
+}
+
+/** By `lastActivityAt` (parsed to epoch ms); tasks with no ledger activity sort last, in both directions. */
+export function compareByRecency(a: BoardRow, b: BoardRow, dir: SortDir): number {
+  const av = a.lastActivityAt ? Date.parse(a.lastActivityAt) : undefined;
+  const bv = b.lastActivityAt ? Date.parse(b.lastActivityAt) : undefined;
+  return compareMissingLast(av, bv, dir);
+}
+
+/**
+ * By `elapsedMs` (in-flight runs only). SIMPLIFICATION (house style — an explicit judgment call):
+ * a task with no `elapsedMs` (not in flight) has no meaningful "age", so it sorts AFTER every task
+ * that does — in BOTH directions — exactly like `recency`'s missing-value rule, never masquerading
+ * as "very old" one way and "very new" the other.
+ */
+export function compareByAge(a: BoardRow, b: BoardRow, dir: SortDir): number {
+  return compareMissingLast(a.elapsedMs, b.elapsedMs, dir);
+}
+
+const COMPARATORS: Record<BoardSortKey, (a: BoardRow, b: BoardRow, dir: SortDir) => number> = {
+  id: compareById,
+  status: compareByStatus,
+  recency: compareByRecency,
+  age: compareByAge,
+};
+
+/** Sort a COPY of `rows` by the given column/direction, with a stable id-ascending tiebreak. */
+export function sortBoardRows(rows: readonly BoardRow[], sort: BoardSortKey, dir: SortDir): BoardRow[] {
+  const cmp = COMPARATORS[sort];
+  return [...rows].sort((a, b) => cmp(a, b, dir) || compareById(a, b, "asc"));
 }
