@@ -54,6 +54,37 @@ import type { Plan, Task, TaskStatus } from "./plan.js";
  */
 export type StatusSource = "ledger" | "pr-field" | "trailer" | "correction" | "none" | "throttled";
 
+/**
+ * The CLASSIFIED reason a `gh` read actually failed (W1-T119 design (i)) —
+ * `"rate_limit"` (quota/secondary-rate-limit exhausted), `"auth"` (expired or
+ * missing credentials), `"transport"` (network/DNS/timeout), and `"unknown"`
+ * for anything else UNCLASSIFIABLE. `"unknown"` still counts as UNAVAILABLE,
+ * never as absent — the fail-closed direction design (i) calls for, because
+ * absence is the conclusion that costs money.
+ */
+export type GhFailureReason = "rate_limit" | "auth" | "transport" | "unknown";
+
+/**
+ * Classify a failed `gh` invocation's exit status + stderr into a {@link
+ * GhFailureReason} (W1-T119 design (i)). Pure and exported so {@link ghGateway}
+ * / {@link buildBatchedGithub} and unit tests share the exact same
+ * classification rather than each re-implementing the string matching — an
+ * injected gateway in a test can construct the identical reason a real `gh`
+ * failure would produce. `status` is accepted for future refinement (some
+ * failure classes may one day be distinguishable by exit code alone) but
+ * today the classification is driven entirely by `stderr`, the one place a
+ * rate-limit/auth/transport message actually appears.
+ */
+export function classifyGhFailure(status: number | null | undefined, stderr: string | null | undefined): GhFailureReason {
+  const text = String(stderr ?? "");
+  if (/rate limit|quota|secondary rate limit/i.test(text)) return "rate_limit";
+  if (/bad credentials|authentication|not logged in|gh auth login|401 unauthorized|unauthorized/i.test(text)) return "auth";
+  if (/getaddrinfo|econnrefused|econnreset|etimedout|enotfound|could not resolve host|network is unreachable|dial tcp|timeout/i.test(text)) {
+    return "transport";
+  }
+  return "unknown";
+}
+
 /** A PR's identity + GitHub merge state, as seen by the {@link GitHub} gateway. */
 export interface PrRef {
   number: number;
@@ -146,6 +177,18 @@ export interface StatusProjection {
    * `"throttled"`'s meaning to gate on it correctly.
    */
   indeterminate?: true;
+  /**
+   * The CLASSIFIED reason behind an `indeterminate` projection (W1-T119 design
+   * (i)/(iii)) — `"rate_limit"` | `"auth"` | `"transport"` | `"unknown"`, from
+   * {@link classifyGhFailure} applied to the underlying gateway's exit status
+   * + stderr. LEGIBILITY: an operator watching a stalled drain can tell
+   * throttle from auth-expiry from a network outage, rather than a bare
+   * "indeterminate" with no reason attached. Present ONLY alongside
+   * `indeterminate: true` (sparse, same convention as `needsHuman`/
+   * `armedAwaitingMerge`) — a caller that only checks `indeterminate` keeps
+   * working unchanged.
+   */
+  unavailableReason?: GhFailureReason;
 }
 
 /**
@@ -189,6 +232,17 @@ export interface GitHub {
    * the same fail-soft discipline every other optional method here already follows.
    */
   readFailed?(): boolean;
+  /**
+   * The CLASSIFIED reason the most recent failed read actually failed (W1-T119
+   * design (i)) — captured from `gh`'s exit status + stderr instead of
+   * discarding them (the pre-W1-T119 `stdio: [ignore, pipe, ignore]` triple
+   * threw stderr away, so rate-limit/auth/transport were indistinguishable
+   * from each other and from a genuine absence). OPTIONAL — a caller consults
+   * this only after `readFailed()` is `true`; {@link derivePrPrecedence}
+   * defaults to `"unknown"` when a `readFailed`-reporting gateway does not
+   * implement this method, never throwing and never guessing "absent".
+   */
+  readFailureReason?(): GhFailureReason | undefined;
 }
 
 /** Reader for the append-only ledger; injectable for tests. */
@@ -529,7 +583,14 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   // an exhausted/errored `gh` call must defer, never be reported as a confirmed
   // not-merged (the false `source: "none"` that mis-filed W1-T116).
   if (deps.github.readFailed?.()) {
-    return { taskId: task.id, status: "queued", merged: false, source: "throttled", indeterminate: true };
+    return {
+      taskId: task.id,
+      status: "queued",
+      merged: false,
+      source: "throttled",
+      indeterminate: true,
+      unavailableReason: deps.github.readFailureReason?.() ?? "unknown",
+    };
   }
   return { taskId: task.id, status: "queued", merged: false, source: "none" };
 }
@@ -712,8 +773,15 @@ export function ghRequiredStatusCheckContexts(owner: string, repo: string, branc
  * Build a {@link GitHub} gateway scoped to `owner/repo`. Every query is fail-soft:
  * a missing PR or a `gh` error resolves to null, so derivation degrades to the
  * next precedence source rather than throwing.
+ *
+ * `opts.exec` (W1-T119) is an INJECTABLE stand-in for the raw `gh` invocation —
+ * real callers omit it and get the actual `execFileSync("gh", args, ...)` call;
+ * unit tests inject a fake that throws an `{status, stderr}`-shaped error to
+ * simulate a rate-limited/auth-expired/network-down `gh` failure WITHOUT
+ * shelling out, so {@link classifyGhFailure} can be exercised deterministically
+ * against exactly the exit status + stderr a real failure would carry.
  */
-export function ghGateway(owner: string, repo: string): GitHub {
+export function ghGateway(owner: string, repo: string, opts: { exec?: (args: string[]) => string } = {}): GitHub {
   const slug = `${owner}/${repo}`;
   // Sticky for this gateway instance's lifetime (W1-T119): once ANY `gh` call fails,
   // every null/[] result derived since is untrustworthy as "absent", not just the one
@@ -722,11 +790,20 @@ export function ghGateway(owner: string, repo: string): GitHub {
   // outage, so it errs toward "defer everything" rather than risk one still reading
   // as a confirmed not-merged.
   let failed = false;
+  let failureReason: GhFailureReason | undefined;
+  const run =
+    opts.exec ??
+    // stdio's 3rd fd is now `pipe`, not `ignore` (W1-T119 design (i)): the
+    // pre-fix triple discarded `gh`'s stderr — the one place a rate-limit or
+    // auth message appears — before anyone could classify WHY a read failed.
+    ((args: string[]) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   const tryJson = <T>(args: string[]): T | null => {
     try {
-      return JSON.parse(execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })) as T;
-    } catch {
+      return JSON.parse(run(args)) as T;
+    } catch (err) {
       failed = true;
+      const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: string | Buffer };
+      failureReason = classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined);
       return null;
     }
   };
@@ -760,6 +837,9 @@ export function ghGateway(owner: string, repo: string): GitHub {
     },
     readFailed() {
       return failed;
+    },
+    readFailureReason() {
+      return failureReason;
     },
   };
 }
@@ -807,6 +887,7 @@ export function buildBatchedGithub(
   // refreshes on its own `ttlMs` cadence, so a stale failure from an earlier TTL window
   // must not keep shadowing a later fetch that actually succeeded.
   let lastFetchFailed = false;
+  let lastFetchFailureReason: GhFailureReason | undefined;
   const fetchAll =
     opts.fetchAll ??
     (() => {
@@ -819,13 +900,19 @@ export function buildBatchedGithub(
             // armed-awaiting-merge taxonomy costs zero extra `gh` calls, preserving the
             // board-fix O(1) invariant this gateway exists for.
             ["pr", "list", "--repo", slug, "--state", "all", "--json", "number,url,state,headRefName,body,autoMergeRequest", "--limit", "1000"],
-            { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+            // 3rd fd is `pipe` (W1-T119), not `ignore` — same stderr-capture fix as
+            // ghGateway, so this gateway's `readFailureReason()` is real too, not
+            // always "unknown".
+            { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
           ),
         ) as BatchedPr[];
         lastFetchFailed = false;
+        lastFetchFailureReason = undefined;
         return result;
-      } catch {
+      } catch (err) {
         lastFetchFailed = true;
+        const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: string | Buffer };
+        lastFetchFailureReason = classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined);
         return [];
       }
     });
@@ -883,6 +970,10 @@ export function buildBatchedGithub(
       // of trivially returning the initial `false`.
       index();
       return lastFetchFailed;
+    },
+    readFailureReason() {
+      index();
+      return lastFetchFailureReason;
     },
   };
 }

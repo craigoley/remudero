@@ -7,8 +7,10 @@ import type { Plan, Task } from "../src/lib/plan.js";
 import { nextRunnable, type MergedSet } from "../src/lib/drain.js";
 import {
   buildBatchedGithub,
+  classifyGhFailure,
   deriveStatus,
   dispatchesWithoutNewOwnedPr,
+  ghGateway,
   isDispatchBreakerTripped,
   projectPlan,
   DEFAULT_MAX_TASK_DISPATCHES,
@@ -350,6 +352,72 @@ test("W1-T119: a gateway with no readFailed method at all (every pre-W1-T119 fix
   const proj = deriveStatus(task({ status: "merged" }), { ledgerPath: ledgerFile([]), github: bareGithub });
   assert.equal(proj.source, "none");
   assert.equal(proj.merged, false);
+});
+
+// ── W1-T119 round 2: the CLASSIFIED reason (design (i)) — exit status + stderr ─────────
+
+test("classifyGhFailure: a rate-limit exit status + stderr classifies as rate_limit", () => {
+  assert.equal(classifyGhFailure(1, "gh: API rate limit exceeded for user ID 123456. (HTTP 403)"), "rate_limit");
+});
+
+test("classifyGhFailure: an auth-failure stderr classifies as auth", () => {
+  assert.equal(classifyGhFailure(1, "gh: authentication required — run `gh auth login`"), "auth");
+});
+
+test("classifyGhFailure: a transport/network stderr classifies as transport", () => {
+  assert.equal(classifyGhFailure(1, "dial tcp: lookup api.github.com: getaddrinfo ENOTFOUND"), "transport");
+});
+
+test("classifyGhFailure: an unrecognized stderr still classifies as unknown, never as absent — the fail-closed direction", () => {
+  assert.equal(classifyGhFailure(1, "gh: something unexpected happened"), "unknown");
+});
+
+test("W1-T119: a throttled read is classified unavailable and never reads as not-merged — unit test over an injected gateway whose read fails with a rate-limit exit status and stderr: deriveStatus returns an indeterminate projection carrying the classified reason, and asserts NOT merged=false/source=none, the exact shape that mis-filed W1-T116", () => {
+  // INJECTED GATEWAY: the real `ghGateway` implementation, with its raw `gh`
+  // exec swapped for a fake that THROWS the exact shape a rate-limited `gh`
+  // invocation throws on the real system — a non-zero exit status plus the
+  // stderr text GitHub actually returns under quota exhaustion. Pre-W1-T119,
+  // `stdio: [ignore, pipe, ignore]` discarded that stderr entirely — the one
+  // place a rate-limit/auth/transport message appears — so every rung's null
+  // collapsed into the SAME `source: "none"` a genuine absence produces: the
+  // false reading that mis-filed W1-T116 as not-merged when GitHub had never
+  // actually been consulted.
+  const rateLimitError = Object.assign(new Error("Command failed: gh pr view"), {
+    status: 1,
+    stderr: "gh: API rate limit exceeded for user ID 123456. (HTTP 403)",
+  });
+  const github = ghGateway("craigoley", "remudero", {
+    exec: () => {
+      throw rateLimitError;
+    },
+  });
+  const proj = deriveStatus(task({ pr: 5, status: "merged" }), { ledgerPath: ledgerFile([]), github });
+  // deriveStatus returns an INDETERMINATE projection CARRYING THE CLASSIFIED REASON:
+  assert.equal(proj.source, "throttled");
+  assert.equal(proj.indeterminate, true);
+  assert.equal(proj.unavailableReason, "rate_limit");
+  assert.equal(proj.merged, false);
+  // ...and asserts NOT merged=false/source=none — the exact shape that mis-filed W1-T116.
+  // `proj.source` is statically "throttled" here (asserted above), so it can never equal
+  // "none" — the type system itself now rules out the mis-filed shape for this path.
+  const src: string = proj.source;
+  assert.notEqual(src, "none", "a throttled read must NEVER collapse to the merged=false/source=none shape a genuine absence produces");
+});
+
+// ── W1-T119 round 2: a genuinely-absent PR still resolves as absent — no fail-closed stall ──
+
+test("an injected gateway returning a clean not-found (zero-exit, empty result) yields the same not-merged projection it does today, and the indeterminate path is asserted NOT taken", () => {
+  // Same real `ghGateway`, but the injected exec behaves like a real
+  // SUCCESSFUL `gh` call that simply found nothing — zero exit, valid JSON,
+  // an empty/null result — never throwing. Must resolve exactly as an
+  // ordinary absence always has: no fail-closed stall on ordinary evidence.
+  const github = ghGateway("craigoley", "remudero", { exec: () => "null" });
+  const proj = deriveStatus(task({ pr: 5, status: "merged" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.source, "none");
+  assert.equal(proj.merged, false);
+  assert.equal(proj.indeterminate, undefined, "the indeterminate path must NOT be taken for a clean not-found");
+  assert.equal(proj.unavailableReason, undefined);
+  assert.equal(github.readFailed?.(), false);
 });
 
 test("a ledger PR that 404s falls through to the next source", () => {
