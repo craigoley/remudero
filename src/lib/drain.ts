@@ -68,6 +68,29 @@ export interface NextRunnableOpts {
    * needs-human issue naming the loop; dispatch never proceeds for that task.
    */
   onCircuitBreak?: (task: Task) => void;
+  /**
+   * W1-T177 (TERMINAL-STATE CHECK AT EVERY SPENDING SITE): an OPTIONAL fresh
+   * re-read of ONE candidate in-flight PR's live GitHub state, consulted
+   * ONLY when `isOpenPr` reports a task in-flight — CONFIRMS, with a read
+   * that is never the cached `isOpenPr` snapshot (`lastProj`, re-derived
+   * once per drain TICK, not once per candidate), whether that PR is
+   * genuinely still open right now. Returns the freshly observed state
+   * string (e.g. "OPEN"/"MERGED"/"CLOSED"), or `undefined` on a
+   * failed/indeterminate read. This site differs in KIND from a spending
+   * site: a stale OPEN here wrongly BLOCKS a runnable task rather than
+   * wrongly spending on one, so the FAIL-OPEN direction is the same shape
+   * but the failure mode is a skip, not a spend — an unreadable state still
+   * means "treat as in-flight, skip it" (never "assume terminal, dispatch").
+   * Omitted ⇒ behaves EXACTLY as before this check existed.
+   */
+  readLiveState?: (taskId: string, prNumber: number) => string | undefined;
+  /**
+   * Called once per task whose CACHED in-flight snapshot this live re-check
+   * overturned — the task proceeds as runnable instead of being skipped.
+   * Mirrors `onSkip`'s legibility contract; the real wiring corrects the
+   * ledgered reason from "open-pr" to the freshly observed terminal state.
+   */
+  onStoodDown?: (task: Task, prNumber: number, state: string) => void;
 }
 
 /**
@@ -108,8 +131,17 @@ export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnable
     }
     const openPrNumber = opts.isOpenPr?.(t.id);
     if (openPrNumber !== undefined) {
-      opts.onSkip?.(t, openPrNumber);
-      continue; // IN-FLIGHT — never a duplicate fresh build.
+      // W1-T177: CONFIRM the cached in-flight snapshot with a fresh read
+      // before skipping — a stale OPEN wrongly blocks a task that is
+      // actually runnable (the #388 fixture: `dispatch.skipped reason=
+      // 'open-pr'` more than six minutes after that PR had merged).
+      const liveState = opts.readLiveState?.(t.id, openPrNumber);
+      if (liveState !== undefined && liveState !== "OPEN") {
+        opts.onStoodDown?.(t, openPrNumber, liveState);
+      } else {
+        opts.onSkip?.(t, openPrNumber);
+        continue; // IN-FLIGHT (or unreadable — fail OPEN) — never a duplicate fresh build.
+      }
     }
     return t;
   }
@@ -410,6 +442,13 @@ export interface DrainDeps {
    */
   isOpenPr?: OpenPrCheck;
   /**
+   * W1-T177: an OPTIONAL fresh, live re-read of ONE candidate in-flight PR's
+   * GitHub state — see {@link NextRunnableOpts.readLiveState}'s doc for the
+   * full contract. Optional — omitted, dispatch behaves exactly as before
+   * this check existed.
+   */
+  readLiveState?: (taskId: string, prNumber: number) => string | undefined;
+  /**
    * The per-task dispatch CIRCUIT BREAKER (P29(ii)), re-derived from the
    * ledger each call — same freshness contract as `refreshMerged`/`isOpenPr`.
    * Optional — omitted, dispatch behaves exactly as before this breaker
@@ -521,6 +560,25 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       // proceeds to the next runnable task — an open PR must not halt the drain
       // the way a block does.
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
+      // W1-T177: wrap the injected reader so a FAILED/INDETERMINATE live read
+      // (returns `undefined`) is LEDGERED here — distinct from an ordinary
+      // un-wired site, which never calls this at all. Still resolves to
+      // `undefined` either way, so nextRunnable's own fail-OPEN contract
+      // (treat as still in-flight, skip it) is completely unchanged — an
+      // unreadable state never overturns the skip, it is just made legible.
+      readLiveState: deps.readLiveState
+        ? (taskId, prNumber) => {
+            const state = deps.readLiveState!(taskId, prNumber);
+            if (state === undefined) log("dispatch.live_state_indeterminate", { task: taskId, pr_number: prNumber });
+            return state;
+          }
+        : undefined,
+      // W1-T177: the cached in-flight snapshot was stale — this task is NOT
+      // actually blocked. Ledgered distinctly from `dispatch.skipped`, naming
+      // the freshly observed terminal state rather than the misleading
+      // "open-pr" reason a stale read produced (the #388 fixture).
+      onStoodDown: (t, prNumber, state) =>
+        log("dispatch.stood_down", { task: t.id, pr_number: prNumber, state, reason: "cached in-flight read was stale" }),
       isIndeterminate: deps.isIndeterminate,
       // INDETERMINATE (W1-T119): a legible ledger line every tick it is
       // consulted, then the drain proceeds to the next runnable task rather

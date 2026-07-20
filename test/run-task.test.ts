@@ -13,6 +13,7 @@ import {
   commitsAhead,
   deriveFixMode,
   deriveStrikeHistory,
+  dispatchFixPreflightStandDown,
   drainCommand,
   FIX_MODE_RULES,
   isTransientResult,
@@ -37,7 +38,9 @@ import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { GitHub } from "../src/lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
+  runSweep,
   strikeCapForAnswer,
+  terminalStateReason,
   type ClarificationQuestion,
   type FixDispatchEvidence,
   type OpenPrView,
@@ -1430,6 +1433,248 @@ test("runFixRung: fetchCiFailures is optional — a strike that goes non-green s
   assert.equal(modes[1], "ci-log", "the mode still corrects itself without a fetchCiFailures dep — content just stays unrefreshed");
 });
 
+// ── W1-T177: TERMINAL-STATE CHECK AT EVERY SPENDING SITE — the fix rung's own
+// two internal checks (top of round; immediately before the exhaustion
+// escalate()). FIXTURE: PR #388 merged at 20:24:44Z; fix.dispatch strike 2
+// still fired at 20:25:04, fix.done at 20:29:05 (cost_usd 1.2405, 38 turns),
+// then a needs-human issue at 20:30:48 — a strike AND an escalation spent on
+// an already-merged PR. ─────────────────────────────────────────────────────
+
+test("runFixRung: a seeded MERGED PR produces ZERO fix-rung strikes — no strike is spent, no worker spawned (the #388 falsifier)", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
+  const stoodDown: unknown[] = [];
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: failing,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: "fix-session-1" });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => {
+        throw new Error("runReview must never be called — the rung must stand down before dispatching a strike");
+      },
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: (step, extra) => {
+        if (step === "fix.stood_down") stoodDown.push(extra);
+      },
+      say: () => {},
+      account: (r) => r,
+      // Round 1's live read is already MERGED — the #388 fixture's exact shape
+      // (merged BEFORE the rung's first check this round, not mid-round).
+      readLiveState: async () => ({ ok: true, state: "MERGED" }),
+    },
+  });
+
+  assert.equal(spawnCalls.length, 0, "zero fix worker spawns — no strike is SPENT on a merged PR");
+  assert.equal(outcome.outcome, "stood_down");
+  assert.equal(outcome.strikes, 0, "strikes never incremented — the check runs BEFORE strikes++");
+  assert.match(outcome.standDownReason ?? "", /MERGED/);
+  assert.equal(stoodDown.length, 1, "exactly one fix.stood_down ledger line, naming the site and the state");
+  assert.deepEqual(stoodDown[0], { site: "rung.strike", strike: 1, reason: outcome.standDownReason });
+});
+
+test("runFixRung: a PR that goes MERGED mid-rung (after round 1's strike, before the exhaustion escalate()) stands down rather than filing a needs-human issue", async () => {
+  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  let reads = 0;
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 1, // one strike, then straight to the exhaustion check
+    initialReview: failing,
+    deps: {
+      spawn: async () => result({ sessionId: "fix-session-1" }),
+      waitForCiGreen: async () => "green",
+      runReview: async () => failing, // still failing — heads toward exhaustion
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+      // Round 1's PRE-STRIKE read is still OPEN (the strike is legitimately
+      // spent); the PR merges by the time the exhaustion check runs.
+      readLiveState: async () => {
+        reads++;
+        return reads === 1 ? { ok: true, state: "OPEN" } : { ok: true, state: "MERGED" };
+      },
+    },
+  });
+
+  assert.equal(outcome.outcome, "stood_down");
+  assert.match(outcome.standDownReason ?? "", /MERGED/);
+  assert.equal(issueCalls.length, 0, "zero needs-human issues opened on a PR that no longer carries a live block");
+});
+
+test("runFixRung: a FAILED/INDETERMINATE read at the EXHAUSTION check (site ii) does NOT stand down — the needs-human issue still files as before, AND the indeterminate read is ledgered distinctly from site (i)'s", async () => {
+  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const indeterminateLogs: unknown[] = [];
+  let reads = 0;
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 1,
+    initialReview: failing,
+    deps: {
+      spawn: async () => result({ sessionId: "fix-session-1" }),
+      waitForCiGreen: async () => "green",
+      runReview: async () => failing,
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath: tmpLedgerPath(),
+      log: (step, extra) => {
+        if (step === "fix.live_state_indeterminate") indeterminateLogs.push(extra);
+      },
+      say: () => {},
+      account: (r) => r,
+      // Round 1's PRE-STRIKE read (site i) succeeds OPEN; the EXHAUSTION
+      // check (site ii) hits a genuine read failure.
+      readLiveState: async () => {
+        reads++;
+        return reads === 1 ? { ok: true, state: "OPEN" } : { ok: false };
+      },
+    },
+  });
+
+  assert.equal(outcome.outcome, "escalated", "an unreadable state at the exhaustion check must NOT stand down — escalation proceeds exactly as today");
+  assert.equal(issueCalls.length, 1, "the needs-human issue still files — a read failure is never treated as terminal");
+  assert.equal(indeterminateLogs.length, 1, "site (ii)'s indeterminate read is ledgered exactly once");
+  assert.deepEqual(indeterminateLogs[0], { site: "rung.exhaustion" });
+});
+
+test("runFixRung: readLiveState omitted ⇒ behaves EXACTLY as before this check existed — the rung dispatches normally", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
+  const passing = fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })]);
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: failing,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: "fix-session-1" });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => passing,
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+      // readLiveState deliberately omitted.
+    },
+  });
+
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(outcome.outcome, "fixed");
+});
+
+test("runFixRung: a FAILED/INDETERMINATE live-state read does NOT stand down — it proceeds exactly as today (fail OPEN, never fail-closed-to-stand-down) — AND the indeterminate read is ledgered, never a silent swallow", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
+  const passing = fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })]);
+  const indeterminateLogs: unknown[] = [];
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: failing,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: "fix-session-1" });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => passing,
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: (step, extra) => {
+        if (step === "fix.live_state_indeterminate") indeterminateLogs.push(extra);
+      },
+      say: () => {},
+      account: (r) => r,
+      // A genuine read failure (rate-limited/network/auth) — ok:false.
+      readLiveState: async () => ({ ok: false }),
+    },
+  });
+
+  assert.equal(spawnCalls.length, 1, "the strike still fires — an unreadable state is never treated as terminal");
+  assert.equal(outcome.outcome, "fixed");
+  assert.equal(indeterminateLogs.length, 1, "the failed/indeterminate read is LEDGERED — never a silent swallow");
+  assert.deepEqual(indeterminateLogs[0], { site: "rung.strike" });
+});
+
+// ── Round-2 fix, W1-T177 SITE (v): the cold/sweep `dispatchFix` pre-flight
+// previously folded its terminal-state read into the SAME `gh pr view` round
+// trip it also used to resolve `headRefName` — so a read failure there threw
+// straight past the `ok:false` fail-open branch entirely (it never got to run)
+// and the caller's own outer try/catch logged `sweep.fix.error` with NO
+// dispatch — a silent fail-CLOSED-to-stand-down on a `gh` hiccup, exactly the
+// falsifier the reviewer's proof harness seeded. `dispatchFixPreflightStandDown`
+// is now the ONE place this site's read happens, decoupled from the
+// headRefName fetch, so it is unit-testable in isolation with a fake
+// `readLiveState` that never throws (mirroring sites i/ii's `LiveStateResult`
+// contract) — proving the SAME fail-open behavior every other site already had. ──
+
+test("dispatchFixPreflightStandDown: a seeded state-read ERROR (ok:false) does NOT stand down — proceeds exactly as today, AND ledgers the indeterminate read via sweep.fix.indeterminate, never treating unreadable as terminal", async () => {
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+
+  const reason = await dispatchFixPreflightStandDown(
+    async () => ({ ok: false }), // a genuine gh outage/rate-limit/auth failure
+    { prUrl: "https://github.com/o/r/pull/9", prNumber: 9 },
+    (step, extra) => logs.push({ step, extra }),
+  );
+
+  assert.equal(reason, undefined, "an unreadable state must NEVER stand the dispatch down — it must proceed exactly as before this check existed");
+  const indeterminate = logs.filter((l) => l.step === "sweep.fix.indeterminate");
+  assert.equal(indeterminate.length, 1, "the failed/indeterminate read is LEDGERED — never a silent swallow");
+  assert.deepEqual(indeterminate[0].extra, { pr_number: 9 });
+  assert.equal(logs.some((l) => l.step === "sweep.fix.not_open"), false, "an indeterminate read must never ALSO log a terminal stand-down");
+});
+
+for (const terminalState of ["MERGED", "CLOSED"]) {
+  test(`dispatchFixPreflightStandDown: a seeded ${terminalState} PR stands down naming the state via sweep.fix.not_open — the SAME terminalStateReason predicate every other site shares`, async () => {
+    const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+
+    const reason = await dispatchFixPreflightStandDown(
+      async () => ({ ok: true, state: terminalState }),
+      { prUrl: "https://github.com/o/r/pull/9", prNumber: 9 },
+      (step, extra) => logs.push({ step, extra }),
+    );
+
+    const expected = terminalStateReason(terminalState);
+    assert.equal(reason, expected, "the stand-down reason must come from the ONE shared predicate, not a re-derived copy");
+    const notOpen = logs.filter((l) => l.step === "sweep.fix.not_open");
+    assert.equal(notOpen.length, 1);
+    assert.deepEqual(notOpen[0].extra, { pr_number: 9, state: terminalState, reason: expected });
+  });
+}
+
+test("dispatchFixPreflightStandDown: a live OPEN read does NOT stand down and logs nothing — dispatch proceeds to resolve headRefName exactly as today", async () => {
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+
+  const reason = await dispatchFixPreflightStandDown(
+    async () => ({ ok: true, state: "OPEN" }),
+    { prUrl: "https://github.com/o/r/pull/9", prNumber: 9 },
+    (step, extra) => logs.push({ step, extra }),
+  );
+
+  assert.equal(reason, undefined);
+  assert.equal(logs.length, 0, "an OPEN PR is the ordinary path — it must not ledger anything at this preflight");
+});
+
 // ── Wiring: ONE call site, both entry points (drain + manual `rmd run-task`
 // both call the SAME `runTask`, so there is exactly one place to gate) ──────
 
@@ -1691,6 +1936,126 @@ test("routeFix: a CLOSED PR refuses naming the state — zero spawns", async () 
   assert.match(result.reason, /CLOSED/);
   assert.equal(deps.fixed.length, 0);
   assert.equal(deps.escalated.length, 0);
+});
+
+// ── W1-T177 acceptance 4: "the automated paths stand down exactly as the
+// operator verb does, via ONE shared predicate" — mirrors the EXISTING
+// operator-verb tests directly above (routeFix: MERGED/CLOSED refuse naming
+// the state, zero spawns) at the SWEEP-DRIVEN entry (runFixRung/runSweep,
+// reached via buildSweepEffects.dispatchFix — never routeFix), PLUS a
+// same-input equality proof that both paths' reasons come from the identical
+// predicate, not two independently-hardcoded conditions. ───────────────────
+
+for (const terminalState of ["MERGED", "CLOSED"]) {
+  test(`runFixRung (the sweep-driven entry): a seeded ${terminalState} PR produces ZERO fix-rung strikes — no strike spent, no worker spawned — mirroring routeFix's ${terminalState} refusal (run-task.test.ts:1814/1826)`, async () => {
+    const spawnCalls: SpawnWorkerArgs[] = [];
+    const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
+
+    const outcome = await runFixRung({
+      ...fixRungBaseOpts(),
+      strikeCap: 2,
+      initialReview: failing,
+      deps: {
+        spawn: async (args) => {
+          spawnCalls.push(args);
+          return result({ sessionId: "fix-session-1" });
+        },
+        waitForCiGreen: async () => "green",
+        runReview: async () => {
+          throw new Error("runReview must never be called — the rung must stand down before dispatching a strike");
+        },
+        push: () => {},
+        issues: fakeIssues([]),
+        ledgerPath: tmpLedgerPath(),
+        log: () => {},
+        say: () => {},
+        account: (r) => r,
+        readLiveState: async () => ({ ok: true, state: terminalState }),
+      },
+    });
+
+    assert.equal(spawnCalls.length, 0, `zero fix worker spawns on a ${terminalState} PR`);
+    assert.equal(outcome.outcome, "stood_down");
+    assert.match(outcome.standDownReason ?? "", new RegExp(terminalState));
+  });
+
+  test(`runSweep (the sweep-driven entry): a seeded ${terminalState} PR produces ZERO dispositions ACTED — zero dispatchFix calls — mirroring routeFix's ${terminalState} refusal (run-task.test.ts:1814/1826)`, async () => {
+    const ledgerDir = mkdtempSync(join(tmpdir(), "rmd-sweep-t177-"));
+    const ledgerP = join(ledgerDir, "ledger.ndjson");
+    const fixed: unknown[] = [];
+    const pr: OpenPrView = {
+      prNumber: 1,
+      prUrl: "https://github.com/o/r/pull/1",
+      taskId: "W1-TX",
+      reviewState: "failure",
+      checksState: "pending",
+      unmetCriteria: [criterion({ claim: "does the thing", met: false })],
+      priorStrikes: 0,
+      lastActivityAt: new Date().toISOString(),
+      headSha: "aaaa111",
+      autoMergeArmed: false,
+    };
+    const summary = await runSweep(
+      [pr],
+      {
+        arm: () => {},
+        close: () => {},
+        dispatchFix: (p, evidence) => {
+          fixed.push({ p, evidence });
+        },
+        escalate: () => {},
+        ledgerPath: ledgerP,
+        runId: "SWEEP-T177",
+        readLiveState: async () => ({ ok: true, state: terminalState }),
+      },
+      DEFAULT_SWEEP_POLICY,
+    );
+    assert.equal(fixed.length, 0, `dispatchFix is called ZERO times on a ${terminalState} PR`);
+    assert.equal(summary.actionsTaken, 0);
+    assert.equal(summary.actions[0].acted, false);
+  });
+}
+
+test("W1-T177 acceptance 4: routeFix (the operator verb) and runFixRung (the sweep-driven entry) stand down IDENTICALLY on the SAME terminal states — proven by EQUAL reason strings from the ONE shared terminalStateReason predicate, not two independently-hardcoded conditions", async () => {
+  for (const state of ["MERGED", "CLOSED"]) {
+    // The operator verb: routeFix's own terminal check.
+    const fixDeps = fakeFixDeps();
+    const pr = fixPr({ reviewState: "failure", unmetCriteria: [criterion({ claim: "x", met: false })] });
+    const routeResult = await routeFix(state, pr, fixDeps);
+    assert.equal(routeResult.outcome, "refused");
+    assert.equal(fixDeps.fixed.length, 0);
+
+    // The automated, sweep-driven path: runFixRung's own internal live-state check.
+    const failing = fakeReview("failure", [criterion({ claim: "criterion A", met: false, reason: "r" })]);
+    const rungOutcome = await runFixRung({
+      ...fixRungBaseOpts(),
+      strikeCap: 2,
+      initialReview: failing,
+      deps: {
+        spawn: async () => result({ sessionId: "s" }),
+        waitForCiGreen: async () => "green",
+        runReview: async () => {
+          throw new Error("must not be called");
+        },
+        push: () => {},
+        issues: fakeIssues([]),
+        ledgerPath: tmpLedgerPath(),
+        log: () => {},
+        say: () => {},
+        account: (r) => r,
+        readLiveState: async () => ({ ok: true, state }),
+      },
+    });
+    assert.equal(rungOutcome.outcome, "stood_down");
+
+    // BOTH reasons equal the SAME imported predicate's output — literal
+    // equality, not a keyword/grep proxy, so a future edit to one condition
+    // without the other would fail this test immediately.
+    const expected = terminalStateReason(state);
+    assert.equal(routeResult.reason, expected);
+    assert.equal(rungOutcome.standDownReason, expected);
+    assert.equal(routeResult.reason, rungOutcome.standDownReason, "the operator verb and the automated path must produce the IDENTICAL reason string");
+  }
 });
 
 test("routeFix: an OPEN PR with no block evidence (review success) refuses — zero spawns", async () => {

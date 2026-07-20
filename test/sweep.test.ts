@@ -462,6 +462,66 @@ test("acceptance 2 — a NEW push (changed head sha) legitimately re-earns a fix
   assert.equal(deps3.fixed.length, 1, "a new head sha (state changed) legitimately re-earns a strike");
 });
 
+// ── W1-T177: TERMINAL-STATE CHECK AT EVERY SPENDING SITE — a sweep disposition
+// never spends a fix-rung strike on a PR whose live GitHub state has already
+// gone terminal since the `openPrs` snapshot this sweep pass started from.
+// FIXTURE: PR #388 merged at 20:24:44Z; sweep.disposed pr 388 disposition=
+// blocked-fixable acted=TRUE fired at 20:30:50 — a fresh rung started on an
+// already-merged PR. ─────────────────────────────────────────────────────────
+
+test("runSweep: a seeded MERGED PR produces ZERO dispositions ACTED — the sweep never starts a rung on a terminal PR (the #388 falsifier)", async () => {
+  const notOpenLogs: unknown[] = [];
+  const deps = fakeDeps({
+    readLiveState: async () => ({ ok: true, state: "MERGED" }),
+    log: (step, extra) => {
+      if (step === "sweep.dispose.not_open") notOpenLogs.push(extra);
+    },
+  });
+
+  const summary = await runSweep([blockedFixablePr()], deps);
+
+  assert.equal(deps.fixed.length, 0, "dispatchFix is called ZERO times on a terminal PR");
+  assert.equal(summary.actionsTaken, 0);
+  assert.equal(summary.actions[0].acted, false, "the disposed line's acted flag reflects the stand-down");
+  assert.equal(notOpenLogs.length, 1, "exactly one sweep.dispose.not_open ledger line, naming the state");
+  assert.match((notOpenLogs[0] as { reason: string }).reason, /MERGED/);
+
+  // The ledgered sweep.disposed line itself names the stand-down reason too.
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed.length, 1);
+  assert.equal(disposed[0].acted, false);
+  assert.match(String(disposed[0].stand_down_reason), /MERGED/);
+});
+
+test("runSweep: readLiveState omitted ⇒ behaves EXACTLY as before this check existed — blocked-fixable still dispatches", async () => {
+  const deps = fakeDeps(); // no readLiveState override
+  const summary = await runSweep([blockedFixablePr()], deps);
+  assert.equal(deps.fixed.length, 1);
+  assert.equal(summary.actionsTaken, 1);
+});
+
+test("runSweep: a FAILED/INDETERMINATE live-state read does NOT stand down — dispatch proceeds exactly as today (fail OPEN), AND the indeterminate read is ledgered, never a silent swallow", async () => {
+  const indeterminateLogs: unknown[] = [];
+  const deps = fakeDeps({
+    readLiveState: async () => ({ ok: false }),
+    log: (step, extra) => {
+      if (step === "sweep.dispose.indeterminate") indeterminateLogs.push(extra);
+    },
+  });
+  const summary = await runSweep([blockedFixablePr()], deps);
+  assert.equal(deps.fixed.length, 1, "an unreadable state is never treated as terminal — the strike still fires");
+  assert.equal(summary.actionsTaken, 1);
+  assert.equal(indeterminateLogs.length, 1, "the failed/indeterminate read is LEDGERED — never a silent swallow");
+  assert.deepEqual(indeterminateLogs[0], { pr_number: blockedFixablePr().prNumber });
+});
+
+test("runSweep: an OPEN live read proceeds to dispatch normally — the check is a stand-down predicate, never a second gate on the ordinary path", async () => {
+  const deps = fakeDeps({ readLiveState: async () => ({ ok: true, state: "OPEN" }) });
+  const summary = await runSweep([blockedFixablePr()], deps);
+  assert.equal(deps.fixed.length, 1);
+  assert.equal(summary.actionsTaken, 1);
+});
+
 // ── ACCEPTANCE 3: policy is DATA, not code branches ───────────────────────────
 
 test("acceptance 3 — policy is data, not code branches: tightening the stale-days threshold in the policy table flips a fixture PR's disposition with zero sweep-code changes", () => {

@@ -85,6 +85,14 @@ export interface DaemonDeps {
    */
   isOpenPr?: OpenPrCheck;
   /**
+   * W1-T177 (TERMINAL-STATE CHECK AT EVERY SPENDING SITE): an OPTIONAL fresh,
+   * live re-read of ONE candidate in-flight PR's GitHub state, consulted ONLY
+   * when `isOpenPr` reports a task in-flight — see drain.ts's
+   * `NextRunnableOpts.readLiveState` for the full contract. Optional —
+   * omitted, dispatch behaves exactly as before this check existed.
+   */
+  readLiveState?: (taskId: string, prNumber: number) => string | undefined;
+  /**
    * The per-task dispatch CIRCUIT BREAKER (MASTER-PLAN P29(ii)): true when a
    * task has been dispatched the policy-capped number of times with no new
    * owned PR since (status.ts's `isDispatchBreakerTripped`, re-derived from the
@@ -283,6 +291,23 @@ export async function runDaemon(
       // IN-FLIGHT (W1-T80): a legible skip on console + ledger; the daemon
       // keeps polling rather than treating an open PR as a block.
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
+      // W1-T177: wrap the injected reader so a FAILED/INDETERMINATE live read
+      // (returns `undefined`) is LEDGERED here — distinct from an ordinary
+      // un-wired site, which never calls this at all. Still resolves to
+      // `undefined` either way, so nextRunnable's own fail-OPEN contract
+      // (treat as still in-flight, skip it) is completely unchanged.
+      readLiveState: deps.readLiveState
+        ? (taskId, prNumber) => {
+            const state = deps.readLiveState!(taskId, prNumber);
+            if (state === undefined) log("dispatch.live_state_indeterminate", { task: taskId, pr_number: prNumber });
+            return state;
+          }
+        : undefined,
+      // W1-T177: the cached in-flight snapshot was stale — this task is NOT
+      // actually blocked. Ledgered distinctly, naming the freshly observed
+      // terminal state rather than the misleading "open-pr" reason.
+      onStoodDown: (t, prNumber, state) =>
+        log("dispatch.stood_down", { task: t.id, pr_number: prNumber, state, reason: "cached in-flight read was stale" }),
       isIndeterminate: deps.isIndeterminate,
       // INDETERMINATE (W1-T119): a legible ledger line every tick it is
       // consulted — the daemon keeps polling everything else rather than

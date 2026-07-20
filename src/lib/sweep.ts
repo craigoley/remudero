@@ -696,6 +696,40 @@ export interface FixDispatchEvidence {
   ciFailures?: CiFailure[];
 }
 
+/**
+ * TERMINAL-STATE PREDICATE (W1-T177) — the ONE definition every spending site
+ * (a fix-rung strike, a sweep disposition, the exhaustion escalation, the
+ * cold-dispatch pre-flight) and the operator verb (`routeFix`) share, so a
+ * merged/closed PR is refused IDENTICALLY everywhere rather than via
+ * independently-hardcoded copies that drift (the #388/#398 fixture: the
+ * interactive `rmd fix` path had this check inline; the unattended
+ * sweep/rung/escalate paths did not, and spent a strike + a needs-human issue
+ * + a fresh sweep rung on an already-merged PR within seven minutes). Only
+ * `"OPEN"` carries a live block; anything else — MERGED, CLOSED, or an
+ * unresolved/missing state — returns a human-legible stand-down reason.
+ *
+ * This function classifies a SUCCESSFULLY-READ state string ONLY. It is
+ * never asked to guess about a failed/indeterminate read — every call site
+ * that reads state live is responsible for its OWN fail-open direction (an
+ * unreadable state must never be treated as terminal; see each site's
+ * `ok:false` handling) before ever calling this predicate.
+ */
+export function terminalStateReason(state: string | undefined): string | undefined {
+  if (state === "OPEN") return undefined;
+  return `state is ${state ?? "UNKNOWN"} (only an OPEN PR carries a live block)`;
+}
+
+/**
+ * One fresh, live read of a PR's GitHub state (W1-T177). `ok:false` marks a
+ * genuinely FAILED or INDETERMINATE read (network/auth/rate-limit) — the
+ * caller must treat that exactly as if no check ran at all, never as
+ * terminal. `state` is present only when `ok`.
+ */
+export interface LiveStateResult {
+  ok: boolean;
+  state?: string;
+}
+
 /** Injected effects — the real command wires arm/close/fix/escalate; tests fake them. */
 export interface SweepDeps {
   /** Arm GitHub auto-merge (armAutoMerge). Idempotent at the GitHub level. */
@@ -716,6 +750,18 @@ export interface SweepDeps {
    * transport, carrying the SAME two candidate resolutions as its options.
    */
   escalate: (pr: OpenPrView, reason: string, question: ClarificationQuestion) => void | Promise<void>;
+  /**
+   * W1-T177: an OPTIONAL fresh re-read of ONE PR's live GitHub state,
+   * consulted immediately before a blocked-fixable disposition actually
+   * spends a fix-rung strike — never the `openPrs` snapshot this whole sweep
+   * pass started from (`buildOpenPrViews`'s ONE `gh pr list` at sweep start,
+   * run-task.ts), which may already be stale by the time a later PR in the
+   * SAME pass is reached (the #388 fixture: merged mid-sweep, dispatched
+   * anyway). Omitted, or a failed/indeterminate read (`ok:false`), behaves
+   * EXACTLY as before this check existed — dispatch proceeds; standing down
+   * fires ONLY on a positive, freshly-observed terminal reading.
+   */
+  readLiveState?: (pr: OpenPrView) => LiveStateResult | Promise<LiveStateResult>;
   /** Absolute path to state/ledger.ndjson — dedup source + sweep.disposed sink. */
   ledgerPath: string;
   /** The sweep's run id (e.g. SWEEP-<epochMs> / DAEMON-<epochMs>). */
@@ -860,14 +906,44 @@ export async function runSweep(
         alreadyDone = false;
     }
 
-    const acted = !alreadyDone && !deps.dryRun;
+    let acted = !alreadyDone && !deps.dryRun;
+    // W1-T177: set ONLY when the terminal-state check below stood the
+    // blocked-fixable dispatch down — distinct from `alreadyDone` (dedup)
+    // and from `deps.dryRun` (preview), so the disposed line can name WHY
+    // `acted` is false without conflating the three.
+    let standDownReason: string | undefined;
 
     if (acted) {
       switch (disposition) {
         case "mergeable":
           await deps.arm(pr);
           break;
-        case "blocked-fixable":
+        case "blocked-fixable": {
+          // W1-T177 — TERMINAL-STATE CHECK AT THE SPENDING SITE: re-read this
+          // PR's state FRESH, right before a fix-rung strike is actually
+          // spent, never the `openPrs` snapshot this whole sweep pass started
+          // from. Optional dep; omitted or an indeterminate read (`ok:false`)
+          // behaves exactly as before — dispatch proceeds (fail OPEN, never
+          // fail-closed-to-stand-down; see `readLiveState`'s own doc).
+          const live = await deps.readLiveState?.(pr);
+          let terminal: string | undefined;
+          if (live) {
+            if (live.ok) {
+              terminal = terminalStateReason(live.state);
+            } else {
+              // FAIL OPEN, ledgered: the read failed/was indeterminate — this
+              // must never be treated as terminal (that would silently halt
+              // every blocked-fixable dispatch on a gh outage). Proceed to
+              // dispatchFix exactly as before this check existed; the failed
+              // read is still legible on the ledger.
+              log("sweep.dispose.indeterminate", { pr_number: pr.prNumber });
+            }
+          }
+          if (terminal) {
+            acted = false;
+            standDownReason = terminal;
+            break;
+          }
           // W1-T100: the evidence shape follows the SAME `isBlockedCi`
           // predicate DISPOSITION_RULES routed on (never a second,
           // independently-hardcoded check) — a failing review carries the
@@ -880,6 +956,7 @@ export async function runSweep(
               : { unmetCriteria: pr.unmetCriteria },
           );
           break;
+        }
         case "stale":
           await deps.close(pr, reason);
           break;
@@ -887,7 +964,14 @@ export async function runSweep(
           await deps.escalate(pr, reason, question!);
           break;
       }
-      actionsTaken++;
+      if (acted) actionsTaken++;
+    }
+
+    if (standDownReason) {
+      // The site the TASK names ("a sweep disposition"), naming the state —
+      // never silent: a caller diffing the ledger sees exactly why a
+      // blocked-fixable disposition spent nothing this pass.
+      log("sweep.dispose.not_open", { pr_number: pr.prNumber, reason: standDownReason });
     }
 
     actions.push({
@@ -924,6 +1008,7 @@ export async function runSweep(
         acted,
         reason,
         head_sha: pr.headSha,
+        ...(standDownReason ? { stand_down_reason: standDownReason } : {}),
         ...(question ? { question: question.question } : {}),
       });
     }

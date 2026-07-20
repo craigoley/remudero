@@ -180,11 +180,13 @@ import {
   runCreditBackfill,
   runSweep,
   strikeCapForAnswer,
+  terminalStateReason,
   toQuestionEntry,
   type CiFailure,
   type ClarificationQuestion,
   type CreditCandidate,
   type FixDispatchEvidence,
+  type LiveStateResult,
   type OpenPrView,
   type StrikeAttempt,
   type SweepDeps,
@@ -992,12 +994,122 @@ function summarizeCiFailure(f: CiFailure): string {
 
 /** Outcome of one full pass through the fix rung. */
 export interface FixRungOutcome {
-  outcome: "fixed" | "escalated";
+  outcome: "fixed" | "escalated" | "stood_down";
   /** The last review computed — passing when `outcome === "fixed"`. */
   review: ReviewVerdict & { headSha: string; reviewerOutcome: string };
   strikes: number;
   /** Set only when `outcome === "escalated"`. */
   issueUrl?: string;
+  /**
+   * W1-T177: set only when `outcome === "stood_down"` — the freshly observed
+   * terminal-state reason (from {@link terminalStateReason}) that stopped a
+   * strike from being spent, or the exhaustion escalate() from firing, on a
+   * PR that no longer carries a live block.
+   */
+  standDownReason?: string;
+}
+
+/**
+ * W1-T177: the real live-state reader every fix-rung/sweep spending site
+ * wires — ONE fresh `gh pr view --json state` read, never a cached snapshot.
+ * A throw (rate limit, network, auth) reports `ok:false` — INDETERMINATE,
+ * never treated as terminal (`terminalStateReason` is never even called on
+ * it; see every call site's fail-open handling).
+ */
+function ghLiveState(prUrl: string): LiveStateResult {
+  try {
+    const v = ghJson(["pr", "view", prUrl, "--json", "state"]) as { state?: string };
+    return v?.state ? { ok: true, state: v.state } : { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * W1-T177: resolve a stand-down reason from an OPTIONAL live-state reader —
+ * shared by the fix rung's two internal checks (top of round; immediately
+ * before the exhaustion escalate()) so both read via the SAME fail-open
+ * contract. `undefined` (no reader wired, or a failed/indeterminate read)
+ * means "proceed exactly as before this check existed" — standing down fires
+ * ONLY on a positive, freshly-observed terminal reading. A FAILED/
+ * INDETERMINATE read (`ok:false`) is explicitly LEDGERED here (never a
+ * silent swallow) so an unreadable state is legible on the ledger even
+ * though it never halts anything — the read failure itself is observable,
+ * distinct from an ordinary un-wired site (which never calls `log` at all).
+ */
+async function fixRungStandDownReason(
+  readLiveState: ((prUrl: string) => LiveStateResult | Promise<LiveStateResult>) | undefined,
+  prUrl: string,
+  site: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<string | undefined> {
+  if (!readLiveState) return undefined;
+  const live = await readLiveState(prUrl);
+  if (!live.ok) {
+    // FAIL OPEN: the read failed/was indeterminate — proceed exactly as
+    // before this check existed. Ledgered so the failure is visible, never
+    // treated as a terminal reading (that would be fail-CLOSED, the far
+    // worse failure this contract exists to prevent — a gh outage must
+    // never silently halt every fix/disposition/dispatch fleet-wide).
+    log("fix.live_state_indeterminate", { site });
+    return undefined;
+  }
+  return terminalStateReason(live.state);
+}
+
+/**
+ * W1-T177 SITE (v): the cold/sweep `dispatchFix` pre-flight's terminal-state
+ * check — a REQUIRED, always-mandatory `readLiveState` call (unlike sites
+ * (i)/(ii)/(iii)/(iv), whose reader is optional), because this is the only
+ * site whose real wiring is `buildSweepEffects`'s own closure, never a
+ * caller-supplied dep. Deliberately an INDEPENDENT read from the headRefName
+ * fetch this site also needs (that fetch predates W1-T177 and is unrelated to
+ * the terminal-state contract) — folding `state` into that SAME round trip
+ * previously meant a `gh` hiccup on the read threw BEFORE the fail-open
+ * `ok:false` branch ever ran, surfacing as `sweep.fix.error` (a silent
+ * fleet-wide stand-down on a gh outage — exactly the fail-closed regression
+ * this contract forbids). Splitting the read in two means a state-read
+ * failure ALWAYS reports `ok:false` (never throws past this function) and is
+ * handled by the SAME fail-open contract as every other site: ledgered via
+ * `sweep.fix.indeterminate`, dispatch proceeds to resolve headRefName exactly
+ * as it did before this check existed. Only a positive, freshly-observed
+ * terminal reading (`sweep.fix.not_open`, naming the state) stands the
+ * dispatch down, BEFORE any worktree/git side effect ever touches the PR.
+ */
+export async function dispatchFixPreflightStandDown(
+  readLiveState: (prUrl: string) => LiveStateResult | Promise<LiveStateResult>,
+  pr: { prUrl: string; prNumber: number },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<string | undefined> {
+  const live = await readLiveState(pr.prUrl);
+  if (!live.ok) {
+    log("sweep.fix.indeterminate", { pr_number: pr.prNumber });
+    return undefined;
+  }
+  const reason = terminalStateReason(live.state);
+  if (reason) {
+    log("sweep.fix.not_open", { pr_number: pr.prNumber, state: live.state, reason });
+  }
+  return reason;
+}
+
+/**
+ * W1-T177 SITE (iv): the real live-state reader `rmd drain`/`rmd daemon` wire
+ * for `nextRunnable`'s in-flight guard — CONFIRMS a candidate in-flight PR
+ * number with a fresh `gh pr view` read, never the `lastProj` snapshot
+ * `isOpenPr` itself answers from. `undefined` on a failed/indeterminate read
+ * — nextRunnable's own contract treats that as "still in-flight, skip it"
+ * (fail-open toward the pre-existing skip, never toward a false dispatch).
+ */
+function ghLiveStateByNumber(owner: string, repo: string, prNumber: number): string | undefined {
+  try {
+    const v = ghJson(["pr", "view", String(prNumber), "--repo", `${owner}/${repo}`, "--json", "state"]) as {
+      state?: string;
+    };
+    return v?.state;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -1065,6 +1177,20 @@ export async function runFixRung(opts: {
       log: (step: string, extra?: Record<string, unknown>) => void,
     ) => Promise<"green" | "red" | "timeout">;
     /**
+     * W1-T177 (TERMINAL-STATE CHECK AT EVERY SPENDING SITE): an OPTIONAL fresh
+     * re-read of THIS PR's live GitHub state, consulted at the top of every
+     * round — BEFORE `strikes++`, the only point that stops a strike being
+     * spent on a PR that went terminal since the previous round — and again
+     * immediately before the exhaustion escalate() call, so a PR that went
+     * terminal mid-rung never files a BLOCKED "fix rung exhausted" issue.
+     * Never the sweep/drain snapshot the caller may itself hold — a fresh
+     * `gh` read every time. Omitted, or a failed/indeterminate read
+     * (`ok:false`), behaves EXACTLY as before this check existed: the rung
+     * proceeds. Standing down fires ONLY on a positive, freshly-observed
+     * terminal reading (see {@link terminalStateReason}).
+     */
+    readLiveState?: (prUrl: string) => LiveStateResult | Promise<LiveStateResult>;
+    /**
      * W1-T138 (the #303/#305/#292/#315 fix): fetch the CURRENTLY failing
      * required check(s) + log tails for THIS pr, called whenever a strike's
      * push leaves CI non-green — refreshes the NEXT strike's ci-log evidence
@@ -1112,6 +1238,16 @@ export async function runFixRung(opts: {
   let currentCiFailures = opts.ciFailures;
 
   while (review.state !== "success" && strikes < opts.strikeCap) {
+    // W1-T177 SITE (i) — TERMINAL-STATE CHECK before `strikes++`: the ONLY
+    // point that stops a strike being SPENT on a PR that went terminal
+    // (merged/closed) since the previous round. Read FRESH every round —
+    // never the caller's snapshot.
+    const preStrikeStandDown = await fixRungStandDownReason(deps.readLiveState, opts.prUrl, "rung.strike", deps.log);
+    if (preStrikeStandDown) {
+      deps.log("fix.stood_down", { site: "rung.strike", strike: strikes + 1, reason: preStrikeStandDown });
+      deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown}`);
+      return { outcome: "stood_down", review, strikes, standDownReason: preStrikeStandDown };
+    }
     strikes++;
     const round: "resume" | "fresh" = strikes === 1 ? "resume" : "fresh";
     const unmet = review.criteria.filter((c) => !c.met);
@@ -1211,6 +1347,18 @@ export async function runFixRung(opts: {
     deps.log("fix.resolved", { strikes });
     deps.say(`fix rung: resolved after ${strikes} strike(s) — review now passes`);
     return { outcome: "fixed", review, strikes };
+  }
+
+  // W1-T177 SITE (ii) — TERMINAL-STATE CHECK immediately before the
+  // exhaustion escalate() below, so a PR that went terminal MID-RUNG (after
+  // the last round's strike-top check, before this escalate) never files a
+  // BLOCKED "fix rung exhausted" needs-human issue on a PR that no longer
+  // carries a live block.
+  const preEscalateStandDown = await fixRungStandDownReason(deps.readLiveState, opts.prUrl, "rung.exhaustion", deps.log);
+  if (preEscalateStandDown) {
+    deps.log("fix.stood_down", { site: "rung.exhaustion", strikes, reason: preEscalateStandDown });
+    deps.say(`fix rung: standing down before escalation — ${preEscalateStandDown}`);
+    return { outcome: "stood_down", review, strikes, standDownReason: preEscalateStandDown };
   }
 
   // Strikes exhausted — escalate (BLOCKED class, W1-T8) rather than loop
@@ -2190,6 +2338,9 @@ async function runTask(
           log: (s, extra) => log(s, extra),
           say,
           account,
+          // W1-T177: the SAME live-state reader every fix-rung call site
+          // wires — a fresh `gh pr view` read, never this run's own snapshot.
+          readLiveState: ghLiveState,
         },
       });
       review = rung.review;
@@ -2203,6 +2354,22 @@ async function runTask(
           billing_mode: "subscription",
         });
         say(`verdict: blocked — fix rung exhausted (${rung.strikes} strike(s)), escalated: ${rung.issueUrl}`);
+        return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
+      }
+      if (rung.outcome === "stood_down") {
+        // W1-T177: this run's own PR went terminal (merged/closed) mid-rung —
+        // stand down rather than spend another strike or escalate. Reuses the
+        // existing "blocked" verdict (never a spend, never a bypass) so the
+        // drain's stop-on-block invariant still holds; the ledger line above
+        // names the SITE and the STATE, not just "blocked".
+        log("verdict", {
+          verdict: "blocked",
+          pr_url: prUrl,
+          reason: `stood down — ${rung.standDownReason}`,
+          cost_usd: costUsd,
+          billing_mode: "subscription",
+        });
+        say(`verdict: blocked — stood down (${rung.standDownReason}): ${prUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
       }
     }
@@ -3102,6 +3269,9 @@ async function drainCommand(
       {
         refreshMerged,
         isOpenPr,
+        // W1-T177: a fresh `gh pr view` re-read, consulted only when isOpenPr
+        // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
+        readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(owner, repo, prNumber),
         isIndeterminate,
         // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
         // ledger every call — persists across drain/daemon process restarts,
@@ -3333,6 +3503,9 @@ async function daemonCommand(rest: string[]): Promise<number> {
       {
         refreshMerged,
         isOpenPr,
+        // W1-T177: a fresh `gh pr view` re-read, consulted only when isOpenPr
+        // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
+        readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
         isIndeterminate,
         // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
         // ledger every call — persists across daemon restarts, unlike this
@@ -3812,7 +3985,7 @@ function buildSweepEffects(
   plan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
-): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate"> {
+): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = ghIssueGateway(owner, repo);
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
@@ -3873,10 +4046,21 @@ function buildSweepEffects(
       }
       let worktreePath = "";
       try {
+        // W1-T177 SITE (v): an INDEPENDENT fresh live-state read, via the
+        // SAME `readLiveState`/`ghLiveState` fail-open contract every other
+        // spending site uses (see {@link dispatchFixPreflightStandDown}) —
+        // BEFORE any worktree/git side effect (fetch/add/checkout) ever
+        // touches this PR. A failed/indeterminate read is ledgered and never
+        // stands the dispatch down; only a positive terminal reading does.
+        const preflightStandDown = await dispatchFixPreflightStandDown(ghLiveState, pr, log);
+        if (preflightStandDown) return;
+
         // Creditability is load-bearing (status.ts ownsBranch): a fix must amend
         // THIS task's own run-branch (run-<id>-<epochMs>), never a foreign/fix-*
         // head — a fix on an uncreditable head loops forever + strands dependents.
-        const headRef = ghJson(["pr", "view", pr.prUrl, "--json", "headRefName"]) as { headRefName?: string };
+        const headRef = ghJson(["pr", "view", pr.prUrl, "--json", "headRefName"]) as {
+          headRefName?: string;
+        };
         const realBranch = headRef.headRefName;
         if (!realBranch || !new RegExp(`^run-${task.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d+$`).test(realBranch)) {
           log("sweep.fix.uncreditable_head", { pr_number: pr.prNumber, head: realBranch });
@@ -3993,6 +4177,10 @@ function buildSweepEffects(
             log: (s, extra) => log(s, { task_id: task.id, ...extra }),
             say,
             account: (r) => r, // sweep meters nothing extra; the ledger carries per-spawn cost
+            // W1-T177: the SAME live-state reader every fix-rung call site
+            // wires — a fresh `gh pr view` read, never the sweep's `openPrs`
+            // snapshot this dispatch was selected from.
+            readLiveState: ghLiveState,
           },
         });
       } catch (e) {
@@ -4007,6 +4195,11 @@ function buildSweepEffects(
         }
       }
     },
+
+    // W1-T177 SITE (iii): consulted by `runSweep` immediately before a
+    // blocked-fixable disposition actually spends a fix-rung strike — see
+    // `SweepDeps.readLiveState`'s own doc for the fail-open contract.
+    readLiveState: (pr) => ghLiveState(pr.prUrl),
   };
 }
 
@@ -4131,8 +4324,12 @@ export async function routeFix(
   deps: FixDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<{ outcome: FixOutcome; reason: string }> {
-  if (prState !== "OPEN") {
-    return { outcome: "refused", reason: `state is ${prState ?? "UNKNOWN"} (only an OPEN PR carries a live block)` };
+  // W1-T177: the SAME extracted predicate every automated spending site now
+  // calls (never a second, independently-hardcoded copy of this condition —
+  // that drift is exactly how the #388/#398 fixture happened).
+  const terminal = terminalStateReason(prState);
+  if (terminal) {
+    return { outcome: "refused", reason: terminal };
   }
   const { disposition, reason } = deriveDisposition(pr, policy);
   if (disposition === "blocked-fixable") {
