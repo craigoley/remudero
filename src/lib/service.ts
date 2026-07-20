@@ -133,6 +133,26 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+/**
+ * CORS (W3-T3 fix-round finding): every browser/webview client that sets an `authorization`
+ * header — i.e. every real client this surface has, since bearer auth is the whole scope
+ * model — is sending a "non-simple" cross-origin request, which the browser preflights with
+ * an unauthenticated `OPTIONS` request before it will even attempt the real one. Node's own
+ * `fetch` (what every existing test here drives) does not enforce or emulate CORS at all, so
+ * this gap was invisible to the suite until a real WebKit webview (the W3-T3 Tauri shell)
+ * hit it: the preflight got this surface's ordinary 404-unknown-path handling, the browser
+ * aborted before ever sending the GET, and the client saw an opaque `TypeError: Load failed`
+ * with nothing in this server's own logs to explain why. `Access-Control-Allow-Origin: *` is
+ * safe here specifically BECAUSE auth is an explicit bearer header, never an ambient
+ * credential (cookie/session) a wildcard origin could get a browser to attach on a victim's
+ * behalf — the one CORS footgun a wildcard actually enables never applies to this scheme.
+ */
+const CORS_HEADERS: Readonly<Record<string, string>> = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+  "access-control-allow-headers": "authorization, content-type",
+};
+
 function openSse(req: IncomingMessage, res: ServerResponse, route: SseRoute, path: string, log: NonNullable<ServiceOptions["log"]>): void {
   res.writeHead(200, {
     "content-type": "text/event-stream",
@@ -166,8 +186,23 @@ export function createService(opts: ServiceOptions): Server {
   const log = opts.log ?? (() => {});
 
   return createServer((req, res) => {
+    // Applied via setHeader (not writeHead) so it survives whichever writeHead call a route
+    // handler / sendJson / openSse makes downstream — none of them name these headers, so
+    // Node keeps what was already set. Every response this server ever sends carries them,
+    // including 401/403/404/500 — a browser needs the header to even read an ERROR body.
+    for (const [name, value] of Object.entries(CORS_HEADERS)) res.setHeader(name, value);
+
+    const rawMethod = (req.method ?? "GET").toUpperCase();
+    if (rawMethod === "OPTIONS") {
+      // The CORS preflight itself: unauthenticated by spec (browsers strip `authorization`
+      // from the preflight request), so this never reaches the token check below — a 204 with
+      // the headers already set above is the entire contract.
+      res.writeHead(204).end();
+      return;
+    }
+    const method = rawMethod as Method;
+
     void (async () => {
-      const method = (req.method ?? "GET").toUpperCase() as Method;
       const path = new URL(req.url ?? "/", "http://localhost").pathname;
 
       const sseRoute = method === "GET" ? sseRoutes.find((r) => r.path === path) : undefined;

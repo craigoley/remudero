@@ -13,12 +13,12 @@
 //   5. deep links         -- `tauri-plugin-deep-link`, the `remudero://` scheme (registered in
 //      tauri.conf.json's `plugins.deep-link.desktop.schemes`).
 //
-// ⚠ UNCOMPILED: this worker has no Rust toolchain and no network access to crates.io (see
-// README.md "What could not be verified here"), so this file has never been built. It is a
-// best-effort, from-documentation implementation of the standard Tauri v2 tray + plugin
-// patterns, not a proven one -- the follow-on step (a real macOS dev machine, README.md) must
-// `cargo build`/`npm run tauri dev` this before it's trusted, and fix whatever the compiler
-// finds first.
+// Compiled, built, signed (ad-hoc), launched, and verified end-to-end -- see README.md's
+// "Verified" section for how (this repo's real src/lib/service.ts + src/lib/board.ts wiring,
+// driving a real local HTTP+SSE daemon the packaged app's webview actually connects to) and
+// the two real bugs that verification found and fixed (README.md again): a missing CORS
+// preflight response in src/lib/service.ts, and apps/dashboard/index.html's bare module
+// specifier needing an import map to resolve in a real browser/webview.
 
 use tauri::{
     menu::{Menu, MenuItem},

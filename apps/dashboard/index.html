@@ -10,12 +10,30 @@
   "browser" half of shell 0) is explicit follow-on work, same as the other five design
   panels this v0 slice defers -- see this task's PR body. Until then, open this file against
   a `tsc`-built `main.js` next to it, pointed at a reachable daemon via `?daemon=<url>`.
+
+  IMPORT MAP (W3-T3 fix round finding): main.js's compiled output keeps main.ts's bare module
+  specifier `@remudero/api-client/client` verbatim -- Node resolves that against node_modules,
+  but a real browser/webview's native ES module loader has no such resolution and throws
+  ("does not resolve to a valid URL"), so the page never rendered past "Loading…" in ANY real
+  browser -- invisible until the W3-T3 Tauri shell actually loaded this page in a real WebKit
+  webview (every prior check either drove main.ts's exported functions directly in Node, or
+  never executed this file as a browser would). This import map is the fix, not a bundler: it
+  still ships tsc's plain, unbundled output, just tells the browser's own resolver where
+  `@remudero/api-client/client` lives -- `./api-client.js`, a **sibling file** every server of
+  this page must place next to `index.html`/`main.js` (this repo's own copy:
+  `dist/packages/api-client/src/client.js`, which -- see that file -- has zero runtime imports
+  of its own, so no further resolution is needed). apps/shell-macos's
+  scripts/sync-web-build.mjs does this for the Tauri shell; wiring the daemon's static serving
+  (shell 0's own follow-on work, above) must do the same when it lands.
 -->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <title>Remudero — Dashboard v0</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script type="importmap">
+      { "imports": { "@remudero/api-client/client": "./api-client.js" } }
+    </script>
   </head>
   <body>
     <h1>Remudero — task board (read-only)</h1>

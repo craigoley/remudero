@@ -173,6 +173,37 @@ test("service surface: an unknown path -> 404, even with a valid token", async (
   });
 });
 
+// W3-T3 fix round: a real WKWebView (the Tauri shell) sending the `authorization` header
+// triggers a browser CORS preflight (`OPTIONS`) before the actual request -- Node's own
+// `fetch`, what every OTHER test in this file drives, never emulates that, so this whole
+// class was invisible until a real browser-family client (WebKit) hit it. These two tests
+// drive the preflight and the real-response headers directly, over HTTP, the same discipline
+// as every other assertion in this file.
+test("service surface: an OPTIONS preflight succeeds with CORS headers, UNAUTHENTICATED (no bearer token needed)", async () => {
+  await withService(async (base) => {
+    const res = await fetch(`${base}/state`, { method: "OPTIONS" });
+    assert.equal(res.status, 204);
+    assert.equal(res.headers.get("access-control-allow-origin"), "*");
+    assert.match(res.headers.get("access-control-allow-methods") ?? "", /GET/);
+    assert.match(res.headers.get("access-control-allow-headers") ?? "", /authorization/);
+  });
+});
+
+test("service surface: every real response carries Access-Control-Allow-Origin -- success AND error paths, so a browser can read them", async () => {
+  await withService(async (base) => {
+    const ok = await fetch(`${base}/state`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    assert.equal(ok.headers.get("access-control-allow-origin"), "*");
+
+    const unauthorized = await fetch(`${base}/state`);
+    assert.equal(unauthorized.status, 401);
+    assert.equal(unauthorized.headers.get("access-control-allow-origin"), "*");
+
+    const notFound = await fetch(`${base}/nope`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    assert.equal(notFound.status, 404);
+    assert.equal(notFound.headers.get("access-control-allow-origin"), "*");
+  });
+});
+
 test("service surface: a handler that throws -> 500, never crashes the server", async () => {
   await withService(async (base, svc) => {
     // register a throwing route on a FRESH service instance sharing the same tokens,

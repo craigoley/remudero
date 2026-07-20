@@ -17,7 +17,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 # Menu-bar presence's four native affordances (MASTER-PLAN §7 design bullet for shell 1):
 # launch-at-login, native notifications, a global hotkey, and deep links. The tray icon + menu
 # itself (also "menu-bar presence") is built from core `tauri::tray` in src/lib.rs, no plugin
