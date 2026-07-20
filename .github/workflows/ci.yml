@@ -100,6 +100,8 @@ jobs:
           node-version-file: .nvmrc
       - name: Install (clean, from lockfile)
         run: npm ci
+      - name: Install Playwright's Chromium (same requirement as the ci job — W1-T153's shell a11y/responsive tests launch a real headless browser; this job runs the same test/**/*.test.ts glob under coverage, so it needs it too)
+        run: npx playwright install --with-deps chromium
       - name: Test with coverage (lcov, src/** only — test/** excluded from the ratio)
         run: |
           mkdir -p coverage
