@@ -1,0 +1,57 @@
+- id: W1-T231
+  title: "the review prompt still tells the worker to POST the status the deny-floor now refuses - prompt and enforcement disagree"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "W1-T203 closed the forge surface at the ENFORCEMENT layer and left the INSTRUCTION untouched.
+    buildReviewPrompt still hands every review worker a literal command to post the gating status
+    (src/lib/review.ts:1406-1408, verified on main at a18fdeb):
+      gh api -X POST repos/<owner>/<repo>/statuses/<headSha> -f context=<ctx> -f state=<state> ...
+    and hooks/deny-floor.sh:60-61 then refuses exactly that call, exiting 2 to block the tool use.
+    SO THE SYSTEM ASKS A WORKER TO DO SOMETHING AND THEN STOPS IT. That is not merely untidy. A worker
+    following its instructions burns a turn on a refused call and reads a denial it was never warned about,
+    and any worker NOT spawned under the hook - a different harness, a future runner, a hand invocation -
+    restores the forge surface by doing exactly what the prompt told it to do. The prompt is a second,
+    contradictory source of truth about who may post the merge gate.
+    THE PRECONDITION IS VERIFIED, so removing the instruction breaks nothing. The judge is the authoritative
+    poster (run-task.ts:796-797), the reviewer's semantic outcome travels by REPORT through
+    reviewerOutcome({attempted, subtype, spawnError}) (run-task.ts:790-794), and the floor's proof execution
+    is wired to the PR head so the gate observes repo state whether or not the reviewer ever completed
+    (run-task.ts:799-801). No leg depends on the worker's POST succeeding.
+    ENFORCEMENT PLACEMENT BEATS RULE EXISTENCE - and its converse holds too: an instruction that contradicts
+    enforcement is a rule that will eventually be followed somewhere the enforcement is not."
+  design: |
+    buildReviewPrompt EMITS NO STATUSES-POST INSTRUCTION. Delete the `post` helper and its uses from the
+    rendered prompt. The worker reports its outcome and the orchestrator remains the sole poster.
+    TELL THE WORKER WHAT TO DO INSTEAD, EXPLICITLY. A reviewer that is no longer asked to post needs to know
+    how its verdict reaches the gate - otherwise the prompt is merely quieter, not clearer, and a capable
+    worker may reach for `gh` anyway. State that the orchestrator posts, and that the worker's job ends at
+    reporting.
+    LEAVE THE DENY-FLOOR RULE IN PLACE. This is defence in depth, not a replacement. The hook stays because a
+    prompt is guidance and a hook is enforcement, and W1-T203 exists because guidance is not a gate.
+    KEEP THE ORCHESTRATOR'S OWN POST PATH UNTOUCHED. postReviewStatus is not the target and must keep working;
+    the change is confined to prompt TEXT.
+  acceptance:
+    - claim: "the rendered review prompt contains no statuses POST instruction"
+      proof: "unit test on buildReviewPrompt output"
+    - claim: "the orchestrator's own postReviewStatus path is unchanged and still posts the verdict"
+      proof: "unit test on buildReviewPrompt output"
+  risk: low
+  origin: architect
+  plan_refs: ["§4A", "§5C"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21, last of the post-W1-T203 set. Precondition verified from source rather than assumed:
+    the judge's verdict travels by report and no leg depends on the worker POST, so the instruction can be
+    removed without changing any behaviour the gate relies on.
+    THIS IS THE INSTRUCTION HALF of sole-poster. W1-T203 delivered the ability half - the deny-floor refusal
+    and the arm-time creator.login check. Until both land, the honest description of the system is
+    ability-level only, because the prompt still asks for the forbidden thing.
+    NOTE FOR WHOEVER SEQUENCES THIS: W1-T203's arm-time provenance check is currently INERT in production - it
+    is wrapped in a trustedLogin guard reading REMUDERO_REVIEWER_LOGIN, which is unset on this host. That is a
+    configuration gap, not this task's scope, but it means the deny-floor is presently the only live half of
+    sole-poster."
