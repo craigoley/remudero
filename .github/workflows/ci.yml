@@ -102,10 +102,18 @@ jobs:
         run: npm ci
       - name: Install Playwright's Chromium (same requirement as the ci job — W1-T153's shell a11y/responsive tests launch a real headless browser; this job runs the same test/**/*.test.ts glob under coverage, so it needs it too)
         run: npx playwright install --with-deps chromium
-      - name: Test with coverage (lcov, src/** only — test/** excluded from the ratio)
+      - name: Test with coverage (spec output to the CI log, lcov to a file — src/** only, test/** excluded from the ratio)
+        # W1-T220 defect 1: this step used to run with ONLY --test-reporter=lcov, whose destination
+        # is a file, so a failing run's CI log carried zero test output -- just
+        # "Process completed with exit code 1", naming no failing test and no coverage delta. Node's
+        # test runner accepts multiple reporter/destination pairs, so a human-readable `spec` reporter
+        # to stdout runs alongside the existing `lcov` pair; this leaves the lcov artifact the ratchet
+        # step consumes byte-for-byte unchanged (same flag, same destination), it only adds a second,
+        # human-legible reporter the CI log actually shows.
         run: |
           mkdir -p coverage
           node --experimental-test-coverage --test-coverage-exclude="test/**" \
+            --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
             --test --import tsx "test/**/*.test.ts"
       - name: Coverage ratchet (blocks a coverage-lowering PR)
