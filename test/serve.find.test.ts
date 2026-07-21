@@ -140,7 +140,15 @@ before(async () => {
   browser = await chromium.launch({ args: ["--no-sandbox"] });
 });
 after(async () => {
-  await browser.close();
+  // W1-T178 (round 2): `after` runs even when `--test-name-pattern` (the
+  // review floor's own `unit test: <name>` dialect, review.ts's
+  // parseTestTarget) matched none of THIS file's tests -- `before` above is
+  // then skipped, so `browser` was never assigned, and an unconditional
+  // `browser.close()` throws (hookFailed), turning the WHOLE glob's process
+  // exit code nonzero and (pre-fix, review.ts's nameFilteredOutcome) risking
+  // every OTHER criterion's name-filtered proof in the same review being
+  // misread as failed by collateral noise from a file it never touched.
+  if (browser) await browser.close();
 });
 
 async function openShell(base: string, token: string = READ_TOKEN): Promise<Page> {

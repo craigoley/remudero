@@ -145,12 +145,14 @@ import { assertProvenance, citation } from "./lib/provenance.js";
 import { loadPlanIndex, renderPlanIndex } from "./lib/plan-index.js";
 import {
   REVIEW_CONTEXT,
+  applyVerdictStability,
   buildReviewPrompt,
   floorDegradedAnnotation,
   judgeReview,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
   postReviewStatus,
+  priorReviewVerdictFromLedger,
   reviewerOutcome,
   reviewerVerdictContract,
   type CriterionVerdict,
@@ -618,6 +620,15 @@ async function runReview(args: {
    * behavior (used by `rmd review`'s manual-PR path, which has no checkout).
    */
   headCheckoutDir?: string;
+  /**
+   * W1-T178 (verdict stability): the run's ledger path, so a semantic-lane
+   * downgrade on an UNCHANGED head sha whose deterministic floor still passes
+   * can be suppressed against the most recent `review.posted` verdict for this
+   * task — see {@link applyVerdictStability}. Every real caller passes it;
+   * absent ⇒ no prior to compare against, so the rule never fires (identical to
+   * pre-W1-T178 behavior) rather than crashing.
+   */
+  ledgerPath?: string;
 }): Promise<ReviewVerdict & { headSha: string; reviewerOutcome: string }> {
   const { owner, repo, prUrl, task, report, log, say } = args;
   const view = ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string };
@@ -695,7 +706,32 @@ async function runReview(args: {
   // execution to the PR HEAD (never the operator's working checkout) — so the
   // gate observes repo state whether or not the advisory reviewer above ever
   // completed.
-  const verdict = judgeReview(criteria, { diff, report, semantic, headCheckoutDir: args.headCheckoutDir });
+  const computed = judgeReview(criteria, { diff, report, semantic, headCheckoutDir: args.headCheckoutDir });
+
+  // W1-T178 (verdict stability): a re-review of an UNCHANGED head sha whose
+  // deterministic floor still passes may not render a verdict WORSE than its
+  // predecessor — see applyVerdictStability's doc comment (lib/review.ts) for
+  // the #388 fixture this fixes and why it is asymmetric (downgrades only).
+  const prior = args.ledgerPath
+    ? priorReviewVerdictFromLedger(readLedgerLines(args.ledgerPath), task.id)
+    : undefined;
+  const { verdict, suppressed } = applyVerdictStability(computed, headSha, prior);
+  if (suppressed) {
+    // VISIBLE, not silently swallowed: names the sha + both verdicts + the
+    // floor result a suppression relied on, distinct from the review.posted
+    // line below (which now carries the SUCCESS actually posted).
+    log("review.downgrade_suppressed", {
+      head_sha: headSha,
+      predecessor_state: prior!.state,
+      suppressed_state: computed.state,
+      floor_state: computed.floorState,
+    });
+    say(
+      `remudero-review: semantic downgrade SUPPRESSED on unchanged head ${headSha.slice(0, 7)} — ` +
+        `deterministic floor still passes; prior verdict (success) stands (verdict-stability, W1-T178)`,
+    );
+  }
+
   postReviewStatus({ owner, repo, sha: headSha, state: verdict.state, description: verdict.summary });
   const unmet = verdict.criteria.filter((c) => !c.met);
   const unmetClaims = unmet.map((c) => c.claim);
@@ -725,6 +761,11 @@ async function runReview(args: {
     // was WRITTEN to be runnable (house dialect). NO blocking-behavior change:
     // `state` above is exactly what it always was.
     floor_degraded: verdict.floorDegraded,
+    // W1-T178: the deterministic anchor `state` was checked against, and
+    // whether this line's `state` is a suppressed downgrade rather than a
+    // review that genuinely passed — always present, never inferred.
+    floor_state: computed.floorState,
+    downgrade_suppressed: suppressed,
   });
   if (verdict.floorDegraded) {
     say(floorDegradedAnnotation(proofExec.length));
@@ -1335,6 +1376,7 @@ export async function runFixRung(opts: {
       account: deps.account,
       reviewerMount: opts.reviewBase.reviewerMount,
       headCheckoutDir: opts.reviewBase.headCheckoutDir,
+      ledgerPath: deps.ledgerPath,
     });
     // W1-T100: a real review verdict now exists for THIS head — the CURRENT
     // strike stays review-mode from here. W1-T138: this can still flip back
@@ -2290,6 +2332,7 @@ async function runTask(
       // that follows never mutates it). NEVER the operator's working checkout —
       // the deterministic floor observes THIS run's repo state, not report prose.
       headCheckoutDir: worktreePath,
+      ledgerPath,
     });
 
     // ── THE blocked_review FIX RUNG (W1-T76, absorbs P21; §3's fixing state).
@@ -2532,6 +2575,7 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
     // concern; until then this path stays keyword-floor-only (proof_exec is
     // not_executable throughout), exactly its pre-W1-T65 behavior — never a
     // regression, just not yet the observed floor.
+    ledgerPath,
   });
   console.log(
     `\nremudero-review=${verdict.state} posted to ${view.url} (head ${verdict.headSha.slice(0, 7)})`,

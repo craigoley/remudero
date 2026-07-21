@@ -62,6 +62,17 @@ export interface CriterionVerdict {
   /** See {@link ProofExecOutcome}. Always present — `not_executable` is the safe
    * default when the proof is prose, or no PR-head checkout was supplied. */
   proof_exec: ProofExecOutcome;
+  /**
+   * W1-T178 (verdict stability): `met` as computed by the mechanical/executed
+   * floor, BEFORE any semantic downgrade is applied — the DETERMINISTIC part of
+   * this criterion's verdict. Equal to `met` whenever semantic review didn't
+   * force a downgrade. Populated by {@link judgeCriterion}; optional so every
+   * OTHER `CriterionVerdict` literal in the codebase (ledger-reconstructed
+   * placeholders in run-task.ts/sweep.ts, which never carry a semantic layer to
+   * begin with) needs no update — {@link applyVerdictStability} falls back to
+   * `met` when it is absent.
+   */
+  floorMet?: boolean;
 }
 
 /** The evidence the JUDGE reads: the PR diff, the implement REPORT, optional LLM verdicts. */
@@ -117,6 +128,20 @@ export interface ReviewVerdict {
    * the operator's doctrine call, explicitly out of scope here.
    */
   floorDegraded: boolean;
+  /**
+   * W1-T178 (verdict stability): the rolled-up `state` as if NO semantic verdict
+   * had been supplied at all — every criterion judged on `floorMet` (falling
+   * back to `met` where `floorMet` is absent) plus the same `testTheater`/empty-
+   * criteria rules `state` itself uses. This is the DETERMINISTIC anchor
+   * {@link applyVerdictStability} consults: a semantic-only downgrade (this
+   * failing while `floorState` still passes) is noise a re-review of an
+   * unchanged, previously-PASSING head may not act on alone. Optional so every
+   * other `ReviewVerdict` literal in the codebase (the fix rung's ledger-
+   * reconstructed seed verdicts, run-task.ts) needs no update; only
+   * {@link judgeReview} populates it, which is the only producer
+   * `applyVerdictStability` is ever fed.
+   */
+  floorState?: ReviewState;
 }
 
 // ── Tokenisation (deterministic, dependency-free) ──────────────────────────
@@ -493,6 +518,23 @@ function ensureDeps(cwd: string): void {
  * all (a timeout kill, a spawn error like the command itself missing) so the
  * caller surfaces `exec_error` — a timeout must never be misjudged as an
  * observed "fail".
+ *
+ * NAME-FILTERED PROOFS ARE THE ONE EXCEPTION to "the exit code is the verdict"
+ * (W1-T178, round 2): a bare TEST NAME compiles to `--test-name-pattern` over
+ * the WHOLE suite glob (`test/**\/*.test.ts`, {@link TEST_GLOB}), so the exit
+ * code reflects EVERY file in that glob, not just the one named test a
+ * criterion cares about. FIXTURE, hit live implementing this very task:
+ * `test/serve.find.test.ts` runs its file-scope `after` (`browser.close()`)
+ * even on a pattern that matched none of ITS tests — `before` is skipped, so
+ * `browser` is never assigned and `after` throws — which turns the ENTIRE
+ * glob's exit code nonzero. On the old "any nonzero exit ⇒ fail" rule that
+ * silently failed every OTHER criterion's name-filtered proof in the SAME
+ * review, even though the test each of them actually named had passed —
+ * observably, all four of this task's own falsifier tests. So for a
+ * name-filtered proof, the verdict is read from {@link nameFilteredOutcome}
+ * parsing the TAP stream for the matched test's OWN result line, never from
+ * the process exit code — on both the success path and a thrown
+ * nonzero-exit's attached stdout.
  */
 export function execWhitelistedProof(
   whitelisted: WhitelistedProof,
@@ -507,27 +549,60 @@ export function execWhitelistedProof(
       timeout: timeoutMs,
       encoding: "utf8",
     });
-    // W1-T72 GUARD: `--test-name-pattern` with ZERO matches still exits 0 (every
-    // file's own wrapper "passes" trivially even though nothing named ran) — a
-    // named test that does not exist on the PR head must be FAIL, never a
-    // silent pass (see {@link WhitelistedProof.nameFiltered}).
-    if (whitelisted.nameFiltered && !testNameMatched(stdout)) return "fail";
+    if (whitelisted.nameFiltered) return nameFilteredOutcome(stdout);
     return "pass";
   } catch (e) {
-    const err = e as NodeJS.ErrnoException & { status?: number | null };
-    if (typeof err.status === "number") return "fail"; // ran to a clean nonzero exit
-    throw err; // killed by signal (timeout) / spawn error (ENOENT, …) ⇒ exec_error
+    const err = e as NodeJS.ErrnoException & { status?: number | null; stdout?: string | Buffer | null };
+    if (typeof err.status !== "number") throw err; // killed by signal (timeout) / spawn error (ENOENT, …) ⇒ exec_error
+    // A clean nonzero exit. For a name-filtered proof this does NOT necessarily
+    // mean OUR named test failed (see the doc comment above) — read the TAP
+    // stream node still attaches to the error rather than trusting the code.
+    if (whitelisted.nameFiltered) {
+      const stdout = typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? "");
+      return nameFilteredOutcome(stdout);
+    }
+    return "fail"; // a single-file/grep proof's own nonzero exit is a genuine fail
   }
 }
 
+/** A file's own trivial TAP wrapper line (`ok N - test/foo.test.ts`) reporting
+ * itself when NONE of its internal tests matched `--test-name-pattern` — not a
+ * real match, whichever way it reports. */
+function isFileWrapperResultName(name: string): boolean {
+  return /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(name.trim());
+}
+
+/** `(not )?ok <n> - <name>` — a node TAP result line, possibly indented for a
+ * nested subtest. Captures the pass/fail marker and the reported name. */
+const TAP_RESULT_LINE_RE = /^\s*(ok|not ok) \d+ - (.+?)\s*$/;
+
 /**
- * True when node's TAP stream shows at least one subtest whose name is NOT
- * itself a bare test-FILE path — i.e. `--test-name-pattern` matched a real
- * named test somewhere in the suite, as opposed to every file trivially
- * reporting its own wrapper as "ok" with zero internal matches.
+ * Read a name-filtered `--test-name-pattern` run's TAP stdout for the verdict
+ * of the REAL (non-file-wrapper) subtest(s) it actually matched, independent
+ * of the overall process exit code (see {@link execWhitelistedProof}'s doc
+ * comment for why the exit code alone is not trustworthy here).
+ *   - zero real matches ⇒ "fail" (W1-T72 guard: a named test that does not
+ *     exist on the PR head is unmet, never a silent pass via the trivial
+ *     "0 children ⇒ ok" wrapper every non-matching file reports).
+ *   - at least one real match, none reporting `not ok` ⇒ "pass".
+ *   - at least one real match reporting `not ok` ⇒ "fail" — the named test
+ *     genuinely failed, not merely swept up in unrelated collateral noise.
+ * Collateral `not ok`/hookFailed lines from files the pattern never matched
+ * (their names ARE file-wrapper names) are ignored entirely — they are not
+ * evidence about the ONE test this proof named.
  */
-function testNameMatched(stdout: string): boolean {
-  return /^# Subtest: (?!.*\.(?:test|spec)\.[cm]?[jt]sx?\s*$).+$/m.test(stdout);
+export function nameFilteredOutcome(stdout: string): "pass" | "fail" {
+  let matched = false;
+  let anyRealFailure = false;
+  for (const line of stdout.split("\n")) {
+    const m = TAP_RESULT_LINE_RE.exec(line);
+    if (!m) continue;
+    if (isFileWrapperResultName(m[2])) continue; // a file's own trivial wrapper, not a real match
+    matched = true;
+    if (m[1] === "not ok") anyRealFailure = true;
+  }
+  if (!matched) return "fail";
+  return anyRealFailure ? "fail" : "pass";
 }
 
 // ── The pure JUDGE ─────────────────────────────────────────────────────────
@@ -612,6 +687,11 @@ export function judgeCriterion(
     }
   }
 
+  // W1-T178 (verdict stability): capture the DETERMINISTIC floor's own verdict
+  // — mechanical keyword coverage, overridden by whitelisted execution where
+  // applicable — BEFORE the semantic layer below gets a chance to downgrade it.
+  const floorMet = met;
+
   // Semantic can only DOWNGRADE: an explicit `false` fails the criterion even if
   // it was mechanically substantiated (or executed-pass); it can never rescue an
   // unpasted / executed-fail proof.
@@ -620,7 +700,7 @@ export function judgeCriterion(
     reason = "reviewer judged the proof non-responsive (semantic downgrade)";
   }
 
-  return { ...base, met, reason, proof_exec: proofExec };
+  return { ...base, met, reason, proof_exec: proofExec, floorMet };
 }
 
 /**
@@ -651,8 +731,17 @@ export function judgeReview(
     noCriteria || unmet.length > 0 || testTheater ? "failure" : "success";
   const summary =
     state === "success"
-      ? `remudero-review: PASS — ${verdicts.length} criteria substantiated, no test theater`
+      ? passSummary(verdicts.length)
       : failSummary(unmet.map((v) => v.claim), testTheater, noCriteria);
+
+  // W1-T178 (verdict stability): the SAME rollup, but ignoring semantic entirely
+  // — every criterion judged on its `floorMet` (mechanical/executed, pre-
+  // downgrade). `testTheater`/`noCriteria` are structural (diff-derived), never
+  // semantic, so they bind the floor exactly as they bind `state`. This is the
+  // anchor a re-review of an unchanged head checks before trusting a downgrade.
+  const floorUnmet = verdicts.filter((v) => !(v.floorMet ?? v.met));
+  const floorState: ReviewState =
+    noCriteria || floorUnmet.length > 0 || testTheater ? "failure" : "success";
 
   // W1-T72 (W1-T65 follow-up, legibility): nothing was OBSERVED on the PR head
   // anywhere in this review, yet at least one proof was WRITTEN to be runnable
@@ -666,7 +755,115 @@ export function judgeReview(
   const floorDegraded =
     executedCount === 0 && criteria.some((c) => !c.satisfied_by && isDialectPrefixed(c.proof));
 
-  return { state, criteria: verdicts, testTheater, summary, floorDegraded };
+  return { state, criteria: verdicts, testTheater, summary, floorDegraded, floorState };
+}
+
+/** The exact PASS status-description text, shared by {@link judgeReview} and a
+ * verdict-stability suppression ({@link applyVerdictStability}) so a suppressed
+ * downgrade posts a summary byte-identical to a review that passed outright —
+ * never a "success" state paired with failure-shaped prose. */
+function passSummary(criteriaCount: number): string {
+  return `remudero-review: PASS — ${criteriaCount} criteria substantiated, no test theater`;
+}
+
+// ── VERDICT STABILITY (W1-T178) ─────────────────────────────────────────────
+//
+// FIXTURE this fixes: PR #388 posted remudero-review=success at 20:28:27Z then
+// =failure at 20:30:47Z against the IDENTICAL head sha 1fbea36…, no new commit
+// in between. The second (wrong) verdict burned fix-rung strike 2 and drove
+// escalation #395 a second later — the flip was the PROXIMATE CAUSE of the
+// strike-out, not a cosmetic flap.
+//
+// RULE: a re-review of an UNCHANGED head sha whose deterministic FLOOR still
+// passes may not render a verdict WORSE than its predecessor. The semantic
+// lane's downgrade on that input is noise — nothing changed for it to have
+// newly observed. A legitimate downgrade always cites NEW INFORMATION: a
+// changed head sha, or the mechanical floor itself failing — either bypasses
+// this rule entirely and the computed verdict posts unmodified.
+//
+// ASYMMETRIC BY DESIGN — do not "fix" this into a general sha-pinned-verdict
+// rule; see W1-T102. Only a SUCCESS→failure transition on an unchanged sha is
+// suppressed. A failure→success transition (an UPGRADE) always posts as
+// computed, which is exactly the path W1-T102 opened for body-only fixes to be
+// recognised. Pinning symmetrically would re-create the #177 stale-status
+// exhaustion T102 fixed.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** The most recent `review.posted` verdict recovered from the ledger for a PR
+ * — {@link applyVerdictStability}'s `prior` argument. */
+export interface PriorReviewVerdict {
+  headSha: string;
+  state: ReviewState;
+}
+
+/** Result of applying the W1-T178 verdict-stability rule to a freshly computed verdict. */
+export interface VerdictStabilityResult {
+  /** The verdict to actually POST — identical to `computed` unless a downgrade was suppressed. */
+  verdict: ReviewVerdict;
+  /** True when a semantic-lane downgrade on unchanged input was suppressed this call. */
+  suppressed: boolean;
+}
+
+/**
+ * Recover the most recent `review.posted` verdict for `taskId` from ledger
+ * lines, "last one wins" — the SAME scanning idiom `unmetFromLedger`
+ * (run-task.ts) and every other precedence helper in this codebase already
+ * use, applied to the same `review.posted` line that carries `head_sha` +
+ * `state`. No new storage: the ledger already records every posted verdict.
+ */
+export function priorReviewVerdictFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+): PriorReviewVerdict | undefined {
+  let prior: PriorReviewVerdict | undefined;
+  for (const line of lines) {
+    if (line.step !== "review.posted" || line.task_id !== taskId) continue;
+    if (typeof line.head_sha !== "string") continue;
+    if (line.state !== "success" && line.state !== "failure") continue;
+    prior = { headSha: line.head_sha, state: line.state };
+  }
+  return prior;
+}
+
+/**
+ * Apply the W1-T178 verdict-stability rule (see block comment above) to a
+ * freshly `judgeReview`-computed verdict. Pure — the falsifier this exists to
+ * prove is a unit fixture, exactly like `judgeReview` itself.
+ */
+export function applyVerdictStability(
+  computed: ReviewVerdict,
+  headSha: string,
+  prior: PriorReviewVerdict | undefined,
+): VerdictStabilityResult {
+  const floorState = computed.floorState ?? computed.state; // no floor info ⇒ never suppress
+  const isUnchangedSemanticDowngrade =
+    prior !== undefined &&
+    prior.headSha === headSha &&
+    prior.state === "success" &&
+    computed.state === "failure" &&
+    floorState === "success";
+  if (!isUnchangedSemanticDowngrade) return { verdict: computed, suppressed: false };
+
+  // The floor passed ⇒ every criterion's floorMet is true; rebuild the criteria
+  // list off the floor result so the posted verdict stays internally consistent
+  // (a "success" state whose criteria all read met, not a success sitting next
+  // to a criteria array that still shows a semantic "unmet").
+  const criteria = computed.criteria.map((c) => {
+    const floorMet = c.floorMet ?? c.met;
+    return c.met === floorMet
+      ? c
+      : {
+          ...c,
+          met: floorMet,
+          reason:
+            `${c.reason} — semantic downgrade suppressed: deterministic floor still passes on ` +
+            `unchanged head ${headSha.slice(0, 7)} (verdict-stability, W1-T178)`,
+        };
+  });
+  return {
+    verdict: { ...computed, state: "success", criteria, summary: passSummary(criteria.length) },
+    suppressed: true,
+  };
 }
 
 /**

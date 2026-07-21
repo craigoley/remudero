@@ -62,6 +62,26 @@ test("buildDigest reads the ledger file and renders merged/blocked/escalations/c
   assert.match(text, /notional cost: \$3\.00/);
 });
 
+test("W1-T178: review.downgrade_suppressed lines are counted and surfaced in the rendered digest", () => {
+  const lines = [
+    ...LINES,
+    {
+      ts: "2026-07-14T10:10:00.000Z",
+      step: "review.downgrade_suppressed",
+      task_id: "W1-T3",
+      head_sha: "1fbea36",
+      predecessor_state: "success",
+      suppressed_state: "failure",
+      floor_state: "success",
+    },
+  ];
+  const s = summarize(lines, "2026-07-14T00:00:00.000Z");
+  assert.equal(s.verdictDowngradesSuppressed, 1);
+  const path = ledgerFile(lines);
+  const text = buildDigest(path, "2026-07-14T00:00:00.000Z");
+  assert.match(text, /verdict downgrades suppressed: 1/);
+});
+
 test("an empty window renders (none) rather than blank sections", () => {
   const path = ledgerFile(LINES);
   const text = buildDigest(path, "2027-01-01T00:00:00.000Z");

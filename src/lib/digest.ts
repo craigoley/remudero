@@ -40,13 +40,30 @@ export interface DigestSummary {
    * Same "latest wins" rule as `alerts`. Undefined when `rmd issues` never polled inside this window.
    */
   issues?: IssuesPollSummary;
+  /**
+   * W1-T178 (verdict stability): count of `review.downgrade_suppressed` ledger
+   * lines inside the window — a semantic-lane downgrade suppressed because the
+   * deterministic floor still passed on an unchanged head. This is the signal
+   * that tells whether the semantic lane is getting noisier or quieter over
+   * time; a suppression is never silent (see run-task.ts's `runReview`), but
+   * this is where the COUNT is visible without reading the raw ledger.
+   */
+  verdictDowngradesSuppressed: number;
 }
 
 /** Reduce the day's ledger lines to the counts a digest reports. Pure over its input. */
 export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary {
   const since = collectSince(lines, sinceIso);
-  const summary: DigestSummary = { sinceIso, merged: [], blocked: [], escalations: [], costUsd: 0 };
+  const summary: DigestSummary = {
+    sinceIso,
+    merged: [],
+    blocked: [],
+    escalations: [],
+    costUsd: 0,
+    verdictDowngradesSuppressed: 0,
+  };
   for (const l of since) {
+    if (l.step === "review.downgrade_suppressed") summary.verdictDowngradesSuppressed++;
     if (l.step === "verdict" && typeof l.task_id === "string") {
       if (l.verdict === "merged") {
         summary.merged.push(l.task_id);
@@ -81,6 +98,7 @@ export function renderDigest(s: DigestSummary): string {
     }`,
     `alerts: ${s.alerts ? renderAlertsSummary(s.alerts) : "(no poll this window)"}`,
     `issues reviewed: ${s.issues ? renderIssuesSummary(s.issues) : "(no poll this window)"}`,
+    `verdict downgrades suppressed: ${s.verdictDowngradesSuppressed}`,
     `notional cost: $${s.costUsd.toFixed(2)}`,
   ];
   return lines.join("\n");
