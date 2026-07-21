@@ -1,4 +1,4 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -134,4 +134,58 @@ export function withInflightLock<T>(
   } finally {
     handle.release();
   }
+}
+
+/** What one boot-time lock sweep removed and left alone. */
+export interface InflightSweepResult {
+  /** Task ids whose lock was removed because its holder pid is gone. */
+  reaped: string[];
+  /** Task ids whose lock was left because its holder is still alive. */
+  kept: string[];
+}
+
+/**
+ * REAP LOCKS WHOSE HOLDER IS GONE (recon R-35), once at daemon boot.
+ *
+ * This is an OBSERVABILITY fix, not a liveness one, and the distinction matters enough to state:
+ * {@link acquireInflightLock} ALREADY steals a dead holder's lock (it unlinks and re-creates on
+ * EEXIST when the pid is dead), so a stale lock has never blocked dispatch and this sweep does not
+ * unblock anything.
+ *
+ * What it fixes is that a stale lock is only ever cleared by the NEXT acquire of that same task —
+ * so a task that is never dispatched again never clears. A circuit-broken task is exactly that
+ * case, and its lock therefore lingers forever, reading as live work in every view that lists the
+ * in-flight directory. Observed 2026-07-21: `W1-T1.lock` held pid 65304, dead since 2026-07-19,
+ * still present two days later because the circuit breaker means W1-T1 is never re-dispatched.
+ *
+ * A lock whose file cannot be parsed is treated as reapable: an unreadable lock names no live
+ * holder, and leaving it would preserve exactly the misleading state this exists to remove.
+ */
+export function sweepStaleInflightLocks(
+  inflightDir: string,
+  opts: { isPidAlive?: (pid: number) => boolean } = {},
+): InflightSweepResult {
+  const isAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  const result: InflightSweepResult = { reaped: [], kept: [] };
+  if (!existsSync(inflightDir)) return result;
+
+  for (const entry of readdirSync(inflightDir)) {
+    if (!entry.endsWith(".lock")) continue;
+    const taskId = entry.slice(0, -".lock".length);
+    const held = readInflightLock(inflightDir, taskId);
+    if (held && isAlive(held.pid)) {
+      result.kept.push(taskId);
+      continue;
+    }
+    try {
+      unlinkSync(inflightLockPath(inflightDir, taskId));
+      result.reaped.push(taskId);
+    } catch {
+      // Raced with a real acquire, or removed by another actor between the read and the
+      // unlink. Either way the lock is no longer ours to reason about — leave it counted
+      // as kept rather than claiming a reap that did not happen.
+      result.kept.push(taskId);
+    }
+  }
+  return result;
 }

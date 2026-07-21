@@ -246,7 +246,7 @@ import {
   type WorkerResult,
 } from "./lib/worker.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "./lib/drain-lock.js";
-import { acquireInflightLock, InflightLockError } from "./lib/inflight-lock.js";
+import { acquireInflightLock, InflightLockError, sweepStaleInflightLocks } from "./lib/inflight-lock.js";
 import { classifyFailure, MAX_TRANSIENT_RETRIES, type FailureSignal } from "./lib/classify.js";
 import { shouldRecordDecision } from "./lib/risk-score.js";
 import {
@@ -3866,7 +3866,12 @@ async function daemonCommand(rest: string[]): Promise<number> {
   // the launchd unit's own closed EnvironmentVariables allowlist (lib/launchd.ts).
   // Also runs the W1-T115 boot sweep of stale rmd-owned temp dirs (the
   // 26,711-dir ENOSPC incident's backstop) and logs the count via daemon.tmp_sweep.
-  daemonBoot(log, process.env, () => sweepStaleTempDirs());
+  daemonBoot(
+    log,
+    process.env,
+    () => sweepStaleTempDirs(),
+    () => sweepStaleInflightLocks(join(config.root, "state", "inflight")),
+  );
 
   try {
     const summary = await runDaemon(

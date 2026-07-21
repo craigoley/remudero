@@ -860,3 +860,24 @@ test("a THROWING onCircuitBreak hook does not kill the loop", async () => {
   assert.ok(hookCalls >= 1, "the escalation hook was actually reached");
   assert.notEqual(s.stopReason, "error", "an undeliverable escalation is not a daemon error");
 });
+
+test("daemonBoot: calls the injected lock sweep once and logs daemon.lock_sweep with reaped/kept COUNTs", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let calls = 0;
+  const sweepLocks = () => {
+    calls += 1;
+    return { reaped: ["W1-T1"], kept: ["W1-T184"] };
+  };
+  daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin" }, undefined, sweepLocks);
+  assert.equal(calls, 1, "swept exactly once at boot, not per poll");
+  const swept = lines.find((l) => l.step === "daemon.lock_sweep");
+  assert.ok(swept, "the sweep is legible on its own ledger step");
+  assert.equal(swept?.extra.reaped, 1, "the COUNT is logged, not the raw id list");
+  assert.equal(swept?.extra.kept, 1);
+});
+
+test("daemonBoot: with no lock sweep injected, no daemon.lock_sweep line is written", () => {
+  const lines: Array<{ step: string }> = [];
+  daemonBoot((step) => lines.push({ step }), { PATH: "/usr/bin" });
+  assert.equal(lines.filter((l) => l.step === "daemon.lock_sweep").length, 0);
+});
