@@ -1,0 +1,56 @@
+- id: W1-T234
+  title: "state/ holds the ledger, the run locks, the service tokens and the proposals register - and none of it is backed up"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MASTER-PLAN section 10 WS-7 describes a nightly state backup with a documented and drilled
+    restore. No task implements it. Described, unbuilt, and until now unfiled - the failure mode a plan-driven
+    system is supposed to be immune to.
+    WHAT IS ACTUALLY AT RISK, and it grew this week. state/ledger.ndjson is the provenance spine and is about
+    to become MERGE-LOAD-BEARING: W1-T230 moves the arm decision off the writable status channel and onto the
+    orchestrator's ledgered verdict, so a lost ledger line becomes a merge-correctness bug rather than an
+    audit gap. R-16 already established the sharper case - readLedgerLines returns an empty array for an
+    absent file and the dispatch circuit breaker has no floor, so losing the ledger silently resets every
+    breaker to zero and merged tasks re-dispatch. state/ also holds the inflight run locks, the 0600 service
+    tokens, and the proposals register, which gained P37 through P45 this session and exists nowhere else.
+    status.json is rederivable and does not matter.
+    NOTHING HERE IS REPLICATED. The repository survives on GitHub. The ledger, the register, the retro markers
+    and the operator learnings state exist on exactly one disk."
+  design: |
+    SCOPE BY WHAT IS IRREPLACEABLE, NOT BY WHAT IS IN THE DIRECTORY. Back up the authoritative files and
+    exclude the derived ones. VERIFY from source which files under state/ are rederivable before choosing the
+    set - backing up a cache is cost without benefit, and missing an authoritative file is the whole failure.
+    A SNAPSHOT THAT IS NOT VERIFIED IS NOT A BACKUP. Assert the snapshot is non-empty and contains the ledger
+    and the proposals register by name, at snapshot time. A silent empty archive is the shape this task exists
+    to prevent.
+    THE RESTORE IS A VERB, NOT A RUNBOOK PARAGRAPH. An operator mid-incident needs a command, and a restore
+    nobody has run is a belief rather than a capability.
+    FAILURE ESCALATES LOUDLY. A backup that fails quietly is indistinguishable from one that never ran, which
+    is how WS-7 stayed unbuilt for months while being described.
+    MECHANISM IS THE IMPLEMENTER'S CHOICE within house patterns - the launchd lineage of W1-T152 and W1-T169
+    is the obvious scheduler. If a serve or daemon plist generator is reused, note that W1-T152's amendment
+    now requires ThrottleInterval and 0600 log modes, and the same hardening applies here.
+    COORDINATE WITH LEDGER ARCHIVAL (W1-T209). Once rotation moves old records into archived rolls, a backup
+    capturing only the live file would silently lose history. The two must agree on what the full record is.
+  acceptance:
+    - claim: "a snapshot exists after the scheduled run and its content list contains the ledger and the proposals register"
+      proof: "unit test on the snapshot content list"
+    - claim: "restore round-trips a seeded state directory, with the restored ledger byte-identical to the source"
+      proof: "unit test"
+    - claim: "a snapshot failure escalates loudly rather than completing silently or leaving an empty archive"
+      proof: "unit test on the failure path"
+  risk: high
+  origin: architect
+  plan_refs: ["§10"]
+  files: [src/lib/ledger.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21. Recon section 6 named this as a described-but-unfiled organ, the audit rung's most
+    valuable finding class because a plan gap is invisible to every code-level check the repo runs.
+    URGENCY ROSE THIS SESSION for two independent reasons: the proposals register gained nine entries that
+    exist on one disk and nowhere else, and W1-T230 makes the ledger the merge gate rather than only the audit
+    log.
+    verify:human because a restore drill's value is an operator having done it once and knowing it works."
