@@ -1,13 +1,22 @@
 # REMUDERO — Master Plan (v2.24 · synced 2026-07-21)
 
-**FOCUS — HIGHEST YIELD EVER (27 runs → 23 shipped tasks, 85%) AND THE CREDIT FIX LANDED WITHOUT WORKING:
-W1-T150 (P30's backfill) merged FIRST this cycle (#358) and 15 of the next 22 merges were still gate-side.**
-Ledger credit went 13/26 → 8/27. A ratified, built, merged fix did not move its own metric — that is the
-cycle's one load-bearing fact and the top of the queue is now **verifying W1-T150 fires live (P35)**, not
-building more credit machinery. What DRAINED: the **console/live-state family** (W1-T153–T158, T179, T181,
+**FOCUS — HIGHEST YIELD EVER (27 runs → 23 shipped tasks, 85%). THE R10 CREDIT CLAIM WAS FALSE AND IS
+CORRECTED HERE (operator hand-verification, 2026-07-21, PR #469's review comment).** R10 reported that
+W1-T150's backfill "landed inert" because ledger credit went 13/26 → 8/27, and set P35 to verify it fires.
+**It fires.** Observed live: `sweep.credit_backfill.summary {"total": 134, "corrected": 1}` at 08:59:06, and
+the ledger holds **70 `verdict.merged` correction lines**. Three of R10's sixteen "discrepancies" were
+reproduced by hand — W1-T154, W1-T157, W1-T181 — and **every one already carries its correction** (PRs #388,
+#405, #411). THE REAL DEFECT IS IN THE RETRO'S OWN READING: the backfill writes `step: "verdict.merged"`
+(sweep.ts:1218, a correction, because the ledger is append-only and must never be rewritten), while the
+gather counts `verdictLine?.verdict` (retro.ts:112) — `step: "verdict"` lines ONLY. The tally is structurally
+blind to the corrections, so it measures a number W1-T150 does not and should not move. This is the rule-22
+class committed by the organ built to catch it: a CLAIM (the raw verdict line) read as EVIDENCE (effective
+credit), with the gap blamed on the fix rather than on the reading. **P35 is REFRAMED accordingly — not
+"does the backfill fire" (it does) but "the retro's credit tally must consult corrections."** What DRAINED: the **console/live-state family** (W1-T153–T158, T179, T181,
 T187 — the board is fast, honest, and searchable), the **P25 ratification inbox** (W1-T110/T111/T192), the
 **P32 layered-knowledge first tasks** (W1-T145/T146), the **governor pair** (W1-T121/T122), and the
-**floor-integrity family** (W1-T128/T185). Next, in order: **P35 (does the backfill fire?) → W1-T149
+**floor-integrity family** (W1-T128/T185). Next, in order: **P35 (REFRAMED — teach the retro tally to read
+`verdict.merged` corrections; the backfill itself is verified working) → W1-T149
 (P29 sibling credit — re-confirmed live by W1-T156 this cycle) → the stale-trailer quarantine (P33) →
 learning-utility + success-mining flywheel (W1-T86/T87/T88) → brownfield onboarding (W1-T82–T85)**.
 
@@ -152,7 +161,9 @@ isolation golden); P19's now-UNBLOCKED parallel-dispatch family (W1-T170/T171/T1
 remaining fleet tasks (W1-T25/T28, W2-T2 dry-run). The P25 inbox (W1-T110/T111/T192), the P32 first rung
 (W1-T145/T146), W1-T150 and the console family all DRAINED this cycle and are struck from this list.
 
-**NEXT (L2) — kick order, re-graded against R10's data:** **(1) P35 — prove W1-T150's backfill actually
+**NEXT (L2) — kick order, re-graded against R10's data and CORRECTED by hand-verification:** **(1) P35
+(REFRAMED) — the backfill is PROVEN firing (134 evaluated, 70 corrections in-ledger); the real work is teaching
+the retro tally to consult `verdict.merged` corrections instead of raw `verdict` lines —
 fires on `remudero`, because 15 of 22 post-#358 merges say it does not; (2) W1-T149 (P29) — re-confirmed
 live by W1-T156 and unbuilt for two cycles; (3) the stale-trailer quarantine (P33); (4) learning-utility +
 success-mining flywheel (W1-T86/T87/T88); (5) brownfield onboarding (W1-T82–T85); (6) W1-T170/T171/T172
