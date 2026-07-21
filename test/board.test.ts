@@ -171,6 +171,81 @@ test("W1-T155: computeBoardSnapshot carries the full status taxonomy through for
   assert.equal(proj.elapsedMs, 10_000);
 });
 
+// ── W1-T182: the escalation join proven at THIS layer too, not only status.ts's direct
+// deriveStatus unit tests — computeBoardSnapshot/GET /v1/status is the actual wiring the
+// console's NEEDS ME section reads from, and this task's own review flagged "an OPEN
+// escalation still renders" / "an unreadable read fails closed" as unmet at the review-proof
+// level, so both are proven here end-to-end (ledger -> deriveStatus -> projectPlan ->
+// computeBoardSnapshot -> the real GET /v1/status HTTP route), never re-deriving a second
+// join of its own. ──────────────────────────────────────────────────────────────────────────
+
+test("W1-T182: an OPEN escalation survives the FULL board pipeline end-to-end — ledger, computeBoardSnapshot, AND the real GET /v1/status route all still carry it as needsHuman; the fix that drops CLOSED escalations must never also key off anything that drops a genuinely OPEN one", async () => {
+  const ledgerPath = tmpLedgerPath();
+  const issueUrl = "https://github.com/o/r/issues/501";
+  appendFileSync(
+    ledgerPath,
+    JSON.stringify({ ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "A", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" }) + "\n",
+  );
+  const plan = planOf([task({ id: "A" })]);
+  const github: GitHub = {
+    ...fakeGitHub(),
+    issueByUrl: (url) => (url === issueUrl ? { state: "OPEN", title: "[BLOCKED] A: needs a decision" } : null),
+  };
+  const deps: BoardDeps = { plan, ledgerPath, github };
+
+  const snapshot = computeBoardSnapshot(deps);
+  const row = snapshot.tasks.find((t) => t.taskId === "A");
+  assert.ok(row, "the task must still be present in the snapshot — an open escalation is never dropped");
+  assert.equal(row!.needsHuman, true, "an OPEN escalation must remain needsHuman");
+  assert.equal(row!.escalationTitle, "[BLOCKED] A: needs a decision");
+  assert.equal(row!.escalationIssueUrl, issueUrl);
+  assert.equal(row!.escalationUnverified, undefined, "a CONFIRMED open read is verified, not merely unverified-but-shown");
+
+  await withBoardService(deps, 250, async (base) => {
+    const res = await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { tasks: BoardRow[] };
+    const httpRow = body.tasks.find((t) => t.taskId === "A");
+    assert.ok(httpRow, "the real GET /v1/status HTTP response must carry the task too");
+    assert.equal(httpRow!.needsHuman, true, "GET /v1/status must carry the SAME needsHuman through, end to end");
+    assert.equal(httpRow!.escalationIssueUrl, issueUrl);
+    assert.equal(httpRow!.escalationTitle, "[BLOCKED] A: needs a decision");
+  });
+});
+
+test("W1-T182: an issue-state READ FAILURE fails closed through the FULL board pipeline — the row is retained and flagged unverified in BOTH computeBoardSnapshot and the real GET /v1/status route, never silently dropped (a GitHub outage must never empty the operator's NEEDS ME section)", async () => {
+  const ledgerPath = tmpLedgerPath();
+  const issueUrl = "https://github.com/o/r/issues/502";
+  appendFileSync(
+    ledgerPath,
+    JSON.stringify({ ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "A", step: "escalation.issue_opened", issue_url: issueUrl, class: "MANUAL" }) + "\n",
+  );
+  const plan = planOf([task({ id: "A" })]);
+  const github: GitHub = {
+    ...fakeGitHub(),
+    issueByUrl: () => {
+      throw new Error("simulated gh outage");
+    },
+  };
+  const deps: BoardDeps = { plan, ledgerPath, github };
+
+  const snapshot = computeBoardSnapshot(deps);
+  const row = snapshot.tasks.find((t) => t.taskId === "A");
+  assert.ok(row, "a read failure must NEVER drop the row — that is the more dangerous direction of this bug");
+  assert.equal(row!.needsHuman, true);
+  assert.equal(row!.escalationUnverified, true);
+  assert.equal(row!.escalationIssueUrl, issueUrl);
+
+  await withBoardService(deps, 250, async (base) => {
+    const res = await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    const body = (await res.json()) as { tasks: BoardRow[] };
+    const httpRow = body.tasks.find((t) => t.taskId === "A");
+    assert.ok(httpRow, "the real GET /v1/status HTTP response must still carry the task despite the read failure");
+    assert.equal(httpRow!.needsHuman, true, "an unreadable issue state must still render through GET /v1/status");
+    assert.equal(httpRow!.escalationUnverified, true);
+  });
+});
+
 test("GET /v1/status: read-scoped snapshot, matches computeBoardSnapshot", async () => {
   const ledgerPath = tmpLedgerPath();
   const plan = planOf([task({ id: "A" })]);

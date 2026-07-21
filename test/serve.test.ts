@@ -760,3 +760,50 @@ test("W1-T182: an Approve control NEVER renders on an escalation row, while the 
   // item type that word is actually defined for (rmd approve, the ratification-inbox action).
   assert.match(inboxRowFn, /approve/i, "a P## inbox-proposal row must still carry the defined rmd approve affordance");
 });
+
+// ── W1-T182: the row template proven over its ACTUAL RENDERED OUTPUT, not just its source
+// text — a browser-driven DOM proof already exists (test/serve.live-state.test.ts), but that
+// requires launching a real headless browser; this test proves the exact same claim (the
+// issue's real ask + a direct link + no free-text/URL input of any kind, not merely no
+// `type="url"` one) by extracting the row template's own small, pure helper functions
+// (escapeHtml/statusBadge/prLink/journeyButtonHtml/needsMeTaskRowHtml — none of them touch
+// `document`) straight out of the served shell and calling them with real StatusProjection
+// shapes, so the proof runs anywhere Node does, no browser required.
+test("W1-T182: needsMeTaskRowHtml's ACTUAL rendered output shows the issue's real ask + a direct link, and contains NO <input> of any kind — never solicits data the ledger (escalation.issue_opened's issue_url) already holds", () => {
+  const html = renderShellHtml();
+  const parts: Record<string, string | undefined> = {
+    STATUS_LABELS: html.match(/const STATUS_LABELS = \{[\s\S]*?\};/)?.[0],
+    escapeHtml: html.match(/function escapeHtml\(text\) \{[\s\S]*?\n  \}/)?.[0],
+    statusBadge: html.match(/function statusBadge\(key\) \{[\s\S]*?\n  \}/)?.[0],
+    prLink: html.match(/function prLink\(t\) \{[\s\S]*?\n  \}/)?.[0],
+    journeyButtonHtml: html.match(/function journeyButtonHtml\(taskId\) \{[\s\S]*?\n  \}/)?.[0],
+    needsMeTaskRowHtml: html.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0],
+  };
+  for (const [name, src] of Object.entries(parts)) assert.ok(src, `${name} must exist in the shell's inline script`);
+
+  const renderRow = new Function(
+    `${parts.STATUS_LABELS}\n${parts.escapeHtml}\n${parts.statusBadge}\n${parts.prLink}\n${parts.journeyButtonHtml}\n${parts.needsMeTaskRowHtml}\nreturn needsMeTaskRowHtml(arguments[0]);`,
+  ) as (t: Record<string, unknown>) => string;
+
+  // A CONFIRMED-open escalation, live issue title flowing through escalationTitle.
+  const issueUrl = "https://github.com/o/r/issues/393";
+  const openRow = renderRow({
+    taskId: "W1-T1",
+    needsHuman: true,
+    escalationTitle: "[BLOCKED] W1-T1: needs a decision",
+    escalationIssueUrl: issueUrl,
+  });
+  assert.match(openRow, /needs a decision/, "renders the issue's ACTUAL one-line ask, not a generic label");
+  assert.match(openRow, new RegExp(`href="${issueUrl.replace(/[/.]/g, "\\$&")}"`), "a direct link to the issue");
+  assert.match(openRow, /Mark handled/);
+  assert.doesNotMatch(openRow, /Approve/i, "no defined verb for an escalation of any class");
+  assert.doesNotMatch(openRow, /<input\b/i, "must render NO input of any kind — free-text or url — the ledger already holds issue_url");
+
+  // An UNVERIFIED escalation with no title yet resolved and no issue url at all (a malformed
+  // ledger line) — still renders, generic ask, still no link, still no input anywhere.
+  const unverifiedRow = renderRow({ taskId: "W1-T2", needsHuman: true, escalationUnverified: true });
+  assert.match(unverifiedRow, /needs human attention \(escalated\)/, "falls back to a generic ask only when no issue title is available");
+  assert.match(unverifiedRow, /unverified/i);
+  assert.doesNotMatch(unverifiedRow, /view issue/i, "no issue url to join against -> no link rendered");
+  assert.doesNotMatch(unverifiedRow, /<input\b/i);
+});
