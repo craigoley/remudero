@@ -106,6 +106,7 @@ jobs:
         run: |
           mkdir -p coverage
           node --experimental-test-coverage --test-coverage-exclude="test/**" \
+            --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
             --test --import tsx "test/**/*.test.ts"
       - name: Coverage ratchet (blocks a coverage-lowering PR)
