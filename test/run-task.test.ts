@@ -35,6 +35,8 @@ import {
   type FixEvidence,
   type PrHeadGateway,
   type ReviewWorktreeDeps,
+  priorStrikesFor,
+  currentStrikeRegimeFor,
 } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import { judgeReview } from "../src/lib/review.js";
@@ -2341,4 +2343,66 @@ test("the terminal blocked_review return (no fix rung) is gone — a failing rev
     /if \(review\.state !== "success"\) \{\s*log\("verdict"/,
     "a failing review must route through runFixRung, never straight back to a blocked_review verdict",
   );
+});
+
+// ── W1-T199: strike regime tagging ──────────────────────────────────────────
+//
+// A strike counter that cannot tell noise from evidence blocks the loop exactly
+// where it now works. FIXTURE (2026-07-21): PR #457 converged executed_fail ->
+// fix worker -> executed_pass x3 -> merged, while #449/#452 were refused at 2/2
+// by the SAME rung, carrying executed_fail verdicts of their own — because their
+// two strikes had been spent in the keyword-only era.
+
+test("W1-T199: keyword-era strikes do NOT count under the executed regime", () => {
+  const ledger = [
+    { step: "fix.dispatch", task_id: "W1-T900" }, // untagged => pre-executor
+    { step: "fix.dispatch", task_id: "W1-T900" },
+  ];
+  assert.equal(priorStrikesFor(ledger, "W1-T900", "executed"), 0);
+});
+
+test("W1-T199: a rung refusing SOLELY on pre-regime strikes is not reachable — 2 untagged strikes leave the cap unexhausted", () => {
+  const ledger = [
+    { step: "fix.dispatch", task_id: "W1-T900" },
+    { step: "fix.dispatch", task_id: "W1-T900" },
+  ];
+  const cap = 2;
+  const counted = priorStrikesFor(ledger, "W1-T900", "executed");
+  assert.ok(counted < cap, `expected < ${cap} counted strikes, got ${counted}`);
+});
+
+test("W1-T199: the bound stays REAL — strikes spent under the CURRENT regime still exhaust", () => {
+  const ledger = [
+    { step: "fix.dispatch", task_id: "W1-T900", verdict_regime: "executed" },
+    { step: "fix.dispatch", task_id: "W1-T900", verdict_regime: "executed" },
+  ];
+  assert.equal(priorStrikesFor(ledger, "W1-T900", "executed"), 2);
+});
+
+test("W1-T199: under the keyword_only regime EVERY strike counts — the bound never silently vanishes", () => {
+  const ledger = [
+    { step: "fix.dispatch", task_id: "W1-T900" },
+    { step: "fix.dispatch", task_id: "W1-T900", verdict_regime: "executed" },
+  ];
+  assert.equal(priorStrikesFor(ledger, "W1-T900", "keyword_only"), 2);
+});
+
+test("W1-T199: the current regime is READ from the latest review.posted proof_exec", () => {
+  const keywordOnly = [
+    { step: "review.posted", task_id: "W1-T900", proof_exec: ["not_executable", "not_executable"] },
+  ];
+  const executed = [
+    { step: "review.posted", task_id: "W1-T900", proof_exec: ["not_executable", "not_executable"] },
+    { step: "review.posted", task_id: "W1-T900", proof_exec: ["not_executable", "executed_fail"] },
+  ];
+  assert.equal(currentStrikeRegimeFor(keywordOnly, "W1-T900"), "keyword_only");
+  assert.equal(currentStrikeRegimeFor(executed, "W1-T900"), "executed");
+});
+
+test("W1-T199: the ledger is never mutated — regime is derived at READ time from untouched lines", () => {
+  const ledger = [{ step: "fix.dispatch", task_id: "W1-T900" }];
+  const snapshot = JSON.stringify(ledger);
+  priorStrikesFor(ledger, "W1-T900", "executed");
+  currentStrikeRegimeFor(ledger, "W1-T900");
+  assert.equal(JSON.stringify(ledger), snapshot, "reading strikes must not mutate ledger lines");
 });
