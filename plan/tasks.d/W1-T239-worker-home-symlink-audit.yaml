@@ -1,0 +1,53 @@
+- id: W1-T239
+  title: "reconcile the worker-home symlink family against its documented allowlist intent, and drill each remaining link as load-bearing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "The redirected worker HOME is meant to grant back ONLY named real-HOME paths, each with a recorded
+    reason - worker-home.ts documents that allowlist intent (WORKER_HOME_SYMLINKS, name each grant and its
+    reason, never inherit HOME wholesale). Observed live on this host: three symlinks from worker-home into the
+    operator's real HOME - .claude, .gitconfig, and Library/Keychains/login.keychain-db - plus a real
+    .claude.json. Tonight's incident showed the keychain link is not a neutral grant: it couples the worker to
+    the operator's real, lockable credential store, which is exactly the coupling W1-T235 exists to break.
+    THE INTENDED-VERSUS-ACTUAL LEDGER IS STALE. worker-home.ts's own reason strings flag two of these as
+    UNVERIFIED LIVE - the .claude OAuth-under-HOME dependency and the keychain requirement - and LEARNINGS.md
+    records the W1-T12e live drill that would settle them as never run. Isolation debt that is documented as
+    unverified is debt the fleet is carrying on faith."
+  design: |
+    RECONCILE INTENDED VERSUS ACTUAL. Enumerate every symlink and real file the worker HOME actually contains,
+    diff it against WORKER_HOME_SYMLINKS, and record any drift - a link present but not documented, or
+    documented but absent. VERIFY the current set from the live worker-home directory, not from the source
+    constant alone, because the two can disagree.
+    DRILL EACH REMAINING LINK AS LOAD-BEARING, W1-T12e style: remove or redirect it, spawn a worker, and record
+    whether authentication and the worker's job still succeed. A link that is not load-bearing is isolation
+    surface for nothing and should be dropped; a link that is load-bearing gets its reason string upgraded from
+    'unverified' to a dated live verdict.
+    COORDINATE WITH W1-T235, DO NOT DUPLICATE IT. If the keychain fix lands a dedicated worker keychain, the
+    login.keychain-db symlink should be RETIRED here and the audit records that retirement. This task does not
+    re-implement the keychain fix; it reconciles the symlink family around it.
+    RECORD THE VERDICT IN LEARNINGS. The output is a dated, evidence-backed statement of which grants are
+    load-bearing and why - closing the 'unverified live' notes the source has carried since W1-T18.
+    verify:human because the drill is a live spawn-and-observe under a mutated HOME, the same class of
+    human-verified drill as W1-T12e.
+  acceptance:
+    - claim: "the actual worker-home symlink/file set is reconciled against WORKER_HOME_SYMLINKS with any drift recorded"
+      proof: "unit test: test/worker-home.test.ts"
+    - claim: "each remaining symlink has a dated load-bearing verdict from a live drill, replacing the 'unverified live' reason strings"
+      proof: "unit test: test/worker-home.test.ts"
+    - claim: "if W1-T235 retires the keychain symlink, this audit records that retirement rather than re-granting it"
+      proof: "unit test: test/worker-home.test.ts"
+  risk: low
+  origin: architect
+  plan_refs: ["§4A", "§12", "WS-7"]
+  files: [src/lib/worker-home.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21, unpromoted - this is a hygiene/audit task and should not displace the spawn-path fix
+    (W1-T235) or the gate-integrity ladder. Citation verified at origin/main 2d33735: worker-home.ts:72-83
+    documents the allowlist intent and carries the two 'unverified live' reason strings (.claude and the
+    keychain); LEARNINGS.md:18 records the never-run W1-T12e drill.
+    OBSERVED symlink set this session: .claude, .gitconfig, Library/Keychains/login.keychain-db (all Jul 15),
+    plus a real .claude.json. RELATED to W1-T235, which may retire the keychain link - sequence this after it."
