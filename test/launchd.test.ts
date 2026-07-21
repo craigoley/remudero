@@ -6,6 +6,7 @@ import {
   DEFAULT_LAUNCHD_PATH,
   DIGEST_LABEL,
   LaunchdPlistError,
+  assertNoAnthropicKeys,
   generateDigestLaunchdPlist,
   generateLaunchdPlist,
   launchdPlistPath,
@@ -52,6 +53,33 @@ test("the ANTHROPIC-clean-env boot assertion: no ANTHROPIC_* key in the actual E
   const block = plist.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/)?.[1] ?? "";
   assert.doesNotMatch(block, /ANTHROPIC_/i, "the actual env dict never carries an ANTHROPIC_* key");
   assert.match(plist, /ANTHROPIC-clean-env boot assertion/, "the comment documenting the assertion is present");
+});
+
+// ── assertNoAnthropicKeys: the ONE billing-boundary assertion BOTH generateLaunchdPlist (the
+// daemon unit, W1-T12b) and generateDigestLaunchdPlist (the digest unit, W1-T112) call — exported
+// specifically so a fixture can inject an ANTHROPIC_* key directly and observe the throw. ────────
+
+test("assertNoAnthropicKeys: an injected ANTHROPIC_* key throws a LaunchdPlistError naming the survivor(s)", () => {
+  assert.throws(
+    () => assertNoAnthropicKeys({ PATH: "/usr/bin", HOME: "/Users/op", ANTHROPIC_API_KEY: "sneaky" }),
+    (e) => e instanceof LaunchdPlistError && /billing-boundary violation/.test(e.message) && /ANTHROPIC_API_KEY/.test(e.message),
+  );
+});
+
+test("assertNoAnthropicKeys: a clean {PATH, HOME} env never throws", () => {
+  assert.doesNotThrow(() => assertNoAnthropicKeys({ PATH: "/usr/bin", HOME: "/Users/op" }));
+});
+
+test("assertNoAnthropicKeys: the thrown message names the CALLING generator when given a context", () => {
+  assert.throws(
+    () => assertNoAnthropicKeys({ ANTHROPIC_API_KEY: "sneaky" }, "generateDigestLaunchdPlist"),
+    (e) => e instanceof LaunchdPlistError && e.message.startsWith("generateDigestLaunchdPlist: billing-boundary violation"),
+  );
+  assert.throws(
+    () => assertNoAnthropicKeys({ ANTHROPIC_API_KEY: "sneaky" }),
+    (e) => e instanceof LaunchdPlistError && e.message.startsWith("generateLaunchdPlist: billing-boundary violation"),
+    "defaults to the daemon generator's name for backward compatibility",
+  );
 });
 
 test("EnvironmentVariables is a closed allowlist: only PATH and HOME", () => {
@@ -180,6 +208,21 @@ test("generateDigestLaunchdPlist: the ANTHROPIC-clean-env boot assertion applies
   const plist = generateDigestLaunchdPlist(VALID);
   const block = plist.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/)?.[1] ?? "";
   assert.doesNotMatch(block, /ANTHROPIC_/i, "the actual env dict never carries an ANTHROPIC_* key");
+});
+
+test("generateDigestLaunchdPlist's own EnvironmentVariables block, run through the SAME assertNoAnthropicKeys the daemon generator uses, does not throw (the assertion is reused, not reimplemented)", () => {
+  const plist = generateDigestLaunchdPlist(VALID);
+  const block = plist.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/)?.[1] ?? "";
+  const keys = [...block.matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1]);
+  const values = [...block.matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1]);
+  const env = Object.fromEntries(keys.map((k, i) => [k, values[i]]));
+  assert.doesNotThrow(() => assertNoAnthropicKeys(env, "generateDigestLaunchdPlist"));
+  // ...and an ANTHROPIC_*-polluted VERSION of that same block throws, proving the digest
+  // generator's env block is NOT specially exempt from the daemon's own assertion.
+  assert.throws(
+    () => assertNoAnthropicKeys({ ...env, ANTHROPIC_API_KEY: "sneaky" }, "generateDigestLaunchdPlist"),
+    (e) => e instanceof LaunchdPlistError && /ANTHROPIC_API_KEY/.test(e.message),
+  );
 });
 
 test("generateDigestLaunchdPlist throws LaunchdPlistError when rmdBin/root are not absolute", () => {

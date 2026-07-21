@@ -121,6 +121,45 @@ test("renderDigest: with no inbox.polled line, the digest renders BYTE-IDENTICAL
   assert.equal(withoutInbox, rebuilt);
 });
 
+test("renderDigest: GOLDEN full-text render with `inbox` absent — the exact pre-W1-T112 shape, byte for byte", () => {
+  const s = summarize(LINES, "2026-07-14T00:00:00.000Z");
+  assert.equal(s.inbox, undefined, "precondition: no inbox.polled line in this fixture's window");
+  const text = renderDigest(s);
+  assert.equal(
+    text,
+    [
+      "Remudero daily digest — since 2026-07-14T00:00:00.000Z",
+      "merged: W1-T7",
+      "blocked: W1-T3 (blocked_ci — https://github.com/craigoley/remudero/pull/22)",
+      "escalations: [BLOCKED] W1-T3 — https://github.com/craigoley/remudero/issues/5",
+      "alerts: (no poll this window)",
+      "issues reviewed: (no poll this window)",
+      "verdict downgrades suppressed: 0",
+      "notional cost: $3.00",
+    ].join("\n"),
+  );
+});
+
+test("renderDigest: GOLDEN full-text render with `inbox` present — the SAME lines plus exactly one 'inbox: N ready' line, in place", () => {
+  const s = summarize(LINES, "2026-07-14T00:00:00.000Z");
+  const withInbox = { ...s, inbox: { ready: 2 } };
+  const text = renderDigest(withInbox);
+  assert.equal(
+    text,
+    [
+      "Remudero daily digest — since 2026-07-14T00:00:00.000Z",
+      "merged: W1-T7",
+      "blocked: W1-T3 (blocked_ci — https://github.com/craigoley/remudero/pull/22)",
+      "escalations: [BLOCKED] W1-T3 — https://github.com/craigoley/remudero/issues/5",
+      "alerts: (no poll this window)",
+      "issues reviewed: (no poll this window)",
+      "inbox: 2 ready",
+      "verdict downgrades suppressed: 0",
+      "notional cost: $3.00",
+    ].join("\n"),
+  );
+});
+
 test("sendDigest delivers the built text over the notify channel and ledgers it", () => {
   const path = ledgerFile(LINES);
   const channel = fakeChannel();

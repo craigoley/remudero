@@ -85,13 +85,22 @@ function assertAbsolute(value: string, field: string): void {
   }
 }
 
-/** Same billing-boundary check as `lib/env.ts`'s `buildWorkerEnv`, applied to the plist's own env block. */
-const ANTHROPIC_KEY = /^ANTHROPIC_/i;
-function assertNoAnthropicKeys(env: Record<string, string>): void {
+/**
+ * Same billing-boundary check as `lib/env.ts`'s `buildWorkerEnv`, applied to a launchd unit's
+ * own `EnvironmentVariables` block. EXPORTED (not module-private) so both {@link
+ * generateLaunchdPlist} (the daemon unit, W1-T12b) and {@link generateDigestLaunchdPlist} (the
+ * digest unit, W1-T112) can be PROVEN to call the identical assertion — one billing boundary
+ * implementation, not two that could drift — and so a fixture can inject an ANTHROPIC_* key
+ * directly and observe the throw without needing a generator whose options happen to expose a
+ * raw-env override. `context` names the caller in the thrown message (defaults to the original
+ * daemon-generator name for backward compatibility with existing error-text assertions).
+ */
+export const ANTHROPIC_KEY = /^ANTHROPIC_/i;
+export function assertNoAnthropicKeys(env: Record<string, string>, context: string = "generateLaunchdPlist"): void {
   const survivors = Object.keys(env).filter((k) => ANTHROPIC_KEY.test(k));
   if (survivors.length > 0) {
     throw new LaunchdPlistError(
-      `generateLaunchdPlist: billing-boundary violation — ANTHROPIC_* key(s) in EnvironmentVariables: ${survivors.join(", ")}`,
+      `${context}: billing-boundary violation — ANTHROPIC_* key(s) in EnvironmentVariables: ${survivors.join(", ")}`,
     );
   }
 }
@@ -246,7 +255,7 @@ export function generateDigestLaunchdPlist(opts: DigestLaunchdPlistOpts): string
   const stderrPath = join(logDir, "digest.err.log");
 
   const environment: Record<string, string> = { PATH: path, HOME: home };
-  assertNoAnthropicKeys(environment);
+  assertNoAnthropicKeys(environment, "generateDigestLaunchdPlist");
 
   const programArguments = [opts.rmdBin, "digest"];
 
