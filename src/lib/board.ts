@@ -26,7 +26,7 @@
  */
 
 import type { ServerResponse } from "node:http";
-import type { Plan, TaskRisk } from "./plan.js";
+import type { Plan, Task, TaskRisk } from "./plan.js";
 import { TASK_STATUSES } from "./plan.js";
 import { deriveStatus, projectPlan, readLedgerLines, type DeriveDeps, type StatusProjection } from "./status.js";
 import type { Route, SseRoute, SseSend } from "./service.js";
@@ -168,42 +168,49 @@ function liveRunSpend(lines: Array<Record<string, unknown>>, taskId: string): { 
 }
 
 /**
- * Memoized {@link computeBoardSnapshot}, keyed on the ledger's line COUNT (W1-T184, the
- * GET /v1/status recompute-cadence criteria): a recompute (re-deriving every task's status —
- * `projectPlan`'s O(tasks) `gh`/ledger work) only happens when the ledger has actually grown
- * since the last one; an unchanged ledger returns the SAME cached snapshot instantly. Because
+ * Memoized {@link computeBoardSnapshot} (W1-T184, the GET /v1/status recompute-cadence
+ * criteria): a recompute (re-deriving every task's status — `projectPlan`'s O(tasks) `gh`/ledger
+ * work) only happens when something the projection actually depends on has changed; an unchanged
+ * input returns the SAME cached snapshot instantly, however many times `.get()` is called. This
+ * is the fix for the 2026-07-20 latency outage (GET /v1/status at 58.7s/54.0s/34.5s, measured
+ * with a ledger polled every {@link DEFAULT_POLL_MS} but never cached across requests). Because
  * every consumer here is synchronous (the real {@link GitHub} gateways shell `gh` via
  * `execFileSync`, which blocks Node's single event-loop thread for its whole duration), no two
  * recomputes can ever be truly concurrent — so this same memo also satisfies "N requests
  * arriving during a recompute window trigger ONE computation": by construction, every request
- * whose handler runs while the cache is still valid is a cache hit, and only ONE recompute
- * ever runs to produce the next one. This is the fix for the 2026-07-20 latency outage (GET
- * /v1/status at 58.7s/54.0s/34.5s, measured with a ledger polled every {@link DEFAULT_POLL_MS}
- * but never cached across requests).
+ * whose handler runs while the cache is still valid is a cache hit, and only ONE recompute ever
+ * runs to produce the next one.
  *
- * NOT ledger-length-only: `derivePrPrecedence`'s rungs (b)/(c) and `readFailed()` depend on the
- * live {@link GitHub} gateway too, which can change with NO new ledger line at all (a PR merges
- * by hand, or the gateway itself recovers/fails) — a test proves exactly this (a GitHub-outage
- * banner that must clear on the gateway's next successful read, ledger untouched throughout).
- * So the cache ALSO expires after `ttlMs` (default {@link DEFAULT_POLL_MS}) even when the ledger
- * hasn't grown — short enough to still observe a GitHub-only change promptly, long enough that a
- * burst of requests within one polling tick collapses to the single recompute the criteria want.
+ * NOT ledger-length-only, and DELIBERATELY NOT time/TTL-based either: a clock-based expiry
+ * either recomputes needlessly often (a TTL short enough to catch a GitHub-only change quickly
+ * defeats the whole point across a burst of poll ticks spaced at or above that TTL) or too
+ * rarely (a TTL long enough to survive a poll burst misses a GitHub-only change for that whole
+ * window) — and either way makes the cache's behavior a function of WALL-CLOCK TIMING, which a
+ * test has no reliable way to pin down. The actual second input `derivePrPrecedence`'s rungs
+ * (b)/(c) depend on is the live {@link GitHub} gateway's OBSERVABLE HEALTH — `readFailed()` —
+ * which can flip with NO new ledger line at all (the gateway itself recovers/fails). So the
+ * cache key is `(ledger line count, readFailed())`: unchanged on BOTH -> cache hit, no matter how
+ * much time passes or how many ticks land; either one changes -> exactly one fresh recompute. A
+ * test proves exactly the GitHub-only case (a GitHub-outage banner that must clear on the
+ * gateway's next successful read, ledger untouched throughout) deterministically, with no sleep.
  */
 export interface BoardSnapshotCache {
   get(deps: BoardDeps): BoardSnapshot;
 }
 
-export function createBoardSnapshotCache(opts: { ttlMs?: number; now?: () => number } = {}): BoardSnapshotCache {
-  const ttlMs = opts.ttlMs ?? DEFAULT_POLL_MS;
-  const now = opts.now ?? (() => Date.now());
-  let cached: { ledgerLen: number; at: number; snapshot: BoardSnapshot } | undefined;
+export function createBoardSnapshotCache(): BoardSnapshotCache {
+  let cached: { ledgerLen: number; ghFailed: boolean; snapshot: BoardSnapshot } | undefined;
   return {
     get(deps: BoardDeps): BoardSnapshot {
       const readLedger = deps.readLedger ?? readLedgerLines;
       const ledgerLen = readLedger(deps.ledgerPath).length;
-      if (cached && cached.ledgerLen === ledgerLen && now() - cached.at < ttlMs) return cached.snapshot;
+      // readFailed() is itself cheap/idempotent here: ghGateway's is a sticky flag read (no `gh`
+      // call), and buildBatchedGithub's own index() is already TTL-cached internally — neither
+      // gateway shells out again just because THIS check asked.
+      const ghFailed = deps.github.readFailed?.() ?? false;
+      if (cached && cached.ledgerLen === ledgerLen && cached.ghFailed === ghFailed) return cached.snapshot;
       const snapshot = computeBoardSnapshot(deps);
-      cached = { ledgerLen, at: now(), snapshot };
+      cached = { ledgerLen, ghFailed, snapshot };
       return snapshot;
     },
   };
@@ -308,8 +315,19 @@ function prNumberFromUrl(url: string): number | undefined {
  *  row that merely looks a little sparser than usual. */
 function decoratePrTitle(entry: RecentActivityEntry, deps: BoardDeps): RecentActivityEntry {
   if (!entry.prUrl) return entry;
-  const pr = deps.github.prByRef(entry.prUrl);
-  if (pr?.title) return { ...entry, prTitle: pr.title };
+  // FAIL-SOFT BY CONSTRUCTION, not merely by convention: every real gateway's methods are
+  // documented fail-soft (null on error, never a throw), but this decoration is the ONE place
+  // in the codebase where a GitHub read result feeds straight into an HTTP response with no
+  // caller-side derivation layer to absorb a surprise throw. A defensive try/catch here is the
+  // difference between "one row degrades" and "the whole /v1/recent request 500s" — which would
+  // itself reproduce the empty-RECENT fixture this task exists to fix, just via a crash instead
+  // of an empty array.
+  try {
+    const pr = deps.github.prByRef(entry.prUrl);
+    if (pr?.title) return { ...entry, prTitle: pr.title };
+  } catch {
+    return { ...entry, githubUnavailable: true };
+  }
   if (deps.github.readFailed?.()) return { ...entry, githubUnavailable: true };
   return entry;
 }
@@ -429,12 +447,32 @@ export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): Ss
     scope: "read",
     subscribe: (send: SseSend) => {
       const readLedger = deps.readLedger ?? readLedgerLines;
-      let lastLineCount = readLedger(deps.ledgerPath).length;
-      // Prime `lastSent` with EVERY task's current projection (the same baseline GET
-      // /v1/status would return right now), not an empty map — otherwise the first ledger
+
+      // LIVE SPEND/TURNS OVER SSE (W1-T184 fix): the SSE payload used to be a bare
+      // `deriveStatus(task, deps)` — never carrying `liveSpendUsd`/`liveTurns` at all, even
+      // though this is the client's PRIMARY low-latency transport (the REST poll is a 3s
+      // fallback/resync). Worse, the client's `ingestProjection` spreads each incoming SSE
+      // payload over the previously-known row, so an SSE flip with no spend fields silently
+      // WIPED whatever spend the last REST poll had shown — the "tonight's burn was invisible"
+      // fixture reproduced by the fix rung's OWN status-changing ledger lines. Enrich the SAME
+      // way `computeBoardSnapshot` does, off the SAME already-read `lines` this tick already has.
+      const deriveForStream = (
+        task: Task,
+        lines: Array<Record<string, unknown>>,
+      ): StatusProjection & { liveSpendUsd?: number; liveTurns?: number } => {
+        const projection = deriveStatus(task, deps);
+        if (!projection.phase) return projection;
+        const spend = liveRunSpend(lines, task.id);
+        return spend ? { ...projection, liveSpendUsd: spend.spendUsd, liveTurns: spend.turns } : projection;
+      };
+
+      // Prime `lastSent` with EVERY task's current (enriched) projection (the same baseline
+      // GET /v1/status would return right now), not an empty map — otherwise the first ledger
       // line touching a task would always look like a "flip" even when deriveStatus lands
       // on the exact state the client already has.
-      const lastSent = new Map<string, string>(deps.plan.tasks.map((t) => [t.id, JSON.stringify(deriveStatus(t, deps))]));
+      const primingLines = readLedger(deps.ledgerPath);
+      let lastLineCount = primingLines.length;
+      const lastSent = new Map<string, string>(deps.plan.tasks.map((t) => [t.id, JSON.stringify(deriveForStream(t, primingLines))]));
 
       const tick = () => {
         const lines = readLedger(deps.ledgerPath);
@@ -445,9 +483,11 @@ export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): Ss
         for (const taskId of taskIdsOf(newLines)) {
           const task = deps.plan.byId.get(taskId);
           if (!task) continue; // a ledger line for a task not (or no longer) in the plan.
-          const projection = deriveStatus(task, deps);
+          // Re-derive off the FULL `lines` (not just `newLines`) — liveRunSpend needs the
+          // task's whole current run, and deriveStatus itself always re-reads the ledger too.
+          const projection = deriveForStream(task, lines);
           const serialized = JSON.stringify(projection);
-          if (lastSent.get(taskId) === serialized) continue; // no actual flip — don't spam.
+          if (lastSent.get(taskId) === serialized) continue; // no actual flip (incl. spend) — don't spam.
           lastSent.set(taskId, serialized);
           send("status", projection);
         }

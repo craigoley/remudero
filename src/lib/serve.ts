@@ -890,27 +890,36 @@ export function renderShellHtml(): string {
 
   /** GitHub DECORATES: the PR link's label prefers the PR's own title (when GitHub resolved
    *  one); absent that, it degrades to the bare PR number/url -- never omits the link itself. */
+  /** The PR link's label carries BOTH the number AND the title when GitHub resolved one
+   *  ("#123 — the actual PR title") -- never the title ALONE (a bare title with no PR number
+   *  reads ambiguously as free text, not a PR reference). Degrades to the bare number, then the
+   *  raw url, as GitHub's decoration itself degrades -- the link is never omitted. */
   function recentPrLinkHtml(e) {
     if (!e.prUrl) return "";
-    const label = e.prTitle ? e.prTitle : e.prNumber !== undefined ? \`#\${e.prNumber}\` : e.prUrl;
-    return \` · <a href="\${e.prUrl}" target="_blank" rel="noreferrer">\${escapeHtml(label)}</a>\`;
+    const num = e.prNumber !== undefined ? \`#\${e.prNumber}\` : null;
+    const label = num && e.prTitle ? \`\${num} — \${e.prTitle}\` : e.prTitle || num || e.prUrl;
+    return \` · <a class="recent-pr-link" href="\${e.prUrl}" target="_blank" rel="noreferrer">\${escapeHtml(label)}</a>\`;
   }
 
   function recentSpendHtml(e) {
     if (e.costUsd === undefined && e.numTurns === undefined) return "";
     const turns = e.numTurns !== undefined ? \` / \${e.numTurns} turns\` : "";
-    return \` · spend: \${costLabel(e.costUsd)}\${turns}\`;
+    return \` · <span class="recent-spend">spend: \${costLabel(e.costUsd)}\${turns}</span>\`;
   }
 
   function recentRowHtml(e) {
     const key = RECENT_BADGE_KEY[e.verb] ?? "queued";
     const verbLabel = RECENT_VERB_LABEL[e.verb] ?? e.verb;
     const detail = e.detail ? \` (\${escapeHtml(e.detail)})\` : "";
-    const unavailable = e.githubUnavailable ? " · GitHub unavailable" : "";
+    const unavailable = e.githubUnavailable ? \` · <span class="recent-gh-unavailable">GitHub unavailable</span>\` : "";
     return (
-      \`\${statusBadge(key)}<span class="task-id">\${escapeHtml(e.taskId)}</span>\` +
-      \`<span class="detail"><span class="recent-verb">\${escapeHtml(verbLabel)}</span>\${detail} — \${escapeHtml(e.title)}\` +
-      \`\${recentSpendHtml(e)}\${recentPrLinkHtml(e)}\${unavailable} · \${escapeHtml(formatAgo(e.ts))}</span>\` +
+      \`\${statusBadge(key)}<span class="task-id" data-verb="\${escapeHtml(e.verb)}">\${escapeHtml(e.taskId)}</span>\` +
+      \`<span class="detail">\` +
+      \`<span class="recent-verb">\${escapeHtml(verbLabel)}</span>\${detail} — \` +
+      \`<span class="recent-title">\${escapeHtml(e.title)}</span>\` +
+      \`\${recentSpendHtml(e)}\${recentPrLinkHtml(e)}\${unavailable} · \` +
+      \`<time class="recent-ts" datetime="\${escapeHtml(e.ts)}">\${escapeHtml(formatAgo(e.ts))}</time>\` +
+      \`</span>\` +
       journeyButtonHtml(e.taskId)
     );
   }

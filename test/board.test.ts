@@ -17,6 +17,7 @@ import {
   computeRecentActivity,
   createBoardSnapshotCache,
   createRecentActivityCache,
+  DEFAULT_POLL_MS,
   sortBoardRows,
   type BoardDeps,
   type BoardRow,
@@ -370,6 +371,45 @@ test("GET /v1/status/stream: unsubscribing (client disconnect) stops the ledger 
   });
 });
 
+test("W1-T184: GET /v1/status/stream carries LIVE accumulated spend/turns too, not just the bare StatusProjection — and re-sends on a spend-only change with no status/phase change", async () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1" })]);
+  const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub() };
+
+  await withBoardService(deps, 20, async (base) => {
+    const client = openSseClient(base, "/v1/status/stream", READ_TOKEN);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "run.start" }) + "\n");
+      appendFileSync(
+        ledgerPath,
+        JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "implement.done", cost_usd: 1.24, num_turns: 38 }) + "\n",
+      );
+      await waitFor(() => client.events.some((e) => (e.data as { liveSpendUsd?: number }).liveSpendUsd !== undefined));
+      const first = client.events.find((e) => (e.data as { liveSpendUsd?: number }).liveSpendUsd !== undefined)!
+        .data as { liveSpendUsd: number; liveTurns: number; phase: string };
+      assert.equal(first.liveSpendUsd, 1.24);
+      assert.equal(first.liveTurns, 38);
+      assert.equal(first.phase, "review"); // deriveRunState: implement.done advances the phase to "review"
+
+      // A SECOND fix.done line: phase/status stay IDENTICAL (still "review", still no verdict),
+      // but the accumulated spend advances -- this must still emit a fresh SSE event (the
+      // pre-fix "no actual flip" dedup compared only the bare, spend-less StatusProjection, so a
+      // spend-only change was silently swallowed and never reached the client at all).
+      appendFileSync(
+        ledgerPath,
+        JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "fix.done", strike: 1, cost_usd: 1.3, num_turns: 38 }) + "\n",
+      );
+      await waitFor(() => client.events.filter((e) => e.event === "status").length >= 2);
+      const spendEvents = client.events.filter((e) => e.event === "status").map((e) => e.data as { liveSpendUsd?: number });
+      assert.ok(spendEvents.some((d) => d.liveSpendUsd === 2.54), "the spend-only update must reach the client over SSE, live");
+    } finally {
+      client.stop();
+      await client.done;
+    }
+  });
+});
+
 // ── W1-T184: LEDGER-FIRST RENDERING ─────────────────────────────────────────────────────────
 //
 // RECENT becomes an activity feed sourced from the LOCAL ledger; NOW rows carry live per-run
@@ -448,6 +488,38 @@ test("W1-T184: GitHub outage renders the IDENTICAL activity feed as a healthy re
   assert.equal(healthy[0]!.prTitle, "real PR title");
   assert.equal(dark[0]!.prTitle, undefined);
   assert.equal(dark[0]!.githubUnavailable, true);
+});
+
+test("W1-T184: a GitHub gateway that THROWS (not merely fail-soft-nulls) still degrades one row, it never crashes the whole feed", () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1", title: "a task" }), task({ id: "W1-T2", title: "another task" })]);
+  const prUrl1 = "https://github.com/o/r/pull/1";
+  const prUrl2 = "https://github.com/o/r/pull/2";
+  appendFileSync(
+    ledgerPath,
+    [
+      JSON.stringify({ ts: "2026-07-20T10:00:00Z", run_id: "r1", task_id: "W1-T1", step: "pr.opened", pr_url: prUrl1 }),
+      JSON.stringify({ ts: "2026-07-20T10:00:01Z", run_id: "r1", task_id: "W1-T1", step: "verdict", verdict: "merged", cost_usd: 1 }),
+      JSON.stringify({ ts: "2026-07-20T10:01:00Z", run_id: "r2", task_id: "W1-T2", step: "pr.opened", pr_url: prUrl2 }),
+      JSON.stringify({ ts: "2026-07-20T10:01:01Z", run_id: "r2", task_id: "W1-T2", step: "verdict", verdict: "merged", cost_usd: 2 }),
+    ].join("\n") + "\n",
+  );
+  // A fixture that violates the documented fail-soft contract on purpose -- exactly the shape a
+  // malfunctioning/misconfigured real gateway could produce (an uncaught error propagating out of
+  // `execFileSync`'s wrapper, say) -- this must degrade the SAME as a well-behaved failed read,
+  // never take the whole /v1/recent computation down with it.
+  const throwingGithub: GitHub = {
+    prByRef: () => {
+      throw new Error("boom: simulated gateway crash, not a fail-soft null");
+    },
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+  };
+  const entries = computeRecentActivity({ plan, ledgerPath, github: throwingGithub }, createRecentActivityCache());
+  assert.equal(entries.length, 2, "both rows still render despite the throwing gateway");
+  assert.ok(entries.every((e) => e.prTitle === undefined));
+  assert.ok(entries.every((e) => e.githubUnavailable === true));
 });
 
 test("W1-T184: the activity feed tails the ledger — a render never re-decorates (re-fetches GitHub for) an already-seen line, only the new ones", () => {
@@ -562,6 +634,68 @@ test("W1-T184: createBoardSnapshotCache recomputes ONLY when the ledger has grow
   assert.equal(calls, 2, "the ledger grew -> exactly one fresh recompute");
   cache.get(deps);
   assert.equal(calls, 2, "and it settles back to a cache hit once the new length is captured");
+});
+
+test("W1-T184: createBoardSnapshotCache holds ACROSS MANY poll ticks over real wall-clock time (not merely a burst) — the cache is NOT time/TTL-based", async () => {
+  const ledgerPath = tmpLedgerPath();
+  writeFileSync(ledgerPath, "");
+  let calls = 0;
+  const github: GitHub = {
+    prByRef: () => {
+      calls++;
+      return null;
+    },
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+  };
+  const plan = planOf([task({ id: "W1-T1", pr: 1 })]);
+  const deps: BoardDeps = { plan, ledgerPath, github };
+  const cache = createBoardSnapshotCache();
+
+  cache.get(deps);
+  assert.equal(calls, 1);
+  // Poll at the SAME DEFAULT_POLL_MS cadence the SSE stream uses, for several ticks' worth of
+  // real elapsed time -- a clock/TTL-based cache set anywhere near that cadence would expire
+  // and recompute on almost every one of these; a cache with NO time dimension at all does not.
+  for (let i = 0; i < 6; i++) {
+    await new Promise((resolve) => setTimeout(resolve, DEFAULT_POLL_MS));
+    cache.get(deps);
+  }
+  assert.equal(calls, 1, "an unchanged ledger triggers no re-projection no matter how much real time elapses");
+});
+
+test("W1-T184: createBoardSnapshotCache recomputes the instant GitHub's OWN observable health flips — even with the ledger completely untouched", () => {
+  const ledgerPath = tmpLedgerPath();
+  writeFileSync(ledgerPath, "");
+  const ghState = { failed: true };
+  let calls = 0;
+  const github: GitHub = {
+    prByRef: () => {
+      calls++;
+      return null;
+    },
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    readFailed: () => ghState.failed,
+    readFailureReason: () => "transport",
+  };
+  const plan = planOf([task({ id: "W1-T1", pr: 1 })]);
+  const deps: BoardDeps = { plan, ledgerPath, github };
+  const cache = createBoardSnapshotCache();
+
+  cache.get(deps);
+  assert.equal(calls, 1);
+  cache.get(deps);
+  cache.get(deps);
+  assert.equal(calls, 1, "readFailed() unchanged (still true) -> cache hits, ledger untouched throughout");
+
+  ghState.failed = false; // GitHub recovers -- no ledger write at all.
+  cache.get(deps);
+  assert.equal(calls, 2, "GitHub's own health flipped -> exactly one fresh recompute, with no ledger change to key off");
+  cache.get(deps);
+  assert.equal(calls, 2, "and it settles back to a cache hit once the new health reading is captured");
 });
 
 test("GET /v1/recent: reachable through the real assembled route (not just the pure function), still ledger-first", async () => {
