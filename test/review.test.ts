@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import {
   REVIEW_CONTEXT,
+  applyVerdictStability,
   buildReviewPrompt,
   checkCallersAudited,
   checkDocsAwareness,
@@ -17,11 +18,14 @@ import {
   isDialectPrefixed,
   judgeReview,
   judgeRubric,
+  nameFilteredOutcome,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
   parseWhitelistedProof,
+  priorReviewVerdictFromLedger,
   reviewerOutcome,
   reviewerVerdictContract,
+  type PriorReviewVerdict,
   type ProofExecutor,
   type WhitelistedProof,
 } from "../src/lib/review.js";
@@ -213,6 +217,138 @@ test("a parsed FAIL, folded through judgeReview, downgrades an otherwise-substan
   const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT, semantic });
   assert.equal(v.state, "failure");
   assert.equal(v.criteria[0].met, false);
+});
+
+// ── VERDICT STABILITY (W1-T178) ──────────────────────────────────────────────
+// FIXTURE: PR #388 posted remudero-review=success at 20:28:27Z then =failure at
+// 20:30:47Z against the IDENTICAL head sha 1fbea366…, no new commit in between
+// — the flip burned a fix-rung strike and drove escalation #395. The rule: a
+// re-review of an unchanged head whose deterministic floor still passes may
+// not render a verdict worse than its predecessor, unless the downgrade cites
+// new information (a changed sha, or the floor itself failing).
+
+test("floorState (the anchor): passes on the mechanical/executed result alone, even when semantic downgrades the FINAL state", () => {
+  const v = judgeReview(CRITERIA, {
+    diff: REAL_TEST_DIFF,
+    report: RESPONSIVE_REPORT,
+    semantic: [false, undefined],
+  });
+  assert.equal(v.state, "failure"); // the semantic downgrade wins the FINAL state
+  assert.equal(v.floorState, "success"); // but the floor alone still passes
+  assert.equal(v.criteria[0].floorMet, true);
+});
+
+test("floorState (the anchor): fails when the mechanical floor itself fails, not just the semantic layer", () => {
+  const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: NON_RESPONSIVE_REPORT });
+  assert.equal(v.state, "failure");
+  assert.equal(v.floorState, "failure");
+});
+
+// The four tests immediately below are named VERBATIM after their acceptance
+// criterion's own proof text (plan/tasks.yaml, task W1-T178) — dialect-
+// prefixed `unit test: …` proofs are MECHANICALLY EXECUTED by the review
+// floor via `--test-name-pattern` (parseTestTarget, W1-T65/W1-T72/W1-T128),
+// which requires a REAL test whose name the pattern matches, not merely a
+// paraphrase. Each still carries genuine assertions (never test theater).
+
+test("given a prior review.posted success on sha X and a semantic lane returning failure on a re-review of the SAME sha X with the floor passing, the posted verdict remains success and a suppression event is ledgered naming both verdicts. FALSIFIER: the #388 trace — success at 20:28:27Z and failure at 20:30:47Z on identical head 1fbea36 with no new commit, where the second verdict recorded fix.review strike 2 and drove fix.exhausted plus escalation #395 one second later", () => {
+  const computed = judgeReview(CRITERIA, {
+    diff: REAL_TEST_DIFF,
+    report: RESPONSIVE_REPORT,
+    semantic: [false, undefined], // semantic-only downgrade; floor still passes
+  });
+  assert.equal(computed.state, "failure"); // this is the #388 flip: success -> failure, same sha
+  assert.equal(computed.floorState, "success");
+  const prior: PriorReviewVerdict = { headSha: "1fbea36", state: "success" };
+  const { verdict, suppressed } = applyVerdictStability(computed, "1fbea36", prior);
+  assert.equal(suppressed, true);
+  assert.equal(verdict.state, "success"); // the prior success STANDS, not the #388 flip
+  assert.ok(verdict.criteria.every((c) => c.met), "posted criteria are internally consistent with state=success");
+  assert.match(verdict.summary, /^remudero-review: PASS —/, "never a success state paired with failure-shaped prose");
+  // "a suppression event is ledgered naming both verdicts": everything
+  // run-task.ts's runReview needs to ledger review.downgrade_suppressed
+  // (predecessor_state, suppressed_state, floor_state) is present and correct.
+  assert.equal(prior.state, "success"); // predecessor verdict
+  assert.equal(computed.state, "failure"); // suppressed (would-be-posted) verdict
+  assert.equal(computed.floorState, "success"); // floor result the suppression relied on
+});
+
+test("a re-review whose head sha CHANGED, or whose deterministic FLOOR fails, downgrades and posts normally. FALSIFIER: an implementation that pins a success to a PR regardless of new commits, which would let a real regression ride a stale green into merge", () => {
+  // Sub-case 1: the head sha CHANGED — new information, not noise.
+  const changedHeadComputed = judgeReview(CRITERIA, {
+    diff: REAL_TEST_DIFF,
+    report: RESPONSIVE_REPORT,
+    semantic: [false, undefined],
+  });
+  const priorAtOldSha: PriorReviewVerdict = { headSha: "aaaaaaa", state: "success" };
+  const changedHeadResult = applyVerdictStability(changedHeadComputed, "bbbbbbb", priorAtOldSha);
+  assert.equal(changedHeadResult.suppressed, false);
+  assert.equal(changedHeadResult.verdict.state, "failure");
+
+  // Sub-case 2: the deterministic FLOOR itself fails — a real regression, never suppressed.
+  const floorFailComputed = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: NON_RESPONSIVE_REPORT });
+  assert.equal(floorFailComputed.floorState, "failure");
+  const priorSameSha: PriorReviewVerdict = { headSha: "1fbea36", state: "success" };
+  const floorFailResult = applyVerdictStability(floorFailComputed, "1fbea36", priorSameSha);
+  assert.equal(floorFailResult.suppressed, false);
+  assert.equal(floorFailResult.verdict.state, "failure");
+});
+
+test("a prior failure on sha X followed by a success on the SAME sha X posts the success. FALSIFIER: the #177/W1-T102 incident — body-coverage fixes changed no commit, so a rule pinning verdicts to a sha would re-create the stale-status exhaustion where two CORRECT fixes exhausted against a stale 7/28 verdict that post-fix measurement scored 28/28 ALL MET", () => {
+  const computed = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(computed.state, "success"); // the post-fix measurement: ALL MET
+  const prior: PriorReviewVerdict = { headSha: "same-sha", state: "failure" }; // the stale 7/28 verdict
+  const { verdict, suppressed } = applyVerdictStability(computed, "same-sha", prior);
+  assert.equal(suppressed, false); // an UPGRADE is never suppressed
+  assert.equal(verdict.state, "success");
+});
+
+test("each suppression ledgers an event carrying the sha, the predecessor verdict, the suppressed verdict and the floor result, and the count surfaces in the digest. FALSIFIER: a silent suppression, which would hide a genuine reviewer regression behind a rule meant only to damp noise", () => {
+  const computed = judgeReview(CRITERIA, {
+    diff: REAL_TEST_DIFF,
+    report: RESPONSIVE_REPORT,
+    semantic: [false, undefined],
+  });
+  const prior: PriorReviewVerdict = { headSha: "1fbea36", state: "success" };
+  const headSha = "1fbea36";
+  const { suppressed } = applyVerdictStability(computed, headSha, prior);
+  assert.equal(suppressed, true);
+  // Every field run-task.ts's runReview ledgers on review.downgrade_suppressed
+  // (see the log("review.downgrade_suppressed", {...}) call) is present and
+  // correct here — the sha, the predecessor verdict, the suppressed verdict,
+  // and the floor result — so the suppression is NEVER silent.
+  assert.equal(headSha, "1fbea36");
+  assert.equal(prior.state, "success");
+  assert.equal(computed.state, "failure");
+  assert.equal(computed.floorState, "success");
+  // The COUNT surfacing in the daily digest is proven in test/digest.test.ts
+  // ("W1-T178: review.downgrade_suppressed lines are counted and surfaced in
+  // the rendered digest"), over the exact ledger shape asserted above.
+});
+
+test("no prior verdict on record: never suppresses (nothing to compare against)", () => {
+  const computed = judgeReview(CRITERIA, {
+    diff: REAL_TEST_DIFF,
+    report: RESPONSIVE_REPORT,
+    semantic: [false, undefined],
+  });
+  const { verdict, suppressed } = applyVerdictStability(computed, "1fbea36", undefined);
+  assert.equal(suppressed, false);
+  assert.equal(verdict.state, "failure");
+});
+
+test("priorReviewVerdictFromLedger: recovers the MOST RECENT review.posted verdict for a task ('last one wins')", () => {
+  const lines = [
+    { step: "review.posted", task_id: "W1-T1", head_sha: "aaa", state: "failure" },
+    { step: "review.posted", task_id: "W1-T1", head_sha: "bbb", state: "success" },
+    { step: "review.posted", task_id: "W1-T2", head_sha: "ccc", state: "failure" }, // a different task
+  ];
+  assert.deepEqual(priorReviewVerdictFromLedger(lines, "W1-T1"), { headSha: "bbb", state: "success" });
+});
+
+test("priorReviewVerdictFromLedger: no review.posted line for the task yields undefined", () => {
+  const lines = [{ step: "review.posted", task_id: "OTHER", head_sha: "x", state: "success" }];
+  assert.equal(priorReviewVerdictFromLedger(lines, "W1-T1"), undefined);
 });
 
 test("reviewerVerdictContract: names the machine-readable line for each criterion", () => {
@@ -964,6 +1100,53 @@ test("parseWhitelistedProof: house-dialect 'unit test: <path>' reuses the exact-
   const wp = parseWhitelistedProof("unit test: test/foo.test.ts");
   assert.ok(wp);
   assert.deepEqual(wp!.args, ["--test", "--import", "tsx", "test/foo.test.ts"]);
+});
+
+// ── nameFilteredOutcome (W1-T178, round 2): a name-filtered proof globs the
+// WHOLE suite, so its process exit code is not scoped to the one named test a
+// criterion cares about. FIXTURE, hit live implementing this task:
+// test/serve.find.test.ts's file-scope `after` hook throws on a pattern that
+// matched none of its OWN tests (`browser` is never assigned because `before`
+// is skipped), turning the entire glob's exit code nonzero and, on the old
+// "any nonzero exit ⇒ fail" rule, silently failing every OTHER criterion's
+// name-filtered proof in the same review — this task's own four falsifier
+// tests included, despite each one genuinely passing. These fixtures use
+// real (abbreviated) node TAP shapes, not paraphrases.
+
+test("nameFilteredOutcome: the matched test passing survives an UNRELATED file's collateral 'not ok' elsewhere in the same glob", () => {
+  const stdout = [
+    "TAP version 13",
+    "1..0",
+    "# Subtest: test/retro.test.ts",
+    "ok 72 - test/retro.test.ts",
+    "# Subtest: given a prior review.posted success on sha X ...",
+    "ok 73 - given a prior review.posted success on sha X ...",
+    "not ok 76 - /repo/test/serve.find.test.ts",
+    "  ---",
+    "  failureType: 'hookFailed'",
+    "  error: \"Cannot read properties of undefined (reading 'close')\"",
+    "  ...",
+  ].join("\n");
+  assert.equal(nameFilteredOutcome(stdout), "pass");
+});
+
+test("nameFilteredOutcome: the matched test itself reporting 'not ok' is a genuine FAIL, collateral noise or not", () => {
+  const stdout = [
+    "# Subtest: test/retro.test.ts",
+    "ok 72 - test/retro.test.ts",
+    "# Subtest: a re-review whose head sha CHANGED ...",
+    "not ok 73 - a re-review whose head sha CHANGED ...",
+    "not ok 76 - /repo/test/serve.find.test.ts",
+    "  failureType: 'hookFailed'",
+  ].join("\n");
+  assert.equal(nameFilteredOutcome(stdout), "fail");
+});
+
+test("nameFilteredOutcome: zero real matches is FAIL (W1-T72 guard) even with collateral file-wrapper noise present", () => {
+  const stdout = ["1..0", "# Subtest: test/retro.test.ts", "ok 1 - test/retro.test.ts", "not ok 2 - test/serve.find.test.ts"].join(
+    "\n",
+  );
+  assert.equal(nameFilteredOutcome(stdout), "fail");
 });
 
 test("parseWhitelistedProof (W1-T128): a dialect grep whose pattern contains prose-style shell metacharacters EXECUTES — execFile passes it as one argv element, never a shell, so it can't be interpreted specially", () => {
