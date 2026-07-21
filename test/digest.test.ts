@@ -165,7 +165,7 @@ test("renderDigest: GOLDEN full-text render with `inbox` present — the SAME li
 // byte-identical to today" — both halves of that sentence asserted together here, in addition to
 // the more granular/golden tests above. ───────────────────────────────────────────────────────
 
-test("digest render: with an inbox summary present includes 'inbox: N ready'; with the inbox module absent renders byte-identical to today", () => {
+test("digest render with an inbox summary present includes 'inbox: N ready'; with the inbox module absent renders byte-identical to today", () => {
   const s = summarize(LINES, "2026-07-14T00:00:00.000Z");
 
   // "today" = the digest as it renders with no inbox.polled snapshot in the window at all —

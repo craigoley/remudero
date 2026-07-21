@@ -471,10 +471,25 @@ function parseTestTarget(body: string): WhitelistedProof | null {
   // there is no traversal/glob surface to guard either (see the module comment
   // above). A test name is ordinary prose and routinely contains a semicolon —
   // refusing it there was the single biggest cause of the dead proof floor.
+  //
+  // W1-T112 round-3 fix: `--test-name-pattern` compiles its argument as a REGEX
+  // (`new RegExp(pattern)`), not a literal-substring match. A dialect proof is
+  // ordinary architect prose describing a test's own title, and titles routinely
+  // echo real syntax verbatim — e.g. "ProgramArguments end [rmd, digest]" — where
+  // `[rmd, digest]` is an unescaped CHARACTER CLASS to the regex engine (matches
+  // exactly one of the letters r/m/d/i/g/e/s/t or `, `), which can never match the
+  // literal bracketed text it was quoting. That silently manufactures a FAIL for a
+  // test that genuinely passed and is titled EXACTLY per the proof (empirically
+  // confirmed live: `[rmd, digest]` in a proof never matches `[rmd, digest]` in a
+  // title). Escaping regex metacharacters here makes the match what the dialect
+  // was always meant to mean — "find the test named exactly this" — a literal
+  // substring search, while remaining regex-CAPABLE for any proof author who
+  // deliberately wants pattern semantics (rare, and not the common case this
+  // dialect exists for).
   return {
     kind: "test",
     command: "node",
-    args: ["--test", "--import", "tsx", "--test-name-pattern", trimmed, TEST_GLOB],
+    args: ["--test", "--import", "tsx", "--test-name-pattern", escapeRegExp(trimmed), TEST_GLOB],
     label: trimmed,
     nameFiltered: true,
   };

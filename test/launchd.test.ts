@@ -247,7 +247,7 @@ test("launchdPlistPath honors DIGEST_LABEL the same generic way it does DAEMON_L
 // assertion reused)" — every clause of that sentence asserted here, literally, in one place, in
 // addition to the more granular tests above. ──────────────────────────────────────────────────
 
-test("generated plist fixture: StartCalendarInterval at the given hour, EnvironmentVariables exactly {PATH, HOME}, ProgramArguments end [rmd, digest]; an ANTHROPIC_* injection fixture throws (the W1-T12b assertion reused)", () => {
+test("generated plist fixture -> StartCalendarInterval at the given hour, EnvironmentVariables exactly {PATH, HOME}, ProgramArguments end [rmd, digest]; an ANTHROPIC_* injection fixture throws (the W1-T12b assertion reused)", () => {
   const rmdBin = "/Users/op/Remudero/bin/rmd";
   const root = "/Users/op/Remudero";
   const home = "/Users/op";
