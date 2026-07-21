@@ -25,7 +25,21 @@ import {
  * NO injected `readLedger` here -- this exercises the REAL default `readLedgerLines`, a REAL
  * fs.readFileSync of the committed 1.2MB `ledger.ndjson` fixture, exactly the code path a real
  * `GET /v1/status` request drives (board.ts's `computeBoardSnapshot` -> `projectPlan`).
+ *
+ * CEILING NOTE (W1-T190 round 2, 2026-07-21): the `coverage-ratchet` CI job runs this same
+ * suite under `--experimental-test-coverage`, which instruments every call and measurably
+ * slows V8 execution -- observed 445-492ms for this exact assertion when run inside the full
+ * suite under coverage, against ~113ms uninstrumented. That is real V8 coverage-collection
+ * overhead, not a projectPlan regression, but it sits close enough to a 500ms ceiling to flake
+ * red under CI's parallel test-file contention (confirmed: CI's `ci` job, which runs the same
+ * files WITHOUT coverage, passed). The ceiling below is widened ONLY when coverage
+ * instrumentation is detected (via `--test-coverage-exclude` surviving into `execArgv`), so a
+ * normal `node --test` run keeps the original strict 500ms bound while the coverage-ratchet
+ * job gets headroom that still fails hard on the pre-fix regression class (5,229-8,207ms).
  */
+
+const COVERAGE_INSTRUMENTED = process.execArgv.some((arg) => arg.startsWith("--test-coverage"));
+const CEILING_MS = COVERAGE_INSTRUMENTED ? 2000 : 500;
 
 test("W1-T187 criterion 3: projectPlan over the production-scale corpus completes UNDER 500ms (absolute ceiling, not a relative speedup claim)", () => {
   const plan = loadCorpusPlan();
@@ -37,8 +51,8 @@ test("W1-T187 criterion 3: projectPlan over the production-scale corpus complete
   const deps: DeriveDeps = { ledgerPath: corpusLedgerPath(), github, now: () => Date.parse(FIXED_NOW_ISO) };
 
   // Two measured calls -- "cold" (first read of this fixture in this process) and "warm"
-  // (module/JIT/OS-file-cache already primed) -- BOTH must clear the 500ms ceiling; the
-  // ceiling is not allowed to depend on which one a caller happens to hit.
+  // (module/JIT/OS-file-cache already primed) -- BOTH must clear the ceiling; the ceiling is
+  // not allowed to depend on which one a caller happens to hit.
   const coldStart = performance.now();
   const coldById = projectPlan(plan, deps);
   const coldMs = performance.now() - coldStart;
@@ -51,13 +65,13 @@ test("W1-T187 criterion 3: projectPlan over the production-scale corpus complete
   assert.equal(warmById.size, plan.tasks.length);
 
   assert.ok(
-    coldMs < 500,
+    coldMs < CEILING_MS,
     `projectPlan (cold) took ${coldMs.toFixed(1)}ms over ${plan.tasks.length} tasks / ${ledgerLineCount} ledger lines -- ` +
-      `must be < 500ms (pre-fix measured 8,207ms cold; post-hoist control measured 113ms)`,
+      `must be < ${CEILING_MS}ms (pre-fix measured 8,207ms cold; post-hoist control measured 113ms)`,
   );
   assert.ok(
-    warmMs < 500,
+    warmMs < CEILING_MS,
     `projectPlan (warm) took ${warmMs.toFixed(1)}ms over ${plan.tasks.length} tasks / ${ledgerLineCount} ledger lines -- ` +
-      `must be < 500ms (pre-fix measured 5,229ms warm; post-hoist control measured 113ms)`,
+      `must be < ${CEILING_MS}ms (pre-fix measured 5,229ms warm; post-hoist control measured 113ms)`,
   );
 });
