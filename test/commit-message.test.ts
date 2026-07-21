@@ -10,7 +10,8 @@ import {
   shapeCommitMessage,
   wrapBodyLines,
 } from "../src/lib/commit-message.js";
-import { outputContractLines } from "../src/lib/compaction.js";
+import { commitMessageContractLines, outputContractLines } from "../src/lib/compaction.js";
+import { renderFixPrompt } from "../src/run-task.js";
 
 // ── W1-T136/W1-T137 class: machine-built commit messages must pass the REAL gate ──
 //
@@ -149,4 +150,32 @@ test("the contract's own example commit header passes the real gate", () => {
   const example = /Example:\s*`([^`]+)`/.exec(contract);
   assert.ok(example, "the contract must carry a concrete example header for the worker to copy");
   assert.equal(lint(`${example[1]}\n`).status, 0, `the contract's example must pass commitlint: ${example[1]}`);
+});
+
+test("the FIX-RUNG prompt carries the same commit contract as the implement prompt — fix workers were told nothing", () => {
+  // ROOT CAUSE of #427/#428: renderFixPrompt had push guidance but NO commit-message
+  // guidance, so a fix-rung worker authored a 111-char round-3 header and blocked the PR.
+  // PR #407 shipped the rule to outputContractLines only. One shared literal now, so the
+  // two prompts cannot drift again.
+  const fix = renderFixPrompt({
+    task: { id: "W1-T999", title: "a task" },
+    round: 2,
+    branch: "run-W1-T999-1",
+    evidence: { review: { unmetCriteria: [], summary: "unmet" } },
+  });
+  for (const line of commitMessageContractLines()) {
+    assert.ok(String(fix).includes(line), `fix prompt must carry: ${line}`);
+  }
+});
+
+test("the contract states the NO-acronym-exemption rule the real gate enforces", () => {
+  // The first version of this contract said a leading acronym "is fine". Measured against
+  // the real CLI that is FALSE, and this suite already proves it — shipping guidance that
+  // contradicts an adjacent passing test is how a worker gets told to do the wrong thing.
+  const text = commitMessageContractLines().join("\n");
+  assert.match(text, /NO acronym exemption/i);
+  assert.doesNotMatch(text, /acronym[^.]*is fine/i);
+  for (const bad of ["SSE stream severed", "URL round-trips"]) {
+    assert.notEqual(lint(`feat(serve): ${bad}\n`).status, 0, `gate must reject: ${bad}`);
+  }
 });
