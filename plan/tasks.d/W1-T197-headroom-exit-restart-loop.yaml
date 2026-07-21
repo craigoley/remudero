@@ -1,0 +1,90 @@
+- id: W1-T197
+  title: "LIVE RESTART LOOP — headroom_exhausted is a LEGITIMATE stop but the daemon exits NONZERO, so launchd's KeepAlive(SuccessfulExit:false) reads it as a crash and relaunches every ~86s until the weekly window resets"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE AT FILING, 2026-07-21. The daemon is relaunching roughly every 86 seconds and has been since
+    02:22:44. Evidence, all observed rather than inferred:
+      launchctl list  ->  `29565  1  com.remudero.daemon`  — last exit status ONE
+      plist           ->  KeepAlive = { SuccessfulExit: false }  — i.e. RESTART when the job exits UNsuccessfully
+      ledger boots    ->  02:22:44 pid 5839, 02:24:06 pid 11581, 02:25:32 pid 17940, 02:26:59 pid 23833,
+                          02:28:20 pid 29569  — five relaunches in under six minutes, median gap 86s
+      every boot      ->  daemon.headroom {window: 'weekly (all models)', percent_used: 95} then
+                          daemon.summary {stopReason: 'headroom_exhausted', ticks: 0, costUsd: 0} then exit
+    THE CYCLE: the weekly subscription window is genuinely at 95%, so daemon.ts:284 returns
+    summary('headroom_exhausted', ...) — the CORRECT decision. That stop maps to a NONZERO process exit. launchd's
+    KeepAlive is configured to restart exactly on nonzero exits, so it relaunches. The new process re-reads
+    headroom, finds the same 95%, stops again, exits nonzero again. Nothing changes between iterations because
+    the condition is a WEEKLY window that will not move until it resets.
+    THE BUG IS THE EXIT CODE, NOT THE STOP. Stopping on exhausted headroom is right and is exactly what P34's
+    ratified envelope clause (c) asks for. What is wrong is expressing a POLICY stop as a CRASH: an exit status
+    of 1 tells the supervisor 'I failed, restart me', when the truth is 'I am deliberately idle until Sunday'.
+    ALREADY DOCUMENTED AS A CLASS, now with a second trigger: the operator's own notes record 'KeepAlive restarts
+    on ANY exit -> a --max daemon restart-loops' from the W1-T12d commissioning. That was the bounded-run trigger;
+    this is the headroom trigger. The shared defect is that the daemon has no way to say 'stopped on purpose'.
+    HARM IS BOUNDED BUT NOT ZERO: costUsd is 0 and ticks are 0 on every iteration — no worker is spawned, because
+    the headroom check precedes dispatch. What it burns is process spawns, log volume and ledger volume (six
+    daemon.* lines per iteration, ~40 lines an hour indefinitely), and it makes `launchctl list` permanently
+    report a failing job, which is the signal an operator would use to spot a REAL crash.
+    SECOND, SMALLER DEFECT observed in the same lines: resets_at renders inconsistently across consecutive boots
+    — 'Jul 21 at 12am' at 02:25:31 and 'Jul 20 at 11:59pm' at 02:26:59 and 02:28:20, for what must be the same
+    reset instant. Same window, same clock, two renderings a minute apart."
+  design: |
+    DISTINGUISH A POLICY STOP FROM A FAILURE at the process boundary. `headroom_exhausted` — and any other
+    deliberate terminal state such as a STOP request — must exit ZERO, so KeepAlive(SuccessfulExit:false) leaves
+    the job alone. A genuine crash must keep exiting nonzero so it still restarts. VERIFY from source how
+    DaemonStopReason maps to the process exit code today (daemon.ts's summary path and its caller in run-task.ts)
+    before changing anything — the mapping may be implicit rather than explicit, which is likely how this arose.
+    PREFER SLEEPING TO EXITING where the wait is knowable. The daemon already reads `resets_at`, so on headroom
+    exhaustion it could idle until the window resets rather than exiting at all — that keeps one supervised
+    process alive, keeps the lock coherent, and resumes automatically. Weigh this against exiting zero: exiting
+    is simpler and lets launchd own the lifecycle, sleeping avoids a relaunch storm if the exit-code mapping is
+    ever wrong again. EITHER is acceptable; a nonzero exit is not.
+    VERIFICATION STAYS HEADLESS (Rule 18): the deliverable is the pure stop-reason-to-exit-code mapping, which a
+    worker can unit-test with no process spawn and no supervisor. The launchd relaunch behaviour is a property of
+    the supervisor, already observed and recorded in the rationale — do NOT write a test that shells out to
+    launchctl or installs a LaunchAgent.
+    DO NOT FIX THIS BY LOOSENING KeepAlive. Removing SuccessfulExit:false would stop the loop and also stop
+    restarting after real crashes — the property W1-T12d commissioned it for, and which was verified by a kill -9
+    drill. The supervisor is behaving correctly; the daemon is lying to it.
+    ALSO FIX resets_at RENDERING so the same reset instant renders identically on every boot. It is cosmetic
+    until an operator compares two log lines and concludes the window moved.
+    NOTE FOR W1-T187's SIBLING WORK: this loop writes six daemon.* ledger lines every 86 seconds into the same
+    append-only ledger whose size already drives the projection cost. It is a slow contributor to that problem.
+  acceptance:
+    - claim: "a deliberate stop maps to exit code ZERO — headroom_exhausted and an operator STOP both yield 0 from the stop-reason-to-exit-code mapping"
+      proof: "unit test over the pure stop-reason-to-exit-code mapping: headroom_exhausted yields 0 and an operator STOP yields 0, asserted on the mapping function itself with no process spawn and no supervisor involved (Rule 18 — headless-verifiable). FALSIFIER, live at filing and recorded as OBSERVED EVIDENCE rather than as a test to re-run: the supervisor reported `29565 1 com.remudero.daemon` (exit status 1) and the ledger shows five boots between 02:22:44 and 02:28:20 at a median 86-second gap, each ending in daemon.summary stopReason=headroom_exhausted. The supervisor's own restart behaviour is a launchd property, not something a headless worker should drive — the CODE-side obligation is the exit-code mapping above"
+    - claim: "a genuine crash STILL exits nonzero and still restarts"
+      proof: "unit test: an unexpected throw in the daemon loop yields a nonzero exit code, preserving the KeepAlive restart the kill -9 drill in W1-T12d verified. FALSIFIER: mapping every stop to zero would silence real crashes, and loosening KeepAlive's SuccessfulExit:false would do the same at the supervisor — the supervisor is correct here, the daemon is lying to it"
+    - claim: "the daemon does not relaunch-storm while a KNOWN-DURATION condition holds"
+      proof: "unit test: with headroom exhausted and a resets_at in the future, the daemon either exits zero once or idles until the reset — it does not produce repeated boot cycles. FALSIFIER: the observed 86-second cycle produced six daemon.* ledger lines per iteration indefinitely, with ticks 0 and costUsd 0 every time, because a WEEKLY window cannot change between relaunches"
+    - claim: "resets_at renders identically for the same reset instant across boots"
+      proof: "unit test: two headroom reads of the same window render the same resets_at string. FALSIFIER, observed in consecutive boots: 'Jul 21 at 12am' at 02:25:31 versus 'Jul 20 at 11:59pm' at 02:26:59 and 02:28:20 — the same instant, rendered two ways a minute apart"
+  risk: high
+  origin: architect
+  plan_refs: ["§4", "§9"]
+  files: [src/lib/daemon.ts, test/daemon.test.ts]
+  status: queued
+  attempts: 0
+  note: "LIVE at filing — the loop was running while this task was written, last boot 39 seconds before the
+    measurement. Diagnosed from launchctl exit status, the plist's KeepAlive dict, and five ledger boot lines with
+    their lock_pids, rather than from the daemon log files (which had not been written since 22:28 and did not
+    cover the window).
+    CLASSIFIED as a crash class per the operator's fork, but the crash is a MISCLASSIFIED LEGITIMATE STOP — the
+    daemon's decision was right and only its exit code was wrong. Explicitly NOT the W1-T46 halt / W1-T174
+    fixture: no fixable block is involved.
+    SECOND TRIGGER of a documented class — the W1-T12d commissioning already recorded that KeepAlive restarts on
+    ANY exit, which made a --max daemon restart-loop. Same defect, new cause.
+    INCIDENTAL FINDING worth carrying to P34's redraft, recorded here because it answers an open question: the
+    headroom mechanism ALREADY EXISTS. daemon.boot logs billing_mode 'subscription', daemon.headroom logs
+    {window: 'weekly (all models)', percent_used, resets_at}, and daemon.ts carries headroomLimitPct with a
+    HEADROOM_LIMIT_PCT default. P34 clause (c) tells its implementer to VERIFY FROM SOURCE how headroom is read
+    and never to invent an API — the answer is that it is already built and already stopping the fleet.
+    risk:high — graded UP from medium after rmd lint-plan flagged the daemon/launchd span. Recorded as a
+    regrade rather than a workaround, because the honest reading supports it: this changes the process exit code
+    a SUPERVISOR acts on, and the failure direction is a fleet that silently stops restarting after a real
+    crash — worse than the relaunch storm it replaces. The second criterion (a genuine crash still exits
+    nonzero) is the guard, and it is load-bearing rather than defensive."

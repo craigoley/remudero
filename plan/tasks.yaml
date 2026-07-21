@@ -1412,6 +1412,15 @@
     'honest about failing' and 'presented as specified' are different properties, and T156's whole thesis is the
     second one — a console that never lies about its own liveness has to say WHAT is wrong in the vocabulary it
     promised, not leak an exception.
+    SECOND OPERATOR SCREENSHOT, 2026-07-21 — the same section rendering TWO CONTRADICTORY liveness claims at
+    once: 'live · updated 8s ago' directly above 'STALE — showing last known data'. Neither indicator is lying
+    about its own source; they derive from DIFFERENT states. The freshness stamp reports when the last successful
+    render happened, the staleness banner reports the poll lifecycle's verdict, and nothing reconciles them. The
+    operator is told in one glance that the data is 8 seconds old and that it is stale and unusable.
+    THIS SHARPENS THE TASK'S SCOPE: the fix is not merely to stop leaking exceptions into the header. The
+    lifecycle must produce ONE truth that every liveness surface reads. Two indicators that are each individually
+    correct and jointly incoherent fail W1-T156's premise as squarely as a raw TypeError does — arguably worse,
+    because each looks authoritative.
     TWO DEFECTS, ONE SCREENSHOT, and they must not be conflated: the CAUSE is W1-T187 (the fetches time out); the
     PRESENTATION is this task (a raw TypeError where a reconnecting-with-last-success indicator belongs). Fixing
     W1-T187 alone would hide this by removing the trigger — the raw-exception path would survive, waiting for the
@@ -1436,6 +1445,8 @@
     DO NOT FIX THE TRIGGER HERE. W1-T187 owns the latency. This task must be verifiable with the latency defect
     still present — a seeded failing fetch, not a real slow server.
   acceptance:
+    - claim: "the console renders ONE liveness truth — two indicators derived from different states must never contradict each other on screen"
+      proof: "unit/DOM test: with a seeded stale/failing poll, the freshness stamp and the staleness banner agree — there is no rendered state in which one says fresh and the other says stale. FALSIFIER, operator screenshot 2026-07-21: the console showed 'live · updated 8s ago' DIRECTLY ABOVE 'STALE — showing last known data'. Both were honest about their own source and jointly incoherent: the relative timestamp tracked the last successful render while the staleness banner tracked the poll lifecycle, so the operator was told the data is 8 seconds old and unusable in the same glance"
     - claim: "a failing refresh renders T156's reconnecting indicator with its last-success timestamp — never a raw exception string"
       proof: "unit/DOM test with a seeded fetch rejection: the header shows the reconnecting state carrying the last-success time, and the rendered text contains NO exception vocabulary (no 'TypeError', no 'Failed to fetch'). FALSIFIER: the 2026-07-20 operator screenshot, showing the literal string 'refresh failed: TypeError: Failed to fetch' over a rendered board, on a serve process verified to be running current serve.ts"
     - claim: "a fetch TIMEOUT lands in the same lifecycle as an HTTP error — both are failures"
