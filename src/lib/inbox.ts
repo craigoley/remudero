@@ -507,6 +507,34 @@ export function invalidateDraft(drafts: DraftCache, proposalId: string): DraftCa
   return next;
 }
 
+/**
+ * W1-T190 (round 2): the read-side override in {@link classifyProposal} stops a drifted
+ * registry entry from ever being MISCLASSIFIED again, but the drifted entry itself — the
+ * P19-shaped row `rmd approve`'s registry write never reached — otherwise sits in
+ * `state/inbox-proposals.json` forever, unless something actually writes the correction
+ * back. "The ledger receipt is authoritative — a registry disagreeing with it is DETECTED
+ * and corrected, not trusted" means BOTH halves: classification never trusts the stale
+ * flag (already true), AND the stale flag itself gets healed, not merely worked around, the
+ * next time anything classifies these proposals against the ledger. This is that healing
+ * step: given the SAME proposals + classifications one inbox pass already computed, prune
+ * every proposal the ledger now says is ratified, so any OTHER consumer of the registry
+ * file that does not itself call {@link classifyProposal} — a future feature, a support
+ * script, a human `cat`ing the JSON — sees the corrected state too, not just this pass's
+ * in-memory override. A no-op (same array reference, empty `prunedIds`) when nothing needs
+ * healing, so callers can skip the write entirely on the common (already-clean) path.
+ */
+export function pruneRatifiedProposals(
+  proposals: Proposal[],
+  classifications: InboxClassification[],
+): { proposals: Proposal[]; prunedIds: string[] } {
+  const ratifiedIds = new Set(classifications.filter((c) => c.state === "ratified").map((c) => c.proposalId));
+  if (ratifiedIds.size === 0) return { proposals, prunedIds: [] };
+  return {
+    proposals: proposals.filter((p) => !ratifiedIds.has(p.id)),
+    prunedIds: [...ratifiedIds],
+  };
+}
+
 // ── rmd approve — one bit ratifies through the gate (MASTER-PLAN P25 ii, W1-T111) ────────
 //
 // APPROVE = one bit: the operator's thumbs-up INITIATES the plan PR carrying the

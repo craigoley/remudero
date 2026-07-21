@@ -14,6 +14,7 @@ import {
   parseDraftCache,
   parseDraftedCandidate,
   parseProposalRegistry,
+  pruneRatifiedProposals,
   refusalReason,
   renderInbox,
   type DraftedCandidate,
@@ -397,6 +398,39 @@ test("W1-T190 regression: a P19-shaped drifted registry entry (no status/ratifie
   const rendered = renderInbox([result]);
   assert.doesNotMatch(rendered, /READY — P19/, "never offered as READY once the ledger says ratified");
   assert.match(rendered, /RATIFIED — P19/);
+});
+
+test("pruneRatifiedProposals: a P19-shaped drifted registry entry is CORRECTED, not merely worked around — the ledger-ratified proposal is actually removed from the registry array (acceptance 1: DETECTED and corrected, not trusted)", () => {
+  const p19: Proposal = { id: "P19", summary: "WS-2 addendum", evidenceAnchors: [] };
+  const other: Proposal = { id: "P20", summary: "still open", evidenceAnchors: [] };
+  const proposals = [p19, other];
+  const classifications = [
+    classifyProposal(p19, undefined, baseCtx({ isRatified: (id) => id === "P19" })),
+    classifyProposal(other, undefined, baseCtx({ isRatified: () => false })),
+  ];
+
+  const { proposals: healed, prunedIds } = pruneRatifiedProposals(proposals, classifications);
+
+  assert.deepEqual(
+    prunedIds,
+    ["P19"],
+    "the drifted, ledger-ratified proposal is named as pruned",
+  );
+  assert.deepEqual(
+    healed.map((p) => p.id),
+    ["P20"],
+    "the registry is CORRECTED — P19 is actually removed, not just masked at read time — while an unrelated open proposal is untouched",
+  );
+});
+
+test("pruneRatifiedProposals: nothing to heal is a true no-op — same array reference, empty prunedIds, so callers can skip the write entirely", () => {
+  const proposals: Proposal[] = [{ id: "P21", summary: "still open", evidenceAnchors: [] }];
+  const classifications = [classifyProposal(proposals[0], undefined, baseCtx({ isRatified: () => false }))];
+
+  const { proposals: healed, prunedIds } = pruneRatifiedProposals(proposals, classifications);
+
+  assert.equal(healed, proposals, "identical reference when nothing needed healing");
+  assert.deepEqual(prunedIds, []);
 });
 
 test("refusalReason: a ratified classification names the ratified state, not a generic NOT READY", () => {

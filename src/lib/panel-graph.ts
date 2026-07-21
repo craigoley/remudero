@@ -51,7 +51,7 @@
  * deferred siblings (lib/triage.ts's grill mechanics, lib/board.ts's un-rendered design panels).
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadPlan, type MergedResolver } from "./plan.js";
 import { projectPlan, readLedgerLines, type GitHub } from "./status.js";
@@ -68,7 +68,15 @@ import {
 import { renderTraceChain, traceForward, traceReverse, type TraceChain, type TraceGithub } from "./trace.js";
 import type { Route } from "./service.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
-import { classifyProposal, gitGrepAnchorTrue, isRatifiedInLedger, parseDraftCache, parseProposalRegistry } from "./inbox.js";
+import {
+  classifyProposal,
+  gitGrepAnchorTrue,
+  isRatifiedInLedger,
+  parseDraftCache,
+  parseProposalRegistry,
+  pruneRatifiedProposals,
+  type InboxClassification,
+} from "./inbox.js";
 
 export interface PanelGraphDeps {
   /** Repo root — where plan/feedback/ lives (lib/feedback.ts's `feedbackDir`). */
@@ -413,6 +421,7 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
       const ledgerLines = readLedgerLines(deps.ledgerPath);
 
       const ready: InboxReadyItem[] = [];
+      const classifications: InboxClassification[] = [];
       for (const proposal of proposals) {
         const classification = classifyProposal(proposal, drafts[proposal.id], {
           plan,
@@ -421,9 +430,22 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
           openProposalIds: new Set([...allIds].filter((id) => id !== proposal.id)),
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
         });
+        classifications.push(classification);
         if (classification.state === "ready") {
           ready.push({ proposalId: proposal.id, summary: proposal.summary, stampLine: classification.draft?.stampLine });
         }
+      }
+      // W1-T190 (round 2): a proposal classified "ratified" here is DETECTED off the
+      // ledger, never trusted from the registry's own (possibly drifted) copy — but
+      // detection alone leaves the drifted row sitting in state/inbox-proposals.json
+      // forever. Heal it on this read: prune every ledger-ratified proposal from the
+      // registry file so any OTHER consumer of it (one that does not itself call
+      // classifyProposal) sees the corrected state too, not just this request's in-memory
+      // override. A no-op write when nothing needs healing (the common, already-clean
+      // path never touches disk).
+      const { proposals: healedProposals, prunedIds } = pruneRatifiedProposals(proposals, classifications);
+      if (prunedIds.length > 0) {
+        writeFileSync(registryPath, JSON.stringify({ proposals: healedProposals }, null, 2), "utf8");
       }
       sendJson(res, 200, { ready });
     },

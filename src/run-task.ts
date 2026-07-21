@@ -94,6 +94,7 @@ import {
   parseDraftCache,
   parseDraftedCandidate,
   parseProposalRegistry,
+  pruneRatifiedProposals,
   ratifyTelemetry,
   reframeProposal,
   renderInbox,
@@ -5416,6 +5417,18 @@ async function inboxCommand(rest: string[]): Promise<number> {
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
+
+  // W1-T190 (round 2): a proposal classified "ratified" here is DETECTED off the ledger,
+  // never trusted from the registry's own (possibly drifted) copy — but detection alone
+  // still leaves the drifted row sitting in state/inbox-proposals.json forever. Heal it:
+  // any proposal the ledger already ratified is pruned from the registry on THIS pass, the
+  // same way approveCommand prunes the common (non-drifted) case, so the correction lands
+  // on disk, not just in this run's in-memory classification.
+  const { proposals: healedProposals, prunedIds } = pruneRatifiedProposals(proposals, classifications);
+  if (prunedIds.length > 0) {
+    writeFileSync(registryPath, JSON.stringify({ proposals: healedProposals }, null, 2), "utf8");
+    for (const id of prunedIds) log("inbox.registry_healed", { proposal_id: id });
+  }
 
   const rendered = renderInbox(classifications);
   console.log(rendered);

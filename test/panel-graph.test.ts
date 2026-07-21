@@ -677,6 +677,41 @@ test("GET /v1/inbox: a proposal already ratified (ledger carries ratify.approved
   });
 });
 
+test("GET /v1/inbox: a P19-shaped drifted registry entry is CORRECTED on disk, not merely worked around in the response — one request heals state/inbox-proposals.json so any OTHER consumer of that file also sees the ratified proposal gone (acceptance 1: DETECTED and corrected, not trusted)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  mkdirSync(join(root, "state"), { recursive: true });
+  const registryPath = join(root, "state", "inbox-proposals.json");
+  writeFileSync(
+    registryPath,
+    JSON.stringify({
+      proposals: [
+        { id: "P19", summary: "already ratified", evidenceAnchors: [] },
+        { id: "P20", summary: "still genuinely open", evidenceAnchors: [] },
+      ],
+    }),
+  );
+  appendLedger(ledgerPathFor(root), {
+    run_id: "APPROVE-P19-1",
+    task_id: "P19",
+    step: "ratify.approved",
+    pr_url: "https://github.com/craigoley/remudero/pull/900",
+    branch: "run-APPROVE-P19-1",
+  });
+
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await get(base, "/v1/inbox", READ_TOKEN);
+    assert.equal(res.status, 200);
+  });
+
+  const healed = JSON.parse(readFileSync(registryPath, "utf8")) as { proposals: Array<{ id: string }> };
+  assert.deepEqual(
+    healed.proposals.map((p) => p.id),
+    ["P20"],
+    "P19 is actually REMOVED from the registry file on disk -- corrected, not just masked in the response -- while the unrelated open P20 entry survives untouched",
+  );
+});
+
 test("GET /v1/inbox: a genuinely un-ratified proposal with no drafted candidate yet is simply not in `ready` (the ordinary not-drafted case, unaffected by the ratified check)", async () => {
   const root = tmpRoot();
   const planPath = emptyPlanPath(root);
