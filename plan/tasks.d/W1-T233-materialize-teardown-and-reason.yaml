@@ -1,0 +1,58 @@
+- id: W1-T233
+  title: "a failed materialization leaks the worktree it already created and discards the reason - 39 leaked worktrees, and every degraded verdict said only unavailable"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "TWO DEFECTS IN ONE CATCH, run-task.ts:2678-2684:
+      } catch { return undefined; }
+    It returns undefined AFTER step 1 has already created the worktree, and withMaterializedWorktree's teardown
+    is guarded on a truthy path - so the cleanup never runs and the worktree is stranded. And the error object
+    is thrown away, so the operator is told only that materialization was unavailable.
+    THE LEAK IS MEASURED, NOT ESTIMATED. A worktree census on 2026-07-21 found 39 detached review-PR*
+    worktrees, one per failed materialization, all holding no branch. They were removed by hand the same day
+    (41 worktrees before, 2 after). Under the pre-W1-T232 mechanism each leak RAISED THE COLLISION ODDS for the
+    next review, because a stranded worktree is one more holder of a ref - a self-amplifying failure.
+    THE DISCARDED REASON COST A DAY. The git error named the exact cause (branch already used by worktree at
+    PATH) and was thrown away, so a full session of reviews reported an opaque CAPPED and five PRs merged on
+    degraded evidence with nobody able to say why from the output alone. This is the write-side twin of the
+    read-path doctrine this codebase already fixed: a floor that degrades must say why, or the degradation is
+    invisible.
+    STILL WANTED AFTER W1-T232. That task removes the collision class. It does not remove fetch failures, a
+    full disk, or a permissions error - each of which still lands in this catch, still leaks, and still reports
+    nothing."
+  design: |
+    THE FAILURE PATH CLEANS UP WHAT IT CREATED. Before returning, remove any worktree the attempt registered.
+    The invariant to hold is that a failed materialization leaves the workspace exactly as it found it.
+    CARRY THE REASON TO EVERY SURFACE THAT REPORTS THE DEGRADATION: the console line, the CAPPED verdict
+    description, and the review.posted ledger record, the last as a degraded_reason field so it is queryable
+    rather than only readable. Name the error CLASS as well as the message - worktree-collision, fetch-failure,
+    other - so a pattern is visible across runs without parsing prose.
+    NO BARE CATCH REMAINS AT THE SITE. Every return path either leaves a clean workspace or fails loudly with a
+    named reason. VERIFY the teardown guard in withMaterializedWorktree while implementing: today it keys on a
+    truthy worktreePath, and if this task returns undefined on failure that guard must not be the only cleanup.
+  acceptance:
+    - claim: "an injected failure occurring AFTER worktree creation leaves zero new worktrees registered"
+      proof: "unit test: injected step-2-class throw, worktree list unchanged"
+    - claim: "the verdict description and the review.posted record name the error class and message verbatim"
+      proof: "unit test: injected fetch throw, description and ledger carry the reason"
+    - claim: "no path returns undefined without either a clean workspace or a loud named failure"
+      proof: "unit test on the wrapper's error propagation"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5C", "§12"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21. The leak count of 39 is OBSERVED from a worktree census taken the same day, not
+    inferred: 41 registered worktrees before the sweep, 2 after, with all 39 review-PR* entries verified
+    detached before removal.
+    SEQUENCE AFTER W1-T232, which removes the dominant failure mode. Landing this first would harden a path
+    that is about to stop being the common one, and the tests here are clearer once the collision class is
+    gone. Expressed as sequencing rather than a depends_on edge because W1-T232 is still riding an unmerged
+    plan PR, and a dangling edge fails the linter closed - the two are independently valuable in any case,
+    since the teardown and the named reason are wanted for fetch and disk failures regardless.
+    STANDING RULE 23 (write-side atomicity) applies in spirit: a partially-completed multi-step operation that
+    returns failure while leaving its artifacts behind is the same shape as a torn write."
