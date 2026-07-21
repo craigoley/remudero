@@ -343,6 +343,85 @@ test("poll failures: a transient 'reconnecting' indicator, escalating to a visib
   });
 });
 
+// ── (7) W1-T189: ONE liveness truth -- the freshness stamp must never say "fresh" while the
+// stale banner is showing, even when the SSE stream keeps delivering real row deltas while the
+// /v1/status poll itself is the thing failing (the exact operator-observed contradiction: "live ·
+// updated 8s ago" directly above "STALE — showing last known data") ───────────────────────────
+
+test("one liveness truth: an SSE row delta during a failing /v1/status poll does not reset the freshness stamp while the board is stale", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })]);
+  appendFileSync(deps.board.ledgerPath, runStart("W1-T1"));
+  await withShell(deps, async (base) => {
+    const context = await browser.newContext();
+    await context.route("**/v1/status", (route) => route.abort());
+    const page = await context.newPage();
+    try {
+      await page.goto(`${base}/?token=${READ_TOKEN}`);
+
+      // Let /v1/status fail past the escalation threshold -- the board is now visibly stale.
+      await page.waitForFunction(() => document.getElementById("top-status")?.getAttribute("data-poll-state") === "stale", null, {
+        timeout: 12000,
+      });
+
+      // The SSE stream is NOT blocked -- it is still delivering real row deltas. Prove that first.
+      appendFileSync(deps.board.ledgerPath, reconDone("W1-T1"));
+      await page.waitForFunction(() => (document.querySelector("#now-list .detail")?.textContent ?? "").includes("phase: implement"), null, {
+        timeout: 5000,
+      });
+      // tickFreshness() repaints #freshness on its own 1s setInterval, independent of the SSE
+      // delta just applied -- wait past one tick so the DOM has actually caught up to whatever
+      // the delta touched, rather than reading a stale pre-tick #freshness textContent that would
+      // pass even on the buggy code by sheer timing luck.
+      await page.waitForTimeout(1300);
+
+      // The board is STILL stale (the /v1/status poll is still failing) -- the SSE delta above
+      // must not have reset the freshness stamp to "just now". Both indicators must agree the
+      // data is old, never one saying fresh while the other says stale.
+      const after = await page.evaluate(() => ({
+        pollState: document.getElementById("top-status")?.getAttribute("data-poll-state"),
+        staleHidden: (document.getElementById("stale-badge") as HTMLElement)?.hidden,
+        freshness: document.getElementById("freshness")?.textContent ?? "",
+      }));
+      assert.equal(after.pollState, "stale", "the poll is still failing -- the board must still read stale");
+      assert.equal(after.staleHidden, false);
+      assert.doesNotMatch(
+        after.freshness,
+        /just now|updated [01]s ago/,
+        `an SSE delta must not make the freshness stamp claim fresh data while the board reads stale -- got "${after.freshness}"`,
+      );
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+// ── (8) W1-T189: a HANGING /v1/status (never resolves, never rejects on its own) must still
+// land in the reconnecting lifecycle -- a timeout is a failure like any other, and this must be
+// provable with a SEEDED slow fetch, never a real slow server (W1-T187 stays untouched) ─────────
+
+test("a hanging /v1/status (never resolves) still lands in the reconnecting lifecycle -- a timeout is a failure", async () => {
+  const root = tmpRoot();
+  await withShell(fixtureDeps(root, [task({ id: "W1-T1" })]), async (base) => {
+    const context = await browser.newContext();
+    // Never call route.fulfill/continue/abort -- the request just hangs forever, exactly like
+    // W1-T187's 35-58s /v1/status latency, but seeded rather than a real slow server.
+    await context.route("**/v1/status", () => {});
+    const page = await context.newPage();
+    try {
+      await page.goto(`${base}/?token=${READ_TOKEN}`);
+      await page.waitForFunction(() => document.getElementById("top-status")?.getAttribute("data-poll-state") === "reconnecting", null, {
+        timeout: 15000,
+      });
+      const state = await page.evaluate(() => document.getElementById("top-status")?.textContent ?? "");
+      assert.match(state, /reconnecting/);
+      assert.doesNotMatch(state, /TypeError|Failed to fetch|\[object/i, "a timeout must render the lifecycle's own vocabulary, never a raw exception");
+    } finally {
+      await context.close();
+    }
+  });
+});
+
 // ── (6) GitHub-gateway outage: a VISIBLE "GitHub unreachable since <t>" stamp, keyed off the
 // existing per-task indeterminate/throttled signal (W1-T119) -- see this file's header for why
 // this does NOT depend on W1-T155's not-yet-implemented monotonic/last-good mechanism ──────────

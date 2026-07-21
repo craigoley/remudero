@@ -505,10 +505,22 @@ export function renderShellHtml(): string {
     return String(text ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
+  // W1-T189: a HANG is a failure too. The browser's own fetch() never times out on its own --
+  // a request that never resolves would otherwise sit forever, never rejecting, so it would
+  // never reach handlePollFailure() below and the reconnecting/stale lifecycle would never fire
+  // (exactly the gap W1-T187's 35-58s /v1/status latency exposed). FETCH_TIMEOUT_MS aborts it
+  // client-side so a hang lands in the SAME catch path as an HTTP error or a network failure.
+  const FETCH_TIMEOUT_MS = 10000;
   async function getJson(path) {
-    const res = await fetch(path, { headers: authHeaders });
-    if (!res.ok) throw new Error(\`GET \${path} -> \${res.status}\`);
-    return res.json();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(path, { headers: authHeaders, signal: controller.signal });
+      if (!res.ok) throw new Error(\`GET \${path} -> \${res.status}\`);
+      return await res.json();
+    } finally {
+      clearTimeout(timer);
+    }
   }
   function postJson(path, body) {
     return fetch(path, {
@@ -1484,21 +1496,28 @@ export function renderShellHtml(): string {
   // staleness caused it). The banner is DERIVED from poll state on every call, never a latched
   // string a later success forgets to clear — the falsifier this fixes: an operator-observed
   // "board fetch failed" banner that survived subsequent SUCCESSFUL polls beside live data. ────
+  //
+  // W1-T189: ONE derived truth, ONE clock. The freshness stamp (#freshness) and the stale banner
+  // (#stale-badge/top-status) used to read DIFFERENT clocks -- lastSuccessAt (the /v1/status poll)
+  // for staleness, but a separate lastLiveAt ALSO touched by every SSE row-delta for freshness.
+  // A failing poll could escalate the board to visibly-stale while a live SSE delta simultaneously
+  // reset the freshness stamp to "updated just now" -- two indicators, each individually honest
+  // about its own source, jointly incoherent on screen (operator screenshot 2026-07-21: "live ·
+  // updated 8s ago" directly above "STALE — showing last known data"). Both surfaces now read the
+  // SAME lastSuccessAt -- the /v1/status poll's own clock -- so they can never disagree about the
+  // age of the data; an SSE delta updates the row content but is not itself proof the BOARD (whose
+  // liveness is what these two indicators promise) is current.
   const STALE_ESCALATE_AFTER = 3;
   let pollFailures = 0;
   let lastSuccessAt = null;
-  let lastLiveAt = null; // last successful data of ANY kind -- a poll success OR an SSE event.
 
-  function touchFreshness() {
-    lastLiveAt = Date.now();
-  }
   function tickFreshness() {
     const el = document.getElementById("freshness");
-    if (!lastLiveAt) {
+    if (!lastSuccessAt) {
       el.textContent = "";
       return;
     }
-    const secs = Math.max(0, Math.round((Date.now() - lastLiveAt) / 1000));
+    const secs = Math.max(0, Math.round((Date.now() - lastSuccessAt) / 1000));
     el.textContent = secs < 2 ? "updated just now" : \`updated \${secs}s ago\`;
   }
 
@@ -1543,8 +1562,7 @@ export function renderShellHtml(): string {
       return;
     }
     pollFailures = 0;
-    lastSuccessAt = Date.now();
-    touchFreshness();
+    lastSuccessAt = Date.now(); // the SAME clock tickFreshness() and markStale()'s "as of" read (W1-T189).
     const tasks = statusSnap.tasks ?? [];
     for (const t of tasks) ingestProjection(t);
     paintFromTasksById();
@@ -1683,7 +1701,9 @@ export function renderShellHtml(): string {
     (projection) => {
       ingestProjection(projection);
       paintFromTasksById();
-      touchFreshness();
+      // W1-T189: an SSE delta patches THIS row's content but is not itself proof the board's
+      // overall liveness is current -- #freshness/#stale-badge stay keyed on lastSuccessAt (the
+      // /v1/status poll) alone, so the two indicators can never read different clocks.
     },
     (state) => setConnectionState(state),
   );
