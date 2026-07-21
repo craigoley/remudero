@@ -46,7 +46,7 @@ const REL_PATH = "docs/ORIENTATION.md";
  * Render docs/ORIENTATION.md from `opts.gather`/`opts.nextTask` + the
  * worktree's own MASTER-PLAN.md §12 Standing rules, write it, and — ONLY if
  * the content changed from what's currently committed — stage + commit it
- * as its own labeled commit ("rmd retro: regenerate docs/ORIENTATION.md").
+ * as its own labeled commit ("chore(plan): regenerate docs/ORIENTATION.md").
  * Never relies on a caller to remember to `git add` it. Idempotent: calling
  * this twice with an UNCHANGED gather/nextTask produces `committed: false`
  * the second time (no spurious commit).
@@ -66,7 +66,13 @@ export function regenerateOrientation(opts: RegenerateOrientationOpts): Regenera
     return { relPath: REL_PATH, content, committed: false };
   } catch {
     // non-zero ⇒ staged changes exist ⇒ commit them as their own, clearly-labeled commit.
-    execFileSync("git", ["-C", worktreePath, "commit", "-m", "rmd retro: regenerate docs/ORIENTATION.md"]);
+    // W1-T136: "rmd" is NOT a valid commitlint type (see commitlint.config.mjs /
+    // CONVENTIONAL_LIMITS in lib/commit-message.ts) — the old literal
+    // "rmd retro: regenerate docs/ORIENTATION.md" shipped a red REQUIRED check on every
+    // retro that touched ORIENTATION.md, since commitlint lints the whole
+    // origin/main..HEAD range, not just this one commit. `chore(plan): ...` matches this
+    // repo's existing plan-machinery commit convention and is proven commitlint-clean.
+    execFileSync("git", ["-C", worktreePath, "commit", "-m", "chore(plan): regenerate docs/ORIENTATION.md"]);
     const diff = execFileSync("git", ["-C", worktreePath, "show", "--stat=200", "-p", "HEAD"], {
       encoding: "utf8",
       maxBuffer: 1 << 24,

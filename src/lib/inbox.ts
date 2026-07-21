@@ -3,6 +3,7 @@ import type { MergedResolver, Plan } from "./plan.js";
 import { parseTasksFromYaml, PlanError, unmetDependencies } from "./plan.js";
 import { lintPlan } from "./task-linter.js";
 import { appendLedger } from "./ledger.js";
+import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
 
 /**
  * `rmd inbox` — the ratification inbox's DETERMINISTIC CORE (MASTER-PLAN P25(i), W1-T110).
@@ -553,21 +554,29 @@ export function approveProposal(
 }
 
 /** The harness-authored commit message for a `rmd approve` ratification branch — never
- *  the LLM (mirrors lib/plan-architect.ts's `planCommitMessage` discipline: the fragment
- *  and stamp are the Architect's drafted TEXT, but the commit framing around them is the
- *  harness's, deterministically). */
+ *  the LLM (mirrors lib/plan-architect.ts's `planCommitMessage` discipline in spirit: the
+ *  fragment and stamp are the Architect's drafted TEXT, but the commit framing around
+ *  them is the harness's, deterministically). Unlike `planCommitMessage`, this carries NO
+ *  `Remudero-Task:` trailer: a ratification branch is a plan-FILING PR (it introduces the
+ *  ratified task(s) into plan/tasks.yaml, it does not implement them), and
+ *  `findMergedByTrailer` (lib/status.ts) would credit a trailer here as that task being
+ *  DONE — permanently marking a brand-new, never-built task complete on merge. Uses
+ *  {@link "./plan-pr-emitter.js".buildPlanPrCommitMessage} so the stamp line (#387: a real
+ *  673-char single-paragraph stamp blew commitlint's body-max-line-length when spliced in
+ *  raw) is WRAPPED, never spliced verbatim. */
 export function approveCommitMessage(payload: RatificationPayload): string {
-  return [
-    `chore(plan): ratify ${payload.proposalId} via rmd approve`,
-    "",
-    payload.stampLine,
-    "",
-    "The operator's one-bit approve initiated this PR (MASTER-PLAN P25 ii, W1-T111),",
-    "carrying the pre-drafted, lint-clean tasks + the RATIFIED stamp verbatim. The gate",
-    "still reviews (ci + remudero-review); nothing auto-merges without it.",
-    "",
-    `Remudero-Task: ${payload.proposalId}`,
-  ].join("\n");
+  return buildPlanPrCommitMessage({
+    scope: "plan",
+    subject: `ratify ${payload.proposalId} via rmd approve`,
+    extraBody: [
+      payload.stampLine,
+      "",
+      "The operator's one-bit approve initiated this PR (MASTER-PLAN P25 ii, W1-T111), carrying " +
+        "the pre-drafted, lint-clean tasks + the RATIFIED stamp verbatim. The gate still reviews " +
+        "(ci + remudero-review); nothing auto-merges without it.",
+    ].join("\n"),
+    // No taskId ⇒ no Remudero-Task trailer — see the doc comment above.
+  });
 }
 
 // ── Real-world ratification writers (plain text composition, harness-owned) ──────────────

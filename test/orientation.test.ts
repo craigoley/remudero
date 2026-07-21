@@ -1,12 +1,26 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { regenerateOrientation } from "../src/lib/orientation.js";
 import { buildGather } from "../src/lib/retro.js";
 import type { Task } from "../src/lib/plan.js";
+
+// commitlint (W1-T136 class) — same subprocess pattern as test/commit-message.test.ts.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(__dirname, "..");
+const COMMITLINT_CONFIG = join(REPO_ROOT, "commitlint.config.mjs");
+
+function lint(message: string) {
+  return spawnSync(
+    process.execPath,
+    [join(REPO_ROOT, "node_modules", ".bin", "commitlint"), "--config", COMMITLINT_CONFIG],
+    { cwd: REPO_ROOT, input: message, encoding: "utf8" },
+  );
+}
 
 // `regenerateOrientation` is the exact mechanism `rmd retro` calls after every
 // Architect worker step (src/run-task.ts's retroCommand). Standing rule 13: "A
@@ -93,9 +107,28 @@ test("regenerateOrientation: a REAL retro pass commits docs/ORIENTATION.md namin
 
   // And the commit is REAL, on-disk, git-verifiable independent of the returned diff string.
   const log = execFileSync("git", ["-C", worktreePath, "log", "--oneline", "-1"], { encoding: "utf8" });
-  assert.match(log, /rmd retro: regenerate docs\/ORIENTATION\.md/);
+  assert.match(log, /chore\(plan\): regenerate docs\/ORIENTATION\.md/);
   const onDisk = readFileSync(join(worktreePath, "docs", "ORIENTATION.md"), "utf8");
   assert.match(onDisk, /W1-T7/);
+});
+
+test("regenerateOrientation: the commit message passes the REAL commitlint CLI (W1-T136 — the old \"rmd retro: ...\" literal did not)", () => {
+  // W1-T136: "rmd" is not a valid commitlint type, so the OLD literal
+  // "rmd retro: regenerate docs/ORIENTATION.md" shipped a red REQUIRED check on every
+  // retro that touched ORIENTATION.md. This proves the fixed literal against the real CLI,
+  // not just a string match on the log — the same class of falsifier
+  // test/commit-message.test.ts uses for every other machine-built commit message.
+  const worktreePath = makeWorktree();
+  const gather = buildGather({ ledgerNdjson: LEDGER_PASS_1, learningsMd: "# L\n" });
+  regenerateOrientation({
+    worktreePath,
+    generatedAt: "2026-01-01T12:00:00.000Z",
+    gather,
+    nextTask: fixtureTask({ id: "W1-T7", title: "Transient-vs-strike classifier" }),
+  });
+  const message = execFileSync("git", ["-C", worktreePath, "log", "-1", "--format=%B"], { encoding: "utf8" });
+  const result = lint(message);
+  assert.equal(result.status, 0, `orientation regen commit must pass commitlint:\n${message}\n${result.stdout}${result.stderr}`);
 });
 
 test("regenerateOrientation: the SECOND retro pass's diff refreshes the next task AND the shipped list — never re-shows stale state", () => {
@@ -134,7 +167,7 @@ test("regenerateOrientation: the SECOND retro pass's diff refreshes the next tas
   // Two real, distinct, chronologically-ordered commits — not one commit amended, not a no-op.
   const log = execFileSync("git", ["-C", worktreePath, "log", "--oneline"], { encoding: "utf8" }).trim().split("\n");
   assert.equal(log.length, 3); // seed + pass1 + pass2
-  assert.equal(log.filter((l) => l.includes("rmd retro: regenerate")).length, 2);
+  assert.equal(log.filter((l) => l.includes("chore(plan): regenerate docs/ORIENTATION.md")).length, 2);
 });
 
 test("regenerateOrientation: an UNCHANGED gather/next-task on the next pass commits NOTHING (no spurious churn)", () => {
