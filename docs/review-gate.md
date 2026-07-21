@@ -293,6 +293,50 @@ this task's stated file scope, `plan/tasks.yaml` W1-T185 `files:`) — a PR the
 arming path refuses stays OPEN and UNARMED, but a later sweep poll could still
 arm it via that separate path. Left for a follow-up task.
 
+## Status provenance: closing the forge attack (W1-T203)
+
+`gh` runs OUTSIDE the OS sandbox with the operator's own ambient credential
+(recon R-3/R-6), and until this task that credential was the ONLY thing on the
+machine that can post a commit status — so any identity that can shell out to
+`gh` (including a worker, since `gh *` is excluded from the sandbox in
+`settings/worker.json`) could post its own `remudero-review=success` and
+satisfy its own merge gate. THREE PARTS close it, none of which touch merge
+autonomy — no change here adds a human approval to the autonomous path:
+
+1. **A dedicated reviewer identity.** `postReviewStatus` (`src/lib/review.ts`)
+   authenticates as a fine-grained token/GitHub App named by
+   `REMUDERO_REVIEWER_TOKEN` (passed as `GH_TOKEN` for that one `gh` call)
+   when the env var is set, instead of whatever `gh` auth the operator/workers
+   share. The credential itself never reaches a worker: it lives only in the
+   orchestrator's own process env (or `~/.config/remudero/`, already denied to
+   every worker in `settings/worker.json`'s `filesystem.denyRead` /
+   `permissions.deny`).
+2. **The deny-floor blocks worker status-POSTs.** `hooks/deny-floor.sh` refuses
+   any `gh api ... -X POST/--method POST .../statuses/...` call from a spawned
+   worker (any role — implementer, the advisory fresh-context reviewer,
+   anything else `settings/worker.json`'s PreToolUse hook covers). The
+   orchestrator's own `postReviewStatus` call never reaches this hook at all —
+   it's a plain `execFileSync` from the `rmd run-task` process, never a Claude
+   Code tool call. See `test/deny-floor.test.ts`.
+3. **Provenance is checked AT ARM TIME.** `armAutoMerge` (`src/run-task.ts`)
+   re-fetches the LIVE `remudero-review` status right before arming and
+   verifies GitHub attributes it (`creator.login` on the commit-status API —
+   the one field a poster cannot spoof) to the identity named by
+   `REMUDERO_REVIEWER_LOGIN`. `resolveReviewProvenance`/
+   `decideAutoMergeArmAtSha` (`src/lib/review.ts`) implement the rule: a
+   status from anyone else is **ABSENT, never a failure** — a hostile or buggy
+   poster's `failure` is exactly as inert as its `success` would be, so it can
+   forge neither a pass nor a denial-of-service block. See
+   `test/review-status-provenance.test.ts`.
+
+**BOOTSTRAP ORDERING, same doctrine as `ci-gate` above:** both `REMUDERO_REVIEWER_TOKEN`
+and `REMUDERO_REVIEWER_LOGIN` ship unset. Until an operator provisions the
+dedicated identity and sets both, `postReviewStatus` falls back to ambient
+`gh` auth and `armAutoMerge` skips the provenance re-check entirely — byte
+for byte the pre-W1-T203 behavior. Arming the check before the identity
+exists would deadlock every merge, the same failure this doc's `ci-gate`
+section already guards against.
+
 ## Live falsification (proven, not asserted)
 
 - A legitimate PR whose REPORT substantiates its criteria → `remudero-review=success`.

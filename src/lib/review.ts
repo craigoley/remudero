@@ -1160,6 +1160,141 @@ export function resolveAutoMergeArm(
   return decision;
 }
 
+// ── Status-provenance gate (W1-T203 — THE FORGE ATTACK) ─────────────────────
+//
+// Today `gh` runs OUTSIDE the sandbox with the operator's own ambient
+// credential (recon R-3/R-6), and that credential is the ONLY thing on the
+// machine that can post a commit status — so any identity that can shell out
+// to `gh` (including a worker) can post its own `remudero-review=success` and
+// satisfy its own merge gate. This section closes the read-back half: at ARM
+// TIME, whoever is about to trust a live `remudero-review` status must first
+// ask GitHub WHO posted it (the commit-status API's `creator.login`, which
+// GitHub attributes from the authenticating credential — a worker cannot make
+// this say anything but its own identity, unlike the state/description/context
+// fields, which are just request payload). The credential half (a dedicated
+// identity {@link postReviewStatus} authenticates as, which workers never
+// hold) and the deny-floor half (hooks/deny-floor.sh refusing a worker's own
+// status-POST attempt) are the other two parts of the same property.
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Env var naming the GitHub login the dedicated `remudero-review` reviewer
+ * identity authenticates as (a fine-grained PAT or GitHub App installation
+ * token's own login/slug — e.g. `remudero-reviewer[bot]`). Read by the
+ * orchestrator ONLY (never shipped to a worker's environment — the same
+ * containment property `~/.config/remudero/**` already gets in
+ * `settings/worker.json`'s deny-list); {@link resolveReviewProvenance}'s
+ * caller supplies it explicitly so the pure function never reaches into
+ * `process.env` itself.
+ */
+export const REVIEWER_IDENTITY_ENV = "REMUDERO_REVIEWER_LOGIN";
+
+/**
+ * Env var naming the dedicated reviewer identity's own credential.
+ * {@link postReviewStatus} uses it (as `GH_TOKEN`, overriding whatever `gh`
+ * would otherwise resolve from the ambient environment) when set, so the
+ * ONE status that must carry unforgeable provenance is posted by an identity
+ * distinct from the operator/worker credential every other `gh` call on the
+ * machine shares. Unset ⇒ `postReviewStatus` falls back to ambient `gh` auth,
+ * byte-identical to pre-W1-T203 behavior — the same bootstrap-ordering
+ * doctrine `docs/review-gate.md` already documents for `ci-gate`: a
+ * provenance gate armed before the dedicated identity exists would deadlock
+ * every merge, so this ships DARK until an operator provisions the identity
+ * and sets both env vars.
+ */
+export const REVIEWER_TOKEN_ENV = "REMUDERO_REVIEWER_TOKEN";
+
+/**
+ * One fetched `remudero-review` commit-status entry — the two fields
+ * {@link resolveReviewProvenance} needs off GitHub's "get the combined status
+ * for a ref" response (`.statuses[]`, already deduped to the latest post per
+ * context by GitHub itself). `undefined` means no status has ever been posted
+ * under this context for the sha in question.
+ */
+export interface ReviewStatusEntry {
+  state: ReviewState;
+  /**
+   * GitHub's `creator.login` for this status — the one field a poster cannot
+   * spoof (server-attributed from the authenticating credential, never from
+   * the request body). `undefined` only if GitHub's response is itself
+   * malformed/incomplete; treated the same as a mismatched login (untrusted).
+   */
+  posterLogin?: string;
+}
+
+/**
+ * THE PROVENANCE GATE (acceptance criteria 1-3). Resolve what a fetched
+ * `remudero-review` status ACTUALLY proves, gated on WHO posted it:
+ *
+ * - No status at all → `"absent"`.
+ * - A status posted by anyone OTHER than `trustedLogin` → `"absent"` —
+ *   REGARDLESS of its `state`. This is deliberate and covers BOTH forge
+ *   directions: an untrusted `success` must not rescue a merge a genuine
+ *   review would have failed (criterion 1), and an untrusted `failure` must
+ *   not BLOCK a merge a genuine review would have passed (criterion 2) — the
+ *   design's "treat a forged verdict as absent, never as a fail": mapping a
+ *   hostile poster's `failure` to a real failure converts the forge vector
+ *   into a denial-of-service vector, which is worse (an attacker can already
+ *   forge `success`; letting them ALSO forge `failure` costs the operator a
+ *   legitimate merge instead of only a hostile one).
+ * - A status posted by `trustedLogin` → its own `state`, unchanged — the
+ *   autonomous merge path is byte-identical to pre-W1-T203 for every
+ *   non-forged PR (criterion 3).
+ *
+ * Pure and case-insensitive on the login compare (GitHub logins are
+ * case-insensitive for uniqueness, so a byte-exact compare would be a false
+ * mismatch waiting to happen).
+ */
+export function resolveReviewProvenance(
+  entry: ReviewStatusEntry | undefined,
+  trustedLogin: string,
+): ReviewState | "absent" {
+  if (!entry) return "absent";
+  if (!entry.posterLogin || entry.posterLogin.trim().toLowerCase() !== trustedLogin.trim().toLowerCase()) {
+    return "absent";
+  }
+  return entry.state;
+}
+
+/**
+ * The "at arm time" half of the property (acceptance criteria 1-3): whatever
+ * a caller computed in-process, THIS is what decides whether the LIVE status
+ * on GitHub — read back and filtered by who posted it — still says a genuine
+ * reviewer passed the PR. Deliberately narrow and orthogonal to
+ * {@link decideAutoMergeArm}'s capped/override layer (which reasons about a
+ * verdict computed BEFORE anything could have been posted, and is unaffected
+ * by this gate): this function only ever answers "is the CURRENTLY-LIVE
+ * remudero-review, filtered by provenance, a success" — a caller arms only
+ * when BOTH this AND {@link decideAutoMergeArm} say yes.
+ *
+ * An absent/untrusted resolution refuses with a reason that never says
+ * "failure" — {@link decideAutoMergeArm}'s "not success" wording is reserved
+ * for a GENUINE failing review, so a forged or missing status is never
+ * confused with one in a log line or an escalation (criterion 2: a hostile or
+ * buggy poster's `failure` is exactly as inert here as its `success` would
+ * be — neither can move this decision off "wait for a real one").
+ */
+export function decideAutoMergeArmAtSha(entry: ReviewStatusEntry | undefined, trustedLogin: string): ArmDecision {
+  const resolved = resolveReviewProvenance(entry, trustedLogin);
+  if (resolved === "success") {
+    return {
+      arm: true,
+      reason: `remudero-review=success at this sha, posted by the trusted reviewer identity ('${trustedLogin}')`,
+    };
+  }
+  if (resolved === "failure") {
+    return { arm: false, reason: "remudero-review is not success" };
+  }
+  return {
+    arm: false,
+    reason: entry
+      ? `remudero-review at this sha was posted by '${entry.posterLogin ?? "unknown"}', not the trusted ` +
+        `reviewer identity ('${trustedLogin}') — treated as ABSENT, not as a failure, so a forged or ` +
+        `mistaken poster can never itself block a merge a genuine reviewer would pass`
+      : "no remudero-review status found for this sha — treated as ABSENT, arming withheld",
+  };
+}
+
 /**
  * Recover the most recent `automerge.capped_override_granted` ledger line for
  * `taskId`, "last one wins" — the SAME scanning idiom {@link
@@ -1913,6 +2048,18 @@ export function reviewerOutcome(opts: {
  * the exact `gh api` call from the design; mirrors the other gh helpers in
  * lib/worker.ts (untested by unit — it shells out). WRITE-scoped to a commit
  * STATUS only; it can never edit code.
+ *
+ * W1-T203 (i): when {@link REVIEWER_TOKEN_ENV} is set, this `gh` invocation
+ * authenticates as the dedicated reviewer identity (`GH_TOKEN` overrides
+ * whatever `gh` would otherwise pick up from ambient auth) rather than
+ * whatever credential the operator/workers share — the one thing that makes
+ * {@link resolveReviewProvenance}'s login compare meaningful at arm time.
+ * Unset ⇒ falls back to ambient `gh` auth, byte-identical to before this
+ * task (see the env var's own doc comment for the bootstrap-ordering
+ * rationale). The token itself never reaches this function via an argument —
+ * only via the orchestrator's OWN process env, which a worker's sandboxed
+ * env/HOME cannot read (`settings/worker.json` already denies
+ * `~/.config/remudero/**`).
  */
 export function postReviewStatus(opts: {
   owner: string;
@@ -1932,5 +2079,7 @@ export function postReviewStatus(opts: {
     `state=${opts.state}`,
   ];
   if (opts.description) args.push("-f", `description=${opts.description.slice(0, 140)}`);
-  execFileSync("gh", args, { stdio: "pipe" });
+  const reviewerToken = process.env[REVIEWER_TOKEN_ENV];
+  const env = reviewerToken ? { ...process.env, GH_TOKEN: reviewerToken, GITHUB_TOKEN: reviewerToken } : process.env;
+  execFileSync("gh", args, { stdio: "pipe", env });
 }

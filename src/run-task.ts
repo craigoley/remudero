@@ -169,10 +169,12 @@ import { assertProvenance, citation } from "./lib/provenance.js";
 import { loadPlanIndex, renderPlanIndex } from "./lib/plan-index.js";
 import {
   REVIEW_CONTEXT,
+  REVIEWER_IDENTITY_ENV,
   applyVerdictStability,
   buildReviewPrompt,
   cappedAnnotation,
   cappedOverrideFromLedger,
+  decideAutoMergeArmAtSha,
   floorDegradedAnnotation,
   isTddStrict,
   judgeReview,
@@ -187,6 +189,7 @@ import {
   reviewLedgerLegibilityFields,
   type CappedOverride,
   type CriterionVerdict,
+  type ReviewStatusEntry,
   type ReviewVerdict,
 } from "./lib/review.js";
 import { buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
@@ -397,8 +400,66 @@ interface RollupEntry {
   state?: string;
 }
 
-/** Arm GitHub auto-merge on a PR the runner opened. Non-fatal: the poll decides. */
+/**
+ * Fetch the LIVE `remudero-review` status for a PR head sha, with its
+ * poster's login — the read {@link decideAutoMergeArmAtSha} (W1-T203) gates
+ * arming on. GitHub's "get the combined status for a ref" endpoint already
+ * dedups `.statuses[]` to the single latest post per context, so this needs
+ * no client-side "which one is newest" logic. Returns `undefined` when the
+ * context has never been posted at this sha (never posted, or the `state`
+ * field came back empty) rather than throwing; a genuine `gh api` failure
+ * (network, rate limit) propagates, same shape as every other `gh` helper in
+ * this file — {@link armAutoMerge} below treats that as fail-closed.
+ */
+function fetchReviewStatusEntry(owner: string, repo: string, sha: string): ReviewStatusEntry | undefined {
+  const combined = ghJson(["api", `repos/${owner}/${repo}/commits/${sha}/status`]) as {
+    statuses?: Array<{ context?: string; state?: string; creator?: { login?: string } }>;
+  };
+  const entry = (combined.statuses ?? []).find((s) => s.context === REVIEW_CONTEXT);
+  if (!entry || !entry.state) return undefined;
+  return { state: entry.state as "success" | "failure", posterLogin: entry.creator?.login };
+}
+
+/**
+ * Arm GitHub auto-merge on a PR the runner opened. Non-fatal: the poll decides.
+ *
+ * W1-T203 (iii — "provenance checked at arm time"): when {@link
+ * REVIEWER_IDENTITY_ENV} is configured, re-fetches the LIVE `remudero-review`
+ * status right before arming and refuses unless GitHub attributes it to the
+ * dedicated reviewer identity — closing the window between this run's own
+ * in-process verdict and whatever is ACTUALLY live on GitHub at arm time,
+ * which a worker with `gh` access (recon R-3/R-6: `gh` runs outside the
+ * sandbox with the operator's own ambient credential) could otherwise have
+ * overwritten with a forged status. DARK (skipped entirely) until the env var
+ * is set — see its doc comment in lib/review.ts for the bootstrap-ordering
+ * rationale shared with `ci-gate` (docs/review-gate.md): a gate armed before
+ * the dedicated identity exists would deadlock every merge.
+ *
+ * Fails CLOSED on an unreadable live status (network/rate-limit) — an
+ * unverifiable provenance check must never be treated as a pass; the PR is
+ * simply left unarmed this cycle, identical in shape to "no status yet".
+ */
 function armAutoMerge(prUrl: string): void {
+  const trustedLogin = process.env[REVIEWER_IDENTITY_ENV];
+  if (trustedLogin) {
+    try {
+      const m = prUrl.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/\d+/);
+      if (!m) throw new Error(`could not parse owner/repo from PR url: ${prUrl}`);
+      const [, owner, repo] = m;
+      const view = ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string };
+      const entry = fetchReviewStatusEntry(owner, repo, view.headRefOid);
+      const decision = decideAutoMergeArmAtSha(entry, trustedLogin);
+      if (!decision.arm) {
+        console.log(`automerge.provenance_refused (W1-T203): ${decision.reason} — ${prUrl}`);
+        return;
+      }
+    } catch (e) {
+      console.log(
+        `automerge.provenance_check_error (W1-T203): ${String((e as Error)?.message ?? e)} — arm withheld: ${prUrl}`,
+      );
+      return;
+    }
+  }
   try {
     execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"], {
       encoding: "utf8",
