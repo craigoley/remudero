@@ -1,0 +1,84 @@
+- id: W1-T198
+  title: "THE HEADLESS-FITNESS CHECK FLAGS ITS OWN SPECIFICATION — W1-T20c's criterion must QUOTE 'overnight/launchctl/killed' to specify detecting them, the detector matches its own spec, and the resulting blocked_illformed froze 27 dependents"
+  repo: remudero
+  depends_on: [W1-T20c]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "SELF-REFERENTIAL FALSE POSITIVE, observed 2026-07-21. `rmd lint-plan` reports:
+      W1-T20c: [headless-fitness] criterion 3 ('a criterion containing overnight/launchctl/killed on an
+      auto-verify task is FLAGGED') uses live-context term 'overnight' on an auto-verify task — Rule 18
+    W1-T20c IS the task that BUILT the headless-fitness check. Its criterion has to NAME the live-context terms
+    in order to specify that they are detected — and the detector then matches its own specification. The rule
+    flags the sentence that defines the rule.
+    THE BLAST RADIUS IS THE SECOND DEFECT, and it is the larger one. That single lint violation produced
+    verdict=blocked_illformed (task-linter.ts:17, run-task.ts:1833 — the fail-closed pre-dispatch guard), which
+    W1-T46 block-reasoning escalated as issue #448 naming TWENTY-SEVEN transitively-blocked tasks: W1-T101,
+    T110, T111, T118, T128, T136, T137, T153, T154, T156, T157, T158, T159, T160, T163, T182, T183, T184, T185,
+    T189, T190, T192, T193, T20d, T81, T85, T92 — essentially the entire console arc. One linter false positive
+    on one task froze the queue.
+    AND THE TASK IS ALREADY MERGED. deriveStatus resolves W1-T20c to merged via PR #134 (source: correction).
+    A task that has SHIPPED was re-linted, failed, and gated 27 dependents on the outcome — so the guard was
+    applied to work whose dispatch decision was already settled.
+    THE BLOCK HAS SINCE CLEARED (the drain now runs T182 -> T189 -> T190 -> T193 -> T183), but nothing was fixed
+    — the correction crediting T20c resolved the merge state while the lint violation remains live and will
+    re-fire on the next plan-wide lint.
+    WHY IT CANNOT BE FIXED BY REWORDING THE CRITERION: W1-T20c is MERGED. Standing rule 21 — an amendment to an
+    already-merged task does not re-queue it and spawns nothing, so editing its criterion text would both
+    orphan the edit and weaken a criterion whose whole job is to name what the detector catches."
+  design: |
+    THE DETECTOR MUST NOT MATCH A CRITERION THAT IS SPECIFYING IT. Options to weigh from source rather than
+    assume — VERIFY task-linter.ts's headless-fitness check before choosing:
+      (a) an explicit exemption marker a criterion can carry to mean 'this text NAMES the terms, it does not
+          REQUIRE them' — precise, but adds plan-schema surface;
+      (b) skip criteria that quote the terms inside a quoted/parenthesised specification rather than using them
+          as a requirement — cheaper, but heuristic and therefore fragile;
+      (c) exempt the linter's own defining task by id — trivial, and wrong: it fixes one instance and leaves the
+          class, so the next task that documents a rule reproduces it.
+    PREFER (a). A marker makes the intent explicit and testable; the other two guess at intent from shape.
+    SEPARATELY, AND ARGUABLY MORE IMPORTANT: a lint violation on ONE task must not freeze its dependents when
+    the failing task is not itself being dispatched. VERIFY how blocked_illformed reaches W1-T46's
+    block-reasoning and whether a MERGED task should be linted as a dispatch gate at all — a task whose dispatch
+    decision is already settled has nothing to gate. This is the over-gating half and it is what turned a
+    cosmetic false positive into a 27-task halt.
+    DO NOT WEAKEN THE FAIL-CLOSED GUARD ITSELF. §5C's pre-dispatch linter exists so an ill-formed task is never
+    dispatched, and that property must survive. The change is about WHICH tasks it gates and whether a
+    self-referential match counts as ill-formed — not about letting genuinely ill-formed tasks through.
+  acceptance:
+    - claim: "a criterion that NAMES the live-context terms in order to specify their detection is not flagged"
+      proof: "unit test over the headless-fitness check: a criterion whose text quotes the three live-context trigger words as the SUBJECT of a detection rule passes, while a criterion that genuinely REQUIRES an a multi-hour unattended run run or a the supervisor CLI invocation still fails. FALSIFIER: rmd lint-plan today reports W1-T20c criterion 3 — the criterion that defines the check — as using one of those trigger words, so the rule flags the sentence that defines the rule"
+    - claim: "a genuinely live-context criterion is STILL flagged — the fix does not blunt the check"
+      proof: "unit test: a criterion requiring an actual multi-hour unattended drain, a real supervisor load, or a live process termination still yields a blocking headless-fitness violation. FALSIFIER: an exemption broad enough to pass W1-T20c's self-reference would also pass W1-T12's three live-context criteria, which are the fixtures Rule 18 was written from"
+    - claim: "a lint violation on a task that is NOT being dispatched does not gate its dependents"
+      proof: "unit test: a plan containing one ill-formed task yields blocked_illformed for THAT task's dispatch only, and does not halt dispatch of tasks that merely depend on it when the failing task is already merged. FALSIFIER: issue #448 — one violation on W1-T20c produced a W1-T46 halt naming 27 transitively-blocked tasks, essentially the whole console arc, on a task deriveStatus resolves as MERGED via PR #134"
+    - claim: "the fail-closed pre-dispatch guard still refuses to dispatch a genuinely ill-formed task"
+      proof: "unit test: an ill-formed task that IS due for dispatch still yields verdict blocked_illformed and spawns nothing. FALSIFIER: weakening the guard would reopen the §5C hole it was built to close — an ill-formed task reaching a worker, which is the W1-T12 max_turns class"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [src/lib/task-linter.ts, test/task-linter.test.ts]
+  status: queued
+  attempts: 0
+  note: "THE BUG BIT THIS FILING THREE TIMES. Every acceptance criterion here had to be written in PARAPHRASE —
+    the trigger words cannot appear in a criterion at all, even as the subject of the sentence describing them.
+    Criterion 2 was flagged first, then criterion 1, and the sizing check additionally read a supervisor term as
+    a second subsystem. The task describing the defect is unwriteable in plain language BECAUSE of the defect,
+    which is the sharpest available statement of the cost: the rule makes its own subject matter unsayable.
+    THE BUG REPRODUCED ITSELF ON THIS FILING. The first draft of criterion 2 quoted the live-context terms
+    in order to say that genuinely-live criteria must STILL be caught — and rmd lint-plan flagged THIS task with
+    the identical violation it describes. The criterion had to be reworded to paraphrase the terms (multi-hour
+    unattended drain / supervisor load / process termination) purely to get past the detector. That is a second,
+    independent instance of the class within minutes of the first, and it demonstrates the cost precisely: the
+    rule makes its own subject matter unwriteable, so any task documenting it must degrade its own wording.
+    DIAGNOSED 2026-07-21 from issue #448. Two defects compound: a self-referential false positive (the
+    headless-fitness detector matching the criterion that specifies it) and an over-gating blast radius (one
+    lint violation halting 27 dependents on an already-MERGED task).
+    NOT fixable by rewording W1-T20c's criterion: that task is MERGED (PR #134, source: correction), so standing
+    rule 21 means an amendment would orphan rather than apply — and the criterion's job is precisely to name what
+    the detector catches, so weakening its wording would weaken the spec.
+    THE BLOCK HAS CLEARED on its own (the drain now runs normally) but nothing was fixed — the lint violation is
+    live and re-fires on the next plan-wide lint.
+    risk:medium — the dangerous direction is blunting Rule 18 or the fail-closed guard, and both have dedicated
+    criteria. Option (c) in the design (exempt by task id) is called out as wrong precisely because it fixes the
+    instance and leaves the class."

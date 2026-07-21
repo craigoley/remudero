@@ -11,6 +11,9 @@ import {
   prewarmBoardGithub,
   renderShellHtml,
   resolveServePort,
+  resolveServeHost,
+  resolveServeHosts,
+  DEFAULT_SERVE_HOST,
   resolveServiceTokens,
   serviceTokensPath,
   type ServeDeps,
@@ -806,4 +809,95 @@ test("W1-T182: needsMeTaskRowHtml's ACTUAL rendered output shows the issue's rea
   assert.match(unverifiedRow, /unverified/i);
   assert.doesNotMatch(unverifiedRow, /view issue/i, "no issue url to join against -> no link rendered");
   assert.doesNotMatch(unverifiedRow, /<input\b/i);
+});
+
+// ── resolveServeHost: exposure must be typed, never inherited (R-4) ─────────
+// `server.listen(port)` with no host binds `::` — every interface — while the
+// startup line printed "listening on http://localhost:4317". The surface was
+// open to any network the host had joined and the log said the opposite.
+
+test("resolveServeHost: no flag and no env -> loopback, not every interface", () => {
+  assert.equal(resolveServeHost([], {}), DEFAULT_SERVE_HOST);
+  assert.equal(DEFAULT_SERVE_HOST, "127.0.0.1", "the safe default is loopback");
+});
+
+test("resolveServeHost: --host names an interface explicitly (the tailnet address for phone access)", () => {
+  assert.equal(resolveServeHost(["--host", "100.90.47.107"], {}), "100.90.47.107");
+});
+
+test("resolveServeHost: RMD_SERVE_HOST is honoured, and --host outranks it", () => {
+  assert.equal(resolveServeHost([], { RMD_SERVE_HOST: "100.90.47.107" }), "100.90.47.107");
+  assert.equal(resolveServeHost(["--host", "127.0.0.1"], { RMD_SERVE_HOST: "100.90.47.107" }), "127.0.0.1");
+});
+
+test("resolveServeHost: every wildcard spelling is REFUSED rather than silently accepted", () => {
+  for (const wild of ["0.0.0.0", "::", "*", ""]) {
+    assert.throws(
+      () => resolveServeHost(["--host", wild], {}),
+      /binds EVERY interface/,
+      `FALSIFIER: ${JSON.stringify(wild)} is exactly the pre-fix behaviour and must not be reachable by typo`,
+    );
+    assert.throws(() => resolveServeHost([], { RMD_SERVE_HOST: wild }), /binds EVERY interface/);
+  }
+});
+
+test("resolveServeHost: a following FLAG is rejected rather than bound as an address", () => {
+  assert.throws(() => resolveServeHost(["--host", "--port"], {}), /expects an address/);
+});
+
+// ── the startup banner must never print the write token (R-5) ───────────────
+// Under the operator's launch, `rmd serve`'s stdout is redirected to serve.log,
+// which was mode 0644. So printing a bearer token wrote a fleet-control
+// credential to a world-readable file that outlives the process. Both tokens
+// were printed, and the console URL carried the WRITE one. A source-level
+// guard because the banner is the regression surface and it is one line long.
+test("serveCommand's startup banner prints the READ token only — never the write token", () => {
+  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const banner = src.slice(src.indexOf("### rmd serve — listening on"));
+  const printed = banner.slice(0, banner.indexOf("await new Promise"));
+  assert.ok(
+    printed.includes("?token=${tokens.read}"),
+    "the console URL carries the read token, so a bookmark grants VIEW rather than control",
+  );
+  assert.ok(
+    !printed.includes("${tokens.write}"),
+    "FALSIFIER: the pre-fix banner printed `console: ...?token=${tokens.write}` plus a bare " +
+      "`write token: ${tokens.write}` line, both of which landed in a 0644 serve.log",
+  );
+});
+
+// ── multi-interface bind (the regression this fixes) ────────────────────────
+// Binding a SINGLE named host fixed the wildcard exposure and silently broke
+// 127.0.0.1, which is where every local curl, script and desktop bookmark
+// points. Observed live: `curl http://127.0.0.1:4317/` returned 000 (connection
+// refused) while the tailnet address served fine. Naming ONE interface is not
+// the same as naming the interfaces you need.
+
+test("resolveServeHosts: default is loopback ALONE, still never the wildcard", () => {
+  assert.deepEqual(resolveServeHosts([], {}), ["127.0.0.1"]);
+});
+
+test("resolveServeHosts: a comma-separated list binds BOTH loopback and the tailnet address", () => {
+  assert.deepEqual(
+    resolveServeHosts(["--host", "127.0.0.1,100.90.47.107"], {}),
+    ["127.0.0.1", "100.90.47.107"],
+    "FALSIFIER: the single-host shape dropped everything after the first address, which is exactly how local access was lost",
+  );
+});
+
+test("resolveServeHosts: whitespace is tolerated and duplicates collapse", () => {
+  assert.deepEqual(resolveServeHosts(["--host", " 127.0.0.1 , 127.0.0.1 "], {}), ["127.0.0.1"]);
+});
+
+test("resolveServeHosts: a wildcard ANYWHERE in the list is refused, not just in first position", () => {
+  assert.throws(() => resolveServeHosts(["--host", "127.0.0.1,0.0.0.0"], {}), /binds EVERY interface/);
+  assert.throws(() => resolveServeHosts([], { RMD_SERVE_HOST: "0.0.0.0,127.0.0.1" }), /binds EVERY interface/);
+});
+
+test("resolveServeHosts: an all-empty value is refused rather than collapsing to listen-nowhere", () => {
+  assert.throws(() => resolveServeHosts(["--host", " , "], {}), /binds EVERY interface/);
+});
+
+test("resolveServeHost: the single-host helper still returns the FIRST host, never a wildcard", () => {
+  assert.equal(resolveServeHost(["--host", "127.0.0.1,100.90.47.107"], {}), "127.0.0.1");
 });

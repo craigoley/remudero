@@ -9,6 +9,7 @@ import {
   inflightLockPath,
   readInflightLock,
   withInflightLock,
+  sweepStaleInflightLocks,
 } from "../src/lib/inflight-lock.js";
 
 function tmp(): string {
@@ -128,4 +129,52 @@ test("release() is idempotent and removes the file", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── boot-time reap of locks whose holder is gone (R-35) ─────────────────────
+// OBSERVABILITY, not liveness: acquireInflightLock already steals a dead
+// holder's lock, so a stale lock has never blocked dispatch. It lingers because
+// it is only cleared by the NEXT acquire of that same task — and a
+// circuit-broken task is never re-dispatched. Observed 2026-07-21: W1-T1.lock
+// held pid 65304, dead since 2026-07-19, still present two days later.
+
+test("sweepStaleInflightLocks: a lock whose holder pid is DEAD is reaped", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-sweep-"));
+  acquireInflightLock(dir, "W1-T1", { run_id: "R1", info: { pid: 65304, host: "h", startedAt: "t" } });
+  const out = sweepStaleInflightLocks(dir, { isPidAlive: () => false });
+  assert.deepEqual(out.reaped, ["W1-T1"]);
+  assert.deepEqual(out.kept, []);
+  assert.equal(readInflightLock(dir, "W1-T1"), null, "the lock file is actually gone from disk");
+});
+
+test("sweepStaleInflightLocks: a lock whose holder is ALIVE is left strictly alone", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-sweep-"));
+  acquireInflightLock(dir, "W1-T184", { run_id: "R2" });
+  const out = sweepStaleInflightLocks(dir, { isPidAlive: () => true });
+  assert.deepEqual(out.reaped, [], "FALSIFIER: reaping a LIVE holder's lock would let a second run of the same task start");
+  assert.deepEqual(out.kept, ["W1-T184"]);
+  assert.ok(readInflightLock(dir, "W1-T184"), "the live lock survives");
+});
+
+test("sweepStaleInflightLocks: mixed dir reaps only the dead, and ignores non-lock files", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-sweep-"));
+  acquireInflightLock(dir, "DEAD-1", { run_id: "R1", info: { pid: 1, host: "h", startedAt: "t" } });
+  acquireInflightLock(dir, "LIVE-1", { run_id: "R2", info: { pid: 2, host: "h", startedAt: "t" } });
+  writeFileSync(join(dir, "notes.txt"), "not a lock");
+  const out = sweepStaleInflightLocks(dir, { isPidAlive: (pid) => pid === 2 });
+  assert.deepEqual(out.reaped, ["DEAD-1"]);
+  assert.deepEqual(out.kept, ["LIVE-1"]);
+  assert.ok(existsSync(join(dir, "notes.txt")), "a non-.lock file is never touched");
+});
+
+test("sweepStaleInflightLocks: an unparseable lock names no live holder, so it is reaped", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-sweep-"));
+  writeFileSync(join(dir, "GARBAGE.lock"), "{ not json");
+  const out = sweepStaleInflightLocks(dir, { isPidAlive: () => true });
+  assert.deepEqual(out.reaped, ["GARBAGE"], "leaving it would preserve the misleading state this exists to remove");
+});
+
+test("sweepStaleInflightLocks: a missing directory is a no-op, never a throw at boot", () => {
+  const out = sweepStaleInflightLocks(join(tmpdir(), "rmd-does-not-exist-" + process.pid));
+  assert.deepEqual(out, { reaped: [], kept: [] });
 });

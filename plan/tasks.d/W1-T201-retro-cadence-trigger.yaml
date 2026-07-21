@@ -1,0 +1,78 @@
+- id: W1-T201
+  title: "THE RETRO HAS NO CADENCE TRIGGER — retroCommand's only caller is the CLI, so R10 could not fire through 70 merges; wire the condition (25 merges / 7 days, integrity-gated) into the daemon's sweep hook, keyed so one threshold-crossing fires one retro"
+  repo: remudero
+  depends_on: [W1-T192]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "THE SELF-IMPROVEMENT LOOP HAS A SINGLE POINT OF FAILURE AND IT IS UNMANNED. Diagnosed read-only
+    2026-07-21:
+      - `retroCommand` (run-task.ts:3015) has EXACTLY ONE caller — the CLI dispatch at run-task.ts:6632.
+      - The daemon's ONLY per-poll hook is `deps.sweep()` (daemon.ts:274).
+      - The single LaunchAgent (com.remudero.daemon.plist) contains no retro reference.
+      - `loadMarker` is called at run-task.ts:3023 — INSIDE retroCommand. The marker is read to scope the
+        gather WINDOW, never to decide whether to fire.
+    So nothing evaluates a cadence condition anywhere. The retro fires if and only if a human types `rmd retro`.
+    FIXTURE, measured: R10 has not fired through SEVENTY merged PRs since the R9 marker
+    (2026-07-20T14:23:35.961Z, runs_seen 26). The marker still reads R9. Every retro-derived improvement —
+    corrective task filing, the plan-health sweep, overrun-class mining, learnings promotion — has been blocked
+    behind a command nobody ran, during the single most productive stretch the fleet has had.
+    THE FAILURE MODE IS SILENCE, WHICH IS WHY IT PERSISTED. Nothing errors, nothing escalates, no check goes red.
+    A retro that cannot fire looks exactly like a retro with nothing to say, and the marker's presence makes the
+    cadence read as ARMED — a reader who checks state/last-retro.json sees a well-formed marker and reasonably
+    concludes the mechanism is live.
+    THIRD INSTANCE OF ONE CLASS in a single session: W1-T192 (inbox draft rung, CLI-pull only), the
+    answer-driven strike reset (wired to the sweep path only, so the operator verb never sees it), and this. Every
+    other rung — sweep, drain, ops, issues, credit-backfill — runs on the daemon's cadence. The rungs that need a
+    human are exactly the ones that never run."
+  design: |
+    WIRE IT WHERE EVERY OTHER RUNG ALREADY RUNS — the daemon's per-poll hook (`deps.sweep()`, daemon.ts:274),
+    following the W1-T192 pattern rather than inventing a second scheduler. `rmd sweep` already appends a SECOND
+    rung after `runSweep` (W1-T150's credit-backfill, run-task.ts ~4053) and the daemon path goes through
+    `buildSweepHook` — a rung added to the CLI path ALONE would silently never run unattended, which is the exact
+    defect this task fixes and the trap W1-T177's cadence work had to avoid.
+    THE CONDITION IS DATA, NOT CONSTANTS (rule 2): fire when merges-since-marker >= 25 OR days-since-marker >= 7,
+    both tunable without a source change. VERIFY from source what the marker already records and what the gather
+    already counts before adding a new counter — `runs_seen` is written as `gather.totalRuns`, and the merge
+    count may be derivable from what the gather already walks.
+    IDEMPOTENCE IS LOAD-BEARING, keyed to the THRESHOLD CROSSING rather than to poll count. A retro spawns a
+    higher-tier Architect worker; an unkeyed rung on a 300s loop would re-fire every poll while the condition
+    holds, which is the W1-T177 spend-leak class with a more expensive worker. One crossing fires one retro, and
+    the marker advance is what closes the window.
+    INTEGRITY-GATED: do not fire on a corpus the retro cannot honestly read. VERIFY what retro.ts already refuses
+    (renderGather declines to present `shipped` under some conditions) and gate on the same signals rather than
+    inventing new ones — a retro that fires on unreadable state produces confident nonsense, which is worse than
+    not firing.
+    FAIL SOFT: a retro failure must not halt the sweep or the daemon. Log it, leave the marker unadvanced, and let
+    the next crossing retry — an unfired retro is the status quo, a stopped fleet is a regression.
+    `rmd retro` KEEPS ITS ROLE as a manual trigger and a dry-run surface. This removes it as the ONLY trigger.
+  acceptance:
+    - claim: "a threshold crossing fires a retro from the DAEMON path with no CLI invocation"
+      proof: "integration test over the daemon poll path: with merges-since-marker at or above the configured count, a retro is gathered within two polls and `rmd retro` is never invoked. FALSIFIER, measured 2026-07-21: seventy PRs merged since the R9 marker (2026-07-20T14:23:35.961Z) and no retro fired, because retroCommand's only caller is the CLI dispatch at run-task.ts:6632 while the daemon's only per-poll hook is deps.sweep()"
+    - claim: "threshold crossed plus two daemon polls with NO retro gather is a failure"
+      proof: "integration test asserting the negative directly: a seeded state with the threshold crossed produces a retro.gather within two polls, and a run that produces none fails the test. FALSIFIER: this is the exact observed state today — the condition is long since satisfied and no gather event has been emitted"
+    - claim: "ONE threshold crossing fires ONE retro — a poll cadence never re-fires while the condition holds"
+      proof: "unit test: three consecutive polls across one crossing spawn the Architect exactly once, keyed to the crossing rather than to poll count. FALSIFIER: an unkeyed rung re-fires every 300s while merges-since-marker stays above the threshold, spawning a higher-tier worker each time — the W1-T177 spend-leak class with a more expensive worker"
+    - claim: "the cadence condition is DATA — the merge count and the day count are tunable without a source change"
+      proof: "unit test overriding both thresholds from a policy source and asserting the firing decision changes accordingly, per rule 2. FALSIFIER: inlined constants make the cadence untunable and repeat the hard-coded-95 mistake W1-T197 records"
+    - claim: "the integrity gate holds — a retro does not fire on a corpus it cannot honestly read"
+      proof: "unit test: with the gather's own integrity signals unsatisfied, no retro fires and the reason is logged. FALSIFIER: a retro that fires on unreadable state produces confident nonsense and advances the marker over it, which is worse than not firing at all"
+    - claim: "a retro failure fails SOFT — the sweep and daemon keep running and the marker is not advanced"
+      proof: "unit test: a seeded retro failure leaves the daemon loop running, the marker unchanged, and the failure logged, so the next crossing retries. FALSIFIER: a throw that halts the daemon trades a missed retro for a stopped fleet"
+  risk: high
+  origin: architect
+  plan_refs: ["§8", "§4"]
+  files: [src/run-task.ts, test/run-task.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 from a read-only diagnosis requested at session close. All three candidate causes were
+    tested: the merge counter is NOT below threshold (runs_seen is written as gather.totalRuns and never read back
+    as a firing condition), no integrity gate is holding (the only guards found are a rendering-honesty check and
+    an explicit 'generation must never abort a retro over a heading rename'), and the trigger is simply ABSENT.
+    THIRD INSTANCE of the human-trigger-only class in one session, after W1-T192 (inbox draft rung) and the
+    answer-driven strike reset being wired to the sweep path only. Every rung that runs unattended runs; every
+    rung that needs a human does not.
+    risk:high — it adds a higher-tier Architect spawn to an unattended 300s loop. The idempotence and integrity
+    criteria are the load-bearing ones: an unkeyed rung is a spend leak, and an ungated one advances the marker
+    over a corpus it could not read."

@@ -1229,13 +1229,23 @@ export async function runCreditBackfill(
       corrected++;
     }
 
-    log("sweep.credit_backfill", {
-      task_id: c.taskId,
-      pr_number: c.prNumber,
-      pr_url: c.prUrl,
-      corrected: acted,
-      already_credited: alreadyCredited,
-    });
+    // LOG ONLY WHAT WAS ACTED ON. This ran once per candidate per sweep, and the
+    // daemon sweeps every poll, so a backfill that corrects nothing still wrote a
+    // line per already-credited task forever — 5,209 no-op lines, all of them
+    // `corrected: false`. The ledger is the provenance spine and its SIZE is the
+    // read cost behind W1-T187's 310x projection regression; a per-poll restatement
+    // of unchanged state buys nothing and is charged to every reader. The summary
+    // line below still reports `total` on every pass, so the sweep's COVERAGE stays
+    // observable even when its per-candidate detail is silent.
+    if (acted) {
+      log("sweep.credit_backfill", {
+        task_id: c.taskId,
+        pr_number: c.prNumber,
+        pr_url: c.prUrl,
+        corrected: acted,
+        already_credited: alreadyCredited,
+      });
+    }
 
     results.push({ taskId: c.taskId, prNumber: c.prNumber, prUrl: c.prUrl, corrected: acted, alreadyCredited });
   }

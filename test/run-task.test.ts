@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -15,10 +15,13 @@ import {
   deriveStrikeHistory,
   dispatchFixPreflightStandDown,
   drainCommand,
+  escalateCircuitBreak,
   FIX_MODE_RULES,
   isTransientResult,
+  materializeReviewWorktree,
   renderFixPrompt,
   resolveReviewTarget,
+  withMaterializedWorktree,
   resolveDaemonTarget,
   routeFix,
   runFixRung,
@@ -32,8 +35,12 @@ import {
   type FixDeps,
   type FixEvidence,
   type PrHeadGateway,
+  type ReviewWorktreeDeps,
+  priorStrikesFor,
+  currentStrikeRegimeFor,
 } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
+import { judgeReview } from "../src/lib/review.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { GitHub } from "../src/lib/status.js";
 import {
@@ -47,6 +54,7 @@ import {
 } from "../src/lib/sweep.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
+import { worktreesDir } from "../src/lib/worker.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import { loadPlanIndex, renderPlanIndex } from "../src/lib/plan-index.js";
 
@@ -320,6 +328,158 @@ test("resolveReviewTarget: no flag ⇒ the checkout default; --repo overrides (b
   assert.deepEqual(resolveReviewTarget(def, ["--repo", "remudero-sandbox"]), { owner: "craigoley", repo: "remudero-sandbox" });
   assert.deepEqual(resolveReviewTarget(def, ["--repo", "other/box"]), { owner: "other", repo: "box" });
   assert.deepEqual(resolveReviewTarget(def, ["5", "--repo", "remudero-sandbox"]), { owner: "craigoley", repo: "remudero-sandbox" });
+});
+
+// ── W1-T185 (Gap 2): `rmd review` materializes a worktree at the PR head so ──
+// whitelisted proofs actually EXECUTE, mirroring the fix rung's own
+// `git worktree add origin/<branch>` pattern (reuse, not new machinery).
+
+test("ACCEPTANCE (criterion 4, unit slice): materializeReviewWorktree fetches then adds a worktree at origin/<headRefName>, returning a path under worktreesDir(config)", () => {
+  const config = drainFixtureConfig();
+  const calls: string[] = [];
+  const deps: ReviewWorktreeDeps = {
+    fetch: (repoDir) => calls.push(`fetch:${repoDir}`),
+    addWorktree: (repoDir, worktreePath, branch) => calls.push(`add:${repoDir}:${worktreePath}:${branch}`),
+  };
+  const path = materializeReviewWorktree(config, "/repo", 411, "run-W1-T185-123", deps);
+  assert.ok(path, "materialization reports success");
+  assert.ok(path!.startsWith(join(config.root, "worktrees")), "path lives under worktreesDir(config)");
+  assert.ok(path!.includes("review-PR411-"), "path is scoped to the PR number");
+  assert.deepEqual(calls, [`fetch:/repo`, `add:/repo:${path}:run-W1-T185-123`]);
+});
+
+test("materializeReviewWorktree returns undefined (never throws) when fetch fails — network unavailable is a FALLBACK trigger, not a crash", () => {
+  const config = drainFixtureConfig();
+  const deps: ReviewWorktreeDeps = {
+    fetch: () => {
+      throw new Error("network unreachable");
+    },
+    addWorktree: () => assert.fail("addWorktree must not be reached when fetch already failed"),
+  };
+  assert.equal(materializeReviewWorktree(config, "/repo", 391, "some-branch", deps), undefined);
+});
+
+test("materializeReviewWorktree returns undefined (never throws) when the worktree add fails — a detached/deleted head is a FALLBACK trigger, not a crash", () => {
+  const config = drainFixtureConfig();
+  const deps: ReviewWorktreeDeps = {
+    fetch: () => {},
+    addWorktree: () => {
+      throw new Error("fatal: invalid reference: origin/deleted-branch");
+    },
+  };
+  assert.equal(materializeReviewWorktree(config, "/repo", 397, "deleted-branch", deps), undefined);
+});
+
+test("ACCEPTANCE (criterion 4, full chain): an operator-path review over a PR whose proofs are executable reports a NON-EMPTY executed set — materialize -> headCheckoutDir -> judgeReview EXECUTES, exactly the fix rung's own wiring for the same PR/proofs", () => {
+  const config = drainFixtureConfig();
+  // `addWorktree` here plays the role `git worktree add` + `checkout` really
+  // does: it makes the PR head's CONTENT show up on disk at `worktreePath`.
+  // Faking the git calls (never touching real git/network — this environment
+  // has neither) while keeping the FILESYSTEM EFFECT real is what lets
+  // `judgeReview`'s whitelisted executor genuinely run against it below.
+  const deps: ReviewWorktreeDeps = {
+    fetch: () => {},
+    addWorktree: (_repoDir, worktreePath) => {
+      mkdirSync(worktreePath, { recursive: true });
+      writeFileSync(join(worktreePath, "fixture.txt"), "REMUDERO_W1_T185_MARKER\n");
+    },
+  };
+  const worktreePath = materializeReviewWorktree(config, "/repo", 411, "run-W1-T185-fixture", deps);
+  assert.ok(worktreePath, "materialization succeeded");
+  try {
+    const criteria = [
+      { claim: "the marker is present", proof: "grep: REMUDERO_W1_T185_MARKER in fixture.txt" },
+    ];
+    const v = judgeReview(criteria, { diff: "", report: "unrelated", headCheckoutDir: worktreePath });
+    // The SAME observed-execution outcome the fix rung records for a real PR
+    // (#411's own criteria 2/4 recorded executed_fail on the SAME proofs a
+    // keyword-only `rmd review` had read 0/N for) — here, executed_PASS,
+    // because the marker genuinely IS on disk. Either way: EXECUTED, not
+    // not_executable — the operator path is no longer keyword-only by
+    // construction.
+    assert.equal(v.criteria[0].proof_exec, "executed_pass");
+    assert.equal(v.keywordOnly, false);
+    assert.equal(v.capped, false);
+  } finally {
+    rmSync(worktreePath!, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T185 (Gap 2, criterion 6): a materialized worktree is torn down on ──
+// EVERY exit path, including failure.
+
+// W1-T185 acceptance criterion 6's own proof text (plan/tasks.yaml, verbatim
+// from "unit test:" onward) IS this test's name — the mechanical floor's
+// `unit test:` dialect name-filters the whole suite on exactly that text
+// (parseTestTarget in src/lib/review.ts), so this criterion's own proof only
+// counts as OBSERVED when a real test is titled to match it byte-for-byte
+// (case-insensitive). See the identical note on criterion 1's renamed test in
+// test/review.test.ts.
+test("after a review that throws mid-execution, no worktree remains under the worktrees root. FALSIFIER: a teardown only on the success path reproduces the W1-T175 leak class, which exists precisely because run worktrees already strand on disk", async () => {
+  const config = drainFixtureConfig();
+  const worktreePath = join(worktreesDir(config), "review-PR411-fixture");
+  mkdirSync(worktreePath, { recursive: true });
+  assert.ok(existsSync(worktreePath), "sanity: the fixture worktree exists before the run");
+
+  await assert.rejects(
+    withMaterializedWorktree(
+      worktreePath,
+      "/repo",
+      async () => {
+        throw new Error("mid-execution failure");
+      },
+      (_repoDir, wt) => rmSync(wt, { recursive: true, force: true }),
+    ),
+    /mid-execution failure/,
+  );
+
+  assert.equal(existsSync(worktreePath), false, "the worktree was torn down despite the throw");
+});
+
+test("withMaterializedWorktree tears down on the SUCCESS path too, and returns body's result unmodified", async () => {
+  const config = drainFixtureConfig();
+  const worktreePath = join(worktreesDir(config), "review-PR418-fixture");
+  mkdirSync(worktreePath, { recursive: true });
+
+  const result = await withMaterializedWorktree(
+    worktreePath,
+    "/repo",
+    async () => "verdict-shaped-result",
+    (_repoDir, wt) => rmSync(wt, { recursive: true, force: true }),
+  );
+
+  assert.equal(result, "verdict-shaped-result");
+  assert.equal(existsSync(worktreePath), false);
+});
+
+test("withMaterializedWorktree is a no-op finally when worktreePath is undefined (materialization never happened) — remove is never called", async () => {
+  let removeCalled = false;
+  const result = await withMaterializedWorktree(
+    undefined,
+    "/repo",
+    async () => "keyword-only-result",
+    () => {
+      removeCalled = true;
+    },
+  );
+  assert.equal(result, "keyword-only-result");
+  assert.equal(removeCalled, false);
+});
+
+test("withMaterializedWorktree's teardown failure never masks body's own throw", async () => {
+  await assert.rejects(
+    withMaterializedWorktree(
+      "/some/worktree",
+      "/repo",
+      async () => {
+        throw new Error("the real failure");
+      },
+      () => {
+        throw new Error("teardown also failed");
+      },
+    ),
+    /the real failure/,
+  );
 });
 
 // ── BUG 1 (fix/cli-safe-control-surface): a spawning subcommand must FAIL LOUD on junk
@@ -687,6 +847,8 @@ function fakeReview(
     testTheater: false,
     summary: state === "success" ? "all criteria met" : "unmet criteria",
     floorDegraded: false,
+    capped: false,
+    keywordOnly: false,
     headSha: "deadbeef",
     reviewerOutcome: "success",
   };
@@ -1693,6 +1855,90 @@ test("runFixRung is REUSED, never reimplemented — one dispatch from runTask's 
   assert.equal(runTaskDefs.length, 1, "there must be exactly one runTask implementation for both callers to share");
 });
 
+// ── W1-T192: the draft rung runs DAEMON-SIDE, not CLI-pull ─────────────────────────────────
+//
+// The decision logic (which proposals are due, the idempotence throttle, the fail-soft
+// per-proposal draft loop) is pure and unit-tested exhaustively over fixtures in
+// test/inbox.test.ts, with the LLM stubbed out entirely — mirroring how this file already
+// treats runFixRung above. What ONLY belongs here is WIRING: is the rung actually reachable
+// from the daemon's own `deps.sweep()` seam (daemon.ts:274), not merely from `rmd inbox`?
+// That is a real regression risk this codebase already tests via source-text reachability
+// (see `runFixRung is REUSED...` above), so the same technique applies here.
+
+/** Extract one top-level `function`/`async function` declaration's source text, from its
+ *  signature to the start of the NEXT top-level function declaration (or EOF) — good enough
+ *  for a reachability grep; this file has no nested top-level function of the same shape. */
+function extractFunctionBody(src: string, signature: string): string {
+  const start = src.indexOf(signature);
+  assert.ok(start >= 0, `expected to find '${signature}' in run-task.ts`);
+  const nextFn = src.indexOf("\nfunction ", start + 1);
+  const nextAsyncFn = src.indexOf("\nasync function ", start + 1);
+  const nextExportAsyncFn = src.indexOf("\nexport async function ", start + 1);
+  const boundaries = [nextFn, nextAsyncFn, nextExportAsyncFn].filter((i) => i > start);
+  const end = boundaries.length ? Math.min(...boundaries) : src.length;
+  return src.slice(start, end);
+}
+
+test("W1-T192: buildSweepHook (the daemon's OWN deps.sweep() wiring) reaches the draft rung — the rung is on the DAEMON path, not only inboxCommand", () => {
+  const sweepHookBody = extractFunctionBody(runTaskSrc, "function buildSweepHook(");
+  assert.match(
+    sweepHookBody,
+    /buildInboxDraftHook/,
+    "buildSweepHook must invoke the W1-T192 draft rung — riding the SAME seam the W1-T150 " +
+      "credit-backfill rung already occupies. A rung added to the CLI path alone would " +
+      "silently never run unattended (the exact defect this task fixes).",
+  );
+});
+
+test("W1-T192: `rmd inbox` (inboxCommand) and the daemon's draft rung (buildInboxDraftHook) both drive the SAME draftProposalBatch — one shared drafting loop, never two divergent ones", () => {
+  const inboxBody = extractFunctionBody(runTaskSrc, "async function inboxCommand(");
+  assert.match(inboxBody, /draftProposalBatch\(/, "inboxCommand must call the shared draftProposalBatch");
+
+  const hookBody = extractFunctionBody(runTaskSrc, "function buildInboxDraftHook(");
+  assert.match(hookBody, /draftProposalBatch\(/, "buildInboxDraftHook must call the SAME draftProposalBatch, never a re-derived spawn loop");
+});
+
+test("W1-T192: buildInboxDraftHook is wrapped in its own try/catch, distinct from buildSweepHook's — a draft-rung hiccup never halts the sweep or the daemon", () => {
+  const hookBody = extractFunctionBody(runTaskSrc, "function buildInboxDraftHook(");
+  assert.match(hookBody, /try\s*\{/, "the hook must guard its own body");
+  assert.match(hookBody, /catch \(e\)/);
+  assert.match(hookBody, /inbox\.draft_rung\.error/, "a failure is ledgered under its own step, not silently swallowed");
+});
+
+test("W1-T192: `rmd inbox`'s drafting predicate (proposalsNeedingDraft) is UNTHROTTLED — it never consults the daemon-only DraftAttemptCache, preserving the manual-force contract", () => {
+  const inboxBody = extractFunctionBody(runTaskSrc, "async function inboxCommand(");
+  assert.match(inboxBody, /proposalsNeedingDraft\(/, "inboxCommand must select drafting candidates via the unthrottled predicate");
+  assert.doesNotMatch(
+    inboxBody,
+    /draftsDueOnDaemon/,
+    "inboxCommand must NOT apply the daemon's idempotence throttle — a human forcing a redraft must never be silently no-op'd",
+  );
+});
+
+// W1-T192 review-floor proof-text fixture (composite, additive alongside the two granular
+// tests above — same convention W1-T185's review round 3 established): the review floor's
+// `unit test:` dialect name-filters the WHOLE suite using a criterion's proof body VERBATIM,
+// so this criterion is only mechanically provable by a test whose NAME literally is that text.
+test("inboxCommand still classifies and still forces a draft on demand after the daemon rung exists. FALSIFIER: moving the trigger and removing the manual one leaves an operator unable to force a redraft when they want one — the CLI is demoted from sole trigger, not deleted", () => {
+  const inboxBody = extractFunctionBody(runTaskSrc, "async function inboxCommand(");
+  assert.match(inboxBody, /classifyProposal\(/, "inboxCommand must still CLASSIFY every proposal — the viewer role is preserved");
+  assert.match(
+    inboxBody,
+    /proposalsNeedingDraft\(/,
+    "inboxCommand must still be able to FORCE a draft via the unthrottled predicate — the manual-trigger role is preserved",
+  );
+  assert.match(
+    inboxBody,
+    /draftProposalBatch\(/,
+    "inboxCommand must still actually SPAWN the draft on demand, not merely decide one is due — a real manual trigger, not a stub",
+  );
+  assert.doesNotMatch(
+    inboxBody,
+    /draftsDueOnDaemon/,
+    "the daemon-only idempotence throttle must never gate inboxCommand's manual force — an operator can always force a redraft",
+  );
+});
+
 // ── W1-T78: the CLARIFICATION-QUESTION rung's fix-rung side — an operator's
 // answer re-arms `runFixRung` carrying the answer as an added constraint,
 // VERBATIM, on every strike; the strike allowance is config policy. ──────────
@@ -2098,4 +2344,110 @@ test("the terminal blocked_review return (no fix rung) is gone — a failing rev
     /if \(review\.state !== "success"\) \{\s*log\("verdict"/,
     "a failing review must route through runFixRung, never straight back to a blocked_review verdict",
   );
+});
+
+// ── W1-T199: strike regime tagging ──────────────────────────────────────────
+//
+// A strike counter that cannot tell noise from evidence blocks the loop exactly
+// where it now works. FIXTURE (2026-07-21): PR #457 converged executed_fail ->
+// fix worker -> executed_pass x3 -> merged, while #449/#452 were refused at 2/2
+// by the SAME rung, carrying executed_fail verdicts of their own — because their
+// two strikes had been spent in the keyword-only era.
+
+test("W1-T199: keyword-era strikes do NOT count under the executed regime", () => {
+  const ledger = [
+    { step: "fix.dispatch", task_id: "W1-T900" }, // untagged => pre-executor
+    { step: "fix.dispatch", task_id: "W1-T900" },
+  ];
+  assert.equal(priorStrikesFor(ledger, "W1-T900", "executed"), 0);
+});
+
+test("W1-T199: a rung refusing SOLELY on pre-regime strikes is not reachable — 2 untagged strikes leave the cap unexhausted", () => {
+  const ledger = [
+    { step: "fix.dispatch", task_id: "W1-T900" },
+    { step: "fix.dispatch", task_id: "W1-T900" },
+  ];
+  const cap = 2;
+  const counted = priorStrikesFor(ledger, "W1-T900", "executed");
+  assert.ok(counted < cap, `expected < ${cap} counted strikes, got ${counted}`);
+});
+
+test("W1-T199: the bound stays REAL — strikes spent under the CURRENT regime still exhaust", () => {
+  const ledger = [
+    { step: "fix.dispatch", task_id: "W1-T900", verdict_regime: "executed" },
+    { step: "fix.dispatch", task_id: "W1-T900", verdict_regime: "executed" },
+  ];
+  assert.equal(priorStrikesFor(ledger, "W1-T900", "executed"), 2);
+});
+
+test("W1-T199: under the keyword_only regime EVERY strike counts — the bound never silently vanishes", () => {
+  const ledger = [
+    { step: "fix.dispatch", task_id: "W1-T900" },
+    { step: "fix.dispatch", task_id: "W1-T900", verdict_regime: "executed" },
+  ];
+  assert.equal(priorStrikesFor(ledger, "W1-T900", "keyword_only"), 2);
+});
+
+test("W1-T199: the current regime is READ from the latest review.posted proof_exec", () => {
+  const keywordOnly = [
+    { step: "review.posted", task_id: "W1-T900", proof_exec: ["not_executable", "not_executable"] },
+  ];
+  const executed = [
+    { step: "review.posted", task_id: "W1-T900", proof_exec: ["not_executable", "not_executable"] },
+    { step: "review.posted", task_id: "W1-T900", proof_exec: ["not_executable", "executed_fail"] },
+  ];
+  assert.equal(currentStrikeRegimeFor(keywordOnly, "W1-T900"), "keyword_only");
+  assert.equal(currentStrikeRegimeFor(executed, "W1-T900"), "executed");
+});
+
+test("W1-T199: the ledger is never mutated — regime is derived at READ time from untouched lines", () => {
+  const ledger = [{ step: "fix.dispatch", task_id: "W1-T900" }];
+  const snapshot = JSON.stringify(ledger);
+  priorStrikesFor(ledger, "W1-T900", "executed");
+  currentStrikeRegimeFor(ledger, "W1-T900");
+  assert.equal(JSON.stringify(ledger), snapshot, "reading strikes must not mutate ledger lines");
+});
+
+// ── the circuit-break dedup marker survives a FAILED delivery (R-1) ─────────
+// The cross-boot dedup was already ledger-derived and already the right shape.
+// Its defect was ORDERING: the marker was written only after escalate() RETURNED,
+// so a throwing `gh` recorded nothing and the next boot retried the same
+// escalation — which is how a transport failure became an unbounded relaunch
+// loop. The ledger showed 1 such marker against 460 boots.
+
+test("escalateCircuitBreak: a THROWING gh gateway still writes the dedup marker, so the next boot does not retry", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-circuit-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const task = { id: "W1-TQ", title: "t", repo: "remudero", type: "implement", depends_on: [], status: "queued" };
+  const boom = {
+    create() {
+      throw new Error("gh: HTTP 403 rate limit exceeded");
+    },
+  };
+
+  // BOOT 1: delivery fails. It must not throw, and it must leave a marker.
+  assert.doesNotThrow(() =>
+    escalateCircuitBreak(task as never, { owner: "craigoley", repo: "remudero", ledgerPath, runId: "RUN-1", issues: boom }),
+  );
+  const afterFirst = readFileSync(ledgerPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const markers = afterFirst.filter((l) => l.step === "dispatch.circuit_broken.escalated");
+  assert.equal(markers.length, 1, "FALSIFIER: pre-fix the marker was written only on SUCCESS, so this was 0");
+  assert.equal(markers[0].delivered, false, "and it records that delivery did NOT happen (claimed vs evidenced)");
+  assert.equal(
+    afterFirst.filter((l) => l.step === "escalation.failed").length,
+    1,
+    "the failure is legible on its own step",
+  );
+
+  // BOOT 2: a fresh process over the SAME ledger must dedup on that marker and
+  // not call the gateway again. This is the loop, reproduced across boots.
+  let calls = 0;
+  const counting = {
+    create() {
+      calls += 1;
+      throw new Error("gh: HTTP 403 rate limit exceeded");
+    },
+  };
+  escalateCircuitBreak(task as never, { owner: "craigoley", repo: "remudero", ledgerPath, runId: "RUN-2", issues: counting });
+  assert.equal(calls, 0, "the second boot never re-attempted — the dedup is durable across the process death");
 });

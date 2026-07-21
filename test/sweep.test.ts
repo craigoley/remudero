@@ -972,3 +972,54 @@ test("credit backfill: distinct tasks each get their own independent correction"
   assert.equal(lines.filter((l) => l.step === "verdict.merged" && l.task_id === "W1-T1").length, 1);
   assert.equal(lines.filter((l) => l.step === "verdict.merged" && l.task_id === "W1-T2").length, 1);
 });
+
+// ── credit backfill logs only what it ACTED on (R-36) ───────────────────────
+// This rung logged once per candidate per pass, and the daemon sweeps every
+// poll, so a backfill correcting nothing still restated every already-credited
+// task forever: 5,209 accumulated no-op lines, all `corrected: false`. The
+// ledger's SIZE is the read cost behind W1-T187's projection regression, so a
+// per-poll restatement of unchanged state is charged to every reader.
+
+test("runCreditBackfill: an already-credited candidate logs NO per-candidate line (R-36 no-op silence)", async () => {
+  const logged: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runCreditBackfill(
+    [{ taskId: "W1-TA", prNumber: 1, prUrl: "u/1", merged: true }],
+    {
+      ledgerPath: join(mkdtempSync(join(tmpdir(), "rmd-backfill-")), "ledger.ndjson"),
+      runId: "RUN-1",
+      // already credited: the pre-existing terminal verdict line
+      readLedger: () => [{ task_id: "W1-TA", step: "verdict", verdict: "merged" }],
+      appendLine: () => {},
+      log: (step, extra = {}) => logged.push({ step, extra }),
+    },
+  );
+  assert.equal(s.corrected, 0, "nothing to correct");
+  assert.equal(
+    logged.filter((l) => l.step === "sweep.credit_backfill").length,
+    0,
+    "FALSIFIER: pre-fix this logged one `corrected:false` line per candidate per poll, forever",
+  );
+  // COVERAGE stays observable — the summary still reports what was examined.
+  const summary = logged.find((l) => l.step === "sweep.credit_backfill.summary");
+  assert.ok(summary, "the summary line still fires");
+  assert.equal(summary?.extra.total, 1, "and still reports the full candidate count");
+});
+
+test("runCreditBackfill: a candidate it ACTUALLY corrects still logs its per-candidate line", async () => {
+  const logged: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runCreditBackfill(
+    [{ taskId: "W1-TB", prNumber: 7, prUrl: "u/7", merged: true }],
+    {
+      ledgerPath: join(mkdtempSync(join(tmpdir(), "rmd-backfill-")), "ledger.ndjson"),
+      runId: "RUN-1",
+      readLedger: () => [],
+      appendLine: () => {},
+      log: (step, extra = {}) => logged.push({ step, extra }),
+    },
+  );
+  assert.equal(s.corrected, 1);
+  const acted = logged.filter((l) => l.step === "sweep.credit_backfill");
+  assert.equal(acted.length, 1, "silence is scoped to NO-OPS — a real correction stays legible");
+  assert.equal(acted[0].extra.task_id, "W1-TB");
+  assert.equal(acted[0].extra.corrected, true);
+});

@@ -1,0 +1,571 @@
+{
+  "prByUrl": {
+    "https://github.com/craigoley/remudero/pull/20000": {
+      "number": 20000,
+      "url": "https://github.com/craigoley/remudero/pull/20000",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20001": {
+      "number": 20001,
+      "url": "https://github.com/craigoley/remudero/pull/20001",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20002": {
+      "number": 20002,
+      "url": "https://github.com/craigoley/remudero/pull/20002",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20006": {
+      "number": 20006,
+      "url": "https://github.com/craigoley/remudero/pull/20006",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20007": {
+      "number": 20007,
+      "url": "https://github.com/craigoley/remudero/pull/20007",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20008": {
+      "number": 20008,
+      "url": "https://github.com/craigoley/remudero/pull/20008",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20012": {
+      "number": 20012,
+      "url": "https://github.com/craigoley/remudero/pull/20012",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20013": {
+      "number": 20013,
+      "url": "https://github.com/craigoley/remudero/pull/20013",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20014": {
+      "number": 20014,
+      "url": "https://github.com/craigoley/remudero/pull/20014",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20018": {
+      "number": 20018,
+      "url": "https://github.com/craigoley/remudero/pull/20018",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20019": {
+      "number": 20019,
+      "url": "https://github.com/craigoley/remudero/pull/20019",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20020": {
+      "number": 20020,
+      "url": "https://github.com/craigoley/remudero/pull/20020",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20024": {
+      "number": 20024,
+      "url": "https://github.com/craigoley/remudero/pull/20024",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20025": {
+      "number": 20025,
+      "url": "https://github.com/craigoley/remudero/pull/20025",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20026": {
+      "number": 20026,
+      "url": "https://github.com/craigoley/remudero/pull/20026",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20030": {
+      "number": 20030,
+      "url": "https://github.com/craigoley/remudero/pull/20030",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20031": {
+      "number": 20031,
+      "url": "https://github.com/craigoley/remudero/pull/20031",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20032": {
+      "number": 20032,
+      "url": "https://github.com/craigoley/remudero/pull/20032",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20036": {
+      "number": 20036,
+      "url": "https://github.com/craigoley/remudero/pull/20036",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20037": {
+      "number": 20037,
+      "url": "https://github.com/craigoley/remudero/pull/20037",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20038": {
+      "number": 20038,
+      "url": "https://github.com/craigoley/remudero/pull/20038",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20042": {
+      "number": 20042,
+      "url": "https://github.com/craigoley/remudero/pull/20042",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20043": {
+      "number": 20043,
+      "url": "https://github.com/craigoley/remudero/pull/20043",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20044": {
+      "number": 20044,
+      "url": "https://github.com/craigoley/remudero/pull/20044",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20048": {
+      "number": 20048,
+      "url": "https://github.com/craigoley/remudero/pull/20048",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20049": {
+      "number": 20049,
+      "url": "https://github.com/craigoley/remudero/pull/20049",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20050": {
+      "number": 20050,
+      "url": "https://github.com/craigoley/remudero/pull/20050",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20054": {
+      "number": 20054,
+      "url": "https://github.com/craigoley/remudero/pull/20054",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20055": {
+      "number": 20055,
+      "url": "https://github.com/craigoley/remudero/pull/20055",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20056": {
+      "number": 20056,
+      "url": "https://github.com/craigoley/remudero/pull/20056",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20060": {
+      "number": 20060,
+      "url": "https://github.com/craigoley/remudero/pull/20060",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20061": {
+      "number": 20061,
+      "url": "https://github.com/craigoley/remudero/pull/20061",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20062": {
+      "number": 20062,
+      "url": "https://github.com/craigoley/remudero/pull/20062",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20066": {
+      "number": 20066,
+      "url": "https://github.com/craigoley/remudero/pull/20066",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20067": {
+      "number": 20067,
+      "url": "https://github.com/craigoley/remudero/pull/20067",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20068": {
+      "number": 20068,
+      "url": "https://github.com/craigoley/remudero/pull/20068",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20072": {
+      "number": 20072,
+      "url": "https://github.com/craigoley/remudero/pull/20072",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20073": {
+      "number": 20073,
+      "url": "https://github.com/craigoley/remudero/pull/20073",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20074": {
+      "number": 20074,
+      "url": "https://github.com/craigoley/remudero/pull/20074",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20078": {
+      "number": 20078,
+      "url": "https://github.com/craigoley/remudero/pull/20078",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20079": {
+      "number": 20079,
+      "url": "https://github.com/craigoley/remudero/pull/20079",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20080": {
+      "number": 20080,
+      "url": "https://github.com/craigoley/remudero/pull/20080",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20084": {
+      "number": 20084,
+      "url": "https://github.com/craigoley/remudero/pull/20084",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20085": {
+      "number": 20085,
+      "url": "https://github.com/craigoley/remudero/pull/20085",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20086": {
+      "number": 20086,
+      "url": "https://github.com/craigoley/remudero/pull/20086",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20090": {
+      "number": 20090,
+      "url": "https://github.com/craigoley/remudero/pull/20090",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20091": {
+      "number": 20091,
+      "url": "https://github.com/craigoley/remudero/pull/20091",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20092": {
+      "number": 20092,
+      "url": "https://github.com/craigoley/remudero/pull/20092",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20096": {
+      "number": 20096,
+      "url": "https://github.com/craigoley/remudero/pull/20096",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20097": {
+      "number": 20097,
+      "url": "https://github.com/craigoley/remudero/pull/20097",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20098": {
+      "number": 20098,
+      "url": "https://github.com/craigoley/remudero/pull/20098",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20102": {
+      "number": 20102,
+      "url": "https://github.com/craigoley/remudero/pull/20102",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20103": {
+      "number": 20103,
+      "url": "https://github.com/craigoley/remudero/pull/20103",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20104": {
+      "number": 20104,
+      "url": "https://github.com/craigoley/remudero/pull/20104",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20108": {
+      "number": 20108,
+      "url": "https://github.com/craigoley/remudero/pull/20108",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20109": {
+      "number": 20109,
+      "url": "https://github.com/craigoley/remudero/pull/20109",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20110": {
+      "number": 20110,
+      "url": "https://github.com/craigoley/remudero/pull/20110",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20114": {
+      "number": 20114,
+      "url": "https://github.com/craigoley/remudero/pull/20114",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20115": {
+      "number": 20115,
+      "url": "https://github.com/craigoley/remudero/pull/20115",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20116": {
+      "number": 20116,
+      "url": "https://github.com/craigoley/remudero/pull/20116",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20120": {
+      "number": 20120,
+      "url": "https://github.com/craigoley/remudero/pull/20120",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20121": {
+      "number": 20121,
+      "url": "https://github.com/craigoley/remudero/pull/20121",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20122": {
+      "number": 20122,
+      "url": "https://github.com/craigoley/remudero/pull/20122",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20126": {
+      "number": 20126,
+      "url": "https://github.com/craigoley/remudero/pull/20126",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20127": {
+      "number": 20127,
+      "url": "https://github.com/craigoley/remudero/pull/20127",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20128": {
+      "number": 20128,
+      "url": "https://github.com/craigoley/remudero/pull/20128",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20132": {
+      "number": 20132,
+      "url": "https://github.com/craigoley/remudero/pull/20132",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20133": {
+      "number": 20133,
+      "url": "https://github.com/craigoley/remudero/pull/20133",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20134": {
+      "number": 20134,
+      "url": "https://github.com/craigoley/remudero/pull/20134",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20138": {
+      "number": 20138,
+      "url": "https://github.com/craigoley/remudero/pull/20138",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20139": {
+      "number": 20139,
+      "url": "https://github.com/craigoley/remudero/pull/20139",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20140": {
+      "number": 20140,
+      "url": "https://github.com/craigoley/remudero/pull/20140",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20144": {
+      "number": 20144,
+      "url": "https://github.com/craigoley/remudero/pull/20144",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20145": {
+      "number": 20145,
+      "url": "https://github.com/craigoley/remudero/pull/20145",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20146": {
+      "number": 20146,
+      "url": "https://github.com/craigoley/remudero/pull/20146",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20150": {
+      "number": 20150,
+      "url": "https://github.com/craigoley/remudero/pull/20150",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20151": {
+      "number": 20151,
+      "url": "https://github.com/craigoley/remudero/pull/20151",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20152": {
+      "number": 20152,
+      "url": "https://github.com/craigoley/remudero/pull/20152",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20156": {
+      "number": 20156,
+      "url": "https://github.com/craigoley/remudero/pull/20156",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20157": {
+      "number": 20157,
+      "url": "https://github.com/craigoley/remudero/pull/20157",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20158": {
+      "number": 20158,
+      "url": "https://github.com/craigoley/remudero/pull/20158",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20162": {
+      "number": 20162,
+      "url": "https://github.com/craigoley/remudero/pull/20162",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20163": {
+      "number": 20163,
+      "url": "https://github.com/craigoley/remudero/pull/20163",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20164": {
+      "number": 20164,
+      "url": "https://github.com/craigoley/remudero/pull/20164",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20168": {
+      "number": 20168,
+      "url": "https://github.com/craigoley/remudero/pull/20168",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20169": {
+      "number": 20169,
+      "url": "https://github.com/craigoley/remudero/pull/20169",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20170": {
+      "number": 20170,
+      "url": "https://github.com/craigoley/remudero/pull/20170",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20174": {
+      "number": 20174,
+      "url": "https://github.com/craigoley/remudero/pull/20174",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20175": {
+      "number": 20175,
+      "url": "https://github.com/craigoley/remudero/pull/20175",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20176": {
+      "number": 20176,
+      "url": "https://github.com/craigoley/remudero/pull/20176",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20180": {
+      "number": 20180,
+      "url": "https://github.com/craigoley/remudero/pull/20180",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20181": {
+      "number": 20181,
+      "url": "https://github.com/craigoley/remudero/pull/20181",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20182": {
+      "number": 20182,
+      "url": "https://github.com/craigoley/remudero/pull/20182",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20186": {
+      "number": 20186,
+      "url": "https://github.com/craigoley/remudero/pull/20186",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20187": {
+      "number": 20187,
+      "url": "https://github.com/craigoley/remudero/pull/20187",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20188": {
+      "number": 20188,
+      "url": "https://github.com/craigoley/remudero/pull/20188",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20192": {
+      "number": 20192,
+      "url": "https://github.com/craigoley/remudero/pull/20192",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20193": {
+      "number": 20193,
+      "url": "https://github.com/craigoley/remudero/pull/20193",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20194": {
+      "number": 20194,
+      "url": "https://github.com/craigoley/remudero/pull/20194",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20198": {
+      "number": 20198,
+      "url": "https://github.com/craigoley/remudero/pull/20198",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20199": {
+      "number": 20199,
+      "url": "https://github.com/craigoley/remudero/pull/20199",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20200": {
+      "number": 20200,
+      "url": "https://github.com/craigoley/remudero/pull/20200",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20204": {
+      "number": 20204,
+      "url": "https://github.com/craigoley/remudero/pull/20204",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20205": {
+      "number": 20205,
+      "url": "https://github.com/craigoley/remudero/pull/20205",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20206": {
+      "number": 20206,
+      "url": "https://github.com/craigoley/remudero/pull/20206",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20210": {
+      "number": 20210,
+      "url": "https://github.com/craigoley/remudero/pull/20210",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20211": {
+      "number": 20211,
+      "url": "https://github.com/craigoley/remudero/pull/20211",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20212": {
+      "number": 20212,
+      "url": "https://github.com/craigoley/remudero/pull/20212",
+      "state": "CLOSED"
+    },
+    "https://github.com/craigoley/remudero/pull/20216": {
+      "number": 20216,
+      "url": "https://github.com/craigoley/remudero/pull/20216",
+      "state": "MERGED"
+    },
+    "https://github.com/craigoley/remudero/pull/20217": {
+      "number": 20217,
+      "url": "https://github.com/craigoley/remudero/pull/20217",
+      "state": "OPEN"
+    },
+    "https://github.com/craigoley/remudero/pull/20218": {
+      "number": 20218,
+      "url": "https://github.com/craigoley/remudero/pull/20218",
+      "state": "CLOSED"
+    }
+  },
+  "autoMergeArmedUrls": [
+    "https://github.com/craigoley/remudero/pull/20001",
+    "https://github.com/craigoley/remudero/pull/20025",
+    "https://github.com/craigoley/remudero/pull/20049",
+    "https://github.com/craigoley/remudero/pull/20073",
+    "https://github.com/craigoley/remudero/pull/20097",
+    "https://github.com/craigoley/remudero/pull/20121",
+    "https://github.com/craigoley/remudero/pull/20145",
+    "https://github.com/craigoley/remudero/pull/20169",
+    "https://github.com/craigoley/remudero/pull/20193",
+    "https://github.com/craigoley/remudero/pull/20217"
+  ]
+}

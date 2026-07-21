@@ -110,6 +110,42 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
 }
 
 /**
+ * NON-THROWING escalation, for callers inside a SUPERVISED LOOP.
+ *
+ * `escalate()` reaches GitHub through `gh issue create` via execFileSync, which throws on any
+ * nonzero exit — a rate-limit, an expired token, a network partition. That contract is right for
+ * a one-shot command (a failed escalation should fail the run loudly), and wrong inside
+ * `rmd daemon`'s `for(;;)`, where the throw is not contained: an uncaught escalation ends the
+ * PROCESS, launchd's KeepAlive{SuccessfulExit:false} reads the nonzero exit as a crash and
+ * relaunches, the fresh process re-selects the same circuit-broken task, escalates, and throws
+ * again. Observed 2026-07-21 04:02-04:13 as one boot per minute (460 `daemon.boot` lines since
+ * Jul 19) — the SECOND boot-loop cause, distinct from W1-T197's headroom exit-1 loop, and NOT
+ * headroom: that window is post-reset.
+ *
+ * Returns the issue URL, or `null` when the escalation could not be delivered. Never throws.
+ * A failure is recorded on its own `escalation.failed` ledger step, so an undelivered
+ * escalation is degraded and legible rather than silent.
+ *
+ * NOTE: this also catches `escalate()`'s zero-options programming error. That is deliberate —
+ * inside a supervised loop even a bug in the escalation payload must not take the fleet down;
+ * the `escalation.failed` line carries the message.
+ */
+export function tryEscalate(e: Escalation, deps: EscalateDeps): string | null {
+  try {
+    return escalate(e, deps);
+  } catch (err) {
+    appendLedger(deps.ledgerPath, {
+      run_id: deps.runId,
+      task_id: e.taskId,
+      step: "escalation.failed",
+      class: e.class,
+      error: String((err as Error)?.message ?? err),
+    });
+    return null;
+  }
+}
+
+/**
  * Real gateway: `gh issue create`, scoped to `owner/repo`. Runs outside the sandbox
  * (gh is documented to fail TLS verification under Seatbelt, §4A) but still inside
  * bypass + the deny-hook floor, carrying only the scoped PAT.
