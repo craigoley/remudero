@@ -1093,88 +1093,6 @@
     risk:high — it changes what verdict gets POSTED to a required status check, i.e. what can merge. The
     fail-direction that matters is suppressing a genuine regression, which is why the citation rule and the
     always-ledgered suppression event are load-bearing criteria rather than nice-to-haves."
-- id: W1-T179
-  title: "W1-T155 DARKNESS FOLLOW-UP — monotonic-under-darkness (a gateway-fetch failure never regresses a credited task to queued, marked github_unobservable) + the in-flight liveness bound; both criteria were amended onto W1-T155 AFTER it merged, so nothing can ever dispatch them"
-  repo: remudero
-  depends_on: [W1-T155, W1-T119]
-  type: implement
-  verify: auto
-  principles: {tdd: strict}
-  budget_usd: 100.00
-  rationale: "ORPHANED CRITERIA, mechanically unreachable — this task exists to give them a dispatchable home.
-    TIMELINE (exact): PR #365 ('feat(W1-T155): board projection exposes the full status taxonomy') merged
-    2026-07-20T15:50:08Z and CREDITED W1-T155. PR #374 ('chore(plan): amend T155/T156 darkness-marked + T155
-    liveness bound + T154 progressive load') merged 2026-07-20T17:35:20Z — one hour forty-five minutes LATER —
-    and ADDED two acceptance criteria to W1-T155: the monotonic-under-darkness/github_unobservable marking, and
-    the in-flight liveness bound.
-    WHY NOTHING WILL EVER BUILD THEM: deriveStatus reads W1-T155 as merged (verified live: merged=true, source
-    PR #365), and MERGED IS TERMINAL in the status layer ('MERGED is terminal — nothing below can add anything
-    more useful than \"it landed\"', status.ts:696). The drain's first filter is `if (isMerged(t.id)) continue`
-    (drain.ts:88), so a merged task is skipped before any criterion is examined — VERIFIED: W1-T155 does not
-    appear in a 40-deep `rmd drain --dry-run` at all. The retro's planHealthSweep explicitly skips it too
-    (`if (CLOSED_TASK_STATUSES.has(task.status)) continue; // out of scope — already shipped`, retro.ts:578).
-    And rmd correct cannot un-credit — it re-points a task to its TRUE merged PR and requires --pr, with no
-    un-credit operation. So the criteria sit in the plan, look authoritative, and are unreachable by every rung.
-    THIS IS NOT ACADEMIC — IT IS THE BUG THAT SURVIVED TONIGHT. Criterion 4 IS the fix for the
-    regression-to-queued-on-read-failure defect (the 12:24->12:58 fail-open where merged✓ tasks with PR links
-    became every-task-queued with empty PR cells). PR #398's own body records the consequence in writing: 'W1-T155
-    (the DATA half, listed as this task's dependency) is not actually implemented in status.ts/board.ts as of this
-    PR — the GitHub-unreachable banner therefore reflects whatever the projection reports today, including the
-    not-yet-fixed regression-to-queued-on-read-failure bug.' So W1-T156's darkness banner is satisfied at the
-    RENDER layer over a DATA layer that still lies. The console can now honestly stamp 'GitHub unreachable' while
-    the projection underneath it still regresses credited tasks to queued.
-    HOUSE ANSWER APPLIED (see W1-T180, which makes it enforceable): the amender owns filing the follow-up. Per
-    rule 16 no criterion is dropped or weakened — only REDISTRIBUTED — so both criteria are carried below
-    VERBATIM from W1-T155, character for character, including their falsifiers."
-  design: |
-    Implement the two criteria against the projection, exactly as W1-T155 would have had it done. Both live in
-    the DATA layer (src/lib/status.ts), not the render layer — W1-T156 already shipped the render half, and it
-    is currently stamping honesty over a projection that does not yet provide it. board.ts needs no change: it
-    declares 'Zero new business logic' and consumes projectPlan/deriveStatus verbatim.
-    (i) MONOTONIC UNDER DARKNESS. When the batched gateway's fetch FAILS, the projection must KEEP each task's
-        last-good status and mark it github_unobservable(since <t>) rather than recomputing it as absent. The
-        distinction between a FAILED read and a genuinely ABSENT one already exists — W1-T119 shipped it
-        (PRs #382 and #391 this evening), so this criterion CONSUMES that polarity rather than re-deriving it.
-        Statuses move only FORWARD across an observation gap.
-    (ii) LIVENESS BOUND. 'running' must require recent ledger activity (a heartbeat within N minutes, N a data
-         threshold) OR an open PR. A dispatched row with no terminal verdict AND no recent activity renders
-         unknown/orphaned.
-    NOTE THE RENDER HALF IS ALREADY DONE and must not be rebuilt: W1-T156 (PR #398, merged) ships the visible
-    'GitHub unreachable since <t> — statuses may be stale' stamp keyed off the projection's signal. This task
-    supplies the signal that stamp is keyed off. VERIFY from source which of github_unobservable's plumbing
-    already exists after #398 before writing any of it — distrust this note.
-    DO NOT amend W1-T155 to remove these criteria. It is merged and terminal, and per rule 16 nothing is dropped.
-    The correct end state is that W1-T155 retains them for the record and this task delivers them.
-  acceptance:
-    - claim: "GitHub-unobservable is a MARKED state, never a silent downgrade — a gateway-fetch FAILURE never regresses a credited task to queued (statuses are MONOTONIC under darkness); it keeps the last-good status marked unobservable"
-      proof: "unit test: with the batched gateway's fetch FAILING (throttled/errored — distinguished from genuinely ABSENT per W1-T119/W1-T130's cannot-observe polarity), the projection KEEPS each task's LAST-GOOD status and marks it github_unobservable (since <t>); a merged/credited task does NOT regress to queued on the fetch failure — statuses only move FORWARD across an observation gap. FALSIFIER: a merged/credited task rendered queued during a gateway outage FAILS (the 12:58 fail-open where every task read queued with empty PR cells)"
-    - claim: "in-flight 'running' has a LIVENESS bound — a dispatched row with no terminal verdict AND no recent activity is unknown/orphaned, never running"
-      proof: "unit test: 'running' requires recent ledger activity (a heartbeat within N minutes, N a data threshold) OR an open PR; a dispatched row with no terminal verdict AND no recent activity renders 'unknown/orphaned', NOT running — the W1-T1 crash-era spin-loop orphan rows (dispatched, no terminal verdict, ledger-only join) classify as unknown, not in-flight (the falsifier: an orphaned dispatch rendered as running, the 12:58 W1-T1='running' reading)"
-  risk: medium
-  origin: architect
-  plan_refs: ["§7", "§9"]
-  files: [src/lib/status.ts, test/status.test.ts]
-  status: queued
-  attempts: 0
-  note: "Both acceptance criteria are carried VERBATIM from W1-T155 (added there by PR #374 at 17:35:20Z, after
-    PR #365 credited the task at 15:50:08Z). Rule 16: no criterion dropped or weakened, only redistributed.
-    W1-T155 KEEPS them for the historical record — it is merged and terminal, and editing a merged task to
-    remove criteria would be the goalpost-moving rule 15 forbids.
-    Companion W1-T180 turns the house answer that produced this task (the amender owns filing the follow-up)
-    into an ENFORCED lint check, so the next post-merge amendment cannot orphan silently the way this one did.
-    Delivers the DATA half that W1-T156's shipped render half is currently stamping honesty over.
-    SCOPE NARROWED at filing to src/lib/status.ts alone (an earlier draft also listed board.ts). board.ts states
-    'Zero new business logic: this module only wires those two together' and consumes projectPlan/deriveStatus
-    from status.ts verbatim, so both criteria land wholly in the projection. The narrowing is a correction, not a
-    dodge of Rule 19 — the work genuinely has one home.
-    PROMOTED 2026-07-20 from plan/tasks.d/ into tasks.yaml, positioned directly behind W1-T128. Filing it as a
-    shard (the conflict-free-by-construction default, W1-T122) had an unintended cost: loadPlan APPENDS every
-    tasks.d shard AFTER all of tasks.yaml, and the drain scans in FILE ORDER, so a sharded task sits at the very
-    BOTTOM of the queue regardless of urgency — verified, it did not appear in a 40-deep dry-run. Its fixtures are
-    now on the operator's screen (W1-T1 rendering 'running' at 27h21m is the liveness-bound falsifier; the
-    merged-0/160 fail-open is the monotonic-under-darkness falsifier), so it belongs at the front. GENERAL LESSON
-    worth keeping: shards are the right default for conflict-free FILING, and the wrong choice for anything that
-    needs PRIORITY. Those two goals are in tension and the tension is invisible until a shard never dispatches."
 - id: W1-T136
   title: "EVERY machine plan-PR emitter (retro, approve, future inbox writes) must emit a PR mergeable under the full gate stack — a SHARED gate-compliant emitter: plan-index regen, commitlint-clean commit (header AND body <=100), and a judgeable Acceptance body so remudero-review does not fail closed (the #287 retro + #387 approve fixtures)"
   repo: remudero
@@ -1190,6 +1108,16 @@
     review-body hygiene independently. PR #407 shipped the instructional half (the worker OUTPUT CONTRACT now
     carries the rule) and a shaping helper for two harness sites — but it did NOT build the shared emitter, so
     every OTHER emission path still re-learns the same lessons one outage at a time.
+    RE-ORDERED 2026-07-20 (second time tonight) to sit AHEAD of W1-T179, giving drain order
+    T187 -> T136 -> T179 -> T182. The argument that moved it: SIX commitlint firings in one evening
+    including cross-PR blast radius (the operator's own #418 squash at 101 chars red-blocked the
+    unrelated #417, because commitlint lints the whole base..head range and main cannot be rewritten),
+    the OPERATOR half is still unshaped (PR #430 closed the WORKER half by giving renderFixPrompt the
+    commit contract, but nothing shapes a hand-authored PR title, and the ' (#NNN)' squash suffix means
+    a 94-char title still lands at 101), and R10 is approaching — the retro emits its OWN plan PR, so
+    the compliant emitter must exist before the cadence trigger fires.
+    W1-T179 yields the slot because DARKNESS FIRES ONLY DURING OUTAGES, while the emitter class fires
+    on every plan PR anyone writes. Frequency, not severity, decided this one.
     RESTORED 2026-07-20 to immediately after W1-T179, ahead of W1-T185 and the console pass
     (W1-T183/W1-T184/W1-T182/W1-T159). Evidence for the restore: FIVE hand-hit commitlint failures in a single
     evening while filing tasks about this very trap (#399 header-max-length, #403 subject-case, an earlier
@@ -1279,6 +1207,88 @@
     which is a correctness rule — the trailer would credit the task DONE on merge of its mere filing. The #389/#392
     convention was correct but undocumented, so every future plan PR steps on it until the emitter encodes it."
 
+- id: W1-T179
+  title: "W1-T155 DARKNESS FOLLOW-UP — monotonic-under-darkness (a gateway-fetch failure never regresses a credited task to queued, marked github_unobservable) + the in-flight liveness bound; both criteria were amended onto W1-T155 AFTER it merged, so nothing can ever dispatch them"
+  repo: remudero
+  depends_on: [W1-T155, W1-T119]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "ORPHANED CRITERIA, mechanically unreachable — this task exists to give them a dispatchable home.
+    TIMELINE (exact): PR #365 ('feat(W1-T155): board projection exposes the full status taxonomy') merged
+    2026-07-20T15:50:08Z and CREDITED W1-T155. PR #374 ('chore(plan): amend T155/T156 darkness-marked + T155
+    liveness bound + T154 progressive load') merged 2026-07-20T17:35:20Z — one hour forty-five minutes LATER —
+    and ADDED two acceptance criteria to W1-T155: the monotonic-under-darkness/github_unobservable marking, and
+    the in-flight liveness bound.
+    WHY NOTHING WILL EVER BUILD THEM: deriveStatus reads W1-T155 as merged (verified live: merged=true, source
+    PR #365), and MERGED IS TERMINAL in the status layer ('MERGED is terminal — nothing below can add anything
+    more useful than \"it landed\"', status.ts:696). The drain's first filter is `if (isMerged(t.id)) continue`
+    (drain.ts:88), so a merged task is skipped before any criterion is examined — VERIFIED: W1-T155 does not
+    appear in a 40-deep `rmd drain --dry-run` at all. The retro's planHealthSweep explicitly skips it too
+    (`if (CLOSED_TASK_STATUSES.has(task.status)) continue; // out of scope — already shipped`, retro.ts:578).
+    And rmd correct cannot un-credit — it re-points a task to its TRUE merged PR and requires --pr, with no
+    un-credit operation. So the criteria sit in the plan, look authoritative, and are unreachable by every rung.
+    THIS IS NOT ACADEMIC — IT IS THE BUG THAT SURVIVED TONIGHT. Criterion 4 IS the fix for the
+    regression-to-queued-on-read-failure defect (the 12:24->12:58 fail-open where merged✓ tasks with PR links
+    became every-task-queued with empty PR cells). PR #398's own body records the consequence in writing: 'W1-T155
+    (the DATA half, listed as this task's dependency) is not actually implemented in status.ts/board.ts as of this
+    PR — the GitHub-unreachable banner therefore reflects whatever the projection reports today, including the
+    not-yet-fixed regression-to-queued-on-read-failure bug.' So W1-T156's darkness banner is satisfied at the
+    RENDER layer over a DATA layer that still lies. The console can now honestly stamp 'GitHub unreachable' while
+    the projection underneath it still regresses credited tasks to queued.
+    HOUSE ANSWER APPLIED (see W1-T180, which makes it enforceable): the amender owns filing the follow-up. Per
+    rule 16 no criterion is dropped or weakened — only REDISTRIBUTED — so both criteria are carried below
+    VERBATIM from W1-T155, character for character, including their falsifiers."
+  design: |
+    Implement the two criteria against the projection, exactly as W1-T155 would have had it done. Both live in
+    the DATA layer (src/lib/status.ts), not the render layer — W1-T156 already shipped the render half, and it
+    is currently stamping honesty over a projection that does not yet provide it. board.ts needs no change: it
+    declares 'Zero new business logic' and consumes projectPlan/deriveStatus verbatim.
+    (i) MONOTONIC UNDER DARKNESS. When the batched gateway's fetch FAILS, the projection must KEEP each task's
+        last-good status and mark it github_unobservable(since <t>) rather than recomputing it as absent. The
+        distinction between a FAILED read and a genuinely ABSENT one already exists — W1-T119 shipped it
+        (PRs #382 and #391 this evening), so this criterion CONSUMES that polarity rather than re-deriving it.
+        Statuses move only FORWARD across an observation gap.
+    (ii) LIVENESS BOUND. 'running' must require recent ledger activity (a heartbeat within N minutes, N a data
+         threshold) OR an open PR. A dispatched row with no terminal verdict AND no recent activity renders
+         unknown/orphaned.
+    NOTE THE RENDER HALF IS ALREADY DONE and must not be rebuilt: W1-T156 (PR #398, merged) ships the visible
+    'GitHub unreachable since <t> — statuses may be stale' stamp keyed off the projection's signal. This task
+    supplies the signal that stamp is keyed off. VERIFY from source which of github_unobservable's plumbing
+    already exists after #398 before writing any of it — distrust this note.
+    DO NOT amend W1-T155 to remove these criteria. It is merged and terminal, and per rule 16 nothing is dropped.
+    The correct end state is that W1-T155 retains them for the record and this task delivers them.
+  acceptance:
+    - claim: "GitHub-unobservable is a MARKED state, never a silent downgrade — a gateway-fetch FAILURE never regresses a credited task to queued (statuses are MONOTONIC under darkness); it keeps the last-good status marked unobservable"
+      proof: "unit test: with the batched gateway's fetch FAILING (throttled/errored — distinguished from genuinely ABSENT per W1-T119/W1-T130's cannot-observe polarity), the projection KEEPS each task's LAST-GOOD status and marks it github_unobservable (since <t>); a merged/credited task does NOT regress to queued on the fetch failure — statuses only move FORWARD across an observation gap. FALSIFIER: a merged/credited task rendered queued during a gateway outage FAILS (the 12:58 fail-open where every task read queued with empty PR cells)"
+    - claim: "in-flight 'running' has a LIVENESS bound — a dispatched row with no terminal verdict AND no recent activity is unknown/orphaned, never running"
+      proof: "unit test: 'running' requires recent ledger activity (a heartbeat within N minutes, N a data threshold) OR an open PR; a dispatched row with no terminal verdict AND no recent activity renders 'unknown/orphaned', NOT running — the W1-T1 crash-era spin-loop orphan rows (dispatched, no terminal verdict, ledger-only join) classify as unknown, not in-flight (the falsifier: an orphaned dispatch rendered as running, the 12:58 W1-T1='running' reading)"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§9"]
+  files: [src/lib/status.ts, test/status.test.ts]
+  status: queued
+  attempts: 0
+  note: "Both acceptance criteria are carried VERBATIM from W1-T155 (added there by PR #374 at 17:35:20Z, after
+    PR #365 credited the task at 15:50:08Z). Rule 16: no criterion dropped or weakened, only redistributed.
+    W1-T155 KEEPS them for the historical record — it is merged and terminal, and editing a merged task to
+    remove criteria would be the goalpost-moving rule 15 forbids.
+    Companion W1-T180 turns the house answer that produced this task (the amender owns filing the follow-up)
+    into an ENFORCED lint check, so the next post-merge amendment cannot orphan silently the way this one did.
+    Delivers the DATA half that W1-T156's shipped render half is currently stamping honesty over.
+    SCOPE NARROWED at filing to src/lib/status.ts alone (an earlier draft also listed board.ts). board.ts states
+    'Zero new business logic: this module only wires those two together' and consumes projectPlan/deriveStatus
+    from status.ts verbatim, so both criteria land wholly in the projection. The narrowing is a correction, not a
+    dodge of Rule 19 — the work genuinely has one home.
+    PROMOTED 2026-07-20 from plan/tasks.d/ into tasks.yaml, positioned directly behind W1-T128. Filing it as a
+    shard (the conflict-free-by-construction default, W1-T122) had an unintended cost: loadPlan APPENDS every
+    tasks.d shard AFTER all of tasks.yaml, and the drain scans in FILE ORDER, so a sharded task sits at the very
+    BOTTOM of the queue regardless of urgency — verified, it did not appear in a 40-deep dry-run. Its fixtures are
+    now on the operator's screen (W1-T1 rendering 'running' at 27h21m is the liveness-bound falsifier; the
+    merged-0/160 fail-open is the monotonic-under-darkness falsifier), so it belongs at the front. GENERAL LESSON
+    worth keeping: shards are the right default for conflict-free FILING, and the wrong choice for anything that
+    needs PRIORITY. Those two goals are in tension and the tension is invisible until a shard never dispatches."
 - id: W1-T182
   title: "NEEDS ME must join LIVE escalation STATE and render the affordance the item type actually supports — today it renders ledger HISTORY (a closed issue never leaves the section) and puts an Approve button on escalations, which is an undefined action"
   repo: remudero
@@ -1380,6 +1390,141 @@
     Note the fail-safe direction here INVERTS W1-T181's: an unreadable merged-count should degrade visibly, but an
     unreadable escalation state must KEEP the row — hiding live work from the operator's queue is the worse
     failure. Do not unify the two behind one 'unreadable' policy."
+- id: W1-T189
+  title: "W1-T156 FOLLOW-UP (rule 21) — the console renders a RAW fetch exception over a live board instead of T156's specified reconnecting/last-success lifecycle: honest about failing, wrongly dressed"
+  repo: remudero
+  depends_on: [W1-T156, W1-T187]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR SCREENSHOT, 2026-07-20: the console header renders the literal string
+    'refresh failed: TypeError: Failed to fetch' over an otherwise-rendered board. W1-T156's shipped criterion 4
+    specifies a LIFECYCLE for exactly this state — a fetch failure shows a 'reconnecting' indicator carrying the
+    LAST-SUCCESS timestamp, the next successful poll CLEARS it, and only N consecutive failures escalate to a
+    visibly-stamped-stale board. A raw JavaScript exception string is none of those things.
+    VINTAGE CONFIRMED FIRST, because the stale-process class has bitten this investigation twice already: the
+    running serve started 20:08:31 against main a99733b, which INCLUDES W1-T156, and `git log -- src/lib/serve.ts`
+    since that moment returns ZERO commits. So serve.ts is current and this is NOT a stale-process artifact — it
+    is a real gap in shipped code.
+    THE FAILURE ITSELF IS HONEST. The polls are genuinely failing: W1-T187's projection defect makes /v1/status
+    answer in 35-58 seconds, so a browser fetch times out for real. The console is not inventing a problem. But
+    'honest about failing' and 'presented as specified' are different properties, and T156's whole thesis is the
+    second one — a console that never lies about its own liveness has to say WHAT is wrong in the vocabulary it
+    promised, not leak an exception.
+    TWO DEFECTS, ONE SCREENSHOT, and they must not be conflated: the CAUSE is W1-T187 (the fetches time out); the
+    PRESENTATION is this task (a raw TypeError where a reconnecting-with-last-success indicator belongs). Fixing
+    W1-T187 alone would hide this by removing the trigger — the raw-exception path would survive, waiting for the
+    next genuine outage, which is precisely when an operator most needs the specified lifecycle.
+    FILED AS A FOLLOW-UP, NOT AN AMENDMENT: W1-T156 is merged. Standing rule 21 — an amendment to an
+    already-merged task does not re-queue it and spawns nothing. T156 keeps its criteria for the record.
+    NOTE ALSO that T156's criterion 4 was certified pre-#414 by keyword coverage, so this is a second member of
+    the W1-T188 class: an acceptance criterion that reads correct, was never executed, and is contradicted by the
+    operator's screen."
+  design: |
+    Route EVERY refresh failure through T156's existing lifecycle rather than letting an exception reach the DOM.
+    The lifecycle is already specified and shipped — reconnecting indicator carrying last-success time, cleared
+    unconditionally by the next success, escalating to visibly-stamped-stale only after N consecutive failures.
+    VERIFY from source which path bypasses it (the header refresh appears to have its own error handling, distinct
+    from the poll lifecycle T156 built) before changing anything.
+    A TIMEOUT IS A FAILURE LIKE ANY OTHER. The specific trigger here is a fetch that never returns within the
+    browser's timeout, which may not be travelling the same code path as an HTTP error response. Both must land in
+    the lifecycle.
+    NEVER RENDER AN EXCEPTION STRING TO THE OPERATOR. 'TypeError: Failed to fetch' is implementation vocabulary
+    that tells an operator nothing actionable. The rendered text belongs to the lifecycle's vocabulary; the
+    exception belongs in the console log for a developer.
+    DO NOT FIX THE TRIGGER HERE. W1-T187 owns the latency. This task must be verifiable with the latency defect
+    still present — a seeded failing fetch, not a real slow server.
+  acceptance:
+    - claim: "a failing refresh renders T156's reconnecting indicator with its last-success timestamp — never a raw exception string"
+      proof: "unit/DOM test with a seeded fetch rejection: the header shows the reconnecting state carrying the last-success time, and the rendered text contains NO exception vocabulary (no 'TypeError', no 'Failed to fetch'). FALSIFIER: the 2026-07-20 operator screenshot, showing the literal string 'refresh failed: TypeError: Failed to fetch' over a rendered board, on a serve process verified to be running current serve.ts"
+    - claim: "a fetch TIMEOUT lands in the same lifecycle as an HTTP error — both are failures"
+      proof: "unit test: a fetch that never resolves within the timeout produces the same reconnecting state as a fetch that rejects with an HTTP error. FALSIFIER: the observed failure was a genuine timeout against 35-58s responses, and it escaped into a raw exception — evidence that at least one failure mode bypasses the shipped lifecycle"
+    - claim: "the fix is verifiable with the latency defect STILL PRESENT — it does not depend on W1-T187"
+      proof: "the lifecycle tests drive a seeded failing/slow fetch rather than a real server, so they pass regardless of projection latency. FALSIFIER: fixing W1-T187 alone removes the TRIGGER while leaving the raw-exception path alive, waiting for the next genuine outage — exactly when an operator most needs the specified lifecycle"
+  risk: high
+  origin: architect
+  plan_refs: ["§7"]
+  files: [src/lib/serve.ts, test/serve.live-state.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high — graded UP from medium after rmd lint-plan flagged the span. Recorded as a regrade, not a
+    workaround: this governs the path by which the console reports its OWN liveness, and getting it wrong means
+    the surface misreports whether it can be trusted — which is the one property W1-T156 exists to guarantee.
+    (The flag itself is partly a linter artifact: it derives concern from filename stem, so serve.ts plus
+    serve.live-state.test.ts reads as two subsystems. The test belongs in that file, beside T156's own
+    lifecycle tests, so the honest move is the regrade rather than relocating a test to a worse home.)
+    RULE 21 FOLLOW-UP to the merged W1-T156. Vintage was confirmed BEFORE filing (serve started 20:08:31 on
+    main a99733b which includes T156, and serve.ts has zero commits since), so this is a real gap in shipped code
+    rather than the stale-process class that has misled this investigation twice.
+    CAUSE vs PRESENTATION: W1-T187 owns the timeouts, this owns the dressing. Deliberately separable, and the
+    third criterion enforces that separation.
+    SECOND MEMBER of the W1-T188 class — a criterion certified pre-#414 by keyword coverage, contradicted by the
+    operator's screen. T154's timing budget was the first."
+
+- id: W1-T190
+  title: "INBOX STATE SYNC — `rmd approve` ledgers ratify.approved but never updates the proposal registry, so the console still offers P19 as 'READY to ratify' three hours after it was ratified"
+  repo: remudero
+  depends_on: [W1-T110, W1-T111]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR SCREENSHOT, 2026-07-20: the console rendered P19 as 'READY to ratify' roughly three hours
+    after it had been ratified. VERIFIED IN THE DATA, not just the pixels — this is not a rendering bug:
+      ledger:   ratify.approved fired at 2026-07-20T19:04:04 for P19
+      registry: state/inbox-proposals.json still carries P19 with NO status field and NO ratifiedAt
+    So the ledger recorded the ratification and the registry never learned of it. The console reads the registry,
+    renders the only state it finds, and is therefore telling the truth about a store that is wrong.
+    WHY IT MATTERS MORE THAN A STALE LABEL: the offered action is RATIFY. An operator following the console would
+    ratify an already-ratified proposal. `rmd approve` refuses a non-READY proposal, so the second attempt should
+    fail safely — but the console is inviting an action it knows to be complete, and 'the affordance is wrong but
+    the backend catches it' is exactly the shape W1-T182 exists to eliminate in NEEDS ME (an Approve button on an
+    escalation, which has no approve verb). Same defect class, different section.
+    THIS IS THE CLAIMED-vs-EVIDENCED DOCTRINE (standing rule 22) at the inbox: the registry holds a CLAIM about
+    P19's state, the ledger holds the RECEIPT of its ratification, and they disagree. The receipt is authoritative
+    and the console is reading the claim."
+  design: |
+    Make `rmd approve` update the proposal registry as part of the SAME operation that writes ratify.approved, so
+    the two cannot diverge. VERIFY from source how approveCommand writes the ledger line and what owns
+    state/inbox-proposals.json before changing either.
+    PREFER RECONCILIATION OVER A SECOND WRITE where the shapes allow it. Two independent writes can always drift
+    (one succeeds, the other fails, and nothing notices); deriving the registry's ratified state FROM the ledger's
+    ratify.approved lines cannot. If a stored status is kept for read performance, it must be reconcilable — an
+    inbox read should be able to detect and correct a registry that disagrees with the ledger, the way
+    derivePrPrecedence treats GitHub as observable rather than remembered.
+    HEAL THE EXISTING DRIFT. P19 is wrong in the live registry right now, and any fix that only prevents FUTURE
+    drift leaves a proposal permanently mislabelled. A reconciliation pass fixes both at once, which is a further
+    argument for deriving over storing.
+    SCOPE NOTE: files are src/lib/inbox.ts only, because the PREFERRED design above (derive/reconcile the
+    ratified state FROM the ledger on read) needs no change to approveCommand in run-task.ts. If the
+    implementer instead adds a second write at the command site, that widens the scope AND re-introduces the
+    drift this task exists to remove — prefer the read-side derivation.
+    DO NOT WIDEN INTO THE CONSOLE. W1-T182 owns NEEDS ME's affordances and W1-T184 owns the feed; this task owns
+    the state the inbox reads. If the registry is correct, the console is correct.
+  acceptance:
+    - claim: "a ratified proposal is never offered as READY — the registry agrees with the ledger's ratify.approved receipt"
+      proof: "integration test: after `rmd approve P##` succeeds, an `rmd inbox` classification (and the console's inbox view) reports that proposal as ratified, not READY. FALSIFIER, verified in live data 2026-07-20: ratify.approved fired for P19 at 19:04:04 while state/inbox-proposals.json still carried P19 with no status and no ratifiedAt, and the console offered it as 'READY to ratify' ~3 hours later"
+    - claim: "the ledger receipt is authoritative — a registry disagreeing with it is DETECTED and corrected, not trusted"
+      proof: "unit test: a registry entry marked READY for a proposal whose ledger carries ratify.approved is reconciled to ratified on read. FALSIFIER: two independent writes (ledger line plus registry update) can always drift when one succeeds and the other does not, and nothing today notices — which is how P19 reached a three-hour disagreement"
+    - claim: "the EXISTING drift is healed, not merely prevented going forward"
+      proof: "the reconciliation applied to the live registry leaves P19 correctly ratified. FALSIFIER: a fix that only guards future approvals leaves P19 permanently mislabelled, since nothing re-derives a stored status once written"
+    - claim: "no action is offered that the backend would refuse"
+      proof: "unit test: the inbox offers the ratify affordance ONLY for a proposal that is genuinely READY, matching what `rmd approve` will accept. FALSIFIER: offering RATIFY on an already-ratified proposal invites an operator into an action that fails — the same wrong-affordance shape W1-T182 removes from NEEDS ME, where an Approve control renders on escalations that have no approve verb"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7B", "§12"]
+  files: [src/lib/inbox.ts, test/inbox.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-20 from a second operator report. Filed rather than confirmed: there was no existing
+    inbox state-sync task — the nearest matches (W1-T110 inbox core, W1-T173 draft fences) cover different ground.
+    VERIFIED IN THE DATA before filing: the ledger's ratify.approved for P19 (19:04:04) versus the registry's
+    absent status. The console is faithfully rendering a store that is wrong, so this is a state defect, not a
+    rendering one.
+    Applies standing rule 22 at the inbox: the registry holds a CLAIM, the ledger holds the RECEIPT, and the
+    console reads the claim. SIBLING of W1-T182 — same wrong-affordance shape (an action offered that the backend
+    would refuse), different section."
 - id: W1-T185
   title: "FLOOR VERDICT INTEGRITY — two gaps W1-T128's execution engine left open: a verdict with ZERO executed proofs must render a CAPPED/DEGRADED class that cannot arm auto-merge on tdd:strict work, and `rmd review` from the operator checkout must either execute at the PR head or mark its verdict keyword-only"
   repo: remudero
@@ -1622,13 +1767,15 @@
       proof: "unit test: across successive poll ticks with the ledger unchanged, the projection is computed once and reused; a change triggers exactly one recompute. FALSIFIER: board.ts polls every DEFAULT_POLL_MS = 250 (board.ts:35) and boardSnapshot calls projectPlan (board.ts:97), so before W1-T187 work arrived 20-32x faster than it completed and every request queued behind a permanent backlog — measured 2026-07-20 as GET /v1/status at 58.7s/54.0s/34.5s with no warm improvement"
     - claim: "concurrent requests never queue behind more than ONE in-flight recompute"
       proof: "unit test: N concurrent snapshot requests arriving during a recompute trigger ONE computation and are all served from it. FALSIFIER: unbounded concurrent recomputes at the 250ms cadence, the observed backlog behind the 2026-07-20 latency outage"
+    - claim: "every RECENT row carries the event VERB, task id AND title, the PR link WITH its title, a relative timestamp, and spend where the ledger has it — and the row is a W1-T158 drill target"
+      proof: "unit/DOM test over the rendered feed: each row exposes the verb (merged / verdict / fix outcome / escalated / spend), the task id AND its title, a PR link carrying the PR TITLE rather than a bare number, a relative timestamp, and a spend figure wherever the source ledger line has cost_usd — and clicking the row opens W1-T158's task card. FALSIFIER (operator screenshot, 2026-07-20): a RECENT row rendering only a task id and a PR number is unreadable as an activity feed — it names WHAT changed but not what it WAS, so the operator must click through to learn whether anything important happened"
   risk: high
   origin: architect
   plan_refs: ["§7", "§7B"]
   files: [src/lib/serve.ts, src/lib/board.ts, test/serve.test.ts]
   status: queued
   attempts: 0
-  note: "RECEIVED 2026-07-20 the two RECOMPUTE-CADENCE criteria (unchanged-ledger-no-reprojection, and coalesce-concurrent-recomputes) redistributed from W1-T187 per rule 16 — nothing dropped, only moved. W1-T187 stays a pure per-request hoist with no cross-request cache, because a cache there would mask staleness the way the old empty-array catch masked failure; the cadence belongs with this task's SSE work. CONSOLE DESIGN PASS v2, task 2 of 2 filed together (sibling W1-T183, density/IA). Directly applies the
+  note: "AMENDED 2026-07-20 with the RECENT ROW CONTENT spec (verb, task id + title, PR link with PR title, relative timestamp, spend where present, row as a W1-T158 drill target) after a second operator report: an id-and-PR-number row names what changed but not what it was. RECEIVED 2026-07-20 the two RECOMPUTE-CADENCE criteria (unchanged-ledger-no-reprojection, and coalesce-concurrent-recomputes) redistributed from W1-T187 per rule 16 — nothing dropped, only moved. W1-T187 stays a pure per-request hoist with no cross-request cache, because a cache there would mask staleness the way the old empty-array catch masked failure; the cadence belongs with this task's SSE work. CONSOLE DESIGN PASS v2, task 2 of 2 filed together (sibling W1-T183, density/IA). Directly applies the
     CLAIMED-vs-EVIDENCED doctrine (standing rule 22): the ledger is the fleet's own RECEIPT of what it did, and
     GitHub is a claim about the same events from a remote that can be unreachable. Sourcing the feed from the
     receipt is the doctrine made concrete.
