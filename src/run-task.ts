@@ -167,6 +167,7 @@ import {
   resolveAutoMergeArm,
   reviewerOutcome,
   reviewerVerdictContract,
+  reviewLedgerLegibilityFields,
   type CappedOverride,
   type CriterionVerdict,
   type ReviewVerdict,
@@ -779,16 +780,15 @@ async function runReview(args: {
     // was WRITTEN to be runnable (house dialect). NO blocking-behavior change:
     // `state` above is exactly what it always was.
     floor_degraded: verdict.floorDegraded,
-    // W1-T185: true when the review's proof_exec set is entirely
-    // not_executable/exec_error (nothing OBSERVED anywhere) — computed
-    // UNCONDITIONALLY, never forcing `state`/`floor_state` (CAPPED IS NOT
-    // FAIL). Consequential only via the SEPARATE auto-merge arming path
-    // (decideAutoMergeArm, below) on a tdd:strict task.
-    capped: verdict.capped,
-    // W1-T185: LEGIBILITY-only — true when NO PR-head checkout was given at
-    // all (e.g. `rmd review`'s manual-PR path), so this verdict rests entirely
-    // on keyword coverage, never on OBSERVED repo state.
-    keyword_only: verdict.keywordOnly,
+    // W1-T185 (criterion 5): `capped` — computed UNCONDITIONALLY, never forcing
+    // `state`/`floor_state` (CAPPED IS NOT FAIL); consequential only via the
+    // SEPARATE auto-merge arming path (decideAutoMergeArm, below) on a
+    // tdd:strict task — and `keyword_only` — true when NO PR-head checkout was
+    // given at all (e.g. `rmd review`'s manual-PR path). Read off `verdict`
+    // through `reviewLedgerLegibilityFields` so the ledger line names EXACTLY
+    // the same two facts the posted status description rendered, never a
+    // hand-copied projection that could drift from it.
+    ...reviewLedgerLegibilityFields(verdict),
     // W1-T178: the deterministic anchor `state` was checked against, and
     // whether this line's `state` is a suppressed downgrade rather than a
     // review that genuinely passed — always present, never inferred.

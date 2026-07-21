@@ -1143,6 +1143,22 @@ export function keywordOnlyAnnotation(): string {
   );
 }
 
+/**
+ * The `capped`/`keywordOnly` facts the `review.posted` ledger line records
+ * (W1-T185, criterion 5: "when materialization is impossible the verdict is
+ * EXPLICITLY marked keyword-only, in both the posted status and the ledger —
+ * silent keyword-only posting is unreachable"). Pure + exported so run-task.ts's
+ * `log("review.posted", …)` call and a unit test both read the SAME two fields
+ * off the SAME verdict, rather than the ledger line risking a hand-copied
+ * projection that could silently drift from what {@link cappedSummary}/
+ * {@link passSummary} actually rendered on the posted status.
+ */
+export function reviewLedgerLegibilityFields(
+  verdict: Pick<ReviewVerdict, "capped" | "keywordOnly">,
+): { capped: boolean; keyword_only: boolean } {
+  return { capped: verdict.capped, keyword_only: verdict.keywordOnly };
+}
+
 /** Max length of a GitHub commit-status description (postReviewStatus also truncates). */
 const STATUS_DESC_MAX = 140;
 const FAIL_PREFIX = "remudero-review: FAIL — ";

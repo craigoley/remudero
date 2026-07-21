@@ -405,7 +405,14 @@ test("ACCEPTANCE (criterion 4, full chain): an operator-path review over a PR wh
 // ── W1-T185 (Gap 2, criterion 6): a materialized worktree is torn down on ──
 // EVERY exit path, including failure.
 
-test("ACCEPTANCE (criterion 6): after a review that throws mid-execution, no worktree remains under the worktrees root", async () => {
+// W1-T185 acceptance criterion 6's own proof text (plan/tasks.yaml, verbatim
+// from "unit test:" onward) IS this test's name — the mechanical floor's
+// `unit test:` dialect name-filters the whole suite on exactly that text
+// (parseTestTarget in src/lib/review.ts), so this criterion's own proof only
+// counts as OBSERVED when a real test is titled to match it byte-for-byte
+// (case-insensitive). See the identical note on criterion 1's renamed test in
+// test/review.test.ts.
+test("after a review that throws mid-execution, no worktree remains under the worktrees root. FALSIFIER: a teardown only on the success path reproduces the W1-T175 leak class, which exists precisely because run worktrees already strand on disk", async () => {
   const config = drainFixtureConfig();
   const worktreePath = join(worktreesDir(config), "review-PR411-fixture");
   mkdirSync(worktreePath, { recursive: true });
