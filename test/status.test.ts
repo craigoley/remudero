@@ -734,7 +734,7 @@ test("W1-T155: in-flight implement phase — recon.done advances the phase past 
     { ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "W1-TX", step: "run.start" },
     { ts: "2026-07-20T10:01:00.000Z", run_id: "r1", task_id: "W1-TX", step: "recon.done" },
   ]);
-  const proj = deriveStatus(task(), { ledgerPath, github });
+  const proj = deriveStatus(task(), { ledgerPath, github, now: () => Date.parse("2026-07-20T10:01:05.000Z") });
   assert.equal(proj.status, "running");
   assert.equal(proj.phase, "implement");
 });
@@ -746,7 +746,7 @@ test("W1-T155: in-flight review phase — implement.done (PR not yet opened) adv
     { ts: "2026-07-20T10:01:00.000Z", run_id: "r1", task_id: "W1-TX", step: "recon.done" },
     { ts: "2026-07-20T10:02:00.000Z", run_id: "r1", task_id: "W1-TX", step: "implement.done" },
   ]);
-  const proj = deriveStatus(task(), { ledgerPath, github });
+  const proj = deriveStatus(task(), { ledgerPath, github, now: () => Date.parse("2026-07-20T10:02:05.000Z") });
   assert.equal(proj.status, "running");
   assert.equal(proj.phase, "review");
 });
@@ -784,7 +784,7 @@ test("W1-T155: fix.resolved returns the phase to review (post-fix re-check), not
     { run_id: "r1", task_id: "W1-TX", step: "fix.dispatch" },
     { run_id: "r1", task_id: "W1-TX", step: "fix.resolved" },
   ]);
-  const proj = deriveStatus(task(), { ledgerPath, github });
+  const proj = deriveStatus(task(), { ledgerPath, github, now: () => Date.parse("2026-07-20T10:00:05.000Z") });
   assert.equal(proj.phase, "review");
 });
 
@@ -867,7 +867,7 @@ test("W1-T155: needs-human is superseded by a NEW run.start since the escalation
     { run_id: "r1", task_id: "W1-TX", step: "verdict", verdict: "blocked_review" },
     { ts: "2026-07-20T12:00:00.000Z", run_id: "r2", task_id: "W1-TX", step: "run.start" },
   ]);
-  const proj = deriveStatus(task(), { ledgerPath, github });
+  const proj = deriveStatus(task(), { ledgerPath, github, now: () => Date.parse("2026-07-20T12:00:05.000Z") });
   assert.equal(proj.needsHuman, undefined, "a redispatch since the escalation supersedes it");
   assert.equal(proj.phase, "recon", "and the task is genuinely back in flight");
 });
@@ -930,8 +930,14 @@ test("W1-T155: a full-taxonomy projection over a mixed fixture yields a DISTINCT
 
   const projections: Record<string, ReturnType<typeof deriveStatus>> = {};
   const scenarios: Array<[string, Array<Record<string, unknown>>]> = [
-    ["recon", [{ task_id: "recon", step: "run.start" }]],
-    ["implement", [{ task_id: "implement", step: "run.start" }, { task_id: "implement", step: "recon.done" }]],
+    ["recon", [{ task_id: "recon", step: "run.start", ts: "2026-07-20T09:00:00.000Z" }]],
+    [
+      "implement",
+      [
+        { task_id: "implement", step: "run.start", ts: "2026-07-20T09:00:00.000Z" },
+        { task_id: "implement", step: "recon.done", ts: "2026-07-20T09:01:00.000Z" },
+      ],
+    ],
     ["review", [{ task_id: "review", step: "run.start" }, { task_id: "review", step: "pr.opened", pr_url: openUrl }]],
     [
       "fixrung",
@@ -955,8 +961,12 @@ test("W1-T155: a full-taxonomy projection over a mixed fixture yields a DISTINCT
     ["queued", []],
   ];
   const ledgerPath = ledgerFile(scenarios.flatMap(([, lines]) => lines));
+  // Close enough to "recon"'s and "implement"'s own ts fixtures to stay inside the
+  // liveness bound (W1-T179) -- their in-flight-without-a-PR shape is exactly what that
+  // bound gates, so a stale `now` here would silently orphan them instead of testing phase.
+  const now = () => Date.parse("2026-07-20T09:02:00.000Z");
   for (const [id] of scenarios) {
-    projections[id] = deriveStatus(task({ id }), { ledgerPath, github });
+    projections[id] = deriveStatus(task({ id }), { ledgerPath, github, now });
   }
 
   assert.deepEqual(
@@ -1109,6 +1119,203 @@ test("W1-T181: a batched-gateway fetch FAILURE projects indeterminate/throttled 
     "none",
     "a gateway failure must never collapse to the ordinary-absence shape — that is the exact bug that produced merged 0/212 on 2026-07-20",
   );
+});
+
+// ── W1-T179: the two criteria PR #374 amended onto the already-merged W1-T155, orphaned
+// (nothing could ever dispatch them) until this task gave them a dispatchable home ──────────
+
+test("W1-T179: MONOTONIC UNDER DARKNESS — a gateway fetch FAILURE never regresses a credited (merged) task to queued; it keeps the last-good status and marks it github_unobservable(since <t>)", () => {
+  // FALSIFIER (the 12:24->12:58 fail-open): a merged task with PR links rendered queued with
+  // empty PR cells the instant a gateway read failed. previousProjection is what a caller
+  // (projectPlan's own cache read, or a long-lived server's last snapshot) hands back.
+  const enobufsError = Object.assign(new Error("spawnSync gh ENOBUFS"), { code: "ENOBUFS", status: null, stderr: "" });
+  const github = buildBatchedGithub("o", "r", {
+    exec: () => {
+      throw enobufsError;
+    },
+  });
+  const previouslyMerged = {
+    taskId: "W1-T1",
+    status: "merged" as const,
+    merged: true,
+    source: "trailer" as const,
+    prNumber: 365,
+    prUrl: "https://github.com/craigoley/remudero/pull/365",
+    prState: "MERGED",
+  };
+  const proj = deriveStatus(task({ id: "W1-T1" }), {
+    ledgerPath: ledgerFile([]),
+    github,
+    previousProjection: (taskId) => (taskId === "W1-T1" ? previouslyMerged : undefined),
+    now: () => Date.parse("2026-07-20T12:58:00.000Z"),
+  });
+  assert.equal(proj.status, "merged", "statuses move only FORWARD across an observation gap — never back to queued");
+  assert.equal(proj.merged, true);
+  assert.equal(proj.prNumber, 365);
+  assert.equal(proj.prUrl, previouslyMerged.prUrl);
+  assert.equal(proj.indeterminate, true, "the gap is still marked -- this is not a silent downgrade, it is MARKED unobservable");
+  assert.equal(proj.unavailableReason, "buffer_overflow");
+  assert.equal(proj.githubUnobservableSince, "2026-07-20T12:58:00.000Z", "since <t> -- the instant this gap was first observed");
+});
+
+test("W1-T179: consecutive darkness reads report the SAME github_unobservable(since <t>) -- a LATER failed read never resets the clock", () => {
+  const enobufsError = Object.assign(new Error("spawnSync gh ENOBUFS"), { code: "ENOBUFS", status: null, stderr: "" });
+  const github = buildBatchedGithub("o", "r", {
+    exec: () => {
+      throw enobufsError;
+    },
+  });
+  const alreadyDarkSince = "2026-07-20T12:24:00.000Z";
+  const previouslyDark = {
+    taskId: "W1-T1",
+    status: "merged" as const,
+    merged: true,
+    source: "trailer" as const,
+    prNumber: 365,
+    indeterminate: true as const,
+    unavailableReason: "buffer_overflow" as const,
+    githubUnobservableSince: alreadyDarkSince,
+  };
+  const proj = deriveStatus(task({ id: "W1-T1" }), {
+    ledgerPath: ledgerFile([]),
+    github,
+    previousProjection: () => previouslyDark,
+    now: () => Date.parse("2026-07-20T12:58:00.000Z"),
+  });
+  assert.equal(proj.githubUnobservableSince, alreadyDarkSince, "the START of the gap, not the time of THIS read");
+});
+
+test("W1-T179: the NEXT successful gateway read clears the github_unobservable marking", () => {
+  const url = "https://github.com/craigoley/remudero/pull/365";
+  const fixture = ownedTrailerFixture("W1-T1", "W1-T1-1784460723173");
+  const github = fakeGitHub({
+    byTrailer: { "W1-T1": { number: 365, url, state: "MERGED" } },
+    headRefByUrl: { [url]: fixture.headRefName },
+    bodyByUrl: { [url]: fixture.body },
+  });
+  const previouslyDark = {
+    taskId: "W1-T1",
+    status: "merged" as const,
+    merged: true,
+    source: "trailer" as const,
+    indeterminate: true as const,
+    unavailableReason: "buffer_overflow" as const,
+    githubUnobservableSince: "2026-07-20T12:24:00.000Z",
+  };
+  const proj = deriveStatus(task({ id: "W1-T1" }), {
+    ledgerPath: ledgerFile([]),
+    github,
+    previousProjection: () => previouslyDark,
+  });
+  assert.equal(proj.status, "merged");
+  assert.equal(proj.indeterminate, undefined, "a successful read clears the darkness stamp");
+  assert.equal(proj.githubUnobservableSince, undefined);
+});
+
+test("W1-T179: with NO prior observation to fall back on (a task never before seen), a gateway failure still marks throttled/queued -- there is nothing to keep monotonic", () => {
+  const enobufsError = Object.assign(new Error("spawnSync gh ENOBUFS"), { code: "ENOBUFS", status: null, stderr: "" });
+  const github = buildBatchedGithub("o", "r", {
+    exec: () => {
+      throw enobufsError;
+    },
+  });
+  const proj = deriveStatus(task({ id: "W1-T-NEW" }), {
+    ledgerPath: ledgerFile([]),
+    github,
+    previousProjection: () => undefined,
+  });
+  assert.equal(proj.status, "queued");
+  assert.equal(proj.source, "throttled");
+  assert.equal(proj.indeterminate, true);
+  assert.equal(proj.githubUnobservableSince, undefined);
+});
+
+test("W1-T179: projectPlan is monotonic under darkness FOR FREE across two sequential calls sharing a cachePath -- no caller wiring required", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-status-cache-"));
+  const cachePath = join(dir, "status.json");
+  const ledgerPath = ledgerFile([]);
+  const url = "https://github.com/craigoley/remudero/pull/365";
+  const t1 = task({ id: "W1-T1" });
+  const plan: Plan = { tasks: [t1], byId: new Map([[t1.id, t1]]) };
+
+  // Cycle 1: GitHub is reachable and credits the task.
+  const fixture = ownedTrailerFixture("W1-T1", "W1-T1-1784460723173");
+  const healthyGithub = fakeGitHub({
+    byTrailer: { "W1-T1": { number: 365, url, state: "MERGED" } },
+    headRefByUrl: { [url]: fixture.headRefName },
+    bodyByUrl: { [url]: fixture.body },
+  });
+  const first = projectPlan(plan, { ledgerPath, github: healthyGithub }, cachePath);
+  assert.equal(first.get("W1-T1")?.status, "merged");
+
+  // Cycle 2: the SAME cachePath, a gateway that has since gone dark, and NO explicit
+  // previousProjection wired by the caller -- projectPlan must read its own prior write.
+  const enobufsError = Object.assign(new Error("spawnSync gh ENOBUFS"), { code: "ENOBUFS", status: null, stderr: "" });
+  const darkGithub = buildBatchedGithub("o", "r", {
+    exec: () => {
+      throw enobufsError;
+    },
+  });
+  const second = projectPlan(plan, { ledgerPath, github: darkGithub }, cachePath);
+  const proj = second.get("W1-T1");
+  assert.equal(proj?.status, "merged", "the credited task must NOT regress to queued across the two projectPlan calls");
+  assert.equal(proj?.indeterminate, true);
+});
+
+// ── W1-T179: LIVENESS BOUND -- 'running' requires recent ledger activity OR an open PR ──────
+
+test("W1-T179: LIVENESS BOUND -- a dispatched task with no terminal verdict, no open PR, and NO recent ledger activity is unknown/orphaned, never running (the W1-T1 crash-era spin-loop fixture: 27h21m, no PR, no fresh ledger activity)", () => {
+  const github = fakeGitHub({});
+  const ledgerPath = ledgerFile([{ ts: "2026-07-19T09:00:00.000Z", run_id: "r1", task_id: "W1-T1", step: "run.start" }]);
+  const proj = deriveStatus(task({ id: "W1-T1" }), {
+    ledgerPath,
+    github,
+    now: () => Date.parse("2026-07-20T12:21:00.000Z"), // ~27h21m later
+  });
+  assert.notEqual(proj.status, "running", "the falsifier: an orphaned dispatch rendered as running");
+  assert.equal(proj.orphaned, true);
+});
+
+test("W1-T179: LIVENESS BOUND -- ledger activity inside the bound still renders running, with no orphaned flag", () => {
+  const github = fakeGitHub({});
+  const ledgerPath = ledgerFile([{ ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "W1-TX", step: "run.start" }]);
+  const proj = deriveStatus(task(), {
+    ledgerPath,
+    github,
+    now: () => Date.parse("2026-07-20T10:05:00.000Z"),
+    livenessBoundMs: 10 * 60_000,
+  });
+  assert.equal(proj.status, "running");
+  assert.equal(proj.orphaned, undefined);
+});
+
+test("W1-T179: LIVENESS BOUND -- activity OUTSIDE the (injected, short) bound orphans a task even minutes after its last ledger line", () => {
+  const github = fakeGitHub({});
+  const ledgerPath = ledgerFile([{ ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "W1-TX", step: "run.start" }]);
+  const proj = deriveStatus(task(), {
+    ledgerPath,
+    github,
+    now: () => Date.parse("2026-07-20T10:05:00.000Z"),
+    livenessBoundMs: 60_000, // 1 minute -- the 5-minute-old run.start blows past it
+  });
+  assert.equal(proj.status, "queued");
+  assert.equal(proj.orphaned, true);
+});
+
+test("W1-T179: LIVENESS BOUND -- an OPEN PR keeps a dispatch running regardless of ledger silence; the bound never applies to GitHub-backed evidence", () => {
+  const url = "https://github.com/craigoley/remudero/pull/80";
+  const github = fakeGitHub({ byRef: { [url]: { number: 80, url, state: "OPEN" } } });
+  const ledgerPath = ledgerFile([
+    { ts: "2026-07-19T09:00:00.000Z", run_id: "r1", task_id: "W1-T1", step: "run.start" },
+    { run_id: "r1", task_id: "W1-T1", step: "pr.opened", pr_url: url },
+  ]);
+  const proj = deriveStatus(task({ id: "W1-T1" }), {
+    ledgerPath,
+    github,
+    now: () => Date.parse("2026-07-20T12:21:00.000Z"), // ~27h21m later, well past any reasonable bound
+  });
+  assert.equal(proj.status, "running");
+  assert.equal(proj.orphaned, undefined, "an open PR is independent, stronger evidence -- never subject to the ledger-silence bound");
 });
 
 test("W1-T181: a successful batched fetch logs its payload byte size and PR count via the injectable log hook", () => {

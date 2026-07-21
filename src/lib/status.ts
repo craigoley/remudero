@@ -205,6 +205,32 @@ export interface StatusProjection {
    * working unchanged.
    */
   unavailableReason?: GhFailureReason;
+  /**
+   * MONOTONIC UNDER DARKNESS (W1-T179, W1-T155's amended criterion): present ONLY when
+   * `status`/`merged`/`source` (and any `pr*` fields) were carried forward from a PRIOR
+   * successful observation because THIS cycle's GitHub read genuinely failed and no
+   * precedence rung resolved anything fresh — the ISO-8601 timestamp since which this task
+   * has been unobservable (the start of the CURRENT unbroken run of failed reads; a LATER
+   * failed read never resets it, only a subsequent SUCCESSFUL read clears it by omission).
+   * This is the "marked `github_unobservable`" state the amendment named: a credited task's
+   * status/merged never silently regresses to an absent-looking `queued` across a gap where
+   * GitHub simply could not be consulted (the 12:24->12:58 fail-open this fixes). Always
+   * accompanied by `indeterminate: true` / `unavailableReason` — same sparse convention as
+   * `needsHuman`/`armedAwaitingMerge`.
+   */
+  githubUnobservableSince?: string;
+  /**
+   * LIVENESS BOUND (W1-T179, W1-T155's amended criterion): true when the ledger shows this
+   * task DISPATCHED with no terminal verdict since, and NEITHER an open PR nor ledger
+   * activity within the liveness bound backs it up — a stale in-flight trace a crashed
+   * worker left behind (the W1-T1 27h21m spin-loop fixture). `status` deliberately stays
+   * within {@link TaskStatus}'s closed set rather than gaining a new enum value (whatever the
+   * PR-precedence rungs above already resolved, ordinarily `queued`); this sparse flag is
+   * the "unknown/orphaned, never running" signal a caller checks instead — same additive
+   * convention as `needsHuman`/`indeterminate`. Present only while `runState.inFlight` and
+   * absent once a fresh heartbeat or an open PR resolves the row back to `running`.
+   */
+  orphaned?: true;
 }
 
 /**
@@ -287,7 +313,36 @@ export interface DeriveDeps {
    * Injectable so a test can assert an exact elapsed value without a real sleep.
    */
   now?: () => number;
+  /**
+   * MONOTONIC UNDER DARKNESS (W1-T179): the LAST successfully-observed projection for a
+   * task, consulted ONLY when this cycle's GitHub read has genuinely failed
+   * ({@link GitHub.readFailed}) and every precedence rung above resolved nothing fresh.
+   * Lets a caller (e.g. {@link projectPlan} reading its own `state/status.json` cache
+   * before overwriting it, or a long-lived server keeping its last snapshot in memory)
+   * hand back what was true before the gap, so a fetch failure never regresses a
+   * credited task to `queued`. Omitted, or returning `undefined` for a given taskId, falls
+   * back to the pre-W1-T179 behavior (`queued`/`throttled`) — the same fail-soft discipline
+   * every other optional dependency here already follows.
+   */
+  previousProjection?: (taskId: string) => StatusProjection | undefined;
+  /**
+   * LIVENESS BOUND (W1-T179 design (ii)): how many milliseconds of ledger silence a
+   * dispatched, unresolved run tolerates before it is no longer "running" absent an open
+   * PR — a data threshold, injectable so a test can assert the boundary without a real
+   * sleep (mirrors {@link DeriveDeps.now}). Defaults to {@link DEFAULT_LIVENESS_BOUND_MS}.
+   */
+  livenessBoundMs?: number;
 }
+
+/**
+ * Default LIVENESS BOUND (W1-T179 design (ii), 30 minutes): a dispatched task with no
+ * terminal verdict and no ledger line newer than this is no longer trusted as "running"
+ * absent an open PR — the bound the W1-T1 crash-era spin-loop (27h21m, no PR, no fresh
+ * ledger activity) blows past by two orders of magnitude, while comfortably tolerating a
+ * slow `pollToGate`/`waitForCiGreen` cadence (a `ci.polling`/`pr.polling` line at most
+ * every 5 * 6s = 30s while a PR is open — and an open PR bypasses this bound entirely).
+ */
+export const DEFAULT_LIVENESS_BOUND_MS = 30 * 60_000;
 
 /**
  * The minimal fs surface {@link readLedgerLines} needs to read the ledger — deliberately
@@ -327,6 +382,26 @@ export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedge
         return {};
       }
     });
+}
+
+/**
+ * The PR-precedence fields ONLY from a prior {@link StatusProjection} (W1-T179) — `taskId`/
+ * `status`/`merged`/`source`/`pr*`/`rejected_candidates`, deliberately EXCLUDING the taxonomy
+ * layer `deriveStatus` adds on top (`phase`/`startedAt`/`elapsedMs`/`needsHuman`/
+ * `armedAwaitingMerge`/`indeterminate`/`unavailableReason`/`githubUnobservableSince`). The
+ * darkness fallback below carries this forward as its `base`; the taxonomy layer is then
+ * RE-DERIVED fresh from the ledger (still readable during a GitHub-only outage) exactly as
+ * any other call — carrying it forward unfiltered would leak a STALE `needsHuman`/`phase`
+ * that a later, un-observed ledger event already superseded (`deriveStatus` only ever SETS
+ * those flags true from a fresh scan, never clears a stale `true` it did not itself derive).
+ */
+function priorPrecedence(p: StatusProjection): StatusProjection {
+  const out: StatusProjection = { taskId: p.taskId, status: p.status, merged: p.merged, source: p.source };
+  if (p.prNumber !== undefined) out.prNumber = p.prNumber;
+  if (p.prUrl !== undefined) out.prUrl = p.prUrl;
+  if (p.prState !== undefined) out.prState = p.prState;
+  if (p.rejected_candidates !== undefined) out.rejected_candidates = p.rejected_candidates;
+  return out;
 }
 
 /** Map a GitHub PR state onto a plan status label + the merged predicate. */
@@ -610,13 +685,35 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   // an exhausted/errored `gh` call must defer, never be reported as a confirmed
   // not-merged (the false `source: "none"` that mis-filed W1-T116).
   if (deps.github.readFailed?.()) {
+    const unavailableReason = deps.github.readFailureReason?.() ?? "unknown";
+    // MONOTONIC UNDER DARKNESS (W1-T179 / W1-T155's amended criterion): a genuine gateway
+    // FAILURE must never regress a previously-observed status to `queued` -- that IS the
+    // 12:24->12:58 fail-open (merged tasks with PR links became every-task-queued with
+    // empty PR cells). When a prior successful observation exists, carry its PR-precedence
+    // conclusion forward unchanged (see priorPrecedence's note on why only THOSE fields)
+    // and mark the gap instead of recomputing an absence. `since` is the START of the
+    // CURRENT unbroken run of failures -- carried from the previous projection if it was
+    // ALREADY marked unobservable, so consecutive failed reads report the same instant, not
+    // a fresh one each poll.
+    const previous = deps.previousProjection?.(task.id);
+    if (previous) {
+      const now = deps.now ?? Date.now;
+      return {
+        ...priorPrecedence(previous),
+        indeterminate: true,
+        unavailableReason,
+        githubUnobservableSince: previous.githubUnobservableSince ?? new Date(now()).toISOString(),
+      };
+    }
+    // No prior observation to fall back on (this task has never been seen) -- nothing to
+    // keep monotonic, so the pre-W1-T179 shape stands.
     return {
       taskId: task.id,
       status: "queued",
       merged: false,
       source: "throttled",
       indeterminate: true,
-      unavailableReason: deps.github.readFailureReason?.() ?? "unknown",
+      unavailableReason,
     };
   }
   return { taskId: task.id, status: "queued", merged: false, source: "none" };
@@ -629,6 +726,13 @@ interface RunState {
   phase?: Phase;
   /** The in-flight run's `run.start` `ts`. */
   startedAt?: string;
+  /**
+   * `ts` of the LATEST ledger line naming this task, any step (W1-T179's liveness
+   * heartbeat) — every `appendLedger` call stamps `ts` (ledger.ts), so this is a real
+   * proxy for "the task's worker is still doing something", not a dedicated event type.
+   * `undefined` only when no line for this task carries a `ts` at all.
+   */
+  lastActivityTs?: string;
 }
 
 /**
@@ -646,8 +750,10 @@ function deriveRunState(lines: ReadonlyArray<Record<string, unknown>>, taskId: s
   let inFlight = false;
   let phase: Phase | undefined;
   let startedAt: string | undefined;
+  let lastActivityTs: string | undefined;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
+    if (typeof line.ts === "string") lastActivityTs = line.ts;
     switch (line.step) {
       case "run.start":
         inFlight = true;
@@ -674,7 +780,7 @@ function deriveRunState(lines: ReadonlyArray<Record<string, unknown>>, taskId: s
         break;
     }
   }
-  return { inFlight, phase, startedAt };
+  return { inFlight, phase, startedAt, lastActivityTs };
 }
 
 /**
@@ -719,11 +825,27 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   if (base.status !== "blocked") {
     const runState = deriveRunState(ledgerLines, task.id);
     if (runState.inFlight && runState.phase) {
-      projection.status = "running";
-      projection.phase = runState.phase;
-      if (runState.startedAt) {
-        projection.startedAt = runState.startedAt;
-        projection.elapsedMs = Math.max(0, now() - Date.parse(runState.startedAt));
+      // LIVENESS BOUND (W1-T179 design (ii), W1-T155's amended criterion): a ledger-only
+      // in-flight trace is only "running" while it is BACKED by an open PR (base.status is
+      // already "running" from the precedence rungs above -- independent, stronger GitHub
+      // evidence, never subject to this bound) OR by ledger activity within the liveness
+      // bound. Absent both, it is a stale/orphaned dispatch (a crashed worker's spin-loop --
+      // the W1-T1 27h21m fixture) and must NOT render as running.
+      const hasOpenPr = base.status === "running";
+      const livenessBoundMs = deps.livenessBoundMs ?? DEFAULT_LIVENESS_BOUND_MS;
+      const recentActivity =
+        runState.lastActivityTs !== undefined && now() - Date.parse(runState.lastActivityTs) <= livenessBoundMs;
+      if (hasOpenPr || recentActivity) {
+        projection.status = "running";
+        projection.phase = runState.phase;
+        if (runState.startedAt) {
+          projection.startedAt = runState.startedAt;
+          projection.elapsedMs = Math.max(0, now() - Date.parse(runState.startedAt));
+        }
+      } else {
+        // Dispatched, no terminal verdict, no open PR, no recent activity: unknown/orphaned,
+        // never running (the falsifier: an orphaned dispatch rendered as running).
+        projection.orphaned = true;
       }
     }
   }
@@ -751,8 +873,23 @@ export function projectPlan(
   deps: DeriveDeps,
   cachePath?: string,
 ): Map<string, StatusProjection> {
+  // MONOTONIC UNDER DARKNESS (W1-T179): when the caller has not already injected its own
+  // `previousProjection` (e.g. a long-lived server's in-memory snapshot), fall back to
+  // reading THIS cache file's PRIOR contents before they are overwritten below -- the
+  // natural "last successfully observed projection" for any caller that persists to
+  // `cachePath`. Every existing `projectPlan(plan, deps, statusPath)` call site gets the
+  // fix for free, with no wiring changes of its own. Fails soft to "nothing to fall back
+  // on" on a missing/corrupt cache, same discipline as readLedgerLines' malformed-line
+  // handling above.
+  let effectiveDeps = deps;
+  if (cachePath && !deps.previousProjection) {
+    const previousByTaskId = readCachedProjections(cachePath);
+    if (previousByTaskId) {
+      effectiveDeps = { ...deps, previousProjection: (taskId) => previousByTaskId.get(taskId) };
+    }
+  }
   const byId = new Map<string, StatusProjection>();
-  for (const task of plan.tasks) byId.set(task.id, deriveStatus(task, deps));
+  for (const task of plan.tasks) byId.set(task.id, deriveStatus(task, effectiveDeps));
   if (cachePath) {
     fs.mkdirSync(dirname(cachePath), { recursive: true });
     const projection = {
@@ -763,6 +900,25 @@ export function projectPlan(
     fs.writeFileSync(cachePath, JSON.stringify(projection, null, 2) + "\n");
   }
   return byId;
+}
+
+/**
+ * Read a previously-written `state/status.json` cache back into a taskId -> projection map
+ * (W1-T179) -- undefined on anything short of a well-formed prior write (missing file,
+ * unparseable JSON, or a shape that is not `{ tasks: {...} }`), never throwing. Feeds
+ * {@link projectPlan}'s own darkness fallback; not exported, since a caller wanting a
+ * `previousProjection` for reasons OTHER than "read my own prior cache write" (e.g. an
+ * in-memory snapshot) can and should inject it directly on {@link DeriveDeps}.
+ */
+function readCachedProjections(cachePath: string): Map<string, StatusProjection> | undefined {
+  if (!fs.existsSync(cachePath)) return undefined;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(cachePath, "utf8")) as { tasks?: Record<string, StatusProjection> };
+    if (!parsed || typeof parsed.tasks !== "object" || parsed.tasks === null) return undefined;
+    return new Map(Object.entries(parsed.tasks));
+  } catch {
+    return undefined;
+  }
 }
 
 /**
