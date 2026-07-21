@@ -1692,12 +1692,12 @@
       proof: "integration test over the daemon poll path: a proposal whose cached draft was invalidated and whose trigger has fired gets a draft spawned within two polls, with `rmd inbox` never invoked. FALSIFIER, live at filing: P34's reframe at 2026-07-21T01:35:56.574Z invalidated its draft (zero P34 entries in state/inbox-drafts.json) and no draft exists, because inboxDraftPrompt is called only from inboxCommand (run-task.ts:5321) and daemon.ts references the inbox nowhere"
     - claim: "the rung runs on the DAEMON path, not only the CLI path"
       proof: "unit test asserting the draft rung is reachable from the daemon's per-poll hook (the `deps.sweep()` seam at daemon.ts:274, where W1-T150's credit-backfill rung already rides), not merely from inboxCommand. FALSIFIER: a rung added to the CLI path alone silently never runs unattended — the same trap the W1-T177 cadence work had to avoid, and the exact shape of the defect this task fixes"
-    - claim: "ONE invalidation produces ONE draft attempt — a poll cadence never re-spawns for the same cause"
-      proof: "unit test: three consecutive polls over the same invalidated proposal spawn the Architect exactly once, keyed to the invalidation (reframe round) rather than to poll count. FALSIFIER: an unkeyed rung spawns a bounded Architect worker every 300s against the same proposal — a repeating spend leak of the class W1-T177 exists to prevent"
-    - claim: "a draft failure fails SOFT — it never halts the sweep or the daemon"
-      proof: "unit test: a seeded draft-spawn failure leaves the sweep and daemon loop running and the proposal un-drafted, with the failure logged. FALSIFIER: a throw that halts the daemon trades a missing draft for a stopped fleet, when an un-drafted proposal is merely the status quo"
-    - claim: "`rmd inbox` still works as a viewer AND as a manual trigger"
-      proof: "unit test: inboxCommand still classifies and still forces a draft on demand after the daemon rung exists. FALSIFIER: moving the trigger and removing the manual one leaves an operator unable to force a redraft when they want one — the CLI is demoted from sole trigger, not deleted"
+    - claim: "ONE invalidation produces ONE draft attempt — a poll cadence never re-spawns for the same cause: three consecutive polls over the same invalidated proposal spawn the Architect exactly once, keyed to the invalidation (reframe round) rather than to poll count (the falsifier: an unkeyed rung spawns a bounded Architect worker every 300s against the same proposal — a repeating spend leak of the class W1-T177 exists to prevent)"
+      proof: "unit test: test/inbox.test.ts"
+    - claim: "a draft failure fails SOFT — it never halts the sweep or the daemon: a seeded draft-spawn failure leaves the sweep and daemon loop running and the proposal un-drafted, with the failure logged (the falsifier: a throw that halts the daemon trades a missing draft for a stopped fleet, when an un-drafted proposal is merely the status quo)"
+      proof: "unit test: test/inbox.test.ts"
+    - claim: "`rmd inbox` still works as a viewer AND as a manual trigger: inboxCommand still classifies and still forces a draft on demand after the daemon rung exists (the falsifier: moving the trigger and removing the manual one leaves an operator unable to force a redraft when they want one — the CLI is demoted from sole trigger, not deleted)"
+      proof: "unit test: test/run-task.test.ts"
   risk: high
   origin: architect
   plan_refs: ["§7B", "§4"]
