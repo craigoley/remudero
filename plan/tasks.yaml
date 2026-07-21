@@ -9928,7 +9928,29 @@
   files: [src/run-task.ts, src/lib/launchd.ts]
   status: queued
   attempts: 0
-  note: "Sibling of W1-T152 (serve service GENERATOR), not folded into it — these are the operator-facing lifecycle
+  note: "AMENDED 2026-07-21 by operator ruling. Task verified QUEUED first - zero merged PRs carry its
+    Remudero-Task trailer - so standing rule 21 does not apply.
+    ADDS A STANDALONE rmd console VERB, callable OUTSIDE up and down. It prints the console URL for EACH
+    BOUND HOST with the READ token, refuses to print the write token unless an explicit --write flag is
+    passed, and offers --qr so the operator can re-bookmark on a phone without retyping a 64-character hex
+    string.
+    FIXTURE, from today rather than imagined: after the mandatory token rotation, the operator had NO
+    supported path to their new bookmark. The only way to recover it was grepping serve.log - which is both
+    undiscoverable and the exact file that standing rule 24 says must not be where credentials live. A system
+    that rotates a credential owes the operator a first-class way to learn the new one.
+    PER BOUND HOST matters now that serve binds a LIST. It listens on loopback and the tailnet address
+    together, so there is no single console URL any more, and a verb printing one of them would be wrong half
+    the time depending on whether the operator is at the machine or on their phone.
+    THE READ DEFAULT IS THE POINT, NOT A DETAIL. The read token grants a view; the write token grants
+    fleet control. Printing is how the write token leaked in the first place (R-5), so the default must be
+    read and --write must be a deliberate act.
+    RECONCILE THIS TASK OWN TITLE, which still says print console URL-with-token from before the token
+    hygiene work landed. That phrasing predates standing rule 24 and must not be implemented literally with
+    the WRITE token - the URL carries the READ token.
+    FALSIFIER, operator-supplied: a token rotation after which rmd console prints a DEAD URL fails. The verb
+    must read the live tokens file rather than caching, echoing a startup banner, or reprinting a value
+    captured at boot.
+    ORIGINAL NOTE FOLLOWS. Sibling of W1-T152 (serve service GENERATOR), not folded into it — these are the operator-facing lifecycle
     VERBS that orchestrate daemon + serve + freshness + recoverability reporting, and DEPEND on T152. Fixture: the
     restart-procedure question answered today with four manual blocks + the reap-wait gotcha (serve-restart-reap-wait
     memory). Composes W1-T152 (serve service + off-main refuse + reap-wait), W1-T151 (install-freshness), W1-T12b (the
@@ -10148,7 +10170,27 @@
   files: [src/lib/serve.ts]
   status: queued
   attempts: 0
-  note: "FILED BY THE AMENDER under standing rule 21 — the token-hygiene PR created this gap and therefore
+  note: "AMENDED 2026-07-21 by operator ruling, adding the AUTH ENDGAME design. Task verified QUEUED
+    first - zero merged PRs carry its Remudero-Task trailer - so standing rule 21 does not apply.
+    THE IMPLEMENTER VERIFIES FROM DOCUMENTATION AND NEVER INVENTS AN API. Both options below depend on what
+    Tailscale and the runtime actually provide. Read the current documentation before designing, and if the
+    preferred shape is not available as described, say so and fall back rather than approximating it.
+    PREFERRED - TAILSCALE IDENTITY. serve trusts tailnet-asserted identity, via the identity headers a
+    tailscale serve proxy injects or via tsnet, so the operator arriving over their own tailnet gets a
+    SESSION WITH NO TOKEN IN ANY URL - write scope included. This is strictly better than any token scheme
+    because it removes the credential from the client entirely rather than moving it somewhere safer: there
+    is no bookmark to leak, no query parameter to screenshot, and no rotation for the operator to chase.
+    Token auth REMAINS THE FALLBACK for loopback and for the case where Tailscale is down, which is exactly
+    why serve binds both interfaces.
+    ACCEPTABLE - TOKEN-PASTE-ONCE. A login screen that takes the write token and stores it client-side,
+    session-scoped. Weaker than tailnet identity because the credential still exists on the client and can
+    still be exfiltrated by anything achieving script execution on that origin, but it removes the token from
+    the URL, which is the leak that actually happened.
+    FALSIFIER EITHER WAY, operator-supplied: a write-capable credential appearing in a URL, a log, or a
+    bookmark FAILS. That criterion binds regardless of which option is built, and it is the whole point of
+    the task - the read-only bookmark this task exists to fix must not be repaired by putting the write
+    token back where it was.
+    ORIGINAL NOTE FOLLOWS. FILED BY THE AMENDER under standing rule 21 — the token-hygiene PR created this gap and therefore
     owes the follow-up rather than leaving it to be discovered at the next NEEDS-ME moment.
     POSITION IS THE OPERATOR'S CALL and is deliberately not asserted here. This is appended at the tail,
     but it gates the operator's own write path to the fleet, so it may well deserve pulling forward ahead
