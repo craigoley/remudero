@@ -105,6 +105,14 @@ export interface ReviewEvidence {
    * shell (acceptance: "unit test over an injected executor").
    */
   execProof?: ProofExecutor;
+  /**
+   * W1-T185: true when the task under review declares `principles: {tdd: strict}`
+   * (plan/tasks.yaml). Consulted ONLY to decide whether a verdict that observed
+   * ZERO proof executions is CAPPED (see {@link ReviewVerdict.capped}) —
+   * absent/false behaves exactly as before this task (no capping), so every
+   * caller that predates it (and every fixture below) is unaffected.
+   */
+  tddStrict?: boolean;
 }
 
 /** The rolled-up review verdict — exactly what {@link postReviewStatus} posts. */
@@ -142,6 +150,39 @@ export interface ReviewVerdict {
    * `applyVerdictStability` is ever fed.
    */
   floorState?: ReviewState;
+  /**
+   * W1-T185 (closes a W1-T128 gap — MASTER-PLAN rule 22 fixture (iii): a PASS at
+   * `proof_exec: 0/5`, directly beneath its own FLOOR DEGRADED banner, over a
+   * diff satisfying one criterion in five with zero tests on a `tdd: strict`
+   * task). True when `state` was FORCED to `"failure"` because ZERO criteria
+   * observed any proof execution (`executed_pass`/`executed_fail`) on a task
+   * that declares `principles: {tdd: strict}` — a keyword-only PASS is a CLAIM,
+   * not EVIDENCE, and tdd:strict is the task's own declaration that executed
+   * proof is required. Folded into BOTH `state` and `floorState` (never `state`
+   * alone) so {@link applyVerdictStability} can never treat this as a
+   * suppressible semantic downgrade — capping is a DETERMINISTIC-FLOOR decision,
+   * exactly like executed-proof override, never an LLM judgment. Distinct from
+   * `floorDegraded` (W1-T72, legibility-only, dialect-gated, never blocking):
+   * `capped` is CONSEQUENTIAL and fires on ANY zero-executed verdict on a
+   * tdd:strict task, dialect-prefixed proofs or not — every caller/gate that
+   * reads `state` (this module's own callers AND `sweep.ts`'s GitHub-status
+   * reconciliation) sees the same failure, not just a console annotation.
+   */
+  capped: boolean;
+  /**
+   * W1-T185 (closes the second W1-T128 gap): true when this verdict was judged
+   * with NO `headCheckoutDir` — i.e. proof execution was never attempted for
+   * ANY criterion, so `state` rests entirely on the keyword floor (+ optional
+   * semantic downgrade). This is the case today for `rmd review`'s manual-PR
+   * escape hatch (the operator's working checkout is never used as a PR-head
+   * substitute — HEAD DISCIPLINE, W1-T65). Surfaced on the posted commit-status
+   * summary, the ledger `review.posted` line, and the console `say()` output
+   * (run-task.ts) so a keyword-only PASS is never mistaken for an OBSERVED one.
+   * Purely a LEGIBILITY signal, like `floorDegraded` — it does not itself force
+   * `state`, since a `not_executable`-only floor is the long-standing, correct
+   * behavior for every criterion whose proof is free prose.
+   */
+  keywordOnly: boolean;
 }
 
 // ── Tokenisation (deterministic, dependency-free) ──────────────────────────
@@ -727,12 +768,7 @@ export function judgeReview(
 
   const unmet = verdicts.filter((v) => !v.met);
   const noCriteria = criteria.length === 0;
-  const state: ReviewState =
-    noCriteria || unmet.length > 0 || testTheater ? "failure" : "success";
-  const summary =
-    state === "success"
-      ? passSummary(verdicts.length)
-      : failSummary(unmet.map((v) => v.claim), testTheater, noCriteria);
+  let state: ReviewState = noCriteria || unmet.length > 0 || testTheater ? "failure" : "success";
 
   // W1-T178 (verdict stability): the SAME rollup, but ignoring semantic entirely
   // — every criterion judged on its `floorMet` (mechanical/executed, pre-
@@ -740,7 +776,7 @@ export function judgeReview(
   // semantic, so they bind the floor exactly as they bind `state`. This is the
   // anchor a re-review of an unchanged head checks before trusting a downgrade.
   const floorUnmet = verdicts.filter((v) => !(v.floorMet ?? v.met));
-  const floorState: ReviewState =
+  let floorState: ReviewState =
     noCriteria || floorUnmet.length > 0 || testTheater ? "failure" : "success";
 
   // W1-T72 (W1-T65 follow-up, legibility): nothing was OBSERVED on the PR head
@@ -755,15 +791,71 @@ export function judgeReview(
   const floorDegraded =
     executedCount === 0 && criteria.some((c) => !c.satisfied_by && isDialectPrefixed(c.proof));
 
-  return { state, criteria: verdicts, testTheater, summary, floorDegraded, floorState };
+  // W1-T185 (closes a W1-T128 gap — MASTER-PLAN rule 22 fixture (iii)): a
+  // tdd:strict task's verdict that observed ZERO proof executions is CAPPED —
+  // forced to failure so auto-merge can never arm on a keyword-only claim
+  // alone. Scoped to `state === "success"`: if the floor/semantic layer already
+  // failed the review for its own reason, that failure (and its specific,
+  // named unmet criterion) already blocks auto-merge and stays the summary —
+  // capping exists to catch the case that used to slip through, a CLEAN pass
+  // with nothing actually observed. `satisfied_by`-only criteria are excluded
+  // (an Architect override that deliberately never attempts execution is not a
+  // tdd:strict violation). Folded into `floorState` too (never `state` alone)
+  // so {@link applyVerdictStability} can never mistake this for a suppressible
+  // semantic downgrade on an unchanged head.
+  const executableCriteria = criteria.filter((c) => !c.satisfied_by);
+  const capped =
+    state === "success" && executableCriteria.length > 0 && executedCount === 0 && evidence.tddStrict === true;
+  if (capped) {
+    state = "failure";
+    floorState = "failure";
+  }
+
+  // W1-T185 (closes the second W1-T128 gap): this verdict never attempted
+  // execution for ANY criterion (no `headCheckoutDir` was given at all) — the
+  // `rmd review` manual-PR path today (it has no run-owned worktree at the PR
+  // head; the operator's working checkout is never substituted — HEAD
+  // DISCIPLINE, W1-T65). Purely legibility: `state` is unaffected here (a
+  // `not_executable`-only floor is the correct, long-standing behavior for
+  // free-prose proofs), but the posted status/ledger/console must say so
+  // plainly rather than let a keyword-only PASS read as an observed one.
+  const keywordOnly = execCtx === undefined;
+
+  const summary = capped
+    ? cappedSummary(verdicts.length)
+    : state === "success"
+      ? passSummary(verdicts.length, keywordOnly)
+      : failSummary(unmet.map((v) => v.claim), testTheater, noCriteria);
+
+  return { state, criteria: verdicts, testTheater, summary, floorDegraded, floorState, capped, keywordOnly };
 }
 
 /** The exact PASS status-description text, shared by {@link judgeReview} and a
  * verdict-stability suppression ({@link applyVerdictStability}) so a suppressed
  * downgrade posts a summary byte-identical to a review that passed outright —
- * never a "success" state paired with failure-shaped prose. */
-function passSummary(criteriaCount: number): string {
-  return `remudero-review: PASS — ${criteriaCount} criteria substantiated, no test theater`;
+ * never a "success" state paired with failure-shaped prose. `keywordOnly`
+ * (W1-T185) appends an explicit "(keyword-only)" tag so a PASS with no proof
+ * ever executed is never mistaken for an OBSERVED one — e.g. on the commit
+ * status GitHub renders for `rmd review`'s manual-PR path. Verdict-stability
+ * suppression always passes `false` here (see {@link applyVerdictStability}):
+ * a suppressed downgrade re-posts the ORIGINAL passing verdict's shape, which
+ * predates this tag and never carried it. */
+function passSummary(criteriaCount: number, keywordOnly = false): string {
+  return (
+    `remudero-review: PASS — ${criteriaCount} criteria substantiated, no test theater` +
+    (keywordOnly ? " (keyword-only: no proof was executed on the PR head)" : "")
+  );
+}
+
+/** The CAPPED status-description text (W1-T185) — a verdict forced to failure
+ * because a tdd:strict task's review observed zero proof executions. Distinct
+ * wording from {@link failSummary} so the commit-status/ledger/console name
+ * WHY immediately: not a substantive unmet criterion, a missing OBSERVATION. */
+function cappedSummary(criteriaCount: number): string {
+  return (
+    `remudero-review: CAPPED — 0/${criteriaCount} proofs executed on a tdd:strict task; ` +
+    `a keyword-only claim cannot arm auto-merge`
+  );
 }
 
 // ── VERDICT STABILITY (W1-T178) ─────────────────────────────────────────────
@@ -861,7 +953,12 @@ export function applyVerdictStability(
         };
   });
   return {
-    verdict: { ...computed, state: "success", criteria, summary: passSummary(criteria.length) },
+    verdict: {
+      ...computed,
+      state: "success",
+      criteria,
+      summary: passSummary(criteria.length, computed.keywordOnly),
+    },
     suppressed: true,
   };
 }
@@ -878,6 +975,46 @@ export function floorDegradedAnnotation(criteriaCount: number): string {
     `FLOOR DEGRADED: 0/${criteriaCount} proofs executed; keyword floor was binding — ` +
     `a dialect-prefixed proof ('grep: …' / 'unit test: …') was written to be runnable ` +
     `but nothing was observed on the PR head.`
+  );
+}
+
+/**
+ * True when a task's `principles` field (plan/tasks.yaml `principles: {tdd:
+ * strict}`) declares `tdd: strict`. The ONLY input {@link judgeReview} consults
+ * to decide whether a zero-executed verdict is CAPPED (W1-T185) — a task that
+ * never declared tdd:strict never gets capped, because it never claimed
+ * executed proof was mandatory in the first place.
+ */
+export function isTddStrict(principles?: Record<string, unknown>): boolean {
+  return principles?.tdd === "strict";
+}
+
+/**
+ * The LOUD console annotation for a CAPPED verdict (W1-T185) — printed once per
+ * review when {@link ReviewVerdict.capped} is true. Mirrors
+ * {@link floorDegradedAnnotation}: pure + exported so the exact text is a
+ * unit-testable falsifier, independent of the console call site (run-task.ts).
+ */
+export function cappedAnnotation(criteriaCount: number): string {
+  return (
+    `CAPPED: 0/${criteriaCount} proofs executed on a tdd:strict task — a keyword-only ` +
+    `verdict cannot arm auto-merge; the task's own \`principles: {tdd: strict}\` requires ` +
+    `OBSERVED proof, not report prose.`
+  );
+}
+
+/**
+ * The LOUD console annotation for a keyword-only verdict (W1-T185 — closes the
+ * second W1-T128 gap) — printed once per review when {@link
+ * ReviewVerdict.keywordOnly} is true and the verdict was NOT already capped
+ * (a capped verdict's own annotation already says nothing was executed; this
+ * would be redundant). Mirrors {@link floorDegradedAnnotation}.
+ */
+export function keywordOnlyAnnotation(): string {
+  return (
+    `KEYWORD-ONLY: no PR-head checkout was given, so no proof was executed for any ` +
+    `criterion — this verdict rests entirely on keyword coverage (+ optional semantic ` +
+    `downgrade), never on OBSERVED repo state.`
   );
 }
 

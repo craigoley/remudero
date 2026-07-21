@@ -687,6 +687,8 @@ function fakeReview(
     testTheater: false,
     summary: state === "success" ? "all criteria met" : "unmet criteria",
     floorDegraded: false,
+    capped: false,
+    keywordOnly: false,
     headSha: "deadbeef",
     reviewerOutcome: "success",
   };

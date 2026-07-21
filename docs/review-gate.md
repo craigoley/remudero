@@ -221,6 +221,35 @@ the PR body against each criterion's proof, and posts the status. **Absent crite
 FAIL CLOSED** — nothing to judge is never a pass. See
 [CONTRIBUTING.md](../CONTRIBUTING.md) for the `Acceptance:` block format.
 
+This escape hatch never checks out the PR head — it judges from the operator's own
+checkout, never a substitute for the PR head (HEAD DISCIPLINE, W1-T65) — so no
+proof is ever executed on this path; every criterion rests on keyword coverage
+alone. **W1-T185**: this is no longer silent. `judgeReview` sets
+`keywordOnly: true` whenever no PR-head checkout is given, which the posted
+commit-status summary, the `review.posted` ledger line, and the console output
+all name explicitly (`... (keyword-only: no proof was executed on the PR head)`)
+— a `rmd review` pass can never be mistaken for a `rmd run-task` pass that
+actually OBSERVED its proofs.
+
+## Zero-executed proofs on tdd:strict work (CAPPED)
+
+**W1-T185** closes a gap the observed-proof execution engine (W1-T65/W1-T72,
+"W1-T128") left open: a keyword floor can substantiate a criterion purely from
+report prose, so a task with `principles: {tdd: strict}` — a task that has
+declared executed proof is mandatory — could still post `remudero-review=success`
+having OBSERVED nothing at all (MASTER-PLAN rule 22 fixture (iii): a PASS at
+`proof_exec: 0/5`, directly beneath its own `FLOOR DEGRADED` banner, on a
+tdd:strict task with zero tests). `judgeReview` now CAPS that case: when every
+criterion's `proof_exec` is `not_executable`/`exec_error` (nothing executed) on a
+`tdd: strict` task, `state` is forced to `failure` — never a clean pass — so
+auto-merge can never arm on a keyword-only claim alone. The posted summary reads
+`remudero-review: CAPPED — 0/N proofs executed on a tdd:strict task; a
+keyword-only claim cannot arm auto-merge`, and `ReviewVerdict.capped` carries the
+same fact to the ledger (`review.posted.capped`) and console. Capping is folded
+into the DETERMINISTIC floor (never just a console annotation), so it also binds
+`floorState` and can never be undone by the W1-T178 verdict-stability
+suppression. A task that does not declare `tdd: strict` is unaffected.
+
 ## Live falsification (proven, not asserted)
 
 - A legitimate PR whose REPORT substantiates its criteria → `remudero-review=success`.

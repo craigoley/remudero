@@ -154,8 +154,11 @@ import {
   REVIEW_CONTEXT,
   applyVerdictStability,
   buildReviewPrompt,
+  cappedAnnotation,
   floorDegradedAnnotation,
+  isTddStrict,
   judgeReview,
+  keywordOnlyAnnotation,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
   postReviewStatus,
@@ -606,7 +609,17 @@ async function runReview(args: {
   owner: string;
   repo: string;
   prUrl: string;
-  task: { id: string; acceptance?: AcceptanceCriterion[] };
+  task: {
+    id: string;
+    acceptance?: AcceptanceCriterion[];
+    /**
+     * W1-T185: `plan/tasks.yaml`'s `principles: {tdd: strict}` field, forwarded
+     * verbatim so {@link judgeReview} can decide whether a zero-executed
+     * verdict must be CAPPED. Absent ⇒ never capped — identical to pre-W1-T185
+     * behavior for every caller (and fixture) that predates this task.
+     */
+    principles?: Record<string, unknown>;
+  };
   report: string;
   settingsFile: string;
   config: Config;
@@ -713,7 +726,15 @@ async function runReview(args: {
   // execution to the PR HEAD (never the operator's working checkout) — so the
   // gate observes repo state whether or not the advisory reviewer above ever
   // completed.
-  const computed = judgeReview(criteria, { diff, report, semantic, headCheckoutDir: args.headCheckoutDir });
+  const computed = judgeReview(criteria, {
+    diff,
+    report,
+    semantic,
+    headCheckoutDir: args.headCheckoutDir,
+    // W1-T185: forwards `plan/tasks.yaml`'s `principles: {tdd: strict}` so a
+    // zero-executed verdict on a tdd:strict task is CAPPED, never a clean PASS.
+    tddStrict: isTddStrict(task.principles),
+  });
 
   // W1-T178 (verdict stability): a re-review of an UNCHANGED head sha whose
   // deterministic floor still passes may not render a verdict WORSE than its
@@ -768,14 +789,27 @@ async function runReview(args: {
     // was WRITTEN to be runnable (house dialect). NO blocking-behavior change:
     // `state` above is exactly what it always was.
     floor_degraded: verdict.floorDegraded,
+    // W1-T185: CONSEQUENTIAL (folded into `state`/`floor_state` above already,
+    // never just this annotation) — true when a tdd:strict task's verdict was
+    // forced to failure because zero criteria observed any proof execution.
+    capped: verdict.capped,
+    // W1-T185: LEGIBILITY-only — true when NO PR-head checkout was given at
+    // all (e.g. `rmd review`'s manual-PR path), so this verdict rests entirely
+    // on keyword coverage, never on OBSERVED repo state.
+    keyword_only: verdict.keywordOnly,
     // W1-T178: the deterministic anchor `state` was checked against, and
     // whether this line's `state` is a suppressed downgrade rather than a
     // review that genuinely passed — always present, never inferred.
     floor_state: computed.floorState,
     downgrade_suppressed: suppressed,
   });
-  if (verdict.floorDegraded) {
+  if (verdict.capped) {
+    say(cappedAnnotation(proofExec.length));
+  } else if (verdict.floorDegraded) {
     say(floorDegradedAnnotation(proofExec.length));
+  }
+  if (verdict.keywordOnly && !verdict.capped) {
+    say(keywordOnlyAnnotation());
   }
   if (verdict.state !== "success" && (unmetClaims.length > 0 || verdict.testTheater)) {
     // Post the full unmet list as a PR comment so a blocked PR names its gap in one
@@ -2531,6 +2565,11 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
   // Criteria: task trailer → tasks.yaml; else the PR body's Acceptance: block.
   let criteria: AcceptanceCriterion[] = [];
   let source = "NONE (fail closed — nothing to judge is never a pass)";
+  // W1-T185: the trailer-resolved task's `principles` (e.g. `{tdd: strict}`),
+  // carried through to runReview so a zero-executed verdict on a tdd:strict
+  // task is still CAPPED even on this manual escape hatch. Absent when no
+  // task id resolves (a plan/doc PR with only a body Acceptance: block).
+  let principles: Record<string, unknown> | undefined;
   const taskId = body.match(/Remudero-Task:\s*(\S+)/)?.[1];
   if (taskId) {
     try {
@@ -2539,6 +2578,7 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
       if (t?.acceptance?.length) {
         criteria = t.acceptance;
         source = `plan/tasks.yaml task ${taskId} (${criteria.length} criteria)`;
+        principles = t.principles;
       }
     } catch {
       // A bad/absent plan is not the reviewer's concern; fall through to the body.
@@ -2563,7 +2603,7 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
     owner,
     repo,
     prUrl: view.url,
-    task: { id: taskId ?? `PR-${view.number}`, acceptance: criteria },
+    task: { id: taskId ?? `PR-${view.number}`, acceptance: criteria, principles },
     report: body, // the PR body is the manual author's REPORT (proofs are pasted here)
     settingsFile: "",
     config,
@@ -2577,15 +2617,18 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
     reviewerMount: resolveMount(loadMounts(mountsPath(repoRoot)), "reviewer", "medium"),
     // No headCheckoutDir: this manual escape hatch has no run-owned worktree at
     // the PR head (GROUND TRUTH's blocked_review class — and P15 — is the
-    // AUTONOMOUS `runTask` path above, which does). A fresh temp checkout fetched
-    // at the head sha here is a reasonable follow-up, out of THIS task's one
-    // concern; until then this path stays keyword-floor-only (proof_exec is
-    // not_executable throughout), exactly its pre-W1-T65 behavior — never a
-    // regression, just not yet the observed floor.
+    // AUTONOMOUS `runTask` path above, which does). This path stays
+    // keyword-floor-only (proof_exec is not_executable throughout), exactly
+    // its pre-W1-T65 behavior — but W1-T185 makes that fact EXPLICIT rather
+    // than implicit: `judgeReview` sets `keywordOnly: true` whenever
+    // `headCheckoutDir` is absent, which flows into the posted commit-status
+    // summary, the `review.posted` ledger line, and the console line below —
+    // never a regression, just no longer silent about it.
     ledgerPath,
   });
   console.log(
-    `\nremudero-review=${verdict.state} posted to ${view.url} (head ${verdict.headSha.slice(0, 7)})`,
+    `\nremudero-review=${verdict.state} posted to ${view.url} (head ${verdict.headSha.slice(0, 7)})` +
+      (verdict.keywordOnly ? " — KEYWORD-ONLY: no proof was executed (no PR-head checkout)" : ""),
   );
   return verdict.state === "success" ? 0 : 1;
 }
@@ -4191,6 +4234,8 @@ function buildSweepEffects(
               testTheater: false,
               summary: `sweep-reconstructed: required checks red (${(evidence.ciFailures ?? []).length} failing check(s)) — ci-log dispatch, any review verdict on this head is disregarded until checks are green`,
               floorDegraded: false,
+              capped: false,
+              keywordOnly: false,
               headSha: pr.headSha,
               reviewerOutcome: "sweep-reconstructed-ci-log",
             }
@@ -4200,6 +4245,8 @@ function buildSweepEffects(
               testTheater: false,
               summary: pr.reviewSummary ?? `sweep-reconstructed failing review (${unmet.length} unmet)`,
               floorDegraded: false,
+              capped: false,
+              keywordOnly: false,
               headSha: pr.headSha,
               reviewerOutcome: "sweep-reconstructed",
             };

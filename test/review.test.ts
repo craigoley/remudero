@@ -5,6 +5,7 @@ import {
   REVIEW_CONTEXT,
   applyVerdictStability,
   buildReviewPrompt,
+  cappedAnnotation,
   checkCallersAudited,
   checkDocsAwareness,
   checkOneConcern,
@@ -16,8 +17,10 @@ import {
   failSummary,
   floorDegradedAnnotation,
   isDialectPrefixed,
+  isTddStrict,
   judgeReview,
   judgeRubric,
+  keywordOnlyAnnotation,
   nameFilteredOutcome,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
@@ -1320,4 +1323,116 @@ test("W1-T72: a satisfied_by criterion's dialect-looking proof does not itself t
   const v = judgeReview(criteria, { diff: "", report: "" });
   assert.equal(v.criteria[0].proof_exec, "not_executable");
   assert.equal(v.floorDegraded, false);
+});
+
+// ── W1-T185 (i): CAPPED — a zero-executed verdict on a tdd:strict task can ──
+// never render a clean PASS, closing MASTER-PLAN rule 22 fixture (iii): a PASS
+// at proof_exec 0/5 beneath its own FLOOR DEGRADED banner on a tdd:strict task.
+
+test("isTddStrict: true only for principles: {tdd: strict}", () => {
+  assert.equal(isTddStrict({ tdd: "strict" }), true);
+  assert.equal(isTddStrict({ tdd: "loose" }), false);
+  assert.equal(isTddStrict({}), false);
+  assert.equal(isTddStrict(undefined), false);
+});
+
+test("FALSIFIER (MASTER-PLAN rule 22 fixture (iii)): a keyword-covered, zero-executed verdict on a tdd:strict task is CAPPED to failure, not a clean PASS", () => {
+  // Same (criteria, diff, report) as the plain success fixture above — proves
+  // the keyword floor alone WOULD pass this (no headCheckoutDir ⇒ 0 executed).
+  const uncapped = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(uncapped.state, "success", "sanity: the keyword floor alone passes this fixture");
+  assert.equal(uncapped.capped, false);
+
+  const v = judgeReview(CRITERIA, {
+    diff: REAL_TEST_DIFF,
+    report: RESPONSIVE_REPORT,
+    tddStrict: true,
+  });
+  assert.equal(v.state, "failure");
+  assert.equal(v.floorState, "failure"); // never just `state` — see the doc comment
+  assert.equal(v.capped, true);
+  assert.match(v.summary, /CAPPED/);
+  assert.match(v.summary, /0\/2/);
+  assert.match(cappedAnnotation(v.criteria.length), /CAPPED/);
+  assert.match(cappedAnnotation(v.criteria.length), /0\/2/);
+});
+
+test("capped never fires when the task is NOT tdd:strict (tddStrict absent/false) — the same zero-executed fixture stays a clean PASS", () => {
+  const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT, tddStrict: false });
+  assert.equal(v.state, "success");
+  assert.equal(v.capped, false);
+});
+
+test("capped never fires when at least ONE criterion's proof was actually observed — 'ZERO executed' is exact, not 'not every'", () => {
+  const alwaysPass: ProofExecutor = () => "pass";
+  const criteria: AcceptanceCriterion[] = [
+    { claim: "a", proof: "grep: frobnicate in src/lib/widget.ts" }, // executes
+    ...CRITERIA, // stays keyword-floor
+  ];
+  const v = judgeReview(criteria, {
+    diff: REAL_TEST_DIFF,
+    report: RESPONSIVE_REPORT,
+    headCheckoutDir: "/fake/head/checkout",
+    execProof: alwaysPass,
+    tddStrict: true,
+  });
+  assert.equal(v.state, "success");
+  assert.equal(v.capped, false);
+});
+
+test("capped never overrides an ALREADY-failing verdict's specific reason — a real unmet criterion keeps its own failSummary, not the generic CAPPED text", () => {
+  const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: NON_RESPONSIVE_REPORT, tddStrict: true });
+  assert.equal(v.state, "failure");
+  assert.equal(v.capped, false); // already failing for its own reason before capping is even considered
+  assert.doesNotMatch(v.summary, /CAPPED/);
+});
+
+test("capped never fires when EVERY criterion is satisfied_by (an Architect override that deliberately never attempts execution)", () => {
+  const criteria: AcceptanceCriterion[] = [{ claim: "already shipped", proof: "grep: x in y.ts", satisfied_by: "#16" }];
+  const v = judgeReview(criteria, { diff: "", report: "", tddStrict: true });
+  assert.equal(v.state, "success");
+  assert.equal(v.capped, false);
+});
+
+test("a capped verdict can never be resurrected by verdict-stability suppression (W1-T178) — floorState is forced to failure too", () => {
+  const computed = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT, tddStrict: true });
+  assert.equal(computed.capped, true);
+  const prior: PriorReviewVerdict = { headSha: "deadbeef", state: "success" };
+  const { verdict, suppressed } = applyVerdictStability(computed, "deadbeef", prior);
+  assert.equal(suppressed, false, "a capped downgrade is a FLOOR decision, never a suppressible semantic one");
+  assert.equal(verdict.state, "failure");
+});
+
+// ── W1-T185 (ii): keywordOnly — `rmd review`'s manual-PR path (no PR-head ──
+// checkout) marks its verdict EXPLICITLY keyword-only, never silently.
+
+test("keywordOnly is true whenever NO headCheckoutDir is given, on both a passing and a failing verdict", () => {
+  const pass = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(pass.keywordOnly, true);
+  assert.match(pass.summary, /keyword-only/i);
+
+  const fail = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: NON_RESPONSIVE_REPORT });
+  assert.equal(fail.keywordOnly, true);
+});
+
+test("keywordOnly is false whenever a headCheckoutDir IS given, regardless of what actually executed", () => {
+  const v = judgeReview(CRITERIA, {
+    diff: REAL_TEST_DIFF,
+    report: RESPONSIVE_REPORT,
+    headCheckoutDir: "/fake/head/checkout",
+  });
+  assert.equal(v.keywordOnly, false);
+  assert.doesNotMatch(v.summary, /keyword-only/i);
+});
+
+test("keywordOnlyAnnotation names that no proof was executed for any criterion", () => {
+  assert.match(keywordOnlyAnnotation(), /no proof was executed/i);
+});
+
+test("a CAPPED verdict's summary states CAPPED, not the (redundant) passSummary keyword-only TAG — one clear reason, not two", () => {
+  const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT, tddStrict: true });
+  assert.equal(v.capped, true);
+  assert.equal(v.keywordOnly, true); // still true — legibility field, independent of `capped`
+  assert.match(v.summary, /^remudero-review: CAPPED/);
+  assert.doesNotMatch(v.summary, /PASS/); // cappedSummary owns the message here, never passSummary's tag
 });
