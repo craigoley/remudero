@@ -1912,6 +1912,30 @@ test("W1-T192: `rmd inbox`'s drafting predicate (proposalsNeedingDraft) is UNTHR
   );
 });
 
+// W1-T192 review-floor proof-text fixture (composite, additive alongside the two granular
+// tests above — same convention W1-T185's review round 3 established): the review floor's
+// `unit test:` dialect name-filters the WHOLE suite using a criterion's proof body VERBATIM,
+// so this criterion is only mechanically provable by a test whose NAME literally is that text.
+test("inboxCommand still classifies and still forces a draft on demand after the daemon rung exists. FALSIFIER: moving the trigger and removing the manual one leaves an operator unable to force a redraft when they want one — the CLI is demoted from sole trigger, not deleted", () => {
+  const inboxBody = extractFunctionBody(runTaskSrc, "async function inboxCommand(");
+  assert.match(inboxBody, /classifyProposal\(/, "inboxCommand must still CLASSIFY every proposal — the viewer role is preserved");
+  assert.match(
+    inboxBody,
+    /proposalsNeedingDraft\(/,
+    "inboxCommand must still be able to FORCE a draft via the unthrottled predicate — the manual-trigger role is preserved",
+  );
+  assert.match(
+    inboxBody,
+    /draftProposalBatch\(/,
+    "inboxCommand must still actually SPAWN the draft on demand, not merely decide one is due — a real manual trigger, not a stub",
+  );
+  assert.doesNotMatch(
+    inboxBody,
+    /draftsDueOnDaemon/,
+    "the daemon-only idempotence throttle must never gate inboxCommand's manual force — an operator can always force a redraft",
+  );
+});
+
 // ── W1-T78: the CLARIFICATION-QUESTION rung's fix-rung side — an operator's
 // answer re-arms `runFixRung` carrying the answer as an added constraint,
 // VERBATIM, on every strike; the strike allowance is config policy. ──────────

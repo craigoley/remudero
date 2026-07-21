@@ -685,3 +685,83 @@ test("a FAILED daemon draft attempt is throttled too — a stuck cause does not 
   assert.equal(spawnCalls, 1, "a failing cause is attempted once, not re-spawned every subsequent poll");
   assert.equal(drafts["P1"], undefined, "the proposal remains genuinely un-drafted — the status quo, not a regression");
 });
+
+// ── W1-T192 acceptance-proof-text fixtures ──────────────────────────────────────────────────
+//
+// The review floor's `unit test:` dialect (lib/review.ts's parseTestTarget) runs a criterion's
+// proof body as a `--test-name-pattern` search across the WHOLE suite when it names no exact
+// file path — so the criterion is only mechanically provable by a REAL test whose name IS that
+// proof text, verbatim. These are additive composites alongside the granular tests above (same
+// convention W1-T185's review round 3 established for this exact class of proof) — they do not
+// replace the more narrowly-named tests already covering the same behavior.
+
+// NOTE: the review floor's `unit test:` dialect runs this criterion's proof body as a raw
+// `--test-name-pattern` REGEX (lib/review.ts's parseTestTarget), not a literal string match.
+// The proof's own parenthesized aside "(reframe round)" therefore parses as a REGEX CAPTURE
+// GROUP — grouping parens are zero-width and never literally matched — so a test name
+// containing the literal characters "(reframe round)" (with parens) does NOT match the
+// pattern; a name containing the bare words "reframe round" (no parens) at that position
+// does. This test's name is the criterion's proof text with only that one pair of parens
+// dropped, so the SAME regex quirk that would otherwise false-fail this criterion instead
+// lets it match — the underlying assertions are unchanged from the fully-verbatim name.
+test("three consecutive polls over the same invalidated proposal spawn the Architect exactly once, keyed to the invalidation reframe round rather than to poll count. FALSIFIER: an unkeyed rung spawns a bounded Architect worker every 300s against the same proposal — a repeating spend leak of the class W1-T177 exists to prevent", async () => {
+  const anchor: EvidenceAnchor = { description: "x", pattern: "landed" };
+  const proposal: Proposal = { id: "P1", summary: "s", evidenceAnchors: [anchor], reframeHistory: [{ feedback: "fb" }] };
+  let drafts: DraftCache = {};
+  let attempts: DraftAttemptCache = {};
+  let spawnCalls = 0;
+  const spawn: DraftSpawn = async () => {
+    spawnCalls++;
+    return fakeWorkerResult(VALID_DRAFT_TEXT);
+  };
+
+  for (let poll = 0; poll < 3; poll++) {
+    const due = draftsDueOnDaemon([proposal], drafts, attempts);
+    if (due.length === 0) continue;
+    const outcomes = await runDraftRung(due, "plan text", { spawn, log: () => {} }, `POLL-${poll}`);
+    for (const outcome of outcomes) {
+      attempts = { ...attempts, [outcome.proposalId]: draftAttemptKey(due.find((p) => p.id === outcome.proposalId)!) };
+      if (outcome.ok) drafts = { ...drafts, [outcome.proposalId]: outcome.candidate };
+    }
+  }
+
+  assert.equal(spawnCalls, 1, "ONE invalidation (one reframe round, keyed by draftAttemptKey) must produce ONE draft attempt across three 300s-cadence polls, never one per poll");
+});
+
+test("a seeded draft-spawn failure leaves the sweep and daemon loop running and the proposal un-drafted, with the failure logged. FALSIFIER: a throw that halts the daemon trades a missing draft for a stopped fleet, when an un-drafted proposal is merely the status quo", async () => {
+  const anchor: EvidenceAnchor = { description: "x", pattern: "landed" };
+  const bad: Proposal = { id: "P-BAD", summary: "s", evidenceAnchors: [anchor] };
+  const good: Proposal = { id: "P-GOOD", summary: "s", evidenceAnchors: [anchor] };
+  const logLines: { step: string; extra?: Record<string, unknown> }[] = [];
+  const spawn: DraftSpawn = async (proposal) => {
+    if (proposal.id === "P-BAD") throw new Error("architect worker crashed"); // the SEEDED draft-spawn failure
+    return fakeWorkerResult(VALID_DRAFT_TEXT);
+  };
+
+  // The sweep/daemon LOOP is simulated by the surrounding try/catch here: runDraftRung must
+  // return NORMALLY (never throw) for a seeded spawn failure, or the caller (buildInboxDraftHook,
+  // riding the daemon's own deps.sweep() seam) would propagate the throw and halt the daemon.
+  let threw = false;
+  let outcomes: Awaited<ReturnType<typeof runDraftRung>> = [];
+  try {
+    outcomes = await runDraftRung([bad, good], "plan text", { spawn, log: (step, extra) => logLines.push({ step, extra }) }, "run-1");
+  } catch {
+    threw = true;
+  }
+  assert.equal(threw, false, "a seeded draft-spawn failure must never propagate a throw — the sweep and daemon loop keeps running");
+
+  const badOutcome = outcomes.find((o) => o.proposalId === "P-BAD")!;
+  assert.equal(badOutcome.ok, false, "the proposal remains un-drafted — the status quo, not a regression");
+  assert.ok(
+    logLines.some((l) => l.step === "inbox.draft_error" && l.extra?.proposal_id === "P-BAD"),
+    "the failure is LOGGED, never silently swallowed",
+  );
+
+  const goodOutcome = outcomes.find((o) => o.proposalId === "P-GOOD")!;
+  assert.equal(goodOutcome.ok, true, "a sibling proposal in the same batch still drafted — the batch was never halted by the seeded failure");
+
+  // A LATER poll after the failure must still run normally — the daemon loop is not stuck.
+  const anotherProposal: Proposal = { id: "P-ANOTHER", summary: "s", evidenceAnchors: [anchor] };
+  const secondPollOutcomes = await runDraftRung([anotherProposal], "plan text", { spawn, log: () => {} }, "run-2");
+  assert.equal(secondPollOutcomes[0].ok, true, "a subsequent poll still runs normally — the daemon loop was never halted by the earlier seeded failure");
+});
