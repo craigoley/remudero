@@ -1899,6 +1899,170 @@
     dep is real rather than cosmetic: W1-T203 removes the forge vector without touching autonomy, so if this
     task stalls on GitHub's capabilities the system is still meaningfully harder to forge."
 
+- id: W1-T219
+  title: "the keyword floor passes on a 34 percent echo, auto-passes a proof with no keywords at all, and the capped-verdict override is an unauthenticated free string"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "RECON R-13 and R-14, both VERIFIED at source during intake. Filed as a NEW task rather than as an
+    amendment to W1-T185 because W1-T185 is DONE - a merged PR carries its Remudero-Task trailer - and
+    standing rule 21 requires the amender to file a follow-up rather than edit shipped work.
+    R-13, four holes in the mechanical floor, each confirmed separately.
+    (i) MIN_COVERAGE is 0.34 (review.ts:262), applied at :697-698, so echoing roughly a third of a proof's
+    distinctive tokens marks a criterion met.
+    (ii) A proof yielding ZERO keywords sets met = true unconditionally with the reason no mechanical anchors
+    in proof, deferred to reviewer judgment (review.ts:690-694). That is fail-open, and it is reachable by
+    writing a proof entirely in short or stopword or numeric tokens - see PR 123 has no keywords at all.
+    (iii) The pathless grep default runs the pattern across the whole repo (review.ts:448-453), and an
+    executed_pass OVERRIDES the keyword floor positively (:711), so any pattern matching one line anywhere
+    certifies the criterion.
+    (iv) A renamed path makes grep exit 2, which counts as fail and overrides coverage into UNMET (:560-564,
+    :712, :729) - so a stale path FALSE-BLOCKS. Deliberate and documented, but the asymmetry is real: a
+    trivial match certifies, a moved file blocks.
+    R-14, the override is unauthenticated. --override-capped-by is read as a free string
+    (run-task.ts:2828-2838) and ledgered verbatim, and the recovery side accepts it on a bare typeof check
+    (review.ts:1118-1129) with no signature, no operator allowlist, and no binding to the PR head it was
+    granted against. Last one wins, so a single appended ledger line arms auto-merge on a CAPPED verdict for a
+    tdd:strict task - exactly the condition capping exists to block. Since the ledger is append-only and
+    unlocked, anything that can append can forge an override."
+  design: |
+    RAISE THE FLOOR WHERE IT FAILS OPEN, NOT UNIFORMLY. The zero-keyword auto-pass is the worst of the four
+    because it is unconditional: fix that first, and make a proof with no mechanical anchors resolve to
+    INDETERMINATE rather than MET. That is the same cannot-observe-implies-wait move this codebase has made
+    repeatedly on the read path.
+    A TRIVIAL GREP MUST NOT CERTIFY. A pathless repo-wide match is not evidence for a specific criterion.
+    VERIFY from source how proof paths are resolved before changing the default - the fix may be to require a
+    path rather than to weaken the executed_pass override, and those have very different blast radii.
+    KEEP THE FALSE-BLOCK ASYMMETRY IN VIEW. Hole (iv) is the one that costs the fleet time rather than
+    safety, and fixing it by making exit 2 lenient would re-open hole (iii). Distinguish grep found nothing
+    from grep could not look - the same corrupt-versus-absent distinction standing rule 23 names on the write
+    path.
+    BIND THE OVERRIDE TO SOMETHING. At minimum the PR head SHA it was granted against, so an override cannot
+    outlive the diff it was judged on. An operator allowlist is worth considering, but head-binding is the
+    change that stops a stale or forged line arming a later, different diff.
+    RESPECT THE PLAN-ONLY CARVE-OUT. W1-T205 carries the operator rider that plan-only PRs are structurally
+    capped and gate deterministically. Any floor raised here must exempt them or the plan lane halts.
+  acceptance:
+    - claim: "a proof yielding zero mechanical keywords resolves to INDETERMINATE rather than auto-passing as met"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a pathless repo-wide grep matching one incidental line does NOT certify a criterion"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a grep that could not look, such as a since-renamed path, is distinguished from a grep that looked and found nothing"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a capped-verdict override is bound to the PR head it was granted against, so a stale or appended override line cannot arm a later different diff"
+      proof: "unit test: test/review.test.ts"
+    - claim: "THE CARVE-OUT FALSIFIER - a plan-only PR still arms under the raised floor, so tightening the floor does not halt the plan lane"
+      proof: "unit test: test/review.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "P22"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, findings R-13 and R-14. FILED AS A FOLLOW-UP, NOT AN AMENDMENT: the intake brief
+    proposed amending the W1-T185 family, but W1-T185 is DONE - verified by a merged PR carrying its
+    Remudero-Task trailer - so standing rule 21 applies and the amender owes a follow-up instead. The same
+    check cleared W1-T197 and W1-T175 for genuine amendment, and blocked W1-T30 and W1-T48, whose docs
+    follow-up is W1-T213.
+    R-14 is the sharper of the two despite its lower recon severity: it is a total bypass of the capped-verdict
+    floor requiring one appended ledger line, on an append-only file with no write authentication. It composes
+    with R-8 - anything that can append can forge an override."
+- id: W1-T220
+  title: "coverage-ratchet fails nondeterministically AND names nothing when it does - an unfalsifiable red, the mirror of the unfalsifiable green the floor work killed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "TWO DEFECTS, ONE TASK, AND THE ORDER MATTERS: the job cannot be diagnosed, and it fails at
+    random. The second cannot be fixed until the first is, which is why they are filed together and why
+    diagnosability leads.
+    DEFECT 1 - THE FAILURE NAMES NOTHING. The job runs the suite under a SINGLE reporter whose destination
+    is a file: --test-reporter=lcov --test-reporter-destination=coverage/lcov.info (ci.yml:108-110). TAP goes
+    to that file, so the CI log gets no test output at all. Evidence, first-hand rather than recalled: the
+    full 436-line coverage-ratchet job log from PR 473 contains ZERO lines matching a failing test, ZERO
+    naming a coverage percentage or threshold or baseline, and exactly one failure line in the whole log -
+    ##[error]Process completed with exit code 1. That is the entire diagnostic. An operator cannot tell
+    whether a test failed, which test, or whether coverage moved at all.
+    DEFECT 2 - THE FLAKE. Directly observed this session: coverage-ratchet went red and then green on a
+    bare re-run, with no code change, on PRs 473, 474, 475 (twice) and 482 - five firings across four PRs.
+    At least two of those diffs were PLAN-ONLY, touching zero source and zero tests (474 and 475), which
+    rules out any explanation resting on the content of the change. The identical command exits 0 locally on
+    the same commit, and the sibling ci job - the SAME test glob without coverage instrumentation - passed
+    on every one of those commits.
+    IT IS NOT CONFINED TO HAND-AUTHORED PRs. A job-level query today also found current coverage-ratchet
+    failures on two branches nobody touched by hand: a W1-T184 worker run and a RETRO run. So the fleet's own
+    autonomous PRs hit this too, and its cost is not only the operator's time.
+    THE FLAKE ERASES ITS OWN EVIDENCE, which belongs in the design rather than as a footnote: re-running a
+    job to green OVERWRITES its conclusion, so a failure that was re-run is no longer visible at job level
+    afterwards. Historical firings from earlier today were unqueryable by the time this was filed, and the
+    count above rests on direct observation rather than on a query that can still be reproduced. A gate whose
+    failures cannot be counted after the fact cannot be measured for improvement either.
+    COST: roughly a dozen gate re-runs in one session, the single largest tax on it.
+    THE KINSHIP, which is why this is worth more than its severity suggests: an UNFALSIFIABLE RED is the
+    mirror of the UNFALSIFIABLE GREEN that W1-T128 and W1-T185 spent so much effort killing. Both are gates
+    that cannot be seen to fail CORRECTLY. A green that cannot be trusted lets bad work through; a red that
+    cannot be explained trains the operator to re-run until it passes - which is exactly what happened a
+    dozen times today, and which would hide a REAL regression the moment one appeared."
+  design: |
+    DIAGNOSABILITY FIRST - IT IS THE ENABLER, NOT A NICE-TO-HAVE. Nothing about defect 2 can be honestly
+    diagnosed while the log is blind, so this half lands first and the flake work reads its output.
+    Node's test runner accepts MULTIPLE reporter/destination pairs, so a human-readable reporter to stdout
+    can run alongside the lcov reporter to its file. VERIFY that against the Node version actually pinned in
+    CI before relying on it - if the pairing does not behave as documented there, tee the run to a file
+    uploaded as an artifact, or switch reporters on failure. Any of the three satisfies the criterion. What
+    is NOT acceptable is replacing lcov, since the ratchet needs it.
+    ALSO PRINT THE RATCHET COMPARISON. The second half of the blindness is that even a clean test run tells
+    the operator nothing about WHY the ratchet objected. scripts/coverage-ratchet.mjs knows the observed
+    totals and the baseline it compared against - it should say both, and the delta, on failure. A threshold
+    gate that will not show its arithmetic is asking to be re-run rather than read.
+    THEN DIAGNOSE THE FLAKE FROM THE NOW-VISIBLE OUTPUT. DO NOT GUESS, and do not fix a suspected cause
+    without evidence from a real failing run - a nondeterministic bug closed on a hypothesis usually just
+    changes its frequency. Suspect classes to test against the output rather than to assume: coverage
+    instrumentation interacting with test parallelism, an environment delta between this job and the ci job
+    that runs the same glob successfully, or the ratchet comparison racing the lcov artifact write. That
+    third one is worth checking early precisely because it would explain the plan-only failures, which no
+    test-content explanation can.
+    THE PLAN-ONLY FIRINGS ARE THE SHARPEST CLUE IN THE TASK. A diff touching zero source and zero tests
+    produced a red. Whatever the cause is, it must be consistent with that, and any proposed explanation
+    that requires the diff to have changed code is wrong by construction.
+    CONSIDER WHETHER A RE-RUN SHOULD PRESERVE THE PRIOR CONCLUSION so the flake rate stays measurable. Not
+    required by the criteria below, but the inability to count past failures is the reason this task had to
+    be filed from memory rather than from a query.
+  acceptance:
+    - claim: "a coverage-ratchet failure whose CI log names NO failing test and NO threshold delta FAILS - the log must identify what failed or by how much coverage moved"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+    - claim: "the lcov output the ratchet consumes is still produced unchanged, so making the run legible does not break the gate it feeds"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+    - claim: "the ratchet prints the observed totals, the baseline it compared against, and the delta on failure, rather than only exiting nonzero"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+    - claim: "the diagnosed root cause is supported by output from a REAL failing run rather than by a hypothesis, and the fix is falsified by a test that fails against the pre-fix behaviour"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+    - claim: "THE PLAN-ONLY FALSIFIER - the explanation accounts for a diff touching zero source and zero test files producing a red, so any cause requiring changed code is rejected"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§12"]
+  files: [scripts/coverage-ratchet.mjs]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 by operator ruling, from the session that paid for it. Evidence gathered first-hand
+    rather than taken on recollection: the 436-line job log from PR 473 was pulled and grepped, and it
+    contains zero failing-test lines, zero threshold or baseline mentions, and a single ##[error] line.
+    HONEST LIMIT ON THE COUNT, recorded because the task is partly ABOUT measurability: five firings across
+    four PRs are directly observed, and the operator brief cites six across five. The discrepancy cannot be
+    resolved after the fact, because re-running a job to green overwrites its conclusion and the earlier
+    failures are no longer queryable. The count is a floor, not a total. That the number is unrecoverable is
+    itself part of defect 1.
+    PROMOTE ALONGSIDE W1-T219 - both are shards, and a shard never reaches the drain front because shards
+    sort after every task in tasks.yaml. Filing this does not schedule it.
+    THIS TASK GATES THE HONESTY OF EVERY OTHER GATE'S EVIDENCE. Every remudero-review verdict posted today
+    was CAPPED at 0 proofs executed, so the real evidence for each merged PR was a hand-run suite - and a
+    suite whose CI counterpart fails at random for unexplained reasons weakens that substitute too."
 - id: W1-T216
   title: "the forge attack is INFERRED end to end - drill it, so the biggest claimed risk in the audit becomes observed fact or is retired"
   repo: remudero
