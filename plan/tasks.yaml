@@ -1623,6 +1623,168 @@
     `unit test: <file-or-test-name>` dialect. W1-T181's criteria 3 and 5 lacked the prefix entirely and the
     prefixed ones carried prose where a test NAME belongs, so they read executed_fail via an empty name-filter —
     an operator authoring error, not a floor defect, and the linter should warn on it before dispatch."
+- id: W1-T192
+  title: "THE DRAFT RUNG MUST RUN DAEMON-SIDE, NOT CLI-PULL — a fired trigger or an invalidated draft (reframe) gets redrafted on the daemon's next poll, with `rmd inbox` demoted to a viewer and a MANUAL trigger rather than the only one"
+  repo: remudero
+  queue_note: |
+    Filed 2026-07-21 as a tasks.d shard and PROMOTED into the console arc in the same change — shards append
+    AFTER every tasks.yaml task and the drain scans in FILE ORDER, so a shard cannot reach the arc from where it
+    is filed. Positioned directly after W1-T190 (registry sync), which is the dependency truth: card state is
+    only trustworthy once the registry agrees with the ledger.
+    These ARE console-arc work under the WS-2 deferral criterion recorded in DECISIONS.md 2026-07-20 — the
+    console is the deliverable until it is feature-rich, and a ratification loop whose decision moment lives only
+    at a terminal is not a feature-rich console.
+  depends_on: [W1-T110, W1-T111]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR QUESTION, 2026-07-21: 'why do I need to run the inbox command? Shouldn't it surface in
+    console?' The answer from source is that nothing but a human at a terminal can currently cause a draft to
+    exist.
+    VERIFIED FROM SOURCE, not inferred: `inboxDraftPrompt` is invoked from exactly ONE call site —
+    run-task.ts:5321, inside `async function inboxCommand(rest: string[])`. `src/lib/daemon.ts` contains NO
+    reference to the inbox or the draft rung at all, and the daemon's only per-poll hook is `deps.sweep()`
+    (daemon.ts:274). So the entire ratification pipeline is gated on someone typing `rmd inbox`.
+    FIXTURE, live at filing: P34's third reframe was ledgered `ratify.reframed` at 2026-07-21T01:35:56.574Z,
+    which invalidated its cached draft (`state/inbox-drafts.json` holds zero P34 entries). The trigger fired, the
+    draft is gone, and NOTHING will regenerate it — the proposal will sit un-drafted indefinitely until a human
+    runs a CLI command. The daemon has polled since and cannot know it has work to do.
+    WHY THIS IS THE POINT, not a convenience: P25's ratification loop is designed so one operator bit ratifies
+    through the gate. If the DRAFT half only exists on a human pull, the loop is not autonomous at its most
+    important moment — the one where an operator is being asked to decide. The console cannot surface a decision
+    that was never drafted, so every console-side ratification feature (W1-T193) is dead behind this.
+    THE ASYMMETRY IS THE TELL: every other rung the fleet owns — sweep, drain, ops, issues, credit-backfill —
+    runs on the daemon's cadence. The draft rung alone waits to be asked."
+  design: |
+    Run the draft rung on the daemon's cadence. The seam already exists and has a precedent: the daemon's per-poll
+    hook is `deps.sweep()` (daemon.ts:274), and `rmd sweep` already appends a SECOND rung after `runSweep` — the
+    W1-T150 credit-backfill rung (run-task.ts ~4053) — with the daemon path wired through `buildSweepHook`. A
+    draft rung added to the CLI path ALONE would silently never run under the daemon, which is the same trap
+    W1-T177's cadence work had to avoid.
+    TRIGGER ON OBSERVED STATE, not on a schedule: a proposal needs a draft when its cached draft is absent AND
+    either its trigger has fired or it was reframed. That predicate is already most of `rmd inbox`'s
+    classification — REUSE it rather than re-deriving, so the daemon and the CLI can never disagree about what is
+    draftable.
+    IDEMPOTENCE IS LOAD-BEARING, because this spawns a worker on a 300s cadence. A single invalidation must
+    produce ONE draft attempt, not one per poll. Key the attempt to something stable — the reframe round or the
+    invalidation that caused it — the way the fix rung keys dispatch idempotence to a head sha. Getting this
+    wrong turns a 5-minute poll into a repeating Architect spawn, which is a spend leak of exactly the class
+    W1-T177 was filed for.
+    BOUND THE SPAWN and fail soft: the existing draft rung is already a bounded, read-only Architect worker. Keep
+    that. A draft failure must not halt the sweep or the daemon — log it, leave the proposal un-drafted, and let
+    the next poll retry, since an un-drafted proposal is the status quo rather than a regression.
+    `rmd inbox` KEEPS ITS ROLE: still the viewer, still able to force a draft on demand. This task removes it as
+    the ONLY trigger, not as a trigger.
+  acceptance:
+    - claim: "an invalidated draft with a fired trigger is redrafted by the daemon, with no CLI invocation"
+      proof: "integration test over the daemon poll path: a proposal whose cached draft was invalidated and whose trigger has fired gets a draft spawned within two polls, with `rmd inbox` never invoked. FALSIFIER, live at filing: P34's reframe at 2026-07-21T01:35:56.574Z invalidated its draft (zero P34 entries in state/inbox-drafts.json) and no draft exists, because inboxDraftPrompt is called only from inboxCommand (run-task.ts:5321) and daemon.ts references the inbox nowhere"
+    - claim: "the rung runs on the DAEMON path, not only the CLI path"
+      proof: "unit test asserting the draft rung is reachable from the daemon's per-poll hook (the `deps.sweep()` seam at daemon.ts:274, where W1-T150's credit-backfill rung already rides), not merely from inboxCommand. FALSIFIER: a rung added to the CLI path alone silently never runs unattended — the same trap the W1-T177 cadence work had to avoid, and the exact shape of the defect this task fixes"
+    - claim: "ONE invalidation produces ONE draft attempt — a poll cadence never re-spawns for the same cause"
+      proof: "unit test: three consecutive polls over the same invalidated proposal spawn the Architect exactly once, keyed to the invalidation (reframe round) rather than to poll count. FALSIFIER: an unkeyed rung spawns a bounded Architect worker every 300s against the same proposal — a repeating spend leak of the class W1-T177 exists to prevent"
+    - claim: "a draft failure fails SOFT — it never halts the sweep or the daemon"
+      proof: "unit test: a seeded draft-spawn failure leaves the sweep and daemon loop running and the proposal un-drafted, with the failure logged. FALSIFIER: a throw that halts the daemon trades a missing draft for a stopped fleet, when an un-drafted proposal is merely the status quo"
+    - claim: "`rmd inbox` still works as a viewer AND as a manual trigger"
+      proof: "unit test: inboxCommand still classifies and still forces a draft on demand after the daemon rung exists. FALSIFIER: moving the trigger and removing the manual one leaves an operator unable to force a redraft when they want one — the CLI is demoted from sole trigger, not deleted"
+  risk: high
+  origin: architect
+  plan_refs: ["§7B", "§4"]
+  files: [src/run-task.ts, test/run-task.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 from the operator question 'why do I need to run the inbox command?'. The answer,
+    verified from source, is that the draft rung has exactly one caller and it is the CLI — daemon.ts references
+    the inbox nowhere, while every other rung (sweep, drain, ops, issues, credit-backfill) runs on the daemon's
+    cadence. The draft rung alone waits to be asked.
+    ENABLER for W1-T193 (actionable proposal cards): the console cannot surface a decision that was never
+    drafted, so the console-side ratification work is dead behind this.
+    risk:high — it adds an Architect spawn to an unattended 300s loop. The idempotence criterion is the
+    load-bearing one: an unkeyed rung is a repeating spend leak, which is precisely the W1-T177 class."
+- id: W1-T193
+  title: "PROPOSAL CARDS MUST BE ACTIONABLE — a READY card renders its draft summary (task ids + titles) with APPROVE and REFRAME wired to the write-token API, under the same confirm discipline as fleet control; a drafting card says so with its spawn time"
+  repo: remudero
+  queue_note: |
+    Filed 2026-07-21 as a tasks.d shard and PROMOTED into the console arc in the same change — shards append
+    AFTER every tasks.yaml task and the drain scans in FILE ORDER, so a shard cannot reach the arc from where it
+    is filed. Positioned directly after W1-T190 (registry sync), which is the dependency truth: card state is
+    only trustworthy once the registry agrees with the ledger.
+    These ARE console-arc work under the WS-2 deferral criterion recorded in DECISIONS.md 2026-07-20 — the
+    console is the deliverable until it is feature-rich, and a ratification loop whose decision moment lives only
+    at a terminal is not a feature-rich console.
+  depends_on: [W1-T190, W1-T192, W1-T153]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR QUESTION, 2026-07-21: 'why do I need to run the inbox command? Shouldn't it surface in
+    console?' The ratification loop's decision moment — the one bit that ratifies through the gate (P25 ii) —
+    currently exists only at a terminal. The console can show that a proposal is READY and then has nothing to
+    offer but prose telling the operator to go type a command.
+    THE ACTION IS ALREADY GATE-SAFE, which is what makes this a rendering task rather than a policy change.
+    `rmd approve` does not merge anything: it ships the cached draft's fragment into a plan PR that rides the FULL
+    stack (ci-gate + remudero-review) before auto-merge is armed. So exposing APPROVE in the console adds no new
+    authority — it moves an existing, already-gated bit from a terminal to the surface the operator is already
+    looking at. The write-token API and its scopes already exist (W1-T139's panel-actions), as does the
+    read-back-and-confirm discipline: serve.ts:1295 implements STOP's explicit two-click arm-then-confirm with an
+    8-second reset, and the cmd+K palette deliberately does NOT bypass it (serve.ts:1140-1141).
+    REFRAME NEEDS A TEXTAREA, not a link. `rmd reframe` captures operator feedback VERBATIM and it is the only
+    input in the loop that is genuinely authored rather than chosen — a console that offers APPROVE but sends the
+    operator to a terminal to object has made agreeing easy and disagreeing hard, which is the wrong asymmetry for
+    a ratification gate.
+    A DRAFTING CARD MUST SAY SO. Once W1-T192 lands, drafts are spawned by the daemon and a proposal can be
+    legitimately mid-draft for minutes. A card that renders nothing during that window is indistinguishable from
+    one that is broken, so the drafting state carries its SPAWN TIMESTAMP — the same 'never lies about its own
+    state' obligation W1-T156 put on liveness."
+  design: |
+    RENDER THE DRAFT'S SUBSTANCE, not just its existence. A READY card shows what would actually be filed: the
+    drafted task IDS AND TITLES, so the operator is approving a known change rather than an opaque token. VERIFY
+    from source what the cached draft holds (state/inbox-drafts.json and the fragment `rmd approve` ships) before
+    deciding what can be rendered — do not promise fields the draft does not carry.
+    REUSE THE EXISTING CONFIRM DISCIPLINE VERBATIM. Do not invent a second confirmation pattern: APPROVE is a
+    write action and must arm-then-confirm exactly as STOP does (serve.ts:1295, with the palette non-bypass at
+    :1140-1141 preserved). A read-back of what is about to be approved belongs IN the confirm step, not beside it.
+    WIRE THROUGH THE WRITE TOKEN, reusing panel-actions' existing write scope rather than adding an endpoint with
+    its own auth story. VERIFY the existing action shape from source.
+    STATES ARE DISTINCT AND NAMED — READY, DRAFTING (with spawn timestamp), NOT-READY (with the failing predicate
+    named, which `rmd inbox` already computes), DEFERRED-WITH-TRIGGER. Reuse the classification the inbox core
+    already produces rather than re-deriving it in the renderer, so console and CLI cannot disagree about a
+    proposal's state.
+    DEPENDENCY TRUTH, and the reason W1-T190 is a hard dep rather than a nice-to-have: card state is only
+    trustworthy once the registry agrees with the ledger. P19 renders READY on the operator's screen RIGHT NOW,
+    hours after `ratify.approved` fired for it at 2026-07-20T19:04:04, because state/inbox-proposals.json carries
+    no status for it. Shipping APPROVE buttons over that data would offer the operator an action the backend will
+    refuse — the exact wrong-affordance shape W1-T182 removes from NEEDS ME. Sequence accordingly.
+  acceptance:
+    - claim: "a READY card renders the DRAFT SUMMARY — the task ids and titles that would be filed — not an opaque proposal id"
+      proof: "unit/DOM test: a READY proposal card shows each drafted task's id AND title from the cached draft. FALSIFIER: a card that names only P## leaves the operator approving something they cannot see, which is not a ratification decision"
+    - claim: "APPROVE and REFRAME are wired to the write-token API from the card — no CLI required"
+      proof: "integration test over the panel-actions write path: the card's APPROVE triggers the same approve action `rmd approve` drives, and REFRAME submits free text through the reframe action, both authenticated by the existing write token. FALSIFIER: a READY card whose only action is prose telling the operator to run a CLI command fails — that is the state at filing, and it is what prompted the operator's question"
+    - claim: "REFRAME accepts AUTHORED feedback in the card — a textarea, not a link to a terminal"
+      proof: "unit/DOM test: the card exposes a multi-line feedback input whose contents are submitted VERBATIM. FALSIFIER: offering one-click APPROVE while routing objections to a terminal makes agreeing easy and disagreeing hard, the wrong asymmetry for a ratification gate"
+    - claim: "APPROVE reuses fleet control's arm-then-confirm discipline, with a read-back of what is being approved"
+      proof: "unit/DOM test: a single click ARMS and does not act; a second click within the window acts; the armed state reads back the drafted task ids. The cmd+K palette does not bypass it. FALSIFIER: a single-click APPROVE is a weaker guard than STOP already has (serve.ts:1295), and the palette non-bypass at serve.ts:1140-1141 exists precisely so a shortcut cannot skip a confirm"
+    - claim: "a DRAFTING card says so and carries its spawn timestamp"
+      proof: "unit/DOM test: a proposal whose draft is in flight renders a drafting state with the spawn time, distinct from READY and from NOT-READY. FALSIFIER: after W1-T192 a proposal can be legitimately mid-draft for minutes, and a card rendering nothing in that window is indistinguishable from a broken one — the same never-lie-about-your-own-state obligation W1-T156 placed on liveness"
+    - claim: "no action is offered that the backend would refuse"
+      proof: "unit test: APPROVE renders only for a proposal whose LIVE state is genuinely READY, matching what `rmd approve` accepts. FALSIFIER: P19 renders READY on the operator's console right now, hours after ratify.approved fired at 2026-07-20T19:04:04, because the registry carries no status — approving it would be refused, which is why W1-T190 is a hard dependency"
+  risk: high
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/serve.ts, src/lib/panel-actions.ts, test/serve.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 from the operator question 'why do I need to run the inbox command?'. Companion to
+    W1-T192 (autonomous drafting): that one makes a draft EXIST without a human pull, this one makes the decision
+    ACTIONABLE where the operator already is. Neither is sufficient alone — a card cannot surface a draft that was
+    never generated.
+    HARD dep on W1-T190 (registry sync) is deliberate and evidenced: P19 renders READY hours post-ratification
+    because the registry disagrees with the ledger. Buttons over untrustworthy state offer actions the backend
+    refuses — the W1-T182 wrong-affordance shape. Sequence T190 -> T192 -> T193.
+    Adds NO new authority: `rmd approve` only opens a plan PR that rides ci-gate + remudero-review, so this moves
+    an already-gated bit from a terminal to the console.
+    risk:high — it puts write actions on the primary operator surface. The confirm-discipline and
+    no-refused-action criteria are the guards, and both reuse existing patterns rather than inventing new ones."
 - id: W1-T183
   title: "CONSOLE DENSITY + IA v2 — sections render DENSE single-line rows (id · status · phase · elapsed · spend · PR/issue link), one task per line, with W1-T158's card as the click-drill target; timestamps render local + relative, never raw ISO-millis; anomalous elapsed is visually flagged"
   repo: remudero
