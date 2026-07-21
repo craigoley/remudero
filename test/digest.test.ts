@@ -160,6 +160,30 @@ test("renderDigest: GOLDEN full-text render with `inbox` present — the SAME li
   );
 });
 
+// ── W1-T112 review-gate proof, restated as ONE combined fixture (round-2 fix): "digest render
+// with an inbox summary present includes 'inbox: N ready'; with the inbox module absent renders
+// byte-identical to today" — both halves of that sentence asserted together here, in addition to
+// the more granular/golden tests above. ───────────────────────────────────────────────────────
+
+test("digest render: with an inbox summary present includes 'inbox: N ready'; with the inbox module absent renders byte-identical to today", () => {
+  const s = summarize(LINES, "2026-07-14T00:00:00.000Z");
+
+  // "today" = the digest as it renders with no inbox.polled snapshot in the window at all —
+  // `inbox` is `undefined` on the summary, exactly as every digest rendered before this feature.
+  assert.equal(s.inbox, undefined, "precondition: the inbox module never polled inside this window");
+  const today = renderDigest(s);
+  assert.doesNotMatch(today, /inbox:/, "no inbox line at all when the module is absent from the window");
+
+  // Re-rendering the SAME summary, unchanged, is byte-identical — the absent-inbox render is
+  // deterministic and stable, not just "no inbox substring" by accident.
+  assert.equal(renderDigest(summarize(LINES, "2026-07-14T00:00:00.000Z")), today);
+
+  // Now with an inbox summary present: the SAME lines, plus exactly one 'inbox: N ready' line.
+  const withInbox = renderDigest({ ...s, inbox: { ready: 5 } });
+  assert.match(withInbox, /inbox: 5 ready/);
+  assert.equal(withInbox, today.replace("issues reviewed: (no poll this window)", "issues reviewed: (no poll this window)\ninbox: 5 ready"));
+});
+
 test("sendDigest delivers the built text over the notify channel and ledgers it", () => {
   const path = ledgerFile(LINES);
   const channel = fakeChannel();

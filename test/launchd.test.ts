@@ -240,3 +240,42 @@ test("launchdPlistPath honors DIGEST_LABEL the same generic way it does DAEMON_L
   const p = launchdPlistPath(DIGEST_LABEL, "/Users/op");
   assert.equal(p, "/Users/op/Library/LaunchAgents/com.remudero.digest.plist");
 });
+
+// ── W1-T112 review-gate proof, restated as ONE combined fixture (round-2 fix): "generated plist
+// fixture -> StartCalendarInterval at the given hour, EnvironmentVariables exactly {PATH, HOME},
+// ProgramArguments end [rmd, digest]; an ANTHROPIC_* injection fixture throws (the W1-T12b
+// assertion reused)" — every clause of that sentence asserted here, literally, in one place, in
+// addition to the more granular tests above. ──────────────────────────────────────────────────
+
+test("generated plist fixture: StartCalendarInterval at the given hour, EnvironmentVariables exactly {PATH, HOME}, ProgramArguments end [rmd, digest]; an ANTHROPIC_* injection fixture throws (the W1-T12b assertion reused)", () => {
+  const rmdBin = "/Users/op/Remudero/bin/rmd";
+  const root = "/Users/op/Remudero";
+  const home = "/Users/op";
+  const hour = 6;
+  const plist = generateDigestLaunchdPlist({ rmdBin, root, home, hour });
+
+  // StartCalendarInterval at the given hour, :00.
+  const calBlock = plist.match(/<key>StartCalendarInterval<\/key>\s*<dict>([\s\S]*?)<\/dict>/)?.[1] ?? "";
+  const calKeys = [...calBlock.matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1]);
+  const calInts = [...calBlock.matchAll(/<integer>([^<]+)<\/integer>/g)].map((m) => Number(m[1]));
+  assert.deepEqual(Object.fromEntries(calKeys.map((k, i) => [k, calInts[i]])), { Hour: hour, Minute: 0 });
+
+  // EnvironmentVariables exactly {PATH, HOME} — not a subset check, the full closed dict.
+  const envBlock = plist.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/)?.[1] ?? "";
+  const envKeys = [...envBlock.matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1]);
+  const envValues = [...envBlock.matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1]);
+  const env = Object.fromEntries(envKeys.map((k, i) => [k, envValues[i]]));
+  assert.deepEqual(env, { PATH: DEFAULT_LAUNCHD_PATH, HOME: home });
+
+  // ProgramArguments ends [rmdBin, "digest"] — and here that IS the whole array.
+  const argsBlock = plist.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/)?.[1] ?? "";
+  const args = [...argsBlock.matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1]);
+  assert.deepEqual(args, [rmdBin, "digest"]);
+
+  // The ANTHROPIC_* injection fixture: run the digest unit's OWN rendered env back through the
+  // SAME assertNoAnthropicKeys the daemon generator (W1-T12b) uses, polluted, and observe the throw.
+  assert.throws(
+    () => assertNoAnthropicKeys({ ...env, ANTHROPIC_API_KEY: "sneaky" }, "generateDigestLaunchdPlist"),
+    (e) => e instanceof LaunchdPlistError && /billing-boundary violation/.test(e.message) && /ANTHROPIC_API_KEY/.test(e.message),
+  );
+});
