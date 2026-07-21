@@ -1,0 +1,69 @@
+- id: W1-T225
+  title: "a push leaves the new head with NO remudero-review, which reads as ABSENT rather than failed - nothing re-posts it and auto-merge waits forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "OBSERVED on 2026-07-21 as two of a seven-PR jam. PRs 477 and 484 were fully green and armed for
+    auto-merge, and both sat indefinitely because their heads carried NO remudero-review status at all. Each
+    had been reviewed, then received one more commit, and the review stayed bound to the SHA it was posted
+    against. Both cleared instantly on a re-post.
+    PUSH-INVALIDATES-REVIEW IS CORRECT AND MUST NOT BE UNDONE. The code changed, so the old verdict no longer
+    describes the head. A gate that carried a stale approval across a new commit would be the forgeable-floor
+    class this plan is spending W1-T203 and W1-T204 to close. The bug is not invalidation - it is SILENCE
+    AFTER invalidation.
+    ABSENT IS THE WORST OF THE THREE STATES. A red review blocks and says why. A green review merges. An
+    ABSENT review is indistinguishable from a check that has not run yet, so auto-merge waits politely and
+    forever, and no operator surface reports anything wrong. This is the cannot-observe-implies-wait doctrine
+    hitting its own blind spot: waiting is the correct response to an unobservable verdict, but only if
+    something is eventually going to produce one.
+    VERIFIED AT FILING, and it narrows the scope. runReview resolves headSha from the LIVE PR view
+    (run-task.ts:665) and posts to that sha, and the fix rung re-reviews inside its own loop after its worker
+    pushes and CI settles. So a push made BY A RUNG is normally followed by a fresh review, and the machine
+    route does not generally self-jam. The exposure is any push NOT followed by a rung re-review: a hand push
+    (both observed fixtures), or a rung that pushes and then dies, is cancelled, or exhausts strikes before
+    re-reviewing.
+    THE SWEEP DOES NOT CURRENTLY REMEDIATE IT, which is the actual finding. The daemon ran sweep passes
+    throughout the window in which PRs 477 and 484 sat reviewless, and neither was re-reviewed. The sweep
+    already derives a reviewState per open PR, so it can SEE this state - it just has no disposition for it."
+  design: |
+    THE SWEEP DETECTS THE TRANSITION AND RE-DISPATCHES THE REVIEW RUNG ON THE NEW HEAD. The signal is
+    specific and cheap: a PR whose LEDGER shows a prior review.posted for an earlier head, whose CURRENT head
+    carries no review status. That is distinguishable from a PR never reviewed at all, and from one reviewed
+    red. VERIFY from source how the sweep derives reviewState today, and how review.posted records head_sha
+    (run-task.ts:759) before adding a second notion of reviewed.
+    RE-REVIEW, NEVER RE-USE. The remedy is to run the review rung again against the new head and post its
+    real verdict. It must never copy the prior verdict forward - that would re-introduce the stale-approval
+    hole invalidation exists to prevent, and would be strictly worse than the silence it replaces.
+    BOUND IT. A PR that pushes repeatedly must not trigger unbounded re-reviews, and a re-review that itself
+    fails must not loop. Same discipline W1-T224 owes for CI re-runs, and for the same reason: an unbounded
+    automatic action is a headroom-burning loop by another name.
+    DO NOT FIX THIS BY WEAKENING INVALIDATION. Making the status non-SHA-bound, or carrying it across
+    commits, would close this symptom by opening a much worse hole.
+  acceptance:
+    - claim: "a push leaving a previously-reviewed PR reviewless after the next sweep pass FAILS - the sweep re-dispatches the review rung on the new head"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "a PR that has NEVER been reviewed is distinguished from one whose review was orphaned by a push, so the remedy does not fire on a PR simply awaiting its first review"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "the re-review posts a FRESH verdict for the new head and never copies the prior verdict forward"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "THE LOOP FALSIFIER - repeated pushes or a repeatedly-failing re-review are bounded and counted, so this cannot become an unbounded automatic action"
+      proof: "unit test: test/sweep.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§4B", "§5C"]
+  files: [src/lib/sweep.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 from the seven-PR jam. Fixtures PRs 477 and 484, both cleared by re-posting the
+    review by hand.
+    SPLIT FROM W1-T224 DELIBERATELY, and the machine-route check confirms the split was right rather than
+    merely tidy. W1-T224 is about a rung that cannot ACT on a red CI check. This is about a rung that is
+    never ASKED because a status is silently absent. Different mechanism, different remedy, different file.
+    SCOPE NARROWED BY THE MACHINE-ROUTE VERIFICATION requested at filing: the fix rung re-reviews inside its
+    own loop and runReview resolves the head sha live, so the machine route does not generally self-jam.
+    This is therefore NOT the wider hole it might have been. It bites any push not followed by a rung
+    re-review - the hand route always, and a rung that dies or is cancelled after pushing. Recorded because
+    an implementer reading only the fixtures would over-scope it to the whole fleet."
