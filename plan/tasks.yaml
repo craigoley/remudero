@@ -9256,3 +9256,188 @@
     rather than regraded, because the honest reading supports it: the design states the two-level auth
     model does not change, so service.ts is READ to verify the token comparison and is never edited. The
     deliverable is confined to the shell's credential channel in serve.ts."
+
+- id: W1-T203
+  title: "remudero-review must be postable ONLY by a dedicated reviewer identity the workers never hold — provenance checked at arm time, worker status-POSTs denied at the floor"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "THE FORGE ATTACK. remudero-review is one of two required checks, and today ANY identity
+    carrying the operator's credentials can post it — including a worker, which runs `gh` outside the
+    sandbox with those very credentials (recon R-3, R-6). A worker that posts its own
+    remudero-review=success satisfies its own merge gate. The reviewed system can forge the verdict that
+    governs it.
+    THIS IS THE CLEANEST HALF OF THE GATE PROBLEM AND IT LEADS (operator ruling, 2026-07-21). It closes
+    the forge without touching merge autonomy at all: nothing here adds a human to the merge path, it
+    only makes the reviewer identity unforgeable. Its sibling — protecting the gate CONFIG from in-band
+    edits — is W1-T204 and is deliberately sequenced after this one, because that half carries a real
+    risk of reverting the system's thesis if implemented bluntly.
+    THREE PARTS, ONE PROPERTY. (i) remudero-review is posted by a DEDICATED reviewer identity — a
+    fine-grained token or GitHub App credential that workers never hold and cannot read. (ii) the
+    deny-floor blocks a worker from POSTing commit statuses at all. (iii) provenance is checked AT ARM
+    TIME: a remudero-review whose poster is not the trusted reviewer identity is treated as ABSENT, not
+    as a pass."
+  design: |
+    VERIFY FROM SOURCE AND FROM GITHUB'S DOCS BEFORE BUILDING — do not invent an API. Read how
+    remudero-review is posted today (the review command's status-post path), what identity that
+    credential actually resolves to, and what GitHub reports as a status/check-run's creator, before
+    choosing where provenance is asserted. The check must key on something GitHub attributes and a
+    worker cannot set.
+    TREAT A FORGED VERDICT AS ABSENT, NEVER AS A FAIL. An untrusted poster means "no verdict yet", so
+    the PR waits for a real one. Treating it as a failure would let a hostile or buggy worker BLOCK
+    merges by posting garbage, converting a forge vector into a denial-of-service vector.
+    THE CREDENTIAL MUST NOT REACH THE WORKER. Whatever identity posts the review, its secret must be
+    unreadable from the worker's environment — the same containment property W1-T2's probe already
+    asserts for the filesystem. If the reviewer credential lives anywhere the worker's HOME or env can
+    reach, this task has not been done.
+    DENY-FLOOR SCOPE, from R-3: the floor currently permits `gh` broadly. Statuses are the surface this
+    task owns. Note in passing, do NOT fix here: `gh pr merge`, gist creation, push-to-main and workflow
+    edits are the same class and belong to their own task rather than being smuggled into this one.
+  acceptance:
+    - claim: "a remudero-review success posted by an identity other than the dedicated reviewer is treated as ABSENT at arm time, so the PR does not arm auto-merge"
+      proof: "unit test: test/review-status-provenance.test.ts"
+    - claim: "an untrusted poster yields ABSENT rather than FAIL, so a hostile or buggy poster cannot block a merge that a genuine reviewer would pass"
+      proof: "unit test: test/review-status-provenance.test.ts"
+    - claim: "a remudero-review posted by the dedicated reviewer identity is honoured exactly as today, so the autonomous merge path is unchanged for every non-forged PR"
+      proof: "unit test: test/review-status-provenance.test.ts"
+    - claim: "the deny-floor refuses a worker attempt to POST a commit status, and that refusal is asserted against the floor script itself rather than described"
+      proof: "unit test: test/deny-floor.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§4A", "§5C"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "OPERATOR RIDER, 2026-07-21, recorded verbatim in force: this is T1-AC2 and it LEADS. 'remudero-review
+    posted by a DEDICATED reviewer identity (fine-grained token/App the workers never hold), deny-floor blocks
+    worker status-POSTs, and status provenance is checked at arm time. That kills the forge attack without
+    touching merge autonomy.'
+    THE INVARIANT THIS TASK MUST NOT BREAK: no change here may add a human approval to the merge path. If an
+    implementation of this task results in an operator having to approve ordinary autonomous PRs, it has
+    misread the task — that is W1-T204's territory and even there it is bounded."
+
+- id: W1-T204
+  title: "protect the gate CONFIG from in-band edits WITHOUT putting a human on every autonomous merge — path-scoped protection or an operator-only push path, never blanket required reviews"
+  repo: remudero
+  depends_on: [W1-T203]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "THE SECOND HALF OF THE GATE PROBLEM. A PR can today weaken `.github/workflows/ci-gate.yml`
+    or ratchet a `scripts/*-baseline.json` IN THE SAME PR whose merge those files govern (recon R-6).
+    Live protection carries no required_pull_request_reviews and enforce_admins is false, so the floor
+    is editable by the system it governs.
+    THE OBVIOUS FIX IS THE WRONG ONE AND IS EXPLICITLY REFUSED. The recon's T1-AC1 as written asks for a
+    matching approval from an identity distinct from the author. Implemented as BLANKET required PR
+    reviews, that puts a human approval on EVERY autonomous merge — which reverts the entire thesis of
+    the system. remudero exists to drain its own plan unattended. A gate that requires a human on every
+    merge does not harden that system, it ends it.
+    THE PROPERTY IS PATH-SCOPED, NOT GLOBAL. Gate-TOUCHING PRs need the operator. Everything else keeps
+    autonomous merge. Those are separable, and the whole difficulty of this task is expressing that
+    separation in whatever GitHub actually supports."
+  design: |
+    VERIFY GITHUB'S ACTUAL CAPABILITIES FROM ITS DOCS BEFORE DESIGNING. Do not assume a shape works
+    because it sounds right — repository rulesets, CODEOWNERS-gated required review, and branch
+    protection differ in what they can scope BY PATH, and that difference decides this task. Read the
+    current documentation, then choose.
+    TWO ACCEPTABLE SHAPES, named by the operator. (a) PATH-SCOPED PROTECTION — rulesets or CODEOWNERS
+    limited to `.github/workflows` plus the baseline files, so only PRs touching those paths require the
+    operator's review. (b) RELOCATION — move the gate configs behind a push path only the operator can
+    write, so an ordinary PR structurally cannot contain an edit to them. Either satisfies the invariant.
+    A blanket required-review setting satisfies neither and is a failed implementation of this task.
+    PROVE THE NEGATIVE, NOT JUST THE POSITIVE. It is not enough to show a gate-touching PR is held. The
+    load-bearing evidence is that an ORDINARY PR — one touching only src and test — still merges with no
+    human approval. That is the property most likely to be silently lost, and it is the one the operator
+    will notice last.
+    verify:human DELIBERATELY. The deliverable is a change to live GitHub protection state, which a
+    headless worker can neither apply nor honestly verify (Rule 18). A worker can prepare the config and
+    the assertions, but an operator confirms the live protection and the two-sided behaviour.
+  acceptance:
+    - claim: "a PR that modifies a gate config or a baseline file cannot merge without the operator, asserted against the live protection configuration rather than described"
+      proof: "unit test: test/gate-self-modification.test.ts"
+    - claim: "THE AUTONOMY FALSIFIER — an ordinary PR touching only src and test still merges with NO human approval, so the fleet keeps draining unattended"
+      proof: "unit test: test/gate-self-modification.test.ts"
+    - claim: "the implementation is path-scoped or relocation-based, and NOT a blanket required-PR-reviews setting, asserted by reading the resulting protection configuration"
+      proof: "unit test: test/gate-self-modification.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§4A", "§5C"]
+  files: [.github/workflows/ci-gate.yml]
+  status: queued
+  attempts: 0
+  note: "OPERATOR RIDER, 2026-07-21, recorded verbatim and BINDING: 'T1-AC1 must NOT be implemented as blanket
+    required-PR-reviews (that puts a human approval on every autonomous merge - reverting the system's thesis).
+    Acceptable shapes, implementer verifies GitHub's actual capabilities from docs: path-scoped protection
+    (rulesets/CODEOWNERS limited to .github/workflows + baseline files), or gate configs relocated behind an
+    operator-only push path. The invariant: gate-TOUCHING PRs need the operator, everything else keeps
+    autonomous merge.'
+    SEQUENCED AFTER W1-T203 on the operator's ruling that the provenance half is cleaner and leads. The hard
+    dep is real rather than cosmetic: W1-T203 removes the forge vector without touching autonomy, so if this
+    task stalls on GitHub's capabilities the system is still meaningfully harder to forge."
+
+- id: W1-T205
+  title: "raising the proof floor must CARVE OUT plan-only PRs — they are structurally always capped, and a floor that ignores this stalls every retro, approve and filing PR forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "R-2 IS REAL: a capped verdict (zero proofs executed) still arms and merges unless the task
+    is tdd:strict, and prose is the default — so the executed-proof floor binds on a minority of work.
+    Raising it is right. Raising it NAIVELY halts the plan lane.
+    PLAN-ONLY PRs HAVE NO EXECUTABLE PROOFS TO RUN. A PR that only edits plan/tasks.yaml files a task, it
+    does not implement one — there is no test it could execute, because the thing it describes does not
+    exist yet. Such a PR is ALWAYS capped, structurally and permanently. Any floor of the form 'capped
+    never arms' or 'non-tdd:strict requires executedCount > 0' therefore blocks it forever.
+    OBSERVED, NOT PREDICTED — three PRs on 2026-07-21 all posted CAPPED. #472 and #473 were code PRs
+    capped only because worktree materialization was unavailable, which is a fixable degradation. #474
+    was plan-only and posted 'CAPPED - 0/3 proofs executed', which is NOT a degradation and cannot be
+    fixed by repairing materialization: a filing PR has nothing executable to point at. Under T1-AC3 as
+    written, #474 would never have merged, and neither would any retro or approve PR the machine emits.
+    THE PLAN LANE IS ALREADY GATED, JUST NOT BY PROOF EXECUTION. lint-plan, the W1-T136 shared plan-PR
+    emitter, and the plan-index checks are deterministic and they all bind on exactly these PRs. The
+    carve-out does not lower the bar for plan work, it names the bar that already applies to it."
+  design: |
+    CLASSIFY THE PR, THEN CHOOSE THE FLOOR. A plan-only PR is one whose diff touches only plan files
+    (and the generated plan index) and no src or test file. VERIFY FROM SOURCE how the review path
+    already determines a PR's changed files before adding a second way to compute it — the shared plan-PR
+    emitter and the review command both already reason about diffs, and a third divergent notion of
+    'plan-only' would itself become a defect.
+    FAIL CLOSED ON THE CLASSIFIER. A PR that mixes plan files WITH src or test files is NOT plan-only and
+    gets the full executed-proof floor. That direction matters: the dangerous shape is a code change
+    smuggled into a plan PR to inherit the carve-out, so ambiguity must resolve toward the stricter floor,
+    never toward the exemption.
+    THE CARVE-OUT IS AN EXEMPTION FROM PROOF EXECUTION ONLY. A plan-only PR still faces lint-plan, the
+    emitter's own structural checks, plan-index regeneration, and commitlint. Nothing here weakens those,
+    and the task fails if it does.
+    STATE THE VERDICT HONESTLY (standing rule 22 — claimed versus evidenced). A plan-only PR that passes
+    must not be reported as though proofs were executed. It should read as deterministically gated, which
+    is what it is, so an operator reading the status is never misled about what was checked.
+  acceptance:
+    - claim: "THE OPERATOR'S FALSIFIER — a plan-only PR blocked solely on proof execution fails the design, so a plan-only PR with zero executed proofs still arms auto-merge"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a PR mixing plan files with src or test files is NOT treated as plan-only and faces the full executed-proof floor"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a non-tdd:strict CODE PR with zero executed proofs does NOT arm, so the floor is genuinely raised for the work it was raised for"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a plan-only PR's passing verdict reads as deterministically gated rather than as proof-executed, so the status never overstates what was checked"
+      proof: "unit test: test/review.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "P22"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "OPERATOR RIDER, 2026-07-21, recorded verbatim and BINDING on this task and on any future floor-raising
+    work: 'plan-only PRs structurally have zero executable proofs - they are ALWAYS capped. Any floor of the
+    form capped never arms or non-tdd:strict requires executedCount>0 must exempt plan-only PRs, which are
+    instead gated deterministically (lint-plan + the T136 emitter + plan-index checks). Without this, every
+    retro/approve/filing PR stalls forever. Falsifier: a plan-only PR blocked solely on proof-execution fails
+    the design.'
+    FILED AS A NEW TASK RATHER THAN AS AN AMENDMENT TO W1-T185, per standing rule 21 — W1-T185 shipped the
+    capped-verdict class this task now builds on, and a merged task is not editable."
