@@ -891,6 +891,97 @@
     usual fail-closed default and is deliberate.
     Companion: W1-T178 (verdict stability on unchanged input) — the SAME #388 trace, different defect. This task
     would have made that fixture harmless without making the reviewer stable."
+- id: W1-T187
+  title: "LIVE OPERATOR OUTAGE — projectPlan re-reads and re-parses the WHOLE ledger once PER TASK (O(tasks × ledger)), costing 5-8s per projection, and a 250ms SSE poll drives that recompute: the console answers in 35-58 SECONDS against a <2s budget"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  queue_note: |
+    PLACED AT THE DRAIN FRONT, ahead of the W1-T178/W1-T179/W1-T136 train — the same severity logic applied to
+    W1-T181: a LIVE operator-facing outage outranks queued work, the fix is small and measured, and every task
+    behind it is developed against a console that currently takes ~49 seconds to paint.
+    DISTINCT from W1-T183 (density/IA) and W1-T184 (ledger-first rendering), which are RENDERING tasks queued
+    behind the train. This is a SERVER-side algorithmic defect: those two would make a 49-second page prettier
+    and better-sourced, and it would still take 49 seconds.
+  rationale: "MEASURED 2026-07-20 against a serve process running current main (a99733b, T181's ENOBUFS fix
+    present), operator report of slow load — initial paint AND data arrival:
+      GET /            ttfb 49.0s cold, 42.6s warm   (78,328 bytes)
+      GET /v1/status   ttfb 58.7s cold, 54.0s warm, 34.5s third   (67,441 bytes)
+      connect time     0.0002s on every request
+    Connect is instant and the payloads are tens of kilobytes, so this is entirely SERVER time — not network,
+    not payload size. W1-T154's acceptance budget is first-paint-to-data under 2 SECONDS.
+    ROOT CAUSE, PROVEN BY DIRECT MEASUREMENT. projectPlan (status.ts:749-755) is:
+      for (const task of plan.tasks) byId.set(task.id, deriveStatus(task, deps));
+    and deriveStatus opens with `const ledgerLines = readLedger(deps.ledgerPath)`. So the ENTIRE ledger is read
+    and JSON-parsed ONCE PER TASK. The live ledger is 6.9 MB / 18,141 lines and the plan holds 218 tasks —
+    roughly 3.95 MILLION line-parses per projection.
+    THE FIX IS PROVEN BEFORE IT IS WRITTEN. Measured on the real corpus, same gateway, same data:
+      projectPlan as-is (ledger re-read per task)   5,229 ms
+      one hoisted ledger read, same derivations       113 ms  (91 ms derive + 22 ms for the single read)
+    A 46x improvement from reading the ledger ONCE. Note the as-is figure is the WARM case — a cold gateway
+    measures 8,207 ms — so the GitHub fetch is NOT the cost. loadPlan is 86 ms and the ledger read itself is
+    9-22 ms. The 5.2 seconds is the re-parsing.
+    THE AMPLIFIER, and it is why 5-8s presents as 35-58s: board.ts polls the ledger every DEFAULT_POLL_MS = 250
+    (board.ts:35) to decide when to recompute, and boardSnapshot calls projectPlan (board.ts:97). Work arrives
+    20-32x faster than it completes, so the server is permanently backlogged and every request queues behind a
+    recompute that is already behind. The defect is the per-task re-read; the cadence turns it into an outage.
+    IT GETS WORSE ON BOTH AXES. The ledger is append-only and unbounded — it grew to 6.9 MB in a day of heavy
+    use — and the plan grows with every filing. O(tasks × ledger) degrades on both, so this cannot be waited out.
+    NOT A REGRESSION FROM T181, though the numbers rose after it. Before T181's fix the gateway threw ENOBUFS and
+    returned [] fast, so the projection derived almost nothing and the page was WRONG rather than slow (the
+    merged 0/160 outage). Fixing the data restored the real work, revealing a cost that was always there."
+  design: |
+    HOIST THE LEDGER READ. projectPlan must read and parse the ledger ONCE and pass the parsed lines to every
+    deriveStatus call. The seam already exists — DeriveDeps carries an optional `readLedger`, and deriveStatus
+    uses `deps.readLedger ?? readLedgerLines`, so a single read can be injected without changing deriveStatus's
+    contract or any caller that derives ONE task. VERIFY that shape from source before building.
+    KEEP deriveStatus USABLE ALONE. It is called per-task in several places outside projectPlan; it must keep
+    working when no pre-read lines are supplied. This is a projectPlan-level fix, not a signature change that
+    ripples through every call site.
+    THEN ADDRESS THE CADENCE, because the algorithmic fix alone leaves a 113ms recompute firing 4x a second.
+    Options to weigh from source rather than assume: recompute only when the ledger's size/mtime actually
+    changed (the poll already stats it), debounce/coalesce concurrent recomputes so a request never queues
+    behind more than one, and serve from the W1-T154 snapshot cache while a recompute is in flight. Do NOT
+    simply raise the poll interval — that trades staleness for latency and hides the defect rather than fixing
+    it.
+    MEASURE THE RESULT THE SAME WAY IT WAS DIAGNOSED. The acceptance below fixes numbers because a
+    performance fix without a measured ceiling regresses silently the first time someone adds a per-task call.
+    OUT OF SCOPE, deliberately: W1-T183's density rendering and W1-T184's ledger-first feed. Both are queued and
+    neither addresses this — a prettier, better-sourced page still takes 49 seconds if the projection does.
+  acceptance:
+    - claim: "projectPlan reads and parses the ledger EXACTLY ONCE per projection, not once per task"
+      proof: "unit test with an instrumented readLedger counting invocations: projecting a plan of N tasks calls it exactly 1 time, for N > 1. FALSIFIER: projectPlan today (status.ts:754-755) calls deriveStatus per task and each opens with `readLedger(deps.ledgerPath)`, so a 218-task plan over an 18,141-line ledger performs ~3.95 million line-parses per projection"
+    - claim: "a full projection over the real-scale corpus completes in well under 1 second"
+      proof: "benchmark test over a seeded corpus at production scale (>= 200 tasks, >= 18,000 ledger lines): projectPlan completes under 1000 ms. FALSIFIER, measured 2026-07-20 on the live corpus: 5,229 ms warm and 8,207 ms cold, against 113 ms for the identical derivations with a single hoisted ledger read — a 46x gap that is entirely re-parsing"
+    - claim: "deriveStatus still works standalone, with no pre-read lines supplied"
+      proof: "unit test: deriveStatus called directly for ONE task, with no injected readLedger, returns the same projection as before. FALSIFIER: a fix that makes pre-read lines mandatory breaks every per-task caller outside projectPlan and turns a contained performance fix into a ripple through the codebase"
+    - claim: "a recompute is not driven blindly at the poll interval — an unchanged ledger triggers no re-projection"
+      proof: "unit test: with the ledger unchanged across successive poll ticks, the projection is computed once and reused; a change triggers exactly one recompute. FALSIFIER: board.ts polls every DEFAULT_POLL_MS = 250 (board.ts:35) and boardSnapshot calls projectPlan (board.ts:97), so at 5-8s per projection the server is permanently backlogged — which is how a 5-second defect presents as a 58-second response"
+    - claim: "concurrent requests never queue behind more than one in-flight recompute"
+      proof: "unit test: N concurrent snapshot requests arriving during a recompute trigger ONE computation and are all served from it. FALSIFIER: unbounded concurrent recomputes at 250ms cadence, which is the observed backlog — GET /v1/status measured 58.7s, 54.0s and 34.5s across three successive calls, with no warm-cache improvement"
+    - claim: "the measured end-to-end budget is met — first paint to data under 2 seconds, W1-T154's own bar"
+      proof: "integration/timing test against a running server at production corpus scale: GET / and GET /v1/status each return in under 2000 ms. FALSIFIER, measured 2026-07-20: GET / at 49.0s cold and 42.6s warm, GET /v1/status at 58.7s/54.0s/34.5s, with connect time 0.0002s and payloads of 78 KB and 67 KB — entirely server time"
+  risk: high
+  origin: architect
+  plan_refs: ["§7"]
+  files: [src/lib/status.ts, src/lib/board.ts, test/status.test.ts]
+  status: queued
+  attempts: 0
+  note: "LIVE OUTAGE at filing, second operator report. Placed at the drain front by the same severity logic as
+    W1-T181: an operator-facing outage outranks queued work, and every task behind it is being developed against
+    a ~49-second console.
+    The fix is measured before it is written — 5,229 ms to 113 ms on the real corpus by hoisting one read — so
+    this is a well-bounded change with a proven ceiling, not an open-ended optimisation.
+    Applies standing rule 22 obliquely: the console was not lying here, it was simply too slow to answer, which
+    is its own way of failing an operator asking 'is everything okay'.
+    risk:high — it changes the projection path every console surface reads, and a wrong hoist could serve stale
+    or cross-contaminated ledger state to every task at once. The standalone-deriveStatus criterion is the guard
+    against turning a contained fix into a codebase-wide signature change.
+    SIBLING of W1-T188 (W1-T154's re-verification): this is the CAUSE of that task's unmet budget; T188 is the
+    obligation to re-verify an acceptance that merged under the dead floor."
 - id: W1-T178
   title: "VERDICT STABILITY ON UNCHANGED INPUT — a re-review of an unchanged head that previously PASSED must not be downgraded by semantic-lane noise alone; a legitimate downgrade must cite what changed, or the deterministic floor's pass stands"
   repo: remudero
@@ -1179,6 +1270,107 @@
     which is a correctness rule — the trailer would credit the task DONE on merge of its mere filing. The #389/#392
     convention was correct but undocumented, so every future plan PR steps on it until the emitter encodes it."
 
+- id: W1-T182
+  title: "NEEDS ME must join LIVE escalation STATE and render the affordance the item type actually supports — today it renders ledger HISTORY (a closed issue never leaves the section) and puts an Approve button on escalations, which is an undefined action"
+  repo: remudero
+  queue_note: |
+    PULLED FORWARD 2026-07-20 to immediately after W1-T136, on a SECOND operator report of the ghost pile:
+    ~44 escalation rows rendering against a true open needs-human count of 0. Every escalation this session was
+    closed by hand and every one of them still renders, because hasOpenEscalation (status.ts:672) reads ledger
+    HISTORY — the last event for the task — and the ledger is append-only, so closing an issue cannot change it.
+    It is a small join fix, and NEEDS ME is currently the least trustworthy region of a console whose whole
+    thesis is that it does not lie to the operator.
+    PROMOTED 2026-07-20 from plan/tasks.d/ into tasks.yaml and positioned with the console design pass, directly
+    behind the W1-T177/W1-T178/W1-T179 train. Shards append AFTER every tasks.yaml task and the drain scans in
+    FILE ORDER, so a sharded task cannot reach the front regardless of urgency — the same promotion W1-T179,
+    W1-T177 and W1-T178 each needed.
+    AMENDED at the same time with the ACTUAL-ASK criterion: a NEEDS ME row must render the escalation's real
+    one-line ask plus a direct link, never an input soliciting a URL the ledger already holds.
+  depends_on: [W1-T153]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR FIXTURE (console v2 screenshot, 2026-07-20 ~21:30): the NEEDS ME section rendered roughly
+    44 escalated rows, each carrying an Approve button. Measured against GitHub at the same moment: needs-human
+    issues OPEN = 0, needs-human issues TOTAL (all states) = 30. So the section is showing more rows than there
+    are issues in existence, and every issue it claims needs attention is CLOSED.
+    DEFECT 1 — NEEDS ME JOINS HISTORY, NOT STATE. The predicate is hasOpenEscalation (status.ts:672), and despite
+    its name it never reads an issue's state. It scans the ledger and returns true when the task's MOST RECENT
+    line was `escalation.issue_opened` rather than `run.start`:
+      let last: 'run' | 'escalation' | undefined;
+      for (const line of lines) { ... if (step==='run.start') last='run'; else if (step==='escalation.issue_opened') last='escalation'; }
+      return last === 'escalation';
+    The ledger is append-only and immutable, so CLOSING the GitHub issue cannot change the answer — the row is
+    stuck until some future run.start for that task. Verified live tonight: issues #393, #395 and #401 were each
+    closed by hand after being confirmed terminal, and each remains needsHuman by this predicate. The name is
+    actively misleading — 'hasOpenEscalation' implies openness is checked, and it is not; it means 'the last thing
+    that happened to this task was an escalation being opened'. Resolution is invisible to the console, so the
+    section only ever grows and an operator who works the queue sees no progress.
+    DEFECT 2 — WRONG AFFORDANCE. Every row carries an Approve button. Approve is the RATIFICATION-INBOX action for
+    a P## proposal (rmd approve, P25(ii) — one bit ratifies a READY proposal through the gate). It has NO defined
+    meaning for an escalation: there is no approve verb for a needs-human issue, and the escalation's own issue
+    body says so ('Closing this issue does not resolve the underlying block by itself — act on it, then resume via
+    rmd drain'). A control that cannot map to a real action is worse than no control: it invites a click that
+    either does nothing or does something the operator did not intend, on a surface whose entire premise (W1-T156,
+    'the console never lies') is that it tells the truth about state.
+    WHY THIS COMPOUNDS TONIGHT'S OTHER FINDINGS: the same board is simultaneously showing merged 0/160 (the
+    W1-T181 ENOBUFS outage) and W1-T1 as running at 27h21m (the unbuilt liveness bound, W1-T179). An operator
+    looking at this console currently cannot trust the merged count, the in-flight rows, OR the needs-attention
+    queue. NEEDS ME is the one section whose whole job is to be the operator's work list."
+  design: |
+    JOIN LIVE STATE, DO NOT PATCH THE HISTORY SCAN. The ledger correctly records that an escalation was OPENED —
+    that event is true and immutable, and it is the right provenance. What is missing is the CURRENT state of the
+    thing it points at. The escalation ledger line already carries `issue_url` (verified: escalation.issue_opened
+    lines record `{class, issue_url, labels}`), so the resolution is to read that issue's state rather than to
+    infer liveness from event ordering.
+    Read it through the SAME batched-gateway discipline the board already uses (buildBatchedGithub, one fetch,
+    TTL-refreshed) rather than one gh call per escalated row — the board-fix O(1) invariant is explicit in
+    status.ts and a per-row fetch would regress it at exactly the scale (44 rows) that exposed the bug.
+    RENAME hasOpenEscalation or give it a state parameter, so the name cannot lie again. A predicate called
+    hasOpenEscalation that does not check openness is how this survived review.
+    AFFORDANCE BY ITEM TYPE — the section is heterogeneous and must dispatch on type, not render one row template:
+      - ESCALATION -> 'view issue' (link to issue_url) and 'mark handled'. Mark-handled must be honest about what
+        it does: the issue body already states that closing does not resolve the underlying block, so this control
+        closes/acknowledges the ESCALATION and must not imply the block is fixed.
+      - INBOX PROPOSAL (P##) -> Approve, which is the existing, defined rmd approve action.
+    An Approve control MUST NOT render on a non-proposal. Prefer a shape where an unknown item type renders NO
+    action control rather than a default one — a missing button is recoverable, a wrong button is not.
+    FAIL-CLOSED ON AN UNREADABLE ISSUE STATE, matching W1-T177's boundary: if the issue's state cannot be read,
+    KEEP the row (an escalation that might still be open must not silently vanish from the operator's work list)
+    and mark it unverified. The fail-safe direction here is the opposite of the merged-count case, because the
+    cost of hiding live work exceeds the cost of showing a stale row.
+    VERIFY hasOpenEscalation, the escalation ledger line shape, and the T153 shell's NEEDS ME row template from
+    source before building — distrust this note, it is a 2026-07-20 survey.
+  acceptance:
+    - claim: "a CLOSED escalation does not render in NEEDS ME — the section reflects live state, not ledger history"
+      proof: "unit test over the projection: a task whose most recent ledger line is escalation.issue_opened but whose referenced issue reads CLOSED is NOT needsHuman and does not render in NEEDS ME. FALSIFIER: the 2026-07-20 console — ~44 escalated rows against 0 OPEN needs-human issues (30 total, all closed), including #393, #395 and #401 which were each closed by hand after being confirmed terminal and each still render, because hasOpenEscalation (status.ts:672) returns `last === 'escalation'` from an append-only ledger and never reads issue state"
+    - claim: "an OPEN escalation still renders — the fix removes stale rows without hiding live work"
+      proof: "unit test: a task whose escalation issue reads OPEN remains needsHuman and renders. FALSIFIER: a change that keys the section off anything that also drops genuinely open escalations, which would silently empty the operator's work list — the more dangerous direction of this bug"
+    - claim: "an UNREADABLE issue state KEEPS the row, marked unverified — fail-closed toward showing work"
+      proof: "unit test: a seeded issue-state read failure retains the row and flags it unverified rather than dropping it. FALSIFIER: dropping rows on a read failure, which during a GitHub outage would show an empty NEEDS ME section and tell the operator there is nothing to do"
+    - claim: "each escalation row renders the escalation's ACTUAL one-line ask, with a direct link — never an input soliciting data the ledger already holds"
+      proof: "unit/DOM test: an escalation row shows the ask text derived from the issue title/body plus a direct link to the issue, and renders NO free-text or URL input. FALSIFIER: a row rendering an empty URL input fails — the escalation's ledger line already carries issue_url (escalation.issue_opened records {class, issue_url, labels}), so soliciting a URL the system already holds is both redundant and an invitation to paste the wrong one"
+    - claim: "an Approve control NEVER renders on a non-proposal item"
+      proof: "unit/DOM test over the NEEDS ME row template: an escalation row renders 'view issue' and 'mark handled' and contains NO Approve control, while a P## inbox-proposal row renders Approve. FALSIFIER: the 2026-07-20 console, where every one of ~44 escalation rows carried an Approve button — an action with no defined meaning for an escalation, whose own issue body states that closing it does not resolve the underlying block"
+    - claim: "the join costs no per-row GitHub call — the board-fix O(1) invariant holds at 44+ rows"
+      proof: "unit test asserting issue states resolve through ONE batched fetch (the buildBatchedGithub discipline the board already uses), not one gh call per escalated row. FALSIFIER: a per-row fetch, which regresses the explicit O(1) board invariant at exactly the row count that exposed this defect"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/status.ts, test/status.test.ts]
+  status: queued
+  attempts: 0
+  note: "Fixture is an operator screenshot of console v2, 2026-07-20 ~21:30: ~44 escalated rows each with an
+    Approve button, against 0 OPEN needs-human issues (30 total, all closed). Two independent defects in one
+    section — a history-vs-state join and a wrong affordance — filed together because they share the row template
+    and the same fix pass.
+    THIRD SIBLING of tonight's console-honesty findings, all on the same screen: W1-T181 (merged 0/160, the
+    batched-gateway ENOBUFS outage) and W1-T179 (W1-T1 rendering running at 27h21m, the unbuilt liveness bound).
+    Each independently breaks the W1-T156 premise that the console never lies about its own state.
+    Note the fail-safe direction here INVERTS W1-T181's: an unreadable merged-count should degrade visibly, but an
+    unreadable escalation state must KEEP the row — hiding live work from the operator's queue is the worse
+    failure. Do not unify the two behind one 'unreadable' policy."
 - id: W1-T185
   title: "FLOOR VERDICT INTEGRITY — two gaps W1-T128's execution engine left open: a verdict with ZERO executed proofs must render a CAPPED/DEGRADED class that cannot arm auto-merge on tdd:strict work, and `rmd review` from the operator checkout must either execute at the PR head or mark its verdict keyword-only"
   repo: remudero
@@ -1434,101 +1626,6 @@
     per-event feed and per-run figures. Factor any shared ledger reduction once.
     risk:high — it re-sources a primary console section and adds a per-render ledger read path, where the naive
     implementation degrades continuously as the ledger grows."
-- id: W1-T182
-  title: "NEEDS ME must join LIVE escalation STATE and render the affordance the item type actually supports — today it renders ledger HISTORY (a closed issue never leaves the section) and puts an Approve button on escalations, which is an undefined action"
-  repo: remudero
-  queue_note: |
-    PROMOTED 2026-07-20 from plan/tasks.d/ into tasks.yaml and positioned with the console design pass, directly
-    behind the W1-T177/W1-T178/W1-T179 train. Shards append AFTER every tasks.yaml task and the drain scans in
-    FILE ORDER, so a sharded task cannot reach the front regardless of urgency — the same promotion W1-T179,
-    W1-T177 and W1-T178 each needed.
-    AMENDED at the same time with the ACTUAL-ASK criterion: a NEEDS ME row must render the escalation's real
-    one-line ask plus a direct link, never an input soliciting a URL the ledger already holds.
-  depends_on: [W1-T153]
-  type: implement
-  verify: auto
-  principles: {tdd: strict}
-  budget_usd: 100.00
-  rationale: "OPERATOR FIXTURE (console v2 screenshot, 2026-07-20 ~21:30): the NEEDS ME section rendered roughly
-    44 escalated rows, each carrying an Approve button. Measured against GitHub at the same moment: needs-human
-    issues OPEN = 0, needs-human issues TOTAL (all states) = 30. So the section is showing more rows than there
-    are issues in existence, and every issue it claims needs attention is CLOSED.
-    DEFECT 1 — NEEDS ME JOINS HISTORY, NOT STATE. The predicate is hasOpenEscalation (status.ts:672), and despite
-    its name it never reads an issue's state. It scans the ledger and returns true when the task's MOST RECENT
-    line was `escalation.issue_opened` rather than `run.start`:
-      let last: 'run' | 'escalation' | undefined;
-      for (const line of lines) { ... if (step==='run.start') last='run'; else if (step==='escalation.issue_opened') last='escalation'; }
-      return last === 'escalation';
-    The ledger is append-only and immutable, so CLOSING the GitHub issue cannot change the answer — the row is
-    stuck until some future run.start for that task. Verified live tonight: issues #393, #395 and #401 were each
-    closed by hand after being confirmed terminal, and each remains needsHuman by this predicate. The name is
-    actively misleading — 'hasOpenEscalation' implies openness is checked, and it is not; it means 'the last thing
-    that happened to this task was an escalation being opened'. Resolution is invisible to the console, so the
-    section only ever grows and an operator who works the queue sees no progress.
-    DEFECT 2 — WRONG AFFORDANCE. Every row carries an Approve button. Approve is the RATIFICATION-INBOX action for
-    a P## proposal (rmd approve, P25(ii) — one bit ratifies a READY proposal through the gate). It has NO defined
-    meaning for an escalation: there is no approve verb for a needs-human issue, and the escalation's own issue
-    body says so ('Closing this issue does not resolve the underlying block by itself — act on it, then resume via
-    rmd drain'). A control that cannot map to a real action is worse than no control: it invites a click that
-    either does nothing or does something the operator did not intend, on a surface whose entire premise (W1-T156,
-    'the console never lies') is that it tells the truth about state.
-    WHY THIS COMPOUNDS TONIGHT'S OTHER FINDINGS: the same board is simultaneously showing merged 0/160 (the
-    W1-T181 ENOBUFS outage) and W1-T1 as running at 27h21m (the unbuilt liveness bound, W1-T179). An operator
-    looking at this console currently cannot trust the merged count, the in-flight rows, OR the needs-attention
-    queue. NEEDS ME is the one section whose whole job is to be the operator's work list."
-  design: |
-    JOIN LIVE STATE, DO NOT PATCH THE HISTORY SCAN. The ledger correctly records that an escalation was OPENED —
-    that event is true and immutable, and it is the right provenance. What is missing is the CURRENT state of the
-    thing it points at. The escalation ledger line already carries `issue_url` (verified: escalation.issue_opened
-    lines record `{class, issue_url, labels}`), so the resolution is to read that issue's state rather than to
-    infer liveness from event ordering.
-    Read it through the SAME batched-gateway discipline the board already uses (buildBatchedGithub, one fetch,
-    TTL-refreshed) rather than one gh call per escalated row — the board-fix O(1) invariant is explicit in
-    status.ts and a per-row fetch would regress it at exactly the scale (44 rows) that exposed the bug.
-    RENAME hasOpenEscalation or give it a state parameter, so the name cannot lie again. A predicate called
-    hasOpenEscalation that does not check openness is how this survived review.
-    AFFORDANCE BY ITEM TYPE — the section is heterogeneous and must dispatch on type, not render one row template:
-      - ESCALATION -> 'view issue' (link to issue_url) and 'mark handled'. Mark-handled must be honest about what
-        it does: the issue body already states that closing does not resolve the underlying block, so this control
-        closes/acknowledges the ESCALATION and must not imply the block is fixed.
-      - INBOX PROPOSAL (P##) -> Approve, which is the existing, defined rmd approve action.
-    An Approve control MUST NOT render on a non-proposal. Prefer a shape where an unknown item type renders NO
-    action control rather than a default one — a missing button is recoverable, a wrong button is not.
-    FAIL-CLOSED ON AN UNREADABLE ISSUE STATE, matching W1-T177's boundary: if the issue's state cannot be read,
-    KEEP the row (an escalation that might still be open must not silently vanish from the operator's work list)
-    and mark it unverified. The fail-safe direction here is the opposite of the merged-count case, because the
-    cost of hiding live work exceeds the cost of showing a stale row.
-    VERIFY hasOpenEscalation, the escalation ledger line shape, and the T153 shell's NEEDS ME row template from
-    source before building — distrust this note, it is a 2026-07-20 survey.
-  acceptance:
-    - claim: "a CLOSED escalation does not render in NEEDS ME — the section reflects live state, not ledger history"
-      proof: "unit test over the projection: a task whose most recent ledger line is escalation.issue_opened but whose referenced issue reads CLOSED is NOT needsHuman and does not render in NEEDS ME. FALSIFIER: the 2026-07-20 console — ~44 escalated rows against 0 OPEN needs-human issues (30 total, all closed), including #393, #395 and #401 which were each closed by hand after being confirmed terminal and each still render, because hasOpenEscalation (status.ts:672) returns `last === 'escalation'` from an append-only ledger and never reads issue state"
-    - claim: "an OPEN escalation still renders — the fix removes stale rows without hiding live work"
-      proof: "unit test: a task whose escalation issue reads OPEN remains needsHuman and renders. FALSIFIER: a change that keys the section off anything that also drops genuinely open escalations, which would silently empty the operator's work list — the more dangerous direction of this bug"
-    - claim: "an UNREADABLE issue state KEEPS the row, marked unverified — fail-closed toward showing work"
-      proof: "unit test: a seeded issue-state read failure retains the row and flags it unverified rather than dropping it. FALSIFIER: dropping rows on a read failure, which during a GitHub outage would show an empty NEEDS ME section and tell the operator there is nothing to do"
-    - claim: "each escalation row renders the escalation's ACTUAL one-line ask, with a direct link — never an input soliciting data the ledger already holds"
-      proof: "unit/DOM test: an escalation row shows the ask text derived from the issue title/body plus a direct link to the issue, and renders NO free-text or URL input. FALSIFIER: a row rendering an empty URL input fails — the escalation's ledger line already carries issue_url (escalation.issue_opened records {class, issue_url, labels}), so soliciting a URL the system already holds is both redundant and an invitation to paste the wrong one"
-    - claim: "an Approve control NEVER renders on a non-proposal item"
-      proof: "unit/DOM test over the NEEDS ME row template: an escalation row renders 'view issue' and 'mark handled' and contains NO Approve control, while a P## inbox-proposal row renders Approve. FALSIFIER: the 2026-07-20 console, where every one of ~44 escalation rows carried an Approve button — an action with no defined meaning for an escalation, whose own issue body states that closing it does not resolve the underlying block"
-    - claim: "the join costs no per-row GitHub call — the board-fix O(1) invariant holds at 44+ rows"
-      proof: "unit test asserting issue states resolve through ONE batched fetch (the buildBatchedGithub discipline the board already uses), not one gh call per escalated row. FALSIFIER: a per-row fetch, which regresses the explicit O(1) board invariant at exactly the row count that exposed this defect"
-  risk: medium
-  origin: architect
-  plan_refs: ["§7", "§7B"]
-  files: [src/lib/status.ts, test/status.test.ts]
-  status: queued
-  attempts: 0
-  note: "Fixture is an operator screenshot of console v2, 2026-07-20 ~21:30: ~44 escalated rows each with an
-    Approve button, against 0 OPEN needs-human issues (30 total, all closed). Two independent defects in one
-    section — a history-vs-state join and a wrong affordance — filed together because they share the row template
-    and the same fix pass.
-    THIRD SIBLING of tonight's console-honesty findings, all on the same screen: W1-T181 (merged 0/160, the
-    batched-gateway ENOBUFS outage) and W1-T179 (W1-T1 rendering running at 27h21m, the unbuilt liveness bound).
-    Each independently breaks the W1-T156 premise that the console never lies about its own state.
-    Note the fail-safe direction here INVERTS W1-T181's: an unreadable merged-count should degrade visibly, but an
-    unreadable escalation state must KEEP the row — hiding live work from the operator's queue is the worse
-    failure. Do not unify the two behind one 'unreadable' policy."
 - id: W1-T159
   title: "GLANCE layer — a pinned summary strip (running/needs-me/blocked/queued/merged-today/spend-today), a daemon-health widget, and a browser-tab needs-me badge"
   repo: remudero
@@ -1572,6 +1669,78 @@
   note: "The GLANCE layer (interaction layer 4). spend-today is governor-aware once W1-T148 lands (a dep). Counts
     from W1-T155's taxonomy. Every number traceable to a source — no decorative estimates."
 
+- id: W1-T188
+  title: "W1-T154 RE-VERIFICATION (rule 21 follow-up) — its <2s first-paint budget was keyword-certified under the dead proof floor and is CONTRADICTED in production at 49s; re-verify the budget empirically and bring pre-#414 acceptance under W1-T165's goldens"
+  repo: remudero
+  depends_on: [W1-T187, W1-T165]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "W1-T154 ('console first-paint — pre-warm gateway at boot + skeleton/last-snapshot cache') merged as
+    PR #388 on 2026-07-20 carrying an acceptance criterion of first-paint-to-data under 2 SECONDS at 183-task
+    scale. Measured in production the same day, on a serve process running current main: GET / answered in 49.0s
+    cold and 42.6s warm, GET /v1/status in 58.7s/54.0s/34.5s. The budget is missed by more than an order of
+    magnitude. THIS IS T154'S OWN FALSIFIER FIRING IN PRODUCTION.
+    HOW IT MERGED: #388's remudero-review passed BEFORE W1-T128 shipped the working proof executor (#414), so its
+    criteria were certified by KEYWORD COVERAGE, not by execution. The measured session-wide figure at the time:
+    22 verdicts, 76 proofs, 75 not_executable — a 1.3% execution rate. A <2s timing budget is precisely the kind
+    of claim keyword matching cannot test: the words 'first-paint-to-data is < 2s measured from the REAL browser
+    client at 183-task scale' appear in the proof text and in the PR body, and matching them proves nothing about
+    milliseconds.
+    THE GENERAL CLASS, and it is larger than this task: EVERY task merged before #414 carries keyword-verified
+    acceptance. Most are probably fine — a criterion about code structure is partly checkable by keyword overlap.
+    But nothing distinguishes the fine ones from the unverified ones, and W1-T154 is the FIRST to be contradicted
+    by operator experience rather than by inspection. It is unlikely to be the only one, and the ones at risk are
+    exactly those whose criteria assert MEASURED properties — latency, throughput, scale, resource ceilings —
+    because those are unfalsifiable by keyword.
+    WHY THIS IS A FOLLOW-UP AND NOT AN AMENDMENT: W1-T154 is MERGED. Standing rule 21 — an amendment to an
+    already-merged task does not re-queue it and spawns nothing, so the amender owns filing the follow-up. Editing
+    T154's criteria would orphan them exactly as PR #374's amendments to the merged W1-T155 were orphaned (the
+    fixture rule 21 was written from). T154 keeps its criteria for the record; this task carries the
+    re-verification."
+  design: |
+    RE-VERIFY THE BUDGET EMPIRICALLY, ONCE W1-T187 LANDS. The 49s measurement is dominated by the O(tasks x
+    ledger) projection defect W1-T187 fixes, so re-verifying before that lands would only re-measure a known
+    outage. Hence the dependency. After it lands, measure first-paint-to-data at production corpus scale the way
+    T154's criterion actually reads — from a real client, not from a unit test asserting a constant.
+    IF THE BUDGET IS MET after W1-T187, that is the honest outcome and this task records it with numbers. If it
+    is still missed, the residual is a genuine T154 gap and this task closes it — the pre-warm and
+    skeleton/last-snapshot cache behaviours T154 claimed must actually hold under load.
+    BRING IT UNDER THE GOLDENS. W1-T165 (golden-task regression suite — replayable golden tasks from the ledger
+    validating a harness-touching change before it ships) is the right long-term home: a timing budget needs a
+    REPLAYABLE fixture at real scale, not a one-off manual curl. Add first-paint-to-data as a golden so the
+    budget is re-checked on every harness-touching change rather than rediscovered by an operator months later.
+    VERIFY W1-T165's actual shape from source/plan before assuming it can host a timing golden — if it cannot,
+    say so in the PR rather than bending it.
+    SCOPE THE RE-VERIFICATION SWEEP HONESTLY. Do NOT attempt to re-verify every pre-#414 task; that is a
+    workstream, not a task. What belongs here is (a) T154 specifically, and (b) a mechanical IDENTIFICATION of
+    which merged tasks carry criteria asserting MEASURED properties — the at-risk set — so the scale of the
+    problem is known rather than guessed. Filing the sweep itself is a separate decision with its own cost.
+  acceptance:
+    - claim: "first-paint-to-data is re-measured empirically at production corpus scale, and the result is recorded with numbers whichever way it falls"
+      proof: "an integration/timing measurement at >= 200 tasks against a running server, recorded in the PR with the same shape as the diagnosis (connect, ttfb, total, bytes) for GET / and GET /v1/status. FALSIFIER: W1-T154's criterion claims < 2s first-paint-to-data at 183-task scale, and the 2026-07-20 production measurement was 49.0s/42.6s for GET / and 58.7s/54.0s/34.5s for GET /v1/status — the criterion was certified without ever being measured"
+    - claim: "the timing budget becomes a REPLAYABLE golden, not a one-off manual measurement"
+      proof: "the first-paint-to-data budget is expressed as a golden fixture that re-runs on harness-touching changes, or — if W1-T165's shape cannot host a timing golden — the PR states that from source and names what would. FALSIFIER: a re-measurement that lives only in a PR body is rediscovered by the next operator report, which is exactly how this defect surfaced"
+    - claim: "the at-risk pre-#414 set is IDENTIFIED mechanically — which merged tasks carry criteria asserting measured properties"
+      proof: "a check or script enumerating merged tasks whose acceptance criteria assert measured properties (latency, throughput, scale, resource ceilings), since those are the criteria keyword matching cannot falsify. FALSIFIER: today nothing distinguishes a keyword-certified criterion from an executed one, so the size of the unverified set is unknown — W1-T154 was found by an operator noticing, not by any gate"
+    - claim: "W1-T154 itself is NOT amended — rule 21 is honoured"
+      proof: "a structural check that plan/tasks.yaml's W1-T154 entry is unchanged by this task's PR. FALSIFIER: amending a merged task's criteria orphans them — nothing dispatches them, exactly as PR #374's amendments to the already-merged W1-T155 were orphaned, which is the fixture standing rule 21 was written from"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§12"]
+  files: [test/serve.test.ts]
+  status: queued
+  attempts: 0
+  note: "RULE 21 FOLLOW-UP to the merged W1-T154 — filed rather than amended, for the reason rule 21 exists.
+    Depends on W1-T187 because the 49s measurement is dominated by that task's O(tasks x ledger) projection
+    defect: re-verifying first would only re-measure a known outage.
+    THE BROADER POINT, recorded here because it needs a home: every task merged before #414 carries
+    keyword-verified acceptance, and W1-T154 is the first contradicted by operator experience rather than by
+    inspection. The at-risk ones are those asserting MEASURED properties, which keyword matching cannot falsify
+    even in principle. This task identifies that set mechanically; acting on it is a separate decision.
+    risk:medium — it is a verification and identification task, not a behaviour change. The one real hazard is
+    scope creep into a full pre-#414 re-verification sweep, which is a workstream and is explicitly out of scope."
 - id: W1-T157
   title: "FIND layer — instant client-side fuzzy search + faceted filters with live counts + sortable columns + cmd+K palette + URL-persisted (shareable) view state"
   repo: remudero
