@@ -85,6 +85,16 @@ export interface ServeDeps {
    * go stale). Only meaningful for a gateway implementing {@link GitHub.warm}; a no-op otherwise.
    */
   boardGithubRefreshMs?: number;
+  /**
+   * W1-T183: per-phase elapsed-time ANOMALY thresholds (ms), keyed by {@link Phase} (plus a
+   * `default` fallback for a phase not listed) — DATA, not a constant baked into the row
+   * template, so an operator (or a test) can tune "how long is too long" without a source
+   * change. Defaults to {@link DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS} when omitted. Embedded
+   * verbatim into the shell's own script (see {@link renderShellHtml}) — the anomaly check
+   * itself runs client-side, over the SAME `elapsedMs`/`phase` fields NOW rows already render
+   * (W1-T155), never a new server-side derivation.
+   */
+  phaseElapsedThresholdsMs?: Record<string, number>;
   /** Forwarded to `createService` — one ledger line per auth decision/SSE lifecycle/handler error. */
   log?: ServiceOptions["log"];
 }
@@ -92,6 +102,21 @@ export interface ServeDeps {
 /** Matches {@link buildBatchedGithub}'s own default `ttlMs` (status.ts) — kept as one named
  *  constant here rather than a bare literal so the two stay visibly the same number. */
 export const DEFAULT_BOARD_PREWARM_MS = 15_000;
+
+/**
+ * W1-T183 default anomaly thresholds — how long a phase normally takes before a still-running
+ * row is worth a second look. NOT a liveness verdict (W1-T179 owns "is this actually running");
+ * purely a visual "this one is taking unusually long" flag. Keyed by status.ts's {@link Phase}
+ * union, plus `default` for any value not listed (defensive — Phase is a closed set today, but
+ * the client-side check is written against an arbitrary string key, never a hard-coded switch).
+ */
+export const DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS: Record<string, number> = {
+  recon: 15 * 60 * 1000,
+  implement: 90 * 60 * 1000,
+  review: 30 * 60 * 1000,
+  "fix-rung": 45 * 60 * 1000,
+  default: 60 * 60 * 1000,
+};
 
 /**
  * PRE-WARM (W1-T154, MASTER-PLAN §7/§7B): call `github.warm()` (if it has one — status.ts's
@@ -179,7 +204,7 @@ function skeletonRows(n: number): string {
   return Array.from({ length: n }, () => '<li class="row skeleton" aria-hidden="true"><span class="skeleton-bar"></span></li>').join("");
 }
 
-export function renderShellHtml(): string {
+export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number> = DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -225,14 +250,32 @@ export function renderShellHtml(): string {
     background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 1rem;
   }
-  .row-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+  .row-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+  /* W1-T183 DENSITY + IA v2: one line per task by default -- id · status · phase · elapsed ·
+     spend · PR/issue link -- truncated with an ellipsis rather than wrapping to a second line,
+     so a first screen reads the fleet at a glance instead of scrolling card-shaped rows to find
+     anything (the 2026-07-20 console v2 fixture this task falsifies). A row carrying a real
+     inline FORM (NEEDS ME's approve/answer/accept-reject affordances) opts back into wrapping
+     below -- an <input> cannot usefully truncate onto one line. */
   .row {
-    display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem;
-    background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 8px;
-    padding: 0.5rem 0.75rem; overflow-wrap: anywhere;
+    display: flex; flex-wrap: nowrap; align-items: center; gap: 0.5rem;
+    background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 6px;
+    padding: 0.3rem 0.6rem; overflow: hidden;
   }
+  .row > * { flex-shrink: 0; }
+  .row:has(form), .row:has(.btn-row) { flex-wrap: wrap; overflow: visible; align-items: baseline; }
   .row .task-id { font-family: var(--font-mono); font-weight: 600; }
-  .row .detail { color: var(--text-dim); font-size: 0.875rem; flex-basis: 100%; }
+  .row .detail {
+    color: var(--text-dim); font-size: 0.875rem; flex: 1 1 auto; min-width: 0; flex-shrink: 1;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .row:has(form) .detail, .row:has(.btn-row) .detail {
+    flex-basis: 100%; white-space: normal; overflow: visible; text-overflow: clip;
+  }
+  /* ANOMALY FLAG (W1-T183): a per-phase elapsed threshold exceeded -- never carried by colour
+     alone, always paired with the "⚠ long-running" text+glyph marker (nowRowHtml/tickElapsed). */
+  .row.anomaly { border-color: var(--status-needs-human); background: rgba(255, 184, 77, 0.1); }
+  .anomaly-flag { color: var(--status-needs-human); font-weight: 700; }
   .status-dot { display: inline-block; width: 0.6em; height: 0.6em; border-radius: 50%; margin-right: 0.15em; }
   .status-label { font-size: 0.8rem; font-weight: 600; background: none; }
   /* the DOT is a filled swatch (background); the LABEL is text colored to match (never a
@@ -501,6 +544,15 @@ export function renderShellHtml(): string {
   // embeds the live-indicator markup) stable across re-renders instead of flapping.
   const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+  // W1-T183: per-phase elapsed ANOMALY thresholds -- DATA embedded by the server from
+  // ServeDeps.phaseElapsedThresholdsMs (defaults to DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS),
+  // never a constant baked into this template. A row's own phase looks itself up here (falling
+  // back to "default") -- see phaseThresholdMs() below.
+  const PHASE_ELAPSED_THRESHOLD_MS = ${JSON.stringify(phaseElapsedThresholdsMs)};
+  function phaseThresholdMs(phase) {
+    return PHASE_ELAPSED_THRESHOLD_MS[phase] ?? PHASE_ELAPSED_THRESHOLD_MS.default ?? Infinity;
+  }
+
   function escapeHtml(text) {
     return String(text ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
@@ -544,6 +596,33 @@ export function renderShellHtml(): string {
     if (!t.prUrl) return "";
     const label = t.prNumber !== undefined ? \`#\${t.prNumber}\` : t.prUrl;
     return \` · <a href="\${t.prUrl}" target="_blank" rel="noreferrer">\${label}</a>\`;
+  }
+
+  // ── W1-T183: TIME RENDERING -- local + relative TOGETHER ('14:23:05 · 8s ago'), never a raw
+  // ISO-8601-with-milliseconds string anywhere in the UI (the falsifier: a UTC millisecond stamp
+  // forces the reader to do arithmetic to answer "is this recent"). Every place this shell used
+  // to render \`someDate.toISOString()\`/a bare \`generated_at\` routes through this pair instead. ──
+  function formatRelative(ms) {
+    if (typeof ms !== "number" || !Number.isFinite(ms)) return "";
+    if (ms < 1000) return "just now";
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return \`\${s}s ago\`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return \`\${m}m ago\`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return \`\${h}h ago\`;
+    const d = Math.floor(h / 24);
+    return \`\${d}d ago\`;
+  }
+  /** \`iso\` -> "14:23:05 · 8s ago" -- local wall-clock time (the reader's own timezone) PLUS a
+   *  relative offset from now, together, never either alone. Falls back to the raw string only
+   *  when \`iso\` fails to parse (never silently swallowed). */
+  function formatTimestamp(iso) {
+    if (!iso) return "unknown";
+    const t = Date.parse(iso);
+    if (Number.isNaN(t)) return String(iso);
+    const local = new Date(t).toLocaleTimeString();
+    return \`\${local} · \${formatRelative(Date.now() - t)}\`;
   }
 
   // ── W1-T156 UI+TRUST: an animated per-row "in flight" indicator, replaced by a STATIC badge
@@ -649,7 +728,7 @@ export function renderShellHtml(): string {
   function markStale(asOf) {
     const badge = document.getElementById("stale-badge");
     badge.hidden = false;
-    badge.textContent = \`STALE — showing last known data as of \${asOf ?? "an earlier load"}\`;
+    badge.textContent = \`STALE — showing last known data as of \${asOf ? formatTimestamp(asOf) : "an earlier load"}\`;
     document.getElementById("top-status").dataset.stale = "true";
   }
   function clearStale() {
@@ -724,7 +803,7 @@ export function renderShellHtml(): string {
     if (unreachable) {
       if (!githubUnreachableSince) githubUnreachableSince = new Date();
       banner.hidden = false;
-      banner.textContent = \`GitHub unreachable since \${githubUnreachableSince.toISOString()} — statuses may be stale\`;
+      banner.textContent = \`GitHub unreachable since \${formatTimestamp(githubUnreachableSince.toISOString())} — statuses may be stale\`;
     } else {
       githubUnreachableSince = null;
       banner.hidden = true;
@@ -768,11 +847,19 @@ export function renderShellHtml(): string {
   }
 
   // ── NOW — in-flight runs, live phase + LIVE-TICKING elapsed (W1-T156) ───────────────────
+  // W1-T183: each in-flight row also carries its own phase's ANOMALY threshold
+  // (data-threshold-ms) plus a hidden \`.anomaly-flag\` marker -- tickElapsed() below flips both
+  // the marker and the row's own \`.anomaly\` class live, off the SAME ticking clock that already
+  // drives the elapsed text, so a row that crosses its threshold mid-session is flagged without
+  // waiting on the next status flip/re-render.
   function nowRowHtml(t) {
     const key = statusColorKey(t);
+    const threshold = phaseThresholdMs(t.phase);
     return (
       \`<span class="task-id">\${escapeHtml(t.taskId)}</span>\${statusBadge(key)}\${liveIndicatorHtml()}\` +
-      \`<span class="detail">phase: \${escapeHtml(t.phase)} · elapsed: <span class="elapsed" data-started="\${escapeHtml(t.startedAt ?? "")}">…</span>\${t.armedAwaitingMerge ? " · auto-merge armed" : ""}\${prLink(t)}</span>\` +
+      \`<span class="detail">phase: \${escapeHtml(t.phase)} · elapsed: <span class="elapsed" data-started="\${escapeHtml(t.startedAt ?? "")}" data-threshold-ms="\${threshold}">…</span>\` +
+      \`<span class="anomaly-flag" hidden title="running longer than usual for this phase">⚠ long-running</span>\` +
+      \`\${t.armedAwaitingMerge ? " · auto-merge armed" : ""}\${prLink(t)}</span>\` +
       journeyButtonHtml(t.taskId)
     );
   }
@@ -786,12 +873,26 @@ export function renderShellHtml(): string {
 
   /** Every \`.elapsed[data-started]\` span, wherever it lives, ticks off wall-clock time -- this
    *  runs independently of any row re-render, so elapsed advancing every second never counts as
-   *  a "flip" (no flash, no aria announcement, no DOM node touched beyond this one text node). */
+   *  a "flip" (no flash, no aria announcement, no DOM node touched beyond this one text node).
+   *  W1-T183 ADDENDUM: also re-evaluates that same span's own \`data-threshold-ms\` anomaly check
+   *  every tick -- crossing the threshold toggles the row's \`.anomaly\` class AND its
+   *  \`.anomaly-flag\` marker's visibility, but is deliberately NOT routed through
+   *  ingestProjection/flashRow: it is volatile, tick-driven state, exactly like elapsed itself
+   *  (see withoutVolatile's own note), never a "flip" that flashes or announces. */
   function tickElapsed() {
     const now = Date.now();
     document.querySelectorAll(".elapsed[data-started]").forEach((el) => {
       const started = el.getAttribute("data-started");
-      el.textContent = started ? formatElapsed(now - Date.parse(started)) : "";
+      const elapsedMs = started ? now - Date.parse(started) : NaN;
+      el.textContent = started ? formatElapsed(elapsedMs) : "";
+      const thresholdAttr = el.getAttribute("data-threshold-ms");
+      const row = el.closest(".row");
+      if (row && thresholdAttr !== null) {
+        const anomalous = Number.isFinite(elapsedMs) && elapsedMs > Number(thresholdAttr);
+        row.classList.toggle("anomaly", anomalous);
+        const marker = row.querySelector(".anomaly-flag");
+        if (marker) marker.hidden = !anomalous;
+      }
     });
   }
 
@@ -1563,7 +1664,7 @@ export function renderShellHtml(): string {
       latestRecentEntries = recentSnap.entries ?? [];
       paintFromTasksById(); // re-run NOW/NEEDS ME/rest now that feedback/inbox/up-next/recent are current
       applyControlStatus(controlStatus);
-      document.getElementById("top-status").textContent = \`updated \${statusSnap.generated_at ?? new Date().toISOString()}\`;
+      document.getElementById("top-status").textContent = \`updated \${formatTimestamp(statusSnap.generated_at ?? new Date().toISOString())}\`;
       document.getElementById("top-status").dataset.pollState = "ok";
       clearStale(); // a completed live refresh always supersedes whatever the cache/failure-escalation painted
 
@@ -1701,7 +1802,7 @@ export function renderShellHtml(): string {
  * closes the W1-T139 bootstrap paradox: the auth spec was satisfied against header-sending fetch
  * clients and unreachable by the one client that matters, the browser opening the URL.
  */
-function buildShellRoute(): Route {
+function buildShellRoute(phaseElapsedThresholdsMs: Record<string, number>): Route {
   return {
     method: "GET",
     path: "/",
@@ -1709,7 +1810,7 @@ function buildShellRoute(): Route {
     allowQueryToken: true,
     handler: (_req, res) => {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(renderShellHtml());
+      res.end(renderShellHtml(phaseElapsedThresholdsMs));
     },
   };
 }
@@ -1735,7 +1836,7 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     buildApproveManualRoute(fleetControlDeps),
     ...buildPanelGraphRoutes(panelGraphDeps),
     buildTaskCardRoute(deps.board),
-    buildShellRoute(),
+    buildShellRoute(deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS),
   ];
 }
 
