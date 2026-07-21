@@ -118,6 +118,13 @@ import {
   type ShippedGithub,
 } from "./lib/retro.js";
 import { regenerateOrientation } from "./lib/orientation.js";
+import {
+  buildPlanPrBody,
+  ensureJudgeableBody,
+  filingAcceptanceCriteria,
+  regeneratePlanIndexAndCommit,
+  regeneratePlanIndexFile,
+} from "./lib/plan-pr-emitter.js";
 import { appendLedger } from "./lib/ledger.js";
 import {
   assertRunnable,
@@ -2918,9 +2925,23 @@ async function retroCommand(rest: string[]): Promise<number> {
       log("orientation.write.error", { error: String((e as Error)?.message ?? e) });
     }
 
+    // W1-T136 (#287 class): plan/plan-index.json is HARNESS-OWNED too — the Architect
+    // just edited MASTER-PLAN.md above, and an un-regenerated index reds
+    // `plan-index:check` post-push (#287's exact failure). Mirrors regenerateOrientation's
+    // write/add/diff-cached-quiet/commit-if-changed discipline (lib/plan-pr-emitter.ts).
+    let planIndexCommitted = false;
+    try {
+      const result = regeneratePlanIndexAndCommit({ worktreePath });
+      planIndexCommitted = result.committed;
+      if (result.committed) log("plan_index.regenerated", { diff_bytes: result.diff?.length ?? 0 });
+    } catch (e) {
+      log("plan_index.regen.error", { error: String((e as Error)?.message ?? e) });
+    }
+
     // Ensure the branch reached origin (worker pushes without -u). Also push when
-    // ORIENTATION.md was regenerated AFTER the worker's own push, so that commit
-    // isn't silently left local (never reaches the PR the worker already opened).
+    // ORIENTATION.md/plan-index.json were regenerated AFTER the worker's own push, so
+    // those commits aren't silently left local (never reaching the PR the worker already
+    // opened).
     let onOrigin = false;
     try {
       execFileSync("git", ["-C", worktreePath, "ls-remote", "--exit-code", "origin", branch], { stdio: "ignore" });
@@ -2928,7 +2949,9 @@ async function retroCommand(rest: string[]): Promise<number> {
     } catch {
       onOrigin = false;
     }
-    if (!onOrigin || orientationCommitted) execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+    if (!onOrigin || orientationCommitted || planIndexCommitted) {
+      execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+    }
 
     let prUrl = parseReport([worker.text, worker.blocks.join("\n")].join("\n"))?.prUrl;
     if (!prUrl) {
@@ -2969,6 +2992,31 @@ async function retroCommand(rest: string[]): Promise<number> {
       return 1;
     }
     ensureTaskTrailer(prUrl, "RETRO");
+
+    // W1-T136 (#394 class): verify-and-repair the PR body's Acceptance block BEFORE the
+    // gate runs. retroPrompt instructs the Architect worker to write one, but that's
+    // advisory (an LLM can get the shape wrong, e.g. #394's non-bare header, which
+    // parseAcceptanceBlock never recognizes) — this harness-side pass is the
+    // deterministic backstop so a worker's shape mistake doesn't fail the whole retro
+    // CLOSED at remudero-review. Best-effort: never lets this crash an otherwise-fine retro.
+    try {
+      const view = ghJson(["pr", "view", prUrl, "--json", "body"]) as { body?: string };
+      const body = view.body ?? "";
+      if (parseAcceptanceBlock(body).length === 0) {
+        const repaired = ensureJudgeableBody(body, [
+          {
+            claim: "the retro's plan-only sync PR is gate-compliant",
+            proof:
+              "SHIPPED-log/NET-STATE/calibration-table updates and the COMPRESSION deletion are in this diff; " +
+              "docs/ORIENTATION.md and plan/plan-index.json are harness-regenerated separately in this same PR",
+          },
+        ]);
+        execFileSync("gh", ["pr", "edit", prUrl, "--body", repaired], { stdio: "pipe" });
+        log("acceptance.repaired", { pr_url: prUrl });
+      }
+    } catch (e) {
+      log("acceptance.repair.error", { error: String((e as Error)?.message ?? e) });
+    }
 
     // DETERMINISTIC GUARD: a retro is PLAN-ONLY. If the diff touches src/ or test/,
     // fail closed (the retro may never carry code — one concern).
@@ -5437,6 +5485,11 @@ async function approveCommand(rest: string[]): Promise<number> {
 
   let repoDir: string | undefined;
   let worktreePath: string | undefined;
+  // Filed task id(s), captured by createRatificationBranch (it runs first — approveProposal
+  // always calls createRatificationBranch(payload) before openPlanPr) for openPlanPr's
+  // Acceptance-criteria auto-authorship below — the closure approach lets openPlanPr's
+  // signature (part of the RatifyGateway interface other tests fake) stay unchanged.
+  let filedTaskIds: string[] = [];
   const gateway: RatifyGateway = {
     createRatificationBranch(payload) {
       repoDir = join(config.root, "repos", repo);
@@ -5456,20 +5509,42 @@ async function approveCommand(rest: string[]): Promise<number> {
       const masterPlanPath = join(worktreePath, "MASTER-PLAN.md");
       writeFileSync(masterPlanPath, applyStampToMasterPlan(readFileSync(masterPlanPath, "utf8"), payload.proposalId, payload.stampLine), "utf8");
 
+      // W1-T136 (#287 class): regenerate plan/plan-index.json to reflect the just-stamped
+      // MASTER-PLAN.md BEFORE the single git-add below, which already sweeps up anything
+      // under plan/ — no separate commit needed here, unlike retro's own commit.
+      try {
+        regeneratePlanIndexFile({ worktreePath });
+      } catch (e) {
+        log("plan_index.regen.error", { error: String((e as Error)?.message ?? e) });
+      }
+
+      // fragmentYaml is already a valid top-level sequence (schema v1 — see
+      // applyFragmentToPlanYaml's doc comment), so a per-line regex over `- id: <id>` is
+      // sufficient without a full YAML re-parse.
+      filedTaskIds = [...payload.fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]);
+
       execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
       execFileSync("git", ["-C", worktreePath, "commit", "-m", approveCommitMessage(payload)], { stdio: "inherit" });
       execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
       return branch;
     },
     openPlanPr(branch, id) {
-      const body = [
+      const intro = [
         classification.draft?.stampLine ?? "",
         "",
         "The operator's one-bit approve initiated this PR (MASTER-PLAN P25 ii, W1-T111). The",
         "gate still reviews (ci + remudero-review); nothing auto-merges without it.",
-        "",
-        `Remudero-Task: ${id}`,
       ].join("\n");
+      // W1-T136 (#387 class): a real, rendered, ALWAYS-judgeable Acceptance block — the #387
+      // bug was opening this PR with NO Acceptance section, which fails remudero-review
+      // CLOSED. This is a plan-FILING PR (it introduces filedTaskIds, doesn't implement
+      // them), so the criteria are about the filing itself (filingAcceptanceCriteria), and
+      // NO Remudero-Task trailer is emitted (the correctness rule, lib/plan-pr-emitter.ts).
+      const ids = filedTaskIds.length > 0 ? filedTaskIds : [id];
+      const body = buildPlanPrBody({
+        intro,
+        criteria: filingAcceptanceCriteria(ids, ["plan/tasks.yaml", "MASTER-PLAN.md"]),
+      });
       const out = execFileSync(
         "gh",
         ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch, "--title", `chore(plan): ratify ${id} via rmd approve`, "--body", body],
@@ -5504,7 +5579,14 @@ async function approveCommand(rest: string[]): Promise<number> {
       worktreeRemove(ownedRepoDir, ownedWorktreePath);
       return 1;
     }
-    ensureTaskTrailer(result.prUrl, proposalId);
+    // W1-T136 (#387 correctness rule): NO `ensureTaskTrailer` call here — a ratification
+    // branch is a plan-FILING PR (it introduces the ratified task(s), it does not
+    // implement them). `ensureTaskTrailer(result.prUrl, proposalId)` used to stamp a
+    // `Remudero-Task: <proposalId>` trailer post-hoc, undoing the no-trailer contract
+    // approveCommitMessage/openPlanPr's body now enforce (findMergedByTrailer would
+    // credit that trailer's id as DONE on merge — see lib/plan-pr-emitter.ts's doc
+    // comment). proposalId (e.g. "P19") never collides with a real task id's W1-Txxx
+    // shape, but a filing PR carries NO Remudero-Task trailer at all, full stop.
     log("pr.opened", { pr_url: result.prUrl, branch: result.branch });
     console.log(`rmd approve: ${proposalId} — plan PR opened: ${result.prUrl}`);
 

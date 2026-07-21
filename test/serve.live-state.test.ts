@@ -128,10 +128,6 @@ async function withShell<T>(deps: ServeDeps, fn: (base: string) => Promise<T>): 
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function runStart(taskId: string, runId = "r1"): string {
   return JSON.stringify({ ts: new Date().toISOString(), run_id: runId, task_id: taskId, step: "run.start" }) + "\n";
 }
@@ -169,11 +165,17 @@ test("dispatched run: in-flight-with-phase renders, elapsed ticks live, and an S
       await page.waitForFunction(() => (document.querySelector("#now-list .detail")?.textContent ?? "").includes("phase: recon"));
 
       // elapsed ticks live -- a live-updating text node, not a one-shot value frozen at render.
+      // tickElapsed() fires off a 1s setInterval that starts at page load, not at this read, so a
+      // FIXED sleep can straddle zero interval firings depending on phase alignment (flaky under
+      // CI/runner jitter -- W1-T136 round-1 fixture). Poll until the text actually changes instead
+      // of asserting after one arbitrary wall-clock window.
       const elapsedAt = async () => page.evaluate(() => document.querySelector("#now-list .elapsed")?.textContent ?? "");
       const first = await elapsedAt();
-      await sleep(1300);
+      await page
+        .waitForFunction((prev) => (document.querySelector("#now-list .elapsed")?.textContent ?? "") !== prev, first, { timeout: 4000 })
+        .catch(() => null);
       const second = await elapsedAt();
-      assert.notEqual(first, second, `elapsed must tick live -- was "${first}" both before and after 1.3s`);
+      assert.notEqual(first, second, `elapsed must tick live -- was "${first}" for the full 4s poll window`);
 
       // stamp the row so we can prove the SSE flip below updates it IN PLACE, not by replacement.
       await page.evaluate(() => document.querySelector("#now-list li")?.setAttribute("data-test-mark", "same-node"));
