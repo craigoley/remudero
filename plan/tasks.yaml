@@ -947,21 +947,30 @@
     behind more than one, and serve from the W1-T154 snapshot cache while a recompute is in flight. Do NOT
     simply raise the poll interval — that trades staleness for latency and hides the defect rather than fixing
     it.
+    CACHE INVALIDATION STAYS TRIVIAL — HOIST PER REQUEST, NO CROSS-REQUEST CACHE. Read the ledger once per
+    projection and pass the parsed lines down. Do NOT add a cache that survives between requests, and do not
+    add recompute coalescing here. Two reasons, and the second is the important one: (a) a per-request hoist has
+    no invalidation problem at all, so it cannot go stale; (b) a cross-request cache would mask STALENESS the
+    same way the pre-W1-T181 catch masked FAILURE — a surface confidently serving data that is quietly wrong is
+    the exact class this codebase has now paid for twice (merged 0/160, and 'no recent outcomes yet' over a
+    100-merge week). A 113 ms projection does not need a cache.
+    THE 250ms POLL AMPLIFIER IS NOT THIS TASK'S TO KILL. It belongs to the SSE/rendering work — the
+    unchanged-ledger and coalescing criteria were MOVED to W1-T184 (rule 16: redistributed, not dropped). Fixing
+    the algorithm here takes the recompute from 5-8s to ~113ms, which removes the outage; the cadence is then a
+    tuning question on a cheap operation rather than a backlog on an expensive one.
     MEASURE THE RESULT THE SAME WAY IT WAS DIAGNOSED. The acceptance below fixes numbers because a
     performance fix without a measured ceiling regresses silently the first time someone adds a per-task call.
     OUT OF SCOPE, deliberately: W1-T183's density rendering and W1-T184's ledger-first feed. Both are queued and
     neither addresses this — a prettier, better-sourced page still takes 49 seconds if the projection does.
   acceptance:
+    - claim: "the hoisted read is DERIVATION-EQUIVALENT — every task's verdict is byte-identical to the per-task path over the FULL real corpus"
+      proof: "equivalence test against a committed corpus fixture at production scale (>= 200 tasks, >= 18,000 ledger lines): projectPlan with the hoisted read and the per-task path produce IDENTICAL StatusProjection values for EVERY task — compared as data, not spot-checked. This is a CORRECTNESS test, not a perf assertion, and it must live beside the corpus fixture so it re-runs. FALSIFIER: a hoist that shares mutable parsed state across derivations, or that reads the ledger at a different instant than a per-task read would, could silently change a verdict for one task while every timing number improves — the 113 ms control already demonstrated equivalence is achievable, so there is no excuse for asserting speed without asserting sameness"
     - claim: "projectPlan reads and parses the ledger EXACTLY ONCE per projection, not once per task"
       proof: "unit test with an instrumented readLedger counting invocations: projecting a plan of N tasks calls it exactly 1 time, for N > 1. FALSIFIER: projectPlan today (status.ts:754-755) calls deriveStatus per task and each opens with `readLedger(deps.ledgerPath)`, so a 218-task plan over an 18,141-line ledger performs ~3.95 million line-parses per projection"
-    - claim: "a full projection over the real-scale corpus completes in well under 1 second"
-      proof: "benchmark test over a seeded corpus at production scale (>= 200 tasks, >= 18,000 ledger lines): projectPlan completes under 1000 ms. FALSIFIER, measured 2026-07-20 on the live corpus: 5,229 ms warm and 8,207 ms cold, against 113 ms for the identical derivations with a single hoisted ledger read — a 46x gap that is entirely re-parsing"
+    - claim: "projectPlan over the real-scale corpus completes UNDER 500 ms — an absolute measured budget, never 'faster than before'"
+      proof: "benchmark test over a seeded corpus at production scale (>= 200 tasks, >= 18,000 ledger lines): projectPlan completes under 500 ms, asserted as a fixed ceiling in the test itself. The criterion is stated ABSOLUTELY on purpose: a relative claim ('faster than before') cannot fail, which is the defect W1-T188 exists to answer for.  FALSIFIER, measured 2026-07-20 on the live corpus: 5,229 ms warm and 8,207 ms cold, against 113 ms for the identical derivations with a single hoisted ledger read — a 46x gap that is entirely re-parsing"
     - claim: "deriveStatus still works standalone, with no pre-read lines supplied"
       proof: "unit test: deriveStatus called directly for ONE task, with no injected readLedger, returns the same projection as before. FALSIFIER: a fix that makes pre-read lines mandatory breaks every per-task caller outside projectPlan and turns a contained performance fix into a ripple through the codebase"
-    - claim: "a recompute is not driven blindly at the poll interval — an unchanged ledger triggers no re-projection"
-      proof: "unit test: with the ledger unchanged across successive poll ticks, the projection is computed once and reused; a change triggers exactly one recompute. FALSIFIER: board.ts polls every DEFAULT_POLL_MS = 250 (board.ts:35) and boardSnapshot calls projectPlan (board.ts:97), so at 5-8s per projection the server is permanently backlogged — which is how a 5-second defect presents as a 58-second response"
-    - claim: "concurrent requests never queue behind more than one in-flight recompute"
-      proof: "unit test: N concurrent snapshot requests arriving during a recompute trigger ONE computation and are all served from it. FALSIFIER: unbounded concurrent recomputes at 250ms cadence, which is the observed backlog — GET /v1/status measured 58.7s, 54.0s and 34.5s across three successive calls, with no warm-cache improvement"
     - claim: "the measured end-to-end budget is met — first paint to data under 2 seconds, W1-T154's own bar"
       proof: "integration/timing test against a running server at production corpus scale: GET / and GET /v1/status each return in under 2000 ms. FALSIFIER, measured 2026-07-20: GET / at 49.0s cold and 42.6s warm, GET /v1/status at 58.7s/54.0s/34.5s, with connect time 0.0002s and payloads of 78 KB and 67 KB — entirely server time"
   risk: high
@@ -1609,13 +1618,17 @@
       proof: "unit test: a feed row whose GitHub enrichment is unavailable still renders with its ledger-sourced content and a marked-unavailable decoration, rather than being dropped from the feed. FALSIFIER: any implementation where a failed GitHub read reduces the feed's row count, which reproduces the empty-RECENT fixture"
     - claim: "the feed does not re-read the whole ledger per render — it holds at a ledger that grows without bound"
       proof: "unit test asserting the feed is served from a tail/index rather than a full file re-read per render, reusing the existing ledger-tail precedent in lib/board.ts. FALSIFIER: a full re-read per render, which degrades continuously as the append-only ledger grows and turns a console refresh into an O(history) operation"
+    - claim: "an UNCHANGED ledger triggers NO re-projection — the poll does not drive a recompute blindly"
+      proof: "unit test: across successive poll ticks with the ledger unchanged, the projection is computed once and reused; a change triggers exactly one recompute. FALSIFIER: board.ts polls every DEFAULT_POLL_MS = 250 (board.ts:35) and boardSnapshot calls projectPlan (board.ts:97), so before W1-T187 work arrived 20-32x faster than it completed and every request queued behind a permanent backlog — measured 2026-07-20 as GET /v1/status at 58.7s/54.0s/34.5s with no warm improvement"
+    - claim: "concurrent requests never queue behind more than ONE in-flight recompute"
+      proof: "unit test: N concurrent snapshot requests arriving during a recompute trigger ONE computation and are all served from it. FALSIFIER: unbounded concurrent recomputes at the 250ms cadence, the observed backlog behind the 2026-07-20 latency outage"
   risk: high
   origin: architect
   plan_refs: ["§7", "§7B"]
   files: [src/lib/serve.ts, src/lib/board.ts, test/serve.test.ts]
   status: queued
   attempts: 0
-  note: "CONSOLE DESIGN PASS v2, task 2 of 2 filed together (sibling W1-T183, density/IA). Directly applies the
+  note: "RECEIVED 2026-07-20 the two RECOMPUTE-CADENCE criteria (unchanged-ledger-no-reprojection, and coalesce-concurrent-recomputes) redistributed from W1-T187 per rule 16 — nothing dropped, only moved. W1-T187 stays a pure per-request hoist with no cross-request cache, because a cache there would mask staleness the way the old empty-array catch masked failure; the cadence belongs with this task's SSE work. CONSOLE DESIGN PASS v2, task 2 of 2 filed together (sibling W1-T183, density/IA). Directly applies the
     CLAIMED-vs-EVIDENCED doctrine (standing rule 22): the ledger is the fleet's own RECEIPT of what it did, and
     GitHub is a claim about the same events from a remote that can be unreachable. Sourcing the feed from the
     receipt is the doctrine made concrete.
