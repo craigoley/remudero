@@ -1354,3 +1354,74 @@ test("W1-T181: a FAILED batched fetch logs LOUDLY — console.error fires AND th
   assert.ok(errorSpy.mock.calls.length >= 1, "a failed fetch must ALSO be loud on console.error, independent of the injectable log hook");
   assert.match(String(errorSpy.mock.calls[0].arguments[0]), /buffer_overflow/);
 });
+
+// ── W1-T187 criterion 4 — "deriveStatus still works standalone, with no pre-read lines
+// supplied" — proven HERE, in this file, per the task's own `files:` list (plan/tasks.yaml),
+// rather than only in the separate test/w1-t187-*.test.ts corpus suite. The W1-T187 fix
+// (status.ts's `projectPlan`) hoists ONE ledger read and hands every task the SAME
+// already-parsed array via an overriding `readLedger` on an internal `effectiveDeps` copy —
+// `deriveStatus`'s own body/signature are untouched, and the `deps` object every OTHER caller
+// (board.ts's SSE stream, run-task.ts, correct.ts) already owns is never mutated by that
+// hoist, only spread into a fresh object local to `projectPlan`.
+//
+// Two independent proofs, deliberately NOT circular:
+//  (a) below, `deriveStatus(task, deps)` is called with a bare `deps` literal that has no
+//      `readLedger` key at all — exactly what every one of the ~50 pre-existing calls above in
+//      THIS file already do, and every one of them is UNCHANGED by this task and still passes.
+//      The exact values asserted below are hand-computed from the fixture, never re-derived
+//      via `projectPlan` — so a regression that broke BOTH paths identically could not hide here.
+//  (b) the second test below cross-checks that same standalone call against a hand-built,
+//      minimal (non-corpus) multi-task `projectPlan` call over an IDENTICAL fixture, proving
+//      the projectPlan-level hoist changed nothing observable for a per-task caller.
+test("W1-T187 criterion 4: deriveStatus(task, deps) with NO `readLedger` key on `deps` at all still resolves via the default reader, unchanged by the projectPlan-level hoist", () => {
+  const url = "https://github.com/craigoley/remudero/pull/187";
+  const github = fakeGitHub({ byRef: { [url]: { number: 187, url, state: "MERGED" } } });
+  const ledgerPath = ledgerFile([
+    { step: "run.start", task_id: "W1-T187X", run_id: "r1" },
+    { step: "pr.opened", task_id: "W1-T187X", run_id: "r1", pr_url: url },
+  ]);
+  // `deps` below is a bare object literal -- no `readLedger` property in sight, not even
+  // `readLedger: undefined` -- the exact "no pre-read lines supplied" shape the criterion names.
+  const deps = { ledgerPath, github };
+  const proj = deriveStatus(task({ id: "W1-T187X" }), deps);
+  assert.equal(proj.taskId, "W1-T187X");
+  assert.equal(proj.source, "ledger");
+  assert.equal(proj.merged, true);
+  assert.equal(proj.status, "merged");
+  assert.equal(proj.prNumber, 187);
+  assert.equal(proj.prUrl, url);
+});
+
+test("W1-T187 criterion 4: standalone deriveStatus (no readLedger override) matches the SAME task's projection inside a hoisted projectPlan pass, over a hand-built (non-corpus) multi-task fixture", () => {
+  const mergedUrl = "https://github.com/craigoley/remudero/pull/1871";
+  const openUrl = "https://github.com/craigoley/remudero/pull/1872";
+  const github = fakeGitHub({
+    byRef: {
+      [mergedUrl]: { number: 1871, url: mergedUrl, state: "MERGED" },
+      [openUrl]: { number: 1872, url: openUrl, state: "OPEN" },
+    },
+  });
+  const ledgerPath = ledgerFile([
+    { step: "run.start", task_id: "W1-T187A", run_id: "a1" },
+    { step: "pr.opened", task_id: "W1-T187A", run_id: "a1", pr_url: mergedUrl },
+    { step: "run.start", task_id: "W1-T187B", run_id: "b1" },
+    { step: "pr.opened", task_id: "W1-T187B", run_id: "b1", pr_url: openUrl },
+    { step: "run.start", task_id: "W1-T187C", run_id: "c1" }, // queued/no-PR bucket
+  ]);
+  const deps = { ledgerPath, github };
+  const plan: Plan = {
+    tasks: [task({ id: "W1-T187A" }), task({ id: "W1-T187B" }), task({ id: "W1-T187C" })],
+    byId: new Map(),
+  };
+  plan.byId = new Map(plan.tasks.map((t) => [t.id, t]));
+
+  const hoisted = projectPlan(plan, deps);
+  for (const t of plan.tasks) {
+    const standalone = deriveStatus(t, deps); // deliberately the SAME bare `deps`, no override
+    assert.deepEqual(standalone, hoisted.get(t.id), `${t.id}: standalone deriveStatus diverged from the hoisted projectPlan result`);
+  }
+  // Sanity: the fixture actually exercises distinct buckets, not three identical rows.
+  assert.equal(hoisted.get("W1-T187A")?.status, "merged");
+  assert.equal(hoisted.get("W1-T187B")?.status, "running");
+  assert.equal(hoisted.get("W1-T187C")?.status, "queued");
+});
