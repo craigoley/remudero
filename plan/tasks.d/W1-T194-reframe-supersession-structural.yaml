@@ -1,0 +1,94 @@
+- id: W1-T194
+  title: "REFRAME SUPERSESSION MUST BE STRUCTURAL, NOT RHETORICAL — `rmd reframe` gains explicit retraction and the draft-rung composer OMITS retracted rounds entirely; today a reversal is prose competing with the composer's own address-EVERY-round header"
+  repo: remudero
+  depends_on: [W1-T111, W1-T110]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "THERE IS NO WAY TO RETRACT A REFRAME ROUND — only to add another arguing against it. Verified from
+    source:
+      COMPOSER (inbox.ts:306-311): emits the header 'OPERATOR FEEDBACK (rmd reframe, P25 iii — address EVERY
+        round below in this redraft)' followed by `...proposal.reframeHistory.map((r, i) => `${i + 1}. ${r.feedback}`)`
+        — the FULL history, numbered, unconditionally.
+      CLI (run-task.ts:5548): `unknownArgError(\"reframe\", rest.slice(1), [\"--feedback\"], [])` — `--feedback` is
+        the ONLY accepted flag, so there is no surface on which to express a retraction even if the composer
+        honoured one.
+    So a later round cannot supersede an earlier one. It can only ASK the model to disregard it, while the
+    composer's own header instructs the opposite. Correctness rests on prose precedence — on the Architect
+    resolving a conflict between two instructions in the same prompt, one of which is the harness's.
+    LIVE FIXTURE, measured at filing — P34's history is three rounds and TWO of them contain the discarded
+    dollar-ceiling framing:
+      round 1 (752 chars)  — the superseded design, dollar-ceiling text PRESENT
+      round 2 (2008 chars) — a crossed-message duplicate of the superseded design, dollar text ABSENT
+      round 3 (2516 chars) — the ratified envelope, which RESTATES the dollar framing in order to reject it
+    All three go into the next redraft prompt verbatim. The Architect is told to address every round, then told
+    within round 3 to ignore rounds 1-2. The contradictory budget model is physically present in the prompt and
+    nothing but wording keeps it out of the drafted tasks.
+    THE PLAN IS A PROGRAM AND THIS IS ITS DEAD-CODE-STILL-EXECUTES CLASS. Sibling of two defects already filed:
+    standing rule 21's AMENDMENT ORPHANING (criteria added to a merged task are unreachable — dead code that
+    never runs) and W1-T190's REGISTRY DRIFT (a stored claim disagreeing with the ledger receipt). This is the
+    inverse of rule 21: not work that can never execute, but text that executes when it should not.
+    COST IS NOT HYPOTHETICAL. Each retained round is prompt budget spent re-arguing a settled question, and the
+    failure mode is silent — a drafted task that meters dollars instead of subscription headroom would look
+    entirely plausible, and only an operator who remembers the reversal would catch it."
+  design: |
+    TWO HALVES, both required — a flag with no composer change would be theatre, and a composer change with no
+    flag has nothing to read.
+    (i) CLI SURFACE. `rmd reframe <P##> --feedback "<text>" --supersedes <rounds>` (or an equivalent retraction
+        expression — round numbers, a range, or ALL). Note the arg validator at run-task.ts:5548 currently accepts
+        ONLY `--feedback` and will reject an unknown flag, so this is a defined, single-point change rather than a
+        loose addition. Retraction must be EXPLICIT — never inferred from recency, because 'the newest round wins'
+        is exactly the implicit rule that does not hold today and would silently discard a still-live earlier
+        objection the operator meant to keep.
+    (ii) COMPOSER. `inboxDraftPrompt` OMITS retracted rounds entirely. Their text must not appear — not quoted,
+        not summarised, not 'for context'. Optionally emit a provenance line ('rounds 1-2 retracted by round 3')
+        so the redraft knows history exists without carrying the argument. VERIFY the exact composer shape from
+        source before changing it; the numbering is positional today, so omitting rounds must not renumber
+        survivors in a way that makes a retraction reference ambiguous on the NEXT round.
+    RETRACTION IS RECORDED, NOT DESTROYED. The retracted feedback stays in `reframeHistory` and in the ledger —
+    this is a PROMPT-COMPOSITION change, not a deletion. `ratify.reframed` remains the append-only receipt, and an
+    operator must be able to read what was retracted and when. Deleting history to fix a prompt would trade one
+    honesty defect for a worse one.
+    NOT AN AUTO-SUPERSESSION RULE. Do not add 'the latest round wins' as a default. Multiple rounds are frequently
+    complementary — P34's own round 1 established the non-presence-gating envelope that rounds 2 and 3 build on,
+    and only its BUDGET framing was reversed. Retraction is per-round and operator-declared.
+  acceptance:
+    - claim: "a retracted round's text NEVER appears in the composed draft prompt"
+      proof: "unit test over inboxDraftPrompt: given a proposal whose round 1 is marked retracted, the composed prompt contains no substring of round 1's feedback. FALSIFIER, live at filing: P34 carries three rounds of which two contain the discarded dollar-ceiling framing, and inbox.ts:306-311 maps the FULL reframeHistory into the prompt under a header instructing the model to address every round — so the reversed budget model is physically present and only wording keeps it out of the drafted tasks"
+    - claim: "the composer never includes a round the operator explicitly retracted, regardless of recency or position"
+      proof: "unit test: a retracted MIDDLE round is omitted while later and earlier rounds survive, and no renumbering makes a subsequent retraction reference ambiguous. FALSIFIER: an implementation that only drops rounds older than the newest retraction implements 'latest wins', which is the implicit rule that does not hold today and would discard still-live earlier objections"
+    - claim: "retraction is EXPLICIT — never inferred from recency"
+      proof: "unit test: adding a new round WITHOUT a retraction flag leaves every prior round in the prompt, unchanged. FALSIFIER: auto-superseding on recency would have silently dropped P34's round 1, whose non-presence-gating envelope rounds 2 and 3 BUILD ON — only its budget framing was reversed, so an implicit rule would have discarded live design"
+    - claim: "retracted feedback is PRESERVED in history and in the ledger — composition changes, the record does not"
+      proof: "unit test: after retraction, reframeHistory still contains the round's verbatim feedback and the original ratify.reframed ledger line is untouched; only the composed prompt omits it. FALSIFIER: deleting history to fix a prompt trades a composition defect for an audit-record defect, which is strictly worse — the receipt is what makes the retraction reviewable"
+    - claim: "`rmd reframe` accepts the retraction flag and rejects it nowhere else"
+      proof: "unit test over the CLI arg validator: --supersedes is accepted for reframe with a valid round expression and rejected with a usage error for an invalid one. FALSIFIER: run-task.ts:5548 today declares --feedback as the ONLY accepted flag, so a retraction has no surface to be expressed on even if the composer honoured one"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7B"]
+  files: [src/lib/inbox.ts, test/inbox.test.ts]
+  status: queued
+  attempts: 0
+  cycle_residual: |
+    FOR THE CURRENT P34 CYCLE, which runs BEFORE this task ships and therefore on prose precedence by necessity:
+    P34's round-3 redraft will be composed with all three rounds present, two of which carry the discarded
+    dollar-ceiling framing. Round 3 opens with an explicit supersession instruction, and that is the only thing
+    keeping the reversed budget model out of the drafted tasks.
+    VERIFICATION OBLIGATION when that draft lands, BEFORE it is surfaced for approval: read the drafted tasks and
+    confirm the DOLLAR framing is absent — no per-unattended-window dollar cap, no dollar-metered ceiling, budget
+    expressed as SUBSCRIPTION HEADROOM (weekly capacity above an operator reserve) per round 3 clause (c).
+    IF ANY DRAFTED TASK METERS DOLLARS, that is this task's fixture firing in production: prose precedence failed,
+    the draft goes back via another reframe with the finding attached, and the occurrence is recorded on this task
+    as the empirical falsifier rather than the hypothetical one.
+  note: "FILED 2026-07-21 as a tasks.d shard per instruction. NOTE the position consequence: loadPlan appends
+    shards AFTER every tasks.yaml task and the drain scans in FILE ORDER, so this sits at the BOTTOM of the queue
+    until promoted — the same demotion W1-T179, W1-T177, W1-T178 and W1-T182 each needed rescuing from.
+    Sibling of standing rule 21 (amendment orphaning) and W1-T190 (registry drift): the plan is a program with the
+    code's bug classes, and this is its DEAD-CODE-STILL-EXECUTES member — rule 21 is work that can never run,
+    this is text that runs when it should not.
+    Carries a cycle_residual block: the current P34 redraft happens before this ships, so the dollar framing must
+    be verified absent from the drafted tasks by hand before approval. That check is the difference between
+    catching this fixture and shipping it.
+    risk:medium — it changes prompt composition, and the realistic failure is over-reach: dropping a round the
+    operator did not retract, or deleting history to simplify the prompt. Both have dedicated criteria."
