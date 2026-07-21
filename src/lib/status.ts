@@ -395,6 +395,105 @@ export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedge
 }
 
 /**
+ * The minimal extra fs surface an INCREMENTAL reader needs on top of {@link LedgerFsDeps}: the
+ * current file size, and the bytes from `start` to EOF — never the whole file. Deliberately
+ * property-accessed off the same mutable `fs` default import at call time (see this module's
+ * header note on why), so a test spying on `fs.statSync`/`fs.openSync`/`fs.readSync` observes
+ * every real call, exactly like {@link LedgerFsDeps}'s existing two methods already promise.
+ */
+export interface LedgerTailFsDeps extends LedgerFsDeps {
+  statSize: (path: string) => number;
+  readRange: (path: string, start: number, end: number) => string;
+}
+
+const realLedgerTailFs: LedgerTailFsDeps = {
+  ...realLedgerFs,
+  statSize: (path) => fs.statSync(path).size,
+  readRange: (path, start, end) => {
+    const fd = fs.openSync(path, "r");
+    try {
+      const buf = Buffer.alloc(end - start);
+      fs.readSync(fd, buf, 0, end - start, start);
+      return buf.toString("utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  },
+};
+
+/**
+ * Persistent state a {@link readLedgerTail} caller holds ACROSS calls (one per long-lived route/
+ * connection, never reconstructed per render — mirroring board.ts's own `RecentActivityCache`/
+ * `BoardSnapshotCache`/SSE `lastLineCount` handles). `lines` is the SAME array reference handed
+ * back on every call and only ever appended to, never rebuilt — a caller may hold onto a prior
+ * return value across calls and it stays valid (append-only, same identity).
+ */
+export interface LedgerTailCache {
+  /** @internal — byte offset already consumed. */
+  offset: number;
+  /** @internal — a not-yet-newline-terminated trailing partial line, carried to the next read. */
+  pending: string;
+  /** @internal — cumulative parsed lines; never re-parsed once minted. */
+  lines: Array<Record<string, unknown>>;
+}
+
+export function createLedgerTailCache(): LedgerTailCache {
+  return { offset: 0, pending: "", lines: [] };
+}
+
+/**
+ * INCREMENTAL ledger read (W1-T184): only the bytes appended since `cache`'s last read are ever
+ * pulled off disk and parsed; an UNCHANGED file costs exactly one `statSync` call — no `open`/
+ * `read` at all, and NO re-parse of a single already-seen line. This is the fix for {@link
+ * readLedgerLines} being a full file re-read on every call, which is fine for the many one-shot
+ * CLI callers but wrong for a route polled every ~250ms (lib/board.ts's DEFAULT_POLL_MS) against a
+ * ledger that only ever grows — the "a console refresh degrades into an O(history) operation" bug
+ * behind both the RECENT feed's per-render cost and GET /v1/status's 2026-07-20 latency outage
+ * (a `createBoardSnapshotCache` hit still paid a full re-read+re-parse of the WHOLE ledger just to
+ * compute its cache key, before this fix). Returns the SAME cumulative array every call (append-
+ * only, never rebuilt) — a caller may safely hold a reference across calls. A file shorter than
+ * last observed (rotation/truncation — the append-only ledger writer itself never does this)
+ * degrades safely by rescanning from byte 0, mirroring computeRecentActivity's own "ledger got
+ * shorter -> rescan from scratch" rule at the line-cursor layer above this one.
+ */
+export function readLedgerTail(
+  path: string,
+  cache: LedgerTailCache,
+  fsDeps: LedgerTailFsDeps = realLedgerTailFs,
+): Array<Record<string, unknown>> {
+  if (!fsDeps.existsSync(path)) {
+    if (cache.offset !== 0 || cache.lines.length > 0) {
+      cache.offset = 0;
+      cache.pending = "";
+      cache.lines = [];
+    }
+    return cache.lines;
+  }
+  const size = fsDeps.statSize(path);
+  if (size === cache.offset) return cache.lines; // unchanged -- one statSync, nothing else.
+  if (size < cache.offset) {
+    cache.offset = 0;
+    cache.pending = "";
+    cache.lines = [];
+  }
+  const chunk = fsDeps.readRange(path, cache.offset, size);
+  cache.offset = size;
+  const text = cache.pending + chunk;
+  const segments = text.split("\n");
+  cache.pending = segments.pop() ?? ""; // the last segment may be a not-yet-newline-terminated partial line.
+  for (const raw of segments) {
+    const line = raw.trim();
+    if (!line) continue;
+    try {
+      cache.lines.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      cache.lines.push({});
+    }
+  }
+  return cache.lines;
+}
+
+/**
  * The PR-precedence fields ONLY from a prior {@link StatusProjection} (W1-T179) — `taskId`/
  * `status`/`merged`/`source`/`pr*`/`rejected_candidates`, deliberately EXCLUDING the taxonomy
  * layer `deriveStatus` adds on top (`phase`/`startedAt`/`elapsedMs`/`needsHuman`/

@@ -28,7 +28,16 @@
 import type { ServerResponse } from "node:http";
 import type { Plan, Task, TaskRisk } from "./plan.js";
 import { TASK_STATUSES } from "./plan.js";
-import { deriveStatus, projectPlan, readLedgerLines, type DeriveDeps, type StatusProjection } from "./status.js";
+import {
+  createLedgerTailCache,
+  deriveStatus,
+  projectPlan,
+  readLedgerLines,
+  readLedgerTail,
+  type DeriveDeps,
+  type LedgerTailCache,
+  type StatusProjection,
+} from "./status.js";
 import type { Route, SseRoute, SseSend } from "./service.js";
 
 /** Ledger poll pace for the SSE stream — comfortably under the 2s acceptance budget. */
@@ -137,34 +146,48 @@ export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
 }
 
 /**
- * LIVE ACCUMULATED SPEND/TURNS (W1-T184): find `taskId`'s CURRENT run (the `run_id` of its
- * latest `run.start` line — mirrors {@link deriveRunState}'s own "a fresh run.start always
- * resets the scan" rule, so an earlier run's spend never leaks into a later one's total), then
- * sum `cost_usd`/`num_turns` over every `implement.done`/`fix.done` line carrying that SAME
- * `run_id`. Deliberately narrow to those two step names (never a blanket sum of every `cost_usd`
- * field) — `budget.warning`/`verdict` lines log the RUNNING TOTAL, not an incremental amount, so
- * summing those too would double-count exactly the spend `implement.done`/`fix.done` already
- * report (verified against run-task.ts's own `log(...)` call sites, not assumed). Returns
- * undefined only when the task has no `run.start` at all — the phase/inFlight taxonomy above
- * already guarantees one exists whenever this is called.
+ * LIVE ACCUMULATED SPEND/TURNS (W1-T184): sum `cost_usd`/`num_turns` over every
+ * `implement.done`/`fix.done` line for `taskId` SINCE its latest `run.start` — mirroring {@link
+ * deriveRunState}'s OWN reset rule (task_id + `run.start`/`verdict`, never `run_id`), not a
+ * separate narrower one. A prior version of this scan required every summed line to carry the
+ * SAME `run_id` as the `run.start` line — which silently dropped every cold fix-rung dispatch
+ * (rmd sweep's `dispatchFix`/rmd fix's bootstrap, run-task.ts's `buildSweepEffects`): those stamp
+ * their `fix.dispatch`/`fix.done` lines with the OUTER sweep/fix invocation's OWN pseudo `run_id`
+ * ("SWEEP-<ts>"/"FIX-<ts>"), never the original run's — while still carrying the task's REAL
+ * `task_id`, which is exactly what {@link deriveRunState} keys its own inFlight/phase scan on.
+ * The result: a task correctly rendered `phase: "fix-rung"` (in flight) while its live spend
+ * silently stayed frozen at the ORIGINAL run's total, invisible for the whole fix-rung duration —
+ * the exact "tonight's post-merge burn was invisible on an open console" falsifier (two fix
+ * rungs, ~1.24 USD/38 turns then ~1.30 USD/38 turns, ~2.54 USD/76 turns total, every line
+ * present in the ledger as it happened). Deliberately narrow to those two step names (never a
+ * blanket sum of every `cost_usd` field) — `budget.warning`/`verdict` lines log the RUNNING
+ * TOTAL, not an incremental amount, so summing those too would double-count exactly the spend
+ * `implement.done`/`fix.done` already report (verified against run-task.ts's own `log(...)` call
+ * sites, not assumed). Returns undefined only when the task has no run currently in flight — the
+ * phase/inFlight taxonomy above already guarantees one exists whenever this is called.
  */
 function liveRunSpend(lines: Array<Record<string, unknown>>, taskId: string): { spendUsd: number; turns: number } | undefined {
-  let runId: string | undefined;
-  for (const line of lines) {
-    if (line.task_id === taskId && line.step === "run.start" && typeof line.run_id === "string") {
-      runId = line.run_id;
-    }
-  }
-  if (!runId) return undefined;
+  let inFlight = false;
   let spendUsd = 0;
   let turns = 0;
   for (const line of lines) {
-    if (line.run_id !== runId) continue;
+    if (line.task_id !== taskId) continue;
+    if (line.step === "run.start") {
+      inFlight = true;
+      spendUsd = 0;
+      turns = 0;
+      continue;
+    }
+    if (line.step === "verdict") {
+      inFlight = false;
+      continue;
+    }
+    if (!inFlight) continue;
     if (line.step !== "implement.done" && line.step !== "fix.done") continue;
     if (typeof line.cost_usd === "number") spendUsd += line.cost_usd;
     if (typeof line.num_turns === "number") turns += line.num_turns;
   }
-  return { spendUsd, turns };
+  return inFlight ? { spendUsd, turns } : undefined;
 }
 
 /**
@@ -198,18 +221,46 @@ export interface BoardSnapshotCache {
   get(deps: BoardDeps): BoardSnapshot;
 }
 
+/**
+ * `github.readFailed?.()` guarded (W1-T184 hardening): every OTHER {@link GitHub} method this
+ * module calls into GitHub through is already wrapped where it matters (see
+ * {@link decoratePrTitle}'s own note on why a defensive try/catch is load-bearing here, not
+ * merely tidy) — this ONE call sat outside any guard, so a gateway that throws from
+ * `readFailed()` itself (not merely a fail-soft null/false, the exact malformed-gateway shape
+ * the RECENT feed's own throwing-gateway test already covers for `prByRef`) would blow up the
+ * cache-key computation and 500 the WHOLE /v1/status request rather than degrade one field. Fails
+ * CLOSED (treats an unreadable health signal as "GitHub is having a bad day") rather than open,
+ * since the whole point of `readFailed()` is never to under-report an outage.
+ */
+function safeReadFailed(github: BoardDeps["github"]): boolean {
+  try {
+    return github.readFailed?.() ?? false;
+  } catch {
+    return true;
+  }
+}
+
 export function createBoardSnapshotCache(): BoardSnapshotCache {
   let cached: { ledgerLen: number; ghFailed: boolean; snapshot: BoardSnapshot } | undefined;
+  // ONE persistent tail cursor for this route's whole lifetime (never reconstructed per request,
+  // mirroring RecentActivityCache/the SSE stream's own `lastLineCount`) — see readLedgerTail's
+  // own doc for why this is the fix for a cache HIT still paying a full ledger re-read+re-parse
+  // just to compute `ledgerLen`, which degraded exactly like the 2026-07-20 GET /v1/status outage
+  // (58.7s/54.0s/34.5s, never improving) as the ledger grew without bound.
+  const tail = createLedgerTailCache();
   return {
     get(deps: BoardDeps): BoardSnapshot {
-      const readLedger = deps.readLedger ?? readLedgerLines;
+      const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, tail));
       const ledgerLen = readLedger(deps.ledgerPath).length;
       // readFailed() is itself cheap/idempotent here: ghGateway's is a sticky flag read (no `gh`
       // call), and buildBatchedGithub's own index() is already TTL-cached internally — neither
       // gateway shells out again just because THIS check asked.
-      const ghFailed = deps.github.readFailed?.() ?? false;
+      const ghFailed = safeReadFailed(deps.github);
       if (cached && cached.ledgerLen === ledgerLen && cached.ghFailed === ghFailed) return cached.snapshot;
-      const snapshot = computeBoardSnapshot(deps);
+      // Hand computeBoardSnapshot the SAME already-resolved reader (and, on the default path, the
+      // SAME already-read `lines` array `readLedger` above just produced) rather than letting it
+      // re-resolve `deps.readLedger ?? readLedgerLines` on its own — one read, not two.
+      const snapshot = computeBoardSnapshot({ ...deps, readLedger });
       cached = { ledgerLen, ghFailed, snapshot };
       return snapshot;
     },
@@ -289,6 +340,12 @@ interface RecentActivityState {
   /** `run_id` -> its `pr.opened` PR url — carries a run's OWN PR forward onto later lines (e.g.
    *  `verdict`/`fix.done`) that name no `pr_url` of their own. */
   prByRun: Map<string, string>;
+  /** The FILE-LEVEL tail cursor {@link readLedgerTail} reads/writes — one layer below
+   *  `scannedLines`' line-level cursor. `scannedLines` alone stops this module from
+   *  re-decorating/re-classifying an already-seen LINE, but every call still paid a full
+   *  `readFileSync`+re-parse of the WHOLE ledger to produce that line array in the first place;
+   *  this is what makes even THAT read O(new bytes), not O(history) — see readLedgerTail's doc. */
+  ledgerTail: LedgerTailCache;
 }
 
 /** Opaque handle a caller holds across requests (one per `buildRecentRoute` instance, mirroring
@@ -299,7 +356,7 @@ export interface RecentActivityCache {
 }
 
 export function createRecentActivityCache(): RecentActivityCache {
-  return { state: { scannedLines: 0, entries: [], prByRun: new Map() } };
+  return { state: { scannedLines: 0, entries: [], prByRun: new Map(), ledgerTail: createLedgerTailCache() } };
 }
 
 function prNumberFromUrl(url: string): number | undefined {
@@ -321,15 +378,18 @@ function decoratePrTitle(entry: RecentActivityEntry, deps: BoardDeps): RecentAct
   // caller-side derivation layer to absorb a surprise throw. A defensive try/catch here is the
   // difference between "one row degrades" and "the whole /v1/recent request 500s" — which would
   // itself reproduce the empty-RECENT fixture this task exists to fix, just via a crash instead
-  // of an empty array.
+  // of an empty array. BOTH github calls below (`prByRef` AND `readFailed`) live inside this SAME
+  // try — an earlier version only guarded `prByRef`, so a gateway that throws from `readFailed()`
+  // itself (rather than merely reporting it, fail-soft) still 500'd the whole request and emptied
+  // the feed, uncaught past this function's own return.
   try {
     const pr = deps.github.prByRef(entry.prUrl);
     if (pr?.title) return { ...entry, prTitle: pr.title };
+    if (deps.github.readFailed?.()) return { ...entry, githubUnavailable: true };
+    return entry;
   } catch {
     return { ...entry, githubUnavailable: true };
   }
-  if (deps.github.readFailed?.()) return { ...entry, githubUnavailable: true };
-  return entry;
 }
 
 /**
@@ -379,9 +439,14 @@ function classifyLine(
  * PR link exists) — GitHub decorates, it never gates (see {@link decoratePrTitle}).
  */
 export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCache, max = 20): RecentActivityEntry[] {
-  const readLedger = deps.readLedger ?? readLedgerLines;
-  const lines = readLedger(deps.ledgerPath);
   const state = cache.state;
+  // Default reader is INCREMENTAL (readLedgerTail, keyed off this SAME cache's own persistent
+  // ledgerTail cursor) — an unchanged ledger costs one statSync, and a grown one reads only the
+  // NEW bytes, never the whole file again. `state.scannedLines` below then further limits which
+  // of those (already cheaply-obtained) lines get re-classified/re-decorated — two independent
+  // tail cursors, one at the file-I/O layer, one at the classification layer.
+  const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, state.ledgerTail));
+  const lines = readLedger(deps.ledgerPath);
   // A shorter ledger than last scanned should never happen (append-only) -- degrade safely by
   // rescanning from scratch rather than slicing with a negative/nonsensical offset.
   if (lines.length < state.scannedLines) {
@@ -446,7 +511,15 @@ export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): Ss
     path: "/v1/status/stream",
     scope: "read",
     subscribe: (send: SseSend) => {
-      const readLedger = deps.readLedger ?? readLedgerLines;
+      // ONE persistent tail cursor for this connection's whole lifetime (never reconstructed per
+      // tick) — see readLedgerTail's own doc: an unchanged ledger between ticks (the common case
+      // at a 250ms cadence) costs one statSync, not a full re-read+re-parse of the whole file.
+      const tail = createLedgerTailCache();
+      const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, tail));
+      // Hand deriveStatus (via deriveForStream below) the SAME resolved reader, so its own
+      // internal ledger read reuses this tick's already-read `lines` instead of re-resolving
+      // `deps.readLedger ?? readLedgerLines` (a fresh full read) once per task, every tick.
+      const effectiveDeps: BoardDeps = { ...deps, readLedger };
 
       // LIVE SPEND/TURNS OVER SSE (W1-T184 fix): the SSE payload used to be a bare
       // `deriveStatus(task, deps)` — never carrying `liveSpendUsd`/`liveTurns` at all, even
@@ -460,7 +533,7 @@ export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): Ss
         task: Task,
         lines: Array<Record<string, unknown>>,
       ): StatusProjection & { liveSpendUsd?: number; liveTurns?: number } => {
-        const projection = deriveStatus(task, deps);
+        const projection = deriveStatus(task, effectiveDeps);
         if (!projection.phase) return projection;
         const spend = liveRunSpend(lines, task.id);
         return spend ? { ...projection, liveSpendUsd: spend.spendUsd, liveTurns: spend.turns } : projection;

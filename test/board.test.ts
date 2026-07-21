@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
+import fs, { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -522,6 +522,73 @@ test("W1-T184: a GitHub gateway that THROWS (not merely fail-soft-nulls) still d
   assert.ok(entries.every((e) => e.githubUnavailable === true));
 });
 
+test("W1-T184: a gateway that throws from readFailed() ITSELF (not merely prByRef) still degrades one row, never drops it — the empty-RECENT fixture must not reproduce via a crash in the health check", () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1", title: "a task" }), task({ id: "W1-T2", title: "another task" })]);
+  const prUrl1 = "https://github.com/o/r/pull/1";
+  const prUrl2 = "https://github.com/o/r/pull/2";
+  appendFileSync(
+    ledgerPath,
+    [
+      JSON.stringify({ ts: "2026-07-20T10:00:00Z", run_id: "r1", task_id: "W1-T1", step: "pr.opened", pr_url: prUrl1 }),
+      JSON.stringify({ ts: "2026-07-20T10:00:01Z", run_id: "r1", task_id: "W1-T1", step: "verdict", verdict: "merged", cost_usd: 1 }),
+      JSON.stringify({ ts: "2026-07-20T10:01:00Z", run_id: "r2", task_id: "W1-T2", step: "pr.opened", pr_url: prUrl2 }),
+      JSON.stringify({ ts: "2026-07-20T10:01:01Z", run_id: "r2", task_id: "W1-T2", step: "verdict", verdict: "merged", cost_usd: 2 }),
+    ].join("\n") + "\n",
+  );
+  // prByRef fail-soft-nulls (a well-behaved "PR not found" answer), but the SEPARATE readFailed()
+  // health check itself throws -- a malformed/misconfigured gateway shape that is just as real as
+  // the already-covered "prByRef throws" one, and was NOT wrapped by the try/catch that used to
+  // sit around prByRef alone.
+  const flakyHealthCheck: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    readFailed: () => {
+      throw new Error("boom: the health check itself is broken");
+    },
+  };
+  const entries = computeRecentActivity({ plan, ledgerPath, github: flakyHealthCheck }, createRecentActivityCache());
+  assert.equal(entries.length, 2, "both rows still render despite the throwing readFailed()");
+  assert.ok(entries.every((e) => e.githubUnavailable === true), "degrades exactly like a well-behaved failed read");
+});
+
+test("W1-T184: GET /v1/recent never 500s when readFailed() throws — reachable through the real assembled route, not just the pure function", async () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1", title: "a task" })]);
+  const prUrl = "https://github.com/o/r/pull/1";
+  appendFileSync(
+    ledgerPath,
+    [
+      JSON.stringify({ ts: "2026-07-20T10:00:00Z", run_id: "r1", task_id: "W1-T1", step: "pr.opened", pr_url: prUrl }),
+      JSON.stringify({ ts: "2026-07-20T10:00:01Z", run_id: "r1", task_id: "W1-T1", step: "verdict", verdict: "merged", cost_usd: 1 }),
+    ].join("\n") + "\n",
+  );
+  const flakyHealthCheck: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    readFailed: () => {
+      throw new Error("boom: the health check itself is broken");
+    },
+  };
+  const deps: BoardDeps = { plan, ledgerPath, github: flakyHealthCheck };
+  const server = createService({ tokens: { read: READ_TOKEN, write: WRITE_TOKEN }, routes: [buildRecentRoute(deps)] });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const { port } = server.address() as AddressInfo;
+    const res = await fetch(`http://127.0.0.1:${port}/v1/recent`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    assert.equal(res.status, 200, "a broken health check must never 500 the request — that would empty the feed exactly like FIXTURE 1");
+    const body = (await res.json()) as { entries: Array<{ githubUnavailable?: boolean }> };
+    assert.equal(body.entries.length, 1, "the row still renders, ledger-sourced");
+    assert.equal(body.entries[0]!.githubUnavailable, true);
+  } finally {
+    server.close();
+  }
+});
+
 test("W1-T184: the activity feed tails the ledger — a render never re-decorates (re-fetches GitHub for) an already-seen line, only the new ones", () => {
   const ledgerPath = tmpLedgerPath();
   const plan = planOf([task({ id: "W1-T1", title: "t1" }), task({ id: "W1-T2", title: "t2" })]);
@@ -560,6 +627,42 @@ test("W1-T184: the activity feed tails the ledger — a render never re-decorate
   assert.equal(calls, 1, "a new row with NO prUrl triggers no GitHub call at all");
 });
 
+test("W1-T184: computeRecentActivity's underlying ledger read is INCREMENTAL — an unchanged ledger costs no readFileSync/read at all, and a grown one reads only the NEW bytes, never a full re-read of the whole file (the O(history)-per-render performance criterion, proven at the actual fs boundary, not merely the classification layer)", (t) => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1", title: "t1" })]);
+  const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub() };
+  const cache = createRecentActivityCache();
+
+  // A sizeable BASELINE the ledger already carries before the render loop starts — large enough
+  // that "read the whole file again" and "read only the new bytes" are trivially distinguishable
+  // by byte count, not just call count. Lines a real task never names ("PAD") so they occupy real
+  // file bytes without affecting classification.
+  const baseline =
+    Array.from({ length: 500 }, (_, i) => JSON.stringify({ ts: "2026-07-20T09:00:00Z", run_id: `pad-${i}`, task_id: "PAD", step: "noop" })).join(
+      "\n",
+    ) + "\n";
+  appendFileSync(ledgerPath, baseline);
+  computeRecentActivity(deps, cache); // prime the tail cursor past the baseline
+
+  const readFileSyncSpy = t.mock.method(fs, "readFileSync");
+  const readSyncSpy = t.mock.method(fs, "readSync");
+
+  computeRecentActivity(deps, cache); // re-render, ledger UNCHANGED
+  assert.equal(readFileSyncSpy.mock.calls.length, 0, "an unchanged ledger must never call the whole-file reader");
+  assert.equal(readSyncSpy.mock.calls.length, 0, "an unchanged ledger costs one statSync, not a read");
+
+  appendFileSync(
+    ledgerPath,
+    JSON.stringify({ ts: "2026-07-20T10:00:00Z", run_id: "r1", task_id: "W1-T1", step: "implement.done", cost_usd: 0.1, num_turns: 2 }) + "\n",
+  );
+  const entries = computeRecentActivity(deps, cache);
+  assert.equal(entries.length, 1);
+  assert.equal(readFileSyncSpy.mock.calls.length, 0, "growth is read via the incremental byte-range reader, never the whole-file reader");
+  assert.equal(readSyncSpy.mock.calls.length, 1, "exactly one incremental read for the one grown chunk");
+  const length = (readSyncSpy.mock.calls[0]!.arguments as unknown[])[3] as number; // fs.readSync(fd, buffer, offset, length, position)
+  assert.ok(length < baseline.length, "the incremental read pulls only the NEW bytes, nowhere near the whole (500-line) baseline");
+});
+
 test("W1-T184: NOW rows carry LIVE accumulated spend/turns, summed from implement.done/fix.done lines of the task's CURRENT run, ticking as more lines land", () => {
   const ledgerPath = tmpLedgerPath();
   const plan = planOf([task({ id: "W1-T1" })]);
@@ -578,6 +681,43 @@ test("W1-T184: NOW rows carry LIVE accumulated spend/turns, summed from implemen
   appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T10:02:00Z", run_id: "r1", task_id: "W1-T1", step: "fix.done", strike: 1, cost_usd: 1.3, num_turns: 38 }) + "\n");
   row = computeBoardSnapshot(deps).tasks.find((t) => t.taskId === "W1-T1")!;
   assert.equal(row.liveSpendUsd, 2.54, "ticks upward as further lines are appended (the FIXTURE 2 shape: ~2.54 USD total)");
+  assert.equal(row.liveTurns, 76);
+});
+
+test("W1-T184: live spend/turns accumulate a COLD fix-rung dispatch's cost too, even though its fix.dispatch/fix.done lines carry the SWEEP/FIX invocation's OWN pseudo run_id, not the task's original run.start run_id (the real PR #388/#398 post-merge-review-fix shape: run-task.ts's buildSweepEffects stamps task_id: task.id but run_id: `SWEEP-<ts>`/`FIX-<ts>`)", () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1" })]);
+  // Fixed `now` close to every ledger ts below (W1-T179's liveness bound is 30 minutes) — same
+  // discipline the "NOW rows carry LIVE accumulated spend/turns" test above already uses, so an
+  // in-flight ledger-only trace with no open PR still renders `running`/`phase`, not `orphaned`.
+  const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub(), now: () => Date.parse("2026-07-20T22:10:00Z") };
+
+  // The ORIGINAL `rmd run-task` attempt: run.start under its own run_id, an implement.done, then
+  // a failing review leaves the task in-flight with no verdict yet (the process has since exited
+  // — this is exactly the "PR discovered cold on a poll" shape sweep/fix pick up afterward).
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T22:00:00Z", run_id: "r1", task_id: "W1-T1", step: "run.start" }) + "\n");
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T22:01:00Z", run_id: "r1", task_id: "W1-T1", step: "implement.done", cost_usd: 0, num_turns: 0 }) + "\n");
+
+  // `rmd sweep`'s cold dispatchFix (run-task.ts buildSweepEffects): the OUTER log stamps every
+  // line with the sweep invocation's OWN run_id ("SWEEP-<ts>") but overrides task_id to the REAL
+  // task — see run-task.ts's own comment: "`fix.dispatch`/`fix.review` lines need the REAL task
+  // id ... `extra`'s own `task_id` wins over the outer default". No fresh run.start is logged for
+  // this dispatch (dispatchFix calls runFixRung directly, never runTask) — deriveRunState's own
+  // task_id-keyed scan (never run_id-keyed) is exactly why the task still renders phase:
+  // "fix-rung" here; liveRunSpend must track that SAME rule, not a narrower run_id match.
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T22:02:00Z", run_id: "SWEEP-1784000000000", task_id: "W1-T1", step: "fix.dispatch", strike: 1 }) + "\n");
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T22:03:00Z", run_id: "SWEEP-1784000000000", task_id: "W1-T1", step: "fix.done", strike: 1, cost_usd: 1.24, num_turns: 38 }) + "\n");
+
+  let row = computeBoardSnapshot(deps).tasks.find((t) => t.taskId === "W1-T1")!;
+  assert.equal(row.phase, "fix-rung");
+  assert.equal(row.liveSpendUsd, 1.24, "the cold fix-rung's spend must not be invisible just because its run_id differs from run.start's");
+  assert.equal(row.liveTurns, 38);
+
+  // A second cold dispatch (`rmd fix`, a different pseudo run_id again) piles onto the SAME total.
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T22:04:00Z", run_id: "FIX-1784100000000", task_id: "W1-T1", step: "fix.dispatch", strike: 2 }) + "\n");
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T22:05:00Z", run_id: "FIX-1784100000000", task_id: "W1-T1", step: "fix.done", strike: 2, cost_usd: 1.3, num_turns: 38 }) + "\n");
+  row = computeBoardSnapshot(deps).tasks.find((t) => t.taskId === "W1-T1")!;
+  assert.equal(row.liveSpendUsd, 2.54, "tonight's post-merge-review burn: ~1.24 USD/38 turns then ~1.30 USD/38 turns, ~2.54 USD total");
   assert.equal(row.liveTurns, 76);
 });
 
@@ -696,6 +836,40 @@ test("W1-T184: createBoardSnapshotCache recomputes the instant GitHub's OWN obse
   assert.equal(calls, 2, "GitHub's own health flipped -> exactly one fresh recompute, with no ledger change to key off");
   cache.get(deps);
   assert.equal(calls, 2, "and it settles back to a cache hit once the new health reading is captured");
+});
+
+test("W1-T184: createBoardSnapshotCache's cache-KEY check is itself INCREMENTAL — a cache HIT costs one statSync, never a full readFileSync of the whole ledger, however large it has grown. This is the fix for the 2026-07-20 GET /v1/status outage (58.7s/54.0s/34.5s, no warm improvement): memoizing the EXPENSIVE projectPlan/gh work was not enough while computing the cache key still paid a full re-read+re-parse of the whole file on every single poll tick", (t) => {
+  const ledgerPath = tmpLedgerPath();
+  writeFileSync(ledgerPath, "");
+  const plan = planOf([task({ id: "W1-T1" })]);
+  const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub() };
+  const cache = createBoardSnapshotCache();
+
+  // A sizeable ledger BEFORE the poll loop starts -- large enough to make "full re-read" and
+  // "one statSync" trivially distinguishable.
+  const baseline =
+    Array.from({ length: 500 }, (_, i) => JSON.stringify({ ts: "2026-07-20T09:00:00Z", run_id: `pad-${i}`, task_id: "PAD", step: "noop" })).join(
+      "\n",
+    ) + "\n";
+  appendFileSync(ledgerPath, baseline);
+  cache.get(deps); // prime
+
+  const readFileSyncSpy = t.mock.method(fs, "readFileSync");
+  const readSyncSpy = t.mock.method(fs, "readSync");
+
+  // "N concurrent requests" simulated as N synchronous calls in a row (Node's single event-loop
+  // thread makes true interleaving impossible while a synchronous handler runs — see
+  // createBoardSnapshotCache's own doc) -- every one of these must be a cheap cache hit.
+  cache.get(deps);
+  cache.get(deps);
+  cache.get(deps);
+  assert.equal(readFileSyncSpy.mock.calls.length, 0, "N repeated/'concurrent' cache hits must never fall back to a full-file read");
+  assert.equal(readSyncSpy.mock.calls.length, 0, "and must cost nothing beyond the statSync already inside a cache-hit ledgerLen check");
+
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T10:00:00Z", run_id: "r1", task_id: "W1-T1", step: "run.start" }) + "\n");
+  cache.get(deps);
+  assert.equal(readFileSyncSpy.mock.calls.length, 0, "even a genuine recompute reads the ledger incrementally, never the whole file again");
+  assert.ok(readSyncSpy.mock.calls.length >= 1, "the grown tail is pulled via the incremental byte-range reader");
 });
 
 test("GET /v1/recent: reachable through the real assembled route (not just the pure function), still ledger-first", async () => {
