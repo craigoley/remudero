@@ -1,0 +1,74 @@
+- id: W1-T230
+  title: "the arm decision trusts the status channel, which is writable and proved decorative - it must key off the orchestrator's own ledgered verdict for the exact head SHA"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "2026-07-21. The remudero-review status channel took SEVEN contradictory writes on one SHA
+    (PR 449, head 833561d), including a keyword-only CAPPED success overwriting an executed failure, and one
+    write 85 seconds AFTER the PR merged. Two PRs merged riding transient green windows on that channel.
+    W1-T203 fences the ROUTINE writer - hooks/deny-floor.sh refuses a worker gh api POST to a statuses
+    endpoint - but the arm path still trusts the channel, so any process outside the hook restores the surface.
+    A worker was live under the pause carve-out that same day.
+    THE HOUSE DOCTRINE ALREADY ANSWERS THIS, in the other direction. Task status derives from GitHub rather
+    than tasks.yaml because the yaml status field proved decorative. The arm decision should derive from the
+    orchestrator's own ledgered verdict because the status channel proved decorative AND writable - strictly
+    worse than decorative.
+    VERIFIED FROM SOURCE AT FILING, and two of these correct what a reader would assume.
+    (a) SEVEN arm call sites exist, all reaching armAutoMerge (run-task.ts:442), which ends in
+    `gh pr merge --auto --squash` (run-task.ts:464): lines 2611, 2987, 3368, 4562 (the sweep hook), 5526, 5721
+    and 6168.
+    (b) FOUR of those sites compute a review result and then arm UNCONDITIONALLY - the shape is
+    `const reviewCode = await reviewCommand(prNum); armAutoMerge(prUrl);` at 3368, 5526, 5721 and 6168. The
+    verdict is not consulted before arming. Merge safety today rests ENTIRELY on GitHub evaluating the required
+    check, which is the writable channel this task removes from the decision.
+    (c) The record this task needs already exists: the judge writes a review.posted ledger line carrying
+    head_sha, state, proof_exec and floor_degraded, appended by the orchestrator and readable from any other
+    process. Nothing new has to be invented to key off it.
+    (d) W1-T203's provenance check is currently INERT in production - it is wrapped in
+    `if (trustedLogin)` reading REMUDERO_REVIEWER_LOGIN (run-task.ts:443), and that variable is unset on this
+    host. So the status channel is, today, exactly as trusted as it was before W1-T203 merged."
+  design: |
+    EVERY ARM POINT KEYS OFF AN ORCHESTRATOR-WRITTEN LEDGER VERDICT FOR THE EXACT HEAD SHA. Not the status API,
+    not in-memory state. The status remains posted for branch protection and for display, but it becomes
+    strictly downstream of the decision and is never an input to it.
+    NO RECORD MEANS NO ARM. Fail closed. A PR whose head has no ledgered verdict is left unarmed, which is the
+    same shape as no verdict yet - it waits, it does not merge.
+    A RESUMED PASS READS THE LEDGER, NOT ITS OWN MEMORY. A fix rung resuming at strike N in a fresh process must
+    recover the prior pass's verdict from the ledger record for that head, so process death between passes
+    cannot silently downgrade the evidence a later arm relies on.
+    THE SHA BINDING IS THE WHOLE POINT. A verdict ledgered for a different SHA must not arm the current head.
+    This is what makes push-invalidates-review real at the decision layer rather than only at the display layer.
+    FIX THE UNCONDITIONAL ARM SITES AS PART OF THIS. The four sites at 3368, 5526, 5721 and 6168 currently arm
+    regardless of the review result. Keying the decision off the ledger record is what makes them conditional,
+    and an implementation that adds a ledger read while leaving those four unconditional has not done the task.
+    THIS MAKES LEDGER WRITE-INTEGRITY MERGE-LOAD-BEARING. Named here so the implementer sequences it: once the
+    arm decision reads the ledger, a torn or lost ledger line is a merge-correctness bug, which couples this to
+    the write-side atomicity family (standing rule 23, W1-T206).
+  acceptance:
+    - claim: "a remudero-review success status on the head with NO corresponding ledger verdict record arms nothing"
+      proof: "unit test: seeded forged status, arm declines"
+    - claim: "a ledgered passing verdict for the head arms even with the status read stubbed unavailable"
+      proof: "unit test"
+    - claim: "a resumed pass in a fresh process arms from the prior pass's ledgered verdict for an unchanged head, with no in-memory state"
+      proof: "unit test: seeded ledger record, no in-memory state"
+    - claim: "a ledgered verdict for a DIFFERENT sha does not arm the current head"
+      proof: "unit test"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§12", "P22"]
+  files: [src/run-task.ts, src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 after a read-only arm-path recon. Citations verified at origin/main a18fdeb rather
+    than assumed, and the recon corrected two things a reader would otherwise get wrong: there are SEVEN arm
+    sites (not one), and FOUR of them arm without consulting the review result at all.
+    NO BLOCKING FLOW FOUND: the recon looked for a legitimate path arming on a status this orchestrator did not
+    write - an operator hand-post or an external re-post with no ledger record to key off. None exists.
+    `rmd review` posts through the same judge and writes the same review.posted record, so the ledger-keyed
+    decision covers the operator path too.
+    COUPLES TO W1-T228 (status write-integrity). That task hardens the channel as a DISPLAY. This one removes
+    the channel from the DECISION. Both are wanted: one stops the board lying to the operator, the other stops
+    a lie merging code."
