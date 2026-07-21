@@ -244,17 +244,23 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
      section padding, 0.5rem->0.35rem heading margin) -- every priority section above "everything
      else" (NOW/NEEDS ME/UP NEXT/RECENT) is frequently EMPTY on a quiet fleet, so their own chrome
      -- not row height -- was the dominant cost keeping a first screen under 15 rows. */
-  main { max-width: 56rem; margin: 0 auto; display: flex; flex-direction: column; gap: 1rem; }
+  main { max-width: 56rem; margin: 0 auto; display: flex; flex-direction: column; gap: 0.6rem; }
   h1 { font-size: 1.25rem; margin: 0.5rem 0; }
-  h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); margin: 0 0 0.35rem; }
+  h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); margin: 0 0 0.25rem; }
   a { color: var(--accent); }
   code, .mono { font-family: var(--font-mono); }
   #top-status { color: var(--text-dim); font-size: 0.875rem; margin: 0; }
+  /* W1-T183 round 2: the >=15-rows-above-the-fold bar was passing the SYNTHETIC (1-char-title)
+     fixture but only barely clearing 15 against the REAL, realistic-title 218-task plan (measured
+     exactly 15 -- a margin thin enough that a different browser's font metrics could tip it under).
+     Section/toolbar chrome -- not row height -- was still the dominant remaining cost once "everything
+     else" itself was visible, so this round tightens that chrome further for real headroom, not a
+     razor's edge. */
   section.panel-section {
     background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 0.75rem 1rem;
+    padding: 0.5rem 0.75rem;
   }
-  .row-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+  .row-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; }
   /* W1-T183 DENSITY + IA v2: one line per task by default -- id · status · phase · elapsed ·
      spend · PR/issue link -- truncated with an ellipsis rather than wrapping to a second line,
      so a first screen reads the fleet at a glance instead of scrolling card-shaped rows to find
@@ -264,7 +270,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   .row {
     display: flex; flex-wrap: nowrap; align-items: center; gap: 0.5rem;
     background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 6px;
-    padding: 0.3rem 0.6rem; overflow: hidden;
+    padding: 0.22rem 0.5rem; overflow: hidden;
   }
   .row > * { flex-shrink: 0; }
   .row:has(form), .row:has(.btn-row) { flex-wrap: wrap; overflow: visible; align-items: baseline; }
@@ -355,23 +361,26 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   button.danger.confirming { background: var(--status-blocked); color: #200404; }
   input[type="text"], input[type="url"] {
     font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 0.4rem 0.5rem; width: 100%; max-width: 24rem;
+    border-radius: 6px; padding: 0.3rem 0.5rem; width: 100%; max-width: 24rem;
   }
-  label { display: block; font-size: 0.875rem; color: var(--text-dim); margin: 0.35rem 0; }
+  label { display: block; font-size: 0.875rem; color: var(--text-dim); margin: 0.25rem 0; }
+  /* W1-T183 round 2: this label reuses W1-T156's existing .sr-only class (defined above) -- still
+     in the a11y tree (for=/aria-label parity), just not eating a whole line above the fold for a
+     control whose placeholder already names it. */
   form.inline-action { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; flex-basis: 100%; }
   form.inline-action input { flex: 1 1 12rem; width: auto; }
   .btn-row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
   .counts { color: var(--text-dim); font-size: 0.9rem; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   /* W1-T157 FIND layer: faceted filters, sort headers, live counts ─────────────────────────── */
-  .find-facets { display: flex; flex-wrap: wrap; gap: 0.75rem 1rem; margin: 0.5rem 0; }
+  .find-facets { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; margin: 0.3rem 0; }
   .facet-group { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
   .facet-group-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); margin-right: 0.15rem; }
-  .facet-btn, .sort-header { font-size: 0.8rem; padding: 0.25rem 0.55rem; }
+  .facet-btn, .sort-header { font-size: 0.8rem; padding: 0.2rem 0.5rem; }
   .facet-count { color: var(--text-faint); font-variant-numeric: tabular-nums; }
   button[aria-pressed="true"] .facet-count { color: inherit; }
-  .find-sort { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin: 0.35rem 0; }
-  #find-count { margin: 0.25rem 0; }
+  .find-sort { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin: 0.2rem 0; }
+  #find-count { margin: 0.15rem 0; font-size: 0.8rem; }
   /* W1-T157 cmd+K command palette overlay ──────────────────────────────────────────────────── */
   .cmdk-overlay {
     position: fixed; inset: 0; z-index: 50; background: rgba(4, 7, 12, 0.6);
@@ -465,7 +474,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   <div id="rest-detail">
     <!-- W1-T157 FIND layer: instant client-side fuzzy search (id + title), faceted filters with
          LIVE counts, sortable columns, all persisted to the URL (shareable / survives reload). -->
-    <label for="find-search">Search id or title</label>
+    <label for="find-search" class="sr-only">Search id or title</label>
     <input id="find-search" type="text" role="searchbox" aria-controls="rest-list" placeholder="fuzzy — e.g. W1-T157 or words from the title" />
     <div id="find-facets" class="find-facets" role="group" aria-label="Filters (live counts)"></div>
     <div id="find-sort" class="find-sort" role="group" aria-label="Sort">

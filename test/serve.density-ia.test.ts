@@ -321,6 +321,63 @@ test("one-click drill: clicking a dense NOW row opens W1-T158's task card direct
   });
 });
 
+// ── (3c) the claim's own wording is "a click on a row in ANY section" -- not just NOW (3 above)
+// and rest-only (3b above). Cover NEEDS ME, UP NEXT, and RECENT too, in one pass, each opening
+// W1-T158's card in exactly one click. ──────────────────────────────────────────────────────────
+
+test("one-click drill: a click on a row in EVERY section (NOW/NEEDS ME/UP NEXT/RECENT/rest) opens its card directly", async () => {
+  const root = tmpRoot();
+  const now = task({ id: "W1-T1", title: "now section target" });
+  const needsMe = task({ id: "W1-T2", title: "needs me section target" });
+  const upNext = task({ id: "W1-T3", title: "up next section target" });
+  const recent = task({ id: "W1-T4", title: "recent section target" });
+  const rest = task({ id: "W1-T5", title: "rest section target" });
+  const prUrl = "https://github.com/o/r/pull/4";
+  const byRef = { [prUrl]: { number: 4, url: prUrl, state: "MERGED" } };
+  const github = fakeGitHub(byRef);
+  const deps = fixtureDeps(root, [now, needsMe, upNext, recent, rest], { github });
+  appendFileSync(deps.board.ledgerPath, runStart("W1-T1"));
+  appendFileSync(
+    deps.board.ledgerPath,
+    JSON.stringify({ ts: new Date().toISOString(), run_id: "W1-T2-1", task_id: "W1-T2", step: "escalation.issue_opened", issue_url: "https://github.com/o/r/issues/2" }) + "\n",
+  );
+  appendFileSync(
+    deps.board.ledgerPath,
+    [
+      JSON.stringify({ ts: new Date().toISOString(), run_id: "W1-T4-1", task_id: "W1-T4", step: "pr.opened", pr_url: prUrl }),
+      JSON.stringify({ ts: new Date().toISOString(), run_id: "W1-T4-1", task_id: "W1-T4", step: "verdict", verdict: "merged" }),
+    ].join("\n") + "\n",
+  );
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      const sections = [
+        { list: "now-list", taskId: "W1-T1", title: "now section target" },
+        { list: "needs-me-list", taskId: "W1-T2", title: "needs me section target" },
+        { list: "up-next-list", taskId: "W1-T3", title: "up next section target" },
+        { list: "recent-list", taskId: "W1-T4", title: "recent section target" },
+        { list: "rest-list", taskId: "W1-T5", title: "rest section target" },
+      ];
+      for (const s of sections) {
+        await page.waitForFunction((sel) => !!document.querySelector(sel), `#${s.list} li[data-task-id="${s.taskId}"]`, { timeout: 5000 });
+        await page.evaluate(() => { const el = document.getElementById("task-detail"); if (el) el.hidden = true; });
+        // ONE click, on the row's own task-id, scoped to THIS section (rows can legitimately also
+        // appear in the "everything else" FIND corpus, which searches the whole board -- scoping
+        // to the section under test keeps each check unambiguous about which row fired).
+        await page.click(`#${s.list} li[data-task-id="${s.taskId}"] .task-id`);
+        await page.waitForFunction(() => document.getElementById("task-detail")?.hidden === false, null, { timeout: 5000 });
+        await page.waitForFunction(
+          (t) => (document.getElementById("task-detail-title")?.textContent ?? "").includes(t),
+          s.title,
+          { timeout: 5000 },
+        );
+      }
+    } finally {
+      await context.close();
+    }
+  });
+});
+
 // ── (4) ANOMALY FLAG: a per-phase elapsed threshold, exceeded => the row is VISUALLY marked --
 // thresholds are DATA (ServeDeps.phaseElapsedThresholdsMs), never a hard-coded constant. ────────
 
