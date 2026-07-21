@@ -56,6 +56,36 @@ export function isQualitySuspect(events: CompactionEvent[]): boolean {
 }
 
 /**
+ * The COMMIT MESSAGE contract — ONE literal shared by every prompt that asks a worker
+ * to commit (the implement OUTPUT CONTRACT above, and `renderFixPrompt`'s fix-rung
+ * footer in run-task.ts), so the two can never drift.
+ *
+ * WHY IT EXISTS: `commitlint` is a REQUIRED check that lints the WHOLE base..head range
+ * and runs ONLY in CI — there is no husky, no `core.hooksPath`, no `commit-msg` hook, so
+ * nothing local tells a committer their message is malformed. The first signal is a red
+ * required check on an open PR, where the W1-T76 fix rung has no move for a CI-check
+ * failure and escalates a SPEC question instead (#304, #306, #406, #427/#428).
+ *
+ * The rules below are MEASURED against the real CLI (see test/commit-message.test.ts),
+ * not inferred. In particular there is NO acronym exemption: `SSE stream severed`,
+ * `URL round-trips` and `FIND layer …` are all REJECTED by `subject-case`.
+ */
+export function commitMessageContractLines(): string[] {
+  return [
+    "- COMMIT MESSAGE — `commitlint` is a REQUIRED check and lints EVERY commit on the PR,",
+    "  so a malformed message blocks the merge exactly like a failing test:",
+    "  * Conventional Commits: `type(scope): subject` — type is one of build|chore|ci|docs|",
+    "    feat|fix|perf|refactor|revert|style|test, lower-case.",
+    "  * The header (that whole first line) must be <= 100 CHARACTERS. Count characters, not",
+    "    bytes — an em-dash is 3 bytes but 1 character. Put detail in the body, not the header.",
+    "  * Start the subject LOWER-CASE. There is NO acronym exemption — `SSE stream severed`",
+    "    and `URL round-trips` are both REJECTED. Lower-case it (`sse …`) or reword. No final `.`.",
+    "  * Wrap every BODY line at <= 100 characters, with a blank line after the header.",
+    "  * Example: `feat(serve): add fuzzy search to the board (W1-T157)`",
+  ];
+}
+
+/**
  * The hard-constraints block, shared VERBATIM by the initial prompt
  * (`renderImplementPrompt`, run-task.ts) and the post-compaction ANCHOR
  * (`renderAnchorBlock`, below) — ONE source of literal text so the two can
@@ -69,17 +99,9 @@ export function outputContractLines(taskId: string): string[] {
     "- If a filename/approach choice is needed, FIRST emit a DECISION_REQUEST",
     "  (exactly two options, one marked RECOMMENDED, a reversibility note) and STOP.",
     "- Otherwise: stage the changed file(s), commit, then run",
-    "- COMMIT MESSAGE — `commitlint` is a REQUIRED check and lints EVERY commit on the PR,",
-    "  so a malformed message blocks the merge exactly like a failing test:",
-    "  * Conventional Commits: `type(scope): subject` — type is one of build|chore|ci|docs|",
-    "    feat|fix|perf|refactor|revert|style|test, lower-case.",
-    "  * The header (that whole first line) must be <= 100 CHARACTERS. Count characters, not",
-    "    bytes — an em-dash is 3 bytes but 1 character. Put detail in the body, not the header.",
-    "  * Start the subject lower-case (a leading acronym like SSE/URL is fine) and no final `.`.",
-    "  * Wrap every BODY line at <= 100 characters, with a blank line after the header.",
-    "  * Example: `feat(serve): add fuzzy search to the board (W1-T157)`",
     "  `git push origin HEAD` (NOT `-u` — the shared .git/config is outside the sandbox",
     "  write scope, WS-0 FF10f), and open a PR with `gh pr create --fill --base main`.",
+    ...commitMessageContractLines(),
     `- Include this exact trailer as the LAST line of the PR body: Remudero-Task: ${taskId}`,
     "- End with a REPORT whose LAST line is exactly: PR_URL: <the pull request url>",
   ];

@@ -18,7 +18,7 @@ import {
   type Config,
 } from "./lib/config.js";
 import { buildWorkerEnv } from "./lib/env.js";
-import { outputContractLines, renderAnchorBlock } from "./lib/compaction.js";
+import { outputContractLines, renderAnchorBlock, commitMessageContractLines } from "./lib/compaction.js";
 import type { RunResult } from "./lib/run-result.js";
 export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
@@ -906,6 +906,10 @@ export function renderFixPrompt(opts: {
   const footer = [
     "",
     `Amend the SAME branch (${opts.branch}) — do NOT open a new PR and do NOT create a fix/*`,
+    // W1-T136/W1-T137 class: the fix rung authors its OWN commit message and, until now, was
+    // told NOTHING about the format — #427/#428 blocked on a 111-char round-3 header. Same
+    // literal the implement contract uses, so the two prompts cannot drift.
+    ...commitMessageContractLines(),
     `branch (only a run-<taskId>-<epochMs> head is creditable). \`git push origin HEAD\` (no`,
     `-u) when done — never force-push. Your PR body must substantiate EVERY task acceptance`,
     `criterion, not only the ones fixed here — the review floor judges the body against the`,
