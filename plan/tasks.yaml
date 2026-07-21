@@ -455,13 +455,36 @@
       proof: "unit test over the service serve path: given a checkout whose current branch is NOT main, it exits non-zero WITHOUT binding, naming the off-main branch; with the override flag it binds; on main it binds normally — the falsifier being a serve that binds off-main and quietly serves un-shipped code (the exact way an operator gets lied to; the ctrl+C-off-a-branch incident)"
     - claim: "the restart path cannot EADDRINUSE-race — it WAITS for port release (or binds SO_REUSEADDR-safely) so a kill->relaunch does not silently fail to bind"
       proof: "unit/integration test: a kill->immediate-relaunch sequence where the OLD process has not yet released the port does NOT fail with EADDRINUSE — the restart path either WAITS for the port to be released before binding OR binds SO_REUSEADDR-safely and takes over; a relaunch that EADDRINUSE-races into a silent death FAILS (the falsifier — today's sequence: kill+immediate-relaunch raced with no reap wait -> the NEW process died EADDRINUSE into an unread log -> the OLD process kept serving stale code -> the old process eventually exited -> console down with nothing listening)"
+    - claim: "the generated serve plist carries KeepAlive AND ThrottleInterval, so a crash-looping serve is rate-limited rather than relaunching without bound"
+      proof: "unit test on generated plist content"
+    - claim: "plist generation succeeds and references no daemon label or daemon paths with the daemon uninstalled"
+      proof: "unit test"
+    - claim: "the log writer creates serve.log with mode 0600"
+      proof: "unit test on the writer"
   risk: high
   origin: architect
   plan_refs: ["§7", "§9"]
   files: [src/run-task.ts, src/lib/launchd.ts]
   status: queued
   attempts: 0
-  note: "Fixture: the operator ctrl+C'd serve to reclaim his shell twice in one morning. Mirrors rmd daemon-plist
+  note: "AMENDED 2026-07-21 with three lessons from incidents that POSTDATE this filing. Task verified
+    QUEUED first - zero merged PRs carry its Remudero-Task trailer - so amendment is the correct instrument and
+    standing rule 21 does not apply.
+    (i) THROTTLEINTERVAL, not KeepAlive alone. This task predates the R-1 relaunch storm: 438 daemon boots
+    between Jul 19 and Jul 21, one per minute at its worst, because KeepAlive restarts on any nonzero exit and
+    nothing rate-limited it. A serve LaunchAgent generated with KeepAlive and no ThrottleInterval inherits that
+    exact shape. The daemon plist has since been hardened with ThrottleInterval 60 and the generator should
+    emit the same.
+    (ii) DAEMON-INDEPENDENCE IS A REQUIREMENT, not an implementation detail. On 2026-07-21 the daemon was
+    deliberately stopped for containment while the operator still needed the board. If serve supervision
+    references daemon artifacts, or is a daemon child, then stopping the fleet for safety also blinds the
+    operator at exactly the moment they most need to see it. The generated plist must reference no daemon
+    label and no daemon paths, and must install and run with the daemon absent.
+    (iii) LOGS AT 0600. This task says logs to state/serve.log without a mode. R-5 landed after: serve's
+    startup banner prints a token, both bearer tokens were found in a world-readable 0644 serve.log, and the
+    tokens had to be rotated. The banner now prints the read-scope token only, but a token in a world-readable
+    file is the defect standing rule 24 names, so the writer creates the file 0600.
+    ORIGINAL NOTE FOLLOWS. Fixture: the operator ctrl+C'd serve to reclaim his shell twice in one morning. Mirrors rmd daemon-plist
     (W1-T12b / generateLaunchdPlist). Composes W1-T139 (serve), W1-T151 (install-freshness), W1-T143 (line-buffered
     logs). Loading the generated unit is the operator's single step (a --write + a printed load line), not an
     auto-verify criterion — the generator + the two hooks are what this task builds and proves."
