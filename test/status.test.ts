@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,11 +8,13 @@ import { nextRunnable, type MergedSet } from "../src/lib/drain.js";
 import {
   buildBatchedGithub,
   classifyGhFailure,
+  createLedgerTailCache,
   deriveStatus,
   dispatchesWithoutNewOwnedPr,
   ghGateway,
   isDispatchBreakerTripped,
   projectPlan,
+  readLedgerTail,
   DEFAULT_MAX_TASK_DISPATCHES,
   type BatchedPr,
   type GitHub,
@@ -1424,4 +1426,71 @@ test("W1-T187 criterion 4: standalone deriveStatus (no readLedger override) matc
   assert.equal(hoisted.get("W1-T187A")?.status, "merged");
   assert.equal(hoisted.get("W1-T187B")?.status, "running");
   assert.equal(hoisted.get("W1-T187C")?.status, "queued");
+});
+
+// ── W1-T184: readLedgerTail — the INCREMENTAL ledger reader lib/board.ts's per-poll routes
+// (createBoardSnapshotCache, computeRecentActivity, buildStatusStream) hold onto across calls so
+// an unchanged/append-only ledger never costs a full re-read+re-parse of the whole file. ─────────
+
+test("readLedgerTail: reads new lines incrementally as the file grows; an unchanged file returns the SAME cached array reference", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-status-tail-"));
+  const p = join(dir, "ledger.ndjson");
+  writeFileSync(p, "");
+  const cache = createLedgerTailCache();
+
+  assert.deepEqual(readLedgerTail(p, cache), []);
+  const empty = readLedgerTail(p, cache);
+  assert.equal(empty, readLedgerTail(p, cache), "unchanged file -> the SAME array reference back");
+
+  appendFileSync(p, JSON.stringify({ step: "a" }) + "\n");
+  const afterA = readLedgerTail(p, cache);
+  assert.deepEqual(afterA, [{ step: "a" }]);
+  assert.equal(afterA, readLedgerTail(p, cache), "still the same array reference, unchanged since the last read");
+
+  appendFileSync(p, JSON.stringify({ step: "b" }) + "\n");
+  const afterB = readLedgerTail(p, cache);
+  assert.deepEqual(afterB, [{ step: "a" }, { step: "b" }]);
+  assert.equal(afterB, afterA, "the SAME array, appended to in place -- never rebuilt from scratch");
+});
+
+test("readLedgerTail: a not-yet-newline-terminated partial write is buffered, not parsed until the newline lands", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-status-tail-"));
+  const p = join(dir, "ledger.ndjson");
+  writeFileSync(p, "");
+  const cache = createLedgerTailCache();
+
+  const full = JSON.stringify({ step: "run.start", task_id: "W1-T1" });
+  appendFileSync(p, full.slice(0, 10)); // an incomplete write mid-line, no trailing "\n" yet
+  assert.deepEqual(readLedgerTail(p, cache), [], "a partial, not-yet-newline-terminated line is never parsed early");
+
+  appendFileSync(p, full.slice(10) + "\n"); // the rest of the line lands
+  assert.deepEqual(readLedgerTail(p, cache), [{ step: "run.start", task_id: "W1-T1" }]);
+});
+
+test("readLedgerTail: malformed JSON on a line degrades to {} — same discipline as readLedgerLines, never throws", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-status-tail-"));
+  const p = join(dir, "ledger.ndjson");
+  writeFileSync(p, "not json at all\n" + JSON.stringify({ step: "ok" }) + "\n");
+  const cache = createLedgerTailCache();
+  assert.deepEqual(readLedgerTail(p, cache), [{}, { step: "ok" }]);
+});
+
+test("readLedgerTail: a file shorter than last observed (rotation/truncation) rescans from byte 0 rather than throwing or slicing negative", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-status-tail-"));
+  const p = join(dir, "ledger.ndjson");
+  writeFileSync(p, [{ step: "a" }, { step: "b" }, { step: "c" }].map((l) => JSON.stringify(l)).join("\n") + "\n");
+  const cache = createLedgerTailCache();
+  assert.deepEqual(readLedgerTail(p, cache), [{ step: "a" }, { step: "b" }, { step: "c" }]);
+
+  writeFileSync(p, JSON.stringify({ step: "fresh" }) + "\n"); // simulates rotation -- a shorter file
+  assert.deepEqual(readLedgerTail(p, cache), [{ step: "fresh" }], "degrades safely: rescans from scratch, never a negative-length read");
+});
+
+test("readLedgerTail: a missing file returns []; once it appears, subsequent reads pick up its content", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-status-tail-"));
+  const p = join(dir, "ledger.ndjson");
+  const cache = createLedgerTailCache();
+  assert.deepEqual(readLedgerTail(p, cache), []);
+  writeFileSync(p, JSON.stringify({ step: "a" }) + "\n");
+  assert.deepEqual(readLedgerTail(p, cache), [{ step: "a" }]);
 });

@@ -125,7 +125,7 @@ function fixtureDeps(root: string): ServeDeps {
   // the decorative yaml `status: blocked` above is NEVER what actually derives this (module
   // convention: status is DERIVED FROM GITHUB, never trusted from yaml).
   const github = fakeGitHub({
-    "https://github.com/o/r/pull/2": { number: 2, url: "https://github.com/o/r/pull/2", state: "MERGED" },
+    "https://github.com/o/r/pull/2": { number: 2, url: "https://github.com/o/r/pull/2", state: "MERGED", title: "frobnicate the widget" },
     "https://github.com/o/r/pull/3": { number: 3, url: "https://github.com/o/r/pull/3", state: "CLOSED" },
   });
   return {
@@ -262,6 +262,56 @@ test("every task row exposes an explicit one-click Journey action + a PR deep-li
       // Clicking the Journey button opens THAT row's journey directly -- no id ever typed.
       await page.click('#recent-list li[data-task-id="W1-T2"] .row-journey-btn');
       await page.waitForFunction(() => (document.getElementById("journey-title")?.textContent ?? "").includes("W1-T2"));
+    } finally {
+      await page.context().close();
+    }
+  });
+});
+
+// ── (5, W1-T184): a RECENT row is a readable ACTIVITY FEED entry, not a bare id+PR-number ───────
+//
+// FALSIFIER (operator screenshot, 2026-07-20): "a RECENT row rendering only a task id and a PR
+// number is unreadable as an activity feed — it names WHAT changed but not what it WAS." Every
+// row must carry: the event VERB, the task id AND its title, a PR link carrying the PR's TITLE
+// (not a bare number), a relative timestamp, a spend figure wherever the ledger has one, and
+// still be a W1-T158 drill target (clicking it opens the task card).
+
+test("W1-T184: a RECENT row carries the verb, task id AND title, a PR link with the PR's TITLE, a relative timestamp, and spend — and is still a drill target into the task card", async () => {
+  const root = tmpRoot();
+  await withShell(fixtureDeps(root), async (base) => {
+    const page = await openShell(base);
+    try {
+      await page.waitForFunction(() => (document.querySelector("#recent-list")?.textContent ?? "").includes("W1-T2"));
+
+      const row = await page.evaluate(() => {
+        const li = document.querySelector('#recent-list li[data-task-id="W1-T2"]')!;
+        return {
+          verb: li.querySelector(".recent-verb")?.textContent ?? null,
+          dataVerb: li.querySelector(".task-id")?.getAttribute("data-verb") ?? null,
+          taskId: li.querySelector(".task-id")?.textContent ?? null,
+          title: li.querySelector(".recent-title")?.textContent ?? null,
+          prLinkText: li.querySelector(".recent-pr-link")?.textContent ?? null,
+          prHref: li.querySelector(".recent-pr-link")?.getAttribute("href") ?? null,
+          spend: li.querySelector(".recent-spend")?.textContent ?? null,
+          timestamp: li.querySelector(".recent-ts")?.textContent ?? null,
+          timestampDatetime: li.querySelector(".recent-ts")?.getAttribute("datetime") ?? null,
+        };
+      });
+
+      assert.match(row.verb ?? "", /merged/i);
+      assert.equal(row.dataVerb, "merged");
+      assert.match(row.taskId ?? "", /W1-T2/);
+      assert.match(row.title ?? "", /the frobnicator/); // the task's OWN title, not just its id
+      // the PR link's label carries the PR's TITLE, not a bare "#2":
+      assert.match(row.prLinkText ?? "", /frobnicate the widget/);
+      assert.equal(row.prHref, "https://github.com/o/r/pull/2");
+      assert.match(row.spend ?? "", /3\.500/); // the ledger's own cost_usd for this verdict line
+      assert.ok(row.timestamp && row.timestamp.length > 0, "a relative timestamp must render");
+      assert.ok(row.timestampDatetime, "the timestamp carries a machine-readable datetime too");
+
+      // still a W1-T158 drill target: clicking the row (its task-id text) opens the task card.
+      await page.click('#recent-list li[data-task-id="W1-T2"] .task-id');
+      await page.waitForFunction(() => (document.getElementById("task-detail-title")?.textContent ?? "").includes("frobnicator"));
     } finally {
       await page.context().close();
     }

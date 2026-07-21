@@ -107,6 +107,16 @@ export interface PrRef {
   url: string;
   /** GitHub PR state: "MERGED" | "OPEN" | "CLOSED". */
   state: string;
+  /**
+   * The PR's title (W1-T184) — a pure DECORATION, never a precedence input: nothing in
+   * {@link derivePrPrecedence} reads this field, so an absent/stale title never changes
+   * merge-state derivation. Optional (added after every pre-existing {@link PrRef} fixture
+   * was already written) so no existing literal implementer breaks — omitted ⇒ a caller
+   * decorating a row with the PR's title (lib/board.ts's RECENT activity feed) degrades to
+   * showing the bare PR number/url instead, the same fail-soft discipline every other
+   * optional field on this interface already follows.
+   */
+  title?: string;
 }
 
 /**
@@ -382,6 +392,105 @@ export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedge
         return {};
       }
     });
+}
+
+/**
+ * The minimal extra fs surface an INCREMENTAL reader needs on top of {@link LedgerFsDeps}: the
+ * current file size, and the bytes from `start` to EOF — never the whole file. Deliberately
+ * property-accessed off the same mutable `fs` default import at call time (see this module's
+ * header note on why), so a test spying on `fs.statSync`/`fs.openSync`/`fs.readSync` observes
+ * every real call, exactly like {@link LedgerFsDeps}'s existing two methods already promise.
+ */
+export interface LedgerTailFsDeps extends LedgerFsDeps {
+  statSize: (path: string) => number;
+  readRange: (path: string, start: number, end: number) => string;
+}
+
+const realLedgerTailFs: LedgerTailFsDeps = {
+  ...realLedgerFs,
+  statSize: (path) => fs.statSync(path).size,
+  readRange: (path, start, end) => {
+    const fd = fs.openSync(path, "r");
+    try {
+      const buf = Buffer.alloc(end - start);
+      fs.readSync(fd, buf, 0, end - start, start);
+      return buf.toString("utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  },
+};
+
+/**
+ * Persistent state a {@link readLedgerTail} caller holds ACROSS calls (one per long-lived route/
+ * connection, never reconstructed per render — mirroring board.ts's own `RecentActivityCache`/
+ * `BoardSnapshotCache`/SSE `lastLineCount` handles). `lines` is the SAME array reference handed
+ * back on every call and only ever appended to, never rebuilt — a caller may hold onto a prior
+ * return value across calls and it stays valid (append-only, same identity).
+ */
+export interface LedgerTailCache {
+  /** @internal — byte offset already consumed. */
+  offset: number;
+  /** @internal — a not-yet-newline-terminated trailing partial line, carried to the next read. */
+  pending: string;
+  /** @internal — cumulative parsed lines; never re-parsed once minted. */
+  lines: Array<Record<string, unknown>>;
+}
+
+export function createLedgerTailCache(): LedgerTailCache {
+  return { offset: 0, pending: "", lines: [] };
+}
+
+/**
+ * INCREMENTAL ledger read (W1-T184): only the bytes appended since `cache`'s last read are ever
+ * pulled off disk and parsed; an UNCHANGED file costs exactly one `statSync` call — no `open`/
+ * `read` at all, and NO re-parse of a single already-seen line. This is the fix for {@link
+ * readLedgerLines} being a full file re-read on every call, which is fine for the many one-shot
+ * CLI callers but wrong for a route polled every ~250ms (lib/board.ts's DEFAULT_POLL_MS) against a
+ * ledger that only ever grows — the "a console refresh degrades into an O(history) operation" bug
+ * behind both the RECENT feed's per-render cost and GET /v1/status's 2026-07-20 latency outage
+ * (a `createBoardSnapshotCache` hit still paid a full re-read+re-parse of the WHOLE ledger just to
+ * compute its cache key, before this fix). Returns the SAME cumulative array every call (append-
+ * only, never rebuilt) — a caller may safely hold a reference across calls. A file shorter than
+ * last observed (rotation/truncation — the append-only ledger writer itself never does this)
+ * degrades safely by rescanning from byte 0, mirroring computeRecentActivity's own "ledger got
+ * shorter -> rescan from scratch" rule at the line-cursor layer above this one.
+ */
+export function readLedgerTail(
+  path: string,
+  cache: LedgerTailCache,
+  fsDeps: LedgerTailFsDeps = realLedgerTailFs,
+): Array<Record<string, unknown>> {
+  if (!fsDeps.existsSync(path)) {
+    if (cache.offset !== 0 || cache.lines.length > 0) {
+      cache.offset = 0;
+      cache.pending = "";
+      cache.lines = [];
+    }
+    return cache.lines;
+  }
+  const size = fsDeps.statSize(path);
+  if (size === cache.offset) return cache.lines; // unchanged -- one statSync, nothing else.
+  if (size < cache.offset) {
+    cache.offset = 0;
+    cache.pending = "";
+    cache.lines = [];
+  }
+  const chunk = fsDeps.readRange(path, cache.offset, size);
+  cache.offset = size;
+  const text = cache.pending + chunk;
+  const segments = text.split("\n");
+  cache.pending = segments.pop() ?? ""; // the last segment may be a not-yet-newline-terminated partial line.
+  for (const raw of segments) {
+    const line = raw.trim();
+    if (!line) continue;
+    try {
+      cache.lines.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      cache.lines.push({});
+    }
+  }
+  return cache.lines;
 }
 
 /**
@@ -1004,7 +1113,10 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
   };
   return {
     prByRef(ref) {
-      const pr = tryJson<PrRef>(["pr", "view", String(ref), "--repo", slug, "--json", "number,url,state"]);
+      // "title" rides along on this SAME fetch (W1-T184) — a decoration, never an extra
+      // `gh` call: lib/board.ts's RECENT activity feed reads it off the SAME PrRef this
+      // method already returns for every other caller.
+      const pr = tryJson<PrRef>(["pr", "view", String(ref), "--repo", slug, "--json", "number,url,state,title"]);
       return pr && typeof pr.number === "number" ? pr : null;
     },
     findMergedByTrailer(taskId) {
@@ -1053,6 +1165,8 @@ export interface BatchedPr {
    * run-task.ts's `buildOpenPrViews`/`buildOpenPrView` already use for this exact field.
    */
   autoMergeRequest?: unknown;
+  /** The PR's title (W1-T184) — see {@link PrRef.title}; carried verbatim off the same batched fetch. */
+  title?: string;
 }
 
 /**
@@ -1150,7 +1264,9 @@ export function buildBatchedGithub(
         // W1-T155: `autoMergeRequest` rides along on this SAME single fetch — the
         // armed-awaiting-merge taxonomy costs zero extra `gh` calls, preserving the
         // board-fix O(1) invariant this gateway exists for.
-        "pr", "list", "--repo", slug, "--state", "all", "--json", "number,url,state,headRefName,body,autoMergeRequest", "--limit", "1000",
+        // "title" rides along too (W1-T184) — RECENT's PR-title decoration costs zero extra
+        // `gh` calls, same O(1) invariant this gateway already holds for autoMergeRequest.
+        "pr", "list", "--repo", slug, "--state", "all", "--json", "number,url,state,headRefName,body,autoMergeRequest,title", "--limit", "1000",
       ]);
       // W1-T181 design (vi): log the payload size on every SUCCESSFUL fetch, so the next
       // approach to whatever ceiling is set above is observable in advance instead of arriving
@@ -1212,7 +1328,7 @@ export function buildBatchedGithub(
     return cache;
   };
 
-  const asRef = (p: BatchedPr): PrRef => ({ number: p.number, url: p.url, state: p.state });
+  const asRef = (p: BatchedPr): PrRef => ({ number: p.number, url: p.url, state: p.state, title: p.title });
   const lookup = (ref: string | number): BatchedPr | undefined => {
     const idx = index();
     const s = String(ref);
