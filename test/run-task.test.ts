@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -17,8 +17,10 @@ import {
   drainCommand,
   FIX_MODE_RULES,
   isTransientResult,
+  materializeReviewWorktree,
   renderFixPrompt,
   resolveReviewTarget,
+  withMaterializedWorktree,
   resolveDaemonTarget,
   routeFix,
   runFixRung,
@@ -32,8 +34,10 @@ import {
   type FixDeps,
   type FixEvidence,
   type PrHeadGateway,
+  type ReviewWorktreeDeps,
 } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
+import { judgeReview } from "../src/lib/review.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { GitHub } from "../src/lib/status.js";
 import {
@@ -47,6 +51,7 @@ import {
 } from "../src/lib/sweep.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
+import { worktreesDir } from "../src/lib/worker.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import { loadPlanIndex, renderPlanIndex } from "../src/lib/plan-index.js";
 
@@ -320,6 +325,158 @@ test("resolveReviewTarget: no flag ⇒ the checkout default; --repo overrides (b
   assert.deepEqual(resolveReviewTarget(def, ["--repo", "remudero-sandbox"]), { owner: "craigoley", repo: "remudero-sandbox" });
   assert.deepEqual(resolveReviewTarget(def, ["--repo", "other/box"]), { owner: "other", repo: "box" });
   assert.deepEqual(resolveReviewTarget(def, ["5", "--repo", "remudero-sandbox"]), { owner: "craigoley", repo: "remudero-sandbox" });
+});
+
+// ── W1-T185 (Gap 2): `rmd review` materializes a worktree at the PR head so ──
+// whitelisted proofs actually EXECUTE, mirroring the fix rung's own
+// `git worktree add origin/<branch>` pattern (reuse, not new machinery).
+
+test("ACCEPTANCE (criterion 4, unit slice): materializeReviewWorktree fetches then adds a worktree at origin/<headRefName>, returning a path under worktreesDir(config)", () => {
+  const config = drainFixtureConfig();
+  const calls: string[] = [];
+  const deps: ReviewWorktreeDeps = {
+    fetch: (repoDir) => calls.push(`fetch:${repoDir}`),
+    addWorktree: (repoDir, worktreePath, branch) => calls.push(`add:${repoDir}:${worktreePath}:${branch}`),
+  };
+  const path = materializeReviewWorktree(config, "/repo", 411, "run-W1-T185-123", deps);
+  assert.ok(path, "materialization reports success");
+  assert.ok(path!.startsWith(join(config.root, "worktrees")), "path lives under worktreesDir(config)");
+  assert.ok(path!.includes("review-PR411-"), "path is scoped to the PR number");
+  assert.deepEqual(calls, [`fetch:/repo`, `add:/repo:${path}:run-W1-T185-123`]);
+});
+
+test("materializeReviewWorktree returns undefined (never throws) when fetch fails — network unavailable is a FALLBACK trigger, not a crash", () => {
+  const config = drainFixtureConfig();
+  const deps: ReviewWorktreeDeps = {
+    fetch: () => {
+      throw new Error("network unreachable");
+    },
+    addWorktree: () => assert.fail("addWorktree must not be reached when fetch already failed"),
+  };
+  assert.equal(materializeReviewWorktree(config, "/repo", 391, "some-branch", deps), undefined);
+});
+
+test("materializeReviewWorktree returns undefined (never throws) when the worktree add fails — a detached/deleted head is a FALLBACK trigger, not a crash", () => {
+  const config = drainFixtureConfig();
+  const deps: ReviewWorktreeDeps = {
+    fetch: () => {},
+    addWorktree: () => {
+      throw new Error("fatal: invalid reference: origin/deleted-branch");
+    },
+  };
+  assert.equal(materializeReviewWorktree(config, "/repo", 397, "deleted-branch", deps), undefined);
+});
+
+test("ACCEPTANCE (criterion 4, full chain): an operator-path review over a PR whose proofs are executable reports a NON-EMPTY executed set — materialize -> headCheckoutDir -> judgeReview EXECUTES, exactly the fix rung's own wiring for the same PR/proofs", () => {
+  const config = drainFixtureConfig();
+  // `addWorktree` here plays the role `git worktree add` + `checkout` really
+  // does: it makes the PR head's CONTENT show up on disk at `worktreePath`.
+  // Faking the git calls (never touching real git/network — this environment
+  // has neither) while keeping the FILESYSTEM EFFECT real is what lets
+  // `judgeReview`'s whitelisted executor genuinely run against it below.
+  const deps: ReviewWorktreeDeps = {
+    fetch: () => {},
+    addWorktree: (_repoDir, worktreePath) => {
+      mkdirSync(worktreePath, { recursive: true });
+      writeFileSync(join(worktreePath, "fixture.txt"), "REMUDERO_W1_T185_MARKER\n");
+    },
+  };
+  const worktreePath = materializeReviewWorktree(config, "/repo", 411, "run-W1-T185-fixture", deps);
+  assert.ok(worktreePath, "materialization succeeded");
+  try {
+    const criteria = [
+      { claim: "the marker is present", proof: "grep: REMUDERO_W1_T185_MARKER in fixture.txt" },
+    ];
+    const v = judgeReview(criteria, { diff: "", report: "unrelated", headCheckoutDir: worktreePath });
+    // The SAME observed-execution outcome the fix rung records for a real PR
+    // (#411's own criteria 2/4 recorded executed_fail on the SAME proofs a
+    // keyword-only `rmd review` had read 0/N for) — here, executed_PASS,
+    // because the marker genuinely IS on disk. Either way: EXECUTED, not
+    // not_executable — the operator path is no longer keyword-only by
+    // construction.
+    assert.equal(v.criteria[0].proof_exec, "executed_pass");
+    assert.equal(v.keywordOnly, false);
+    assert.equal(v.capped, false);
+  } finally {
+    rmSync(worktreePath!, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T185 (Gap 2, criterion 6): a materialized worktree is torn down on ──
+// EVERY exit path, including failure.
+
+// W1-T185 acceptance criterion 6's own proof text (plan/tasks.yaml, verbatim
+// from "unit test:" onward) IS this test's name — the mechanical floor's
+// `unit test:` dialect name-filters the whole suite on exactly that text
+// (parseTestTarget in src/lib/review.ts), so this criterion's own proof only
+// counts as OBSERVED when a real test is titled to match it byte-for-byte
+// (case-insensitive). See the identical note on criterion 1's renamed test in
+// test/review.test.ts.
+test("after a review that throws mid-execution, no worktree remains under the worktrees root. FALSIFIER: a teardown only on the success path reproduces the W1-T175 leak class, which exists precisely because run worktrees already strand on disk", async () => {
+  const config = drainFixtureConfig();
+  const worktreePath = join(worktreesDir(config), "review-PR411-fixture");
+  mkdirSync(worktreePath, { recursive: true });
+  assert.ok(existsSync(worktreePath), "sanity: the fixture worktree exists before the run");
+
+  await assert.rejects(
+    withMaterializedWorktree(
+      worktreePath,
+      "/repo",
+      async () => {
+        throw new Error("mid-execution failure");
+      },
+      (_repoDir, wt) => rmSync(wt, { recursive: true, force: true }),
+    ),
+    /mid-execution failure/,
+  );
+
+  assert.equal(existsSync(worktreePath), false, "the worktree was torn down despite the throw");
+});
+
+test("withMaterializedWorktree tears down on the SUCCESS path too, and returns body's result unmodified", async () => {
+  const config = drainFixtureConfig();
+  const worktreePath = join(worktreesDir(config), "review-PR418-fixture");
+  mkdirSync(worktreePath, { recursive: true });
+
+  const result = await withMaterializedWorktree(
+    worktreePath,
+    "/repo",
+    async () => "verdict-shaped-result",
+    (_repoDir, wt) => rmSync(wt, { recursive: true, force: true }),
+  );
+
+  assert.equal(result, "verdict-shaped-result");
+  assert.equal(existsSync(worktreePath), false);
+});
+
+test("withMaterializedWorktree is a no-op finally when worktreePath is undefined (materialization never happened) — remove is never called", async () => {
+  let removeCalled = false;
+  const result = await withMaterializedWorktree(
+    undefined,
+    "/repo",
+    async () => "keyword-only-result",
+    () => {
+      removeCalled = true;
+    },
+  );
+  assert.equal(result, "keyword-only-result");
+  assert.equal(removeCalled, false);
+});
+
+test("withMaterializedWorktree's teardown failure never masks body's own throw", async () => {
+  await assert.rejects(
+    withMaterializedWorktree(
+      "/some/worktree",
+      "/repo",
+      async () => {
+        throw new Error("the real failure");
+      },
+      () => {
+        throw new Error("teardown also failed");
+      },
+    ),
+    /the real failure/,
+  );
 });
 
 // ── BUG 1 (fix/cli-safe-control-surface): a spawning subcommand must FAIL LOUD on junk
@@ -687,6 +844,8 @@ function fakeReview(
     testTheater: false,
     summary: state === "success" ? "all criteria met" : "unmet criteria",
     floorDegraded: false,
+    capped: false,
+    keywordOnly: false,
     headSha: "deadbeef",
     reviewerOutcome: "success",
   };

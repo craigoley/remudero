@@ -142,6 +142,53 @@ export interface ReviewVerdict {
    * `applyVerdictStability` is ever fed.
    */
   floorState?: ReviewState;
+  /**
+   * W1-T185 (closes a W1-T128 gap — MASTER-PLAN rule 22 fixture (iii): a PASS at
+   * `proof_exec: 0/5`, directly beneath its own FLOOR DEGRADED banner, over a
+   * diff satisfying one criterion in five with zero tests on a `tdd: strict`
+   * task). True whenever the judged review's `proof_exec` set is ENTIRELY
+   * `not_executable`/`exec_error` across every criterion that could have
+   * attempted execution (`satisfied_by` criteria excluded — an Architect
+   * override deliberately never attempts execution, which is not a capping
+   * concern) — i.e. NOTHING was OBSERVED anywhere in this review. Computed
+   * UNCONDITIONALLY, independent of `state`: it is a fact about what ran, not a
+   * verdict on its own.
+   *
+   * CAPPED IS NOT FAIL (design, load-bearing): `capped` never forces `state` to
+   * `"failure"` — mapping capped to failure would red every PR the moment one
+   * proof is unparseable, halting the fleet, which is a worse failure than the
+   * uncertified PASS it replaces (it would punish authors for a dialect gap
+   * rather than surfacing it). What `capped` DOES change is the RENDERING: a
+   * capped `state: "success"` never uses {@link passSummary}'s wording — never
+   * "substantiated", never "no test theater" — because neither claim was
+   * measured; see {@link cappedSummary}. It is a CLAIM either way; `capped`
+   * says so honestly instead of dressing it as certified.
+   *
+   * The one place `capped` IS consequential: {@link decideAutoMergeArm} refuses
+   * to arm auto-merge on a `capped` verdict for a task whose `principles` are
+   * `{tdd: strict}`, unless an explicit, ledgered {@link CappedOverride} is
+   * supplied — a separate decision layer from this verdict's own `state`, so a
+   * capped verdict can still post as a non-blocking commit status (criterion 3)
+   * while the ARMING path still refuses it (criterion 2). A non-tdd:strict task
+   * is unaffected either way. Distinct from `floorDegraded` (W1-T72,
+   * legibility-only, gated on a DIALECT-PREFIXED proof specifically): `capped`
+   * fires on ANY zero-executed verdict, dialect-prefixed or not.
+   */
+  capped: boolean;
+  /**
+   * W1-T185 (closes the second W1-T128 gap): true when this verdict was judged
+   * with NO `headCheckoutDir` — i.e. proof execution was never attempted for
+   * ANY criterion, so `state` rests entirely on the keyword floor (+ optional
+   * semantic downgrade). This is the case today for `rmd review`'s manual-PR
+   * escape hatch (the operator's working checkout is never used as a PR-head
+   * substitute — HEAD DISCIPLINE, W1-T65). Surfaced on the posted commit-status
+   * summary, the ledger `review.posted` line, and the console `say()` output
+   * (run-task.ts) so a keyword-only PASS is never mistaken for an OBSERVED one.
+   * Purely a LEGIBILITY signal, like `floorDegraded` — it does not itself force
+   * `state`, since a `not_executable`-only floor is the long-standing, correct
+   * behavior for every criterion whose proof is free prose.
+   */
+  keywordOnly: boolean;
 }
 
 // ── Tokenisation (deterministic, dependency-free) ──────────────────────────
@@ -727,12 +774,7 @@ export function judgeReview(
 
   const unmet = verdicts.filter((v) => !v.met);
   const noCriteria = criteria.length === 0;
-  const state: ReviewState =
-    noCriteria || unmet.length > 0 || testTheater ? "failure" : "success";
-  const summary =
-    state === "success"
-      ? passSummary(verdicts.length)
-      : failSummary(unmet.map((v) => v.claim), testTheater, noCriteria);
+  const state: ReviewState = noCriteria || unmet.length > 0 || testTheater ? "failure" : "success";
 
   // W1-T178 (verdict stability): the SAME rollup, but ignoring semantic entirely
   // — every criterion judged on its `floorMet` (mechanical/executed, pre-
@@ -755,15 +797,74 @@ export function judgeReview(
   const floorDegraded =
     executedCount === 0 && criteria.some((c) => !c.satisfied_by && isDialectPrefixed(c.proof));
 
-  return { state, criteria: verdicts, testTheater, summary, floorDegraded, floorState };
+  // W1-T185 (closes a W1-T128 gap — MASTER-PLAN rule 22 fixture (iii)): CAPPED
+  // is a FACT about what ran, computed UNCONDITIONALLY — never gated on
+  // `state`, never forcing it either (CAPPED IS NOT FAIL, criterion 3; see
+  // {@link ReviewVerdict.capped}'s doc). `satisfied_by`-only criteria are
+  // excluded from the "could have executed" set (an Architect override that
+  // deliberately never attempts execution is not a capping concern); a review
+  // with no executable criteria at all is never capped (nothing to observe).
+  const executableCriteria = criteria.filter((c) => !c.satisfied_by);
+  const capped = executableCriteria.length > 0 && executedCount === 0;
+
+  // W1-T185 (closes the second W1-T128 gap): this verdict never attempted
+  // execution for ANY criterion (no `headCheckoutDir` was given at all) — the
+  // case today when `rmd review`'s worktree materialization fails or is
+  // skipped (the operator's working checkout is never substituted — HEAD
+  // DISCIPLINE, W1-T65). Purely legibility: `state` is unaffected here (a
+  // `not_executable`-only floor is the correct, long-standing behavior for
+  // free-prose proofs), but the posted status/ledger/console must say so
+  // plainly rather than let a keyword-only PASS read as an observed one.
+  const keywordOnly = execCtx === undefined;
+
+  // A capped `state: "success"` NEVER uses passSummary's "substantiated"/"no
+  // test theater" wording (criterion 1) — neither claim was measured. A
+  // capped `state: "failure"` already renders via failSummary, which carries
+  // its own specific unmet-criterion reason and never those two phrases
+  // either, so no extra branch is needed there.
+  const summary =
+    state === "success"
+      ? capped
+        ? cappedSummary(verdicts.length, keywordOnly)
+        : passSummary(verdicts.length, keywordOnly)
+      : failSummary(unmet.map((v) => v.claim), testTheater, noCriteria);
+
+  return { state, criteria: verdicts, testTheater, summary, floorDegraded, floorState, capped, keywordOnly };
 }
 
 /** The exact PASS status-description text, shared by {@link judgeReview} and a
  * verdict-stability suppression ({@link applyVerdictStability}) so a suppressed
  * downgrade posts a summary byte-identical to a review that passed outright —
- * never a "success" state paired with failure-shaped prose. */
-function passSummary(criteriaCount: number): string {
-  return `remudero-review: PASS — ${criteriaCount} criteria substantiated, no test theater`;
+ * never a "success" state paired with failure-shaped prose. `keywordOnly`
+ * (W1-T185) appends an explicit "(keyword-only)" tag so a PASS with no proof
+ * ever executed is never mistaken for an OBSERVED one — e.g. on the commit
+ * status GitHub renders for `rmd review`'s manual-PR path. {@link
+ * applyVerdictStability} passes the SUPPRESSED verdict's own `keywordOnly`
+ * through unchanged, so a re-review that was keyword-only stays labeled that
+ * way even when its semantic downgrade is suppressed back to success. */
+function passSummary(criteriaCount: number, keywordOnly = false): string {
+  return (
+    `remudero-review: PASS — ${criteriaCount} criteria substantiated, no test theater` +
+    (keywordOnly ? " (keyword-only: no proof was executed on the PR head)" : "")
+  );
+}
+
+/** The CAPPED status-description text (W1-T185) — posted whenever a verdict
+ * that would otherwise render as a clean PASS observed zero proof executions.
+ * Deliberately contains neither "substantiated" nor "no test theater"
+ * (criterion 1's falsifier, verbatim: PR #411 posted PASS text at
+ * `proof_exec: 0/5` directly beneath its own FLOOR DEGRADED banner) — CAPPED
+ * means "not certified", never "rejected" (criterion 3: this is still a
+ * `state: "success"` commit status, never a red check). `keywordOnly`
+ * (W1-T185, gap 2) appends the same explicit tag {@link passSummary} does, so
+ * a materialization-failure fallback names BOTH facts in one description
+ * (criterion 5). */
+function cappedSummary(criteriaCount: number, keywordOnly = false): string {
+  return (
+    `remudero-review: CAPPED — 0/${criteriaCount} proofs executed; not certified ` +
+    `(a keyword match is a claim, not evidence)` +
+    (keywordOnly ? " (keyword-only: no proof was executed on the PR head)" : "")
+  );
 }
 
 // ── VERDICT STABILITY (W1-T178) ─────────────────────────────────────────────
@@ -861,7 +962,12 @@ export function applyVerdictStability(
         };
   });
   return {
-    verdict: { ...computed, state: "success", criteria, summary: passSummary(criteria.length) },
+    verdict: {
+      ...computed,
+      state: "success",
+      criteria,
+      summary: passSummary(criteria.length, computed.keywordOnly),
+    },
     suppressed: true,
   };
 }
@@ -879,6 +985,178 @@ export function floorDegradedAnnotation(criteriaCount: number): string {
     `a dialect-prefixed proof ('grep: …' / 'unit test: …') was written to be runnable ` +
     `but nothing was observed on the PR head.`
   );
+}
+
+/**
+ * True when a task's `principles` field (plan/tasks.yaml `principles: {tdd:
+ * strict}`) declares `tdd: strict`. The ONLY input {@link judgeReview} consults
+ * to decide whether a zero-executed verdict is CAPPED (W1-T185) — a task that
+ * never declared tdd:strict never gets capped, because it never claimed
+ * executed proof was mandatory in the first place.
+ */
+export function isTddStrict(principles?: Record<string, unknown>): boolean {
+  return principles?.tdd === "strict";
+}
+
+/**
+ * The LOUD console annotation for a CAPPED verdict (W1-T185) — printed once per
+ * review when {@link ReviewVerdict.capped} is true. Mirrors
+ * {@link floorDegradedAnnotation}: pure + exported so the exact text is a
+ * unit-testable falsifier, independent of the console call site (run-task.ts).
+ */
+export function cappedAnnotation(criteriaCount: number): string {
+  return (
+    `CAPPED: 0/${criteriaCount} proofs executed — not certified (a keyword match is a claim, ` +
+    `never evidence). On a tdd:strict task this refuses to arm auto-merge (see decideAutoMergeArm) ` +
+    `until proof executes or an operator grants an explicit, ledgered override.`
+  );
+}
+
+// ── THE AUTO-MERGE ARMING PATH (W1-T185, closes gap 1's criteria 2-3) ───────
+//
+// GAP: `judgeReview`'s `state`/`capped` alone cannot express "cannot arm
+// unattended" without ALSO reddening every PR the moment a proof is
+// unparseable (criterion 3 forbids exactly that). So arming is a SEPARATE
+// decision layer, consulted by the CALLER right before it would otherwise
+// call `armAutoMerge` — never folded into `state`/`floorState`.
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * An explicit, human-granted exception to "a CAPPED verdict on a tdd:strict
+ * task cannot arm auto-merge" (design: "an override is a decision someone
+ * made, and it must be attributable"). Never inferred, never anonymous — `by`
+ * names WHO. Granted via `rmd review <pr> --override-capped-by/
+ * --override-capped-reason` (run-task.ts) and recovered from the ledger by
+ * {@link cappedOverrideFromLedger}.
+ */
+export interface CappedOverride {
+  by: string;
+  reason: string;
+}
+
+/** The auto-merge arming path's decision (W1-T185). */
+export interface ArmDecision {
+  arm: boolean;
+  reason: string;
+}
+
+/**
+ * Decide whether the auto-merge arming path may proceed, given a freshly
+ * computed review verdict, whether the task under review declares
+ * `principles: {tdd: strict}`, and an optional operator override. Pure.
+ *
+ * - `state !== "success"` → refuse. The ordinary required-check gate;
+ *   unrelated to capping (a genuinely failing review was ALWAYS refused).
+ * - CAPPED IS NOT FAIL (criterion 3): a capped verdict never refuses arming on
+ *   its own. Only on a `tdd: strict` task, and only absent an override, does
+ *   capping refuse — a non-tdd:strict PR arms exactly as if this were an
+ *   ordinary PASS.
+ * - An override permits arming. Whether the caller actually LEDGERS that
+ *   override is {@link resolveAutoMergeArm}'s job, not this pure predicate's —
+ *   keeping this function side-effect-free is what makes "refuses without an
+ *   override; permits with one" a single unit fixture (acceptance criterion
+ *   2), independent of ledger/CLI plumbing.
+ */
+export function decideAutoMergeArm(
+  verdict: Pick<ReviewVerdict, "state" | "capped">,
+  tddStrict: boolean,
+  override?: CappedOverride,
+): ArmDecision {
+  if (verdict.state !== "success") {
+    return { arm: false, reason: "remudero-review is not success" };
+  }
+  if (!verdict.capped || !tddStrict) {
+    return {
+      arm: true,
+      reason: verdict.capped ? "capped, but the task is not tdd:strict" : "verdict is a full PASS",
+    };
+  }
+  if (override) {
+    return { arm: true, reason: `CAPPED override granted by ${override.by}: ${override.reason}` };
+  }
+  return {
+    arm: false,
+    reason:
+      "CAPPED verdict (zero proofs executed) on a tdd:strict task — refuses to arm auto-merge " +
+      "without executed proof or an explicit, ledgered operator override",
+  };
+}
+
+/**
+ * The auto-merge arming path, WITH its ledger side effect (W1-T185, criterion
+ * 2's "writes an attributable ledger line naming the overrider"). Wraps
+ * {@link decideAutoMergeArm}: when arming succeeds ONLY because an override
+ * was supplied for a genuinely capped, tdd:strict verdict, this logs
+ * `automerge.capped_override_used` naming who — an override that arms
+ * silently is exactly the #411 hazard this task closes (auto-merge armed
+ * unattended, no human reading the diff). `log` is injected so the whole
+ * contract — refuse without an override, arm + LEDGER with one — is a single
+ * unit fixture; `run-task.ts`'s `runTaskBody` is the real caller.
+ */
+export function resolveAutoMergeArm(
+  verdict: Pick<ReviewVerdict, "state" | "capped">,
+  tddStrict: boolean,
+  override: CappedOverride | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): ArmDecision {
+  const decision = decideAutoMergeArm(verdict, tddStrict, override);
+  if (decision.arm && override && tddStrict && verdict.capped) {
+    log("automerge.capped_override_used", { by: override.by, reason: override.reason });
+  }
+  return decision;
+}
+
+/**
+ * Recover the most recent `automerge.capped_override_granted` ledger line for
+ * `taskId`, "last one wins" — the SAME scanning idiom {@link
+ * priorReviewVerdictFromLedger} and every other precedence helper in this
+ * codebase already use. Written by `rmd review <pr>
+ * --override-capped-by/--override-capped-reason` (run-task.ts); consulted by
+ * the arming path ({@link decideAutoMergeArm}) before refusing a CAPPED
+ * tdd:strict verdict.
+ */
+export function cappedOverrideFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+): CappedOverride | undefined {
+  let found: CappedOverride | undefined;
+  for (const line of lines) {
+    if (line.step !== "automerge.capped_override_granted" || line.task_id !== taskId) continue;
+    if (typeof line.by !== "string" || typeof line.reason !== "string") continue;
+    found = { by: line.by, reason: line.reason };
+  }
+  return found;
+}
+
+/**
+ * The LOUD console annotation for a keyword-only verdict (W1-T185 — closes the
+ * second W1-T128 gap) — printed once per review when {@link
+ * ReviewVerdict.keywordOnly} is true and the verdict was NOT already capped
+ * (a capped verdict's own annotation already says nothing was executed; this
+ * would be redundant). Mirrors {@link floorDegradedAnnotation}.
+ */
+export function keywordOnlyAnnotation(): string {
+  return (
+    `KEYWORD-ONLY: no PR-head checkout was given, so no proof was executed for any ` +
+    `criterion — this verdict rests entirely on keyword coverage (+ optional semantic ` +
+    `downgrade), never on OBSERVED repo state.`
+  );
+}
+
+/**
+ * The `capped`/`keywordOnly` facts the `review.posted` ledger line records
+ * (W1-T185, criterion 5: "when materialization is impossible the verdict is
+ * EXPLICITLY marked keyword-only, in both the posted status and the ledger —
+ * silent keyword-only posting is unreachable"). Pure + exported so run-task.ts's
+ * `log("review.posted", …)` call and a unit test both read the SAME two fields
+ * off the SAME verdict, rather than the ledger line risking a hand-copied
+ * projection that could silently drift from what {@link cappedSummary}/
+ * {@link passSummary} actually rendered on the posted status.
+ */
+export function reviewLedgerLegibilityFields(
+  verdict: Pick<ReviewVerdict, "capped" | "keywordOnly">,
+): { capped: boolean; keyword_only: boolean } {
+  return { capped: verdict.capped, keyword_only: verdict.keywordOnly };
 }
 
 /** Max length of a GitHub commit-status description (postReviewStatus also truncates). */
