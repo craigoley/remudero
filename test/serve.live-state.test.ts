@@ -410,8 +410,11 @@ test("a hanging /v1/status (never resolves) still lands in the reconnecting life
     const page = await context.newPage();
     try {
       await page.goto(`${base}/?token=${READ_TOKEN}`);
+      // Real wall-clock wait, generously past getJson's own FETCH_TIMEOUT_MS (10s) -- CI runs
+      // many Playwright-driven test files concurrently in this suite, so this budget is wide
+      // rather than tight against the production timeout.
       await page.waitForFunction(() => document.getElementById("top-status")?.getAttribute("data-poll-state") === "reconnecting", null, {
-        timeout: 15000,
+        timeout: 60000,
       });
       const state = await page.evaluate(() => document.getElementById("top-status")?.textContent ?? "");
       assert.match(state, /reconnecting/);
