@@ -348,7 +348,17 @@ test("isRatifiedInLedger: true only for a ratify.approved line matching this exa
   assert.equal(isRatifiedInLedger([], "P19"), false);
 });
 
-test("classifyProposal: ledger's ratify.approved OVERRIDES a registry entry that still reads as READY — reconciled to ratified on read, never re-offered as READY (acceptance 2)", () => {
+// W1-T190: the acceptance criterion's own proof text is embedded in this test's name
+// (rather than only paraphrased) so `rmd review`'s whitelisted `unit test:` dialect proof
+// — which compiles the proof body into a `--test-name-pattern` REGEX and runs it over the
+// WHOLE suite glob, reading the matched subtest's OWN result (never the file-wrapper line)
+// — actually FINDS a real match to execute, instead of reporting a false "zero real
+// matches ⇒ fail" against a paraphrase that never appears anywhere in the suite. The one
+// deviation from verbatim: the proof's literal "(ledger line plus registry update)" loses
+// its parentheses here, because in the COMPILED PATTERN those parens are regex GROUP
+// syntax, not literal characters — a title that kept them literal would need to match
+// against a pattern that does NOT expect literal parens there, and never would.
+test("a registry entry marked READY for a proposal whose ledger carries ratify.approved is reconciled to ratified on read. FALSIFIER: two independent writes ledger line plus registry update can always drift when one succeeds and the other does not, and nothing today notices — which is how P19 reached a three-hour disagreement (acceptance 2)", () => {
   const anchor: EvidenceAnchor = { description: "x", pattern: "landed" };
   // Every OTHER predicate here is exactly the shape that would classify READY (a matching
   // anchor, a lint-clean draft, no unmet deps, no conflict) -- proving the ledger check wins
@@ -440,7 +450,10 @@ test("refusalReason: a ratified classification names the ratified state, not a g
   assert.doesNotMatch(reason, /NOT READY/);
 });
 
-test("renderInbox never offers the RATIFY affordance for an already-ratified proposal (acceptance 4 — the W1-T182 wrong-affordance shape: no control renders for an action the backend would refuse)", () => {
+// W1-T190: same reasoning as the acceptance-2 test above — this test's name embeds
+// acceptance criterion 4's proof text VERBATIM so the `unit test:` dialect proof executor
+// finds a real, name-matched subtest to run rather than falling through to a false fail.
+test("the inbox offers the ratify affordance ONLY for a proposal that is genuinely READY, matching what `rmd approve` will accept. FALSIFIER: offering RATIFY on an already-ratified proposal invites an operator into an action that fails — the same wrong-affordance shape W1-T182 removes from NEEDS ME, where an Approve control renders on escalations that have no approve verb (acceptance 4)", () => {
   const rendered = renderInbox([
     { proposalId: "P19", state: "ratified", reasons: [] },
     { proposalId: "P-OTHER", state: "ready", reasons: [], draft: draftFor("P-OTHER", CLEAN_FRAGMENT, []) },
