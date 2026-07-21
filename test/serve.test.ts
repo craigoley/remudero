@@ -12,6 +12,7 @@ import {
   renderShellHtml,
   resolveServePort,
   resolveServeHost,
+  resolveServeHosts,
   DEFAULT_SERVE_HOST,
   resolveServiceTokens,
   serviceTokensPath,
@@ -787,4 +788,40 @@ test("serveCommand's startup banner prints the READ token only — never the wri
     "FALSIFIER: the pre-fix banner printed `console: ...?token=${tokens.write}` plus a bare " +
       "`write token: ${tokens.write}` line, both of which landed in a 0644 serve.log",
   );
+});
+
+// ── multi-interface bind (the regression this fixes) ────────────────────────
+// Binding a SINGLE named host fixed the wildcard exposure and silently broke
+// 127.0.0.1, which is where every local curl, script and desktop bookmark
+// points. Observed live: `curl http://127.0.0.1:4317/` returned 000 (connection
+// refused) while the tailnet address served fine. Naming ONE interface is not
+// the same as naming the interfaces you need.
+
+test("resolveServeHosts: default is loopback ALONE, still never the wildcard", () => {
+  assert.deepEqual(resolveServeHosts([], {}), ["127.0.0.1"]);
+});
+
+test("resolveServeHosts: a comma-separated list binds BOTH loopback and the tailnet address", () => {
+  assert.deepEqual(
+    resolveServeHosts(["--host", "127.0.0.1,100.90.47.107"], {}),
+    ["127.0.0.1", "100.90.47.107"],
+    "FALSIFIER: the single-host shape dropped everything after the first address, which is exactly how local access was lost",
+  );
+});
+
+test("resolveServeHosts: whitespace is tolerated and duplicates collapse", () => {
+  assert.deepEqual(resolveServeHosts(["--host", " 127.0.0.1 , 127.0.0.1 "], {}), ["127.0.0.1"]);
+});
+
+test("resolveServeHosts: a wildcard ANYWHERE in the list is refused, not just in first position", () => {
+  assert.throws(() => resolveServeHosts(["--host", "127.0.0.1,0.0.0.0"], {}), /binds EVERY interface/);
+  assert.throws(() => resolveServeHosts([], { RMD_SERVE_HOST: "0.0.0.0,127.0.0.1" }), /binds EVERY interface/);
+});
+
+test("resolveServeHosts: an all-empty value is refused rather than collapsing to listen-nowhere", () => {
+  assert.throws(() => resolveServeHosts(["--host", " , "], {}), /binds EVERY interface/);
+});
+
+test("resolveServeHost: the single-host helper still returns the FIRST host, never a wildcard", () => {
+  assert.equal(resolveServeHost(["--host", "127.0.0.1,100.90.47.107"], {}), "127.0.0.1");
 });
