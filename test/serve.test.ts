@@ -636,23 +636,85 @@ test("GET /v1/control/status (assembled server): reads back the REAL fleet-contr
   });
 });
 
-test("GET /v1/recent (assembled server): last merges/blocks, PR-linked, most-recent-first by ledger order", async () => {
+test("GET /v1/recent (assembled server): a LEDGER-FIRST activity feed — verdict/fix/escalation/spend events, PR-linked, most-recent-first by ledger order (W1-T184)", async () => {
   const root = tmpRoot();
   const prUrl = "https://github.com/craigoley/remudero/pull/9";
-  const plan = planOf([task({ id: "OLD", status: "merged" }), task({ id: "NEW", status: "merged" })]);
+  const plan = planOf([task({ id: "OLD", title: "the old task", status: "merged" }), task({ id: "NEW", title: "the new task", status: "merged" })]);
   const ledgerPath = ledgerPathFor(root);
   const github = fakeGitHub({ [prUrl]: { number: 9, url: prUrl, state: "MERGED" } });
   const deps = depsFor(root, plan, { board: { plan, ledgerPath, github } });
-  // OLD is mentioned first, NEW second — NEW must sort first (most-recent-first).
+  // OLD is mentioned first, NEW second — NEW must sort first (most-recent-first, ledger-append order).
   appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "OLD", step: "pr.opened", pr_url: prUrl }) + "\n");
+  appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "OLD", step: "verdict", verdict: "merged", cost_usd: 1.5 }) + "\n");
   appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r2", task_id: "NEW", step: "pr.opened", pr_url: prUrl }) + "\n");
+  appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r2", task_id: "NEW", step: "verdict", verdict: "merged", cost_usd: 2.5 }) + "\n");
   await withServeServer(deps, async (base) => {
     const res = await get(base, "/v1/recent", READ_TOKEN);
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { entries: Array<{ taskId: string; outcome: string }> };
+    const body = (await res.json()) as {
+      entries: Array<{ taskId: string; title: string; verb: string; prUrl?: string; prNumber?: number; costUsd?: number; ts: string }>;
+    };
     assert.deepEqual(body.entries.map((e) => e.taskId), ["NEW", "OLD"]);
-    assert.ok(body.entries.every((e) => e.outcome === "merged"));
+    assert.ok(body.entries.every((e) => e.verb === "merged"));
+    assert.ok(body.entries.every((e) => e.prUrl === prUrl && e.prNumber === 9));
+    assert.ok(body.entries.every((e) => typeof e.title === "string" && e.title.length > 0));
+    assert.deepEqual(body.entries.map((e) => e.costUsd), [2.5, 1.5]);
   });
+});
+
+test("GET /v1/recent (assembled server): a GitHub outage renders the IDENTICAL feed — GitHub decorates, it never gates (W1-T184 FIXTURE 1)", async () => {
+  const prUrl = "https://github.com/craigoley/remudero/pull/9";
+  const plan = planOf([task({ id: "W1-T1", title: "a task" })]);
+  const ledgerLines = [
+    JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "pr.opened", pr_url: prUrl }),
+    JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "verdict", verdict: "merged", cost_usd: 1 }),
+  ].join("\n") + "\n";
+
+  // `depsFor`/`ledgerPathFor` TRUNCATE the ledger file as a side effect (fresh-fixture hygiene),
+  // so the ledger content must be appended AFTER building `deps`, never before.
+  const healthyRoot = tmpRoot();
+  const healthyLedgerPath = ledgerPathFor(healthyRoot);
+  const healthyGithub = fakeGitHub({ [prUrl]: { number: 9, url: prUrl, state: "MERGED", title: "the actual PR title" } });
+  const healthyDeps = depsFor(healthyRoot, plan, { board: { plan, ledgerPath: healthyLedgerPath, github: healthyGithub } });
+  appendFileSync(healthyLedgerPath, ledgerLines);
+  const healthy = await (async () => {
+    let out: unknown;
+    await withServeServer(healthyDeps, async (base) => {
+      out = await (await get(base, "/v1/recent", READ_TOKEN)).json();
+    });
+    return out as { entries: Array<Record<string, unknown>> };
+  })();
+
+  // A gateway seeded to FAIL every read (W1-T181's marked-failure signal) — never throws, just
+  // reports readFailed()/readFailureReason() truthfully, exactly like a real outage would.
+  const darkGithub: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    readFailed: () => true,
+    readFailureReason: () => "transport",
+  };
+  const darkRoot = tmpRoot();
+  const darkLedgerPath = ledgerPathFor(darkRoot);
+  const darkDeps = depsFor(darkRoot, plan, { board: { plan, ledgerPath: darkLedgerPath, github: darkGithub } });
+  appendFileSync(darkLedgerPath, ledgerLines);
+  const dark = await (async () => {
+    let out: unknown;
+    await withServeServer(darkDeps, async (base) => {
+      out = await (await get(base, "/v1/recent", READ_TOKEN)).json();
+    });
+    return out as { entries: Array<Record<string, unknown>> };
+  })();
+
+  assert.equal(dark.entries.length, healthy.entries.length);
+  assert.deepEqual(
+    dark.entries.map((e) => ({ taskId: e.taskId, verb: e.verb, prUrl: e.prUrl, costUsd: e.costUsd })),
+    healthy.entries.map((e) => ({ taskId: e.taskId, verb: e.verb, prUrl: e.prUrl, costUsd: e.costUsd })),
+  );
+  assert.equal(healthy.entries[0]!.prTitle, "the actual PR title");
+  assert.equal(dark.entries[0]!.prTitle, undefined, "a failed GitHub read degrades to ledger-only detail, never removes the row");
+  assert.equal(dark.entries[0]!.githubUnavailable, true, "a failed read is marked unavailable, not silently absent");
 });
 
 test("GET /v1/inbox (assembled server): the W1-T110 ratification inbox's READY tier, reachable and header-only", async () => {
@@ -733,6 +795,82 @@ test("W1-T157: palette actions fire through the EXISTING buttons (one implementa
   assert.match(html, /getElementById\("stop-btn"\)\.click\(\)/);
   assert.match(html, /getElementById\("feedback-btn"\)\.click\(\)/);
   assert.match(html, /getElementById\("graph-btn"\)\.click\(\)/);
+});
+
+// ── W1-T182: NEEDS ME dispatches the Approve affordance BY ITEM TYPE, never one row template ────
+// for every kind. Structural proof over the two row-template function BODIES (the DOM/behavioral
+// half — a real escalation row rendered live, "Mark handled" actually closing the issue — is
+// test/serve.live-state.test.ts's job, per this codebase's own "exercise the real client" rule;
+// this test proves the CONTRAST the acceptance bar names: an escalation template carries no
+// Approve control at all, while the P## inbox-proposal template still carries its OWN, pre-
+// existing, intentionally CLI-only `rmd approve` affordance (W1-T110/W1-T111's documented scope
+// boundary, panel-graph.ts's buildInboxRoute: a REAL write route needs a RatifyGateway this task
+// does not add — a fake button here would be exactly the "control with no defined action" this
+// task exists to remove, not add a second instance of).
+
+test("W1-T182: an Approve control NEVER renders on an escalation row, while the P## inbox-proposal row still carries its own (CLI-only, pre-existing) approve affordance", () => {
+  const html = renderShellHtml();
+  const taskRowFn = html.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0];
+  const inboxRowFn = html.match(/function needsMeInboxHtml\(p\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(taskRowFn, "needsMeTaskRowHtml (the escalation row template) must exist");
+  assert.ok(inboxRowFn, "needsMeInboxHtml (the P## proposal row template) must exist");
+
+  // The escalation template: no Approve control, anywhere, in any form (button, form, label).
+  assert.doesNotMatch(taskRowFn, /Approve/i, "an escalation row template must never render an Approve control");
+  assert.doesNotMatch(taskRowFn, /<input[^>]*type="url"/i, "never solicit a URL the ledger already holds");
+  assert.match(taskRowFn, /view issue/i, "must render a direct link to the issue");
+  assert.match(taskRowFn, /Mark handled/i, "must render the escalation's OWN affordance, not a borrowed one");
+
+  // The P## proposal template: unchanged, and it DOES still carry the word "approve" — the one
+  // item type that word is actually defined for (rmd approve, the ratification-inbox action).
+  assert.match(inboxRowFn, /approve/i, "a P## inbox-proposal row must still carry the defined rmd approve affordance");
+});
+
+// ── W1-T182: the row template proven over its ACTUAL RENDERED OUTPUT, not just its source
+// text — a browser-driven DOM proof already exists (test/serve.live-state.test.ts), but that
+// requires launching a real headless browser; this test proves the exact same claim (the
+// issue's real ask + a direct link + no free-text/URL input of any kind, not merely no
+// `type="url"` one) by extracting the row template's own small, pure helper functions
+// (escapeHtml/statusBadge/prLink/journeyButtonHtml/needsMeTaskRowHtml — none of them touch
+// `document`) straight out of the served shell and calling them with real StatusProjection
+// shapes, so the proof runs anywhere Node does, no browser required.
+test("W1-T182: needsMeTaskRowHtml's ACTUAL rendered output shows the issue's real ask + a direct link, and contains NO <input> of any kind — never solicits data the ledger (escalation.issue_opened's issue_url) already holds", () => {
+  const html = renderShellHtml();
+  const parts: Record<string, string | undefined> = {
+    STATUS_LABELS: html.match(/const STATUS_LABELS = \{[\s\S]*?\};/)?.[0],
+    escapeHtml: html.match(/function escapeHtml\(text\) \{[\s\S]*?\n  \}/)?.[0],
+    statusBadge: html.match(/function statusBadge\(key\) \{[\s\S]*?\n  \}/)?.[0],
+    prLink: html.match(/function prLink\(t\) \{[\s\S]*?\n  \}/)?.[0],
+    journeyButtonHtml: html.match(/function journeyButtonHtml\(taskId\) \{[\s\S]*?\n  \}/)?.[0],
+    needsMeTaskRowHtml: html.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0],
+  };
+  for (const [name, src] of Object.entries(parts)) assert.ok(src, `${name} must exist in the shell's inline script`);
+
+  const renderRow = new Function(
+    `${parts.STATUS_LABELS}\n${parts.escapeHtml}\n${parts.statusBadge}\n${parts.prLink}\n${parts.journeyButtonHtml}\n${parts.needsMeTaskRowHtml}\nreturn needsMeTaskRowHtml(arguments[0]);`,
+  ) as (t: Record<string, unknown>) => string;
+
+  // A CONFIRMED-open escalation, live issue title flowing through escalationTitle.
+  const issueUrl = "https://github.com/o/r/issues/393";
+  const openRow = renderRow({
+    taskId: "W1-T1",
+    needsHuman: true,
+    escalationTitle: "[BLOCKED] W1-T1: needs a decision",
+    escalationIssueUrl: issueUrl,
+  });
+  assert.match(openRow, /needs a decision/, "renders the issue's ACTUAL one-line ask, not a generic label");
+  assert.match(openRow, new RegExp(`href="${issueUrl.replace(/[/.]/g, "\\$&")}"`), "a direct link to the issue");
+  assert.match(openRow, /Mark handled/);
+  assert.doesNotMatch(openRow, /Approve/i, "no defined verb for an escalation of any class");
+  assert.doesNotMatch(openRow, /<input\b/i, "must render NO input of any kind — free-text or url — the ledger already holds issue_url");
+
+  // An UNVERIFIED escalation with no title yet resolved and no issue url at all (a malformed
+  // ledger line) — still renders, generic ask, still no link, still no input anywhere.
+  const unverifiedRow = renderRow({ taskId: "W1-T2", needsHuman: true, escalationUnverified: true });
+  assert.match(unverifiedRow, /needs human attention \(escalated\)/, "falls back to a generic ask only when no issue title is available");
+  assert.match(unverifiedRow, /unverified/i);
+  assert.doesNotMatch(unverifiedRow, /view issue/i, "no issue url to join against -> no link rendered");
+  assert.doesNotMatch(unverifiedRow, /<input\b/i);
 });
 
 // ── resolveServeHost: exposure must be typed, never inherited (R-4) ─────────

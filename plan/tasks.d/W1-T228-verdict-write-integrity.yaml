@@ -1,0 +1,58 @@
+- id: W1-T228
+  title: "the review status channel is last-write-wins across uncoordinated posters - a CAPPED success overwrote an executed failure, and a status was written 85s after merge"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OBSERVED 2026-07-21 across three PRs. Head 833561d of PR 449 took SEVEN remudero-review writes in
+    one day, oscillating failure to success and back with no intervening push. Two of them are the shape that
+    matters: an executed verdict at 18:02:31 reporting 2 of 6 proofs executed and FAILED, then a keyword-only
+    CAPPED success at 18:10:42 reporting 0 of 6 executed. Weaker evidence overwrote stronger evidence on an
+    identical SHA, and the channel kept the later write.
+    A THIRD WRITE LANDED AT 18:16:20, roughly 85 seconds AFTER the PR merged at 18:14:55. The channel accepts
+    writes against a closed lifecycle.
+    PRs 452 and 479 showed the same failure-to-success flip on unchanged heads the same afternoon. Three
+    instances, one mechanism: multiple posters, no precedence rule, no serialization, last write wins.
+    THIS IS HARDENED REGARDLESS OF THE ARM PATH. A companion filing moves the arm decision off this channel and
+    onto the orchestrator's own ledgered verdict, which removes the channel from the MERGE path. It does not
+    make a lying channel harmless: the posted status is what branch protection reads, what the board renders,
+    and what an operator opens a PR to see. A display that reports 0 of 6 proofs executed when 2 of 6 ran and
+    failed still misleads the person deciding whether to intervene."
+  design: |
+    ONE POST SITE ENFORCES THREE RULES. All three belong at the single writer (postReviewStatus and its caller),
+    never spread across callers - a rule a caller can forget to apply is a rule that will be forgotten.
+    (i) PRECEDENCE: a keyword-only or CAPPED verdict never overwrites an executed-evidence verdict for the same
+    SHA. Executed may overwrite executed - a later real run supersedes an earlier one, which is how a fix rung
+    is supposed to work. The asymmetry is deliberate: evidence outranks its absence, and only in that direction.
+    (ii) LIFECYCLE: no status writes to a merged or closed PR. Refuse, and ledger the refusal - a write arriving
+    after merge is a signal about a live process nobody is tracking, and swallowing it silently loses that.
+    (iii) SERIALIZATION: per-PR, via the O_EXCL lock pattern this codebase already uses for the inflight and
+    drain locks. VERIFY that pattern from source and reuse it rather than writing a second locking discipline.
+    READ BEFORE WRITE, AND STATE THE RACE HONESTLY. Precedence needs the current status, so the writer must
+    fetch then decide then write. That is itself a race; the per-PR lock is what closes it. An implementation
+    with precedence but no lock has narrowed the window rather than closed it, and should not claim otherwise.
+    EVERY ATTEMPT IS LEDGERED, including refused ones. The reason this defect took a day to characterise is
+    that the channel keeps only the winner. A refused write that leaves no trace is the same blindness in a
+    new place.
+  acceptance:
+    - claim: "a CAPPED success posted over an executed_fail on the SAME SHA is refused, and the prior status is left intact"
+      proof: "unit test: refused post, prior status intact"
+    - claim: "a post to a merged or closed PR is refused and the refusal is ledgered"
+      proof: "unit test with seeded merged state"
+    - claim: "N concurrent posters on one PR serialize to a precedence-consistent final state, with every attempt ledgered including the losers"
+      proof: "unit test: concurrent attempts, single winner, every attempt ledgered"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§12"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 from the verdict-oscillation incident. Fixtures: PR 449 head 833561d (seven writes,
+    CAPPED-over-executed at 18:02:31 to 18:10:42, post-merge write at 18:16:20), PRs 452 and 479 (same-SHA
+    failure-to-success flips).
+    RELATED, NOT DUPLICATE: W1-T227 narrows proof runs so the timeout race fires less often. That reduces how
+    frequently a CAPPED verdict is produced at all. It does not make the overwrite safe, which is this task.
+    COUPLES TO STANDING RULE 23 (write-side atomicity): the per-PR lock here is the same discipline the ledger
+    and status.json tasks owe, applied to the status channel."

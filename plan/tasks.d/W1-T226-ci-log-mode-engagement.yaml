@@ -1,0 +1,79 @@
+- id: W1-T226
+  title: "ci-log fix mode is unreachable once a review verdict exists - the rung is not blind to CI reds as W1-T224 claims, it is MASKED out of the mode that handles them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "CORRECTING FOLLOW-UP TO W1-T224 under standing rule 21 - W1-T224 is merged, so its rationale is
+    corrected here rather than edited there.
+    WHAT W1-T224 GOT WRONG. It says the fix rung can only STARE at a red CI check and has nothing to act on.
+    That is overstated. The rung HAS a ci-log FixMode, and it was observed dispatching one on PR 449 during
+    the seven-PR jam - the rung's own line was: dispatching ONE ci-log fix worker for 1 failing check(s).
+    The capability exists.
+    WHAT IS ACTUALLY WRONG, verified at source. FIX_MODE_RULES (run-task.ts) is a first-match-wins table
+    whose first row is ci-log, gated on `e.review === undefined`, and whose LAST row (reviewer-unmet) matches
+    unconditionally. So ci-log is reachable ONLY when there is no review verdict at all. Any verdict - pass
+    OR fail - makes `review` defined, the first row misses, and the rung falls through to a review-shaped
+    mode. The table's own doc comment states the intent plainly: no review verdict at all, the failing signal
+    IS the CI log, never a reviewer verdict.
+    THAT IS THE MASK. A PR that is BOTH review-failed AND CI-red - which is exactly PR 479's shape - can
+    never reach ci-log mode, because its review verdict exists. The rung then dispatches a worker to address
+    unmet criteria while the actual blocker is a red check nobody is looking at. The rung is not blind. It is
+    routed away from the mode that would have helped.
+    ONE OBSERVATION THAT COMPLICATES THIS AND MUST NOT BE GLOSSED. PR 449 carried a posted
+    remudero-review=failure status, yet the rung still chose ci-log. So `e.review` is the rung's OWN computed
+    evidence for that pass, not the posted commit status, and the two can disagree. An investigator who
+    conflates them will misread the whole mechanism. Establish which is which FIRST."
+  design: |
+    INVESTIGATE BEFORE CHANGING THE TABLE. Three branches, and the answer decides the fix:
+    (a) NEVER DISPATCHED - the sweep's disposition never routed a review-less, CI-red PR to the rung at all,
+    so mode selection was never reached. Check the disposition path, not the mode table.
+    (b) DISPATCHED BUT UNABLE TO ACT - ci-log engaged and could not help because the failure was a FLAKE. A
+    re-run is the remedy and a code change is not, which STRENGTHENS W1-T224's flake-disposition criterion
+    rather than replacing it.
+    (c) MASKED BY REVIEW-STATE ORDERING - confirmed as a real mechanism at source above. A posted or computed
+    FAIL verdict makes review defined and the ci-log row unreachable.
+    These are not exclusive. PR 479 (review-failed AND CI-red) fits (c); PR 485 (CI-red, review posted
+    success-capped) also fits (c); a flake underneath either still needs (b)'s remedy.
+    THE CORRECTED SCOPE: make ci-log mode ENGAGE on the observed jam shapes. That likely means the mode is
+    not chosen by absence-of-review but by presence-of-a-failing-check, which is a different question, and
+    may mean a PR can need BOTH a check remedy and a criteria remedy rather than exactly one mode. VERIFY
+    from source whether the rung can express more than one remedy per pass before assuming it can.
+    DO NOT REMOVE THE REVIEW-SHAPED MODES. body-coverage and reviewer-unmet are correct for what they handle,
+    and the #157/#143 lesson encoded in the body-coverage guard - an observed executed_fail always means real
+    code broke - must survive any table change.
+    W1-T224's CRITERIA STAND UNCHANGED: the flake disposition, the bounded re-runs, the honest escalation
+    naming the failing check, and above all the prohibition on remediating a red check by weakening the
+    check. This task changes the diagnosis, not those obligations.
+  acceptance:
+    - claim: "a PR that is BOTH review-failed and CI-red reaches a remedy for the failing CHECK, rather than being routed only to a criteria-shaped mode while the red check goes unaddressed"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "the investigation's conclusion is recorded with evidence from the real jam, naming which of never-dispatched, unable-to-act, or masked-by-review-state actually applied to each fixture"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "ci-log mode remains reachable for its original shape - a PR with no review verdict at all still routes to it"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "THE REGRESSION GUARD - an unmet criterion carrying an observed executed_fail is still never treated as body-only, so the table change cannot undo the #157/#143 lesson"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "the rung's computed review evidence and the POSTED review status are distinguished in the fix, since PR 449 showed them disagreeing"
+      proof: "unit test: test/run-task.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§4B", "§5C"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 as a standing-rule-21 correcting follow-up to W1-T224, which is merged and so cannot
+    be amended. The correction is to the DIAGNOSIS, not the obligations - W1-T224's flake disposition,
+    bounded re-runs, honest escalation and gate-integrity prohibition all stand.
+    THE CORRECTION MATTERS BECAUSE THE WRONG DIAGNOSIS POINTS AT THE WRONG FIX. Read as W1-T224 wrote it, an
+    implementer would build a CI-reading capability the rung already has. Read correctly, the work is about
+    ROUTING - why an existing capability is unreachable on the shapes that need it.
+    FIXTURES UNCHANGED: PRs 479 and 485. Fixture 449 is added as the counter-observation that keeps the
+    investigation honest - it dispatched ci-log despite carrying a posted FAIL status, which proves the
+    rung's computed evidence and the posted status are not the same thing.
+    SELF-CORRECTION NOTE: W1-T224's overstatement was mine, filed hours earlier in the same session from the
+    seven-PR jam. It was caught by reading the rung's own dispatch line rather than by any gate - which is
+    the same class of miss the intake pass caught in the recon's R-1, R-20 and R-23. A claim about code that
+    is not verified at source decays the same way whoever writes it."

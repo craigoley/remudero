@@ -44,6 +44,7 @@ import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
   buildControlStatusRoute,
+  buildEscalationMarkHandledRoute,
   buildPauseRoute,
   buildQuietHoursRoute,
   buildResumeRoute,
@@ -679,7 +680,9 @@ export function renderShellHtml(): string {
    *  timestamp, not part of the status taxonomy the operator is announced about). A row whose
    *  ONLY difference is one of these must not "flip" (re-render/flash/announce). */
   function withoutVolatile(p) {
-    const { elapsedMs, lastActivityAt, ...rest } = p;
+    // W1-T184: liveSpendUsd/liveTurns tick upward as an in-flight run spends/turns, exactly
+    // like elapsedMs ticks with wall-clock time -- neither is a genuine status "flip".
+    const { elapsedMs, lastActivityAt, liveSpendUsd, liveTurns, ...rest } = p;
     return rest;
   }
 
@@ -767,12 +770,17 @@ export function renderShellHtml(): string {
     return \`<button type="button" class="row-journey-btn" data-task-id="\${escapeHtml(taskId)}" title="Open the provenance journey for \${escapeHtml(taskId)}">Journey</button>\`;
   }
 
-  // ── NOW — in-flight runs, live phase + LIVE-TICKING elapsed (W1-T156) ───────────────────
+  // ── NOW — in-flight runs, live phase + LIVE-TICKING elapsed (W1-T156) + LIVE spend/turns (W1-T184) ──
+  function liveSpendHtml(t) {
+    if (t.liveSpendUsd === undefined && t.liveTurns === undefined) return "";
+    const turns = t.liveTurns !== undefined ? \` / \${t.liveTurns} turns\` : "";
+    return \` · spend: \${costLabel(t.liveSpendUsd)}\${turns}\`;
+  }
   function nowRowHtml(t) {
     const key = statusColorKey(t);
     return (
       \`<span class="task-id">\${escapeHtml(t.taskId)}</span>\${statusBadge(key)}\${liveIndicatorHtml()}\` +
-      \`<span class="detail">phase: \${escapeHtml(t.phase)} · elapsed: <span class="elapsed" data-started="\${escapeHtml(t.startedAt ?? "")}">…</span>\${t.armedAwaitingMerge ? " · auto-merge armed" : ""}\${prLink(t)}</span>\` +
+      \`<span class="detail">phase: \${escapeHtml(t.phase)} · elapsed: <span class="elapsed" data-started="\${escapeHtml(t.startedAt ?? "")}">…</span>\${liveSpendHtml(t)}\${t.armedAwaitingMerge ? " · auto-merge armed" : ""}\${prLink(t)}</span>\` +
       journeyButtonHtml(t.taskId)
     );
   }
@@ -796,14 +804,26 @@ export function renderShellHtml(): string {
   }
 
   // ── NEEDS ME — escalations + inbox, one-line ask + action ───────────────────────────────
+  // W1-T182: an ESCALATION row joins LIVE issue state (status.ts's escalationIssueUrl/
+  // escalationTitle/escalationUnverified), never ledger history alone, and renders the
+  // affordance an escalation actually supports -- "view issue" (a DIRECT link, never an input
+  // soliciting a URL the ledger already holds) + "mark handled". There is NO Approve control
+  // here: "approve" has no defined verb for an escalation of any class -- that word is reserved
+  // for a P## ratification-inbox proposal (needsMeInboxHtml, below), the one item type it is
+  // actually defined for.
   function needsMeTaskRowHtml(t) {
+    const ask = t.escalationTitle ? escapeHtml(t.escalationTitle) : "needs human attention (escalated)";
+    const unverifiedNote = t.escalationUnverified ? " · issue state unverified (showing to be safe)" : "";
+    const viewIssueLink = t.escalationIssueUrl
+      ? \`<a href="\${escapeHtml(t.escalationIssueUrl)}" target="_blank" rel="noopener noreferrer">view issue</a>\`
+      : "";
+    const markHandledBtn = t.escalationIssueUrl
+      ? \`<button type="button" class="needs-me-mark-handled" data-task-id="\${escapeHtml(t.taskId)}" data-issue-url="\${escapeHtml(t.escalationIssueUrl)}">Mark handled</button>\`
+      : "";
     return (
-      \`\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(t.taskId)}</span><span class="detail">needs human attention (escalated)\${prLink(t)}</span>\` +
+      \`\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(t.taskId)}</span><span class="detail">\${ask}\${unverifiedNote}\${prLink(t)}</span>\` +
       journeyButtonHtml(t.taskId) +
-      \`<form class="inline-action needs-me-approve" data-task-id="\${escapeHtml(t.taskId)}">\` +
-      \`<label for="issue-\${escapeHtml(t.taskId)}">Issue URL</label>\` +
-      \`<input id="issue-\${escapeHtml(t.taskId)}" type="url" placeholder="https://github.com/.../issues/…" required />\` +
-      \`<button type="submit">Approve</button></form>\`
+      (viewIssueLink || markHandledBtn ? \`<span class="btn-row">\${viewIssueLink}\${markHandledBtn}</span>\` : "")
     );
   }
   function needsMeGrillHtml(e) {
@@ -857,15 +877,73 @@ export function renderShellHtml(): string {
     return new Set(head.map((c) => c.id));
   }
 
-  // ── RECENT — last ~10 merges/blocks, PR-linked ───────────────────────────────────────────
+  // ── RECENT — a LEDGER-FIRST activity feed (W1-T184): merges/verdicts/fix outcomes/
+  // escalations/spend, one row per ledger EVENT (not a task's final state) — GitHub only ever
+  // DECORATES a row (the PR's title); an unreachable GitHub degrades that decoration, it never
+  // removes the row (see lib/board.ts's computeRecentActivity for the full design rationale). ──
+
+  const RECENT_VERB_LABEL = { merged: "merged", verdict: "verdict", fix: "fix", escalated: "escalated", spend: "spend" };
+  // Reuses the board's existing status-dot palette (statusBadge/STATUS_LABELS above) rather than
+  // inventing new colors for this feed's own vocabulary — merged/verdict map onto their obvious
+  // counterparts; fix/spend read as "in progress" (running); escalated reads as needs-human.
+  const RECENT_BADGE_KEY = { merged: "merged", verdict: "blocked", fix: "running", escalated: "needs-human", spend: "running" };
+
+  /** "5m ago"/"2h ago"/"3d ago" -- RECENT's relative-timestamp column (a distinct concept from
+   *  \`formatElapsed\`'s live countUP for an in-flight NOW row's own \`elapsedMs\`). */
+  function formatAgo(ts) {
+    const ms = Date.now() - Date.parse(ts);
+    if (!Number.isFinite(ms)) return "";
+    if (ms < 60_000) return "just now";
+    const m = Math.floor(ms / 60_000);
+    if (m < 60) return \`\${m}m ago\`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return \`\${h}h ago\`;
+    return \`\${Math.floor(h / 24)}d ago\`;
+  }
+
+  /** GitHub DECORATES: the PR link's label prefers the PR's own title (when GitHub resolved
+   *  one); absent that, it degrades to the bare PR number/url -- never omits the link itself. */
+  /** The PR link's label carries BOTH the number AND the title when GitHub resolved one
+   *  ("#123 — the actual PR title") -- never the title ALONE (a bare title with no PR number
+   *  reads ambiguously as free text, not a PR reference). Degrades to the bare number, then the
+   *  raw url, as GitHub's decoration itself degrades -- the link is never omitted. */
+  function recentPrLinkHtml(e) {
+    if (!e.prUrl) return "";
+    const num = e.prNumber !== undefined ? \`#\${e.prNumber}\` : null;
+    const label = num && e.prTitle ? \`\${num} — \${e.prTitle}\` : e.prTitle || num || e.prUrl;
+    return \` · <a class="recent-pr-link" href="\${e.prUrl}" target="_blank" rel="noreferrer">\${escapeHtml(label)}</a>\`;
+  }
+
+  function recentSpendHtml(e) {
+    if (e.costUsd === undefined && e.numTurns === undefined) return "";
+    const turns = e.numTurns !== undefined ? \` / \${e.numTurns} turns\` : "";
+    return \` · <span class="recent-spend">spend: \${costLabel(e.costUsd)}\${turns}</span>\`;
+  }
+
+  function recentRowHtml(e) {
+    const key = RECENT_BADGE_KEY[e.verb] ?? "queued";
+    const verbLabel = RECENT_VERB_LABEL[e.verb] ?? e.verb;
+    const detail = e.detail ? \` (\${escapeHtml(e.detail)})\` : "";
+    const unavailable = e.githubUnavailable ? \` · <span class="recent-gh-unavailable">GitHub unavailable</span>\` : "";
+    return (
+      \`\${statusBadge(key)}<span class="task-id" data-verb="\${escapeHtml(e.verb)}">\${escapeHtml(e.taskId)}</span>\` +
+      \`<span class="detail">\` +
+      \`<span class="recent-verb">\${escapeHtml(verbLabel)}</span>\${detail} — \` +
+      \`<span class="recent-title">\${escapeHtml(e.title)}</span>\` +
+      \`\${recentSpendHtml(e)}\${recentPrLinkHtml(e)}\${unavailable} · \` +
+      \`<time class="recent-ts" datetime="\${escapeHtml(e.ts)}">\${escapeHtml(formatAgo(e.ts))}</time>\` +
+      \`</span>\` +
+      journeyButtonHtml(e.taskId)
+    );
+  }
+
   function renderRecent(entries) {
     const list = entries ?? [];
-    const rows = list.map((e) => ({
-      key: e.taskId,
-      html: \`\${statusBadge(e.outcome === "blocked" ? "blocked" : "merged")}<span class="task-id">\${escapeHtml(e.taskId)}</span><span class="detail">\${escapeHtml(e.outcome)}\${prLink(e)}</span>\${journeyButtonHtml(e.taskId)}\`,
-      taskId: e.taskId,
-    }));
-    reconcileRows(document.getElementById("recent-list"), rows, "no recent outcomes yet");
+    // Keyed on taskId+ts+index (never bare taskId): the SAME task can carry many rows over
+    // time (a verdict, a fix outcome, a spend checkpoint, …) -- an activity FEED, not one row
+    // per task (W1-T156's DOM-stability reconciliation needs a key unique PER ROW, not per task).
+    const rows = list.map((e, i) => ({ key: \`\${e.taskId}:\${e.ts}:\${i}\`, html: recentRowHtml(e), taskId: e.taskId }));
+    reconcileRows(document.getElementById("recent-list"), rows, "no recent activity yet");
     return new Set(list.map((e) => e.taskId));
   }
 
@@ -1251,27 +1329,26 @@ export function renderShellHtml(): string {
 
   // ── NEEDS ME row actions (event delegation — rows are re-rendered on every refresh) ─────
   document.getElementById("needs-me-list").addEventListener("submit", async (e) => {
-    const approveForm = e.target.closest(".needs-me-approve");
     const answerForm = e.target.closest(".needs-me-answer");
-    if (approveForm) {
-      e.preventDefault();
-      const taskId = approveForm.dataset.taskId;
-      const issueUrl = approveForm.querySelector("input").value.trim();
-      await postJson("/v1/manual/approve", { taskId, issueUrl });
-      refreshAll();
-    } else if (answerForm) {
-      e.preventDefault();
-      const replyTo = answerForm.dataset.replyTo;
-      const answer = answerForm.querySelector("input").value.trim();
-      await postJson("/v1/feedback", { text: answer, replyTo });
-      refreshAll();
-    }
+    if (!answerForm) return;
+    e.preventDefault();
+    const replyTo = answerForm.dataset.replyTo;
+    const answer = answerForm.querySelector("input").value.trim();
+    await postJson("/v1/feedback", { text: answer, replyTo });
+    refreshAll();
   });
   document.getElementById("needs-me-list").addEventListener("click", async (e) => {
-    const btn = e.target.closest(".needs-me-decide");
-    if (!btn) return;
-    await postJson("/v1/feedback/decision", { id: btn.dataset.id, decision: btn.dataset.decision });
-    refreshAll();
+    const decideBtn = e.target.closest(".needs-me-decide");
+    const markHandledBtn = e.target.closest(".needs-me-mark-handled");
+    if (decideBtn) {
+      await postJson("/v1/feedback/decision", { id: decideBtn.dataset.id, decision: decideBtn.dataset.decision });
+      refreshAll();
+    } else if (markHandledBtn) {
+      // W1-T182: the escalation's own issue_url rides on the row's data attribute -- never an
+      // operator-typed input, since the ledger (and now the live join) already holds it.
+      await postJson("/v1/escalation/mark-handled", { taskId: markHandledBtn.dataset.taskId, issueUrl: markHandledBtn.dataset.issueUrl });
+      refreshAll();
+    }
   });
 
   // ── fleet control READ-BACK (W1-T153): render the ACTIVE mode, never stateless buttons ──
@@ -1733,6 +1810,7 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     buildQuietHoursRoute(fleetControlDeps),
     buildAnswerQuestionRoute(questionDeps),
     buildApproveManualRoute(fleetControlDeps),
+    buildEscalationMarkHandledRoute(fleetControlDeps),
     ...buildPanelGraphRoutes(panelGraphDeps),
     buildTaskCardRoute(deps.board),
     buildShellRoute(),
