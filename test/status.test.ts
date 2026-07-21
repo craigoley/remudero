@@ -14,6 +14,7 @@ import {
   isDispatchBreakerTripped,
   projectPlan,
   DEFAULT_MAX_TASK_DISPATCHES,
+  type BatchedIssue,
   type BatchedPr,
   type GitHub,
   type PrRef,
@@ -47,6 +48,10 @@ function fakeGitHub(opts: {
   autoMergeByUrl?: Record<string, boolean>;
   /** W1-T119: simulates every underlying `gh` call in this snapshot having failed. */
   readFailed?: boolean;
+  /** W1-T182: escalation issue state/title per `issue_url` — absent url ⇒ null (not found/unreadable). */
+  issuesByUrl?: Record<string, { state: string; title?: string } | null>;
+  /** W1-T182: simulates the issue-fetch specifically failing (independent of the PR-fetch `readFailed`). */
+  issueReadFailed?: boolean;
 }): GitHub & { calls: string[] } {
   const calls: string[] = [];
   return {
@@ -54,6 +59,14 @@ function fakeGitHub(opts: {
     readFailed() {
       calls.push("readFailed");
       return opts.readFailed ?? false;
+    },
+    issueByUrl(url) {
+      calls.push(`issueByUrl:${url}`);
+      return opts.issuesByUrl?.[url] ?? null;
+    },
+    issueReadFailed() {
+      calls.push("issueReadFailed");
+      return opts.issueReadFailed ?? false;
     },
     prByRef(ref) {
       calls.push(`prByRef:${ref}`);
@@ -870,6 +883,126 @@ test("W1-T155: needs-human is superseded by a NEW run.start since the escalation
   const proj = deriveStatus(task(), { ledgerPath, github, now: () => Date.parse("2026-07-20T12:00:05.000Z") });
   assert.equal(proj.needsHuman, undefined, "a redispatch since the escalation supersedes it");
   assert.equal(proj.phase, "recon", "and the task is genuinely back in flight");
+});
+
+// ── W1-T182: NEEDS ME joins LIVE escalation state, not ledger history ───────────────────────
+
+test("W1-T182: a CLOSED escalation does not render — the join reflects live state, not ledger history", () => {
+  // The exact operator fixture: #393/#395/#401 were each closed by hand after the ledger's
+  // last line for the task was still `escalation.issue_opened` — the OLD `hasOpenEscalation`
+  // returned true from that ledger shape alone, forever, because the ledger is append-only.
+  const issueUrl = "https://github.com/o/r/issues/393";
+  const github = fakeGitHub({ issuesByUrl: { [issueUrl]: { state: "CLOSED", title: "[BLOCKED] W1-TX: stuck" } } });
+  const ledgerPath = ledgerFile([
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.needsHuman, undefined, "a CONFIRMED closed issue must clear the row");
+  assert.equal(proj.escalationIssueUrl, undefined);
+});
+
+test("W1-T182: an OPEN escalation still renders, carrying the issue's title as the real one-line ask", () => {
+  const issueUrl = "https://github.com/o/r/issues/9";
+  const github = fakeGitHub({
+    issuesByUrl: { [issueUrl]: { state: "OPEN", title: "[BLOCKED] W1-TX: needs a decision" } },
+  });
+  const ledgerPath = ledgerFile([
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.needsHuman, true, "a CONFIRMED open escalation must still render — the fix must not drop live work");
+  assert.equal(proj.escalationIssueUrl, issueUrl, "a direct link, never a URL the operator must supply");
+  assert.equal(proj.escalationTitle, "[BLOCKED] W1-TX: needs a decision");
+  assert.equal(proj.escalationUnverified, undefined, "a CONFIRMED open read is not unverified");
+});
+
+test("W1-T182: an UNREADABLE issue state (no issueByUrl support at all) KEEPS the row, marked unverified — fail-closed toward showing work", () => {
+  const issueUrl = "https://github.com/o/r/issues/9";
+  // Every pre-W1-T182 GitHub fixture — a literal object with none of this task's new methods.
+  const bareGithub: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+  };
+  const ledgerPath = ledgerFile([
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github: bareGithub });
+  assert.equal(proj.needsHuman, true, "an unreadable state must never silently empty the operator's work list");
+  assert.equal(proj.escalationUnverified, true);
+  assert.equal(proj.escalationIssueUrl, issueUrl);
+});
+
+test("W1-T182: an UNREADABLE issue state (issueByUrl implemented but this url unresolved) also fails closed", () => {
+  const issueUrl = "https://github.com/o/r/issues/9";
+  const github = fakeGitHub({ issuesByUrl: {}, issueReadFailed: true }); // simulates a failed batched fetch
+  const ledgerPath = ledgerFile([
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.needsHuman, true);
+  assert.equal(proj.escalationUnverified, true);
+});
+
+test("W1-T182: buildBatchedGithub resolves escalation issue state through ONE batched `gh issue list` fetch, not one call per escalated row", () => {
+  let issueFetchCalls = 0;
+  const issues: BatchedIssue[] = Array.from({ length: 44 }, (_, i) => ({
+    number: i,
+    url: `https://github.com/o/r/issues/${i}`,
+    state: i === 0 ? "OPEN" : "CLOSED",
+    title: `[BLOCKED] W1-T${i}: stuck`,
+  }));
+  const github = buildBatchedGithub("o", "r", {
+    fetchAll: () => [],
+    fetchAllIssues: () => {
+      issueFetchCalls++;
+      return issues;
+    },
+  });
+  const tasks: Task[] = Array.from({ length: 44 }, (_, i) => task({ id: `W1-T${i}` }));
+  const plan: Plan = { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+  const ledgerPath = ledgerFile(
+    tasks.map((t, i) => ({
+      task_id: t.id,
+      step: "escalation.issue_opened",
+      run_id: `r${i}`,
+      issue_url: `https://github.com/o/r/issues/${i}`,
+      class: "BLOCKED",
+    })),
+  );
+  const byId = projectPlan(plan, { ledgerPath, github });
+  assert.equal(byId.get("W1-T0")?.needsHuman, true, "the one OPEN issue still renders");
+  assert.equal(byId.get("W1-T1")?.needsHuman, undefined, "every CLOSED issue is dropped");
+  assert.equal(byId.get("W1-T43")?.needsHuman, undefined);
+  assert.equal(issueFetchCalls, 1, "ONE batched issue fetch backs all 44 escalated rows, never O(N)");
+});
+
+test("W1-T182: buildBatchedGithub's issueByUrl fails closed (issueReadFailed=true) when the batched issue fetch itself throws", () => {
+  const github = buildBatchedGithub("o", "r", {
+    fetchAll: () => [],
+    fetchAllIssues: () => {
+      throw Object.assign(new Error("rate limited"), { status: 1, stderr: "API rate limit exceeded" });
+    },
+  });
+  assert.equal(github.issueByUrl?.("https://github.com/o/r/issues/1"), null);
+  assert.equal(github.issueReadFailed?.(), true);
+});
+
+test("W1-T182: an escalation.issue_opened line with NO issue_url (malformed/pre-W1-T8 ledger shape) still renders needsHuman, unverified — the absence of a join target never suppresses the row", () => {
+  const github = fakeGitHub({}); // issueByUrl would never even be called — there's no url to look up
+  const ledgerPath = ledgerFile([
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened" }, // no issue_url field at all
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.needsHuman, true);
+  assert.equal(proj.escalationUnverified, true);
+  assert.equal(proj.escalationIssueUrl, undefined);
 });
 
 test("W1-T155: armed-awaiting-merge — an OPEN PR the batched gateway reports as auto-merge-armed", () => {

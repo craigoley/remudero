@@ -365,6 +365,47 @@ export function buildApproveManualRoute(deps: PanelActionDeps): Route {
   };
 }
 
+// ── POST /v1/escalation/mark-handled ─────────────────────────────────────────
+
+interface MarkEscalationHandledInput {
+  taskId: string;
+  issueUrl: string;
+}
+
+function validateMarkEscalationHandled(body: unknown): { error: string } | MarkEscalationHandledInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.taskId !== "string" || !body.taskId.trim()) return { error: "taskId is required" };
+  if (typeof body.issueUrl !== "string" || !body.issueUrl.trim()) return { error: "issueUrl is required" };
+  return { taskId: body.taskId, issueUrl: body.issueUrl };
+}
+
+/**
+ * POST /v1/escalation/mark-handled (W1-T182) — the NEEDS ME affordance an ESCALATION row
+ * actually supports, distinct from `/v1/manual/approve`'s MANUAL-queue check-off: "approve" has
+ * no defined verb for an escalation of ANY class (BLOCKED/MANUAL/HARD_STOP/GRILL), because
+ * escalate.ts's own issue body already says so ("closing this issue does not resolve the
+ * underlying block by itself — act on it, then resume via `rmd drain`"). This route is
+ * deliberately named "mark handled", not "approve" or "resolve" — closing the issue is real
+ * (it is what clears the row via {@link resolveEscalation}'s live join, status.ts), but the name
+ * must not imply the underlying block is fixed, the same honesty bar the issue body itself sets.
+ * A SEPARATE route from `/v1/manual/approve` (rather than a relabel) so that route's existing
+ * `panel.manual_approved` semantics — and apps/dashboard's own "Approve a MANUAL item" form,
+ * which posts to it — are untouched.
+ */
+export function buildEscalationMarkHandledRoute(deps: PanelActionDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/escalation/mark-handled",
+    scope: "write",
+    handler: jsonAction(validateMarkEscalationHandled, (input, req, res) => {
+      deps.issues.close(input.issueUrl);
+      const origin = bearerTokenId(req);
+      ledgerPanelAction(deps, "panel.escalation_marked_handled", input.taskId, origin, { issue_url: input.issueUrl });
+      sendJson(res, 200, { ok: true, taskId: input.taskId, issueUrl: input.issueUrl });
+    }),
+  };
+}
+
 // ── POST /v1/drain/feedback ─────────────────────────────────────────────────
 
 /** The one-tap verdict a post-drain rundown line (W1-T141, drain.ts's `buildRundown`) takes — the label the learning limb (W1-T87 success-mining, W1-T88 contradiction-detection) reads. */
@@ -422,6 +463,7 @@ export function buildPanelActionRoutes(deps: PanelActionDeps): Route[] {
     buildQuietHoursRoute(deps),
     buildAnswerQuestionRoute(deps),
     buildApproveManualRoute(deps),
+    buildEscalationMarkHandledRoute(deps),
     buildDrainFeedbackRoute(deps),
   ];
 }

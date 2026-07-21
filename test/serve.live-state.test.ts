@@ -365,3 +365,89 @@ test("GitHub-gateway outage: the board is VISIBLY stamped 'GitHub unreachable si
     }
   });
 });
+
+// ── (7) W1-T182: NEEDS ME renders the affordance an ESCALATION actually supports -- a direct
+// link + "mark handled", never an Approve button/URL-soliciting input -- and a CLOSED escalation
+// (live state, not ledger history) drops out of the section entirely ─────────────────────────
+
+/** A GitHub gateway whose issue state is mutable via `close()` -- lets a test prove a live
+ *  "mark handled" click (which calls the SAME `IssueCloser.close`) actually clears the row on
+ *  the NEXT poll, rather than merely asserting the button posts somewhere. */
+function stubEscalationGithub(issueUrl: string, initialState: string, title: string): { github: GitHub; issues: IssueCloser } {
+  const state = { value: initialState };
+  const github: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    issueByUrl: (url) => (url === issueUrl ? { state: state.value, title } : null),
+  };
+  const issues: IssueCloser = {
+    close(url) {
+      if (url === issueUrl) state.value = "CLOSED";
+    },
+  };
+  return { github, issues };
+}
+
+test("W1-T182: an escalation row renders the issue's real ask + a direct link + 'Mark handled' -- NO Approve control, NO URL input", async () => {
+  const root = tmpRoot();
+  const issueUrl = "https://github.com/o/r/issues/393";
+  const { github, issues } = stubEscalationGithub(issueUrl, "OPEN", "[BLOCKED] W1-T1: needs a decision");
+  const deps = { ...fixtureDeps(root, [task({ id: "W1-T1" })], github), issues };
+  const ledgerPath = deps.board.ledgerPath;
+  appendFileSync(
+    ledgerPath,
+    JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "run.start" }) + "\n",
+  );
+  appendFileSync(
+    ledgerPath,
+    JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" }) + "\n",
+  );
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => (document.getElementById("needs-me-list")?.textContent ?? "").includes("needs a decision"));
+      const row = await page.evaluate(() => {
+        const li = document.querySelector("#needs-me-list li");
+        return {
+          text: li?.textContent ?? "",
+          hasApproveButton: Array.from(li?.querySelectorAll("button") ?? []).some((b) => b.textContent?.trim() === "Approve"),
+          hasUrlInput: (li?.querySelectorAll('input[type="url"]').length ?? 0) > 0,
+          viewIssueHref: li?.querySelector("a")?.getAttribute("href"),
+          hasMarkHandled: Array.from(li?.querySelectorAll("button") ?? []).some((b) => b.textContent?.trim() === "Mark handled"),
+        };
+      });
+      assert.match(row.text, /needs a decision/, "the row shows the issue's ACTUAL one-line ask, not a generic label");
+      assert.equal(row.hasApproveButton, false, "Approve has no defined verb for an escalation -- it must never render here");
+      assert.equal(row.hasUrlInput, false, "the ledger already holds the issue_url -- never solicit it from the operator");
+      assert.equal(row.viewIssueHref, issueUrl, "a DIRECT link to the issue");
+      assert.equal(row.hasMarkHandled, true);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+test("W1-T182: clicking 'Mark handled' closes the issue via the real route, and the row drops off the NEXT poll once the issue reads CLOSED", async () => {
+  const root = tmpRoot();
+  const issueUrl = "https://github.com/o/r/issues/401";
+  const { github, issues } = stubEscalationGithub(issueUrl, "OPEN", "[HARD_STOP] W1-T1: force-push attempted");
+  const deps = { ...fixtureDeps(root, [task({ id: "W1-T1" })], github), issues };
+  appendFileSync(
+    deps.board.ledgerPath,
+    JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "escalation.issue_opened", issue_url: issueUrl, class: "HARD_STOP" }) + "\n",
+  );
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base, { token: WRITE_TOKEN });
+    try {
+      await page.waitForFunction(() => (document.getElementById("needs-me-list")?.textContent ?? "").includes("force-push"));
+      await page.click("#needs-me-list button:has-text('Mark handled')");
+      await page.waitForFunction(() => (document.getElementById("needs-me-list")?.textContent ?? "").includes("nothing needs you"), null, {
+        timeout: 5000,
+      });
+    } finally {
+      await context.close();
+    }
+  });
+});

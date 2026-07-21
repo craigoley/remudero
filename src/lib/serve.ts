@@ -44,6 +44,7 @@ import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
   buildControlStatusRoute,
+  buildEscalationMarkHandledRoute,
   buildPauseRoute,
   buildQuietHoursRoute,
   buildResumeRoute,
@@ -796,14 +797,26 @@ export function renderShellHtml(): string {
   }
 
   // ── NEEDS ME — escalations + inbox, one-line ask + action ───────────────────────────────
+  // W1-T182: an ESCALATION row joins LIVE issue state (status.ts's escalationIssueUrl/
+  // escalationTitle/escalationUnverified), never ledger history alone, and renders the
+  // affordance an escalation actually supports -- "view issue" (a DIRECT link, never an input
+  // soliciting a URL the ledger already holds) + "mark handled". There is NO Approve control
+  // here: "approve" has no defined verb for an escalation of any class -- that word is reserved
+  // for a P## ratification-inbox proposal (needsMeInboxHtml, below), the one item type it is
+  // actually defined for.
   function needsMeTaskRowHtml(t) {
+    const ask = t.escalationTitle ? escapeHtml(t.escalationTitle) : "needs human attention (escalated)";
+    const unverifiedNote = t.escalationUnverified ? " · issue state unverified (showing to be safe)" : "";
+    const viewIssueLink = t.escalationIssueUrl
+      ? \`<a href="\${escapeHtml(t.escalationIssueUrl)}" target="_blank" rel="noopener noreferrer">view issue</a>\`
+      : "";
+    const markHandledBtn = t.escalationIssueUrl
+      ? \`<button type="button" class="needs-me-mark-handled" data-task-id="\${escapeHtml(t.taskId)}" data-issue-url="\${escapeHtml(t.escalationIssueUrl)}">Mark handled</button>\`
+      : "";
     return (
-      \`\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(t.taskId)}</span><span class="detail">needs human attention (escalated)\${prLink(t)}</span>\` +
+      \`\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(t.taskId)}</span><span class="detail">\${ask}\${unverifiedNote}\${prLink(t)}</span>\` +
       journeyButtonHtml(t.taskId) +
-      \`<form class="inline-action needs-me-approve" data-task-id="\${escapeHtml(t.taskId)}">\` +
-      \`<label for="issue-\${escapeHtml(t.taskId)}">Issue URL</label>\` +
-      \`<input id="issue-\${escapeHtml(t.taskId)}" type="url" placeholder="https://github.com/.../issues/…" required />\` +
-      \`<button type="submit">Approve</button></form>\`
+      (viewIssueLink || markHandledBtn ? \`<span class="btn-row">\${viewIssueLink}\${markHandledBtn}</span>\` : "")
     );
   }
   function needsMeGrillHtml(e) {
@@ -1251,27 +1264,26 @@ export function renderShellHtml(): string {
 
   // ── NEEDS ME row actions (event delegation — rows are re-rendered on every refresh) ─────
   document.getElementById("needs-me-list").addEventListener("submit", async (e) => {
-    const approveForm = e.target.closest(".needs-me-approve");
     const answerForm = e.target.closest(".needs-me-answer");
-    if (approveForm) {
-      e.preventDefault();
-      const taskId = approveForm.dataset.taskId;
-      const issueUrl = approveForm.querySelector("input").value.trim();
-      await postJson("/v1/manual/approve", { taskId, issueUrl });
-      refreshAll();
-    } else if (answerForm) {
-      e.preventDefault();
-      const replyTo = answerForm.dataset.replyTo;
-      const answer = answerForm.querySelector("input").value.trim();
-      await postJson("/v1/feedback", { text: answer, replyTo });
-      refreshAll();
-    }
+    if (!answerForm) return;
+    e.preventDefault();
+    const replyTo = answerForm.dataset.replyTo;
+    const answer = answerForm.querySelector("input").value.trim();
+    await postJson("/v1/feedback", { text: answer, replyTo });
+    refreshAll();
   });
   document.getElementById("needs-me-list").addEventListener("click", async (e) => {
-    const btn = e.target.closest(".needs-me-decide");
-    if (!btn) return;
-    await postJson("/v1/feedback/decision", { id: btn.dataset.id, decision: btn.dataset.decision });
-    refreshAll();
+    const decideBtn = e.target.closest(".needs-me-decide");
+    const markHandledBtn = e.target.closest(".needs-me-mark-handled");
+    if (decideBtn) {
+      await postJson("/v1/feedback/decision", { id: decideBtn.dataset.id, decision: decideBtn.dataset.decision });
+      refreshAll();
+    } else if (markHandledBtn) {
+      // W1-T182: the escalation's own issue_url rides on the row's data attribute -- never an
+      // operator-typed input, since the ledger (and now the live join) already holds it.
+      await postJson("/v1/escalation/mark-handled", { taskId: markHandledBtn.dataset.taskId, issueUrl: markHandledBtn.dataset.issueUrl });
+      refreshAll();
+    }
   });
 
   // ── fleet control READ-BACK (W1-T153): render the ACTIVE mode, never stateless buttons ──
@@ -1733,6 +1745,7 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     buildQuietHoursRoute(fleetControlDeps),
     buildAnswerQuestionRoute(questionDeps),
     buildApproveManualRoute(fleetControlDeps),
+    buildEscalationMarkHandledRoute(fleetControlDeps),
     ...buildPanelGraphRoutes(panelGraphDeps),
     buildTaskCardRoute(deps.board),
     buildShellRoute(),
