@@ -270,8 +270,22 @@ export async function runDaemon(
     // per iteration, re-derive every open PR's disposition and take its gated
     // action. Runs alongside dispatch (not instead of it): dispatch opens NEW
     // work, the sweep reconciles the OPEN PRs already in flight so none strands
-    // open-and-orphaned (the #111/#113/#123 class). Best-effort by contract.
-    if (deps.sweep) await deps.sweep();
+    // open-and-orphaned (the #111/#113/#123 class). Best-effort by contract —
+    // and now IN CODE, not just in this comment. The sweep reaches `gh` through
+    // execFileSync, which THROWS on any nonzero exit (rate-limit, auth blip,
+    // network partition). This loop's only try/catch wraps `runOne` (below), so
+    // before this guard such a throw propagated out of the process; launchd's
+    // KeepAlive{SuccessfulExit:false} reads the nonzero exit as a CRASH and
+    // relaunches, which re-runs the same sweep and throws again. A reconciler
+    // that cannot reach GitHub must cost the daemon one logged iteration, never
+    // its life.
+    if (deps.sweep) {
+      try {
+        await deps.sweep();
+      } catch (e) {
+        log("daemon.sweep.failed", { error: String((e as Error)?.message ?? e) });
+      }
+    }
 
     // HEADROOM: never hammer a nearly-exhausted pool. Best-effort — an unreadable
     // /usage does not halt the daemon; an at/near-limit reading DOES, with the
@@ -326,7 +340,16 @@ export async function runDaemon(
         log("dispatch.circuit_broken", { task: t.id });
         if (!circuitEscalated.has(t.id)) {
           circuitEscalated.add(t.id);
-          deps.onCircuitBreak?.(t);
+          // The injected hook opens a GitHub issue (escalateCircuitBreak ->
+          // escalate -> `gh issue create`). It fires during task SELECTION,
+          // outside the `runOne` try/catch below, so an unreachable `gh` used
+          // to kill the daemon here. The notification is a backstop; failing to
+          // send it must never outrank staying alive to do the work.
+          try {
+            deps.onCircuitBreak?.(t);
+          } catch (e) {
+            log("daemon.escalation.failed", { task: t.id, error: String((e as Error)?.message ?? e) });
+          }
         }
       },
     });

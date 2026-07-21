@@ -43,7 +43,14 @@ import { DEFAULT_POLL_INTERVAL_MS, daemonBoot, runDaemon, type DaemonOpts, type 
 import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
 import { generateLaunchdPlist, launchdPlistPath } from "./lib/launchd.js";
 import { buildDigest, sendDigest } from "./lib/digest.js";
-import { escalate, ghIssueGateway, type EscalationClass, type EscalationOption, type IssueGateway } from "./lib/escalate.js";
+import {
+  escalate,
+  ghIssueGateway,
+  tryEscalate,
+  type EscalationClass,
+  type EscalationOption,
+  type IssueGateway,
+} from "./lib/escalate.js";
 import { imessageChannel, notify } from "./lib/notify.js";
 import { ghAlertGateway, pollAlerts, renderAlertsSummary } from "./lib/ops.js";
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
@@ -3371,16 +3378,29 @@ function readUsageSnapshot(config: Config): UsageSnapshot | undefined {
  * alone, which a genuine_blocker escalation for the SAME task could also have
  * written, for an unrelated reason) — mirrors ops.ts's alert-escalation dedup
  * discipline (a ledger line as the dedup key), never a second store.
+ *
+ * THE DEDUP KEY IS WRITTEN WHETHER OR NOT DELIVERY SUCCEEDS. The ledger-derived,
+ * cross-boot dedup above was already the right shape; its defect was that the
+ * marker was recorded only AFTER `escalate()` returned, so a THROWING `gh` wrote
+ * nothing and every subsequent boot retried the same escalation — which is how a
+ * transport failure became an unbounded relaunch loop (1 such marker in the
+ * ledger against 460 boots). Marking the attempt makes the dedup durable across
+ * the process death it is supposed to survive.
+ *
+ * The trade-off is deliberate and stated: a task whose escalation failed will not
+ * be retried automatically. That is the correct side to err on for a BACKSTOP
+ * NOTIFICATION — an undelivered notice is visible as an `escalation.failed` line
+ * and costs one operator read, whereas retry-until-success costs the fleet.
  */
-function escalateCircuitBreak(
+export function escalateCircuitBreak(
   task: Task,
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string },
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
 ): void {
   const already = readLedgerLines(ctx.ledgerPath).some(
     (l) => l.step === "dispatch.circuit_broken.escalated" && l.task_id === task.id,
   );
   if (already) return;
-  const issueUrl = escalate(
+  const issueUrl = tryEscalate(
     {
       class: "BLOCKED",
       taskId: task.id,
@@ -3403,13 +3423,18 @@ function escalateCircuitBreak(
       ],
       recommendation: "fix and resume",
     },
-    { issues: ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
   );
   appendLedger(ctx.ledgerPath, {
     run_id: ctx.runId,
     task_id: task.id,
     step: "dispatch.circuit_broken.escalated",
     issue_url: issueUrl,
+    delivered: issueUrl !== null,
   });
 }
 
