@@ -118,7 +118,28 @@
   files: [src/lib/worker.ts, src/run-task.ts, test/prune-liveness.test.ts]
   status: queued
   attempts: 0
-  note: "SIBLING of W1-T115/W1-T131 (tmp hygiene) — same leak class, different directory. NOT a duplicate of
+  note: "AMENDED at recon intake, 2026-07-21. Task is QUEUED - verified that zero merged PRs carry its
+    Remudero-Task trailer - so standing rule 21 does not apply.
+    TWO LOCK-SIDE GAPS from the recon, both verified at source, and BOTH NARROWER than the report states.
+    Recorded so the implementer sizes to the truth rather than to the audit.
+    R-18, the atomicity gap: writeRunLock is a plain truncating writeFileSync (worker.ts:738-740) and the read
+    path collapses BOTH a malformed-JSON throw and a non-numeric pid to null (:742-750) - the same value that
+    means no lock at all. A torn read is therefore indistinguishable from a free worktree. REFUTED though,
+    and this matters: the recon claims a zero grace period lets this prune a LIVE worktree.
+    DEFAULT_PRUNE_GRACE_MS is 120000 (:767), the zero at :804 is only a library default, and all six
+    production call sites override it (run-task.ts 2046, 3115, 5269, 5498, 5690, 5953). Better still the
+    grace branch is gated on the absent-lock state, which is exactly what a torn read produces, so the age
+    guard already covers the torn-read case. The residual is a worktree idle on writes for over two minutes
+    coinciding with a sub-millisecond truncate window. Filed as W1-T208 and sized accordingly. Do not restate
+    the zero-grace claim anywhere - it is false on every production path.
+    R-35, the stale-lock gap: a dead-pid lock lingers for a task that is never re-dispatched, because
+    acquireInflightLock only clears a stale lock on the NEXT acquire of that same task id, and a
+    circuit-broken task never gets one. Observed: state/inflight/W1-T1.lock, pid 65304, dead since
+    2026-07-19, still present two days later. ALSO NARROWER than implied - acquireInflightLock already STEALS
+    a dead holder lock (inflight-lock.ts:98-101), so this never blocked dispatch and the harm is operator
+    legibility only. SHIPPED SEPARATELY in PR 477 as a boot-time reap mirroring the tmp sweep, so this task
+    INHERITS the fix rather than owing it.
+    ORIGINAL NOTE FOLLOWS. SIBLING of W1-T115/W1-T131 (tmp hygiene) — same leak class, different directory. NOT a duplicate of
     pruneStaleRuns: that owner exists and works on what it can SEE; this closes what it cannot see (git-deregistered
     dirs), when it runs (run-start only, never on a cadence), and what it leaves behind (widowed .lock files,
     detached-HEAD sweep-* dirs). risk:high (Rule 19, graded UP from an initial medium after `rmd lint-plan` flagged

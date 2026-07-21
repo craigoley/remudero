@@ -2133,6 +2133,51 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    — GitHub decorates, never gates), W1-T179 (last-good status under darkness), W1-T182 (NEEDS ME joins live
    escalation state, not ledger history). [console design pass, 2026-07-20]
 
+23. **WRITE-SIDE ATOMICITY — every multi-process-visible write is atomic or locked.** The write-path sibling
+   of cannot-observe ⇒ wait. This codebase has a rich, hard-won READ-side doctrine: a value that cannot be
+   observed is marked indeterminate and deferred, never silently downgraded to absent or permitted
+   (W1-T130/T179/T181/T197). It has no matching write-side doctrine, and the 2026-07-21 recon named the
+   consequence precisely: *read-path integrity is doctrine, write-path atomicity is unowned*. The gap matters
+   because the same invariant a read-side fix protects is REINTRODUCIBLE THROUGH A WRITE RACE UNDERNEATH IT —
+   W1-T179's monotonic-under-darkness guarantee is defeated not by a flaw in its own logic but by a truncating
+   `writeFileSync` on the file it reads.
+   The rule: any file a second process can observe is written whole or not at all — temp-file-plus-rename, an
+   append the kernel serializes, or an explicit lock. And a file that cannot be parsed is a DIFFERENT
+   observation from a file that is absent. Collapsing those two is the write-side form of
+   cannot-observe ⇒ permitted, and it is how a torn read becomes a zeroed circuit breaker or a pruned live
+   worktree.
+   Three fixtures from the 2026-07-21 recon, each verified at source. (i) `appendLedger` has no atomicity
+   guarantee and its reader parses a torn line to `{}` — silently invisible to every consumer, on the file that
+   backs the dispatch circuit breaker (R-8/R-16, W1-T206). (ii) `status.json` is written by four callers with a
+   truncating write, so a reader arriving mid-write loses exactly the cached projection W1-T179 exists to
+   preserve (R-17, W1-T207). (iii) `run.lock` collapses an unparseable read and an absent lock to the same
+   `null` (R-18, W1-T208).
+   One honest caveat, because the doctrine should not be justified by a fiction: `appendFileSync` opens
+   `O_APPEND`, so concurrent appenders do NOT overwrite each other and the recon's suggested PIPE_BUF guarantee
+   does not apply to a regular file. The exposure is a partial write and a silent torn-line read, not a lost
+   append. Doctrine earns its keep by being true.
+   Executable duties: W1-T206 (ledger), W1-T207 (status.json), W1-T208 (run.lock), W1-T209 (breaker-safe
+   archival). [recon intake, 2026-07-21]
+
+24. **SECRETS-AT-REST — a credential never lives in a log, a URL, or an argv.** The threat model this plan
+   grew up with is a malicious worker escaping its sandbox, and it is well served: scoped PATs, containment
+   probes, deny-floor hooks. What it did not cover is the mundane leak — the operator's own credential sitting
+   in a world-readable file because a startup banner printed it. The 2026-07-21 recon put it exactly: the plan
+   tracks scoped PATs and containment sandboxing but not *a token in a log, a token in a URL, no rotation path*.
+   The rule has three parts. A secret is never printed to stdout or stderr by a long-running service, because
+   that output is routinely redirected to a file that outlives the process. A secret never travels in a URL,
+   because URLs are copied, screenshotted, bookmarked, proxied and restored by session-restore — a link is the
+   worst possible place to put a capability. And ROTATION IS A DOCUMENTED PATH, not an implementation detail
+   someone can reconstruct: an undocumented rotation path is operationally an absent one, which is why R-31
+   was a real finding even though `rm` had always worked.
+   The corollary that makes it actionable: exposure is judged by where a secret HAS BEEN, not by who was
+   watching. A token that reached a log file, a terminal transcript, a screenshot or a chat window is
+   compromised and must be ROTATED, not merely un-shared.
+   Fixtures: R-5 — both bearer tokens printed to a 0644 `serve.log` with the WRITE token embedded in the
+   console URL, so merely running the command leaked a fleet-control capability to disk (fixed #473, rotated
+   the same day). R-31 — token generation is create-once/read-thereafter, making rotation a `rm` nobody had
+   written down (documented #473). [recon intake, 2026-07-21]
+
 - Lives at repo root. Header carries sync date + focus, his-house style.
 - Humans and agents edit via commits/PRs; the Architect does narrative syncs at workstream
   boundaries; the control plane flips task statuses only.

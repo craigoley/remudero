@@ -1,0 +1,71 @@
+- id: W1-T219
+  title: "the keyword floor passes on a 34 percent echo, auto-passes a proof with no keywords at all, and the capped-verdict override is an unauthenticated free string"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "RECON R-13 and R-14, both VERIFIED at source during intake. Filed as a NEW task rather than as an
+    amendment to W1-T185 because W1-T185 is DONE - a merged PR carries its Remudero-Task trailer - and
+    standing rule 21 requires the amender to file a follow-up rather than edit shipped work.
+    R-13, four holes in the mechanical floor, each confirmed separately.
+    (i) MIN_COVERAGE is 0.34 (review.ts:262), applied at :697-698, so echoing roughly a third of a proof's
+    distinctive tokens marks a criterion met.
+    (ii) A proof yielding ZERO keywords sets met = true unconditionally with the reason no mechanical anchors
+    in proof, deferred to reviewer judgment (review.ts:690-694). That is fail-open, and it is reachable by
+    writing a proof entirely in short or stopword or numeric tokens - see PR 123 has no keywords at all.
+    (iii) The pathless grep default runs the pattern across the whole repo (review.ts:448-453), and an
+    executed_pass OVERRIDES the keyword floor positively (:711), so any pattern matching one line anywhere
+    certifies the criterion.
+    (iv) A renamed path makes grep exit 2, which counts as fail and overrides coverage into UNMET (:560-564,
+    :712, :729) - so a stale path FALSE-BLOCKS. Deliberate and documented, but the asymmetry is real: a
+    trivial match certifies, a moved file blocks.
+    R-14, the override is unauthenticated. --override-capped-by is read as a free string
+    (run-task.ts:2828-2838) and ledgered verbatim, and the recovery side accepts it on a bare typeof check
+    (review.ts:1118-1129) with no signature, no operator allowlist, and no binding to the PR head it was
+    granted against. Last one wins, so a single appended ledger line arms auto-merge on a CAPPED verdict for a
+    tdd:strict task - exactly the condition capping exists to block. Since the ledger is append-only and
+    unlocked, anything that can append can forge an override."
+  design: |
+    RAISE THE FLOOR WHERE IT FAILS OPEN, NOT UNIFORMLY. The zero-keyword auto-pass is the worst of the four
+    because it is unconditional: fix that first, and make a proof with no mechanical anchors resolve to
+    INDETERMINATE rather than MET. That is the same cannot-observe-implies-wait move this codebase has made
+    repeatedly on the read path.
+    A TRIVIAL GREP MUST NOT CERTIFY. A pathless repo-wide match is not evidence for a specific criterion.
+    VERIFY from source how proof paths are resolved before changing the default - the fix may be to require a
+    path rather than to weaken the executed_pass override, and those have very different blast radii.
+    KEEP THE FALSE-BLOCK ASYMMETRY IN VIEW. Hole (iv) is the one that costs the fleet time rather than
+    safety, and fixing it by making exit 2 lenient would re-open hole (iii). Distinguish grep found nothing
+    from grep could not look - the same corrupt-versus-absent distinction standing rule 23 names on the write
+    path.
+    BIND THE OVERRIDE TO SOMETHING. At minimum the PR head SHA it was granted against, so an override cannot
+    outlive the diff it was judged on. An operator allowlist is worth considering, but head-binding is the
+    change that stops a stale or forged line arming a later, different diff.
+    RESPECT THE PLAN-ONLY CARVE-OUT. W1-T205 carries the operator rider that plan-only PRs are structurally
+    capped and gate deterministically. Any floor raised here must exempt them or the plan lane halts.
+  acceptance:
+    - claim: "a proof yielding zero mechanical keywords resolves to INDETERMINATE rather than auto-passing as met"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a pathless repo-wide grep matching one incidental line does NOT certify a criterion"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a grep that could not look, such as a since-renamed path, is distinguished from a grep that looked and found nothing"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a capped-verdict override is bound to the PR head it was granted against, so a stale or appended override line cannot arm a later different diff"
+      proof: "unit test: test/review.test.ts"
+    - claim: "THE CARVE-OUT FALSIFIER - a plan-only PR still arms under the raised floor, so tightening the floor does not halt the plan lane"
+      proof: "unit test: test/review.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "P22"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, findings R-13 and R-14. FILED AS A FOLLOW-UP, NOT AN AMENDMENT: the intake brief
+    proposed amending the W1-T185 family, but W1-T185 is DONE - verified by a merged PR carrying its
+    Remudero-Task trailer - so standing rule 21 applies and the amender owes a follow-up instead. The same
+    check cleared W1-T197 and W1-T175 for genuine amendment, and blocked W1-T30 and W1-T48, whose docs
+    follow-up is W1-T213.
+    R-14 is the sharper of the two despite its lower recon severity: it is a total bypass of the capped-verdict
+    floor requiring one appended ledger line, on an append-only file with no write authentication. It composes
+    with R-8 - anything that can append can forge an override."
