@@ -1,0 +1,78 @@
+- id: W1-T195
+  title: "ESCALATION DEDUP ACROSS RUNGS — two rungs observing ONE failing state must not file sibling issues: dedupe on (PR, head sha, cause class) so the second observer APPENDS to the existing escalation instead of opening its own"
+  repo: remudero
+  depends_on: [W1-T77, W1-T78]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "SIX SAME-PR ESCALATION PAIRS IN ONE EVENING, four of them within roughly seventy seconds of each
+    other. Each pair is two rungs independently observing the SAME failing state on the SAME PR and each opening
+    its own needs-human issue:
+      #412 / #413  PR #410 (W1-T158)  22:26:39 / 22:27:53  —  74s apart
+      #420 / #421  PR #417 (W1-T177)  23:30:24 / 23:31:34  —  70s apart
+      #427 / #428  PR #423 (W1-T178)  00:39:36 / 00:40:40  —  64s apart
+      #433 / #434  PR #431 (W1-T179)  01:11:15 / 01:12:22  —  67s apart
+      #415 / #416  PR #411 (W1-T181)  22:46:04 / 22:59:06  —  13m apart
+      #390 / #395  PR #388 (W1-T154)  19:15:43 / 20:30:48  —  75m apart
+    The shape is consistent: the FIX-RUNG-EXHAUSTED escalation and the CLARIFICATION-NEEDED escalation are two
+    reports of one underlying condition — most often a single failing `remudero-review` on one head sha. #433 and
+    #434 were both the same review failing at proof_exec 0/2 with 11-of-50 keyword coverage, on delivered work.
+    THE COST IS THE OPERATOR'S ATTENTION, not money — this is the investigation-minutes class, not the
+    money-burn class that W1-T177 addressed. An operator opening the board sees twice the queue depth that exists,
+    and must read both issues to discover they are one item. Tonight that happened six times, and each pair had to
+    be diagnosed once and closed twice by hand.
+    IT ALSO DISTORTS THE SIGNAL. Escalation COUNT is what a digest, a glance strip (W1-T159) and a recap
+    (W1-T163) all report. If one blocked PR reliably produces two issues, every count that reaches the operator
+    is inflated by an unknown factor, and 'needs-human: 6' cannot be compared against 'needs-human: 3' without
+    knowing how many are siblings.
+    THE FAMILY, stated precisely: W1-T177 fixed WHETHER a rung should spend against a terminal PR. W1-T186 fixes
+    WHAT an escalation says (name the observed blocker, not an inferred symptom). This fixes HOW MANY say it. All
+    three are rungs reasoning independently from an impoverished shared view; this is the coordination member."
+  design: |
+    DEDUPE ON A COMPOSITE KEY, not on text similarity. The natural key is (PR number, head sha, cause class):
+      - PR number alone is too coarse — a genuinely NEW block on a NEW push deserves its own escalation
+      - head sha keeps it honest across pushes, mirroring how the fix rung already keys dispatch idempotence
+      - cause class distinguishes 'the review is failing' from 'the checks are red' from 'this PR is conflicted',
+        which are different operator asks even on the same sha
+    SECOND OBSERVER APPENDS, NEVER OPENS. When the key already has an open escalation, the second rung adds a
+    comment naming its own view of the state and returns — it does NOT open a sibling and does NOT silently drop
+    its observation, because the second rung frequently knows something the first did not (the fix-rung knows
+    strikes were spent; the clarification rung knows there is no single nameable unmet criterion).
+    REUSE THE EXISTING DEDUP PRECEDENT rather than inventing one: sweep.ts already has ledger-deduped escalation
+    for the ops-alert lane ('acted goes false (deduped: no repeat escalate())' — sweep.ts:999) and
+    `escalate()` is a single shared entry point (W1-T8). VERIFY both from source before designing a new mechanism;
+    the cheapest correct fix is likely a check INSIDE escalate() so every caller inherits it, rather than a check
+    added per rung.
+    A CLOSED ESCALATION DOES NOT SUPPRESS A NEW ONE. If the operator closed the issue and the condition recurs on
+    the same sha, that is a genuine re-escalation and must open. Dedup is about concurrent observers, not about
+    silencing a recurrence — getting this backwards would hide live work, which is strictly worse than a duplicate.
+    OUT OF SCOPE: merging the two RUNGS. They observe legitimately different things and both observations are
+    useful; this task deduplicates their OUTPUT, not their reasoning.
+  acceptance:
+    - claim: "two rungs observing the same (PR, head sha, cause class) produce ONE escalation, with the second appending"
+      proof: "unit test: the fix-rung-exhausted path and the clarification path, both fired against one PR at one head sha for one cause, yield exactly ONE open issue, and the second observer's state appears as a comment on it. FALSIFIER: six same-PR pairs on 2026-07-20/21 — #412/#413, #420/#421, #427/#428, #433/#434, #415/#416, #390/#395 — four of them within 64-74 seconds, each pair being two reports of one failing condition"
+    - claim: "the second observer's information is PRESERVED, never dropped"
+      proof: "unit test: the appended comment carries the second rung's own view (strike count, or the no-single-unmet-criterion finding), not merely a 'duplicate' marker. FALSIFIER: dropping the second observation loses what that rung uniquely knew — #433 knew two strikes had been spent, #434 knew there was no single nameable unmet criterion, and an operator needs both to decide"
+    - claim: "a NEW head sha, or a DIFFERENT cause class, still opens its own escalation"
+      proof: "unit test: the same PR escalating after a new push, and the same PR escalating for a different cause class on the same sha, each open a fresh issue. FALSIFIER: keying on PR number alone would suppress a genuinely new block on a new push — dedup that hides live work is worse than the duplication it removes"
+    - claim: "a CLOSED escalation does not suppress a genuine recurrence"
+      proof: "unit test: with the prior issue CLOSED and the condition recurring on the same sha, a new escalation opens. FALSIFIER: treating a closed issue as a dedup hit would silence a condition the operator has already tried to resolve, which is the inverse failure and the more dangerous one"
+  risk: medium
+  origin: architect
+  plan_refs: ["§4", "§7B"]
+  files: [src/lib/escalate.ts, test/escalate.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 morning. Flagged at ~02:00 and DELIBERATELY DEFERRED under the no-2am-filings rule —
+    recorded overnight in state/morning-note-2026-07-21.md and filed rested.
+    Evidence is stronger than first estimated: SIX same-PR pairs, not four. The four tightest fired 64-74 seconds
+    apart, which is the signature of two rungs reading one state in a single sweep pass rather than a genuine
+    re-escalation.
+    THE FAMILY: W1-T177 fixed WHETHER to spend, W1-T186 fixes WHAT the escalation says, this fixes HOW MANY say
+    it. Sibling W1-T196 (unattributable-PR stand-down) was filed alongside from the same night.
+    INVESTIGATION-MINUTES class, not money class — nothing here burns worker spend; it burns operator attention
+    and inflates every escalation COUNT that reaches a digest, glance strip or recap. Sequenced behind the
+    console arc accordingly.
+    risk:medium — the dangerous direction is over-suppression. Two criteria exist for it specifically: a new sha
+    or a different cause class must still open, and a CLOSED issue must never suppress a recurrence."

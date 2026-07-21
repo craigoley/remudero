@@ -1,0 +1,78 @@
+- id: W1-T196
+  title: "UNATTRIBUTABLE-PR STAND-DOWN — a rung that cannot resolve a task id must stand down with a ledger line, not escalate `task: UNKNOWN`: plan-filing PRs carry no trailer BY DESIGN, so attribution failure on that class is a known state, not an emergency"
+  repo: remudero
+  depends_on: [W1-T78, W1-T186]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "FIXTURE: issue #440, opened 2026-07-21T01:46:53Z — '[BLOCKED] UNKNOWN: PR #439 needs a
+    clarification — not positively mergeable — checks pending, review none — escalating'. Two things are wrong
+    with it, and the second is the interesting one.
+    FIRST, it was STALE ON ARRIVAL: PR #439 merged at 01:48:11Z, roughly 75 seconds later. That half is the
+    W1-T177 class (terminal-state check at every spending site), already filed and merged.
+    SECOND, AND THE POINT OF THIS TASK: the task id rendered as `UNKNOWN` because PR #439 is a plan-FILING PR,
+    and a filing PR deliberately carries NO `Remudero-Task:` trailer. That omission is a CORRECTNESS RULE, not an
+    oversight — `findMergedByTrailer` would otherwise credit the filed task DONE on merge of its own filing,
+    marking unbuilt work complete and letting the drain skip it forever. The rule is encoded in W1-T136's
+    acceptance (criterion 5, 'a plan-FILING PR carries NO Remudero-Task: trailer') and now enforced by the shared
+    emitter merged as PR #437, with tests asserting the trailer is omitted for a filing and present for an
+    implementing PR.
+    SO THE RUNG ESCALATED ON A PR IT WAS CORRECT NOT TO ATTRIBUTE. It observed an absence that the system
+    deliberately creates, could not name a task, and rendered that as `UNKNOWN` in an operator-facing issue
+    title — which reads like a bug in attribution rather than a designed property of the PR class.
+    THE ASK IS INCOHERENT, WHICH IS THE REAL COST. An escalation exists to put a decidable question in front of
+    an operator. 'Task UNKNOWN, PR not positively mergeable' asks the operator to adjudicate a task that does not
+    exist, about a PR that files tasks. There is no answer to give. An operator must first work out that the PR
+    is a filing, then that the missing trailer is deliberate, then that the escalation should not have fired —
+    three inferences to reach 'ignore this', which is exactly the investigation-minutes cost this class imposes.
+    NOT COVERED BY WHAT IS ALREADY FILED: W1-T186 fixes what an escalation SAYS (name the observed blocker, not
+    an inferred symptom) and would improve the wording. W1-T177 fixes whether to spend against a TERMINAL PR and
+    would have suppressed this instance for a different reason. Neither says a rung should stand down when it
+    cannot attribute a PR to a task at all."
+  design: |
+    STAND DOWN, LEDGER, DO NOT ESCALATE. When a rung cannot resolve a task id for a PR, the correct action is a
+    ledger line naming the PR and the unresolved attribution — not a needs-human issue. The condition is
+    observable, expected for a known PR class, and carries no operator-decidable question.
+    DISTINGUISH 'DELIBERATELY UNATTRIBUTED' FROM 'ATTRIBUTION BROKEN', because they are not the same state and
+    only one is benign:
+      - a plan-FILING PR with no trailer is the DESIGNED case (W1-T136 criterion 5) — stand down quietly
+      - an IMPLEMENTING PR whose trailer is missing or malformed is a genuine defect worth surfacing, since a
+        task that should be credited will not be
+    VERIFY FROM SOURCE how a filing PR is identifiable — the shared emitter merged in PR #437 is the authority on
+    what it emits, and its tests already assert the trailer's presence/absence per PR class. Prefer a positive
+    signal from the emitter over inferring 'filing' from the diff touching only plan/**, since inference will
+    misclassify a hand-authored plan PR.
+    THE LEDGER LINE IS THE DELIVERABLE, not a silence. A rung standing down must leave a trace — this is the
+    same discipline W1-T181 established for the gateway (a marked failure, never a silent empty result) and
+    W1-T177 for the fix rung (a stand-down event naming the state). Silence and stand-down are different, and
+    only one is debuggable.
+    DO NOT WIDEN INTO SUPPRESSING ESCALATIONS GENERALLY. This is narrowly about attribution failure. A rung that
+    CAN attribute a PR and finds a genuine block still escalates exactly as today.
+  acceptance:
+    - claim: "a rung that cannot resolve a task id STANDS DOWN with a ledger line and opens NO issue"
+      proof: "unit test: a rung reaching a PR with no resolvable task id ledgers a stand-down naming the PR and the unresolved attribution, and calls escalate() zero times. FALSIFIER: issue #440, opened 2026-07-21T01:46:53Z as '[BLOCKED] UNKNOWN: PR #439 needs a clarification', against a plan-filing PR whose missing trailer is required by W1-T136 criterion 5"
+    - claim: "a DELIBERATELY-unattributed filing PR is distinguished from BROKEN attribution on an implementing PR"
+      proof: "unit test: a filing PR with no trailer stands down quietly, while an IMPLEMENTING PR with a missing or malformed trailer still surfaces — a task that should be credited and will not be is a real defect. FALSIFIER: treating every attribution failure as benign would silence the case where a worker's PR loses its trailer and its task is never credited"
+    - claim: "the stand-down is TRACED, never silent"
+      proof: "unit test: the stand-down emits a ledger line an operator can find, rather than returning without record. FALSIFIER: silence and stand-down are different states — the same distinction W1-T181 drew for the gateway (a marked failure, never a bare empty result) and W1-T177 for the fix rung"
+    - claim: "an attributable PR with a genuine block still escalates unchanged"
+      proof: "unit test: a PR whose task resolves and whose state is genuinely blocked escalates exactly as today. FALSIFIER: widening this into general escalation suppression would hide live work — the task is narrowly about attribution failure, not about escalating less"
+  risk: medium
+  origin: architect
+  plan_refs: ["§4", "§7B"]
+  files: [src/lib/sweep.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 morning. Flagged at ~02:00 and DELIBERATELY DEFERRED under the no-2am-filings rule —
+    recorded overnight in state/morning-note-2026-07-21.md and filed rested.
+    Fixture #440 has TWO defects and only one is new: it was stale on arrival (PR #439 merged 75 seconds later —
+    the W1-T177 class, already merged) AND it escalated a PR it was correct not to attribute. This task is about
+    the second only.
+    THE ATTRIBUTION ABSENCE IS A DESIGNED PROPERTY: a plan-filing PR carries no Remudero-Task trailer because
+    findMergedByTrailer would otherwise credit the filed task DONE on merge of its own filing. That rule is
+    W1-T136 criterion 5 and is now enforced by the shared emitter merged in PR #437.
+    Sibling W1-T195 (escalation dedup) filed alongside from the same night. INVESTIGATION-MINUTES class, not
+    money class — sequenced behind the console arc accordingly.
+    risk:medium — the dangerous direction is over-suppression, covered by the criterion that broken attribution
+    on an IMPLEMENTING PR must still surface."
