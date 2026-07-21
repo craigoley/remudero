@@ -1005,6 +1005,63 @@ test("W1-T182: an escalation.issue_opened line with NO issue_url (malformed/pre-
   assert.equal(proj.escalationIssueUrl, undefined);
 });
 
+test("W1-T182: an OPEN escalation renders regardless of the issue-state casing convention (\"OPEN\" or lowercase \"open\") -- two conventions genuinely coexist in this repo (gh issue view/list use uppercase; issues-intake.ts's gh api reader already sees lowercase)", () => {
+  const issueUrl = "https://github.com/o/r/issues/9";
+  for (const state of ["OPEN", "open", "Open"]) {
+    const github = fakeGitHub({ issuesByUrl: { [issueUrl]: { state, title: "needs a decision" } } });
+    const ledgerPath = ledgerFile([
+      { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+      { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" },
+    ]);
+    const proj = deriveStatus(task(), { ledgerPath, github });
+    assert.equal(proj.needsHuman, true, `state=${state} must still render`);
+    assert.equal(proj.escalationUnverified, undefined, `state=${state} is a CONFIRMED open read, not unverified`);
+  }
+});
+
+test("W1-T182: a CLOSED escalation drops the row regardless of casing (\"CLOSED\" or lowercase \"closed\")", () => {
+  const issueUrl = "https://github.com/o/r/issues/393";
+  for (const state of ["CLOSED", "closed", "Closed"]) {
+    const github = fakeGitHub({ issuesByUrl: { [issueUrl]: { state } } });
+    const ledgerPath = ledgerFile([
+      { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+      { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" },
+    ]);
+    const proj = deriveStatus(task(), { ledgerPath, github });
+    assert.equal(proj.needsHuman, undefined, `state=${state} must clear the row`);
+  }
+});
+
+test("W1-T182: a THROWING issueByUrl (a gateway/fixture that raises instead of failing soft) never crashes deriveStatus -- fails closed, keeps the row, marks it unverified", () => {
+  const issueUrl = "https://github.com/o/r/issues/9";
+  const throwingGithub: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    issueByUrl: () => {
+      throw new Error("gh issue view: rate limited");
+    },
+  };
+  const ledgerPath = ledgerFile([
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" },
+  ]);
+  assert.doesNotThrow(() => deriveStatus(task(), { ledgerPath, github: throwingGithub }));
+  const proj = deriveStatus(task(), { ledgerPath, github: throwingGithub });
+  assert.equal(proj.needsHuman, true);
+  assert.equal(proj.escalationUnverified, true);
+});
+
+test("W1-T182: buildBatchedGithub's issueByUrl also resolves by a bare issue NUMBER, mirroring prByRef's flexible ref resolution", () => {
+  const github = buildBatchedGithub("o", "r", {
+    fetchAll: () => [],
+    fetchAllIssues: () => [{ number: 9, url: "https://github.com/o/r/issues/9", state: "OPEN", title: "t" }],
+  });
+  assert.deepEqual(github.issueByUrl?.("9"), { state: "OPEN", title: "t" });
+  assert.deepEqual(github.issueByUrl?.("https://github.com/o/r/issues/9"), { state: "OPEN", title: "t" });
+});
+
 test("W1-T155: armed-awaiting-merge — an OPEN PR the batched gateway reports as auto-merge-armed", () => {
   const url = "https://github.com/craigoley/remudero/pull/60";
   const github = fakeGitHub({ byRef: { [url]: { number: 60, url, state: "OPEN" } }, autoMergeByUrl: { [url]: true } });

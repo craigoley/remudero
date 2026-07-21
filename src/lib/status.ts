@@ -844,7 +844,7 @@ function deriveRunState(lines: ReadonlyArray<Record<string, unknown>>, taskId: s
  * only the live join {@link resolveEscalation} can attempt: same fail-closed direction as an
  * unreadable issue read, never a silently dropped row.
  */
-function latestEscalationLine(
+export function latestEscalationLine(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
 ): { issueUrl?: string; escalationClass?: string } | undefined {
@@ -865,7 +865,7 @@ function latestEscalationLine(
 }
 
 /** {@link deriveStatus}'s escalation-derived fields, once an escalation resolves as still-relevant. */
-interface EscalationState {
+export interface EscalationState {
   issueUrl?: string;
   escalationClass?: string;
   title?: string;
@@ -887,7 +887,7 @@ interface EscalationState {
  * the inverse of W1-T181's merged-count fail-direction — never unify the two behind one
  * "unreadable" policy).
  */
-function resolveEscalation(
+export function resolveEscalation(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
   github: GitHub,
@@ -896,13 +896,32 @@ function resolveEscalation(
   if (!latest) return undefined;
   // No issue_url at all (malformed/pre-W1-T8 ledger line) ⇒ there is nothing to join against —
   // same fail-closed treatment as an unresolved/unreadable url, never a dropped row.
-  const issue = latest.issueUrl ? (github.issueByUrl?.(latest.issueUrl) ?? null) : null;
-  if (issue?.state === "CLOSED") return undefined; // confirmed resolved — the only way to drop the row.
+  let issue: { state: string; title?: string } | null = null;
+  if (latest.issueUrl) {
+    try {
+      // A THROWING issueByUrl (an injected fixture that raises rather than fails soft, or a
+      // gateway this module didn't anticipate) must NEVER propagate out of deriveStatus — that
+      // would crash the whole projection instead of degrading this ONE task to unverified. Every
+      // other read on this interface (ghGateway/buildBatchedGithub) already catches its OWN `gh`
+      // errors internally and returns null/false; this call is EXTERNALLY supplied, so it gets
+      // its own belt-and-suspenders catch rather than trusting that convention was followed.
+      issue = github.issueByUrl?.(latest.issueUrl) ?? null;
+    } catch {
+      issue = null;
+    }
+  }
+  // Case-INSENSITIVE: `gh issue view/list --json state` reports "OPEN"/"CLOSED" (verified live),
+  // but this repo's OTHER GitHub-issue reader (issues-intake.ts, over `gh api`'s raw REST JSON)
+  // already sees lowercase "open"/"closed" for the SAME underlying resource — two real, already-
+  // coexisting conventions in this codebase. Normalizing here means whichever a `GitHub.issueByUrl`
+  // implementation happens to surface, "confirmed open" and "confirmed closed" are read the same.
+  const state = typeof issue?.state === "string" ? issue.state.toUpperCase() : undefined;
+  if (state === "CLOSED") return undefined; // confirmed resolved — the only way to drop the row.
   return {
     issueUrl: latest.issueUrl,
     escalationClass: latest.escalationClass,
     title: issue?.title,
-    unverified: issue?.state === "OPEN" ? undefined : true,
+    unverified: state === "OPEN" ? undefined : true,
   };
 }
 
@@ -1310,6 +1329,7 @@ export function buildBatchedGithub(
   interface IssueIndex {
     at: number;
     byUrl: Map<string, BatchedIssue>;
+    byNum: Map<string, BatchedIssue>;
   }
   let issueCache: IssueIndex | undefined;
   const issueIndex = (): IssueIndex => {
@@ -1331,9 +1351,21 @@ export function buildBatchedGithub(
         // genuine outage, never a confirmed "no such issues".
         all = [];
       }
-      issueCache = { at: now(), byUrl: new Map(all.map((i) => [i.url, i])) };
+      issueCache = {
+        at: now(),
+        byUrl: new Map(all.map((i) => [i.url, i])),
+        byNum: new Map(all.map((i) => [String(i.number), i])),
+      };
     }
     return issueCache;
+  };
+  // Flexible ref resolution — accepts a full issue URL OR a bare number, mirroring the PR
+  // `lookup()` below (and `prByRef`/`ghGateway.issueByUrl`, which already delegate to `gh`'s own
+  // ref parsing and so already accept either shape). escalate.ts's ledger line always writes a
+  // full URL, but a caller resolving by number should not silently miss.
+  const lookupIssue = (ref: string): BatchedIssue | undefined => {
+    const idx = issueIndex();
+    return idx.byUrl.get(ref) ?? idx.byNum.get(ref) ?? idx.byNum.get(ref.replace(/^.*\/(\d+)$/, "$1"));
   };
 
   interface Index {
@@ -1416,7 +1448,7 @@ export function buildBatchedGithub(
       return index().byUrl.get(prUrl)?.autoMergeRequest != null;
     },
     issueByUrl(url) {
-      const i = issueIndex().byUrl.get(url);
+      const i = lookupIssue(url);
       return i ? { state: i.state, title: i.title } : null;
     },
     // W1-T154: forces `index()` NOW. Boot calls this once (cache is empty -> always fetches);

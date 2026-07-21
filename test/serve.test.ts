@@ -731,3 +731,32 @@ test("W1-T157: palette actions fire through the EXISTING buttons (one implementa
   assert.match(html, /getElementById\("feedback-btn"\)\.click\(\)/);
   assert.match(html, /getElementById\("graph-btn"\)\.click\(\)/);
 });
+
+// ── W1-T182: NEEDS ME dispatches the Approve affordance BY ITEM TYPE, never one row template ────
+// for every kind. Structural proof over the two row-template function BODIES (the DOM/behavioral
+// half — a real escalation row rendered live, "Mark handled" actually closing the issue — is
+// test/serve.live-state.test.ts's job, per this codebase's own "exercise the real client" rule;
+// this test proves the CONTRAST the acceptance bar names: an escalation template carries no
+// Approve control at all, while the P## inbox-proposal template still carries its OWN, pre-
+// existing, intentionally CLI-only `rmd approve` affordance (W1-T110/W1-T111's documented scope
+// boundary, panel-graph.ts's buildInboxRoute: a REAL write route needs a RatifyGateway this task
+// does not add — a fake button here would be exactly the "control with no defined action" this
+// task exists to remove, not add a second instance of).
+
+test("W1-T182: an Approve control NEVER renders on an escalation row, while the P## inbox-proposal row still carries its own (CLI-only, pre-existing) approve affordance", () => {
+  const html = renderShellHtml();
+  const taskRowFn = html.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0];
+  const inboxRowFn = html.match(/function needsMeInboxHtml\(p\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(taskRowFn, "needsMeTaskRowHtml (the escalation row template) must exist");
+  assert.ok(inboxRowFn, "needsMeInboxHtml (the P## proposal row template) must exist");
+
+  // The escalation template: no Approve control, anywhere, in any form (button, form, label).
+  assert.doesNotMatch(taskRowFn, /Approve/i, "an escalation row template must never render an Approve control");
+  assert.doesNotMatch(taskRowFn, /<input[^>]*type="url"/i, "never solicit a URL the ledger already holds");
+  assert.match(taskRowFn, /view issue/i, "must render a direct link to the issue");
+  assert.match(taskRowFn, /Mark handled/i, "must render the escalation's OWN affordance, not a borrowed one");
+
+  // The P## proposal template: unchanged, and it DOES still carry the word "approve" — the one
+  // item type that word is actually defined for (rmd approve, the ratification-inbox action).
+  assert.match(inboxRowFn, /approve/i, "a P## inbox-proposal row must still carry the defined rmd approve affordance");
+});
