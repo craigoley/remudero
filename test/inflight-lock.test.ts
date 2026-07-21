@@ -140,7 +140,7 @@ test("release() is idempotent and removes the file", () => {
 
 test("sweepStaleInflightLocks: a lock whose holder pid is DEAD is reaped", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-sweep-"));
-  acquireInflightLock(dir, "W1-T1", { run_id: "R1", info: { pid: 65304, run_id: "R1", host: "h", startedAt: "t" } });
+  acquireInflightLock(dir, "W1-T1", { run_id: "R1", info: { pid: 65304, host: "h", startedAt: "t" } });
   const out = sweepStaleInflightLocks(dir, { isPidAlive: () => false });
   assert.deepEqual(out.reaped, ["W1-T1"]);
   assert.deepEqual(out.kept, []);
@@ -158,8 +158,8 @@ test("sweepStaleInflightLocks: a lock whose holder is ALIVE is left strictly alo
 
 test("sweepStaleInflightLocks: mixed dir reaps only the dead, and ignores non-lock files", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-sweep-"));
-  acquireInflightLock(dir, "DEAD-1", { run_id: "R1", info: { pid: 1, run_id: "R1", host: "h", startedAt: "t" } });
-  acquireInflightLock(dir, "LIVE-1", { run_id: "R2", info: { pid: 2, run_id: "R2", host: "h", startedAt: "t" } });
+  acquireInflightLock(dir, "DEAD-1", { run_id: "R1", info: { pid: 1, host: "h", startedAt: "t" } });
+  acquireInflightLock(dir, "LIVE-1", { run_id: "R2", info: { pid: 2, host: "h", startedAt: "t" } });
   writeFileSync(join(dir, "notes.txt"), "not a lock");
   const out = sweepStaleInflightLocks(dir, { isPidAlive: (pid) => pid === 2 });
   assert.deepEqual(out.reaped, ["DEAD-1"]);
