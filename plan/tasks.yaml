@@ -1948,6 +1948,146 @@
     per-event feed and per-run figures. Factor any shared ledger reduction once.
     risk:high — it re-sources a primary console section and adds a per-render ledger read path, where the naive
     implementation degrades continuously as the ledger grows."
+- id: W1-T112
+  title: "The morning pulse — rmd digest as a daily LaunchAgent (the W1-T12b generator pattern; the operator's awareness surface)"
+  repo: remudero
+  queue_note: |
+    MOVED 2026-07-21 into the console arc, immediately after W1-T184, as a DEPENDENCY CHAIN — W1-T112 then
+    W1-T144 then W1-T163, in that order. Moving W1-T163 ALONE would have been cosmetic: it would sit at the arc
+    while still gated behind W1-T112 (which was at index 181) and W1-T144 (index 35), and would never dispatch.
+    THE CHAIN IS UNBLOCKED AT THE ROOT, verified: W1-T112's only dep W1-T12b is MERGED, so T112 is dispatchable
+    now; W1-T144 needs T112 plus W1-T139 which is MERGED; W1-T163 needs T112, T144 and W1-T158, the last already
+    merged. Nothing here waits on unbuilt work — only on queue position, which is the shard-invisibility class
+    expressed as an index rather than a file.
+    WHY THIS IS CONSOLE-ARC WORK: P34's ratified envelope (round 3, clause e) specifies away-mode escalations
+    batching into the recap for ASYNC verdict. These three ARE that mechanism — T112 is the digest LaunchAgent
+    (the morning pulse), T144 pushes needs-human escalations through the digest channel, and T163 is the
+    since-you-last-checked recap keyed to a per-operator last-seen marker. Clause e has no substrate without them.
+  depends_on: [W1-T12b]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "With the daemon commissioned, the operator's question is 'how do I know what needs me?'
+    Escalation issues push via GitHub; ratifications surface via the inbox (W1-T110/T111); the missing
+    piece is the once-daily pulse: merges, blocks, open escalations, cost, and the inbox's READY count,
+    delivered to the operator's pocket. rmd digest exists (ledger rollup -> iMessage); this schedules it."
+  design: |
+    rmd digest-plist [--hour <h>] [--write]: generates com.remudero.digest — a daily
+    StartCalendarInterval LaunchAgent invoking rmd digest — reusing the W1-T12b generator's closed-env
+    allowlist + ANTHROPIC-clean assertion verbatim (one generator family, one billing boundary). The
+    digest body gains one line when the inbox lands: 'inbox: N ready' (soft compose — absent inbox,
+    absent line, no hard dep). Golden fixtures per the daemon-plist precedent, including the
+    clean-env-throws case.
+  acceptance:
+    - claim: "the generated unit is daily, clean-env, and correctly targeted"
+      proof: "unit test: generated plist fixture -> StartCalendarInterval at the given hour, EnvironmentVariables exactly {PATH, HOME}, ProgramArguments end [rmd, digest]; an ANTHROPIC_* injection fixture throws (the W1-T12b assertion reused)"
+    - claim: "the inbox line is soft-composed"
+      proof: "unit test: digest render with an inbox summary present includes 'inbox: N ready'; with the inbox module absent renders byte-identical to today"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§9"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+
+- id: W1-T144
+  title: "console push via the digest channel — needs-human escalations + drain rundowns emit through the digest path to the operator's message channel, deep-linking to the console card"
+  repo: remudero
+  queue_note: |
+    MOVED 2026-07-21 into the console arc, immediately after W1-T184, as a DEPENDENCY CHAIN — W1-T112 then
+    W1-T144 then W1-T163, in that order. Moving W1-T163 ALONE would have been cosmetic: it would sit at the arc
+    while still gated behind W1-T112 (which was at index 181) and W1-T144 (index 35), and would never dispatch.
+    THE CHAIN IS UNBLOCKED AT THE ROOT, verified: W1-T112's only dep W1-T12b is MERGED, so T112 is dispatchable
+    now; W1-T144 needs T112 plus W1-T139 which is MERGED; W1-T163 needs T112, T144 and W1-T158, the last already
+    merged. Nothing here waits on unbuilt work — only on queue position, which is the shard-invisibility class
+    expressed as an index rather than a file.
+    WHY THIS IS CONSOLE-ARC WORK: P34's ratified envelope (round 3, clause e) specifies away-mode escalations
+    batching into the recap for ASYNC verdict. These three ARE that mechanism — T112 is the digest LaunchAgent
+    (the morning pulse), T144 pushes needs-human escalations through the digest channel, and T163 is the
+    since-you-last-checked recap keyed to a per-operator last-seen marker. Clause e has no substrate without them.
+  depends_on: [W1-T112, W1-T139]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The console (W1-T139) is PULL — the operator must be looking at it. Escalations and drain rundowns need
+    a PUSH so an operator who is NOT watching still learns of a needs-human within a bounded time. Reuse the EXISTING
+    digest channel (W1-T112, rmd digest — the morning pulse) rather than inventing a second transport: needs-human
+    escalations and drain rundowns emit through the digest path to the operator's message channel, each line
+    DEEP-LINKING back to the console (the PWA opens straight to the relevant task card). Installed-PWA web push is
+    later polish ONLY if this proves insufficient — the digest channel is the v1 push, no new infra."
+  design: |
+    Route needs-human escalations (escalate(), lib/escalate.ts) and drain rundowns (the W1-T141 surface /
+    DrainSummary) into the digest emit path (lib/digest.ts, W1-T112) so they reach the operator's configured message
+    channel within one digest cycle. Each emitted item carries a DEEP LINK to the console (W1-T139) that resolves to
+    the specific task card (e.g. /#task=<id> or the serve route that renders that card). VERIFY the digest emit
+    surface, the escalate() call sites, and the console's card-addressing scheme from source before wiring (distrust
+    this note). No new transport — the digest channel IS the push; installed-PWA web push is deferred polish.
+  acceptance:
+    - claim: "an escalation created with NO console open reaches the operator's channel within one digest cycle"
+      proof: "integration test over an injected digest/channel sink: escalate() a needs-human with no live console; within one digest cycle the sink receives a message naming the task + reason; a fabricated 'reached' with no actual send FAILS the assertion (the sink is ground truth, not a log line)"
+    - claim: "the pushed item deep-links to the RIGHT console card (planted-probe)"
+      proof: "unit test: the emitted link for task X resolves to X's console card address, not another task's; a planted link pointing at the WRONG/absent task id is REJECTED by the link builder's assertion (the falsifier)"
+    - claim: "a drain rundown emits through the SAME channel, not a second transport"
+      proof: "unit test: a completed DrainSummary produces a digest-channel message via the SAME emit path as escalations (one code path, grep-provable), not a parallel sender; installed-PWA web push is absent (deferred)"
+  risk: high
+  origin: architect
+  plan_refs: ["§7B", "§7"]
+  files: [src/lib/digest.ts, src/lib/escalate.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "PUSH counterpart to the PULL console (W1-T139 console, W1-T140 preview, W1-T141 rundown pull-view,
+    W1-T110/T111 inbox). Reuses W1-T112's digest channel as the transport; installed-PWA web push deferred to polish
+    only if the digest cycle proves insufficient."
+
+- id: W1-T163
+  title: "since-you-last-checked recap — a per-operator last-seen marker (per token, updated on board view) drives a console recap of everything after it; the digest becomes marker-aware so push and pull tell one story"
+  repo: remudero
+  queue_note: |
+    MOVED 2026-07-21 into the console arc, immediately after W1-T184, as a DEPENDENCY CHAIN — W1-T112 then
+    W1-T144 then W1-T163, in that order. Moving W1-T163 ALONE would have been cosmetic: it would sit at the arc
+    while still gated behind W1-T112 (which was at index 181) and W1-T144 (index 35), and would never dispatch.
+    THE CHAIN IS UNBLOCKED AT THE ROOT, verified: W1-T112's only dep W1-T12b is MERGED, so T112 is dispatchable
+    now; W1-T144 needs T112 plus W1-T139 which is MERGED; W1-T163 needs T112, T144 and W1-T158, the last already
+    merged. Nothing here waits on unbuilt work — only on queue position, which is the shard-invisibility class
+    expressed as an index rather than a file.
+    WHY THIS IS CONSOLE-ARC WORK: P34's ratified envelope (round 3, clause e) specifies away-mode escalations
+    batching into the recap for ASYNC verdict. These three ARE that mechanism — T112 is the digest LaunchAgent
+    (the morning pulse), T144 pushes needs-human escalations through the digest channel, and T163 is the
+    since-you-last-checked recap keyed to a per-operator last-seen marker. Clause e has no substrate without them.
+  depends_on: [W1-T112, W1-T144, W1-T158]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "The operator opens the console and cannot tell what changed since they last looked. Track a per-operator
+    LAST-SEEN marker (keyed per bearer token, advanced when the board is viewed) and render a 'Since you last checked'
+    section: merges, blocks, escalations, feedback answered, retro runs — everything after the marker, each row
+    expanding into its T158 task card for drill-in. The digest (W1-T112 / W1-T144) becomes marker-aware so the PUSH
+    (digest) and the PULL (console recap) tell ONE story, not two divergent ones."
+  design: |
+    A per-token last-seen marker (advanced on board view / GET /v1/status from that token). A recap builder collects
+    ledger+GitHub events AFTER the marker (merges, blocks, escalations, feedback answered, retro runs), rendered as a
+    console section whose rows expand into the T158 task card. The digest (W1-T112/W1-T144) reads the SAME marker so
+    a pushed digest and the pulled recap cover the same window. VERIFY the token identity (service.ts bearer id), the
+    board-view path, the digest emit surface, and the T158 card address from source first (distrust this note).
+  acceptance:
+    - claim: "the recap renders every event AFTER the per-operator marker (merges/blocks/escalations/feedback/retro), each row drilling into its T158 card"
+      proof: "integration test: with a marker set, events created AFTER it appear in the recap (one row per merge/block/escalation/feedback-answered/retro), each linking to the T158 task card; an event created BEFORE the marker does NOT appear (the falsifier)"
+    - claim: "viewing the board advances the marker — a reload then yields an empty recap"
+      proof: "integration test: viewing the board (from a token) advances that token's marker to now; an immediate reload renders an EMPTY 'Since you last checked' recap (nothing after the just-advanced marker); a recap still showing pre-view events FAILS"
+    - claim: "the digest is marker-aware — push and pull cover the same window"
+      proof: "unit test: the digest (W1-T112/W1-T144) reads the same per-operator marker as the console recap, so the pushed digest's event set equals the pulled recap's for the same marker; a digest computed off a different/stale window FAILS"
+  risk: high
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/serve.ts, src/lib/board.ts, src/lib/digest.ts]
+  status: queued
+  attempts: 0
+  note: "Per-token last-seen marker; recap rows drill into T158 cards; digest (W1-T112/W1-T144) marker-aware so push
+    and pull are one story. Falsifiers: a pre-marker event in the recap fails; view-then-reload yields empty recap."
+
 - id: W1-T159
   title: "GLANCE layer — a pinned summary strip (running/needs-me/blocked/queued/merged-today/spend-today), a daemon-health widget, and a browser-tab needs-me badge"
   repo: remudero
@@ -2503,44 +2643,6 @@
   note: "Directly answers Craig's pain (can't see the drain without hand cross-referencing). Second leg of the
     operator-console arc; builds on W1-T139 (the served panel) and reuses drain.ts's plannedSequence + panel-graph's
     edge derivation. The curated selection is a new INPUT into the existing drain dispatch — provable via a runOne recorder."
-
-- id: W1-T144
-  title: "console push via the digest channel — needs-human escalations + drain rundowns emit through the digest path to the operator's message channel, deep-linking to the console card"
-  repo: remudero
-  depends_on: [W1-T112, W1-T139]
-  type: implement
-  verify: auto
-  principles: {tdd: strict}
-  budget_usd: 100.00
-  rationale: "The console (W1-T139) is PULL — the operator must be looking at it. Escalations and drain rundowns need
-    a PUSH so an operator who is NOT watching still learns of a needs-human within a bounded time. Reuse the EXISTING
-    digest channel (W1-T112, rmd digest — the morning pulse) rather than inventing a second transport: needs-human
-    escalations and drain rundowns emit through the digest path to the operator's message channel, each line
-    DEEP-LINKING back to the console (the PWA opens straight to the relevant task card). Installed-PWA web push is
-    later polish ONLY if this proves insufficient — the digest channel is the v1 push, no new infra."
-  design: |
-    Route needs-human escalations (escalate(), lib/escalate.ts) and drain rundowns (the W1-T141 surface /
-    DrainSummary) into the digest emit path (lib/digest.ts, W1-T112) so they reach the operator's configured message
-    channel within one digest cycle. Each emitted item carries a DEEP LINK to the console (W1-T139) that resolves to
-    the specific task card (e.g. /#task=<id> or the serve route that renders that card). VERIFY the digest emit
-    surface, the escalate() call sites, and the console's card-addressing scheme from source before wiring (distrust
-    this note). No new transport — the digest channel IS the push; installed-PWA web push is deferred polish.
-  acceptance:
-    - claim: "an escalation created with NO console open reaches the operator's channel within one digest cycle"
-      proof: "integration test over an injected digest/channel sink: escalate() a needs-human with no live console; within one digest cycle the sink receives a message naming the task + reason; a fabricated 'reached' with no actual send FAILS the assertion (the sink is ground truth, not a log line)"
-    - claim: "the pushed item deep-links to the RIGHT console card (planted-probe)"
-      proof: "unit test: the emitted link for task X resolves to X's console card address, not another task's; a planted link pointing at the WRONG/absent task id is REJECTED by the link builder's assertion (the falsifier)"
-    - claim: "a drain rundown emits through the SAME channel, not a second transport"
-      proof: "unit test: a completed DrainSummary produces a digest-channel message via the SAME emit path as escalations (one code path, grep-provable), not a parallel sender; installed-PWA web push is absent (deferred)"
-  risk: high
-  origin: architect
-  plan_refs: ["§7B", "§7"]
-  files: [src/lib/digest.ts, src/lib/escalate.ts, src/run-task.ts]
-  status: queued
-  attempts: 0
-  note: "PUSH counterpart to the PULL console (W1-T139 console, W1-T140 preview, W1-T141 rundown pull-view,
-    W1-T110/T111 inbox). Reuses W1-T112's digest channel as the transport; installed-PWA web push deferred to polish
-    only if the digest cycle proves insufficient."
 
 - id: W1-T141
   title: "post-drain rundown + feedback hook — per-task merged/blocked/escalated outcome lines, each with a one-tap operator verdict written to the ledger as operator_feedback"
@@ -7315,37 +7417,6 @@
   status: queued
   attempts: 0
 
-- id: W1-T112
-  title: "The morning pulse — rmd digest as a daily LaunchAgent (the W1-T12b generator pattern; the operator's awareness surface)"
-  repo: remudero
-  depends_on: [W1-T12b]
-  type: implement
-  verify: auto
-  principles: {tdd: strict}
-  budget_usd: 100.00
-  rationale: "With the daemon commissioned, the operator's question is 'how do I know what needs me?'
-    Escalation issues push via GitHub; ratifications surface via the inbox (W1-T110/T111); the missing
-    piece is the once-daily pulse: merges, blocks, open escalations, cost, and the inbox's READY count,
-    delivered to the operator's pocket. rmd digest exists (ledger rollup -> iMessage); this schedules it."
-  design: |
-    rmd digest-plist [--hour <h>] [--write]: generates com.remudero.digest — a daily
-    StartCalendarInterval LaunchAgent invoking rmd digest — reusing the W1-T12b generator's closed-env
-    allowlist + ANTHROPIC-clean assertion verbatim (one generator family, one billing boundary). The
-    digest body gains one line when the inbox lands: 'inbox: N ready' (soft compose — absent inbox,
-    absent line, no hard dep). Golden fixtures per the daemon-plist precedent, including the
-    clean-env-throws case.
-  acceptance:
-    - claim: "the generated unit is daily, clean-env, and correctly targeted"
-      proof: "unit test: generated plist fixture -> StartCalendarInterval at the given hour, EnvironmentVariables exactly {PATH, HOME}, ProgramArguments end [rmd, digest]; an ANTHROPIC_* injection fixture throws (the W1-T12b assertion reused)"
-    - claim: "the inbox line is soft-composed"
-      proof: "unit test: digest render with an inbox summary present includes 'inbox: N ready'; with the inbox module absent renders byte-identical to today"
-  risk: medium
-  origin: architect
-  plan_refs: ["§7", "§9"]
-  files: [src/run-task.ts]
-  status: queued
-  attempts: 0
-
 - id: W1-T113
   title: "Toolchain resolution + spawn-infra degradation — resolve the claude executable at spawn, refuse legibly, and NEVER crash-loop silently (the vanished-binary incident)"
   repo: remudero
@@ -8702,41 +8773,6 @@
   note: "Extends the sweep's level-triggered reconciliation (W1-T77 / P22) from PRs to escalation ISSUES. Evidence:
     11 closed by hand, 6 re-accrued in a day. Falsifier: a live-referent escalation must not close. Companion to
     W1-T104 (escalation-dedup) — dedup stops duplicates being opened; this closes them once the referent resolves."
-
-- id: W1-T163
-  title: "since-you-last-checked recap — a per-operator last-seen marker (per token, updated on board view) drives a console recap of everything after it; the digest becomes marker-aware so push and pull tell one story"
-  repo: remudero
-  depends_on: [W1-T112, W1-T144, W1-T158]
-  type: implement
-  verify: auto
-  principles: {tdd: strict}
-  budget_usd: 100.00
-  rationale: "The operator opens the console and cannot tell what changed since they last looked. Track a per-operator
-    LAST-SEEN marker (keyed per bearer token, advanced when the board is viewed) and render a 'Since you last checked'
-    section: merges, blocks, escalations, feedback answered, retro runs — everything after the marker, each row
-    expanding into its T158 task card for drill-in. The digest (W1-T112 / W1-T144) becomes marker-aware so the PUSH
-    (digest) and the PULL (console recap) tell ONE story, not two divergent ones."
-  design: |
-    A per-token last-seen marker (advanced on board view / GET /v1/status from that token). A recap builder collects
-    ledger+GitHub events AFTER the marker (merges, blocks, escalations, feedback answered, retro runs), rendered as a
-    console section whose rows expand into the T158 task card. The digest (W1-T112/W1-T144) reads the SAME marker so
-    a pushed digest and the pulled recap cover the same window. VERIFY the token identity (service.ts bearer id), the
-    board-view path, the digest emit surface, and the T158 card address from source first (distrust this note).
-  acceptance:
-    - claim: "the recap renders every event AFTER the per-operator marker (merges/blocks/escalations/feedback/retro), each row drilling into its T158 card"
-      proof: "integration test: with a marker set, events created AFTER it appear in the recap (one row per merge/block/escalation/feedback-answered/retro), each linking to the T158 task card; an event created BEFORE the marker does NOT appear (the falsifier)"
-    - claim: "viewing the board advances the marker — a reload then yields an empty recap"
-      proof: "integration test: viewing the board (from a token) advances that token's marker to now; an immediate reload renders an EMPTY 'Since you last checked' recap (nothing after the just-advanced marker); a recap still showing pre-view events FAILS"
-    - claim: "the digest is marker-aware — push and pull cover the same window"
-      proof: "unit test: the digest (W1-T112/W1-T144) reads the same per-operator marker as the console recap, so the pushed digest's event set equals the pulled recap's for the same marker; a digest computed off a different/stale window FAILS"
-  risk: high
-  origin: architect
-  plan_refs: ["§7", "§7B"]
-  files: [src/lib/serve.ts, src/lib/board.ts, src/lib/digest.ts]
-  status: queued
-  attempts: 0
-  note: "Per-token last-seen marker; recap rows drill into T158 cards; digest (W1-T112/W1-T144) marker-aware so push
-    and pull are one story. Falsifiers: a pre-marker event in the recap fails; view-then-reload yields empty recap."
 
 - id: W1-T164
   title: "operator guidance notes — a task carries console-editable, provenance-stamped operator_note(s) injected into recon/implement prompts under the provenance rule (feedback INTO a task before it runs)"
