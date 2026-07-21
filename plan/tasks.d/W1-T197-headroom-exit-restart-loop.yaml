@@ -99,7 +99,24 @@
   files: [src/lib/daemon.ts, test/daemon.test.ts]
   status: queued
   attempts: 0
-  note: "TIME-AWARE RESERVE added 2026-07-21 by operator ruling — the ceiling is a function of time-to-reset,
+  note: "AMENDED at recon intake, 2026-07-21. Task is QUEUED - verified that zero merged PRs carry its
+    Remudero-Task trailer - so standing rule 21 does not apply.
+    RECON R-7 SUPPLIES MEASURED EVIDENCE for the fail-open half of this task, which was previously argued
+    rather than quantified: the headroom guard is BLIND on 197 of 253 checks. daemon.headroom.unavailable
+    appears 197 times in the ledger, each logging usage unreadable - continuing (best-effort), and the daemon
+    keeps spawning on every one of them (daemon.ts:286, mirrored at drain.ts:554). The guard that exists to
+    stop the fleet at the subscription ceiling is inoperative roughly 78 percent of the time.
+    THAT NUMBER CHANGES THE DESIGN, which is why it is recorded here rather than left in the audit. A guard
+    blind 78 percent of the time cannot be fixed by making the unreadable case fail closed - that would halt
+    the fleet most of the time. Recon T6 names the right shape: a BOUNDED DEGRADED MODE. On an unreadable
+    reading the daemon continues under a reduced allowance rather than either stopping dead or proceeding as
+    though it had read zero, and N consecutive unreadable readings escalate to a slowed or paused posture
+    rather than continuing indefinitely.
+    ADDED OBLIGATION for the implementer: readUsage returning null AND a task spawning in the same tick FAILS
+    unless a bounded degraded-mode allowance applies, and N consecutive unavailable readings without entering
+    a slowed mode FAILS. Falsifier for both is the 197-of-253 ledger history, which under current code
+    produces neither.
+    ORIGINAL NOTE FOLLOWS. TIME-AWARE RESERVE added 2026-07-21 by operator ruling — the ceiling is a function of time-to-reset,
     relaxing toward 100% on the window's final day (Monday local) because unspent headroom is destroyed at the
     Mon->Tue midnight reset. This is the policy P34 clause (c) inherits: the operator reserve is real every
     other day, and on the last day the reset itself serves the reserve's purpose. The in-process idle fires ONLY
