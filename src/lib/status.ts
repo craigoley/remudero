@@ -888,6 +888,18 @@ export function projectPlan(
       effectiveDeps = { ...deps, previousProjection: (taskId) => previousByTaskId.get(taskId) };
     }
   }
+  // READ THE LEDGER ONCE (W1-T187): `deriveStatus` reads+parses the WHOLE NDJSON ledger via
+  // `deps.readLedger` on every call, and the loop below calls `deriveStatus` once PER TASK --
+  // so an N-task plan re-read and re-parsed the entire ledger N times (O(tasks x ledger)),
+  // clocked at 5-8s per projection against the 250ms-polled console's <2s budget. `ledgerPath`
+  // is a single field on `deps`, shared by every task in this call, and the ledger cannot
+  // change mid-loop (nothing here writes to it), so read+parse it exactly once up front and
+  // hand every task the SAME already-parsed array via an overriding `readLedger` -- same
+  // batch-once-amortize-over-N-tasks shape as {@link buildBatchedGithub}'s fix for the
+  // analogous O(N) `gh` subprocess cost below.
+  const readLedgerOnce = effectiveDeps.readLedger ?? readLedgerLines;
+  const ledgerLinesOnce = readLedgerOnce(effectiveDeps.ledgerPath);
+  effectiveDeps = { ...effectiveDeps, readLedger: () => ledgerLinesOnce };
   const byId = new Map<string, StatusProjection>();
   for (const task of plan.tasks) byId.set(task.id, deriveStatus(task, effectiveDeps));
   if (cachePath) {
