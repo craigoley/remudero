@@ -1412,6 +1412,12 @@
     'honest about failing' and 'presented as specified' are different properties, and T156's whole thesis is the
     second one — a console that never lies about its own liveness has to say WHAT is wrong in the vocabulary it
     promised, not leak an exception.
+    MEASURABLE DISAGREEMENT, 2026-07-21 08:41 — the contradiction now carries timestamps that quantify it:
+    'live · updated 18s ago' rendered directly above 'STALE — as of 08:41:16'. The two indicators disagree by
+    roughly TWO MINUTES about the age of the same data. This is no longer only incoherent wording: the freshness
+    stamp and the staleness banner are reading clocks that are measurably out of step, so 'one truth' is a
+    concrete numeric requirement rather than a stylistic one — whatever single source the lifecycle produces
+    must yield ONE age, and every surface must render that age.
     SECOND OPERATOR SCREENSHOT, 2026-07-21 — the same section rendering TWO CONTRADICTORY liveness claims at
     once: 'live · updated 8s ago' directly above 'STALE — showing last known data'. Neither indicator is lying
     about its own source; they derive from DIFFERENT states. The freshness stamp reports when the last successful
