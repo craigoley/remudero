@@ -5472,9 +5472,10 @@ async function approveCommand(rest: string[]): Promise<number> {
   const config = loadConfig();
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const registryPath = join(config.root, "state", "inbox-proposals.json");
   const { owner, repo } = resolveOwnerRepo();
 
-  const { proposal, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
+  const { proposal, proposals, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
   if (!proposal || !classification) {
     console.error(`rmd approve: unknown proposal '${proposalId}' — not in the ACTIVE registry (state/inbox-proposals.json)`);
     return 2;
@@ -5561,6 +5562,17 @@ async function approveCommand(rest: string[]): Promise<number> {
     console.error(`rmd approve: ${result.refusal}`);
     return 1;
   }
+
+  // W1-T190: `ratify.approved` above just ledgered this proposal's ratification, but the
+  // ledger and the registry are two different sources of truth — `rmd inbox`/the console's
+  // `/v1/inbox` route (buildInboxRoute) classify strictly off state/inbox-proposals.json,
+  // never the ledger, so leaving this entry in place kept recommending an already-ratified
+  // proposal as READY indefinitely. Mirrors reframeCommand's registry write below (5646+ in
+  // this file): this proposal is no longer ACTIVE (see the Proposal interface's doc comment
+  // in lib/inbox.ts), so it is removed rather than rewritten in place.
+  const nextProposals = proposals.filter((p) => p.id !== proposalId);
+  writeFileSync(registryPath, JSON.stringify({ proposals: nextProposals }, null, 2), "utf8");
+
   if (!repoDir || !worktreePath) {
     // Unreachable in practice — the gateway above always sets these before returning a
     // branch — but fail LOUD rather than silently skip cleanup/gate if it ever were.
