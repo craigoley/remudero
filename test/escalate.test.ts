@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
   NEEDS_HUMAN_LABEL,
   escalate,
+  tryEscalate,
   renderIssueBody,
   type Escalation,
   type IssueGateway,
@@ -132,4 +133,59 @@ test("escalate() sends the gateway a body CONTAINING every option + the recommen
     // the queue label the §4 control panel reads is always present:
     assert.ok(call.labels.includes(NEEDS_HUMAN_LABEL), `${cls}: labels ${call.labels} include ${NEEDS_HUMAN_LABEL}`);
   }
+});
+
+// ── tryEscalate: the daemon-survivability contract (R-1) ────────────────────
+// `gh issue create` throws on any nonzero exit. Inside `rmd daemon`'s for(;;)
+// that throw was uncontained: it ended the PROCESS, launchd's
+// KeepAlive{SuccessfulExit:false} read the nonzero exit as a crash, relaunched,
+// re-selected the same task, and threw again — one boot per minute, observed
+// 2026-07-21 04:02-04:13 (460 daemon.boot lines since Jul 19). These tests pin
+// the contract that makes that loop unreachable.
+
+test("tryEscalate: a THROWING gh gateway yields null instead of propagating (the daemon survives)", () => {
+  const path = ledgerPath();
+  const boom: IssueGateway = {
+    create() {
+      throw new Error("gh: HTTP 403 rate limit exceeded");
+    },
+  };
+  // FALSIFIER: the pre-fix shape is plain `escalate()`, which DOES propagate —
+  // asserted here so the test fails if tryEscalate ever degrades to a re-export.
+  assert.throws(() => escalate(escalation(), { issues: boom, ledgerPath: path, runId: "RUN-1" }));
+
+  const url = tryEscalate(escalation(), { issues: boom, ledgerPath: path, runId: "RUN-1" });
+  assert.equal(url, null, "an undeliverable escalation returns null rather than throwing");
+});
+
+test("tryEscalate: a failed delivery is RECORDED on escalation.failed, never silent", () => {
+  const path = ledgerPath();
+  const boom: IssueGateway = {
+    create() {
+      throw new Error("gh: HTTP 403 rate limit exceeded");
+    },
+  };
+  tryEscalate(escalation({ taskId: "W1-TZ" }), { issues: boom, ledgerPath: path, runId: "RUN-9" });
+
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const failed = lines.filter((l) => l.step === "escalation.failed");
+  assert.equal(failed.length, 1, "exactly one escalation.failed line");
+  assert.equal(failed[0].task_id, "W1-TZ");
+  assert.equal(failed[0].class, "BLOCKED");
+  assert.match(failed[0].error, /rate limit/, "the transport error is carried, not swallowed");
+  assert.equal(
+    lines.filter((l) => l.step === "escalation.issue_opened").length,
+    0,
+    "a FAILED delivery must never claim issue_opened — that is the claimed-vs-evidenced rule",
+  );
+});
+
+test("tryEscalate: a SUCCESSFUL delivery is byte-identical to escalate() (no behaviour change on the happy path)", () => {
+  const issues = fakeIssues();
+  const path = ledgerPath();
+  const url = tryEscalate(escalation(), { issues, ledgerPath: path, runId: "RUN-1" });
+  assert.equal(url, "https://github.com/craigoley/remudero/issues/99");
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(lines.filter((l) => l.step === "escalation.issue_opened").length, 1);
+  assert.equal(lines.filter((l) => l.step === "escalation.failed").length, 0);
 });

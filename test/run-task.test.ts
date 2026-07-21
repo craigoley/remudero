@@ -15,6 +15,7 @@ import {
   deriveStrikeHistory,
   dispatchFixPreflightStandDown,
   drainCommand,
+  escalateCircuitBreak,
   FIX_MODE_RULES,
   isTransientResult,
   materializeReviewWorktree,
@@ -2405,4 +2406,48 @@ test("W1-T199: the ledger is never mutated — regime is derived at READ time fr
   priorStrikesFor(ledger, "W1-T900", "executed");
   currentStrikeRegimeFor(ledger, "W1-T900");
   assert.equal(JSON.stringify(ledger), snapshot, "reading strikes must not mutate ledger lines");
+});
+
+// ── the circuit-break dedup marker survives a FAILED delivery (R-1) ─────────
+// The cross-boot dedup was already ledger-derived and already the right shape.
+// Its defect was ORDERING: the marker was written only after escalate() RETURNED,
+// so a throwing `gh` recorded nothing and the next boot retried the same
+// escalation — which is how a transport failure became an unbounded relaunch
+// loop. The ledger showed 1 such marker against 460 boots.
+
+test("escalateCircuitBreak: a THROWING gh gateway still writes the dedup marker, so the next boot does not retry", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-circuit-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const task = { id: "W1-TQ", title: "t", repo: "remudero", type: "implement", depends_on: [], status: "queued" };
+  const boom = {
+    create() {
+      throw new Error("gh: HTTP 403 rate limit exceeded");
+    },
+  };
+
+  // BOOT 1: delivery fails. It must not throw, and it must leave a marker.
+  assert.doesNotThrow(() =>
+    escalateCircuitBreak(task as never, { owner: "craigoley", repo: "remudero", ledgerPath, runId: "RUN-1", issues: boom }),
+  );
+  const afterFirst = readFileSync(ledgerPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const markers = afterFirst.filter((l) => l.step === "dispatch.circuit_broken.escalated");
+  assert.equal(markers.length, 1, "FALSIFIER: pre-fix the marker was written only on SUCCESS, so this was 0");
+  assert.equal(markers[0].delivered, false, "and it records that delivery did NOT happen (claimed vs evidenced)");
+  assert.equal(
+    afterFirst.filter((l) => l.step === "escalation.failed").length,
+    1,
+    "the failure is legible on its own step",
+  );
+
+  // BOOT 2: a fresh process over the SAME ledger must dedup on that marker and
+  // not call the gateway again. This is the loop, reproduced across boots.
+  let calls = 0;
+  const counting = {
+    create() {
+      calls += 1;
+      throw new Error("gh: HTTP 403 rate limit exceeded");
+    },
+  };
+  escalateCircuitBreak(task as never, { owner: "craigoley", repo: "remudero", ledgerPath, runId: "RUN-2", issues: counting });
+  assert.equal(calls, 0, "the second boot never re-attempted — the dedup is durable across the process death");
 });
