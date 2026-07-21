@@ -2,6 +2,7 @@ import { readLedgerLines } from "./status.js";
 import { notify, type NotifyDeps } from "./notify.js";
 import { renderAlertsSummary, type AlertsPollSummary } from "./ops.js";
 import { renderIssuesSummary, type IssuesPollSummary } from "./issues-intake.js";
+import { renderInboxPollSummary, type InboxPollSummary } from "./inbox.js";
 
 /**
  * Daily digest (W1-T8 title; assembled here, delivered here, SCHEDULED by the
@@ -40,6 +41,16 @@ export interface DigestSummary {
    * Same "latest wins" rule as `alerts`. Undefined when `rmd issues` never polled inside this window.
    */
   issues?: IssuesPollSummary;
+  /**
+   * The LATEST `inbox.polled` snapshot inside the window (W1-T112, lib/inbox.ts) — the
+   * ready-proposal count so the morning pulse answers "what needs me" without a separate
+   * `rmd inbox` check. Same "latest wins" rule as `alerts`/`issues`. Undefined when `rmd
+   * inbox` never polled inside this window — {@link renderDigest} SOFT-COMPOSES this one:
+   * it OMITS the "inbox: N ready" line entirely rather than falling back to a "(no poll
+   * this window)" placeholder, so a digest predating `rmd inbox` (or one where it simply
+   * hasn't run yet) renders byte-identical to before this field existed.
+   */
+  inbox?: InboxPollSummary;
   /**
    * W1-T178 (verdict stability): count of `review.downgrade_suppressed` ledger
    * lines inside the window — a semantic-lane downgrade suppressed because the
@@ -81,6 +92,9 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
     if (l.step === "issues.polled" && l.issues && typeof l.issues === "object") {
       summary.issues = l.issues as IssuesPollSummary;
     }
+    if (l.step === "inbox.polled" && l.inbox && typeof l.inbox === "object") {
+      summary.inbox = l.inbox as InboxPollSummary;
+    }
   }
   return summary;
 }
@@ -98,6 +112,10 @@ export function renderDigest(s: DigestSummary): string {
     }`,
     `alerts: ${s.alerts ? renderAlertsSummary(s.alerts) : "(no poll this window)"}`,
     `issues reviewed: ${s.issues ? renderIssuesSummary(s.issues) : "(no poll this window)"}`,
+    // W1-T112: soft-composed — present only when `rmd inbox` polled inside this window, an
+    // absent entirely (not a "(no poll this window)" placeholder) line otherwise, see the
+    // `inbox` field's doc on DigestSummary.
+    ...(s.inbox ? [`inbox: ${renderInboxPollSummary(s.inbox)}`] : []),
     `verdict downgrades suppressed: ${s.verdictDowngradesSuppressed}`,
     `notional cost: $${s.costUsd.toFixed(2)}`,
   ];

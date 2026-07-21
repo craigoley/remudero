@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildDigest, collectSince, sendDigest, summarize } from "../src/lib/digest.js";
+import { buildDigest, collectSince, renderDigest, sendDigest, summarize } from "../src/lib/digest.js";
 import type { NotifyChannel } from "../src/lib/notify.js";
 
 function ledgerFile(lines: Array<Record<string, unknown>>): string {
@@ -88,6 +88,37 @@ test("an empty window renders (none) rather than blank sections", () => {
   assert.match(text, /merged: \(none\)/);
   assert.match(text, /blocked: \(none\)/);
   assert.match(text, /escalations: \(none\)/);
+});
+
+// ── W1-T112: the inbox's ready count is SOFT-COMPOSED into the digest ─────────────────────
+
+test("summarize: an inbox.polled line inside the window folds its InboxPollSummary in, latest wins", () => {
+  const lines = [
+    ...LINES,
+    { ts: "2026-07-14T09:30:00.000Z", step: "inbox.polled", inbox: { ready: 1 } },
+    { ts: "2026-07-14T11:00:00.000Z", step: "inbox.polled", inbox: { ready: 4 } },
+  ];
+  const s = summarize(lines, "2026-07-14T00:00:00.000Z");
+  assert.deepEqual(s.inbox, { ready: 4 });
+});
+
+test("summarize: no inbox.polled line inside the window leaves `inbox` undefined", () => {
+  const s = summarize(LINES, "2026-07-14T00:00:00.000Z");
+  assert.equal(s.inbox, undefined);
+});
+
+test("renderDigest: an inbox summary present renders 'inbox: N ready'", () => {
+  const lines = [...LINES, { ts: "2026-07-14T09:30:00.000Z", step: "inbox.polled", inbox: { ready: 2 } }];
+  const path = ledgerFile(lines);
+  const text = buildDigest(path, "2026-07-14T00:00:00.000Z");
+  assert.match(text, /inbox: 2 ready/);
+});
+
+test("renderDigest: with no inbox.polled line, the digest renders BYTE-IDENTICAL to before this field existed (no inbox line at all)", () => {
+  const withoutInbox = buildDigest(ledgerFile(LINES), "2026-07-14T00:00:00.000Z");
+  assert.doesNotMatch(withoutInbox, /inbox:/);
+  const rebuilt = renderDigest(summarize(LINES, "2026-07-14T00:00:00.000Z"));
+  assert.equal(withoutInbox, rebuilt);
 });
 
 test("sendDigest delivers the built text over the notify channel and ledgers it", () => {

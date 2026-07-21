@@ -191,3 +191,102 @@ ${stringArray(programArguments)}
 export function launchdPlistPath(label: string = DAEMON_LABEL, home: string = homedir()): string {
   return join(home, "Library", "LaunchAgents", `${label}.plist`);
 }
+
+// ── The digest LaunchAgent (W1-T112 — the morning pulse) ──────────────────────────────────
+//
+// SAME generator family as generateLaunchdPlist above (W1-T12b) — the SAME absolute-path
+// assertions and the SAME closed-allowlist, ANTHROPIC-clean EnvironmentVariables reused
+// verbatim (one billing boundary, not two generators that could drift apart on it). The one
+// real difference is WHEN it runs: the daemon is a long-lived RunAtLoad+KeepAlive process;
+// `rmd digest` runs once, sends the pulse, and exits, so this unit is a StartCalendarInterval
+// firing once a day at `hour`:00 local time instead.
+
+/** The launchd label the digest unit is always generated under. */
+export const DIGEST_LABEL = "com.remudero.digest";
+
+/** Default local hour (24h, 0-23) the digest pulse fires — a MORNING pulse, per the title. */
+export const DEFAULT_DIGEST_HOUR = 8;
+
+export interface DigestLaunchdPlistOpts {
+  /** Absolute path to the `bin/rmd` launcher. Never resolved from PATH — launchd doesn't search it. */
+  rmdBin: string;
+  /** Workspace root (config.root, §4A) — absolute. WorkingDirectory + log files derive from it. */
+  root: string;
+  /** launchd label. Default {@link DIGEST_LABEL}. */
+  label?: string;
+  /** Explicit PATH the digest process boots with. Default {@link DEFAULT_LAUNCHD_PATH}. */
+  path?: string;
+  /** HOME the digest process boots with. Default `os.homedir()`. */
+  home?: string;
+  /** Local hour (0-23) the digest fires each day. Default {@link DEFAULT_DIGEST_HOUR}. */
+  hour?: number;
+}
+
+/**
+ * Generate the launchd .plist TEXT for the daily `rmd digest` pulse. Pure function of its
+ * args — no filesystem write, no `launchctl` call (see this module's header). Throws
+ * {@link LaunchdPlistError} if `rmdBin`/`root` (or a given `home`) aren't absolute, if
+ * `hour` is out of `[0, 23]`, or if the assembled `EnvironmentVariables` block carries an
+ * `ANTHROPIC_*` key — the SAME checks {@link generateLaunchdPlist} applies to the daemon unit.
+ */
+export function generateDigestLaunchdPlist(opts: DigestLaunchdPlistOpts): string {
+  assertAbsolute(opts.rmdBin, "rmdBin");
+  assertAbsolute(opts.root, "root");
+  if (opts.home !== undefined) assertAbsolute(opts.home, "home");
+
+  const label = opts.label ?? DIGEST_LABEL;
+  const path = opts.path ?? DEFAULT_LAUNCHD_PATH;
+  const home = opts.home ?? homedir();
+  const hour = opts.hour ?? DEFAULT_DIGEST_HOUR;
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
+    throw new LaunchdPlistError(`generateDigestLaunchdPlist: hour must be an integer in [0, 23], got ${JSON.stringify(opts.hour)}`);
+  }
+  const logDir = join(opts.root, "state", "logs");
+  const stdoutPath = join(logDir, "digest.out.log");
+  const stderrPath = join(logDir, "digest.err.log");
+
+  const environment: Record<string, string> = { PATH: path, HOME: home };
+  assertNoAnthropicKeys(environment);
+
+  const programArguments = [opts.rmdBin, "digest"];
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${escapeXml(label)}</string>
+  <!-- ANTHROPIC-clean-env boot assertion (billing boundary, MASTER-PLAN §9 — the SAME
+       assertion generateLaunchdPlist() applies to the daemon unit, W1-T12b):
+       EnvironmentVariables below is a CLOSED allowlist (PATH + HOME only) — launchd
+       never sources ~/.zshrc, so this dict is the WHOLE env the digest process
+       receives at boot. generateDigestLaunchdPlist() throws if any ANTHROPIC_* key
+       ever lands in it. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${escapeXml(path)}</string>
+    <key>HOME</key>
+    <string>${escapeXml(home)}</string>
+  </dict>
+  <key>ProgramArguments</key>
+  <array>
+${stringArray(programArguments)}
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${escapeXml(opts.root)}</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>${hour}</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>${escapeXml(stdoutPath)}</string>
+  <key>StandardErrorPath</key>
+  <string>${escapeXml(stderrPath)}</string>
+</dict>
+</plist>
+`;
+}

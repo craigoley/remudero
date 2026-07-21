@@ -568,6 +568,32 @@ export function renderInbox(classifications: InboxClassification[]): string {
   return lines.join("\n");
 }
 
+// ── The digest's ready-count block (W1-T112: the morning pulse) ──────────────────────────
+//
+// Same "latest wins" snapshot discipline as lib/ops.ts's AlertsPollSummary / lib/issues-
+// intake.ts's IssuesPollSummary: `rmd inbox` ledgers ONE `inbox.polled` line per invocation
+// carrying this summary, and digest.ts reads the LATEST such line inside its window — a
+// snapshot of the CURRENT ready count, not an additive event count, exactly like a
+// re-poll of unchanged alerts/issues never double-counts. Unlike alerts/issues, digest.ts
+// renders this SOFT: no line at all when `rmd inbox` never polled inside the window,
+// rather than an always-present "(no poll this window)" fallback — the inbox module can
+// land or not without the digest's rendered shape ever depending on it.
+
+export interface InboxPollSummary {
+  /** How many active proposals classified READY this poll — the digest's "N ready" count. */
+  ready: number;
+}
+
+/** Reduce a batch of classifications to the digest's ready count. Pure. */
+export function summarizeInboxPoll(classifications: InboxClassification[]): InboxPollSummary {
+  return { ready: classifications.filter((c) => c.state === "ready").length };
+}
+
+/** One-line render of an {@link InboxPollSummary} — what the digest prints ("inbox: <this>"). */
+export function renderInboxPollSummary(s: InboxPollSummary): string {
+  return `${s.ready} ready`;
+}
+
 // ── State-side registry shapes (harness reads/writes these; this module only types them) ──
 
 /** `<config.root>/state/inbox-proposals.json` — the ACTIVE-proposal registry. */

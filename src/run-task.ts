@@ -42,7 +42,7 @@ import {
 } from "./lib/drain.js";
 import { DEFAULT_POLL_INTERVAL_MS, daemonBoot, runDaemon, type DaemonOpts, type DaemonSummary } from "./lib/daemon.js";
 import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
-import { generateLaunchdPlist, launchdPlistPath } from "./lib/launchd.js";
+import { DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, launchdPlistPath } from "./lib/launchd.js";
 import { buildDigest, sendDigest } from "./lib/digest.js";
 import {
   escalate,
@@ -112,6 +112,7 @@ import {
   renderInbox,
   renderRatifyTelemetry,
   runDraftRung,
+  summarizeInboxPoll,
   type DraftAttemptCache,
   type DraftCache,
   type DraftRungOutcome,
@@ -3996,6 +3997,44 @@ async function daemonPlistCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
+/**
+ * `rmd digest-plist [--hour <h>] [--write]` — GENERATE the launchd unit for the daily
+ * `rmd digest` pulse (W1-T112 — "the morning pulse"; lib/launchd.ts's
+ * `generateDigestLaunchdPlist` owns the generation, the SAME W1-T12b generator family
+ * `daemonPlistCommand` above uses, reused rather than re-implemented — one billing
+ * boundary, one closed env allowlist). Default: print the .plist to stdout plus the
+ * `launchctl load` invocation the operator would run, and do nothing else. `--write`
+ * additionally writes it to `~/Library/LaunchAgents/<label>.plist` — still just a file
+ * write, never a `launchctl` call. Actually LOADING it (so the pulse survives
+ * logout/reboot) is an operator action, mirroring `daemon-plist`'s W1-T12d boundary.
+ */
+async function digestPlistCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("digest-plist", rest, ["--hour"], ["--write"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const config = loadConfig();
+  const hourRaw = flagValue(rest, "--hour");
+  const hour = hourRaw !== undefined ? Number(hourRaw) : undefined;
+  const rmdBin = join(repoRoot, "bin", "rmd");
+  const plist = generateDigestLaunchdPlist({ rmdBin, root: config.root, hour });
+  const plistPath = launchdPlistPath(DIGEST_LABEL);
+
+  if (rest.includes("--write")) {
+    mkdirSync(dirname(plistPath), { recursive: true });
+    writeFileSync(plistPath, plist);
+    console.log(`### rmd digest-plist — wrote ${plistPath}`);
+  } else {
+    console.log(plist);
+  }
+  console.log(
+    `\n# to commission (operator-run — NOT done by this command):\n` +
+      `launchctl load ${plistPath}`,
+  );
+  return 0;
+}
+
 // ── rmd serve — the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B) ──
 //
 // Real business logic lives entirely in the four already-proven modules lib/serve.ts
@@ -5868,6 +5907,15 @@ async function inboxCommand(rest: string[]): Promise<number> {
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
+  // W1-T112: one `inbox.polled` snapshot per invocation — digest.ts reads the LATEST such
+  // line inside its window and folds it into the daily pulse's soft-composed "inbox: N
+  // ready" line (see lib/inbox.ts's InboxPollSummary doc). Logged unconditionally, same as
+  // the `inbox.classified` lines just above — `rmd inbox --dry-run` already always
+  // classifies+ledgers (it only skips the draft-synthesis SPAWN), unlike `rmd ops`/`rmd
+  // issues`, whose dry-run skips their own poll-summary line because THEIR poll has real
+  // side effects (escalate/capture) a preview must leave no trace of; classification here
+  // has none.
+  log("inbox.polled", { inbox: summarizeInboxPoll(classifications) });
 
   const rendered = renderInbox(classifications);
   console.log(rendered);
@@ -6635,6 +6683,11 @@ const COMMANDS: readonly CommandSpec[] = [
     usage: "rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message",
   },
   {
+    name: "digest-plist",
+    usage:
+      "rmd digest-plist [--hour <h>] [--write]   # generate the launchd unit for the daily `rmd digest` pulse (W1-T112, the W1-T12b generator pattern) — StartCalendarInterval at <h>:00 local time (default 8); commissioning (launchctl load) is an operator action",
+  },
+  {
     name: "ops",
     usage:
       "rmd ops [--dry-run]   # alert intake v0+v1 (W1-T55/W1-T56, §5D lane 2, §7B): poll code-scanning/Dependabot/secret-scanning alerts for this repo via gh api, fold open counts+ages into the next digest, escalate every NEW critical/high alert exactly once (needs-human, ledger-deduped so a re-poll never double-escalates), and capture a plan/feedback/<id>.yaml entry (origin: alert#<source>-<id>) for every open alert not already captured, any severity, for rmd triage to ground; id-deduped so a re-poll never double-creates; --dry-run previews, opens no issues, creates no feedback",
@@ -6811,6 +6864,9 @@ async function main(): Promise<void> {
   }
   if (cmd === "digest") {
     process.exit(await digestCommand(rest));
+  }
+  if (cmd === "digest-plist") {
+    process.exit(await digestPlistCommand(rest));
   }
   if (cmd === "ops") {
     process.exit(await opsCommand(rest));
