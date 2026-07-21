@@ -1,0 +1,70 @@
+- id: W1-T200
+  title: "SKELETON LIFECYCLE (rule-21 follow-up to W1-T154) — skeletons render ONLY before first data arrival; a successful section render REPLACES the whole section with exactly the data, including an honest empty state, never residual placeholders"
+  repo: remudero
+  depends_on: [W1-T154, W1-T183]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR SCREENSHOTS, 2026-07-21 04:52: NOW, NEEDS ME and RECENT each rendered REAL ROWS sitting
+    above PERPETUAL SHIMMER SLOTS. The sections had received their data — actual tasks were listed — and the
+    skeleton placeholders were still there underneath, animating forever.
+    A skeleton is a promise that data is COMING. Left rendered after the data has arrived it becomes a lie about
+    the section's own state: the operator cannot tell whether the list is complete or still filling, so a
+    three-row NOW section reads as 'three so far, more loading' when in fact three is the answer. That is the
+    same class W1-T156 exists to prevent — a surface that misreports its own liveness — expressed as layout
+    rather than as a banner.
+    AN HONEST EMPTY STATE IS PART OF THE CONTRACT, and is the case most likely to be missed: when the data
+    arrives and is EMPTY, the section must say so ('nothing in flight', 'nothing needs you') rather than falling
+    back to skeletons. Skeletons standing in for emptiness is how a quiet fleet reads as a loading fleet, and it
+    is precisely when an operator most wants to know that nothing is wrong.
+    W1-T154 SHIPPED the skeleton and last-snapshot cache; its acceptance covered first-paint speed, not the
+    skeleton's RETIREMENT. That criterion was also certified pre-#414 by keyword coverage, making this a third
+    member of the W1-T188 class after T154's own timing budget and T156's criterion 4 — an acceptance that reads
+    correct, was never executed, and is contradicted by the operator's screen.
+    FILED AS A FOLLOW-UP, NOT AN AMENDMENT: W1-T154 is merged. Standing rule 21 — an amendment to an
+    already-merged task does not re-queue it and spawns nothing."
+  design: |
+    ONE RULE, STATED AS A STATE MACHINE: a section is in exactly one of PRE-FIRST-DATA (skeleton), HAS-DATA
+    (exactly the rows), or HAS-DATA-EMPTY (an honest empty message). There is no state in which skeleton markup
+    and data markup coexist, and the transition out of skeleton is one-way per section until a reload.
+    REPLACE THE SECTION, DO NOT APPEND TO IT. The observed defect is consistent with rendering data INTO a
+    container that still holds its placeholders — so the successful render must clear the container, not add to
+    it. VERIFY the actual mechanism from source before assuming; the bug may equally be a skeleton rendered by a
+    sibling path that the data render never touches.
+    COORDINATION — W1-T183 IS IN FLIGHT AND REBUILDS THESE SECTIONS. The density/IA rewrite replaces the row
+    template for every section, which is exactly the markup this task must correct. Do NOT build against
+    today's DOM: verify W1-T183's LANDED markup first and target the real successor. If W1-T183 has not merged
+    when this is dispatched, the correct action is to wait rather than to fix markup that is about to be
+    replaced — that is why it is a hard dependency rather than a note.
+    PRESERVE W1-T156's DOM STABILITY. Clearing and replacing a section naively destroys node identity and an
+    active text selection, which T156's shipped tests already encode as falsifiers. The replacement must go
+    through the existing reconciliation path, not innerHTML.
+  acceptance:
+    - claim: "no skeleton renders in a section after that section's first successful data render"
+      proof: "unit/DOM test: after a section receives data, the rendered section contains ZERO skeleton/placeholder nodes. FALSIFIER, operator screenshots 2026-07-21 04:52: NOW, NEEDS ME and RECENT each showed real rows above perpetual shimmer slots — the data had arrived and the placeholders were still animating underneath"
+    - claim: "an EMPTY successful result renders an honest empty state, never skeletons"
+      proof: "unit/DOM test: a section whose data arrives EMPTY renders an explicit message ('nothing in flight' / 'nothing needs you') and no placeholder nodes. FALSIFIER: falling back to skeletons on empty makes a quiet fleet read as a loading fleet, which is the reading an operator is least able to distinguish and most needs to trust"
+    - claim: "skeleton and data markup NEVER coexist in one section"
+      proof: "unit/DOM test across the three sections: at every point in a seeded load sequence the section is in exactly one of pre-first-data, has-data, or has-data-empty. FALSIFIER: a section holding both tells the operator the list may still be filling, so a complete three-row NOW section reads as 'three so far'"
+    - claim: "the replacement preserves W1-T156's DOM stability — node identity and active selection survive"
+      proof: "the existing W1-T156 tests in test/serve.live-state.test.ts continue to pass unmodified: an unchanged row keeps DOM identity across an update and an active text selection survives. FALSIFIER: clearing a section with innerHTML destroys both, which those tests already encode as falsifiers — the replacement must go through the existing reconciliation path"
+  risk: high
+  origin: architect
+  plan_refs: ["§7"]
+  files: [src/lib/serve.ts, test/serve.live-state.test.ts]
+  status: queued
+  attempts: 0
+  note: "RULE 21 FOLLOW-UP to the merged W1-T154, which shipped the skeleton but whose acceptance covered
+    first-paint SPEED rather than the skeleton's RETIREMENT.
+    HARD dependency on W1-T183 is deliberate and is a coordination constraint, not a formality: T183 was IN
+    FLIGHT when this was filed and rebuilds the row template for every one of these sections. Building against
+    today's DOM would target markup that is about to be replaced. Verify T183's landed markup first.
+    THIRD member of the W1-T188 class — an acceptance certified pre-#414 by keyword coverage and contradicted by
+    the operator's screen, after T154's own timing budget and T156's criterion 4.
+    risk:high — graded UP from medium after rmd lint-plan flagged the serve/serve.live-state span. Recorded as a
+    regrade with its reason rather than a workaround: this modifies the section render path that W1-T183 is
+    CONCURRENTLY rebuilding, so the coordination risk is real and not merely a filename artifact. The dangerous
+    direction remains a naive clear-and-rebuild that regresses W1-T156's node identity and selection survival,
+    which has its own criterion. (The flag itself is partly a linter artifact — concern is derived from filename
+    stem — but the tests belong beside T156's own lifecycle tests, so relocating them would be the dishonest fix.)"
