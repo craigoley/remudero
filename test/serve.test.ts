@@ -11,6 +11,8 @@ import {
   prewarmBoardGithub,
   renderShellHtml,
   resolveServePort,
+  resolveServeHost,
+  DEFAULT_SERVE_HOST,
   resolveServiceTokens,
   serviceTokensPath,
   type ServeDeps,
@@ -730,4 +732,59 @@ test("W1-T157: palette actions fire through the EXISTING buttons (one implementa
   assert.match(html, /getElementById\("stop-btn"\)\.click\(\)/);
   assert.match(html, /getElementById\("feedback-btn"\)\.click\(\)/);
   assert.match(html, /getElementById\("graph-btn"\)\.click\(\)/);
+});
+
+// ── resolveServeHost: exposure must be typed, never inherited (R-4) ─────────
+// `server.listen(port)` with no host binds `::` — every interface — while the
+// startup line printed "listening on http://localhost:4317". The surface was
+// open to any network the host had joined and the log said the opposite.
+
+test("resolveServeHost: no flag and no env -> loopback, not every interface", () => {
+  assert.equal(resolveServeHost([], {}), DEFAULT_SERVE_HOST);
+  assert.equal(DEFAULT_SERVE_HOST, "127.0.0.1", "the safe default is loopback");
+});
+
+test("resolveServeHost: --host names an interface explicitly (the tailnet address for phone access)", () => {
+  assert.equal(resolveServeHost(["--host", "100.90.47.107"], {}), "100.90.47.107");
+});
+
+test("resolveServeHost: RMD_SERVE_HOST is honoured, and --host outranks it", () => {
+  assert.equal(resolveServeHost([], { RMD_SERVE_HOST: "100.90.47.107" }), "100.90.47.107");
+  assert.equal(resolveServeHost(["--host", "127.0.0.1"], { RMD_SERVE_HOST: "100.90.47.107" }), "127.0.0.1");
+});
+
+test("resolveServeHost: every wildcard spelling is REFUSED rather than silently accepted", () => {
+  for (const wild of ["0.0.0.0", "::", "*", ""]) {
+    assert.throws(
+      () => resolveServeHost(["--host", wild], {}),
+      /binds EVERY interface/,
+      `FALSIFIER: ${JSON.stringify(wild)} is exactly the pre-fix behaviour and must not be reachable by typo`,
+    );
+    assert.throws(() => resolveServeHost([], { RMD_SERVE_HOST: wild }), /binds EVERY interface/);
+  }
+});
+
+test("resolveServeHost: a following FLAG is rejected rather than bound as an address", () => {
+  assert.throws(() => resolveServeHost(["--host", "--port"], {}), /expects an address/);
+});
+
+// ── the startup banner must never print the write token (R-5) ───────────────
+// Under the operator's launch, `rmd serve`'s stdout is redirected to serve.log,
+// which was mode 0644. So printing a bearer token wrote a fleet-control
+// credential to a world-readable file that outlives the process. Both tokens
+// were printed, and the console URL carried the WRITE one. A source-level
+// guard because the banner is the regression surface and it is one line long.
+test("serveCommand's startup banner prints the READ token only — never the write token", () => {
+  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const banner = src.slice(src.indexOf("### rmd serve — listening on"));
+  const printed = banner.slice(0, banner.indexOf("await new Promise"));
+  assert.ok(
+    printed.includes("?token=${tokens.read}"),
+    "the console URL carries the read token, so a bookmark grants VIEW rather than control",
+  );
+  assert.ok(
+    !printed.includes("${tokens.write}"),
+    "FALSIFIER: the pre-fix banner printed `console: ...?token=${tokens.write}` plus a bare " +
+      "`write token: ${tokens.write}` line, both of which landed in a 0644 serve.log",
+  );
 });

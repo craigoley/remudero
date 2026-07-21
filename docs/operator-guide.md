@@ -101,3 +101,41 @@ ratchet floors so the new repo never onboards at zero. It prints the file list
 and the manual steps (arming branch protection is a human, admin-run act, same
 reasoning as the branch-protection flip described in
 [review-gate.md](review-gate.md)'s "CI-gate aggregator" section).
+
+## The console: what it binds, and rotating its tokens
+
+`rmd serve` is the operator console's front door. Two things about it are security-relevant
+and were previously either wrong or undocumented.
+
+**It binds one named interface.** `--host` defaults to `127.0.0.1`, also reads `RMD_SERVE_HOST`,
+and *refuses* wildcards such as `0.0.0.0`. Remote access is expressed by naming the interface you
+mean, not by opening all of them. This fleet is reached from the operator's phone over Tailscale,
+so the tailnet address is the right value:
+
+```
+RMD_SERVE_HOST=100.x.y.z rmd serve
+```
+
+That keeps the console on an authenticated, encrypted overlay rather than on every network the
+machine happens to join. Previously `serve` bound *every* interface while printing
+"listening on http://localhost:4317" — the log said the opposite of what was true.
+
+**The banner prints the read token only.** There are two bearer tokens: the read token grants a
+view-only board, the write token additionally arms fleet-control and question/approve actions.
+The startup banner prints the console URL carrying the **read** token, and never prints the write
+token, because `serve`'s stdout is commonly redirected to a log file that outlives the process.
+Read the write token from the tokens file when you need to arm a write action.
+
+**Rotating the tokens.** Token generation is create-once/read-thereafter, so rotation is a delete:
+
+```
+lsof -ti :4317 | xargs kill
+rm ~/Remudero/state/service-tokens.json
+RMD_SERVE_HOST=100.x.y.z rmd serve     # mints a fresh 0600 pair, prints the new console URL
+```
+
+Your console bookmark changes every time you rotate, because the token is in the URL.
+
+Rotate whenever a token has been exposed. Treat *exposed* broadly: a token that reached a log
+file, a terminal transcript, a screenshot, or a chat window is compromised and must be rotated
+rather than merely un-shared.
