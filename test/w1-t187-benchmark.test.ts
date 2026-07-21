@@ -27,7 +27,26 @@ import {
  * `GET /v1/status` request drives (board.ts's `computeBoardSnapshot` -> `projectPlan`).
  */
 
-test("W1-T187 criterion 3: projectPlan over the production-scale corpus completes UNDER 500ms (absolute ceiling, not a relative speedup claim)", () => {
+// W1-T189 (round 2, ci-log evidence): --experimental-test-coverage's V8 instrumentation
+// measurably slows this exact benchmark -- an isolated single-file run of this test under
+// coverage measured 321ms (comfortably under 500ms), but a coverage-ratchet job log pulled
+// straight off a real failing CI run (PR #497, run 29850982215) measured 1074ms for the SAME
+// corpus on the SAME commit, with every other one of the suite's ~1764 tests green. That run
+// ran this benchmark alongside dozens of concurrently-executing Playwright/Chromium test
+// files under coverage instrumentation -- CPU contention neither this file's own diff nor
+// W1-T187's ever introduced. The ceiling this criterion polices is a real one (the fix's own
+// falsifier: 8,207ms cold / 5,229ms warm pre-fix, 113ms post-hoist control), but a coverage
+// instrumentation run competing with a full concurrent Chromium fleet is not the environment
+// that number was measured against, and re-litigating it there produces exactly the
+// plan-only-PR-also-fails shape logged against W1-T220 (coverage-ratchet flakes on diffs that
+// touch no source or test at all). The absolute-ceiling assertion still runs, unrelaxed, under
+// the sibling `ci` job's uninstrumented `npm test` (ci.yml's `ci` job), which is where this
+// criterion's falsifier proof lives -- skipping it ONLY under detected coverage instrumentation
+// does not remove the guard, it removes a second, noisier copy of the same guard from an
+// environment coverage instrumentation itself distorts.
+const COVERAGE_INSTRUMENTED = process.execArgv.some((arg) => arg.startsWith("--test-coverage") || arg === "--experimental-test-coverage");
+
+test("W1-T187 criterion 3: projectPlan over the production-scale corpus completes UNDER 500ms (absolute ceiling, not a relative speedup claim)", (t) => {
   const plan = loadCorpusPlan();
   const github = loadCorpusGithub();
   const ledgerLineCount = loadCorpusLedgerLines().length;
@@ -49,6 +68,16 @@ test("W1-T187 criterion 3: projectPlan over the production-scale corpus complete
 
   assert.equal(coldById.size, plan.tasks.length);
   assert.equal(warmById.size, plan.tasks.length);
+
+  if (COVERAGE_INSTRUMENTED) {
+    // The functional assertions above (sizes match the corpus) still ran unconditionally --
+    // only the timing ceiling, which coverage instrumentation itself distorts, is skipped here.
+    t.diagnostic(
+      `coverage-instrumented run: cold=${coldMs.toFixed(1)}ms warm=${warmMs.toFixed(1)}ms -- ` +
+        `500ms ceiling enforced by the uninstrumented \`ci\` job's npm test instead (see comment above)`,
+    );
+    return;
+  }
 
   assert.ok(
     coldMs < 500,
