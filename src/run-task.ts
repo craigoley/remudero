@@ -155,6 +155,7 @@ import {
   applyVerdictStability,
   buildReviewPrompt,
   cappedAnnotation,
+  cappedOverrideFromLedger,
   floorDegradedAnnotation,
   isTddStrict,
   judgeReview,
@@ -163,8 +164,10 @@ import {
   parseReviewerVerdicts,
   postReviewStatus,
   priorReviewVerdictFromLedger,
+  resolveAutoMergeArm,
   reviewerOutcome,
   reviewerVerdictContract,
+  type CappedOverride,
   type CriterionVerdict,
   type ReviewVerdict,
 } from "./lib/review.js";
@@ -609,17 +612,7 @@ async function runReview(args: {
   owner: string;
   repo: string;
   prUrl: string;
-  task: {
-    id: string;
-    acceptance?: AcceptanceCriterion[];
-    /**
-     * W1-T185: `plan/tasks.yaml`'s `principles: {tdd: strict}` field, forwarded
-     * verbatim so {@link judgeReview} can decide whether a zero-executed
-     * verdict must be CAPPED. Absent ⇒ never capped — identical to pre-W1-T185
-     * behavior for every caller (and fixture) that predates this task.
-     */
-    principles?: Record<string, unknown>;
-  };
+  task: { id: string; acceptance?: AcceptanceCriterion[] };
   report: string;
   settingsFile: string;
   config: Config;
@@ -731,9 +724,6 @@ async function runReview(args: {
     report,
     semantic,
     headCheckoutDir: args.headCheckoutDir,
-    // W1-T185: forwards `plan/tasks.yaml`'s `principles: {tdd: strict}` so a
-    // zero-executed verdict on a tdd:strict task is CAPPED, never a clean PASS.
-    tddStrict: isTddStrict(task.principles),
   });
 
   // W1-T178 (verdict stability): a re-review of an UNCHANGED head sha whose
@@ -789,9 +779,11 @@ async function runReview(args: {
     // was WRITTEN to be runnable (house dialect). NO blocking-behavior change:
     // `state` above is exactly what it always was.
     floor_degraded: verdict.floorDegraded,
-    // W1-T185: CONSEQUENTIAL (folded into `state`/`floor_state` above already,
-    // never just this annotation) — true when a tdd:strict task's verdict was
-    // forced to failure because zero criteria observed any proof execution.
+    // W1-T185: true when the review's proof_exec set is entirely
+    // not_executable/exec_error (nothing OBSERVED anywhere) — computed
+    // UNCONDITIONALLY, never forcing `state`/`floor_state` (CAPPED IS NOT
+    // FAIL). Consequential only via the SEPARATE auto-merge arming path
+    // (decideAutoMergeArm, below) on a tdd:strict task.
     capped: verdict.capped,
     // W1-T185: LEGIBILITY-only — true when NO PR-head checkout was given at
     // all (e.g. `rmd review`'s manual-PR path), so this verdict rests entirely
@@ -2462,6 +2454,68 @@ async function runTask(
       }
     }
 
+    // ── W1-T185 (Gap 1, criteria 2-3): THE AUTO-MERGE ARMING PATH refuses a
+    // CAPPED verdict on a tdd:strict task, unattended — the #411 shape (0/5
+    // proofs executed, posted as an uncapped PASS, merged with no human
+    // reading the diff). No autonomous run carries an operator override of
+    // its own: an override is a HUMAN decision, granted out of band via
+    // `rmd review <pr> --override-capped-by/--override-capped-reason` and
+    // recovered here from the SAME ledger every other precedence check in
+    // this file reads (readLedgerLines). A non-tdd:strict task, or a verdict
+    // that isn't capped, arms exactly as before this task — decideAutoMergeArm
+    // only ever REFUSES the one shape rule 22's fixture (iii) named.
+    //
+    // KNOWN RESIDUAL GAP (explicitly out of this task's stated file scope,
+    // `plan/tasks.yaml` W1-T185 `files:`): `sweep.ts`'s independent
+    // "checks green + review success -> mergeable" reconciliation does not
+    // yet consult `capped`/an override — a PR this refuses stays OPEN and
+    // UNARMED, but a later sweep poll could still arm it via that separate
+    // path. Left for a follow-up task rather than widened here unreviewed.
+    const tddStrict = isTddStrict(task.principles);
+    const cappedOverride =
+      review.capped && tddStrict ? cappedOverrideFromLedger(readLedgerLines(ledgerPath), taskId) : undefined;
+    const armDecision = resolveAutoMergeArm(review, tddStrict, cappedOverride, (s, extra) => log(s, extra));
+    if (!armDecision.arm) {
+      const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
+      const issueUrl = escalate(
+        {
+          class: "BLOCKED",
+          taskId,
+          runId,
+          summary: `CAPPED verdict on a tdd:strict task — auto-merge refused unattended — ${prUrl}`,
+          detail:
+            `remudero-review posted CAPPED (0 of ${review.criteria.length} proofs executed) on a task ` +
+            `whose principles are {tdd: strict}. ${armDecision.reason}\n\nAuto-merge was NOT armed.`,
+          options: [
+            {
+              label: "add-proof",
+              detail:
+                "push executable proof (a whitelisted `grep:`/`unit test:` dialect proof) so the review " +
+                "executes and certifies the diff for real, then re-drain.",
+            },
+            {
+              label: "override",
+              detail:
+                `rmd review ${prNum} --override-capped-by <name> --override-capped-reason <text>, then ` +
+                `re-drain to arm.`,
+            },
+          ],
+          recommendation: "add-proof",
+        },
+        { issues: ghIssueGateway(owner, task.repo), ledgerPath, runId },
+      );
+      log("verdict", {
+        verdict: "blocked",
+        pr_url: prUrl,
+        reason: "capped verdict on tdd:strict task refused auto-merge",
+        issue_url: issueUrl,
+        cost_usd: costUsd,
+        billing_mode: "subscription",
+      });
+      say(`verdict: blocked — CAPPED verdict on tdd:strict task, escalated: ${issueUrl}`);
+      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
+    }
+
     // ── ARM auto-merge, then POLL to the gate (W1-T1B).
     // The runner NEVER force-merges: it arms GitHub auto-merge on the PR it just
     // opened against main, then observes. GitHub merges only when the required
@@ -2546,6 +2600,100 @@ export function resolveReviewTarget(
   return { owner: defaults.owner, repo: arg };
 }
 
+// ── W1-T185 (Gap 2): materialize a PR-head worktree for `rmd review` ────────
+//
+// GROUND TRUTH this closes: every review hand-posted on 2026-07-20 read
+// `proof_exec: 0/N` — #391 0/3, #394 0/4, #397 0/4, #407 0/6, #411 0/5,
+// #418 0/5 — while the automated fix rung, which HAS a worktree at the head,
+// recorded `executed_fail` on the SAME proofs of #411. The operator path was
+// keyword-only BY CONSTRUCTION, not by defect: it never checked anything out.
+//
+// Preferred fix, per the task's own design note: materialize a throwaway
+// worktree at the PR's head branch and execute there — REUSE of the exact
+// `git worktree add origin/<branch>` pattern `buildSweepEffects`'s
+// `dispatchFix` path already uses for the SAME purpose (see that function,
+// above), never new machinery. Teardown is the CALLER's job (a `finally` in
+// `reviewCommand`, below) so it covers every exit path.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** Injected git operations for {@link materializeReviewWorktree} — real
+ * callers use the module's own `execFileSync` calls; tests fake them so
+ * materialization success/failure is a unit fixture, no real git/network
+ * involved. */
+export interface ReviewWorktreeDeps {
+  fetch: (repoDir: string) => void;
+  addWorktree: (repoDir: string, worktreePath: string, branch: string) => void;
+}
+
+const realReviewWorktreeDeps: ReviewWorktreeDeps = {
+  fetch: (repoDir) => execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" }),
+  addWorktree: (repoDir, worktreePath, branch) => {
+    execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`], { stdio: "pipe" });
+    execFileSync("git", ["-C", worktreePath, "checkout", "-B", branch, `origin/${branch}`], { stdio: "pipe" });
+  },
+};
+
+/**
+ * Materialize a throwaway worktree at a PR's head branch so `rmd review` can
+ * execute whitelisted proofs exactly like the automated fix rung does.
+ * Returns the worktree path on success; `undefined` on ANY failure (network,
+ * disk, a detached/deleted head) — the caller then falls back to a
+ * keyword-only, CAPPED verdict (acceptance criterion 5), never a thrown
+ * command reaching the operator. Teardown is the CALLER's responsibility
+ * (`reviewCommand`'s `finally`), so a throw from `runReview` itself still
+ * tears the worktree down (criterion 6) — this function only ever creates.
+ */
+export function materializeReviewWorktree(
+  config: Config,
+  repoDir: string,
+  prNumber: number,
+  headRefName: string,
+  deps: ReviewWorktreeDeps = realReviewWorktreeDeps,
+): string | undefined {
+  const worktreePath = join(worktreesDir(config), `review-PR${prNumber}-${Date.now()}`);
+  try {
+    deps.fetch(repoDir);
+    deps.addWorktree(repoDir, worktreePath, headRefName);
+    return worktreePath;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Run `body` against a possibly-materialized worktree, tearing it down on
+ * EVERY exit path — `body` resolving, AND `body` throwing — never just the
+ * success path, which would reproduce the W1-T175 leak class (that task
+ * exists precisely because run worktrees already strand on disk). `undefined`
+ * `worktreePath` (materialization was skipped/unavailable) is a no-op finally,
+ * matching {@link materializeReviewWorktree}'s failure contract. Exported +
+ * injectable so the teardown-on-throw guarantee (acceptance criterion 6) is a
+ * unit fixture, independent of the real git/CLI plumbing `reviewCommand`
+ * wires this with.
+ */
+export async function withMaterializedWorktree<T>(
+  worktreePath: string | undefined,
+  repoDir: string,
+  body: () => Promise<T>,
+  remove: (repoDir: string, worktreePath: string) => void = worktreeRemove,
+): Promise<T> {
+  try {
+    return await body();
+  } finally {
+    if (worktreePath) {
+      try {
+        remove(repoDir, worktreePath);
+      } catch (e) {
+        // Best-effort teardown: a removal failure must never mask `body`'s own
+        // result or throw — the ledger/console already carry the review's
+        // outcome; a stranded worktree here is a startup-prune concern
+        // (pruneStaleRuns), never this command's job to retry.
+        console.error(`(worktree teardown failed for ${worktreePath}: ${String((e as Error)?.message ?? e)})`);
+      }
+    }
+  }
+}
+
 async function reviewCommand(prArg: string, rest: string[] = []): Promise<number> {
   // `--repo <name>` or `--repo <owner>/<name>` lets the runner post remudero-review to a
   // repo OTHER than this checkout (e.g. remudero-sandbox for the daemon's live commissioning,
@@ -2554,8 +2702,11 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
   // layer (runReview / postReviewStatus) already takes owner+repo; only the CLI was pinned.
   const { owner, repo } = resolveReviewTarget(resolveOwnerRepo(), rest);
   const slug = `${owner}/${repo}`;
-  const view = ghJson(["pr", "view", prArg, "--repo", slug, "--json", "headRefOid,body,url,number"]) as {
+  const view = ghJson([
+    "pr", "view", prArg, "--repo", slug, "--json", "headRefOid,headRefName,body,url,number",
+  ]) as {
     headRefOid: string;
+    headRefName: string;
     body: string;
     url: string;
     number: number;
@@ -2565,10 +2716,10 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
   // Criteria: task trailer → tasks.yaml; else the PR body's Acceptance: block.
   let criteria: AcceptanceCriterion[] = [];
   let source = "NONE (fail closed — nothing to judge is never a pass)";
-  // W1-T185: the trailer-resolved task's `principles` (e.g. `{tdd: strict}`),
-  // carried through to runReview so a zero-executed verdict on a tdd:strict
-  // task is still CAPPED even on this manual escape hatch. Absent when no
-  // task id resolves (a plan/doc PR with only a body Acceptance: block).
+  // W1-T185: the trailer-resolved task's `principles` (e.g. `{tdd: strict}`) —
+  // consulted below to decide whether a CAPPED verdict here can accept an
+  // operator override, and whether to hint at one. Absent when no task id
+  // resolves (a plan/doc PR with only a body Acceptance: block).
   let principles: Record<string, unknown> | undefined;
   const taskId = body.match(/Remudero-Task:\s*(\S+)/)?.[1];
   if (taskId) {
@@ -2599,37 +2750,77 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, ...extra });
 
   console.log(`### rmd review PR #${view.number} — criteria from ${source}`);
-  const verdict = await runReview({
-    owner,
-    repo,
-    prUrl: view.url,
-    task: { id: taskId ?? `PR-${view.number}`, acceptance: criteria, principles },
-    report: body, // the PR body is the manual author's REPORT (proofs are pasted here)
-    settingsFile: "",
-    config,
-    log,
-    say: (m) => console.log(m),
-    account: (r) => r,
-    spawnReviewer: false, // deterministic binding path — the same judge, by hand
-    // spawnReviewer:false ⇒ never actually consulted (no spawn happens); "medium"
-    // is a safe, always-resolvable placeholder — a manual `rmd review` PR carries
-    // no plan task risk of its own to key a real one off.
-    reviewerMount: resolveMount(loadMounts(mountsPath(repoRoot)), "reviewer", "medium"),
-    // No headCheckoutDir: this manual escape hatch has no run-owned worktree at
-    // the PR head (GROUND TRUTH's blocked_review class — and P15 — is the
-    // AUTONOMOUS `runTask` path above, which does). This path stays
-    // keyword-floor-only (proof_exec is not_executable throughout), exactly
-    // its pre-W1-T65 behavior — but W1-T185 makes that fact EXPLICIT rather
-    // than implicit: `judgeReview` sets `keywordOnly: true` whenever
-    // `headCheckoutDir` is absent, which flows into the posted commit-status
-    // summary, the `review.posted` ledger line, and the console line below —
-    // never a regression, just no longer silent about it.
-    ledgerPath,
-  });
+
+  // W1-T185 (Gap 2): materialize a throwaway worktree at the PR head so
+  // whitelisted proofs actually EXECUTE on this manual path, matching what
+  // the automated fix rung observes for the same PR/proofs (acceptance
+  // criterion 4). On ANY failure this returns undefined and the review falls
+  // back to keyword-only — EXPLICITLY marked (criterion 5), never silently.
+  const worktreePath = materializeReviewWorktree(config, repoRoot, view.number, view.headRefName);
+  if (!worktreePath) {
+    console.log("(worktree materialization unavailable — this verdict will post keyword-only)");
+  }
+
+  // W1-T185 (Gap 2, criterion 6): withMaterializedWorktree guarantees teardown
+  // on EVERY exit path, including a throw from runReview itself — never just
+  // the success path, which would reproduce the W1-T175 leak class.
+  const verdict = await withMaterializedWorktree(worktreePath, repoRoot, () =>
+    runReview({
+      owner,
+      repo,
+      prUrl: view.url,
+      task: { id: taskId ?? `PR-${view.number}`, acceptance: criteria },
+      report: body, // the PR body is the manual author's REPORT (proofs are pasted here)
+      settingsFile: "",
+      config,
+      log,
+      say: (m) => console.log(m),
+      account: (r) => r,
+      spawnReviewer: false, // deterministic binding path — the same judge, by hand
+      // spawnReviewer:false ⇒ never actually consulted (no spawn happens); "medium"
+      // is a safe, always-resolvable placeholder — a manual `rmd review` PR carries
+      // no plan task risk of its own to key a real one off.
+      reviewerMount: resolveMount(loadMounts(mountsPath(repoRoot)), "reviewer", "medium"),
+      // W1-T185 (Gap 2): the materialized worktree above when available — the
+      // SAME `headCheckoutDir` wiring the autonomous path uses, so whitelisted
+      // proofs execute here too. `undefined` (materialization unavailable)
+      // makes `judgeReview` mark the verdict `keywordOnly`+`capped`, exactly
+      // the documented fallback (criterion 5) — never silent.
+      headCheckoutDir: worktreePath,
+      ledgerPath,
+    }),
+  );
+
   console.log(
     `\nremudero-review=${verdict.state} posted to ${view.url} (head ${verdict.headSha.slice(0, 7)})` +
-      (verdict.keywordOnly ? " — KEYWORD-ONLY: no proof was executed (no PR-head checkout)" : ""),
+      (verdict.keywordOnly ? " — KEYWORD-ONLY: no proof was executed (no PR-head checkout)" : "") +
+      (verdict.capped ? " — CAPPED: not certified (0 proofs executed)" : ""),
   );
+
+  // W1-T185 (Gap 1, criterion 2): the operator override — a LEDGERED,
+  // attributable decision to arm a capped tdd:strict verdict anyway. Granted
+  // here (the manual escape hatch, an operator-run command) rather than
+  // inferred: an override is a decision someone made, and it must name who.
+  const overrideBy = flagValue(rest, "--override-capped-by");
+  const overrideReason = flagValue(rest, "--override-capped-reason");
+  if (overrideBy && overrideReason) {
+    if (!taskId) {
+      console.error(
+        "--override-capped-by/--override-capped-reason need a resolvable task (a Remudero-Task: trailer) " +
+          "— not recorded.",
+      );
+    } else {
+      log("automerge.capped_override_granted", { by: overrideBy, reason: overrideReason, pr_url: view.url });
+      console.log(`CAPPED override recorded — by ${overrideBy}: ${overrideReason} (task ${taskId})`);
+    }
+  } else if (verdict.capped && isTddStrict(principles)) {
+    console.log(
+      `NOTE: this task declares tdd:strict — a CAPPED verdict cannot arm auto-merge without executed ` +
+        `proof or an operator override: rmd review ${view.number} --override-capped-by <name> ` +
+        `--override-capped-reason <text>`,
+    );
+  }
+
   return verdict.state === "success" ? 0 : 1;
 }
 
@@ -6151,7 +6342,11 @@ const COMMANDS: readonly CommandSpec[] = [
     usage:
       "rmd run-task <task-id> [--allow-stale]   # dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing",
   },
-  { name: "review", usage: "rmd review <pr-number>   # post remudero-review on a hand-opened PR" },
+  {
+    name: "review",
+    usage:
+      "rmd review <pr-number> [--repo <name>] [--override-capped-by <name> --override-capped-reason <text>]   # post remudero-review on a hand-opened PR; materializes a worktree at the PR head so proofs EXECUTE (W1-T185), falling back to an explicit keyword-only CAPPED verdict if materialization fails; --override-capped-by/--override-capped-reason ledgers an attributable operator override so a CAPPED verdict on a tdd:strict task can arm auto-merge",
+  },
   {
     name: "dep-review",
     usage:

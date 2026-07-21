@@ -16,7 +16,7 @@ Every `rmd <command>` this binary dispatches, rendered from the same `COMMANDS` 
 ```
 usage:
   rmd run-task <task-id> [--allow-stale]   # dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing
-  rmd review <pr-number>   # post remudero-review on a hand-opened PR
+  rmd review <pr-number> [--repo <name>] [--override-capped-by <name> --override-capped-reason <text>]   # post remudero-review on a hand-opened PR; materializes a worktree at the PR head so proofs EXECUTE (W1-T185), falling back to an explicit keyword-only CAPPED verdict if materialization fails; --override-capped-by/--override-capped-reason ledgers an attributable operator override so a CAPPED verdict on a tdd:strict task can arm auto-merge
   rmd dep-review <pr-number> [--repo <name>]   # deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse
   rmd lint-plan [--plan <path>] [--base <git-ref>]   # §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing
   rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)
@@ -63,10 +63,10 @@ dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stal
 ### `rmd review`
 
 ```
-rmd review <pr-number>
+rmd review <pr-number> [--repo <name>] [--override-capped-by <name> --override-capped-reason <text>]
 ```
 
-post remudero-review on a hand-opened PR
+post remudero-review on a hand-opened PR; materializes a worktree at the PR head so proofs EXECUTE (W1-T185), falling back to an explicit keyword-only CAPPED verdict if materialization fails; --override-capped-by/--override-capped-reason ledgers an attributable operator override so a CAPPED verdict on a tdd:strict task can arm auto-merge
 
 ### `rmd dep-review`
 

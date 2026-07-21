@@ -221,34 +221,77 @@ the PR body against each criterion's proof, and posts the status. **Absent crite
 FAIL CLOSED** — nothing to judge is never a pass. See
 [CONTRIBUTING.md](../CONTRIBUTING.md) for the `Acceptance:` block format.
 
-This escape hatch never checks out the PR head — it judges from the operator's own
-checkout, never a substitute for the PR head (HEAD DISCIPLINE, W1-T65) — so no
-proof is ever executed on this path; every criterion rests on keyword coverage
-alone. **W1-T185**: this is no longer silent. `judgeReview` sets
-`keywordOnly: true` whenever no PR-head checkout is given, which the posted
-commit-status summary, the `review.posted` ledger line, and the console output
-all name explicitly (`... (keyword-only: no proof was executed on the PR head)`)
-— a `rmd review` pass can never be mistaken for a `rmd run-task` pass that
-actually OBSERVED its proofs.
+**W1-T185 (Gap 2)**: this escape hatch now MATERIALIZES a throwaway worktree at
+the PR's head branch — `git fetch origin` + `git worktree add <path>
+origin/<headRefName>` — reusing the exact pattern the automated fix rung's
+sweep-dispatch path already uses (never new machinery), so whitelisted proofs
+(`grep: …` / `unit test: …`) actually EXECUTE here, matching what `rmd run-task`
+observes for the same PR/proofs. The worktree is torn down on EVERY exit path —
+success, a judged failure, or `runReview` throwing — via `withMaterializedWorktree`,
+never just the happy path (the W1-T175 leak class exists precisely because run
+worktrees already strand on disk otherwise).
 
-## Zero-executed proofs on tdd:strict work (CAPPED)
+FALLBACK, and it is EXPLICIT: if materialization fails for any reason (network,
+disk, a detached/deleted head), `materializeReviewWorktree` returns `undefined`
+rather than throwing, and the review posts with NO `headCheckoutDir` — the
+operator's own working checkout is never substituted for the PR head (HEAD
+DISCIPLINE, W1-T65). `judgeReview` sets `keywordOnly: true` whenever no
+PR-head checkout is given, which the posted commit-status summary, the
+`review.posted` ledger line, and the console output all name explicitly
+(`... (keyword-only: no proof was executed on the PR head)`) — a `rmd review`
+verdict can never silently pass as though it had OBSERVED proof when it hadn't.
 
-**W1-T185** closes a gap the observed-proof execution engine (W1-T65/W1-T72,
-"W1-T128") left open: a keyword floor can substantiate a criterion purely from
-report prose, so a task with `principles: {tdd: strict}` — a task that has
-declared executed proof is mandatory — could still post `remudero-review=success`
-having OBSERVED nothing at all (MASTER-PLAN rule 22 fixture (iii): a PASS at
-`proof_exec: 0/5`, directly beneath its own `FLOOR DEGRADED` banner, on a
-tdd:strict task with zero tests). `judgeReview` now CAPS that case: when every
-criterion's `proof_exec` is `not_executable`/`exec_error` (nothing executed) on a
-`tdd: strict` task, `state` is forced to `failure` — never a clean pass — so
-auto-merge can never arm on a keyword-only claim alone. The posted summary reads
-`remudero-review: CAPPED — 0/N proofs executed on a tdd:strict task; a
-keyword-only claim cannot arm auto-merge`, and `ReviewVerdict.capped` carries the
-same fact to the ledger (`review.posted.capped`) and console. Capping is folded
-into the DETERMINISTIC floor (never just a console annotation), so it also binds
-`floorState` and can never be undone by the W1-T178 verdict-stability
-suppression. A task that does not declare `tdd: strict` is unaffected.
+## Zero-executed proofs (CAPPED) — and the auto-merge arming path
+
+**W1-T185 (Gap 1)** closes a gap the observed-proof execution engine
+(W1-T65/W1-T72, "W1-T128") left open: a keyword floor can substantiate a
+criterion purely from report prose, so a verdict could post
+`remudero-review=success` having OBSERVED nothing at all (MASTER-PLAN rule 22
+fixture (iii): a PASS at `proof_exec: 0/5`, directly beneath its own
+`FLOOR DEGRADED` banner, satisfying 1 of 5 criteria with zero tests on a
+`tdd: strict` task).
+
+`judgeReview` now computes `capped` UNCONDITIONALLY — true whenever a review's
+`proof_exec` set is entirely `not_executable`/`exec_error` across every
+criterion that could have attempted execution (an Architect `satisfied_by`
+override is excluded — it never attempts execution by design). A capped
+`state: "success"` NEVER renders with `passSummary`'s "substantiated"/"no test
+theater" wording; the posted summary reads `remudero-review: CAPPED — 0/N
+proofs executed; not certified (a keyword match is a claim, not evidence)`.
+
+**CAPPED IS NOT FAIL** — this is load-bearing, not a simplification. `capped`
+never forces `state` to `"failure"`: mapping capped to failure would red every
+PR the moment one proof is unparseable, halting the fleet, which is a worse
+failure than the uncertified PASS it replaces (and it would punish authors for
+a dialect gap rather than surfacing it). A capped verdict still posts as a
+non-blocking `success` commit status, and a task that does not declare
+`principles: {tdd: strict}` is completely unaffected either way.
+
+What CAPPED *does* gate is a separate decision layer — **the auto-merge
+arming path** (`decideAutoMergeArm`/`resolveAutoMergeArm`, `lib/review.ts`),
+consulted by `rmd run-task`'s autonomous flow right before it would otherwise
+call `armAutoMerge`. On a task whose `principles` are `{tdd: strict}`, a
+capped verdict REFUSES to arm — the #411 shape (0/5 executed, posted as a
+clean PASS, merged with no human reading the diff) can no longer happen
+unattended. The run instead posts a `blocked` verdict and opens a `BLOCKED`
+escalation naming two options: push executable proof, or grant an **explicit,
+LEDGERED operator override** —
+
+```sh
+rmd review <pr-number> --override-capped-by <name> --override-capped-reason <text>
+```
+
+— which writes an `automerge.capped_override_granted` ledger line (an
+override is a decision someone made, and it must be attributable) that
+`decideAutoMergeArm` looks up on the next arm attempt. Using an override to
+arm is itself ledgered (`automerge.capped_override_used`, naming who) — never
+a silent bypass.
+
+KNOWN RESIDUAL GAP: `sweep.ts`'s independent "checks green + review success →
+mergeable" reconciliation does not yet consult `capped`/an override (out of
+this task's stated file scope, `plan/tasks.yaml` W1-T185 `files:`) — a PR the
+arming path refuses stays OPEN and UNARMED, but a later sweep poll could still
+arm it via that separate path. Left for a follow-up task.
 
 ## Live falsification (proven, not asserted)
 
