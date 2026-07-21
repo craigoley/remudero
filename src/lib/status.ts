@@ -15,6 +15,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { dirname } from "node:path";
 import type { Plan, Task, TaskStatus } from "./plan.js";
+import { NEEDS_HUMAN_LABEL } from "./escalate.js";
 
 /**
  * Derived task status (MASTER-PLAN v2.1 decision, implemented here).
@@ -184,6 +185,27 @@ export interface StatusProjection {
    */
   needsHuman?: true;
   /**
+   * The escalation issue's own URL (W1-T182), from escalate.ts's `escalation.issue_opened`
+   * ledger line — carried so NEEDS ME can render a DIRECT link rather than soliciting a URL
+   * the ledger already holds. Present iff `needsHuman` is.
+   */
+  escalationIssueUrl?: string;
+  /**
+   * The escalation's real one-line ask (W1-T182) — the live issue's title (escalate.ts's
+   * `[${class}] ${taskId}: ${summary}`), read through the SAME batched gateway as everything
+   * else on this interface. Present iff `needsHuman` is AND the issue's title could actually be
+   * read; a caller falls back to a generic label when absent (e.g. an unverified row, below).
+   */
+  escalationTitle?: string;
+  /**
+   * True when the escalation's live issue state could NOT be confirmed OPEN — either no
+   * {@link GitHub.issueByUrl} support, or the read itself failed (W1-T182 design's FAIL-CLOSED
+   * boundary: an unreadable issue state must KEEP the row rather than silently drop it, the
+   * opposite direction from W1-T181's merged-count boundary). Present only alongside
+   * `needsHuman`, sparse like every other flag on this projection.
+   */
+  escalationUnverified?: true;
+  /**
    * True when the projection's current OPEN PR already has GitHub auto-merge armed,
    * observed via the SAME batched gateway fetch {@link buildBatchedGithub} already
    * makes for every other {@link GitHub} method — W1-T155 preserves the board-fix O(1)
@@ -306,6 +328,28 @@ export interface GitHub {
    * implement this method, never throwing and never guessing "absent".
    */
   readFailureReason?(): GhFailureReason | undefined;
+  /**
+   * Resolve an escalation issue's LIVE state (+ title, for NEEDS ME's one-line ask) by its
+   * `issue_url` (W1-T182) — the join that replaces trusting escalate.ts's
+   * `escalation.issue_opened` ledger line as a permanent proxy for "still open" ({@link
+   * resolveEscalation} below). `null` when the issue cannot be resolved — either genuinely
+   * absent, or the underlying read failed; {@link issueReadFailed} distinguishes which, the
+   * same split {@link readFailed}/{@link prByRef} already use for PRs.
+   * OPTIONAL, but the FAIL-SOFT DIRECTION here INVERTS every other optional method on this
+   * interface: omitted, or a `null` result, means "cannot confirm this is closed" — the
+   * escalation stays `needsHuman` (marked unverified), never silently dropped. Every other
+   * optional method here defaults to false/absent-evidence; this one defaults to "still open"
+   * because hiding a possibly-live escalation from the operator's work list costs more than
+   * one stale-looking row (W1-T182 design, the inverse of W1-T181's merged-count direction).
+   */
+  issueByUrl?(url: string): { state: string; title?: string } | null;
+  /**
+   * True iff the most recent {@link issueByUrl} read genuinely FAILED (rate-limited, network
+   * error, auth failure) rather than resolving to a clean not-found. Mirrors {@link
+   * readFailed}, but scoped to the issue fetch — an independent batched source from the PR
+   * fetch, so the two failure flags never conflate a PR outage with an issue-read outage.
+   */
+  issueReadFailed?(): boolean;
 }
 
 /** Reader for the append-only ledger; injectable for tests. */
@@ -893,21 +937,101 @@ function deriveRunState(lines: ReadonlyArray<Record<string, unknown>>, taskId: s
 }
 
 /**
- * True iff the LATEST signal for `taskId`, among `run.start` (a (re)dispatch) and
- * `escalation.issue_opened` (escalate.ts's needs-human issue), is the escalation — a
- * human has not yet acted, or the task was never redispatched since (W1-T155, "needs-
- * human from the open escalation"). Mirrors the "last one wins" scanning idiom every
+ * The task's most recent escalation ledger line, IF `escalation.issue_opened` is the LATEST
+ * signal among it and `run.start` (a (re)dispatch) — a human has not yet acted, or the task
+ * was never redispatched since (W1-T155). Mirrors the "last one wins" scanning idiom every
  * other precedence helper in this module already uses ({@link lastPrOpened},
  * {@link debunkedTrailerUrls}, {@link latestActualPrUrl}) rather than inventing a second.
+ *
+ * DELIBERATELY DOES NOT ANSWER "is the escalation still open" — that requires a LIVE join
+ * against the issue itself ({@link resolveEscalation}, below), which is the whole point of
+ * W1-T182: the ledger is append-only, so it can only ever say an escalation WAS opened, never
+ * that it has since been closed.
+ *
+ * `issueUrl` is OPTIONAL on the return value (escalate.ts always writes one, but a malformed
+ * or pre-W1-T8 ledger line might not) — its ABSENCE never suppresses the escalation itself,
+ * only the live join {@link resolveEscalation} can attempt: same fail-closed direction as an
+ * unreadable issue read, never a silently dropped row.
  */
-function hasOpenEscalation(lines: ReadonlyArray<Record<string, unknown>>, taskId: string): boolean {
+export function latestEscalationLine(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+): { issueUrl?: string; escalationClass?: string } | undefined {
   let last: "run" | "escalation" | undefined;
+  let issueUrl: string | undefined;
+  let escalationClass: string | undefined;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
-    if (line.step === "run.start") last = "run";
-    else if (line.step === "escalation.issue_opened") last = "escalation";
+    if (line.step === "run.start") {
+      last = "run";
+    } else if (line.step === "escalation.issue_opened") {
+      last = "escalation";
+      issueUrl = typeof line.issue_url === "string" ? line.issue_url : undefined;
+      escalationClass = typeof line.class === "string" ? line.class : undefined;
+    }
   }
-  return last === "escalation";
+  return last === "escalation" ? { issueUrl, escalationClass } : undefined;
+}
+
+/** {@link deriveStatus}'s escalation-derived fields, once an escalation resolves as still-relevant. */
+export interface EscalationState {
+  issueUrl?: string;
+  escalationClass?: string;
+  title?: string;
+  unverified?: true;
+}
+
+/**
+ * JOIN LIVE STATE, DO NOT PATCH THE HISTORY SCAN (W1-T182 design). {@link latestEscalationLine}
+ * only proves the ledger's own append-only history — that an escalation issue was opened and
+ * never superseded by a redispatch. Whether it is STILL a needs-human item depends on the
+ * issue's LIVE state, read here through {@link GitHub.issueByUrl} (the same batched-gateway
+ * discipline {@link buildBatchedGithub} already uses for PRs — one fetch, not one `gh` call per
+ * escalated row).
+ *
+ * Returns `undefined` (not needs-human) ONLY when the issue is CONFIRMED closed — every other
+ * outcome (no `issueByUrl` support, the issue unresolvable, or a read failure) FAILS CLOSED,
+ * keeping the row and marking it `unverified`, because hiding a possibly-still-open escalation
+ * from the operator's work list is the more dangerous direction of this bug (W1-T182 design,
+ * the inverse of W1-T181's merged-count fail-direction — never unify the two behind one
+ * "unreadable" policy).
+ */
+export function resolveEscalation(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  github: GitHub,
+): EscalationState | undefined {
+  const latest = latestEscalationLine(lines, taskId);
+  if (!latest) return undefined;
+  // No issue_url at all (malformed/pre-W1-T8 ledger line) ⇒ there is nothing to join against —
+  // same fail-closed treatment as an unresolved/unreadable url, never a dropped row.
+  let issue: { state: string; title?: string } | null = null;
+  if (latest.issueUrl) {
+    try {
+      // A THROWING issueByUrl (an injected fixture that raises rather than fails soft, or a
+      // gateway this module didn't anticipate) must NEVER propagate out of deriveStatus — that
+      // would crash the whole projection instead of degrading this ONE task to unverified. Every
+      // other read on this interface (ghGateway/buildBatchedGithub) already catches its OWN `gh`
+      // errors internally and returns null/false; this call is EXTERNALLY supplied, so it gets
+      // its own belt-and-suspenders catch rather than trusting that convention was followed.
+      issue = github.issueByUrl?.(latest.issueUrl) ?? null;
+    } catch {
+      issue = null;
+    }
+  }
+  // Case-INSENSITIVE: `gh issue view/list --json state` reports "OPEN"/"CLOSED" (verified live),
+  // but this repo's OTHER GitHub-issue reader (issues-intake.ts, over `gh api`'s raw REST JSON)
+  // already sees lowercase "open"/"closed" for the SAME underlying resource — two real, already-
+  // coexisting conventions in this codebase. Normalizing here means whichever a `GitHub.issueByUrl`
+  // implementation happens to surface, "confirmed open" and "confirmed closed" are read the same.
+  const state = typeof issue?.state === "string" ? issue.state.toUpperCase() : undefined;
+  if (state === "CLOSED") return undefined; // confirmed resolved — the only way to drop the row.
+  return {
+    issueUrl: latest.issueUrl,
+    escalationClass: latest.escalationClass,
+    title: issue?.title,
+    unverified: state === "OPEN" ? undefined : true,
+  };
 }
 
 /**
@@ -959,8 +1083,12 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
     }
   }
 
-  if (hasOpenEscalation(ledgerLines, task.id)) {
+  const escalation = resolveEscalation(ledgerLines, task.id, deps.github);
+  if (escalation) {
     projection.needsHuman = true;
+    if (escalation.issueUrl) projection.escalationIssueUrl = escalation.issueUrl;
+    if (escalation.title) projection.escalationTitle = escalation.title;
+    if (escalation.unverified) projection.escalationUnverified = true;
   }
 
   // ARMED-AWAITING-MERGE: only meaningful for a currently OPEN PR — reuses the exact
@@ -1142,11 +1270,21 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
       const view = tryJson<{ autoMergeRequest?: unknown }>(["pr", "view", prUrl, "--json", "autoMergeRequest"]);
       return view?.autoMergeRequest != null;
     },
+    issueByUrl(url) {
+      const view = tryJson<{ state?: string; title?: string }>(["issue", "view", url, "--json", "state,title"]);
+      return view && typeof view.state === "string" ? { state: view.state, title: view.title } : null;
+    },
     readFailed() {
       return failed;
     },
     readFailureReason() {
       return failureReason;
+    },
+    // Shares the same sticky `failed` flag as `readFailed()` above (W1-T119's per-instance
+    // "one outage taints every read since" discipline) — this per-task gateway makes one `gh`
+    // call per query already, so there is no separate batched issue-fetch to distinguish.
+    issueReadFailed() {
+      return failed;
     },
   };
 }
@@ -1166,6 +1304,20 @@ export interface BatchedPr {
    */
   autoMergeRequest?: unknown;
   /** The PR's title (W1-T184) — see {@link PrRef.title}; carried verbatim off the same batched fetch. */
+  title?: string;
+}
+
+/**
+ * One issue row from the single batched `gh issue list --label needs-human` fetch that backs
+ * {@link buildBatchedGithub}'s {@link GitHub.issueByUrl} (W1-T182) — the escalation-state
+ * counterpart to {@link BatchedPr}, fetched and cached exactly the same way (one call, TTL-
+ * refreshed) so resolving 44+ escalated rows' live state costs the SAME one `gh` call the board
+ * already pays for PRs, never one call per row.
+ */
+export interface BatchedIssue {
+  number: number;
+  url: string;
+  state: string;
   title?: string;
 }
 
@@ -1236,6 +1388,14 @@ export function buildBatchedGithub(
      * 2026-07-20 outage was for hours.
      */
     log?: (event: string, extra?: Record<string, unknown>) => void;
+    /**
+     * INJECTABLE stand-in for the batched `gh issue list --label needs-human` fetch (W1-T182)
+     * {@link GitHub.issueByUrl} resolves against — mirrors `opts.fetchAll`'s role for PRs. Real
+     * callers omit it and get the actual `gh issue list` call (via the same `run` exec closure
+     * `opts.exec` already overrides); unit tests inject a fixture array or a throwing fake to
+     * prove the escalation join is O(1) and fails closed on a read error, without shelling out.
+     */
+    fetchAllIssues?: () => BatchedIssue[];
   } = {},
 ): GitHub {
   const ttlMs = opts.ttlMs ?? 15_000;
@@ -1274,6 +1434,67 @@ export function buildBatchedGithub(
       log("board_gateway.fetch_bytes", { bytes: Buffer.byteLength(raw, "utf8") });
       return JSON.parse(raw) as BatchedPr[];
     });
+
+  // W1-T182: an INDEPENDENT batched fetch/cache pair for escalation issues, deliberately not
+  // folded into the PR fetch/cache above — a PR-fetch outage and an issue-fetch outage are
+  // different failures with different classified reasons, and {@link resolveEscalation}'s
+  // fail-closed join needs its OWN `issueReadFailed()` signal rather than inheriting the PR
+  // fetch's. Scoped to `--label needs-human` (escalate.ts's `NEEDS_HUMAN_LABEL`) so this stays
+  // one small, bounded fetch (dozens of rows) rather than every issue in the repo.
+  let lastIssueFetchFailed = false;
+  let lastIssueFetchFailureReason: GhFailureReason | undefined;
+  const fetchAllIssues =
+    opts.fetchAllIssues ??
+    (() => {
+      const raw = run([
+        "issue", "list", "--repo", slug, "--label", NEEDS_HUMAN_LABEL, "--state", "all",
+        "--json", "number,url,state,title", "--limit", "1000",
+      ]);
+      log("board_gateway.issue_fetch_bytes", { bytes: Buffer.byteLength(raw, "utf8") });
+      return JSON.parse(raw) as BatchedIssue[];
+    });
+
+  interface IssueIndex {
+    at: number;
+    byUrl: Map<string, BatchedIssue>;
+    byNum: Map<string, BatchedIssue>;
+  }
+  let issueCache: IssueIndex | undefined;
+  const issueIndex = (): IssueIndex => {
+    if (!issueCache || now() - issueCache.at >= ttlMs) {
+      let all: BatchedIssue[];
+      try {
+        all = fetchAllIssues();
+        lastIssueFetchFailed = false;
+        lastIssueFetchFailureReason = undefined;
+        log("board_gateway.issue_fetch_ok", { issueCount: all.length });
+      } catch (err) {
+        lastIssueFetchFailed = true;
+        const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: string | Buffer };
+        lastIssueFetchFailureReason = classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined, e?.code);
+        console.error(`board gateway: batched issue fetch failed (${lastIssueFetchFailureReason}): ${e?.message ?? String(err)}`);
+        log("board_gateway.issue_fetch_failed", { reason: lastIssueFetchFailureReason, message: e?.message ?? String(err) });
+        // A bare [] here is the SAME W1-T181 hazard as the PR fetch's — paired with
+        // `lastIssueFetchFailed` so `issueReadFailed()` tells resolveEscalation this is a
+        // genuine outage, never a confirmed "no such issues".
+        all = [];
+      }
+      issueCache = {
+        at: now(),
+        byUrl: new Map(all.map((i) => [i.url, i])),
+        byNum: new Map(all.map((i) => [String(i.number), i])),
+      };
+    }
+    return issueCache;
+  };
+  // Flexible ref resolution — accepts a full issue URL OR a bare number, mirroring the PR
+  // `lookup()` below (and `prByRef`/`ghGateway.issueByUrl`, which already delegate to `gh`'s own
+  // ref parsing and so already accept either shape). escalate.ts's ledger line always writes a
+  // full URL, but a caller resolving by number should not silently miss.
+  const lookupIssue = (ref: string): BatchedIssue | undefined => {
+    const idx = issueIndex();
+    return idx.byUrl.get(ref) ?? idx.byNum.get(ref) ?? idx.byNum.get(ref.replace(/^.*\/(\d+)$/, "$1"));
+  };
 
   interface Index {
     at: number;
@@ -1354,12 +1575,20 @@ export function buildBatchedGithub(
     autoMergeArmed(prUrl) {
       return index().byUrl.get(prUrl)?.autoMergeRequest != null;
     },
+    issueByUrl(url) {
+      const i = lookupIssue(url);
+      return i ? { state: i.state, title: i.title } : null;
+    },
     // W1-T154: forces `index()` NOW. Boot calls this once (cache is empty -> always fetches);
     // a background timer paced to `ttlMs` calls it again every tick, and by construction the
     // cache is always exactly at (or past) its TTL when that fires, so `index()`'s own
     // `now() - cache.at >= ttlMs` check refetches every time — no separate "force" branch needed.
+    // W1-T182: warms the issue index too, on the same cadence — a cold escalation join would
+    // otherwise pay its first `gh issue list` on the request path exactly like the pre-W1-T154
+    // PR fetch did.
     warm() {
       index();
+      issueIndex();
     },
     readFailed() {
       // Forces a fetch first if the cache is cold/expired, so `readFailed()` alone
@@ -1371,6 +1600,10 @@ export function buildBatchedGithub(
     readFailureReason() {
       index();
       return lastFetchFailureReason;
+    },
+    issueReadFailed() {
+      issueIndex();
+      return lastIssueFetchFailed;
     },
   };
 }

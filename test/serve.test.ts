@@ -797,6 +797,82 @@ test("W1-T157: palette actions fire through the EXISTING buttons (one implementa
   assert.match(html, /getElementById\("graph-btn"\)\.click\(\)/);
 });
 
+// ── W1-T182: NEEDS ME dispatches the Approve affordance BY ITEM TYPE, never one row template ────
+// for every kind. Structural proof over the two row-template function BODIES (the DOM/behavioral
+// half — a real escalation row rendered live, "Mark handled" actually closing the issue — is
+// test/serve.live-state.test.ts's job, per this codebase's own "exercise the real client" rule;
+// this test proves the CONTRAST the acceptance bar names: an escalation template carries no
+// Approve control at all, while the P## inbox-proposal template still carries its OWN, pre-
+// existing, intentionally CLI-only `rmd approve` affordance (W1-T110/W1-T111's documented scope
+// boundary, panel-graph.ts's buildInboxRoute: a REAL write route needs a RatifyGateway this task
+// does not add — a fake button here would be exactly the "control with no defined action" this
+// task exists to remove, not add a second instance of).
+
+test("W1-T182: an Approve control NEVER renders on an escalation row, while the P## inbox-proposal row still carries its own (CLI-only, pre-existing) approve affordance", () => {
+  const html = renderShellHtml();
+  const taskRowFn = html.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0];
+  const inboxRowFn = html.match(/function needsMeInboxHtml\(p\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(taskRowFn, "needsMeTaskRowHtml (the escalation row template) must exist");
+  assert.ok(inboxRowFn, "needsMeInboxHtml (the P## proposal row template) must exist");
+
+  // The escalation template: no Approve control, anywhere, in any form (button, form, label).
+  assert.doesNotMatch(taskRowFn, /Approve/i, "an escalation row template must never render an Approve control");
+  assert.doesNotMatch(taskRowFn, /<input[^>]*type="url"/i, "never solicit a URL the ledger already holds");
+  assert.match(taskRowFn, /view issue/i, "must render a direct link to the issue");
+  assert.match(taskRowFn, /Mark handled/i, "must render the escalation's OWN affordance, not a borrowed one");
+
+  // The P## proposal template: unchanged, and it DOES still carry the word "approve" — the one
+  // item type that word is actually defined for (rmd approve, the ratification-inbox action).
+  assert.match(inboxRowFn, /approve/i, "a P## inbox-proposal row must still carry the defined rmd approve affordance");
+});
+
+// ── W1-T182: the row template proven over its ACTUAL RENDERED OUTPUT, not just its source
+// text — a browser-driven DOM proof already exists (test/serve.live-state.test.ts), but that
+// requires launching a real headless browser; this test proves the exact same claim (the
+// issue's real ask + a direct link + no free-text/URL input of any kind, not merely no
+// `type="url"` one) by extracting the row template's own small, pure helper functions
+// (escapeHtml/statusBadge/prLink/journeyButtonHtml/needsMeTaskRowHtml — none of them touch
+// `document`) straight out of the served shell and calling them with real StatusProjection
+// shapes, so the proof runs anywhere Node does, no browser required.
+test("W1-T182: needsMeTaskRowHtml's ACTUAL rendered output shows the issue's real ask + a direct link, and contains NO <input> of any kind — never solicits data the ledger (escalation.issue_opened's issue_url) already holds", () => {
+  const html = renderShellHtml();
+  const parts: Record<string, string | undefined> = {
+    STATUS_LABELS: html.match(/const STATUS_LABELS = \{[\s\S]*?\};/)?.[0],
+    escapeHtml: html.match(/function escapeHtml\(text\) \{[\s\S]*?\n  \}/)?.[0],
+    statusBadge: html.match(/function statusBadge\(key\) \{[\s\S]*?\n  \}/)?.[0],
+    prLink: html.match(/function prLink\(t\) \{[\s\S]*?\n  \}/)?.[0],
+    journeyButtonHtml: html.match(/function journeyButtonHtml\(taskId\) \{[\s\S]*?\n  \}/)?.[0],
+    needsMeTaskRowHtml: html.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0],
+  };
+  for (const [name, src] of Object.entries(parts)) assert.ok(src, `${name} must exist in the shell's inline script`);
+
+  const renderRow = new Function(
+    `${parts.STATUS_LABELS}\n${parts.escapeHtml}\n${parts.statusBadge}\n${parts.prLink}\n${parts.journeyButtonHtml}\n${parts.needsMeTaskRowHtml}\nreturn needsMeTaskRowHtml(arguments[0]);`,
+  ) as (t: Record<string, unknown>) => string;
+
+  // A CONFIRMED-open escalation, live issue title flowing through escalationTitle.
+  const issueUrl = "https://github.com/o/r/issues/393";
+  const openRow = renderRow({
+    taskId: "W1-T1",
+    needsHuman: true,
+    escalationTitle: "[BLOCKED] W1-T1: needs a decision",
+    escalationIssueUrl: issueUrl,
+  });
+  assert.match(openRow, /needs a decision/, "renders the issue's ACTUAL one-line ask, not a generic label");
+  assert.match(openRow, new RegExp(`href="${issueUrl.replace(/[/.]/g, "\\$&")}"`), "a direct link to the issue");
+  assert.match(openRow, /Mark handled/);
+  assert.doesNotMatch(openRow, /Approve/i, "no defined verb for an escalation of any class");
+  assert.doesNotMatch(openRow, /<input\b/i, "must render NO input of any kind — free-text or url — the ledger already holds issue_url");
+
+  // An UNVERIFIED escalation with no title yet resolved and no issue url at all (a malformed
+  // ledger line) — still renders, generic ask, still no link, still no input anywhere.
+  const unverifiedRow = renderRow({ taskId: "W1-T2", needsHuman: true, escalationUnverified: true });
+  assert.match(unverifiedRow, /needs human attention \(escalated\)/, "falls back to a generic ask only when no issue title is available");
+  assert.match(unverifiedRow, /unverified/i);
+  assert.doesNotMatch(unverifiedRow, /view issue/i, "no issue url to join against -> no link rendered");
+  assert.doesNotMatch(unverifiedRow, /<input\b/i);
+});
+
 // ── resolveServeHost: exposure must be typed, never inherited (R-4) ─────────
 // `server.listen(port)` with no host binds `::` — every interface — while the
 // startup line printed "listening on http://localhost:4317". The surface was
