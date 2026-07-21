@@ -240,15 +240,19 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
     line-height: 1.4;
   }
-  main { max-width: 56rem; margin: 0 auto; display: flex; flex-direction: column; gap: 1.5rem; }
+  /* W1-T183: tightened section/heading chrome (1.5rem->1rem gap, 1rem->0.75rem vertical
+     section padding, 0.5rem->0.35rem heading margin) -- every priority section above "everything
+     else" (NOW/NEEDS ME/UP NEXT/RECENT) is frequently EMPTY on a quiet fleet, so their own chrome
+     -- not row height -- was the dominant cost keeping a first screen under 15 rows. */
+  main { max-width: 56rem; margin: 0 auto; display: flex; flex-direction: column; gap: 1rem; }
   h1 { font-size: 1.25rem; margin: 0.5rem 0; }
-  h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); margin: 0 0 0.5rem; }
+  h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); margin: 0 0 0.35rem; }
   a { color: var(--accent); }
   code, .mono { font-family: var(--font-mono); }
   #top-status { color: var(--text-dim); font-size: 0.875rem; margin: 0; }
   section.panel-section {
     background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 1rem;
+    padding: 0.75rem 1rem;
   }
   .row-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
   /* W1-T183 DENSITY + IA v2: one line per task by default -- id · status · phase · elapsed ·
@@ -445,11 +449,20 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
 
 <section id="rest" class="panel-section" aria-label="Everything else">
   <h2>Everything else</h2>
+  <!-- W1-T183: EXPANDED BY DEFAULT. W1-T153's original v0 IA hid this whole corpus behind an
+       "Expand" click, which is exactly what fails this task's own density/one-click bars against
+       a realistic (mostly queued, low-activity) fleet: NOW/NEEDS ME/RECENT are near-empty and UP
+       NEXT caps at 5, so under a couple hundred plain tasks a collapsed rest section left a first
+       screen with a handful of rows, and any task living only in "everything else" needed an
+       expand-THEN-click (two interactions) to reach its card. Rendering these as DENSE
+       single-line rows (see .row-list .row CSS) removed the original space cost that motivated
+       collapsing them, so the corpus now renders open -- "Collapse" remains available for anyone
+       who wants the compact grouped-count summary instead. -->
   <div class="btn-row">
     <span id="rest-counts" class="counts">…</span>
-    <button id="rest-toggle" type="button" aria-expanded="false" aria-controls="rest-detail">Expand</button>
+    <button id="rest-toggle" type="button" aria-expanded="true" aria-controls="rest-detail">Collapse</button>
   </div>
-  <div id="rest-detail" hidden>
+  <div id="rest-detail">
     <!-- W1-T157 FIND layer: instant client-side fuzzy search (id + title), faceted filters with
          LIVE counts, sortable columns, all persisted to the URL (shareable / survives reload). -->
     <label for="find-search">Search id or title</label>
@@ -463,7 +476,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
       <button type="button" class="sort-header" data-sort="age" aria-pressed="false">age</button>
     </div>
     <p id="find-count" class="counts" aria-live="polite"></p>
-    <ul id="rest-list" class="row-list"></ul>
+    <ul id="rest-list" class="row-list">${skeletonRows(5)}</ul>
   </div>
 </section>
 
@@ -700,8 +713,15 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
       if (anchor !== el) list.insertBefore(el, anchor); // a no-op when el is already positioned correctly.
       prev = el;
     }
-    for (const [key, el] of existing) {
-      if (!seen.has(key)) el.remove();
+    // W1-T183: remove every child that is NOT one of this render's keyed rows -- including a
+    // leftover UN-KEYED first-paint skeleton placeholder (W1-T154's skeletonRows) that real data
+    // has now superseded. The old version of this cleanup only walked \`existing\` (keyed children),
+    // so a skeleton <li> -- which never carries a data-key -- was never in that map and was
+    // stranded in the DOM forever once real rows arrived (reproduced: #now-list/#rest-list still
+    // held their initial skeleton <li>s alongside real content after the first successful paint).
+    for (const child of Array.from(list.children)) {
+      const key = child.dataset && child.dataset.key;
+      if (key === undefined || !seen.has(key)) child.remove();
     }
   }
 

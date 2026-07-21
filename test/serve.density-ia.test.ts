@@ -198,6 +198,62 @@ test("density: at a 1440px viewport height, at least 15 task rows render fully a
   });
 });
 
+// ── (1b) the LITERAL falsifier fixture: a realistic, mostly-queued 214-task plan with NO special
+// activity -- NOW/NEEDS ME are empty, RECENT is empty (nothing merged/blocked yet), UP NEXT caps
+// at 5. Before this fix, "everything else" stayed hidden behind an "Expand" click, so a first
+// screen here showed only a handful of rows even though the CSS itself was already dense -- the
+// exact 2026-07-20 console v2 bug. This is the fixture that catches that regression; (1) above
+// only proves the CSS is dense once rows are visible. ──────────────────────────────────────────
+
+test("density: a realistic 214-task, mostly-queued plan (no NOW/NEEDS-ME/RECENT activity) still shows >= 15 rows on the FIRST screen, no interaction", async () => {
+  const root = tmpRoot();
+  const tasks = Array.from({ length: 214 }, (_, i) => task({ id: `W1-T${i}` }));
+  const deps = fixtureDeps(root, tasks);
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base, { viewport: { width: 1440, height: 1440 } });
+    try {
+      await page.waitForFunction(() => document.querySelectorAll("#rest-list li[data-key]").length > 0);
+      // no click, no scroll, no expand -- exactly what a fresh page load hands the operator.
+      const aboveFold = await page.evaluate(() => {
+        const vh = window.innerHeight;
+        const rows = [...document.querySelectorAll(".row-list .row:not(.skeleton)")];
+        return rows.filter((el) => {
+          const r = el.getBoundingClientRect();
+          return r.top >= 0 && r.bottom <= vh;
+        }).length;
+      });
+      assert.ok(aboveFold >= 15, `expected >= 15 dense rows above the fold with NO interaction, got ${aboveFold}`);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+// ── (3b) a task reachable ONLY via "everything else" (not in any priority section) is STILL
+// one click from its card -- the exact gap a collapsed-by-default rest section left open (an
+// expand click THEN a row click is two interactions, which the acceptance bar's own falsifier
+// names explicitly). ──────────────────────────────────────────────────────────────────────────
+
+test("one-click drill: a task reachable only via the 'everything else' corpus opens its card in ONE click, no prior expand", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1", title: "only in the rest corpus" })]);
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => document.querySelectorAll("#rest-list li[data-key]").length === 1);
+      // the section must already be visible -- no expand click before the row is even clickable.
+      assert.equal(await page.evaluate(() => (document.getElementById("rest-detail") as HTMLElement)?.hidden), false);
+      assert.equal(await page.evaluate(() => document.getElementById("task-detail")?.hidden), true);
+
+      await page.click('#rest-list li[data-task-id="W1-T1"] .task-id');
+      await page.waitForFunction(() => document.getElementById("task-detail")?.hidden === false, null, { timeout: 5000 });
+      await page.waitForFunction(() => (document.getElementById("task-detail-title")?.textContent ?? "").includes("only in the rest corpus"), null, { timeout: 5000 });
+    } finally {
+      await context.close();
+    }
+  });
+});
+
 // ── (2) TIMESTAMPS: local + relative together, NEVER a raw ISO-millisecond string ──────────────
 
 const ISO_MS_PATTERN = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/;
@@ -316,6 +372,55 @@ test("anomaly flag: a row past its per-phase elapsed threshold is visually marke
       });
       assert.equal(unmarked.rowHasClass, false, "a fresh run under its (default, DATA-sourced) threshold must not be flagged");
       assert.equal(unmarked.flagVisible, false);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+// ── (4b) the LITERAL falsifier fixture, updated for a CORRECT liveness verdict: "W1-T1 rendering
+// in NOW at 27h21m" -- but backed by a genuinely still-OPEN PR (so W1-T179's liveness bound does
+// not exclude it from "running" at all; that bound is a SEPARATE concern this task's own design
+// note is explicit about: "the liveness bound is W1-T179's job... the visual FLAG is this task's").
+// Under DEFAULT thresholds (no override), this must render visibly distinct from a run started a
+// minute ago -- the exact pair the falsifier says looked "identical". ──────────────────────────
+
+test("anomaly flag: a genuinely still-running task at 27h21m elapsed (open PR, DEFAULT thresholds) renders visibly distinct from a run started a minute ago", async () => {
+  const root = tmpRoot();
+  const byRef: Record<string, PrRef> = { "https://github.com/o/r/pull/1": { number: 1, url: "https://github.com/o/r/pull/1", state: "OPEN" } };
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" }), task({ id: "W1-T2" })], { github: fakeGitHub(byRef) });
+  const twentySevenH21mAgo = new Date(Date.now() - (27 * 60 + 21) * 60 * 1000).toISOString();
+  appendFileSync(
+    deps.board.ledgerPath,
+    [
+      JSON.stringify({ ts: twentySevenH21mAgo, run_id: "W1-T1-1", task_id: "W1-T1", step: "run.start" }),
+      JSON.stringify({ ts: twentySevenH21mAgo, run_id: "W1-T1-1", task_id: "W1-T1", step: "pr.opened", pr_url: "https://github.com/o/r/pull/1" }),
+    ].join("\n") + "\n",
+  );
+  appendFileSync(deps.board.ledgerPath, runStart("W1-T2")); // a run that "started a minute ago" (fresh)
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => document.querySelectorAll("#now-list li[data-key]").length === 2);
+      await page.waitForFunction(() => document.querySelector('#now-list li[data-task-id="W1-T1"]')?.classList.contains("anomaly"), null, { timeout: 4000 });
+      // NOTE: no nested helper function with a TS type annotation inside this evaluate callback --
+      // tsx/esbuild's `__name` naming helper can leak into that inner function's serialized
+      // source (Playwright ships `fn.toString()` alone to the browser), which then throws
+      // "__name is not defined" in the isolated page context. Two flat, separate reads instead.
+      const stale = await page.evaluate(() => {
+        const row = document.querySelector('#now-list li[data-task-id="W1-T1"]');
+        const flag = row ? row.querySelector(".anomaly-flag") : null;
+        return { anomaly: row ? row.classList.contains("anomaly") : false, flagVisible: flag ? !(flag as HTMLElement).hidden : false };
+      });
+      const fresh = await page.evaluate(() => {
+        const row = document.querySelector('#now-list li[data-task-id="W1-T2"]');
+        const flag = row ? row.querySelector(".anomaly-flag") : null;
+        return { anomaly: row ? row.classList.contains("anomaly") : false, flagVisible: flag ? !(flag as HTMLElement).hidden : false };
+      });
+      assert.equal(stale.anomaly, true, "a genuinely-running task at 27h21m elapsed must be flagged anomalous");
+      assert.equal(stale.flagVisible, true);
+      assert.equal(fresh.anomaly, false, "a run started a minute ago must NOT be flagged -- the two must render visibly distinct");
+      assert.equal(fresh.flagVisible, false);
     } finally {
       await context.close();
     }

@@ -164,8 +164,13 @@ async function restListIds(page: Page): Promise<string[]> {
   return page.$$eval("#rest-list > li", (lis) => lis.map((li) => (li as HTMLElement).dataset.key).filter((k): k is string => !!k));
 }
 
+/** Ensure the #rest/FIND section is expanded -- idempotent regardless of its CURRENT state.
+ *  W1-T183 made "everything else" expanded BY DEFAULT (a collapsed-by-default corpus was
+ *  exactly what failed that task's density/one-click bars against a realistic, mostly-queued
+ *  fleet), so this no longer assumes a fixed starting state -- it only acts when collapsed. */
 async function expandFind(page: Page): Promise<void> {
-  await page.click("#rest-toggle");
+  const hidden = await page.getAttribute("#rest-detail", "hidden");
+  if (hidden !== null) await page.click("#rest-toggle");
   await page.waitForSelector('#find-facets button[data-group="status"]');
 }
 
@@ -269,14 +274,19 @@ test("W1-T157 (3): cmd+K opens from multiple states and jumps to a task (expand 
   await withShell(fixtureDeps(root), async (base) => {
     const page = await openShell(base);
 
-    // reachable from the DEFAULT (collapsed) view
+    // reachable from the DEFAULT view (W1-T183: #rest/FIND is expanded by default — a collapsed-
+    // by-default corpus is exactly what failed that task's density/one-click bars)
     await page.keyboard.press("Control+k");
     await page.waitForSelector("#cmdk-overlay:not([hidden])");
     await page.keyboard.press("Escape");
     await page.waitForSelector("#cmdk-overlay", { state: "hidden" });
 
-    // reachable from a DIFFERENT view: section expanded + scrolled to the bottom
-    await expandFind(page);
+    // reachable from a DIFFERENT view too: explicitly COLLAPSED, scrolled to the bottom
+    await page.click("#rest-toggle"); // collapse (starts expanded — see above)
+    // NOTE: a plain `page.waitForSelector("#rest-detail[hidden]")` defaults to state "visible",
+    // which a `hidden`-attributed element can never satisfy (the UA stylesheet makes it
+    // display:none) — wait on the property directly instead.
+    await page.waitForFunction(() => (document.getElementById("rest-detail") as HTMLElement)?.hidden === true);
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     await page.keyboard.press("Control+k");
     await page.waitForSelector("#cmdk-overlay:not([hidden])");
