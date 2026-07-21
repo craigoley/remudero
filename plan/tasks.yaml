@@ -61,6 +61,297 @@
 #   operator-kicked (the daemon drains the sandbox), so this is the authoritative kick guide, NOT a
 #   physical reordering of the entries below (a contiguous block-move can't produce this interleaving).
 
+- id: W1-T230
+  title: "the arm decision trusts the status channel, which is writable and proved decorative - it must key off the orchestrator's own ledgered verdict for the exact head SHA"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "2026-07-21. The remudero-review status channel took SEVEN contradictory writes on one SHA
+    (PR 449, head 833561d), including a keyword-only CAPPED success overwriting an executed failure, and one
+    write 85 seconds AFTER the PR merged. Two PRs merged riding transient green windows on that channel.
+    W1-T203 fences the ROUTINE writer - hooks/deny-floor.sh refuses a worker gh api POST to a statuses
+    endpoint - but the arm path still trusts the channel, so any process outside the hook restores the surface.
+    A worker was live under the pause carve-out that same day.
+    THE HOUSE DOCTRINE ALREADY ANSWERS THIS, in the other direction. Task status derives from GitHub rather
+    than tasks.yaml because the yaml status field proved decorative. The arm decision should derive from the
+    orchestrator's own ledgered verdict because the status channel proved decorative AND writable - strictly
+    worse than decorative.
+    VERIFIED FROM SOURCE AT FILING, and two of these correct what a reader would assume.
+    (a) SEVEN arm call sites exist, all reaching armAutoMerge (run-task.ts:442), which ends in
+    `gh pr merge --auto --squash` (run-task.ts:464): lines 2611, 2987, 3368, 4562 (the sweep hook), 5526, 5721
+    and 6168.
+    (b) FOUR of those sites compute a review result and then arm UNCONDITIONALLY - the shape is
+    `const reviewCode = await reviewCommand(prNum); armAutoMerge(prUrl);` at 3368, 5526, 5721 and 6168. The
+    verdict is not consulted before arming. Merge safety today rests ENTIRELY on GitHub evaluating the required
+    check, which is the writable channel this task removes from the decision.
+    (c) The record this task needs already exists: the judge writes a review.posted ledger line carrying
+    head_sha, state, proof_exec and floor_degraded, appended by the orchestrator and readable from any other
+    process. Nothing new has to be invented to key off it.
+    (d) W1-T203's provenance check is currently INERT in production - it is wrapped in
+    `if (trustedLogin)` reading REMUDERO_REVIEWER_LOGIN (run-task.ts:443), and that variable is unset on this
+    host. So the status channel is, today, exactly as trusted as it was before W1-T203 merged."
+  design: |
+    EVERY ARM POINT KEYS OFF AN ORCHESTRATOR-WRITTEN LEDGER VERDICT FOR THE EXACT HEAD SHA. Not the status API,
+    not in-memory state. The status remains posted for branch protection and for display, but it becomes
+    strictly downstream of the decision and is never an input to it.
+    NO RECORD MEANS NO ARM. Fail closed. A PR whose head has no ledgered verdict is left unarmed, which is the
+    same shape as no verdict yet - it waits, it does not merge.
+    A RESUMED PASS READS THE LEDGER, NOT ITS OWN MEMORY. A fix rung resuming at strike N in a fresh process must
+    recover the prior pass's verdict from the ledger record for that head, so process death between passes
+    cannot silently downgrade the evidence a later arm relies on.
+    THE SHA BINDING IS THE WHOLE POINT. A verdict ledgered for a different SHA must not arm the current head.
+    This is what makes push-invalidates-review real at the decision layer rather than only at the display layer.
+    FIX THE UNCONDITIONAL ARM SITES AS PART OF THIS. The four sites at 3368, 5526, 5721 and 6168 currently arm
+    regardless of the review result. Keying the decision off the ledger record is what makes them conditional,
+    and an implementation that adds a ledger read while leaving those four unconditional has not done the task.
+    THIS MAKES LEDGER WRITE-INTEGRITY MERGE-LOAD-BEARING. Named here so the implementer sequences it: once the
+    arm decision reads the ledger, a torn or lost ledger line is a merge-correctness bug, which couples this to
+    the write-side atomicity family (standing rule 23, W1-T206).
+  acceptance:
+    - claim: "a remudero-review success status on the head with NO corresponding ledger verdict record arms nothing"
+      proof: "unit test: seeded forged status, arm declines"
+    - claim: "a ledgered passing verdict for the head arms even with the status read stubbed unavailable"
+      proof: "unit test"
+    - claim: "a resumed pass in a fresh process arms from the prior pass's ledgered verdict for an unchanged head, with no in-memory state"
+      proof: "unit test: seeded ledger record, no in-memory state"
+    - claim: "a ledgered verdict for a DIFFERENT sha does not arm the current head"
+      proof: "unit test"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§12", "P22"]
+  files: [src/run-task.ts, src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 after a read-only arm-path recon. Citations verified at origin/main a18fdeb rather
+    than assumed, and the recon corrected two things a reader would otherwise get wrong: there are SEVEN arm
+    sites (not one), and FOUR of them arm without consulting the review result at all.
+    NO BLOCKING FLOW FOUND: the recon looked for a legitimate path arming on a status this orchestrator did not
+    write - an operator hand-post or an external re-post with no ledger record to key off. None exists.
+    `rmd review` posts through the same judge and writes the same review.posted record, so the ledger-keyed
+    decision covers the operator path too.
+    COUPLES TO W1-T228 (status write-integrity). That task hardens the channel as a DISPLAY. This one removes
+    the channel from the DECISION. Both are wanted: one stops the board lying to the operator, the other stops
+    a lie merging code."
+- id: W1-T228
+  title: "the review status channel is last-write-wins across uncoordinated posters - a CAPPED success overwrote an executed failure, and a status was written 85s after merge"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OBSERVED 2026-07-21 across three PRs. Head 833561d of PR 449 took SEVEN remudero-review writes in
+    one day, oscillating failure to success and back with no intervening push. Two of them are the shape that
+    matters: an executed verdict at 18:02:31 reporting 2 of 6 proofs executed and FAILED, then a keyword-only
+    CAPPED success at 18:10:42 reporting 0 of 6 executed. Weaker evidence overwrote stronger evidence on an
+    identical SHA, and the channel kept the later write.
+    A THIRD WRITE LANDED AT 18:16:20, roughly 85 seconds AFTER the PR merged at 18:14:55. The channel accepts
+    writes against a closed lifecycle.
+    PRs 452 and 479 showed the same failure-to-success flip on unchanged heads the same afternoon. Three
+    instances, one mechanism: multiple posters, no precedence rule, no serialization, last write wins.
+    THIS IS HARDENED REGARDLESS OF THE ARM PATH. A companion filing moves the arm decision off this channel and
+    onto the orchestrator's own ledgered verdict, which removes the channel from the MERGE path. It does not
+    make a lying channel harmless: the posted status is what branch protection reads, what the board renders,
+    and what an operator opens a PR to see. A display that reports 0 of 6 proofs executed when 2 of 6 ran and
+    failed still misleads the person deciding whether to intervene."
+  design: |
+    ONE POST SITE ENFORCES THREE RULES. All three belong at the single writer (postReviewStatus and its caller),
+    never spread across callers - a rule a caller can forget to apply is a rule that will be forgotten.
+    (i) PRECEDENCE: a keyword-only or CAPPED verdict never overwrites an executed-evidence verdict for the same
+    SHA. Executed may overwrite executed - a later real run supersedes an earlier one, which is how a fix rung
+    is supposed to work. The asymmetry is deliberate: evidence outranks its absence, and only in that direction.
+    (ii) LIFECYCLE: no status writes to a merged or closed PR. Refuse, and ledger the refusal - a write arriving
+    after merge is a signal about a live process nobody is tracking, and swallowing it silently loses that.
+    (iii) SERIALIZATION: per-PR, via the O_EXCL lock pattern this codebase already uses for the inflight and
+    drain locks. VERIFY that pattern from source and reuse it rather than writing a second locking discipline.
+    READ BEFORE WRITE, AND STATE THE RACE HONESTLY. Precedence needs the current status, so the writer must
+    fetch then decide then write. That is itself a race; the per-PR lock is what closes it. An implementation
+    with precedence but no lock has narrowed the window rather than closed it, and should not claim otherwise.
+    EVERY ATTEMPT IS LEDGERED, including refused ones. The reason this defect took a day to characterise is
+    that the channel keeps only the winner. A refused write that leaves no trace is the same blindness in a
+    new place.
+  acceptance:
+    - claim: "a CAPPED success posted over an executed_fail on the SAME SHA is refused, and the prior status is left intact"
+      proof: "unit test: refused post, prior status intact"
+    - claim: "a post to a merged or closed PR is refused and the refusal is ledgered"
+      proof: "unit test with seeded merged state"
+    - claim: "N concurrent posters on one PR serialize to a precedence-consistent final state, with every attempt ledgered including the losers"
+      proof: "unit test: concurrent attempts, single winner, every attempt ledgered"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§12"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 from the verdict-oscillation incident. Fixtures: PR 449 head 833561d (seven writes,
+    CAPPED-over-executed at 18:02:31 to 18:10:42, post-merge write at 18:16:20), PRs 452 and 479 (same-SHA
+    failure-to-success flips).
+    RELATED, NOT DUPLICATE: W1-T227 narrows proof runs so the timeout race fires less often. That reduces how
+    frequently a CAPPED verdict is produced at all. It does not make the overwrite safe, which is this task.
+    COUPLES TO STANDING RULE 23 (write-side atomicity): the per-PR lock here is the same discipline the ledger
+    and status.json tasks owe, applied to the status channel."
+- id: W1-T227
+  title: "the judge runs every name-pattern proof against the FULL test glob, so the same proof coins executed or exec_error depending on machine load"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "MEASURED 2026-07-21 on origin/main. review.ts:333 documents the name-filtered shape as running
+    `node --test --import tsx --test-name-pattern <name> test/**/*.test.ts` - the whole suite, filtered. Node
+    still LOADS every test file before filtering by name, so the cost is the full suite load regardless of how
+    few tests match.
+    THE NUMBERS, taken by hand on a scratch clone of main: a narrowed run of one W1-T182 proof against
+    test/status.test.ts alone completes in 0.2 SECONDS. The same two files whole are 1.51s (status, 94 tests)
+    and 4.72s (board, 36 tests). A full-glob load is roughly 22s on an idle machine, against
+    DEFAULT_PROOF_TIMEOUT_MS of 30_000 (review.ts:538).
+    THAT MARGIN IS THE DEFECT. Twenty-two seconds against a thirty-second cap leaves no headroom on a machine
+    running workers. The same proof, unchanged, coins executed_pass on an idle host and exec_error on a loaded
+    one - and exec_error DEGRADES to the keyword floor, which is how one SHA reports 0/6 proofs executed in one
+    pass and 2/6 in another. That oscillation was observed on PR 449 the same day, and it is not a flake in the
+    tests: it is a timeout race in the harness that runs them.
+    THE PROOFS THEMSELVES ARE SOUND. All six dialect proofs across W1-T182 and W1-T184 were re-run narrowed on
+    main and every one is EXECUTED-PASS against a test named verbatim after its own acceptance criterion. The
+    contract works. Only its invocation is too expensive to be reliable."
+  design: |
+    RESOLVE CANDIDATE FILES FIRST, THEN RUN ONLY THOSE. Take a distinctive fixed-string fragment of the pattern,
+    grep test/ for it (fixed-string, never regex - a pattern body is architect prose and contains characters a
+    regex would misread), and run node --test against the matched file or files alone.
+    ZERO CANDIDATES CHANGES NOTHING. If no file matches, the existing behaviour stands: the run reports only the
+    file wrapper, nameFilteredOutcome's wrapper filter finds no real result, and the proof fails as a zero-match
+    (review.ts:641-653). Narrowing is an optimisation of the executed path, never a new way to pass.
+    TIMEOUT STAYS exec_error, BUT STOPS BEING SILENT. Keep the 30s cap and the exec_error mapping. Add the
+    invocation and the measured wall time to what is logged, so the next time a proof coins differently on two
+    passes an operator can see which one timed out instead of inferring it from a verdict diff.
+    VERIFY THE GLOB CLAIM FROM SOURCE before building. This task cites review.ts:333 as documentation of the
+    invocation shape - read the actual argv construction and correct the citation if the code differs from its
+    comment.
+  acceptance:
+    - claim: "a proof matching tests in exactly one file executes against only that file"
+      proof: "unit test: built argv contains the single file, not the glob"
+    - claim: "no name-pattern invocation carries the full glob"
+      proof: "unit test on the command builder"
+    - claim: "zero-candidate patterns still fail as zero-match"
+      proof: "unit test: nameFilteredOutcome path unchanged"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21. Measurements taken by hand on a scratch clone of origin/main a9ef3b9, not estimated:
+    0.2s narrowed, 1.51s and 4.72s whole-file, against a 30s cap.
+    THIS IS THE HARNESS HALF of the same-SHA proof_exec oscillation. The verdict-write half - a CAPPED result
+    overwriting an executed one - is filed separately, because narrowing the runs reduces how often the race
+    fires without making the overwrite safe."
+- id: W1-T229
+  title: "a capped verdict with ZERO proofs executed still arms auto-merge for any non-tdd:strict task - prose is the default merge floor"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "RECON R-2, and recon T1-AC3. A CAPPED verdict means zero proofs were executed and the pass rests
+    entirely on keyword coverage - a claim, never evidence. Today that still arms auto-merge unless the task is
+    marked tdd:strict, and tdd:strict is not the default. So the DEFAULT merge floor for this system is prose.
+    THE CEILING IS STRONG AND THE FLOOR IS NOT. Executed proofs, the awareness surface, the ratchets and the
+    review judge are all real, and on a tdd:strict task they bind. The recon's summary of the gap is exact: the
+    ceiling is strong, the floor is prose, and most work rides the floor.
+    THIS SESSION SUPPLIED THE FIXTURES WITHOUT MEANING TO. Every remudero-review verdict posted by hand on
+    2026-07-21 came back CAPPED at 0 proofs executed, because worktree materialization was unavailable, and
+    those PRs armed and merged on that basis. The mechanism is not hypothetical and it is not rare - it was the
+    normal case for a full day of merges."
+  design: |
+    decideAutoMergeArm RETURNS arm:false FOR A CAPPED VERDICT REGARDLESS OF TDD TIER. One conditional, at the
+    decision function rather than at its callers, so every arm point inherits it - Phase-1 enumeration found
+    seven distinct armAutoMerge call sites, and a rule applied per-caller would be applied per-caller wrong.
+    VERIFY THE PLAN-ONLY CARVE-OUT SURVIVES. W1-T205 carries the operator's standing rider: a plan-only PR is
+    STRUCTURALLY capped, because the task it files has no code and therefore no executable proof. If this
+    change makes capped-never-arms unconditional without that exemption, every retro, approve and filing PR
+    stalls forever. Read W1-T205 before implementing, and treat its falsifier as binding here.
+    EXPECT THIS TO BITE IMMEDIATELY, AND SIZE FOR IT. Once capped stops arming, work whose proofs cannot execute
+    stops merging - which is the point, and which is also a throughput cliff if proof execution is unreliable.
+    W1-T227 (narrow the proof runs so they stop timing out) is the task that makes this survivable. Sequence
+    accordingly rather than landing this into a harness that coins exec_error under load.
+  acceptance:
+    - claim: "decideAutoMergeArm with a capped verdict and tddStrict false returns arm false"
+      proof: "unit test: case added to test/review.test.ts"
+    - claim: "a plan-only PR still arms under the raised floor, so the plan lane does not stall"
+      proof: "unit test: case added to test/review.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "P22"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21. Recon R-2 / T1-AC3.
+    THE PLAN-ONLY CARVE-OUT IS NOT OPTIONAL and is carried as the second criterion rather than left to the
+    implementer to remember - W1-T205 records the operator's rider verbatim, and a floor raised without it
+    halts every machine-emitted plan PR.
+    SEQUENCING: land W1-T227 first. Raising the floor while the proof harness still times out under load turns
+    an evidence gate into a throughput stop."
+- id: W1-T231
+  title: "the review prompt still tells the worker to POST the status the deny-floor now refuses - prompt and enforcement disagree"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "W1-T203 closed the forge surface at the ENFORCEMENT layer and left the INSTRUCTION untouched.
+    buildReviewPrompt still hands every review worker a literal command to post the gating status
+    (src/lib/review.ts:1406-1408, verified on main at a18fdeb):
+      gh api -X POST repos/<owner>/<repo>/statuses/<headSha> -f context=<ctx> -f state=<state> ...
+    and hooks/deny-floor.sh:60-61 then refuses exactly that call, exiting 2 to block the tool use.
+    SO THE SYSTEM ASKS A WORKER TO DO SOMETHING AND THEN STOPS IT. That is not merely untidy. A worker
+    following its instructions burns a turn on a refused call and reads a denial it was never warned about,
+    and any worker NOT spawned under the hook - a different harness, a future runner, a hand invocation -
+    restores the forge surface by doing exactly what the prompt told it to do. The prompt is a second,
+    contradictory source of truth about who may post the merge gate.
+    THE PRECONDITION IS VERIFIED, so removing the instruction breaks nothing. The judge is the authoritative
+    poster (run-task.ts:796-797), the reviewer's semantic outcome travels by REPORT through
+    reviewerOutcome({attempted, subtype, spawnError}) (run-task.ts:790-794), and the floor's proof execution
+    is wired to the PR head so the gate observes repo state whether or not the reviewer ever completed
+    (run-task.ts:799-801). No leg depends on the worker's POST succeeding.
+    ENFORCEMENT PLACEMENT BEATS RULE EXISTENCE - and its converse holds too: an instruction that contradicts
+    enforcement is a rule that will eventually be followed somewhere the enforcement is not."
+  design: |
+    buildReviewPrompt EMITS NO STATUSES-POST INSTRUCTION. Delete the `post` helper and its uses from the
+    rendered prompt. The worker reports its outcome and the orchestrator remains the sole poster.
+    TELL THE WORKER WHAT TO DO INSTEAD, EXPLICITLY. A reviewer that is no longer asked to post needs to know
+    how its verdict reaches the gate - otherwise the prompt is merely quieter, not clearer, and a capable
+    worker may reach for `gh` anyway. State that the orchestrator posts, and that the worker's job ends at
+    reporting.
+    LEAVE THE DENY-FLOOR RULE IN PLACE. This is defence in depth, not a replacement. The hook stays because a
+    prompt is guidance and a hook is enforcement, and W1-T203 exists because guidance is not a gate.
+    KEEP THE ORCHESTRATOR'S OWN POST PATH UNTOUCHED. postReviewStatus is not the target and must keep working;
+    the change is confined to prompt TEXT.
+  acceptance:
+    - claim: "the rendered review prompt contains no statuses POST instruction"
+      proof: "unit test on buildReviewPrompt output"
+    - claim: "the orchestrator's own postReviewStatus path is unchanged and still posts the verdict"
+      proof: "unit test on buildReviewPrompt output"
+  risk: low
+  origin: architect
+  plan_refs: ["§4A", "§5C"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21, last of the post-W1-T203 set. Precondition verified from source rather than assumed:
+    the judge's verdict travels by report and no leg depends on the worker POST, so the instruction can be
+    removed without changing any behaviour the gate relies on.
+    THIS IS THE INSTRUCTION HALF of sole-poster. W1-T203 delivered the ability half - the deny-floor refusal
+    and the arm-time creator.login check. Until both land, the honest description of the system is
+    ability-level only, because the prompt still asks for the forbidden thing.
+    NOTE FOR WHOEVER SEQUENCES THIS: W1-T203's arm-time provenance check is currently INERT in production - it
+    is wrapped in a trustedLogin guard reading REMUDERO_REVIEWER_LOGIN, which is unset on this host. That is a
+    configuration gap, not this task's scope, but it means the deny-floor is presently the only live half of
+    sole-poster."
 - id: W1-T121
   title: QUEUE GOVERNOR — a WIP limit on DISPATCH only; flow control throttles intake, never drainage
     (the 23-open-PR incident)
