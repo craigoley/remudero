@@ -1796,21 +1796,41 @@ const WILDCARD_HOSTS = new Set(["0.0.0.0", "::", "*", ""]);
  * here (`RMD_SERVE_HOST=100.x.y.z`) — that keeps the console on an authenticated, encrypted
  * overlay instead of on every coffee-shop LAN the laptop joins.
  */
-export function resolveServeHost(rest: string[], env: NodeJS.ProcessEnv = process.env): string {
+export function resolveServeHosts(rest: string[], env: NodeJS.ProcessEnv = process.env): string[] {
   const idx = rest.indexOf("--host");
   const raw = idx >= 0 ? rest[idx + 1] : env.RMD_SERVE_HOST;
-  if (raw === undefined) return DEFAULT_SERVE_HOST;
-  const host = raw.trim();
+  if (raw === undefined) return [DEFAULT_SERVE_HOST];
+  const hosts = raw
+    .split(",")
+    .map((h) => h.trim())
+    .filter((h, i, all) => all.indexOf(h) === i);
+  // An all-empty value (",", "  ") must not silently collapse to "listen nowhere" — that would
+  // read as a working server that answers no one. Fall through to the wildcard check below,
+  // which names the empty string, so the operator gets a message rather than a silent no-op.
+  if (hosts.length === 0) hosts.push("");
+  for (const host of hosts) assertBindableHost(host, raw);
+  return hosts;
+}
+
+/**
+ * SINGLE-HOST CONVENIENCE, retained because most callers want one address. Returns the FIRST
+ * resolved host — never a wildcard, since {@link resolveServeHosts} has already refused those.
+ */
+export function resolveServeHost(rest: string[], env: NodeJS.ProcessEnv = process.env): string {
+  return resolveServeHosts(rest, env)[0] as string;
+}
+
+function assertBindableHost(host: string, raw: string): void {
   if (WILDCARD_HOSTS.has(host)) {
     throw new Error(
-      `--host ${JSON.stringify(raw)} binds EVERY interface. Name the interface you mean ` +
-        `(e.g. ${DEFAULT_SERVE_HOST} for local only, or this host's tailnet address for phone access).`,
+      `--host ${JSON.stringify(raw)} binds EVERY interface. Name the interface(s) you mean ` +
+        `(e.g. ${DEFAULT_SERVE_HOST} for local only, or "${DEFAULT_SERVE_HOST},<tailnet-ip>" ` +
+        `to keep the console reachable locally AND from the phone).`,
     );
   }
   if (host.startsWith("--")) {
     throw new Error(`--host expects an address, got the flag ${JSON.stringify(raw)}`);
   }
-  return host;
 }
 
 /** Where `rmd serve`'s generated bearer tokens persist across restarts (config.root, like every other `<root>/state/*` control file). */

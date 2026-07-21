@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
 import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -67,7 +68,7 @@ import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./
 import { ghIssueCloser } from "./lib/panel-actions.js";
 import {
   buildServeServer,
-  resolveServeHost,
+  resolveServeHosts,
   resolveServePort,
   resolveServiceTokens,
   serviceTokensPath,
@@ -4004,10 +4005,10 @@ async function serveCommand(rest: string[]): Promise<number> {
     return 2;
   }
   let port: number;
-  let host: string;
+  let hosts: string[];
   try {
     port = resolveServePort(rest);
-    host = resolveServeHost(rest);
+    hosts = resolveServeHosts(rest);
   } catch (e) {
     console.error(`### rmd serve — ${(e as Error).message}\n${USAGE}`);
     return 2;
@@ -4060,29 +4061,46 @@ async function serveCommand(rest: string[]): Promise<number> {
     log,
   });
 
+  // BIND EACH NAMED INTERFACE — never the wildcard. `listen(port)` alone defaults to `::`
+  // (every interface) while the banner printed "localhost", so the surface was wide open and
+  // the log said otherwise. But a SINGLE named host is not enough either: binding only the
+  // tailnet address kept the phone working and silently broke `127.0.0.1`, which is where
+  // every local curl, script and desktop bookmark points. Both must work, so each host gets
+  // its own listener sharing this one server's handlers, deps and warm caches.
+  const mirrors: Server[] = [];
   try {
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      // BIND AN INTERFACE BY NAME. `listen(port)` alone defaults to `::` — every interface —
-      // while the line below printed "localhost", so the surface was wide open and the log
-      // said otherwise. See resolveServeHost: loopback by default, a wildcard refused, and
-      // remote access expressed by naming the interface (the tailnet address) rather than
-      // by opening all of them.
-      server.listen(port, host, resolve);
-    });
+    for (const [i, h] of hosts.entries()) {
+      const target =
+        i === 0
+          ? server
+          : // Additional interfaces reuse the PRIMARY server's request/upgrade listeners rather
+            // than building a second service: a second buildServeServer would start a second
+            // board pre-warm timer and poll GitHub twice for one console.
+            createServer((req, res) => {
+              for (const h2 of server.listeners("request") as Array<(a: unknown, b: unknown) => void>) {
+                h2(req, res);
+              }
+            });
+      if (i > 0) mirrors.push(target);
+      await new Promise<void>((resolve, reject) => {
+        target.once("error", reject);
+        target.listen(port, h, resolve);
+      });
+    }
   } catch (e) {
-    console.error(`### rmd serve — failed to listen on ${host}:${port}: ${(e as Error).message}`);
+    console.error(`### rmd serve — failed to listen on ${hosts.join(", ")}:${port}: ${(e as Error).message}`);
+    for (const m of mirrors) m.close();
     return 1;
   }
 
-  log("serve.start", { port, host, repo: `${self.owner}/${self.repo}` });
+  log("serve.start", { port, hosts, repo: `${self.owner}/${self.repo}` });
   // THE PRINTED URL CARRIES THE READ TOKEN ONLY, and the write token is never echoed at all.
   // These lines are the operator's console bookmark, and under the real launch stdout is
   // redirected to serve.log — so whatever is printed here is written to disk in the clear and
   // outlives the process. A bookmark needs to VIEW the board; arming a write action can pay the
   // one-time cost of reading the 0600 tokens file. See resolveServiceTokens for rotation.
-  console.log(`### rmd serve — listening on http://${host}:${port} (repo ${self.owner}/${self.repo})`);
-  console.log(`    console:     http://${host}:${port}/?token=${tokens.read}`);
+  console.log(`### rmd serve — listening on ${hosts.map((h) => `http://${h}:${port}`).join(", ")} (repo ${self.owner}/${self.repo})`);
+  for (const h of hosts) console.log(`    console:     http://${h}:${port}/?token=${tokens.read}`);
   console.log(`    write token: ${serviceTokensPath(config.root)} (0600, not printed)`);
 
   await new Promise<void>((resolve) => {
@@ -6573,7 +6591,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "serve",
     usage:
-      "rmd serve [--port <n>] [--host <addr>]   # the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317 (matches apps/dashboard's own default); --host defaults to 127.0.0.1 and also reads RMD_SERVE_HOST, names ONE interface (use this host's tailnet address for phone access), and REFUSES wildcards like 0.0.0.0; blocks until SIGINT/SIGTERM",
+      "rmd serve [--port <n>] [--host <addr>]   # the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317 (matches apps/dashboard's own default); --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the console can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM",
   },
   {
     name: "sweep",

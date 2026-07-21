@@ -107,13 +107,15 @@ reasoning as the branch-protection flip described in
 `rmd serve` is the operator console's front door. Two things about it are security-relevant
 and were previously either wrong or undocumented.
 
-**It binds one named interface.** `--host` defaults to `127.0.0.1`, also reads `RMD_SERVE_HOST`,
-and *refuses* wildcards such as `0.0.0.0`. Remote access is expressed by naming the interface you
-mean, not by opening all of them. This fleet is reached from the operator's phone over Tailscale,
-so the tailnet address is the right value:
+**It binds the interfaces you name, and only those.** `--host` defaults to `127.0.0.1`, also reads
+`RMD_SERVE_HOST`, accepts a comma-separated list, and *refuses* wildcards such as `0.0.0.0`
+anywhere in that list. Remote access is expressed by naming the interface you mean, not by opening
+all of them. This fleet is reached from the operator's phone over Tailscale, so bind loopback
+*and* the tailnet address — loopback alone cuts off the phone, and the tailnet address alone
+silently breaks every local curl, script and desktop bookmark:
 
 ```
-RMD_SERVE_HOST=100.x.y.z rmd serve
+RMD_SERVE_HOST=127.0.0.1,100.x.y.z rmd serve
 ```
 
 That keeps the console on an authenticated, encrypted overlay rather than on every network the
@@ -131,7 +133,7 @@ Read the write token from the tokens file when you need to arm a write action.
 ```
 lsof -ti :4317 | xargs kill
 rm ~/Remudero/state/service-tokens.json
-RMD_SERVE_HOST=100.x.y.z rmd serve     # mints a fresh 0600 pair, prints the new console URL
+RMD_SERVE_HOST=127.0.0.1,100.x.y.z rmd serve   # mints a fresh 0600 pair, prints the new console URL
 ```
 
 Your console bookmark changes every time you rotate, because the token is in the URL.
