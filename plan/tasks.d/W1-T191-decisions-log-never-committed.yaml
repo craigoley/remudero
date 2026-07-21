@@ -1,0 +1,82 @@
+- id: W1-T191
+  title: "THE DECISION AUDIT LOG NEVER REACHES THE REPO — decision.autochoose appends to the OPERATOR CHECKOUT's DECISIONS.md, which no worker PR ever includes, so every auto-choose resolution accumulates uncommitted on one machine's disk"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OBSERVED 2026-07-20/21 while recording an operator decision: the operator checkout
+    (~/Remudero/remudero) showed `M DECISIONS.md` with THREE machine-written entries present in the working tree
+    and absent from origin/main:
+      2026-07-20T20:36:14.454Z — W1-T156 (W1-T156-1784579460422)
+      2026-07-20T22:31:09.231Z — W1-T128 (W1-T128-1784586484416)
+      2026-07-21T01:18:25.612Z — W1-T136 (W1-T136-1784596357757)
+    Committed HEAD carried 29 entries, the working tree 32. Each corresponds to a real `decision.autochoose`
+    ledger line, so the DECISIONS were made and acted on — only the AUDIT RECORD of them never left the disk.
+    WHY IT HAPPENS (verify from source before building): the worker runs in its own worktree under
+    ~/Remudero/worktrees/, and its PR contains that worktree's diff. But the decision log is written against the
+    OPERATOR CHECKOUT's path — the same repoRoot-is-the-install-path behaviour that makes `rmd` gate the main
+    checkout's plan regardless of cwd. So the append lands in a tree that no PR is ever cut from, and nothing
+    stages, commits or pushes it.
+    WHY IT MATTERS. DECISIONS.md is the append-only provenance record for every DECISION_REQUEST the control
+    plane auto-resolved — MASTER-PLAN §4 names it as the rollback pointer for those choices. Today that record
+    exists on exactly one machine, uncommitted:
+      - `git checkout -- DECISIONS.md` in the operator checkout destroys it silently, and that is a routine
+        command someone runs to clean a dirty tree;
+      - any PR that touches DECISIONS.md conflicts with it or, worse, overwrites it from a clean base;
+      - a second operator machine has no record at all;
+      - the file is the audit trail for decisions the fleet MADE AUTONOMOUSLY, which is the record most needed
+        when reconstructing why an unattended run chose what it chose.
+    IT IS ALREADY LOSSY. The three entries above survived only because a dirty-tree check happened to notice
+    them. How many earlier resolutions were lost to a clean-up or a checkout is not knowable from here — which is
+    itself the argument for fixing it rather than periodically rescuing it by hand."
+  design: |
+    Make the decision record reach the repo by the same path every other artifact does — a PR — rather than by an
+    operator noticing a dirty tree.
+    VERIFY FROM SOURCE FIRST which path writes DECISIONS.md and against which root (the decision.autochoose
+    handler, and whatever resolves the file's location). Distrust this note's account of repoRoot: it is inferred
+    from the observed symptom plus the known install-path behaviour, not read from the writer.
+    Options to weigh, not a prescription:
+      (a) WRITE IT IN THE WORKER'S WORKTREE so the entry rides the worker's own PR — the decision and the code it
+          governed land together, which is the strongest provenance and needs no new commit path. Risk: concurrent
+          workers each appending to their own copy produces merge conflicts on a shared append-only file, which is
+          exactly the class W1-T122 solved for plan/tasks.yaml by sharding.
+      (b) EMIT PER-DECISION FILES (a decisions.d/ shard per resolution, one file per run id) so concurrent writes
+          cannot conflict by construction — the W1-T122 pattern applied to this log. DECISIONS.md then becomes a
+          rendered view or an index.
+      (c) DERIVE THE LOG FROM THE LEDGER. Every entry already corresponds to a `decision.autochoose` line that IS
+          committed-adjacent and durable. If the ledger holds the full option text, DECISIONS.md can be generated
+          rather than appended, and the whole class disappears. VERIFY whether the ledger line carries the options
+          and the chosen rationale, or only a reference — that determines whether (c) is possible at all.
+    (c) IS THE FIRST TO CHECK, because deriving beats storing for the same reason it did in W1-T190: two writes
+        drift, one source does not.
+    RESCUE THE EXISTING THREE either way. Whatever mechanism ships, the three entries observed above must end up
+    in the repo — they are already preserved in the PR that files this task, so the fix must not assume an empty
+    starting state.
+  acceptance:
+    - claim: "a decision.autochoose resolution reaches the repository without an operator noticing a dirty tree"
+      proof: "integration test over a seeded auto-choose resolution: the decision record is present in a committed/committable artifact of the run rather than only in the operator checkout's working tree. FALSIFIER, observed 2026-07-20/21: three resolutions (W1-T156 20:36:14, W1-T128 22:31:09, W1-T136 01:18:25) sat uncommitted in ~/Remudero/remudero/DECISIONS.md — committed HEAD 29 entries, working tree 32 — with matching decision.autochoose ledger lines proving each decision was made and acted on"
+    - claim: "concurrent resolutions cannot conflict on the log"
+      proof: "unit test: two runs resolving decisions concurrently both land their records without a merge conflict on a shared append-only file. FALSIFIER: naively moving the append into each worker's worktree makes every concurrent pair conflict on the same file — the exact class W1-T122 solved for plan/tasks.yaml by sharding, and a fix that trades silent loss for noisy conflicts is not a fix"
+    - claim: "the record cannot be destroyed by an ordinary git hygiene command"
+      proof: "unit/structural test: no decision record exists solely as an uncommitted modification in a long-lived checkout. FALSIFIER: today `git checkout -- DECISIONS.md` in the operator checkout silently destroys every unrescued entry, and that is a routine command for cleaning a dirty tree"
+    - claim: "the three already-observed entries are preserved, not assumed away"
+      proof: "the three 2026-07-20/21 resolutions are present in the repository after this task ships. FALSIFIER: a fix that only handles future decisions leaves these three dependent on the PR that happened to rescue them, and provides no evidence that earlier resolutions were not already lost to a checkout or clean-up"
+  risk: medium
+  origin: architect
+  plan_refs: ["§4"]
+  files: [src/run-task.ts, test/run-task.test.ts]
+  status: queued
+  attempts: 0
+  note: "FOUND 2026-07-21 by a dirty-tree check while recording an operator decision — not by any gate. Three
+    machine-written entries were sitting uncommitted in the operator checkout with matching decision.autochoose
+    ledger lines. They are preserved in the PR that files this task, so the fix starts from a non-empty state.
+    Applies standing rule 22: the ledger holds the RECEIPT of each decision and DECISIONS.md holds the readable
+    CLAIM, and the claim was never reaching the repo. Option (c) in the design — derive the log from the ledger —
+    is listed first for the same reason W1-T190 prefers deriving over storing: two writes drift, one source does
+    not.
+    Sibling of the repoRoot-is-the-install-path class: the same behaviour that makes `rmd` gate the main
+    checkout's plan regardless of cwd is what routes this append into a tree no PR is cut from.
+    risk:medium — it changes where an audit artifact is written, and the realistic failure is trading silent loss
+    for merge conflicts on a shared append-only file, which the second criterion exists to prevent."

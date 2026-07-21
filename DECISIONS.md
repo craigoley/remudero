@@ -8,6 +8,39 @@ decision reversible.
 
 <!-- Entries below are appended verbatim by the runner. -->
 
+## 2026-07-20 — OPERATOR DECISION: WS-2 deferral, overnight posture, P34 family
+
+*Operator-authored, not a machine auto-choose resolution. This file's other entries are
+`DECISION_REQUEST` resolutions written by the control plane; this one is recorded by hand at the
+operator's instruction and is marked so the two are never confused.*
+
+- **WS-2 second-repo expansion is DEFERRED** until remudero is substantially built. The criterion is
+  explicit and operator-judged, not a metric: **the console is feature-rich and looks good.**
+  Post-train priority is therefore the CONSOLE FEATURE ARC — W1-T183 (density/IA), W1-T184
+  (ledger-first rendering), W1-T163 (since-you-last-checked recap), W1-T159 (glance strip) — NOT
+  expansion to a second repo. Rationale: the 2026-07-20 operating day showed the observation surface
+  is the fleet's best defect classifier (six defects found by an operator looking at a screen, none
+  by gates), so a second repo before the surface is trustworthy multiplies unobserved work.
+- **Overnight posture: RUN FREE, no quiet hours.** Verified against live state at recording time —
+  `isQuietHours` false, `isPaused` false, `isStopped` false, and no `state/QUIET_HOURS` marker, so
+  the recorded posture matches the actual configuration rather than merely asserting it. NOTE from
+  source (lib/fleet-control.ts:24): `setQuietHours` "only flips the flag a future consumer reads" —
+  nothing consumes it today, so quiet hours is currently a no-op in either position. The posture is
+  recorded as intent; it is not yet an enforced control.
+- **The P34 envelope governs once its mechanism lands** — not before. Until then the control surface
+  is what it is today: gates, escalations, and the console. P34 was reframed twice on 2026-07-20
+  (ledgered `ratify.reframed` at 01:16:11 and 01:25:15) and its cached draft is invalidated, so the
+  next `rmd inbox` pass redrafts the mechanism against the ratified envelope.
+- **W1-T167 (model routing by task class) is to be PULLED FORWARD into the P34 mechanism family when
+  the redraft files.** Recorded as a pending action, not performed: no reframe moves a task, and the
+  redraft has not run. W1-T167 is queued and unmoved as of this entry.
+- **KNOWN CAVEAT for the redraft — W1-T173 (inbox draft-rung fence stripping) is UNBUILT.** If the
+  Architect returns a a markdown yaml code fence, draft the rung dead-ends. Remedy: hand-strip the fences and
+  proceed; that occurrence is itself another fixture for W1-T173, which should be recorded on the
+  task when it happens rather than only worked around.
+- Rollback: none required — this entry records intent and defers work. Reversing the WS-2 deferral is
+  a plan-order decision, not a code change.
+
 ## 2026-07-14T10:49:50.570Z — WS-0 spike filename
 - Options: docs/spike.md | docs/spike-hello.md (RECOMMENDED) | docs/spike.md | docs/spike-hello.md (RECOMMENDED)
 - Chosen (RECOMMENDED, auto): `docs/spike-hello.md`
@@ -188,3 +221,21 @@ governor — bound dispatch) + W1-T122 (plan sharding — conflict-free concurre
 N parallel dispatch lanes bounded by the governor's WIP limit (start N=2), with T80 dedup + T149
 circuit-breaker as the per-task guards. Both prerequisites pulled to the immediate drain front.
 - Rollback: n/a (a direction record; no runtime is bound to it).
+
+## 2026-07-20T20:36:14.454Z — W1-T156 (W1-T156-1784579460422)
+- Options: Context: W1-T156 depends on W1-T155 ("live-state DATA — full status taxonomy … MONOTONIC under darkness … github_unobservable"). I verified src/lib/status.ts from source: W1-T155 is not actually implemented despite the plan listing it as a merged dependency. derivePrPrecedence's failed-read fallback (lines 596–605) still does exactly the bug W1-T155's own rationale names as the falsifier: on a GitHub read failure it returns status: "queued", source: "throttled", indeterminate: true — i.e. a previously-merged/credited task can regress to queued on a transient outage, with no persistent "last-good" retention and no github_unobservable(since <t>) field. Only the older W1-T119 indeterminate/unavailableReason sparse fields exist. | Option A — : Scope W1-T156 strictly to its own files (src/lib/serve.ts). Build every UI+TRUST mechanic (live-ticking elapsed, delta-driven SSE via header-authed fetch streaming — mirroring packages/api-client's subscribeStatus pattern — in-place DOM patching preserving node identity/selection, reduced-motion/aria-live, and the reconnecting→N-failures→stale error lifecycle) against the projection fields that exist today. For the "GitHub unreachable" stamp, key it off the existing per-task indeterminate/source:"throttled" signal (real data, already flowing) rather than a new field. This faithfully renders whatever the projection says — including the still-buggy regression-to-queued if/when it fires upstream — but does not touch status.ts/board.ts. | Reversibility: fully additive. A future W1-T155 PR adding a real githubUnobservable/last-good field is a small follow-up wire-in here; nothing in this PR needs to be undone. | Option B — Also fix the monotonic-under-darkness + last-good-cache gap in status.ts/board.ts inside this same PR, so criterion 6 is end-to-end provably true. | Reversibility: harder — this duplicates/preempts W1-T155's own declared file scope, and risks a direct merge conflict if W1-T155 is independently dispatched/in-flight on the same files.
+- Chosen (RECOMMENDED, auto): Option A — : Scope W1-T156 strictly to its own files (src/lib/serve.ts). Build every UI+TRUST mechanic (live-ticking elapsed, delta-driven SSE via header-authed fetch streaming — mirroring packages/api-client's subscribeStatus pattern — in-place DOM patching preserving node identity/selection, reduced-motion/aria-live, and the reconnecting→N-failures→stale error lifecycle) against the projection fields that exist today. For the "GitHub unreachable" stamp, key it off the existing per-task indeterminate/source:"throttled" signal (real data, already flowing) rather than a new field. This faithfully renders whatever the projection says — including the still-buggy regression-to-queued if/when it fires upstream — but does not touch status.ts/board.ts.
+- Risk: medium (medium-risk signal in the decision text)
+- Rollback: revert the PR.
+
+## 2026-07-20T22:31:09.231Z — W1-T128 (W1-T128-1784586484416)
+- Options: Task W1-T128 names two fix directions in its own design field (i): "Replace character-blocklist REFUSAL with EXECUTION IN THE EXISTING SANDBOX, or adopt a structured proof format with explicit cmd/expect fields." I verified the current mechanism in src/lib/review.ts — UNSAFE_FENCE_CHARS_RE = /[;&\$<>\n]/ refuses any dialect body (grep: … / unit test: …) containing those characters, even though execution goes through execFileSync with an argv array (never a shell), so those characters can't actually cause injection — the blocklist is refusing safety it already has by construction. This is a genuine approach fork with different blast radii, so per the output contract I'm stopping here instead of picking one. | Option 1 — Narrow the character blocklist . Since execFile never invokes a shell, ;, &, , $, <, > are inert as shell metacharacters — the real remaining hazards are path traversal (.., already separately checked) and literal glob expansion (, already separately refused). Stop refusing a dialect body just because ordinary prose contains a semicolon; keep refusing only what's actually unsafe for the argv it becomes. Surgical change confined to parseDialectGrep/parseTestTarget in src/lib/review.ts plus new tests in test/proof-execution.test.ts covering the four acceptance fixtures (101→N executable, a genuine fail still fails, the W1-T38 over-cap fixture, the #234 semicolon regression). Reversible: revert the regex/parsing diff; dialect proofs simply stop executing again — no schema or data migration, nothing else in the plan format changes. | Option 2 — New structured proof format (cmd:/expect: fields). Add a second, parallel dialect that sidesteps prose-parsing entirely. Requires extending the AcceptanceCriterion schema, teaching plan-authoring (Architect prompts/tooling) to emit the new shape, and either migrating or permanently stranding the 126 existing dialect-prefixed criteria already committed in plan/tasks.yaml/tasks.d/. Touches schema + authoring + review.ts. Not cleanly reversible once new-format criteria exist in the live plan (a second migration would be needed to back out).
+- Chosen (RECOMMENDED, auto): Option 1 — Narrow the character blocklist . Since execFile never invokes a shell, ;, &, , $, <, > are inert as shell metacharacters — the real remaining hazards are path traversal (.., already separately checked) and literal glob expansion (, already separately refused). Stop refusing a dialect body just because ordinary prose contains a semicolon; keep refusing only what's actually unsafe for the argv it becomes. Surgical change confined to parseDialectGrep/parseTestTarget in src/lib/review.ts plus new tests in test/proof-execution.test.ts covering the four acceptance fixtures (101→N executable, a genuine fail still fails, the W1-T38 over-cap fixture, the #234 semicolon regression). Reversible: revert the regex/parsing diff; dialect proofs simply stop executing again — no schema or data migration, nothing else in the plan format changes.
+- Risk: high (explicit reversibility caveat in the decision text)
+- Rollback: revert the PR.
+
+## 2026-07-21T01:18:25.612Z — W1-T136 (W1-T136-1784596357757)
+- Options: Context: No shared "gate-compliant plan-PR emitter" exists today. retro and approve each build commits/PR bodies independently — approve's RatifyGateway.createRatificationBranch/openPlanPr (src/lib/inbox.ts + src/run-task.ts:5440-5482) splices payload.stampLine raw and unwrapped into the commit body (the live #387 defect) and opens a PR with no Acceptance block at all; retro (src/run-task.ts:2772-3053) delegates commit-authoring to a free-text-prompted LLM worker with no plan-index regen. plan-architect.ts and triage.ts each independently hand-roll a similar-but-not-identical pattern (header-only use of shapeCommitMessage, a hand-built single-bullet Acceptance block, no plan-index regen, no body-line wrapping). Building the shared emitter requires picking where it lives. | Option A — New module src/lib/plan-pr-emitter.ts | Option B — Extend src/lib/commit-message.ts in place | Reversibility: Both options are low-risk/high-reversibility — no data migration, no external contract change; either can be reverted with a single commit revert since nothing outside this repo depends on the new module's name or location yet.
+- Chosen (RECOMMENDED, auto): Option A — New module src/lib/plan-pr-emitter.ts
+- Risk: medium (medium-risk signal in the decision text)
+- Rollback: revert the PR.
