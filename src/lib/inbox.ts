@@ -135,7 +135,7 @@ export interface PredicateFailure {
   detail: string;
 }
 
-export type InboxState = "ready" | "not_ready" | "deferred_with_trigger";
+export type InboxState = "ready" | "not_ready" | "deferred_with_trigger" | "ratified";
 
 export interface InboxClassification {
   proposalId: string;
@@ -161,6 +161,30 @@ export interface ReadinessContext {
   grepAnchorTrue: (anchor: EvidenceAnchor) => boolean;
   /** Every OTHER proposal id currently open (not yet ratified) — the conflict source. */
   openProposalIds: Set<string>;
+  /**
+   * True when the LEDGER already carries a `ratify.approved` line for this proposal id —
+   * checked FIRST, unconditionally, and OVERRIDING whatever the registry's own copy of this
+   * proposal claims (W1-T190). `rmd approve`'s ledger append and its registry rewrite are two
+   * independent writes; one can succeed while the other does not (a crash, an interrupted
+   * run), and a registry entry left stale by that drift must never be trusted at face value —
+   * the ledger is the one authoritative receipt. Real implementations derive this from
+   * {@link isRatifiedInLedger} over `readLedgerLines(ledgerPath)`; the P19 incident this task
+   * fixes is exactly a registry entry that drifted from an already-ledgered `ratify.approved`.
+   */
+  isRatified: (proposalId: string) => boolean;
+}
+
+/**
+ * The ledger's own answer to "has this proposal already been ratified?" — the predicate
+ * {@link ReadinessContext.isRatified} wraps in the real runner. Re-derived from the ledger on
+ * EVERY read rather than trusted from any stored registry flag, so an EXISTING drifted
+ * registry entry (the P19 case: `ratify.approved` landed in the ledger while the registry
+ * entry sat untouched for three more hours) is healed the next time anything classifies it —
+ * no migration step required, because nothing here ever trusted the stale copy in the first
+ * place.
+ */
+export function isRatifiedInLedger(ledgerLines: { step?: unknown; task_id?: unknown }[], proposalId: string): boolean {
+  return ledgerLines.some((l) => l.step === "ratify.approved" && l.task_id === proposalId);
 }
 
 /**
@@ -232,6 +256,16 @@ export function classifyProposal(
   draft: DraftedCandidate | undefined,
   ctx: ReadinessContext,
 ): InboxClassification {
+  // W1-T190: the ledger's ratify.approved receipt is checked FIRST, unconditionally, and
+  // OVERRIDES every other predicate below (including the trigger check) — a proposal the
+  // ledger already says is ratified is NEVER re-offered as READY (or as anything else that
+  // implies more approve action is possible), no matter what the registry's own copy of it
+  // still claims. This is the read-side half of the fix: the write-side half (the registry
+  // rewrite in run-task.ts's approveCommand) keeps the common case clean, but this check is
+  // what heals an EXISTING drifted entry, since it never trusts a stored flag at all.
+  if (ctx.isRatified(proposal.id)) {
+    return { proposalId: proposal.id, state: "ratified", reasons: [] };
+  }
   if (proposal.trigger && !proposal.trigger.fired) {
     return {
       proposalId: proposal.id,
@@ -392,8 +426,11 @@ export function renderInbox(classifications: InboxClassification[]): string {
   const ready = classifications.filter((c) => c.state === "ready");
   const deferred = classifications.filter((c) => c.state === "deferred_with_trigger");
   const notReady = classifications.filter((c) => c.state === "not_ready");
+  const ratified = classifications.filter((c) => c.state === "ratified");
 
-  lines.push(`rmd inbox: ${ready.length} READY, ${notReady.length} not ready, ${deferred.length} deferred-with-trigger.`);
+  lines.push(
+    `rmd inbox: ${ready.length} READY, ${notReady.length} not ready, ${deferred.length} deferred-with-trigger, ${ratified.length} already ratified.`,
+  );
   for (const c of ready) {
     lines.push("");
     lines.push(`READY — ${c.proposalId}`);
@@ -409,6 +446,14 @@ export function renderInbox(classifications: InboxClassification[]): string {
     lines.push("");
     lines.push(`DEFERRED-WITH-TRIGGER — ${c.proposalId} (never recommended)`);
     lines.push(`  trigger: ${c.trigger?.description ?? ""} (fired=${String(c.trigger?.fired ?? false)})`);
+  }
+  // W1-T190: a ratified proposal is NEVER listed under READY, no matter what its own
+  // predicates would otherwise say — offering the ratify affordance again on something the
+  // backend (`rmd approve`) would refuse is the exact wrong-affordance shape W1-T182 removes
+  // elsewhere. Named here so it is visible, never silently dropped from the summary count.
+  for (const c of ratified) {
+    lines.push("");
+    lines.push(`RATIFIED — ${c.proposalId} (already ratified via a prior \`rmd approve\`; no longer active)`);
   }
   return lines.join("\n");
 }
@@ -500,6 +545,9 @@ export type ApproveResult =
  *  or deferred state names ITS failing predicate(s)/trigger, never a bare refusal. */
 export function refusalReason(c: InboxClassification): string {
   if (c.state === "ready") return "";
+  if (c.state === "ratified") {
+    return `${c.proposalId} is already RATIFIED (the ledger carries ratify.approved for it) — no further approve action is possible`;
+  }
   if (c.state === "deferred_with_trigger") {
     return `${c.proposalId} is DEFERRED-WITH-TRIGGER (trigger not fired: ${c.trigger?.description ?? "unnamed trigger"}) — never approvable`;
   }

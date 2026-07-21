@@ -90,6 +90,7 @@ import {
   gitGrepAnchorTrue,
   inboxDraftPrompt,
   isDraftStale,
+  isRatifiedInLedger,
   parseDraftCache,
   parseDraftedCandidate,
   parseProposalRegistry,
@@ -5400,6 +5401,10 @@ async function inboxCommand(rest: string[]): Promise<number> {
   const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
   const isMerged: MergedResolver = (t) => deriveStatus(t, deriveDeps).merged;
   const openProposalIds = new Set(proposals.map((p) => p.id));
+  // W1-T190: re-derive "already ratified" from the ledger on every `rmd inbox` pass, never
+  // from the registry's own state — a proposal ratify.approved already fired for is reported
+  // ratified even if the registry entry itself drifted (the P19 incident).
+  const ledgerLinesForRatify = readLedgerLines(ledgerPath);
 
   const classifications = proposals.map((p) =>
     classifyProposal(p, drafts[p.id], {
@@ -5407,6 +5412,7 @@ async function inboxCommand(rest: string[]): Promise<number> {
       isMerged,
       grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
       openProposalIds,
+      isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
@@ -5441,11 +5447,17 @@ function loadProposalForRatify(
 
   const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
   const isMerged: MergedResolver = (t) => deriveStatus(t, deriveDeps).merged;
+  // W1-T190: read the ledger ONCE here and cross-check it, never the registry's own copy of
+  // "is this ratified" (there isn't one) — a proposal the ledger already carries
+  // ratify.approved for is `ratified`, no matter what stale/drifted state the registry entry
+  // itself is still in (the P19 incident this task fixes).
+  const ledgerLines = readLedgerLines(ledgerPath);
   const ctx: ReadinessContext = {
     plan,
     isMerged,
     grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
     openProposalIds: new Set(proposals.map((p) => p.id)),
+    isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };

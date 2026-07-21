@@ -10,9 +10,11 @@ import {
   gitGrepAnchorTrue,
   inboxDraftPrompt,
   isDraftStale,
+  isRatifiedInLedger,
   parseDraftCache,
   parseDraftedCandidate,
   parseProposalRegistry,
+  refusalReason,
   renderInbox,
   type DraftedCandidate,
   type EvidenceAnchor,
@@ -20,6 +22,8 @@ import {
   type ReadinessContext,
 } from "../src/lib/inbox.js";
 import { loadPlanFromYaml, type MergedResolver, type Plan } from "../src/lib/plan.js";
+import { appendLedger } from "../src/lib/ledger.js";
+import { readLedgerLines } from "../src/lib/status.js";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -116,6 +120,7 @@ function baseCtx(overrides: Partial<ReadinessContext> = {}): ReadinessContext {
     isMerged: yamlIsMerged,
     grepAnchorTrue: () => true,
     openProposalIds: new Set(),
+    isRatified: () => false,
     ...overrides,
   };
 }
@@ -319,6 +324,96 @@ test("a fired trigger does NOT defer — the proposal is judged on the usual fou
   const draft = draftFor("P-FIRED", CLEAN_FRAGMENT, [anchor]);
   const result = classifyProposal(proposal, draft, baseCtx({ grepAnchorTrue: () => true }));
   assert.equal(result.state, "ready");
+});
+
+// ── W1-T190: the ledger's ratify.approved receipt reconciles a drifted registry entry ──────
+//
+// The bug: `rmd approve` ledgered `ratify.approved` but never updated state/inbox-proposals.json,
+// so `rmd inbox`/the console kept classifying an already-ratified proposal as READY (P19, three
+// hours after ratification). The fix has two layers: (write-side, run-task.ts's approveCommand)
+// the registry is rewritten immediately after a successful approve; (read-side, HERE) the ledger
+// is re-checked on EVERY classification and OVERRIDES whatever the registry itself claims — so
+// an entry that already drifted before this fix shipped (no stored "ratified" marker of its own)
+// is healed the very next time anything reads it, with no migration step required.
+
+test("isRatifiedInLedger: true only for a ratify.approved line matching this exact proposal id", () => {
+  const lines = [
+    { step: "ratify.approved", task_id: "P19" },
+    { step: "ratify.approve_refused", task_id: "P20" },
+    { step: "run.start", task_id: "P19" },
+  ];
+  assert.equal(isRatifiedInLedger(lines, "P19"), true);
+  assert.equal(isRatifiedInLedger(lines, "P20"), false);
+  assert.equal(isRatifiedInLedger([], "P19"), false);
+});
+
+test("classifyProposal: ledger's ratify.approved OVERRIDES a registry entry that still reads as READY — reconciled to ratified on read, never re-offered as READY (acceptance 2)", () => {
+  const anchor: EvidenceAnchor = { description: "x", pattern: "landed" };
+  // Every OTHER predicate here is exactly the shape that would classify READY (a matching
+  // anchor, a lint-clean draft, no unmet deps, no conflict) -- proving the ledger check wins
+  // even when the registry's own view of the proposal has no idea anything is wrong.
+  const proposal: Proposal = { id: "P19", summary: "s", evidenceAnchors: [anchor] };
+  const draft = draftFor("P19", CLEAN_FRAGMENT, [anchor]);
+  const ctx = baseCtx({ grepAnchorTrue: () => true, isRatified: (id) => id === "P19" });
+  const result = classifyProposal(proposal, draft, ctx);
+  assert.equal(result.state, "ratified");
+  assert.notEqual(result.state, "ready");
+  assert.deepEqual(result.reasons, []);
+});
+
+test("classifyProposal: the ratify.approved check runs BEFORE the trigger/draft checks — a ratified proposal is reported ratified even with no cached draft or an unfired trigger", () => {
+  const noDraft: Proposal = { id: "P1", summary: "s", evidenceAnchors: [] };
+  assert.equal(classifyProposal(noDraft, undefined, baseCtx({ isRatified: () => true })).state, "ratified");
+
+  const unfiredTrigger: Proposal = {
+    id: "P2",
+    summary: "s",
+    evidenceAnchors: [],
+    trigger: { description: "unbuilt consumer", fired: false },
+  };
+  assert.equal(classifyProposal(unfiredTrigger, undefined, baseCtx({ isRatified: () => true })).state, "ratified");
+});
+
+test("W1-T190 regression: a P19-shaped drifted registry entry (no status/ratifiedAt field of its own) is read back as ratified once the REAL ledger carries ratify.approved for it — heals EXISTING drift end to end, exactly the incident this task fixes", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-inbox-w1t190-"));
+  const ledgerFile = join(dir, "ledger.ndjson");
+  appendLedger(ledgerFile, {
+    run_id: "APPROVE-P19-1",
+    task_id: "P19",
+    step: "ratify.approved",
+    pr_url: "https://github.com/craigoley/remudero/pull/900",
+    branch: "run-APPROVE-P19-1",
+  });
+
+  // The registry entry itself is exactly the pre-fix shape the incident describes: plain
+  // ACTIVE proposal fields only, nothing marking it ratified.
+  const drifted: Proposal = { id: "P19", summary: "WS-2 addendum", evidenceAnchors: [] };
+
+  const ledgerLines = readLedgerLines(ledgerFile);
+  const ctx = baseCtx({ isRatified: (id) => isRatifiedInLedger(ledgerLines, id) });
+  const result = classifyProposal(drifted, undefined, ctx);
+  assert.equal(result.state, "ratified", "the ledger receipt alone is enough — no registry field needs to change first");
+
+  const rendered = renderInbox([result]);
+  assert.doesNotMatch(rendered, /READY — P19/, "never offered as READY once the ledger says ratified");
+  assert.match(rendered, /RATIFIED — P19/);
+});
+
+test("refusalReason: a ratified classification names the ratified state, not a generic NOT READY", () => {
+  const c = classifyProposal({ id: "P19", summary: "s", evidenceAnchors: [] }, undefined, baseCtx({ isRatified: () => true }));
+  const reason = refusalReason(c);
+  assert.match(reason, /already RATIFIED/);
+  assert.doesNotMatch(reason, /NOT READY/);
+});
+
+test("renderInbox never offers the RATIFY affordance for an already-ratified proposal (acceptance 4 — the W1-T182 wrong-affordance shape: no control renders for an action the backend would refuse)", () => {
+  const rendered = renderInbox([
+    { proposalId: "P19", state: "ratified", reasons: [] },
+    { proposalId: "P-OTHER", state: "ready", reasons: [], draft: draftFor("P-OTHER", CLEAN_FRAGMENT, []) },
+  ]);
+  assert.doesNotMatch(rendered, /READY — P19/);
+  assert.match(rendered, /RATIFIED — P19/);
+  assert.match(rendered, /READY — P-OTHER/, "a genuinely ready proposal is unaffected");
 });
 
 // ── The draft rung: prompt + parser (pure) ──────────────────────────────────

@@ -68,7 +68,7 @@ import {
 import { renderTraceChain, traceForward, traceReverse, type TraceChain, type TraceGithub } from "./trace.js";
 import type { Route } from "./service.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
-import { classifyProposal, gitGrepAnchorTrue, parseDraftCache, parseProposalRegistry } from "./inbox.js";
+import { classifyProposal, gitGrepAnchorTrue, isRatifiedInLedger, parseDraftCache, parseProposalRegistry } from "./inbox.js";
 
 export interface PanelGraphDeps {
   /** Repo root — where plan/feedback/ lives (lib/feedback.ts's `feedbackDir`). */
@@ -406,6 +406,11 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
       const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
       const isMerged: MergedResolver = (t) => projection.get(t.id)?.merged ?? false;
       const allIds = new Set(proposals.map((p) => p.id));
+      // W1-T190: the console must never offer the ratify affordance on a proposal the
+      // ledger already carries `ratify.approved` for, even when the registry entry itself
+      // still looks READY (a drifted write) — re-derived from the ledger on every request,
+      // never trusted from the registry's own state.
+      const ledgerLines = readLedgerLines(deps.ledgerPath);
 
       const ready: InboxReadyItem[] = [];
       for (const proposal of proposals) {
@@ -414,6 +419,7 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
           isMerged,
           grepAnchorTrue: (anchor) => gitGrepAnchorTrue(deps.root, "origin/main", anchor),
           openProposalIds: new Set([...allIds].filter((id) => id !== proposal.id)),
+          isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
         });
         if (classification.state === "ready") {
           ready.push({ proposalId: proposal.id, summary: proposal.summary, stampLine: classification.draft?.stampLine });
