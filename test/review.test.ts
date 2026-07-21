@@ -1171,11 +1171,50 @@ test("nameFilteredOutcome: the matched test itself reporting 'not ok' is a genui
   assert.equal(nameFilteredOutcome(stdout), "fail");
 });
 
-test("nameFilteredOutcome: zero real matches is FAIL (W1-T72 guard) even with collateral file-wrapper noise present", () => {
-  const stdout = ["1..0", "# Subtest: test/retro.test.ts", "ok 1 - test/retro.test.ts", "not ok 2 - test/serve.find.test.ts"].join(
-    "\n",
-  );
+test("nameFilteredOutcome: zero real matches is FAIL (W1-T72 guard) when the run genuinely COMPLETED (trailing summary present) even with collateral file-wrapper noise", () => {
+  const stdout = [
+    "1..0",
+    "# Subtest: test/retro.test.ts",
+    "ok 1 - test/retro.test.ts",
+    "not ok 2 - test/serve.find.test.ts",
+    "# tests 2",
+    "# pass 1",
+    "# fail 1",
+    "# duration_ms 123.456",
+  ].join("\n");
   assert.equal(nameFilteredOutcome(stdout), "fail");
+});
+
+// ── W1-T112 round-4: a name-filtered proof scopes the WHOLE suite glob (100+ files, several
+// driving a real browser), so execWhitelistedProof's own timeout can fire before node ever
+// reaches the named test's file — a run cut short mid-suite, not a genuine "test not found".
+// Confirmed live on this exact repo: a timeout-killed run of the real review command reliably
+// prints zero trailing-summary lines. Root-caused the observed flap on THIS PR's own head
+// commit (remudero-review: fail -> success -> fail with an unchanged diff).
+
+test("nameFilteredOutcome: zero real matches with NO trailing summary is a TRUNCATED run — throws (degrades to exec_error), never a manufactured FAIL", () => {
+  const stdout = [
+    "1..0",
+    "# Subtest: test/retro.test.ts",
+    "ok 1 - test/retro.test.ts",
+    "not ok 76 - /repo/test/serve.find.test.ts",
+    "  ---",
+    "  failureType: 'hookFailed'",
+    "  ...",
+    // no `# duration_ms` trailer: the process was killed before finishing.
+  ].join("\n");
+  assert.throws(() => nameFilteredOutcome(stdout));
+});
+
+test("nameFilteredOutcome: a real match found BEFORE truncation is kept — positive evidence survives an incomplete run", () => {
+  const stdout = [
+    "# Subtest: the named test",
+    "ok 5 - the named test",
+    "not ok 76 - /repo/test/serve.find.test.ts",
+    "  failureType: 'hookFailed'",
+    // no trailing summary — the run was still cut short later in the glob.
+  ].join("\n");
+  assert.equal(nameFilteredOutcome(stdout), "pass");
 });
 
 test("parseWhitelistedProof (W1-T128): a dialect grep whose pattern contains prose-style shell metacharacters EXECUTES — execFile passes it as one argv element, never a shell, so it can't be interpreted specially", () => {
