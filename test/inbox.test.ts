@@ -7,19 +7,28 @@ import { test } from "node:test";
 import {
   anchorFingerprint,
   classifyProposal,
+  draftAttemptKey,
+  draftsDueOnDaemon,
   gitGrepAnchorTrue,
   inboxDraftPrompt,
   isDraftStale,
+  parseDraftAttemptCache,
   parseDraftCache,
   parseDraftedCandidate,
   parseProposalRegistry,
+  proposalsNeedingDraft,
   renderInbox,
+  runDraftRung,
+  type DraftAttemptCache,
+  type DraftCache,
   type DraftedCandidate,
+  type DraftSpawn,
   type EvidenceAnchor,
   type Proposal,
   type ReadinessContext,
 } from "../src/lib/inbox.js";
 import { loadPlanFromYaml, type MergedResolver, type Plan } from "../src/lib/plan.js";
+import type { WorkerResult } from "../src/lib/worker.js";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -440,4 +449,239 @@ test("renderInbox: a READY item's rendering carries its drafted tasks and stamp;
   assert.match(rendered, /DEFERRED-WITH-TRIGGER — P-DEFER \(never recommended\)/);
   assert.match(rendered, /unbuilt consumer/);
   assert.doesNotMatch(rendered, /READY — P-DEFER/);
+});
+
+// ── The draft rung runs DAEMON-SIDE, not CLI-pull (W1-T192) ────────────────────────────────
+//
+// The daemon's per-poll draft rung (run-task.ts's `buildInboxDraftHook`) and `rmd inbox`
+// share ONE predicate (`proposalsNeedingDraft`) and ONE drafting loop (`runDraftRung`) — the
+// design's "REUSE it rather than re-deriving, so the daemon and the CLI can never disagree"
+// requirement. Everything below is provable with a FAKE spawn — no real worktree, gh, or LLM
+// call anywhere, the same discipline the rest of this file already holds `classifyProposal`
+// to.
+
+const VALID_DRAFT_TEXT = [
+  "=== FRAGMENT START ===",
+  "- id: W1-T900",
+  "  title: drafted candidate",
+  "=== FRAGMENT END ===",
+  "STAMP: - P1 (plan) — RATIFIED 2026-07-21 -> W1-T900.",
+].join("\n");
+
+function fakeWorkerResult(text: string): WorkerResult {
+  return {
+    sessionId: "s",
+    costUsd: 0.01,
+    numTurns: 1,
+    text,
+    blocks: [],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "default",
+    effort: "default",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+  };
+}
+
+test("proposalsNeedingDraft: excludes an unfired-trigger proposal, includes missing/stale drafts, excludes a fresh cached draft", () => {
+  const anchor: EvidenceAnchor = { description: "x", pattern: "landed" };
+  const deferred: Proposal = { id: "P-DEFER", summary: "s", evidenceAnchors: [anchor], trigger: { description: "t", fired: false } };
+  const noDraft: Proposal = { id: "P-NEW", summary: "s", evidenceAnchors: [anchor] };
+  const staleDraft: Proposal = { id: "P-STALE", summary: "s", evidenceAnchors: [anchor] };
+  const freshDraft: Proposal = { id: "P-FRESH", summary: "s", evidenceAnchors: [anchor] };
+  const drafts: DraftCache = {
+    "P-STALE": draftFor("P-STALE", CLEAN_FRAGMENT, [{ description: "old", pattern: "old-pattern" }]),
+    "P-FRESH": draftFor("P-FRESH", CLEAN_FRAGMENT, [anchor]),
+  };
+  const due = proposalsNeedingDraft([deferred, noDraft, staleDraft, freshDraft], drafts);
+  assert.deepEqual(
+    due.map((p) => p.id).sort(),
+    ["P-NEW", "P-STALE"],
+  );
+});
+
+test("draftAttemptKey changes when the reframe round advances or the anchor set moves; stable across everything else", () => {
+  const anchor: EvidenceAnchor = { description: "x", pattern: "landed" };
+  const p1: Proposal = { id: "P1", summary: "s", evidenceAnchors: [anchor] };
+  const p1DifferentSummary: Proposal = { ...p1, summary: "an entirely different summary" };
+  assert.equal(draftAttemptKey(p1), draftAttemptKey(p1DifferentSummary), "summary text is irrelevant to the cause fingerprint");
+
+  const p1Reframed: Proposal = { ...p1, reframeHistory: [{ feedback: "operator objection" }] };
+  assert.notEqual(draftAttemptKey(p1), draftAttemptKey(p1Reframed), "a new reframe round is a NEW cause");
+
+  const p1MovedAnchor: Proposal = { ...p1, evidenceAnchors: [{ description: "y", pattern: "moved" }] };
+  assert.notEqual(draftAttemptKey(p1), draftAttemptKey(p1MovedAnchor), "a moved evidence anchor is a NEW cause");
+});
+
+test("parseDraftAttemptCache: missing/malformed input yields {} rather than throwing; valid input round-trips", () => {
+  assert.deepEqual(parseDraftAttemptCache(undefined), {});
+  assert.deepEqual(parseDraftAttemptCache("not json"), {});
+  assert.deepEqual(parseDraftAttemptCache("[]"), {});
+  const cache: DraftAttemptCache = { P1: "fingerprint::0" };
+  assert.deepEqual(parseDraftAttemptCache(JSON.stringify(cache)), cache);
+});
+
+test("draftsDueOnDaemon layers the attempt throttle on top of proposalsNeedingDraft — `rmd inbox` itself stays UNTHROTTLED (the manual-force contract)", () => {
+  const anchor: EvidenceAnchor = { description: "x", pattern: "landed" };
+  const proposal: Proposal = { id: "P1", summary: "s", evidenceAnchors: [anchor] };
+  const drafts: DraftCache = {}; // still needs a draft
+  const attempts: DraftAttemptCache = { P1: draftAttemptKey(proposal) }; // daemon already attempted THIS cause
+
+  assert.deepEqual(draftsDueOnDaemon([proposal], drafts, attempts), [], "the daemon must not re-attempt the SAME cause");
+
+  const reframed: Proposal = { ...proposal, reframeHistory: [{ feedback: "operator objection" }] };
+  assert.deepEqual(
+    draftsDueOnDaemon([reframed], drafts, attempts).map((p) => p.id),
+    ["P1"],
+    "a NEW reframe round is a NEW cause — due again",
+  );
+
+  // `rmd inbox`'s own predicate never consults the daemon's attempt cache at all — a human
+  // asking for a redraft is a genuine FORCE, not subject to the daemon's throttle.
+  assert.deepEqual(
+    proposalsNeedingDraft([proposal], drafts).map((p) => p.id),
+    ["P1"],
+  );
+});
+
+test("runDraftRung: a successful spawn produces a cached-shape DraftedCandidate and ledgers draft_synthesized + drafted", async () => {
+  const anchor: EvidenceAnchor = { description: "x", pattern: "landed" };
+  const proposal: Proposal = { id: "P1", summary: "s", evidenceAnchors: [anchor] };
+  const logLines: { step: string; extra?: Record<string, unknown> }[] = [];
+  const spawn: DraftSpawn = async () => fakeWorkerResult(VALID_DRAFT_TEXT);
+
+  const outcomes = await runDraftRung([proposal], "- id: W1-T1\n", { spawn, log: (step, extra) => logLines.push({ step, extra }) }, "run-1");
+
+  assert.equal(outcomes.length, 1);
+  const outcome = outcomes[0];
+  assert.equal(outcome.ok, true);
+  if (outcome.ok) {
+    assert.match(outcome.candidate.fragmentYaml, /W1-T900/);
+    assert.equal(outcome.candidate.anchorFingerprint, anchorFingerprint([anchor]));
+  }
+  assert.ok(logLines.some((l) => l.step === "inbox.draft_synthesized"));
+  assert.ok(logLines.some((l) => l.step === "inbox.drafted" && l.extra?.proposal_id === "P1"));
+});
+
+test("runDraftRung: malformed worker output (no FRAGMENT/STAMP markers) is logged and skipped — never a throw", async () => {
+  const proposal: Proposal = { id: "P1", summary: "s", evidenceAnchors: [] };
+  const spawn: DraftSpawn = async () => fakeWorkerResult("no markers in this output at all");
+
+  const outcomes = await runDraftRung([proposal], "plan text", { spawn, log: () => {} }, "run-1");
+
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0].ok, false);
+});
+
+test("runDraftRung: one proposal's spawn THROWING never strands the rest of the batch — per-proposal isolation (W1-T192 fail-soft)", async () => {
+  const anchor: EvidenceAnchor = { description: "x", pattern: "landed" };
+  const bad: Proposal = { id: "P-BAD", summary: "s", evidenceAnchors: [anchor] };
+  const good: Proposal = { id: "P-GOOD", summary: "s", evidenceAnchors: [anchor] };
+  const logLines: { step: string; extra?: Record<string, unknown> }[] = [];
+  const spawn: DraftSpawn = async (proposal) => {
+    if (proposal.id === "P-BAD") throw new Error("transport error");
+    return fakeWorkerResult(VALID_DRAFT_TEXT);
+  };
+
+  const outcomes = await runDraftRung([bad, good], "plan text", { spawn, log: (step, extra) => logLines.push({ step, extra }) }, "run-1");
+
+  assert.equal(outcomes.length, 2, "BOTH proposals were attempted — one throwing did not abort the batch");
+  const badOutcome = outcomes.find((o) => o.proposalId === "P-BAD")!;
+  assert.equal(badOutcome.ok, false);
+  if (!badOutcome.ok) assert.match(badOutcome.error, /transport error/);
+  const goodOutcome = outcomes.find((o) => o.proposalId === "P-GOOD")!;
+  assert.equal(goodOutcome.ok, true, "the OTHER proposal in the same batch still succeeded");
+  assert.ok(logLines.some((l) => l.step === "inbox.draft_error" && l.extra?.proposal_id === "P-BAD"));
+});
+
+test("W1-T192 acceptance fixture: a proposal with a fired trigger and an invalidated (reframed) draft is redrafted by the DAEMON path within two polls — `rmd inbox` is never referenced", async () => {
+  // Mirrors the live fixture at filing: P34's reframe invalidated its cached draft
+  // (state/inbox-drafts.json held zero P34 entries) and its trigger had already fired; the
+  // daemon polled since and had nothing to make it redraft. This test drives ONLY the
+  // daemon-shaped functions (draftsDueOnDaemon + runDraftRung) — it never imports or calls
+  // inboxCommand/`rmd inbox` at all, so a pass here is proof the daemon path alone suffices.
+  const anchor: EvidenceAnchor = { description: "x", pattern: "landed" };
+  const proposal: Proposal = {
+    id: "P34",
+    summary: "s",
+    evidenceAnchors: [anchor],
+    trigger: { description: "consumer shipped", fired: true },
+    reframeHistory: [{ feedback: "third reframe round" }],
+  };
+  let drafts: DraftCache = {}; // the reframe invalidated the cache — nothing cached for P34
+  let attempts: DraftAttemptCache = {};
+  let spawnCalls = 0;
+  const spawn: DraftSpawn = async () => {
+    spawnCalls++;
+    return fakeWorkerResult(VALID_DRAFT_TEXT);
+  };
+
+  for (let poll = 0; poll < 2; poll++) {
+    const due = draftsDueOnDaemon([proposal], drafts, attempts);
+    if (due.length === 0) continue;
+    const outcomes = await runDraftRung(due, "- id: W1-T1\n", { spawn, log: () => {} }, `POLL-${poll}`);
+    for (const outcome of outcomes) {
+      attempts = { ...attempts, [outcome.proposalId]: draftAttemptKey(due.find((p) => p.id === outcome.proposalId)!) };
+      if (outcome.ok) drafts = { ...drafts, [outcome.proposalId]: outcome.candidate };
+    }
+  }
+
+  assert.equal(spawnCalls, 1, "a draft was spawned within the two simulated polls");
+  assert.ok(drafts["P34"], "P34 now has a cached draft, with no CLI invocation anywhere in this test");
+});
+
+test("three consecutive daemon polls over the SAME invalidated proposal spawn the Architect exactly once — idempotence is keyed to the cause, not poll count (W1-T192)", async () => {
+  const anchor: EvidenceAnchor = { description: "x", pattern: "landed" };
+  const proposal: Proposal = { id: "P1", summary: "s", evidenceAnchors: [anchor], reframeHistory: [{ feedback: "fb" }] };
+  let drafts: DraftCache = {};
+  let attempts: DraftAttemptCache = {};
+  let spawnCalls = 0;
+  const spawn: DraftSpawn = async () => {
+    spawnCalls++;
+    return fakeWorkerResult(VALID_DRAFT_TEXT);
+  };
+
+  for (let poll = 0; poll < 3; poll++) {
+    const due = draftsDueOnDaemon([proposal], drafts, attempts);
+    if (due.length === 0) continue;
+    const outcomes = await runDraftRung(due, "plan text", { spawn, log: () => {} }, `POLL-${poll}`);
+    for (const outcome of outcomes) {
+      attempts = { ...attempts, [outcome.proposalId]: draftAttemptKey(due.find((p) => p.id === outcome.proposalId)!) };
+      if (outcome.ok) drafts = { ...drafts, [outcome.proposalId]: outcome.candidate };
+    }
+  }
+
+  assert.equal(spawnCalls, 1, "ONE invalidation must produce ONE draft attempt across three polls");
+});
+
+test("a FAILED daemon draft attempt is throttled too — a stuck cause does not re-spawn every poll", async () => {
+  const anchor: EvidenceAnchor = { description: "x", pattern: "landed" };
+  const proposal: Proposal = { id: "P1", summary: "s", evidenceAnchors: [anchor], reframeHistory: [{ feedback: "fb" }] };
+  let drafts: DraftCache = {};
+  let attempts: DraftAttemptCache = {};
+  let spawnCalls = 0;
+  const spawn: DraftSpawn = async () => {
+    spawnCalls++;
+    throw new Error("architect worker crashed");
+  };
+
+  for (let poll = 0; poll < 3; poll++) {
+    const due = draftsDueOnDaemon([proposal], drafts, attempts);
+    if (due.length === 0) continue;
+    const outcomes = await runDraftRung(due, "plan text", { spawn, log: () => {} }, `POLL-${poll}`);
+    for (const outcome of outcomes) {
+      attempts = { ...attempts, [outcome.proposalId]: draftAttemptKey(due.find((p) => p.id === outcome.proposalId)!) };
+      if (outcome.ok) drafts = { ...drafts, [outcome.proposalId]: outcome.candidate };
+    }
+  }
+
+  assert.equal(spawnCalls, 1, "a failing cause is attempted once, not re-spawned every subsequent poll");
+  assert.equal(drafts["P1"], undefined, "the proposal remains genuinely un-drafted — the status quo, not a regression");
 });

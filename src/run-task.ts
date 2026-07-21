@@ -81,24 +81,26 @@ import {
   planCommitMessage,
 } from "./lib/plan-architect.js";
 import {
-  anchorFingerprint,
   applyFragmentToPlanYaml,
   applyStampToMasterPlan,
   approveCommitMessage,
   approveProposal,
   classifyProposal,
+  draftAttemptKey,
+  draftsDueOnDaemon,
   gitGrepAnchorTrue,
-  inboxDraftPrompt,
-  isDraftStale,
+  parseDraftAttemptCache,
   parseDraftCache,
-  parseDraftedCandidate,
   parseProposalRegistry,
+  proposalsNeedingDraft,
   ratifyTelemetry,
   reframeProposal,
   renderInbox,
   renderRatifyTelemetry,
+  runDraftRung,
+  type DraftAttemptCache,
   type DraftCache,
-  type DraftedCandidate,
+  type DraftRungOutcome,
   type EvidenceAnchor,
   type InboxClassification,
   type Proposal,
@@ -4614,6 +4616,10 @@ function buildSweepHook(
   plan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): () => Promise<void> {
+  // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
+  // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
+  // why it rides THIS seam rather than a second, separately-scheduled loop.
+  const draftHook = buildInboxDraftHook(owner, repo, config, runId, log);
   return async () => {
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath);
@@ -4626,6 +4632,10 @@ function buildSweepHook(
     } catch (e) {
       log("sweep.error", { error: String((e as Error)?.message ?? e) });
     }
+    // W1-T192: the draft rung (fail-soft internally, its own try/catch) — a fired trigger
+    // or an invalidated draft gets redrafted here, on the daemon's cadence, with no CLI
+    // invocation required.
+    await draftHook();
   };
 }
 
@@ -5509,6 +5519,136 @@ function readFileIfExists(path: string): string | undefined {
 }
 
 /**
+ * Materialize ONE worktree and draft EVERY proposal in `toDraft` against it — the shared
+ * harness-owned glue {@link runDraftRung}'s pure core (lib/inbox.ts) needs: a real
+ * `spawnWorker` inside a real worktree. Both `inboxCommand` (CLI, `rmd inbox`) and
+ * {@link buildInboxDraftHook} (the daemon's per-poll rung, W1-T192) call this SAME function,
+ * so the two paths can never diverge on HOW a proposal gets drafted — only on WHICH
+ * proposals are due (`rmd inbox` uses {@link proposalsNeedingDraft} unthrottled;
+ * the daemon uses {@link draftsDueOnDaemon}'s idempotence throttle on top of it) and what
+ * happens with the resulting {@link DraftRungOutcome}s. `toDraft.length === 0` short-circuits
+ * before any clone/worktree — no spend for the common "nothing to draft" case.
+ */
+async function draftProposalBatch(
+  toDraft: Proposal[],
+  config: Config,
+  owner: string,
+  repo: string,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<DraftRungOutcome[]> {
+  if (toDraft.length === 0) return [];
+
+  const arch = architectModel(config);
+  const wrk = workerModel(config);
+  assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
+  const mountsTable = loadMounts(mountsPath(repoRoot));
+
+  const settingsFile = renderWorkerSettings({
+    templatePath: join(repoRoot, "settings", "worker.json"),
+    hooksDir: join(repoRoot, "hooks"),
+    outPath: join(config.root, "tmp", `inbox-settings-${runId}.json`),
+  });
+  validateWorkerSettingsFile(settingsFile);
+
+  const repoDir = join(config.root, "repos", repo);
+  if (!existsSync(repoDir)) {
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+  }
+  const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
+  if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
+  const branch = `run-${runId}`;
+  const worktreePath = join(worktreesDir(config), branch);
+  worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+
+  try {
+    const planText = readFileSync(join(worktreePath, "plan", "tasks.yaml"), "utf8");
+    return await runDraftRung(
+      toDraft,
+      planText,
+      {
+        spawn: (proposal, prompt) =>
+          spawnWorker({
+            cwd: worktreePath,
+            permissionMode: "bypassPermissions",
+            settingsFile,
+            model: arch,
+            maxTurns: mountsTable.architect.maxTurns,
+            maxBudgetUsd: DEFAULT_BUDGET_USD,
+            config,
+            prompt,
+            tools: INBOX_DRAFT_WORKER_TOOLS,
+          }),
+        log,
+      },
+      runId,
+    );
+  } finally {
+    worktreeRemove(repoDir, worktreePath);
+    removeRunLock(worktreePath);
+  }
+}
+
+/**
+ * The daemon's per-poll DRAFT rung (W1-T192, ratifies P25's autonomous half). Reachable from
+ * the daemon's OWN `deps.sweep()` seam (daemon.ts:274) — wired into {@link buildSweepHook}
+ * below, riding the SAME slot the W1-T150 credit-backfill rung already occupies, never a
+ * second, separately-scheduled loop. Selects candidates via {@link draftsDueOnDaemon}: the
+ * SAME {@link proposalsNeedingDraft} predicate `rmd inbox` classifies against, further
+ * throttled so a 300s poll cadence never re-spawns the Architect for the SAME cause (one
+ * invalidation ⇒ one attempt — see lib/inbox.ts's `draftAttemptKey` doc). Every attempted
+ * proposal's key is recorded in `state/inbox-draft-attempts.json` regardless of outcome —
+ * a FAILED attempt is also throttled, or a stuck cause would re-spawn every poll forever
+ * (the exact spend leak W1-T177 exists to prevent). Wrapped in its own try/catch so a
+ * registry-read hiccup or a worktree failure is logged (`inbox.draft_rung.error`) and
+ * skipped, never thrown up into the sweep/daemon loop — an un-drafted proposal is the status
+ * quo, not a regression; `rmd inbox` remains available to force a draft on demand in the
+ * meantime.
+ */
+function buildInboxDraftHook(
+  owner: string,
+  repo: string,
+  config: Config,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): () => Promise<void> {
+  return async () => {
+    try {
+      const registryPath = join(config.root, "state", "inbox-proposals.json");
+      const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
+      if (proposals.length === 0) return; // no active proposals — no spend
+
+      const draftsPath = join(config.root, "state", "inbox-drafts.json");
+      const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
+      const attemptsPath = join(config.root, "state", "inbox-draft-attempts.json");
+      const attempts: DraftAttemptCache = parseDraftAttemptCache(readFileIfExists(attemptsPath));
+
+      const due = draftsDueOnDaemon(proposals, drafts, attempts);
+      if (due.length === 0) return;
+
+      const outcomes = await draftProposalBatch(due, config, owner, repo, runId, log);
+
+      const nextDrafts: DraftCache = { ...drafts };
+      const nextAttempts: DraftAttemptCache = { ...attempts };
+      for (const outcome of outcomes) {
+        const proposal = due.find((p) => p.id === outcome.proposalId);
+        if (!proposal) continue; // unreachable — outcomes are 1:1 with `due`
+        // IDEMPOTENCE (W1-T192): mark this cause ATTEMPTED whether it succeeded or failed —
+        // see this function's own doc for why a failed attempt must be throttled too.
+        nextAttempts[outcome.proposalId] = draftAttemptKey(proposal);
+        if (outcome.ok) nextDrafts[outcome.proposalId] = outcome.candidate;
+      }
+      writeFileSync(draftsPath, JSON.stringify(nextDrafts, null, 2), "utf8");
+      writeFileSync(attemptsPath, JSON.stringify(nextAttempts, null, 2), "utf8");
+    } catch (e) {
+      log("inbox.draft_rung.error", { error: String((e as Error)?.message ?? e) });
+    }
+  };
+}
+
+/**
  * `rmd inbox [--dry-run]` — the ratification inbox's deterministic core, wired live
  * (MASTER-PLAN P25(i), W1-T110). The actual readiness predicate ({@link
  * classifyProposal}) is a PURE function, unit-tested exhaustively over fixtures
@@ -5521,12 +5661,13 @@ function readFileIfExists(path: string): string | undefined {
  *      MASTER-PLAN.md's proposal list — is a separate, later concern). Zero
  *      proposals ⇒ print "no active proposals" and return immediately (no clone, no
  *      spend) — the common case on a fresh checkout.
- *   2. For every proposal that is NOT deferred-by-trigger and whose cached draft
- *      (`state/inbox-drafts.json`) is missing or stale ({@link isDraftStale}), spawn
- *      ONE bounded Architect worker ({@link INBOX_DRAFT_WORKER_TOOLS} — read-only,
- *      never touches a file) to draft a candidate via {@link inboxDraftPrompt}, parse
- *      it with {@link parseDraftedCandidate}, and cache it — skipped entirely under
- *      `--dry-run` (classify against whatever is already cached, spend nothing).
+ *   2. For every proposal {@link proposalsNeedingDraft} names (NOT deferred-by-trigger,
+ *      cached draft missing or stale) — UNTHROTTLED, unlike the daemon's own rung below,
+ *      because this is the operator's MANUAL FORCE (W1-T192: `rmd inbox` is demoted from
+ *      the only trigger to a manual one, never removed as a trigger) — spawn ONE bounded
+ *      Architect worker per proposal ({@link draftProposalBatch}) and cache the result.
+ *      Skipped entirely under `--dry-run` (classify against whatever is already cached,
+ *      spend nothing).
  *   3. Classify every proposal with REAL facts: dependency-merge state via
  *      `deriveStatus` (GitHub-derived, corrections-supreme — never the decorative
  *      yaml `status:` field), evidence-anchor truth via a real `git grep` against
@@ -5535,6 +5676,9 @@ function readFileIfExists(path: string): string | undefined {
  *      classifyProposal itself).
  *   4. Print {@link renderInbox} and ledger-log one `inbox.classified` line per
  *      proposal (traceable via `rmd trace`).
+ *
+ * NOTE (W1-T192): the daemon's OWN per-poll draft rung ({@link buildInboxDraftHook}) is what
+ * makes a draft exist without this command ever being invoked — see that function's doc.
  */
 async function inboxCommand(rest: string[]): Promise<number> {
   const badArg = unknownArgError("inbox", rest, [], ["--dry-run"]);
@@ -5559,80 +5703,20 @@ async function inboxCommand(rest: string[]): Promise<number> {
   const draftsPath = join(config.root, "state", "inbox-drafts.json");
   const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
 
-  const needsDraft = proposals.filter((p) => {
-    if (p.trigger && !p.trigger.fired) return false; // never drafted for a dead-consumer proposal
-    const cached = drafts[p.id];
-    return !cached || isDraftStale(cached, p.evidenceAnchors);
-  });
+  // UNTHROTTLED (see this command's doc) — `rmd inbox` is the manual FORCE, so it always
+  // attempts every proposal `proposalsNeedingDraft` names, never consulting the daemon-only
+  // DraftAttemptCache.
+  const needsDraft = proposalsNeedingDraft(proposals, drafts);
 
   const runId = `INBOX-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: "inbox", step, ...extra });
 
   if (needsDraft.length > 0 && !dryRun) {
-    const arch = architectModel(config);
-    const wrk = workerModel(config);
-    assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
-    const mountsTable = loadMounts(mountsPath(repoRoot));
-
-    const settingsFile = renderWorkerSettings({
-      templatePath: join(repoRoot, "settings", "worker.json"),
-      hooksDir: join(repoRoot, "hooks"),
-      outPath: join(config.root, "tmp", `inbox-settings-${runId}.json`),
-    });
-    validateWorkerSettingsFile(settingsFile);
-
-    const repoDir = join(config.root, "repos", repo);
-    if (!existsSync(repoDir)) {
-      mkdirSync(dirname(repoDir), { recursive: true });
-      execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+    const outcomes = await draftProposalBatch(needsDraft, config, owner, repo, runId, log);
+    for (const outcome of outcomes) {
+      if (outcome.ok) drafts[outcome.proposalId] = outcome.candidate;
     }
-    const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
-    if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-    const branch = `run-${runId}`;
-    const worktreePath = join(worktreesDir(config), branch);
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main");
-    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
-
-    try {
-      const planText = readFileSync(join(worktreePath, "plan", "tasks.yaml"), "utf8");
-      for (const proposal of needsDraft) {
-        const worker = await spawnWorker({
-          cwd: worktreePath,
-          permissionMode: "bypassPermissions",
-          settingsFile,
-          model: arch,
-          maxTurns: mountsTable.architect.maxTurns,
-          maxBudgetUsd: DEFAULT_BUDGET_USD,
-          config,
-          prompt: inboxDraftPrompt(proposal, planText, runId),
-          tools: INBOX_DRAFT_WORKER_TOOLS,
-        });
-        log("inbox.draft_synthesized", {
-          proposal_id: proposal.id,
-          session_id: worker.sessionId,
-          cost_usd: worker.costUsd,
-          subtype: worker.subtype,
-          ...workerLedgerFields(worker),
-        });
-        const parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"));
-        if (!parsed) {
-          log("inbox.draft_error", { proposal_id: proposal.id, error: "no FRAGMENT/STAMP markers in worker output" });
-          continue;
-        }
-        const candidate: DraftedCandidate = {
-          proposalId: proposal.id,
-          fragmentYaml: parsed.fragmentYaml,
-          stampLine: parsed.stampLine,
-          anchorFingerprint: anchorFingerprint(proposal.evidenceAnchors),
-        };
-        drafts[proposal.id] = candidate;
-        log("inbox.drafted", { proposal_id: proposal.id });
-      }
-      writeFileSync(draftsPath, JSON.stringify(drafts, null, 2), "utf8");
-    } finally {
-      worktreeRemove(repoDir, worktreePath);
-      removeRunLock(worktreePath);
-    }
+    writeFileSync(draftsPath, JSON.stringify(drafts, null, 2), "utf8");
   }
 
   const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };

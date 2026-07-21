@@ -1852,6 +1852,66 @@ test("runFixRung is REUSED, never reimplemented — one dispatch from runTask's 
   assert.equal(runTaskDefs.length, 1, "there must be exactly one runTask implementation for both callers to share");
 });
 
+// ── W1-T192: the draft rung runs DAEMON-SIDE, not CLI-pull ─────────────────────────────────
+//
+// The decision logic (which proposals are due, the idempotence throttle, the fail-soft
+// per-proposal draft loop) is pure and unit-tested exhaustively over fixtures in
+// test/inbox.test.ts, with the LLM stubbed out entirely — mirroring how this file already
+// treats runFixRung above. What ONLY belongs here is WIRING: is the rung actually reachable
+// from the daemon's own `deps.sweep()` seam (daemon.ts:274), not merely from `rmd inbox`?
+// That is a real regression risk this codebase already tests via source-text reachability
+// (see `runFixRung is REUSED...` above), so the same technique applies here.
+
+/** Extract one top-level `function`/`async function` declaration's source text, from its
+ *  signature to the start of the NEXT top-level function declaration (or EOF) — good enough
+ *  for a reachability grep; this file has no nested top-level function of the same shape. */
+function extractFunctionBody(src: string, signature: string): string {
+  const start = src.indexOf(signature);
+  assert.ok(start >= 0, `expected to find '${signature}' in run-task.ts`);
+  const nextFn = src.indexOf("\nfunction ", start + 1);
+  const nextAsyncFn = src.indexOf("\nasync function ", start + 1);
+  const nextExportAsyncFn = src.indexOf("\nexport async function ", start + 1);
+  const boundaries = [nextFn, nextAsyncFn, nextExportAsyncFn].filter((i) => i > start);
+  const end = boundaries.length ? Math.min(...boundaries) : src.length;
+  return src.slice(start, end);
+}
+
+test("W1-T192: buildSweepHook (the daemon's OWN deps.sweep() wiring) reaches the draft rung — the rung is on the DAEMON path, not only inboxCommand", () => {
+  const sweepHookBody = extractFunctionBody(runTaskSrc, "function buildSweepHook(");
+  assert.match(
+    sweepHookBody,
+    /buildInboxDraftHook/,
+    "buildSweepHook must invoke the W1-T192 draft rung — riding the SAME seam the W1-T150 " +
+      "credit-backfill rung already occupies. A rung added to the CLI path alone would " +
+      "silently never run unattended (the exact defect this task fixes).",
+  );
+});
+
+test("W1-T192: `rmd inbox` (inboxCommand) and the daemon's draft rung (buildInboxDraftHook) both drive the SAME draftProposalBatch — one shared drafting loop, never two divergent ones", () => {
+  const inboxBody = extractFunctionBody(runTaskSrc, "async function inboxCommand(");
+  assert.match(inboxBody, /draftProposalBatch\(/, "inboxCommand must call the shared draftProposalBatch");
+
+  const hookBody = extractFunctionBody(runTaskSrc, "function buildInboxDraftHook(");
+  assert.match(hookBody, /draftProposalBatch\(/, "buildInboxDraftHook must call the SAME draftProposalBatch, never a re-derived spawn loop");
+});
+
+test("W1-T192: buildInboxDraftHook is wrapped in its own try/catch, distinct from buildSweepHook's — a draft-rung hiccup never halts the sweep or the daemon", () => {
+  const hookBody = extractFunctionBody(runTaskSrc, "function buildInboxDraftHook(");
+  assert.match(hookBody, /try\s*\{/, "the hook must guard its own body");
+  assert.match(hookBody, /catch \(e\)/);
+  assert.match(hookBody, /inbox\.draft_rung\.error/, "a failure is ledgered under its own step, not silently swallowed");
+});
+
+test("W1-T192: `rmd inbox`'s drafting predicate (proposalsNeedingDraft) is UNTHROTTLED — it never consults the daemon-only DraftAttemptCache, preserving the manual-force contract", () => {
+  const inboxBody = extractFunctionBody(runTaskSrc, "async function inboxCommand(");
+  assert.match(inboxBody, /proposalsNeedingDraft\(/, "inboxCommand must select drafting candidates via the unthrottled predicate");
+  assert.doesNotMatch(
+    inboxBody,
+    /draftsDueOnDaemon/,
+    "inboxCommand must NOT apply the daemon's idempotence throttle — a human forcing a redraft must never be silently no-op'd",
+  );
+});
+
 // ── W1-T78: the CLARIFICATION-QUESTION rung's fix-rung side — an operator's
 // answer re-arms `runFixRung` carrying the answer as an added constraint,
 // VERBATIM, on every strike; the strike allowance is config policy. ──────────
