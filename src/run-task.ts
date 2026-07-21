@@ -1340,7 +1340,15 @@ export async function runFixRung(opts: {
       branch: opts.branch,
       evidence,
     });
-    deps.log("fix.dispatch", { strike: strikes, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: deriveFixMode(evidence) });
+    // W1-T199: TAG THE STRIKE WITH THE VERDICT REGIME IT WAS SPENT AGAINST. A strike
+    // spent when no proof could execute is a strike against KEYWORD NOISE; one spent
+    // when the floor actually ran proofs is a strike against EVIDENCE. Untagged
+    // historical lines are read as "keyword_only" (see priorStrikesFor) — they were
+    // all written before the executor shipped.
+    const verdictRegime: StrikeRegime = review.criteria.some((c) => c.proof_exec !== "not_executable")
+      ? "executed"
+      : "keyword_only";
+    deps.log("fix.dispatch", { strike: strikes, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: deriveFixMode(evidence), verdict_regime: verdictRegime });
     deps.say(
       noReviewYet
         ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE ci-log fix worker for ` +
@@ -4171,11 +4179,74 @@ function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string):
  * starve an answered PR of its one legitimate extra strike (W1-T78's
  * `strikeCapForAnswer` ceiling check).
  */
-function priorStrikesFor(lines: Array<Record<string, unknown>>, taskId: string | undefined): number {
+/**
+ * The regime the CURRENT verdict for a task was produced under (W1-T199) — read
+ * from the most recent `review.posted` ledger line's `proof_exec`.
+ *
+ * This is what decides whether keyword-era strikes are amnestied: the amnesty
+ * applies only when the verdict the rung would act on NOW is itself evidence.
+ * A task still being judged by keyword overlap gets no amnesty, because there is
+ * nothing better to spend the next strike against.
+ */
+export function currentStrikeRegimeFor(lines: Array<Record<string, unknown>>, taskId: string | undefined): StrikeRegime {
+  if (!taskId) return "keyword_only";
+  let latest: Record<string, unknown> | undefined;
+  for (const line of lines) {
+    if (line.step === "review.posted" && line.task_id === taskId) latest = line;
+  }
+  const pe = latest?.proof_exec;
+  if (!Array.isArray(pe)) return "keyword_only";
+  return pe.some((x) => x !== "not_executable") ? "executed" : "keyword_only";
+}
+
+/**
+ * The verdict regime a fix-rung strike was spent against (W1-T199).
+ *
+ * `"executed"` — the floor RAN at least one proof, so the unmet criteria the
+ * strike was dispatched against are EVIDENCE.
+ * `"keyword_only"` — no proof executed, so the strike was spent against keyword
+ * overlap. Historical `fix.dispatch` lines carry no tag at all and are read as
+ * this, because every one of them predates the executor.
+ */
+export type StrikeRegime = "executed" | "keyword_only";
+
+/** The regime a ledger `fix.dispatch` line records — untagged ⇒ pre-executor. */
+export function strikeRegimeOf(line: Record<string, unknown>): StrikeRegime {
+  return line.verdict_regime === "executed" ? "executed" : "keyword_only";
+}
+
+/**
+ * Strikes that COUNT toward the cap, for a task, under `currentRegime` (W1-T199).
+ *
+ * WHY THIS IS NOT A PLAIN COUNT. `fix.dispatch` lines are append-only and
+ * monotonic, so a strike spent months ago against a keyword-only verdict gated
+ * the rung forever — including after the executor shipped and the SAME rung had
+ * demonstrably converged on executed evidence (PR #457: executed_fail → fix
+ * worker → executed_pass ×3 → merged, while #449/#452 were refused at 2/2 with
+ * executed_fail verdicts of their own).
+ *
+ * Under the `"executed"` regime, keyword-only strikes are NOT counted: they were
+ * spent against noise and say nothing about whether the rung would converge on
+ * evidence. Under `"keyword_only"` every strike counts, because there is no
+ * better signal to distinguish them and the bound must not silently vanish.
+ *
+ * THE BOUND STAYS REAL either way — strikes spent under the CURRENT regime always
+ * count, so a task genuinely failing against executed evidence still exhausts.
+ * This never mutates the ledger: it changes how strikes are READ.
+ */
+export function priorStrikesFor(
+  lines: Array<Record<string, unknown>>,
+  taskId: string | undefined,
+  currentRegime: StrikeRegime = "keyword_only",
+): number {
   if (!taskId) return 0;
   let n = 0;
   for (const line of lines) {
-    if (line.step === "fix.dispatch" && line.task_id === taskId) n++;
+    if (line.step !== "fix.dispatch" || line.task_id !== taskId) continue;
+    // Under the executed regime a keyword-era strike is amnestied; every other
+    // combination counts, so the cap keeps binding on same-regime failures.
+    if (currentRegime === "executed" && strikeRegimeOf(line) === "keyword_only") continue;
+    n++;
   }
   return n;
 }
@@ -4252,7 +4323,7 @@ function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): Open
       reviewState,
       checksState,
       unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
-      priorStrikes: priorStrikesFor(ledger, taskId),
+      priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId)),
       strikeHistory: deriveStrikeHistory(ledger, taskId),
       supersededBy,
       lastActivityAt: pr.updatedAt,
@@ -4769,7 +4840,7 @@ async function fixCommand(rest: string[]): Promise<number> {
     reviewState,
     checksState,
     unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
-    priorStrikes: priorStrikesFor(ledger, taskId),
+    priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId)),
     strikeHistory: deriveStrikeHistory(ledger, taskId),
     // superseded-by is a cross-PR sweep concern (which OTHER open PR credits the
     // same task) — out of scope for a single explicitly-named PR lookup.
