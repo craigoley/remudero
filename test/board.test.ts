@@ -554,6 +554,51 @@ test("W1-T184: a gateway that throws from readFailed() ITSELF (not merely prByRe
   assert.ok(entries.every((e) => e.githubUnavailable === true), "degrades exactly like a well-behaved failed read");
 });
 
+// Acceptance-proof-titled test (plan/tasks.yaml, W1-T184 criterion 3) — the review floor's
+// whitelisted `unit test:` dialect execution runs this proof text verbatim as a
+// `--test-name-pattern`, so this test's OWN NAME is the proof itself; see the sibling proof-titled
+// tests below (criteria 2/5/6) for the same discipline.
+test(
+  "a feed row whose GitHub enrichment is unavailable still renders with its ledger-sourced content and a marked-unavailable decoration, rather than being dropped from the feed. FALSIFIER: any implementation where a failed GitHub read reduces the feed's row count, which reproduces the empty-RECENT fixture",
+  () => {
+    const ledgerPath = tmpLedgerPath();
+    const plan = planOf([task({ id: "W1-T1", title: "a task" }), task({ id: "W1-T2", title: "another task" })]);
+    const prUrl1 = "https://github.com/o/r/pull/1";
+    const prUrl2 = "https://github.com/o/r/pull/2";
+    appendFileSync(
+      ledgerPath,
+      [
+        JSON.stringify({ ts: "2026-07-20T10:00:00Z", run_id: "r1", task_id: "W1-T1", step: "pr.opened", pr_url: prUrl1 }),
+        JSON.stringify({ ts: "2026-07-20T10:00:01Z", run_id: "r1", task_id: "W1-T1", step: "verdict", verdict: "merged", cost_usd: 1 }),
+        JSON.stringify({ ts: "2026-07-20T10:01:00Z", run_id: "r2", task_id: "W1-T2", step: "pr.opened", pr_url: prUrl2 }),
+        JSON.stringify({ ts: "2026-07-20T10:01:01Z", run_id: "r2", task_id: "W1-T2", step: "verdict", verdict: "merged", cost_usd: 2 }),
+      ].join("\n") + "\n",
+    );
+    const unavailableGithub: GitHub = {
+      prByRef: () => null,
+      findMergedByTrailer: () => null,
+      headRefName: () => undefined,
+      prBody: () => undefined,
+      readFailed: () => true,
+      readFailureReason: () => "buffer_overflow",
+    };
+    const entries = computeRecentActivity({ plan, ledgerPath, github: unavailableGithub }, createRecentActivityCache());
+    assert.equal(
+      entries.length,
+      2,
+      "an unavailable GitHub enrichment never reduces the feed's row count -- both ledger-sourced rows still render",
+    );
+    assert.ok(
+      entries.every((e) => e.taskId && e.verb),
+      "every row still carries its ledger-sourced content",
+    );
+    assert.ok(
+      entries.every((e) => e.githubUnavailable === true),
+      "and is marked unavailable, rather than being dropped from the feed",
+    );
+  },
+);
+
 test("W1-T184: GET /v1/recent never 500s when readFailed() throws — reachable through the real assembled route, not just the pure function", async () => {
   const ledgerPath = tmpLedgerPath();
   const plan = planOf([task({ id: "W1-T1", title: "a task" })]);
@@ -721,6 +766,35 @@ test("W1-T184: live spend/turns accumulate a COLD fix-rung dispatch's cost too, 
   assert.equal(row.liveTurns, 76);
 });
 
+// Acceptance-proof-titled test (plan/tasks.yaml, W1-T184 criterion 2) — see the criterion-3 test
+// above for why this test's name is the proof text verbatim.
+test(
+  "a NOW row for an in-flight run shows spend and turn count summed from that run's ledger lines, and both advance as further lines are appended. FALSIFIER: tonight's post-merge burn — 1.24 USD/38 turns on PR #388 and 1.30 USD/38 turns on PR #398, roughly 2.54 USD and 76 turns total — was invisible on an open console while every event sat in the ledger as it happened",
+  () => {
+    const ledgerPath = tmpLedgerPath();
+    const plan = planOf([task({ id: "W1-T1" })]);
+    const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub(), now: () => Date.parse("2026-07-20T22:10:00Z") };
+
+    appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T22:00:00Z", run_id: "r1", task_id: "W1-T1", step: "run.start" }) + "\n");
+    appendFileSync(
+      ledgerPath,
+      JSON.stringify({ ts: "2026-07-20T22:01:00Z", run_id: "r1", task_id: "W1-T1", step: "implement.done", cost_usd: 1.24, num_turns: 38 }) + "\n",
+    );
+
+    let row = computeBoardSnapshot(deps).tasks.find((t) => t.taskId === "W1-T1")!;
+    assert.equal(row.liveSpendUsd, 1.24, "PR #388's own 1.24 USD/38 turns is visible the instant its implement.done line lands");
+    assert.equal(row.liveTurns, 38);
+
+    appendFileSync(
+      ledgerPath,
+      JSON.stringify({ ts: "2026-07-20T22:02:00Z", run_id: "r1", task_id: "W1-T1", step: "fix.done", strike: 1, cost_usd: 1.3, num_turns: 38 }) + "\n",
+    );
+    row = computeBoardSnapshot(deps).tasks.find((t) => t.taskId === "W1-T1")!;
+    assert.equal(row.liveSpendUsd, 2.54, "advances as PR #398's own line is appended -- the ~2.54 USD/76 turn total, never invisible");
+    assert.equal(row.liveTurns, 76);
+  },
+);
+
 test("W1-T184: a terminal (non-in-flight) task never carries liveSpendUsd/liveTurns — those are a NOW-only, in-flight concept", () => {
   const ledgerPath = tmpLedgerPath();
   const prUrl = "https://github.com/o/r/pull/1";
@@ -775,6 +849,48 @@ test("W1-T184: createBoardSnapshotCache recomputes ONLY when the ledger has grow
   cache.get(deps);
   assert.equal(calls, 2, "and it settles back to a cache hit once the new length is captured");
 });
+
+// Acceptance-proof-titled test (plan/tasks.yaml, W1-T184 criterion 5) — see the criterion-3 test
+// above for why this test's name is the proof text verbatim. NOTE the parenthesised
+// `(board.ts:35)`/`(board.ts:97)` citations from the plan's own proof text are stripped here:
+// the review floor's `unit test:` dialect runs a criterion's proof text as a
+// `--test-name-pattern` REGEX, where `(`/`)` are un-escaped GROUP metacharacters, not literal
+// characters — a title containing the LITERAL parens can never self-match that regex (verified
+// empirically: `new RegExp(fullProofText).test(fullProofText)` is false with the parens present,
+// true once they're removed). Everything else in the proof text is regex-safe (`.` a harmless
+// wildcard over itself, no other metacharacters), so this is the ONE necessary edit.
+test(
+  "across successive poll ticks with the ledger unchanged, the projection is computed once and reused; a change triggers exactly one recompute. FALSIFIER: board.ts polls every DEFAULT_POLL_MS = 250 board.ts:35 and boardSnapshot calls projectPlan board.ts:97, so before W1-T187 work arrived 20-32x faster than it completed and every request queued behind a permanent backlog — measured 2026-07-20 as GET /v1/status at 58.7s/54.0s/34.5s with no warm improvement",
+  () => {
+    const ledgerPath = tmpLedgerPath();
+    writeFileSync(ledgerPath, "");
+    let calls = 0;
+    const github: GitHub = {
+      prByRef: () => {
+        calls++;
+        return null;
+      },
+      findMergedByTrailer: () => null,
+      headRefName: () => undefined,
+      prBody: () => undefined,
+    };
+    const plan = planOf([task({ id: "W1-T1", pr: 1 })]);
+    const deps: BoardDeps = { plan, ledgerPath, github };
+    const cache = createBoardSnapshotCache();
+
+    // Successive poll ticks (the SSE/REST poll cadence) with the ledger untouched -- the
+    // projection is computed ONCE and reused, never re-projected blindly per tick.
+    for (let i = 0; i < 8; i++) cache.get(deps);
+    assert.equal(calls, 1, "an unchanged ledger across successive poll ticks is computed once and reused");
+
+    appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "run.start" }) + "\n");
+    cache.get(deps);
+    assert.equal(calls, 2, "a change triggers exactly one recompute");
+
+    for (let i = 0; i < 8; i++) cache.get(deps);
+    assert.equal(calls, 2, "and settles back to reuse -- not a recompute per subsequent tick");
+  },
+);
 
 test("W1-T184: createBoardSnapshotCache holds ACROSS MANY poll ticks over real wall-clock time (not merely a burst) — the cache is NOT time/TTL-based", async () => {
   const ledgerPath = tmpLedgerPath();
@@ -871,6 +987,51 @@ test("W1-T184: createBoardSnapshotCache's cache-KEY check is itself INCREMENTAL 
   assert.equal(readFileSyncSpy.mock.calls.length, 0, "even a genuine recompute reads the ledger incrementally, never the whole file again");
   assert.ok(readSyncSpy.mock.calls.length >= 1, "the grown tail is pulled via the incremental byte-range reader");
 });
+
+// Acceptance-proof-titled test (plan/tasks.yaml, W1-T184 criterion 6) — see the criterion-3 test
+// above for why this test's name is the proof text verbatim. Unlike the sibling proof-titled
+// tests (which prove the cache's IN-PROCESS call-count behavior directly), this one drives N
+// genuinely CONCURRENT `fetch()` calls against the real assembled HTTP server (createService +
+// buildStatusRoute, via withBoardService) -- the actual shape of the 2026-07-20 outage (a burst
+// of GET /v1/status requests arriving together), not N sequential in-process calls standing in
+// for concurrency.
+test(
+  "N concurrent snapshot requests arriving during a recompute trigger ONE computation and are all served from it. FALSIFIER: unbounded concurrent recomputes at the 250ms cadence, the observed backlog behind the 2026-07-20 latency outage",
+  async () => {
+    const ledgerPath = tmpLedgerPath();
+    writeFileSync(ledgerPath, "");
+    let calls = 0;
+    const github: GitHub = {
+      prByRef: (ref) => {
+        calls++;
+        return String(ref) === "1" ? { number: 1, url: "https://github.com/o/r/pull/1", state: "OPEN" } : null;
+      },
+      findMergedByTrailer: () => null,
+      headRefName: () => undefined,
+      prBody: () => undefined,
+    };
+    const plan = planOf([task({ id: "W1-T1", pr: 1 })]);
+    const deps: BoardDeps = { plan, ledgerPath, github };
+
+    await withBoardService(deps, 60_000, async (base) => {
+      const N = 12;
+      const responses = await Promise.all(
+        Array.from({ length: N }, () => fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}` } })),
+      );
+      assert.ok(
+        responses.every((r) => r.status === 200),
+        "every one of the N concurrent requests is served",
+      );
+      const bodies = await Promise.all(responses.map((r) => r.json()));
+      const first = JSON.stringify(bodies[0]);
+      assert.ok(
+        bodies.every((b) => JSON.stringify(b) === first),
+        "all N concurrent requests are served from the SAME computed snapshot",
+      );
+      assert.equal(calls, 1, "N concurrent requests never queue behind more than ONE in-flight recompute");
+    });
+  },
+);
 
 test("GET /v1/recent: reachable through the real assembled route (not just the pure function), still ledger-first", async () => {
   const ledgerPath = tmpLedgerPath();
