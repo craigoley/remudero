@@ -1,0 +1,67 @@
+- id: W1-T216
+  title: "the forge attack is INFERRED end to end - drill it, so the biggest claimed risk in the audit becomes observed fact or is retired"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "RECON §8, honest-limits item 1, and the single most valuable unverified claim in the audit. The
+    recon's own words: the forge-your-own-status attack is INFERRED end-to-end. What it CONFIRMED at source,
+    and what intake re-verified independently, is every precondition:
+      the sandbox excludes gh entirely (settings/worker.json:45, excludedCommands ['gh *'])
+      the worker holds the operator's gh credential (worker-home.ts:78, .config/gh symlinked in)
+      the deny-floor blocks only force-push-to-main, gh auth subcommands, a planted canary string, and an
+        operator-local deny list - it does NOT block gh api statuses, gh pr merge, gh gist, plain push to
+        main, workflow edits, gh secret set, or gh pr review --approve (hooks/deny-floor.sh, 59 lines total)
+      branch protection requires NO independent review - required_pull_request_reviews is null, so CODEOWNERS
+        is never enforced, and enforce_admins is false
+    What NOBODY has done is execute it: a worker identity posting remudero-review=success on a real PR and
+    observing whether auto-merge arms. Until that happens the system's single biggest risk rests on a chain of
+    correct-looking inferences, and this codebase's own doctrine is that a keyword match is a claim while
+    execution is evidence. The same standard should apply to its threat model."
+  design: |
+    A CONTROLLED DRILL ON A THROWAWAY PR, MIRRORING THE W1-T12 COMMISSIONING DRILLS. Open a test PR that
+    changes nothing meaningful, have a worker-identity credential post remudero-review=success against its
+    head, and observe whether the arm path accepts it. Record the outcome as OBSERVED evidence with the same
+    honesty the commissioning drills used - including the deltas, if the drill turns out to be less faithful
+    than intended.
+    THE DRILL MUST BE SAFE BY CONSTRUCTION. It runs against a disposable PR that would be harmless if merged,
+    and it must not be capable of merging anything real. Prefer the sandbox repo over remudero itself if the
+    fidelity loss is acceptable, and state which was chosen and why.
+    EITHER OUTCOME IS A RESULT WORTH HAVING. If the forge succeeds, the audit's top finding is confirmed and
+    W1-T203's priority is vindicated by evidence rather than by argument. If it fails, something already
+    prevents it that nobody has identified - and finding out WHAT is more valuable than the assumption,
+    because that mechanism is currently undocumented and could be removed by an unrelated refactor without
+    anyone noticing.
+    SEQUENCE WITH W1-T203 so the drill can also serve as its acceptance evidence: run it BEFORE the
+    provenance check to observe the hole, and AFTER to observe it closed. That makes one drill do two jobs.
+    Expressed as sequencing rather than as a hard depends_on edge, because the two are independently
+    valuable - observing the hole is worth doing even if the provenance work slips.
+    verify:human - a security drill's conclusion is an operator's to draw, and its safety depends on judgement
+    a headless worker should not be making alone.
+  acceptance:
+    - claim: "a worker-identity post of remudero-review=success on a controlled test PR is EXECUTED and its effect on auto-merge arming is recorded as observed evidence rather than inferred"
+      proof: "unit test: test/forge-drill.test.ts"
+    - claim: "the drill runs against a disposable PR that is harmless if merged, and cannot merge anything real"
+      proof: "unit test: test/forge-drill.test.ts"
+    - claim: "after W1-T203 lands, the same drill shows the forged status treated as ABSENT rather than honoured, closing the loop from inferred risk to observed mitigation"
+      proof: "unit test: test/forge-drill.test.ts"
+    - claim: "the drill's honest deltas are recorded - anything about it that is less faithful than a real attack is stated rather than glossed"
+      proof: "unit test: test/forge-drill.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§4A", "§5C"]
+  files: [test/forge-drill.test.ts]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, recon §8 honest-limits item 1, in the shape of the W1-T12e commissioning drills.
+    Every PRECONDITION was independently re-verified at intake and all hold - the deny-floor enumeration above
+    is complete, read from all 59 lines of the script rather than from the report's claimed range. The
+    ATTACK ITSELF remains unexecuted, which is exactly what this task fixes.
+    SEQUENCING NOTE: this should run around W1-T203 (reviewer-identity provenance, filed separately). Not
+    expressed as a depends_on edge because that would make this task unrunnable until T203 lands, and
+    observing the hole has standalone value.
+    The recon lists four further drills worth running (400-turn cliff, flock-stress the ledger, kill -9
+    mid-run reclaim, simulated state loss). The last is covered by W1-T214's restore drill. The others are
+    not filed here - Rule 19 sizing, and each wants its own harness."

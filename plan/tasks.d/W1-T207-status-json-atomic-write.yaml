@@ -1,0 +1,53 @@
+- id: W1-T207
+  title: "status.json is written by four callers with a plain truncating writeFileSync, so a concurrent reader can observe a half-written file and lose the monotonic-under-darkness fallback"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "RECON R-17, VERIFIED at source during intake with corrected line numbers. The write is a plain
+    truncate-and-write at src/lib/status.ts:906-912 - mkdirSync then writeFileSync, no temp file, no rename.
+    Four call sites pass a cachePath and therefore write it: src/run-task.ts:1832, :3131, :3565, :3802. The
+    recon's count of four writers is exactly right, though every one of its line numbers was stale by 23 to
+    103 lines. Other projectPlan callers (board.ts:97, task-card.ts:123, panel-graph.ts:353 and :406) pass no
+    cachePath and never write, which is why the count is four and not eight.
+    THE HARM IS SPECIFICALLY TO THE DARKNESS FALLBACK. The reader at src/lib/status.ts:925-934 degrades to
+    undefined on a parse failure or a shape mismatch. Because writeFileSync truncates before writing, a
+    reader arriving mid-write observes a zero-length or partial file, gets undefined, and loses exactly the
+    cached prior projection that W1-T179 exists to preserve. So the monotonic-under-darkness invariant is
+    not defeated by a bug in its own logic - it is reintroducible through a write race underneath it. That is
+    the structural point the recon makes and it is correct: read-path integrity is doctrine here, write-path
+    atomicity is unowned."
+  design: |
+    TEMP FILE PLUS RENAME. Write to a sibling temp path in the same directory, then rename over the target.
+    rename(2) within one filesystem is atomic, so a reader sees either the whole old file or the whole new
+    one and never a partial. Same directory matters - a rename across filesystems is a copy and loses the
+    guarantee.
+    ONE WRITER FUNCTION, NOT FOUR PATCHES. The four call sites all reach the same writer inside status.ts.
+    Fix it there once rather than at each caller, so a fifth caller added later inherits the property instead
+    of having to remember it.
+    THE FALSIFIER IS THE POINT OF THE TASK. A test that only asserts the file is written correctly proves
+    nothing about atomicity. The test that matters interleaves a reader with a writer and asserts the reader
+    NEVER observes a partial state - and it must be written so that it FAILS against the current
+    truncate-and-write implementation, otherwise it is not testing what it claims.
+    DO NOT WEAKEN THE READER TO COMPENSATE. Making the reader retry or tolerate garbage would paper over the
+    write race while leaving it in place for every future reader. The write is what is wrong.
+  acceptance:
+    - claim: "a reader interleaved with a writer never observes a partial or zero-length status.json, asserted against a test that FAILS on the current truncate-and-write implementation"
+      proof: "unit test: test/status-atomic-write.test.ts"
+    - claim: "a torn read can no longer regress a merged task to queued by silently losing the cached prior projection"
+      proof: "unit test: test/status-atomic-write.test.ts"
+    - claim: "the atomic write is a property of the single writer in status.ts, so a NEW caller inherits it without changing the call site"
+      proof: "unit test: test/status-atomic-write.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§12", "P22"]
+  files: [src/lib/status.ts]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, finding R-17. Line numbers corrected during intake: the writer is status.ts:906-912
+    and the four callers are run-task.ts:1832/:3131/:3565/:3802, not the stale values in the report.
+    SECOND MEMBER of the WRITE-SIDE ATOMICITY family (MASTER-PLAN §12), alongside W1-T206 (ledger) and
+    W1-T208 (run.lock). This is the member that most directly reintroduces a defect the plan already fixed on
+    the read side, which is why it is worth doing even though status.json is rederivable."

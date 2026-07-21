@@ -1,0 +1,56 @@
+- id: W1-T215
+  title: "nothing notices a daemon relaunch loop - two distinct causes have now produced one, and both were found by a human reading ledger timestamps"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "RECON T2-AC2, the durable half of R-1. Two DIFFERENT root causes have now produced a relaunch
+    loop in this system: W1-T197's headroom stop expressed as a nonzero exit, and the uncaught escalate throw
+    fixed in #472. Both were caught only because a person looked at daemon.boot timestamps and noticed the
+    gaps were about sixty seconds. Nothing in the system observes its own boot rate.
+    THAT IS THE GENERALISABLE DEFECT. Whatever the next cause is - and a third is likely, since any uncaught
+    throw anywhere in the poll loop produces the same shape - the SYMPTOM is identical and cheap to detect:
+    many boots in a short window, each doing no work. 460 daemon.boot lines exist in the ledger, 438 of them
+    since Jul 19.
+    SCOPE, STATED PRECISELY BECAUSE THE OTHER HALF IS DONE. The recon's T2-AC3 asks for escalation dedup that
+    survives a process restart. That already existed as ledger-derived cross-boot dedup, and its real defect -
+    the marker being written only after a successful gh call - was fixed in #472. This task is the boot-rate
+    invariant ONLY. Do not re-file or re-implement the dedup."
+  design: |
+    A HEALTH INVARIANT OVER THE LEDGER, NOT A NEW COUNTER. The evidence already exists: daemon.boot lines
+    carry timestamps. The invariant is a pure function over them - more than K boots in a rolling window
+    FAILS - so it is unit-testable against a synthetic ledger with no process spawning and no supervisor
+    involvement (Rule 18).
+    DECIDE WHAT BREACH DOES, AND PREFER LOUD OVER CLEVER. Self-healing a crash loop is a trap: the loop
+    usually means an invariant is already violated, so acting automatically risks compounding it. Escalating
+    with the evidence attached is almost certainly right. Whatever is chosen, a breach must be OBSERVABLE
+    without a human reading raw timestamps, since that is the exact labour this removes.
+    IT MUST NOT FIRE ON LEGITIMATE RESTARTS. An operator reloading the LaunchAgent, or a deliberate restart
+    after a config change, produces boots that are not a loop. The falsifier for this task is a
+    false-positive test, not only a true-positive one - an invariant that cries wolf gets muted, and a muted
+    invariant is worse than none.
+    NOTE THE CONVERGENCE: this is one of several things that want to run on a cadence (the audit rung's T0
+    smoke tier, and W1-T201's retro trigger). One scheduler, several consumers - see P36.
+  acceptance:
+    - claim: "more than K daemon boots in a rolling window FAILS the health invariant, asserted as a pure function over a synthetic daemon.boot ledger with no process spawn"
+      proof: "unit test: test/daemon-crashloop.test.ts"
+    - claim: "THE FALSE-POSITIVE FALSIFIER - a legitimate operator restart, and a normal daily boot pattern, do NOT trip the invariant"
+      proof: "unit test: test/daemon-crashloop.test.ts"
+    - claim: "a breach is surfaced with its evidence rather than requiring a human to read raw boot timestamps, which is the labour this replaces"
+      proof: "unit test: test/daemon-crashloop.test.ts"
+    - claim: "the invariant detects the SHAPE rather than a known cause, so it fires on a loop whose trigger is neither headroom nor a throwing escalation"
+      proof: "unit test: test/daemon-crashloop.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§9"]
+  files: [src/lib/daemon.ts]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, recon T2-AC2. The sibling criterion T2-AC3 (cross-boot escalation dedup) is
+    DELIBERATELY NOT FILED - it already existed as ledger-derived dedup and its ordering defect was fixed in
+    #472. The recon's description of it as an in-memory Set that resets across restarts was wrong, verified at
+    intake.
+    ALSO SHIPPED, supervisor-side: ThrottleInterval 60 is in the daemon plist as independent insurance. That
+    bounds the RATE of a loop but detects nothing, which is why this task still matters."

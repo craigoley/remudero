@@ -1,0 +1,55 @@
+- id: W1-T213
+  title: "the hand-written docs contradict the code on four counts, and the claims gate that would have caught it points at six claims and one file"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "RECON R-30 and R-25, VERIFIED on every sub-claim during intake.
+    THE DOCS ARE WRONG IN WAYS THAT WOULD MISLEAD A CRISIS RESPONDER. README.md:31 still says the repo
+    'currently contains the WS-0 spike', and :38-39 says run-task.ts is something that 'becomes' real in
+    WS-1 - it exists and is over six thousand lines. CONTRIBUTING.md:3-6 names the required check as `ci`,
+    repeated at :15, :20 and :61; the actual required contexts are remudero-review and ci-gate. The operator
+    guide contains no mention of --repo at all, though it is a real parsed flag (run-task.ts:2617), and
+    documents 18 verbs against at least 28 implemented - twelve confirmed missing including approve, fix,
+    inbox, sweep, plan and triage. docs/ci-gate.md is a one-line probe artifact.
+    WHY THIS SURVIVED IN A REPO THAT GATES ITS CLAIMS: claims-check executes only assertions listed in
+    plan/claims.yaml, which holds SIX claims, and the only docs file referenced is docs/review-gate.md. So
+    README, CONTRIBUTING, the operator guide and ci-gate.md are entirely unguarded. The gate exists and does
+    not point at them.
+    R-25, MEASURED AT INTAKE: no rotation exists for any log - nothing in newsyslog.d, nothing in src, scripts
+    or bin. Honest sizing though, and it changes the priority: the logs are currently SMALL (daemon.err 42 KB,
+    daemon.out 117 KB, serve.log under 1 KB, drain 1.2 KB, sweep-loop 9.5 KB). The genuinely unbounded file in
+    that directory is ledger.ndjson at 9.4 MB, which is W1-T209's subject, not this one."
+  design: |
+    EXTEND THE EXISTING CLAIMS GATE RATHER THAN BUILDING A DOCS LINTER. plan/claims.yaml already drives an
+    executable check on every PR. Add assertions for the specific contradictions above so they cannot recur:
+    the required-check name, the WS-stage claim, --repo coverage, and the verb list. A claim that can go
+    stale silently is the thing being fixed, so the fix must itself be executable.
+    THE VERB-COVERAGE CHECK SHOULD DERIVE, NOT ENUMERATE. The CLI already has a COMMANDS registry that
+    generates docs/cli-reference.md. Derive the operator guide's coverage obligation from that registry so a
+    verb added later is caught automatically instead of needing this task done again.
+    DELETE docs/ci-gate.md OR MAKE IT REAL. A one-line probe artifact masquerading as documentation is worse
+    than an absent file, because a reader trusts the filename.
+  acceptance:
+    - claim: "a doc contradicting the code on the required-check name, the WS stage, or --repo coverage FAILS an executable check rather than surviving in prose"
+      proof: "unit test: test/docs-claims.test.ts"
+    - claim: "a CLI verb present in the COMMANDS registry but absent from the operator guide FAILS, derived from the registry so a later verb is caught without re-doing this task"
+      proof: "unit test: test/docs-claims.test.ts"
+    - claim: "docs/ci-gate.md is either removed or carries real content, so a probe artifact cannot masquerade as documentation under a trusted filename"
+      proof: "unit test: test/docs-claims.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§10"]
+  files: [plan/claims.yaml]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, findings R-30 and R-25, recon T10. Every R-30 sub-claim verified at intake;
+    CONTRIBUTING's offending line is 3-6 rather than the reported 5, and the missing-verb count is twelve
+    rather than the reported fourteen. Log sizes measured rather than assumed - all four are small today,
+    which is why rotation is sized as hygiene here and the 9.4 MB ledger is W1-T209's problem.
+    SCOPE NARROWED at intake after rmd lint-plan flagged a rule-19 span (claims, daemon, launchd) and a
+    rule-18 headless-fitness violation on a criterion naming launchctl. Split rather than regraded: the
+    runbook and log-rotation half became W1-T217, which is where the supervisor-restart material belongs.
+    R-25 (log rotation) therefore lives in W1-T217, not here."
