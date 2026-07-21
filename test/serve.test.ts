@@ -635,23 +635,85 @@ test("GET /v1/control/status (assembled server): reads back the REAL fleet-contr
   });
 });
 
-test("GET /v1/recent (assembled server): last merges/blocks, PR-linked, most-recent-first by ledger order", async () => {
+test("GET /v1/recent (assembled server): a LEDGER-FIRST activity feed — verdict/fix/escalation/spend events, PR-linked, most-recent-first by ledger order (W1-T184)", async () => {
   const root = tmpRoot();
   const prUrl = "https://github.com/craigoley/remudero/pull/9";
-  const plan = planOf([task({ id: "OLD", status: "merged" }), task({ id: "NEW", status: "merged" })]);
+  const plan = planOf([task({ id: "OLD", title: "the old task", status: "merged" }), task({ id: "NEW", title: "the new task", status: "merged" })]);
   const ledgerPath = ledgerPathFor(root);
   const github = fakeGitHub({ [prUrl]: { number: 9, url: prUrl, state: "MERGED" } });
   const deps = depsFor(root, plan, { board: { plan, ledgerPath, github } });
-  // OLD is mentioned first, NEW second — NEW must sort first (most-recent-first).
+  // OLD is mentioned first, NEW second — NEW must sort first (most-recent-first, ledger-append order).
   appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "OLD", step: "pr.opened", pr_url: prUrl }) + "\n");
+  appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "OLD", step: "verdict", verdict: "merged", cost_usd: 1.5 }) + "\n");
   appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r2", task_id: "NEW", step: "pr.opened", pr_url: prUrl }) + "\n");
+  appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r2", task_id: "NEW", step: "verdict", verdict: "merged", cost_usd: 2.5 }) + "\n");
   await withServeServer(deps, async (base) => {
     const res = await get(base, "/v1/recent", READ_TOKEN);
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { entries: Array<{ taskId: string; outcome: string }> };
+    const body = (await res.json()) as {
+      entries: Array<{ taskId: string; title: string; verb: string; prUrl?: string; prNumber?: number; costUsd?: number; ts: string }>;
+    };
     assert.deepEqual(body.entries.map((e) => e.taskId), ["NEW", "OLD"]);
-    assert.ok(body.entries.every((e) => e.outcome === "merged"));
+    assert.ok(body.entries.every((e) => e.verb === "merged"));
+    assert.ok(body.entries.every((e) => e.prUrl === prUrl && e.prNumber === 9));
+    assert.ok(body.entries.every((e) => typeof e.title === "string" && e.title.length > 0));
+    assert.deepEqual(body.entries.map((e) => e.costUsd), [2.5, 1.5]);
   });
+});
+
+test("GET /v1/recent (assembled server): a GitHub outage renders the IDENTICAL feed — GitHub decorates, it never gates (W1-T184 FIXTURE 1)", async () => {
+  const prUrl = "https://github.com/craigoley/remudero/pull/9";
+  const plan = planOf([task({ id: "W1-T1", title: "a task" })]);
+  const ledgerLines = [
+    JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "pr.opened", pr_url: prUrl }),
+    JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "verdict", verdict: "merged", cost_usd: 1 }),
+  ].join("\n") + "\n";
+
+  // `depsFor`/`ledgerPathFor` TRUNCATE the ledger file as a side effect (fresh-fixture hygiene),
+  // so the ledger content must be appended AFTER building `deps`, never before.
+  const healthyRoot = tmpRoot();
+  const healthyLedgerPath = ledgerPathFor(healthyRoot);
+  const healthyGithub = fakeGitHub({ [prUrl]: { number: 9, url: prUrl, state: "MERGED", title: "the actual PR title" } });
+  const healthyDeps = depsFor(healthyRoot, plan, { board: { plan, ledgerPath: healthyLedgerPath, github: healthyGithub } });
+  appendFileSync(healthyLedgerPath, ledgerLines);
+  const healthy = await (async () => {
+    let out: unknown;
+    await withServeServer(healthyDeps, async (base) => {
+      out = await (await get(base, "/v1/recent", READ_TOKEN)).json();
+    });
+    return out as { entries: Array<Record<string, unknown>> };
+  })();
+
+  // A gateway seeded to FAIL every read (W1-T181's marked-failure signal) — never throws, just
+  // reports readFailed()/readFailureReason() truthfully, exactly like a real outage would.
+  const darkGithub: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    readFailed: () => true,
+    readFailureReason: () => "transport",
+  };
+  const darkRoot = tmpRoot();
+  const darkLedgerPath = ledgerPathFor(darkRoot);
+  const darkDeps = depsFor(darkRoot, plan, { board: { plan, ledgerPath: darkLedgerPath, github: darkGithub } });
+  appendFileSync(darkLedgerPath, ledgerLines);
+  const dark = await (async () => {
+    let out: unknown;
+    await withServeServer(darkDeps, async (base) => {
+      out = await (await get(base, "/v1/recent", READ_TOKEN)).json();
+    });
+    return out as { entries: Array<Record<string, unknown>> };
+  })();
+
+  assert.equal(dark.entries.length, healthy.entries.length);
+  assert.deepEqual(
+    dark.entries.map((e) => ({ taskId: e.taskId, verb: e.verb, prUrl: e.prUrl, costUsd: e.costUsd })),
+    healthy.entries.map((e) => ({ taskId: e.taskId, verb: e.verb, prUrl: e.prUrl, costUsd: e.costUsd })),
+  );
+  assert.equal(healthy.entries[0]!.prTitle, "the actual PR title");
+  assert.equal(dark.entries[0]!.prTitle, undefined, "a failed GitHub read degrades to ledger-only detail, never removes the row");
+  assert.equal(dark.entries[0]!.githubUnavailable, true, "a failed read is marked unavailable, not silently absent");
 });
 
 test("GET /v1/inbox (assembled server): the W1-T110 ratification inbox's READY tier, reachable and header-only", async () => {

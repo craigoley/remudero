@@ -6,6 +6,7 @@ import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { createService } from "../src/lib/service.js";
 import {
+  buildRecentRoute,
   buildStatusRoute,
   buildStatusStream,
   compareByAge,
@@ -13,6 +14,9 @@ import {
   compareByRecency,
   compareByStatus,
   computeBoardSnapshot,
+  computeRecentActivity,
+  createBoardSnapshotCache,
+  createRecentActivityCache,
   sortBoardRows,
   type BoardDeps,
   type BoardRow,
@@ -364,4 +368,225 @@ test("GET /v1/status/stream: unsubscribing (client disconnect) stops the ledger 
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.equal(client.events.filter((e) => e.event === "status").length, 0);
   });
+});
+
+// ── W1-T184: LEDGER-FIRST RENDERING ─────────────────────────────────────────────────────────
+//
+// RECENT becomes an activity feed sourced from the LOCAL ledger; NOW rows carry live per-run
+// spend/turns; GitHub decorates (never gates) — see board.ts's own header comment on
+// computeRecentActivity/decoratePrTitle for the full design rationale (the 2026-07-20 outage +
+// invisible-burn fixtures this task exists to fix).
+
+test("W1-T184: computeRecentActivity classifies every ledger event class the design note names — merged, verdict, fix (dispatch/done/exhausted), escalated, spend — each carrying task id + title", () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1", title: "task one" }), task({ id: "W1-T2", title: "task two" })]);
+  const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub() };
+  const cache = createRecentActivityCache();
+
+  appendFileSync(
+    ledgerPath,
+    [
+      JSON.stringify({ ts: "2026-07-20T10:00:00Z", run_id: "r1", task_id: "W1-T1", step: "pr.opened", pr_url: "https://github.com/o/r/pull/1" }),
+      JSON.stringify({ ts: "2026-07-20T10:00:01Z", run_id: "r1", task_id: "W1-T1", step: "verdict", verdict: "merged", cost_usd: 3.5 }),
+      JSON.stringify({ ts: "2026-07-20T10:01:00Z", run_id: "r2", task_id: "W1-T2", step: "fix.dispatch", strike: 1 }),
+      JSON.stringify({ ts: "2026-07-20T10:02:00Z", run_id: "r2", task_id: "W1-T2", step: "fix.done", strike: 1, cost_usd: 1.24, num_turns: 38 }),
+      JSON.stringify({ ts: "2026-07-20T10:03:00Z", run_id: "r2", task_id: "W1-T2", step: "fix.exhausted", strikes: 2, issue_url: "https://github.com/o/r/issues/5" }),
+      JSON.stringify({ ts: "2026-07-20T10:04:00Z", run_id: "r2", task_id: "W1-T2", step: "escalation.issue_opened", class: "BLOCKED", issue_url: "https://github.com/o/r/issues/5" }),
+      JSON.stringify({ ts: "2026-07-20T10:05:00Z", run_id: "r3", task_id: "W1-T2", step: "implement.done", cost_usd: 0.42, num_turns: 5 }),
+      // pseudo-ids the daemon/sweep/drain log under -- never a real plan task, must be filtered out.
+      JSON.stringify({ ts: "2026-07-20T10:06:00Z", run_id: "r9", task_id: "DAEMON", step: "verdict", verdict: "merged", cost_usd: 99 }),
+    ].join("\n") + "\n",
+  );
+
+  const entries = computeRecentActivity(deps, cache, 20);
+  // most-recent-first: implement.done, escalation, fix.exhausted, fix.done, fix.dispatch, then the W1-T1 merge.
+  assert.deepEqual(entries.map((e) => e.taskId), ["W1-T2", "W1-T2", "W1-T2", "W1-T2", "W1-T2", "W1-T1"]);
+  assert.deepEqual(entries.map((e) => e.verb), ["spend", "escalated", "fix", "fix", "fix", "merged"]);
+  assert.ok(entries.every((e) => e.title === (e.taskId === "W1-T1" ? "task one" : "task two")));
+  assert.ok(!entries.some((e) => e.taskId === "DAEMON"), "a pseudo run-id task must never surface as a feed row");
+
+  const merged = entries.find((e) => e.verb === "merged")!;
+  assert.equal(merged.costUsd, 3.5);
+  assert.equal(merged.prUrl, "https://github.com/o/r/pull/1");
+  assert.equal(merged.prNumber, 1);
+
+  const fixDone = entries.find((e) => e.verb === "fix" && e.detail?.startsWith("done"))!;
+  assert.equal(fixDone.costUsd, 1.24);
+  assert.equal(fixDone.numTurns, 38);
+});
+
+test("W1-T184: GitHub outage renders the IDENTICAL activity feed as a healthy read — GitHub decorates (PR title), it never gates the row", () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1", title: "a task" })]);
+  const prUrl = "https://github.com/o/r/pull/1";
+  appendFileSync(
+    ledgerPath,
+    [
+      JSON.stringify({ ts: "2026-07-20T10:00:00Z", run_id: "r1", task_id: "W1-T1", step: "pr.opened", pr_url: prUrl }),
+      JSON.stringify({ ts: "2026-07-20T10:00:01Z", run_id: "r1", task_id: "W1-T1", step: "verdict", verdict: "merged", cost_usd: 1 }),
+    ].join("\n") + "\n",
+  );
+
+  const healthy = computeRecentActivity(
+    { plan, ledgerPath, github: fakeGitHub({ [prUrl]: { number: 1, url: prUrl, state: "MERGED", title: "real PR title" } }) },
+    createRecentActivityCache(),
+  );
+
+  const darkGithub: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    readFailed: () => true,
+    readFailureReason: () => "buffer_overflow",
+  };
+  const dark = computeRecentActivity({ plan, ledgerPath, github: darkGithub }, createRecentActivityCache());
+
+  assert.equal(dark.length, healthy.length);
+  const strip = (e: { taskId: string; verb: string; prUrl?: string; costUsd?: number }) => ({ taskId: e.taskId, verb: e.verb, prUrl: e.prUrl, costUsd: e.costUsd });
+  assert.deepEqual(dark.map(strip), healthy.map(strip));
+  assert.equal(healthy[0]!.prTitle, "real PR title");
+  assert.equal(dark[0]!.prTitle, undefined);
+  assert.equal(dark[0]!.githubUnavailable, true);
+});
+
+test("W1-T184: the activity feed tails the ledger — a render never re-decorates (re-fetches GitHub for) an already-seen line, only the new ones", () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1", title: "t1" }), task({ id: "W1-T2", title: "t2" })]);
+  let calls = 0;
+  const prUrl = "https://github.com/o/r/pull/1";
+  const github: GitHub = {
+    prByRef: (ref) => {
+      calls++;
+      return String(ref) === prUrl ? { number: 1, url: prUrl, state: "MERGED" } : null;
+    },
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+  };
+  const deps: BoardDeps = { plan, ledgerPath, github };
+  const cache = createRecentActivityCache();
+
+  appendFileSync(
+    ledgerPath,
+    [
+      JSON.stringify({ ts: "2026-07-20T10:00:00Z", run_id: "r1", task_id: "W1-T1", step: "pr.opened", pr_url: prUrl }),
+      JSON.stringify({ ts: "2026-07-20T10:00:01Z", run_id: "r1", task_id: "W1-T1", step: "verdict", verdict: "merged", cost_usd: 1 }),
+    ].join("\n") + "\n",
+  );
+  computeRecentActivity(deps, cache);
+  assert.equal(calls, 1, "one PR-decoration call for the one PR-linked row minted so far");
+  computeRecentActivity(deps, cache); // re-render, ledger unchanged -> no new lines to classify/decorate
+  computeRecentActivity(deps, cache);
+  assert.equal(calls, 1, "re-rendering an unchanged ledger must not re-decorate already-minted rows");
+
+  appendFileSync(
+    ledgerPath,
+    JSON.stringify({ ts: "2026-07-20T10:01:00Z", run_id: "r2", task_id: "W1-T2", step: "implement.done", cost_usd: 0.1, num_turns: 2 }) + "\n",
+  );
+  computeRecentActivity(deps, cache);
+  assert.equal(calls, 1, "a new row with NO prUrl triggers no GitHub call at all");
+});
+
+test("W1-T184: NOW rows carry LIVE accumulated spend/turns, summed from implement.done/fix.done lines of the task's CURRENT run, ticking as more lines land", () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1" })]);
+  const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub(), now: () => Date.parse("2026-07-20T10:10:00Z") };
+
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T10:00:00Z", run_id: "r1", task_id: "W1-T1", step: "run.start" }) + "\n");
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T10:01:00Z", run_id: "r1", task_id: "W1-T1", step: "implement.done", cost_usd: 1.24, num_turns: 38 }) + "\n");
+  // a mid-run running-total line (budget.warning) must NOT be double-counted into the sum.
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T10:01:30Z", run_id: "r1", task_id: "W1-T1", step: "budget.warning", cost_usd: 1.24 }) + "\n");
+
+  let row = computeBoardSnapshot(deps).tasks.find((t) => t.taskId === "W1-T1")!;
+  assert.equal(row.phase, "review"); // deriveRunState: implement.done advances the phase to "review"
+  assert.equal(row.liveSpendUsd, 1.24);
+  assert.equal(row.liveTurns, 38);
+
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T10:02:00Z", run_id: "r1", task_id: "W1-T1", step: "fix.done", strike: 1, cost_usd: 1.3, num_turns: 38 }) + "\n");
+  row = computeBoardSnapshot(deps).tasks.find((t) => t.taskId === "W1-T1")!;
+  assert.equal(row.liveSpendUsd, 2.54, "ticks upward as further lines are appended (the FIXTURE 2 shape: ~2.54 USD total)");
+  assert.equal(row.liveTurns, 76);
+});
+
+test("W1-T184: a terminal (non-in-flight) task never carries liveSpendUsd/liveTurns — those are a NOW-only, in-flight concept", () => {
+  const ledgerPath = tmpLedgerPath();
+  const prUrl = "https://github.com/o/r/pull/1";
+  const plan = planOf([task({ id: "W1-T1" })]);
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T10:00:00Z", run_id: "r1", task_id: "W1-T1", step: "run.start" }) + "\n");
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T10:00:30Z", run_id: "r1", task_id: "W1-T1", step: "implement.done", cost_usd: 1, num_turns: 10 }) + "\n");
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T10:01:00Z", run_id: "r1", task_id: "W1-T1", step: "pr.opened", pr_url: prUrl }) + "\n");
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T10:01:01Z", run_id: "r1", task_id: "W1-T1", step: "verdict", verdict: "merged", cost_usd: 1 }) + "\n");
+  const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub({ [prUrl]: { number: 1, url: prUrl, state: "MERGED" } }) };
+
+  const row = computeBoardSnapshot(deps).tasks.find((t) => t.taskId === "W1-T1")!;
+  assert.equal(row.status, "merged");
+  assert.equal(row.phase, undefined);
+  assert.equal(row.liveSpendUsd, undefined);
+  assert.equal(row.liveTurns, undefined);
+});
+
+test("W1-T184: createBoardSnapshotCache recomputes ONLY when the ledger has grown — an unchanged ledger across repeated/'concurrent' calls triggers no re-projection", () => {
+  const ledgerPath = tmpLedgerPath();
+  writeFileSync(ledgerPath, "");
+  const prUrl = "https://github.com/o/r/pull/1";
+  let calls = 0;
+  const github: GitHub = {
+    prByRef: (ref) => {
+      calls++;
+      return String(ref) === "1" ? { number: 1, url: prUrl, state: "OPEN" } : null;
+    },
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+  };
+  // rung (b), `task.pr` -- forces a prByRef call on EVERY derivation, so `calls` is a direct
+  // proxy for "did a real recompute happen" (a cache hit calls github zero times).
+  const plan = planOf([task({ id: "W1-T1", pr: 1 })]);
+  const deps: BoardDeps = { plan, ledgerPath, github };
+  const cache = createBoardSnapshotCache();
+
+  cache.get(deps);
+  assert.equal(calls, 1);
+  // Node's real GitHub gateways shell `gh` synchronously (execFileSync), blocking the ONE event
+  // loop thread for the whole call -- so N calls arriving in a burst before the ledger changes
+  // (simulated here as N synchronous calls in a row) can never trigger more than the one
+  // recompute the first call already performed; every one of these is a cache hit.
+  cache.get(deps);
+  cache.get(deps);
+  cache.get(deps);
+  assert.equal(calls, 1, "unchanged ledger across repeated/'concurrent' calls -> exactly one recompute");
+
+  appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "run.start" }) + "\n");
+  cache.get(deps);
+  assert.equal(calls, 2, "the ledger grew -> exactly one fresh recompute");
+  cache.get(deps);
+  assert.equal(calls, 2, "and it settles back to a cache hit once the new length is captured");
+});
+
+test("GET /v1/recent: reachable through the real assembled route (not just the pure function), still ledger-first", async () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1", title: "a task" })]);
+  const prUrl = "https://github.com/o/r/pull/1";
+  appendFileSync(
+    ledgerPath,
+    [
+      JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "pr.opened", pr_url: prUrl }),
+      JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "verdict", verdict: "merged", cost_usd: 2 }),
+    ].join("\n") + "\n",
+  );
+  const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub({ [prUrl]: { number: 1, url: prUrl, state: "MERGED" } }) };
+  const server = createService({ tokens: { read: READ_TOKEN, write: WRITE_TOKEN }, routes: [buildRecentRoute(deps)] });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/recent`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { entries: Array<Record<string, unknown>> };
+    assert.deepEqual(body.entries, [
+      { taskId: "W1-T1", verb: "merged", detail: "merged", title: "a task", costUsd: 2, prUrl, prNumber: 1, ts: body.entries[0]!.ts },
+    ]);
+  } finally {
+    server.close();
+  }
 });

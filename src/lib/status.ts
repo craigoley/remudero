@@ -107,6 +107,16 @@ export interface PrRef {
   url: string;
   /** GitHub PR state: "MERGED" | "OPEN" | "CLOSED". */
   state: string;
+  /**
+   * The PR's title (W1-T184) — a pure DECORATION, never a precedence input: nothing in
+   * {@link derivePrPrecedence} reads this field, so an absent/stale title never changes
+   * merge-state derivation. Optional (added after every pre-existing {@link PrRef} fixture
+   * was already written) so no existing literal implementer breaks — omitted ⇒ a caller
+   * decorating a row with the PR's title (lib/board.ts's RECENT activity feed) degrades to
+   * showing the bare PR number/url instead, the same fail-soft discipline every other
+   * optional field on this interface already follows.
+   */
+  title?: string;
 }
 
 /**
@@ -1004,7 +1014,10 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
   };
   return {
     prByRef(ref) {
-      const pr = tryJson<PrRef>(["pr", "view", String(ref), "--repo", slug, "--json", "number,url,state"]);
+      // "title" rides along on this SAME fetch (W1-T184) — a decoration, never an extra
+      // `gh` call: lib/board.ts's RECENT activity feed reads it off the SAME PrRef this
+      // method already returns for every other caller.
+      const pr = tryJson<PrRef>(["pr", "view", String(ref), "--repo", slug, "--json", "number,url,state,title"]);
       return pr && typeof pr.number === "number" ? pr : null;
     },
     findMergedByTrailer(taskId) {
@@ -1053,6 +1066,8 @@ export interface BatchedPr {
    * run-task.ts's `buildOpenPrViews`/`buildOpenPrView` already use for this exact field.
    */
   autoMergeRequest?: unknown;
+  /** The PR's title (W1-T184) — see {@link PrRef.title}; carried verbatim off the same batched fetch. */
+  title?: string;
 }
 
 /**
@@ -1150,7 +1165,9 @@ export function buildBatchedGithub(
         // W1-T155: `autoMergeRequest` rides along on this SAME single fetch — the
         // armed-awaiting-merge taxonomy costs zero extra `gh` calls, preserving the
         // board-fix O(1) invariant this gateway exists for.
-        "pr", "list", "--repo", slug, "--state", "all", "--json", "number,url,state,headRefName,body,autoMergeRequest", "--limit", "1000",
+        // "title" rides along too (W1-T184) — RECENT's PR-title decoration costs zero extra
+        // `gh` calls, same O(1) invariant this gateway already holds for autoMergeRequest.
+        "pr", "list", "--repo", slug, "--state", "all", "--json", "number,url,state,headRefName,body,autoMergeRequest,title", "--limit", "1000",
       ]);
       // W1-T181 design (vi): log the payload size on every SUCCESSFUL fetch, so the next
       // approach to whatever ceiling is set above is observable in advance instead of arriving
@@ -1212,7 +1229,7 @@ export function buildBatchedGithub(
     return cache;
   };
 
-  const asRef = (p: BatchedPr): PrRef => ({ number: p.number, url: p.url, state: p.state });
+  const asRef = (p: BatchedPr): PrRef => ({ number: p.number, url: p.url, state: p.state, title: p.title });
   const lookup = (ref: string | number): BatchedPr | undefined => {
     const idx = index();
     const s = String(ref);
