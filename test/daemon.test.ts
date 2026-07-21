@@ -809,3 +809,75 @@ test("reconstructState: reconstructs a MIX of orphans in order, logging one daem
   assert.deepEqual(lines.map((l) => l.extra.task), ["W1-A", "W1-B", "W1-C"]);
   assert.deepEqual(lines.map((l) => l.extra.action), ["resume", "clean", "clean"]);
 });
+
+// ── the loop survives a throwing sweep / escalation hook (R-1) ──────────────
+// Both hooks reach GitHub through execFileSync, which throws on any nonzero
+// exit. Neither sat inside the loop's only try/catch (which wraps `runOne`), so
+// an unreachable `gh` ended the PROCESS; launchd's KeepAlive{SuccessfulExit:
+// false} read that as a crash and relaunched into the same failure — one boot
+// per minute, 2026-07-21 04:02-04:13. The daemon must degrade, not die.
+
+test("a THROWING sweep does not kill the loop — it logs daemon.sweep.failed and keeps polling", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  let sweeps = 0;
+  const root = mkdtempSync(join(tmpdir(), "daemon-sweep-throw-"));
+  const s = await runDaemon(plan, {
+    refreshMerged: () => (id: string) => merged.has(id),
+    runOne: async (id) => {
+      merged.add(id);
+      return okResult(id);
+    },
+    sweep: async () => {
+      sweeps += 1;
+      // FALSIFIER: pre-fix, this throw propagated straight out of runDaemon.
+      throw new Error("gh: HTTP 403 rate limit exceeded");
+    },
+    checkStop: () => (sweeps >= 2 ? (requestStop(root, "two failed sweeps seen"), stopDetail(root)) : undefined),
+    sleep: async () => {},
+  });
+  assert.ok(sweeps >= 2, `the loop kept iterating THROUGH the failures (saw ${sweeps} sweeps)`);
+  assert.notEqual(s.stopReason, "error", "a failing reconciler is not a daemon error");
+});
+
+test("a THROWING onCircuitBreak hook does not kill the loop", async () => {
+  const plan = fixturePlan();
+  let hookCalls = 0;
+  const root = mkdtempSync(join(tmpdir(), "daemon-escalate-throw-"));
+  let ticks = 0;
+  const s = await runDaemon(plan, {
+    refreshMerged: () => () => false,
+    runOne: async (id) => okResult(id),
+    isCircuitTripped: () => true,
+    onCircuitBreak: () => {
+      hookCalls += 1;
+      // FALSIFIER: pre-fix, `gh` failing here ended the process mid-selection.
+      throw new Error("gh: could not create issue");
+    },
+    checkStop: () => (++ticks >= 3 ? (requestStop(root, "done"), stopDetail(root)) : undefined),
+    sleep: async () => {},
+  });
+  assert.ok(hookCalls >= 1, "the escalation hook was actually reached");
+  assert.notEqual(s.stopReason, "error", "an undeliverable escalation is not a daemon error");
+});
+
+test("daemonBoot: calls the injected lock sweep once and logs daemon.lock_sweep with reaped/kept COUNTs", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let calls = 0;
+  const sweepLocks = () => {
+    calls += 1;
+    return { reaped: ["W1-T1"], kept: ["W1-T184"] };
+  };
+  daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin" }, undefined, sweepLocks);
+  assert.equal(calls, 1, "swept exactly once at boot, not per poll");
+  const swept = lines.find((l) => l.step === "daemon.lock_sweep");
+  assert.ok(swept, "the sweep is legible on its own ledger step");
+  assert.equal(swept?.extra.reaped, 1, "the COUNT is logged, not the raw id list");
+  assert.equal(swept?.extra.kept, 1);
+});
+
+test("daemonBoot: with no lock sweep injected, no daemon.lock_sweep line is written", () => {
+  const lines: Array<{ step: string }> = [];
+  daemonBoot((step) => lines.push({ step }), { PATH: "/usr/bin" });
+  assert.equal(lines.filter((l) => l.step === "daemon.lock_sweep").length, 0);
+});

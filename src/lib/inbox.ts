@@ -4,6 +4,7 @@ import { parseTasksFromYaml, PlanError, unmetDependencies } from "./plan.js";
 import { lintPlan } from "./task-linter.js";
 import { appendLedger } from "./ledger.js";
 import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
+import { workerLedgerFields, type WorkerResult } from "./worker.js";
 
 /**
  * `rmd inbox` — the ratification inbox's DETERMINISTIC CORE (MASTER-PLAN P25(i), W1-T110).
@@ -20,12 +21,20 @@ import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
  *
  * THE SPLIT (mirrors lib/plan-architect.ts and lib/dep-review.ts): drafting a candidate
  * ratification — a `plan/tasks.yaml` fragment + the MASTER-PLAN.md stamp line — is the
- * LLM's job (a bounded Architect worker, harness-spawned by run-task.ts's `inboxCommand`,
- * using {@link inboxDraftPrompt}/{@link parseDraftedCandidate} below). EVERYTHING AFTER
- * drafting is deterministic: {@link classifyProposal} is a PURE function (rule 2,
- * policy-as-data) over an already-drafted candidate + injected facts about the world
- * (dependency merge-state, evidence-anchor grep-truth, lint cleanliness, open conflicts)
- * — no LLM call anywhere in this module, so every branch is a unit fixture.
+ * LLM's job (a bounded Architect worker, harness-spawned by run-task.ts, via
+ * {@link runDraftRung} below). EVERYTHING AFTER drafting is deterministic:
+ * {@link classifyProposal} is a PURE function (rule 2, policy-as-data) over an
+ * already-drafted candidate + injected facts about the world (dependency merge-state,
+ * evidence-anchor grep-truth, lint cleanliness, open conflicts) — no LLM call anywhere in
+ * this module, so every branch is a unit fixture.
+ *
+ * DAEMON-SIDE, NOT CLI-PULL (W1-T192): the draft rung runs on the daemon's own poll cadence
+ * (run-task.ts's `buildInboxDraftHook`, riding the SAME `deps.sweep()` seam the W1-T150
+ * credit-backfill rung occupies) — a fired trigger or an invalidated (reframed) draft gets
+ * redrafted there, with NO CLI invocation required. `rmd inbox` (`inboxCommand`) is a
+ * viewer AND a manual force, never the only trigger — see {@link proposalsNeedingDraft}
+ * (the shared, unthrottled predicate) vs {@link draftsDueOnDaemon} (the daemon's own
+ * idempotence-throttled selection) below.
  *
  * READY = drafted tasks' deps all merged (deriveStatus, corrections-supreme, via the
  * caller's injected {@link MergedResolver}) AND the proposal's cited evidence anchors
@@ -124,6 +133,78 @@ export function anchorFingerprint(anchors: EvidenceAnchor[]): string {
  *  currently grep-true: a fixture that "moves" an anchor typically flips both at once. */
 export function isDraftStale(draft: DraftedCandidate, currentAnchors: EvidenceAnchor[]): boolean {
   return draft.anchorFingerprint !== anchorFingerprint(currentAnchors);
+}
+
+// ── The draft rung's "needs a draft" predicate (W1-T192) ──────────────────────────────────
+//
+// Both `rmd inbox` (CLI, on-demand) and the daemon's per-poll draft rung must select the
+// SAME set of drafting candidates from the SAME facts — "REUSE it rather than re-deriving,
+// so the daemon and the CLI can never disagree about what is draftable" (design). This is
+// that ONE predicate; everything below layers on top of it.
+
+/** Every proposal that currently needs a fresh draft: not deferred by an unfired trigger,
+ *  and either never drafted or its cached draft is stale ({@link isDraftStale}). Deliberately
+ *  takes NO attempt-throttle input — this is the UNTHROTTLED predicate `rmd inbox`'s manual
+ *  force uses (design: "`rmd inbox` KEEPS ITS ROLE... able to force a draft on demand"). The
+ *  daemon-side rung layers {@link draftsDueOnDaemon}'s idempotence throttle on TOP of this,
+ *  never instead of it. */
+export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache): Proposal[] {
+  return proposals.filter((p) => {
+    if (p.trigger && !p.trigger.fired) return false; // never drafted for a dead-consumer proposal
+    const cached = drafts[p.id];
+    return !cached || isDraftStale(cached, p.evidenceAnchors);
+  });
+}
+
+// ── Daemon-side idempotence (W1-T192) ──────────────────────────────────────────────────────
+//
+// The draft rung now spawns from an UNATTENDED 300s daemon poll (buildSweepHook's cadence,
+// run-task.ts), not only from a human typing `rmd inbox`. A single invalidation (a reframe
+// round, an evidence anchor moving) must produce ONE draft attempt, never one per poll — the
+// same "keyed to a stable cause, not to poll count" discipline the fix rung applies to a
+// head sha. {@link draftAttemptKey} is that stable cause fingerprint; {@link DraftAttemptCache}
+// records the key the daemon LAST ATTEMPTED (successfully or not) per proposal, distinct from
+// {@link DraftCache} (which records only SUCCESSFUL drafts) precisely so a FAILED attempt does
+// not get repeated every poll for the same cause either.
+
+/** A proposal's current "draft cause" fingerprint: its evidence-anchor set plus how many
+ *  `rmd reframe` rounds it has been through. This changes exactly when something that would
+ *  make a genuinely DIFFERENT draft worth attempting changes — a new reframe round, or the
+ *  anchor set moving — never on poll count alone. */
+export function draftAttemptKey(proposal: Proposal): string {
+  return `${anchorFingerprint(proposal.evidenceAnchors)}::${(proposal.reframeHistory ?? []).length}`;
+}
+
+/** `<config.root>/state/inbox-draft-attempts.json` — one {@link draftAttemptKey} per
+ *  proposal id, recording the cause the DAEMON rung last attempted a draft for (win or
+ *  lose). Daemon-only: `rmd inbox`'s manual force never reads or writes this cache — see
+ *  {@link proposalsNeedingDraft}'s doc. */
+export interface DraftAttemptCache {
+  [proposalId: string]: string;
+}
+
+/** Parse a {@link DraftAttemptCache} JSON blob; `{}` on missing/malformed input (mirrors
+ *  {@link parseDraftCache}'s fail-soft-to-empty discipline — a daemon that has never
+ *  attempted a draft yet is the normal pre-population state, not an error). */
+export function parseDraftAttemptCache(text: string | undefined): DraftAttemptCache {
+  if (!text) return {};
+  try {
+    const raw = JSON.parse(text) as unknown;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+    return raw as DraftAttemptCache;
+  } catch {
+    return {};
+  }
+}
+
+/** Proposals the DAEMON-SIDE draft rung should attempt THIS poll: {@link proposalsNeedingDraft}
+ *  further throttled by {@link DraftAttemptCache} so a 300s poll cadence never re-spawns the
+ *  Architect for the SAME cause — a proposal is due again only once its {@link draftAttemptKey}
+ *  has actually changed since the daemon's last attempt (or it has never been attempted at
+ *  all). `rmd inbox` never calls this — it calls {@link proposalsNeedingDraft} directly,
+ *  unthrottled, which is what makes it a genuine manual force. */
+export function draftsDueOnDaemon(proposals: Proposal[], drafts: DraftCache, attempts: DraftAttemptCache): Proposal[] {
+  return proposalsNeedingDraft(proposals, drafts).filter((p) => attempts[p.id] !== draftAttemptKey(p));
 }
 
 // ── The readiness predicate (rule 2, policy-as-data) ───────────────────────────────────────
@@ -392,6 +473,80 @@ export function parseDraftedCandidate(text: string): ParsedDraft | null {
   };
 }
 
+// ── The draft rung's INJECTABLE orchestration core (W1-T192) ─────────────────────────────
+//
+// One Architect spawn per proposal is still the harness's job (run-task.ts materializes a
+// worktree and calls worker.ts's real `spawnWorker`) — but WHICH proposals get attempted,
+// how each spawn's output is parsed/logged, and whether one proposal's failure can strand
+// the rest of the batch, is exactly the "pure core / harness-owned I/O" split this module's
+// header describes for lib/plan-architect.ts/lib/dep-review.ts. `deps.spawn` is the ONE
+// injected side effect (mirrors lib/sweep.ts's `SweepDeps.dispatchFix`/lib/review.ts's
+// `runFixRung` `deps.spawn`), so both `rmd inbox` and the daemon rung ride this SAME loop
+// and it is provable from a unit fixture with no real worktree/gh/LLM call anywhere.
+
+/** One Architect worker call for one proposal's draft prompt — real wiring (run-task.ts)
+ *  calls worker.ts's `spawnWorker` inside an already-materialized worktree; tests inject a
+ *  fake. Returns the full {@link WorkerResult} so {@link runDraftRung} can log the SAME
+ *  `workerLedgerFields` every other spawn site ledgers (cost/tokens/compaction/etc). */
+export type DraftSpawn = (proposal: Proposal, prompt: string) => Promise<WorkerResult>;
+
+export interface DraftRungDeps {
+  spawn: DraftSpawn;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+/** One proposal's draft-rung outcome — `ok: true` carries the {@link DraftedCandidate} to
+ *  cache; `ok: false` names why (a malformed worker output, OR a genuine spawn-level
+ *  exception) without ever throwing out of {@link runDraftRung}. */
+export type DraftRungOutcome =
+  | { proposalId: string; ok: true; candidate: DraftedCandidate }
+  | { proposalId: string; ok: false; error: string };
+
+/**
+ * Draft EVERY proposal in `toDraft` against `currentPlanText`, via {@link inboxDraftPrompt} +
+ * {@link parseDraftedCandidate}. Each proposal's spawn+parse is isolated in its OWN try/catch
+ * — W1-T192's fail-soft requirement: a genuine spawn-level exception for one proposal (a
+ * network hiccup, an API error — distinct from the "no FRAGMENT/STAMP markers" malformed-
+ * output case, which was already tolerated pre-W1-T192) never prevents the REST of the batch
+ * from being attempted. This is what makes the SAME loop safe to call from an unattended
+ * daemon poll, not only from a human watching `rmd inbox`'s output. Never throws.
+ */
+export async function runDraftRung(toDraft: Proposal[], currentPlanText: string, deps: DraftRungDeps, runId: string): Promise<DraftRungOutcome[]> {
+  const outcomes: DraftRungOutcome[] = [];
+  for (const proposal of toDraft) {
+    try {
+      const worker = await deps.spawn(proposal, inboxDraftPrompt(proposal, currentPlanText, runId));
+      deps.log("inbox.draft_synthesized", {
+        proposal_id: proposal.id,
+        session_id: worker.sessionId,
+        cost_usd: worker.costUsd,
+        subtype: worker.subtype,
+        ...workerLedgerFields(worker),
+      });
+      const parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"));
+      if (!parsed) {
+        const error = "no FRAGMENT/STAMP markers in worker output";
+        deps.log("inbox.draft_error", { proposal_id: proposal.id, error });
+        outcomes.push({ proposalId: proposal.id, ok: false, error });
+        continue;
+      }
+      const candidate: DraftedCandidate = {
+        proposalId: proposal.id,
+        fragmentYaml: parsed.fragmentYaml,
+        stampLine: parsed.stampLine,
+        anchorFingerprint: anchorFingerprint(proposal.evidenceAnchors),
+      };
+      deps.log("inbox.drafted", { proposal_id: proposal.id });
+      outcomes.push({ proposalId: proposal.id, ok: true, candidate });
+    } catch (e) {
+      const error = String((e as Error)?.message ?? e);
+      deps.log("inbox.draft_error", { proposal_id: proposal.id, error });
+      outcomes.push({ proposalId: proposal.id, ok: false, error });
+    }
+  }
+  return outcomes;
+}
+
 // ── Real-world evidence-anchor adapter (git grep, never a network call) ──────────────────
 
 /**
@@ -456,6 +611,32 @@ export function renderInbox(classifications: InboxClassification[]): string {
     lines.push(`RATIFIED — ${c.proposalId} (already ratified via a prior \`rmd approve\`; no longer active)`);
   }
   return lines.join("\n");
+}
+
+// ── The digest's ready-count block (W1-T112: the morning pulse) ──────────────────────────
+//
+// Same "latest wins" snapshot discipline as lib/ops.ts's AlertsPollSummary / lib/issues-
+// intake.ts's IssuesPollSummary: `rmd inbox` ledgers ONE `inbox.polled` line per invocation
+// carrying this summary, and digest.ts reads the LATEST such line inside its window — a
+// snapshot of the CURRENT ready count, not an additive event count, exactly like a
+// re-poll of unchanged alerts/issues never double-counts. Unlike alerts/issues, digest.ts
+// renders this SOFT: no line at all when `rmd inbox` never polled inside the window,
+// rather than an always-present "(no poll this window)" fallback — the inbox module can
+// land or not without the digest's rendered shape ever depending on it.
+
+export interface InboxPollSummary {
+  /** How many active proposals classified READY this poll — the digest's "N ready" count. */
+  ready: number;
+}
+
+/** Reduce a batch of classifications to the digest's ready count. Pure. */
+export function summarizeInboxPoll(classifications: InboxClassification[]): InboxPollSummary {
+  return { ready: classifications.filter((c) => c.state === "ready").length };
+}
+
+/** One-line render of an {@link InboxPollSummary} — what the digest prints ("inbox: <this>"). */
+export function renderInboxPollSummary(s: InboxPollSummary): string {
+  return `${s.ready} ready`;
 }
 
 // ── State-side registry shapes (harness reads/writes these; this module only types them) ──

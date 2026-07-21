@@ -1774,6 +1774,65 @@ export function resolveServePort(rest: string[]): number {
   return n;
 }
 
+/** Loopback. The default bind: reachable from this machine and from nothing else. */
+export const DEFAULT_SERVE_HOST = "127.0.0.1";
+
+/**
+ * Wildcard binds, refused by name. `server.listen(port)` with no host defaults to `::`, which
+ * accepts from EVERY interface — which is what `rmd serve` actually did while printing
+ * "listening on http://localhost:4317". Anyone on any network the host is attached to could
+ * reach the console, and the only thing between them and fleet-control write actions was a
+ * bearer token that the same command printed to a world-readable log.
+ */
+const WILDCARD_HOSTS = new Set(["0.0.0.0", "::", "*", ""]);
+
+/**
+ * Resolve the interface `rmd serve` binds to: `--host <addr>`, else `RMD_SERVE_HOST`, else
+ * loopback. A wildcard is REFUSED rather than silently accepted — exposure must be a thing
+ * someone typed, naming the interface they meant.
+ *
+ * Remote access is expressed by naming the interface, not by opening all of them. This fleet is
+ * reached from the operator's phone over Tailscale, so the tailnet address is the correct value
+ * here (`RMD_SERVE_HOST=100.x.y.z`) — that keeps the console on an authenticated, encrypted
+ * overlay instead of on every coffee-shop LAN the laptop joins.
+ */
+export function resolveServeHosts(rest: string[], env: NodeJS.ProcessEnv = process.env): string[] {
+  const idx = rest.indexOf("--host");
+  const raw = idx >= 0 ? rest[idx + 1] : env.RMD_SERVE_HOST;
+  if (raw === undefined) return [DEFAULT_SERVE_HOST];
+  const hosts = raw
+    .split(",")
+    .map((h) => h.trim())
+    .filter((h, i, all) => all.indexOf(h) === i);
+  // An all-empty value (",", "  ") must not silently collapse to "listen nowhere" — that would
+  // read as a working server that answers no one. Fall through to the wildcard check below,
+  // which names the empty string, so the operator gets a message rather than a silent no-op.
+  if (hosts.length === 0) hosts.push("");
+  for (const host of hosts) assertBindableHost(host, raw);
+  return hosts;
+}
+
+/**
+ * SINGLE-HOST CONVENIENCE, retained because most callers want one address. Returns the FIRST
+ * resolved host — never a wildcard, since {@link resolveServeHosts} has already refused those.
+ */
+export function resolveServeHost(rest: string[], env: NodeJS.ProcessEnv = process.env): string {
+  return resolveServeHosts(rest, env)[0] as string;
+}
+
+function assertBindableHost(host: string, raw: string): void {
+  if (WILDCARD_HOSTS.has(host)) {
+    throw new Error(
+      `--host ${JSON.stringify(raw)} binds EVERY interface. Name the interface(s) you mean ` +
+        `(e.g. ${DEFAULT_SERVE_HOST} for local only, or "${DEFAULT_SERVE_HOST},<tailnet-ip>" ` +
+        `to keep the console reachable locally AND from the phone).`,
+    );
+  }
+  if (host.startsWith("--")) {
+    throw new Error(`--host expects an address, got the flag ${JSON.stringify(raw)}`);
+  }
+}
+
 /** Where `rmd serve`'s generated bearer tokens persist across restarts (config.root, like every other `<root>/state/*` control file). */
 export function serviceTokensPath(configRoot: string): string {
   return join(configRoot, "state", "service-tokens.json");
@@ -1787,6 +1846,19 @@ export function serviceTokensPath(configRoot: string): string {
  * established for its own first-run file (`openSync(p, "wx")` folds the existence check and
  * the create into one atomic syscall — no TOCTOU window for a second `rmd serve` racing this
  * one's first launch to clobber the other's tokens).
+ *
+ * ROTATION (previously undocumented, which made it effectively absent — R-31). Because this is
+ * create-once/read-thereafter, rotation is: stop `rmd serve`, delete the file, start it again.
+ * The next start mints a fresh pair at 0600.
+ *
+ *     lsof -ti :4317 | xargs kill
+ *     rm ~/Remudero/state/service-tokens.json
+ *     rmd serve            # prints the new console URL
+ *
+ * Rotate whenever a token has been exposed — and note that MERELY RUNNING `rmd serve` used to
+ * expose both, because it printed them to stdout, which under the operator's launch is
+ * redirected to a world-readable `serve.log`. Any token that reached a log, a terminal
+ * transcript, or a chat window is compromised and must be rotated, not merely un-shared.
  */
 export function resolveServiceTokens(configRoot: string): ServiceTokens {
   const p = serviceTokensPath(configRoot);

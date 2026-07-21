@@ -1,0 +1,84 @@
+- id: W1-T221
+  title: "the workers got an enforced commit contract and the operator's hand route got a memory note - one preflight command running commitlint, tsc and the emitter's own checks before a hand-authored push"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "HYGIENE CLASS, LOW PRIORITY, filed because the same defect keeps recurring in the one lane
+    nothing guards.
+    THE ASYMMETRY IS THE FINDING. Workers and the operator hit IDENTICAL gates for IDENTICAL reasons -
+    commitlint header length, subject case, body line length, and a typecheck. The worker lane got real
+    machinery for this: W1-T136's shared plan-PR emitter and src/lib/commit-message.ts, whose
+    shapeCommitMessage and wrapBodyLines are consumed by plan-pr-emitter.ts, plan-architect.ts and
+    triage.ts. Verified at intake: those are all MACHINE lanes. No hand or CLI path consumes that module
+    at all. The operator's route got a memory note, and a memory note is not a gate.
+    FIXTURE 1 - COMMITLINT, REPEATEDLY. The operator records a seventh commitlint firing on the hand route
+    since W1-T136 landed. That is consistent with this project's own record of at least six earlier
+    self-inflicted firings across header-max-length, subject-case and footer-max-line-length, plus one more
+    on 2026-07-21 when a body line landed at 101 characters, one over the limit. The most expensive of
+    these did not even block its own PR - a 101-character squash on PR 418 red-blocked the UNRELATED PR 417.
+    FIXTURE 2 - TYPES, SHIPPED UNDER A GREEN SUITE. PR 477 merged tests that did not compile. npm test runs
+    through tsx, which STRIPS types without checking them, so a 1730-test green run never proved the tests
+    typechecked. CI caught three TS2353 errors that no local signal had surfaced, because the only step that
+    would have caught them - tsc --noEmit - had been run BEFORE the tests were added rather than after.
+    A GREEN SUITE IS NOT A COMPILE.
+    FIXTURE 3 - THE FAILURE THAT NEARLY WENT UNSEEN, observed the same day and the reason the design below
+    insists on independent exit reporting. A preflight commitlint run was chained as
+    `npx commitlint ... >/dev/null && echo CLEAN`. It FAILED, the redirect ate its output, the chain
+    short-circuited, and the only surviving signal was the ABSENCE of a success message. A check whose
+    failure is legible only as a missing line is barely a check at all."
+  design: |
+    ONE COMMAND, THREE INDEPENDENT STEPS, EACH REPORTING ITS OWN EXIT. Run commitlint over the range, then
+    tsc --noEmit, then the emitter's header and body checks against the STAGED commits. The steps must not
+    be chained such that one failure hides another, and each must NAME itself in both the pass and the fail
+    direction - fixture 3 exists precisely because a chained, redirected check reported failure only by
+    staying silent. A passing preflight should say what it checked, not merely exit 0.
+    REUSE lib/commit-message.ts RATHER THAN RESTATING ITS RULES. The header and body checks already exist
+    and are already tested against the REAL commitlint CLI. The whole point of this task is that the hand
+    lane does not reach them, so the fix is to give it a call site, never to reimplement the shaping rules
+    in a second place where the two can drift.
+    PLACEMENT IS THE DECISION, AND IT IS NOT SETTLED HERE. Two shapes are acceptable. An `rmd preflight`
+    verb is discoverable, testable headlessly, and requires the author to remember it. A pre-push or
+    pre-commit git hook cannot be forgotten but must be INSTALLED - and verified at intake, this repo
+    currently ships no git hooks at all (.git/hooks holds only samples, and hooks/deny-floor.sh is a worker
+    sandbox tool, not a git hook), so the hook route carries install machinery this task would also owe.
+    Prefer the verb if the hook's install path is not cheap, and record which was chosen and why.
+    THE LESSON THIS APPLIES IS ALREADY IN LEARNINGS, in the PR 407 entry: an observed gap named only in
+    prose is a leak, and a report is not a backlog because prose decays while a filed criterion does not.
+    The operator's restatement of it is that ENFORCEMENT PLACEMENT BEATS RULE EXISTENCE, and that the
+    principle applies to the human lane and not only to the worker lane. Both readings point the same way:
+    the rule here already exists and is written down in several places. What it lacks is a place that
+    ENFORCES it before a push.
+  acceptance:
+    - claim: "a hand-authored commit violating commitlint that reaches push without a LOCAL named failure FAILS"
+      proof: "unit test: test/preflight.test.ts"
+    - claim: "a hand-authored commit whose sources do not typecheck reaches push without a local named failure FAILS, so a green test suite can no longer stand in for a compile"
+      proof: "unit test: test/preflight.test.ts"
+    - claim: "each step reports its own exit independently, so a failing step is named rather than being visible only as a missing success line"
+      proof: "unit test: test/preflight.test.ts"
+    - claim: "one step failing does not prevent the remaining steps from running and reporting, so a single run surfaces every problem rather than only the first"
+      proof: "unit test: test/preflight.test.ts"
+    - claim: "the header and body checks call lib/commit-message.ts rather than restating its rules, so the hand lane and the emitter lane cannot drift apart"
+      proof: "unit test: test/preflight.test.ts"
+  risk: low
+  origin: architect
+  plan_refs: ["§5C", "§10"]
+  files: [src/lib/commit-message.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 by operator ruling as a LOW-PRIORITY HYGIENE task, and deliberately LEFT AS A SHARD.
+    Every other filing this session had to be promoted into tasks.yaml because a shard sorts after every task
+    there and so never reaches the drain front. Here that behaviour is CORRECT rather than a trap: this is
+    real but minor, it should not displace gate integrity or write atomicity, and leaving it sharded expresses
+    that without needing a priority field the system does not have. First time all session the shard ordering
+    has been the desired outcome.
+    ONE CORRECTION TO THE BRIEF, made at filing. The operator cites LEARNINGS' PR 407 entry as saying
+    enforcement placement beats rule existence. That entry's actual wording is that an observed gap named
+    only in prose is a leak, and that a report is not a backlog. The operator's phrasing is a fair
+    restatement rather than a quotation, and it is recorded as such above so a later reader does not go
+    looking for a sentence that is not there.
+    THE COUNT IS RECORDED AS GIVEN. Seven firings on the hand route is the operator's count. This project's
+    own record independently substantiates at least six earlier ones plus one on the filing date, which is
+    consistent, but the exact total is not reconstructible from the PR history and is not claimed to be."
