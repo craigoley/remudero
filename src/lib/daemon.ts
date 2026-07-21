@@ -189,12 +189,22 @@ export function daemonBoot(
   log: (step: string, extra?: Record<string, unknown>) => void,
   env: NodeJS.ProcessEnv = process.env,
   sweepTmp?: () => { removed: string[]; kept: string[] },
+  sweepLocks?: () => { reaped: string[]; kept: string[] },
 ): BootAssertion {
   const assertion = assertCleanBoot(env);
   log("daemon.boot", { env_clean: assertion.env_clean, billing_mode: assertion.billing_mode });
   if (sweepTmp) {
     const swept = sweepTmp();
     log("daemon.tmp_sweep", { removed: swept.removed.length, kept: swept.kept.length });
+  }
+  // STALE IN-FLIGHT LOCKS (R-35). Mirrors the tmp sweep above: injected, once at boot, logged
+  // by COUNT. Purely an observability fix — acquireInflightLock already steals a dead holder's
+  // lock, so nothing here unblocks dispatch. It exists because a stale lock is otherwise only
+  // cleared by the next acquire of that same task, and a circuit-broken task is never
+  // re-dispatched, so its lock lingers indefinitely and reads as live work.
+  if (sweepLocks) {
+    const swept = sweepLocks();
+    log("daemon.lock_sweep", { reaped: swept.reaped.length, kept: swept.kept.length });
   }
   return assertion;
 }
