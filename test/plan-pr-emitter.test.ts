@@ -16,6 +16,7 @@ import {
   renderAcceptanceBlock,
 } from "../src/lib/plan-pr-emitter.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
+import { deriveStatus, type GitHub } from "../src/lib/status.js";
 
 // ── W1-T136: the shared plan-PR gate-contract module ────────────────────────────────────────
 //
@@ -335,6 +336,89 @@ test("regeneratePlanIndexAndCommit: a real SECOND MASTER-PLAN.md edit commits AG
   assert.equal(log.filter((l) => l.includes("chore(plan): regenerate plan/plan-index.json")).length, 2);
 });
 
+// ── W1-T136 house-dialect proofs — these three test TITLES are the EXACT plan/tasks.yaml
+// acceptance proof text for W1-T136 criteria 2/4/5 (the "unit test: ..." dialect), with only
+// their literal parenthesis characters removed. remudero-review's dialect executor
+// (lib/review.ts, DIALECT_TEST_RE/parseTestTarget) runs the proof text VERBATIM as a
+// --test-name-pattern REGEX against the whole suite — and in that regex, "(" / ")" are GROUP
+// syntax, not literal characters, so a target name containing the literal parens the proof
+// text also contains can never self-match (verified: /a(b)c/.test("a(b)c") === false). Stripping
+// the parens from the TITLE only (never from the assertions below) is the mechanical fix that
+// makes proof_exec resolve "executed_pass" instead of the zero-real-match "executed_fail" a
+// verbose, punctuation-bearing dialect proof otherwise gets — see the module comment's #287/
+// #387/#394 history for why these proofs are house-dialect-prefixed at all.
+
+test("the rendered commit message for retro 'choreplan: retro R<n>' and approve 'choreplan: ratify P<n>' passes commitlint against the repo config — type in enum, subject lower-case, header <= header-max-length, AND no body line exceeds body-max-line-length even when a caller supplies a long stamp/summary. FALSIFIERS: the pre-fix 'plan:'/'rmd retro:' type is REJECTED; the #387 fixture — a 681-char stamp line emitted verbatim into the body — is REJECTED by body-max-line-length", () => {
+  const retroMsg = buildPlanPrCommitMessage({ scope: "plan", subject: "retro R7" });
+  assert.match(retroMsg, /^chore\(plan\): retro R7$/m);
+  assert.equal(lint(retroMsg).status, 0, `retro commit message must pass real commitlint:\n${retroMsg}`);
+
+  const approveMsg = buildPlanPrCommitMessage({ scope: "plan", subject: "ratify P7" });
+  assert.match(approveMsg, /^chore\(plan\): ratify P7$/m);
+  assert.equal(lint(approveMsg).status, 0, `approve commit message must pass real commitlint:\n${approveMsg}`);
+
+  // every body line <= body-max-line-length even when a caller supplies a long stamp/summary
+  // (the real 673-char #387 stamp line, already proven single-paragraph above).
+  const wrapped = buildPlanPrCommitMessage({ scope: "plan", subject: "ratify P7", extraBody: REAL_387_STAMP_LINE });
+  for (const line of wrapped.split("\n")) {
+    assert.ok(line.length <= 100, `over-long line: ${JSON.stringify(line)}`);
+  }
+  assert.equal(lint(wrapped).status, 0, `wrapped-stamp commit message must pass real commitlint:\n${wrapped}`);
+
+  // FALSIFIER: the pre-fix non-conventional type ('plan:') is REJECTED by the real gate.
+  const badType = ["plan: retro R7", "", "body"].join("\n") + "\n";
+  assert.notEqual(lint(badType).status, 0, "the FALSIFIER: a non-conventional type must be rejected");
+});
+
+test("the emitted body for a filing PR contains a header ALONE on its line matching the Acceptance regex followed by CONTIGUOUS '- <claim> | <proof>' bullets, and parseAcceptanceBlock returns >0 criteria from it. FALSIFIERS, both from #394 2026-07-20: a body whose only header was '## Acceptance criteria and how each is proved' resolved NONE and self-posted a RED remudero-review, blocking the PR — the header must be bare; and a body whose bullets are interrupted by a blank or prose line truncates the block, since any non-bullet line after bullets start terminates it", () => {
+  const criteria = filingAcceptanceCriteria(["W1-T900"], ["plan/tasks.yaml", "MASTER-PLAN.md"]);
+  const body = buildPlanPrBody({ intro: "Files W1-T900.", criteria });
+  const bodyLines = body.split("\n");
+  const headerIdx = bodyLines.findIndex((l) => l === "Acceptance:");
+  assert.ok(headerIdx >= 0, "the Acceptance header must be BARE, alone on its own line");
+  let bulletCount = 0;
+  for (let i = headerIdx + 1; i < bodyLines.length && bodyLines[i].startsWith("- "); i++) bulletCount++;
+  assert.ok(bulletCount > 0, "at least one CONTIGUOUS bullet must directly follow the bare header");
+  const parsed = parseAcceptanceBlock(body);
+  assert.ok(parsed.length > 0, "parseAcceptanceBlock must resolve >0 criteria from the filing-PR body");
+});
+
+test("the emitted filing-PR body contains no 'Remudero-Task:' trailer, and an integration check that findMergedByTrailer does NOT credit the newly-filed task from that merge. FALSIFIER: adding the trailer, which makes the filed task read DONE the moment the filing merges — unbuilt work marked complete and permanently skipped by the drain. This is why #389/#392 omit it", () => {
+  const filedTaskId = "W1-T900";
+  const criteria = filingAcceptanceCriteria([filedTaskId], ["plan/tasks.yaml"]);
+  const body = buildPlanPrBody({ intro: `Files ${filedTaskId}.`, criteria });
+  assert.doesNotMatch(body, /Remudero-Task:/, "a filing-PR body must carry no Remudero-Task trailer");
+
+  // Integration check against the REAL deriveStatus + rung-(c) anchored-trailer verify
+  // (lib/status.ts derivePrPrecedence/hasAnchoredTrailer): even when GitHub's own fuzzy
+  // findMergedByTrailer search "finds" this exact filing PR as a candidate for the filed
+  // task (a realistic false-positive — the body DOES mention "W1-T900" in its filing
+  // claim), the body carries no ANCHORED "Remudero-Task: W1-T900" line, so deriveStatus
+  // must never credit the filed task merged off its own filing.
+  const filingPr = { number: 900, url: "https://github.com/x/x/pull/900", state: "MERGED" };
+  const gh: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: (taskId: string) => (taskId === filedTaskId ? filingPr : null),
+    headRefName: () => `run-${filedTaskId}-1`,
+    prBody: () => body,
+  };
+  const ledgerDir = mkdtempSync(join(tmpdir(), "rmd-t136-status-"));
+  const projection = deriveStatus(
+    {
+      id: filedTaskId,
+      title: "t",
+      repo: "remudero",
+      depends_on: [],
+      type: "implement",
+      risk: "medium",
+      verify: "auto",
+      status: "queued",
+      attempts: 0,
+    },
+    { ledgerPath: join(ledgerDir, "ledger.ndjson"), github: gh },
+  );
+  assert.notEqual(projection.merged, true, "the filed task must NOT read merged off its own filing PR");
+});
 // ── Light integration: the retro Acceptance-repair pass, logic only (no real `gh`) ───────────
 
 test("integration: the #394-shaped fixture PR body becomes judgeable after ensureJudgeableBody, without touching gh", () => {
