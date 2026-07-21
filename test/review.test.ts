@@ -1075,6 +1075,9 @@ test("parseWhitelistedProof: a dialect body containing a semicolon and a test-pa
   // test-file path, since there is trailing content after '.ts'), never silently
   // narrowed to the 'test/foo.test.ts' substring the legacy TEST_PATH_RE would
   // have matched inside a different, unrelated shape.
+  // W1-T112 round-3: the compiled pattern is now regex-ESCAPED (see parseTestTarget) so a
+  // literal '.' in the body matches only a literal '.', never "any character" — the body's
+  // two dots are the only characters this proof text needs escaped.
   const wp = parseWhitelistedProof("unit test: test/foo.test.ts; rm -rf /");
   assert.ok(wp);
   assert.equal(wp!.kind, "test");
@@ -1084,7 +1087,7 @@ test("parseWhitelistedProof: a dialect body containing a semicolon and a test-pa
     "--import",
     "tsx",
     "--test-name-pattern",
-    "test/foo.test.ts; rm -rf /",
+    "test/foo\\.test\\.ts; rm -rf /",
     "test/**/*.test.ts",
   ]);
 });
@@ -1101,6 +1104,25 @@ test("parseWhitelistedProof: house-dialect 'unit test: <name>' (not a path) comp
     "exclusive-create EEXIST falls through to read",
     "test/**/*.test.ts",
   ]);
+});
+
+// W1-T112 round-3 (regression): a dialect body that legitimately quotes real syntax —
+// brackets, braces, a trailing '*' — must still name-filter to ITSELF. Pre-fix,
+// `--test-name-pattern` compiled the RAW body as a regex: `[rmd, digest]` became an
+// unescaped character class (matches exactly one of r/m/d/i/g/e/s/t/','/' ', never the
+// literal bracketed text), so a test titled EXACTLY per this proof could never match —
+// live-observed on W1-T112 itself. The escaped pattern must match a real node:test TAP
+// run whose ONLY test is titled with this exact body.
+test("parseWhitelistedProof (W1-T112 round-3): a dialect NAME containing regex-significant syntax ([], {}, *, ()) compiles to a pattern that matches its OWN literal text, not an unrelated character class", () => {
+  const body = "ProgramArguments end [rmd, digest]; an ANTHROPIC_* thing (parenthetical) {and, a, brace}";
+  const wp = parseWhitelistedProof(`unit test: ${body}`);
+  assert.ok(wp);
+  assert.ok(wp!.nameFiltered);
+  const pattern = wp!.args[wp!.args.indexOf("--test-name-pattern") + 1];
+  assert.ok(new RegExp(pattern).test(body), "the compiled pattern must match the literal body it was quoting");
+  // The un-escaped raw body must NOT still be present verbatim — proves escaping actually ran,
+  // not merely that the (harmless) escaped form happens to also satisfy the assertion above.
+  assert.notEqual(pattern, body);
 });
 
 test("parseWhitelistedProof: house-dialect 'unit test: <path>' reuses the exact-file shape verbatim", () => {
@@ -1149,11 +1171,50 @@ test("nameFilteredOutcome: the matched test itself reporting 'not ok' is a genui
   assert.equal(nameFilteredOutcome(stdout), "fail");
 });
 
-test("nameFilteredOutcome: zero real matches is FAIL (W1-T72 guard) even with collateral file-wrapper noise present", () => {
-  const stdout = ["1..0", "# Subtest: test/retro.test.ts", "ok 1 - test/retro.test.ts", "not ok 2 - test/serve.find.test.ts"].join(
-    "\n",
-  );
+test("nameFilteredOutcome: zero real matches is FAIL (W1-T72 guard) when the run genuinely COMPLETED (trailing summary present) even with collateral file-wrapper noise", () => {
+  const stdout = [
+    "1..0",
+    "# Subtest: test/retro.test.ts",
+    "ok 1 - test/retro.test.ts",
+    "not ok 2 - test/serve.find.test.ts",
+    "# tests 2",
+    "# pass 1",
+    "# fail 1",
+    "# duration_ms 123.456",
+  ].join("\n");
   assert.equal(nameFilteredOutcome(stdout), "fail");
+});
+
+// ── W1-T112 round-4: a name-filtered proof scopes the WHOLE suite glob (100+ files, several
+// driving a real browser), so execWhitelistedProof's own timeout can fire before node ever
+// reaches the named test's file — a run cut short mid-suite, not a genuine "test not found".
+// Confirmed live on this exact repo: a timeout-killed run of the real review command reliably
+// prints zero trailing-summary lines. Root-caused the observed flap on THIS PR's own head
+// commit (remudero-review: fail -> success -> fail with an unchanged diff).
+
+test("nameFilteredOutcome: zero real matches with NO trailing summary is a TRUNCATED run — throws (degrades to exec_error), never a manufactured FAIL", () => {
+  const stdout = [
+    "1..0",
+    "# Subtest: test/retro.test.ts",
+    "ok 1 - test/retro.test.ts",
+    "not ok 76 - /repo/test/serve.find.test.ts",
+    "  ---",
+    "  failureType: 'hookFailed'",
+    "  ...",
+    // no `# duration_ms` trailer: the process was killed before finishing.
+  ].join("\n");
+  assert.throws(() => nameFilteredOutcome(stdout));
+});
+
+test("nameFilteredOutcome: a real match found BEFORE truncation is kept — positive evidence survives an incomplete run", () => {
+  const stdout = [
+    "# Subtest: the named test",
+    "ok 5 - the named test",
+    "not ok 76 - /repo/test/serve.find.test.ts",
+    "  failureType: 'hookFailed'",
+    // no trailing summary — the run was still cut short later in the glob.
+  ].join("\n");
+  assert.equal(nameFilteredOutcome(stdout), "pass");
 });
 
 test("parseWhitelistedProof (W1-T128): a dialect grep whose pattern contains prose-style shell metacharacters EXECUTES — execFile passes it as one argv element, never a shell, so it can't be interpreted specially", () => {
@@ -1176,10 +1237,14 @@ test("parseWhitelistedProof (W1-T128): a dialect grep whose pattern contains pro
 });
 
 test("parseWhitelistedProof (W1-T128): a dialect unit-test NAME with prose-style shell metacharacters EXECUTES (name-filtered) — same argv-array reasoning as the grep case", () => {
+  // `$` and `(`/`)` ARE regex metacharacters (unlike the shell metacharacters this test's name
+  // references), so W1-T112 round-3's regex-escaping compiles them to `\$\(whoami\)` — still one
+  // argv element handed to execFile (never a shell), still never shell-interpreted; only the
+  // literal-vs-pattern regex semantics changed, not the shell-safety property this test is named for.
   const wp1 = parseWhitelistedProof("unit test: $(whoami)");
   assert.ok(wp1);
   assert.ok(wp1!.nameFiltered);
-  assert.ok(wp1!.args.includes("$(whoami)"));
+  assert.ok(wp1!.args.includes("\\$\\(whoami\\)"));
 
   const wp2 = parseWhitelistedProof("unit test: foo; rm -rf /");
   assert.ok(wp2);

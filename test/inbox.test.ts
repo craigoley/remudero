@@ -18,12 +18,15 @@ import {
   parseProposalRegistry,
   proposalsNeedingDraft,
   renderInbox,
+  renderInboxPollSummary,
   runDraftRung,
+  summarizeInboxPoll,
   type DraftAttemptCache,
   type DraftCache,
   type DraftedCandidate,
   type DraftSpawn,
   type EvidenceAnchor,
+  type InboxClassification,
   type Proposal,
   type ReadinessContext,
 } from "../src/lib/inbox.js";
@@ -449,6 +452,27 @@ test("renderInbox: a READY item's rendering carries its drafted tasks and stamp;
   assert.match(rendered, /DEFERRED-WITH-TRIGGER — P-DEFER \(never recommended\)/);
   assert.match(rendered, /unbuilt consumer/);
   assert.doesNotMatch(rendered, /READY — P-DEFER/);
+});
+
+// ── The digest's ready-count block (W1-T112 — the morning pulse) ──────────────────────────
+
+test("summarizeInboxPoll: counts only READY classifications, ignoring not_ready and deferred", () => {
+  const classifications: InboxClassification[] = [
+    { proposalId: "P-1", state: "ready", reasons: [] },
+    { proposalId: "P-2", state: "ready", reasons: [] },
+    { proposalId: "P-3", state: "not_ready", reasons: [{ predicate: "deps_merged", detail: "x" }] },
+    { proposalId: "P-4", state: "deferred_with_trigger", reasons: [], trigger: { description: "y", fired: false } },
+  ];
+  assert.deepEqual(summarizeInboxPoll(classifications), { ready: 2 });
+});
+
+test("summarizeInboxPoll: an empty batch is zero ready, not an error", () => {
+  assert.deepEqual(summarizeInboxPoll([]), { ready: 0 });
+});
+
+test("renderInboxPollSummary: renders the digest's one-line 'N ready'", () => {
+  assert.equal(renderInboxPollSummary({ ready: 3 }), "3 ready");
+  assert.equal(renderInboxPollSummary({ ready: 0 }), "0 ready");
 });
 
 // ── The draft rung runs DAEMON-SIDE, not CLI-pull (W1-T192) ────────────────────────────────

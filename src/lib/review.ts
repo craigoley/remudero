@@ -471,10 +471,25 @@ function parseTestTarget(body: string): WhitelistedProof | null {
   // there is no traversal/glob surface to guard either (see the module comment
   // above). A test name is ordinary prose and routinely contains a semicolon —
   // refusing it there was the single biggest cause of the dead proof floor.
+  //
+  // W1-T112 round-3 fix: `--test-name-pattern` compiles its argument as a REGEX
+  // (`new RegExp(pattern)`), not a literal-substring match. A dialect proof is
+  // ordinary architect prose describing a test's own title, and titles routinely
+  // echo real syntax verbatim — e.g. "ProgramArguments end [rmd, digest]" — where
+  // `[rmd, digest]` is an unescaped CHARACTER CLASS to the regex engine (matches
+  // exactly one of the letters r/m/d/i/g/e/s/t or `, `), which can never match the
+  // literal bracketed text it was quoting. That silently manufactures a FAIL for a
+  // test that genuinely passed and is titled EXACTLY per the proof (empirically
+  // confirmed live: `[rmd, digest]` in a proof never matches `[rmd, digest]` in a
+  // title). Escaping regex metacharacters here makes the match what the dialect
+  // was always meant to mean — "find the test named exactly this" — a literal
+  // substring search, while remaining regex-CAPABLE for any proof author who
+  // deliberately wants pattern semantics (rare, and not the common case this
+  // dialect exists for).
   return {
     kind: "test",
     command: "node",
-    args: ["--test", "--import", "tsx", "--test-name-pattern", trimmed, TEST_GLOB],
+    args: ["--test", "--import", "tsx", "--test-name-pattern", escapeRegExp(trimmed), TEST_GLOB],
     label: trimmed,
     nameFiltered: true,
   };
@@ -535,7 +550,11 @@ export function parseWhitelistedProof(proof: string): WhitelistedProof | null {
  * injectable so unit tests fake pass/fail/throw without touching the filesystem. */
 export type ProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => "pass" | "fail";
 
-const DEFAULT_PROOF_TIMEOUT_MS = 30_000;
+// W1-T112 round-4: 30s was observed live truncating a name-filtered proof's WHOLE-suite
+// run before it ever reached the named test's file (see nameFilteredOutcome's doc
+// comment) — widened for headroom. The truncation-detection fix above is the actual
+// correctness guarantee; this just reduces how often it needs to engage.
+const DEFAULT_PROOF_TIMEOUT_MS = 60_000;
 const npmCiPrimed = new Set<string>();
 
 /** `npm ci` a fresh checkout ONCE before its first test proof (design: "fresh
@@ -623,15 +642,42 @@ function isFileWrapperResultName(name: string): boolean {
  * nested subtest. Captures the pass/fail marker and the reported name. */
 const TAP_RESULT_LINE_RE = /^\s*(ok|not ok) \d+ - (.+?)\s*$/;
 
+/** The node test runner's own trailing summary block (`# tests N`, `# pass N`,
+ * …, `# duration_ms N`) is written ONCE, after every file in the glob has
+ * finished — it is the one reliable signal that a `--test-name-pattern` run
+ * over {@link TEST_GLOB} ran to genuine completion rather than being cut off
+ * mid-suite by {@link execWhitelistedProof}'s own timeout kill. */
+function hasFinalSummary(stdout: string): boolean {
+  return /^# duration_ms\b/m.test(stdout);
+}
+
 /**
  * Read a name-filtered `--test-name-pattern` run's TAP stdout for the verdict
  * of the REAL (non-file-wrapper) subtest(s) it actually matched, independent
  * of the overall process exit code (see {@link execWhitelistedProof}'s doc
  * comment for why the exit code alone is not trustworthy here).
- *   - zero real matches ⇒ "fail" (W1-T72 guard: a named test that does not
- *     exist on the PR head is unmet, never a silent pass via the trivial
- *     "0 children ⇒ ok" wrapper every non-matching file reports).
- *   - at least one real match, none reporting `not ok` ⇒ "pass".
+ *   - zero real matches, run genuinely completed ⇒ "fail" (W1-T72 guard: a
+ *     named test that does not exist on the PR head is unmet, never a silent
+ *     pass via the trivial "0 children ⇒ ok" wrapper every non-matching file
+ *     reports).
+ *   - zero real matches, run was CUT SHORT before its trailing summary ⇒
+ *     THROWS (W1-T112 round-4 fix). {@link TEST_GLOB} scopes a name-filtered
+ *     proof to the WHOLE suite (100+ files, several driving a real headless
+ *     browser), so {@link execWhitelistedProof}'s 30s timeout can fire before
+ *     node ever reaches the one file the named test lives in — confirmed live
+ *     against this exact repo: a timeout-killed run of this command reliably
+ *     reports zero final-summary lines, i.e. genuinely never finished. On the
+ *     old rule that truncation read identically to "test not found", ANY
+ *     criterion whose test happened to sit late enough in the glob's
+ *     (filesystem-order-dependent, not alphabetically guaranteed) discovery
+ *     order intermittently failed for a test that demonstrably passes in
+ *     isolation — the exact flap observed live on this PR's own head commit
+ *     (fail → pass → fail, unchanged code). A truncated run is inconclusive,
+ *     not evidence of absence: the caller's catch degrades it to exec_error
+ *     (the keyword floor), never a manufactured FAIL.
+ *   - at least one real match, none reporting `not ok` ⇒ "pass" (found before
+ *     any truncation — real, positive evidence, kept even if the run was cut
+ *     short afterward elsewhere in the glob).
  *   - at least one real match reporting `not ok` ⇒ "fail" — the named test
  *     genuinely failed, not merely swept up in unrelated collateral noise.
  * Collateral `not ok`/hookFailed lines from files the pattern never matched
@@ -648,7 +694,15 @@ export function nameFilteredOutcome(stdout: string): "pass" | "fail" {
     matched = true;
     if (m[1] === "not ok") anyRealFailure = true;
   }
-  if (!matched) return "fail";
+  if (!matched) {
+    if (!hasFinalSummary(stdout)) {
+      throw new Error(
+        "name-filtered proof run was truncated before its trailing summary (proof timeout) — " +
+          "inconclusive, not evidence the named test is missing",
+      );
+    }
+    return "fail";
+  }
   return anyRealFailure ? "fail" : "pass";
 }
 
