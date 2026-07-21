@@ -9192,3 +9192,67 @@
     W1-T106's CONFLICTED disposition rather than a Bors-style queue of our own — both are reasons to earn N
     on evidence. Raising N is a policy-data row edit once the ledger supports it, which is the point of
     holding the threshold in SweepPolicy rather than in code."
+
+- id: W1-T202
+  title: "the console bookmark is READ-ONLY after the token-hygiene fix — the shell must accept the write token once and hold it client-side, or every NEEDS-ME write action 401s"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "CONSEQUENCE OF A SHIPPED SECURITY FIX, filed by the amender under standing rule 21 rather
+    than left for the operator to discover. The token-hygiene PR stopped the startup banner printing the
+    WRITE bearer token, because under the real launch serve's stdout is redirected to a serve.log that was
+    mode 0644 — running the command wrote a fleet-control credential to a world-readable file. The console
+    URL now carries the READ token.
+    THE COST IS REAL AND WAS ACCEPTED KNOWINGLY. service.ts:153-154 maps the write token to READ_WRITE and
+    the read token to READ_ONLY. So the operator's bookmarked console is now a view: fleet-control
+    pause/stop, answering a question, and manual approve all 401. That is precisely the NEEDS-ME
+    affordance set the console v2 design pass is built around, so the security fix and the console arc
+    are currently pulling against each other.
+    THE TWO PROPERTIES ARE NOT ACTUALLY IN CONFLICT — they only look it because the bookmark is the sole
+    credential channel. A URL is the WRONG place for a write credential: it is copied, screenshotted,
+    logged by proxies, and restored by the browser session-restore. A client-side store the operator pastes
+    into ONCE is both safer than the URL and more usable than re-pasting per action."
+  design: |
+    HAVE THE SHELL HOLD THE WRITE TOKEN, NOT THE URL. The read token stays in the bookmark and keeps the
+    board loading on first paint with no prompt. When the operator takes a WRITE action, the shell uses a
+    write token it has been given once and kept client-side, rather than reading it from the query string.
+    VERIFY FROM SOURCE FIRST, do not invent an API: read service.ts's token comparison (safeEqual against
+    tokens.write / tokens.read) and serve.ts's `?token=` bootstrap at the HTML shell before choosing where
+    the write token enters. The auth model is already two-level and does not need changing — this is about
+    the CHANNEL the write token arrives on.
+    STORAGE CHOICE IS THE REAL DECISION and should be made on stated trade-offs: sessionStorage dies with
+    the tab (safest, most re-pasting), localStorage persists (most usable, readable by any script that
+    achieves XSS on this origin). Whichever is chosen, the write token must NEVER be written back into the
+    URL, into a log line, or into the ledger — that is the defect this task exists to avoid recreating.
+    DEGRADE HONESTLY WHEN READ-ONLY (standing rule 22: the console distinguishes CLAIMED from EVIDENCED
+    state — here, PERMITTED from ATTEMPTED). With only a read token the write affordances must render
+    visibly unavailable with a stated reason, never render armed and 401 on click. A button that looks
+    live and fails is worse than one that says why it is disabled.
+  acceptance:
+    - claim: "a console loaded with the READ token alone renders the board fully and shows every write affordance as explicitly unavailable with a stated reason, rather than rendering it armed"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "a write action issued with a client-held write token succeeds while the URL still carries only the read token — the bookmark never gains write power"
+      proof: "unit test: test/serve.live-state.test.ts"
+    - claim: "the write token is never written into the URL, a ledger line, or a log line at any point in the flow — asserted against the rendered shell and the emitted ledger steps"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "clearing the stored write token returns the console to the read-only rendering without a reload"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/serve.ts]
+  status: queued
+  attempts: 0
+  note: "FILED BY THE AMENDER under standing rule 21 — the token-hygiene PR created this gap and therefore
+    owes the follow-up rather than leaving it to be discovered at the next NEEDS-ME moment.
+    POSITION IS THE OPERATOR'S CALL and is deliberately not asserted here. This is appended at the tail,
+    but it gates the operator's own write path to the fleet, so it may well deserve pulling forward ahead
+    of queued work that does not. Flagged rather than silently reordered — queue order is the operator's
+    dial, per the standing filing discipline.
+    SCOPE NARROWED after rmd lint-plan flagged a rule-19 span (serve, service) at risk:medium. Narrowed
+    rather than regraded, because the honest reading supports it: the design states the two-level auth
+    model does not change, so service.ts is READ to verify the token comparison and is never edited. The
+    deliverable is confined to the shell's credential channel in serve.ts."
