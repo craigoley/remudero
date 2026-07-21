@@ -1,42 +1,44 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-07-20T14:23:33.286Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-07-21T09:35:59.148Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-26 run(s) since the last retro marker. Verdicts: {"blocked":3,"blocked_ci":8,"incomplete":1,"merged":13,"no_pr":1}.
+27 run(s) since the last retro marker. Verdicts: {"blocked":7,"blocked_ci":9,"incomplete":3,"merged":8}.
 
 ### Shipped since marker
-- W1-T131 → https://github.com/craigoley/remudero/pull/341
-- W1-T138 → https://github.com/craigoley/remudero/pull/345 (gate-side merge; run ended blocked_ci)
-- W1-T139 → https://github.com/craigoley/remudero/pull/334
-- W1-T140 → https://github.com/craigoley/remudero/pull/338
-- W1-T141 → https://github.com/craigoley/remudero/pull/346
-- W1-T41 → https://github.com/craigoley/remudero/pull/291
-- W1-T43 → https://github.com/craigoley/remudero/pull/301
-- W1-T45 → https://github.com/craigoley/remudero/pull/303 (gate-side merge; run ended blocked)
-- W1-T52 → https://github.com/craigoley/remudero/pull/308 (gate-side merge; run ended blocked_ci)
-- W1-T53 → https://github.com/craigoley/remudero/pull/309
-- W1-T55 → https://github.com/craigoley/remudero/pull/310 (gate-side merge; run ended blocked_ci)
-- W1-T56 → https://github.com/craigoley/remudero/pull/315 (gate-side merge; run ended blocked_ci)
-- W1-T57 → https://github.com/craigoley/remudero/pull/314
-- W1-T59 → https://github.com/craigoley/remudero/pull/318 (gate-side merge; run ended blocked_ci)
-- W1-T61 → https://github.com/craigoley/remudero/pull/320 (gate-side merge; run ended blocked_ci)
-- W1-T66 → https://github.com/craigoley/remudero/pull/323
-- W1-T67 → https://github.com/craigoley/remudero/pull/324
-- W3-T2 → https://github.com/craigoley/remudero/pull/294
-- W3-T5 → https://github.com/craigoley/remudero/pull/300
-- W3-T6 → https://github.com/craigoley/remudero/pull/302
-- W3-T8 → https://github.com/craigoley/remudero/pull/305 (gate-side merge; run ended blocked)
+- W1-T110 → https://github.com/craigoley/remudero/pull/368 (gate-side merge; run ended blocked_ci)
+- W1-T111 → https://github.com/craigoley/remudero/pull/373
+- W1-T119 → https://github.com/craigoley/remudero/pull/382 (gate-side merge; run ended blocked_ci)
+- W1-T121 → https://github.com/craigoley/remudero/pull/385
+- W1-T122 → https://github.com/craigoley/remudero/pull/386
+- W1-T128 → https://github.com/craigoley/remudero/pull/414
+- W1-T136 → https://github.com/craigoley/remudero/pull/437 (gate-side merge; run ended blocked_ci)
+- W1-T145 → https://github.com/craigoley/remudero/pull/360 (gate-side merge; run ended blocked)
+- W1-T146 → https://github.com/craigoley/remudero/pull/371 (gate-side merge; run ended blocked_ci)
+- W1-T150 → https://github.com/craigoley/remudero/pull/358
+- W1-T153 → https://github.com/craigoley/remudero/pull/376 (gate-side merge; run ended blocked_ci)
+- W1-T154 → https://github.com/craigoley/remudero/pull/388 (gate-side merge; run ended blocked_ci)
+- W1-T155 → https://github.com/craigoley/remudero/pull/365
+- W1-T156 → https://github.com/craigoley/remudero/pull/398 (gate-side merge; run ended blocked_ci)
+- W1-T157 → https://github.com/craigoley/remudero/pull/405 (gate-side merge; run ended blocked_ci)
+- W1-T158 → https://github.com/craigoley/remudero/pull/410 (gate-side merge; run ended blocked_ci)
+- W1-T177 → https://github.com/craigoley/remudero/pull/417 (gate-side merge; run ended blocked)
+- W1-T178 → https://github.com/craigoley/remudero/pull/423 (gate-side merge; run ended blocked)
+- W1-T179 → https://github.com/craigoley/remudero/pull/431 (gate-side merge; run ended blocked)
+- W1-T181 → https://github.com/craigoley/remudero/pull/411 (gate-side merge; run ended blocked)
+- W1-T185 → https://github.com/craigoley/remudero/pull/456
+- W1-T187 → https://github.com/craigoley/remudero/pull/445 (gate-side merge; run ended incomplete)
+- W1-T192 → https://github.com/craigoley/remudero/pull/457
 
 ## Next runnable task
 
-**W1-T145** — layered knowledge: ONE entry schema valid at every layer + the layer homes (project / user-overall / rmd-global) — P32 first task
+**W1-T189** — W1-T156 FOLLOW-UP (rule 21) — the console renders a RAW fetch exception over a live board instead of T156's specified reconnecting/last-success lifecycle: honest about failing, wrongly dressed
 
-- risk: high · depends_on: W1-T33, W1-T34
+- risk: high · depends_on: W1-T156, W1-T187
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 
@@ -62,3 +64,5 @@ not by re-deriving state from the full plan and ledger.
 - 18. EVERY ACCEPTANCE CRITERION MUST BE SATISFIABLE BY A NON-INTERACTIVE WORKER. A criterion that requires live operator input ("operator confirms", "user selects", "prompt the human") is STRUCTURALLY UNFIT for the headless runner — there is no TTY and no operator, so the worker cannot satisfy or test it and will burn its whole budget trying (W1-T9 spent its last ~15 turns on readline-repro scripts conjuring an operator that isn't there, then died error_max_turns). Interactive behavior is designed for no-TTY and tested via INJECTED INPUT / FLAGS / TTY-ABSENT DEFAULTS, never a live human in the loop: a prompt is an interactive-only affordance layered on top of a fully non-interactive path. This is a new error CLASS, distinct from over-scoping (rule 19) and looping. [DIAGNOSIS.md diag/w1t9-max-turns, W1-T9]
 - 19. SIZING IS A PLAN-LAYER CONCERN, NOT A BUDGET KNOB. A task spanning ≥2 independent acceptance concerns, or shipping ≥2 new subsystems, must be `risk: high` or DECOMPOSED at plan time — never left `risk: medium` and rescued with a bigger turn budget. Two cross-cutting tasks (W1-T6, W1-T9) overran the medium/80 mount; the medium budget is correctly calibrated for genuine single-concern work (observed mean now 45.2 turns — RETRO-1784133446353, 22 runs; honest single-concern merges ran 58–69 turns: #47, #48, #55, #56, #62 — still under the medium/80 ceiling; P7 ratified), so raising it would MASK over-scoping and reward it (and W1-T9 was the THIRD max_turns event — a third budget bump was refused). The retro fix lives in task SIZING (rule 16 decomposition), not in `.remudero/mounts.yaml`. [DIAGNOSIS.md diag/w1t9-max-turns, W1-T6, W1-T9; P7 RETRO-1784133446353]
 - 20. A NEW SIZING/FITNESS RULE MUST RETROACTIVELY RE-GRADE THE OPEN QUEUE — RULES ARE NOT FORWARD-ONLY. When a rule like 18 or 19 is added, every ALREADY-AUTHORED open task must be re-checked against it, not only new authoring. W1-T12 pre-existed rules 18 and 19 and violated BOTH (three concerns at `risk:medium`; three live-context criteria — overnight drain, launchctl-load, live-kill) yet still reached a worker and burned 81 turns / $10.27 — the FOURTH max_turns event — because the rules were enforced forward-only. `rmd retro` re-grades every open task against every standing rule and files a corrective task for each violation (the executable duty is W1-T20d). A rule the queue is never swept against protects only the tasks written after it. [DIAGNOSIS.md diag/w1t12-max-turns, W1-T12]
+- 21. AMENDING AN ALREADY-MERGED TASK DOES NOT RE-QUEUE IT AND SPAWNS NOTHING — THE AMENDER OWNS FILING THE FOLLOW-UP. A criterion added to a task that has already merged is unreachable by every rung: `deriveStatus` treats MERGED as terminal, the drain's first filter is `if (isMerged(t.id)) continue`, the retro's `planHealthSweep` skips merged/done as "already shipped", the linter is status-blind, and `rmd correct` re-points credit but cannot un-credit. So the criterion sits in the plan looking authoritative while nothing can ever dispatch, review or prove it. This is not a gap to be closed by making merge reversible — it is the correct behaviour of a derived-status system, and the duty sits with the author of the amendment: amend for the record if the task's spec was genuinely incomplete, and in the SAME PR file a follow-up task carrying the new criteria VERBATIM (rule 16 — nothing dropped or weakened, only redistributed). This was already the consistent convention (W1-T161, W1-T97, the W1-T65 pair, the W1-T76 follow-up) and it still failed, because convention is not a gate: PR #374 amended W1-T155 at 17:35:20Z, 1h45m after PR #365 credited it merged at 15:50:08Z, adding the monotonic-under-darkness and liveness-bound criteria — and passed every check clean. Both orphaned. One of them WAS the fix for the regression-to-queued-on-read-failure bug, which therefore survived wearing a "merged ✓" badge while the console shipped a render-layer honesty banner over a data layer that still lied. Found by hand, by nothing else. The executable duty is W1-T180 (a §5C lint check that fails a bare post-merge amendment and passes one accompanied by its follow-up); the rehoming of what this already orphaned is W1-T179. [W1-T155/PR #374 vs PR #365, 2026-07-20]
+- 22. THE CONSOLE MUST DISTINGUISH CLAIMED STATE FROM EVIDENCED STATE — THE W1-T128 DOCTRINE, APPLIED TO PIXELS. A CLAIM is what a remote or a judge ASSERTS: merged-per-GitHub, review-passed. EVIDENCE is what the fleet can SHOW: a ledger receipt of the merge, proofs that actually executed. They are not the same fact, and the console must never render them as one. Every surface owes the reader which it is showing, and a surface that cannot obtain evidence SAYS SO rather than silently downgrading to the claim — or worse, to nothing. Three fixtures from 2026-07-20 make the cost concrete. (i) The board rendered `merged 0/160` with every task queued, because a failed GitHub read returned an empty set and cannot-read was presented as nothing-exists (W1-T181). (ii) RECENT rendered "no recent outcomes yet" across a week containing ~100 merges, because the section was GitHub-sourced while the LOCAL ledger held every one of them (W1-T184). (iii) `remudero-review` posted "PASS — 5 criteria substantiated, no test theater" at `proof_exec: 0/5`, directly beneath its own FLOOR DEGRADED banner, over a diff satisfying one criterion in five with zero tests on a `tdd: strict` task — a CLAIM of substantiation rendered as though it were EVIDENCE of it. The rule follows from where authority actually sits: the ledger is LOCAL, append-only and complete — the fleet's own receipt of what it did. GitHub is a REMOTE, rate-limited, occasionally-unreachable claim about the same events. A console that inverts that dependency lets a remote outage empty a local truth. Executable duties: W1-T183 (density/IA — anomaly visible at the list layer), W1-T184 (ledger-first rendering — GitHub decorates, never gates), W1-T179 (last-good status under darkness), W1-T182 (NEEDS ME joins live escalation state, not ledger history). [console design pass, 2026-07-20]
