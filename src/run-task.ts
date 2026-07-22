@@ -50,7 +50,8 @@ import {
 } from "./lib/daemon.js";
 import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
-import { DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, launchdPlistPath } from "./lib/launchd.js";
+import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateSupervisorLaunchdPlist, launchdPlistPath, SUPERVISOR_LABEL } from "./lib/launchd.js";
+import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js";
 import { buildDigest, sendDigest } from "./lib/digest.js";
 import {
   escalate,
@@ -4471,6 +4472,86 @@ async function daemonPlistCommand(rest: string[]): Promise<number> {
 }
 
 /**
+ * `rmd deploy [--reason <text>]` — the OPERATOR trigger (option C, human-gated). Sets
+ * state/DEPLOY_REQUESTED so the deploy supervisor fast-forwards the daemon's checkout
+ * and kickstarts it at the next idle gap. Deploys nothing itself; keeps Craig's
+ * control over WHEN a merged fix goes live.
+ */
+async function deployCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("deploy", rest, ["--reason"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const config = loadConfig();
+  requestDeploy(config.root, flagValue(rest, "--reason"));
+  console.log(
+    `### rmd deploy — requested (state/DEPLOY_REQUESTED). The supervisor will fast-forward + ` +
+      `kickstart the daemon at the next idle gap, health-check it, and roll back on failure.`,
+  );
+  return 0;
+}
+
+/**
+ * `rmd deploy-run [--dry-run]` — ONE supervisor cycle (the launchd unit runs this on
+ * its interval). No-op unless a deploy is triggered AND the daemon is idle. `--dry-run`
+ * runs the whole sequence (fetch/compare/idle-check/pull) but SKIPS the real kickstart —
+ * so validation can exercise it against the real install without restarting production.
+ */
+async function deployRunCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("deploy-run", rest, [], ["--dry-run"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const config = loadConfig();
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const deps = realDeployDeps({
+    installPath: repoRoot,
+    stateRoot: config.root,
+    daemonLabel: DAEMON_LABEL,
+    uid,
+    ledgerPath: join(config.root, "state", "ledger.ndjson"),
+    log: (step, data) => console.log(`### [deploy] ${step}${data ? " " + JSON.stringify(data) : ""}`),
+  });
+  const result = runDeployCycle(deps, { dryRun: rest.includes("--dry-run") });
+  console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);
+  return result.reason.startsWith("dirty-tree-conflict") || result.rolledBackTo ? 1 : 0;
+}
+
+/**
+ * `rmd deploy-plist [--interval <s>] [--write]` — GENERATE the deploy-supervisor
+ * launchd unit (a periodic `rmd deploy-run`). Mirrors `daemon-plist`: prints by
+ * default, `--write` installs it; loading it is an operator action.
+ */
+async function deployPlistCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("deploy-plist", rest, ["--interval"], ["--write"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const config = loadConfig();
+  const iv = flagValue(rest, "--interval");
+  const rmdBin = join(repoRoot, "bin", "rmd");
+  const plist = generateSupervisorLaunchdPlist({ rmdBin, root: config.root, intervalSeconds: iv ? Number(iv) : undefined });
+  const plistPath = launchdPlistPath(SUPERVISOR_LABEL);
+  if (rest.includes("--write")) {
+    mkdirSync(dirname(plistPath), { recursive: true });
+    writeFileSync(plistPath, plist);
+    console.log(`### rmd deploy-plist — wrote ${plistPath}`);
+  } else {
+    console.log(plist);
+  }
+  console.log(
+    `\n# to enable (operator-run — NOT done by this command):\n` +
+      `launchctl load ${plistPath}\n` +
+      `# request a deploy:  rmd deploy\n` +
+      `# opt into auto (behind the health-check):  touch ${join(config.root, "state", "DEPLOY_AUTO")}`,
+  );
+  return 0;
+}
+
+/**
  * `rmd digest-plist [--hour <h>] [--write]` — GENERATE the launchd unit for the daily
  * `rmd digest` pulse (W1-T112 — "the morning pulse"; lib/launchd.ts's
  * `generateDigestLaunchdPlist` owns the generation, the SAME W1-T12b generator family
@@ -4968,7 +5049,7 @@ function buildSweepEffects(
   plan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
-): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview"> {
+): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = ghIssueGateway(owner, repo);
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
@@ -4987,6 +5068,15 @@ function buildSweepEffects(
         .filter((l) => l.step === "dep-review.decided" && l.task_id === `dep-review-PR${pr.prNumber}`)
         .at(-1);
       return typeof decided?.decision === "string" ? decided.decision : "unknown";
+    },
+
+    // POST-REVIEW ROUTING (the #584 stall): a checks-green PR with NO posted
+    // remudero-review gets the SAME reviewCommand the operator verb runs. The
+    // posted verdict drives the NEXT sweep pass (success -> arm, failure ->
+    // fix/escalate); a criteria-less PR posts FAIL fail-closed — a legible
+    // gate state instead of a needs-human clarification issue.
+    postReview: async (pr) => {
+      await reviewCommand(String(pr.prNumber), ["--repo", repo]);
     },
 
     close: (pr, reason) => {
@@ -7197,6 +7287,21 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)",
   },
   {
+    name: "deploy",
+    usage:
+      "rmd deploy [--reason <text>]   # OPERATOR trigger for the deploy supervisor (human-gated): writes state/DEPLOY_REQUESTED so the supervisor fast-forwards the daemon's checkout + `launchctl kickstart -k`s the daemon at the next idle gap, health-checks it, and rolls back on failure. Deploys nothing itself — keeps Craig's control over WHEN a merged fix goes live. The daemon runs `tsx src/` loaded once + dispatches in-process, so merged fixes are inert until this restart.",
+  },
+  {
+    name: "deploy-run",
+    usage:
+      "rmd deploy-run [--dry-run]   # ONE deploy-supervisor cycle (the launchd unit runs this on its interval): no-op unless a deploy is triggered (marker or auto) AND the daemon is idle (no worker/inflight), then ff + kickstart at a re-checked idle gap, with health-check + rollback. --dry-run runs the whole sequence but SKIPS the real kickstart. Never restarts under an active task (the #559/#581 SIGKILL-orphan class).",
+  },
+  {
+    name: "deploy-plist",
+    usage:
+      "rmd deploy-plist [--interval <s>] [--write]   # generate the deploy-supervisor launchd unit (a periodic `rmd deploy-run`, default every 120s). Mirrors daemon-plist: prints by default, --write installs it; `launchctl load` is an operator action. Opt into auto-on-new-main (behind the health-check) by touching state/DEPLOY_AUTO.",
+  },
+  {
     name: "serve",
     usage:
       "rmd serve [--port <n>] [--host <addr>]   # the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317 (matches apps/dashboard's own default); --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the console can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM",
@@ -7383,6 +7488,15 @@ async function main(): Promise<void> {
   }
   if (cmd === "daemon-plist") {
     process.exit(await daemonPlistCommand(rest));
+  }
+  if (cmd === "deploy") {
+    process.exit(await deployCommand(rest));
+  }
+  if (cmd === "deploy-run") {
+    process.exit(await deployRunCommand(rest));
+  }
+  if (cmd === "deploy-plist") {
+    process.exit(await deployPlistCommand(rest));
   }
   if (cmd === "serve") {
     process.exit(await serveCommand(rest));

@@ -133,7 +133,7 @@ test("acceptance 1 — at the limit: checkQueueGovernor defers, a dispatch_defer
     mergeable: 1,
     "blocked-fixable": 1,
     stale: 1,
-    "blocked-ambiguous": 1, "dep-review": 0 });
+    "blocked-ambiguous": 1, "dep-review": 0, "post-review": 0 });
   assert.equal(summary.actionsTaken, 4, "all four dispositions acted — drainage is ungated at any depth");
   assert.equal(deps.armed.length, 1, "merge-eligible PR still armed");
   assert.equal(deps.fixed.length, 1, "fixable PR still dispatched a fix worker");

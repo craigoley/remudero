@@ -470,7 +470,7 @@ test("acceptance 1 — the P22 golden: {mergeable, blocked-fixable(2 criteria), 
     mergeable: 1,
     "blocked-fixable": 1,
     stale: 1,
-    "blocked-ambiguous": 1, "dep-review": 0 });
+    "blocked-ambiguous": 1, "dep-review": 0, "post-review": 0 });
   assert.equal(summary.total, 4);
   assert.equal(summary.actionsTaken, 4);
   assert.equal(summary.noneCount, 0, "no open PR ends the sweep with disposition=none");
@@ -665,7 +665,7 @@ test("an already-armed PR (observed autoMergeArmed=true) is not re-armed", async
 test("renderSweepSummary is a single legible line", () => {
   const s = {
     total: 4,
-    byDisposition: { mergeable: 1, "blocked-fixable": 1, stale: 1, "blocked-ambiguous": 1, "dep-review": 0 },
+    byDisposition: { mergeable: 1, "blocked-fixable": 1, stale: 1, "blocked-ambiguous": 1, "dep-review": 0, "post-review": 0 },
     actionsTaken: 4,
     actions: [],
     noneCount: 0,
@@ -1083,4 +1083,40 @@ test("runCreditBackfill: a candidate it ACTUALLY corrects still logs its per-can
   assert.equal(acted.length, 1, "silence is scoped to NO-OPS — a real correction stays legible");
   assert.equal(acted[0].extra.task_id, "W1-TB");
   assert.equal(acted[0].extra.corrected, true);
+});
+
+// ── post-review routing: a green-but-ungated PR gets the review lane, not an escalation ──
+
+function ungatedGreenPr(over: Partial<OpenPrView> = {}): OpenPrView {
+  return pr({ prNumber: 584, prUrl: "url/584", taskId: undefined, reviewState: "none", checksState: "green", ...over });
+}
+
+test("deriveDisposition: checks green + review never posted -> post-review, NOT the clarification catch-all (the #584 stall)", () => {
+  const r = deriveDisposition(ungatedGreenPr(), DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "post-review");
+  assert.match(r.reason, /review never posted/);
+});
+
+test("deriveDisposition: checks PENDING + review none still lands on the catch-all — review-before-green is not the lane's order", () => {
+  assert.equal(deriveDisposition(ungatedGreenPr({ checksState: "pending" }), DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
+});
+
+test("runSweep: the postReview dep is invoked once and deduped per head on the next pass", async () => {
+  const calls: number[] = [];
+  const first = fakeDeps({ postReview: (p) => { calls.push(p.prNumber); } });
+  await runSweep([ungatedGreenPr()], first, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(calls, [584]);
+  const calls2: number[] = [];
+  const second = fakeDeps({ ledgerPath: first.ledgerPath, postReview: (p) => { calls2.push(p.prNumber); } });
+  await runSweep([ungatedGreenPr()], second, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(calls2, [], "a posted verdict is per-head — never re-posted for the same sha");
+});
+
+test("runSweep: no postReview dep wired -> ledgered stand-down, no crash, no escalation fires", async () => {
+  const deps = fakeDeps();
+  await runSweep([ungatedGreenPr()], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(deps.escalated.length, 0);
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed[0].disposition, "post-review");
+  assert.equal(disposed[0].acted, false);
 });
