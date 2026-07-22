@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import {
@@ -24,12 +27,14 @@ import {
   judgeReview,
   judgeRubric,
   keywordOnlyAnnotation,
+  narrowNameFilteredArgs,
   nameFilteredOutcome,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
   parseWhitelistedProof,
   priorReviewVerdictFromLedger,
   resolveAutoMergeArm,
+  resolveNameFilteredCandidates,
   reviewerOutcome,
   reviewerVerdictContract,
   reviewLedgerLegibilityFields,
@@ -1675,4 +1680,85 @@ test("a seeded materialization failure posts a verdict whose description names i
   assert.doesNotMatch(v.summary, /substantiated/);
   // whose ledger line records the same:
   assert.deepEqual(reviewLedgerLegibilityFields(v), { capped: true, keyword_only: true });
+});
+
+// ── W1-T227: a name-filtered proof must scope its node --test invocation to
+// the candidate file(s) it could actually match, never the WHOLE suite glob
+// (test/**/*.test.ts) — node loads every file in a glob before filtering by
+// name regardless of how few match, and that full-suite load time is what
+// coins the SAME proof `executed_pass` on an idle host and `exec_error` on a
+// loaded one (a timeout race in the harness, not a flake in the tests).
+
+test('W1-T227 (acceptance 1): a proof matching tests in exactly one file executes against only that file — the built argv contains the single file, not the glob', () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w227-"));
+  mkdirSync(join(dir, "test"));
+  writeFileSync(
+    join(dir, "test", "foo.test.ts"),
+    'test("a very distinctive test name for W1-T227", () => {});\n',
+  );
+  writeFileSync(join(dir, "test", "bar.test.ts"), 'test("something unrelated entirely", () => {});\n');
+
+  const candidates = resolveNameFilteredCandidates(dir, "a very distinctive test name for W1-T227");
+  assert.deepEqual(candidates, ["test/foo.test.ts"]);
+
+  const baseArgs = [
+    "--test",
+    "--import",
+    "tsx",
+    "--test-name-pattern",
+    "a very distinctive test name for W1-T227",
+    "test/**/*.test.ts",
+  ];
+  const narrowed = narrowNameFilteredArgs(baseArgs, candidates);
+  assert.deepEqual(narrowed, [
+    "--test",
+    "--import",
+    "tsx",
+    "--test-name-pattern",
+    "a very distinctive test name for W1-T227",
+    "test/foo.test.ts",
+  ]);
+});
+
+test("W1-T227 (acceptance 2): no name-pattern invocation carries the full glob once at least one candidate file is found — even with several matches", () => {
+  const baseArgs = ["--test", "--import", "tsx", "--test-name-pattern", "shared fragment", "test/**/*.test.ts"];
+  const narrowed = narrowNameFilteredArgs(baseArgs, ["test/foo.test.ts", "test/bar.test.ts"]);
+  assert.ok(!narrowed.includes("test/**/*.test.ts"), "the narrowed argv must never carry the full suite glob");
+  assert.deepEqual(narrowed, [
+    "--test",
+    "--import",
+    "tsx",
+    "--test-name-pattern",
+    "shared fragment",
+    "test/foo.test.ts",
+    "test/bar.test.ts",
+  ]);
+});
+
+test("W1-T227 (acceptance 3): zero-candidate patterns still fail as zero-match — narrowing changes nothing, nameFilteredOutcome's existing zero-match path is unchanged", () => {
+  const baseArgs = [
+    "--test",
+    "--import",
+    "tsx",
+    "--test-name-pattern",
+    "a name that appears in no test file at all",
+    "test/**/*.test.ts",
+  ];
+  // No candidate found ⇒ narrowNameFilteredArgs falls back to the base (globbed) args verbatim.
+  assert.deepEqual(narrowNameFilteredArgs(baseArgs, []), baseArgs);
+
+  // And the same zero-match TAP shape nameFilteredOutcome always treated as "fail" (a
+  // genuinely completed run whose only result lines are file wrappers, never a real
+  // match) still fails — narrowing never turns an absent test into a pass.
+  const stdout = ["1..0", "# Subtest: test/retro.test.ts", "ok 1 - test/retro.test.ts", "# duration_ms 5"].join(
+    "\n",
+  );
+  assert.equal(nameFilteredOutcome(stdout), "fail");
+});
+
+test("resolveNameFilteredCandidates: no file contains the raw name ⇒ empty candidate list (best-effort, never throws)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w227-"));
+  mkdirSync(join(dir, "test"));
+  writeFileSync(join(dir, "test", "foo.test.ts"), 'test("something else entirely", () => {});\n');
+  assert.deepEqual(resolveNameFilteredCandidates(dir, "a name that appears nowhere"), []);
 });
