@@ -36,12 +36,16 @@
     COORDINATE WITH LEDGER ARCHIVAL (W1-T209). Once rotation moves old records into archived rolls, a backup
     capturing only the live file would silently lose history. The two must agree on what the full record is.
   acceptance:
+    # PROOFS REALIGNED to executable dialect (feedback#fb-1784732686356-8d739e; Rule 16 — nothing weakened).
+    # The prior proofs were the bare strings 'unit test' / 'unit test on the snapshot content list' /
+    # 'unit test on the failure path' — regex name-filters matching zero tests, so no proof could ever
+    # execute. Each is now a TEST-TITLE SUBSTRING the worker's test titles must contain.
     - claim: "a snapshot exists after the scheduled run and its content list contains the ledger and the proposals register"
-      proof: "unit test on the snapshot content list"
+      proof: "unit test: snapshot content list"
     - claim: "restore round-trips a seeded state directory, with the restored ledger byte-identical to the source"
-      proof: "unit test"
+      proof: "unit test: restore round-trips"
     - claim: "a snapshot failure escalates loudly rather than completing silently or leaving an empty archive"
-      proof: "unit test on the failure path"
+      proof: "unit test: snapshot failure escalates"
   risk: high
   origin: architect
   plan_refs: ["§10"]

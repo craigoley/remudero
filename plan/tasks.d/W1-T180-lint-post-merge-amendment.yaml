@@ -62,23 +62,57 @@
     board all read, for a problem a lint gate catches at authoring time. If the orphan class recurs in a form
     lint cannot see, revisit it then.
   acceptance:
+    # PROOFS REALIGNED to executable dialect (feedback#fb-1784732686356-8d739e; Rule 16 — nothing dropped or
+    # weakened). The prior proofs were `unit test: <prose>` bodies — an empty --test-name-pattern filter, so
+    # THIS TASK'S OWN proofs walled the proof floor it exists to lint (it could never self-certify). Each
+    # proof is now a TEST-TITLE SUBSTRING the worker's test titles must contain; the full falsifier prose is
+    # preserved in the comments below, verbatim in intent, and the worker builds each test to it.
     - claim: "a plan PR that ADDS an acceptance criterion to an already-merged task FAILS the linter, naming the task and the criterion"
-      proof: "unit test over the new check with injected merge state: a task whose derived status is merged and whose criteria set gained an entry vs the base ref produces a blocking violation naming the task id and the added claim. FALSIFIER: PR #374, which added two criteria to W1-T155 at 17:35:20Z — one hour forty-five minutes after PR #365 credited it merged at 15:50:08Z — and passed every gate clean, leaving both criteria unreachable by the drain (drain.ts:88 skips merged) and by the retro sweep (retro.ts:578 skips merged/done)"
+      # Test body: over the new check with injected merge state, a task whose derived status is merged and
+      # whose criteria set gained an entry vs the base ref produces a blocking violation naming the task id
+      # and the added claim. FALSIFIER: PR #374, which added two criteria to W1-T155 at 17:35:20Z — one hour
+      # forty-five minutes after PR #365 credited it merged at 15:50:08Z — and passed every gate clean,
+      # leaving both criteria unreachable by the drain (drain.ts:88 skips merged) and by the retro sweep
+      # (retro.ts:578 skips merged/done).
+      proof: "unit test: blocks a bare post-merge amendment"
     - claim: "the same PR filing a FOLLOW-UP task carrying the amended criteria PASSES — the check gates the orphaning, not the amending"
-      proof: "unit test: a changed-set containing BOTH the amended merged task AND a new task carrying those criteria produces no violation. FALSIFIER: a check with no escape hatch, which would make the correct action (amend for the record, file the follow-up) impossible and push authors to skip the record entirely"
+      # Test body: a changed-set containing BOTH the amended merged task AND a new task carrying those
+      # criteria produces no violation. FALSIFIER: a check with no escape hatch, which would make the correct
+      # action (amend for the record, file the follow-up) impossible and push authors to skip the record.
+      proof: "unit test: follow-up escape hatch"
     - claim: "the linter WARNS on an acceptance proof the executor cannot parse — a proof that can never run is caught at authoring time, not discovered as a 0/N verdict"
-      proof: "unit test: a criterion whose proof lacks the `unit test:`/`grep:` dialect prefix, or whose prefixed body is prose where a file-or-test NAME belongs, yields a WARNING (not a blocking violation — an unrunnable proof is a quality problem, not a merge-stopper). FALSIFIER: W1-T181 shipped with criteria 3 and 5 carrying no dialect prefix at all and the prefixed ones carrying prose, so all five read not_executable/executed_fail via an empty name-filter and nothing warned before dispatch — an operator authoring error the linter was positioned to catch and did not"
+      # Test body: a criterion whose proof lacks the `unit test:`/`grep:` dialect prefix, or whose prefixed
+      # body is prose where a file-or-test NAME belongs, yields a WARNING (not a blocking violation — an
+      # unrunnable proof is a quality problem, not a merge-stopper). FALSIFIER: W1-T181 shipped with criteria
+      # 3 and 5 carrying no dialect prefix at all and the prefixed ones carrying prose, so all five read
+      # not_executable/executed_fail via an empty name-filter and nothing warned before dispatch.
+      proof: "unit test: warns on an unparseable proof"
     - claim: "an UNREADABLE derived status fails OPEN — a status-read failure never reds an otherwise-valid plan PR"
-      proof: "unit test: a seeded status-resolution failure yields no violation. FALSIFIER: a fail-closed implementation, which during a GitHub outage would red every plan PR — blocking the plan-only lane that remains usable precisely when the fleet cannot observe GitHub"
+      # Test body: a seeded status-resolution failure yields no violation. FALSIFIER: a fail-closed
+      # implementation, which during a GitHub outage would red every plan PR — blocking the plan-only lane
+      # that remains usable precisely when the fleet cannot observe GitHub.
+      proof: "unit test: unreadable status fails open"
     - claim: "the linter stays PURE — merge state arrives by injection, the check performs no I/O"
-      proof: "unit/structural test: the new check is reachable with merge state supplied through LintOpts and task-linter.ts imports neither status.ts nor any gh/exec surface, preserving the documented 'PURE function over a loaded Task/Plan, no I/O' contract at task-linter.ts:3-4. FALSIFIER: a check that fetches merge state itself, which makes every linter unit test require network or heavy mocking and breaks the CI-safe purity the linter depends on"
+      # Structural test body: the new check is reachable with merge state supplied through LintOpts and
+      # task-linter.ts imports neither status.ts nor any gh/exec surface, preserving the documented 'PURE
+      # function over a loaded Task/Plan, no I/O' contract at task-linter.ts:3-4. FALSIFIER: a check that
+      # fetches merge state itself, which makes every linter unit test require network or heavy mocking.
+      proof: "unit test: linter stays pure"
   risk: high
   origin: architect
   plan_refs: ["§5C", "§12"]
   files: [src/lib/task-linter.ts, src/run-task.ts, test/task-linter.test.ts]
   status: queued
   attempts: 0
-  note: "EXTENDED 2026-07-20 with a proof-parseability WARNING (see acceptance): the same linter pass that
+  note: "PROOFS REALIGNED 2026-07-22 (feedback#fb-1784732686356-8d739e): this task's own five proofs were
+    prose `unit test:` bodies — offenders of the exact class its parseability WARNING exists to catch — so it
+    could never self-certify. Now test-title substrings (executable). SYSTEMIC INVENTORY the WARN check will
+    surface on first run: ~231 of 329 `unit test:` proofs in plan/tasks.yaml are prose-not-a-test-target
+    (floor-degrade, NOT false verdicts — the 10 false-verdict `grep:` prose proofs were rewritten in the same
+    plan PR that realigned this task: W1-T4/T66/T67/T68/T71/T77/T78/T87/T90/T107), plus the tasks.d prose
+    class (W1-T173/174/175/176/186/191/194/195/196/198/201). Remainder is rewritten Architect-side (plan
+    PRs, Rule 16 realignment) as tasks approach dispatch, with this linter's WARNING as the standing catch.
+    EXTENDED 2026-07-20 with a proof-parseability WARNING (see acceptance): the same linter pass that
     catches a post-merge amendment is the cheapest place to catch a proof the executor can never run. Folded
     here rather than filed standalone because it is one more check in an already-planned linter change.
     Ships WITH standing rule 21 (MASTER-PLAN §12), which records the house answer in prose: an amendment to
