@@ -1525,9 +1525,13 @@ export interface ReviewPromptInput {
 /**
  * Render the prompt for a FRESH-context REVIEW worker (acceptance #1/#3). The
  * worker is read-only + gh: it reads the PR diff, the task's acceptance criteria,
- * and the implement REPORT, verdicts each criterion against its proof, and posts
- * the `remudero-review` commit status. It is told NEVER to edit code — and the
- * runner spawns it with a read-only settings profile, so this is belt-and-braces.
+ * and the implement REPORT, and verdicts each criterion against its proof. It
+ * does NOT post the `remudero-review` commit status itself — the deny-floor
+ * (W1-T203) refuses any `gh api -X POST .../statuses/...` call from a worker,
+ * so the reviewer only emits `REVIEW_VERDICT` lines and the ORCHESTRATOR posts
+ * the authoritative status after folding them in (see reviewerVerdictContract,
+ * parseReviewerVerdicts). It is told NEVER to edit code — and the runner spawns
+ * it with a read-only settings profile, so this is belt-and-braces.
  *
  * The reviewer verifies against REPO STATE, not diff+report alone: when a proof
  * names an EXECUTABLE check (a test to run, a grep/command over the source), the
@@ -1540,9 +1544,6 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
   const criteria = (input.task.acceptance ?? [])
     .map((c, i) => `  ${i + 1}. CLAIM: ${c.claim}\n     PROOF: ${c.proof}`)
     .join("\n");
-  const post = (state: ReviewState) =>
-    `gh api -X POST repos/${input.owner}/${input.repo}/statuses/${input.headSha} ` +
-    `-f context=${REVIEW_CONTEXT} -f state=${state} -f description="<one line>"`;
 
   return [
     `You are a REVIEW worker with FRESH context — you are NOT the implementer and`,
@@ -1573,13 +1574,13 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
     `ACCEPTANCE CRITERIA:`,
     criteria || "  (none stated — treat as FAILURE: nothing to verify)",
     ``,
-    `Then post the commit status on the PR head sha (${input.headSha}):`,
-    `  on PASS:  ${post("success")}`,
-    `  on FAIL:  ${post("failure")}`,
+    `Do NOT post the \`${REVIEW_CONTEXT}\` commit status yourself — a worker`,
+    `\`gh api -X POST .../statuses/...\` call is refused by the deny-floor`,
+    `(W1-T203); it would simply fail. Instead, emit your per-criterion`,
+    `REVIEW_VERDICT lines (below) and the ORCHESTRATOR will post the`,
+    `authoritative status on sha ${input.headSha} after folding them in.`,
     ``,
-    `This does NOT touch branch protection — you only POST the ${REVIEW_CONTEXT}`,
-    `status; whether it is REQUIRED is a separate concern. End with a REPORT: the`,
-    `per-criterion verdicts, the state you posted, and the sha.`,
+    `End with a REPORT: the per-criterion verdicts and your reasoning for each.`,
   ].join("\n");
 }
 
@@ -1595,7 +1596,8 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
 export function reviewerVerdictContract(count: number): string {
   return [
     ``,
-    `MACHINE-READABLE OUTPUT (required, in addition to posting the status): emit`,
+    `MACHINE-READABLE OUTPUT (required — this is what the orchestrator posts`,
+    `the status from, since you do not post it yourself): emit`,
     `EXACTLY one line per criterion, in this form and nothing else on the line:`,
     `  REVIEW_VERDICT <n>: PASS   (proof is responsive and substantiated)`,
     `  REVIEW_VERDICT <n>: FAIL   (proof missing, unpasted, or non-responsive)`,
