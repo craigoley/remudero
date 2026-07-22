@@ -427,6 +427,90 @@ export interface DaemonDeps {
 }
 
 /**
+ * THE BOOT-RATE INVARIANT (W1-T215, recon T2-AC2). Two DIFFERENT root causes
+ * have already produced a daemon relaunch loop: W1-T197's headroom-exhausted
+ * exit-1 (fixed by moving headroom overage to an in-process idle heartbeat —
+ * see `DaemonStopReason`'s doc, above) and the uncaught-escalate-throw loop
+ * fixed in #472 (`tryEscalate`'s doc, escalate.ts — observed 2026-07-21
+ * 04:02-04:13, one boot per minute). Both were caught only because a human
+ * read `daemon.boot` ledger timestamps and noticed the gaps were ~60s —
+ * nothing in the system observed its OWN boot rate. A third cause is likely
+ * (any uncaught throw anywhere in the poll loop produces the identical
+ * shape), so this detects the SHAPE — many boots in a short window, each
+ * doing no work — rather than any one known trigger.
+ *
+ * A PURE FUNCTION over already-extracted `daemon.boot` timestamps (Rule 18):
+ * no ledger read, no clock, no process spawn — provable against a synthetic
+ * boot history with nothing but arrays and dates (this module never touches
+ * the filesystem, see the file header). The caller re-derives
+ * `bootTimestamps` from the ledger's own `daemon.boot` lines.
+ */
+export interface CrashLoopWindow {
+  /** The rolling window's width, in ms. */
+  windowMs: number;
+  /** STRICTLY MORE than this many boots inside `windowMs` is a breach. */
+  maxBoots: number;
+}
+
+/**
+ * DEFAULT: more than 5 boots inside any rolling 10-minute window. Sized
+ * against the two observed incidents (~one boot/minute — 10+ boots in 10
+ * minutes) with headroom for a legitimate handful of restarts during
+ * commissioning or config-change testing, which this must NOT trip on (the
+ * false-positive falsifier, test/daemon-crashloop.test.ts) — an invariant
+ * that cries wolf gets muted, and a muted invariant is worse than none.
+ */
+export const DEFAULT_CRASHLOOP_WINDOW: CrashLoopWindow = { windowMs: 10 * 60_000, maxBoots: 5 };
+
+/**
+ * The breach verdict — carries its OWN evidence (the densest window's actual
+ * boot timestamps + the threshold breached), so surfacing it never sends a
+ * human back to raw ledger timestamps, which is the exact labour this
+ * replaces.
+ */
+export interface CrashLoopVerdict {
+  breached: boolean;
+  /** The densest `windowMs`-wide run of boots found, oldest first. */
+  windowBoots: string[];
+  windowMs: number;
+  maxBoots: number;
+}
+
+/**
+ * Find the densest `windowMs`-wide run of boots and compare its size against
+ * `maxBoots`. Unparseable timestamps are dropped rather than thrown on — the
+ * ledger's own torn-line discipline (ledger.ts) — so one malformed line never
+ * takes the invariant itself down. Detects the SHAPE only: it does not care
+ * WHY a boot happened, so the identical function catches a headroom-exit
+ * loop, an escalate-throw loop, and whatever the next uncaught-throw cause
+ * turns out to be. O(n²) in the boot count, which is fine — callers pass a
+ * bounded recent tail of the ledger, never its full history.
+ */
+export function detectDaemonCrashLoop(
+  bootTimestamps: readonly string[],
+  window: CrashLoopWindow = DEFAULT_CRASHLOOP_WINDOW,
+): CrashLoopVerdict {
+  const parsed = bootTimestamps
+    .map((raw) => ({ raw, ms: Date.parse(raw) }))
+    .filter((p) => Number.isFinite(p.ms))
+    .sort((a, b) => a.ms - b.ms);
+
+  let densest: { raw: string; ms: number }[] = [];
+  for (const anchor of parsed) {
+    const windowStart = anchor.ms - window.windowMs;
+    const inWindow = parsed.filter((p) => p.ms > windowStart && p.ms <= anchor.ms);
+    if (inWindow.length > densest.length) densest = inWindow;
+  }
+
+  return {
+    breached: densest.length > window.maxBoots,
+    windowBoots: densest.map((p) => p.raw),
+    windowMs: window.windowMs,
+    maxBoots: window.maxBoots,
+  };
+}
+
+/**
  * The daemon's startup routine (W1-T12b): the ANTHROPIC-clean-env boot
  * assertion, run ONCE before the scheduler loop starts. Takes the log sink and
  * the env to check as explicit, injectable inputs — same shape as the rest of
@@ -444,6 +528,15 @@ export interface DaemonDeps {
  * `lib/tmp.ts`'s `sweepStaleTempDirs`; tests inject a fake that counts calls
  * or seeds a fixed summary. Omitted ⇒ no sweep, behavior unchanged from
  * before W1-T115.
+ *
+ * BOOT-RATE INVARIANT (W1-T215): an optional `crashLoopCheck` dependency,
+ * consulted once here, logged as `daemon.crashloop_check` either way so the
+ * check's OWN pass/fail is part of the boot record — a breach is surfaced via
+ * `crashLoopCheck.onBreach`, called with the {@link CrashLoopVerdict}'s
+ * evidence attached (the real command wires this to escalate.ts, e.g.
+ * `tryEscalate`, so a loop opens a needs-human issue instead of waiting for a
+ * human to notice the boot-timestamp gaps). Omitted ⇒ no check, behavior
+ * unchanged from before W1-T215.
  */
 export function daemonBoot(
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -451,9 +544,51 @@ export function daemonBoot(
   sweepTmp?: () => { removed: string[]; kept: string[] },
   sweepLocks?: () => { reaped: string[]; kept: string[] },
   unlockWorkerKeychain?: () => { keychainPath: string; provisioned: boolean; unlocked: true },
+  crashLoopCheck?: {
+    /**
+     * Prior `daemon.boot` timestamps (ISO strings), re-derived from the ledger
+     * by the CALLER before invoking `daemonBoot` — this module never touches
+     * the filesystem (see the file header). Must NOT include this boot's own
+     * timestamp; `daemonBoot` appends it (via `now`) before checking.
+     */
+    priorBoots: () => string[];
+    /** Override the default window/threshold (POLICY DATA, rule 2). */
+    window?: CrashLoopWindow;
+    /**
+     * THIS boot's own timestamp — defaults to the real wall clock; tests
+     * inject a fixed instant so the check is provable without a real
+     * wall-clock wait (Rule 18), same discipline as `DaemonDeps.now`.
+     */
+    now?: () => string;
+    /**
+     * Called ONLY on breach, with the evidence attached. The real command
+     * wires this to escalate.ts (e.g. `tryEscalate`) so a loop opens a
+     * needs-human issue instead of waiting for a human to read raw
+     * timestamps.
+     */
+    onBreach: (verdict: CrashLoopVerdict) => void;
+  },
 ): BootAssertion {
   const assertion = assertCleanBoot(env);
   log("daemon.boot", { env_clean: assertion.env_clean, billing_mode: assertion.billing_mode });
+  // BOOT-RATE INVARIANT (W1-T215): the SHAPE-not-cause check — see this
+  // function's doc and detectDaemonCrashLoop's, above. Logged either way
+  // (daemon.crashloop_check) so the invariant's own pass/fail is part of the
+  // legible boot record, not only its breaches.
+  if (crashLoopCheck) {
+    const nowIso = (crashLoopCheck.now ?? (() => new Date().toISOString()))();
+    const verdict = detectDaemonCrashLoop(
+      [...crashLoopCheck.priorBoots(), nowIso],
+      crashLoopCheck.window ?? DEFAULT_CRASHLOOP_WINDOW,
+    );
+    log("daemon.crashloop_check", {
+      breached: verdict.breached,
+      boot_count: verdict.windowBoots.length,
+      window_ms: verdict.windowMs,
+      max_boots: verdict.maxBoots,
+    });
+    if (verdict.breached) crashLoopCheck.onBreach(verdict);
+  }
   // W1-T235 (WS-7 keychain-unlock gate): the boot-time worker-keychain unlock,
   // EXPLICIT AND LEDGERED — the fleet's credential store comes up unlocked as a
   // named boot step, never as a side effect of unlocking the operator's login
