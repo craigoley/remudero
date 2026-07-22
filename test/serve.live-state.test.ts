@@ -101,7 +101,7 @@ function writePlan(root: string, yamlBody: string): string {
   return planPath;
 }
 
-function fixtureDeps(root: string, tasks: Task[], github: GitHub = fakeGitHub(), pollMs = 50): ServeDeps {
+function fixtureDeps(root: string, tasks: Task[], github: GitHub = fakeGitHub(), pollMs = 50, fetchTimeoutMs?: number): ServeDeps {
   const plan = planOf(tasks);
   const ledgerPath = ledgerPathFor(root);
   const planPath = writePlan(root, planYaml(plan));
@@ -114,6 +114,7 @@ function fixtureDeps(root: string, tasks: Task[], github: GitHub = fakeGitHub(),
     questionsRoot: root,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
     pollMs,
+    fetchTimeoutMs,
   };
 }
 
@@ -337,6 +338,81 @@ test("poll failures: a transient 'reconnecting' indicator, escalating to a visib
       assert.equal(recovered.dataStale, null);
       assert.match(recovered.text, /updated/);
       assert.doesNotMatch(recovered.text, /reconnecting|failed/);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+// ── (4b) W1-T189: ONE liveness truth -- an SSE row delta arriving while the REST poll is failing
+// must not independently reset the freshness stamp while the board is visibly stale ────────────
+
+test("one liveness truth: an SSE row delta during a failing /v1/status poll does not reset the freshness stamp while the board is stale", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })]);
+  await withShell(deps, async (base) => {
+    const context = await browser.newContext();
+    let shouldFail = false;
+    await context.route("**/v1/status", (route) => (shouldFail ? route.abort() : route.continue()));
+    const page = await context.newPage();
+    try {
+      await page.goto(`${base}/?token=${READ_TOKEN}`);
+
+      // let ONE successful poll land first, so lastSuccessAt (and #freshness) has a real clock.
+      await page.waitForFunction(() => document.getElementById("top-status")?.getAttribute("data-poll-state") === "ok", null, { timeout: 5000 });
+
+      // now fail the REST poll until it escalates to visibly stale.
+      shouldFail = true;
+      await page.waitForFunction(() => document.getElementById("top-status")?.getAttribute("data-poll-state") === "stale", null, { timeout: 12000 });
+
+      // the SSE stream is independent of the REST poll (it tails the ledger server-side) -- prove
+      // it still delivers and patches row content in place...
+      appendFileSync(deps.board.ledgerPath, runStart("W1-T1"));
+      await page.waitForFunction(() => (document.querySelector("#now-list .detail")?.textContent ?? "").includes("phase: recon"), null, {
+        timeout: 5000,
+      });
+
+      // ...but must NOT independently reset the freshness stamp to "just now" while the poll keeps
+      // failing -- the FALSIFIER this fixes, operator screenshot 2026-07-21: "live · updated 8s
+      // ago" rendered directly above "STALE — showing last known data". tickFreshness() only
+      // repaints #freshness on its own 1s setInterval, so wait past at least one such tick AFTER
+      // the SSE delta landed -- otherwise a bugged clock reset by the delta would not yet have
+      // been repainted, and the assertion below would pass for the wrong reason.
+      await new Promise((resolve) => setTimeout(resolve, 1300));
+      const state = await page.evaluate(() => ({
+        freshness: document.getElementById("freshness")?.textContent ?? "",
+        staleHidden: (document.getElementById("stale-badge") as HTMLElement)?.hidden,
+      }));
+      assert.equal(state.staleHidden, false, "the board must still be visibly stale");
+      assert.doesNotMatch(state.freshness, /just now/, "an SSE delta must not reset the freshness stamp while the poll keeps failing");
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+// ── (4c) W1-T189: a fetch that never resolves (a genuine hang, not a rejection) must still land
+// in the SAME reconnecting lifecycle as an HTTP error -- and never leak exception vocabulary ────
+
+test("a hanging /v1/status (never resolves) still lands in the reconnecting lifecycle -- a timeout is a failure", async () => {
+  const root = tmpRoot();
+  const FETCH_TIMEOUT_MS = 300; // small + deterministic -- never races real CI concurrency.
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })], undefined, undefined, FETCH_TIMEOUT_MS);
+  await withShell(deps, async (base) => {
+    const context = await browser.newContext();
+    // Intercept and never call fulfill/continue/abort -- a genuine hang, not a rejection. This is
+    // the shape W1-T187's 35-58s /v1/status latency produces: a request that eventually would
+    // resolve, but not within any bound the client itself enforces.
+    await context.route("**/v1/status", () => {});
+    const page = await context.newPage();
+    try {
+      await page.goto(`${base}/?token=${READ_TOKEN}`);
+      await page.waitForFunction(() => document.getElementById("top-status")?.getAttribute("data-poll-state") === "reconnecting", null, {
+        timeout: FETCH_TIMEOUT_MS + 5000,
+      });
+      const text = await page.evaluate(() => document.getElementById("top-status")?.textContent ?? "");
+      assert.match(text, /reconnecting/);
+      assert.doesNotMatch(text, /TypeError|AbortError|Failed to fetch|Error:/i, "a timeout must render the lifecycle's own vocabulary, never a raw exception string");
     } finally {
       await context.close();
     }

@@ -96,6 +96,16 @@ export interface ServeDeps {
    * (W1-T155), never a new server-side derivation.
    */
   phaseElapsedThresholdsMs?: Record<string, number>;
+  /**
+   * W1-T189: how long the shell's own client-side `getJson()` waits before aborting a hung
+   * `fetch` and routing it through the SAME poll-failure lifecycle as an HTTP error (see
+   * `handlePollFailure` in {@link renderShellHtml}). The browser's `fetch` never times out on
+   * its own, so without this a genuinely hung request (W1-T187's 35-58s `/v1/status` latency)
+   * would sit forever, never reaching the reconnecting/stale lifecycle at all. Defaults to
+   * {@link DEFAULT_FETCH_TIMEOUT_MS}; a test overrides it to a small value so the timeout path
+   * is exercised in bounded real time rather than racing a fixed 10s constant under CI load.
+   */
+  fetchTimeoutMs?: number;
   /** Forwarded to `createService` — one ledger line per auth decision/SSE lifecycle/handler error. */
   log?: ServiceOptions["log"];
 }
@@ -118,6 +128,9 @@ export const DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS: Record<string, number> = {
   "fix-rung": 45 * 60 * 1000,
   default: 60 * 60 * 1000,
 };
+
+/** W1-T189 default client-side fetch timeout (ms) — see {@link ServeDeps.fetchTimeoutMs}. */
+export const DEFAULT_FETCH_TIMEOUT_MS = 10_000;
 
 /**
  * PRE-WARM (W1-T154, MASTER-PLAN §7/§7B): call `github.warm()` (if it has one — status.ts's
@@ -205,7 +218,10 @@ function skeletonRows(n: number): string {
   return Array.from({ length: n }, () => '<li class="row skeleton" aria-hidden="true"><span class="skeleton-bar"></span></li>').join("");
 }
 
-export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number> = DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS): string {
+export function renderShellHtml(
+  phaseElapsedThresholdsMs: Record<string, number> = DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS,
+  fetchTimeoutMs: number = DEFAULT_FETCH_TIMEOUT_MS,
+): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -580,10 +596,24 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     return String(text ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
+  // W1-T189: a HANG is a failure too. The browser's own fetch() never times out on its own -- a
+  // request that never resolves would otherwise sit forever, never rejecting, so it would never
+  // reach handlePollFailure() below and the reconnecting/stale lifecycle would never fire at all
+  // (exactly the gap W1-T187's 35-58s /v1/status latency exposed). FETCH_TIMEOUT_MS aborts it
+  // client-side so a hang lands in the SAME catch path as an HTTP error or a network failure --
+  // never a raw exception escaping past the callers below, every one of which already funnels
+  // ANY getJson() rejection into that same lifecycle rather than rendering \`e\` itself.
+  const FETCH_TIMEOUT_MS = ${JSON.stringify(fetchTimeoutMs)};
   async function getJson(path) {
-    const res = await fetch(path, { headers: authHeaders });
-    if (!res.ok) throw new Error(\`GET \${path} -> \${res.status}\`);
-    return res.json();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(path, { headers: authHeaders, signal: controller.signal });
+      if (!res.ok) throw new Error(\`GET \${path} -> \${res.status}\`);
+      return await res.json();
+    } finally {
+      clearTimeout(timer);
+    }
   }
   function postJson(path, body) {
     return fetch(path, {
@@ -1691,21 +1721,28 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   // staleness caused it). The banner is DERIVED from poll state on every call, never a latched
   // string a later success forgets to clear — the falsifier this fixes: an operator-observed
   // "board fetch failed" banner that survived subsequent SUCCESSFUL polls beside live data. ────
+  //
+  // W1-T189: ONE derived truth, ONE clock. The freshness stamp (#freshness) and the stale banner
+  // (#stale-badge/top-status) used to read DIFFERENT clocks -- lastSuccessAt (the /v1/status
+  // poll) drove staleness, but a separate lastLiveAt, ALSO touched by every SSE row delta, drove
+  // freshness. A failing poll could escalate the board to visibly-stale while a live SSE delta
+  // simultaneously reset the freshness stamp to "updated just now" -- two indicators, each
+  // individually honest about its own source, jointly incoherent on screen (operator screenshot,
+  // 2026-07-21: "live · updated 8s ago" directly above "STALE — showing last known data"). Both
+  // surfaces now read the SAME lastSuccessAt -- the /v1/status poll's own clock -- so they can
+  // never disagree about the age of the data; an SSE delta still patches row content in place but
+  // is no longer itself proof that the BOARD (what these two indicators jointly promise) is fresh.
   const STALE_ESCALATE_AFTER = 3;
   let pollFailures = 0;
   let lastSuccessAt = null;
-  let lastLiveAt = null; // last successful data of ANY kind -- a poll success OR an SSE event.
 
-  function touchFreshness() {
-    lastLiveAt = Date.now();
-  }
   function tickFreshness() {
     const el = document.getElementById("freshness");
-    if (!lastLiveAt) {
+    if (!lastSuccessAt) {
       el.textContent = "";
       return;
     }
-    const secs = Math.max(0, Math.round((Date.now() - lastLiveAt) / 1000));
+    const secs = Math.max(0, Math.round((Date.now() - lastSuccessAt) / 1000));
     el.textContent = secs < 2 ? "updated just now" : \`updated \${secs}s ago\`;
   }
 
@@ -1751,7 +1788,6 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     }
     pollFailures = 0;
     lastSuccessAt = Date.now();
-    touchFreshness();
     const tasks = statusSnap.tasks ?? [];
     for (const t of tasks) ingestProjection(t);
     paintFromTasksById();
@@ -1888,9 +1924,11 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   setInterval(tickFreshness, 1000);
   subscribeStatusStream(
     (projection) => {
+      // W1-T189: an SSE delta patches THIS row's content in place, but it is not itself proof
+      // that the board is fresh -- lastSuccessAt (the /v1/status poll's own clock) is the ONE
+      // clock #freshness and the stale banner both read, so they can never disagree.
       ingestProjection(projection);
       paintFromTasksById();
-      touchFreshness();
     },
     (state) => setConnectionState(state),
   );
@@ -1908,7 +1946,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
  * closes the W1-T139 bootstrap paradox: the auth spec was satisfied against header-sending fetch
  * clients and unreachable by the one client that matters, the browser opening the URL.
  */
-function buildShellRoute(phaseElapsedThresholdsMs: Record<string, number>): Route {
+function buildShellRoute(phaseElapsedThresholdsMs: Record<string, number>, fetchTimeoutMs: number): Route {
   return {
     method: "GET",
     path: "/",
@@ -1916,7 +1954,7 @@ function buildShellRoute(phaseElapsedThresholdsMs: Record<string, number>): Rout
     allowQueryToken: true,
     handler: (_req, res) => {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(renderShellHtml(phaseElapsedThresholdsMs));
+      res.end(renderShellHtml(phaseElapsedThresholdsMs, fetchTimeoutMs));
     },
   };
 }
@@ -1943,7 +1981,7 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     buildEscalationMarkHandledRoute(fleetControlDeps),
     ...buildPanelGraphRoutes(panelGraphDeps),
     buildTaskCardRoute(deps.board),
-    buildShellRoute(deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS),
+    buildShellRoute(deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS, deps.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS),
   ];
 }
 
