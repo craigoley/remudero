@@ -81,7 +81,7 @@ import {
   resolveServiceTokens,
   serviceTokensPath,
 } from "./lib/serve.js";
-import {
+import { assertProposedPlanLoads,
   buildGrillEscalation,
   decideTriage,
   diffCitesFeedback,
@@ -5847,6 +5847,21 @@ async function triageCommand(rest: string[]): Promise<number> {
       });
       log("triage.grill_opened", { issue_url: grillIssueUrl, options: decision.options.length, recommendation: decision.recommendation });
       say(`grill opened (needs-human, ${decision.options.length} options + a recommendation): ${grillIssueUrl}`);
+    }
+
+    // ID-COLLISION GUARD (W1-T236 triple-mint, 2026-07-22): refuse a proposal whose merged plan
+    // (monolith + tasks.d shards) does not load — e.g. a minted id a shard already owns — BEFORE
+    // any push, with the duplicate named. See lib/triage.ts's assertProposedPlanLoads.
+    if (decision.action === "propose") {
+      try {
+        assertProposedPlanLoads(worktreePath);
+      } catch (e) {
+        const reason = String((e as Error)?.message ?? e);
+        log("triage.error", { error: `proposed plan does not load: ${reason}` });
+        say(`triage PROPOSED an unloadable plan — ${reason}; leaving no PR`);
+        worktreeRemove(repoDir, worktreePath);
+        return 1;
+      }
     }
 
     // Harness-owned deterministic status write (never LLM-authored) — folded into the SAME diff

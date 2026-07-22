@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
   COMMIT_BODY_MAX_LINE,
+  assertProposedPlanLoads,
   fitAcceptanceBullet,
   wrapBodyLine,
   buildGrillEscalation,
@@ -247,6 +248,40 @@ test("decideTriage: any file outside plan/ fails loud regardless of verdict (the
   });
   assert.equal(d.action, "error");
   assert.match((d as { reason: string }).reason, /touched non-plan file\(s\): src\/lib\/triage\.ts/);
+});
+
+// ── assertProposedPlanLoads (the W1-T236 triple-mint id-collision guard) ─────
+
+test("assertProposedPlanLoads: a minted id already owned by a tasks.d shard throws PlanError NAMING the duplicate — refused pre-push", () => {
+  const root = mkdtempSync(join(tmpdir(), "triage-idguard-"));
+  try {
+    mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
+    writeFileSync(
+      join(root, "plan", "tasks.yaml"),
+      "- id: W1-T236\n  title: minted by the worker off the monolith max\n  repo: r\n  type: implement\n  verify: auto\n  status: queued\n",
+    );
+    writeFileSync(
+      join(root, "plan", "tasks.d", "W1-T236-already-owned.yaml"),
+      "- id: W1-T236\n  title: the shard that already owns the id\n  repo: r\n  type: implement\n  verify: auto\n  status: queued\n",
+    );
+    assert.throws(() => assertProposedPlanLoads(root), /duplicate task id 'W1-T236'/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("assertProposedPlanLoads: a collision-free proposal loads clean — the guard adds no false refusal", () => {
+  const root = mkdtempSync(join(tmpdir(), "triage-idguard-ok-"));
+  try {
+    mkdirSync(join(root, "plan"), { recursive: true });
+    writeFileSync(
+      join(root, "plan", "tasks.yaml"),
+      "- id: W1-T240\n  title: a fresh id\n  repo: r\n  type: implement\n  verify: auto\n  status: queued\n",
+    );
+    assert.doesNotThrow(() => assertProposedPlanLoads(root));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // ── nonPlanFilesInDiff / diffCitesFeedback ────────────────────────────────────
