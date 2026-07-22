@@ -91,10 +91,22 @@ jobs:
     # this run's lcov totals against the recorded floor in scripts/coverage-baseline.json and
     # exits non-zero on any coverage-lowering PR; that floor only ever ratchets UP (a deliberate,
     # reviewed bump when coverage genuinely improves), never down to make a red PR pass.
+    #
+    # W1-T212 (recon R-12): that aggregate floor is diff-blind by design (proven in
+    # test/coverage-ratchet.test.ts's PLAN-ONLY FALSIFIER) — new code with zero covering tests
+    # merges freely as long as the codebase-wide aggregate stays above it, and the larger the
+    # codebase grows, the less any single untested addition can move that aggregate. The
+    # "Diff coverage" step below is a SEPARATE, diff-scoped check on the SAME job (so it shares
+    # coverage-ratchet's unconditional, always-registers-a-check-run shape rather than adding a
+    # new required context that could itself go silently absent): it reads the same lcov artifact
+    # plus this PR's base...head diff and fails when the diff adds a source line lcov marks
+    # instrumented-but-never-hit, even when the aggregate ratchet above stays green.
     name: coverage-ratchet
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
@@ -118,6 +130,12 @@ jobs:
             --test --import tsx "test/**/*.test.ts"
       - name: Coverage ratchet (blocks a coverage-lowering PR)
         run: node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
+      - name: Compute this PR's base...head diff (for the per-diff coverage check below)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git diff "${BASE_SHA}"...HEAD > pr.diff
+      - name: Diff coverage (blocks a PR that adds untested source lines, even when the aggregate floor above stays green)
+        run: node scripts/diff-coverage.mjs --lcov coverage/lcov.info --diff pr.diff
 
   mutation-ratchet:
     # §5 TIER 2, quality gate 2/4 (W1-T96) — green tests that kill no mutants are theater; the

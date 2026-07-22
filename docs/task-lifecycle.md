@@ -93,6 +93,13 @@ of the awareness layer described in `MASTER-PLAN.md` §12A: "docs are not
 evidence unless CI proves they match the code" — Tier A (generated docs,
 CI byte-equality) is a separate, later mechanism.
 
+That surface also covers what DEFINES a gate's measurement, not just the gate
+code (W1-T212): `.github/workflows/`, `scripts/*-ratchet.mjs`, every
+`scripts/*-baseline.json` floor, `scripts/mutation-relevant-paths.json`, and
+`stryker.conf.json` all trip the same item — a diff that lowers a ratchet
+floor or edits `ci-gate.yml`'s REQUIRED list is exactly as "user-visible" as
+editing `review.ts` itself, so it can no longer clear this rung silently.
+
 ## Terminal verdicts
 
 Only when `remudero-review=success` (and, once armed, `ci-gate=success`) does

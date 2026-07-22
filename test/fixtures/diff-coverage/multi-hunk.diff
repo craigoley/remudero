@@ -1,0 +1,9 @@
+diff --git a/src/multi.ts b/src/multi.ts
++++ b/src/multi.ts
+@@ -1,2 +1,2 @@
+-old1
++line1
+ line2
+@@ -5,2 +6,2 @@
+ line6-ctx
++line7-added

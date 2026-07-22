@@ -1,0 +1,5 @@
+diff --git a/test/example.test.ts b/test/example.test.ts
++++ b/test/example.test.ts
+@@ -1,1 +1,2 @@
+ import { test } from "node:test";
++test("new", () => {});
