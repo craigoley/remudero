@@ -674,6 +674,82 @@
     risk:high - credential plumbing plus a boot-time unlock, whose failure direction is a fleet that cannot
     spawn at all (fail-closed, which is why the gate caught it) or an operator keychain unlocked more widely
     than intended. The scripted locked-spawn test is the guard."
+- id: W1-T236
+  title: "Lock RECLAIM is TOCTOU-racy — dead-holder reclaim unlinks UNCONDITIONALLY, so two reclaimers can both win (the #143/#145 double-run class resurfacing in the stale-holder branch)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  risk: high
+  origin: feedback#fb-1784732585507-04eac2
+  plan_refs: ["§3"]
+  rationale: "LATENT BUG, observed code / inferred race, covered-by NONE. All three single-instance locks
+    share one reclaim shape: on openSync(wx)->EEXIST, read the lock, and if the holder pid is DEAD,
+    UNCONDITIONALLY unlinkSync(lockPath) then loop to re-create — inflight-lock.ts:99-101,
+    drain-lock.ts:94-96, review.ts:2489. The CREATE is O_EXCL-atomic (the pattern the CodeQL
+    exists-then-write task rightly cites as correct) but the RECLAIM is not: the unlink is not conditional
+    on the file still being the same dead lock that was read. Two reclaimers racing a dead lock: A reads
+    dead, B reads dead, A unlinks+creates (A holds), B's unlink deletes A's FRESH LIVE lock, B creates
+    (B holds) -> both believe they hold it -> concurrent run (two drains, two runs of one task, or a
+    double review-status post — the exact double-run class W1-T80 closed on the dispatch side, reopened
+    on the stale-holder side). The swallowed catch on the unlink (inflight-lock.ts:102 and siblings)
+    means a removed live competitor's lock leaves NO trace. Common trigger: a crashed run leaves a stale
+    lock and two retriers (drain + manual run-task, or two drains) collide. SAME read-then-unlink reap
+    race in sweepStaleInflightLocks (inflight-lock.ts:175-182, run at daemon boot daemon.ts:459): a real
+    acquire between the sweep's read and its unlink gets its live lock reaped. Existing tests
+    (inflight-lock.test.ts:71, drain-lock.test.ts:50, review-status-gate.test.ts:186) exercise only a
+    SINGLE reclaimer, so the race is unfalsified today."
+  design: |
+    VERIFY THE CITED LINES FROM SOURCE FIRST (distrust this note's line numbers). Then build ONE SHARED
+    reclaim primitive — not three divergent per-lock copies — used by all three lock sites AND the
+    boot-time sweeper. Implementer chooses the mechanism WITH EVIDENCE:
+    (i) COMPARE-AND-DELETE: re-verify, under an exclusive hold (e.g. a reclaim side-lock created O_EXCL,
+    or fd-identity via open+fstat inode/mtime match against the read snapshot), that the file on disk is
+    STILL the same dead lock that was read, and only then delete; a mismatch means a competitor won —
+    back off to the EEXIST path, touch nothing.
+    (ii) ATOMIC-RENAME RECLAIM: rename(2) the suspected-dead lock to a unique per-reclaimer name (rename
+    is atomic; exactly one racer's rename succeeds, the loser gets ENOENT and backs off), verify the
+    RENAMED file still names the dead holder, then create fresh via O_EXCL; if the renamed file turns out
+    live, rename it BACK (or fail closed).
+    Either way the invariants are: (a) at most ONE reclaimer proceeds past reclaim for a given dead lock;
+    (b) a LIVE lock is NEVER deleted by a reclaimer or by sweepStaleInflightLocks; (c) the loser's path is
+    indistinguishable from ordinary lock-held contention (EEXIST/backoff), never a crash.
+    STOP SWALLOWING THE EVIDENCE: the reclaim/sweep delete path must ledger (or at minimum log) what it
+    deleted — path, recorded pid/host, why it judged the holder dead — so a bad reclaim is traceable
+    instead of silent (the current catch{} hides exactly the incident this task exists to prevent).
+    TESTABILITY IS A DESIGN INPUT: a real-fs interleaving cannot be forced from outside, so the reclaim
+    steps (read / verify / delete / create) must be injectable or hookable so the two-acquirer test can
+    deterministically interleave A's delete+create BEFORE B's delete. That falsifying test is the core
+    deliverable; the existing single-reclaimer tests stay green and are not weakened.
+    MINOR SIBLING (fold in, cheap): reclaim checks isAlive(held.pid) but ignores the recorded host field
+    (inflight-lock.ts:99) — a pid from ANOTHER host is meaningless to isAlive, so if lock dirs ever sit
+    on a shared FS a live foreign holder reads as dead. Rule: only ever auto-reclaim a lock whose
+    recorded host matches this host; a foreign-host stale lock is surfaced (ledger/escalate), never
+    auto-reclaimed.
+    SCOPE: the lock/sweep modules and their tests only. No behavior change on the uncontended acquire
+    path; no changes to what the locks protect.
+  acceptance:
+    - claim: "two acquirers racing one pre-seeded dead-pid lock cannot BOTH hold: with A's delete+create interleaved BEFORE B's delete, exactly one wins and the loser backs off via the EEXIST path without deleting the winner's fresh live lock"
+      proof: "unit test: test/inflight-lock.test.ts (two-acquirer interleaved reclaim via injected step hooks; asserts single winner AND the winner's lock file survives the loser)"
+    - claim: "the drain lock and the review status lock get the SAME guarantee via ONE shared reclaim helper — no per-lock reimplementation of read-then-unlink remains"
+      proof: "grep: a single shared reclaim/compare-and-delete helper imported by inflight-lock.ts, drain-lock.ts and review.ts; zero remaining unconditional unlinkSync-after-read reclaim sites; unit test: test/drain-lock.test.ts two-acquirer case"
+    - claim: "sweepStaleInflightLocks cannot reap a LIVE lock acquired between its read and its delete"
+      proof: "unit test: test/inflight-lock.test.ts (sweep vs racing fresh acquire interleaved via the same hooks — the fresh live lock survives the sweep)"
+    - claim: "a reclaim/sweep delete is no longer silent: the deletion is ledgered/logged with path + recorded holder + dead-verdict reason, and a foreign-host lock is never auto-reclaimed"
+      proof: "unit test: reclaim of a dead same-host lock emits the trace line; a stale lock recording a DIFFERENT host is left in place and surfaced, not deleted"
+    - claim: "existing single-reclaimer behavior is unchanged: the current inflight-lock/drain-lock/review-status-gate suites pass unmodified in their assertions"
+      proof: "unit test: test/inflight-lock.test.ts, test/drain-lock.test.ts, test/review-status-gate.test.ts all green"
+  files: [src/lib/inflight-lock.ts, src/lib/drain-lock.ts, src/lib/review.ts, test/inflight-lock.test.ts, test/drain-lock.test.ts, test/review-status-gate.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-22 from feedback fb-1784732585507-04eac2. risk:high — this cuts the concurrency-control
+    layer whose failure mode is precisely the silent double run (two drains, a double task build, a double
+    review-status post) that W1-T80 was filed to kill; a wrong fix here fails INVISIBLY, which is why the
+    two-acquirer falsifying test (not the single-reclaimer happy path) is the non-negotiable deliverable.
+    Complements, does not touch: W1-T80 (dispatch-side dedup, shipped) and the CodeQL exists-then-write task
+    (create-side TOCTOU in config/init — different sites, same discipline)."
 - id: W1-T121
   title: QUEUE GOVERNOR — a WIP limit on DISPATCH only; flow control throttles intake, never drainage
     (the 23-open-PR incident)
