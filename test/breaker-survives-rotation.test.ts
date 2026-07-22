@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { appendLedger, ledgerExceedsRotationCeiling, rotateLedger, type LedgerLine } from "../src/lib/ledger.js";
 import { createDispatchBreakerCache, evaluateDispatchBreaker } from "../src/lib/status.js";
 
 // ── W1-T206: "an ABSENT ledger does not silently report a dispatch-breaker count of zero
@@ -130,6 +131,61 @@ test("evaluateDispatchBreaker: a clean, monotonically growing ledger with no ano
 
     writeFileSync(ledgerPath, runStartLines("W1-TW", 3));
     assert.equal(evaluateDispatchBreaker(ledgerPath, "W1-TW", cache, { maxDispatches: 3 }), "tripped");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T209: THE BREAKER INVARIANT — for a task with prior dispatch history, the
+// dispatch-breaker's verdict must be IDENTICAL before and after an ACTUAL rotation (as
+// opposed to the tests above, which cover an arbitrary/adversarial external truncation and
+// correctly fall back to "indeterminate"). rotateLedger (src/lib/ledger.ts) is deliberately
+// held to a STRONGER bar than "never lies" — it must never even need the indeterminate
+// fallback, because it preserves every decision-relevant line (run.start/pr.opened
+// included) verbatim. A fresh DispatchBreakerCache is used on each side so this proves the
+// invariant holds even across a process restart (the SCOPE NOTE on DispatchBreakerCache
+// says the in-memory regression guard alone cannot survive that — real rotation must not
+// need it to). ─────────────────────────────────────────────────────────────────────────
+
+test("rotateLedger: the dispatch breaker reads TRIPPED, never indeterminate, before and after an actual rotation — a real rotation is a no-op for the breaker", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const taskId = "W1-REAL-ROTATION";
+
+    for (let i = 0; i < 5; i++) {
+      appendLedger(ledgerPath, { run_id: `r${i}`, task_id: taskId, step: "run.start" } as LedgerLine, {
+        ceilingBytes: Number.MAX_SAFE_INTEGER, // don't let setup itself trigger rotation early
+      });
+    }
+    // Bulk of realistic ledger growth: high-frequency polling noise for OTHER activity,
+    // interleaved, none of it decision-relevant to this task's breaker.
+    for (let n = 0; n < 400; n++) {
+      writeFileSync(
+        ledgerPath,
+        JSON.stringify({ step: "ci.polling", run_id: `noise-${n}`, detail: "x".repeat(64) }) + "\n",
+        { flag: "a" },
+      );
+    }
+
+    const beforeCache = createDispatchBreakerCache();
+    const before = evaluateDispatchBreaker(ledgerPath, taskId, beforeCache, { maxDispatches: 3 });
+    assert.equal(before, "tripped", "5 dispatches with no new owned PR >= maxDispatches(3)");
+
+    const ceiling = 2000;
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "test setup sanity: padded past the ceiling");
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling });
+    assert.equal(result.rotated, true);
+
+    // A FRESH cache, as a brand-new process (drain/daemon restart) would build — proving the
+    // invariant does not depend on in-memory history surviving the rotation.
+    const afterCache = createDispatchBreakerCache();
+    const after = evaluateDispatchBreaker(ledgerPath, taskId, afterCache, { maxDispatches: 3 });
+    assert.equal(
+      after,
+      "tripped",
+      "a REAL rotation must read back identically tripped, not regress to clear OR fall back to indeterminate",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
