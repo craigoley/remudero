@@ -414,6 +414,30 @@ interface RollupEntry {
 }
 
 /**
+ * Build the `gh pr create --fill` invocation for a plan/triage/retro PR, with the
+ * `cwd` pinned to the run's WORKTREE. The cwd is load-bearing, not cosmetic: the
+ * head branch (`run-<id>`) is a local ref ONLY inside that worktree, so `--fill`
+ * (which resolves `origin/main...<branch>` locally to fill title/body) throws
+ * `ambiguous argument` from any other cwd. The harness process cwd is never the
+ * worktree, so a harness-opened PR silently failed and left an orphan branch with
+ * no PR. The build/retro WORKER paths avoid this by opening the PR from inside the
+ * worktree (their own cwd); the harness paths must pass the cwd explicitly. Pure so
+ * a unit test can assert the cwd without spawning gh.
+ */
+export function ghPrCreateFillCommand(
+  worktreePath: string,
+  owner: string,
+  repo: string,
+  branch: string,
+): { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } } {
+  return {
+    command: "gh",
+    args: ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch, "--fill"],
+    options: { cwd: worktreePath, encoding: "utf8" },
+  };
+}
+
+/**
  * Arm GitHub auto-merge on a PR the runner opened. Non-fatal: the poll decides.
  *
  * W1-T230 (THE ARM DECISION): this is the SOLE choke point every arm call
@@ -2442,11 +2466,8 @@ async function runTask(
       execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
     }
     if (!prUrl) {
-      const out = execFileSync(
-        "gh",
-        ["pr", "create", "--repo", `${owner}/${task.repo}`, "--base", "main", "--head", branch, "--fill"],
-        { encoding: "utf8" },
-      );
+      const prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch);
+      const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
       prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
     }
     if (!prUrl) {
@@ -3547,11 +3568,8 @@ async function retroCommand(rest: string[]): Promise<number> {
         worktreeRemove(repoDir, worktreePath);
         return 1;
       }
-      const out = execFileSync(
-        "gh",
-        ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch, "--fill"],
-        { encoding: "utf8" },
-      );
+      const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch);
+      const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
       prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
     }
     if (!prUrl) {
@@ -5810,11 +5828,8 @@ async function triageCommand(rest: string[]): Promise<number> {
     execFileSync("git", ["-C", worktreePath, "commit", "-m", commitMessage], { stdio: "inherit" });
     execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
 
-    const out = execFileSync(
-      "gh",
-      ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch, "--fill"],
-      { encoding: "utf8" },
-    );
+    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch);
+    const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
     const prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
     if (!prUrl) {
       log("triage.error", { error: "no PR opened" });
@@ -6022,11 +6037,8 @@ async function planCommand(rest: string[]): Promise<number> {
     applyPlanProposalCommit(worktreePath, commitMessage);
     execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
 
-    const out = execFileSync(
-      "gh",
-      ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch, "--fill"],
-      { encoding: "utf8" },
-    );
+    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch);
+    const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
     const prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
     if (!prUrl) {
       log("plan.error", { error: "no PR opened" });

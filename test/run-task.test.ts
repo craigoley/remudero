@@ -40,6 +40,7 @@ import {
   type ReviewWorktreeDeps,
   priorStrikesFor,
   currentStrikeRegimeFor,
+  ghPrCreateFillCommand,
 } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import { judgeReview } from "../src/lib/review.js";
@@ -2702,4 +2703,20 @@ test("escalateCircuitBreak: a THROWING gh gateway still writes the dedup marker,
   };
   escalateCircuitBreak(task as never, { owner: "craigoley", repo: "remudero", ledgerPath, runId: "RUN-2", issues: counting });
   assert.equal(calls, 0, "the second boot never re-attempted — the dedup is durable across the process death");
+});
+
+test("ghPrCreateFillCommand: plan/triage PR-create runs gh with cwd pinned to the run worktree, not the process cwd", () => {
+  // The harness opens plan/triage/retro PRs itself (no worker step) and `gh pr create
+  // --fill` resolves `origin/main...<branch>` LOCALLY. The head branch is a local ref
+  // only inside its run worktree, so gh MUST run with cwd = that worktree — from any
+  // other cwd (the rmd process's own dir) --fill throws `ambiguous argument` and no PR
+  // opens, leaving an orphan branch. This asserts the cwd is the fix, not process.cwd().
+  const worktree = "/Users/x/Remudero/repos/remudero/worktrees/run-TRIAGE-fb-abc-123";
+  const built = ghPrCreateFillCommand(worktree, "craigoley", "remudero", "run-TRIAGE-fb-abc-123");
+  assert.equal(built.options.cwd, worktree, "cwd MUST be the run worktree — this is the whole fix");
+  assert.notEqual(built.options.cwd, process.cwd(), "cwd must NOT default to the process cwd, where the branch is unresolvable");
+  assert.equal(built.command, "gh");
+  assert.deepEqual(built.args, [
+    "pr", "create", "--repo", "craigoley/remudero", "--base", "main", "--head", "run-TRIAGE-fb-abc-123", "--fill",
+  ]);
 });
