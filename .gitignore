@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 local/
 *.pat
 FINDINGS-local*
