@@ -416,7 +416,7 @@ test("PAUSE (drain-and-hold): issued mid-run, the in-flight task still reaches m
 
 // ── headroom (W1-T4) ─────────────────────────────────────────────────────────
 
-test("headroom: a near-limit reading STOPS with reason=headroom_exhausted BEFORE spawning", async () => {
+test("headroom: a near-limit reading is an IN-PROCESS idle heartbeat, never a stop — no spawn while over the limit", async () => {
   const plan = fixturePlan();
   const nearLimit: UsageSnapshot = {
     billingMode: "subscription",
@@ -424,16 +424,37 @@ test("headroom: a near-limit reading STOPS with reason=headroom_exhausted BEFORE
     weekly: [{ label: "all models", percentUsed: 98, resetsAt: "Monday" }],
   };
   let spawned = 0;
-  const clock = fakeClock();
+  const root = mkdtempSync(join(tmpdir(), "daemon-headroom-"));
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let calls = 0;
+  const sleep: DaemonDeps["sleep"] = async (_ms) => {
+    calls++;
+    // Same pattern as the no-runnable idle test: prove the loop is genuinely
+    // pacing itself (never exiting on its own) by having a "test operator"
+    // request STOP after a few heartbeats.
+    if (calls >= 3) requestStop(root, "test done polling — headroom never freed up");
+  };
   const s = await runDaemon(plan, {
     refreshMerged: () => NONE_MERGED,
     runOne: async (id) => { spawned++; return okResult(id); },
     readUsage: () => nearLimit,
-    sleep: clock.sleep,
+    checkStop: () => stopDetail(root),
+    sleep,
+    log: (step, extra = {}) => lines.push({ step, extra }),
   });
-  assert.equal(s.stopReason, "headroom_exhausted");
-  assert.match(s.stopDetail ?? "", /weekly \(all models\) at 98% — resets Monday/);
-  assert.equal(spawned, 0, "no task is spawned when a window is at/near its limit");
+  // The daemon HALTS here only because the fake "operator" issued STOP above —
+  // headroom exhaustion by itself never ends the loop (KeepAlive would just
+  // relaunch a process that exits, restart-looping every idle poll instead of
+  // sleeping through the window's actual reset).
+  assert.equal(s.stopReason, "stopped");
+  assert.equal(spawned, 0, "no task is spawned while any window is at/near its limit");
+  assert.ok(s.ticks >= 3, "the loop idle-heartbeated via the injected clock rather than exiting on headroom");
+  assert.equal(calls, s.ticks, "one sleep() call per headroom heartbeat tick");
+  const heartbeats = lines.filter((l) => l.step === "daemon.headroom");
+  assert.ok(heartbeats.length >= 3, "one daemon.headroom heartbeat logged per idle tick");
+  assert.equal(heartbeats[0].extra.window, "weekly (all models)");
+  assert.equal(heartbeats[0].extra.percent_used, 98);
+  assert.equal(heartbeats[0].extra.resets_at, "Monday");
 });
 
 test("headroom unreadable (undefined) does NOT halt — best-effort, the daemon continues", async () => {

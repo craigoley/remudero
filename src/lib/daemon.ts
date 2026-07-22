@@ -38,14 +38,22 @@ import type { UsageSnapshot } from "./headroom.js";
 import type { Plan, Task } from "./plan.js";
 import type { StatusProjection } from "./status.js";
 
-/** Reason the scheduler loop returned — every terminal state is one of these. */
-export type DaemonStopReason =
-  | "stopped"
-  | "paused"
-  | "headroom_exhausted"
-  | "blocked"
-  | "max_reached"
-  | "error";
+/**
+ * Reason the scheduler loop returned — every terminal state is one of these.
+ *
+ * `headroom_exhausted` is deliberately ABSENT: unlike `rmd drain` (a bounded
+ * one-shot run, where headroom exhaustion is a terminal stop, see drain.ts's
+ * own `StopReason`), the daemon is a PERSISTENT loop under launchd KeepAlive —
+ * returning here at all ends the process, and KeepAlive relaunches it
+ * (SuccessfulExit:false reads ANY exit, zero or not, as worth restarting on
+ * this unit), so a headroom-exhausted reading used to restart-loop the daemon
+ * roughly once per idle poll until the window reset. Headroom overage is now
+ * an IN-PROCESS idle state handled inline in the loop below (same shape as
+ * "nothing runnable"): it sleeps and re-polls via the injected clock, logging
+ * a `daemon.headroom` heartbeat each tick, and never returns while still over
+ * the limit.
+ */
+export type DaemonStopReason = "stopped" | "paused" | "blocked" | "max_reached" | "error";
 
 /** Default idle-poll pace: check back once a minute while nothing is runnable. */
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
@@ -216,9 +224,10 @@ export function daemonBoot(
  * REASON about any non-merged verdict (W1-T46, superseding v1's blunt
  * stop-on-block): transient retries (no strike), an independent failure is
  * flagged + skipped while the rest of the drain continues, a genuine blocker
- * halts + escalates. When nothing is runnable, sleep via the injected clock
- * and poll again — the loop is PERSISTENT by default (no `max`), unlike a
- * bounded drain.
+ * halts + escalates. When nothing is runnable OR headroom is exhausted, sleep
+ * via the injected clock and poll again — the loop is PERSISTENT by default
+ * (no `max`), unlike a bounded drain, and idling (for either reason) is an
+ * in-process state, never a process exit.
  */
 export async function runDaemon(
   plan: Plan,
@@ -298,14 +307,28 @@ export async function runDaemon(
     }
 
     // HEADROOM: never hammer a nearly-exhausted pool. Best-effort — an unreadable
-    // /usage does not halt the daemon; an at/near-limit reading DOES, with the
-    // reset time reported, before any new task is spawned.
+    // /usage does not halt the daemon; an at/near-limit reading gates new spawns
+    // WITHOUT halting the loop (see the DaemonStopReason doc above — a launchd
+    // KeepAlive unit restart-loops on any exit, so exiting here would just
+    // relaunch into the same exhausted reading every poll). Instead this is an
+    // in-process idle state, identical in shape to "nothing runnable" below:
+    // sleep via the injected clock, emit one `daemon.headroom` heartbeat per
+    // tick naming the window/percent/reset, and re-check next tick — until the
+    // window resets and headroom frees up, or STOP/PAUSE is honoured above.
     if (deps.readUsage) {
       const snap = deps.readUsage();
       const over = snap ? headroomExhausted(snap, opts.headroomLimitPct) : null;
       if (over) {
-        log("daemon.headroom", { window: over.window, percent_used: over.percentUsed, resets_at: over.resetsAt });
-        return summary("headroom_exhausted", `${over.window} at ${over.percentUsed}% — resets ${over.resetsAt}`);
+        ticks++;
+        log("daemon.headroom", {
+          tick: ticks,
+          window: over.window,
+          percent_used: over.percentUsed,
+          resets_at: over.resetsAt,
+          poll_interval_ms: pollIntervalMs,
+        });
+        await deps.sleep(pollIntervalMs);
+        continue;
       }
       if (!snap) log("daemon.headroom.unavailable", { note: "usage unreadable — continuing (best-effort)" });
     }

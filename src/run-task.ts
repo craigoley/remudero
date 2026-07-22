@@ -3836,10 +3836,14 @@ function renderDaemonSummary(s: DaemonSummary): string {
  * (W1-T12a; lib/daemon.ts owns the logic, this only wires the real defaults —
  * same GitHub-derived status, same run-task path, same fleet control +
  * headroom + locks as `rmd drain`). Unlike `rmd drain`, it does not stop on
- * "nothing runnable right now" — it paces itself with a real `setTimeout`
- * sleep and keeps polling, since new work can land later. It DOES still stop
- * on STOP, PAUSE, headroom-exhausted, a block (v1 stop-on-block — reasoning
- * about the block is W1-T46), or an unexpected error.
+ * "nothing runnable right now" OR on headroom-exhausted — both are in-process
+ * idle states: it paces itself with a real `setTimeout` sleep and keeps
+ * polling (logging a heartbeat each tick), since new work can land later and a
+ * usage window resets on its own. Exiting on either would just restart-loop
+ * under launchd's KeepAlive (SuccessfulExit:false relaunches on ANY exit,
+ * clean or not). It DOES still stop on STOP, PAUSE, a block (v1
+ * stop-on-block — reasoning about the block is W1-T46), or an unexpected
+ * error.
  *
  * Shares the SAME single-instance drain lock as `rmd drain` (state/drain.lock)
  * — a daemon and a drain are both "the loop that spawns run-task", so only one
@@ -4076,9 +4080,11 @@ async function daemonCommand(rest: string[]): Promise<number> {
       opts,
     );
     console.log("\n" + renderDaemonSummary(summary));
-    // Exit 0 only on a clean stop (STOP requested / max reached); a block,
-    // headroom exhaustion, or error is a non-zero exit so a supervising
-    // wrapper (or launchd, W1-T12b) notices.
+    // Exit 0 only on a clean stop (STOP requested / max reached); a block or
+    // error is a non-zero exit so a supervising wrapper (or launchd, W1-T12b)
+    // notices. Headroom exhaustion never reaches here as a stopReason — it is
+    // an in-process idle state inside runDaemon (lib/daemon.ts), never a
+    // process exit.
     return summary.stopReason === "stopped" || summary.stopReason === "max_reached" ? 0 : 1;
   } finally {
     process.removeListener("SIGINT", onSignal);
