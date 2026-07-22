@@ -49,6 +49,7 @@ import {
   type DaemonSummary,
 } from "./lib/daemon.js";
 import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
+import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, launchdPlistPath } from "./lib/launchd.js";
 import { buildDigest, sendDigest } from "./lib/digest.js";
 import {
@@ -818,6 +819,9 @@ async function runReview(args: {
           // shape as a worker call, so ledger lines are queryable uniformly.
           ...workerLedgerFields(reviewer),
         });
+        // The reviewer is fresh (no resume) — reap its SDK scratchpad now, before
+        // withTempDir removes reviewCwd. Best-effort, guarded (lib/worker-scratch).
+        reapWorkerScratch(reviewCwd);
       });
     } catch (e) {
       // Advisory only — the deterministic floor still binds and posts below.
@@ -4268,7 +4272,17 @@ async function daemonCommand(rest: string[]): Promise<number> {
   daemonBoot(
     log,
     process.env,
-    () => sweepStaleTempDirs(),
+    () => {
+      // STEP 2 backstop: reap SDK worker-scratchpad orphans a crashed orchestrator
+      // could not reap at teardown (lib/worker-scratch.ts). Age-ceilinged (24h) so a
+      // live session is never collateral; runs in the same clean-env boot as the tmp
+      // sweep. Logged separately; returns the tmp summary daemonBoot renders.
+      const scratch = sweepStaleWorkerScratch();
+      if (scratch.removed.length) {
+        log("daemon.scratch_sweep", { removed: scratch.removed.length, sample: scratch.removed.slice(0, 5) });
+      }
+      return sweepStaleTempDirs();
+    },
     () => sweepStaleInflightLocks(join(config.root, "state", "inflight")),
     // W1-T235: the boot-time worker-keychain unlock, explicit and ledgered
     // (`daemon.worker_keychain`) — macOS only; elsewhere the rung is absent.
