@@ -14,6 +14,7 @@ import {
   checkSatisfiedByGuard,
   checkTestTheater,
   checkTroubleshootingCoverage,
+  decideArmFromLedgerVerdict,
   decideAutoMergeArm,
   detectTestTheater,
   failSummary,
@@ -356,6 +357,45 @@ test("priorReviewVerdictFromLedger: recovers the MOST RECENT review.posted verdi
 test("priorReviewVerdictFromLedger: no review.posted line for the task yields undefined", () => {
   const lines = [{ step: "review.posted", task_id: "OTHER", head_sha: "x", state: "success" }];
   assert.equal(priorReviewVerdictFromLedger(lines, "W1-T1"), undefined);
+});
+
+// ── decideArmFromLedgerVerdict (W1-T230): THE ARM DECISION keys off the ────
+// orchestrator's own ledgered review.posted verdict for the EXACT head sha —
+// never the live remudero-review status channel, which #449 proved is
+// writable and last-write-wins (seven contradictory writes on one sha).
+
+test("decideArmFromLedgerVerdict: a remudero-review success status on the head with NO corresponding ledger verdict record arms nothing. FALSIFIER: a forged/live-only status must never substitute for a ledgered verdict", () => {
+  // No ledger record exists for this task at all (simulates a seeded forged
+  // live status with nothing backing it in the orchestrator's own ledger).
+  const decision = decideArmFromLedgerVerdict(undefined, "abc1234");
+  assert.equal(decision.arm, false);
+});
+
+test("decideArmFromLedgerVerdict: a ledgered passing verdict for the head arms even with the status read stubbed unavailable", () => {
+  const prior: PriorReviewVerdict = { headSha: "abc1234", state: "success" };
+  const decision = decideArmFromLedgerVerdict(prior, "abc1234");
+  assert.equal(decision.arm, true);
+});
+
+test("decideArmFromLedgerVerdict: a resumed pass in a fresh process arms from the prior pass's ledgered verdict for an unchanged head, with no in-memory state. FALSIFIER: the function takes NOTHING but the ledger-recovered prior + the live head — there is no in-process channel for it to have remembered anything through", () => {
+  const lines = [
+    { step: "review.posted", task_id: "W1-T230", head_sha: "seeded-sha", state: "success" },
+  ];
+  const prior = priorReviewVerdictFromLedger(lines, "W1-T230");
+  const decision = decideArmFromLedgerVerdict(prior, "seeded-sha");
+  assert.equal(decision.arm, true);
+});
+
+test("decideArmFromLedgerVerdict: a ledgered verdict for a DIFFERENT sha does not arm the current head. FALSIFIER: a verdict ledgered before a subsequent push must never arm the new head — this is what makes push-invalidates-review real at the decision layer", () => {
+  const prior: PriorReviewVerdict = { headSha: "old-sha", state: "success" };
+  const decision = decideArmFromLedgerVerdict(prior, "new-sha-after-push");
+  assert.equal(decision.arm, false);
+});
+
+test("decideArmFromLedgerVerdict: a ledgered FAILURE verdict for the exact head still refuses to arm — this task changes nothing about a genuine failing review", () => {
+  const prior: PriorReviewVerdict = { headSha: "abc1234", state: "failure" };
+  const decision = decideArmFromLedgerVerdict(prior, "abc1234");
+  assert.equal(decision.arm, false);
 });
 
 test("reviewerVerdictContract: names the machine-readable line for each criterion", () => {

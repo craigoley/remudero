@@ -173,12 +173,11 @@ import { assertProvenance, citation } from "./lib/provenance.js";
 import { loadPlanIndex, renderPlanIndex } from "./lib/plan-index.js";
 import {
   REVIEW_CONTEXT,
-  REVIEWER_IDENTITY_ENV,
   applyVerdictStability,
   buildReviewPrompt,
   cappedAnnotation,
   cappedOverrideFromLedger,
-  decideAutoMergeArmAtSha,
+  decideArmFromLedgerVerdict,
   floorDegradedAnnotation,
   isTddStrict,
   judgeReview,
@@ -193,7 +192,6 @@ import {
   reviewLedgerLegibilityFields,
   type CappedOverride,
   type CriterionVerdict,
-  type ReviewStatusEntry,
   type ReviewVerdict,
 } from "./lib/review.js";
 import { buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
@@ -405,64 +403,48 @@ interface RollupEntry {
 }
 
 /**
- * Fetch the LIVE `remudero-review` status for a PR head sha, with its
- * poster's login — the read {@link decideAutoMergeArmAtSha} (W1-T203) gates
- * arming on. GitHub's "get the combined status for a ref" endpoint already
- * dedups `.statuses[]` to the single latest post per context, so this needs
- * no client-side "which one is newest" logic. Returns `undefined` when the
- * context has never been posted at this sha (never posted, or the `state`
- * field came back empty) rather than throwing; a genuine `gh api` failure
- * (network, rate limit) propagates, same shape as every other `gh` helper in
- * this file — {@link armAutoMerge} below treats that as fail-closed.
- */
-function fetchReviewStatusEntry(owner: string, repo: string, sha: string): ReviewStatusEntry | undefined {
-  const combined = ghJson(["api", `repos/${owner}/${repo}/commits/${sha}/status`]) as {
-    statuses?: Array<{ context?: string; state?: string; creator?: { login?: string } }>;
-  };
-  const entry = (combined.statuses ?? []).find((s) => s.context === REVIEW_CONTEXT);
-  if (!entry || !entry.state) return undefined;
-  return { state: entry.state as "success" | "failure", posterLogin: entry.creator?.login };
-}
-
-/**
  * Arm GitHub auto-merge on a PR the runner opened. Non-fatal: the poll decides.
  *
- * W1-T203 (iii — "provenance checked at arm time"): when {@link
- * REVIEWER_IDENTITY_ENV} is configured, re-fetches the LIVE `remudero-review`
- * status right before arming and refuses unless GitHub attributes it to the
- * dedicated reviewer identity — closing the window between this run's own
- * in-process verdict and whatever is ACTUALLY live on GitHub at arm time,
- * which a worker with `gh` access (recon R-3/R-6: `gh` runs outside the
- * sandbox with the operator's own ambient credential) could otherwise have
- * overwritten with a forged status. DARK (skipped entirely) until the env var
- * is set — see its doc comment in lib/review.ts for the bootstrap-ordering
- * rationale shared with `ci-gate` (docs/review-gate.md): a gate armed before
- * the dedicated identity exists would deadlock every merge.
+ * W1-T230 (THE ARM DECISION): this is the SOLE choke point every arm call
+ * site reaches, and it keys arming ENTIRELY off the orchestrator's own
+ * ledgered `review.posted` verdict for `taskId`, re-checked against the LIVE
+ * current head sha right here — never the live `remudero-review` status
+ * channel, which #449 proved is a mutable, writable, last-write-wins surface
+ * (seven contradictory writes on one sha, one 85s after merge) that W1-T203's
+ * provenance gate never actually fenced in production (REVIEWER_IDENTITY_ENV
+ * is unset on this host). No ledger record for this task/head ⇒ no arm — fail
+ * closed, identical in shape to "no verdict yet" (the decision itself is
+ * {@link decideArmFromLedgerVerdict}, lib/review.ts). `taskId` absent (a PR
+ * this orchestrator cannot key a verdict to) also fails closed, same shape.
  *
- * Fails CLOSED on an unreadable live status (network/rate-limit) — an
- * unverifiable provenance check must never be treated as a pass; the PR is
- * simply left unarmed this cycle, identical in shape to "no status yet".
+ * Re-fetches the live head sha immediately before arming — never trusts a
+ * caller's possibly-stale in-memory value — so a push between review and arm
+ * is caught by the sha-binding check, and re-reads the ledger fresh every
+ * call: a resumed process recovers the SAME decision from nothing but the
+ * ledger + the live head (acceptance criterion 3), never from memory.
  */
-function armAutoMerge(prUrl: string): void {
-  const trustedLogin = process.env[REVIEWER_IDENTITY_ENV];
-  if (trustedLogin) {
-    try {
-      const m = prUrl.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/\d+/);
-      if (!m) throw new Error(`could not parse owner/repo from PR url: ${prUrl}`);
-      const [, owner, repo] = m;
-      const view = ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string };
-      const entry = fetchReviewStatusEntry(owner, repo, view.headRefOid);
-      const decision = decideAutoMergeArmAtSha(entry, trustedLogin);
-      if (!decision.arm) {
-        console.log(`automerge.provenance_refused (W1-T203): ${decision.reason} — ${prUrl}`);
-        return;
-      }
-    } catch (e) {
-      console.log(
-        `automerge.provenance_check_error (W1-T203): ${String((e as Error)?.message ?? e)} — arm withheld: ${prUrl}`,
-      );
-      return;
-    }
+function armAutoMerge(prUrl: string, taskId: string | undefined): void {
+  if (!taskId) {
+    console.log(`automerge.ledger_refused (W1-T230): no task id resolvable for this PR — arming withheld: ${prUrl}`);
+    return;
+  }
+  let headSha: string;
+  try {
+    const view = ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string };
+    headSha = view.headRefOid;
+  } catch (e) {
+    console.log(
+      `automerge.head_sha_unavailable (W1-T230): ${String((e as Error)?.message ?? e)} — arm withheld: ${prUrl}`,
+    );
+    return;
+  }
+  const config = loadConfig();
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const prior = priorReviewVerdictFromLedger(readLedgerLines(ledgerPath), taskId);
+  const decision = decideArmFromLedgerVerdict(prior, headSha);
+  if (!decision.arm) {
+    console.log(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
+    return;
   }
   try {
     execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"], {
@@ -2612,7 +2594,7 @@ async function runTask(
     // check is green. If checks go red or the poll times out, the PR is LEFT
     // OPEN and the verdict is blocked_ci — pending is treated as blocked, never
     // as pass. No Action arms a PR; only this code, only on PRs it opened.
-    armAutoMerge(prUrl);
+    armAutoMerge(prUrl, taskId);
     log("automerge.armed", {});
     const outcome = await pollToGate(prUrl, (s, extra) => log(s, extra));
 
@@ -2988,7 +2970,13 @@ async function depReviewCommand(prArg: string, rest: string[] = []): Promise<num
       state: "success",
       description: `remudero-review: PASS — ${result.semverLevel} dependency bump, confined + gates green`,
     });
-    armAutoMerge(view.url);
+    // W1-T230: armAutoMerge no longer trusts the live status just posted above
+    // (display/branch-protection only from here on) — it keys off this
+    // orchestrator's OWN ledgered `review.posted` verdict. This second judge
+    // (decideDepReview) must ledger its own verdict in that SAME shape so
+    // armAutoMerge has a record to find for this task/head.
+    log("review.posted", { context: REVIEW_CONTEXT, state: "success", head_sha: view.headRefOid, dep_review: true });
+    armAutoMerge(view.url, taskId);
     log("automerge.armed", {});
     console.log(`remudero-review=success posted + auto-merge armed: ${view.url}`);
     return 0;
@@ -3369,7 +3357,11 @@ async function retroCommand(rest: string[]): Promise<number> {
     }
     const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
     const reviewCode = await reviewCommand(prNum);
-    armAutoMerge(prUrl);
+    // W1-T230: reviewCommand resolved this PR's task id off its own
+    // `Remudero-Task: RETRO` trailer (ensureTaskTrailer above), so its
+    // review.posted ledger line is keyed "RETRO" too — the SAME literal
+    // armAutoMerge must pass to find it.
+    armAutoMerge(prUrl, "RETRO");
     log("automerge.armed", {});
     worktreeRemove(repoDir, worktreePath);
     say(`retro PR gated + armed (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
@@ -4563,7 +4555,7 @@ function buildSweepEffects(
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
 
   return {
-    arm: (pr) => armAutoMerge(pr.prUrl),
+    arm: (pr) => armAutoMerge(pr.prUrl, pr.taskId),
 
     close: (pr, reason) => {
       try {
@@ -5527,7 +5519,11 @@ async function triageCommand(rest: string[]): Promise<number> {
     }
     const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
     const reviewCode = await reviewCommand(prNum);
-    armAutoMerge(prUrl);
+    // W1-T230: reviewCommand resolved this PR's task id off its own
+    // `Remudero-Task: <taskId>` trailer (ensureTaskTrailer above), so its
+    // review.posted ledger line is keyed to the SAME `taskId` armAutoMerge
+    // must pass to find it.
+    armAutoMerge(prUrl, taskId);
     log("automerge.armed", {});
     worktreeRemove(repoDir, worktreePath);
     say(`triage PR gated + armed (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
@@ -5722,7 +5718,11 @@ async function planCommand(rest: string[]): Promise<number> {
     }
     const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
     const reviewCode = await reviewCommand(prNum);
-    armAutoMerge(prUrl);
+    // W1-T230: reviewCommand resolved this PR's task id off its own
+    // `Remudero-Task: <taskId>` trailer (ensureTaskTrailer above), so its
+    // review.posted ledger line is keyed to the SAME `taskId` armAutoMerge
+    // must pass to find it.
+    armAutoMerge(prUrl, taskId);
     log("automerge.armed", {});
     worktreeRemove(repoDir, worktreePath);
     say(`plan PR gated + armed (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
@@ -6204,7 +6204,11 @@ async function approveCommand(rest: string[]): Promise<number> {
     }
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
     const reviewCode = await reviewCommand(prNum);
-    armAutoMerge(result.prUrl);
+    // W1-T230: a ratification PR carries NO Remudero-Task trailer by design
+    // (see the no-trailer comment above) — reviewCommand's own taskId resolve
+    // therefore falls back to `PR-${view.number}` and its review.posted ledger
+    // line is keyed to that same fallback, not `proposalId`.
+    armAutoMerge(result.prUrl, `PR-${prNum}`);
     log("automerge.armed", {});
     worktreeRemove(ownedRepoDir, ownedWorktreePath);
     console.log(`rmd approve: ${proposalId} gated + armed (review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`);
