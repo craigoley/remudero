@@ -52,8 +52,17 @@ import type { StatusProjection } from "./status.js";
  * "nothing runnable"): it sleeps and re-polls via the injected clock, logging
  * a `daemon.headroom` heartbeat each tick, and never returns while still over
  * the limit.
+ *
+ * `paused` is ABSENT for exactly the same reason (the 2026-07-22 relaunch
+ * storm): PAUSE is a drain-and-hold, an awaiting-resume state with a KNOWN
+ * clearing condition (`rmd resume` deletes the flag) — returning it exited
+ * the process nonzero, KeepAlive relaunched (~10s throttle), and the fresh
+ * boot re-read the same flag and exited again, storming until bootout. A
+ * paused daemon now idles IN-PROCESS (a `daemon.pause` heartbeat per tick,
+ * re-polling the flag via the injected clock), so `rmd resume` takes effect
+ * on the next tick of the SAME process — no relaunch involved.
  */
-export type DaemonStopReason = "stopped" | "paused" | "blocked" | "max_reached" | "error";
+export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error";
 
 /** Default idle-poll pace: check back once a minute while nothing is runnable. */
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
@@ -68,16 +77,15 @@ export const DEFAULT_POLL_INTERVAL_MS = 60_000;
  * lives in one place, provable without launchd.
  *
  * `stopped`/`max_reached` are the only exits meaning "this was deliberate,
- * nothing to see" ⇒ 0. Every other reason — `blocked`, `paused` (a paused
- * daemon should NOT look successful; an operator awaiting resume should see a
- * non-clean exit if the process ever does end while paused), and `error` —
- * is nonzero so a supervisor (or launchd's KeepAlive, W1-T12b) restarts. This
- * is exactly why headroom exhaustion can never be allowed to reach this
- * function as a `DaemonStopReason` at all (see that type's doc, above): it
- * would either wrongly map to 0 (silence — permanently dead until a manual
- * reload) or wrongly map to 1 (the 86-second relaunch storm this task fixes)
- * — both wrong, because it is neither a clean stop nor a crash. It is handled
- * entirely inside the loop below instead, and never becomes a return value.
+ * nothing to see" ⇒ 0. Every other reason — `blocked` and `error` — is
+ * nonzero so a supervisor (or launchd's KeepAlive, W1-T12b) restarts. This
+ * is exactly why neither headroom exhaustion NOR pause can be allowed to
+ * reach this function as a `DaemonStopReason` at all (see that type's doc,
+ * above): each would either wrongly map to 0 (silence — permanently dead
+ * until a manual reload) or wrongly map to 1 (a relaunch storm — ~86s for
+ * headroom, ~10s for the 2026-07-22 paused storm) — both wrong, because an
+ * awaiting-state is neither a clean stop nor a crash. Both are handled
+ * entirely inside the loop below instead, and never become return values.
  */
 export function daemonExitCode(stopReason: DaemonStopReason): number {
   return stopReason === "stopped" || stopReason === "max_reached" ? 0 : 1;
@@ -531,10 +539,19 @@ export async function runDaemon(
       log("daemon.stop", { detail: stopped });
       return summary("stopped", stopped);
     }
+    // PAUSE is an IN-PROCESS idle, never an exit (the 2026-07-22 relaunch
+    // storm: returning here exited nonzero, and KeepAlive{SuccessfulExit:false}
+    // relaunched into the same flag every ~10s until bootout). Same shape as
+    // the headroom idle below: one heartbeat per tick, sleep on the injected
+    // clock, re-poll — `rmd resume` deletes the flag and the very next tick of
+    // this SAME process proceeds. STOP (above) is deliberately checked FIRST,
+    // so a hard STOP still terminates a paused daemon cleanly (exit 0).
     const paused = deps.checkPause?.();
     if (paused) {
-      log("daemon.pause", { detail: paused });
-      return summary("paused", paused);
+      ticks++;
+      log("daemon.pause", { tick: ticks, detail: paused, poll_interval_ms: pollIntervalMs });
+      await deps.sleep(pollIntervalMs);
+      continue;
     }
 
     const isMerged = deps.refreshMerged();
