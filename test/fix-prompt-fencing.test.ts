@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CI_LOG_FENCE_CLOSE,
+  FIX_WORKER_TOOLS,
   CI_LOG_FENCE_OPEN,
   neutralizeFenceMarkers,
   renderFixPrompt,
@@ -112,4 +113,17 @@ test("neutralizeFenceMarkers: breaks every run of 3+ '=' so neutralized text can
   // is a targeted defusal of the fence signature, not a blanket "=" stripper.
   assert.equal(neutralizeFenceMarkers("a == b"), "a == b");
   assert.equal(neutralizeFenceMarkers("no equals here"), "no equals here");
+});
+
+// ── the least-privilege toolset itself (W1-T210 criterion: nothing web-facing) ──
+
+test("FIX_WORKER_TOOLS is the least-privilege fix-and-push set — no web-facing tool an injected log payload could exfiltrate through", () => {
+  assert.deepEqual(
+    [...FIX_WORKER_TOOLS].sort(),
+    ["Bash", "Edit", "Glob", "Grep", "Read", "Write"].sort(),
+    "exactly the read/edit/commit surface the fix contract needs — nothing more",
+  );
+  for (const banned of ["WebFetch", "WebSearch"]) {
+    assert.ok(!FIX_WORKER_TOOLS.includes(banned), `${banned} must never be granted to a worker fed untrusted CI logs`);
+  }
 });
