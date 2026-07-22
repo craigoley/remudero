@@ -86,6 +86,16 @@ export interface ServeDeps {
    * go stale). Only meaningful for a gateway implementing {@link GitHub.warm}; a no-op otherwise.
    */
   boardGithubRefreshMs?: number;
+  /**
+   * W1-T183: per-phase elapsed-time ANOMALY thresholds (ms), keyed by {@link Phase} (plus a
+   * `default` fallback for a phase not listed) — DATA, not a constant baked into the row
+   * template, so an operator (or a test) can tune "how long is too long" without a source
+   * change. Defaults to {@link DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS} when omitted. Embedded
+   * verbatim into the shell's own script (see {@link renderShellHtml}) — the anomaly check
+   * itself runs client-side, over the SAME `elapsedMs`/`phase` fields NOW rows already render
+   * (W1-T155), never a new server-side derivation.
+   */
+  phaseElapsedThresholdsMs?: Record<string, number>;
   /** Forwarded to `createService` — one ledger line per auth decision/SSE lifecycle/handler error. */
   log?: ServiceOptions["log"];
 }
@@ -93,6 +103,21 @@ export interface ServeDeps {
 /** Matches {@link buildBatchedGithub}'s own default `ttlMs` (status.ts) — kept as one named
  *  constant here rather than a bare literal so the two stay visibly the same number. */
 export const DEFAULT_BOARD_PREWARM_MS = 15_000;
+
+/**
+ * W1-T183 default anomaly thresholds — how long a phase normally takes before a still-running
+ * row is worth a second look. NOT a liveness verdict (W1-T179 owns "is this actually running");
+ * purely a visual "this one is taking unusually long" flag. Keyed by status.ts's {@link Phase}
+ * union, plus `default` for any value not listed (defensive — Phase is a closed set today, but
+ * the client-side check is written against an arbitrary string key, never a hard-coded switch).
+ */
+export const DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS: Record<string, number> = {
+  recon: 15 * 60 * 1000,
+  implement: 90 * 60 * 1000,
+  review: 30 * 60 * 1000,
+  "fix-rung": 45 * 60 * 1000,
+  default: 60 * 60 * 1000,
+};
 
 /**
  * PRE-WARM (W1-T154, MASTER-PLAN §7/§7B): call `github.warm()` (if it has one — status.ts's
@@ -180,7 +205,7 @@ function skeletonRows(n: number): string {
   return Array.from({ length: n }, () => '<li class="row skeleton" aria-hidden="true"><span class="skeleton-bar"></span></li>').join("");
 }
 
-export function renderShellHtml(): string {
+export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number> = DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -216,24 +241,52 @@ export function renderShellHtml(): string {
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
     line-height: 1.4;
   }
-  main { max-width: 56rem; margin: 0 auto; display: flex; flex-direction: column; gap: 1.5rem; }
+  /* W1-T183: tightened section/heading chrome (1.5rem->1rem gap, 1rem->0.75rem vertical
+     section padding, 0.5rem->0.35rem heading margin) -- every priority section above "everything
+     else" (NOW/NEEDS ME/UP NEXT/RECENT) is frequently EMPTY on a quiet fleet, so their own chrome
+     -- not row height -- was the dominant cost keeping a first screen under 15 rows. */
+  main { max-width: 56rem; margin: 0 auto; display: flex; flex-direction: column; gap: 0.6rem; }
   h1 { font-size: 1.25rem; margin: 0.5rem 0; }
-  h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); margin: 0 0 0.5rem; }
+  h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); margin: 0 0 0.25rem; }
   a { color: var(--accent); }
   code, .mono { font-family: var(--font-mono); }
   #top-status { color: var(--text-dim); font-size: 0.875rem; margin: 0; }
+  /* W1-T183 round 2: the >=15-rows-above-the-fold bar was passing the SYNTHETIC (1-char-title)
+     fixture but only barely clearing 15 against the REAL, realistic-title 218-task plan (measured
+     exactly 15 -- a margin thin enough that a different browser's font metrics could tip it under).
+     Section/toolbar chrome -- not row height -- was still the dominant remaining cost once "everything
+     else" itself was visible, so this round tightens that chrome further for real headroom, not a
+     razor's edge. */
   section.panel-section {
     background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 1rem;
+    padding: 0.5rem 0.75rem;
   }
-  .row-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+  .row-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; }
+  /* W1-T183 DENSITY + IA v2: one line per task by default -- id · status · phase · elapsed ·
+     spend · PR/issue link -- truncated with an ellipsis rather than wrapping to a second line,
+     so a first screen reads the fleet at a glance instead of scrolling card-shaped rows to find
+     anything (the 2026-07-20 console v2 fixture this task falsifies). A row carrying a real
+     inline FORM (NEEDS ME's approve/answer/accept-reject affordances) opts back into wrapping
+     below -- an <input> cannot usefully truncate onto one line. */
   .row {
-    display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem;
-    background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 8px;
-    padding: 0.5rem 0.75rem; overflow-wrap: anywhere;
+    display: flex; flex-wrap: nowrap; align-items: center; gap: 0.5rem;
+    background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 6px;
+    padding: 0.22rem 0.5rem; overflow: hidden;
   }
+  .row > * { flex-shrink: 0; }
+  .row:has(form), .row:has(.btn-row) { flex-wrap: wrap; overflow: visible; align-items: baseline; }
   .row .task-id { font-family: var(--font-mono); font-weight: 600; }
-  .row .detail { color: var(--text-dim); font-size: 0.875rem; flex-basis: 100%; }
+  .row .detail {
+    color: var(--text-dim); font-size: 0.875rem; flex: 1 1 auto; min-width: 0; flex-shrink: 1;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .row:has(form) .detail, .row:has(.btn-row) .detail {
+    flex-basis: 100%; white-space: normal; overflow: visible; text-overflow: clip;
+  }
+  /* ANOMALY FLAG (W1-T183): a per-phase elapsed threshold exceeded -- never carried by colour
+     alone, always paired with the "⚠ long-running" text+glyph marker (nowRowHtml/tickElapsed). */
+  .row.anomaly { border-color: var(--status-needs-human); background: rgba(255, 184, 77, 0.1); }
+  .anomaly-flag { color: var(--status-needs-human); font-weight: 700; }
   .status-dot { display: inline-block; width: 0.6em; height: 0.6em; border-radius: 50%; margin-right: 0.15em; }
   .status-label { font-size: 0.8rem; font-weight: 600; background: none; }
   /* the DOT is a filled swatch (background); the LABEL is text colored to match (never a
@@ -309,23 +362,26 @@ export function renderShellHtml(): string {
   button.danger.confirming { background: var(--status-blocked); color: #200404; }
   input[type="text"], input[type="url"] {
     font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 0.4rem 0.5rem; width: 100%; max-width: 24rem;
+    border-radius: 6px; padding: 0.3rem 0.5rem; width: 100%; max-width: 24rem;
   }
-  label { display: block; font-size: 0.875rem; color: var(--text-dim); margin: 0.35rem 0; }
+  label { display: block; font-size: 0.875rem; color: var(--text-dim); margin: 0.25rem 0; }
+  /* W1-T183 round 2: this label reuses W1-T156's existing .sr-only class (defined above) -- still
+     in the a11y tree (for=/aria-label parity), just not eating a whole line above the fold for a
+     control whose placeholder already names it. */
   form.inline-action { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; flex-basis: 100%; }
   form.inline-action input { flex: 1 1 12rem; width: auto; }
   .btn-row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
   .counts { color: var(--text-dim); font-size: 0.9rem; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   /* W1-T157 FIND layer: faceted filters, sort headers, live counts ─────────────────────────── */
-  .find-facets { display: flex; flex-wrap: wrap; gap: 0.75rem 1rem; margin: 0.5rem 0; }
+  .find-facets { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; margin: 0.3rem 0; }
   .facet-group { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
   .facet-group-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); margin-right: 0.15rem; }
-  .facet-btn, .sort-header { font-size: 0.8rem; padding: 0.25rem 0.55rem; }
+  .facet-btn, .sort-header { font-size: 0.8rem; padding: 0.2rem 0.5rem; }
   .facet-count { color: var(--text-faint); font-variant-numeric: tabular-nums; }
   button[aria-pressed="true"] .facet-count { color: inherit; }
-  .find-sort { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin: 0.35rem 0; }
-  #find-count { margin: 0.25rem 0; }
+  .find-sort { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin: 0.2rem 0; }
+  #find-count { margin: 0.15rem 0; font-size: 0.8rem; }
   /* W1-T157 cmd+K command palette overlay ──────────────────────────────────────────────────── */
   .cmdk-overlay {
     position: fixed; inset: 0; z-index: 50; background: rgba(4, 7, 12, 0.6);
@@ -403,14 +459,23 @@ export function renderShellHtml(): string {
 
 <section id="rest" class="panel-section" aria-label="Everything else">
   <h2>Everything else</h2>
+  <!-- W1-T183: EXPANDED BY DEFAULT. W1-T153's original v0 IA hid this whole corpus behind an
+       "Expand" click, which is exactly what fails this task's own density/one-click bars against
+       a realistic (mostly queued, low-activity) fleet: NOW/NEEDS ME/RECENT are near-empty and UP
+       NEXT caps at 5, so under a couple hundred plain tasks a collapsed rest section left a first
+       screen with a handful of rows, and any task living only in "everything else" needed an
+       expand-THEN-click (two interactions) to reach its card. Rendering these as DENSE
+       single-line rows (see .row-list .row CSS) removed the original space cost that motivated
+       collapsing them, so the corpus now renders open -- "Collapse" remains available for anyone
+       who wants the compact grouped-count summary instead. -->
   <div class="btn-row">
     <span id="rest-counts" class="counts">…</span>
-    <button id="rest-toggle" type="button" aria-expanded="false" aria-controls="rest-detail">Expand</button>
+    <button id="rest-toggle" type="button" aria-expanded="true" aria-controls="rest-detail">Collapse</button>
   </div>
-  <div id="rest-detail" hidden>
+  <div id="rest-detail">
     <!-- W1-T157 FIND layer: instant client-side fuzzy search (id + title), faceted filters with
          LIVE counts, sortable columns, all persisted to the URL (shareable / survives reload). -->
-    <label for="find-search">Search id or title</label>
+    <label for="find-search" class="sr-only">Search id or title</label>
     <input id="find-search" type="text" role="searchbox" aria-controls="rest-list" placeholder="fuzzy — e.g. W1-T157 or words from the title" />
     <div id="find-facets" class="find-facets" role="group" aria-label="Filters (live counts)"></div>
     <div id="find-sort" class="find-sort" role="group" aria-label="Sort">
@@ -421,7 +486,7 @@ export function renderShellHtml(): string {
       <button type="button" class="sort-header" data-sort="age" aria-pressed="false">age</button>
     </div>
     <p id="find-count" class="counts" aria-live="polite"></p>
-    <ul id="rest-list" class="row-list"></ul>
+    <ul id="rest-list" class="row-list">${skeletonRows(5)}</ul>
   </div>
 </section>
 
@@ -502,6 +567,15 @@ export function renderShellHtml(): string {
   // embeds the live-indicator markup) stable across re-renders instead of flapping.
   const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+  // W1-T183: per-phase elapsed ANOMALY thresholds -- DATA embedded by the server from
+  // ServeDeps.phaseElapsedThresholdsMs (defaults to DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS),
+  // never a constant baked into this template. A row's own phase looks itself up here (falling
+  // back to "default") -- see phaseThresholdMs() below.
+  const PHASE_ELAPSED_THRESHOLD_MS = ${JSON.stringify(phaseElapsedThresholdsMs)};
+  function phaseThresholdMs(phase) {
+    return PHASE_ELAPSED_THRESHOLD_MS[phase] ?? PHASE_ELAPSED_THRESHOLD_MS.default ?? Infinity;
+  }
+
   function escapeHtml(text) {
     return String(text ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
@@ -545,6 +619,33 @@ export function renderShellHtml(): string {
     if (!t.prUrl) return "";
     const label = t.prNumber !== undefined ? \`#\${t.prNumber}\` : t.prUrl;
     return \` · <a href="\${t.prUrl}" target="_blank" rel="noreferrer">\${label}</a>\`;
+  }
+
+  // ── W1-T183: TIME RENDERING -- local + relative TOGETHER ('14:23:05 · 8s ago'), never a raw
+  // ISO-8601-with-milliseconds string anywhere in the UI (the falsifier: a UTC millisecond stamp
+  // forces the reader to do arithmetic to answer "is this recent"). Every place this shell used
+  // to render \`someDate.toISOString()\`/a bare \`generated_at\` routes through this pair instead. ──
+  function formatRelative(ms) {
+    if (typeof ms !== "number" || !Number.isFinite(ms)) return "";
+    if (ms < 1000) return "just now";
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return \`\${s}s ago\`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return \`\${m}m ago\`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return \`\${h}h ago\`;
+    const d = Math.floor(h / 24);
+    return \`\${d}d ago\`;
+  }
+  /** \`iso\` -> "14:23:05 · 8s ago" -- local wall-clock time (the reader's own timezone) PLUS a
+   *  relative offset from now, together, never either alone. Falls back to the raw string only
+   *  when \`iso\` fails to parse (never silently swallowed). */
+  function formatTimestamp(iso) {
+    if (!iso) return "unknown";
+    const t = Date.parse(iso);
+    if (Number.isNaN(t)) return String(iso);
+    const local = new Date(t).toLocaleTimeString();
+    return \`\${local} · \${formatRelative(Date.now() - t)}\`;
   }
 
   // ── W1-T156 UI+TRUST: an animated per-row "in flight" indicator, replaced by a STATIC badge
@@ -622,8 +723,15 @@ export function renderShellHtml(): string {
       if (anchor !== el) list.insertBefore(el, anchor); // a no-op when el is already positioned correctly.
       prev = el;
     }
-    for (const [key, el] of existing) {
-      if (!seen.has(key)) el.remove();
+    // W1-T183: remove every child that is NOT one of this render's keyed rows -- including a
+    // leftover UN-KEYED first-paint skeleton placeholder (W1-T154's skeletonRows) that real data
+    // has now superseded. The old version of this cleanup only walked \`existing\` (keyed children),
+    // so a skeleton <li> -- which never carries a data-key -- was never in that map and was
+    // stranded in the DOM forever once real rows arrived (reproduced: #now-list/#rest-list still
+    // held their initial skeleton <li>s alongside real content after the first successful paint).
+    for (const child of Array.from(list.children)) {
+      const key = child.dataset && child.dataset.key;
+      if (key === undefined || !seen.has(key)) child.remove();
     }
   }
 
@@ -650,7 +758,7 @@ export function renderShellHtml(): string {
   function markStale(asOf) {
     const badge = document.getElementById("stale-badge");
     badge.hidden = false;
-    badge.textContent = \`STALE — showing last known data as of \${asOf ?? "an earlier load"}\`;
+    badge.textContent = \`STALE — showing last known data as of \${asOf ? formatTimestamp(asOf) : "an earlier load"}\`;
     document.getElementById("top-status").dataset.stale = "true";
   }
   function clearStale() {
@@ -727,7 +835,7 @@ export function renderShellHtml(): string {
     if (unreachable) {
       if (!githubUnreachableSince) githubUnreachableSince = new Date();
       banner.hidden = false;
-      banner.textContent = \`GitHub unreachable since \${githubUnreachableSince.toISOString()} — statuses may be stale\`;
+      banner.textContent = \`GitHub unreachable since \${formatTimestamp(githubUnreachableSince.toISOString())} — statuses may be stale\`;
     } else {
       githubUnreachableSince = null;
       banner.hidden = true;
@@ -771,6 +879,11 @@ export function renderShellHtml(): string {
   }
 
   // ── NOW — in-flight runs, live phase + LIVE-TICKING elapsed (W1-T156) + LIVE spend/turns (W1-T184) ──
+  // W1-T183: each in-flight row also carries its own phase's ANOMALY threshold
+  // (data-threshold-ms) plus a hidden \`.anomaly-flag\` marker -- tickElapsed() below flips both
+  // the marker and the row's own \`.anomaly\` class live, off the SAME ticking clock that already
+  // drives the elapsed text, so a row that crosses its threshold mid-session is flagged without
+  // waiting on the next status flip/re-render.
   function liveSpendHtml(t) {
     if (t.liveSpendUsd === undefined && t.liveTurns === undefined) return "";
     const turns = t.liveTurns !== undefined ? \` / \${t.liveTurns} turns\` : "";
@@ -778,9 +891,12 @@ export function renderShellHtml(): string {
   }
   function nowRowHtml(t) {
     const key = statusColorKey(t);
+    const threshold = phaseThresholdMs(t.phase);
     return (
       \`<span class="task-id">\${escapeHtml(t.taskId)}</span>\${statusBadge(key)}\${liveIndicatorHtml()}\` +
-      \`<span class="detail">phase: \${escapeHtml(t.phase)} · elapsed: <span class="elapsed" data-started="\${escapeHtml(t.startedAt ?? "")}">…</span>\${liveSpendHtml(t)}\${t.armedAwaitingMerge ? " · auto-merge armed" : ""}\${prLink(t)}</span>\` +
+      \`<span class="detail">phase: \${escapeHtml(t.phase)} · elapsed: <span class="elapsed" data-started="\${escapeHtml(t.startedAt ?? "")}" data-threshold-ms="\${threshold}">…</span>\` +
+      \`<span class="anomaly-flag" hidden title="running longer than usual for this phase">⚠ long-running</span>\` +
+      \`\${liveSpendHtml(t)}\${t.armedAwaitingMerge ? " · auto-merge armed" : ""}\${prLink(t)}</span>\` +
       journeyButtonHtml(t.taskId)
     );
   }
@@ -794,12 +910,26 @@ export function renderShellHtml(): string {
 
   /** Every \`.elapsed[data-started]\` span, wherever it lives, ticks off wall-clock time -- this
    *  runs independently of any row re-render, so elapsed advancing every second never counts as
-   *  a "flip" (no flash, no aria announcement, no DOM node touched beyond this one text node). */
+   *  a "flip" (no flash, no aria announcement, no DOM node touched beyond this one text node).
+   *  W1-T183 ADDENDUM: also re-evaluates that same span's own \`data-threshold-ms\` anomaly check
+   *  every tick -- crossing the threshold toggles the row's \`.anomaly\` class AND its
+   *  \`.anomaly-flag\` marker's visibility, but is deliberately NOT routed through
+   *  ingestProjection/flashRow: it is volatile, tick-driven state, exactly like elapsed itself
+   *  (see withoutVolatile's own note), never a "flip" that flashes or announces. */
   function tickElapsed() {
     const now = Date.now();
     document.querySelectorAll(".elapsed[data-started]").forEach((el) => {
       const started = el.getAttribute("data-started");
-      el.textContent = started ? formatElapsed(now - Date.parse(started)) : "";
+      const elapsedMs = started ? now - Date.parse(started) : NaN;
+      el.textContent = started ? formatElapsed(elapsedMs) : "";
+      const thresholdAttr = el.getAttribute("data-threshold-ms");
+      const row = el.closest(".row");
+      if (row && thresholdAttr !== null) {
+        const anomalous = Number.isFinite(elapsedMs) && elapsedMs > Number(thresholdAttr);
+        row.classList.toggle("anomaly", anomalous);
+        const marker = row.querySelector(".anomaly-flag");
+        if (marker) marker.hidden = !anomalous;
+      }
     });
   }
 
@@ -1640,7 +1770,7 @@ export function renderShellHtml(): string {
       latestRecentEntries = recentSnap.entries ?? [];
       paintFromTasksById(); // re-run NOW/NEEDS ME/rest now that feedback/inbox/up-next/recent are current
       applyControlStatus(controlStatus);
-      document.getElementById("top-status").textContent = \`updated \${statusSnap.generated_at ?? new Date().toISOString()}\`;
+      document.getElementById("top-status").textContent = \`updated \${formatTimestamp(statusSnap.generated_at ?? new Date().toISOString())}\`;
       document.getElementById("top-status").dataset.pollState = "ok";
       clearStale(); // a completed live refresh always supersedes whatever the cache/failure-escalation painted
 
@@ -1778,7 +1908,7 @@ export function renderShellHtml(): string {
  * closes the W1-T139 bootstrap paradox: the auth spec was satisfied against header-sending fetch
  * clients and unreachable by the one client that matters, the browser opening the URL.
  */
-function buildShellRoute(): Route {
+function buildShellRoute(phaseElapsedThresholdsMs: Record<string, number>): Route {
   return {
     method: "GET",
     path: "/",
@@ -1786,7 +1916,7 @@ function buildShellRoute(): Route {
     allowQueryToken: true,
     handler: (_req, res) => {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(renderShellHtml());
+      res.end(renderShellHtml(phaseElapsedThresholdsMs));
     },
   };
 }
@@ -1813,7 +1943,7 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     buildEscalationMarkHandledRoute(fleetControlDeps),
     ...buildPanelGraphRoutes(panelGraphDeps),
     buildTaskCardRoute(deps.board),
-    buildShellRoute(),
+    buildShellRoute(deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS),
   ];
 }
 
