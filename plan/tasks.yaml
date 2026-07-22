@@ -674,7 +674,7 @@
     risk:high - credential plumbing plus a boot-time unlock, whose failure direction is a fleet that cannot
     spawn at all (fail-closed, which is why the gate caught it) or an operator keychain unlocked more widely
     than intended. The scripted locked-spawn test is the guard."
-- id: W1-T236
+- id: W1-T241
   title: "port the daemon's bounded-degraded headroom ceiling to the DRAIN — drain.ts:544-554 still fails OPEN on an unreadable /usage (over=null -> keep dispatching), the polarity W1-T197 fixed on the daemon consumer only"
   repo: remudero
   depends_on: []
