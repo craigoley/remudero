@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,12 +8,15 @@ import { nextRunnable, type MergedSet } from "../src/lib/drain.js";
 import {
   buildBatchedGithub,
   classifyGhFailure,
+  createLedgerTailCache,
   deriveStatus,
   dispatchesWithoutNewOwnedPr,
   ghGateway,
   isDispatchBreakerTripped,
   projectPlan,
+  readLedgerTail,
   DEFAULT_MAX_TASK_DISPATCHES,
+  type BatchedIssue,
   type BatchedPr,
   type GitHub,
   type PrRef,
@@ -47,6 +50,10 @@ function fakeGitHub(opts: {
   autoMergeByUrl?: Record<string, boolean>;
   /** W1-T119: simulates every underlying `gh` call in this snapshot having failed. */
   readFailed?: boolean;
+  /** W1-T182: escalation issue state/title per `issue_url` — absent url ⇒ null (not found/unreadable). */
+  issuesByUrl?: Record<string, { state: string; title?: string } | null>;
+  /** W1-T182: simulates the issue-fetch specifically failing (independent of the PR-fetch `readFailed`). */
+  issueReadFailed?: boolean;
 }): GitHub & { calls: string[] } {
   const calls: string[] = [];
   return {
@@ -54,6 +61,14 @@ function fakeGitHub(opts: {
     readFailed() {
       calls.push("readFailed");
       return opts.readFailed ?? false;
+    },
+    issueByUrl(url) {
+      calls.push(`issueByUrl:${url}`);
+      return opts.issuesByUrl?.[url] ?? null;
+    },
+    issueReadFailed() {
+      calls.push("issueReadFailed");
+      return opts.issueReadFailed ?? false;
     },
     prByRef(ref) {
       calls.push(`prByRef:${ref}`);
@@ -872,6 +887,210 @@ test("W1-T155: needs-human is superseded by a NEW run.start since the escalation
   assert.equal(proj.phase, "recon", "and the task is genuinely back in flight");
 });
 
+// ── W1-T182: NEEDS ME joins LIVE escalation state, not ledger history ───────────────────────
+
+test("W1-T182: a CLOSED escalation does not render — the join reflects live state, not ledger history", () => {
+  // The exact operator fixture: #393/#395/#401 were each closed by hand after the ledger's
+  // last line for the task was still `escalation.issue_opened` — the OLD `hasOpenEscalation`
+  // returned true from that ledger shape alone, forever, because the ledger is append-only.
+  const issueUrl = "https://github.com/o/r/issues/393";
+  const github = fakeGitHub({ issuesByUrl: { [issueUrl]: { state: "CLOSED", title: "[BLOCKED] W1-TX: stuck" } } });
+  const ledgerPath = ledgerFile([
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.needsHuman, undefined, "a CONFIRMED closed issue must clear the row");
+  assert.equal(proj.escalationIssueUrl, undefined);
+});
+
+// W1-T182 round 3: this test's NAME is the acceptance criterion's own dialect proof text,
+// VERBATIM (plan/tasks.yaml, "unit test: a task whose escalation issue reads OPEN remains
+// needsHuman and renders. FALSIFIER: ..."), so `--test-name-pattern` (review.ts's dialect
+// executor, W1-T72) matches and RUNS this exact test rather than reporting zero matches ⇒ fail.
+// Round 1/2 named this test with paraphrased prose that never matched the proof's own pattern,
+// so the mechanical floor's dialect executor found zero real matches and reported
+// "proof executed and FAILED" every round regardless of behavior — a naming defect, not a
+// behavioral one. Body unchanged from round 1/2: an issue read CONFIRMED OPEN still renders.
+test(
+  "W1-T182: a task whose escalation issue reads OPEN remains needsHuman and renders. " +
+    "FALSIFIER: a change that keys the section off anything that also drops genuinely open " +
+    "escalations, which would silently empty the operator's work list — the more dangerous " +
+    "direction of this bug",
+  () => {
+    const issueUrl = "https://github.com/o/r/issues/9";
+    const github = fakeGitHub({
+      issuesByUrl: { [issueUrl]: { state: "OPEN", title: "[BLOCKED] W1-TX: needs a decision" } },
+    });
+    const ledgerPath = ledgerFile([
+      { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+      { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" },
+    ]);
+    const proj = deriveStatus(task(), { ledgerPath, github });
+    assert.equal(proj.needsHuman, true, "a CONFIRMED open escalation must still render — the fix must not drop live work");
+    assert.equal(proj.escalationIssueUrl, issueUrl, "a direct link, never a URL the operator must supply");
+    assert.equal(proj.escalationTitle, "[BLOCKED] W1-TX: needs a decision");
+    assert.equal(proj.escalationUnverified, undefined, "a CONFIRMED open read is not unverified");
+  },
+);
+
+// W1-T182 round 3: same naming fix as the OPEN test above — this test's NAME is now the
+// acceptance criterion's own dialect proof text VERBATIM (plan/tasks.yaml, "unit test: a
+// seeded issue-state read failure retains the row and flags it unverified rather than
+// dropping it. FALSIFIER: ..."), so review.ts's `--test-name-pattern` dialect executor
+// (W1-T72) actually finds and runs this test instead of reporting zero matches ⇒ fail.
+// Body unchanged from round 1/2: an unreadable issue state (no issueByUrl support at all)
+// fails closed — the row stays, marked unverified.
+test(
+  "W1-T182: a seeded issue-state read failure retains the row and flags it unverified " +
+    "rather than dropping it. FALSIFIER: dropping rows on a read failure, which during a " +
+    "GitHub outage would show an empty NEEDS ME section and tell the operator there is " +
+    "nothing to do",
+  () => {
+    const issueUrl = "https://github.com/o/r/issues/9";
+    // Every pre-W1-T182 GitHub fixture — a literal object with none of this task's new methods.
+    const bareGithub: GitHub = {
+      prByRef: () => null,
+      findMergedByTrailer: () => null,
+      headRefName: () => undefined,
+      prBody: () => undefined,
+    };
+    const ledgerPath = ledgerFile([
+      { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+      { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" },
+    ]);
+    const proj = deriveStatus(task(), { ledgerPath, github: bareGithub });
+    assert.equal(proj.needsHuman, true, "an unreadable state must never silently empty the operator's work list");
+    assert.equal(proj.escalationUnverified, true);
+    assert.equal(proj.escalationIssueUrl, issueUrl);
+  },
+);
+
+test("W1-T182: an UNREADABLE issue state (issueByUrl implemented but this url unresolved) also fails closed", () => {
+  const issueUrl = "https://github.com/o/r/issues/9";
+  const github = fakeGitHub({ issuesByUrl: {}, issueReadFailed: true }); // simulates a failed batched fetch
+  const ledgerPath = ledgerFile([
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" },
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.needsHuman, true);
+  assert.equal(proj.escalationUnverified, true);
+});
+
+test("W1-T182: buildBatchedGithub resolves escalation issue state through ONE batched `gh issue list` fetch, not one call per escalated row", () => {
+  let issueFetchCalls = 0;
+  const issues: BatchedIssue[] = Array.from({ length: 44 }, (_, i) => ({
+    number: i,
+    url: `https://github.com/o/r/issues/${i}`,
+    state: i === 0 ? "OPEN" : "CLOSED",
+    title: `[BLOCKED] W1-T${i}: stuck`,
+  }));
+  const github = buildBatchedGithub("o", "r", {
+    fetchAll: () => [],
+    fetchAllIssues: () => {
+      issueFetchCalls++;
+      return issues;
+    },
+  });
+  const tasks: Task[] = Array.from({ length: 44 }, (_, i) => task({ id: `W1-T${i}` }));
+  const plan: Plan = { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+  const ledgerPath = ledgerFile(
+    tasks.map((t, i) => ({
+      task_id: t.id,
+      step: "escalation.issue_opened",
+      run_id: `r${i}`,
+      issue_url: `https://github.com/o/r/issues/${i}`,
+      class: "BLOCKED",
+    })),
+  );
+  const byId = projectPlan(plan, { ledgerPath, github });
+  assert.equal(byId.get("W1-T0")?.needsHuman, true, "the one OPEN issue still renders");
+  assert.equal(byId.get("W1-T1")?.needsHuman, undefined, "every CLOSED issue is dropped");
+  assert.equal(byId.get("W1-T43")?.needsHuman, undefined);
+  assert.equal(issueFetchCalls, 1, "ONE batched issue fetch backs all 44 escalated rows, never O(N)");
+});
+
+test("W1-T182: buildBatchedGithub's issueByUrl fails closed (issueReadFailed=true) when the batched issue fetch itself throws", () => {
+  const github = buildBatchedGithub("o", "r", {
+    fetchAll: () => [],
+    fetchAllIssues: () => {
+      throw Object.assign(new Error("rate limited"), { status: 1, stderr: "API rate limit exceeded" });
+    },
+  });
+  assert.equal(github.issueByUrl?.("https://github.com/o/r/issues/1"), null);
+  assert.equal(github.issueReadFailed?.(), true);
+});
+
+test("W1-T182: an escalation.issue_opened line with NO issue_url (malformed/pre-W1-T8 ledger shape) still renders needsHuman, unverified — the absence of a join target never suppresses the row", () => {
+  const github = fakeGitHub({}); // issueByUrl would never even be called — there's no url to look up
+  const ledgerPath = ledgerFile([
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened" }, // no issue_url field at all
+  ]);
+  const proj = deriveStatus(task(), { ledgerPath, github });
+  assert.equal(proj.needsHuman, true);
+  assert.equal(proj.escalationUnverified, true);
+  assert.equal(proj.escalationIssueUrl, undefined);
+});
+
+test("W1-T182: an OPEN escalation renders regardless of the issue-state casing convention (\"OPEN\" or lowercase \"open\") -- two conventions genuinely coexist in this repo (gh issue view/list use uppercase; issues-intake.ts's gh api reader already sees lowercase)", () => {
+  const issueUrl = "https://github.com/o/r/issues/9";
+  for (const state of ["OPEN", "open", "Open"]) {
+    const github = fakeGitHub({ issuesByUrl: { [issueUrl]: { state, title: "needs a decision" } } });
+    const ledgerPath = ledgerFile([
+      { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+      { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" },
+    ]);
+    const proj = deriveStatus(task(), { ledgerPath, github });
+    assert.equal(proj.needsHuman, true, `state=${state} must still render`);
+    assert.equal(proj.escalationUnverified, undefined, `state=${state} is a CONFIRMED open read, not unverified`);
+  }
+});
+
+test("W1-T182: a CLOSED escalation drops the row regardless of casing (\"CLOSED\" or lowercase \"closed\")", () => {
+  const issueUrl = "https://github.com/o/r/issues/393";
+  for (const state of ["CLOSED", "closed", "Closed"]) {
+    const github = fakeGitHub({ issuesByUrl: { [issueUrl]: { state } } });
+    const ledgerPath = ledgerFile([
+      { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+      { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" },
+    ]);
+    const proj = deriveStatus(task(), { ledgerPath, github });
+    assert.equal(proj.needsHuman, undefined, `state=${state} must clear the row`);
+  }
+});
+
+test("W1-T182: a THROWING issueByUrl (a gateway/fixture that raises instead of failing soft) never crashes deriveStatus -- fails closed, keeps the row, marks it unverified", () => {
+  const issueUrl = "https://github.com/o/r/issues/9";
+  const throwingGithub: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    issueByUrl: () => {
+      throw new Error("gh issue view: rate limited");
+    },
+  };
+  const ledgerPath = ledgerFile([
+    { run_id: "r1", task_id: "W1-TX", step: "run.start" },
+    { run_id: "r1", task_id: "W1-TX", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" },
+  ]);
+  assert.doesNotThrow(() => deriveStatus(task(), { ledgerPath, github: throwingGithub }));
+  const proj = deriveStatus(task(), { ledgerPath, github: throwingGithub });
+  assert.equal(proj.needsHuman, true);
+  assert.equal(proj.escalationUnverified, true);
+});
+
+test("W1-T182: buildBatchedGithub's issueByUrl also resolves by a bare issue NUMBER, mirroring prByRef's flexible ref resolution", () => {
+  const github = buildBatchedGithub("o", "r", {
+    fetchAll: () => [],
+    fetchAllIssues: () => [{ number: 9, url: "https://github.com/o/r/issues/9", state: "OPEN", title: "t" }],
+  });
+  assert.deepEqual(github.issueByUrl?.("9"), { state: "OPEN", title: "t" });
+  assert.deepEqual(github.issueByUrl?.("https://github.com/o/r/issues/9"), { state: "OPEN", title: "t" });
+});
+
 test("W1-T155: armed-awaiting-merge — an OPEN PR the batched gateway reports as auto-merge-armed", () => {
   const url = "https://github.com/craigoley/remudero/pull/60";
   const github = fakeGitHub({ byRef: { [url]: { number: 60, url, state: "OPEN" } }, autoMergeByUrl: { [url]: true } });
@@ -1353,4 +1572,142 @@ test("W1-T181: a FAILED batched fetch logs LOUDLY — console.error fires AND th
   // console.error must fire independently of whether a caller ever wires `opts.log`.
   assert.ok(errorSpy.mock.calls.length >= 1, "a failed fetch must ALSO be loud on console.error, independent of the injectable log hook");
   assert.match(String(errorSpy.mock.calls[0].arguments[0]), /buffer_overflow/);
+});
+
+// ── W1-T187 criterion 4 — "deriveStatus still works standalone, with no pre-read lines
+// supplied" — proven HERE, in this file, per the task's own `files:` list (plan/tasks.yaml),
+// rather than only in the separate test/w1-t187-*.test.ts corpus suite. The W1-T187 fix
+// (status.ts's `projectPlan`) hoists ONE ledger read and hands every task the SAME
+// already-parsed array via an overriding `readLedger` on an internal `effectiveDeps` copy —
+// `deriveStatus`'s own body/signature are untouched, and the `deps` object every OTHER caller
+// (board.ts's SSE stream, run-task.ts, correct.ts) already owns is never mutated by that
+// hoist, only spread into a fresh object local to `projectPlan`.
+//
+// Two independent proofs, deliberately NOT circular:
+//  (a) below, `deriveStatus(task, deps)` is called with a bare `deps` literal that has no
+//      `readLedger` key at all — exactly what every one of the ~50 pre-existing calls above in
+//      THIS file already do, and every one of them is UNCHANGED by this task and still passes.
+//      The exact values asserted below are hand-computed from the fixture, never re-derived
+//      via `projectPlan` — so a regression that broke BOTH paths identically could not hide here.
+//  (b) the second test below cross-checks that same standalone call against a hand-built,
+//      minimal (non-corpus) multi-task `projectPlan` call over an IDENTICAL fixture, proving
+//      the projectPlan-level hoist changed nothing observable for a per-task caller.
+test("W1-T187 criterion 4: deriveStatus(task, deps) with NO `readLedger` key on `deps` at all still resolves via the default reader, unchanged by the projectPlan-level hoist", () => {
+  const url = "https://github.com/craigoley/remudero/pull/187";
+  const github = fakeGitHub({ byRef: { [url]: { number: 187, url, state: "MERGED" } } });
+  const ledgerPath = ledgerFile([
+    { step: "run.start", task_id: "W1-T187X", run_id: "r1" },
+    { step: "pr.opened", task_id: "W1-T187X", run_id: "r1", pr_url: url },
+  ]);
+  // `deps` below is a bare object literal -- no `readLedger` property in sight, not even
+  // `readLedger: undefined` -- the exact "no pre-read lines supplied" shape the criterion names.
+  const deps = { ledgerPath, github };
+  const proj = deriveStatus(task({ id: "W1-T187X" }), deps);
+  assert.equal(proj.taskId, "W1-T187X");
+  assert.equal(proj.source, "ledger");
+  assert.equal(proj.merged, true);
+  assert.equal(proj.status, "merged");
+  assert.equal(proj.prNumber, 187);
+  assert.equal(proj.prUrl, url);
+});
+
+test("W1-T187 criterion 4: standalone deriveStatus (no readLedger override) matches the SAME task's projection inside a hoisted projectPlan pass, over a hand-built (non-corpus) multi-task fixture", () => {
+  const mergedUrl = "https://github.com/craigoley/remudero/pull/1871";
+  const openUrl = "https://github.com/craigoley/remudero/pull/1872";
+  const github = fakeGitHub({
+    byRef: {
+      [mergedUrl]: { number: 1871, url: mergedUrl, state: "MERGED" },
+      [openUrl]: { number: 1872, url: openUrl, state: "OPEN" },
+    },
+  });
+  const ledgerPath = ledgerFile([
+    { step: "run.start", task_id: "W1-T187A", run_id: "a1" },
+    { step: "pr.opened", task_id: "W1-T187A", run_id: "a1", pr_url: mergedUrl },
+    { step: "run.start", task_id: "W1-T187B", run_id: "b1" },
+    { step: "pr.opened", task_id: "W1-T187B", run_id: "b1", pr_url: openUrl },
+    { step: "run.start", task_id: "W1-T187C", run_id: "c1" }, // queued/no-PR bucket
+  ]);
+  const deps = { ledgerPath, github };
+  const plan: Plan = {
+    tasks: [task({ id: "W1-T187A" }), task({ id: "W1-T187B" }), task({ id: "W1-T187C" })],
+    byId: new Map(),
+  };
+  plan.byId = new Map(plan.tasks.map((t) => [t.id, t]));
+
+  const hoisted = projectPlan(plan, deps);
+  for (const t of plan.tasks) {
+    const standalone = deriveStatus(t, deps); // deliberately the SAME bare `deps`, no override
+    assert.deepEqual(standalone, hoisted.get(t.id), `${t.id}: standalone deriveStatus diverged from the hoisted projectPlan result`);
+  }
+  // Sanity: the fixture actually exercises distinct buckets, not three identical rows.
+  assert.equal(hoisted.get("W1-T187A")?.status, "merged");
+  assert.equal(hoisted.get("W1-T187B")?.status, "running");
+  assert.equal(hoisted.get("W1-T187C")?.status, "queued");
+});
+
+// ── W1-T184: readLedgerTail — the INCREMENTAL ledger reader lib/board.ts's per-poll routes
+// (createBoardSnapshotCache, computeRecentActivity, buildStatusStream) hold onto across calls so
+// an unchanged/append-only ledger never costs a full re-read+re-parse of the whole file. ─────────
+
+test("readLedgerTail: reads new lines incrementally as the file grows; an unchanged file returns the SAME cached array reference", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-status-tail-"));
+  const p = join(dir, "ledger.ndjson");
+  writeFileSync(p, "");
+  const cache = createLedgerTailCache();
+
+  assert.deepEqual(readLedgerTail(p, cache), []);
+  const empty = readLedgerTail(p, cache);
+  assert.equal(empty, readLedgerTail(p, cache), "unchanged file -> the SAME array reference back");
+
+  appendFileSync(p, JSON.stringify({ step: "a" }) + "\n");
+  const afterA = readLedgerTail(p, cache);
+  assert.deepEqual(afterA, [{ step: "a" }]);
+  assert.equal(afterA, readLedgerTail(p, cache), "still the same array reference, unchanged since the last read");
+
+  appendFileSync(p, JSON.stringify({ step: "b" }) + "\n");
+  const afterB = readLedgerTail(p, cache);
+  assert.deepEqual(afterB, [{ step: "a" }, { step: "b" }]);
+  assert.equal(afterB, afterA, "the SAME array, appended to in place -- never rebuilt from scratch");
+});
+
+test("readLedgerTail: a not-yet-newline-terminated partial write is buffered, not parsed until the newline lands", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-status-tail-"));
+  const p = join(dir, "ledger.ndjson");
+  writeFileSync(p, "");
+  const cache = createLedgerTailCache();
+
+  const full = JSON.stringify({ step: "run.start", task_id: "W1-T1" });
+  appendFileSync(p, full.slice(0, 10)); // an incomplete write mid-line, no trailing "\n" yet
+  assert.deepEqual(readLedgerTail(p, cache), [], "a partial, not-yet-newline-terminated line is never parsed early");
+
+  appendFileSync(p, full.slice(10) + "\n"); // the rest of the line lands
+  assert.deepEqual(readLedgerTail(p, cache), [{ step: "run.start", task_id: "W1-T1" }]);
+});
+
+test("readLedgerTail: malformed JSON on a line degrades to {} — same discipline as readLedgerLines, never throws", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-status-tail-"));
+  const p = join(dir, "ledger.ndjson");
+  writeFileSync(p, "not json at all\n" + JSON.stringify({ step: "ok" }) + "\n");
+  const cache = createLedgerTailCache();
+  assert.deepEqual(readLedgerTail(p, cache), [{}, { step: "ok" }]);
+});
+
+test("readLedgerTail: a file shorter than last observed (rotation/truncation) rescans from byte 0 rather than throwing or slicing negative", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-status-tail-"));
+  const p = join(dir, "ledger.ndjson");
+  writeFileSync(p, [{ step: "a" }, { step: "b" }, { step: "c" }].map((l) => JSON.stringify(l)).join("\n") + "\n");
+  const cache = createLedgerTailCache();
+  assert.deepEqual(readLedgerTail(p, cache), [{ step: "a" }, { step: "b" }, { step: "c" }]);
+
+  writeFileSync(p, JSON.stringify({ step: "fresh" }) + "\n"); // simulates rotation -- a shorter file
+  assert.deepEqual(readLedgerTail(p, cache), [{ step: "fresh" }], "degrades safely: rescans from scratch, never a negative-length read");
+});
+
+test("readLedgerTail: a missing file returns []; once it appears, subsequent reads pick up its content", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-status-tail-"));
+  const p = join(dir, "ledger.ndjson");
+  const cache = createLedgerTailCache();
+  assert.deepEqual(readLedgerTail(p, cache), []);
+  writeFileSync(p, JSON.stringify({ step: "a" }) + "\n");
+  assert.deepEqual(readLedgerTail(p, cache), [{ step: "a" }]);
 });

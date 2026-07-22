@@ -61,6 +61,619 @@
 #   operator-kicked (the daemon drains the sandbox), so this is the authoritative kick guide, NOT a
 #   physical reordering of the entries below (a contiguous block-move can't produce this interleaving).
 
+- id: W1-T230
+  title: "the arm decision trusts the status channel, which is writable and proved decorative - it must key off the orchestrator's own ledgered verdict for the exact head SHA"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "2026-07-21. The remudero-review status channel took SEVEN contradictory writes on one SHA
+    (PR 449, head 833561d), including a keyword-only CAPPED success overwriting an executed failure, and one
+    write 85 seconds AFTER the PR merged. Two PRs merged riding transient green windows on that channel.
+    W1-T203 fences the ROUTINE writer - hooks/deny-floor.sh refuses a worker gh api POST to a statuses
+    endpoint - but the arm path still trusts the channel, so any process outside the hook restores the surface.
+    A worker was live under the pause carve-out that same day.
+    THE HOUSE DOCTRINE ALREADY ANSWERS THIS, in the other direction. Task status derives from GitHub rather
+    than tasks.yaml because the yaml status field proved decorative. The arm decision should derive from the
+    orchestrator's own ledgered verdict because the status channel proved decorative AND writable - strictly
+    worse than decorative.
+    VERIFIED FROM SOURCE AT FILING, and two of these correct what a reader would assume.
+    (a) SEVEN arm call sites exist, all reaching armAutoMerge (run-task.ts:442), which ends in
+    `gh pr merge --auto --squash` (run-task.ts:464): lines 2611, 2987, 3368, 4562 (the sweep hook), 5526, 5721
+    and 6168.
+    (b) FOUR of those sites compute a review result and then arm UNCONDITIONALLY - the shape is
+    `const reviewCode = await reviewCommand(prNum); armAutoMerge(prUrl);` at 3368, 5526, 5721 and 6168. The
+    verdict is not consulted before arming. Merge safety today rests ENTIRELY on GitHub evaluating the required
+    check, which is the writable channel this task removes from the decision.
+    (c) The record this task needs already exists: the judge writes a review.posted ledger line carrying
+    head_sha, state, proof_exec and floor_degraded, appended by the orchestrator and readable from any other
+    process. Nothing new has to be invented to key off it.
+    (d) W1-T203's provenance check is currently INERT in production - it is wrapped in
+    `if (trustedLogin)` reading REMUDERO_REVIEWER_LOGIN (run-task.ts:443), and that variable is unset on this
+    host. So the status channel is, today, exactly as trusted as it was before W1-T203 merged."
+  design: |
+    EVERY ARM POINT KEYS OFF AN ORCHESTRATOR-WRITTEN LEDGER VERDICT FOR THE EXACT HEAD SHA. Not the status API,
+    not in-memory state. The status remains posted for branch protection and for display, but it becomes
+    strictly downstream of the decision and is never an input to it.
+    NO RECORD MEANS NO ARM. Fail closed. A PR whose head has no ledgered verdict is left unarmed, which is the
+    same shape as no verdict yet - it waits, it does not merge.
+    A RESUMED PASS READS THE LEDGER, NOT ITS OWN MEMORY. A fix rung resuming at strike N in a fresh process must
+    recover the prior pass's verdict from the ledger record for that head, so process death between passes
+    cannot silently downgrade the evidence a later arm relies on.
+    THE SHA BINDING IS THE WHOLE POINT. A verdict ledgered for a different SHA must not arm the current head.
+    This is what makes push-invalidates-review real at the decision layer rather than only at the display layer.
+    FIX THE UNCONDITIONAL ARM SITES AS PART OF THIS. The four sites at 3368, 5526, 5721 and 6168 currently arm
+    regardless of the review result. Keying the decision off the ledger record is what makes them conditional,
+    and an implementation that adds a ledger read while leaving those four unconditional has not done the task.
+    THIS MAKES LEDGER WRITE-INTEGRITY MERGE-LOAD-BEARING. Named here so the implementer sequences it: once the
+    arm decision reads the ledger, a torn or lost ledger line is a merge-correctness bug, which couples this to
+    the write-side atomicity family (standing rule 23, W1-T206).
+  acceptance:
+    - claim: "a remudero-review success status on the head with NO corresponding ledger verdict record arms nothing"
+      proof: "unit test: seeded forged status, arm declines"
+    - claim: "a ledgered passing verdict for the head arms even with the status read stubbed unavailable"
+      proof: "unit test"
+    - claim: "a resumed pass in a fresh process arms from the prior pass's ledgered verdict for an unchanged head, with no in-memory state"
+      proof: "unit test: seeded ledger record, no in-memory state"
+    - claim: "a ledgered verdict for a DIFFERENT sha does not arm the current head"
+      proof: "unit test"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§12", "P22"]
+  files: [src/run-task.ts, src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 after a read-only arm-path recon. Citations verified at origin/main a18fdeb rather
+    than assumed, and the recon corrected two things a reader would otherwise get wrong: there are SEVEN arm
+    sites (not one), and FOUR of them arm without consulting the review result at all.
+    NO BLOCKING FLOW FOUND: the recon looked for a legitimate path arming on a status this orchestrator did not
+    write - an operator hand-post or an external re-post with no ledger record to key off. None exists.
+    `rmd review` posts through the same judge and writes the same review.posted record, so the ledger-keyed
+    decision covers the operator path too.
+    COUPLES TO W1-T228 (status write-integrity). That task hardens the channel as a DISPLAY. This one removes
+    the channel from the DECISION. Both are wanted: one stops the board lying to the operator, the other stops
+    a lie merging code."
+- id: W1-T228
+  title: "the review status channel is last-write-wins across uncoordinated posters - a CAPPED success overwrote an executed failure, and a status was written 85s after merge"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OBSERVED 2026-07-21 across three PRs. Head 833561d of PR 449 took SEVEN remudero-review writes in
+    one day, oscillating failure to success and back with no intervening push. Two of them are the shape that
+    matters: an executed verdict at 18:02:31 reporting 2 of 6 proofs executed and FAILED, then a keyword-only
+    CAPPED success at 18:10:42 reporting 0 of 6 executed. Weaker evidence overwrote stronger evidence on an
+    identical SHA, and the channel kept the later write.
+    A THIRD WRITE LANDED AT 18:16:20, roughly 85 seconds AFTER the PR merged at 18:14:55. The channel accepts
+    writes against a closed lifecycle.
+    PRs 452 and 479 showed the same failure-to-success flip on unchanged heads the same afternoon. Three
+    instances, one mechanism: multiple posters, no precedence rule, no serialization, last write wins.
+    THIS IS HARDENED REGARDLESS OF THE ARM PATH. A companion filing moves the arm decision off this channel and
+    onto the orchestrator's own ledgered verdict, which removes the channel from the MERGE path. It does not
+    make a lying channel harmless: the posted status is what branch protection reads, what the board renders,
+    and what an operator opens a PR to see. A display that reports 0 of 6 proofs executed when 2 of 6 ran and
+    failed still misleads the person deciding whether to intervene."
+  design: |
+    ONE POST SITE ENFORCES THREE RULES. All three belong at the single writer (postReviewStatus and its caller),
+    never spread across callers - a rule a caller can forget to apply is a rule that will be forgotten.
+    (i) PRECEDENCE: a keyword-only or CAPPED verdict never overwrites an executed-evidence verdict for the same
+    SHA. Executed may overwrite executed - a later real run supersedes an earlier one, which is how a fix rung
+    is supposed to work. The asymmetry is deliberate: evidence outranks its absence, and only in that direction.
+    (ii) LIFECYCLE: no status writes to a merged or closed PR. Refuse, and ledger the refusal - a write arriving
+    after merge is a signal about a live process nobody is tracking, and swallowing it silently loses that.
+    (iii) SERIALIZATION: per-PR, via the O_EXCL lock pattern this codebase already uses for the inflight and
+    drain locks. VERIFY that pattern from source and reuse it rather than writing a second locking discipline.
+    READ BEFORE WRITE, AND STATE THE RACE HONESTLY. Precedence needs the current status, so the writer must
+    fetch then decide then write. That is itself a race; the per-PR lock is what closes it. An implementation
+    with precedence but no lock has narrowed the window rather than closed it, and should not claim otherwise.
+    EVERY ATTEMPT IS LEDGERED, including refused ones. The reason this defect took a day to characterise is
+    that the channel keeps only the winner. A refused write that leaves no trace is the same blindness in a
+    new place.
+  acceptance:
+    - claim: "a CAPPED success posted over an executed_fail on the SAME SHA is refused, and the prior status is left intact"
+      proof: "unit test: refused post, prior status intact"
+    - claim: "a post to a merged or closed PR is refused and the refusal is ledgered"
+      proof: "unit test with seeded merged state"
+    - claim: "N concurrent posters on one PR serialize to a precedence-consistent final state, with every attempt ledgered including the losers"
+      proof: "unit test: concurrent attempts, single winner, every attempt ledgered"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§12"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 from the verdict-oscillation incident. Fixtures: PR 449 head 833561d (seven writes,
+    CAPPED-over-executed at 18:02:31 to 18:10:42, post-merge write at 18:16:20), PRs 452 and 479 (same-SHA
+    failure-to-success flips).
+    RELATED, NOT DUPLICATE: W1-T227 narrows proof runs so the timeout race fires less often. That reduces how
+    frequently a CAPPED verdict is produced at all. It does not make the overwrite safe, which is this task.
+    COUPLES TO STANDING RULE 23 (write-side atomicity): the per-PR lock here is the same discipline the ledger
+    and status.json tasks owe, applied to the status channel."
+- id: W1-T227
+  title: "the judge runs every name-pattern proof against the FULL test glob, so the same proof coins executed or exec_error depending on machine load"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "MEASURED 2026-07-21 on origin/main. review.ts:333 documents the name-filtered shape as running
+    `node --test --import tsx --test-name-pattern <name> test/**/*.test.ts` - the whole suite, filtered. Node
+    still LOADS every test file before filtering by name, so the cost is the full suite load regardless of how
+    few tests match.
+    THE NUMBERS, taken by hand on a scratch clone of main: a narrowed run of one W1-T182 proof against
+    test/status.test.ts alone completes in 0.2 SECONDS. The same two files whole are 1.51s (status, 94 tests)
+    and 4.72s (board, 36 tests). A full-glob load is roughly 22s on an idle machine, against
+    DEFAULT_PROOF_TIMEOUT_MS of 30_000 (review.ts:538).
+    THAT MARGIN IS THE DEFECT. Twenty-two seconds against a thirty-second cap leaves no headroom on a machine
+    running workers. The same proof, unchanged, coins executed_pass on an idle host and exec_error on a loaded
+    one - and exec_error DEGRADES to the keyword floor, which is how one SHA reports 0/6 proofs executed in one
+    pass and 2/6 in another. That oscillation was observed on PR 449 the same day, and it is not a flake in the
+    tests: it is a timeout race in the harness that runs them.
+    THE PROOFS THEMSELVES ARE SOUND. All six dialect proofs across W1-T182 and W1-T184 were re-run narrowed on
+    main and every one is EXECUTED-PASS against a test named verbatim after its own acceptance criterion. The
+    contract works. Only its invocation is too expensive to be reliable."
+  design: |
+    RESOLVE CANDIDATE FILES FIRST, THEN RUN ONLY THOSE. Take a distinctive fixed-string fragment of the pattern,
+    grep test/ for it (fixed-string, never regex - a pattern body is architect prose and contains characters a
+    regex would misread), and run node --test against the matched file or files alone.
+    ZERO CANDIDATES CHANGES NOTHING. If no file matches, the existing behaviour stands: the run reports only the
+    file wrapper, nameFilteredOutcome's wrapper filter finds no real result, and the proof fails as a zero-match
+    (review.ts:641-653). Narrowing is an optimisation of the executed path, never a new way to pass.
+    TIMEOUT STAYS exec_error, BUT STOPS BEING SILENT. Keep the 30s cap and the exec_error mapping. Add the
+    invocation and the measured wall time to what is logged, so the next time a proof coins differently on two
+    passes an operator can see which one timed out instead of inferring it from a verdict diff.
+    VERIFY THE GLOB CLAIM FROM SOURCE before building. This task cites review.ts:333 as documentation of the
+    invocation shape - read the actual argv construction and correct the citation if the code differs from its
+    comment.
+  acceptance:
+    - claim: "a proof matching tests in exactly one file executes against only that file"
+      proof: "unit test: built argv contains the single file, not the glob"
+    - claim: "no name-pattern invocation carries the full glob"
+      proof: "unit test on the command builder"
+    - claim: "zero-candidate patterns still fail as zero-match"
+      proof: "unit test: nameFilteredOutcome path unchanged"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21. Measurements taken by hand on a scratch clone of origin/main a9ef3b9, not estimated:
+    0.2s narrowed, 1.51s and 4.72s whole-file, against a 30s cap.
+    THIS IS THE HARNESS HALF of the same-SHA proof_exec oscillation. The verdict-write half - a CAPPED result
+    overwriting an executed one - is filed separately, because narrowing the runs reduces how often the race
+    fires without making the overwrite safe."
+- id: W1-T229
+  title: "a capped verdict with ZERO proofs executed still arms auto-merge for any non-tdd:strict task - prose is the default merge floor"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "RECON R-2, and recon T1-AC3. A CAPPED verdict means zero proofs were executed and the pass rests
+    entirely on keyword coverage - a claim, never evidence. Today that still arms auto-merge unless the task is
+    marked tdd:strict, and tdd:strict is not the default. So the DEFAULT merge floor for this system is prose.
+    THE CEILING IS STRONG AND THE FLOOR IS NOT. Executed proofs, the awareness surface, the ratchets and the
+    review judge are all real, and on a tdd:strict task they bind. The recon's summary of the gap is exact: the
+    ceiling is strong, the floor is prose, and most work rides the floor.
+    THIS SESSION SUPPLIED THE FIXTURES WITHOUT MEANING TO. Every remudero-review verdict posted by hand on
+    2026-07-21 came back CAPPED at 0 proofs executed, because worktree materialization was unavailable, and
+    those PRs armed and merged on that basis. The mechanism is not hypothetical and it is not rare - it was the
+    normal case for a full day of merges."
+  design: |
+    decideAutoMergeArm RETURNS arm:false FOR A CAPPED VERDICT REGARDLESS OF TDD TIER. One conditional, at the
+    decision function rather than at its callers, so every arm point inherits it - Phase-1 enumeration found
+    seven distinct armAutoMerge call sites, and a rule applied per-caller would be applied per-caller wrong.
+    VERIFY THE PLAN-ONLY CARVE-OUT SURVIVES. W1-T205 carries the operator's standing rider: a plan-only PR is
+    STRUCTURALLY capped, because the task it files has no code and therefore no executable proof. If this
+    change makes capped-never-arms unconditional without that exemption, every retro, approve and filing PR
+    stalls forever. Read W1-T205 before implementing, and treat its falsifier as binding here.
+    EXPECT THIS TO BITE IMMEDIATELY, AND SIZE FOR IT. Once capped stops arming, work whose proofs cannot execute
+    stops merging - which is the point, and which is also a throughput cliff if proof execution is unreliable.
+    W1-T227 (narrow the proof runs so they stop timing out) is the task that makes this survivable. Sequence
+    accordingly rather than landing this into a harness that coins exec_error under load.
+  acceptance:
+    - claim: "decideAutoMergeArm with a capped verdict and tddStrict false returns arm false"
+      proof: "unit test: case added to test/review.test.ts"
+    - claim: "a plan-only PR still arms under the raised floor, so the plan lane does not stall"
+      proof: "unit test: case added to test/review.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "P22"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21. Recon R-2 / T1-AC3.
+    THE PLAN-ONLY CARVE-OUT IS NOT OPTIONAL and is carried as the second criterion rather than left to the
+    implementer to remember - W1-T205 records the operator's rider verbatim, and a floor raised without it
+    halts every machine-emitted plan PR.
+    SEQUENCING: land W1-T227 first. Raising the floor while the proof harness still times out under load turns
+    an evidence gate into a throughput stop."
+- id: W1-T231
+  title: "the review prompt still tells the worker to POST the status the deny-floor now refuses - prompt and enforcement disagree"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "W1-T203 closed the forge surface at the ENFORCEMENT layer and left the INSTRUCTION untouched.
+    buildReviewPrompt still hands every review worker a literal command to post the gating status
+    (src/lib/review.ts:1406-1408, verified on main at a18fdeb):
+      gh api -X POST repos/<owner>/<repo>/statuses/<headSha> -f context=<ctx> -f state=<state> ...
+    and hooks/deny-floor.sh:60-61 then refuses exactly that call, exiting 2 to block the tool use.
+    SO THE SYSTEM ASKS A WORKER TO DO SOMETHING AND THEN STOPS IT. That is not merely untidy. A worker
+    following its instructions burns a turn on a refused call and reads a denial it was never warned about,
+    and any worker NOT spawned under the hook - a different harness, a future runner, a hand invocation -
+    restores the forge surface by doing exactly what the prompt told it to do. The prompt is a second,
+    contradictory source of truth about who may post the merge gate.
+    THE PRECONDITION IS VERIFIED, so removing the instruction breaks nothing. The judge is the authoritative
+    poster (run-task.ts:796-797), the reviewer's semantic outcome travels by REPORT through
+    reviewerOutcome({attempted, subtype, spawnError}) (run-task.ts:790-794), and the floor's proof execution
+    is wired to the PR head so the gate observes repo state whether or not the reviewer ever completed
+    (run-task.ts:799-801). No leg depends on the worker's POST succeeding.
+    ENFORCEMENT PLACEMENT BEATS RULE EXISTENCE - and its converse holds too: an instruction that contradicts
+    enforcement is a rule that will eventually be followed somewhere the enforcement is not."
+  design: |
+    buildReviewPrompt EMITS NO STATUSES-POST INSTRUCTION. Delete the `post` helper and its uses from the
+    rendered prompt. The worker reports its outcome and the orchestrator remains the sole poster.
+    TELL THE WORKER WHAT TO DO INSTEAD, EXPLICITLY. A reviewer that is no longer asked to post needs to know
+    how its verdict reaches the gate - otherwise the prompt is merely quieter, not clearer, and a capable
+    worker may reach for `gh` anyway. State that the orchestrator posts, and that the worker's job ends at
+    reporting.
+    LEAVE THE DENY-FLOOR RULE IN PLACE. This is defence in depth, not a replacement. The hook stays because a
+    prompt is guidance and a hook is enforcement, and W1-T203 exists because guidance is not a gate.
+    KEEP THE ORCHESTRATOR'S OWN POST PATH UNTOUCHED. postReviewStatus is not the target and must keep working;
+    the change is confined to prompt TEXT.
+  acceptance:
+    - claim: "the rendered review prompt contains no statuses POST instruction"
+      proof: "unit test on buildReviewPrompt output"
+    - claim: "the orchestrator's own postReviewStatus path is unchanged and still posts the verdict"
+      proof: "unit test on buildReviewPrompt output"
+  risk: low
+  origin: architect
+  plan_refs: ["§4A", "§5C"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21, last of the post-W1-T203 set. Precondition verified from source rather than assumed:
+    the judge's verdict travels by report and no leg depends on the worker POST, so the instruction can be
+    removed without changing any behaviour the gate relies on.
+    THIS IS THE INSTRUCTION HALF of sole-poster. W1-T203 delivered the ability half - the deny-floor refusal
+    and the arm-time creator.login check. Until both land, the honest description of the system is
+    ability-level only, because the prompt still asks for the forbidden thing.
+    NOTE FOR WHOEVER SEQUENCES THIS: W1-T203's arm-time provenance check is currently INERT in production - it
+    is wrapped in a trustedLogin guard reading REMUDERO_REVIEWER_LOGIN, which is unset on this host. That is a
+    configuration gap, not this task's scope, but it means the deny-floor is presently the only live half of
+    sole-poster."
+- id: W1-T197
+  title: "DELIBERATE IDLE MUST BE AN IN-PROCESS STATE — headroom_exhausted currently exits NONZERO and KeepAlive relaunches it every ~86s; exiting ZERO is NOT the fix (SuccessfulExit:false never restarts a clean exit), so the daemon must SLEEP until resets_at with an idle heartbeat"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE AT FILING, 2026-07-21. The daemon is relaunching roughly every 86 seconds and has been since
+    02:22:44. Evidence, all observed rather than inferred:
+      launchctl list  ->  `29565  1  com.remudero.daemon`  — last exit status ONE
+      plist           ->  KeepAlive = { SuccessfulExit: false }  — i.e. RESTART when the job exits UNsuccessfully
+      ledger boots    ->  02:22:44 pid 5839, 02:24:06 pid 11581, 02:25:32 pid 17940, 02:26:59 pid 23833,
+                          02:28:20 pid 29569  — five relaunches in under six minutes, median gap 86s
+      every boot      ->  daemon.headroom {window: 'weekly (all models)', percent_used: 95} then
+                          daemon.summary {stopReason: 'headroom_exhausted', ticks: 0, costUsd: 0} then exit
+    THE CYCLE: the weekly subscription window is genuinely at 95%, so daemon.ts:284 returns
+    summary('headroom_exhausted', ...) — the CORRECT decision. That stop maps to a NONZERO process exit. launchd's
+    KeepAlive is configured to restart exactly on nonzero exits, so it relaunches. The new process re-reads
+    headroom, finds the same 95%, stops again, exits nonzero again. Nothing changes between iterations because
+    the condition is a WEEKLY window that will not move until it resets.
+    THE BUG IS THE EXIT CODE, NOT THE STOP. Stopping on exhausted headroom is right and is exactly what P34's
+    ratified envelope clause (c) asks for. What is wrong is expressing a POLICY stop as a CRASH: an exit status
+    of 1 tells the supervisor 'I failed, restart me', when the truth is 'I am deliberately idle until Sunday'.
+    ALREADY DOCUMENTED AS A CLASS, now with a second trigger: the operator's own notes record 'KeepAlive restarts
+    on ANY exit -> a --max daemon restart-loops' from the W1-T12d commissioning. That was the bounded-run trigger;
+    this is the headroom trigger. The shared defect is that the daemon has no way to say 'stopped on purpose'.
+    HARM IS BOUNDED BUT NOT ZERO: costUsd is 0 and ticks are 0 on every iteration — no worker is spawned, because
+    the headroom check precedes dispatch. What it burns is process spawns, log volume and ledger volume (six
+    daemon.* lines per iteration, ~40 lines an hour indefinitely), and it makes `launchctl list` permanently
+    report a failing job, which is the signal an operator would use to spot a REAL crash.
+    SECOND, SMALLER DEFECT observed in the same lines: resets_at renders inconsistently across consecutive boots
+    — 'Jul 21 at 12am' at 02:25:31 and 'Jul 20 at 11:59pm' at 02:26:59 and 02:28:20, for what must be the same
+    reset instant. Same window, same clock, two renderings a minute apart."
+  design: |
+    DO NOT SOLVE THIS WITH AN EXIT CODE — that was this task's first design and it was WRONG. Under
+    `KeepAlive = { SuccessfulExit: false }` launchd restarts a job ONLY when it exits UNsuccessfully, so an exit
+    of ZERO is NEVER relaunched. Mapping headroom_exhausted to exit 0 would replace an 86-second relaunch storm
+    with a daemon that is permanently DEAD until someone reloads the LaunchAgent by hand — silence instead of
+    flapping, which is strictly worse because nothing surfaces it. EXIT CODES STAY RESERVED FOR REAL FAILURE.
+    THE CEILING IS TIME-AWARE — the idle only fires when the ceiling ACTUALLY BINDS under this policy
+    (operator ruling, 2026-07-21). The subscription window resets midnight Monday->Tuesday local, and headroom
+    remaining at that instant EXPIRES. So the correct threshold is a FUNCTION OF TIME-TO-RESET, not a constant:
+      - on the window's FINAL day (Monday local), the throttle RELAXES — consuming to 100% is correct, because
+        anything unspent is destroyed at reset. Extra-usage credits exist as a cushion: do NOT target them, and
+        do NOT refuse work merely because a request might graze them.
+      - on every other day, the ceiling HOLDS at the operator reserve, and breaching it triggers the in-process
+        idle above.
+    ENCODE AS POLICY DATA, not code constants (rule 2: policy-as-data). The threshold is a lookup or a curve over
+    time-to-reset, tunable without a source change — the same treatment W1-T183's anomaly thresholds get. A
+    hard-coded 95 is exactly what produced the fixture below.
+    FIXTURE FOR THE TIME-BLINDNESS, measured: on Monday 2026-07-20 the fleet parked from 22:22 to 00:00 EDT — 56
+    consecutive headroom_exhausted stops across roughly 98 minutes — protecting headroom at 95% that EXPIRED at
+    midnight, while W1-T187 (the console latency outage, ~49s first paint) sat at the drain head. That capacity
+    was not saved; it was destroyed unused, and the operator-facing outage stayed unfixed for the duration. A
+    time-blind ceiling does not conserve on the last day of a window; it wastes.
+    THE RESERVE'S PURPOSE SURVIVES: the operator's own usage must never be crowded out. On the final day that
+    purpose is served by the reset itself, which is why relaxing then is not a weakening of the reserve but a
+    correct reading of what the reserve is for.
+    DELIBERATE IDLE IS AN IN-PROCESS STATE. On headroom exhaustion the daemon must NOT exit at all: it sleeps
+    until `resets_at` (a value it already reads and already logs) and then resumes its normal loop. One
+    supervised process stays alive, the lock stays coherent, and recovery needs no supervisor involvement and no
+    operator action.
+    THE IDLE STATE MUST BE VISIBLE, or it is indistinguishable from a hang. Emit an idle heartbeat on a cadence
+    the liveness surfaces can read — the console's own trust layer (W1-T156) and the glance strip's
+    daemon-health widget (W1-T159) both need to say 'idle until <t>' rather than 'last poll: 4 hours ago'. A
+    silent sleep re-creates the observability defect this task exists to fix, one layer down.
+    VERIFY from source how DaemonStopReason reaches the process exit today (daemon.ts's summary path and its
+    caller in run-task.ts) before changing anything — the mapping may be implicit, which is likely how this
+    arose. The goal is that headroom_exhausted stops reaching that path at all, not that it maps to a different
+    code.
+    VERIFICATION STAYS HEADLESS (Rule 18): the deliverable is the pure stop-reason-to-exit-code mapping, which a
+    worker can unit-test with no process spawn and no supervisor. The launchd relaunch behaviour is a property of
+    the supervisor, already observed and recorded in the rationale — do NOT write a test that shells out to
+    launchctl or installs a LaunchAgent.
+    DO NOT FIX THIS BY LOOSENING KeepAlive. Removing SuccessfulExit:false would stop the loop and also stop
+    restarting after real crashes — the property W1-T12d commissioned it for, and which was verified by a kill -9
+    drill. The supervisor is behaving correctly; the daemon is lying to it.
+    ALSO FIX resets_at RENDERING so the same reset instant renders identically on every boot. It is cosmetic
+    until an operator compares two log lines and concludes the window moved.
+    NOTE FOR W1-T187's SIBLING WORK: this loop writes six daemon.* ledger lines every 86 seconds into the same
+    append-only ledger whose size already drives the projection cost. It is a slow contributor to that problem.
+  acceptance:
+    - claim: "headroom exhaustion IDLES IN PROCESS until resets_at — the daemon does not exit at all, by any code"
+      proof: "unit test with an injected clock and an injected headroom reader: with the window exhausted and resets_at in the future, the daemon loop enters an idle state and RESUMES after the clock passes resets_at, without the process terminating — asserted on the loop with no process spawn and no supervisor (Rule 18, headless). FALSIFIER, and it is why the exit-code fix is wrong: under KeepAlive SuccessfulExit:false launchd restarts ONLY on a nonzero exit, so exiting 0 would leave the daemon permanently dead until a manual reload — silence instead of the observed 86-second flapping, which is worse because nothing surfaces it"
+    - claim: "the ceiling is TIME-AWARE — on the window's final day the throttle relaxes toward 100%, every other day it holds, and the threshold is policy DATA rather than a code constant"
+      proof: "unit test with an injected clock: with the same percent_used, a time-to-reset inside the final day permits dispatch while a time-to-reset earlier in the window triggers the in-process idle; and the threshold is read from an overridable policy source, asserted by a test that changes the curve without touching source. FALSIFIER, measured: on Monday 2026-07-20 the fleet parked 22:22-00:00 EDT — 56 consecutive headroom_exhausted stops over ~98 minutes — protecting 95%-exhausted headroom that EXPIRED at the midnight reset, while W1-T187 (a live ~49s-first-paint operator outage) sat at the drain head. A hard-coded ceiling wasted capacity it could not carry forward"
+    - claim: "an UNREADABLE headroom read does NOT silently continue — cannot-read-the-budget is never rendered as proceed-as-if-unlimited"
+      proof: "unit test: with the headroom reader returning no snapshot, the daemon surfaces the unreadable state as a distinguishable condition rather than proceeding as though headroom were available, and the behaviour on unreadable is an explicit, tested policy rather than an implicit fall-through. FALSIFIER, observed in the live ledger: daemon.ts:286 logs 'usage unreadable — continuing (best-effort)' and CONTINUES, and that line has fired 197 times since 2026-07-18T23:01:30Z. On a subscription the budget IS the constraint, so an unreadable budget that proceeds is the fail-open polarity at the spending layer — the same cannot-observe-rendered-as-permissive family as the gateway returning [] (W1-T181) and the projection regressing to queued (W1-T179)"
+    - claim: "a genuine crash STILL exits nonzero and still restarts"
+      proof: "unit test: an unexpected throw in the daemon loop yields a nonzero exit code, preserving the KeepAlive restart the kill -9 drill in W1-T12d verified. FALSIFIER: mapping every stop to zero would silence real crashes, and loosening KeepAlive's SuccessfulExit:false would do the same at the supervisor — the supervisor is correct here, the daemon is lying to it"
+    - claim: "the daemon does not relaunch-storm while a KNOWN-DURATION condition holds"
+      proof: "unit test: with headroom exhausted and a resets_at in the future, the daemon either exits zero once or idles until the reset — it does not produce repeated boot cycles. FALSIFIER: the observed 86-second cycle produced six daemon.* ledger lines per iteration indefinitely, with ticks 0 and costUsd 0 every time, because a WEEKLY window cannot change between relaunches"
+    - claim: "resets_at renders identically for the same reset instant across boots"
+      proof: "unit test: two headroom reads of the same window render the same resets_at string. FALSIFIER, observed in consecutive boots: 'Jul 21 at 12am' at 02:25:31 versus 'Jul 20 at 11:59pm' at 02:26:59 and 02:28:20 — the same instant, rendered two ways a minute apart"
+  risk: high
+  origin: architect
+  plan_refs: ["§4", "§9"]
+  files: [src/lib/daemon.ts, test/daemon.test.ts]
+  status: queued
+  attempts: 0
+  note: "AMENDED at recon intake, 2026-07-21. Task is QUEUED - verified that zero merged PRs carry its
+    Remudero-Task trailer - so standing rule 21 does not apply.
+    RECON R-7 SUPPLIES MEASURED EVIDENCE for the fail-open half of this task, which was previously argued
+    rather than quantified: the headroom guard is BLIND on 197 of 253 checks. daemon.headroom.unavailable
+    appears 197 times in the ledger, each logging usage unreadable - continuing (best-effort), and the daemon
+    keeps spawning on every one of them (daemon.ts:286, mirrored at drain.ts:554). The guard that exists to
+    stop the fleet at the subscription ceiling is inoperative roughly 78 percent of the time.
+    THAT NUMBER CHANGES THE DESIGN, which is why it is recorded here rather than left in the audit. A guard
+    blind 78 percent of the time cannot be fixed by making the unreadable case fail closed - that would halt
+    the fleet most of the time. Recon T6 names the right shape: a BOUNDED DEGRADED MODE. On an unreadable
+    reading the daemon continues under a reduced allowance rather than either stopping dead or proceeding as
+    though it had read zero, and N consecutive unreadable readings escalate to a slowed or paused posture
+    rather than continuing indefinitely.
+    ADDED OBLIGATION for the implementer: readUsage returning null AND a task spawning in the same tick FAILS
+    unless a bounded degraded-mode allowance applies, and N consecutive unavailable readings without entering
+    a slowed mode FAILS. Falsifier for both is the 197-of-253 ledger history, which under current code
+    produces neither.
+    ORIGINAL NOTE FOLLOWS. TIME-AWARE RESERVE added 2026-07-21 by operator ruling — the ceiling is a function of time-to-reset,
+    relaxing toward 100% on the window's final day (Monday local) because unspent headroom is destroyed at the
+    Mon->Tue midnight reset. This is the policy P34 clause (c) inherits: the operator reserve is real every
+    other day, and on the last day the reset itself serves the reserve's purpose. The in-process idle fires ONLY
+    when the ceiling binds under this policy.
+    LIVE at filing — the loop was running while this task was written, last boot 39 seconds before the
+    measurement. Diagnosed from launchctl exit status, the plist's KeepAlive dict, and five ledger boot lines with
+    their lock_pids, rather than from the daemon log files (which had not been written since 22:28 and did not
+    cover the window).
+    CLASSIFIED as a crash class per the operator's fork, but the crash is a MISCLASSIFIED LEGITIMATE STOP — the
+    daemon's decision was right and only its exit code was wrong. Explicitly NOT the W1-T46 halt / W1-T174
+    fixture: no fixable block is involved.
+    SECOND TRIGGER of a documented class — the W1-T12d commissioning already recorded that KeepAlive restarts on
+    ANY exit, which made a --max daemon restart-loop. Same defect, new cause.
+    INCIDENTAL FINDING worth carrying to P34's redraft, recorded here because it answers an open question: the
+    headroom mechanism ALREADY EXISTS. daemon.boot logs billing_mode 'subscription', daemon.headroom logs
+    {window: 'weekly (all models)', percent_used, resets_at}, and daemon.ts carries headroomLimitPct with a
+    HEADROOM_LIMIT_PCT default. P34 clause (c) tells its implementer to VERIFY FROM SOURCE how headroom is read
+    and never to invent an API — the answer is that it is already built and already stopping the fleet.
+    risk:high — graded UP from medium after rmd lint-plan flagged the daemon/launchd span. Recorded as a
+    regrade rather than a workaround, because the honest reading supports it: this changes the process exit code
+    a SUPERVISOR acts on, and the failure direction is a fleet that silently stops restarting after a real
+    crash — worse than the relaunch storm it replaces. The second criterion (a genuine crash still exits
+    nonzero) is the guard, and it is load-bearing rather than defensive."
+- id: W1-T232
+  title: "review materialization checks out a branch it never needs, and that step is the only reason a held branch can keyword-only a review"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "VERIFIED AT SOURCE 2026-07-21, run-task.ts:2716-2718. materializeReviewWorktree runs TWO git
+    commands:
+      git -C <repo> worktree add <path> origin/<branch>          - succeeds, leaves a DETACHED worktree
+      git -C <path> checkout -B <branch> origin/<branch>         - THROWS when any worktree holds that branch
+    Step 2 exists only to give the worktree a branch NAME. Proof execution reads files at the PR head tip,
+    which the detached checkout from step 1 already provides.
+    THE COLLISION IS ENTIRELY A CONSEQUENCE OF STEP 2, and it is not theoretical. Every operator-lane review on
+    2026-07-21 posted keyword-only CAPPED because the session's own filing worktrees (f4a through f4e) held the
+    very branches being reviewed. Reproduced by hand:
+      fatal: 'plan/gate-worker-post-instruction' is already used by worktree at '.../worktrees/f4d'
+    Five PRs then merged on that degraded evidence. Removing step 2 removes the class - not a workaround for
+    it, not a detection of it.
+    THE RUNG PATH NEVER SAW THIS because it executes inside the run's existing worktree and never materializes
+    a second one. That is why the in-rung judge executed 2 of 6 proofs on PR 449 the same afternoon while every
+    operator-lane review of the same period executed zero. Two paths, one of them carrying an unnecessary step."
+  design: |
+    DROP THE checkout -B. Materialize detached at the origin/<branch> tip and stop there.
+    ADD A STALE-FETCH GUARD, because dropping the branch pin removes an implicit freshness check. After
+    materializing, assert the checked-out tip equals the PR head SHA and FAIL LOUDLY on mismatch. Reviewing
+    stale code silently is worse than not reviewing - a verdict against the wrong tree is a false verdict.
+    PROVE DETACHED PARITY RATHER THAN ASSUMING IT. The third criterion executes a real proof in a detached
+    materialization. If any part of the proof-execution path turns out to need a named branch, it must be named
+    and fixed HERE. Deferring that would ship a change whose whole premise is unverified.
+    THIS DOES NOT REPLACE THE TEARDOWN WORK. Residual failure modes remain after this - a failed fetch, a full
+    disk, a permissions error - and each still leaks a worktree and still reports an opaque reason. That is
+    W1-T233, filed alongside, and it is wanted even once this lands.
+  acceptance:
+    - claim: "materialization performs no branch checkout and yields a detached worktree at the PR head SHA"
+      proof: "unit test: recorded git argv contains no checkout -B, worktree HEAD equals head SHA"
+    - claim: "a review materializes and executes proofs while another worktree holds the PR's branch"
+      proof: "unit test: seeded holding worktree, proofs execute, no CAPPED, no collision error"
+    - claim: "detached parity - the proof-execution path performs no operation requiring a named branch, and any dependence found is fixed in this task rather than deferred"
+      proof: "unit test executing a real proof in a detached materialization"
+    - claim: "a tip mismatch after fetch fails materialization loudly rather than reviewing stale code"
+      proof: "unit test: seeded stale origin ref, loud failure, no verdict posted"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 from a hand-reproduced failure, not from a report. The collision was reproduced
+    verbatim against a live PR branch and the two-step shape read at source.
+    SUPERSEDES an earlier framing that blamed the bare catch alone. The catch is a real defect and is filed as
+    W1-T233, but it is the SECOND defect: step 2 is what fails, and the catch is what makes the failure both
+    silent and leaky."
+- id: W1-T233
+  title: "a failed materialization leaks the worktree it already created and discards the reason - 39 leaked worktrees, and every degraded verdict said only unavailable"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "TWO DEFECTS IN ONE CATCH, run-task.ts:2678-2684:
+      } catch { return undefined; }
+    It returns undefined AFTER step 1 has already created the worktree, and withMaterializedWorktree's teardown
+    is guarded on a truthy path - so the cleanup never runs and the worktree is stranded. And the error object
+    is thrown away, so the operator is told only that materialization was unavailable.
+    THE LEAK IS MEASURED, NOT ESTIMATED. A worktree census on 2026-07-21 found 39 detached review-PR*
+    worktrees, one per failed materialization, all holding no branch. They were removed by hand the same day
+    (41 worktrees before, 2 after). Under the pre-W1-T232 mechanism each leak RAISED THE COLLISION ODDS for the
+    next review, because a stranded worktree is one more holder of a ref - a self-amplifying failure.
+    THE DISCARDED REASON COST A DAY. The git error named the exact cause (branch already used by worktree at
+    PATH) and was thrown away, so a full session of reviews reported an opaque CAPPED and five PRs merged on
+    degraded evidence with nobody able to say why from the output alone. This is the write-side twin of the
+    read-path doctrine this codebase already fixed: a floor that degrades must say why, or the degradation is
+    invisible.
+    STILL WANTED AFTER W1-T232. That task removes the collision class. It does not remove fetch failures, a
+    full disk, or a permissions error - each of which still lands in this catch, still leaks, and still reports
+    nothing."
+  design: |
+    THE FAILURE PATH CLEANS UP WHAT IT CREATED. Before returning, remove any worktree the attempt registered.
+    The invariant to hold is that a failed materialization leaves the workspace exactly as it found it.
+    CARRY THE REASON TO EVERY SURFACE THAT REPORTS THE DEGRADATION: the console line, the CAPPED verdict
+    description, and the review.posted ledger record, the last as a degraded_reason field so it is queryable
+    rather than only readable. Name the error CLASS as well as the message - worktree-collision, fetch-failure,
+    other - so a pattern is visible across runs without parsing prose.
+    NO BARE CATCH REMAINS AT THE SITE. Every return path either leaves a clean workspace or fails loudly with a
+    named reason. VERIFY the teardown guard in withMaterializedWorktree while implementing: today it keys on a
+    truthy worktreePath, and if this task returns undefined on failure that guard must not be the only cleanup.
+  acceptance:
+    - claim: "an injected failure occurring AFTER worktree creation leaves zero new worktrees registered"
+      proof: "unit test: injected step-2-class throw, worktree list unchanged"
+    - claim: "the verdict description and the review.posted record name the error class and message verbatim"
+      proof: "unit test: injected fetch throw, description and ledger carry the reason"
+    - claim: "no path returns undefined without either a clean workspace or a loud named failure"
+      proof: "unit test on the wrapper's error propagation"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5C", "§12"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21. The leak count of 39 is OBSERVED from a worktree census taken the same day, not
+    inferred: 41 registered worktrees before the sweep, 2 after, with all 39 review-PR* entries verified
+    detached before removal.
+    SEQUENCE AFTER W1-T232, which removes the dominant failure mode. Landing this first would harden a path
+    that is about to stop being the common one, and the tests here are clearer once the collision class is
+    gone. Expressed as sequencing rather than a depends_on edge because W1-T232 is still riding an unmerged
+    plan PR, and a dangling edge fails the linter closed - the two are independently valuable in any case,
+    since the teardown and the named reason are wanted for fetch and disk failures regardless.
+    STANDING RULE 23 (write-side atomicity) applies in spirit: a partially-completed multi-step operation that
+    returns failure while leaving its artifacts behind is the same shape as a torn write."
+- id: W1-T235
+  title: "a headless worker spawn dies 'Not logged in' at $0 when the login keychain is LOCKED - the WS-7 unlock gate, pre-registered and fired live 2026-07-21"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "THE HAZARD WAS PRE-REGISTERED AND FIRED LIVE. worker-home.ts records the mechanism verbatim: the
+    login keychain holds the Claude Code OAuth token and is HOME-relative, so under the redirected worker HOME
+    'Claude Code exits Not logged in at $0 before any turn (W1-T18 spawn deadlock, verified live)'. FINDINGS.md
+    records for WS-7 that 'the Keychain must be unlocked for the lookup to succeed', that 'no OAuth token is
+    stored in a file (Keychain only)' - which closes the file-credential escape - and flags 'Keychain unlock
+    under cold-boot launchd (no console login) is unverified ... a hard WS-7 chaos-drill gate'. LEARNINGS.md
+    records the W1-T12e live-drill lineage that was never run.
+    ON 2026-07-21 THE GATE FIRED. Two worker spawns died at 20:59:10Z and 21:15:00Z, verdict blocked_containment
+    at $0, while the login keychain was locked. Proven by controlled repro on the same tree (0fd5db5) and the
+    same binary: locked keychain yields text 'Not logged in - Please run /login', isError true, cost $0, one
+    turn; unlocked yields a normal pass. The securityd state confirmed the lock held through the decisive run
+    (post-run SecKeychainCopySettings returned 'User interaction is not allowed'), and no unlock event landed
+    between the lock and the spawn. The stderr the incident discarded was recovered from the repro:
+    'Claude Code returned an error result: Not logged in - Please run /login'.
+    WHY IT LOOKED LIKE A CONTAINMENT FINDING. The credential-dead worker makes zero writes, so the containment
+    probe sees no outside write, no inside write, and no OS-denial text, and renders the generic
+    'containment UNPROVEN ... may never have been attempted'. That misdiagnosis cost two days of theory. Naming
+    the credential failure distinctly is a SEPARATE task (the preflight-naming shard); THIS task removes the
+    cause on the spawn path."
+  design: |
+    THE ACCEPTANCE IS NON-NEGOTIABLE: a headless worker spawn SUCCEEDS while the LOGIN keychain is LOCKED.
+    Tonight's locked repro is the regression proof and must be scripted - lock the login keychain, spawn a
+    worker, assert a normal result rather than 'Not logged in' at $0.
+    DESIGN SPACE, implementer chooses WITH EVIDENCE, not from this note:
+    (i) a DEDICATED always-unlocked worker keychain holding a copy of the 'Claude Code-credentials' item, with
+    the harness unlocking it at daemon boot and the worker HOME pointing at it instead of the login keychain
+    symlink. Smallest blast radius - the operator's login keychain and GUI session are untouched.
+    (ii) a GUARANTEED login-keychain unlock at daemon boot. Simpler, but it unlocks the operator's real
+    credential store as a side effect of running the fleet, which is a larger and more surprising blast radius.
+    THE FILE-CREDENTIAL OPTION IS CLOSED. FINDINGS.md records no OAuth token is stored in a file - keychain
+    only - so 'just read a creds file' is not available and must not be proposed. Verified this session:
+    ~/.claude/.credentials.json does not exist under either HOME.
+    VERIFY THE SYMLINK TRUTH FROM SOURCE before designing: worker-home/Library/Keychains/login.keychain-db is a
+    single-inode symlink to the operator's real login keychain, so anything done to the worker path is done to
+    the real one. A dedicated keychain (option i) is what breaks that coupling.
+    SCOPE: THE SPAWN PATH ONLY. Distinct-naming of the failure (the preflight shard) and stderr persistence
+    (the persistence shard) are filed separately and must not be folded in here.
+    verify:human because the deliverable changes credential plumbing and a boot-time unlock, which an operator
+    confirms live - the same reason the W1-T12e drill it descends from is human-verified.
+  acceptance:
+    - claim: "a headless worker spawn succeeds while the LOGIN keychain is LOCKED, scripted from tonight's locked repro as the regression proof"
+      proof: "unit test: test/worker-keychain.test.ts"
+    - claim: "the worker credential path does not require unlocking the operator's real login keychain as a side effect of running the fleet, OR if it does, that unlock is explicit and ledgered at daemon boot"
+      proof: "unit test: test/worker-keychain.test.ts"
+    - claim: "a locked-keychain spawn no longer renders as blocked_containment - it either succeeds or fails with a credential-named reason"
+      proof: "unit test: test/worker-keychain.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§4A", "§12", "WS-7"]
+  files: [src/lib/worker-home.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 from the spawn-death incident, h9 proven. This closes the WS-7 keychain-unlock gate
+    that worker-home.ts:76-84, FINDINGS.md:61/:268/:306-307 and LEARNINGS.md:18 all pre-registered.
+    CITATION CORRECTIONS made at filing: the worker-home keychain block is lines 76-84 (the brief said 81-83 -
+    the 'Not logged in at $0 before any turn' quote sits inside that block, verified verbatim). All other
+    anchors verified exact.
+    risk:high - credential plumbing plus a boot-time unlock, whose failure direction is a fleet that cannot
+    spawn at all (fail-closed, which is why the gate caught it) or an operator keychain unlocked more widely
+    than intended. The scripted locked-spawn test is the guard."
 - id: W1-T121
   title: QUEUE GOVERNOR — a WIP limit on DISPATCH only; flow control throttles intake, never drainage
     (the 23-open-PR incident)
@@ -455,13 +1068,36 @@
       proof: "unit test over the service serve path: given a checkout whose current branch is NOT main, it exits non-zero WITHOUT binding, naming the off-main branch; with the override flag it binds; on main it binds normally — the falsifier being a serve that binds off-main and quietly serves un-shipped code (the exact way an operator gets lied to; the ctrl+C-off-a-branch incident)"
     - claim: "the restart path cannot EADDRINUSE-race — it WAITS for port release (or binds SO_REUSEADDR-safely) so a kill->relaunch does not silently fail to bind"
       proof: "unit/integration test: a kill->immediate-relaunch sequence where the OLD process has not yet released the port does NOT fail with EADDRINUSE — the restart path either WAITS for the port to be released before binding OR binds SO_REUSEADDR-safely and takes over; a relaunch that EADDRINUSE-races into a silent death FAILS (the falsifier — today's sequence: kill+immediate-relaunch raced with no reap wait -> the NEW process died EADDRINUSE into an unread log -> the OLD process kept serving stale code -> the old process eventually exited -> console down with nothing listening)"
+    - claim: "the generated serve plist carries KeepAlive AND ThrottleInterval, so a crash-looping serve is rate-limited rather than relaunching without bound"
+      proof: "unit test on generated plist content"
+    - claim: "plist generation succeeds and references no daemon label or daemon paths with the daemon uninstalled"
+      proof: "unit test"
+    - claim: "the log writer creates serve.log with mode 0600"
+      proof: "unit test on the writer"
   risk: high
   origin: architect
   plan_refs: ["§7", "§9"]
   files: [src/run-task.ts, src/lib/launchd.ts]
   status: queued
   attempts: 0
-  note: "Fixture: the operator ctrl+C'd serve to reclaim his shell twice in one morning. Mirrors rmd daemon-plist
+  note: "AMENDED 2026-07-21 with three lessons from incidents that POSTDATE this filing. Task verified
+    QUEUED first - zero merged PRs carry its Remudero-Task trailer - so amendment is the correct instrument and
+    standing rule 21 does not apply.
+    (i) THROTTLEINTERVAL, not KeepAlive alone. This task predates the R-1 relaunch storm: 438 daemon boots
+    between Jul 19 and Jul 21, one per minute at its worst, because KeepAlive restarts on any nonzero exit and
+    nothing rate-limited it. A serve LaunchAgent generated with KeepAlive and no ThrottleInterval inherits that
+    exact shape. The daemon plist has since been hardened with ThrottleInterval 60 and the generator should
+    emit the same.
+    (ii) DAEMON-INDEPENDENCE IS A REQUIREMENT, not an implementation detail. On 2026-07-21 the daemon was
+    deliberately stopped for containment while the operator still needed the board. If serve supervision
+    references daemon artifacts, or is a daemon child, then stopping the fleet for safety also blinds the
+    operator at exactly the moment they most need to see it. The generated plist must reference no daemon
+    label and no daemon paths, and must install and run with the daemon absent.
+    (iii) LOGS AT 0600. This task says logs to state/serve.log without a mode. R-5 landed after: serve's
+    startup banner prints a token, both bearer tokens were found in a world-readable 0644 serve.log, and the
+    tokens had to be rotated. The banner now prints the read-scope token only, but a token in a world-readable
+    file is the defect standing rule 24 names, so the writer creates the file 0600.
+    ORIGINAL NOTE FOLLOWS. Fixture: the operator ctrl+C'd serve to reclaim his shell twice in one morning. Mirrors rmd daemon-plist
     (W1-T12b / generateLaunchdPlist). Composes W1-T139 (serve), W1-T151 (install-freshness), W1-T143 (line-buffered
     logs). Loading the generated unit is the operator's single step (a --write + a printed load line), not an
     auto-verify criterion — the generator + the two hooks are what this task builds and proves."
@@ -1412,6 +2048,12 @@
     'honest about failing' and 'presented as specified' are different properties, and T156's whole thesis is the
     second one — a console that never lies about its own liveness has to say WHAT is wrong in the vocabulary it
     promised, not leak an exception.
+    MEASURABLE DISAGREEMENT, 2026-07-21 08:41 — the contradiction now carries timestamps that quantify it:
+    'live · updated 18s ago' rendered directly above 'STALE — as of 08:41:16'. The two indicators disagree by
+    roughly TWO MINUTES about the age of the same data. This is no longer only incoherent wording: the freshness
+    stamp and the staleness banner are reading clocks that are measurably out of step, so 'one truth' is a
+    concrete numeric requirement rather than a stylistic one — whatever single source the lifecycle produces
+    must yield ONE age, and every surface must render that age.
     SECOND OPERATOR SCREENSHOT, 2026-07-21 — the same section rendering TWO CONTRADICTORY liveness claims at
     once: 'live · updated 8s ago' directly above 'STALE — showing last known data'. Neither indicator is lying
     about its own source; they derive from DIFFERENT states. The freshness stamp reports when the last successful
@@ -1536,6 +2178,1088 @@
     Applies standing rule 22 at the inbox: the registry holds a CLAIM, the ledger holds the RECEIPT, and the
     console reads the claim. SIBLING of W1-T182 — same wrong-affordance shape (an action offered that the backend
     would refuse), different section."
+- id: W1-T220
+  title: "coverage-ratchet fails nondeterministically AND names nothing when it does - an unfalsifiable red, the mirror of the unfalsifiable green the floor work killed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "TWO DEFECTS, ONE TASK, AND THE ORDER MATTERS: the job cannot be diagnosed, and it fails at
+    random. The second cannot be fixed until the first is, which is why they are filed together and why
+    diagnosability leads.
+    DEFECT 1 - THE FAILURE NAMES NOTHING. The job runs the suite under a SINGLE reporter whose destination
+    is a file: --test-reporter=lcov --test-reporter-destination=coverage/lcov.info (ci.yml:108-110). TAP goes
+    to that file, so the CI log gets no test output at all. Evidence, first-hand rather than recalled: the
+    full 436-line coverage-ratchet job log from PR 473 contains ZERO lines matching a failing test, ZERO
+    naming a coverage percentage or threshold or baseline, and exactly one failure line in the whole log -
+    ##[error]Process completed with exit code 1. That is the entire diagnostic. An operator cannot tell
+    whether a test failed, which test, or whether coverage moved at all.
+    DEFECT 2 - THE FLAKE. Directly observed this session: coverage-ratchet went red and then green on a
+    bare re-run, with no code change, on PRs 473, 474, 475 (twice) and 482 - five firings across four PRs.
+    At least two of those diffs were PLAN-ONLY, touching zero source and zero tests (474 and 475), which
+    rules out any explanation resting on the content of the change. The identical command exits 0 locally on
+    the same commit, and the sibling ci job - the SAME test glob without coverage instrumentation - passed
+    on every one of those commits.
+    IT IS NOT CONFINED TO HAND-AUTHORED PRs. A job-level query today also found current coverage-ratchet
+    failures on two branches nobody touched by hand: a W1-T184 worker run and a RETRO run. So the fleet's own
+    autonomous PRs hit this too, and its cost is not only the operator's time.
+    THE FLAKE ERASES ITS OWN EVIDENCE, which belongs in the design rather than as a footnote: re-running a
+    job to green OVERWRITES its conclusion, so a failure that was re-run is no longer visible at job level
+    afterwards. Historical firings from earlier today were unqueryable by the time this was filed, and the
+    count above rests on direct observation rather than on a query that can still be reproduced. A gate whose
+    failures cannot be counted after the fact cannot be measured for improvement either.
+    COST: roughly a dozen gate re-runs in one session, the single largest tax on it.
+    THE KINSHIP, which is why this is worth more than its severity suggests: an UNFALSIFIABLE RED is the
+    mirror of the UNFALSIFIABLE GREEN that W1-T128 and W1-T185 spent so much effort killing. Both are gates
+    that cannot be seen to fail CORRECTLY. A green that cannot be trusted lets bad work through; a red that
+    cannot be explained trains the operator to re-run until it passes - which is exactly what happened a
+    dozen times today, and which would hide a REAL regression the moment one appeared."
+  design: |
+    DIAGNOSABILITY FIRST - IT IS THE ENABLER, NOT A NICE-TO-HAVE. Nothing about defect 2 can be honestly
+    diagnosed while the log is blind, so this half lands first and the flake work reads its output.
+    Node's test runner accepts MULTIPLE reporter/destination pairs, so a human-readable reporter to stdout
+    can run alongside the lcov reporter to its file. VERIFY that against the Node version actually pinned in
+    CI before relying on it - if the pairing does not behave as documented there, tee the run to a file
+    uploaded as an artifact, or switch reporters on failure. Any of the three satisfies the criterion. What
+    is NOT acceptable is replacing lcov, since the ratchet needs it.
+    ALSO PRINT THE RATCHET COMPARISON. The second half of the blindness is that even a clean test run tells
+    the operator nothing about WHY the ratchet objected. scripts/coverage-ratchet.mjs knows the observed
+    totals and the baseline it compared against - it should say both, and the delta, on failure. A threshold
+    gate that will not show its arithmetic is asking to be re-run rather than read.
+    THEN DIAGNOSE THE FLAKE FROM THE NOW-VISIBLE OUTPUT. DO NOT GUESS, and do not fix a suspected cause
+    without evidence from a real failing run - a nondeterministic bug closed on a hypothesis usually just
+    changes its frequency. Suspect classes to test against the output rather than to assume: coverage
+    instrumentation interacting with test parallelism, an environment delta between this job and the ci job
+    that runs the same glob successfully, or the ratchet comparison racing the lcov artifact write. That
+    third one is worth checking early precisely because it would explain the plan-only failures, which no
+    test-content explanation can.
+    THE PLAN-ONLY FIRINGS ARE THE SHARPEST CLUE IN THE TASK. A diff touching zero source and zero tests
+    produced a red. Whatever the cause is, it must be consistent with that, and any proposed explanation
+    that requires the diff to have changed code is wrong by construction.
+    CONSIDER WHETHER A RE-RUN SHOULD PRESERVE THE PRIOR CONCLUSION so the flake rate stays measurable. Not
+    required by the criteria below, but the inability to count past failures is the reason this task had to
+    be filed from memory rather than from a query.
+  acceptance:
+    - claim: "a coverage-ratchet failure whose CI log names NO failing test and NO threshold delta FAILS - the log must identify what failed or by how much coverage moved"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+    - claim: "the lcov output the ratchet consumes is still produced unchanged, so making the run legible does not break the gate it feeds"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+    - claim: "the ratchet prints the observed totals, the baseline it compared against, and the delta on failure, rather than only exiting nonzero"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+    - claim: "the diagnosed root cause is supported by output from a REAL failing run rather than by a hypothesis, and the fix is falsified by a test that fails against the pre-fix behaviour"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+    - claim: "THE PLAN-ONLY FALSIFIER - the explanation accounts for a diff touching zero source and zero test files producing a red, so any cause requiring changed code is rejected"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§12"]
+  files: [scripts/coverage-ratchet.mjs]
+  status: queued
+  attempts: 0
+  note: "PULLED TO THE IMMEDIATE DRAIN HEAD 2026-07-21 by operator ruling, ahead of W1-T203 and therefore
+    ahead of the entire gate-integrity and write-atomicity block. The reasoning is not that this defect is
+    more severe than a forgeable merge floor - it plainly is not - but that it is a TAX ON EVERY SUBSEQUENT
+    TASK, so paying it first makes everything behind it cheaper.
+    IT TAXES THE FLEET, NOT ONLY THE OPERATOR. Observed today: coverage-ratchet failing on branches nobody
+    touched by hand - a W1-T184 worker branch and a RETRO branch. Under subscription billing a re-run is not
+    free in the way a dollar figure suggests it is, because the constrained resource is the weekly headroom
+    window rather than money. Headroom burned re-running a randomly-red gate is headroom not spent
+    dispatching work, and W1-T197 already records the fleet stopping at 95 percent of that window.
+    IT ERODES THE EVIDENCE STANDARD THE FLEET IS CURRENTLY RUNNING ON. Every remudero-review verdict posted
+    today was CAPPED at zero proofs executed, because worktree materialization was unavailable. That makes
+    the HAND-RUN SUITE the operative evidence for each merged PR. A CI counterpart that goes red at random,
+    for reasons its own log will not name, directly weakens the substitute the fleet is leaning on while the
+    proof floor is degraded. The two defects compound rather than sit side by side.
+    BUILD ORDER IS UNCHANGED by this move: diagnosability first, per this task's own design, and the fix
+    follows what the visible output shows rather than a hypothesis chosen in advance.
+    ORIGINAL NOTE FOLLOWS. FILED 2026-07-21 by operator ruling, from the session that paid for it. Evidence gathered first-hand
+    rather than taken on recollection: the 436-line job log from PR 473 was pulled and grepped, and it
+    contains zero failing-test lines, zero threshold or baseline mentions, and a single ##[error] line.
+    HONEST LIMIT ON THE COUNT, recorded because the task is partly ABOUT measurability: five firings across
+    four PRs are directly observed, and the operator brief cites six across five. The discrepancy cannot be
+    resolved after the fact, because re-running a job to green overwrites its conclusion and the earlier
+    failures are no longer queryable. The count is a floor, not a total. That the number is unrecoverable is
+    itself part of defect 1.
+    PROMOTE ALONGSIDE W1-T219 - both are shards, and a shard never reaches the drain front because shards
+    sort after every task in tasks.yaml. Filing this does not schedule it.
+    THIS TASK GATES THE HONESTY OF EVERY OTHER GATE'S EVIDENCE. Every remudero-review verdict posted today
+    was CAPPED at 0 proofs executed, so the real evidence for each merged PR was a hand-run suite - and a
+    suite whose CI counterpart fails at random for unexplained reasons weakens that substitute too."
+- id: W1-T203
+  title: "remudero-review must be postable ONLY by a dedicated reviewer identity the workers never hold — provenance checked at arm time, worker status-POSTs denied at the floor"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "THE FORGE ATTACK. remudero-review is one of two required checks, and today ANY identity
+    carrying the operator's credentials can post it — including a worker, which runs `gh` outside the
+    sandbox with those very credentials (recon R-3, R-6). A worker that posts its own
+    remudero-review=success satisfies its own merge gate. The reviewed system can forge the verdict that
+    governs it.
+    THIS IS THE CLEANEST HALF OF THE GATE PROBLEM AND IT LEADS (operator ruling, 2026-07-21). It closes
+    the forge without touching merge autonomy at all: nothing here adds a human to the merge path, it
+    only makes the reviewer identity unforgeable. Its sibling — protecting the gate CONFIG from in-band
+    edits — is W1-T204 and is deliberately sequenced after this one, because that half carries a real
+    risk of reverting the system's thesis if implemented bluntly.
+    THREE PARTS, ONE PROPERTY. (i) remudero-review is posted by a DEDICATED reviewer identity — a
+    fine-grained token or GitHub App credential that workers never hold and cannot read. (ii) the
+    deny-floor blocks a worker from POSTing commit statuses at all. (iii) provenance is checked AT ARM
+    TIME: a remudero-review whose poster is not the trusted reviewer identity is treated as ABSENT, not
+    as a pass."
+  design: |
+    VERIFY FROM SOURCE AND FROM GITHUB'S DOCS BEFORE BUILDING — do not invent an API. Read how
+    remudero-review is posted today (the review command's status-post path), what identity that
+    credential actually resolves to, and what GitHub reports as a status/check-run's creator, before
+    choosing where provenance is asserted. The check must key on something GitHub attributes and a
+    worker cannot set.
+    TREAT A FORGED VERDICT AS ABSENT, NEVER AS A FAIL. An untrusted poster means "no verdict yet", so
+    the PR waits for a real one. Treating it as a failure would let a hostile or buggy worker BLOCK
+    merges by posting garbage, converting a forge vector into a denial-of-service vector.
+    THE CREDENTIAL MUST NOT REACH THE WORKER. Whatever identity posts the review, its secret must be
+    unreadable from the worker's environment — the same containment property W1-T2's probe already
+    asserts for the filesystem. If the reviewer credential lives anywhere the worker's HOME or env can
+    reach, this task has not been done.
+    DENY-FLOOR SCOPE, from R-3: the floor currently permits `gh` broadly. Statuses are the surface this
+    task owns. Note in passing, do NOT fix here: `gh pr merge`, gist creation, push-to-main and workflow
+    edits are the same class and belong to their own task rather than being smuggled into this one.
+  acceptance:
+    - claim: "a remudero-review success posted by an identity other than the dedicated reviewer is treated as ABSENT at arm time, so the PR does not arm auto-merge"
+      proof: "unit test: test/review-status-provenance.test.ts"
+    - claim: "an untrusted poster yields ABSENT rather than FAIL, so a hostile or buggy poster cannot block a merge that a genuine reviewer would pass"
+      proof: "unit test: test/review-status-provenance.test.ts"
+    - claim: "a remudero-review posted by the dedicated reviewer identity is honoured exactly as today, so the autonomous merge path is unchanged for every non-forged PR"
+      proof: "unit test: test/review-status-provenance.test.ts"
+    - claim: "the deny-floor refuses a worker attempt to POST a commit status, and that refusal is asserted against the floor script itself rather than described"
+      proof: "unit test: test/deny-floor.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§4A", "§5C"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "OPERATOR RIDER, 2026-07-21, recorded verbatim in force: this is T1-AC2 and it LEADS. 'remudero-review
+    posted by a DEDICATED reviewer identity (fine-grained token/App the workers never hold), deny-floor blocks
+    worker status-POSTs, and status provenance is checked at arm time. That kills the forge attack without
+    touching merge autonomy.'
+    THE INVARIANT THIS TASK MUST NOT BREAK: no change here may add a human approval to the merge path. If an
+    implementation of this task results in an operator having to approve ordinary autonomous PRs, it has
+    misread the task — that is W1-T204's territory and even there it is bounded."
+
+- id: W1-T206
+  title: "the ledger is the provenance spine AND the backing store for the dispatch breaker, yet an append has no atomicity guarantee and a torn line is silently parsed to {}"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "RECON R-8 + R-16, both VERIFIED at source during intake. appendLedger (src/lib/ledger.ts:23-27)
+    is the entire module: mkdirSync, then appendFileSync with no lock, no temp file, no fsync. The reader
+    (src/lib/status.ts:378-384) wraps JSON.parse in `catch { return {} }`, so a torn record does not throw
+    and is not logged - it becomes an empty object with no task_id and no step, invisible to every consumer
+    downstream.
+    WHY THAT MATTERS MORE THAN AN AUDIT LOG NORMALLY WOULD: this file is not only the audit log. It is the
+    backing store for the dispatch circuit breaker (isDispatchBreakerTripped via readLedgerLines, wired at
+    src/run-task.ts:3651 and :3885) and for sweep dedup (src/lib/sweep.ts:866, :1201). A line that silently
+    becomes {} is a decision input that silently disappears.
+    CORRECTION TO THE RECON, made during intake and load-bearing for the design: appendFileSync opens with
+    O_APPEND, so the kernel serializes the offset update and concurrent appenders do NOT overwrite each
+    other. The recon's suggested PIPE_BUF guarantee does not apply - that is a pipe property, and this is a
+    regular file. So the real exposure is narrower than 'concurrent appends corrupt the ledger': it is a
+    partial write from a crash or signal mid-record, and Node's internal write loop for a record large
+    enough to be split. Design for THAT, and do not add a lock whose only justification was a race that
+    O_APPEND already prevents.
+    R-16 IS THE SAME WOUND FROM THE OTHER SIDE: readLedgerLines returns [] when the file is absent
+    (status.ts:371-372), the breaker counts run.start lines with no floor and no persisted counter, so an
+    absent or rotated ledger silently resets every breaker to zero. A torn run.start line does the same
+    thing one increment at a time."
+  design: |
+    MAKE A TORN LINE LOUD, NOT SILENT. The cheapest real win is not a lock - it is refusing to treat an
+    unparseable line as an empty object. A malformed record must be counted and surfaced (its own ledger
+    step, a console warning, or a field on the read result), so that corruption is observable rather than
+    silently subtracted from a decision count.
+    THEN DECIDE WHETHER ABSENCE MAY ZERO A BREAKER. A breaker that reads zero because the file is gone is
+    the cannot-observe-implies-permitted shape this codebase has repeatedly converted into
+    cannot-observe-implies-wait. Apply the same doctrine on the write path: an ABSENT ledger where one is
+    expected is indeterminate, not proof of zero dispatches. VERIFY from source how deriveStatus consumes
+    the count before changing the predicate - the fix belongs wherever it does not break a genuine
+    first-run empty ledger.
+    ATOMICITY LAST, AND ONLY WHAT THE EVIDENCE SUPPORTS. If a write-atomicity mechanism is added, it must be
+    justified against the O_APPEND finding above rather than against the recon's framing. A single
+    write() of a record under the filesystem block size, or a write-temp-and-append pattern, may be
+    sufficient. Do not import a lock library for a race that does not exist.
+  acceptance:
+    - claim: "a torn or unparseable ledger line is COUNTED and surfaced rather than silently becoming an empty object that no consumer can see"
+      proof: "unit test: test/ledger-atomic.test.ts"
+    - claim: "N concurrent appenders produce N well-formed lines with none lost, asserted on line count AND on JSON-validity of every line"
+      proof: "unit test: test/ledger-atomic.test.ts"
+    - claim: "a record large enough to exceed a single write is still readable as one line, or its failure is observable"
+      proof: "unit test: test/ledger-atomic.test.ts"
+    - claim: "an ABSENT ledger does not silently report a dispatch-breaker count of zero for a task that has dispatch history elsewhere - absence reads as indeterminate rather than as proof of no dispatches"
+      proof: "unit test: test/breaker-survives-rotation.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§12", "P29"]
+  files: [src/lib/ledger.ts]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1 (docs/audits/recon-2026-07-21.md), findings R-8 and R-16. Evidence spot-verified at
+    file:line during intake rather than taken from the report - the report's PIPE_BUF framing was WRONG and
+    its circuit-breaker call site (run-task.ts:3611) was wrong, the real ones being :3651 and :3885. Recorded
+    because the corrected reading changes the design: no lock is needed for the race the report described.
+    FIRST MEMBER of the WRITE-SIDE ATOMICITY doctrine family (MASTER-PLAN §12). Siblings: W1-T207
+    (status.json) and W1-T208 (run.lock). Split per Rule 19 - three different writers, three different
+    failure modes, one doctrine."
+- id: W1-T207
+  title: "status.json is written by four callers with a plain truncating writeFileSync, so a concurrent reader can observe a half-written file and lose the monotonic-under-darkness fallback"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "RECON R-17, VERIFIED at source during intake with corrected line numbers. The write is a plain
+    truncate-and-write at src/lib/status.ts:906-912 - mkdirSync then writeFileSync, no temp file, no rename.
+    Four call sites pass a cachePath and therefore write it: src/run-task.ts:1832, :3131, :3565, :3802. The
+    recon's count of four writers is exactly right, though every one of its line numbers was stale by 23 to
+    103 lines. Other projectPlan callers (board.ts:97, task-card.ts:123, panel-graph.ts:353 and :406) pass no
+    cachePath and never write, which is why the count is four and not eight.
+    THE HARM IS SPECIFICALLY TO THE DARKNESS FALLBACK. The reader at src/lib/status.ts:925-934 degrades to
+    undefined on a parse failure or a shape mismatch. Because writeFileSync truncates before writing, a
+    reader arriving mid-write observes a zero-length or partial file, gets undefined, and loses exactly the
+    cached prior projection that W1-T179 exists to preserve. So the monotonic-under-darkness invariant is
+    not defeated by a bug in its own logic - it is reintroducible through a write race underneath it. That is
+    the structural point the recon makes and it is correct: read-path integrity is doctrine here, write-path
+    atomicity is unowned."
+  design: |
+    TEMP FILE PLUS RENAME. Write to a sibling temp path in the same directory, then rename over the target.
+    rename(2) within one filesystem is atomic, so a reader sees either the whole old file or the whole new
+    one and never a partial. Same directory matters - a rename across filesystems is a copy and loses the
+    guarantee.
+    ONE WRITER FUNCTION, NOT FOUR PATCHES. The four call sites all reach the same writer inside status.ts.
+    Fix it there once rather than at each caller, so a fifth caller added later inherits the property instead
+    of having to remember it.
+    THE FALSIFIER IS THE POINT OF THE TASK. A test that only asserts the file is written correctly proves
+    nothing about atomicity. The test that matters interleaves a reader with a writer and asserts the reader
+    NEVER observes a partial state - and it must be written so that it FAILS against the current
+    truncate-and-write implementation, otherwise it is not testing what it claims.
+    DO NOT WEAKEN THE READER TO COMPENSATE. Making the reader retry or tolerate garbage would paper over the
+    write race while leaving it in place for every future reader. The write is what is wrong.
+  acceptance:
+    - claim: "a reader interleaved with a writer never observes a partial or zero-length status.json, asserted against a test that FAILS on the current truncate-and-write implementation"
+      proof: "unit test: test/status-atomic-write.test.ts"
+    - claim: "a torn read can no longer regress a merged task to queued by silently losing the cached prior projection"
+      proof: "unit test: test/status-atomic-write.test.ts"
+    - claim: "the atomic write is a property of the single writer in status.ts, so a NEW caller inherits it without changing the call site"
+      proof: "unit test: test/status-atomic-write.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§12", "P22"]
+  files: [src/lib/status.ts]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, finding R-17. Line numbers corrected during intake: the writer is status.ts:906-912
+    and the four callers are run-task.ts:1832/:3131/:3565/:3802, not the stale values in the report.
+    SECOND MEMBER of the WRITE-SIDE ATOMICITY family (MASTER-PLAN §12), alongside W1-T206 (ledger) and
+    W1-T208 (run.lock). This is the member that most directly reintroduces a defect the plan already fixed on
+    the read side, which is why it is worth doing even though status.json is rederivable."
+- id: W1-T208
+  title: "run.lock is written non-atomically and an unparseable read is indistinguishable from no lock at all, so a torn read can misclassify a live run as abandoned"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "RECON R-18, VERIFIED IN PART during intake - and the recon's stated trigger was REFUTED, which
+    narrows this task considerably and is recorded here so the implementer does not chase a condition that
+    cannot occur.
+    WHAT IS TRUE: writeRunLock (src/lib/worker.ts:738-740) is a plain writeFileSync with flag w, which
+    truncates before writing - no temp file, no rename. The read path (:742-750) collapses BOTH a
+    malformed-JSON throw and a non-numeric pid into `null`, which is the exact same value the caller sees
+    when there is no lock file at all. A torn read is therefore indistinguishable from an absent lock.
+    WHAT IS FALSE: the recon claims a zero grace period lets this prune a LIVE worktree. It does not.
+    DEFAULT_PRUNE_GRACE_MS is 120_000 (worker.ts:767), the `graceMs ?? 0` at :804 is only a library default,
+    and ALL SIX production call sites override it (run-task.ts:2046, :3115, :5269, :5498, :5690, :5953). No
+    non-test caller uses the zero default. Better still, the grace branch is gated on `!lock` - precisely the
+    state a torn read produces - so the age guard already COVERS the torn-read case rather than being
+    bypassed by it.
+    THE RESIDUAL RISK, STATED HONESTLY, IS SMALL: a live worktree whose directory mtime is older than two
+    minutes AND whose lock is read torn in the same instant would be force-removed. That requires a run idle
+    on filesystem writes for over two minutes coinciding with the sub-millisecond truncate window of another
+    process rewriting that same lock. This task is filed because the fix is cheap and the failure is
+    destructive, NOT because the failure is likely."
+  design: |
+    SAME REMEDY AS ITS SIBLINGS: write to a temp path in the same directory and rename over the target, so a
+    reader sees a whole lock or no lock and never half of one.
+    DISTINGUISH CORRUPT FROM ABSENT. The more valuable half of this task is that the read path currently
+    conflates two different facts. `null` should mean 'there is no lock'. An unparseable lock file is a
+    DIFFERENT observation and the caller deserves to tell them apart, because one means the worktree is free
+    and the other means something is wrong. Whatever shape that takes, a corrupt lock must not silently read
+    as an idle worktree.
+    KEEP THE GRACE PERIOD. It is doing real work and the intake evidence shows it already covers the
+    torn-read path. Do not remove or shorten it as part of this change, and do not restate the recon's
+    zero-grace claim in any artifact - it is false on every production path.
+  acceptance:
+    - claim: "a reader interleaved with a lock writer never observes a partial lock file"
+      proof: "unit test: test/worker-run-lock.test.ts"
+    - claim: "an unparseable lock is reported DISTINCTLY from an absent lock, so a corrupt lock cannot read as an idle worktree"
+      proof: "unit test: test/worker-run-lock.test.ts"
+    - claim: "the two-minute prune grace still applies unchanged after the fix, asserted so a later refactor cannot quietly drop the guard that makes the torn-read case survivable"
+      proof: "unit test: test/worker-run-lock.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§12"]
+  files: [src/lib/worker.ts]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, finding R-18. The recon's zero-grace trigger was REFUTED at source during intake
+    (DEFAULT_PRUNE_GRACE_MS 120_000, overridden at all six production call sites, and the grace branch gated
+    on the very !lock state a torn read produces). Filed anyway because the remedy is cheap and the failure
+    mode is destructive, but SIZED to that honest reading rather than to the report's.
+    THIRD MEMBER of the WRITE-SIDE ATOMICITY family (MASTER-PLAN §12), with W1-T206 and W1-T207."
+- id: W1-T205
+  title: "raising the proof floor must CARVE OUT plan-only PRs — they are structurally always capped, and a floor that ignores this stalls every retro, approve and filing PR forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "R-2 IS REAL: a capped verdict (zero proofs executed) still arms and merges unless the task
+    is tdd:strict, and prose is the default — so the executed-proof floor binds on a minority of work.
+    Raising it is right. Raising it NAIVELY halts the plan lane.
+    PLAN-ONLY PRs HAVE NO EXECUTABLE PROOFS TO RUN. A PR that only edits plan/tasks.yaml files a task, it
+    does not implement one — there is no test it could execute, because the thing it describes does not
+    exist yet. Such a PR is ALWAYS capped, structurally and permanently. Any floor of the form 'capped
+    never arms' or 'non-tdd:strict requires executedCount > 0' therefore blocks it forever.
+    OBSERVED, NOT PREDICTED — three PRs on 2026-07-21 all posted CAPPED. #472 and #473 were code PRs
+    capped only because worktree materialization was unavailable, which is a fixable degradation. #474
+    was plan-only and posted 'CAPPED - 0/3 proofs executed', which is NOT a degradation and cannot be
+    fixed by repairing materialization: a filing PR has nothing executable to point at. Under T1-AC3 as
+    written, #474 would never have merged, and neither would any retro or approve PR the machine emits.
+    THE PLAN LANE IS ALREADY GATED, JUST NOT BY PROOF EXECUTION. lint-plan, the W1-T136 shared plan-PR
+    emitter, and the plan-index checks are deterministic and they all bind on exactly these PRs. The
+    carve-out does not lower the bar for plan work, it names the bar that already applies to it."
+  design: |
+    CLASSIFY THE PR, THEN CHOOSE THE FLOOR. A plan-only PR is one whose diff touches only plan files
+    (and the generated plan index) and no src or test file. VERIFY FROM SOURCE how the review path
+    already determines a PR's changed files before adding a second way to compute it — the shared plan-PR
+    emitter and the review command both already reason about diffs, and a third divergent notion of
+    'plan-only' would itself become a defect.
+    FAIL CLOSED ON THE CLASSIFIER. A PR that mixes plan files WITH src or test files is NOT plan-only and
+    gets the full executed-proof floor. That direction matters: the dangerous shape is a code change
+    smuggled into a plan PR to inherit the carve-out, so ambiguity must resolve toward the stricter floor,
+    never toward the exemption.
+    THE CARVE-OUT IS AN EXEMPTION FROM PROOF EXECUTION ONLY. A plan-only PR still faces lint-plan, the
+    emitter's own structural checks, plan-index regeneration, and commitlint. Nothing here weakens those,
+    and the task fails if it does.
+    STATE THE VERDICT HONESTLY (standing rule 22 — claimed versus evidenced). A plan-only PR that passes
+    must not be reported as though proofs were executed. It should read as deterministically gated, which
+    is what it is, so an operator reading the status is never misled about what was checked.
+  acceptance:
+    - claim: "THE OPERATOR'S FALSIFIER — a plan-only PR blocked solely on proof execution fails the design, so a plan-only PR with zero executed proofs still arms auto-merge"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a PR mixing plan files with src or test files is NOT treated as plan-only and faces the full executed-proof floor"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a non-tdd:strict CODE PR with zero executed proofs does NOT arm, so the floor is genuinely raised for the work it was raised for"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a plan-only PR's passing verdict reads as deterministically gated rather than as proof-executed, so the status never overstates what was checked"
+      proof: "unit test: test/review.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "P22"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "OPERATOR RIDER, 2026-07-21, recorded verbatim and BINDING on this task and on any future floor-raising
+    work: 'plan-only PRs structurally have zero executable proofs - they are ALWAYS capped. Any floor of the
+    form capped never arms or non-tdd:strict requires executedCount>0 must exempt plan-only PRs, which are
+    instead gated deterministically (lint-plan + the T136 emitter + plan-index checks). Without this, every
+    retro/approve/filing PR stalls forever. Falsifier: a plan-only PR blocked solely on proof-execution fails
+    the design.'
+    FILED AS A NEW TASK RATHER THAN AS AN AMENDMENT TO W1-T185, per standing rule 21 — W1-T185 shipped the
+    capped-verdict class this task now builds on, and a merged task is not editable."
+- id: W1-T204
+  title: "protect the gate CONFIG from in-band edits WITHOUT putting a human on every autonomous merge — path-scoped protection or an operator-only push path, never blanket required reviews"
+  repo: remudero
+  depends_on: [W1-T203]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "THE SECOND HALF OF THE GATE PROBLEM. A PR can today weaken `.github/workflows/ci-gate.yml`
+    or ratchet a `scripts/*-baseline.json` IN THE SAME PR whose merge those files govern (recon R-6).
+    Live protection carries no required_pull_request_reviews and enforce_admins is false, so the floor
+    is editable by the system it governs.
+    THE OBVIOUS FIX IS THE WRONG ONE AND IS EXPLICITLY REFUSED. The recon's T1-AC1 as written asks for a
+    matching approval from an identity distinct from the author. Implemented as BLANKET required PR
+    reviews, that puts a human approval on EVERY autonomous merge — which reverts the entire thesis of
+    the system. remudero exists to drain its own plan unattended. A gate that requires a human on every
+    merge does not harden that system, it ends it.
+    THE PROPERTY IS PATH-SCOPED, NOT GLOBAL. Gate-TOUCHING PRs need the operator. Everything else keeps
+    autonomous merge. Those are separable, and the whole difficulty of this task is expressing that
+    separation in whatever GitHub actually supports."
+  design: |
+    VERIFY GITHUB'S ACTUAL CAPABILITIES FROM ITS DOCS BEFORE DESIGNING. Do not assume a shape works
+    because it sounds right — repository rulesets, CODEOWNERS-gated required review, and branch
+    protection differ in what they can scope BY PATH, and that difference decides this task. Read the
+    current documentation, then choose.
+    TWO ACCEPTABLE SHAPES, named by the operator. (a) PATH-SCOPED PROTECTION — rulesets or CODEOWNERS
+    limited to `.github/workflows` plus the baseline files, so only PRs touching those paths require the
+    operator's review. (b) RELOCATION — move the gate configs behind a push path only the operator can
+    write, so an ordinary PR structurally cannot contain an edit to them. Either satisfies the invariant.
+    A blanket required-review setting satisfies neither and is a failed implementation of this task.
+    PROVE THE NEGATIVE, NOT JUST THE POSITIVE. It is not enough to show a gate-touching PR is held. The
+    load-bearing evidence is that an ORDINARY PR — one touching only src and test — still merges with no
+    human approval. That is the property most likely to be silently lost, and it is the one the operator
+    will notice last.
+    verify:human DELIBERATELY. The deliverable is a change to live GitHub protection state, which a
+    headless worker can neither apply nor honestly verify (Rule 18). A worker can prepare the config and
+    the assertions, but an operator confirms the live protection and the two-sided behaviour.
+  acceptance:
+    - claim: "a PR that modifies a gate config or a baseline file cannot merge without the operator, asserted against the live protection configuration rather than described"
+      proof: "unit test: test/gate-self-modification.test.ts"
+    - claim: "THE AUTONOMY FALSIFIER — an ordinary PR touching only src and test still merges with NO human approval, so the fleet keeps draining unattended"
+      proof: "unit test: test/gate-self-modification.test.ts"
+    - claim: "the implementation is path-scoped or relocation-based, and NOT a blanket required-PR-reviews setting, asserted by reading the resulting protection configuration"
+      proof: "unit test: test/gate-self-modification.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§4A", "§5C"]
+  files: [.github/workflows/ci-gate.yml]
+  status: queued
+  attempts: 0
+  note: "OPERATOR RIDER, 2026-07-21, recorded verbatim and BINDING: 'T1-AC1 must NOT be implemented as blanket
+    required-PR-reviews (that puts a human approval on every autonomous merge - reverting the system's thesis).
+    Acceptable shapes, implementer verifies GitHub's actual capabilities from docs: path-scoped protection
+    (rulesets/CODEOWNERS limited to .github/workflows + baseline files), or gate configs relocated behind an
+    operator-only push path. The invariant: gate-TOUCHING PRs need the operator, everything else keeps
+    autonomous merge.'
+    SEQUENCED AFTER W1-T203 on the operator's ruling that the provenance half is cleaner and leads. The hard
+    dep is real rather than cosmetic: W1-T203 removes the forge vector without touching autonomy, so if this
+    task stalls on GitHub's capabilities the system is still meaningfully harder to forge."
+
+- id: W1-T219
+  title: "the keyword floor passes on a 34 percent echo, auto-passes a proof with no keywords at all, and the capped-verdict override is an unauthenticated free string"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "RECON R-13 and R-14, both VERIFIED at source during intake. Filed as a NEW task rather than as an
+    amendment to W1-T185 because W1-T185 is DONE - a merged PR carries its Remudero-Task trailer - and
+    standing rule 21 requires the amender to file a follow-up rather than edit shipped work.
+    R-13, four holes in the mechanical floor, each confirmed separately.
+    (i) MIN_COVERAGE is 0.34 (review.ts:262), applied at :697-698, so echoing roughly a third of a proof's
+    distinctive tokens marks a criterion met.
+    (ii) A proof yielding ZERO keywords sets met = true unconditionally with the reason no mechanical anchors
+    in proof, deferred to reviewer judgment (review.ts:690-694). That is fail-open, and it is reachable by
+    writing a proof entirely in short or stopword or numeric tokens - see PR 123 has no keywords at all.
+    (iii) The pathless grep default runs the pattern across the whole repo (review.ts:448-453), and an
+    executed_pass OVERRIDES the keyword floor positively (:711), so any pattern matching one line anywhere
+    certifies the criterion.
+    (iv) A renamed path makes grep exit 2, which counts as fail and overrides coverage into UNMET (:560-564,
+    :712, :729) - so a stale path FALSE-BLOCKS. Deliberate and documented, but the asymmetry is real: a
+    trivial match certifies, a moved file blocks.
+    R-14, the override is unauthenticated. --override-capped-by is read as a free string
+    (run-task.ts:2828-2838) and ledgered verbatim, and the recovery side accepts it on a bare typeof check
+    (review.ts:1118-1129) with no signature, no operator allowlist, and no binding to the PR head it was
+    granted against. Last one wins, so a single appended ledger line arms auto-merge on a CAPPED verdict for a
+    tdd:strict task - exactly the condition capping exists to block. Since the ledger is append-only and
+    unlocked, anything that can append can forge an override."
+  design: |
+    RAISE THE FLOOR WHERE IT FAILS OPEN, NOT UNIFORMLY. The zero-keyword auto-pass is the worst of the four
+    because it is unconditional: fix that first, and make a proof with no mechanical anchors resolve to
+    INDETERMINATE rather than MET. That is the same cannot-observe-implies-wait move this codebase has made
+    repeatedly on the read path.
+    A TRIVIAL GREP MUST NOT CERTIFY. A pathless repo-wide match is not evidence for a specific criterion.
+    VERIFY from source how proof paths are resolved before changing the default - the fix may be to require a
+    path rather than to weaken the executed_pass override, and those have very different blast radii.
+    KEEP THE FALSE-BLOCK ASYMMETRY IN VIEW. Hole (iv) is the one that costs the fleet time rather than
+    safety, and fixing it by making exit 2 lenient would re-open hole (iii). Distinguish grep found nothing
+    from grep could not look - the same corrupt-versus-absent distinction standing rule 23 names on the write
+    path.
+    BIND THE OVERRIDE TO SOMETHING. At minimum the PR head SHA it was granted against, so an override cannot
+    outlive the diff it was judged on. An operator allowlist is worth considering, but head-binding is the
+    change that stops a stale or forged line arming a later, different diff.
+    RESPECT THE PLAN-ONLY CARVE-OUT. W1-T205 carries the operator rider that plan-only PRs are structurally
+    capped and gate deterministically. Any floor raised here must exempt them or the plan lane halts.
+  acceptance:
+    - claim: "a proof yielding zero mechanical keywords resolves to INDETERMINATE rather than auto-passing as met"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a pathless repo-wide grep matching one incidental line does NOT certify a criterion"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a grep that could not look, such as a since-renamed path, is distinguished from a grep that looked and found nothing"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a capped-verdict override is bound to the PR head it was granted against, so a stale or appended override line cannot arm a later different diff"
+      proof: "unit test: test/review.test.ts"
+    - claim: "THE CARVE-OUT FALSIFIER - a plan-only PR still arms under the raised floor, so tightening the floor does not halt the plan lane"
+      proof: "unit test: test/review.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "P22"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, findings R-13 and R-14. FILED AS A FOLLOW-UP, NOT AN AMENDMENT: the intake brief
+    proposed amending the W1-T185 family, but W1-T185 is DONE - verified by a merged PR carrying its
+    Remudero-Task trailer - so standing rule 21 applies and the amender owes a follow-up instead. The same
+    check cleared W1-T197 and W1-T175 for genuine amendment, and blocked W1-T30 and W1-T48, whose docs
+    follow-up is W1-T213.
+    R-14 is the sharper of the two despite its lower recon severity: it is a total bypass of the capped-verdict
+    floor requiring one appended ledger line, on an append-only file with no write authentication. It composes
+    with R-8 - anything that can append can forge an override."
+- id: W1-T216
+  title: "the forge attack is INFERRED end to end - drill it, so the biggest claimed risk in the audit becomes observed fact or is retired"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "RECON §8, honest-limits item 1, and the single most valuable unverified claim in the audit. The
+    recon's own words: the forge-your-own-status attack is INFERRED end-to-end. What it CONFIRMED at source,
+    and what intake re-verified independently, is every precondition:
+      the sandbox excludes gh entirely (settings/worker.json:45, excludedCommands ['gh *'])
+      the worker holds the operator's gh credential (worker-home.ts:78, .config/gh symlinked in)
+      the deny-floor blocks only force-push-to-main, gh auth subcommands, a planted canary string, and an
+        operator-local deny list - it does NOT block gh api statuses, gh pr merge, gh gist, plain push to
+        main, workflow edits, gh secret set, or gh pr review --approve (hooks/deny-floor.sh, 59 lines total)
+      branch protection requires NO independent review - required_pull_request_reviews is null, so CODEOWNERS
+        is never enforced, and enforce_admins is false
+    What NOBODY has done is execute it: a worker identity posting remudero-review=success on a real PR and
+    observing whether auto-merge arms. Until that happens the system's single biggest risk rests on a chain of
+    correct-looking inferences, and this codebase's own doctrine is that a keyword match is a claim while
+    execution is evidence. The same standard should apply to its threat model."
+  design: |
+    A CONTROLLED DRILL ON A THROWAWAY PR, MIRRORING THE W1-T12 COMMISSIONING DRILLS. Open a test PR that
+    changes nothing meaningful, have a worker-identity credential post remudero-review=success against its
+    head, and observe whether the arm path accepts it. Record the outcome as OBSERVED evidence with the same
+    honesty the commissioning drills used - including the deltas, if the drill turns out to be less faithful
+    than intended.
+    THE DRILL MUST BE SAFE BY CONSTRUCTION. It runs against a disposable PR that would be harmless if merged,
+    and it must not be capable of merging anything real. Prefer the sandbox repo over remudero itself if the
+    fidelity loss is acceptable, and state which was chosen and why.
+    EITHER OUTCOME IS A RESULT WORTH HAVING. If the forge succeeds, the audit's top finding is confirmed and
+    W1-T203's priority is vindicated by evidence rather than by argument. If it fails, something already
+    prevents it that nobody has identified - and finding out WHAT is more valuable than the assumption,
+    because that mechanism is currently undocumented and could be removed by an unrelated refactor without
+    anyone noticing.
+    SEQUENCE WITH W1-T203 so the drill can also serve as its acceptance evidence: run it BEFORE the
+    provenance check to observe the hole, and AFTER to observe it closed. That makes one drill do two jobs.
+    Expressed as sequencing rather than as a hard depends_on edge, because the two are independently
+    valuable - observing the hole is worth doing even if the provenance work slips.
+    verify:human - a security drill's conclusion is an operator's to draw, and its safety depends on judgement
+    a headless worker should not be making alone.
+  acceptance:
+    - claim: "a worker-identity post of remudero-review=success on a controlled test PR is EXECUTED and its effect on auto-merge arming is recorded as observed evidence rather than inferred"
+      proof: "unit test: test/forge-drill.test.ts"
+    - claim: "the drill runs against a disposable PR that is harmless if merged, and cannot merge anything real"
+      proof: "unit test: test/forge-drill.test.ts"
+    - claim: "after W1-T203 lands, the same drill shows the forged status treated as ABSENT rather than honoured, closing the loop from inferred risk to observed mitigation"
+      proof: "unit test: test/forge-drill.test.ts"
+    - claim: "the drill's honest deltas are recorded - anything about it that is less faithful than a real attack is stated rather than glossed"
+      proof: "unit test: test/forge-drill.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§4A", "§5C"]
+  files: [test/forge-drill.test.ts]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, recon §8 honest-limits item 1, in the shape of the W1-T12e commissioning drills.
+    Every PRECONDITION was independently re-verified at intake and all hold - the deny-floor enumeration above
+    is complete, read from all 59 lines of the script rather than from the report's claimed range. The
+    ATTACK ITSELF remains unexecuted, which is exactly what this task fixes.
+    SEQUENCING NOTE: this should run around W1-T203 (reviewer-identity provenance, filed separately). Not
+    expressed as a depends_on edge because that would make this task unrunnable until T203 lands, and
+    observing the hole has standalone value.
+    The recon lists four further drills worth running (400-turn cliff, flock-stress the ledger, kill -9
+    mid-run reclaim, simulated state loss). The last is covered by W1-T214's restore drill. The others are
+    not filed here - Rule 19 sizing, and each wants its own harness."
+- id: W1-T212
+  title: "coverage is aggregate-only so untested new code merges above the floor, and the review awareness surface omits every CI workflow and ratchet config it is supposed to police"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "RECON R-12 and R-15, both VERIFIED at source during intake. They are filed together because
+    they are the same hole seen twice: a change can weaken the measurement it is measured by.
+    R-12: scripts/coverage-ratchet.mjs:31-50 sums LF/LH/BRF/BRH across every record with NO filename filter,
+    and the evaluator compares two scalars. A grep of that file for diff, per-file or changed returns nothing.
+    So new code with zero covering tests merges freely as long as the aggregate stays above the floor - and
+    the larger the codebase grows, the less any single untested addition moves that aggregate.
+    R-15: USER_VISIBLE_SURFACE_RE (src/lib/review.ts:1633-1642) matches bin/, run-task.ts, spike.ts and nine
+    named src/lib files. It does NOT match .github/workflows/ (any of the nine), scripts/*-ratchet.mjs,
+    stryker.conf.json, package.json, hooks/, settings/, commitlint.config.mjs, CODEOWNERS, or any other
+    src/lib file including sweep.ts and escalate.ts. Zero surface matches returns pass with the reason
+    'no CLI/config/gate/verdict surface changed' (review.ts:1666-1668). So a PR lowering a coverage floor or
+    deleting a required check from ci-gate.yml clears the docs-awareness rung SILENTLY.
+    TOGETHER THEY MEAN: the ratchets can be weakened by a diff that neither the ratchet nor the review floor
+    treats as notable."
+  design: |
+    PER-DIFF COVERAGE, NOT A HIGHER AGGREGATE. Raising the aggregate floor does not fix this and makes the
+    build brittle. What is needed is a measure over the lines the PR ADDS. VERIFY from the existing lcov
+    plumbing what per-file data is already available before adding tooling - the reporter already emits
+    per-file records, which is why the aggregate has to sum them.
+    WIDEN THE AWARENESS SURFACE TO THE THINGS THAT DEFINE THE GATE. At minimum .github/workflows/, the
+    ratchet scripts and their baselines, and stryker.conf.json. The principle is that anything which can
+    CHANGE THE MEASUREMENT is user-visible surface by definition, even when no user sees it.
+    COORDINATE WITH W1-T204. That task protects gate configs at the branch-protection layer, this one makes a
+    gate-weakening diff visible to the review floor. They are complementary - one makes the edit require the
+    operator, the other makes it impossible to slip past review unremarked. Neither replaces the other.
+    R-10 IS RELATED AND DELIBERATELY NOT FOLDED IN. See the note.
+  acceptance:
+    - claim: "new source lines added with zero covering tests FAIL, even when aggregate coverage stays above the floor"
+      proof: "unit test: test/diff-coverage.test.ts"
+    - claim: "a diff that lowers a coverage or mutation baseline is treated as user-visible surface by the review floor rather than passing unremarked"
+      proof: "unit test: test/awareness-surface-ratchet.test.ts"
+    - claim: "a diff editing a CI workflow, including removing a name from ci-gate REQUIRED, is treated as user-visible surface"
+      proof: "unit test: test/awareness-surface-ratchet.test.ts"
+    - claim: "the widened surface does not fire on ordinary src changes that touch none of those paths, so the rung stays useful rather than becoming noise everyone learns to ignore"
+      proof: "unit test: test/awareness-surface-ratchet.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, findings R-12 and R-15, recon T9. Both claimed line refs verified exact.
+    R-10 (the mutation ratchet covering only src/lib/classify.ts, stryker.conf.json:8) is REAL and verified,
+    but its denominator in the report is wrong: src holds 64 .ts files (62 under src/lib), not 74. It is NOT
+    folded in here because the recon itself records it as ALREADY tracked by W1-T133's nightly full-scope
+    run, and because widening PR-time mutation scope is a runtime-cost decision of a different kind from
+    coverage and surface detection. Rule 19 sizing, not an oversight."
+- id: W1-T209
+  title: "the ledger grows unbounded with no archival, and any rotation that hides a decision-relevant line silently zeroes the dispatch breaker it also backs"
+  repo: remudero
+  depends_on: [W1-T206]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "RECON R-9, coupled to R-16. Measured during intake: state/ledger.ndjson is 9,455,694 bytes and
+    growing, with no rotation mechanism anywhere in src, scripts or bin, and no newsyslog entry. This is the
+    same file whose SIZE drove W1-T187 projection cost from 58.7s to 0.189s once it stopped being re-read per
+    task - so growth here is not merely disk, it is latency in the operator console.
+    THE TRAP THAT MAKES THIS NOT A ROUTINE ROTATION: the ledger is simultaneously the audit log and the
+    backing store for the dispatch circuit breaker and for sweep dedup. readLedgerLines returns [] for an
+    absent file (status.ts:371-372) and the breaker has no floor and no persisted counter, so a naive
+    rotation that moves old lines out of the reader's view resets every breaker to zero. Rotating this file
+    carelessly re-arms the exact redispatch-storm the breaker exists to stop - roughly 130 dispatches on one
+    task in the W1-T1/W1-T29 incident.
+    ALSO MEASURED, AND NOT IN THE REPORT: ad-hoc logs are accumulating in the same directory (t108.log,
+    t115.log, t181.log, watch-274.log). Whatever policy lands should say what happens to those, even if the
+    answer is that they are operator scratch and out of scope."
+  design: |
+    ROLL, BUT KEEP A DECISION TAIL. Archive old records to a dated roll, and keep a compacted DECISION TAIL
+    that readLedgerLines still sees - the lines the breaker and dedup actually consult (dispatch, run.start,
+    pr.opened, escalation, verdict and credit steps). Everything else is archivable. VERIFY from source
+    exactly which steps are decision-relevant before choosing that set, and derive it from the consumers
+    rather than from this note, because a step this note forgets is a breaker that silently resets.
+    THE ACCEPTANCE TEST IS THE BREAKER, NOT THE FILE SIZE. A rotation that shrinks the file and passes is
+    worthless if the breaker count changed. The load-bearing test asserts an INVARIANT ACROSS rotation: for a
+    task with prior dispatch history, the breaker's answer is identical before and after.
+    DEPENDS ON W1-T206 deliberately. That task decides whether an absent or unreadable ledger may report a
+    zero count. Rotation is the operation most likely to produce exactly that state, so the read-side
+    doctrine should settle first.
+  acceptance:
+    - claim: "the ledger exceeding a size ceiling with no archived roll present FAILS"
+      proof: "unit test: test/ledger-rotation.test.ts"
+    - claim: "THE BREAKER INVARIANT - for a task with prior dispatch history, the dispatch-breaker verdict is IDENTICAL before and after a rotation, so rotation cannot re-arm a redispatch storm"
+      proof: "unit test: test/breaker-survives-rotation.test.ts"
+    - claim: "a rotation that drops a decision-relevant line from the reader's view FAILS, with the decision-relevant step set derived from its consumers rather than hardcoded to a stale list"
+      proof: "unit test: test/ledger-rotation.test.ts"
+    - claim: "sweep dedup still suppresses a duplicate action after a rotation, so archival cannot cause a merged task to be re-credited or re-actioned"
+      proof: "unit test: test/ledger-rotation.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§12", "P29"]
+  files: [src/lib/ledger.ts]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, finding R-9 coupled to R-16, recon T5. Size measured at intake: 9,455,694 bytes.
+    The recon's own framing is right that this must be breaker-safe, and that is the whole difficulty - a
+    plain logrotate here is actively dangerous, not merely insufficient."
+- id: W1-T210
+  title: "a CI log tail is interpolated bare into the write-capable fix-worker prompt, and that worker carries no tool restriction - untrusted text reaching an agent that can push"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "RECON R-19, VERIFIED at source during intake with corrected line numbers. The untrusted text is
+    fetched by `gh run view --log-failed` (src/run-task.ts:4183-4187) and interpolated raw at
+    src/run-task.ts:1013, then spliced bare into the prompt array at :1023 between narrative instruction
+    lines. No delimiter, no label, no escaping, no treat-as-data instruction. Both the check NAME and the
+    60-line log tail are attacker-influenceable by anyone who can make a CI job print text.
+    WHY THIS ONE IS WORSE THAN IT LOOKS, found during intake and NOT in the report: this prompt is
+    write-capable - it instructs `git push origin HEAD` and branch amending (run-task.ts:1000-1006) - and
+    unlike every other worker prompt in the codebase it carries NO tools restriction. INBOX_DRAFT_WORKER_TOOLS,
+    PLAN_WORKER_TOOLS and TRIAGE_WORKER_TOOLS all constrain their workers. The fix worker does not. So the
+    single unfenced input in the system is the one feeding the least constrained agent.
+    THE CODEBASE ALREADY KNOWS HOW TO DO THIS. inboxDraftPrompt fences its untrusted content with an explicit
+    `=== THE PROPOSAL ===` delimiter (src/lib/inbox.ts:384). This task is applying an existing local
+    convention to the place that skipped it, not inventing a mechanism."
+  design: |
+    FENCE THE UNTRUSTED SPAN AND LABEL IT AS DATA. Wrap the log tail and the check name in an explicit,
+    clearly delimited block that states the content is untrusted output to be analysed, never instructions to
+    follow. Mirror inbox.ts's existing delimiter convention rather than inventing a second style.
+    HANDLE A HOSTILE DELIMITER. Untrusted text that itself contains the fence marker must not be able to
+    close the fence and escape. Whatever marker is chosen, the content must be neutralised against it - and
+    that case needs its own test, because it is the first thing an attacker tries.
+    CONSIDER THE TOOL RESTRICTION SEPARATELY AND STATE THE DECISION. The missing tools allowlist on the fix
+    worker is a real second exposure found during intake. Either constrain it here with the reason recorded,
+    or file it explicitly as follow-up. Do not silently leave it - an unfenced input was survivable partly
+    because nobody had noticed the agent reading it is unconstrained.
+    SCOPE NOTE - R-20 IS NOT PART OF THIS TASK. See the note field.
+  acceptance:
+    - claim: "a CI log tail containing an injected instruction reaches the fix-worker prompt wrapped in an inert labelled block rather than bare"
+      proof: "unit test: test/fix-prompt-fencing.test.ts"
+    - claim: "the attacker-influenceable check NAME is fenced too, not only the log tail"
+      proof: "unit test: test/fix-prompt-fencing.test.ts"
+    - claim: "untrusted content containing the fence marker itself cannot close the fence and escape into instruction context"
+      proof: "unit test: test/fix-prompt-fencing.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§4A"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, finding R-19. Line numbers corrected at intake: the interpolation is
+    run-task.ts:1013 and the fetch is :4183-4187, not the report's 995-1011 and 1064 (1064 is unrelated).
+    R-20 WAS REFUTED AT INTAKE and is deliberately NOT filed. The recon claims GitHub issue bodies flow
+    unfenced into the inbox draft prompt. They do not: issue bodies terminate in plan/feedback/ files via
+    captureFeedback (issues-intake.ts:202-208) and never reach a prompt, the inbox draft prompt reads only
+    the operator-curated state registry, that content IS already fenced (inbox.ts:384), and the inbox worker
+    is read-only (Read/Grep/Glob, run-task.ts:5637). Three independent reasons the finding fails. Recorded
+    here so a future intake does not re-file it from the fixture."
+- id: W1-T211
+  title: "every security scanner is advisory - none appears in ci-gate REQUIRED, so a hard-failing OSV scan is never awaited and a CVE can merge"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "RECON R-11, VERIFIED and EXTENDED during intake. The full enumeration, read from the workflows
+    rather than from the report: semgrep is continue-on-error (semgrep.yml:54), dependency-review is
+    continue-on-error (dependency-review.yml:29), the full OSV scan sets fail-on-vuln false
+    (osv-scanner.yml:29), and CodeQL has no continue-on-error but is absent from ci-gate's REQUIRED array so
+    a red CodeQL never blocks a merge. osv-scanner-pr DOES fail hard (fail-on-vuln true, osv-scanner-pr.yml:28)
+    - and is likewise not in REQUIRED, which is precisely the race: ci-gate only waits on names listed in
+    REQUIRED (ci-gate.yml:115-124), so a scanner that fails is simply never awaited.
+    REQUIRED is at ci-gate.yml:97-98 and contains thirteen names, none of them a security scanner.
+    FOUND AT INTAKE, NOT IN THE REPORT: osv-scanner-pr also skips entirely for Dependabot PRs
+    (osv-scanner-pr.yml:21, `if: github.actor != 'dependabot[bot]'`). So the one scanner that fails hard is
+    disabled on exactly the PRs whose whole purpose is changing dependencies. That is a second exposure and
+    it belongs in this task."
+  design: |
+    ADD THE PR SCANNER TO REQUIRED so it is awaited rather than raced. That single change converts the
+    registration race into a gate. VERIFY from ci-gate.yml how REQUIRED is consumed before editing it, and
+    note that this file is itself the subject of W1-T204's gate-protection work - coordinate rather than
+    collide.
+    DECIDE ADVISORY-VERSUS-BLOCKING PER SCANNER, WITH THE REASON RECORDED. Not every scanner should block;
+    semgrep and CodeQL have false-positive profiles that can wedge a self-driving fleet. What must not
+    persist is the current state where a scanner is DESCRIBED as a gate and configured as advisory. Whatever
+    is chosen, the config must match the claim.
+    THE DEPENDABOT HOLE IS PART OF THIS TASK. A dependency-bumping PR is the highest-value place to run a
+    dependency scanner. If the skip exists to avoid noise or permissions problems, replace it with something
+    that still gates, and record why.
+  acceptance:
+    - claim: "a PR carrying an OSV-detected CVE cannot merge, because the PR scanner is in the awaited REQUIRED set rather than racing it"
+      proof: "unit test: test/scanner-gate-config.test.ts"
+    - claim: "a scanner marked continue-on-error while being claimed as a gate FAILS a config assertion, so the claim and the configuration cannot drift apart"
+      proof: "unit test: test/scanner-gate-config.test.ts"
+    - claim: "a Dependabot PR is NOT exempt from dependency scanning, so the PRs that change dependencies are the ones the dependency scanner actually runs on"
+      proof: "unit test: test/scanner-gate-config.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [.github/workflows/ci-gate.yml]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, finding R-11, recon T8. Both claimed line refs verified exact; REQUIRED spans
+    ci-gate.yml:97-98 rather than 97 alone. The Dependabot exemption (osv-scanner-pr.yml:21) was found during
+    intake and is not in the fixture."
+- id: W1-T214
+  title: "MASTER-PLAN WS-7 describes a nightly state backup with a drilled restore, and grep finds zero filed tasks - the irreplaceable artifact has no backup at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "RECON §6, missing organ 3 - and the sharpest catch in the report, because it is a gap in the
+    PLAN rather than in the code. MASTER-PLAN §10 WS-7 describes a nightly backup of the state directory with
+    a documented and drilled restore. No task implements it. It is described, unbuilt, and until now unfiled -
+    which is exactly the failure mode a plan-driven system is supposed to be immune to.
+    WHAT IS ACTUALLY AT RISK. state/ledger.ndjson is the irreplaceable artifact: it carries credit history and
+    it IS the backing store for the dispatch circuit breaker and sweep dedup. status.json is rederivable and
+    does not matter. If state/ is lost, merged tasks can re-dispatch - that is R-16's mechanism, and the
+    breaker returning zero for every task is precisely the redispatch-storm condition. If the machine is lost,
+    the repository survives on GitHub but the ledger, the retro markers and the operator learnings state do
+    not.
+    THE DRILL IS THE POINT, NOT THE BACKUP. An untested backup is a belief, not a capability. The recon's
+    related note is right that disaster recovery is otherwise well tracked (W1-T147 chaos drill, W1-T12c/d/e
+    crash recovery) - this extends that family to the one scenario none of them covers: state loss."
+  design: |
+    BACK UP THE LEDGER FIRST AND EVERYTHING ELSE SECOND. Scope by what is irreplaceable rather than by what is
+    in the directory. VERIFY from source which files under state/ are derived and which are authoritative
+    before choosing the set - backing up a rederivable cache is cost without benefit, and missing an
+    authoritative file is the whole failure.
+    THE RESTORE MUST BE DRILLED, AND THE DRILL IS THE ACCEPTANCE TEST. Restore into a scratch location, then
+    assert a PROPERTY rather than file equality: after restore, the dispatch breaker returns the same verdict
+    for a task with history, and sweep dedup still suppresses an already-credited task. Those two are what
+    state loss actually breaks.
+    COORDINATE WITH ROTATION. W1-T209 will start moving old ledger records into archived rolls. A backup that
+    captures only the live file after rotation begins would silently lose history, so the two must agree about
+    what constitutes the full record.
+    verify:human DELIBERATELY: a restore drill's value is an operator having done it once and knowing it
+    works. A worker can build and test the mechanism, but the drill is signed off by a person.
+  acceptance:
+    - claim: "a backup exists on a stated cadence and captures every authoritative file under state, with derived files excluded by a rule rather than by hand"
+      proof: "unit test: test/state-backup.test.ts"
+    - claim: "THE DRILL - after restoring into a scratch location, the dispatch breaker returns the SAME verdict for a task with prior dispatch history as it did before the loss"
+      proof: "unit test: test/state-restore-drill.test.ts"
+    - claim: "after restore, sweep dedup still suppresses an already-credited task, so a restored fleet does not re-action or re-credit merged work"
+      proof: "unit test: test/state-restore-drill.test.ts"
+    - claim: "the restore procedure is documented as an operator runbook entry, not only as code"
+      proof: "unit test: test/runbook-coverage.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§10"]
+  files: [src/lib/ledger.ts]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, recon §6 missing-organ 3. Filed because the recon caught a DESCRIBED-BUT-UNFILED
+    item in MASTER-PLAN §10 WS-7 - the audit rung's most valuable class of finding, since a plan gap is
+    invisible to every code-level check the repo runs.
+    RELATED to W1-T209 (rotation) - a backup and an archival policy must agree on what the full record is, or
+    rotation silently truncates what the backup preserves."
+- id: W1-T215
+  title: "nothing notices a daemon relaunch loop - two distinct causes have now produced one, and both were found by a human reading ledger timestamps"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "RECON T2-AC2, the durable half of R-1. Two DIFFERENT root causes have now produced a relaunch
+    loop in this system: W1-T197's headroom stop expressed as a nonzero exit, and the uncaught escalate throw
+    fixed in #472. Both were caught only because a person looked at daemon.boot timestamps and noticed the
+    gaps were about sixty seconds. Nothing in the system observes its own boot rate.
+    THAT IS THE GENERALISABLE DEFECT. Whatever the next cause is - and a third is likely, since any uncaught
+    throw anywhere in the poll loop produces the same shape - the SYMPTOM is identical and cheap to detect:
+    many boots in a short window, each doing no work. 460 daemon.boot lines exist in the ledger, 438 of them
+    since Jul 19.
+    SCOPE, STATED PRECISELY BECAUSE THE OTHER HALF IS DONE. The recon's T2-AC3 asks for escalation dedup that
+    survives a process restart. That already existed as ledger-derived cross-boot dedup, and its real defect -
+    the marker being written only after a successful gh call - was fixed in #472. This task is the boot-rate
+    invariant ONLY. Do not re-file or re-implement the dedup."
+  design: |
+    A HEALTH INVARIANT OVER THE LEDGER, NOT A NEW COUNTER. The evidence already exists: daemon.boot lines
+    carry timestamps. The invariant is a pure function over them - more than K boots in a rolling window
+    FAILS - so it is unit-testable against a synthetic ledger with no process spawning and no supervisor
+    involvement (Rule 18).
+    DECIDE WHAT BREACH DOES, AND PREFER LOUD OVER CLEVER. Self-healing a crash loop is a trap: the loop
+    usually means an invariant is already violated, so acting automatically risks compounding it. Escalating
+    with the evidence attached is almost certainly right. Whatever is chosen, a breach must be OBSERVABLE
+    without a human reading raw timestamps, since that is the exact labour this removes.
+    IT MUST NOT FIRE ON LEGITIMATE RESTARTS. An operator reloading the LaunchAgent, or a deliberate restart
+    after a config change, produces boots that are not a loop. The falsifier for this task is a
+    false-positive test, not only a true-positive one - an invariant that cries wolf gets muted, and a muted
+    invariant is worse than none.
+    NOTE THE CONVERGENCE: this is one of several things that want to run on a cadence (the audit rung's T0
+    smoke tier, and W1-T201's retro trigger). One scheduler, several consumers - see P36.
+  acceptance:
+    - claim: "more than K daemon boots in a rolling window FAILS the health invariant, asserted as a pure function over a synthetic daemon.boot ledger with no process spawn"
+      proof: "unit test: test/daemon-crashloop.test.ts"
+    - claim: "THE FALSE-POSITIVE FALSIFIER - a legitimate operator restart, and a normal daily boot pattern, do NOT trip the invariant"
+      proof: "unit test: test/daemon-crashloop.test.ts"
+    - claim: "a breach is surfaced with its evidence rather than requiring a human to read raw boot timestamps, which is the labour this replaces"
+      proof: "unit test: test/daemon-crashloop.test.ts"
+    - claim: "the invariant detects the SHAPE rather than a known cause, so it fires on a loop whose trigger is neither headroom nor a throwing escalation"
+      proof: "unit test: test/daemon-crashloop.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§9"]
+  files: [src/lib/daemon.ts]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, recon T2-AC2. The sibling criterion T2-AC3 (cross-boot escalation dedup) is
+    DELIBERATELY NOT FILED - it already existed as ledger-derived dedup and its ordering defect was fixed in
+    #472. The recon's description of it as an in-memory Set that resets across restarts was wrong, verified at
+    intake.
+    ALSO SHIPPED, supervisor-side: ThrottleInterval 60 is in the daemon plist as independent insurance. That
+    bounds the RATE of a loop but detects nothing, which is why this task still matters."
+- id: W1-T218
+  title: "no log has a size or age bound - and a naive rotation policy would sweep up the ledger and zero the dispatch breaker"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "RECON R-25. No rotation mechanism exists anywhere - verified at intake across /etc/newsyslog.d,
+    /etc/newsyslog.conf, src, scripts and bin. Greps for rotate/logrotate/newsyslog return only unrelated
+    hits (string truncation, and TOKEN rotation at serve.ts, which is credentials not logs).
+    SIZED TO MEASURED REALITY RATHER THAN TO THE REPORT'S FRAMING. All five logs are small today: daemon.err
+    42 KB, daemon.out 117 KB, serve.log under 1 KB, drain.log 1.2 KB, sweep-loop.log 9.5 KB. This is hygiene
+    against unbounded growth, not a live problem, and the budget reflects that.
+    THE ONE WAY THIS TASK CAN DO HARM is the reason it is filed separately rather than folded into a runbook
+    task. ledger.ndjson sits in the same directory at 9.4 MB and is the only genuinely unbounded file there -
+    and it is the backing store for the dispatch circuit breaker and sweep dedup. A generic 'rotate
+    everything in state/' policy would truncate it and silently reset every breaker to zero, which is the
+    redispatch-storm condition. The ledger has its own breaker-safe archival task (W1-T209) and this policy
+    must exclude it explicitly.
+    ALSO OBSERVED AT INTAKE, not in the report: ad-hoc logs are accumulating in the same directory (t108.log,
+    t115.log, t181.log, watch-274.log). The policy should state what happens to them, even if the answer is
+    that they are operator scratch and out of scope."
+  design: |
+    SMALLEST POLICY THAT BOUNDS GROWTH. A size or age cap per log, enforced either by a newsyslog.d entry or
+    in-code at write time. Do not build a rotation subsystem for 120 KB of text.
+    THE EXCLUSION IS THE LOAD-BEARING PART. Whatever mechanism is chosen must name what it rotates rather
+    than rotating a directory, so that adding a new decision-backing file to state/ later cannot silently
+    enrol it. VERIFY from source which files under state/ back a decision before writing the list.
+  acceptance:
+    - claim: "each of the daemon and service logs has a stated size or age bound rather than growing without policy"
+      proof: "unit test: test/log-rotation.test.ts"
+    - claim: "THE EXCLUSION FALSIFIER - the policy names what it rotates rather than sweeping a directory, so ledger.ndjson is untouched and the dispatch breaker cannot be zeroed by log hygiene"
+      proof: "unit test: test/log-rotation.test.ts"
+    - claim: "a decision-backing file added to state later is NOT silently enrolled into rotation by the same rule"
+      proof: "unit test: test/log-rotation.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§10"]
+  files: [src/lib/ledger.ts]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, finding R-25. Split out of W1-T217 at intake after the plan linter flagged the
+    combined runbook-plus-rotation task as spanning two concerns. Log sizes measured at intake rather than
+    assumed, which is why this is a 40-dollar hygiene task and not an incident.
+    RELATED: W1-T209 handles the ledger under a breaker-safe archival policy. These two must not overlap, and
+    the second criterion here is the guard that they do not.
+    risk:high - GRADED UP after rmd lint-plan flagged the daemon/ledger span. Recorded as a regrade rather
+    than a workaround because the honest reading supports it, even though the work is small and the budget is
+    40 dollars. Effort and risk are different axes: this is an hour of hygiene whose single failure mode is
+    truncating the file that backs every dispatch circuit breaker, and the failure direction is a fleet that
+    silently re-dispatches merged work. The second criterion is the guard, and it is load-bearing rather than
+    defensive."
+- id: W1-T213
+  title: "the hand-written docs contradict the code on four counts, and the claims gate that would have caught it points at six claims and one file"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "RECON R-30 and R-25, VERIFIED on every sub-claim during intake.
+    THE DOCS ARE WRONG IN WAYS THAT WOULD MISLEAD A CRISIS RESPONDER. README.md:31 still says the repo
+    'currently contains the WS-0 spike', and :38-39 says run-task.ts is something that 'becomes' real in
+    WS-1 - it exists and is over six thousand lines. CONTRIBUTING.md:3-6 names the required check as `ci`,
+    repeated at :15, :20 and :61; the actual required contexts are remudero-review and ci-gate. The operator
+    guide contains no mention of --repo at all, though it is a real parsed flag (run-task.ts:2617), and
+    documents 18 verbs against at least 28 implemented - twelve confirmed missing including approve, fix,
+    inbox, sweep, plan and triage. docs/ci-gate.md is a one-line probe artifact.
+    WHY THIS SURVIVED IN A REPO THAT GATES ITS CLAIMS: claims-check executes only assertions listed in
+    plan/claims.yaml, which holds SIX claims, and the only docs file referenced is docs/review-gate.md. So
+    README, CONTRIBUTING, the operator guide and ci-gate.md are entirely unguarded. The gate exists and does
+    not point at them.
+    R-25, MEASURED AT INTAKE: no rotation exists for any log - nothing in newsyslog.d, nothing in src, scripts
+    or bin. Honest sizing though, and it changes the priority: the logs are currently SMALL (daemon.err 42 KB,
+    daemon.out 117 KB, serve.log under 1 KB, drain 1.2 KB, sweep-loop 9.5 KB). The genuinely unbounded file in
+    that directory is ledger.ndjson at 9.4 MB, which is W1-T209's subject, not this one."
+  design: |
+    EXTEND THE EXISTING CLAIMS GATE RATHER THAN BUILDING A DOCS LINTER. plan/claims.yaml already drives an
+    executable check on every PR. Add assertions for the specific contradictions above so they cannot recur:
+    the required-check name, the WS-stage claim, --repo coverage, and the verb list. A claim that can go
+    stale silently is the thing being fixed, so the fix must itself be executable.
+    THE VERB-COVERAGE CHECK SHOULD DERIVE, NOT ENUMERATE. The CLI already has a COMMANDS registry that
+    generates docs/cli-reference.md. Derive the operator guide's coverage obligation from that registry so a
+    verb added later is caught automatically instead of needing this task done again.
+    DELETE docs/ci-gate.md OR MAKE IT REAL. A one-line probe artifact masquerading as documentation is worse
+    than an absent file, because a reader trusts the filename.
+  acceptance:
+    - claim: "a doc contradicting the code on the required-check name, the WS stage, or --repo coverage FAILS an executable check rather than surviving in prose"
+      proof: "unit test: test/docs-claims.test.ts"
+    - claim: "a CLI verb present in the COMMANDS registry but absent from the operator guide FAILS, derived from the registry so a later verb is caught without re-doing this task"
+      proof: "unit test: test/docs-claims.test.ts"
+    - claim: "docs/ci-gate.md is either removed or carries real content, so a probe artifact cannot masquerade as documentation under a trusted filename"
+      proof: "unit test: test/docs-claims.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§10"]
+  files: [plan/claims.yaml]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, findings R-30 and R-25, recon T10. Every R-30 sub-claim verified at intake;
+    CONTRIBUTING's offending line is 3-6 rather than the reported 5, and the missing-verb count is twelve
+    rather than the reported fourteen. Log sizes measured rather than assumed - all four are small today,
+    which is why rotation is sized as hygiene here and the 9.4 MB ledger is W1-T209's problem.
+    SCOPE NARROWED at intake after rmd lint-plan flagged a rule-19 span (claims, daemon, launchd) and a
+    rule-18 headless-fitness violation on a criterion naming launchctl. Split rather than regraded: the
+    runbook and log-rotation half became W1-T217, which is where the supervisor-restart material belongs.
+    R-25 (log rotation) therefore lives in W1-T217, not here."
+- id: W1-T217
+  title: "no operator runbook exists for the procedures a crisis actually needs - supervisor restart, token rotation, first-run setup, the billing boundary"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "RECON R-25 and the runbook half of R-30, recon T10. Split from W1-T213 at intake after the plan
+    linter flagged the combined task as spanning three concerns.
+    THE RUNBOOK GAP IS THE OPERABLE-IN-A-CRISIS ONE. The procedures an operator needs at 3am are the ones
+    nowhere written down: restarting the supervised daemon, rotating the service tokens, first-run setup on a
+    new machine, and where the ANTHROPIC environment boundary sits (which matters because subscription
+    billing strips those variables, so dollar figures in this system are tripwires rather than charges). Some
+    of this exists as tribal knowledge in session notes. None of it is checked, so it rots.
+    LOG ROTATION, SIZED TO MEASURED REALITY RATHER THAN TO THE REPORT. No rotation mechanism exists anywhere -
+    verified at intake across newsyslog.d, src, scripts and bin. But the logs are SMALL today: daemon.err
+    42 KB, daemon.out 117 KB, serve.log under 1 KB, drain 1.2 KB, sweep-loop 9.5 KB. This is hygiene, not an
+    emergency. The genuinely unbounded file in that directory is ledger.ndjson at 9.4 MB, which belongs to
+    W1-T209 and must not be conflated with these.
+    ALSO OBSERVED AT INTAKE, not in the report: ad-hoc logs are accumulating in the same directory (t108.log,
+    t115.log, t181.log, watch-274.log). The policy should say what happens to them even if the answer is that
+    they are operator scratch and out of scope."
+  design: |
+    DERIVE RUNBOOK COVERAGE FROM A NAMED LIST, AND CHECK IT. The check is that an entry EXISTS and is
+    non-trivial for each required procedure - a documentation-coverage assertion, headlessly verifiable, no
+    supervisor involvement (Rule 18). Actually performing a restart is an operator action and is explicitly
+    NOT what this task tests.
+    WRITE THE ENTRIES FROM WHAT IS ALREADY KNOWN. The supervisor restart, the reap-wait needed before
+    rebinding the console port, and the token rotation path have all been performed by hand and are recorded
+    in operator notes and in the operator guide. This task is mostly transcription plus a gate that keeps it
+    honest, not discovery.
+  acceptance:
+    - claim: "a runbook entry is present and non-trivial for each required procedure - supervisor restart, token rotation, first-run setup, and the billing environment boundary"
+      proof: "unit test: test/runbook-coverage.test.ts"
+    - claim: "a required procedure with no runbook entry FAILS, so a later-added procedure cannot silently go undocumented"
+      proof: "unit test: test/runbook-coverage.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§10"]
+  files: [docs/operator-guide.md]
+  status: queued
+  attempts: 0
+  note: "INTAKE FIXTURE #1, finding R-25 plus the runbook half of R-30. SPLIT FROM W1-T213 at intake: the
+    linter flagged that combination as spanning claims, daemon and launchd, and flagged a criterion naming
+    launchctl as unfit for headless verification. Both were fair, so the task was decomposed and the
+    criteria rewritten to assert DOCUMENTATION COVERAGE rather than live supervisor behaviour.
+    SPLIT AGAIN at intake: the linter then flagged runbook-plus-rotation as spanning daemon and
+    operator-guide, so log rotation became W1-T218. Two small tasks rather than one dishonestly-graded one -
+    raising a documentation-hygiene task to risk:high to satisfy a sizing rule would have been a workaround,
+    not an honest reading."
 - id: W1-T185
   title: "FLOOR VERDICT INTEGRITY — two gaps W1-T128's execution engine left open: a verdict with ZERO executed proofs must render a CAPPED/DEGRADED class that cannot arm auto-merge on tdd:strict work, and `rmd review` from the operator checkout must either execute at the PR head or mark its verdict keyword-only"
   repo: remudero
@@ -1875,6 +3599,229 @@
     risk:high — it rewrites the row template every section shares, and W1-T156's DOM-stability and accessibility
     criteria are easy to regress silently while 'only changing the layout'. Those existing tests passing
     unmodified is a load-bearing criterion, not a formality."
+- id: W1-T200
+  title: "SKELETON LIFECYCLE (rule-21 follow-up to W1-T154) — skeletons render ONLY before first data arrival; a successful section render REPLACES the whole section with exactly the data, including an honest empty state, never residual placeholders"
+  repo: remudero
+  depends_on: [W1-T154, W1-T183]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR SCREENSHOTS, 2026-07-21 04:52: NOW, NEEDS ME and RECENT each rendered REAL ROWS sitting
+    above PERPETUAL SHIMMER SLOTS. The sections had received their data — actual tasks were listed — and the
+    skeleton placeholders were still there underneath, animating forever.
+    A skeleton is a promise that data is COMING. Left rendered after the data has arrived it becomes a lie about
+    the section's own state: the operator cannot tell whether the list is complete or still filling, so a
+    three-row NOW section reads as 'three so far, more loading' when in fact three is the answer. That is the
+    same class W1-T156 exists to prevent — a surface that misreports its own liveness — expressed as layout
+    rather than as a banner.
+    AN HONEST EMPTY STATE IS PART OF THE CONTRACT, and is the case most likely to be missed: when the data
+    arrives and is EMPTY, the section must say so ('nothing in flight', 'nothing needs you') rather than falling
+    back to skeletons. Skeletons standing in for emptiness is how a quiet fleet reads as a loading fleet, and it
+    is precisely when an operator most wants to know that nothing is wrong.
+    W1-T154 SHIPPED the skeleton and last-snapshot cache; its acceptance covered first-paint speed, not the
+    skeleton's RETIREMENT. That criterion was also certified pre-#414 by keyword coverage, making this a third
+    member of the W1-T188 class after T154's own timing budget and T156's criterion 4 — an acceptance that reads
+    correct, was never executed, and is contradicted by the operator's screen.
+    FILED AS A FOLLOW-UP, NOT AN AMENDMENT: W1-T154 is merged. Standing rule 21 — an amendment to an
+    already-merged task does not re-queue it and spawns nothing."
+  design: |
+    ONE RULE, STATED AS A STATE MACHINE: a section is in exactly one of PRE-FIRST-DATA (skeleton), HAS-DATA
+    (exactly the rows), or HAS-DATA-EMPTY (an honest empty message). There is no state in which skeleton markup
+    and data markup coexist, and the transition out of skeleton is one-way per section until a reload.
+    REPLACE THE SECTION, DO NOT APPEND TO IT. The observed defect is consistent with rendering data INTO a
+    container that still holds its placeholders — so the successful render must clear the container, not add to
+    it. VERIFY the actual mechanism from source before assuming; the bug may equally be a skeleton rendered by a
+    sibling path that the data render never touches.
+    COORDINATION — W1-T183 IS IN FLIGHT AND REBUILDS THESE SECTIONS. The density/IA rewrite replaces the row
+    template for every section, which is exactly the markup this task must correct. Do NOT build against
+    today's DOM: verify W1-T183's LANDED markup first and target the real successor. If W1-T183 has not merged
+    when this is dispatched, the correct action is to wait rather than to fix markup that is about to be
+    replaced — that is why it is a hard dependency rather than a note.
+    PRESERVE W1-T156's DOM STABILITY. Clearing and replacing a section naively destroys node identity and an
+    active text selection, which T156's shipped tests already encode as falsifiers. The replacement must go
+    through the existing reconciliation path, not innerHTML.
+  acceptance:
+    - claim: "no skeleton renders in a section after that section's first successful data render"
+      proof: "unit/DOM test: after a section receives data, the rendered section contains ZERO skeleton/placeholder nodes. FALSIFIER, operator screenshots 2026-07-21 04:52: NOW, NEEDS ME and RECENT each showed real rows above perpetual shimmer slots — the data had arrived and the placeholders were still animating underneath"
+    - claim: "an EMPTY successful result renders an honest empty state, never skeletons"
+      proof: "unit/DOM test: a section whose data arrives EMPTY renders an explicit message ('nothing in flight' / 'nothing needs you') and no placeholder nodes. FALSIFIER: falling back to skeletons on empty makes a quiet fleet read as a loading fleet, which is the reading an operator is least able to distinguish and most needs to trust"
+    - claim: "skeleton and data markup NEVER coexist in one section"
+      proof: "unit/DOM test across the three sections: at every point in a seeded load sequence the section is in exactly one of pre-first-data, has-data, or has-data-empty. FALSIFIER: a section holding both tells the operator the list may still be filling, so a complete three-row NOW section reads as 'three so far'"
+    - claim: "the replacement preserves W1-T156's DOM stability — node identity and active selection survive"
+      proof: "the existing W1-T156 tests in test/serve.live-state.test.ts continue to pass unmodified: an unchanged row keeps DOM identity across an update and an active text selection survives. FALSIFIER: clearing a section with innerHTML destroys both, which those tests already encode as falsifiers — the replacement must go through the existing reconciliation path"
+  risk: high
+  origin: architect
+  plan_refs: ["§7"]
+  files: [src/lib/serve.ts, test/serve.live-state.test.ts]
+  status: queued
+  attempts: 0
+  note: "RULE 21 FOLLOW-UP to the merged W1-T154, which shipped the skeleton but whose acceptance covered
+    first-paint SPEED rather than the skeleton's RETIREMENT.
+    HARD dependency on W1-T183 is deliberate and is a coordination constraint, not a formality: T183 was IN
+    FLIGHT when this was filed and rebuilds the row template for every one of these sections. Building against
+    today's DOM would target markup that is about to be replaced. Verify T183's landed markup first.
+    THIRD member of the W1-T188 class — an acceptance certified pre-#414 by keyword coverage and contradicted by
+    the operator's screen, after T154's own timing budget and T156's criterion 4.
+    risk:high — graded UP from medium after rmd lint-plan flagged the serve/serve.live-state span. Recorded as a
+    regrade with its reason rather than a workaround: this modifies the section render path that W1-T183 is
+    CONCURRENTLY rebuilding, so the coordination risk is real and not merely a filename artifact. The dangerous
+    direction remains a naive clear-and-rebuild that regresses W1-T156's node identity and selection survival,
+    which has its own criterion. (The flag itself is partly a linter artifact — concern is derived from filename
+    stem — but the tests belong beside T156's own lifecycle tests, so relocating them would be the dishonest fix.)"
+- id: W1-T222
+  title: "reaching a task's detail must not mean leaving its row - clicking a row expands a detail card INLINE beneath it, retiring bottom-panel journey navigation"
+  repo: remudero
+  depends_on: [W1-T183]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR FEEDBACK PLUS A RESEARCH PASS, 2026-07-21. The console's current journey affordance
+    navigates to a bottom panel, which means the operator loses the row they were looking at in order to
+    learn about it. In a list whose whole purpose is comparison - which task is stuck, which is oldest, which
+    needs me - navigating away from the row to read its detail defeats the list.
+    THIS IS A RULE-21 SUCCESSOR TO W1-T158, NOT AN AMENDMENT. W1-T158 shipped the panel placement this task
+    retires, and it is DONE - verified at filing that a merged PR carries its Remudero-Task trailer - so
+    standing rule 21 requires a successor task rather than an edit to shipped work. Retiring a shipped
+    decision is exactly the case the rule exists for.
+    DETAILS ON DEMAND AT FOUR DEPTHS. This task is one layer of a single coherent information architecture,
+    not a standalone feature: an overview strip (W1-T159), section summaries (W1-T223), dense rows (W1-T183),
+    an inline drill (this task), and a full journey lazy-loaded inside the drill. Each layer answers a
+    different question at a different cost, and they only work if they compose. AN IMPLEMENTER MUST READ THE
+    SIBLING TASKS' CRITERIA BEFORE BUILDING - these were written together and can collide if built in
+    isolation."
+  design: |
+    THE WHOLE ROW IS THE TRIGGER, with a right-edge chevron as the visible affordance whose direction flips
+    on state. A large target beats a small one, and the chevron exists so the row LOOKS expandable rather
+    than requiring the operator to discover that it is.
+    THE CARD OPENS INLINE, DIRECTLY BELOW ITS OWN ROW. Never a navigation, never a scroll-away. The row stays
+    exactly where it was, and its neighbours stay comparable. Re-click collapses.
+    CARD CONTENT: status, phase, elapsed and spend, PR and issue links, recent ledger events, and the
+    available actions. Actions RENDER PER AUTH SCOPE - a read-only bookmark shows no write affordances at
+    all, rather than showing them and failing on click. That coordinates with W1-T202, which is where the
+    auth model itself is decided, and it inherits standing rule 22: a surface owes the reader which state it
+    is showing, and an action the viewer cannot take must not be rendered as available.
+    THE FULL JOURNEY LAZY-LOADS INSIDE THE EXPANSION on demand. It is the fourth and deepest layer, and it
+    must not be fetched merely because a card opened.
+    DETAIL FETCHES ON EXPAND, WITH A W1-T200-COMPLIANT SKELETON - pre-data only, cleared on render, never
+    left standing as decoration. A skeleton that outlives its data is the exact defect W1-T200 exists to fix.
+    DEEP-LINK VIA ?task=<id>, which opens with that row expanded and scrolled into view. This REPLACES the
+    bottom-panel anchor as the addressable target for a single task.
+    KEYBOARD AND ASSISTIVE PARITY: Enter and Space toggle, aria-expanded reflects state, and focus is
+    RETAINED across the toggle rather than being dropped to the document.
+    DOM-STABILITY REACHES INTO EXPANSIONS - W1-T156's doctrine extended, and this is the half most likely to
+    be missed. A background SSE or poll update must not collapse an open expansion, steal focus from inside
+    it, destroy a selection inside it, or jump the viewport. W1-T156 is DONE, so this obligation is carried
+    HERE rather than added there. VERIFY from source how T156 achieved stability for rows before designing
+    it for expansions - the mechanism should be extended, not reinvented beside it.
+  acceptance:
+    - claim: "reaching a task's detail requiring the operator to scroll away from its row FAILS - the detail opens inline directly beneath the row that triggered it"
+      proof: "unit test: test/serve.detail-journey.test.ts"
+    - claim: "expanding or collapsing a card causing a viewport jump FAILS - the triggering row stays put"
+      proof: "unit test: test/serve.detail-journey.test.ts"
+    - claim: "a background SSE or poll update collapsing an OPEN expansion, stealing focus from inside it, or destroying a selection inside it FAILS"
+      proof: "unit test: test/serve.live-state.test.ts"
+    - claim: "the journey affordance navigating to a bottom panel after this lands FAILS - the panel route is retired rather than left beside the inline one"
+      proof: "unit test: test/serve.detail-journey.test.ts"
+    - claim: "a read-only bookmark renders NO write affordances inside the card, rather than rendering them and failing on click"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "?task=<id> opens with that row expanded and scrolled into view, and re-click collapses it"
+      proof: "unit test: test/serve.detail-journey.test.ts"
+    - claim: "Enter and Space toggle the row, aria-expanded reflects state, and focus is retained across the toggle"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "the detail skeleton appears only before data and is cleared on render, never left standing"
+      proof: "unit test: test/serve.first-paint.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/serve.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 from operator feedback plus a research pass. VERIFIED FIRST, per the operator's
+    instruction: W1-T183 is IN FLIGHT (PR 466 open), so this is filed as a coordinated FOLLOW-ON behind it
+    rather than as an amendment to a task mid-flight. W1-T158 and W1-T156 are both DONE - each verified by a
+    merged PR carrying its trailer - so the panel retirement and the DOM-stability extension are carried here
+    as successor obligations under standing rule 21, never as edits to shipped work.
+    ONE COHERENT IA WITH W1-T223, W1-T159 and W1-T183: overview strip, section summaries, dense rows, inline
+    drill, full journey - details on demand at four depths. Read the siblings' criteria before building.
+    SEQUENCING, per the operator's standing decision: this sits in the console feature block BEHIND the
+    safety head (W1-T220, W1-T203 and the write-atomicity family lead), ordered after W1-T183's successor
+    state and W1-T200, ahead of W1-T159 and W1-T184.
+    NOT YET SEQUENCED IN FILE ORDER, stated plainly because it has caught this project repeatedly: this task
+    is a SHARD, and a shard sorts after every task in tasks.yaml, so filing it does not schedule it. It needs
+    promoting into the console block once the in-flight plan PRs land."
+- id: W1-T223
+  title: "a collapsed console section must still inform - every section collapses, and its header carries an always-visible one-line summary from the same projection as its rows"
+  repo: remudero
+  depends_on: [W1-T183]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "OPERATOR FEEDBACK PLUS A RESEARCH PASS, 2026-07-21. The console's sections are all-or-nothing:
+    everything is visible, so nothing is prioritised, and a long RECENT or EVERYTHING ELSE pushes the
+    sections that matter off the screen. Collapsing alone would trade one problem for a worse one - a
+    collapsed section that shows nothing is a section the operator has to open to learn whether it needed
+    opening.
+    THE SUMMARY HEADER IS THE WHOLE POINT, not a decoration on a collapse feature. A collapsed section must
+    still answer its own question: NOW says how many are running and how old the oldest is, NEEDS ME says how
+    many are open and how old the oldest is, UP NEXT names the next task id, RECENT says how many landed
+    today and how long ago the last one was. That is enough to decide whether to expand, which is the only
+    decision a collapsed section needs to support.
+    COUNTS COME FROM THE SAME PROJECTION AS THE ROWS - never a second derivation. This is standing rule 22
+    applied to a summary: a header claiming three items over a list showing four is a surface disagreeing
+    with itself, and the operator has no way to know which is lying. The W1-T181 outage (merged 0 of 160 with
+    every task queued) is what a second, disagreeing derivation looks like when it fails."
+  design: |
+    WHOLE HEADER IS THE TRIGGER, with a chevron affordance, matching W1-T222's row interaction so the console
+    has ONE expand gesture rather than two that differ by region.
+    COLLAPSE STATE PERSISTS ACROSS RELOADS, client-side. Standing rule 24 applies and is not incidental here:
+    persisted UI state must contain NO credential. Collapse state is a layout preference and nothing more.
+    DEFAULTS THAT RESPECT ATTENTION. NEEDS ME auto-expands when it is non-empty, because that is the section
+    the console exists to surface. When a NEEDS ME item arrives while the section is COLLAPSED, its header
+    carries emphasis - otherwise collapsing becomes a way to silently miss the thing most worth seeing, which
+    would make the feature actively harmful. Empty sections default collapsed with an HONEST empty summary,
+    the words nothing needs you rather than a zero that reads like a load failure.
+    NEVER A SKELETON IN A HEADER (W1-T200). A summary with no data yet says so honestly. A skeleton in a
+    collapsed header is indistinguishable from a hung fetch, and W1-T200 exists because a skeleton that
+    outlives its data misleads.
+    ONE COHERENT IA - read the siblings before building. Overview strip (W1-T159), section summaries (this
+    task), dense rows (W1-T183), inline drill (W1-T222), full journey inside the drill. Four depths of
+    details-on-demand. The failure mode if these are built in isolation is duplication: a strip, a header and
+    a row each deriving the same count three ways, which is precisely what the third criterion below forbids.
+  acceptance:
+    - claim: "a collapsed section whose header shows no count or summary FAILS - a collapsed section still answers its own question"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "collapse state lost on reload FAILS, and the persisted state contains no credential"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "a header summary disagreeing with its own expanded rows FAILS - the count comes from the same projection as the rows, never a second derivation"
+      proof: "unit test: test/serve.live-state.test.ts"
+    - claim: "a NEEDS ME item arriving while that section is collapsed with NO header emphasis FAILS - collapsing must not become a way to silently miss it"
+      proof: "unit test: test/serve.live-state.test.ts"
+    - claim: "NEEDS ME auto-expands when non-empty, and an empty section defaults collapsed with an honest empty summary rather than a skeleton or a bare zero"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "the header expand gesture matches the row expand gesture, so the console has one interaction rather than two that differ by region"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/serve.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 from operator feedback plus a research pass. VERIFIED FIRST, per the operator's
+    instruction: W1-T183 is IN FLIGHT (PR 466 open), so this is a coordinated FOLLOW-ON behind it rather than
+    an amendment to a task mid-flight. W1-T158 is DONE (merged PR carries its trailer), so this is a new task
+    under standing rule 21 rather than an edit to it.
+    ONE COHERENT IA WITH W1-T222, W1-T159 and W1-T183 - overview strip, section summaries, dense rows, inline
+    drill, full journey. Read the siblings' criteria before building so the layers compose rather than
+    collide. The specific collision risk here is three surfaces deriving the same count three ways.
+    SEQUENCING, per the operator's standing decision: console feature block BEHIND the safety head (W1-T220,
+    W1-T203 and write-atomicity lead), ordered after W1-T183's successor state and W1-T200, beside W1-T222,
+    ahead of W1-T159 and W1-T184.
+    NOT YET SEQUENCED IN FILE ORDER: this is a SHARD and a shard sorts after every task in tasks.yaml, so
+    filing it does not schedule it. It needs promoting into the console block once the in-flight plan PRs
+    land."
 - id: W1-T184
   title: "LEDGER-FIRST RENDERING — RECENT becomes an activity feed sourced from the LOCAL ledger (merges, verdicts, fix outcomes, escalations, spend), NOW rows carry live per-run spend and turns, and GitHub DECORATES rather than gates: the feed reads identically during a GitHub outage"
   repo: remudero
@@ -9020,7 +10967,29 @@
   files: [src/run-task.ts, src/lib/launchd.ts]
   status: queued
   attempts: 0
-  note: "Sibling of W1-T152 (serve service GENERATOR), not folded into it — these are the operator-facing lifecycle
+  note: "AMENDED 2026-07-21 by operator ruling. Task verified QUEUED first - zero merged PRs carry its
+    Remudero-Task trailer - so standing rule 21 does not apply.
+    ADDS A STANDALONE rmd console VERB, callable OUTSIDE up and down. It prints the console URL for EACH
+    BOUND HOST with the READ token, refuses to print the write token unless an explicit --write flag is
+    passed, and offers --qr so the operator can re-bookmark on a phone without retyping a 64-character hex
+    string.
+    FIXTURE, from today rather than imagined: after the mandatory token rotation, the operator had NO
+    supported path to their new bookmark. The only way to recover it was grepping serve.log - which is both
+    undiscoverable and the exact file that standing rule 24 says must not be where credentials live. A system
+    that rotates a credential owes the operator a first-class way to learn the new one.
+    PER BOUND HOST matters now that serve binds a LIST. It listens on loopback and the tailnet address
+    together, so there is no single console URL any more, and a verb printing one of them would be wrong half
+    the time depending on whether the operator is at the machine or on their phone.
+    THE READ DEFAULT IS THE POINT, NOT A DETAIL. The read token grants a view; the write token grants
+    fleet control. Printing is how the write token leaked in the first place (R-5), so the default must be
+    read and --write must be a deliberate act.
+    RECONCILE THIS TASK OWN TITLE, which still says print console URL-with-token from before the token
+    hygiene work landed. That phrasing predates standing rule 24 and must not be implemented literally with
+    the WRITE token - the URL carries the READ token.
+    FALSIFIER, operator-supplied: a token rotation after which rmd console prints a DEAD URL fails. The verb
+    must read the live tokens file rather than caching, echoing a startup banner, or reprinting a value
+    captured at boot.
+    ORIGINAL NOTE FOLLOWS. Sibling of W1-T152 (serve service GENERATOR), not folded into it — these are the operator-facing lifecycle
     VERBS that orchestrate daemon + serve + freshness + recoverability reporting, and DEPEND on T152. Fixture: the
     restart-procedure question answered today with four manual blocks + the reap-wait gotcha (serve-restart-reap-wait
     memory). Composes W1-T152 (serve service + off-main refuse + reap-wait), W1-T151 (install-freshness), W1-T12b (the
@@ -9186,3 +11155,88 @@
     W1-T106's CONFLICTED disposition rather than a Bors-style queue of our own — both are reasons to earn N
     on evidence. Raising N is a policy-data row edit once the ledger supports it, which is the point of
     holding the threshold in SweepPolicy rather than in code."
+
+- id: W1-T202
+  title: "the console bookmark is READ-ONLY after the token-hygiene fix — the shell must accept the write token once and hold it client-side, or every NEEDS-ME write action 401s"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "CONSEQUENCE OF A SHIPPED SECURITY FIX, filed by the amender under standing rule 21 rather
+    than left for the operator to discover. The token-hygiene PR stopped the startup banner printing the
+    WRITE bearer token, because under the real launch serve's stdout is redirected to a serve.log that was
+    mode 0644 — running the command wrote a fleet-control credential to a world-readable file. The console
+    URL now carries the READ token.
+    THE COST IS REAL AND WAS ACCEPTED KNOWINGLY. service.ts:153-154 maps the write token to READ_WRITE and
+    the read token to READ_ONLY. So the operator's bookmarked console is now a view: fleet-control
+    pause/stop, answering a question, and manual approve all 401. That is precisely the NEEDS-ME
+    affordance set the console v2 design pass is built around, so the security fix and the console arc
+    are currently pulling against each other.
+    THE TWO PROPERTIES ARE NOT ACTUALLY IN CONFLICT — they only look it because the bookmark is the sole
+    credential channel. A URL is the WRONG place for a write credential: it is copied, screenshotted,
+    logged by proxies, and restored by the browser session-restore. A client-side store the operator pastes
+    into ONCE is both safer than the URL and more usable than re-pasting per action."
+  design: |
+    HAVE THE SHELL HOLD THE WRITE TOKEN, NOT THE URL. The read token stays in the bookmark and keeps the
+    board loading on first paint with no prompt. When the operator takes a WRITE action, the shell uses a
+    write token it has been given once and kept client-side, rather than reading it from the query string.
+    VERIFY FROM SOURCE FIRST, do not invent an API: read service.ts's token comparison (safeEqual against
+    tokens.write / tokens.read) and serve.ts's `?token=` bootstrap at the HTML shell before choosing where
+    the write token enters. The auth model is already two-level and does not need changing — this is about
+    the CHANNEL the write token arrives on.
+    STORAGE CHOICE IS THE REAL DECISION and should be made on stated trade-offs: sessionStorage dies with
+    the tab (safest, most re-pasting), localStorage persists (most usable, readable by any script that
+    achieves XSS on this origin). Whichever is chosen, the write token must NEVER be written back into the
+    URL, into a log line, or into the ledger — that is the defect this task exists to avoid recreating.
+    DEGRADE HONESTLY WHEN READ-ONLY (standing rule 22: the console distinguishes CLAIMED from EVIDENCED
+    state — here, PERMITTED from ATTEMPTED). With only a read token the write affordances must render
+    visibly unavailable with a stated reason, never render armed and 401 on click. A button that looks
+    live and fails is worse than one that says why it is disabled.
+  acceptance:
+    - claim: "a console loaded with the READ token alone renders the board fully and shows every write affordance as explicitly unavailable with a stated reason, rather than rendering it armed"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "a write action issued with a client-held write token succeeds while the URL still carries only the read token — the bookmark never gains write power"
+      proof: "unit test: test/serve.live-state.test.ts"
+    - claim: "the write token is never written into the URL, a ledger line, or a log line at any point in the flow — asserted against the rendered shell and the emitted ledger steps"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "clearing the stored write token returns the console to the read-only rendering without a reload"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/serve.ts]
+  status: queued
+  attempts: 0
+  note: "AMENDED 2026-07-21 by operator ruling, adding the AUTH ENDGAME design. Task verified QUEUED
+    first - zero merged PRs carry its Remudero-Task trailer - so standing rule 21 does not apply.
+    THE IMPLEMENTER VERIFIES FROM DOCUMENTATION AND NEVER INVENTS AN API. Both options below depend on what
+    Tailscale and the runtime actually provide. Read the current documentation before designing, and if the
+    preferred shape is not available as described, say so and fall back rather than approximating it.
+    PREFERRED - TAILSCALE IDENTITY. serve trusts tailnet-asserted identity, via the identity headers a
+    tailscale serve proxy injects or via tsnet, so the operator arriving over their own tailnet gets a
+    SESSION WITH NO TOKEN IN ANY URL - write scope included. This is strictly better than any token scheme
+    because it removes the credential from the client entirely rather than moving it somewhere safer: there
+    is no bookmark to leak, no query parameter to screenshot, and no rotation for the operator to chase.
+    Token auth REMAINS THE FALLBACK for loopback and for the case where Tailscale is down, which is exactly
+    why serve binds both interfaces.
+    ACCEPTABLE - TOKEN-PASTE-ONCE. A login screen that takes the write token and stores it client-side,
+    session-scoped. Weaker than tailnet identity because the credential still exists on the client and can
+    still be exfiltrated by anything achieving script execution on that origin, but it removes the token from
+    the URL, which is the leak that actually happened.
+    FALSIFIER EITHER WAY, operator-supplied: a write-capable credential appearing in a URL, a log, or a
+    bookmark FAILS. That criterion binds regardless of which option is built, and it is the whole point of
+    the task - the read-only bookmark this task exists to fix must not be repaired by putting the write
+    token back where it was.
+    ORIGINAL NOTE FOLLOWS. FILED BY THE AMENDER under standing rule 21 — the token-hygiene PR created this gap and therefore
+    owes the follow-up rather than leaving it to be discovered at the next NEEDS-ME moment.
+    POSITION IS THE OPERATOR'S CALL and is deliberately not asserted here. This is appended at the tail,
+    but it gates the operator's own write path to the fleet, so it may well deserve pulling forward ahead
+    of queued work that does not. Flagged rather than silently reordered — queue order is the operator's
+    dial, per the standing filing discipline.
+    SCOPE NARROWED after rmd lint-plan flagged a rule-19 span (serve, service) at risk:medium. Narrowed
+    rather than regraded, because the honest reading supports it: the design states the two-level auth
+    model does not change, so service.ts is READ to verify the token comparison and is never edited. The
+    deliverable is confined to the shell's credential channel in serve.ts."
+

@@ -11,6 +11,7 @@ import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
   buildDrainFeedbackRoute,
+  buildEscalationMarkHandledRoute,
   buildPauseRoute,
   buildQuietHoursRoute,
   buildResumeRoute,
@@ -83,6 +84,7 @@ async function withService<T>(deps: PanelActionDeps, fn: (baseUrl: string) => Pr
       buildQuietHoursRoute(deps),
       buildAnswerQuestionRoute(deps),
       buildApproveManualRoute(deps),
+      buildEscalationMarkHandledRoute(deps),
       buildDrainFeedbackRoute(deps),
     ],
   });
@@ -415,6 +417,56 @@ test("POST /v1/manual/approve: missing issueUrl -> 400, issues.close never calle
   const issues = fakeIssueCloser();
   await withService(depsFor(root, issues), async (base) => {
     const res = await post(base, "/v1/manual/approve", WRITE_TOKEN, { taskId: "W2-T3" });
+    assert.equal(res.status, 400);
+  });
+  assert.deepEqual(issues.closed, []);
+});
+
+// ── POST /v1/escalation/mark-handled (W1-T182) ──────────────────────────────────
+
+test("POST /v1/escalation/mark-handled: closes the GitHub issue, then ledgers panel.escalation_marked_handled — NOT panel.manual_approved", async () => {
+  const root = tmpRoot();
+  const issues = fakeIssueCloser();
+  const deps = depsFor(root, issues);
+  const issueUrl = "https://github.com/craigoley/remudero/issues/393";
+
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/escalation/mark-handled", WRITE_TOKEN, { taskId: "W1-T50", issueUrl });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true, taskId: "W1-T50", issueUrl });
+  });
+
+  assert.deepEqual(issues.closed, [issueUrl]);
+  const lines = readLedgerLines(deps.ledgerPath);
+  assert.equal(lines[0].step, "panel.escalation_marked_handled");
+  assert.equal(lines[0].task_id, "W1-T50");
+  assert.equal(lines[0].issue_url, issueUrl);
+});
+
+test("POST /v1/escalation/mark-handled: issues.close throwing -> 500, no ledger line (never a false handled)", async () => {
+  const root = tmpRoot();
+  const throwing: IssueCloser = {
+    close() {
+      throw new Error("gh issue close: not found");
+    },
+  };
+  const deps = depsFor(root, throwing);
+
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/escalation/mark-handled", WRITE_TOKEN, {
+      taskId: "W1-T50",
+      issueUrl: "https://github.com/craigoley/remudero/issues/999",
+    });
+    assert.equal(res.status, 500);
+  });
+  assert.equal(readLedgerLines(deps.ledgerPath).length, 0);
+});
+
+test("POST /v1/escalation/mark-handled: missing issueUrl -> 400, issues.close never called", async () => {
+  const root = tmpRoot();
+  const issues = fakeIssueCloser();
+  await withService(depsFor(root, issues), async (base) => {
+    const res = await post(base, "/v1/escalation/mark-handled", WRITE_TOKEN, { taskId: "W1-T50" });
     assert.equal(res.status, 400);
   });
   assert.deepEqual(issues.closed, []);

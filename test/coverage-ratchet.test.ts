@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -17,6 +18,7 @@ import { dirname, join } from "node:path";
 // clean under `tsc --noEmit`.)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(__dirname, "..");
 const SCRIPT = join(__dirname, "..", "scripts", "coverage-ratchet.mjs");
 const FIXTURES = join(__dirname, "fixtures", "coverage-ratchet");
 const BASELINE = join(FIXTURES, "baseline.json");
@@ -68,6 +70,139 @@ test("coverage-ratchet CLI: lcov record with NO branch data -> branchesPct falls
   const result = runRatchet("no-branch-data.lcov");
   assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
   assert.match(result.stdout.toString(), /branches 100\.00%/);
+});
+
+// ── W1-T220 defect 1: the CI log used to name nothing when this gate failed ──
+//
+// The "Test with coverage" step ran node --test with ONLY --test-reporter=lcov, whose
+// destination is a FILE -- so a failing run's CI log carried zero test output, just
+// "Process completed with exit code 1" (verified first-hand against PR #473's real 436-line job
+// log: zero failing-test lines, zero coverage/threshold mentions, one ##[error] line). Node's
+// test runner accepts multiple reporter/destination pairs, so a human-readable `spec` reporter to
+// stdout now runs alongside the existing `lcov` pair -- this test proves that wiring is present
+// in ci.yml, and that the lcov artifact the ratchet step consumes is unchanged (same flag, same
+// destination), so making the run legible does not break the gate it feeds.
+
+test("coverage-ratchet CI wiring: ci.yml's coverage-ratchet job emits a human-readable reporter to stdout ALONGSIDE the unchanged lcov-to-file reporter", async () => {
+  const ciYml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+  const jobStart = ciYml.indexOf("coverage-ratchet:");
+  assert.notEqual(jobStart, -1, "ci.yml must declare a coverage-ratchet job");
+  const nextJobStart = ciYml.indexOf("\n  mutation-ratchet:", jobStart);
+  assert.notEqual(nextJobStart, -1, "coverage-ratchet job body must be findable in ci.yml");
+  const jobBody = ciYml.slice(jobStart, nextJobStart);
+
+  // Defect 1's fix: a human-readable reporter to stdout, so a failing run's log names what failed.
+  assert.match(
+    jobBody,
+    /--test-reporter=spec --test-reporter-destination=stdout/,
+    "coverage-ratchet's test-with-coverage step must emit a spec reporter to stdout",
+  );
+  // The lcov artifact the ratchet step consumes must be unchanged -- same flag, same file.
+  assert.match(
+    jobBody,
+    /--test-reporter=lcov --test-reporter-destination=coverage\/lcov\.info/,
+    "coverage-ratchet's test-with-coverage step must still emit the unchanged lcov artifact",
+  );
+  assert.match(
+    jobBody,
+    /node scripts\/coverage-ratchet\.mjs --lcov coverage\/lcov\.info --baseline scripts\/coverage-baseline\.json/,
+    "the ratchet step must still consume that same unchanged lcov artifact",
+  );
+});
+
+// ── W1-T220 acceptance criterion 3: the ratchet must print observed totals, baseline, AND the
+// delta on failure, not just exit nonzero ──
+
+test("coverage-ratchet CLI: BELOW-baseline failure names the delta explicitly, not just the two raw percentages", () => {
+  const result = runRatchet("below-baseline.lcov");
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  const stderr = result.stderr.toString();
+  assert.match(stderr, /lines coverage 70\.00% < baseline 90\.00% \(delta -20\.00pts\)/);
+});
+
+test("coverage-ratchet CLI: BRANCHES-below-baseline failure also names the delta explicitly", () => {
+  const result = runRatchet("branches-below-lines-ok.lcov");
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  const stderr = result.stderr.toString();
+  assert.match(stderr, /branches coverage 75\.00% < baseline 85\.00% \(delta -10\.00pts\)/);
+});
+
+// ── W1-T220 acceptance criterion 5 (THE PLAN-ONLY FALSIFIER): the explanation must account for a
+// diff touching ZERO source and ZERO test files producing a red -- so any candidate cause that
+// requires changed code is wrong by construction (PRs #474/#475 flaked this gate while touching
+// neither src/** nor test/**). Both halves of the shipped mechanism are proven here, by reading
+// their actual source, to be diff-content-BLIND:
+//
+//   (a) scripts/coverage-ratchet.mjs's verdict is a PURE function of two files on disk -- the lcov
+//       report and the baseline JSON -- and nothing else. Unlike its sibling
+//       scripts/mutation-ratchet.mjs (which explicitly reads a `--changed-files` list, itself
+//       `git diff --name-only <base>...HEAD` output, to scope whether it even runs -- see ci.yml's
+//       mutation-ratchet job), coverage-ratchet.mjs never inspects which files a PR touched. A
+//       zero-source/zero-test diff therefore exercises the EXACT SAME comparison path as any
+//       other diff -- there is no diff-aware branch that could have behaved differently.
+//
+//   (b) test/w1-t187-benchmark.test.ts's flake fix -- skipping the 500ms timing assertion -- is
+//       keyed SOLELY on `process.execArgv` (whether THIS run was launched with coverage
+//       instrumentation flags), an environment/runtime signal identical on every coverage-ratchet
+//       job invocation regardless of the PR's diff. It is never keyed on git diff, changed-file
+//       lists, or any other diff-derived input. So the skip/no-skip decision -- and therefore the
+//       CPU-contention-driven timing flake it guards against -- is identical whether the
+//       triggering PR touches src/**, test/**, or nothing at all, matching the plan-only firings.
+//
+// Both assertions below are genuine falsifiers, not just documentation: the pre-fix
+// coverage-ratchet.mjs never referenced process.execArgv (that guard did not exist), and neither
+// file would have failed the diff-blindness check either -- so these tests would have caught a fix
+// that "solved" the flake by inspecting the diff, which is precisely the class of explanation the
+// plan-only firings rule out.
+
+test("coverage-ratchet PLAN-ONLY FALSIFIER: the gate's verdict is a pure function of the lcov + baseline files, never of which files a diff touched (unlike mutation-ratchet's explicit --changed-files diff-scoping)", async () => {
+  const ratchetSrc = await readFile(SCRIPT, "utf8");
+  assert.doesNotMatch(
+    ratchetSrc,
+    /changed-files|changedFiles|git diff|BASE_SHA/i,
+    "coverage-ratchet.mjs must stay diff-blind -- a verdict that inspected the diff would no " +
+      "longer explain a red on a diff touching zero source and zero test files",
+  );
+  assert.match(
+    ratchetSrc,
+    /options:\s*{\s*lcov:\s*{[^}]*}\s*,\s*baseline:\s*{[^}]*}\s*,?\s*}/s,
+    "coverage-ratchet.mjs's CLI surface must stay exactly --lcov/--baseline -- no diff-scoping flag",
+  );
+
+  // Contrast proof: the sibling mutation-ratchet gate DOES scope itself off the diff -- confirming
+  // that shape exists elsewhere in this file family, so coverage-ratchet's absence of it is a
+  // deliberate, checked property rather than an accident this test would fail to notice drifting.
+  const mutationRatchetSrc = await readFile(
+    join(REPO_ROOT, "scripts", "mutation-ratchet.mjs"),
+    "utf8",
+  );
+  assert.match(
+    mutationRatchetSrc,
+    /changed-files/,
+    "sanity check: mutation-ratchet.mjs is the diff-scoped sibling -- if this ever stops matching, " +
+      "the contrast this test draws is stale",
+  );
+});
+
+test("coverage-ratchet PLAN-ONLY FALSIFIER: the W1-T187 benchmark's flake-avoidance skip is keyed on process.execArgv (environment), never on git diff or changed-file content", async () => {
+  const benchmarkSrc = await readFile(
+    join(REPO_ROOT, "test", "w1-t187-benchmark.test.ts"),
+    "utf8",
+  );
+  // The mechanism that prevents the flake must be a pure environment read -- present identically
+  // whether the triggering PR touched src/**, test/**, or (per PRs #474/#475) nothing at all.
+  assert.match(
+    benchmarkSrc,
+    /process\.execArgv/,
+    "the coverage-instrumentation skip must be keyed on process.execArgv, an environment signal " +
+      "identical across every coverage-ratchet run regardless of diff content",
+  );
+  assert.doesNotMatch(
+    benchmarkSrc,
+    /changed-files|changedFiles|git diff|BASE_SHA/i,
+    "the flake fix must never key its skip decision on diff/changed-file content -- doing so " +
+      "would stop explaining the plan-only firings (PRs #474/#475 touched zero source, zero test)",
+  );
 });
 
 test("coverage-ratchet CLI: baseline record missing BOTH metrics -> no crash, no false block, prints 0.00% baseline", () => {

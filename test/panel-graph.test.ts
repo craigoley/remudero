@@ -17,6 +17,7 @@ import {
 } from "../src/lib/panel-graph.js";
 import { bearerTokenId } from "../src/lib/panel-actions.js";
 import { captureFeedback, feedbackEntryPath, readFeedbackEntry, setFeedbackStatus, type FeedbackEntry } from "../src/lib/feedback.js";
+import { appendLedger } from "../src/lib/ledger.js";
 import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
 import type { GitHub } from "../src/lib/status.js";
 import {
@@ -645,6 +646,86 @@ test("GET /v1/drain/preview: an empty plan -> an empty card list, not an error",
     const res = await get(base, "/v1/drain/preview", READ_TOKEN);
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { cards: [] });
+  });
+});
+
+// ── GET /v1/inbox (W1-T190: a ratified proposal is never re-offered as READY) ──────────────
+
+test("GET /v1/inbox: a proposal already ratified (ledger carries ratify.approved) is EXCLUDED from `ready`, even though the registry entry itself was never updated — the console never re-offers the ratify affordance on an already-ratified proposal (acceptance 1 + 4)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  mkdirSync(join(root, "state"), { recursive: true });
+  // The registry entry is exactly the drifted P19 shape: a plain ACTIVE-looking proposal
+  // record, nothing on it marking it ratified -- only the ledger line below knows.
+  writeFileSync(
+    join(root, "state", "inbox-proposals.json"),
+    JSON.stringify({ proposals: [{ id: "P19", summary: "already ratified", evidenceAnchors: [] }] }),
+  );
+  appendLedger(ledgerPathFor(root), {
+    run_id: "APPROVE-P19-1",
+    task_id: "P19",
+    step: "ratify.approved",
+    pr_url: "https://github.com/craigoley/remudero/pull/900",
+    branch: "run-APPROVE-P19-1",
+  });
+
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await get(base, "/v1/inbox", READ_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ready: Array<{ proposalId: string }> };
+    assert.ok(!body.ready.some((r) => r.proposalId === "P19"), "P19 must never appear in `ready` once the ledger says ratified");
+  });
+});
+
+test("GET /v1/inbox: a P19-shaped drifted registry entry is CORRECTED on disk, not merely worked around in the response — one request heals state/inbox-proposals.json so any OTHER consumer of that file also sees the ratified proposal gone (acceptance 1: DETECTED and corrected, not trusted)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  mkdirSync(join(root, "state"), { recursive: true });
+  const registryPath = join(root, "state", "inbox-proposals.json");
+  writeFileSync(
+    registryPath,
+    JSON.stringify({
+      proposals: [
+        { id: "P19", summary: "already ratified", evidenceAnchors: [] },
+        { id: "P20", summary: "still genuinely open", evidenceAnchors: [] },
+      ],
+    }),
+  );
+  appendLedger(ledgerPathFor(root), {
+    run_id: "APPROVE-P19-1",
+    task_id: "P19",
+    step: "ratify.approved",
+    pr_url: "https://github.com/craigoley/remudero/pull/900",
+    branch: "run-APPROVE-P19-1",
+  });
+
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await get(base, "/v1/inbox", READ_TOKEN);
+    assert.equal(res.status, 200);
+  });
+
+  const healed = JSON.parse(readFileSync(registryPath, "utf8")) as { proposals: Array<{ id: string }> };
+  assert.deepEqual(
+    healed.proposals.map((p) => p.id),
+    ["P20"],
+    "P19 is actually REMOVED from the registry file on disk -- corrected, not just masked in the response -- while the unrelated open P20 entry survives untouched",
+  );
+});
+
+test("GET /v1/inbox: a genuinely un-ratified proposal with no drafted candidate yet is simply not in `ready` (the ordinary not-drafted case, unaffected by the ratified check)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(
+    join(root, "state", "inbox-proposals.json"),
+    JSON.stringify({ proposals: [{ id: "P-NEW", summary: "no draft yet", evidenceAnchors: [] }] }),
+  );
+
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await get(base, "/v1/inbox", READ_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ready: Array<{ proposalId: string }> };
+    assert.deepEqual(body.ready, []);
   });
 });
 

@@ -11,14 +11,17 @@ import {
   checkPrOwnership,
   ciGateFromRollup,
   commitsAhead,
+  degradedReasonLedgerFields,
   deriveFixMode,
   deriveStrikeHistory,
   dispatchFixPreflightStandDown,
   drainCommand,
+  escalateCircuitBreak,
   FIX_MODE_RULES,
   isTransientResult,
   materializeReviewWorktree,
   renderFixPrompt,
+  reviewPostedDescription,
   resolveReviewTarget,
   withMaterializedWorktree,
   resolveDaemonTarget,
@@ -35,6 +38,8 @@ import {
   type FixEvidence,
   type PrHeadGateway,
   type ReviewWorktreeDeps,
+  priorStrikesFor,
+  currentStrikeRegimeFor,
 } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import { judgeReview } from "../src/lib/review.js";
@@ -331,46 +336,215 @@ test("resolveReviewTarget: no flag ⇒ the checkout default; --repo overrides (b
 // whitelisted proofs actually EXECUTE, mirroring the fix rung's own
 // `git worktree add origin/<branch>` pattern (reuse, not new machinery).
 
-test("ACCEPTANCE (criterion 4, unit slice): materializeReviewWorktree fetches then adds a worktree at origin/<headRefName>, returning a path under worktreesDir(config)", () => {
+test("ACCEPTANCE (criterion 4, unit slice): materializeReviewWorktree fetches, adds a worktree at origin/<headRefName>, then reads its tip — returning a path under worktreesDir(config) when the tip matches the PR head", () => {
   const config = drainFixtureConfig();
   const calls: string[] = [];
   const deps: ReviewWorktreeDeps = {
     fetch: (repoDir) => calls.push(`fetch:${repoDir}`),
     addWorktree: (repoDir, worktreePath, branch) => calls.push(`add:${repoDir}:${worktreePath}:${branch}`),
+    revParseHead: (worktreePath) => {
+      calls.push(`rev-parse:${worktreePath}`);
+      return "cafef00d";
+    },
   };
-  const path = materializeReviewWorktree(config, "/repo", 411, "run-W1-T185-123", deps);
+  const result = materializeReviewWorktree(config, "/repo", 411, "run-W1-T185-123", "cafef00d", deps);
+  const path = result.worktreePath;
   assert.ok(path, "materialization reports success");
+  assert.equal(result.failure, undefined, "a success carries no failure");
   assert.ok(path!.startsWith(join(config.root, "worktrees")), "path lives under worktreesDir(config)");
   assert.ok(path!.includes("review-PR411-"), "path is scoped to the PR number");
-  assert.deepEqual(calls, [`fetch:/repo`, `add:/repo:${path}:run-W1-T185-123`]);
+  assert.deepEqual(calls, [`fetch:/repo`, `add:/repo:${path}:run-W1-T185-123`, `rev-parse:${path}`]);
 });
 
-test("materializeReviewWorktree returns undefined (never throws) when fetch fails — network unavailable is a FALLBACK trigger, not a crash", () => {
+test("materializeReviewWorktree returns a NAMED fetch-failure reason (never throws) when fetch fails — network unavailable is a FALLBACK trigger, not a crash", () => {
   const config = drainFixtureConfig();
   const deps: ReviewWorktreeDeps = {
     fetch: () => {
       throw new Error("network unreachable");
     },
     addWorktree: () => assert.fail("addWorktree must not be reached when fetch already failed"),
+    revParseHead: () => assert.fail("revParseHead must not be reached when fetch already failed"),
   };
-  assert.equal(materializeReviewWorktree(config, "/repo", 391, "some-branch", deps), undefined);
+  const result = materializeReviewWorktree(config, "/repo", 391, "some-branch", "cafef00d", deps);
+  assert.equal(result.worktreePath, undefined);
+  assert.equal(result.failure?.errorClass, "fetch-failure");
+  assert.equal(result.failure?.message, "network unreachable");
 });
 
-test("materializeReviewWorktree returns undefined (never throws) when the worktree add fails — a detached/deleted head is a FALLBACK trigger, not a crash", () => {
+test("materializeReviewWorktree returns a NAMED (\"other\") reason (never throws) when the worktree add fails — a detached/deleted head is a FALLBACK trigger, not a crash", () => {
   const config = drainFixtureConfig();
   const deps: ReviewWorktreeDeps = {
     fetch: () => {},
     addWorktree: () => {
       throw new Error("fatal: invalid reference: origin/deleted-branch");
     },
+    revParseHead: () => assert.fail("revParseHead must not be reached when addWorktree already failed"),
   };
-  assert.equal(materializeReviewWorktree(config, "/repo", 397, "deleted-branch", deps), undefined);
+  const result = materializeReviewWorktree(config, "/repo", 397, "deleted-branch", "cafef00d", deps);
+  assert.equal(result.worktreePath, undefined);
+  assert.equal(result.failure?.errorClass, "other");
+  assert.match(result.failure?.message ?? "", /deleted-branch/);
+});
+
+test("materializeReviewWorktree classifies a worktree-collision distinctly from other add failures, by the git error text", () => {
+  const config = drainFixtureConfig();
+  const deps: ReviewWorktreeDeps = {
+    fetch: () => {},
+    addWorktree: () => {
+      throw new Error("fatal: 'held-branch' is already used by worktree at '/repo/../holding-worktree'");
+    },
+    revParseHead: () => assert.fail("revParseHead must not be reached when addWorktree already failed"),
+  };
+  const result = materializeReviewWorktree(config, "/repo", 398, "held-branch", "cafef00d", deps);
+  assert.equal(result.worktreePath, undefined);
+  assert.equal(result.failure?.errorClass, "worktree-collision");
+});
+
+// W1-T233, acceptance criterion 1: "an injected failure occurring AFTER
+// worktree creation leaves zero new worktrees registered" — a step-2-class
+// throw (addWorktree succeeds, then revParseHead fails) must clean up the
+// worktree addWorktree already registered, not strand it (the 39-leaked-
+// worktree defect: withMaterializedWorktree's own teardown never runs here,
+// because this function never returns a path for it to key on).
+test("W1-T233 (criterion 1): a failure AFTER worktree creation (revParseHead throws) removes the just-created worktree before returning the named failure", () => {
+  const config = drainFixtureConfig();
+  const removeCalls: string[] = [];
+  const deps: ReviewWorktreeDeps = {
+    fetch: () => {},
+    addWorktree: () => {},
+    revParseHead: () => {
+      throw new Error("fatal: not a git repository");
+    },
+    removeWorktree: (repoDir, worktreePath) => removeCalls.push(`${repoDir}:${worktreePath}`),
+  };
+  const result = materializeReviewWorktree(config, "/repo", 399, "some-branch", "cafef00d", deps);
+  assert.equal(result.worktreePath, undefined);
+  assert.equal(result.failure?.errorClass, "other");
+  assert.match(result.failure?.message ?? "", /not a git repository/);
+  assert.equal(removeCalls.length, 1, "the worktree step 1 created is torn down exactly once");
+  assert.ok(removeCalls[0].startsWith("/repo:"), "cleanup targets the SAME repoDir/worktreePath step 1 used");
+});
+
+test("W1-T233: a fetch failure never attempts a removal — nothing was created for step 1 to have registered", () => {
+  const config = drainFixtureConfig();
+  const removeCalls: string[] = [];
+  const deps: ReviewWorktreeDeps = {
+    fetch: () => {
+      throw new Error("network unreachable");
+    },
+    addWorktree: () => assert.fail("addWorktree must not be reached when fetch already failed"),
+    revParseHead: () => assert.fail("revParseHead must not be reached when fetch already failed"),
+    removeWorktree: (repoDir, worktreePath) => removeCalls.push(`${repoDir}:${worktreePath}`),
+  };
+  materializeReviewWorktree(config, "/repo", 400, "some-branch", "cafef00d", deps);
+  assert.deepEqual(removeCalls, []);
+});
+
+test("W1-T233: a removal failure during cleanup is swallowed (logged), never masking the original materialization failure it was cleaning up after", () => {
+  const config = drainFixtureConfig();
+  const originalConsoleError = console.error;
+  const errors: string[] = [];
+  console.error = (msg: string) => errors.push(msg);
+  try {
+    const deps: ReviewWorktreeDeps = {
+      fetch: () => {},
+      addWorktree: () => {},
+      revParseHead: () => {
+        throw new Error("original failure: rev-parse exploded");
+      },
+      removeWorktree: () => {
+        throw new Error("removal also failed");
+      },
+    };
+    const result = materializeReviewWorktree(config, "/repo", 401, "some-branch", "cafef00d", deps);
+    assert.equal(result.worktreePath, undefined);
+    assert.match(result.failure?.message ?? "", /original failure: rev-parse exploded/);
+    assert.ok(
+      errors.some((e) => /removal also failed/.test(e)),
+      "the removal failure is still surfaced somewhere (console), not silently dropped",
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
+// W1-T232, acceptance: "a tip mismatch after fetch fails materialization loudly
+// rather than reviewing stale code" — a stale fetch or a moved ref must never
+// degrade to the ordinary keyword-only fallback; it must THROW, uncaught, so
+// `reviewCommand` posts no verdict at all rather than a false one.
+test("materializeReviewWorktree THROWS (does not return undefined) when the materialized tip does not match the PR head SHA — a stale fetch must fail loudly, never quietly review the wrong tree", () => {
+  const config = drainFixtureConfig();
+  const deps: ReviewWorktreeDeps = {
+    fetch: () => {},
+    addWorktree: () => {},
+    revParseHead: () => "stale0ld",
+  };
+  assert.throws(
+    () => materializeReviewWorktree(config, "/repo", 402, "moved-branch", "cafef00d", deps),
+    /stale0ld.*cafef00d|cafef00d.*stale0ld/s,
+  );
+});
+
+// W1-T233 (criterion 1 also covers the THROW path): a tip-mismatch throw is
+// not an "ordinary" failure, but the worktree it discards was created just as
+// really — it must be torn down before the throw, too.
+test("W1-T233: a tip-mismatch throw ALSO removes the just-created worktree before throwing — the discarded tree never strands either", () => {
+  const config = drainFixtureConfig();
+  const removeCalls: string[] = [];
+  const deps: ReviewWorktreeDeps = {
+    fetch: () => {},
+    addWorktree: () => {},
+    revParseHead: () => "stale0ld",
+    removeWorktree: (repoDir, worktreePath) => removeCalls.push(`${repoDir}:${worktreePath}`),
+  };
+  assert.throws(() => materializeReviewWorktree(config, "/repo", 403, "moved-branch", "cafef00d", deps));
+  assert.equal(removeCalls.length, 1, "the mismatched worktree is torn down exactly once before the throw");
+});
+
+// W1-T233, acceptance criterion 2: "the verdict description and the
+// review.posted record name the error class and message verbatim" — these two
+// pure helpers are what `runReview` composes both surfaces through, so a unit
+// test on them IS a unit test on what gets posted/ledgered, without spawning
+// `gh`/a reviewer.
+test("W1-T233 (criterion 2): reviewPostedDescription appends the error class + message VERBATIM to a CAPPED verdict's description", () => {
+  const verdict = { summary: "remudero-review: CAPPED — 0/3 proofs executed", capped: true };
+  const failure = { errorClass: "worktree-collision" as const, message: "fatal: 'x' is already used by worktree at '/y'" };
+  const description = reviewPostedDescription(verdict, failure);
+  assert.match(description, /^remudero-review: CAPPED — 0\/3 proofs executed/);
+  assert.match(description, /worktree-collision/);
+  assert.match(description, /fatal: 'x' is already used by worktree at '\/y'/);
+});
+
+test("W1-T233: reviewPostedDescription leaves the summary UNCHANGED when the verdict is not capped, even with a materialization failure present", () => {
+  const verdict = { summary: "remudero-review: PASS", capped: false };
+  const failure = { errorClass: "fetch-failure" as const, message: "network unreachable" };
+  assert.equal(reviewPostedDescription(verdict, failure), "remudero-review: PASS");
+});
+
+test("W1-T233: reviewPostedDescription leaves the summary UNCHANGED when there is no materialization failure at all (capped for an unrelated reason)", () => {
+  const verdict = { summary: "remudero-review: CAPPED — 0/3 proofs executed", capped: true };
+  assert.equal(reviewPostedDescription(verdict, undefined), "remudero-review: CAPPED — 0/3 proofs executed");
+});
+
+test("W1-T233 (criterion 2): degradedReasonLedgerFields names the error class and message verbatim for the review.posted ledger line", () => {
+  const failure = { errorClass: "fetch-failure" as const, message: "network unreachable" };
+  assert.deepEqual(degradedReasonLedgerFields(failure), {
+    degraded_reason: "network unreachable",
+    degraded_reason_class: "fetch-failure",
+  });
+});
+
+test("W1-T233: degradedReasonLedgerFields yields both fields undefined (absent once ledgered) when materialization was never attempted", () => {
+  const fields = degradedReasonLedgerFields(undefined);
+  assert.equal(fields.degraded_reason, undefined);
+  assert.equal(fields.degraded_reason_class, undefined);
 });
 
 test("ACCEPTANCE (criterion 4, full chain): an operator-path review over a PR whose proofs are executable reports a NON-EMPTY executed set — materialize -> headCheckoutDir -> judgeReview EXECUTES, exactly the fix rung's own wiring for the same PR/proofs", () => {
   const config = drainFixtureConfig();
-  // `addWorktree` here plays the role `git worktree add` + `checkout` really
-  // does: it makes the PR head's CONTENT show up on disk at `worktreePath`.
+  // `addWorktree` here plays the role `git worktree add` really does: it
+  // makes the PR head's CONTENT show up on disk at `worktreePath`, DETACHED
+  // (W1-T232: no `checkout -B` — nothing downstream needs a branch name).
   // Faking the git calls (never touching real git/network — this environment
   // has neither) while keeping the FILESYSTEM EFFECT real is what lets
   // `judgeReview`'s whitelisted executor genuinely run against it below.
@@ -380,8 +554,10 @@ test("ACCEPTANCE (criterion 4, full chain): an operator-path review over a PR wh
       mkdirSync(worktreePath, { recursive: true });
       writeFileSync(join(worktreePath, "fixture.txt"), "REMUDERO_W1_T185_MARKER\n");
     },
+    revParseHead: () => "cafef00d",
   };
-  const worktreePath = materializeReviewWorktree(config, "/repo", 411, "run-W1-T185-fixture", deps);
+  const worktreePath = materializeReviewWorktree(config, "/repo", 411, "run-W1-T185-fixture", "cafef00d", deps)
+    .worktreePath;
   assert.ok(worktreePath, "materialization succeeded");
   try {
     const criteria = [
@@ -400,6 +576,85 @@ test("ACCEPTANCE (criterion 4, full chain): an operator-path review over a PR wh
   } finally {
     rmSync(worktreePath!, { recursive: true, force: true });
   }
+});
+
+// W1-T232: real-git integration tests — no faked git deps — proving the
+// DEFAULT `realReviewWorktreeDeps` (not just an injected fixture) actually
+// produces a detached worktree, never collides with another worktree already
+// holding the branch, and still executes proofs there (detached parity).
+
+test("W1-T232: realReviewWorktreeDeps.addWorktree yields a DETACHED worktree at the branch tip (proof there is no checkout -B, which would leave HEAD symbolic)", () => {
+  const { localDir } = gitFixture();
+  execFileSync("git", ["-C", localDir, "checkout", "-q", "-b", "feature-x"]);
+  writeFileSync(join(localDir, "plan", "feature.txt"), "on the feature branch\n", "utf8");
+  execFileSync("git", ["-C", localDir, "add", "."]);
+  execFileSync("git", ["-C", localDir, "commit", "--quiet", "-m", "feature work"]);
+  execFileSync("git", ["-C", localDir, "push", "--quiet", "origin", "feature-x"]);
+  const headSha = execFileSync("git", ["-C", localDir, "rev-parse", "feature-x"], { encoding: "utf8" }).trim();
+
+  const config = drainFixtureConfig();
+  const worktreePath = materializeReviewWorktree(config, localDir, 500, "feature-x", headSha).worktreePath;
+  assert.ok(worktreePath, "materialization succeeded against real git");
+  try {
+    // `checkout -B <branch>` would leave HEAD as a SYMBOLIC ref to
+    // refs/heads/<branch>; a plain `worktree add origin/<branch>` leaves it
+    // DETACHED, so `symbolic-ref HEAD` has nothing to resolve and errors.
+    assert.throws(() => execFileSync("git", ["-C", worktreePath!, "symbolic-ref", "-q", "HEAD"], { stdio: "pipe" }));
+    assert.equal(
+      execFileSync("git", ["-C", worktreePath!, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+      headSha,
+    );
+  } finally {
+    execFileSync("git", ["-C", localDir, "worktree", "remove", "--force", worktreePath!]);
+  }
+});
+
+test("W1-T232: materialization SUCCEEDS (no collision) while another real worktree already holds the PR's branch — the exact defect this task removes", () => {
+  const { localDir } = gitFixture();
+  execFileSync("git", ["-C", localDir, "checkout", "-q", "-b", "held-branch"]);
+  // At the repo ROOT, not under plan/ — the grep proof's recursive default
+  // excludes plan/ (W1-T72, to keep a proof from self-matching its own
+  // description in plan/tasks.yaml), and this test passes an explicit
+  // "in held.txt" path resolved relative to the checkout root.
+  writeFileSync(join(localDir, "held.txt"), "held elsewhere\n", "utf8");
+  execFileSync("git", ["-C", localDir, "add", "."]);
+  execFileSync("git", ["-C", localDir, "commit", "--quiet", "-m", "held work"]);
+  execFileSync("git", ["-C", localDir, "push", "--quiet", "origin", "held-branch"]);
+  const headSha = execFileSync("git", ["-C", localDir, "rev-parse", "held-branch"], { encoding: "utf8" }).trim();
+  execFileSync("git", ["-C", localDir, "checkout", "-q", "main"]);
+
+  // Seed a SECOND worktree that already holds `held-branch` — this is exactly
+  // what made every operator-lane `checkout -B` collide on 2026-07-21.
+  const holdingWorktree = join(localDir, "..", "holding-worktree");
+  execFileSync("git", ["-C", localDir, "worktree", "add", holdingWorktree, "held-branch"]);
+
+  const config = drainFixtureConfig();
+  let worktreePath: string | undefined;
+  try {
+    worktreePath = materializeReviewWorktree(config, localDir, 501, "held-branch", headSha).worktreePath;
+    assert.ok(worktreePath, "materialization succeeds even though another worktree holds the branch");
+
+    const criteria = [{ claim: "the held marker is present", proof: "grep: held elsewhere in held.txt" }];
+    const v = judgeReview(criteria, { diff: "", report: "unrelated", headCheckoutDir: worktreePath });
+    assert.equal(v.criteria[0].proof_exec, "executed_pass");
+    assert.equal(v.keywordOnly, false, "no collision means no keyword-only fallback");
+    assert.equal(v.capped, false);
+  } finally {
+    if (worktreePath) execFileSync("git", ["-C", localDir, "worktree", "remove", "--force", worktreePath]);
+    execFileSync("git", ["-C", localDir, "worktree", "remove", "--force", holdingWorktree]);
+  }
+});
+
+test("W1-T232: a stale origin ref (materialized tip != PR head SHA) throws loudly through real git too — no verdict would ever be posted", () => {
+  const { localDir } = gitFixture();
+  execFileSync("git", ["-C", localDir, "checkout", "-q", "-b", "moving-branch"]);
+  execFileSync("git", ["-C", localDir, "push", "--quiet", "origin", "moving-branch"]);
+  execFileSync("git", ["-C", localDir, "checkout", "-q", "main"]);
+
+  const config = drainFixtureConfig();
+  // Claim a PR head SHA that does NOT match what's actually on origin/moving-branch —
+  // simulating a fetch that raced a force-push/rebase after the PR view was read.
+  assert.throws(() => materializeReviewWorktree(config, localDir, 502, "moving-branch", "0000000000000000000000000000000000000000"));
 });
 
 // ── W1-T185 (Gap 2, criterion 6): a materialized worktree is torn down on ──
@@ -2341,4 +2596,110 @@ test("the terminal blocked_review return (no fix rung) is gone — a failing rev
     /if \(review\.state !== "success"\) \{\s*log\("verdict"/,
     "a failing review must route through runFixRung, never straight back to a blocked_review verdict",
   );
+});
+
+// ── W1-T199: strike regime tagging ──────────────────────────────────────────
+//
+// A strike counter that cannot tell noise from evidence blocks the loop exactly
+// where it now works. FIXTURE (2026-07-21): PR #457 converged executed_fail ->
+// fix worker -> executed_pass x3 -> merged, while #449/#452 were refused at 2/2
+// by the SAME rung, carrying executed_fail verdicts of their own — because their
+// two strikes had been spent in the keyword-only era.
+
+test("W1-T199: keyword-era strikes do NOT count under the executed regime", () => {
+  const ledger = [
+    { step: "fix.dispatch", task_id: "W1-T900" }, // untagged => pre-executor
+    { step: "fix.dispatch", task_id: "W1-T900" },
+  ];
+  assert.equal(priorStrikesFor(ledger, "W1-T900", "executed"), 0);
+});
+
+test("W1-T199: a rung refusing SOLELY on pre-regime strikes is not reachable — 2 untagged strikes leave the cap unexhausted", () => {
+  const ledger = [
+    { step: "fix.dispatch", task_id: "W1-T900" },
+    { step: "fix.dispatch", task_id: "W1-T900" },
+  ];
+  const cap = 2;
+  const counted = priorStrikesFor(ledger, "W1-T900", "executed");
+  assert.ok(counted < cap, `expected < ${cap} counted strikes, got ${counted}`);
+});
+
+test("W1-T199: the bound stays REAL — strikes spent under the CURRENT regime still exhaust", () => {
+  const ledger = [
+    { step: "fix.dispatch", task_id: "W1-T900", verdict_regime: "executed" },
+    { step: "fix.dispatch", task_id: "W1-T900", verdict_regime: "executed" },
+  ];
+  assert.equal(priorStrikesFor(ledger, "W1-T900", "executed"), 2);
+});
+
+test("W1-T199: under the keyword_only regime EVERY strike counts — the bound never silently vanishes", () => {
+  const ledger = [
+    { step: "fix.dispatch", task_id: "W1-T900" },
+    { step: "fix.dispatch", task_id: "W1-T900", verdict_regime: "executed" },
+  ];
+  assert.equal(priorStrikesFor(ledger, "W1-T900", "keyword_only"), 2);
+});
+
+test("W1-T199: the current regime is READ from the latest review.posted proof_exec", () => {
+  const keywordOnly = [
+    { step: "review.posted", task_id: "W1-T900", proof_exec: ["not_executable", "not_executable"] },
+  ];
+  const executed = [
+    { step: "review.posted", task_id: "W1-T900", proof_exec: ["not_executable", "not_executable"] },
+    { step: "review.posted", task_id: "W1-T900", proof_exec: ["not_executable", "executed_fail"] },
+  ];
+  assert.equal(currentStrikeRegimeFor(keywordOnly, "W1-T900"), "keyword_only");
+  assert.equal(currentStrikeRegimeFor(executed, "W1-T900"), "executed");
+});
+
+test("W1-T199: the ledger is never mutated — regime is derived at READ time from untouched lines", () => {
+  const ledger = [{ step: "fix.dispatch", task_id: "W1-T900" }];
+  const snapshot = JSON.stringify(ledger);
+  priorStrikesFor(ledger, "W1-T900", "executed");
+  currentStrikeRegimeFor(ledger, "W1-T900");
+  assert.equal(JSON.stringify(ledger), snapshot, "reading strikes must not mutate ledger lines");
+});
+
+// ── the circuit-break dedup marker survives a FAILED delivery (R-1) ─────────
+// The cross-boot dedup was already ledger-derived and already the right shape.
+// Its defect was ORDERING: the marker was written only after escalate() RETURNED,
+// so a throwing `gh` recorded nothing and the next boot retried the same
+// escalation — which is how a transport failure became an unbounded relaunch
+// loop. The ledger showed 1 such marker against 460 boots.
+
+test("escalateCircuitBreak: a THROWING gh gateway still writes the dedup marker, so the next boot does not retry", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-circuit-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const task = { id: "W1-TQ", title: "t", repo: "remudero", type: "implement", depends_on: [], status: "queued" };
+  const boom = {
+    create() {
+      throw new Error("gh: HTTP 403 rate limit exceeded");
+    },
+  };
+
+  // BOOT 1: delivery fails. It must not throw, and it must leave a marker.
+  assert.doesNotThrow(() =>
+    escalateCircuitBreak(task as never, { owner: "craigoley", repo: "remudero", ledgerPath, runId: "RUN-1", issues: boom }),
+  );
+  const afterFirst = readFileSync(ledgerPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const markers = afterFirst.filter((l) => l.step === "dispatch.circuit_broken.escalated");
+  assert.equal(markers.length, 1, "FALSIFIER: pre-fix the marker was written only on SUCCESS, so this was 0");
+  assert.equal(markers[0].delivered, false, "and it records that delivery did NOT happen (claimed vs evidenced)");
+  assert.equal(
+    afterFirst.filter((l) => l.step === "escalation.failed").length,
+    1,
+    "the failure is legible on its own step",
+  );
+
+  // BOOT 2: a fresh process over the SAME ledger must dedup on that marker and
+  // not call the gateway again. This is the loop, reproduced across boots.
+  let calls = 0;
+  const counting = {
+    create() {
+      calls += 1;
+      throw new Error("gh: HTTP 403 rate limit exceeded");
+    },
+  };
+  escalateCircuitBreak(task as never, { owner: "craigoley", repo: "remudero", ledgerPath, runId: "RUN-2", issues: counting });
+  assert.equal(calls, 0, "the second boot never re-attempted — the dedup is durable across the process death");
 });

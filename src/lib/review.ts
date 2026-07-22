@@ -1,7 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { hostname } from "node:os";
+import { dirname, join } from "node:path";
+import { defaultIsPidAlive } from "./drain-lock.js";
+import { appendLedger } from "./ledger.js";
 import type { AcceptanceCriterion } from "./plan.js";
+import { readLedgerLines } from "./status.js";
 
 /**
  * The JUDGE (MASTER-PLAN §12 rule 4 / rule 3B; task W1-T1C).
@@ -165,12 +169,14 @@ export interface ReviewVerdict {
    * says so honestly instead of dressing it as certified.
    *
    * The one place `capped` IS consequential: {@link decideAutoMergeArm} refuses
-   * to arm auto-merge on a `capped` verdict for a task whose `principles` are
-   * `{tdd: strict}`, unless an explicit, ledgered {@link CappedOverride} is
-   * supplied — a separate decision layer from this verdict's own `state`, so a
-   * capped verdict can still post as a non-blocking commit status (criterion 3)
-   * while the ARMING path still refuses it (criterion 2). A non-tdd:strict task
-   * is unaffected either way. Distinct from `floorDegraded` (W1-T72,
+   * to arm auto-merge on ANY `capped` verdict (W1-T229 — regardless of the
+   * task's `principles`; a prior version of this gate exempted every
+   * non-tdd:strict task, which made prose the DEFAULT merge floor, since
+   * `{tdd: strict}` is opt-in), unless an explicit, ledgered
+   * {@link CappedOverride} is supplied — a separate decision layer from this
+   * verdict's own `state`, so a capped verdict can still post as a
+   * non-blocking commit status (criterion 3) while the ARMING path still
+   * refuses it (criterion 2). Distinct from `floorDegraded` (W1-T72,
    * legibility-only, gated on a DIALECT-PREFIXED proof specifically): `capped`
    * fires on ANY zero-executed verdict, dialect-prefixed or not.
    */
@@ -471,10 +477,25 @@ function parseTestTarget(body: string): WhitelistedProof | null {
   // there is no traversal/glob surface to guard either (see the module comment
   // above). A test name is ordinary prose and routinely contains a semicolon —
   // refusing it there was the single biggest cause of the dead proof floor.
+  //
+  // W1-T112 round-3 fix: `--test-name-pattern` compiles its argument as a REGEX
+  // (`new RegExp(pattern)`), not a literal-substring match. A dialect proof is
+  // ordinary architect prose describing a test's own title, and titles routinely
+  // echo real syntax verbatim — e.g. "ProgramArguments end [rmd, digest]" — where
+  // `[rmd, digest]` is an unescaped CHARACTER CLASS to the regex engine (matches
+  // exactly one of the letters r/m/d/i/g/e/s/t or `, `), which can never match the
+  // literal bracketed text it was quoting. That silently manufactures a FAIL for a
+  // test that genuinely passed and is titled EXACTLY per the proof (empirically
+  // confirmed live: `[rmd, digest]` in a proof never matches `[rmd, digest]` in a
+  // title). Escaping regex metacharacters here makes the match what the dialect
+  // was always meant to mean — "find the test named exactly this" — a literal
+  // substring search, while remaining regex-CAPABLE for any proof author who
+  // deliberately wants pattern semantics (rare, and not the common case this
+  // dialect exists for).
   return {
     kind: "test",
     command: "node",
-    args: ["--test", "--import", "tsx", "--test-name-pattern", trimmed, TEST_GLOB],
+    args: ["--test", "--import", "tsx", "--test-name-pattern", escapeRegExp(trimmed), TEST_GLOB],
     label: trimmed,
     nameFiltered: true,
   };
@@ -535,7 +556,11 @@ export function parseWhitelistedProof(proof: string): WhitelistedProof | null {
  * injectable so unit tests fake pass/fail/throw without touching the filesystem. */
 export type ProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => "pass" | "fail";
 
-const DEFAULT_PROOF_TIMEOUT_MS = 30_000;
+// W1-T112 round-4: 30s was observed live truncating a name-filtered proof's WHOLE-suite
+// run before it ever reached the named test's file (see nameFilteredOutcome's doc
+// comment) — widened for headroom. The truncation-detection fix above is the actual
+// correctness guarantee; this just reduces how often it needs to engage.
+const DEFAULT_PROOF_TIMEOUT_MS = 60_000;
 const npmCiPrimed = new Set<string>();
 
 /** `npm ci` a fresh checkout ONCE before its first test proof (design: "fresh
@@ -551,6 +576,63 @@ function ensureDeps(cwd: string): void {
   } catch {
     /* best-effort priming; see doc comment above */
   }
+}
+
+/**
+ * W1-T227: resolve the CANDIDATE test file(s) a name-filtered proof's raw name
+ * could actually live in, so {@link execWhitelistedProof} can scope its `node
+ * --test` invocation to just those files instead of blindly compiling
+ * `--test-name-pattern` across the WHOLE suite glob ({@link TEST_GLOB}). Node
+ * still LOADS every file in a glob before filtering by name regardless of how
+ * few match — MEASURED live on a scratch clone of main: a narrowed run of one
+ * proof against its own file alone completes in 0.2s; the full-glob load is
+ * ~22s against a 60s timeout, leaving too little headroom on a machine already
+ * running workers (the exact defect this task exists to close — the same
+ * unchanged proof coins `executed_pass` on an idle host and `exec_error` on a
+ * loaded one).
+ *
+ * Fixed-string (`grep -F`), never a regex: a name-filtered proof's raw name is
+ * ordinary architect prose, not a pattern — the same reasoning
+ * {@link parseTestTarget}'s `escapeRegExp` already applies to the
+ * `--test-name-pattern` argument itself, applied here to the search that finds
+ * candidate files.
+ *
+ * Best-effort: any grep failure (no match, `test/` absent, grep itself
+ * missing, …) degrades to an EMPTY candidate list — {@link narrowNameFilteredArgs}
+ * treats that identically to "genuinely zero candidates" and falls back to the
+ * unchanged (full-glob) invocation, so a resolution hiccup can only cost the
+ * optimisation, never turn into a false verdict.
+ */
+export function resolveNameFilteredCandidates(cwd: string, rawName: string): string[] {
+  try {
+    const stdout = execFileSync("grep", ["-rl", "-F", "--include=*.test.ts", "--", rawName, "test"], {
+      cwd,
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8",
+    });
+    return stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * W1-T227's command builder: given a name-filtered proof's already-compiled
+ * `baseArgs` (from {@link parseTestTarget}, trailing with {@link TEST_GLOB})
+ * and the candidate file(s) {@link resolveNameFilteredCandidates} found, swap
+ * the full glob for just those candidates. ZERO candidates CHANGES NOTHING —
+ * returns `baseArgs` verbatim, still globbed — because narrowing is an
+ * optimisation of the executed path, never a new way for a genuinely-absent
+ * test to pass: {@link nameFilteredOutcome}'s existing zero-match ⇒ "fail"
+ * path fires identically either way (a wider search finding nothing is exactly
+ * as conclusive as a narrower one).
+ */
+export function narrowNameFilteredArgs(baseArgs: readonly string[], candidateFiles: readonly string[]): string[] {
+  if (candidateFiles.length === 0) return [...baseArgs];
+  return [...baseArgs.filter((a) => a !== TEST_GLOB), ...candidateFiles];
 }
 
 /**
@@ -589,8 +671,17 @@ export function execWhitelistedProof(
   timeoutMs = DEFAULT_PROOF_TIMEOUT_MS,
 ): "pass" | "fail" {
   if (whitelisted.kind === "test") ensureDeps(cwd);
+  // W1-T227: a name-filtered proof's `args` (from parseTestTarget) still carry
+  // the FULL suite glob — resolve the actual candidate file(s) now, against
+  // the real PR-head checkout, and narrow to just those before ever spawning
+  // node. Not folded into parseWhitelistedProof itself: that function is a
+  // pure parse with no `cwd`, and the candidate set can only be known against
+  // a real checkout.
+  const args = whitelisted.nameFiltered
+    ? narrowNameFilteredArgs(whitelisted.args, resolveNameFilteredCandidates(cwd, whitelisted.label))
+    : whitelisted.args;
   try {
-    const stdout = execFileSync(whitelisted.command, whitelisted.args, {
+    const stdout = execFileSync(whitelisted.command, args, {
       cwd,
       stdio: ["ignore", "pipe", "ignore"],
       timeout: timeoutMs,
@@ -623,15 +714,42 @@ function isFileWrapperResultName(name: string): boolean {
  * nested subtest. Captures the pass/fail marker and the reported name. */
 const TAP_RESULT_LINE_RE = /^\s*(ok|not ok) \d+ - (.+?)\s*$/;
 
+/** The node test runner's own trailing summary block (`# tests N`, `# pass N`,
+ * …, `# duration_ms N`) is written ONCE, after every file in the glob has
+ * finished — it is the one reliable signal that a `--test-name-pattern` run
+ * over {@link TEST_GLOB} ran to genuine completion rather than being cut off
+ * mid-suite by {@link execWhitelistedProof}'s own timeout kill. */
+function hasFinalSummary(stdout: string): boolean {
+  return /^# duration_ms\b/m.test(stdout);
+}
+
 /**
  * Read a name-filtered `--test-name-pattern` run's TAP stdout for the verdict
  * of the REAL (non-file-wrapper) subtest(s) it actually matched, independent
  * of the overall process exit code (see {@link execWhitelistedProof}'s doc
  * comment for why the exit code alone is not trustworthy here).
- *   - zero real matches ⇒ "fail" (W1-T72 guard: a named test that does not
- *     exist on the PR head is unmet, never a silent pass via the trivial
- *     "0 children ⇒ ok" wrapper every non-matching file reports).
- *   - at least one real match, none reporting `not ok` ⇒ "pass".
+ *   - zero real matches, run genuinely completed ⇒ "fail" (W1-T72 guard: a
+ *     named test that does not exist on the PR head is unmet, never a silent
+ *     pass via the trivial "0 children ⇒ ok" wrapper every non-matching file
+ *     reports).
+ *   - zero real matches, run was CUT SHORT before its trailing summary ⇒
+ *     THROWS (W1-T112 round-4 fix). {@link TEST_GLOB} scopes a name-filtered
+ *     proof to the WHOLE suite (100+ files, several driving a real headless
+ *     browser), so {@link execWhitelistedProof}'s 30s timeout can fire before
+ *     node ever reaches the one file the named test lives in — confirmed live
+ *     against this exact repo: a timeout-killed run of this command reliably
+ *     reports zero final-summary lines, i.e. genuinely never finished. On the
+ *     old rule that truncation read identically to "test not found", ANY
+ *     criterion whose test happened to sit late enough in the glob's
+ *     (filesystem-order-dependent, not alphabetically guaranteed) discovery
+ *     order intermittently failed for a test that demonstrably passes in
+ *     isolation — the exact flap observed live on this PR's own head commit
+ *     (fail → pass → fail, unchanged code). A truncated run is inconclusive,
+ *     not evidence of absence: the caller's catch degrades it to exec_error
+ *     (the keyword floor), never a manufactured FAIL.
+ *   - at least one real match, none reporting `not ok` ⇒ "pass" (found before
+ *     any truncation — real, positive evidence, kept even if the run was cut
+ *     short afterward elsewhere in the glob).
  *   - at least one real match reporting `not ok` ⇒ "fail" — the named test
  *     genuinely failed, not merely swept up in unrelated collateral noise.
  * Collateral `not ok`/hookFailed lines from files the pattern never matched
@@ -648,7 +766,15 @@ export function nameFilteredOutcome(stdout: string): "pass" | "fail" {
     matched = true;
     if (m[1] === "not ok") anyRealFailure = true;
   }
-  if (!matched) return "fail";
+  if (!matched) {
+    if (!hasFinalSummary(stdout)) {
+      throw new Error(
+        "name-filtered proof run was truncated before its trailing summary (proof timeout) — " +
+          "inconclusive, not evidence the named test is missing",
+      );
+    }
+    return "fail";
+  }
   return anyRealFailure ? "fail" : "pass";
 }
 
@@ -1007,8 +1133,8 @@ export function isTddStrict(principles?: Record<string, unknown>): boolean {
 export function cappedAnnotation(criteriaCount: number): string {
   return (
     `CAPPED: 0/${criteriaCount} proofs executed — not certified (a keyword match is a claim, ` +
-    `never evidence). On a tdd:strict task this refuses to arm auto-merge (see decideAutoMergeArm) ` +
-    `until proof executes or an operator grants an explicit, ledgered override.`
+    `never evidence). This refuses to arm auto-merge (see decideAutoMergeArm) until proof ` +
+    `executes or an operator grants an explicit, ledgered override.`
   );
 }
 
@@ -1022,10 +1148,10 @@ export function cappedAnnotation(criteriaCount: number): string {
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
- * An explicit, human-granted exception to "a CAPPED verdict on a tdd:strict
- * task cannot arm auto-merge" (design: "an override is a decision someone
- * made, and it must be attributable"). Never inferred, never anonymous — `by`
- * names WHO. Granted via `rmd review <pr> --override-capped-by/
+ * An explicit, human-granted exception to "a CAPPED verdict cannot arm
+ * auto-merge" (design: "an override is a decision someone made, and it must
+ * be attributable"). Never inferred, never anonymous — `by` names WHO.
+ * Granted via `rmd review <pr> --override-capped-by/
  * --override-capped-reason` (run-task.ts) and recovered from the ledger by
  * {@link cappedOverrideFromLedger}.
  */
@@ -1047,15 +1173,18 @@ export interface ArmDecision {
  *
  * - `state !== "success"` → refuse. The ordinary required-check gate;
  *   unrelated to capping (a genuinely failing review was ALWAYS refused).
- * - CAPPED IS NOT FAIL (criterion 3): a capped verdict never refuses arming on
- *   its own. Only on a `tdd: strict` task, and only absent an override, does
- *   capping refuse — a non-tdd:strict PR arms exactly as if this were an
- *   ordinary PASS.
- * - An override permits arming. Whether the caller actually LEDGERS that
- *   override is {@link resolveAutoMergeArm}'s job, not this pure predicate's —
- *   keeping this function side-effect-free is what makes "refuses without an
- *   override; permits with one" a single unit fixture (acceptance criterion
- *   2), independent of ledger/CLI plumbing.
+ * - W1-T229: A CAPPED verdict (zero proofs executed) refuses to arm
+ *   UNCONDITIONALLY, regardless of `tddStrict` — a prior version of this
+ *   function armed any capped, non-tdd:strict PR exactly as if it were an
+ *   ordinary PASS, which made "declare tdd:strict" the ONLY thing standing
+ *   between zero executed proof and an unattended merge, and tdd:strict is
+ *   not the default. `tddStrict` is retained purely for override-provenance
+ *   bookkeeping ({@link resolveAutoMergeArm}), never for gating.
+ * - An override permits arming, on any capped verdict. Whether the caller
+ *   actually LEDGERS that override is {@link resolveAutoMergeArm}'s job, not
+ *   this pure predicate's — keeping this function side-effect-free is what
+ *   makes "refuses without an override; permits with one" a single unit
+ *   fixture (acceptance criterion 2), independent of ledger/CLI plumbing.
  */
 export function decideAutoMergeArm(
   verdict: Pick<ReviewVerdict, "state" | "capped">,
@@ -1065,11 +1194,8 @@ export function decideAutoMergeArm(
   if (verdict.state !== "success") {
     return { arm: false, reason: "remudero-review is not success" };
   }
-  if (!verdict.capped || !tddStrict) {
-    return {
-      arm: true,
-      reason: verdict.capped ? "capped, but the task is not tdd:strict" : "verdict is a full PASS",
-    };
+  if (!verdict.capped) {
+    return { arm: true, reason: "verdict is a full PASS" };
   }
   if (override) {
     return { arm: true, reason: `CAPPED override granted by ${override.by}: ${override.reason}` };
@@ -1077,8 +1203,8 @@ export function decideAutoMergeArm(
   return {
     arm: false,
     reason:
-      "CAPPED verdict (zero proofs executed) on a tdd:strict task — refuses to arm auto-merge " +
-      "without executed proof or an explicit, ledgered operator override",
+      "CAPPED verdict (zero proofs executed) — refuses to arm auto-merge without executed proof " +
+      "or an explicit, ledgered operator override",
   };
 }
 
@@ -1086,12 +1212,13 @@ export function decideAutoMergeArm(
  * The auto-merge arming path, WITH its ledger side effect (W1-T185, criterion
  * 2's "writes an attributable ledger line naming the overrider"). Wraps
  * {@link decideAutoMergeArm}: when arming succeeds ONLY because an override
- * was supplied for a genuinely capped, tdd:strict verdict, this logs
- * `automerge.capped_override_used` naming who — an override that arms
- * silently is exactly the #411 hazard this task closes (auto-merge armed
- * unattended, no human reading the diff). `log` is injected so the whole
- * contract — refuse without an override, arm + LEDGER with one — is a single
- * unit fixture; `run-task.ts`'s `runTaskBody` is the real caller.
+ * was supplied for a genuinely capped verdict (W1-T229: any capped verdict,
+ * not just a tdd:strict one), this logs `automerge.capped_override_used`
+ * naming who — an override that arms silently is exactly the #411 hazard
+ * this task closes (auto-merge armed unattended, no human reading the diff).
+ * `log` is injected so the whole contract — refuse without an override, arm +
+ * LEDGER with one — is a single unit fixture; `run-task.ts`'s `runTaskBody`
+ * is the real caller.
  */
 export function resolveAutoMergeArm(
   verdict: Pick<ReviewVerdict, "state" | "capped">,
@@ -1100,10 +1227,209 @@ export function resolveAutoMergeArm(
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): ArmDecision {
   const decision = decideAutoMergeArm(verdict, tddStrict, override);
-  if (decision.arm && override && tddStrict && verdict.capped) {
+  if (decision.arm && override && verdict.capped) {
     log("automerge.capped_override_used", { by: override.by, reason: override.reason });
   }
   return decision;
+}
+
+// ── Status-provenance gate (W1-T203 — THE FORGE ATTACK) ─────────────────────
+//
+// Today `gh` runs OUTSIDE the sandbox with the operator's own ambient
+// credential (recon R-3/R-6), and that credential is the ONLY thing on the
+// machine that can post a commit status — so any identity that can shell out
+// to `gh` (including a worker) can post its own `remudero-review=success` and
+// satisfy its own merge gate. This section closes the read-back half: at ARM
+// TIME, whoever is about to trust a live `remudero-review` status must first
+// ask GitHub WHO posted it (the commit-status API's `creator.login`, which
+// GitHub attributes from the authenticating credential — a worker cannot make
+// this say anything but its own identity, unlike the state/description/context
+// fields, which are just request payload). The credential half (a dedicated
+// identity {@link postReviewStatus} authenticates as, which workers never
+// hold) and the deny-floor half (hooks/deny-floor.sh refusing a worker's own
+// status-POST attempt) are the other two parts of the same property.
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Env var naming the GitHub login the dedicated `remudero-review` reviewer
+ * identity authenticates as (a fine-grained PAT or GitHub App installation
+ * token's own login/slug — e.g. `remudero-reviewer[bot]`). Read by the
+ * orchestrator ONLY (never shipped to a worker's environment — the same
+ * containment property `~/.config/remudero/**` already gets in
+ * `settings/worker.json`'s deny-list); {@link resolveReviewProvenance}'s
+ * caller supplies it explicitly so the pure function never reaches into
+ * `process.env` itself.
+ */
+export const REVIEWER_IDENTITY_ENV = "REMUDERO_REVIEWER_LOGIN";
+
+/**
+ * Env var naming the dedicated reviewer identity's own credential.
+ * {@link postReviewStatus} uses it (as `GH_TOKEN`, overriding whatever `gh`
+ * would otherwise resolve from the ambient environment) when set, so the
+ * ONE status that must carry unforgeable provenance is posted by an identity
+ * distinct from the operator/worker credential every other `gh` call on the
+ * machine shares. Unset ⇒ `postReviewStatus` falls back to ambient `gh` auth,
+ * byte-identical to pre-W1-T203 behavior — the same bootstrap-ordering
+ * doctrine `docs/review-gate.md` already documents for `ci-gate`: a
+ * provenance gate armed before the dedicated identity exists would deadlock
+ * every merge, so this ships DARK until an operator provisions the identity
+ * and sets both env vars.
+ */
+export const REVIEWER_TOKEN_ENV = "REMUDERO_REVIEWER_TOKEN";
+
+/**
+ * One fetched `remudero-review` commit-status entry — the two fields
+ * {@link resolveReviewProvenance} needs off GitHub's "get the combined status
+ * for a ref" response (`.statuses[]`, already deduped to the latest post per
+ * context by GitHub itself). `undefined` means no status has ever been posted
+ * under this context for the sha in question.
+ */
+export interface ReviewStatusEntry {
+  state: ReviewState;
+  /**
+   * GitHub's `creator.login` for this status — the one field a poster cannot
+   * spoof (server-attributed from the authenticating credential, never from
+   * the request body). `undefined` only if GitHub's response is itself
+   * malformed/incomplete; treated the same as a mismatched login (untrusted).
+   */
+  posterLogin?: string;
+}
+
+/**
+ * THE PROVENANCE GATE (acceptance criteria 1-3). Resolve what a fetched
+ * `remudero-review` status ACTUALLY proves, gated on WHO posted it:
+ *
+ * - No status at all → `"absent"`.
+ * - A status posted by anyone OTHER than `trustedLogin` → `"absent"` —
+ *   REGARDLESS of its `state`. This is deliberate and covers BOTH forge
+ *   directions: an untrusted `success` must not rescue a merge a genuine
+ *   review would have failed (criterion 1), and an untrusted `failure` must
+ *   not BLOCK a merge a genuine review would have passed (criterion 2) — the
+ *   design's "treat a forged verdict as absent, never as a fail": mapping a
+ *   hostile poster's `failure` to a real failure converts the forge vector
+ *   into a denial-of-service vector, which is worse (an attacker can already
+ *   forge `success`; letting them ALSO forge `failure` costs the operator a
+ *   legitimate merge instead of only a hostile one).
+ * - A status posted by `trustedLogin` → its own `state`, unchanged — the
+ *   autonomous merge path is byte-identical to pre-W1-T203 for every
+ *   non-forged PR (criterion 3).
+ *
+ * Pure and case-insensitive on the login compare (GitHub logins are
+ * case-insensitive for uniqueness, so a byte-exact compare would be a false
+ * mismatch waiting to happen).
+ */
+export function resolveReviewProvenance(
+  entry: ReviewStatusEntry | undefined,
+  trustedLogin: string,
+): ReviewState | "absent" {
+  if (!entry) return "absent";
+  if (!entry.posterLogin || entry.posterLogin.trim().toLowerCase() !== trustedLogin.trim().toLowerCase()) {
+    return "absent";
+  }
+  return entry.state;
+}
+
+/**
+ * The "at arm time" half of the property (acceptance criteria 1-3): whatever
+ * a caller computed in-process, THIS is what decides whether the LIVE status
+ * on GitHub — read back and filtered by who posted it — still says a genuine
+ * reviewer passed the PR. Deliberately narrow and orthogonal to
+ * {@link decideAutoMergeArm}'s capped/override layer (which reasons about a
+ * verdict computed BEFORE anything could have been posted, and is unaffected
+ * by this gate): this function only ever answers "is the CURRENTLY-LIVE
+ * remudero-review, filtered by provenance, a success" — a caller arms only
+ * when BOTH this AND {@link decideAutoMergeArm} say yes.
+ *
+ * An absent/untrusted resolution refuses with a reason that never says
+ * "failure" — {@link decideAutoMergeArm}'s "not success" wording is reserved
+ * for a GENUINE failing review, so a forged or missing status is never
+ * confused with one in a log line or an escalation (criterion 2: a hostile or
+ * buggy poster's `failure` is exactly as inert here as its `success` would
+ * be — neither can move this decision off "wait for a real one").
+ */
+export function decideAutoMergeArmAtSha(entry: ReviewStatusEntry | undefined, trustedLogin: string): ArmDecision {
+  const resolved = resolveReviewProvenance(entry, trustedLogin);
+  if (resolved === "success") {
+    return {
+      arm: true,
+      reason: `remudero-review=success at this sha, posted by the trusted reviewer identity ('${trustedLogin}')`,
+    };
+  }
+  if (resolved === "failure") {
+    return { arm: false, reason: "remudero-review is not success" };
+  }
+  return {
+    arm: false,
+    reason: entry
+      ? `remudero-review at this sha was posted by '${entry.posterLogin ?? "unknown"}', not the trusted ` +
+        `reviewer identity ('${trustedLogin}') — treated as ABSENT, not as a failure, so a forged or ` +
+        `mistaken poster can never itself block a merge a genuine reviewer would pass`
+      : "no remudero-review status found for this sha — treated as ABSENT, arming withheld",
+  };
+}
+
+// ── THE LEDGER-KEYED ARM DECISION (W1-T230 — THE STATUS CHANNEL PROVED DECORATIVE) ──
+//
+// #449's incident: the `remudero-review` commit status took SEVEN contradictory
+// writes on one sha (including a keyword-only CAPPED success overwriting an
+// executed failure), with one write 85 SECONDS AFTER the PR merged. GitHub's
+// commit-status API is a mutable, last-write-wins channel that anything holding
+// `gh` can post to — the W1-T203 provenance gate above closes one forge vector,
+// but it is DARK in production (REVIEWER_IDENTITY_ENV is unset), so today the
+// channel is exactly as trusted as before W1-T203 shipped. The house doctrine
+// already answers this in the other direction: task status derives from GitHub
+// rather than tasks.yaml because the yaml field proved decorative. Here the fix
+// runs the other way — the arm decision derives from the orchestrator's OWN
+// ledgered verdict because the status channel proved decorative AND writable,
+// strictly worse than decorative. The status stays posted (branch protection,
+// display) but from here on it is never an INPUT to this decision.
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * THE ARM DECISION (W1-T230). Given the most recent `review.posted` verdict
+ * this orchestrator itself ledgered for a task ({@link priorReviewVerdictFromLedger})
+ * and the CURRENT live head sha, decide whether to arm auto-merge. Pure — the
+ * whole point is that a fresh process can re-derive this identically from
+ * nothing but the ledger + the live head, never from in-process memory
+ * (acceptance criterion 3: a resumed pass arms from the prior pass's ledgered
+ * verdict, with no in-memory state).
+ *
+ * - No record at all → refuse. FAIL CLOSED: a head with no ledgered verdict is
+ *   left unarmed, the same shape as "no verdict yet" (acceptance criterion 1 —
+ *   a forged/live-only `remudero-review` success with no ledger backing must
+ *   arm nothing).
+ * - A record for a DIFFERENT sha → refuse. This is the sha binding that makes
+ *   push-invalidates-review real at the decision layer, not only at display
+ *   (acceptance criterion 4): a verdict ledgered before a subsequent push must
+ *   never arm the new head.
+ * - A record for THIS sha whose state isn't "success" → refuse (a genuine
+ *   ledgered failure blocks exactly as before).
+ * - A record for THIS sha that is "success" → arm — regardless of whatever the
+ *   live status channel currently says, including a stubbed-unavailable read
+ *   (acceptance criterion 2).
+ */
+export function decideArmFromLedgerVerdict(prior: PriorReviewVerdict | undefined, headSha: string): ArmDecision {
+  if (!prior) {
+    return {
+      arm: false,
+      reason: "no ledgered review.posted verdict found for this task — arming withheld (W1-T230, fail closed)",
+    };
+  }
+  if (prior.headSha !== headSha) {
+    return {
+      arm: false,
+      reason:
+        `ledgered verdict is for a different head (${prior.headSha.slice(0, 7)}), not the current head ` +
+        `(${headSha.slice(0, 7)}) — a push after the verdict was posted must not arm the new head (W1-T230)`,
+    };
+  }
+  if (prior.state !== "success") {
+    return { arm: false, reason: "the ledgered verdict for this exact head is not success (W1-T230)" };
+  }
+  return {
+    arm: true,
+    reason: `ledgered review.posted verdict for this exact head (${headSha.slice(0, 7)}) is success (W1-T230)`,
+  };
 }
 
 /**
@@ -1113,7 +1439,7 @@ export function resolveAutoMergeArm(
  * codebase already use. Written by `rmd review <pr>
  * --override-capped-by/--override-capped-reason` (run-task.ts); consulted by
  * the arming path ({@link decideAutoMergeArm}) before refusing a CAPPED
- * tdd:strict verdict.
+ * verdict.
  */
 export function cappedOverrideFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -1199,9 +1525,13 @@ export interface ReviewPromptInput {
 /**
  * Render the prompt for a FRESH-context REVIEW worker (acceptance #1/#3). The
  * worker is read-only + gh: it reads the PR diff, the task's acceptance criteria,
- * and the implement REPORT, verdicts each criterion against its proof, and posts
- * the `remudero-review` commit status. It is told NEVER to edit code — and the
- * runner spawns it with a read-only settings profile, so this is belt-and-braces.
+ * and the implement REPORT, and verdicts each criterion against its proof. It
+ * does NOT post the `remudero-review` commit status itself — the deny-floor
+ * (W1-T203) refuses any `gh api -X POST .../statuses/...` call from a worker,
+ * so the reviewer only emits `REVIEW_VERDICT` lines and the ORCHESTRATOR posts
+ * the authoritative status after folding them in (see reviewerVerdictContract,
+ * parseReviewerVerdicts). It is told NEVER to edit code — and the runner spawns
+ * it with a read-only settings profile, so this is belt-and-braces.
  *
  * The reviewer verifies against REPO STATE, not diff+report alone: when a proof
  * names an EXECUTABLE check (a test to run, a grep/command over the source), the
@@ -1214,9 +1544,6 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
   const criteria = (input.task.acceptance ?? [])
     .map((c, i) => `  ${i + 1}. CLAIM: ${c.claim}\n     PROOF: ${c.proof}`)
     .join("\n");
-  const post = (state: ReviewState) =>
-    `gh api -X POST repos/${input.owner}/${input.repo}/statuses/${input.headSha} ` +
-    `-f context=${REVIEW_CONTEXT} -f state=${state} -f description="<one line>"`;
 
   return [
     `You are a REVIEW worker with FRESH context — you are NOT the implementer and`,
@@ -1247,13 +1574,13 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
     `ACCEPTANCE CRITERIA:`,
     criteria || "  (none stated — treat as FAILURE: nothing to verify)",
     ``,
-    `Then post the commit status on the PR head sha (${input.headSha}):`,
-    `  on PASS:  ${post("success")}`,
-    `  on FAIL:  ${post("failure")}`,
+    `Do NOT post the \`${REVIEW_CONTEXT}\` commit status yourself — a worker`,
+    `\`gh api -X POST .../statuses/...\` call is refused by the deny-floor`,
+    `(W1-T203); it would simply fail. Instead, emit your per-criterion`,
+    `REVIEW_VERDICT lines (below) and the ORCHESTRATOR will post the`,
+    `authoritative status on sha ${input.headSha} after folding them in.`,
     ``,
-    `This does NOT touch branch protection — you only POST the ${REVIEW_CONTEXT}`,
-    `status; whether it is REQUIRED is a separate concern. End with a REPORT: the`,
-    `per-criterion verdicts, the state you posted, and the sha.`,
+    `End with a REPORT: the per-criterion verdicts and your reasoning for each.`,
   ].join("\n");
 }
 
@@ -1269,7 +1596,8 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
 export function reviewerVerdictContract(count: number): string {
   return [
     ``,
-    `MACHINE-READABLE OUTPUT (required, in addition to posting the status): emit`,
+    `MACHINE-READABLE OUTPUT (required — this is what the orchestrator posts`,
+    `the status from, since you do not post it yourself): emit`,
     `EXACTLY one line per criterion, in this form and nothing else on the line:`,
     `  REVIEW_VERDICT <n>: PASS   (proof is responsive and substantiated)`,
     `  REVIEW_VERDICT <n>: FAIL   (proof missing, unpasted, or non-responsive)`,
@@ -1859,6 +2187,18 @@ export function reviewerOutcome(opts: {
  * the exact `gh api` call from the design; mirrors the other gh helpers in
  * lib/worker.ts (untested by unit — it shells out). WRITE-scoped to a commit
  * STATUS only; it can never edit code.
+ *
+ * W1-T203 (i): when {@link REVIEWER_TOKEN_ENV} is set, this `gh` invocation
+ * authenticates as the dedicated reviewer identity (`GH_TOKEN` overrides
+ * whatever `gh` would otherwise pick up from ambient auth) rather than
+ * whatever credential the operator/workers share — the one thing that makes
+ * {@link resolveReviewProvenance}'s login compare meaningful at arm time.
+ * Unset ⇒ falls back to ambient `gh` auth, byte-identical to before this
+ * task (see the env var's own doc comment for the bootstrap-ordering
+ * rationale). The token itself never reaches this function via an argument —
+ * only via the orchestrator's OWN process env, which a worker's sandboxed
+ * env/HOME cannot read (`settings/worker.json` already denies
+ * `~/.config/remudero/**`).
  */
 export function postReviewStatus(opts: {
   owner: string;
@@ -1878,5 +2218,352 @@ export function postReviewStatus(opts: {
     `state=${opts.state}`,
   ];
   if (opts.description) args.push("-f", `description=${opts.description.slice(0, 140)}`);
-  execFileSync("gh", args, { stdio: "pipe" });
+  const reviewerToken = process.env[REVIEWER_TOKEN_ENV];
+  const env = reviewerToken ? { ...process.env, GH_TOKEN: reviewerToken, GITHUB_TOKEN: reviewerToken } : process.env;
+  execFileSync("gh", args, { stdio: "pipe", env });
+}
+
+// ── W1-T228: the status CHANNEL is last-write-wins across uncoordinated
+// posters ────────────────────────────────────────────────────────────────
+//
+// GROUND TRUTH this hardens (plan/tasks.yaml W1-T228): PR 449 head 833561d
+// took SEVEN `remudero-review` writes in one day. An EXECUTED verdict (2/6
+// proofs run, FAILED) at 18:02:31 was overwritten by a KEYWORD-ONLY CAPPED
+// success (0/6 executed) at 18:10:42 — weaker evidence clobbered stronger
+// evidence on an IDENTICAL sha. A THIRD write landed at 18:16:20, ~85s AFTER
+// the PR merged at 18:14:55 — the channel accepted a write against a closed
+// lifecycle. W1-T230 already took the ARM decision off this channel onto the
+// orchestrator's own ledger; this hardens the CHANNEL itself, regardless of
+// the arm path, because the posted status is what branch protection reads,
+// what the board renders, and what an operator opens a PR to see.
+//
+// ONE POST SITE enforces THREE RULES — {@link postReviewStatusGuarded} is the
+// only call path `run-task.ts` uses from here on (the raw {@link
+// postReviewStatus} above becomes an internal implementation detail + the
+// injectable "real poster" in tests):
+//   (i)   PRECEDENCE — a keyword-only/CAPPED verdict (no criterion's proof
+//         actually EXECUTED) never overwrites an executed-evidence verdict
+//         for the SAME sha. Executed may overwrite executed (a later real
+//         run supersedes an earlier one) — {@link decideReviewStatusPost}.
+//   (ii)  LIFECYCLE — no status writes to a merged or closed PR. Refused,
+//         and the refusal is ledgered (never silently dropped).
+//   (iii) SERIALIZATION — per task (== per PR; every real caller already
+//         keys its `review.posted` ledger lines by task id), via the SAME
+//         O_EXCL create-or-fail primitive drain-lock.ts/inflight-lock.ts use
+//         ({@link acquireReviewStatusLock}) — adapted from a SINGLETON GUARD
+//         (refuse a second concurrent holder) to a MUTEX (wait for the
+//         holder, then proceed): the drain/inflight locks guard a whole RUN;
+//         this guards one short read-decide-write critical section.
+// READ BEFORE WRITE, HONESTLY: precedence needs the CURRENT posted state, so
+// {@link postReviewStatusGuarded} reads the ledger and the live PR lifecycle
+// AFTER acquiring the lock, never before — a read taken before the lock is
+// exactly the TOCTOU gap the lock exists to close.
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Whether ANY criterion's proof actually EXECUTED on this sha ("executed"),
+ * or the verdict rests entirely on the ABSENCE of that evidence
+ * ("no_evidence" — keyword-only and CAPPED are both this tier: neither ever
+ * observed the repo state). Evidence outranks its absence, one-directionally
+ * — see {@link decideReviewStatusPost}.
+ */
+export type ReviewEvidenceStrength = "executed" | "no_evidence";
+
+export function reviewEvidenceStrength(
+  criteria: ReadonlyArray<Pick<CriterionVerdict, "proof_exec">>,
+): ReviewEvidenceStrength {
+  const executed = criteria.some((c) => c.proof_exec === "executed_pass" || c.proof_exec === "executed_fail");
+  return executed ? "executed" : "no_evidence";
+}
+
+/**
+ * The most recent `review.posted` line's sha/state/evidence for `taskId` —
+ * {@link decideReviewStatusPost}'s `prior` argument. Deliberately separate
+ * from {@link PriorReviewVerdict} (the W1-T178/W1-T230 shape): those
+ * consumers never needed evidence strength, and giving this task its own
+ * type keeps their contracts untouched. Same "last one wins" scan idiom as
+ * {@link priorReviewVerdictFromLedger} and `unmetFromLedger` (run-task.ts) —
+ * `evidence` is derived from the SAME `proof_exec` array `run-task.ts`
+ * already ledgers on every `review.posted` line (no new ledger field).
+ */
+export interface PostedReviewStatusRecord {
+  headSha: string;
+  state: ReviewState;
+  evidence: ReviewEvidenceStrength;
+}
+
+export function lastPostedReviewStatusFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+): PostedReviewStatusRecord | undefined {
+  let prior: PostedReviewStatusRecord | undefined;
+  for (const line of lines) {
+    if (line.step !== "review.posted" || line.task_id !== taskId) continue;
+    if (typeof line.head_sha !== "string") continue;
+    if (line.state !== "success" && line.state !== "failure") continue;
+    const proofExec: unknown[] = Array.isArray(line.proof_exec) ? (line.proof_exec as unknown[]) : [];
+    const executed = proofExec.some((p) => p === "executed_pass" || p === "executed_fail");
+    prior = { headSha: line.head_sha, state: line.state, evidence: executed ? "executed" : "no_evidence" };
+  }
+  return prior;
+}
+
+/**
+ * The CURRENT PR lifecycle {@link decideReviewStatusPost}'s LIFECYCLE rule
+ * checks against — fetched FRESH (never a snapshot from before ci/the
+ * reviewer spawn ran) by {@link postReviewStatusGuarded}.
+ */
+export interface PrLifecycleState {
+  merged: boolean;
+  closed: boolean;
+}
+
+/**
+ * Real fetcher: shells to `gh` (untested by unit — it shells out, same as
+ * {@link postReviewStatus}'s own `gh api` call) — {@link
+ * postReviewStatusGuarded}'s default; tests inject a fake instead.
+ */
+export function fetchPrLifecycle(prUrl: string): PrLifecycleState {
+  const out = execFileSync("gh", ["pr", "view", prUrl, "--json", "state"], { encoding: "utf8" });
+  const state = String((JSON.parse(out) as { state?: string }).state ?? "").toUpperCase();
+  return { merged: state === "MERGED", closed: state === "CLOSED" };
+}
+
+/** One posting attempt {@link decideReviewStatusPost} judges. */
+export interface ReviewStatusPostAttempt {
+  headSha: string;
+  state: ReviewState;
+  evidence: ReviewEvidenceStrength;
+}
+
+export type ReviewStatusDecision = { post: true } | { post: false; reason: string };
+
+/**
+ * THE PURE W1-T228 GATE — the falsifier this task exists to prove is a unit
+ * fixture, exactly like {@link judgeReview}/{@link decideArmFromLedgerVerdict}.
+ * Order matters: LIFECYCLE is checked FIRST — a merged/closed PR refuses
+ * regardless of precedence, since arguing about which verdict is "stronger"
+ * on a PR nobody can act on anymore is moot.
+ */
+export function decideReviewStatusPost(
+  attempt: ReviewStatusPostAttempt,
+  prior: PostedReviewStatusRecord | undefined,
+  lifecycle: PrLifecycleState,
+): ReviewStatusDecision {
+  if (lifecycle.merged || lifecycle.closed) {
+    return {
+      post: false,
+      reason:
+        `PR is already ${lifecycle.merged ? "merged" : "closed"} — refusing to post remudero-review against ` +
+        `a closed lifecycle (W1-T228 lifecycle rule)`,
+    };
+  }
+  if (
+    prior !== undefined &&
+    prior.headSha === attempt.headSha &&
+    prior.evidence === "executed" &&
+    attempt.evidence === "no_evidence"
+  ) {
+    return {
+      post: false,
+      reason:
+        `refusing to overwrite an executed-evidence ${prior.state} verdict for ${attempt.headSha.slice(0, 7)} ` +
+        `with a keyword-only/CAPPED verdict (W1-T228 precedence: evidence outranks its absence)`,
+    };
+  }
+  return { post: true };
+}
+
+// ── W1-T228 serialization: an O_EXCL MUTEX (not a singleton guard) ────────
+
+export interface ReviewStatusLockInfo {
+  pid: number;
+  host: string;
+  startedAt: string;
+}
+
+export class ReviewStatusLockTimeoutError extends Error {
+  constructor(
+    public readonly lockPath: string,
+    public readonly holder: ReviewStatusLockInfo,
+  ) {
+    super(
+      `timed out waiting for the review-status lock ${lockPath} (held by pid ${holder.pid} on ` +
+        `${holder.host}, since ${holder.startedAt})`,
+    );
+    this.name = "ReviewStatusLockTimeoutError";
+  }
+}
+
+function readReviewStatusLock(lockPath: string): ReviewStatusLockInfo | null {
+  try {
+    const o = JSON.parse(readFileSync(lockPath, "utf8"));
+    if (typeof o?.pid === "number") return o as ReviewStatusLockInfo;
+    return null;
+  } catch {
+    return null; // missing, unreadable, or garbage → treat as "no valid holder"
+  }
+}
+
+function reviewStatusLockDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export interface AcquireReviewStatusLockOpts {
+  /** Override the recorded holder identity (tests). Defaults to this process. */
+  info?: Partial<ReviewStatusLockInfo>;
+  /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */
+  isPidAlive?: (pid: number) => boolean;
+  /** Poll cadence while a LIVE holder blocks acquisition (tests speed this up). */
+  retryMs?: number;
+  /** Give up and throw {@link ReviewStatusLockTimeoutError} after this long. */
+  timeoutMs?: number;
+}
+
+export interface ReviewStatusLockHandle {
+  readonly path: string;
+  /** Remove the lock. Idempotent — safe to call from a finally. */
+  release(): void;
+}
+
+/**
+ * Acquire the per-task review-status MUTEX — the SAME O_EXCL create-or-fail
+ * primitive {@link import("./drain-lock.js").acquireDrainLock}/{@link
+ * import("./inflight-lock.js").acquireInflightLock} use (creation is atomic,
+ * so two racing acquirers cannot both win; a stale lock — holder pid dead, or
+ * the file unreadable/garbage — is reclaimed), adapted from a SINGLETON
+ * GUARD to a MUTEX: where those THROW immediately when a live holder is
+ * found, this WAITS (bounded by `timeoutMs`) and retries — the callers here
+ * are N uncoordinated posters that must all eventually run their own
+ * read-decide-write, never a second run of the same long-lived task that
+ * should simply refuse to start.
+ */
+export async function acquireReviewStatusLock(
+  lockPath: string,
+  opts: AcquireReviewStatusLockOpts = {},
+): Promise<ReviewStatusLockHandle> {
+  const isAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  const retryMs = opts.retryMs ?? 50;
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const info: ReviewStatusLockInfo = {
+    pid: opts.info?.pid ?? process.pid,
+    host: opts.info?.host ?? hostname(),
+    startedAt: opts.info?.startedAt ?? new Date().toISOString(),
+  };
+  mkdirSync(dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + timeoutMs;
+
+  for (;;) {
+    try {
+      // O_EXCL: create-or-fail. Winner writes its identity; there is no TOCTOU gap.
+      const fd = openSync(lockPath, "wx");
+      writeSync(fd, JSON.stringify(info, null, 2));
+      closeSync(fd);
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const held = readReviewStatusLock(lockPath);
+      if (held && isAlive(held.pid)) {
+        if (Date.now() >= deadline) throw new ReviewStatusLockTimeoutError(lockPath, held);
+        await reviewStatusLockDelay(retryMs); // MUTEX: wait + retry, never throw on a live holder
+        continue;
+      }
+      try {
+        unlinkSync(lockPath); // stale (dead pid / garbage) → clear and loop to re-create
+      } catch {
+        // another actor may have cleared it concurrently; retry the create
+      }
+    }
+  }
+
+  let released = false;
+  return {
+    path: lockPath,
+    release() {
+      if (released) return;
+      released = true;
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // already gone — idempotent
+      }
+    },
+  };
+}
+
+// ── W1-T228: the single guarded post site ─────────────────────────────────
+
+export interface PostReviewStatusGuardedOpts {
+  owner: string;
+  repo: string;
+  sha: string;
+  state: ReviewState;
+  description?: string;
+  /** The PR the lock/ledger key off — every real caller already keys its
+   * `review.posted` ledger lines by this same id (the task id, or the
+   * `dep-review-PR<n>`/`PR-<n>` synthetic ids `run-task.ts` falls back to). */
+  taskId: string;
+  evidence: ReviewEvidenceStrength;
+  ledgerPath: string;
+  runId: string;
+  /**
+   * Fresh lifecycle read for THIS attempt — real callers pass
+   * `() => fetchPrLifecycle(prUrl)`; tests inject a fake. Called INSIDE the
+   * lock, never before (see the module doc comment above).
+   */
+  fetchLifecycle: () => PrLifecycleState;
+  /** Injected raw poster (tests). Defaults to {@link postReviewStatus}. */
+  post?: (o: { owner: string; repo: string; sha: string; state: ReviewState; description?: string }) => void;
+  lockOpts?: AcquireReviewStatusLockOpts;
+}
+
+export interface PostReviewStatusGuardedResult {
+  posted: boolean;
+  /** Present only when `posted` is false — see {@link decideReviewStatusPost}. */
+  reason?: string;
+}
+
+/**
+ * THE single call path for posting `remudero-review` from here on (W1-T228).
+ * Acquires the per-task lock, reads the ledger + live PR lifecycle FRESH
+ * (inside the lock — read-before-write, honestly racy without it), decides
+ * via the pure {@link decideReviewStatusPost}, and either posts (delegating
+ * to the raw {@link postReviewStatus}) or refuses — EVERY attempt is
+ * ledgered, including refusals (`review.post_refused`), so a refused write
+ * leaves a trace instead of the same silent blindness this task fixes.
+ */
+export async function postReviewStatusGuarded(
+  opts: PostReviewStatusGuardedOpts,
+): Promise<PostReviewStatusGuardedResult> {
+  const post = opts.post ?? postReviewStatus;
+  const lockDir = join(dirname(opts.ledgerPath), "review-status-locks");
+  const lockPath = join(lockDir, `${opts.taskId}.lock`);
+  const handle = await acquireReviewStatusLock(lockPath, opts.lockOpts);
+  try {
+    // READ BEFORE WRITE, INSIDE THE LOCK — a read taken before acquiring the
+    // lock would leave open exactly the TOCTOU gap the lock exists to close.
+    const prior = lastPostedReviewStatusFromLedger(readLedgerLines(opts.ledgerPath), opts.taskId);
+    const lifecycle = opts.fetchLifecycle();
+    const decision = decideReviewStatusPost(
+      { headSha: opts.sha, state: opts.state, evidence: opts.evidence },
+      prior,
+      lifecycle,
+    );
+    if (!decision.post) {
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId,
+        task_id: opts.taskId,
+        step: "review.post_refused",
+        head_sha: opts.sha,
+        attempted_state: opts.state,
+        evidence: opts.evidence,
+        reason: decision.reason,
+      });
+      return { posted: false, reason: decision.reason };
+    }
+    post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, state: opts.state, description: opts.description });
+    return { posted: true };
+  } finally {
+    handle.release();
+  }
 }

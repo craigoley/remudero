@@ -84,6 +84,16 @@ export interface components {
       taskId: string;
       issueUrl: string;
     };
+    /** POST /v1/escalation/mark-handled's body (W1-T182) -- the NEEDS ME affordance an ESCALATION row (any class: BLOCKED/MANUAL/HARD_STOP/GRILL) actually supports, distinct from ApproveManualRequest's MANUAL-queue check-off: "approve" has no defined verb for an escalation. Closes the named `needs-human`-labeled GitHub issue (src/lib/escalate.ts); the name is deliberately "mark handled", not "approve" or "resolve" -- closing the issue does not, by itself, imply the underlying block is fixed. */
+    MarkEscalationHandledRequest: {
+      taskId: string;
+      issueUrl: string;
+    };
+    MarkEscalationHandledResult: {
+      ok: boolean;
+      taskId: string;
+      issueUrl: string;
+    };
     /** One `plan/feedback/<id>.yaml` entry (src/lib/feedback.ts's `FeedbackEntry` -- the §7B schema shape: capture -> triage -> gate). */
     FeedbackEntry: {
       id: string;
@@ -267,6 +277,17 @@ export interface paths {
     post: {
       responses: {
           "200": ApproveManualResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+        };
+    };
+  };
+  "/v1/escalation/mark-handled": {
+    post: {
+      responses: {
+          "200": MarkEscalationHandledResult;
           "400": Error;
           "401": Error;
           "403": Error;

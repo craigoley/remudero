@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
 import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,11 +40,25 @@ import {
   type MergedSet,
   type OpenPrCheck,
 } from "./lib/drain.js";
-import { DEFAULT_POLL_INTERVAL_MS, daemonBoot, runDaemon, type DaemonOpts, type DaemonSummary } from "./lib/daemon.js";
+import {
+  DEFAULT_POLL_INTERVAL_MS,
+  daemonBoot,
+  daemonExitCode,
+  runDaemon,
+  type DaemonOpts,
+  type DaemonSummary,
+} from "./lib/daemon.js";
 import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
-import { generateLaunchdPlist, launchdPlistPath } from "./lib/launchd.js";
+import { DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, launchdPlistPath } from "./lib/launchd.js";
 import { buildDigest, sendDigest } from "./lib/digest.js";
-import { escalate, ghIssueGateway, type EscalationClass, type EscalationOption, type IssueGateway } from "./lib/escalate.js";
+import {
+  escalate,
+  ghIssueGateway,
+  tryEscalate,
+  type EscalationClass,
+  type EscalationOption,
+  type IssueGateway,
+} from "./lib/escalate.js";
 import { imessageChannel, notify } from "./lib/notify.js";
 import { ghAlertGateway, pollAlerts, renderAlertsSummary } from "./lib/ops.js";
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
@@ -58,7 +73,13 @@ import {
 } from "./lib/feedback.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
-import { buildServeServer, resolveServePort, resolveServiceTokens } from "./lib/serve.js";
+import {
+  buildServeServer,
+  resolveServeHosts,
+  resolveServePort,
+  resolveServiceTokens,
+  serviceTokensPath,
+} from "./lib/serve.js";
 import {
   buildGrillEscalation,
   decideTriage,
@@ -89,15 +110,20 @@ import {
   draftAttemptKey,
   draftsDueOnDaemon,
   gitGrepAnchorTrue,
+  inboxDraftPrompt,
+  isDraftStale,
+  isRatifiedInLedger,
   parseDraftAttemptCache,
   parseDraftCache,
   parseProposalRegistry,
+  pruneRatifiedProposals,
   proposalsNeedingDraft,
   ratifyTelemetry,
   reframeProposal,
   renderInbox,
   renderRatifyTelemetry,
   runDraftRung,
+  summarizeInboxPoll,
   type DraftAttemptCache,
   type DraftCache,
   type DraftRungOutcome,
@@ -158,17 +184,20 @@ import {
   buildReviewPrompt,
   cappedAnnotation,
   cappedOverrideFromLedger,
+  decideArmFromLedgerVerdict,
+  fetchPrLifecycle,
   floorDegradedAnnotation,
   isTddStrict,
   judgeReview,
   keywordOnlyAnnotation,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
-  postReviewStatus,
+  postReviewStatusGuarded,
   priorReviewVerdictFromLedger,
   resolveAutoMergeArm,
   reviewerOutcome,
   reviewerVerdictContract,
+  reviewEvidenceStrength,
   reviewLedgerLegibilityFields,
   type CappedOverride,
   type CriterionVerdict,
@@ -233,7 +262,7 @@ import {
   type WorkerResult,
 } from "./lib/worker.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "./lib/drain-lock.js";
-import { acquireInflightLock, InflightLockError } from "./lib/inflight-lock.js";
+import { acquireInflightLock, InflightLockError, sweepStaleInflightLocks } from "./lib/inflight-lock.js";
 import { classifyFailure, MAX_TRANSIENT_RETRIES, type FailureSignal } from "./lib/classify.js";
 import { shouldRecordDecision } from "./lib/risk-score.js";
 import {
@@ -382,8 +411,50 @@ interface RollupEntry {
   state?: string;
 }
 
-/** Arm GitHub auto-merge on a PR the runner opened. Non-fatal: the poll decides. */
-function armAutoMerge(prUrl: string): void {
+/**
+ * Arm GitHub auto-merge on a PR the runner opened. Non-fatal: the poll decides.
+ *
+ * W1-T230 (THE ARM DECISION): this is the SOLE choke point every arm call
+ * site reaches, and it keys arming ENTIRELY off the orchestrator's own
+ * ledgered `review.posted` verdict for `taskId`, re-checked against the LIVE
+ * current head sha right here — never the live `remudero-review` status
+ * channel, which #449 proved is a mutable, writable, last-write-wins surface
+ * (seven contradictory writes on one sha, one 85s after merge) that W1-T203's
+ * provenance gate never actually fenced in production (REVIEWER_IDENTITY_ENV
+ * is unset on this host). No ledger record for this task/head ⇒ no arm — fail
+ * closed, identical in shape to "no verdict yet" (the decision itself is
+ * {@link decideArmFromLedgerVerdict}, lib/review.ts). `taskId` absent (a PR
+ * this orchestrator cannot key a verdict to) also fails closed, same shape.
+ *
+ * Re-fetches the live head sha immediately before arming — never trusts a
+ * caller's possibly-stale in-memory value — so a push between review and arm
+ * is caught by the sha-binding check, and re-reads the ledger fresh every
+ * call: a resumed process recovers the SAME decision from nothing but the
+ * ledger + the live head (acceptance criterion 3), never from memory.
+ */
+function armAutoMerge(prUrl: string, taskId: string | undefined): void {
+  if (!taskId) {
+    console.log(`automerge.ledger_refused (W1-T230): no task id resolvable for this PR — arming withheld: ${prUrl}`);
+    return;
+  }
+  let headSha: string;
+  try {
+    const view = ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string };
+    headSha = view.headRefOid;
+  } catch (e) {
+    console.log(
+      `automerge.head_sha_unavailable (W1-T230): ${String((e as Error)?.message ?? e)} — arm withheld: ${prUrl}`,
+    );
+    return;
+  }
+  const config = loadConfig();
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const prior = priorReviewVerdictFromLedger(readLedgerLines(ledgerPath), taskId);
+  const decision = decideArmFromLedgerVerdict(prior, headSha);
+  if (!decision.arm) {
+    console.log(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
+    return;
+  }
   try {
     execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"], {
       encoding: "utf8",
@@ -637,14 +708,34 @@ async function runReview(args: {
    */
   headCheckoutDir?: string;
   /**
+   * W1-T233: the NAMED reason `headCheckoutDir` is absent because a worktree
+   * materialization attempt failed (rather than simply never having been
+   * attempted) — carried to the CAPPED verdict's posted description and the
+   * `review.posted` ledger line's `degraded_reason`/`degraded_reason_class`
+   * fields, so a degraded verdict never says only "unavailable" with no way
+   * to tell why. Absent when materialization was never attempted at all.
+   */
+  materializationFailure?: MaterializationFailure;
+  /**
    * W1-T178 (verdict stability): the run's ledger path, so a semantic-lane
    * downgrade on an UNCHANGED head sha whose deterministic floor still passes
    * can be suppressed against the most recent `review.posted` verdict for this
-   * task — see {@link applyVerdictStability}. Every real caller passes it;
-   * absent ⇒ no prior to compare against, so the rule never fires (identical to
-   * pre-W1-T178 behavior) rather than crashing.
+   * task — see {@link applyVerdictStability}.
+   *
+   * W1-T228: also REQUIRED (no longer optional) — it is where {@link
+   * postReviewStatusGuarded} reads the prior posted evidence-strength from and
+   * where its per-task serialization lock lives (a sibling
+   * `review-status-locks/` dir next to this file). Every real caller already
+   * passes it; there is no longer a "skip the guard" path.
    */
-  ledgerPath?: string;
+  ledgerPath: string;
+  /**
+   * W1-T228: the run's ledger `run_id` — carried on the `review.post_refused`
+   * ledger line {@link postReviewStatusGuarded} writes when a post is
+   * refused, so a refusal is attributable to the SAME run every other ledger
+   * line for this call already is.
+   */
+  runId: string;
 }): Promise<ReviewVerdict & { headSha: string; reviewerOutcome: string }> {
   const { owner, repo, prUrl, task, report, log, say } = args;
   const view = ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string };
@@ -753,7 +844,39 @@ async function runReview(args: {
     );
   }
 
-  postReviewStatus({ owner, repo, sha: headSha, state: verdict.state, description: verdict.summary });
+  // W1-T233: a CAPPED verdict caused by a materialization failure carries the
+  // named reason on the posted description itself — the operator reading the
+  // commit status (not just the ledger) sees WHY, never only "unavailable".
+  const description = reviewPostedDescription(verdict, args.materializationFailure);
+
+  // W1-T228: the ONLY call path that posts `remudero-review` from here on —
+  // acquires the per-task serialization lock, re-reads the ledger + live PR
+  // lifecycle INSIDE it, and refuses (ledgering the refusal) rather than
+  // overwrite an executed-evidence verdict with a weaker one, or write
+  // against an already-merged/closed PR. See lib/review.ts's W1-T228 block
+  // comment for the full design.
+  const posted = await postReviewStatusGuarded({
+    owner,
+    repo,
+    sha: headSha,
+    state: verdict.state,
+    description,
+    taskId: task.id,
+    evidence: reviewEvidenceStrength(verdict.criteria),
+    ledgerPath: args.ledgerPath,
+    runId: args.runId,
+    fetchLifecycle: () => fetchPrLifecycle(prUrl),
+  });
+  if (!posted.posted) {
+    // REFUSED, NOT SWALLOWED: postReviewStatusGuarded already ledgered
+    // `review.post_refused` with the full reason; this is the loud console
+    // twin so a refusal is as visible as an ordinary posted verdict is.
+    say(
+      `remudero-review: post REFUSED for ${headSha.slice(0, 7)} (verdict computed: ${verdict.state}) — ` +
+        `${posted.reason} (W1-T228 — see the review.post_refused ledger line)`,
+    );
+    return { ...verdict, headSha, reviewerOutcome: outcome };
+  }
   const unmet = verdict.criteria.filter((c) => !c.met);
   const unmetClaims = unmet.map((c) => c.claim);
   const reasons = unmet.map((c) => c.reason);
@@ -782,11 +905,18 @@ async function runReview(args: {
     // was WRITTEN to be runnable (house dialect). NO blocking-behavior change:
     // `state` above is exactly what it always was.
     floor_degraded: verdict.floorDegraded,
+    // W1-T233: the named reason (+ class) `headCheckoutDir` was absent, when
+    // it is absent because materialization was ATTEMPTED and failed — queryable
+    // directly rather than only readable from prose, so a degraded verdict
+    // never again says only "unavailable". See degradedReasonLedgerFields's
+    // own doc for why this is a shared function, not hand-copied fields.
+    ...degradedReasonLedgerFields(args.materializationFailure),
     // W1-T185 (criterion 5): `capped` — computed UNCONDITIONALLY, never forcing
     // `state`/`floor_state` (CAPPED IS NOT FAIL); consequential only via the
-    // SEPARATE auto-merge arming path (decideAutoMergeArm, below) on a
-    // tdd:strict task — and `keyword_only` — true when NO PR-head checkout was
-    // given at all (e.g. `rmd review`'s manual-PR path). Read off `verdict`
+    // SEPARATE auto-merge arming path (decideAutoMergeArm, below), which
+    // refuses ANY capped verdict since W1-T229 — and `keyword_only` — true
+    // when NO PR-head checkout was given at all (e.g. `rmd review`'s
+    // manual-PR path). Read off `verdict`
     // through `reviewLedgerLegibilityFields` so the ledger line names EXACTLY
     // the same two facts the posted status description rendered, never a
     // hand-copied projection that could drift from it.
@@ -1340,7 +1470,15 @@ export async function runFixRung(opts: {
       branch: opts.branch,
       evidence,
     });
-    deps.log("fix.dispatch", { strike: strikes, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: deriveFixMode(evidence) });
+    // W1-T199: TAG THE STRIKE WITH THE VERDICT REGIME IT WAS SPENT AGAINST. A strike
+    // spent when no proof could execute is a strike against KEYWORD NOISE; one spent
+    // when the floor actually ran proofs is a strike against EVIDENCE. Untagged
+    // historical lines are read as "keyword_only" (see priorStrikesFor) — they were
+    // all written before the executor shipped.
+    const verdictRegime: StrikeRegime = review.criteria.some((c) => c.proof_exec !== "not_executable")
+      ? "executed"
+      : "keyword_only";
+    deps.log("fix.dispatch", { strike: strikes, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: deriveFixMode(evidence), verdict_regime: verdictRegime });
     deps.say(
       noReviewYet
         ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE ci-log fix worker for ` +
@@ -1412,6 +1550,7 @@ export async function runFixRung(opts: {
       reviewerMount: opts.reviewBase.reviewerMount,
       headCheckoutDir: opts.reviewBase.headCheckoutDir,
       ledgerPath: deps.ledgerPath,
+      runId: opts.runId,
     });
     // W1-T100: a real review verdict now exists for THIS head — the CURRENT
     // strike stays review-mode from here. W1-T138: this can still flip back
@@ -2368,6 +2507,7 @@ async function runTask(
       // the deterministic floor observes THIS run's repo state, not report prose.
       headCheckoutDir: worktreePath,
       ledgerPath,
+      runId,
     });
 
     // ── THE blocked_review FIX RUNG (W1-T76, absorbs P21; §3's fixing state).
@@ -2456,16 +2596,19 @@ async function runTask(
       }
     }
 
-    // ── W1-T185 (Gap 1, criteria 2-3): THE AUTO-MERGE ARMING PATH refuses a
-    // CAPPED verdict on a tdd:strict task, unattended — the #411 shape (0/5
-    // proofs executed, posted as an uncapped PASS, merged with no human
-    // reading the diff). No autonomous run carries an operator override of
-    // its own: an override is a HUMAN decision, granted out of band via
-    // `rmd review <pr> --override-capped-by/--override-capped-reason` and
-    // recovered here from the SAME ledger every other precedence check in
-    // this file reads (readLedgerLines). A non-tdd:strict task, or a verdict
-    // that isn't capped, arms exactly as before this task — decideAutoMergeArm
-    // only ever REFUSES the one shape rule 22's fixture (iii) named.
+    // ── W1-T185 (Gap 1, criteria 2-3), raised by W1-T229: THE AUTO-MERGE
+    // ARMING PATH refuses ANY CAPPED verdict, unattended — the #411 shape
+    // (0/5 proofs executed, posted as an uncapped PASS, merged with no human
+    // reading the diff). W1-T229 removed the tdd:strict exemption this used
+    // to carry: a capped, non-tdd:strict PR previously armed exactly as if it
+    // were an ordinary PASS, which made prose the DEFAULT merge floor (since
+    // `{tdd: strict}` is opt-in, not the default). No autonomous run carries
+    // an operator override of its own: an override is a HUMAN decision,
+    // granted out of band via `rmd review <pr> --override-capped-by/
+    // --override-capped-reason` and recovered here from the SAME ledger every
+    // other precedence check in this file reads (readLedgerLines). A verdict
+    // that isn't capped arms exactly as before — decideAutoMergeArm only ever
+    // REFUSES the one shape rule 22's fixture (iii) named.
     //
     // KNOWN RESIDUAL GAP (explicitly out of this task's stated file scope,
     // `plan/tasks.yaml` W1-T185 `files:`): `sweep.ts`'s independent
@@ -2474,8 +2617,7 @@ async function runTask(
     // UNARMED, but a later sweep poll could still arm it via that separate
     // path. Left for a follow-up task rather than widened here unreviewed.
     const tddStrict = isTddStrict(task.principles);
-    const cappedOverride =
-      review.capped && tddStrict ? cappedOverrideFromLedger(readLedgerLines(ledgerPath), taskId) : undefined;
+    const cappedOverride = review.capped ? cappedOverrideFromLedger(readLedgerLines(ledgerPath), taskId) : undefined;
     const armDecision = resolveAutoMergeArm(review, tddStrict, cappedOverride, (s, extra) => log(s, extra));
     if (!armDecision.arm) {
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
@@ -2484,10 +2626,10 @@ async function runTask(
           class: "BLOCKED",
           taskId,
           runId,
-          summary: `CAPPED verdict on a tdd:strict task — auto-merge refused unattended — ${prUrl}`,
+          summary: `CAPPED verdict — auto-merge refused unattended — ${prUrl}`,
           detail:
-            `remudero-review posted CAPPED (0 of ${review.criteria.length} proofs executed) on a task ` +
-            `whose principles are {tdd: strict}. ${armDecision.reason}\n\nAuto-merge was NOT armed.`,
+            `remudero-review posted CAPPED (0 of ${review.criteria.length} proofs executed). ` +
+            `${armDecision.reason}\n\nAuto-merge was NOT armed.`,
           options: [
             {
               label: "add-proof",
@@ -2509,12 +2651,12 @@ async function runTask(
       log("verdict", {
         verdict: "blocked",
         pr_url: prUrl,
-        reason: "capped verdict on tdd:strict task refused auto-merge",
+        reason: "capped verdict refused auto-merge",
         issue_url: issueUrl,
         cost_usd: costUsd,
         billing_mode: "subscription",
       });
-      say(`verdict: blocked — CAPPED verdict on tdd:strict task, escalated: ${issueUrl}`);
+      say(`verdict: blocked — CAPPED verdict, escalated: ${issueUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
     }
 
@@ -2524,7 +2666,7 @@ async function runTask(
     // check is green. If checks go red or the poll times out, the PR is LEFT
     // OPEN and the verdict is blocked_ci — pending is treated as blocked, never
     // as pass. No Action arms a PR; only this code, only on PRs it opened.
-    armAutoMerge(prUrl);
+    armAutoMerge(prUrl, taskId);
     log("automerge.armed", {});
     const outcome = await pollToGate(prUrl, (s, extra) => log(s, extra));
 
@@ -2616,6 +2758,23 @@ export function resolveReviewTarget(
 // `dispatchFix` path already uses for the SAME purpose (see that function,
 // above), never new machinery. Teardown is the CALLER's job (a `finally` in
 // `reviewCommand`, below) so it covers every exit path.
+//
+// W1-T232: the original shape here ALSO ran `git checkout -B <branch>
+// origin/<branch>` after the `worktree add`, purely to give the throwaway
+// worktree a branch NAME — nothing downstream ever reads it; proof execution
+// only reads files at the checked-out tip, which `worktree add` alone already
+// provides (as a DETACHED HEAD — confirmed by hand: `git worktree add <path>
+// origin/<branch>` prints "Preparing worktree (detached HEAD ...)" with no
+// second command). `checkout -B` FORCE-CREATES/RESETS a local branch of that
+// name, which THROWS the moment any other worktree already holds it — e.g.
+// the operator's own filing worktrees, or simply another `rmd review` in
+// flight on the same branch. That collision was reproduced verbatim on
+// 2026-07-21 and cost five PRs a keyword-only CAPPED verdict for a reason
+// that had nothing to do with whether the review could actually run.
+// Dropping the branch pin removes an implicit freshness check, so this now
+// asserts the materialized tip equals the PR head SHA and fails LOUDLY
+// (throws, no verdict posted) on a mismatch — reviewing the wrong tree
+// silently would be worse than not reviewing at all.
 // ────────────────────────────────────────────────────────────────────────────
 
 /** Injected git operations for {@link materializeReviewWorktree} — real
@@ -2625,40 +2784,173 @@ export function resolveReviewTarget(
 export interface ReviewWorktreeDeps {
   fetch: (repoDir: string) => void;
   addWorktree: (repoDir: string, worktreePath: string, branch: string) => void;
+  revParseHead: (worktreePath: string) => string;
+  /** Best-effort teardown of a worktree THIS attempt itself just created, used
+   * only when a LATER step of the SAME attempt fails (W1-T233: a failed
+   * materialization must leave the workspace exactly as it found it, never
+   * strand what step 1 already created). Optional — defaults to the same
+   * {@link worktreeRemove} every other teardown site in this file uses;
+   * tests override it to observe the cleanup call without touching git. */
+  removeWorktree?: (repoDir: string, worktreePath: string) => void;
 }
 
 const realReviewWorktreeDeps: ReviewWorktreeDeps = {
   fetch: (repoDir) => execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" }),
-  addWorktree: (repoDir, worktreePath, branch) => {
-    execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`], { stdio: "pipe" });
-    execFileSync("git", ["-C", worktreePath, "checkout", "-B", branch, `origin/${branch}`], { stdio: "pipe" });
-  },
+  // NO `checkout -B` — `worktree add <path> origin/<branch>` alone already
+  // leaves `<path>` at the right commit, DETACHED, and detached is all a
+  // review's file reads ever need. A named local branch here only exists to
+  // collide with whatever else holds that name (see the block comment above).
+  addWorktree: (repoDir, worktreePath, branch) =>
+    execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`], { stdio: "pipe" }),
+  revParseHead: (worktreePath) =>
+    execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { stdio: "pipe" }).toString().trim(),
 };
+
+/** Named CLASS of a materialization failure (W1-T233) — carried alongside the
+ * raw message so a pattern is visible across runs (grep the class) without
+ * parsing git's prose: `worktree-collision` (another worktree already holds
+ * this ref — the defect W1-T232 removed from the common path; still reachable
+ * via a race), `fetch-failure` (network/auth, thrown by `deps.fetch`), or
+ * `other` (disk, permissions, or any other `deps.addWorktree`/`revParseHead`
+ * failure). */
+export type MaterializationErrorClass = "worktree-collision" | "fetch-failure" | "other";
+
+/** The named reason a materialization attempt failed — never a bare, thrown-
+ * away Error. Carried to every surface that reports the degradation: the
+ * console line, the CAPPED verdict description, and the `review.posted`
+ * ledger's `degraded_reason`/`degraded_reason_class` fields. */
+export interface MaterializationFailure {
+  errorClass: MaterializationErrorClass;
+  message: string;
+}
+
+/** Result of {@link materializeReviewWorktree}: either a usable path, or a
+ * clean workspace (nothing left behind) plus the named reason it failed. */
+export type MaterializeReviewWorktreeResult =
+  | { worktreePath: string; failure?: undefined }
+  | { worktreePath: undefined; failure: MaterializationFailure };
+
+/** The posted CAPPED description, carrying the named materialization-failure
+ * reason (W1-T233) — a capped verdict caused by a failed materialization
+ * names WHY on the commit status itself, not only in the ledger. A non-capped
+ * verdict, or a capped one with no materialization failure at all (rmd
+ * review's checkout was simply never attempted), is returned unchanged. */
+export function reviewPostedDescription(
+  verdict: Pick<ReviewVerdict, "summary" | "capped">,
+  materializationFailure?: MaterializationFailure,
+): string {
+  return verdict.capped && materializationFailure
+    ? `${verdict.summary} — degraded: ${materializationFailure.errorClass}: ${materializationFailure.message}`
+    : verdict.summary;
+}
+
+/** The `review.posted` ledger line's degraded-reason fields (W1-T233) —
+ * mirrors {@link reviewLedgerLegibilityFields}'s pattern: one function the
+ * real log call AND a unit test both read the SAME two fields through, so
+ * they can never hand-drift apart. Both fields are simply absent (dropped by
+ * `JSON.stringify`) when materialization was never attempted at all. */
+export function degradedReasonLedgerFields(materializationFailure?: MaterializationFailure): {
+  degraded_reason?: string;
+  degraded_reason_class?: MaterializationErrorClass;
+} {
+  return {
+    degraded_reason: materializationFailure?.message,
+    degraded_reason_class: materializationFailure?.errorClass,
+  };
+}
 
 /**
  * Materialize a throwaway worktree at a PR's head branch so `rmd review` can
  * execute whitelisted proofs exactly like the automated fix rung does.
- * Returns the worktree path on success; `undefined` on ANY failure (network,
- * disk, a detached/deleted head) — the caller then falls back to a
- * keyword-only, CAPPED verdict (acceptance criterion 5), never a thrown
- * command reaching the operator. Teardown is the CALLER's responsibility
- * (`reviewCommand`'s `finally`), so a throw from `runReview` itself still
- * tears the worktree down (criterion 6) — this function only ever creates.
+ * Returns `{ worktreePath }` on success; on an ORDINARY materialization
+ * failure (network, disk, a detached/deleted head) returns `{ worktreePath:
+ * undefined, failure }` naming the error CLASS + message (W1-T233) — the
+ * caller then falls back to a keyword-only, CAPPED verdict (acceptance
+ * criterion 5), never a thrown command reaching the operator, and never a
+ * bare discarded reason.
+ *
+ * A materialized tip that does NOT match `headSha`, though, is not an
+ * ordinary failure — it means the fetch was stale or the ref moved out from
+ * under us, and reviewing that tree would silently produce a verdict against
+ * the WRONG code. That case throws (uncaught by this function) rather than
+ * degrading to keyword-only, so `reviewCommand` fails loudly and posts no
+ * verdict at all (W1-T232, criterion "tip mismatch after fetch fails
+ * materialization loudly").
+ *
+ * W1-T233: THIS function owns teardown of whatever IT creates. A worktree
+ * `deps.addWorktree` already registered on disk is removed, best-effort,
+ * before any failure return AND before the tip-mismatch throw — a failed (or
+ * discarded) attempt leaves the workspace exactly as it found it, rather than
+ * stranding a `review-PR*` worktree (39 were found stranded on 2026-07-21,
+ * one per failed attempt, because this used to return/throw with the
+ * worktree still on disk and `withMaterializedWorktree`'s teardown keyed on a
+ * truthy path it was never given). Teardown of a SUCCESSFULLY returned path
+ * remains the CALLER's responsibility (`reviewCommand`'s `withMaterializedWorktree`),
+ * so a throw from `runReview` itself still tears that one down (criterion 6).
  */
 export function materializeReviewWorktree(
   config: Config,
   repoDir: string,
   prNumber: number,
   headRefName: string,
+  headSha: string,
   deps: ReviewWorktreeDeps = realReviewWorktreeDeps,
-): string | undefined {
+): MaterializeReviewWorktreeResult {
   const worktreePath = join(worktreesDir(config), `review-PR${prNumber}-${Date.now()}`);
+  const removeWorktree = deps.removeWorktree ?? worktreeRemove;
+
   try {
     deps.fetch(repoDir);
+  } catch (e) {
+    // Nothing was created yet — no cleanup needed, only a named reason.
+    return {
+      worktreePath: undefined,
+      failure: { errorClass: "fetch-failure", message: String((e as Error)?.message ?? e) },
+    };
+  }
+
+  let created = false;
+  let tip: string;
+  try {
     deps.addWorktree(repoDir, worktreePath, headRefName);
-    return worktreePath;
-  } catch {
-    return undefined;
+    created = true; // the worktree is now on disk — any exit from here must clean it up.
+    tip = deps.revParseHead(worktreePath);
+  } catch (e) {
+    if (created) cleanupMaterializedWorktree(removeWorktree, repoDir, worktreePath);
+    const message = String((e as Error)?.message ?? e);
+    const errorClass: MaterializationErrorClass = /already used by worktree/.test(message)
+      ? "worktree-collision"
+      : "other";
+    return { worktreePath: undefined, failure: { errorClass, message } };
+  }
+
+  if (tip !== headSha) {
+    cleanupMaterializedWorktree(removeWorktree, repoDir, worktreePath);
+    throw new Error(
+      `materialized worktree at ${worktreePath} is at ${tip}, not the PR head ${headSha} — ` +
+        "a stale fetch or a moved ref; refusing to review a possibly-wrong tree rather than posting a false verdict",
+    );
+  }
+  return { worktreePath };
+}
+
+/** Best-effort removal of a worktree a materialization attempt itself just
+ * created, on that SAME attempt's failure — swallows a removal error rather
+ * than masking the materialization failure/mismatch that triggered it (the
+ * console still hears about a removal failure, mirroring {@link
+ * withMaterializedWorktree}'s own teardown-failure handling). */
+function cleanupMaterializedWorktree(
+  remove: (repoDir: string, worktreePath: string) => void,
+  repoDir: string,
+  worktreePath: string,
+): void {
+  try {
+    remove(repoDir, worktreePath);
+  } catch (e) {
+    console.error(
+      `(worktree teardown failed for ${worktreePath} after a materialization failure: ` +
+        `${String((e as Error)?.message ?? e)})`,
+    );
   }
 }
 
@@ -2718,11 +3010,6 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
   // Criteria: task trailer → tasks.yaml; else the PR body's Acceptance: block.
   let criteria: AcceptanceCriterion[] = [];
   let source = "NONE (fail closed — nothing to judge is never a pass)";
-  // W1-T185: the trailer-resolved task's `principles` (e.g. `{tdd: strict}`) —
-  // consulted below to decide whether a CAPPED verdict here can accept an
-  // operator override, and whether to hint at one. Absent when no task id
-  // resolves (a plan/doc PR with only a body Acceptance: block).
-  let principles: Record<string, unknown> | undefined;
   const taskId = body.match(/Remudero-Task:\s*(\S+)/)?.[1];
   if (taskId) {
     try {
@@ -2731,7 +3018,6 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
       if (t?.acceptance?.length) {
         criteria = t.acceptance;
         source = `plan/tasks.yaml task ${taskId} (${criteria.length} criteria)`;
-        principles = t.principles;
       }
     } catch {
       // A bad/absent plan is not the reviewer's concern; fall through to the body.
@@ -2756,12 +3042,18 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
   // W1-T185 (Gap 2): materialize a throwaway worktree at the PR head so
   // whitelisted proofs actually EXECUTE on this manual path, matching what
   // the automated fix rung observes for the same PR/proofs (acceptance
-  // criterion 4). On ANY failure this returns undefined and the review falls
-  // back to keyword-only — EXPLICITLY marked (criterion 5), never silently.
-  const worktreePath = materializeReviewWorktree(config, repoRoot, view.number, view.headRefName);
-  if (!worktreePath) {
-    console.log("(worktree materialization unavailable — this verdict will post keyword-only)");
+  // criterion 4). On ANY failure this leaves worktreePath undefined and the
+  // review falls back to keyword-only — EXPLICITLY marked (criterion 5),
+  // never silently, and (W1-T233) the console line below now NAMES why,
+  // instead of a bare "unavailable" with the real reason thrown away.
+  const materialized = materializeReviewWorktree(config, repoRoot, view.number, view.headRefName, view.headRefOid);
+  if (materialized.worktreePath === undefined) {
+    console.log(
+      `(worktree materialization failed [${materialized.failure.errorClass}]: ` +
+        `${materialized.failure.message} — this verdict will post keyword-only)`,
+    );
   }
+  const worktreePath = materialized.worktreePath;
 
   // W1-T185 (Gap 2, criterion 6): withMaterializedWorktree guarantees teardown
   // on EVERY exit path, including a throw from runReview itself — never just
@@ -2789,7 +3081,12 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
       // makes `judgeReview` mark the verdict `keywordOnly`+`capped`, exactly
       // the documented fallback (criterion 5) — never silent.
       headCheckoutDir: worktreePath,
+      // W1-T233: the named reason materialization failed (absent ⇒ it was
+      // never attempted at all) — carried onto the posted CAPPED description
+      // and the review.posted ledger line's degraded_reason fields.
+      materializationFailure: materialized.failure,
       ledgerPath,
+      runId,
     }),
   );
 
@@ -2799,10 +3096,12 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
       (verdict.capped ? " — CAPPED: not certified (0 proofs executed)" : ""),
   );
 
-  // W1-T185 (Gap 1, criterion 2): the operator override — a LEDGERED,
-  // attributable decision to arm a capped tdd:strict verdict anyway. Granted
-  // here (the manual escape hatch, an operator-run command) rather than
-  // inferred: an override is a decision someone made, and it must name who.
+  // W1-T185 (Gap 1, criterion 2), raised by W1-T229: the operator override —
+  // a LEDGERED, attributable decision to arm a capped verdict anyway.
+  // Granted here (the manual escape hatch, an operator-run command) rather
+  // than inferred: an override is a decision someone made, and it must name
+  // who. No `principles`/tdd-tier check gates this note since W1-T229 — a
+  // CAPPED verdict refuses to arm regardless of tdd tier.
   const overrideBy = flagValue(rest, "--override-capped-by");
   const overrideReason = flagValue(rest, "--override-capped-reason");
   if (overrideBy && overrideReason) {
@@ -2815,11 +3114,10 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
       log("automerge.capped_override_granted", { by: overrideBy, reason: overrideReason, pr_url: view.url });
       console.log(`CAPPED override recorded — by ${overrideBy}: ${overrideReason} (task ${taskId})`);
     }
-  } else if (verdict.capped && isTddStrict(principles)) {
+  } else if (verdict.capped) {
     console.log(
-      `NOTE: this task declares tdd:strict — a CAPPED verdict cannot arm auto-merge without executed ` +
-        `proof or an operator override: rmd review ${view.number} --override-capped-by <name> ` +
-        `--override-capped-reason <text>`,
+      `NOTE: a CAPPED verdict cannot arm auto-merge without executed proof or an operator override: ` +
+        `rmd review ${view.number} --override-capped-by <name> --override-capped-reason <text>`,
     );
   }
 
@@ -2893,26 +3191,70 @@ async function depReviewCommand(prArg: string, rest: string[] = []): Promise<num
     return 1;
   }
   if (result.decision === "arm") {
-    postReviewStatus({
+    // W1-T228: guarded post — decideDepReview never executes a proof, so
+    // this attempt's evidence is always "no_evidence"; the guard still
+    // refuses it if a STRONGER (executed) verdict is already posted for this
+    // exact sha, or if the PR is already merged/closed.
+    const posted = await postReviewStatusGuarded({
       owner,
       repo,
       sha: view.headRefOid,
       state: "success",
       description: `remudero-review: PASS — ${result.semverLevel} dependency bump, confined + gates green`,
+      taskId,
+      evidence: "no_evidence",
+      ledgerPath,
+      runId,
+      fetchLifecycle: () => fetchPrLifecycle(view.url),
     });
-    armAutoMerge(view.url);
+    if (!posted.posted) {
+      console.log(`no remudero-review posted (refused: ${posted.reason}): ${view.url}`);
+      return 1;
+    }
+    // W1-T230: armAutoMerge no longer trusts the live status just posted above
+    // (display/branch-protection only from here on) — it keys off this
+    // orchestrator's OWN ledgered `review.posted` verdict. This second judge
+    // (decideDepReview) must ledger its own verdict in that SAME shape so
+    // armAutoMerge has a record to find for this task/head.
+    log("review.posted", {
+      context: REVIEW_CONTEXT,
+      state: "success",
+      head_sha: view.headRefOid,
+      dep_review: true,
+      proof_exec: [], // W1-T228: never executes a proof — explicit so lastPostedReviewStatusFromLedger reads "no_evidence"
+    });
+    armAutoMerge(view.url, taskId);
     log("automerge.armed", {});
     console.log(`remudero-review=success posted + auto-merge armed: ${view.url}`);
     return 0;
   }
   // escalate: post failure (NEVER auto-merge for a major) + open the MANUAL issue.
-  postReviewStatus({
+  const postedFailure = await postReviewStatusGuarded({
     owner,
     repo,
     sha: view.headRefOid,
     state: "failure",
     description: `remudero-review: FAIL — ${result.reason}`, // postReviewStatus truncates to 140
+    taskId,
+    evidence: "no_evidence",
+    ledgerPath,
+    runId,
+    fetchLifecycle: () => fetchPrLifecycle(view.url),
   });
+  if (postedFailure.posted) {
+    // W1-T228: ledger this verdict too (the pre-existing code never did) — a
+    // failure posted here but never ledgered would be INVISIBLE to a later
+    // attempt's precedence check, exactly the blind spot this task closes.
+    log("review.posted", {
+      context: REVIEW_CONTEXT,
+      state: "failure",
+      head_sha: view.headRefOid,
+      dep_review: true,
+      proof_exec: [],
+    });
+  } else {
+    console.log(`remudero-review=failure NOT posted (refused: ${postedFailure.reason}) — still escalating: ${view.url}`);
+  }
   const escalation = buildDepReviewEscalation({
     prUrl: view.url,
     prNumber: view.number,
@@ -3281,7 +3623,11 @@ async function retroCommand(rest: string[]): Promise<number> {
     }
     const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
     const reviewCode = await reviewCommand(prNum);
-    armAutoMerge(prUrl);
+    // W1-T230: reviewCommand resolved this PR's task id off its own
+    // `Remudero-Task: RETRO` trailer (ensureTaskTrailer above), so its
+    // review.posted ledger line is keyed "RETRO" too — the SAME literal
+    // armAutoMerge must pass to find it.
+    armAutoMerge(prUrl, "RETRO");
     log("automerge.armed", {});
     worktreeRemove(repoDir, worktreePath);
     say(`retro PR gated + armed (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
@@ -3363,16 +3709,29 @@ function readUsageSnapshot(config: Config): UsageSnapshot | undefined {
  * alone, which a genuine_blocker escalation for the SAME task could also have
  * written, for an unrelated reason) — mirrors ops.ts's alert-escalation dedup
  * discipline (a ledger line as the dedup key), never a second store.
+ *
+ * THE DEDUP KEY IS WRITTEN WHETHER OR NOT DELIVERY SUCCEEDS. The ledger-derived,
+ * cross-boot dedup above was already the right shape; its defect was that the
+ * marker was recorded only AFTER `escalate()` returned, so a THROWING `gh` wrote
+ * nothing and every subsequent boot retried the same escalation — which is how a
+ * transport failure became an unbounded relaunch loop (1 such marker in the
+ * ledger against 460 boots). Marking the attempt makes the dedup durable across
+ * the process death it is supposed to survive.
+ *
+ * The trade-off is deliberate and stated: a task whose escalation failed will not
+ * be retried automatically. That is the correct side to err on for a BACKSTOP
+ * NOTIFICATION — an undelivered notice is visible as an `escalation.failed` line
+ * and costs one operator read, whereas retry-until-success costs the fleet.
  */
-function escalateCircuitBreak(
+export function escalateCircuitBreak(
   task: Task,
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string },
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
 ): void {
   const already = readLedgerLines(ctx.ledgerPath).some(
     (l) => l.step === "dispatch.circuit_broken.escalated" && l.task_id === task.id,
   );
   if (already) return;
-  const issueUrl = escalate(
+  const issueUrl = tryEscalate(
     {
       class: "BLOCKED",
       taskId: task.id,
@@ -3395,13 +3754,18 @@ function escalateCircuitBreak(
       ],
       recommendation: "fix and resume",
     },
-    { issues: ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
   );
   appendLedger(ctx.ledgerPath, {
     run_id: ctx.runId,
     task_id: task.id,
     step: "dispatch.circuit_broken.escalated",
     issue_url: issueUrl,
+    delivered: issueUrl !== null,
   });
 }
 
@@ -3659,10 +4023,21 @@ function renderDaemonSummary(s: DaemonSummary): string {
  * (W1-T12a; lib/daemon.ts owns the logic, this only wires the real defaults —
  * same GitHub-derived status, same run-task path, same fleet control +
  * headroom + locks as `rmd drain`). Unlike `rmd drain`, it does not stop on
- * "nothing runnable right now" — it paces itself with a real `setTimeout`
- * sleep and keeps polling, since new work can land later. It DOES still stop
- * on STOP, PAUSE, headroom-exhausted, a block (v1 stop-on-block — reasoning
- * about the block is W1-T46), or an unexpected error.
+ * "nothing runnable right now" OR on headroom-exhausted (confirmed OR merely
+ * unreadable) — all three are in-process idle states: it paces itself with a
+ * real `setTimeout` sleep and keeps polling (logging a heartbeat each tick),
+ * since new work can land later and a usage window resets on its own.
+ * Exiting on any of them would just restart-loop under launchd's KeepAlive
+ * (SuccessfulExit:false relaunches on ANY exit, clean or not). The headroom
+ * ceiling itself is TIME-AWARE (lib/daemon.ts's `HeadroomPolicy`, policy DATA
+ * — relaxes toward 100% on a window's final day rather than wasting
+ * capacity that is destroyed unused at reset), and an unreadable `/usage`
+ * runs under a BOUNDED degraded-mode allowance (a handful of consecutive
+ * misses still dispatch, logged explicitly; beyond that it escalates to the
+ * same idle heartbeat) rather than either halting on the first miss or
+ * silently dispatching forever. It DOES still stop on STOP, PAUSE, a block
+ * (v1 stop-on-block — reasoning about the block is W1-T46), or an unexpected
+ * error.
  *
  * Shares the SAME single-instance drain lock as `rmd drain` (state/drain.lock)
  * — a daemon and a drain are both "the loop that spawns run-task", so only one
@@ -3827,7 +4202,12 @@ async function daemonCommand(rest: string[]): Promise<number> {
   // the launchd unit's own closed EnvironmentVariables allowlist (lib/launchd.ts).
   // Also runs the W1-T115 boot sweep of stale rmd-owned temp dirs (the
   // 26,711-dir ENOSPC incident's backstop) and logs the count via daemon.tmp_sweep.
-  daemonBoot(log, process.env, () => sweepStaleTempDirs());
+  daemonBoot(
+    log,
+    process.env,
+    () => sweepStaleTempDirs(),
+    () => sweepStaleInflightLocks(join(config.root, "state", "inflight")),
+  );
 
   try {
     const summary = await runDaemon(
@@ -3855,6 +4235,11 @@ async function daemonCommand(rest: string[]): Promise<number> {
         checkStop: () => stopDetail(config.root),
         checkPause: () => pauseDetail(config.root),
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        // The real wall clock backing the TIME-AWARE headroom ceiling (see
+        // lib/daemon.ts's HeadroomPolicy) — resolves each window's own
+        // hours-to-reset. Explicit here (though `runDaemon` defaults the same
+        // way when omitted) so the real wiring is as self-documenting as `sleep`.
+        now: () => new Date(),
         // LEVEL-TRIGGERED PR-PIPELINE RECONCILER (W1-T77): the SAME runSweep the
         // `rmd sweep` CLI invokes, run once per poll iteration so no open PR
         // strands open-and-orphaned (#111/#113/#123). Best-effort by contract.
@@ -3894,10 +4279,14 @@ async function daemonCommand(rest: string[]): Promise<number> {
       opts,
     );
     console.log("\n" + renderDaemonSummary(summary));
-    // Exit 0 only on a clean stop (STOP requested / max reached); a block,
-    // headroom exhaustion, or error is a non-zero exit so a supervising
-    // wrapper (or launchd, W1-T12b) notices.
-    return summary.stopReason === "stopped" || summary.stopReason === "max_reached" ? 0 : 1;
+    // The pure stop-reason -> exit-code mapping lives in lib/daemon.ts
+    // (`daemonExitCode`), unit-tested there with no process spawn (Rule 18):
+    // 0 only on a clean stop (STOP requested / max reached); a block, a
+    // pause, or an error is non-zero so a supervising wrapper (or launchd,
+    // W1-T12b) notices. Headroom exhaustion never reaches here as a
+    // stopReason at all — it is an in-process idle state inside runDaemon,
+    // never a process exit.
+    return daemonExitCode(summary.stopReason);
   } finally {
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
@@ -3951,6 +4340,44 @@ async function daemonPlistCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
+/**
+ * `rmd digest-plist [--hour <h>] [--write]` — GENERATE the launchd unit for the daily
+ * `rmd digest` pulse (W1-T112 — "the morning pulse"; lib/launchd.ts's
+ * `generateDigestLaunchdPlist` owns the generation, the SAME W1-T12b generator family
+ * `daemonPlistCommand` above uses, reused rather than re-implemented — one billing
+ * boundary, one closed env allowlist). Default: print the .plist to stdout plus the
+ * `launchctl load` invocation the operator would run, and do nothing else. `--write`
+ * additionally writes it to `~/Library/LaunchAgents/<label>.plist` — still just a file
+ * write, never a `launchctl` call. Actually LOADING it (so the pulse survives
+ * logout/reboot) is an operator action, mirroring `daemon-plist`'s W1-T12d boundary.
+ */
+async function digestPlistCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("digest-plist", rest, ["--hour"], ["--write"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const config = loadConfig();
+  const hourRaw = flagValue(rest, "--hour");
+  const hour = hourRaw !== undefined ? Number(hourRaw) : undefined;
+  const rmdBin = join(repoRoot, "bin", "rmd");
+  const plist = generateDigestLaunchdPlist({ rmdBin, root: config.root, hour });
+  const plistPath = launchdPlistPath(DIGEST_LABEL);
+
+  if (rest.includes("--write")) {
+    mkdirSync(dirname(plistPath), { recursive: true });
+    writeFileSync(plistPath, plist);
+    console.log(`### rmd digest-plist — wrote ${plistPath}`);
+  } else {
+    console.log(plist);
+  }
+  console.log(
+    `\n# to commission (operator-run — NOT done by this command):\n` +
+      `launchctl load ${plistPath}`,
+  );
+  return 0;
+}
+
 // ── rmd serve — the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B) ──
 //
 // Real business logic lives entirely in the four already-proven modules lib/serve.ts
@@ -3965,8 +4392,10 @@ async function serveCommand(rest: string[]): Promise<number> {
     return 2;
   }
   let port: number;
+  let hosts: string[];
   try {
     port = resolveServePort(rest);
+    hosts = resolveServeHosts(rest);
   } catch (e) {
     console.error(`### rmd serve — ${(e as Error).message}\n${USAGE}`);
     return 2;
@@ -4019,21 +4448,47 @@ async function serveCommand(rest: string[]): Promise<number> {
     log,
   });
 
+  // BIND EACH NAMED INTERFACE — never the wildcard. `listen(port)` alone defaults to `::`
+  // (every interface) while the banner printed "localhost", so the surface was wide open and
+  // the log said otherwise. But a SINGLE named host is not enough either: binding only the
+  // tailnet address kept the phone working and silently broke `127.0.0.1`, which is where
+  // every local curl, script and desktop bookmark points. Both must work, so each host gets
+  // its own listener sharing this one server's handlers, deps and warm caches.
+  const mirrors: Server[] = [];
   try {
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(port, resolve);
-    });
+    for (const [i, h] of hosts.entries()) {
+      const target =
+        i === 0
+          ? server
+          : // Additional interfaces reuse the PRIMARY server's request/upgrade listeners rather
+            // than building a second service: a second buildServeServer would start a second
+            // board pre-warm timer and poll GitHub twice for one console.
+            createServer((req, res) => {
+              for (const h2 of server.listeners("request") as Array<(a: unknown, b: unknown) => void>) {
+                h2(req, res);
+              }
+            });
+      if (i > 0) mirrors.push(target);
+      await new Promise<void>((resolve, reject) => {
+        target.once("error", reject);
+        target.listen(port, h, resolve);
+      });
+    }
   } catch (e) {
-    console.error(`### rmd serve — failed to listen on port ${port}: ${(e as Error).message}`);
+    console.error(`### rmd serve — failed to listen on ${hosts.join(", ")}:${port}: ${(e as Error).message}`);
+    for (const m of mirrors) m.close();
     return 1;
   }
 
-  log("serve.start", { port, repo: `${self.owner}/${self.repo}` });
-  console.log(`### rmd serve — listening on http://localhost:${port} (repo ${self.owner}/${self.repo})`);
-  console.log(`    console:     http://localhost:${port}/?token=${tokens.write}`);
-  console.log(`    read token:  ${tokens.read}`);
-  console.log(`    write token: ${tokens.write}`);
+  log("serve.start", { port, hosts, repo: `${self.owner}/${self.repo}` });
+  // THE PRINTED URL CARRIES THE READ TOKEN ONLY, and the write token is never echoed at all.
+  // These lines are the operator's console bookmark, and under the real launch stdout is
+  // redirected to serve.log — so whatever is printed here is written to disk in the clear and
+  // outlives the process. A bookmark needs to VIEW the board; arming a write action can pay the
+  // one-time cost of reading the 0600 tokens file. See resolveServiceTokens for rotation.
+  console.log(`### rmd serve — listening on ${hosts.map((h) => `http://${h}:${port}`).join(", ")} (repo ${self.owner}/${self.repo})`);
+  for (const h of hosts) console.log(`    console:     http://${h}:${port}/?token=${tokens.read}`);
+  console.log(`    write token: ${serviceTokensPath(config.root)} (0600, not printed)`);
 
   await new Promise<void>((resolve) => {
     const shutdown = () => {
@@ -4171,11 +4626,74 @@ function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string):
  * starve an answered PR of its one legitimate extra strike (W1-T78's
  * `strikeCapForAnswer` ceiling check).
  */
-function priorStrikesFor(lines: Array<Record<string, unknown>>, taskId: string | undefined): number {
+/**
+ * The regime the CURRENT verdict for a task was produced under (W1-T199) — read
+ * from the most recent `review.posted` ledger line's `proof_exec`.
+ *
+ * This is what decides whether keyword-era strikes are amnestied: the amnesty
+ * applies only when the verdict the rung would act on NOW is itself evidence.
+ * A task still being judged by keyword overlap gets no amnesty, because there is
+ * nothing better to spend the next strike against.
+ */
+export function currentStrikeRegimeFor(lines: Array<Record<string, unknown>>, taskId: string | undefined): StrikeRegime {
+  if (!taskId) return "keyword_only";
+  let latest: Record<string, unknown> | undefined;
+  for (const line of lines) {
+    if (line.step === "review.posted" && line.task_id === taskId) latest = line;
+  }
+  const pe = latest?.proof_exec;
+  if (!Array.isArray(pe)) return "keyword_only";
+  return pe.some((x) => x !== "not_executable") ? "executed" : "keyword_only";
+}
+
+/**
+ * The verdict regime a fix-rung strike was spent against (W1-T199).
+ *
+ * `"executed"` — the floor RAN at least one proof, so the unmet criteria the
+ * strike was dispatched against are EVIDENCE.
+ * `"keyword_only"` — no proof executed, so the strike was spent against keyword
+ * overlap. Historical `fix.dispatch` lines carry no tag at all and are read as
+ * this, because every one of them predates the executor.
+ */
+export type StrikeRegime = "executed" | "keyword_only";
+
+/** The regime a ledger `fix.dispatch` line records — untagged ⇒ pre-executor. */
+export function strikeRegimeOf(line: Record<string, unknown>): StrikeRegime {
+  return line.verdict_regime === "executed" ? "executed" : "keyword_only";
+}
+
+/**
+ * Strikes that COUNT toward the cap, for a task, under `currentRegime` (W1-T199).
+ *
+ * WHY THIS IS NOT A PLAIN COUNT. `fix.dispatch` lines are append-only and
+ * monotonic, so a strike spent months ago against a keyword-only verdict gated
+ * the rung forever — including after the executor shipped and the SAME rung had
+ * demonstrably converged on executed evidence (PR #457: executed_fail → fix
+ * worker → executed_pass ×3 → merged, while #449/#452 were refused at 2/2 with
+ * executed_fail verdicts of their own).
+ *
+ * Under the `"executed"` regime, keyword-only strikes are NOT counted: they were
+ * spent against noise and say nothing about whether the rung would converge on
+ * evidence. Under `"keyword_only"` every strike counts, because there is no
+ * better signal to distinguish them and the bound must not silently vanish.
+ *
+ * THE BOUND STAYS REAL either way — strikes spent under the CURRENT regime always
+ * count, so a task genuinely failing against executed evidence still exhausts.
+ * This never mutates the ledger: it changes how strikes are READ.
+ */
+export function priorStrikesFor(
+  lines: Array<Record<string, unknown>>,
+  taskId: string | undefined,
+  currentRegime: StrikeRegime = "keyword_only",
+): number {
   if (!taskId) return 0;
   let n = 0;
   for (const line of lines) {
-    if (line.step === "fix.dispatch" && line.task_id === taskId) n++;
+    if (line.step !== "fix.dispatch" || line.task_id !== taskId) continue;
+    // Under the executed regime a keyword-era strike is amnestied; every other
+    // combination counts, so the cap keeps binding on same-regime failures.
+    if (currentRegime === "executed" && strikeRegimeOf(line) === "keyword_only") continue;
+    n++;
   }
   return n;
 }
@@ -4252,7 +4770,7 @@ function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): Open
       reviewState,
       checksState,
       unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
-      priorStrikes: priorStrikesFor(ledger, taskId),
+      priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId)),
       strikeHistory: deriveStrikeHistory(ledger, taskId),
       supersededBy,
       lastActivityAt: pr.updatedAt,
@@ -4323,7 +4841,7 @@ function buildSweepEffects(
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
 
   return {
-    arm: (pr) => armAutoMerge(pr.prUrl),
+    arm: (pr) => armAutoMerge(pr.prUrl, pr.taskId),
 
     close: (pr, reason) => {
       try {
@@ -4769,7 +5287,7 @@ async function fixCommand(rest: string[]): Promise<number> {
     reviewState,
     checksState,
     unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
-    priorStrikes: priorStrikesFor(ledger, taskId),
+    priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId)),
     strikeHistory: deriveStrikeHistory(ledger, taskId),
     // superseded-by is a cross-PR sweep concern (which OTHER open PR credits the
     // same task) — out of scope for a single explicitly-named PR lookup.
@@ -5287,7 +5805,11 @@ async function triageCommand(rest: string[]): Promise<number> {
     }
     const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
     const reviewCode = await reviewCommand(prNum);
-    armAutoMerge(prUrl);
+    // W1-T230: reviewCommand resolved this PR's task id off its own
+    // `Remudero-Task: <taskId>` trailer (ensureTaskTrailer above), so its
+    // review.posted ledger line is keyed to the SAME `taskId` armAutoMerge
+    // must pass to find it.
+    armAutoMerge(prUrl, taskId);
     log("automerge.armed", {});
     worktreeRemove(repoDir, worktreePath);
     say(`triage PR gated + armed (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
@@ -5482,7 +6004,11 @@ async function planCommand(rest: string[]): Promise<number> {
     }
     const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
     const reviewCode = await reviewCommand(prNum);
-    armAutoMerge(prUrl);
+    // W1-T230: reviewCommand resolved this PR's task id off its own
+    // `Remudero-Task: <taskId>` trailer (ensureTaskTrailer above), so its
+    // review.posted ledger line is keyed to the SAME `taskId` armAutoMerge
+    // must pass to find it.
+    armAutoMerge(prUrl, taskId);
     log("automerge.armed", {});
     worktreeRemove(repoDir, worktreePath);
     say(`plan PR gated + armed (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
@@ -5722,6 +6248,10 @@ async function inboxCommand(rest: string[]): Promise<number> {
   const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
   const isMerged: MergedResolver = (t) => deriveStatus(t, deriveDeps).merged;
   const openProposalIds = new Set(proposals.map((p) => p.id));
+  // W1-T190: re-derive "already ratified" from the ledger on every `rmd inbox` pass, never
+  // from the registry's own state — a proposal ratify.approved already fired for is reported
+  // ratified even if the registry entry itself drifted (the P19 incident).
+  const ledgerLinesForRatify = readLedgerLines(ledgerPath);
 
   const classifications = proposals.map((p) =>
     classifyProposal(p, drafts[p.id], {
@@ -5729,9 +6259,31 @@ async function inboxCommand(rest: string[]): Promise<number> {
       isMerged,
       grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
       openProposalIds,
+      isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
+  // W1-T112: one `inbox.polled` snapshot per invocation — digest.ts reads the LATEST such
+  // line inside its window and folds it into the daily pulse's soft-composed "inbox: N
+  // ready" line (see lib/inbox.ts's InboxPollSummary doc). Logged unconditionally, same as
+  // the `inbox.classified` lines just above — `rmd inbox --dry-run` already always
+  // classifies+ledgers (it only skips the draft-synthesis SPAWN), unlike `rmd ops`/`rmd
+  // issues`, whose dry-run skips their own poll-summary line because THEIR poll has real
+  // side effects (escalate/capture) a preview must leave no trace of; classification here
+  // has none.
+  log("inbox.polled", { inbox: summarizeInboxPoll(classifications) });
+
+  // W1-T190 (round 2): a proposal classified "ratified" here is DETECTED off the ledger,
+  // never trusted from the registry's own (possibly drifted) copy — but detection alone
+  // still leaves the drifted row sitting in state/inbox-proposals.json forever. Heal it:
+  // any proposal the ledger already ratified is pruned from the registry on THIS pass, the
+  // same way approveCommand prunes the common (non-drifted) case, so the correction lands
+  // on disk, not just in this run's in-memory classification.
+  const { proposals: healedProposals, prunedIds } = pruneRatifiedProposals(proposals, classifications);
+  if (prunedIds.length > 0) {
+    writeFileSync(registryPath, JSON.stringify({ proposals: healedProposals }, null, 2), "utf8");
+    for (const id of prunedIds) log("inbox.registry_healed", { proposal_id: id });
+  }
 
   const rendered = renderInbox(classifications);
   console.log(rendered);
@@ -5763,11 +6315,17 @@ function loadProposalForRatify(
 
   const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
   const isMerged: MergedResolver = (t) => deriveStatus(t, deriveDeps).merged;
+  // W1-T190: read the ledger ONCE here and cross-check it, never the registry's own copy of
+  // "is this ratified" (there isn't one) — a proposal the ledger already carries
+  // ratify.approved for is `ratified`, no matter what stale/drifted state the registry entry
+  // itself is still in (the P19 incident this task fixes).
+  const ledgerLines = readLedgerLines(ledgerPath);
   const ctx: ReadinessContext = {
     plan,
     isMerged,
     grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
     openProposalIds: new Set(proposals.map((p) => p.id)),
+    isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };
@@ -5794,9 +6352,10 @@ async function approveCommand(rest: string[]): Promise<number> {
   const config = loadConfig();
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const registryPath = join(config.root, "state", "inbox-proposals.json");
   const { owner, repo } = resolveOwnerRepo();
 
-  const { proposal, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
+  const { proposal, proposals, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
   if (!proposal || !classification) {
     console.error(`rmd approve: unknown proposal '${proposalId}' — not in the ACTIVE registry (state/inbox-proposals.json)`);
     return 2;
@@ -5883,6 +6442,17 @@ async function approveCommand(rest: string[]): Promise<number> {
     console.error(`rmd approve: ${result.refusal}`);
     return 1;
   }
+
+  // W1-T190: `ratify.approved` above just ledgered this proposal's ratification, but the
+  // ledger and the registry are two different sources of truth — `rmd inbox`/the console's
+  // `/v1/inbox` route (buildInboxRoute) classify strictly off state/inbox-proposals.json,
+  // never the ledger, so leaving this entry in place kept recommending an already-ratified
+  // proposal as READY indefinitely. Mirrors reframeCommand's registry write below (5646+ in
+  // this file): this proposal is no longer ACTIVE (see the Proposal interface's doc comment
+  // in lib/inbox.ts), so it is removed rather than rewritten in place.
+  const nextProposals = proposals.filter((p) => p.id !== proposalId);
+  writeFileSync(registryPath, JSON.stringify({ proposals: nextProposals }, null, 2), "utf8");
+
   if (!repoDir || !worktreePath) {
     // Unreachable in practice — the gateway above always sets these before returning a
     // branch — but fail LOUD rather than silently skip cleanup/gate if it ever were.
@@ -5920,7 +6490,11 @@ async function approveCommand(rest: string[]): Promise<number> {
     }
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
     const reviewCode = await reviewCommand(prNum);
-    armAutoMerge(result.prUrl);
+    // W1-T230: a ratification PR carries NO Remudero-Task trailer by design
+    // (see the no-trailer comment above) — reviewCommand's own taskId resolve
+    // therefore falls back to `PR-${view.number}` and its review.posted ledger
+    // line is keyed to that same fallback, not `proposalId`.
+    armAutoMerge(result.prUrl, `PR-${prNum}`);
     log("automerge.armed", {});
     worktreeRemove(ownedRepoDir, ownedWorktreePath);
     console.log(`rmd approve: ${proposalId} gated + armed (review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`);
@@ -6429,7 +7003,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "review",
     usage:
-      "rmd review <pr-number> [--repo <name>] [--override-capped-by <name> --override-capped-reason <text>]   # post remudero-review on a hand-opened PR; materializes a worktree at the PR head so proofs EXECUTE (W1-T185), falling back to an explicit keyword-only CAPPED verdict if materialization fails; --override-capped-by/--override-capped-reason ledgers an attributable operator override so a CAPPED verdict on a tdd:strict task can arm auto-merge",
+      "rmd review <pr-number> [--repo <name>] [--override-capped-by <name> --override-capped-reason <text>]   # post remudero-review on a hand-opened PR; materializes a worktree at the PR head so proofs EXECUTE (W1-T185), falling back to an explicit keyword-only CAPPED verdict if materialization fails; --override-capped-by/--override-capped-reason ledgers an attributable operator override so a CAPPED verdict can arm auto-merge",
   },
   {
     name: "dep-review",
@@ -6460,7 +7034,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "serve",
     usage:
-      "rmd serve [--port <n>]   # the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted under <config.root>/state/service-tokens.json; --port defaults to 4317 (matches apps/dashboard's own default); blocks until SIGINT/SIGTERM",
+      "rmd serve [--port <n>] [--host <addr>]   # the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317 (matches apps/dashboard's own default); --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the console can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM",
   },
   {
     name: "sweep",
@@ -6497,6 +7071,11 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "digest",
     usage: "rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message",
+  },
+  {
+    name: "digest-plist",
+    usage:
+      "rmd digest-plist [--hour <h>] [--write]   # generate the launchd unit for the daily `rmd digest` pulse (W1-T112, the W1-T12b generator pattern) — StartCalendarInterval at <h>:00 local time (default 8); commissioning (launchctl load) is an operator action",
   },
   {
     name: "ops",
@@ -6675,6 +7254,9 @@ async function main(): Promise<void> {
   }
   if (cmd === "digest") {
     process.exit(await digestCommand(rest));
+  }
+  if (cmd === "digest-plist") {
+    process.exit(await digestPlistCommand(rest));
   }
   if (cmd === "ops") {
     process.exit(await opsCommand(rest));

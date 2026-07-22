@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import {
   REVIEW_CONTEXT,
@@ -14,6 +18,7 @@ import {
   checkSatisfiedByGuard,
   checkTestTheater,
   checkTroubleshootingCoverage,
+  decideArmFromLedgerVerdict,
   decideAutoMergeArm,
   detectTestTheater,
   failSummary,
@@ -23,12 +28,14 @@ import {
   judgeReview,
   judgeRubric,
   keywordOnlyAnnotation,
+  narrowNameFilteredArgs,
   nameFilteredOutcome,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
   parseWhitelistedProof,
   priorReviewVerdictFromLedger,
   resolveAutoMergeArm,
+  resolveNameFilteredCandidates,
   reviewerOutcome,
   reviewerVerdictContract,
   reviewLedgerLegibilityFields,
@@ -36,6 +43,12 @@ import {
   type ProofExecutor,
   type WhitelistedProof,
 } from "../src/lib/review.js";
+
+// W1-T229: source text of run-task.ts, read once, so the plan-only carve-out
+// falsifier below can verify by STRUCTURE (call-site count) rather than by
+// spawning the real CLI — matches the pattern test/isolation-wiring.test.ts
+// and test/mounts-wiring.test.ts already use for this exact file.
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
 // ── Recorded fixtures (acceptance #2, the FALSIFIER) ────────────────────────
 // The verdict LOGIC is a PURE function so the falsifier is a unit fixture: a
@@ -358,6 +371,45 @@ test("priorReviewVerdictFromLedger: no review.posted line for the task yields un
   assert.equal(priorReviewVerdictFromLedger(lines, "W1-T1"), undefined);
 });
 
+// ── decideArmFromLedgerVerdict (W1-T230): THE ARM DECISION keys off the ────
+// orchestrator's own ledgered review.posted verdict for the EXACT head sha —
+// never the live remudero-review status channel, which #449 proved is
+// writable and last-write-wins (seven contradictory writes on one sha).
+
+test("decideArmFromLedgerVerdict: a remudero-review success status on the head with NO corresponding ledger verdict record arms nothing. FALSIFIER: a forged/live-only status must never substitute for a ledgered verdict", () => {
+  // No ledger record exists for this task at all (simulates a seeded forged
+  // live status with nothing backing it in the orchestrator's own ledger).
+  const decision = decideArmFromLedgerVerdict(undefined, "abc1234");
+  assert.equal(decision.arm, false);
+});
+
+test("decideArmFromLedgerVerdict: a ledgered passing verdict for the head arms even with the status read stubbed unavailable", () => {
+  const prior: PriorReviewVerdict = { headSha: "abc1234", state: "success" };
+  const decision = decideArmFromLedgerVerdict(prior, "abc1234");
+  assert.equal(decision.arm, true);
+});
+
+test("decideArmFromLedgerVerdict: a resumed pass in a fresh process arms from the prior pass's ledgered verdict for an unchanged head, with no in-memory state. FALSIFIER: the function takes NOTHING but the ledger-recovered prior + the live head — there is no in-process channel for it to have remembered anything through", () => {
+  const lines = [
+    { step: "review.posted", task_id: "W1-T230", head_sha: "seeded-sha", state: "success" },
+  ];
+  const prior = priorReviewVerdictFromLedger(lines, "W1-T230");
+  const decision = decideArmFromLedgerVerdict(prior, "seeded-sha");
+  assert.equal(decision.arm, true);
+});
+
+test("decideArmFromLedgerVerdict: a ledgered verdict for a DIFFERENT sha does not arm the current head. FALSIFIER: a verdict ledgered before a subsequent push must never arm the new head — this is what makes push-invalidates-review real at the decision layer", () => {
+  const prior: PriorReviewVerdict = { headSha: "old-sha", state: "success" };
+  const decision = decideArmFromLedgerVerdict(prior, "new-sha-after-push");
+  assert.equal(decision.arm, false);
+});
+
+test("decideArmFromLedgerVerdict: a ledgered FAILURE verdict for the exact head still refuses to arm — this task changes nothing about a genuine failing review", () => {
+  const prior: PriorReviewVerdict = { headSha: "abc1234", state: "failure" };
+  const decision = decideArmFromLedgerVerdict(prior, "abc1234");
+  assert.equal(decision.arm, false);
+});
+
 test("reviewerVerdictContract: names the machine-readable line for each criterion", () => {
   const c = reviewerVerdictContract(2);
   assert.match(c, /REVIEW_VERDICT <n>: PASS/);
@@ -488,7 +540,7 @@ test("failSummary: names the first unmet, appends (+N more), and truncates a lon
   assert.match(failSummary([], true, false), /test theater/);
 });
 
-test("buildReviewPrompt: fresh, read-only, gh-only, posts remudero-review, never edits", () => {
+test("buildReviewPrompt: fresh, read-only, gh-only, does NOT post the status (orchestrator does), never edits", () => {
   const prompt = buildReviewPrompt({
     task: { id: "W1-T9Z", acceptance: CRITERIA },
     prUrl: "https://github.com/o/r/pull/7",
@@ -499,16 +551,19 @@ test("buildReviewPrompt: fresh, read-only, gh-only, posts remudero-review, never
   assert.match(prompt, /REVIEW worker/i);
   assert.match(prompt, /read-only/i);
   assert.match(prompt, /remudero-review/);
-  assert.match(prompt, /statuses\/abc123/);
+  // W1-T231: the reviewer is NOT told to POST the status itself — the deny-floor
+  // (W1-T203) refuses a worker `gh api -X POST .../statuses/...` call, so the
+  // ORCHESTRATOR posts. The prompt carries no actionable POST-to-head-sha command,
+  // and instructs the worker not to post.
+  assert.doesNotMatch(prompt, /statuses\/abc123/);
+  assert.match(prompt, /Do NOT post/i);
+  assert.match(prompt, /orchestrator/i);
   // The reviewer must be told never to edit code.
   assert.match(prompt, /never (edit|modify)/i);
-  // The stated proofs must be carried into the reviewer's prompt.
-  assert.match(prompt, /context=remudero-review/);
   // The reviewer verifies against REPO STATE: check out the PR head and RUN the
   // proof's test/grep, not verdict on diff+report alone.
   assert.match(prompt, /repo state/i);
   assert.match(prompt, /checkout|check out/i);
-  assert.match(prompt, /statuses\/abc123/); // still posts to the head sha
   // The checkout target is the head sha, and running tests/greps is allowed.
   assert.match(prompt, /gh pr checkout|git fetch origin abc123/);
 });
@@ -1075,6 +1130,9 @@ test("parseWhitelistedProof: a dialect body containing a semicolon and a test-pa
   // test-file path, since there is trailing content after '.ts'), never silently
   // narrowed to the 'test/foo.test.ts' substring the legacy TEST_PATH_RE would
   // have matched inside a different, unrelated shape.
+  // W1-T112 round-3: the compiled pattern is now regex-ESCAPED (see parseTestTarget) so a
+  // literal '.' in the body matches only a literal '.', never "any character" — the body's
+  // two dots are the only characters this proof text needs escaped.
   const wp = parseWhitelistedProof("unit test: test/foo.test.ts; rm -rf /");
   assert.ok(wp);
   assert.equal(wp!.kind, "test");
@@ -1084,7 +1142,7 @@ test("parseWhitelistedProof: a dialect body containing a semicolon and a test-pa
     "--import",
     "tsx",
     "--test-name-pattern",
-    "test/foo.test.ts; rm -rf /",
+    "test/foo\\.test\\.ts; rm -rf /",
     "test/**/*.test.ts",
   ]);
 });
@@ -1101,6 +1159,25 @@ test("parseWhitelistedProof: house-dialect 'unit test: <name>' (not a path) comp
     "exclusive-create EEXIST falls through to read",
     "test/**/*.test.ts",
   ]);
+});
+
+// W1-T112 round-3 (regression): a dialect body that legitimately quotes real syntax —
+// brackets, braces, a trailing '*' — must still name-filter to ITSELF. Pre-fix,
+// `--test-name-pattern` compiled the RAW body as a regex: `[rmd, digest]` became an
+// unescaped character class (matches exactly one of r/m/d/i/g/e/s/t/','/' ', never the
+// literal bracketed text), so a test titled EXACTLY per this proof could never match —
+// live-observed on W1-T112 itself. The escaped pattern must match a real node:test TAP
+// run whose ONLY test is titled with this exact body.
+test("parseWhitelistedProof (W1-T112 round-3): a dialect NAME containing regex-significant syntax ([], {}, *, ()) compiles to a pattern that matches its OWN literal text, not an unrelated character class", () => {
+  const body = "ProgramArguments end [rmd, digest]; an ANTHROPIC_* thing (parenthetical) {and, a, brace}";
+  const wp = parseWhitelistedProof(`unit test: ${body}`);
+  assert.ok(wp);
+  assert.ok(wp!.nameFiltered);
+  const pattern = wp!.args[wp!.args.indexOf("--test-name-pattern") + 1];
+  assert.ok(new RegExp(pattern).test(body), "the compiled pattern must match the literal body it was quoting");
+  // The un-escaped raw body must NOT still be present verbatim — proves escaping actually ran,
+  // not merely that the (harmless) escaped form happens to also satisfy the assertion above.
+  assert.notEqual(pattern, body);
 });
 
 test("parseWhitelistedProof: house-dialect 'unit test: <path>' reuses the exact-file shape verbatim", () => {
@@ -1149,11 +1226,50 @@ test("nameFilteredOutcome: the matched test itself reporting 'not ok' is a genui
   assert.equal(nameFilteredOutcome(stdout), "fail");
 });
 
-test("nameFilteredOutcome: zero real matches is FAIL (W1-T72 guard) even with collateral file-wrapper noise present", () => {
-  const stdout = ["1..0", "# Subtest: test/retro.test.ts", "ok 1 - test/retro.test.ts", "not ok 2 - test/serve.find.test.ts"].join(
-    "\n",
-  );
+test("nameFilteredOutcome: zero real matches is FAIL (W1-T72 guard) when the run genuinely COMPLETED (trailing summary present) even with collateral file-wrapper noise", () => {
+  const stdout = [
+    "1..0",
+    "# Subtest: test/retro.test.ts",
+    "ok 1 - test/retro.test.ts",
+    "not ok 2 - test/serve.find.test.ts",
+    "# tests 2",
+    "# pass 1",
+    "# fail 1",
+    "# duration_ms 123.456",
+  ].join("\n");
   assert.equal(nameFilteredOutcome(stdout), "fail");
+});
+
+// ── W1-T112 round-4: a name-filtered proof scopes the WHOLE suite glob (100+ files, several
+// driving a real browser), so execWhitelistedProof's own timeout can fire before node ever
+// reaches the named test's file — a run cut short mid-suite, not a genuine "test not found".
+// Confirmed live on this exact repo: a timeout-killed run of the real review command reliably
+// prints zero trailing-summary lines. Root-caused the observed flap on THIS PR's own head
+// commit (remudero-review: fail -> success -> fail with an unchanged diff).
+
+test("nameFilteredOutcome: zero real matches with NO trailing summary is a TRUNCATED run — throws (degrades to exec_error), never a manufactured FAIL", () => {
+  const stdout = [
+    "1..0",
+    "# Subtest: test/retro.test.ts",
+    "ok 1 - test/retro.test.ts",
+    "not ok 76 - /repo/test/serve.find.test.ts",
+    "  ---",
+    "  failureType: 'hookFailed'",
+    "  ...",
+    // no `# duration_ms` trailer: the process was killed before finishing.
+  ].join("\n");
+  assert.throws(() => nameFilteredOutcome(stdout));
+});
+
+test("nameFilteredOutcome: a real match found BEFORE truncation is kept — positive evidence survives an incomplete run", () => {
+  const stdout = [
+    "# Subtest: the named test",
+    "ok 5 - the named test",
+    "not ok 76 - /repo/test/serve.find.test.ts",
+    "  failureType: 'hookFailed'",
+    // no trailing summary — the run was still cut short later in the glob.
+  ].join("\n");
+  assert.equal(nameFilteredOutcome(stdout), "pass");
 });
 
 test("parseWhitelistedProof (W1-T128): a dialect grep whose pattern contains prose-style shell metacharacters EXECUTES — execFile passes it as one argv element, never a shell, so it can't be interpreted specially", () => {
@@ -1176,10 +1292,14 @@ test("parseWhitelistedProof (W1-T128): a dialect grep whose pattern contains pro
 });
 
 test("parseWhitelistedProof (W1-T128): a dialect unit-test NAME with prose-style shell metacharacters EXECUTES (name-filtered) — same argv-array reasoning as the grep case", () => {
+  // `$` and `(`/`)` ARE regex metacharacters (unlike the shell metacharacters this test's name
+  // references), so W1-T112 round-3's regex-escaping compiles them to `\$\(whoami\)` — still one
+  // argv element handed to execFile (never a shell), still never shell-interpreted; only the
+  // literal-vs-pattern regex semantics changed, not the shell-safety property this test is named for.
   const wp1 = parseWhitelistedProof("unit test: $(whoami)");
   assert.ok(wp1);
   assert.ok(wp1!.nameFiltered);
-  assert.ok(wp1!.args.includes("$(whoami)"));
+  assert.ok(wp1!.args.includes("\\$\\(whoami\\)"));
 
   const wp2 = parseWhitelistedProof("unit test: foo; rm -rf /");
   assert.ok(wp2);
@@ -1407,36 +1527,40 @@ test("FALSIFIER (criterion 3): a capped verdict never renders as a failing check
   assert.equal(capped.state, "success"); // never forced to failure by capping alone
 });
 
-test("FALSIFIER (criterion 3): a capped verdict never blocks a NON-tdd:strict PR's auto-merge arming path", () => {
+test("W1-T229 FALSIFIER: a capped verdict with ZERO proofs executed does NOT arm auto-merge for a non-tdd:strict task — prose is no longer the default merge floor", () => {
   const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
   assert.equal(v.capped, true);
   const decision = decideAutoMergeArm(v, false); // tddStrict=false — the task never declared it
-  assert.equal(decision.arm, true);
+  assert.equal(decision.arm, false);
 });
 
 // W1-T185 acceptance criterion 3's own proof text IS this test's name (see the
 // comment on criterion 1's renamed test, above, for why: the mechanical floor
-// name-filters the whole suite on exactly this string). Composes the two
-// granular falsifiers just above into the single fixture the criterion states.
-test("a capped verdict does not render as a failing check and does not block a non-tdd:strict PR from proceeding. FALSIFIER: mapping capped to failure would red every PR the moment one proof is unparseable, halting the fleet — a worse failure than the uncertified-PASS it replaces, and it would punish authors for the dialect gap instead of surfacing it", () => {
+// name-filters the whole suite on exactly this string). CAPPED IS NOT FAIL
+// still holds (the check state is never forced red) — but since W1-T229, a
+// capped verdict on ANY task (tdd:strict or not) refuses to ARM auto-merge.
+// Those are two separate layers (posted state vs. arming decision, as this
+// file's own W1-T185 comments document) and only the first survives here.
+test("a capped verdict does not render as a failing check, on ANY task — but it DOES refuse to arm auto-merge on a non-tdd:strict PR since W1-T229 (arming and posted state are separate decisions). FALSIFIER: mapping capped to failure would red every PR the moment one proof is unparseable, halting the fleet — a worse failure than the uncertified-PASS it replaces, and it would punish authors for the dialect gap instead of surfacing it", () => {
   const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
   assert.equal(v.capped, true);
   // does not render as a failing check on its own:
   assert.equal(v.state, "success");
-  // does not block a non-tdd:strict PR from proceeding:
-  assert.equal(decideAutoMergeArm(v, false).arm, true);
+  // W1-T229: DOES refuse to arm a non-tdd:strict PR too — capped never arms unattended:
+  assert.equal(decideAutoMergeArm(v, false).arm, false);
 });
 
-// ── W1-T185 (Gap 1, criterion 2): THE AUTO-MERGE ARMING PATH refuses a ──
-// capped verdict on a tdd:strict task without executed proof or a LEDGERED
-// operator override; supplying one permits arming AND is attributable.
+// ── W1-T185 (Gap 1, criterion 2), raised by W1-T229: THE AUTO-MERGE ARMING ──
+// PATH refuses ANY capped verdict — regardless of tdd tier, since W1-T229 —
+// without executed proof or a LEDGERED operator override; supplying one
+// permits arming AND is attributable.
 
 test("FALSIFIER (criterion 2, the #411 shape): a capped verdict on a tdd:strict task refuses to arm — no operator override, no unattended arm", () => {
   const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
   assert.equal(v.capped, true);
   const decision = decideAutoMergeArm(v, true); // tddStrict=true, no override
   assert.equal(decision.arm, false);
-  assert.match(decision.reason, /tdd:strict/);
+  assert.match(decision.reason, /CAPPED verdict/);
 });
 
 test("an explicit operator override permits arming a capped, tdd:strict verdict", () => {
@@ -1446,7 +1570,7 @@ test("an explicit operator override permits arming a capped, tdd:strict verdict"
   assert.match(decision.reason, /craig/);
 });
 
-test("resolveAutoMergeArm writes an ATTRIBUTABLE ledger line naming the overrider — ONLY when the override was actually consulted (capped + tdd:strict + arm)", () => {
+test("resolveAutoMergeArm writes an ATTRIBUTABLE ledger line naming the overrider — ONLY when the override was actually consulted (capped + arm; W1-T229 dropped the tdd:strict requirement from this condition too)", () => {
   const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const log = (step: string, extra?: Record<string, unknown>) => logged.push({ step, extra });
   const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
@@ -1482,7 +1606,7 @@ test("with a capped verdict on a task whose principles are {tdd: strict}, the au
   assert.equal(logged[0].extra?.by, "craig");
 });
 
-test("resolveAutoMergeArm logs NOTHING when there is nothing to override — a full PASS, or a non-tdd:strict task, arms silently exactly as before this task", () => {
+test("resolveAutoMergeArm logs NOTHING when there is nothing to override — a full PASS arms silently, and a capped non-tdd:strict task REFUSES silently (W1-T229: no override was consulted in either case, so nothing is logged)", () => {
   const logged: unknown[] = [];
   const log = (step: string, extra?: Record<string, unknown>) => logged.push({ step, extra });
   const executed: AcceptanceCriterion[] = [{ claim: "x", proof: "grep: frobnicate in src/lib/widget.ts" }];
@@ -1495,10 +1619,64 @@ test("resolveAutoMergeArm logs NOTHING when there is nothing to override — a f
   });
   assert.equal(resolveAutoMergeArm(fullPass, true, undefined, log).arm, true);
 
+  // W1-T229: a capped, non-tdd:strict verdict now REFUSES (prose is no longer the default
+  // merge floor) — and refusing without an override logs nothing, same as it always did.
   const cappedNonStrict = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
-  assert.equal(resolveAutoMergeArm(cappedNonStrict, false, undefined, log).arm, true);
+  assert.equal(resolveAutoMergeArm(cappedNonStrict, false, undefined, log).arm, false);
 
   assert.equal(logged.length, 0);
+});
+
+// ── W1-T229: the arming path's floor now binds on EVERY task, not just ──
+// tdd:strict ones — and an override works the same way regardless of tier.
+
+test("W1-T229: decideAutoMergeArm with a capped verdict and tddStrict false returns arm false (acceptance criterion 1, verbatim)", () => {
+  const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(v.capped, true);
+  assert.equal(decideAutoMergeArm(v, false).arm, false);
+});
+
+test("W1-T229: an operator override arms a capped, NON-tdd:strict verdict too (the override escape hatch is not tdd:strict-gated) and is still ledgered attributably", () => {
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const log = (step: string, extra?: Record<string, unknown>) => logged.push({ step, extra });
+  const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
+
+  const decision = decideAutoMergeArm(v, false, { by: "craig", reason: "manually verified the diff" });
+  assert.equal(decision.arm, true);
+
+  const resolved = resolveAutoMergeArm(v, false, { by: "craig", reason: "manually verified the diff" }, log);
+  assert.equal(resolved.arm, true);
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0].step, "automerge.capped_override_used");
+  assert.equal(logged[0].extra?.by, "craig");
+});
+
+// W1-T229 acceptance criterion 2, verbatim: "a plan-only PR still arms under the raised
+// floor, so the plan lane does not stall". PLAN-ONLY PRs (retro/triage/plan/approve/
+// dep-review) never route through decideAutoMergeArm/resolveAutoMergeArm at all — they
+// call armAutoMerge DIRECTLY (see run-task.ts). Only runTask's "implement" flow (a task
+// that produces code, never a plan-only PR) consults the arm-decision gate this task
+// raises. So the raised floor structurally cannot stall the plan lane: there is nothing
+// for it to refuse. This falsifier verifies that invariant by STRUCTURE, so a future
+// change that starts routing plan-only PRs through decideAutoMergeArm without adding an
+// explicit carve-out (W1-T205) trips this test instead of silently stalling every retro/
+// triage/plan/approve PR.
+test("W1-T229 acceptance criterion 2: the plan-only-PR-emitting flows (retro/triage/plan/approve/dep-review) arm auto-merge directly, never through the raised decideAutoMergeArm/resolveAutoMergeArm floor — so the plan lane does not stall", () => {
+  const resolveCallCount = (runTaskSrc.match(/resolveAutoMergeArm\(/g) ?? []).length;
+  // Exactly one production call site: runTask's own "implement" flow, right before its
+  // own direct armAutoMerge(...) call. Every OTHER armAutoMerge(...) call in the file
+  // (retro/triage/plan/approve/dep-review/sweep) must NOT be preceded by a
+  // resolveAutoMergeArm/decideAutoMergeArm gate — i.e. must arm unconditionally.
+  assert.equal(resolveCallCount, 1, "resolveAutoMergeArm must have exactly one call site (runTask's implement flow) — a second call site means a plan-only-PR-emitting command may now route through the raised floor and needs the W1-T205 carve-out first");
+
+  const armAutoMergeCallCount = (runTaskSrc.match(/\barmAutoMerge\(/g) ?? []).length;
+  // 1 definition + 7 direct call sites (runTask's own post-decision call, dep-review,
+  // retro, the sweep arm effect, triage, plan, approve) — at least 6 call sites beyond
+  // the definition confirms the plan-only-PR-emitting commands arm unconditionally.
+  assert.ok(
+    armAutoMergeCallCount >= 7,
+    "expected multiple direct armAutoMerge call sites (retro/triage/plan/approve/dep-review/sweep) bypassing decideAutoMergeArm entirely",
+  );
 });
 
 test("cappedOverrideFromLedger: 'last one wins', scoped to task_id, well-formed lines only", () => {
@@ -1570,4 +1748,85 @@ test("a seeded materialization failure posts a verdict whose description names i
   assert.doesNotMatch(v.summary, /substantiated/);
   // whose ledger line records the same:
   assert.deepEqual(reviewLedgerLegibilityFields(v), { capped: true, keyword_only: true });
+});
+
+// ── W1-T227: a name-filtered proof must scope its node --test invocation to
+// the candidate file(s) it could actually match, never the WHOLE suite glob
+// (test/**/*.test.ts) — node loads every file in a glob before filtering by
+// name regardless of how few match, and that full-suite load time is what
+// coins the SAME proof `executed_pass` on an idle host and `exec_error` on a
+// loaded one (a timeout race in the harness, not a flake in the tests).
+
+test('W1-T227 (acceptance 1): a proof matching tests in exactly one file executes against only that file — the built argv contains the single file, not the glob', () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w227-"));
+  mkdirSync(join(dir, "test"));
+  writeFileSync(
+    join(dir, "test", "foo.test.ts"),
+    'test("a very distinctive test name for W1-T227", () => {});\n',
+  );
+  writeFileSync(join(dir, "test", "bar.test.ts"), 'test("something unrelated entirely", () => {});\n');
+
+  const candidates = resolveNameFilteredCandidates(dir, "a very distinctive test name for W1-T227");
+  assert.deepEqual(candidates, ["test/foo.test.ts"]);
+
+  const baseArgs = [
+    "--test",
+    "--import",
+    "tsx",
+    "--test-name-pattern",
+    "a very distinctive test name for W1-T227",
+    "test/**/*.test.ts",
+  ];
+  const narrowed = narrowNameFilteredArgs(baseArgs, candidates);
+  assert.deepEqual(narrowed, [
+    "--test",
+    "--import",
+    "tsx",
+    "--test-name-pattern",
+    "a very distinctive test name for W1-T227",
+    "test/foo.test.ts",
+  ]);
+});
+
+test("W1-T227 (acceptance 2): no name-pattern invocation carries the full glob once at least one candidate file is found — even with several matches", () => {
+  const baseArgs = ["--test", "--import", "tsx", "--test-name-pattern", "shared fragment", "test/**/*.test.ts"];
+  const narrowed = narrowNameFilteredArgs(baseArgs, ["test/foo.test.ts", "test/bar.test.ts"]);
+  assert.ok(!narrowed.includes("test/**/*.test.ts"), "the narrowed argv must never carry the full suite glob");
+  assert.deepEqual(narrowed, [
+    "--test",
+    "--import",
+    "tsx",
+    "--test-name-pattern",
+    "shared fragment",
+    "test/foo.test.ts",
+    "test/bar.test.ts",
+  ]);
+});
+
+test("W1-T227 (acceptance 3): zero-candidate patterns still fail as zero-match — narrowing changes nothing, nameFilteredOutcome's existing zero-match path is unchanged", () => {
+  const baseArgs = [
+    "--test",
+    "--import",
+    "tsx",
+    "--test-name-pattern",
+    "a name that appears in no test file at all",
+    "test/**/*.test.ts",
+  ];
+  // No candidate found ⇒ narrowNameFilteredArgs falls back to the base (globbed) args verbatim.
+  assert.deepEqual(narrowNameFilteredArgs(baseArgs, []), baseArgs);
+
+  // And the same zero-match TAP shape nameFilteredOutcome always treated as "fail" (a
+  // genuinely completed run whose only result lines are file wrappers, never a real
+  // match) still fails — narrowing never turns an absent test into a pass.
+  const stdout = ["1..0", "# Subtest: test/retro.test.ts", "ok 1 - test/retro.test.ts", "# duration_ms 5"].join(
+    "\n",
+  );
+  assert.equal(nameFilteredOutcome(stdout), "fail");
+});
+
+test("resolveNameFilteredCandidates: no file contains the raw name ⇒ empty candidate list (best-effort, never throws)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w227-"));
+  mkdirSync(join(dir, "test"));
+  writeFileSync(join(dir, "test", "foo.test.ts"), 'test("something else entirely", () => {});\n');
+  assert.deepEqual(resolveNameFilteredCandidates(dir, "a name that appears nowhere"), []);
 });
