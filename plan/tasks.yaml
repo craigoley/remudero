@@ -2088,20 +2088,41 @@
     still present — a seeded failing fetch, not a real slow server.
   acceptance:
     - claim: "the console renders ONE liveness truth — two indicators derived from different states must never contradict each other on screen"
-      proof: "unit/DOM test: with a seeded stale/failing poll, the freshness stamp and the staleness banner agree — there is no rendered state in which one says fresh and the other says stale. FALSIFIER, operator screenshot 2026-07-21: the console showed 'live · updated 8s ago' DIRECTLY ABOVE 'STALE — showing last known data'. Both were honest about their own source and jointly incoherent: the relative timestamp tracked the last successful render while the staleness banner tracked the poll lifecycle, so the operator was told the data is 8 seconds old and unusable in the same glance"
+      proof: "unit test: test/serve.live-state.test.ts"
     - claim: "a failing refresh renders T156's reconnecting indicator with its last-success timestamp — never a raw exception string"
-      proof: "unit/DOM test with a seeded fetch rejection: the header shows the reconnecting state carrying the last-success time, and the rendered text contains NO exception vocabulary (no 'TypeError', no 'Failed to fetch'). FALSIFIER: the 2026-07-20 operator screenshot, showing the literal string 'refresh failed: TypeError: Failed to fetch' over a rendered board, on a serve process verified to be running current serve.ts"
+      proof: "unit test: test/serve.live-state.test.ts"
     - claim: "a fetch TIMEOUT lands in the same lifecycle as an HTTP error — both are failures"
-      proof: "unit test: a fetch that never resolves within the timeout produces the same reconnecting state as a fetch that rejects with an HTTP error. FALSIFIER: the observed failure was a genuine timeout against 35-58s responses, and it escaped into a raw exception — evidence that at least one failure mode bypasses the shipped lifecycle"
+      proof: "unit test: test/serve.live-state.test.ts"
     - claim: "the fix is verifiable with the latency defect STILL PRESENT — it does not depend on W1-T187"
-      proof: "the lifecycle tests drive a seeded failing/slow fetch rather than a real server, so they pass regardless of projection latency. FALSIFIER: fixing W1-T187 alone removes the TRIGGER while leaving the raw-exception path alive, waiting for the next genuine outage — exactly when an operator most needs the specified lifecycle"
+      proof: "unit test: test/serve.live-state.test.ts"
   risk: high
   origin: architect
   plan_refs: ["§7"]
   files: [src/lib/serve.ts, test/serve.live-state.test.ts]
   status: queued
   attempts: 0
-  note: "risk:high — graded UP from medium after rmd lint-plan flagged the span. Recorded as a regrade, not a
+  note: "PROOFS REWRITTEN 2026-07-22 from prose to the executable dialect (the W1-T183/#541 chore, same
+    class): every proof now names test/serve.live-state.test.ts — the file this task's own files: list
+    already designates, where W1-T156's lifecycle tests live — so TEST_PATH_EXACT_RE matches and the
+    review floor EXECUTES the suite at the PR head instead of walling on keyword-only. The criteria
+    themselves are UNCHANGED. Each criterion's FALSIFIER, preserved verbatim from the original proof
+    prose because a falsifier is evidence, not decoration:
+    (1) ONE-TRUTH — operator screenshot 2026-07-21: the console showed 'live · updated 8s ago' DIRECTLY
+    ABOVE 'STALE — showing last known data'. Both were honest about their own source and jointly
+    incoherent: the relative timestamp tracked the last successful render while the staleness banner
+    tracked the poll lifecycle, so the operator was told the data is 8 seconds old and unusable in the
+    same glance.
+    (2) NO-RAW-EXCEPTION — the 2026-07-20 operator screenshot, showing the literal string 'refresh
+    failed: TypeError: Failed to fetch' over a rendered board, on a serve process verified to be running
+    current serve.ts.
+    (3) TIMEOUT-IS-A-FAILURE — the observed failure was a genuine timeout against 35-58s responses, and
+    it escaped into a raw exception — evidence that at least one failure mode bypasses the shipped
+    lifecycle.
+    (4) SEEDED-NOT-LIVE — fixing W1-T187 alone removes the TRIGGER while leaving the raw-exception path
+    alive, waiting for the next genuine outage — exactly when an operator most needs the specified
+    lifecycle. The lifecycle tests must drive a seeded failing/slow fetch rather than a real server (and
+    passing in CI, where no slow live server exists, demonstrates exactly that independence).
+    risk:high — graded UP from medium after rmd lint-plan flagged the span. Recorded as a regrade, not a
     workaround: this governs the path by which the console reports its OWN liveness, and getting it wrong means
     the surface misreports whether it can be trusted — which is the one property W1-T156 exists to guarantee.
     (The flag itself is partly a linter artifact: it derives concern from filename stem, so serve.ts plus
