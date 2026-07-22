@@ -1,5 +1,7 @@
 import type { Escalation, EscalationOption } from "./escalate.js";
+import { join } from "node:path";
 import { shapeCommitMessage } from "./commit-message.js";
+import { loadPlan } from "./plan.js";
 import type { FeedbackEntry, FeedbackStatus } from "./feedback.js";
 
 /**
@@ -289,6 +291,22 @@ export function decideTriage(input: DecideTriageInput): TriageDecision {
 }
 
 // ── Post-hoc deterministic guards (pure, mirroring lib/retro.ts's codeFilesInDiff) ─────────────
+
+/**
+ * ID-COLLISION GUARD (the 2026-07-22 W1-T236 triple-mint): the triage worker picks new task ids
+ * by reading plan/tasks.yaml, which misses the plan/tasks.d/ shards (W1-T122) — three PRs in one
+ * batch each minted W1-T236 while plan/tasks.d/W1-T236-*.yaml already owned it on main, and every
+ * plan-loading CI check went red AFTER the PR opened. Load the FULL merged plan (monolith +
+ * shards) from the worker's own worktree BEFORE anything is pushed: `loadPlan` throws PlanError
+ * naming the duplicate, so a doomed proposal is refused pre-push with the collision named instead
+ * of opening a PR that every plan-loading check rejects. (A collision between two OPEN PRs'
+ * fragments is still possible — that needs id reservation, tracked separately in feedback.)
+ */
+export function assertProposedPlanLoads(worktreeRoot: string): void {
+  loadPlan(join(worktreeRoot, "plan", "tasks.yaml"));
+}
+
+
 
 /**
  * Files OUTSIDE `plan/` touched by a unified diff. A triage PR is PLAN-ONLY by construction
