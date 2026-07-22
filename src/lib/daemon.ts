@@ -33,22 +33,245 @@ import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import { nextRunnable, type MergedSet, type OpenPrCheck } from "./drain.js";
-import { headroomExhausted } from "./headroom.js";
+import { HEADROOM_LIMIT_PCT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { Plan, Task } from "./plan.js";
 import type { StatusProjection } from "./status.js";
 
-/** Reason the scheduler loop returned — every terminal state is one of these. */
-export type DaemonStopReason =
-  | "stopped"
-  | "paused"
-  | "headroom_exhausted"
-  | "blocked"
-  | "max_reached"
-  | "error";
+/**
+ * Reason the scheduler loop returned — every terminal state is one of these.
+ *
+ * `headroom_exhausted` is deliberately ABSENT: unlike `rmd drain` (a bounded
+ * one-shot run, where headroom exhaustion is a terminal stop, see drain.ts's
+ * own `StopReason`), the daemon is a PERSISTENT loop under launchd KeepAlive —
+ * returning here at all ends the process, and KeepAlive relaunches it
+ * (SuccessfulExit:false reads ANY exit, zero or not, as worth restarting on
+ * this unit), so a headroom-exhausted reading used to restart-loop the daemon
+ * roughly once per idle poll until the window reset. Headroom overage is now
+ * an IN-PROCESS idle state handled inline in the loop below (same shape as
+ * "nothing runnable"): it sleeps and re-polls via the injected clock, logging
+ * a `daemon.headroom` heartbeat each tick, and never returns while still over
+ * the limit.
+ */
+export type DaemonStopReason = "stopped" | "paused" | "blocked" | "max_reached" | "error";
 
 /** Default idle-poll pace: check back once a minute while nothing is runnable. */
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
+
+/**
+ * The pure stop-reason → process-exit-code mapping (operator ruling,
+ * 2026-07-21: "VERIFY from source how DaemonStopReason reaches the process
+ * exit today... the deliverable is the pure stop-reason-to-exit-code
+ * mapping"). Extracted so it is unit-testable with NO process spawn (Rule
+ * 18): `rmd daemon`'s CLI wiring (run-task.ts) calls this instead of inlining
+ * the ternary, so the mapping a supervisor's restart decision depends on
+ * lives in one place, provable without launchd.
+ *
+ * `stopped`/`max_reached` are the only exits meaning "this was deliberate,
+ * nothing to see" ⇒ 0. Every other reason — `blocked`, `paused` (a paused
+ * daemon should NOT look successful; an operator awaiting resume should see a
+ * non-clean exit if the process ever does end while paused), and `error` —
+ * is nonzero so a supervisor (or launchd's KeepAlive, W1-T12b) restarts. This
+ * is exactly why headroom exhaustion can never be allowed to reach this
+ * function as a `DaemonStopReason` at all (see that type's doc, above): it
+ * would either wrongly map to 0 (silence — permanently dead until a manual
+ * reload) or wrongly map to 1 (the 86-second relaunch storm this task fixes)
+ * — both wrong, because it is neither a clean stop nor a crash. It is handled
+ * entirely inside the loop below instead, and never becomes a return value.
+ */
+export function daemonExitCode(stopReason: DaemonStopReason): number {
+  return stopReason === "stopped" || stopReason === "max_reached" ? 0 : 1;
+}
+
+/**
+ * One rung of the headroom ceiling's time-to-reset curve (operator ruling,
+ * 2026-07-21, "ENCODE AS POLICY DATA, not code constants" — rule 2). Ordered
+ * narrowest-`maxHoursToReset`-first; {@link resolveHeadroomLimitPct} picks the
+ * first rung whose bound covers the observed hours-to-reset for a window.
+ */
+export interface HeadroomPolicyRule {
+  /** This rung applies when hours-to-reset is <= this bound. */
+  maxHoursToReset: number;
+  /** The ceiling (percent used) that binds under this rung. */
+  limitPct: number;
+}
+
+/** A time-to-reset → ceiling curve, DATA rather than a single constant. */
+export type HeadroomPolicy = HeadroomPolicyRule[];
+
+/**
+ * DEFAULT policy (operator ruling, 2026-07-21, the fixture: on Monday
+ * 2026-07-20 the fleet parked 22:22–00:00 EDT, 56 consecutive
+ * `headroom_exhausted` stops over ~98 minutes, protecting 95%-exhausted
+ * headroom that EXPIRED at the midnight reset regardless): inside the
+ * window's FINAL DAY (<=24h to reset) the ceiling relaxes to 100% — nothing
+ * is gained by refusing to spend headroom that is destroyed unused at reset;
+ * every other day it holds at `holdLimitPct` (the operator reserve, default
+ * {@link HEADROOM_LIMIT_PCT}). A caller supplies a wholly different curve via
+ * `DaemonOpts.headroomPolicy` without touching this source (see
+ * `resolveHeadroomLimitPct`).
+ */
+export function buildDefaultHeadroomPolicy(holdLimitPct: number = HEADROOM_LIMIT_PCT): HeadroomPolicy {
+  return [
+    { maxHoursToReset: 24, limitPct: 100 },
+    { maxHoursToReset: Infinity, limitPct: holdLimitPct },
+  ];
+}
+
+/**
+ * Resolve the ceiling that binds for a window `hoursToReset` away, under
+ * `policy` (default {@link buildDefaultHeadroomPolicy}'s curve). `null`/
+ * non-finite hours-to-reset (the reset text didn't parse, see
+ * `parseResetInstant`) resolves to the LAST (widest) rung — uncertainty is
+ * NEVER read as "we must be in the final day"; the ceiling only ever relaxes
+ * on a CONFIRMED close reset, never on a parse failure.
+ */
+export function resolveHeadroomLimitPct(hoursToReset: number | null, policy: HeadroomPolicy = buildDefaultHeadroomPolicy()): number {
+  if (hoursToReset === null || !Number.isFinite(hoursToReset)) {
+    return policy[policy.length - 1]?.limitPct ?? HEADROOM_LIMIT_PCT;
+  }
+  const rule = policy.find((r) => hoursToReset <= r.maxHoursToReset);
+  return rule?.limitPct ?? HEADROOM_LIMIT_PCT;
+}
+
+const MONTH_ABBRS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const WEEKDAY_ABBRS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+
+/** `h` in 1-12 + `ampm` ("am"/"pm") → 24-hour `h`, with the 12am/12pm fix-up. */
+function to24Hour(h: number, ampm: string): number {
+  const hour = h % 12;
+  return /pm/i.test(ampm) ? hour + 12 : hour;
+}
+
+/**
+ * Best-effort parse of a free-form `/usage` `resets_at` string into an
+ * absolute instant, resolved as the nearest instant AT OR AFTER `now` (a
+ * window's `/usage`-reported reset is never already in the past). Returns
+ * `null` when the text doesn't match a recognized `/usage` shape — callers
+ * MUST treat `null` conservatively (never as "confirmed close"), never throw:
+ * this is display/policy plumbing, not a fail-closed boundary in its own
+ * right (the numeric percent check stays the real safety gate).
+ *
+ * Recognized shapes — every one actually observed from `/usage` (this task's
+ * rationale + test/headroom.test.ts's WS0 fixture):
+ *   `"<Mon> <D>, <H>(:<MM>)?(am|pm)"`     e.g. "Jul 14, 8:00pm"
+ *   `"<Mon> <D> at <H>(:<MM>)?(am|pm)"`   e.g. "Jul 21 at 12am"
+ *   `"<H>(:<MM>)?(am|pm)"`                e.g. "3pm"
+ *   `"<weekday name or abbrev>"`          e.g. "Mon", "Monday"
+ */
+export function parseResetInstant(raw: string, now: Date): Date | null {
+  const text = raw.trim();
+
+  const monthDay = /^([A-Za-z]{3,9})\s+(\d{1,2})\s*(?:,|at)?\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i.exec(text);
+  if (monthDay) {
+    const monthIdx = MONTH_ABBRS.indexOf(monthDay[1].slice(0, 3).toLowerCase());
+    if (monthIdx === -1) return null;
+    const day = Number(monthDay[2]);
+    const hour = to24Hour(Number(monthDay[3]), monthDay[5]);
+    const minute = monthDay[4] ? Number(monthDay[4]) : 0;
+    const year = now.getFullYear();
+    let candidate = new Date(year, monthIdx, day, hour, minute, 0, 0);
+    if (candidate.getTime() < now.getTime()) candidate = new Date(year + 1, monthIdx, day, hour, minute, 0, 0);
+    return candidate;
+  }
+
+  const timeOnly = /^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i.exec(text);
+  if (timeOnly) {
+    const hour = to24Hour(Number(timeOnly[1]), timeOnly[3]);
+    const minute = timeOnly[2] ? Number(timeOnly[2]) : 0;
+    let candidate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute, 0, 0);
+    if (candidate.getTime() < now.getTime()) candidate = new Date(candidate.getTime() + 24 * 3_600_000);
+    return candidate;
+  }
+
+  const weekday = /^(sun(day)?|mon(day)?|tue(s(day)?)?|wed(nesday)?|thu(r(s(day)?)?)?|fri(day)?|sat(urday)?)$/i.exec(text);
+  if (weekday) {
+    const target = WEEKDAY_ABBRS.indexOf(text.slice(0, 3).toLowerCase());
+    if (target === -1) return null;
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+    let deltaDays = (target - startOfToday.getDay() + 7) % 7;
+    // A bare weekday matching TODAY, with no time of day given, is read as
+    // NEXT week's occurrence, not "already underway" — the conservative
+    // (larger hours-to-reset, never-relax-on-ambiguity) reading.
+    if (deltaDays === 0) deltaDays = 7;
+    return new Date(startOfToday.getTime() + deltaDays * 24 * 3_600_000);
+  }
+
+  return null;
+}
+
+/**
+ * Round an instant to the nearest hour. `/usage` has been observed to phrase
+ * the SAME intended reset moment two different ways a minute apart across
+ * consecutive boots ("Jul 21 at 12am" vs "Jul 20 at 11:59pm" — this task's
+ * SECOND, smaller defect) — sub-hour jitter like that has no operational
+ * meaning for a 5-hour session window or a weekly cap, so rounding it away
+ * is what makes {@link formatResetInstant} render the two identically.
+ */
+export function canonicalizeResetInstant(d: Date): Date {
+  const hourMs = 3_600_000;
+  return new Date(Math.round(d.getTime() / hourMs) * hourMs);
+}
+
+/**
+ * Canonical, deterministic rendering of a resolved reset instant — a fixed
+ * UTC ISO string, so the SAME underlying instant renders IDENTICALLY on
+ * every boot no matter how `/usage`'s own free-form text happened to phrase
+ * it (the defect above). Used for logging/display; the raw `/usage` string
+ * (`UsageWindow.resetsAt`) is untouched everywhere else in the codebase.
+ */
+export function formatResetInstant(d: Date): string {
+  return canonicalizeResetInstant(d).toISOString();
+}
+
+/** One window's headroom reading, resolved against the time-aware ceiling. */
+interface ResolvedWindow {
+  window: string;
+  percentUsed: number;
+  resetsAt: string;
+  /** Canonical rendering of the parsed reset instant, or the raw string when unparseable. */
+  resetsAtDisplay: string;
+  limitPct: number;
+}
+
+/**
+ * The daemon's OWN headroom check — deliberately NOT `headroom.ts`'s exported
+ * `headroomExhausted` (still used unchanged by `rmd drain`, which stays on
+ * the flat `HEADROOM_LIMIT_PCT` ceiling; a human-invoked bounded drain is not
+ * this task's concern and touching it is out of scope). This version applies
+ * the TIME-AWARE ceiling (see {@link HeadroomPolicy}) PER WINDOW — each
+ * window's own hours-to-reset resolves ITS OWN limit, since the 5-hour
+ * session window and a weekly cap reset on entirely different clocks.
+ */
+function daemonHeadroomExhausted(snap: UsageSnapshot, now: Date, policy: HeadroomPolicy): ResolvedWindow | null {
+  const windows: Array<{ window: string; percentUsed: number; resetsAt: string }> = [
+    { window: "session (5h)", percentUsed: snap.session.percentUsed, resetsAt: snap.session.resetsAt },
+    ...snap.weekly.map((w) => ({ window: `weekly (${w.label})`, percentUsed: w.percentUsed, resetsAt: w.resetsAt })),
+  ];
+  const resolved: ResolvedWindow[] = windows.map((w) => {
+    const instant = parseResetInstant(w.resetsAt, now);
+    const hoursToReset = instant ? (instant.getTime() - now.getTime()) / 3_600_000 : null;
+    return {
+      ...w,
+      resetsAtDisplay: instant ? formatResetInstant(instant) : w.resetsAt,
+      limitPct: resolveHeadroomLimitPct(hoursToReset, policy),
+    };
+  });
+  const over = resolved.filter((w) => w.percentUsed >= w.limitPct).sort((a, b) => b.percentUsed - a.percentUsed);
+  return over[0] ?? null;
+}
+
+/** Default: escalate to the SAME in-process idle heartbeat as a confirmed
+ * headroom breach after this many CONSECUTIVE unreadable `/usage` reads. A
+ * single blip (or a handful) is a transient read failure, not evidence the
+ * budget is exhausted — but an unreadable budget that dispatches FOREVER is
+ * the fail-open polarity at the spending layer (the #157/#143-adjacent
+ * cannot-observe-rendered-as-permissive family: the gateway returning `[]`,
+ * W1-T181; the projection regressing to `queued`, W1-T179). Recon R-7 found
+ * the real read is unavailable ~78% of the time in the live ledger, so an
+ * unconditional fail-closed-on-first-miss would halt the fleet most of the
+ * time — hence a BOUNDED allowance, not an immediate halt. */
+export const DEFAULT_UNREADABLE_DEGRADED_LIMIT = 3;
 
 export interface DaemonOpts {
   /**
@@ -58,8 +281,27 @@ export interface DaemonOpts {
   max?: number;
   /** Idle-poll pace in ms when nothing is currently runnable (default {@link DEFAULT_POLL_INTERVAL_MS}). */
   pollIntervalMs?: number;
-  /** ≥ this % on any window ⇒ headroom_exhausted (default HEADROOM_LIMIT_PCT). */
+  /**
+   * ≥ this % on any window, on a day the ceiling HOLDS ⇒ in-process idle
+   * (default {@link HEADROOM_LIMIT_PCT}). Ignored when `headroomPolicy` is
+   * also supplied — that curve wins outright. Threading this through still
+   * builds a full {@link HeadroomPolicy} via {@link buildDefaultHeadroomPolicy}
+   * (relax on the final day, hold at this value otherwise) rather than a flat
+   * ceiling — see the TIME-AWARE design above.
+   */
   headroomLimitPct?: number;
+  /**
+   * The time-to-reset → ceiling curve (POLICY DATA, rule 2) — supply a wholly
+   * different curve here to retune the reserve WITHOUT a source change.
+   * Default: {@link buildDefaultHeadroomPolicy} seeded from `headroomLimitPct`.
+   */
+  headroomPolicy?: HeadroomPolicy;
+  /**
+   * CONSECUTIVE unreadable `/usage` reads allowed before the daemon escalates
+   * to the in-process idle heartbeat (default {@link DEFAULT_UNREADABLE_DEGRADED_LIMIT}).
+   * A single successful read resets the count to zero.
+   */
+  unreadableDegradedLimit?: number;
 }
 
 export interface DaemonSummary {
@@ -142,6 +384,16 @@ export interface DaemonDeps {
    * a real wall-clock wait and without an actual overnight run.
    */
   sleep: (ms: number) => Promise<void>;
+  /**
+   * THE INJECTED WALL CLOCK (distinct from `sleep`'s pacing clock): read once
+   * per headroom check to resolve each window's hours-to-reset against the
+   * TIME-AWARE ceiling (see `HeadroomPolicy`). Optional — the real command
+   * wires `() => new Date()`; omitted, defaults the same way, so existing
+   * callers are unaffected. Tests inject a fake that a `sleep` fake can
+   * advance, so "resumes once the window's own reset passes" is provable
+   * without a real wall-clock wait.
+   */
+  now?: () => Date;
   /** One ledger line per tick/task/terminal reason (reuses run-task's ledger). */
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /**
@@ -216,9 +468,10 @@ export function daemonBoot(
  * REASON about any non-merged verdict (W1-T46, superseding v1's blunt
  * stop-on-block): transient retries (no strike), an independent failure is
  * flagged + skipped while the rest of the drain continues, a genuine blocker
- * halts + escalates. When nothing is runnable, sleep via the injected clock
- * and poll again — the loop is PERSISTENT by default (no `max`), unlike a
- * bounded drain.
+ * halts + escalates. When nothing is runnable OR headroom is exhausted, sleep
+ * via the injected clock and poll again — the loop is PERSISTENT by default
+ * (no `max`), unlike a bounded drain, and idling (for either reason) is an
+ * in-process state, never a process exit.
  */
 export async function runDaemon(
   plan: Plan,
@@ -246,6 +499,16 @@ export async function runDaemon(
   // every tick — see drain.ts's `runDrain`, the identical fix for the bounded
   // one-shot loop.
   const circuitEscalated = new Set<string>();
+  // BOUNDED DEGRADED MODE (recon R-7: the live ledger shows /usage unreadable
+  // ~78% of the time — an unconditional fail-closed-on-first-miss would halt
+  // the fleet most of the time, so this counts CONSECUTIVE misses instead of
+  // treating any single one as decisive). Reset to zero by any successful
+  // read; escalates to the in-process idle heartbeat once it exceeds
+  // `unreadableDegradedLimit` — see the headroom check below.
+  let consecutiveUnreadable = 0;
+  const headroomPolicy = opts.headroomPolicy ?? buildDefaultHeadroomPolicy(opts.headroomLimitPct);
+  const unreadableDegradedLimit = opts.unreadableDegradedLimit ?? DEFAULT_UNREADABLE_DEGRADED_LIMIT;
+  const now = deps.now ?? (() => new Date());
 
   const summary = (stopReason: DaemonStopReason, stopDetail?: string): DaemonSummary => {
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
@@ -297,17 +560,73 @@ export async function runDaemon(
       }
     }
 
-    // HEADROOM: never hammer a nearly-exhausted pool. Best-effort — an unreadable
-    // /usage does not halt the daemon; an at/near-limit reading DOES, with the
-    // reset time reported, before any new task is spawned.
+    // HEADROOM: never hammer a nearly-exhausted pool. An at/near-limit reading
+    // gates new spawns WITHOUT halting the loop (see the DaemonStopReason doc
+    // above — a launchd KeepAlive unit restart-loops on any exit, so exiting
+    // here would just relaunch into the same exhausted reading every poll).
+    // Instead this is an in-process idle state, identical in shape to
+    // "nothing runnable" below: sleep via the injected clock, emit one
+    // `daemon.headroom` heartbeat per tick naming the window/percent/reset,
+    // and re-check next tick — until the window resets and headroom frees up
+    // (readUsage() is called fresh every tick, so a real reset is picked up
+    // automatically, no separate "wake up at resets_at" timer needed), or
+    // STOP/PAUSE is honoured above. The ceiling itself is TIME-AWARE
+    // (`headroomPolicy`, resolved once above): on a window's final day it
+    // relaxes toward 100%, since anything unspent is destroyed at reset.
     if (deps.readUsage) {
       const snap = deps.readUsage();
-      const over = snap ? headroomExhausted(snap, opts.headroomLimitPct) : null;
-      if (over) {
-        log("daemon.headroom", { window: over.window, percent_used: over.percentUsed, resets_at: over.resetsAt });
-        return summary("headroom_exhausted", `${over.window} at ${over.percentUsed}% — resets ${over.resetsAt}`);
+      if (snap) {
+        // A GOOD read clears the degraded-mode counter — only CONSECUTIVE
+        // misses count toward escalation, not a lifetime total.
+        consecutiveUnreadable = 0;
+        const over = daemonHeadroomExhausted(snap, now(), headroomPolicy);
+        if (over) {
+          ticks++;
+          log("daemon.headroom", {
+            tick: ticks,
+            window: over.window,
+            percent_used: over.percentUsed,
+            limit_pct: over.limitPct,
+            resets_at: over.resetsAtDisplay,
+            poll_interval_ms: pollIntervalMs,
+          });
+          await deps.sleep(pollIntervalMs);
+          continue;
+        }
+      } else {
+        // UNREADABLE: cannot-read-the-budget must never render as
+        // proceed-as-if-unlimited (the fail-open polarity at the spending
+        // layer — the #157/#143-adjacent cannot-observe-rendered-as-permissive
+        // family: the gateway returning `[]`, W1-T181; the projection
+        // regressing to `queued`, W1-T179). This is now an EXPLICIT, tested,
+        // BOUNDED policy rather than an implicit "continue regardless"
+        // fall-through: a handful of consecutive misses is a transient read
+        // failure (recon R-7: unreadable ~78% of the time in the live
+        // ledger — an unconditional fail-closed-on-first-miss would halt the
+        // fleet most of the time), so dispatch is still permitted WITHIN the
+        // bounded allowance, always logged distinctly (never silently); once
+        // the allowance is exceeded, the daemon escalates to the SAME
+        // in-process idle heartbeat a confirmed breach uses, until a read
+        // succeeds again.
+        consecutiveUnreadable++;
+        if (consecutiveUnreadable > unreadableDegradedLimit) {
+          ticks++;
+          log("daemon.headroom.degraded", {
+            tick: ticks,
+            consecutive_unreadable: consecutiveUnreadable,
+            degraded_limit: unreadableDegradedLimit,
+            poll_interval_ms: pollIntervalMs,
+            note: "usage unreadable beyond the bounded allowance — idling, not dispatching",
+          });
+          await deps.sleep(pollIntervalMs);
+          continue;
+        }
+        log("daemon.headroom.unavailable", {
+          consecutive_unreadable: consecutiveUnreadable,
+          degraded_limit: unreadableDegradedLimit,
+          note: "usage unreadable — bounded degraded-mode allowance, still dispatching",
+        });
       }
-      if (!snap) log("daemon.headroom.unavailable", { note: "usage unreadable — continuing (best-effort)" });
     }
 
     const next = nextRunnable(plan, isMerged, {
