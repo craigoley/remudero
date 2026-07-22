@@ -10,8 +10,10 @@ import {
   applyStampToMasterPlan,
   approveCommitMessage,
   approveProposal,
+  classifyProposal,
   inboxDraftPrompt,
   invalidateDraft,
+  isRatifiedInLedger,
   ratifyTelemetry,
   refusalReason,
   reframeProposal,
@@ -22,7 +24,9 @@ import {
   type Proposal,
   type RatificationPayload,
   type RatifyGateway,
+  type ReadinessContext,
 } from "../src/lib/inbox.js";
+import type { Plan } from "../src/lib/plan.js";
 import { buildPlanPrBody, filingAcceptanceCriteria, regeneratePlanIndexFile } from "../src/lib/plan-pr-emitter.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
 
@@ -135,6 +139,30 @@ test("approveProposal: a READY classification produces exactly ONE branch call a
   assert.equal(lines[0].step, "ratify.approved");
   assert.equal(lines[0].task_id, "P-READY");
   assert.equal(lines[0].pr_url, "https://github.com/craigoley/remudero/pull/500");
+});
+
+test("W1-T190 (acceptance 1): after approveProposal succeeds — the exact call `rmd approve` makes — a FRESH classification of the SAME proposal, off the SAME ledger, reports it as ratified, never READY again (the registry's own copy of the proposal is UNCHANGED here, exactly the 'write never happened' drift the P19 incident hit)", () => {
+  const gateway = fakeGateway();
+  const path = ledgerPath();
+  const result = approveProposal(readyClassification(), gateway, { ledgerPath: path, runId: "RUN-1" });
+  assert.equal(result.ok, true);
+
+  // `rmd inbox`/the console's `/v1/inbox` route both re-classify off the registry's proposal
+  // record + the ledger on every read — this is that SAME read path, given a proposal record
+  // that never itself changed (no status/ratifiedAt field, nothing "knows" it was approved
+  // except the ledger line just above).
+  const proposal: Proposal = { id: "P-READY", summary: "s", evidenceAnchors: [] };
+  const ledgerLines = readLedger(path);
+  const ctx: ReadinessContext = {
+    plan: { tasks: [], byId: new Map() } as Plan,
+    isMerged: () => true,
+    grepAnchorTrue: () => true,
+    openProposalIds: new Set(["P-READY"]),
+    isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
+  };
+  const classification = classifyProposal(proposal, undefined, ctx);
+  assert.equal(classification.state, "ratified");
+  assert.notEqual(classification.state, "ready");
 });
 
 test("approveProposal: a NOT-READY (dep-unmet) classification refuses, naming the state — ZERO gateway calls", () => {

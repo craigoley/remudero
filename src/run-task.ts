@@ -103,9 +103,13 @@ import {
   draftAttemptKey,
   draftsDueOnDaemon,
   gitGrepAnchorTrue,
+  inboxDraftPrompt,
+  isDraftStale,
+  isRatifiedInLedger,
   parseDraftAttemptCache,
   parseDraftCache,
   parseProposalRegistry,
+  pruneRatifiedProposals,
   proposalsNeedingDraft,
   ratifyTelemetry,
   reframeProposal,
@@ -5958,6 +5962,10 @@ async function inboxCommand(rest: string[]): Promise<number> {
   const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
   const isMerged: MergedResolver = (t) => deriveStatus(t, deriveDeps).merged;
   const openProposalIds = new Set(proposals.map((p) => p.id));
+  // W1-T190: re-derive "already ratified" from the ledger on every `rmd inbox` pass, never
+  // from the registry's own state — a proposal ratify.approved already fired for is reported
+  // ratified even if the registry entry itself drifted (the P19 incident).
+  const ledgerLinesForRatify = readLedgerLines(ledgerPath);
 
   const classifications = proposals.map((p) =>
     classifyProposal(p, drafts[p.id], {
@@ -5965,6 +5973,7 @@ async function inboxCommand(rest: string[]): Promise<number> {
       isMerged,
       grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
       openProposalIds,
+      isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
@@ -5977,6 +5986,18 @@ async function inboxCommand(rest: string[]): Promise<number> {
   // side effects (escalate/capture) a preview must leave no trace of; classification here
   // has none.
   log("inbox.polled", { inbox: summarizeInboxPoll(classifications) });
+
+  // W1-T190 (round 2): a proposal classified "ratified" here is DETECTED off the ledger,
+  // never trusted from the registry's own (possibly drifted) copy — but detection alone
+  // still leaves the drifted row sitting in state/inbox-proposals.json forever. Heal it:
+  // any proposal the ledger already ratified is pruned from the registry on THIS pass, the
+  // same way approveCommand prunes the common (non-drifted) case, so the correction lands
+  // on disk, not just in this run's in-memory classification.
+  const { proposals: healedProposals, prunedIds } = pruneRatifiedProposals(proposals, classifications);
+  if (prunedIds.length > 0) {
+    writeFileSync(registryPath, JSON.stringify({ proposals: healedProposals }, null, 2), "utf8");
+    for (const id of prunedIds) log("inbox.registry_healed", { proposal_id: id });
+  }
 
   const rendered = renderInbox(classifications);
   console.log(rendered);
@@ -6008,11 +6029,17 @@ function loadProposalForRatify(
 
   const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
   const isMerged: MergedResolver = (t) => deriveStatus(t, deriveDeps).merged;
+  // W1-T190: read the ledger ONCE here and cross-check it, never the registry's own copy of
+  // "is this ratified" (there isn't one) — a proposal the ledger already carries
+  // ratify.approved for is `ratified`, no matter what stale/drifted state the registry entry
+  // itself is still in (the P19 incident this task fixes).
+  const ledgerLines = readLedgerLines(ledgerPath);
   const ctx: ReadinessContext = {
     plan,
     isMerged,
     grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
     openProposalIds: new Set(proposals.map((p) => p.id)),
+    isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };
@@ -6039,9 +6066,10 @@ async function approveCommand(rest: string[]): Promise<number> {
   const config = loadConfig();
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const registryPath = join(config.root, "state", "inbox-proposals.json");
   const { owner, repo } = resolveOwnerRepo();
 
-  const { proposal, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
+  const { proposal, proposals, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
   if (!proposal || !classification) {
     console.error(`rmd approve: unknown proposal '${proposalId}' — not in the ACTIVE registry (state/inbox-proposals.json)`);
     return 2;
@@ -6128,6 +6156,17 @@ async function approveCommand(rest: string[]): Promise<number> {
     console.error(`rmd approve: ${result.refusal}`);
     return 1;
   }
+
+  // W1-T190: `ratify.approved` above just ledgered this proposal's ratification, but the
+  // ledger and the registry are two different sources of truth — `rmd inbox`/the console's
+  // `/v1/inbox` route (buildInboxRoute) classify strictly off state/inbox-proposals.json,
+  // never the ledger, so leaving this entry in place kept recommending an already-ratified
+  // proposal as READY indefinitely. Mirrors reframeCommand's registry write below (5646+ in
+  // this file): this proposal is no longer ACTIVE (see the Proposal interface's doc comment
+  // in lib/inbox.ts), so it is removed rather than rewritten in place.
+  const nextProposals = proposals.filter((p) => p.id !== proposalId);
+  writeFileSync(registryPath, JSON.stringify({ proposals: nextProposals }, null, 2), "utf8");
+
   if (!repoDir || !worktreePath) {
     // Unreachable in practice — the gateway above always sets these before returning a
     // branch — but fail LOUD rather than silently skip cleanup/gate if it ever were.
