@@ -27,6 +27,7 @@ import {
   isTddStrict,
   judgeReview,
   judgeRubric,
+  judgeCriterion,
   keywordOnlyAnnotation,
   narrowNameFilteredArgs,
   nameFilteredOutcome,
@@ -1226,7 +1227,7 @@ test("nameFilteredOutcome: the matched test itself reporting 'not ok' is a genui
   assert.equal(nameFilteredOutcome(stdout), "fail");
 });
 
-test("nameFilteredOutcome: zero real matches is FAIL (W1-T72 guard) when the run genuinely COMPLETED (trailing summary present) even with collateral file-wrapper noise", () => {
+test("nameFilteredOutcome: zero real matches on a COMPLETED run is NO-MATCH, not a manufactured FAIL — the named test does not exist (proof-authoring mismatch), never a test failure (#466/W1-T183 root cause)", () => {
   const stdout = [
     "1..0",
     "# Subtest: test/retro.test.ts",
@@ -1237,7 +1238,22 @@ test("nameFilteredOutcome: zero real matches is FAIL (W1-T72 guard) when the run
     "# fail 1",
     "# duration_ms 123.456",
   ].join("\n");
-  assert.equal(nameFilteredOutcome(stdout), "fail");
+  // FALSIFIER: the pre-fix shape returned "fail" here, minting an `executed_fail` that hard-blocked
+  // a PR (#466) whose real tests pass under a different name. A pattern matching zero tests is
+  // absence-of-the-named-test, not evidence of a defect.
+  assert.equal(nameFilteredOutcome(stdout), "no-match");
+});
+
+test("judgeCriterion: a proof whose name-pattern matches NO test is not_executable (degrades to keyword floor), NOT executed_fail — and the reason names the mismatch", () => {
+  const criterion = { claim: "the widget renders densely", proof: "unit test: the widget renders densely above the fold" };
+  // Report substantiates the claim's keywords, so the keyword floor is MET.
+  const reportTokens = new Set(["the", "widget", "renders", "densely", "above", "fold"]);
+  // Injected executor returns "no-match" — the named test does not exist in the suite.
+  const v = judgeCriterion(criterion, reportTokens, undefined, { cwd: "/tmp/x", exec: () => "no-match" });
+  assert.equal(v.proof_exec, "not_executable", "a zero-match proof must NOT be executed_fail");
+  assert.notEqual(v.proof_exec, "executed_fail");
+  assert.match(v.reason, /no matching test/i, "the reason names the proof-test mismatch");
+  assert.equal(v.met, true, "with keyword coverage met, the criterion is met via the floor, not hard-failed");
 });
 
 // ── W1-T112 round-4: a name-filtered proof scopes the WHOLE suite glob (100+ files, several
@@ -1803,7 +1819,7 @@ test("W1-T227 (acceptance 2): no name-pattern invocation carries the full glob o
   ]);
 });
 
-test("W1-T227 (acceptance 3): zero-candidate patterns still fail as zero-match — narrowing changes nothing, nameFilteredOutcome's existing zero-match path is unchanged", () => {
+test("W1-T227 (acceptance 3): zero-candidate patterns are NO-MATCH, not a pass — narrowing changes nothing, and a completed zero-match run is the absent-test signal (never turned into a pass)", () => {
   const baseArgs = [
     "--test",
     "--import",
@@ -1815,13 +1831,15 @@ test("W1-T227 (acceptance 3): zero-candidate patterns still fail as zero-match �
   // No candidate found ⇒ narrowNameFilteredArgs falls back to the base (globbed) args verbatim.
   assert.deepEqual(narrowNameFilteredArgs(baseArgs, []), baseArgs);
 
-  // And the same zero-match TAP shape nameFilteredOutcome always treated as "fail" (a
-  // genuinely completed run whose only result lines are file wrappers, never a real
-  // match) still fails — narrowing never turns an absent test into a pass.
+  // A genuinely completed run whose only result lines are file wrappers (never a real match) is
+  // NO-MATCH: the named test is absent. Narrowing never turns that into a "pass". (Post-#466 fix:
+  // no-match degrades to not_executable at the judge, never a false executed_fail.)
   const stdout = ["1..0", "# Subtest: test/retro.test.ts", "ok 1 - test/retro.test.ts", "# duration_ms 5"].join(
     "\n",
   );
-  assert.equal(nameFilteredOutcome(stdout), "fail");
+  const outcome = nameFilteredOutcome(stdout);
+  assert.equal(outcome, "no-match");
+  assert.notEqual(outcome, "pass", "an absent test is never a pass");
 });
 
 test("resolveNameFilteredCandidates: no file contains the raw name ⇒ empty candidate list (best-effort, never throws)", () => {

@@ -552,9 +552,12 @@ export function parseWhitelistedProof(proof: string): WhitelistedProof | null {
   return null;
 }
 
-/** Executes a {@link WhitelistedProof}'s argv and reports whether it passed —
- * injectable so unit tests fake pass/fail/throw without touching the filesystem. */
-export type ProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => "pass" | "fail";
+/** Executes a {@link WhitelistedProof}'s argv and reports the outcome —
+ * injectable so unit tests fake pass/fail/no-match/throw without touching the filesystem.
+ * `"no-match"` (name-filtered proofs only): the run completed but ZERO tests matched the
+ * pattern — the named test does not exist. That is NOT a failing test; the caller degrades
+ * it to `not_executable` (the keyword floor), never a false `executed_fail`. */
+export type ProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => "pass" | "fail" | "no-match";
 
 // W1-T112 round-4: 30s was observed live truncating a name-filtered proof's WHOLE-suite
 // run before it ever reached the named test's file (see nameFilteredOutcome's doc
@@ -669,7 +672,7 @@ export function execWhitelistedProof(
   whitelisted: WhitelistedProof,
   cwd: string,
   timeoutMs = DEFAULT_PROOF_TIMEOUT_MS,
-): "pass" | "fail" {
+): "pass" | "fail" | "no-match" {
   if (whitelisted.kind === "test") ensureDeps(cwd);
   // W1-T227: a name-filtered proof's `args` (from parseTestTarget) still carry
   // the FULL suite glob — resolve the actual candidate file(s) now, against
@@ -756,7 +759,7 @@ function hasFinalSummary(stdout: string): boolean {
  * (their names ARE file-wrapper names) are ignored entirely — they are not
  * evidence about the ONE test this proof named.
  */
-export function nameFilteredOutcome(stdout: string): "pass" | "fail" {
+export function nameFilteredOutcome(stdout: string): "pass" | "fail" | "no-match" {
   let matched = false;
   let anyRealFailure = false;
   for (const line of stdout.split("\n")) {
@@ -773,7 +776,13 @@ export function nameFilteredOutcome(stdout: string): "pass" | "fail" {
           "inconclusive, not evidence the named test is missing",
       );
     }
-    return "fail";
+    // ZERO tests matched the pattern and the run COMPLETED (a trailing summary is present, so
+    // this is not a timeout). The named test does not exist — a proof-authoring mismatch, NOT a
+    // failing test. Returning "fail" here (the pre-fix shape) minted a false `executed_fail` that
+    // HARD-BLOCKED PRs whose real tests pass under a different name — #466/W1-T183 sat blocked a
+    // day+ on exactly this. Report the distinct "no-match" so the caller degrades to the keyword
+    // floor with a legible reason, never a false test failure.
+    return "no-match";
   }
   return anyRealFailure ? "fail" : "pass";
 }
@@ -849,6 +858,14 @@ export function judgeCriterion(
           proofExec = "executed_pass";
           met = true;
           reason = `proof executed and PASSED on the PR head (${whitelisted.kind}: ${whitelisted.label})`;
+        } else if (outcome === "no-match") {
+          // ZERO tests matched the proof's name pattern (the run completed — see
+          // nameFilteredOutcome). The named test does not exist: a proof-authoring mismatch,
+          // NOT a failing test. Degrade to `not_executable` (the keyword floor stands as
+          // computed above — `met`/`reason` from mechanical coverage), and ANNOTATE why, so an
+          // author sees "names no matching test" rather than a misleading "executed and FAILED".
+          proofExec = "not_executable";
+          reason = `${reason} — NOTE: proof names no matching test (0 tests matched '${whitelisted.label}'); not executed, keyword floor applied`;
         } else {
           proofExec = "executed_fail";
           met = false;
