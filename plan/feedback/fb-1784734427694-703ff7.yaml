@@ -22,5 +22,5 @@ raw: "PIPELINE DEFECT (durable-inbox -> triage has no commit bridge). OBSERVED.
   feedback entry'."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
