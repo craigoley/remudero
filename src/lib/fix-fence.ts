@@ -1,14 +1,11 @@
 /**
- * lib/fix-fence.ts — W1-T210's untrusted-CI-output containment, extracted from
- * run-task.ts. Two reasons this lives in its own module: (1) doctrine — pure,
- * dependency-free logic belongs in lib/ where it is unit-testable in isolation;
- * (2) coverage attribution — module-top-level declarations inside run-task.ts's
- * ~7.5k-line module body are a known V8/source-map dead zone (DA:0 despite
- * executing — the pre-existing FIX_MODE_RULES table shows the same artifact),
- * which false-blocked diff-coverage on the original in-place addition.
- */
-
-/**
+ * lib/fix-fence.ts — W1-T210's untrusted-CI-output containment, extracted
+ * from run-task.ts: (1) doctrine — pure, dependency-free logic belongs in
+ * lib/ where it is unit-testable in isolation; (2) coverage attribution —
+ * module-top-level declarations inside run-task.ts's ~7.5k-line module body
+ * are a V8/source-map dead zone (DA:0 despite executing), which
+ * false-blocked diff-coverage on the original in-place addition.
+ *
  * The `ci-log` mode's untrusted-span fence, mirroring inbox.ts's
  * `=== THE PROPOSAL ===` delimiter convention (`inboxDraftPrompt`) rather than
  * inventing a second style. Both the failing check's NAME and its log tail

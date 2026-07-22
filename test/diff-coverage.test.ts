@@ -112,3 +112,14 @@ test("diff-coverage module: importing (not spawning as the entry script) does no
   assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
   assert.match(result.stdout.toString(), /imported-without-main-invocation/);
 });
+
+test("diff-coverage CLI: a new file's LEADING comment block carrying DA:0 records (the --enable-source-maps preamble artifact) does NOT block — comment/blank lines are non-executable regardless of DA presence", () => {
+  const result = runDiffCoverage("leading-comment.lcov", "leading-comment.diff");
+  assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+});
+
+test("diff-coverage CLI: the comment carve-out rescues ONLY non-executable lines — a genuinely uncovered added CODE line in the same file still blocks", () => {
+  const result = runDiffCoverage("leading-comment-real-miss.lcov", "leading-comment-real-miss.diff");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr.toString(), /src\/lib\/newmod\.ts:5/);
+});
