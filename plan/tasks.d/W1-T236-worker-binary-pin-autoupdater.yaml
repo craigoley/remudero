@@ -1,0 +1,53 @@
+- id: W1-T236
+  title: "workers spawn an auto-updating claude binary with the autoupdater NOT disabled - a mid-run content swap is an unguarded hazard, independent of tonight's cause"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "config.ts resolveClaudeBin runs execFileSync('which', ['claude']) once at first config creation
+    and records the result; on this host that resolves to ~/.npm-global/bin/claude, a SYMLINK into the
+    auto-updating npm install. Its content was observed rewritten 2026-07-21 18:45:09 EDT mid-incident, a
+    same-day 2.1.216 to 2.1.217 bump through the shell alias - so the binary the fleet spawns can change
+    underneath it without the recorded path changing.
+    THE AUTOUPDATER IS NOT DISABLED IN THE CHILD. env.ts's ALLOWLIST is exactly
+    ['PATH', 'HOME', 'TMPDIR', 'LANG', 'USER'] and nothing injects DISABLE_AUTOUPDATER; there is no such
+    injection in worker.ts or settings/worker.json either. So a worker child can trigger or race an update of
+    the shared binary while running.
+    THIS IS NOT TONIGHT'S CAUSE, and is filed as the independent hazard it is rather than as part of the
+    keychain fix. The autoupdater-race failure mode is an ENOENT re-raise (the npm swap unlinks the binary
+    mid-spawn), which collectWorkerResult re-raises because no result envelope was seen - a THROW, not the
+    error-result shape the keychain lock produced. Refuted as this incident's mechanism, real as a standing
+    risk (it is the recorded resume-spawn autoupdate race class)."
+  design: |
+    INJECT DISABLE_AUTOUPDATER=1 into buildWorkerEnv for every worker child, so a running worker can never swap
+    the binary it and its siblings are executing. VERIFY the ALLOWLIST discipline from source first - env.ts
+    strips everything not named, so the variable must be added as an explicit grant, not merged in a way the
+    allowlist would drop.
+    CONTENT-PIN THE BINARY. Either the harness owns a copy it controls, or it records the resolved binary's
+    version/content at config time and ASSERTS it at preflight, ledgering a drift with a named reason rather
+    than spawning a silently-changed binary. The recorded-version assert is the smaller change; the
+    harness-owned copy is the stronger guarantee - choose with evidence.
+    DO NOT BREAK LEGITIMATE UPDATES. The operator still updates the CLI deliberately; the pin must make a swap
+    VISIBLE and INTENTIONAL, not impossible. A drift that the operator caused should ledger and continue under
+    an explicit acknowledgement, not hard-fail the fleet forever.
+  acceptance:
+    - claim: "every worker child env carries DISABLE_AUTOUPDATER=1, added through the allowlist rather than dropped by it"
+      proof: "unit test: test/env.test.ts"
+    - claim: "a version mismatch between the recorded binary and the actual binary at preflight is ledgered with a named drift reason"
+      proof: "unit test: test/worker-binary-pin.test.ts"
+    - claim: "a matching binary passes preflight silently, so the pin does not fire on the common case"
+      proof: "unit test: test/worker-binary-pin.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§4A", "§12"]
+  files: [src/lib/env.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21. Citations verified at origin/main 2d33735: config.ts:256-257 (resolveClaudeBin via
+    which), env.ts:29 ALLOWLIST = ['PATH','HOME','TMPDIR','LANG','USER'], no DISABLE_AUTOUPDATER anywhere in
+    the child env path.
+    NOT TONIGHT'S CAUSE - refuted, its failure mode is an ENOENT re-raise not an error-result. Filed because
+    the binary genuinely auto-updated mid-incident and the guard the recorded resume-spawn race lesson calls
+    for (DISABLE_AUTOUPDATER=1) is still absent."
