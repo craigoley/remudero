@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
+import { parseAnchoredVersionBumps,
   buildDepReviewEscalation,
   changedFilesInDiff,
   decideDepReview,
@@ -289,4 +289,35 @@ test("buildDepReviewEscalation: class MANUAL, no-auto-merge language, and the PR
   assert.ok(e.options.length >= 2, "escalate() refuses zero-option escalations — this must carry real choices");
   assert.match(e.options[0].detail, /never auto-merge/);
   assert.equal(e.recommendation, "merge");
+});
+
+// ── anchored parsing: embedded release-notes must never classify THIS PR (#533 false-major) ──
+
+const PR533_SHAPE_BODY = [
+  "Bumps the actions-minor-and-patch group with 4 updates.",
+  "",
+  "Updates `actions/checkout` from 7.0.0 to 7.0.1",
+  "<details><summary>Commits</summary>",
+  "<li>Bump docker/login-action from 3.3.0 to 4.2.0 (#2479)</li>",
+  "<li>Bump docker/build-push-action from 6.5.0 to 7.2.0 (#2478)</li>",
+  "</details>",
+  "Updates `github/codeql-action/init` from 4.37.0 to 4.37.3",
+  "Updates `github/codeql-action/analyze` from 4.37.0 to 4.37.3",
+].join("\n");
+
+test("overallSemverLevel: a grouped PATCH PR whose embedded changelogs quote OTHER projects' MAJOR bumps classifies patch, not major (the #533 false-major)", () => {
+  assert.equal(overallSemverLevel("chore(deps): bump the actions-minor-and-patch group with 4 updates", PR533_SHAPE_BODY), "patch");
+});
+
+test("overallSemverLevel: a genuine MAJOR on Dependabot's own Updates line still escalates the whole group", () => {
+  const body = PR533_SHAPE_BODY + "\nUpdates `left-pad` from 1.3.0 to 2.0.0";
+  assert.equal(overallSemverLevel("chore(deps): bump the actions group with 5 updates", body), "major");
+});
+
+test("overallSemverLevel: a single-dependency 'Bumps [pkg] from X to Y' body line still parses (the non-grouped shape)", () => {
+  assert.equal(overallSemverLevel("chore(deps): bump lodash from 4.17.20 to 4.17.21", "Bumps [lodash](https://github.com/lodash/lodash) from 4.17.20 to 4.17.21."), "patch");
+});
+
+test("parseAnchoredVersionBumps: prose-only from/to pairs yield NOTHING — mid-changelog quotes are somebody else's bumps", () => {
+  assert.deepEqual(parseAnchoredVersionBumps("<li>Bump strip-ansi from 6.0.1 to 7.2.0</li>"), []);
 });

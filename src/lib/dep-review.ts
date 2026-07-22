@@ -86,15 +86,45 @@ export function parseVersionBumps(text: string): SemverLevel[] {
 }
 
 /**
+ * Dependabot's OWN per-constituent summary lines — `Updates \`pkg\` from X to Y`
+ * (grouped PRs, one per dependency) and `Bumps [pkg](url) from X to Y` (single-
+ * dependency PRs, the body's first line; also the PR title's own `bump pkg from
+ * X to Y`). Anchored to line START because everything else in a Dependabot body
+ * is EMBEDDED THIRD-PARTY RELEASE NOTES, which routinely quote other projects'
+ * dependency bumps.
+ */
+const DEPENDABOT_SUMMARY_LINE_RE = /^\s*(?:Updates|Bumps)\b/i;
+
+/**
+ * Parse version bumps ONLY from Dependabot's own summary lines, never from the
+ * embedded release-notes prose (the 2026-07-22 #533 false-major: actions/checkout
+ * 7.0.0→7.0.1 — a PATCH — classified MAJOR because checkout's OWN changelog,
+ * quoted inside the PR body, contains "docker/login-action from 3.3.0 to 4.2.0";
+ * #534 carried the same hazard via commit-and-tag-version's changelog, and
+ * PR #81's 2026-07-15 escalation has the identical signature). A `from X to Y`
+ * pair that only ever appears mid-prose is somebody ELSE'S bump, not this PR's.
+ */
+export function parseAnchoredVersionBumps(text: string): SemverLevel[] {
+  return text
+    .split("\n")
+    .filter((line) => DEPENDABOT_SUMMARY_LINE_RE.test(line))
+    .flatMap((line) => parseVersionBumps(line));
+}
+
+/**
  * The PR's overall semver level across its title + body: the WORST (highest-risk)
  * constituent bump wins — major beats unknown beats minor beats patch. A grouped
  * PR with even ONE major constituent escalates the WHOLE PR (fail closed; Standing
  * rules 2/4 — never split the difference on a mixed-risk group). No parseable
  * bump anywhere is `unknown` — also fail-closed, handled the same as `major` by
  * {@link decideDepReview}.
+ *
+ * The TITLE is parsed whole (a one-line Dependabot-authored string); the BODY is
+ * parsed via {@link parseAnchoredVersionBumps} only — its non-summary lines are
+ * quoted third-party changelogs and must never classify THIS PR's risk.
  */
 export function overallSemverLevel(title: string, body: string): SemverLevel {
-  const bumps = [...parseVersionBumps(title), ...parseVersionBumps(body)];
+  const bumps = [...parseVersionBumps(title), ...parseAnchoredVersionBumps(body)];
   if (bumps.length === 0) return "unknown";
   if (bumps.includes("major")) return "major";
   if (bumps.includes("unknown")) return "unknown";
