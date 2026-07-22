@@ -1,0 +1,115 @@
+/**
+ * Log rotation policy (W1-T218, RECON R-25). None of `daemon.out/err.log`, `digest.out/err.log`,
+ * `supervisor.out/err.log`, `serve.log`, `drain.log` or `sweep-loop.log` under `state/logs/` has
+ * any size or age bound — they grow forever (measured at intake: daemon.err.log 42 KB,
+ * daemon.out.log 117 KB, serve.log <1 KB, drain.log 1.2 KB, sweep-loop.log 9.5 KB — small today,
+ * hygiene rather than an incident). This module is the SMALLEST fix that bounds that growth: a
+ * pure generator (mirrors `lib/launchd.ts`'s plist generators) for a macOS `newsyslog.d` config,
+ * EXPLICITLY naming every rotated file rather than sweeping a directory.
+ *
+ * THE EXCLUSION IS THE LOAD-BEARING PART (plan/tasks.yaml W1-T218). `state/ledger.ndjson` backs
+ * the dispatch circuit breaker and sweep dedup (`lib/status.ts`, `lib/ledger.ts`) and already has
+ * its OWN breaker-safe archival policy (W1-T209, `rotateLedger` in `lib/ledger.ts`). A generic
+ * "rotate everything under state/" rule would truncate it and silently zero every breaker back to
+ * 0 — the exact redispatch-storm condition W1-T209 exists to prevent. So {@link ROTATED_LOG_FILES}
+ * is a closed, explicit list of filenames resolved under `state/logs/` ONLY — never a glob, never
+ * a directory sweep, and never the ledger filename (which doesn't even live in that directory:
+ * it's `state/ledger.ndjson`, a sibling of `state/logs/`, not a member of it). A future file added
+ * to `state/` — decision-backing or not — is NOT automatically enrolled here; rotating a new log
+ * requires a deliberate edit to {@link ROTATED_LOG_FILES}, the same way excluding the ledger
+ * required a deliberate omission from it rather than an accident of scope.
+ *
+ * Installing the generated config under `/etc/newsyslog.d/` requires root, exactly like loading a
+ * launchd unit (see `lib/launchd.ts`'s header) — a headless worker cannot commission it live, so
+ * that step is an operator action, same split as the plist generators.
+ */
+
+import { join } from "node:path";
+
+/**
+ * Every log file this policy rotates, EXPLICITLY named — see this module's header for why a
+ * directory sweep is never acceptable here. `digest.*.log` and `supervisor.*.log` are the same
+ * launchd-redirected-stdio shape as `daemon.*.log` (`lib/launchd.ts`'s three plist generators)
+ * and are included for that reason, even though only `daemon.err/out.log`, `serve.log`,
+ * `drain.log` and `sweep-loop.log` were in RECON R-25's measured sample.
+ */
+export const ROTATED_LOG_FILES: readonly string[] = [
+  "daemon.out.log",
+  "daemon.err.log",
+  "digest.out.log",
+  "digest.err.log",
+  "supervisor.out.log",
+  "supervisor.err.log",
+  "serve.log",
+  "drain.log",
+  "sweep-loop.log",
+];
+
+/**
+ * Never rotate this filename — see module header. {@link generateNewsyslogConfig} asserts
+ * {@link ROTATED_LOG_FILES} never contains it, belt-and-suspenders against a future edit
+ * accidentally enrolling the dispatch breaker's backing store into log hygiene.
+ */
+export const NEVER_ROTATE_FILENAME = "ledger.ndjson";
+
+/** Size ceiling per log, in KB, before newsyslog rotates it. ~85x the largest log at intake (117 KB). */
+export const LOG_SIZE_CEILING_KB = 10 * 1024;
+
+/** Age ceiling per log, in hours, before newsyslog rotates it regardless of size. */
+export const LOG_AGE_CEILING_HOURS = 24 * 30;
+
+/** Archived rotations kept per log before the oldest is deleted. */
+export const LOG_ROTATION_COUNT = 5;
+
+/** Thrown by {@link generateNewsyslogConfig} when an input, or the file list itself, is unsafe. */
+export class LogRotationConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LogRotationConfigError";
+  }
+}
+
+function assertAbsolute(value: string, field: string): void {
+  if (!value.startsWith("/")) {
+    throw new LogRotationConfigError(`generateNewsyslogConfig: ${field} must be an absolute path, got ${JSON.stringify(value)}`);
+  }
+}
+
+/**
+ * Generate the `newsyslog.d` config TEXT that rotates every file in {@link ROTATED_LOG_FILES},
+ * each resolved under `<root>/state/logs/`. Pure function of `root` — no filesystem write, no
+ * `newsyslog` invocation (see module header: installing it is an operator action, mirroring
+ * `lib/launchd.ts generateLaunchdPlist`). Throws {@link LogRotationConfigError} if `root` isn't
+ * absolute, or — belt-and-suspenders — if {@link ROTATED_LOG_FILES} were ever edited to include
+ * {@link NEVER_ROTATE_FILENAME}.
+ */
+export function generateNewsyslogConfig(root: string): string {
+  assertAbsolute(root, "root");
+  if (ROTATED_LOG_FILES.includes(NEVER_ROTATE_FILENAME)) {
+    throw new LogRotationConfigError(
+      `generateNewsyslogConfig: ROTATED_LOG_FILES must never include ${NEVER_ROTATE_FILENAME} — it backs the dispatch circuit breaker (W1-T209)`,
+    );
+  }
+
+  const logDir = join(root, "state", "logs");
+  const header = [
+    "# Remudero daemon/service log rotation (W1-T218, RECON R-25).",
+    "# GENERATED by src/lib/log-rotation.ts — do not hand-edit.",
+    "#",
+    "# Every rotated file below is named EXPLICITLY. This config never globs a directory, so",
+    "# state/ledger.ndjson — the dispatch circuit breaker's backing store, rotated separately",
+    "# and breaker-safely by W1-T209 — is never touched by it.",
+    "#",
+    "# logfilename                                        mode  count  size(KB)  when(hrs)  flags",
+  ];
+  const lines = ROTATED_LOG_FILES.map((name) => {
+    const path = join(logDir, name);
+    return `${path}  600  ${LOG_ROTATION_COUNT}  ${LOG_SIZE_CEILING_KB}  ${LOG_AGE_CEILING_HOURS}  Z`;
+  });
+  return [...header, ...lines, ""].join("\n");
+}
+
+/** Where this config WOULD live under `/etc/newsyslog.d/` — a pure path computation, never a write. */
+export function newsyslogConfigPath(): string {
+  return "/etc/newsyslog.d/com.remudero.logs.conf";
+}
