@@ -4884,6 +4884,9 @@ function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): Open
       lastActivityAt: pr.updatedAt,
       headSha: pr.headRefOid,
       autoMergeArmed: pr.autoMergeRequest != null,
+      // W1-T54 routing: Dependabot PRs go to the dep-review lane, never the
+      // fix/clarification rungs — branch prefix is Dependabot's own contract.
+      isDependabot: (pr.headRefName ?? "").startsWith("dependabot/"),
       reviewSummary: undefined,
       // W1-T100: the ci-log fix mode's input — only worth fetching when checks
       // are actually red (a PR gate that already needs blocked_ci's rung).
@@ -4943,13 +4946,26 @@ function buildSweepEffects(
   plan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
-): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState"> {
+): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = ghIssueGateway(owner, repo);
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
 
   return {
     arm: (pr) => armAutoMerge(pr.prUrl, pr.taskId),
+
+    // W1-T54 ROUTED (the 2026-07-22 #533/#534 stall): the SAME depReviewCommand
+    // `rmd dep-review` runs by hand, invoked from the sweep so a Dependabot PR
+    // is judged unattended. The command's exit code conflates hold/escalate, so
+    // the DECISION is read back off the dep-review.decided ledger line it just
+    // wrote — the outcome drives the sweep's terminal-vs-hold dedup.
+    depReview: async (pr) => {
+      await depReviewCommand(String(pr.prNumber), ["--repo", repo]);
+      const decided = readLedgerLines(ledgerPath)
+        .filter((l) => l.step === "dep-review.decided" && l.task_id === `dep-review-PR${pr.prNumber}`)
+        .at(-1);
+      return typeof decided?.decision === "string" ? decided.decision : "unknown";
+    },
 
     close: (pr, reason) => {
       try {
