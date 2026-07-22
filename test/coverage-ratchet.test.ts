@@ -110,6 +110,31 @@ test("coverage-ratchet CI wiring: ci.yml's coverage-ratchet job emits a human-re
   );
 });
 
+// ── W1-T210 round 2: without `--enable-source-maps`, Node's `--experimental-test-coverage`
+// reports DA:<line> positions against the tsx/esbuild-TRANSPILED JS (comments and type-only
+// lines stripped) rather than the original .ts file named in `SF:` -- verified empirically:
+// `neutralizeFenceMarkers` (a real `src/run-task.ts` line 1120) was reported at line 506 without
+// this flag, growing more wrong deeper into any heavily-commented file. `coverage-ratchet.mjs`'s
+// aggregate sum tolerates this (it only ever sums LF/LH/BRF/BRH, never reads a line number), but
+// `diff-coverage.mjs` (W1-T212) looks up `git diff`'s ORIGINAL-file line numbers directly against
+// lcov's DA: map -- with the offset bug, that lookup silently reads some UNRELATED older line's
+// hit count, which can block a PR's own new, fully-tested code with a false "uncovered" verdict.
+test("coverage-ratchet CI wiring: ci.yml's coverage-collection step passes --enable-source-maps, so lcov's DA: line numbers agree with git diff's (the diff-coverage false-positive fix)", async () => {
+  const ciYml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+  const jobStart = ciYml.indexOf("coverage-ratchet:");
+  assert.notEqual(jobStart, -1, "ci.yml must declare a coverage-ratchet job");
+  const nextJobStart = ciYml.indexOf("\n  mutation-ratchet:", jobStart);
+  assert.notEqual(nextJobStart, -1, "coverage-ratchet job body must be findable in ci.yml");
+  const jobBody = ciYml.slice(jobStart, nextJobStart);
+
+  assert.match(
+    jobBody,
+    /node --enable-source-maps --experimental-test-coverage/,
+    "the coverage-collection step must pass --enable-source-maps ahead of --experimental-test-coverage " +
+      "so Node translates V8 coverage positions through tsx's source map back to real .ts line numbers",
+  );
+});
+
 // ── W1-T220 acceptance criterion 3: the ratchet must print observed totals, baseline, AND the
 // delta on failure, not just exit nonzero ──
 

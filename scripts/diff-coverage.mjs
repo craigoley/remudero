@@ -58,8 +58,10 @@ export function parseLcovHitsByFile(lcovText) {
 }
 
 /**
- * Walk a unified diff (`git diff <base>...HEAD` output) and return `Map<filePath, Set<lineNo>>`
- * of NEW-FILE line numbers the diff ADDS (`+` lines only -- never context or removed lines).
+ * Walk a unified diff (`git diff <base>...HEAD` output) and return
+ * `Map<filePath, Map<lineNo, addedText>>` for lines the diff ADDS (`+` lines only -- never
+ * context or removed lines). The TEXT rides along so the gate can recognise non-executable
+ * added lines (comments/blanks) without re-reading the working tree.
  * Dependency-free hunk-header parser: `@@ -oldStart,oldLines +newStart,newLines @@` gives the
  * new-file starting line; context and added lines each consume one new-file line number in
  * order, removed lines consume none (they exist only in the old file).
@@ -88,8 +90,8 @@ export function addedLinesByFile(diffText) {
     }
     if (currentFile === null || newLineNo === null) continue;
     if (raw.startsWith('+')) {
-      if (!files.has(currentFile)) files.set(currentFile, new Set());
-      files.get(currentFile).add(newLineNo);
+      if (!files.has(currentFile)) files.set(currentFile, new Map());
+      files.get(currentFile).set(newLineNo, raw.slice(1));
       newLineNo += 1;
     } else if (raw.startsWith('-')) {
       // Removed line -- exists only in the old file; does not consume a new-file line number.
@@ -104,8 +106,26 @@ export function addedLinesByFile(diffText) {
 }
 
 /**
+ * A line that cannot carry executable coverage no matter what lcov says about it: blank, a
+ * pure `//` line, or a line living entirely inside `/* ... *\/` block-comment furniture
+ * (`/**`, ` * ...`, ` *\/`). Under `--enable-source-maps` (W1-T210 round 2) the tsx-compiled
+ * module PREAMBLE maps onto a new file's LEADING comment block as `DA:<line>,0` records --
+ * lcov "instruments" lines that are not code, and the gate would false-block every new file
+ * that opens with a doc comment. The diff already carries each added line's text, so the gate
+ * recognises these directly rather than trusting DA presence as an executability signal.
+ * @param {string} text
+ */
+export function isNonExecutableLine(text) {
+  const t = text.trim();
+  if (t === '') return true;
+  if (t.startsWith('//')) return true;
+  if (t.startsWith('/*') || t.startsWith('*')) return true; // /** ... * ... *\/ furniture
+  return false;
+}
+
+/**
  * Compare added lines against lcov hit data.
- * @param {Map<string, Set<number>>} added
+ * @param {Map<string, Map<number, string>>} added
  * @param {Map<string, Map<number, number>>} lcovHits
  * @returns {string[]} `file:line` violations, sorted; empty means the gate is satisfied.
  */
@@ -114,8 +134,9 @@ export function findUncoveredAddedLines(added, lcovHits) {
   for (const [file, lines] of added) {
     const hitsByLine = lcovHits.get(file);
     if (!hitsByLine) continue; // lcov never saw this file (e.g. test/**) -- no claim to make.
-    const uncovered = [...lines]
+    const uncovered = [...lines.keys()]
       .filter((ln) => hitsByLine.has(ln) && hitsByLine.get(ln) === 0)
+      .filter((ln) => !isNonExecutableLine(lines.get(ln) ?? ''))
       .sort((a, b) => a - b);
     for (const ln of uncovered) violations.push(`${file}:${ln}`);
   }
