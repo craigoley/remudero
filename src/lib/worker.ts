@@ -1,14 +1,17 @@
 import { execFileSync } from "node:child_process";
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+// Imported ADDITIONALLY as the module's DEFAULT export (a plain, mutable object), used
+// ONLY by the run.lock read/write path below (writeRunLock/readRunLock/removeRunLock).
+// ESM named-export bindings off `node:fs` are non-configurable (mock.method/
+// defineProperty on them throws "Cannot redefine property"), so a test that spies on the
+// real module -- the W1-T208 proof that a reader interleaved with the writer never
+// observes a torn lock file -- cannot intercept a call already bound to a named import at
+// load time. Calling `fs.writeFileSync(...)`/`fs.renameSync(...)` as a property access AT
+// CALL TIME (never destructured to a local const) keeps those specific calls a live
+// lookup an external `t.mock.method(fs, ...)` actually observes. Matches the identical,
+// already-established doctrine atop src/lib/status.ts for the sibling W1-T207 task; the
+// rest of this file's fs usage is untouched and keeps its existing named imports.
+import fs from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
@@ -763,36 +766,61 @@ export function writeRunLock(worktreePath: string, info: RunLockInfo): void {
   // ATOMIC OVERWRITE (W1-T208): write to a sibling temp file, then rename() into place.
   // The prior direct writeFileSync(target) let a concurrent readRunLock() (pruneStaleRuns
   // runs in a DIFFERENT process, on its own schedule) observe a partially-written file —
-  // JSON.parse then throws, readRunLock catches it and returns null, and null is exactly
-  // what "no lock at all" also looks like. That misclassified a live, mid-write run as
-  // abandoned debris, handing pruneStaleRuns a green light to --force remove its worktree
-  // (the same class of bug DIAGNOSIS.md/drain-concurrency already called out for the
-  // no-lock case). rename(2) atomically swaps the directory entry on a POSIX filesystem,
-  // so a reader can only ever see the complete old content or the complete new content —
-  // never a torn intermediate — which removes the ambiguity at its source instead of
-  // trying to distinguish "torn" from "absent" after the fact. The temp name embeds pid +
-  // timestamp so two writers racing on the same lock path never clobber each other's
-  // in-flight temp file.
+  // JSON.parse then throws, and the old readRunLock caught that and returned null, the
+  // exact same value "no lock at all" also produces. That misclassified a live, mid-write
+  // run as abandoned debris, handing pruneStaleRuns a green light to --force remove its
+  // worktree (the same class of bug DIAGNOSIS.md/drain-concurrency already called out for
+  // the no-lock case). rename(2) atomically swaps the directory entry on a POSIX
+  // filesystem, so a reader can only ever see the complete old content or the complete
+  // new content — never a torn intermediate — which removes the ambiguity at its source
+  // instead of trying to distinguish "torn" from "absent" after the fact. The temp name
+  // embeds pid + timestamp so two writers racing on the same lock path never clobber each
+  // other's in-flight temp file. Uses the default `fs` import (see the header comment on
+  // that import) so the write is a live property lookup a test can spy on.
   const target = runLockPath(worktreePath);
   const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, JSON.stringify(info, null, 2));
-  renameSync(tmp, target);
+  fs.writeFileSync(tmp, JSON.stringify(info, null, 2));
+  fs.renameSync(tmp, target);
 }
 
-export function readRunLock(worktreePath: string): RunLockInfo | null {
+/**
+ * The three, and only three, things reading a run.lock can honestly conclude (W1-T208).
+ * `absent` (no file) is a DIFFERENT fact from `corrupt` (a file is there but did not
+ * parse into a valid {@link RunLockInfo} — e.g. a reader caught a live writer mid
+ * rename, or genuine on-disk corruption): one means the worktree is free, the other means
+ * something is wrong and liveness cannot be determined. Collapsing both into the same
+ * `null` (the pre-fix shape) let a corrupt lock read as silently idle. `live` means the
+ * file parsed; whether that pid is still running is for the caller (isPidAlive) to check.
+ */
+export type RunLockRead =
+  | { kind: "absent" }
+  | { kind: "corrupt"; raw: string }
+  | { kind: "live"; info: RunLockInfo };
+
+export function readRunLock(worktreePath: string): RunLockRead {
+  let raw: string;
   try {
-    const o = JSON.parse(readFileSync(runLockPath(worktreePath), "utf8"));
-    if (typeof o?.pid === "number") return o as RunLockInfo;
-    return null;
+    raw = fs.readFileSync(runLockPath(worktreePath), "utf8");
   } catch {
-    return null;
+    return { kind: "absent" };
   }
+  try {
+    const o = JSON.parse(raw);
+    if (typeof o?.pid === "number") return { kind: "live", info: o as RunLockInfo };
+  } catch {
+    // falls through to the loud "corrupt" report below — never silently treated as absent
+  }
+  console.error(
+    `run.lock: unparseable lock at ${runLockPath(worktreePath)} (W1-T208) — reporting CORRUPT, ` +
+      "not absent, so a torn or garbled lock is never silently mistaken for an idle worktree",
+  );
+  return { kind: "corrupt", raw };
 }
 
 /** Remove the sibling run.lock (idempotent) — called on terminal verdict / on reap. */
 export function removeRunLock(worktreePath: string): void {
   try {
-    unlinkSync(runLockPath(worktreePath));
+    fs.unlinkSync(runLockPath(worktreePath));
   } catch {
     // already gone
   }
@@ -834,6 +862,12 @@ export interface PruneOpts {
  * mid-run and destroyed a successful 65-turn implement. We now SKIP any worktree
  * whose sibling {@link runLockPath} names a LIVE pid, and reap only genuinely dead
  * ones (no lock, or the lock's pid is dead). A live-pid worktree is NEVER removed.
+ *
+ * W1-T208: a CORRUPT lock (present but unparseable — e.g. a reader caught a live writer
+ * mid-write) is treated the SAME as an ABSENT one here, never as proof of death: both go
+ * through the age/grace guard below rather than an immediate force-remove. That is the
+ * guard that makes a torn read survivable — it must keep applying to the corrupt case
+ * exactly as it already did to the lockless case, unchanged by this fix.
  */
 export function pruneStaleRuns(
   repoDir: string,
@@ -866,15 +900,19 @@ export function pruneStaleRuns(
       if (isRun && curPath.startsWith(worktreesRoot)) {
         // LIVENESS GUARD: a worktree whose run.lock names a live pid is IN USE.
         // Never force-remove it — that is the bug that lost a 65-turn implement.
-        const lock = readRunLock(curPath);
-        if (lock && isPidAlive(lock.pid)) {
+        const lockRead = readRunLock(curPath);
+        if (lockRead.kind === "live" && isPidAlive(lockRead.info.pid)) {
           skipped.push(curPath);
           continue;
         }
-        // AGE GUARD: a LOCKLESS worktree younger than graceMs may be a run that just
-        // `git worktree add`-ed but has not yet written its run.lock (the create race).
-        // Protect it; only genuinely-old lockless debris (or a dead-pid lock) is reaped.
-        if (!lock && graceMs > 0) {
+        // AGE GUARD: a LOCKLESS ("absent") OR CORRUPT ("W1-T208: unparseable — may be a
+        // live writer caught mid-write, not proof of death) worktree younger than graceMs
+        // may be a run that just `git worktree add`-ed but has not yet written its
+        // run.lock (the create race), or one whose lock a reader caught mid torn-write.
+        // Protect either; only genuinely-old debris (or a definitively dead-pid lock) is
+        // reaped. A "live" lock naming a dead pid skips this guard entirely below — that
+        // pid cannot still be writing, so no grace period is owed to it.
+        if (lockRead.kind !== "live" && graceMs > 0) {
           let mtimeMs = 0;
           try {
             mtimeMs = statSync(curPath).mtimeMs;
