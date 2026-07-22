@@ -8,6 +8,7 @@ import { detectCompactionEvents, isQualitySuspect, type CompactionEvent } from "
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { buildWorkerEnv } from "./env.js";
 import { validateWorkerSettingsFile } from "./settings.js";
+import { reapWorkerScratch } from "./worker-scratch.js";
 import { ensureWorkerKeychain, materializeWorkerHome, workerKeychainPaths } from "./worker-home.js";
 
 /**
@@ -720,6 +721,11 @@ export function worktreeAdd(
 }
 
 export function worktreeRemove(repoDir: string, worktreePath: string): void {
+  // Reap the worker's SDK scratchpad (lib/worker-scratch.ts) FIRST, while this cwd
+  // still exists for the reap to realpath — the git remove below deletes it. The
+  // Claude CLI leaves `/private/tmp/claude-<uid>/<slug>/` behind on a non-graceful
+  // worker exit; nothing else reaps it. Best-effort, guarded, never throws.
+  reapWorkerScratch(worktreePath);
   execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", worktreePath], {
     stdio: "inherit",
   });

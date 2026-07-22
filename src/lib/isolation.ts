@@ -2,6 +2,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type Config } from "./config.js";
 import { spawnWorker, type SpawnWorkerArgs } from "./worker.js";
+import { reapWorkerScratch } from "./worker-scratch.js";
 
 /**
  * ISOLATION PREFLIGHT PROBE (W1-T17 / Standing rule 11 / FIELD FINDING 11b).
@@ -270,6 +271,8 @@ function defaultExecutor(settingsFile: string, config: Config, budgetUsd?: numbe
         costUsd: probe.costUsd,
       };
     } finally {
+      // Reap the probe worker's SDK scratchpad (keyed by its cwd) before removal.
+      reapWorkerScratch(cwd);
       try {
         rmSync(cwd, { recursive: true, force: true });
       } catch {

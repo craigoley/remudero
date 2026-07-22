@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { loadConfig, type Config } from "./config.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { spawnWorker } from "./worker.js";
+import { reapWorkerScratch } from "./worker-scratch.js";
 
 /**
  * POST-SPAWN CONTAINMENT PROBE (WS-0 verdict 7; W1-T2 acceptance #2).
@@ -132,6 +133,9 @@ function defaultExecutor(settingsFile: string, config: Config, budgetUsd?: numbe
         costUsd: probe.costUsd,
       };
     } finally {
+      // Reap the probe worker's SDK scratchpad (keyed by its cwd) before the cwd
+      // is removed — a probe runs every run and is a killed-worker orphan source.
+      reapWorkerScratch(cwd);
       try {
         rmSync(base, { recursive: true, force: true });
       } catch {
