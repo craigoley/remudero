@@ -2644,7 +2644,11 @@ async function runTask(
     // UNARMED, but a later sweep poll could still arm it via that separate
     // path. Left for a follow-up task rather than widened here unreviewed.
     const tddStrict = isTddStrict(task.principles);
-    const cappedOverride = review.capped ? cappedOverrideFromLedger(readLedgerLines(ledgerPath), taskId) : undefined;
+    // W1-T219: head-bound — an override granted against a DIFFERENT head than
+    // this exact verdict's is never honoured (see cappedOverrideFromLedger).
+    const cappedOverride = review.capped
+      ? cappedOverrideFromLedger(readLedgerLines(ledgerPath), taskId, review.headSha)
+      : undefined;
     const armDecision = resolveAutoMergeArm(review, tddStrict, cappedOverride, (s, extra) => log(s, extra));
     if (!armDecision.arm) {
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
@@ -3138,8 +3142,17 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
           "— not recorded.",
       );
     } else {
-      log("automerge.capped_override_granted", { by: overrideBy, reason: overrideReason, pr_url: view.url });
-      console.log(`CAPPED override recorded — by ${overrideBy}: ${overrideReason} (task ${taskId})`);
+      // W1-T219: BIND the grant to the head it was actually reviewed against —
+      // cappedOverrideFromLedger refuses to honour it against any other head.
+      log("automerge.capped_override_granted", {
+        by: overrideBy,
+        reason: overrideReason,
+        pr_url: view.url,
+        head_sha: verdict.headSha,
+      });
+      console.log(
+        `CAPPED override recorded — by ${overrideBy}: ${overrideReason} (task ${taskId}, head ${verdict.headSha.slice(0, 7)})`,
+      );
     }
   } else if (verdict.capped) {
     console.log(
