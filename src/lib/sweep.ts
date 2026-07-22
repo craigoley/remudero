@@ -85,7 +85,7 @@ import type { QuestionEntry } from "./worker.js";
  */
 
 /** One of the four dispositions every open PR is reconciled into. */
-export type Disposition = "mergeable" | "blocked-fixable" | "stale" | "blocked-ambiguous";
+export type Disposition = "mergeable" | "blocked-fixable" | "stale" | "blocked-ambiguous" | "dep-review";
 
 /**
  * One failing required CI check's name + the tail of its log — the W1-T94
@@ -169,6 +169,10 @@ export interface OpenPrView {
   headSha: string;
   /** Observed: is GitHub auto-merge already armed on this PR? */
   autoMergeArmed: boolean;
+  /** Head ref starts with `dependabot/` — routed to the W1-T54 dep-review lane
+   * (its own deterministic judge), NEVER the fix rung (which would push commits
+   * onto a Dependabot branch) and never the clarification rung. */
+  isDependabot?: boolean;
   /** The failing review's one-line summary (context for fix/escalate). */
   reviewSummary?: string;
   /**
@@ -410,6 +414,18 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     when: (_pr, policy, ageDays) => ageDays >= policy.staleDays,
     reason: (_pr, policy, ageDays) =>
       `abandoned — no activity in ${Math.floor(ageDays)}d (>= ${policy.staleDays}d threshold)`,
+  },
+  {
+    // W1-T54's dep lane, ROUTED (the 2026-07-22 #533/#534 stall): before this
+    // row the sweep had NO Dependabot branch at all, so dep PRs sat ungated
+    // until an operator ran `rmd dep-review` by hand — and the failure rows
+    // below would misroute them (a ci-log fix rung must never push commits
+    // onto a Dependabot branch). The lane itself holds on red checks and
+    // escalates majors, so routing is safe in every checks/review state;
+    // superseded/stale above still close first.
+    disposition: "dep-review",
+    when: (pr) => pr.isDependabot === true,
+    reason: (pr) => `dependabot PR — dep-review lane (checks ${pr.checksState}, review ${pr.reviewState})`,
   },
   {
     // W1-T78: an operator's answer to a clarification question RE-ARMS the fix
@@ -737,6 +753,16 @@ export interface SweepDeps {
   /** Close a superseded/abandoned PR with a stated reason. */
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
   /**
+   * Invoke the W1-T54 dep-review lane on a Dependabot PR and return its
+   * DECISION ("arm" | "hold" | "escalate" | "refuse") so the disposed ledger
+   * line records the outcome and dedup can distinguish TERMINAL outcomes
+   * (arm/escalate/refuse — never re-run for the same head, or a major would
+   * open a fresh escalation issue every poll) from "hold" (re-run next sweep:
+   * a red check can go green on the SAME sha). Optional — omitted, the
+   * disposition is ledgered with a stand-down note and nothing runs.
+   */
+  depReview?: (pr: OpenPrView) => string | void | Promise<string | void>;
+  /**
    * Dispatch the W1-T76 fix rung carrying the mode-appropriate evidence at
    * once (W1-T94/W1-T100) — the FULL unmet set for a review-mode dispatch, or
    * ci-log evidence (failing check names + log tails) for a blocked_ci
@@ -815,6 +841,8 @@ interface PriorActions {
   fixed: Set<string>;
   closed: Set<number>;
   escalated: Set<number>;
+  /** `pr@head` keys whose dep-review reached a TERMINAL outcome (arm/escalate/refuse). */
+  depReviewed: Set<string>;
 }
 
 function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorActions {
@@ -822,6 +850,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const fixed = new Set<string>();
   const closed = new Set<number>();
   const escalated = new Set<number>();
+  const depReviewed = new Set<string>();
   for (const line of lines) {
     if (line.step !== "sweep.disposed" || line.acted !== true) continue;
     const pr = typeof line.pr_number === "number" ? line.pr_number : undefined;
@@ -839,14 +868,22 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
       case "blocked-ambiguous":
         escalated.add(pr);
         break;
+      case "dep-review":
+        // Only a TERMINAL outcome dedups; a "hold" must re-run next sweep so a
+        // same-sha red check going green is picked up (see SweepDeps.depReview).
+        if (line.dep_review_outcome !== "hold") {
+          depReviewed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
+        }
+        break;
     }
   }
-  return { armed, fixed, closed, escalated };
+  return { armed, fixed, closed, escalated, depReviewed };
 }
 
 const ZERO_COUNTS = (): Record<Disposition, number> => ({
   mergeable: 0,
   "blocked-fixable": 0,
+  "dep-review": 0,
   stale: 0,
   "blocked-ambiguous": 0,
 });
@@ -902,11 +939,17 @@ export async function runSweep(
       case "blocked-ambiguous":
         alreadyDone = prior.escalated.has(pr.prNumber);
         break;
+      case "dep-review":
+        alreadyDone = prior.depReviewed.has(`${pr.prNumber}@${pr.headSha}`);
+        break;
       default:
         alreadyDone = false;
     }
 
     let acted = !alreadyDone && !deps.dryRun;
+    // The dep-review lane's decision for THIS pass (dep-review disposition only)
+    // — ledgered so priorActionsFromLedger can tell terminal from hold.
+    let depReviewOutcome: string | undefined;
     // W1-T177: set ONLY when the terminal-state check below stood the
     // blocked-fixable dispatch down — distinct from `alreadyDone` (dedup)
     // and from `deps.dryRun` (preview), so the disposed line can name WHY
@@ -963,6 +1006,14 @@ export async function runSweep(
         case "blocked-ambiguous":
           await deps.escalate(pr, reason, question!);
           break;
+        case "dep-review":
+          if (deps.depReview) {
+            depReviewOutcome = (await deps.depReview(pr)) ?? "unknown";
+          } else {
+            acted = false;
+            standDownReason = "no depReview dep wired — dependabot PR left for the operator lane";
+          }
+          break;
       }
       if (acted) actionsTaken++;
     }
@@ -1008,6 +1059,7 @@ export async function runSweep(
         acted,
         reason,
         head_sha: pr.headSha,
+        ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
         ...(standDownReason ? { stand_down_reason: standDownReason } : {}),
         ...(question ? { question: question.question } : {}),
       });

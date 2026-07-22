@@ -193,6 +193,68 @@ function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & {
   };
 }
 
+// ── W1-T54 ROUTED: dependabot PRs go to the dep-review lane (the #533/#534 stall) ──
+
+function dependabotPr(over: Partial<OpenPrView> = {}): OpenPrView {
+  return pr({
+    prNumber: 533,
+    prUrl: "url/533",
+    taskId: undefined,
+    reviewState: "none",
+    checksState: "red",
+    isDependabot: true,
+    ciFailures: [ciFailure()],
+    ...over,
+  });
+}
+
+test("deriveDisposition: a dependabot PR routes dep-review even with checks red — NEVER the ci-log fix rung (no commits onto a dependabot branch)", () => {
+  const r = deriveDisposition(dependabotPr(), DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "dep-review");
+  assert.match(r.reason, /dep-review lane/);
+});
+
+test("deriveDisposition: a superseded dependabot PR still closes first — stale precedes the dep-review row", () => {
+  assert.equal(deriveDisposition(dependabotPr({ supersededBy: 600 }), DEFAULT_SWEEP_POLICY, NOW).disposition, "stale");
+});
+
+test("runSweep: the depReview dep is invoked and its DECISION rides the disposed ledger line", async () => {
+  const calls: number[] = [];
+  const deps = fakeDeps({ depReview: (p) => { calls.push(p.prNumber); return "hold"; } });
+  await runSweep([dependabotPr()], deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(calls, [533]);
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed[0].disposition, "dep-review");
+  assert.equal(disposed[0].dep_review_outcome, "hold");
+});
+
+test("runSweep dedup: a TERMINAL dep-review outcome (arm/escalate) never re-runs for the same head — a major would open a fresh issue every poll", async () => {
+  const first = fakeDeps({ depReview: () => "escalate" });
+  await runSweep([dependabotPr()], first, DEFAULT_SWEEP_POLICY);
+  const calls2: number[] = [];
+  const second = fakeDeps({ ledgerPath: first.ledgerPath, depReview: (p) => { calls2.push(p.prNumber); return "arm"; } });
+  await runSweep([dependabotPr()], second, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(calls2, [], "same pr@head with a terminal outcome must be deduped");
+});
+
+test("runSweep dedup: a HOLD outcome re-runs next sweep — a red check can go green on the SAME sha", async () => {
+  const first = fakeDeps({ depReview: () => "hold" });
+  await runSweep([dependabotPr()], first, DEFAULT_SWEEP_POLICY);
+  const calls2: number[] = [];
+  const second = fakeDeps({ ledgerPath: first.ledgerPath, depReview: (p) => { calls2.push(p.prNumber); return "arm"; } });
+  await runSweep([dependabotPr()], second, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(calls2, [533], "a held dep-review must retry on the next poll");
+});
+
+test("runSweep: no depReview dep wired -> ledgered stand-down, no crash, no other rung fires on the dependabot PR", async () => {
+  const deps = fakeDeps();
+  await runSweep([dependabotPr()], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(deps.fixed.length, 0);
+  assert.equal(deps.escalated.length, 0);
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed[0].acted, false);
+});
+
 // ── deriveDisposition: the pure predicate (rule 2, policy-as-data) ────────────
 
 test("deriveDisposition: passing review + green checks -> mergeable", () => {
@@ -408,8 +470,7 @@ test("acceptance 1 — the P22 golden: {mergeable, blocked-fixable(2 criteria), 
     mergeable: 1,
     "blocked-fixable": 1,
     stale: 1,
-    "blocked-ambiguous": 1,
-  });
+    "blocked-ambiguous": 1, "dep-review": 0 });
   assert.equal(summary.total, 4);
   assert.equal(summary.actionsTaken, 4);
   assert.equal(summary.noneCount, 0, "no open PR ends the sweep with disposition=none");
@@ -604,7 +665,7 @@ test("an already-armed PR (observed autoMergeArmed=true) is not re-armed", async
 test("renderSweepSummary is a single legible line", () => {
   const s = {
     total: 4,
-    byDisposition: { mergeable: 1, "blocked-fixable": 1, stale: 1, "blocked-ambiguous": 1 },
+    byDisposition: { mergeable: 1, "blocked-fixable": 1, stale: 1, "blocked-ambiguous": 1, "dep-review": 0 },
     actionsTaken: 4,
     actions: [],
     noneCount: 0,
