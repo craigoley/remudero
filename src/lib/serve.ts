@@ -580,10 +580,23 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     return String(text ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
-  async function getJson(path) {
-    const res = await fetch(path, { headers: authHeaders });
-    if (!res.ok) throw new Error(\`GET \${path} -> \${res.status}\`);
-    return res.json();
+  // W1-T189: an OPTIONAL client-side timeout. Plain fetch has none of its own, so a backend
+  // stall (W1-T187's 35-58s /v1/status latency) never rejects on its own -- it just hangs,
+  // which is indistinguishable from "still loading" to every caller below. A caller that names
+  // \`timeoutMs\` gets an abort (routed through the SAME catch/reject path as a network error or
+  // an HTTP error status) once that budget elapses, rather than waiting on a request that may
+  // never settle. Callers that omit it (panel/card/journey, all interactive one-shot fetches) are
+  // unchanged -- this is additive, not a behavior change to every getJson call site.
+  async function getJson(path, { timeoutMs } = {}) {
+    const controller = new AbortController();
+    const timer = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
+    try {
+      const res = await fetch(path, { headers: authHeaders, signal: controller.signal });
+      if (!res.ok) throw new Error(\`GET \${path} -> \${res.status}\`);
+      return await res.json();
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
   function postJson(path, body) {
     return fetch(path, {
@@ -1692,6 +1705,15 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   // string a later success forgets to clear — the falsifier this fixes: an operator-observed
   // "board fetch failed" banner that survived subsequent SUCCESSFUL polls beside live data. ────
   const STALE_ESCALATE_AFTER = 3;
+  const POLL_INTERVAL_MS = 3000; // the SAME cadence refreshAll is scheduled at, below.
+  // W1-T189: how long with NO live data from ANY source (poll success or SSE delta) before the
+  // board is genuinely stale. Anchored to the SAME N-failures-at-the-poll-cadence budget the
+  // original counter approximated, but now measured against actual elapsed time rather than a
+  // raw tally that is blind to a healthy SSE connection.
+  const STALE_DATA_AGE_MS = STALE_ESCALATE_AFTER * POLL_INTERVAL_MS;
+  // W1-T189: bounds a single /v1/status fetch so a genuine backend stall (W1-T187) still lands
+  // in this SAME failure lifecycle instead of hanging past every poll tick with no indication.
+  const STATUS_FETCH_TIMEOUT_MS = 8000;
   let pollFailures = 0;
   let lastSuccessAt = null;
   let lastLiveAt = null; // last successful data of ANY kind -- a poll success OR an SSE event.
@@ -1709,18 +1731,29 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     el.textContent = secs < 2 ? "updated just now" : \`updated \${secs}s ago\`;
   }
 
+  // W1-T189 ONE TRUTH: an operator-observed contradiction -- "live · updated 8s ago" rendered
+  // directly above "STALE — showing last known data" -- came from two indicators reading
+  // DIFFERENT clocks: the freshness stamp tracks \`lastLiveAt\` (poll success OR SSE delta), while
+  // this escalation used to track ONLY a raw consecutive-/v1/status-failure tally, blind to a
+  // healthy SSE connection still delivering genuinely fresh rows. A board can be honestly LIVE
+  // (via SSE) even while its own REST poll is failing outright -- so the STALE claim (not the
+  // transient "reconnecting" one) must also require that NO live data of any kind is recent,
+  // i.e. both indicators must derive from the SAME \`lastLiveAt\` clock the freshness stamp reads.
   function handlePollFailure() {
     pollFailures += 1;
     const topStatus = document.getElementById("top-status");
-    if (pollFailures < STALE_ESCALATE_AFTER) {
+    const dataIsStale = !lastLiveAt || Date.now() - lastLiveAt >= STALE_DATA_AGE_MS;
+    if (pollFailures < STALE_ESCALATE_AFTER || !dataIsStale) {
       // TRANSIENT: last-known-good data stays on screen, UNMARKED -- only the top-status line
       // itself says "reconnecting", carrying the last-success time. Never a persistent error
       // banner; the very next successful poll below clears this unconditionally.
       topStatus.textContent = \`reconnecting… (last success \${lastSuccessAt ? \`\${formatElapsed(Date.now() - lastSuccessAt)} ago\` : "never"})\`;
       topStatus.dataset.pollState = "reconnecting";
     } else {
-      // ESCALATED: N consecutive failures -- the board itself is now visibly stamped stale,
-      // never silently old (reuses the cache-restore path's own stale-badge mechanism).
+      // ESCALATED: N consecutive failures AND no live data (poll or SSE) recently either -- the
+      // board itself is now visibly stamped stale, never silently old (reuses the cache-restore
+      // path's own stale-badge mechanism), and never contradicted by a freshness stamp claiming
+      // otherwise -- both now read \`lastLiveAt\`.
       topStatus.dataset.pollState = "stale";
       markStale(lastSuccessAt ? new Date(lastSuccessAt).toISOString() : undefined);
     }
@@ -1744,7 +1777,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   async function refreshAll() {
     let statusSnap;
     try {
-      statusSnap = await getJson("/v1/status");
+      statusSnap = await getJson("/v1/status", { timeoutMs: STATUS_FETCH_TIMEOUT_MS });
     } catch (e) {
       handlePollFailure();
       return;
@@ -1883,7 +1916,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     markStale(cachedSnapshot.generated_at);
   }
   refreshAll();
-  setInterval(refreshAll, 3000);
+  setInterval(refreshAll, POLL_INTERVAL_MS);
   setInterval(tickElapsed, 1000);
   setInterval(tickFreshness, 1000);
   subscribeStatusStream(
