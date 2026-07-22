@@ -577,6 +577,63 @@ function ensureDeps(cwd: string): void {
 }
 
 /**
+ * W1-T227: resolve the CANDIDATE test file(s) a name-filtered proof's raw name
+ * could actually live in, so {@link execWhitelistedProof} can scope its `node
+ * --test` invocation to just those files instead of blindly compiling
+ * `--test-name-pattern` across the WHOLE suite glob ({@link TEST_GLOB}). Node
+ * still LOADS every file in a glob before filtering by name regardless of how
+ * few match — MEASURED live on a scratch clone of main: a narrowed run of one
+ * proof against its own file alone completes in 0.2s; the full-glob load is
+ * ~22s against a 60s timeout, leaving too little headroom on a machine already
+ * running workers (the exact defect this task exists to close — the same
+ * unchanged proof coins `executed_pass` on an idle host and `exec_error` on a
+ * loaded one).
+ *
+ * Fixed-string (`grep -F`), never a regex: a name-filtered proof's raw name is
+ * ordinary architect prose, not a pattern — the same reasoning
+ * {@link parseTestTarget}'s `escapeRegExp` already applies to the
+ * `--test-name-pattern` argument itself, applied here to the search that finds
+ * candidate files.
+ *
+ * Best-effort: any grep failure (no match, `test/` absent, grep itself
+ * missing, …) degrades to an EMPTY candidate list — {@link narrowNameFilteredArgs}
+ * treats that identically to "genuinely zero candidates" and falls back to the
+ * unchanged (full-glob) invocation, so a resolution hiccup can only cost the
+ * optimisation, never turn into a false verdict.
+ */
+export function resolveNameFilteredCandidates(cwd: string, rawName: string): string[] {
+  try {
+    const stdout = execFileSync("grep", ["-rl", "-F", "--include=*.test.ts", "--", rawName, "test"], {
+      cwd,
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8",
+    });
+    return stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * W1-T227's command builder: given a name-filtered proof's already-compiled
+ * `baseArgs` (from {@link parseTestTarget}, trailing with {@link TEST_GLOB})
+ * and the candidate file(s) {@link resolveNameFilteredCandidates} found, swap
+ * the full glob for just those candidates. ZERO candidates CHANGES NOTHING —
+ * returns `baseArgs` verbatim, still globbed — because narrowing is an
+ * optimisation of the executed path, never a new way for a genuinely-absent
+ * test to pass: {@link nameFilteredOutcome}'s existing zero-match ⇒ "fail"
+ * path fires identically either way (a wider search finding nothing is exactly
+ * as conclusive as a narrower one).
+ */
+export function narrowNameFilteredArgs(baseArgs: readonly string[], candidateFiles: readonly string[]): string[] {
+  if (candidateFiles.length === 0) return [...baseArgs];
+  return [...baseArgs.filter((a) => a !== TEST_GLOB), ...candidateFiles];
+}
+
+/**
  * The REAL proof executor (production default): run a {@link WhitelistedProof}'s
  * argv, no shell, in `cwd`, with a HARD per-proof timeout — a hanging test must
  * never stall the required check into the absent-check deadlock class. Returns
@@ -612,8 +669,17 @@ export function execWhitelistedProof(
   timeoutMs = DEFAULT_PROOF_TIMEOUT_MS,
 ): "pass" | "fail" {
   if (whitelisted.kind === "test") ensureDeps(cwd);
+  // W1-T227: a name-filtered proof's `args` (from parseTestTarget) still carry
+  // the FULL suite glob — resolve the actual candidate file(s) now, against
+  // the real PR-head checkout, and narrow to just those before ever spawning
+  // node. Not folded into parseWhitelistedProof itself: that function is a
+  // pure parse with no `cwd`, and the candidate set can only be known against
+  // a real checkout.
+  const args = whitelisted.nameFiltered
+    ? narrowNameFilteredArgs(whitelisted.args, resolveNameFilteredCandidates(cwd, whitelisted.label))
+    : whitelisted.args;
   try {
-    const stdout = execFileSync(whitelisted.command, whitelisted.args, {
+    const stdout = execFileSync(whitelisted.command, args, {
       cwd,
       stdio: ["ignore", "pipe", "ignore"],
       timeout: timeoutMs,
