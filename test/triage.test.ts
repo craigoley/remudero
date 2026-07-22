@@ -716,3 +716,33 @@ test("wrapBodyLine wraps prose to the budget; fitAcceptanceBullet caps a bullet 
   assert.equal(bullet.length, COMMIT_BODY_MAX_LINE);
   assert.ok(!bullet.includes("\n"));
 });
+
+// ── MASTER-PLAN.md is a plan file (the 728bc1 prompt/guard contradiction) ──
+
+test("decideTriage: a PROPOSED verdict touching MASTER-PLAN.md is a plan-only proposal, not a non-plan inconsistency", () => {
+  const d = decideTriage({
+    verdict: { kind: "proposed", summary: "amend §7B per feedback" },
+    changedFiles: ["MASTER-PLAN.md", "plan/tasks.yaml"],
+  });
+  assert.deepEqual(d, {
+    action: "propose",
+    status: "proposed",
+    detail: "amend §7B per feedback",
+    files: ["MASTER-PLAN.md", "plan/tasks.yaml"],
+  });
+});
+
+test("decideTriage: src/test files are STILL non-plan — widening the guard to MASTER-PLAN.md loosens nothing else", () => {
+  const d = decideTriage({
+    verdict: { kind: "proposed", summary: "x" },
+    changedFiles: ["MASTER-PLAN.md", "src/lib/triage.ts"],
+  });
+  assert.equal(d.action, "error");
+  assert.match((d as { reason: string }).reason, /src\/lib\/triage\.ts/);
+  assert.ok(!(d as { reason: string }).reason.includes("MASTER-PLAN.md"), "MASTER-PLAN.md is not named as the offender");
+});
+
+test("nonPlanFilesInDiff: MASTER-PLAN.md hunks are plan hunks, per this guard's own doc contract", () => {
+  const diff = "--- a/MASTER-PLAN.md\n+++ b/MASTER-PLAN.md\n@@ -1 +1 @@\n-x\n+y\n--- a/src/lib/x.ts\n+++ b/src/lib/x.ts\n@@ -1 +1 @@\n-a\n+b\n";
+  assert.deepEqual(nonPlanFilesInDiff(diff), ["src/lib/x.ts"]);
+});
