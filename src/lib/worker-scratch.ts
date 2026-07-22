@@ -137,6 +137,26 @@ export function reapWorkerScratch(cwd: string, opts: ScratchOpts = {}): ReapResu
 /** Default age ceiling for {@link sweepStaleWorkerScratch}: 24h — matches lib/tmp.ts. */
 export const DEFAULT_SCRATCH_SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Age ceiling for the PER-TEARDOWN accumulation sweep — DISTINCT from, and shorter
+ * than, the 24h boot ceiling above (kept separate so the two reaps tune apart): 4h.
+ *
+ * SIGKILL'd workers/tests leak orphan dirs under the same claude-<uid> root: a test
+ * fixture's own `try/finally` AND test/setup/tmp-hygiene.ts's `process.on("exit")`
+ * reaper are both skipped on SIGKILL (max_turns kill, kill-9, headroom), so a killed
+ * `npm test` leaves its `rmd-*` fixtures behind, and the DAEMON boot sweep scans
+ * os.tmpdir() (/var/folders), never this root. Running {@link sweepStaleWorkerScratch}
+ * at each task teardown with this ceiling reaps those orphans within a task cycle
+ * instead of waiting for the 24h boot sweep.
+ *
+ * 4h is chosen from evidence: the LONGEST observed task wall-time is 92.3 min (rmd
+ * ledger, over 512 runs; 95th percentile 36.5 min). 4h is ~2.6x that maximum, so no
+ * legitimate in-use fixture — even one belonging to a concurrent, still-running task
+ * (a manual `rmd run-task`/`rmd review` alongside the daemon) — is ever old enough to
+ * be reaped mid-run; and 4h << 24h curbs between-boot accumulation ~6x.
+ */
+export const DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS = 4 * 60 * 60 * 1000;
+
 export interface ScratchSweepOpts extends ScratchOpts {
   /** Reap a scratchpad dir older than this. Default 24h (generous vs any session). */
   maxAgeMs?: number;

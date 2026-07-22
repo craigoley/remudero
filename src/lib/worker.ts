@@ -20,7 +20,7 @@ import { detectCompactionEvents, isQualitySuspect, type CompactionEvent } from "
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { buildWorkerEnv } from "./env.js";
 import { validateWorkerSettingsFile } from "./settings.js";
-import { reapWorkerScratch } from "./worker-scratch.js";
+import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStaleWorkerScratch } from "./worker-scratch.js";
 import { ensureWorkerKeychain, materializeWorkerHome, workerKeychainPaths } from "./worker-home.js";
 
 /**
@@ -741,6 +741,14 @@ export function worktreeRemove(repoDir: string, worktreePath: string): void {
   execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", worktreePath], {
     stdio: "inherit",
   });
+  // Accumulation control (orchestrator-side, survives a killed worker): also reap
+  // STALE ORPHAN scratch under the same claude-<uid> root — the `rmd-*` test fixtures
+  // a SIGKILL'd `npm test` leaves behind (its own finally + tmp-hygiene's exit handler
+  // are both skipped on SIGKILL), which the daemon boot sweep (os.tmpdir()) never
+  // scans. The 4h ceiling is far above the longest task, so a concurrent live fixture
+  // is never reaped; far below the 24h boot ceiling, so orphans clear within a task
+  // cycle. Disjoint from the per-<slug> reap above and best-effort/never-throws.
+  sweepStaleWorkerScratch({ maxAgeMs: DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS });
 }
 
 /** Summary of what a start-of-run prune reclaimed (ledgered for provenance). */
