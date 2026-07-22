@@ -781,3 +781,13 @@ test("nonPlanFilesInDiff: MASTER-PLAN.md hunks are plan hunks, per this guard's 
   const diff = "--- a/MASTER-PLAN.md\n+++ b/MASTER-PLAN.md\n@@ -1 +1 @@\n-x\n+y\n--- a/src/lib/x.ts\n+++ b/src/lib/x.ts\n@@ -1 +1 @@\n-a\n+b\n";
   assert.deepEqual(nonPlanFilesInDiff(diff), ["src/lib/x.ts"]);
 });
+
+// ── id selection sees the tasks.d shards (the W1-T236 re-mint stalemate) ────
+
+test("the triage prompt instructs shard-inclusive id selection — max across plan/tasks.yaml AND plan/tasks.d, so a new id never collides with a shard-owned one", () => {
+  const p = triagePrompt(ENTRY, "RUN-1");
+  assert.match(p, /plan\/tasks\.d\/\*\.yaml/, "the id-selection rule must name the shards");
+  assert.match(p, /highest existing id across the monolith AND the shards/i);
+  assert.match(p, /grep -h 'id: W1-T' plan\/tasks\.yaml plan\/tasks\.d\/\*\.yaml/, "the exact discovery command is given, not left to the worker's guess");
+  assert.match(p, /mint the next\n?\s*integer above it/i);
+});
