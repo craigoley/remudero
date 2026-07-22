@@ -85,7 +85,7 @@ import type { QuestionEntry } from "./worker.js";
  */
 
 /** One of the four dispositions every open PR is reconciled into. */
-export type Disposition = "mergeable" | "blocked-fixable" | "stale" | "blocked-ambiguous" | "dep-review";
+export type Disposition = "mergeable" | "blocked-fixable" | "stale" | "blocked-ambiguous" | "dep-review" | "post-review";
 
 /**
  * One failing required CI check's name + the tail of its log — the W1-T94
@@ -497,6 +497,23 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: () => "review success, required checks green — arming auto-merge",
   },
   {
+    // POST-REVIEW ROUTING (the 2026-07-22 #584 stall): a checks-GREEN PR whose
+    // remudero-review was never posted at all previously fell to the terminal
+    // catch-all below and ESCALATED ("checks green, review none") — a hand-
+    // opened PR could sit fully green forever with a needs-human issue as its
+    // only disposition, because nothing ever invoked the review lane on it.
+    // Route it to the SAME reviewCommand the operator verb runs (dedup per
+    // head, like dep-review): the posted verdict then drives the NEXT pass —
+    // success -> mergeable/arm, failure -> the fix/escalate rows. A PR with no
+    // criteria (no trailer, no Acceptance block) posts FAIL fail-closed, which
+    // is a LEGIBLE gate state rather than a clarification escalation.
+    // Dependabot PRs never reach here (their own row above); checks-pending
+    // stays with the catch-all (review-before-green is not the lane's order).
+    disposition: "post-review",
+    when: (pr) => pr.checksState === "green" && pr.reviewState === "none",
+    reason: (pr) => `checks green, review never posted — running the review lane on #${pr.prNumber}`,
+  },
+  {
     // TERMINAL rule (matches unconditionally) — the LEAST permissive disposition
     // (the #161 fix, W1-T93), not the most permissive one. A checks-red PR is
     // the blocked_ci shape and is caught by row 5 above (W1-T100/W1-T138) —
@@ -763,6 +780,14 @@ export interface SweepDeps {
    */
   depReview?: (pr: OpenPrView) => string | void | Promise<string | void>;
   /**
+   * Invoke the review lane (reviewCommand) on a checks-green PR whose
+   * remudero-review was never posted (the post-review disposition). Posted
+   * verdicts are per-head, so dedup is unconditional per `pr@head` — a fresh
+   * push mints a new head and re-routes naturally. Optional — omitted, the
+   * disposition is ledgered with a stand-down note and nothing runs.
+   */
+  postReview?: (pr: OpenPrView) => void | Promise<void>;
+  /**
    * Dispatch the W1-T76 fix rung carrying the mode-appropriate evidence at
    * once (W1-T94/W1-T100) — the FULL unmet set for a review-mode dispatch, or
    * ci-log evidence (failing check names + log tails) for a blocked_ci
@@ -843,6 +868,8 @@ interface PriorActions {
   escalated: Set<number>;
   /** `pr@head` keys whose dep-review reached a TERMINAL outcome (arm/escalate/refuse). */
   depReviewed: Set<string>;
+  /** `pr@head` keys the post-review lane already posted a verdict for. */
+  postReviewed: Set<string>;
 }
 
 function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorActions {
@@ -851,6 +878,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const closed = new Set<number>();
   const escalated = new Set<number>();
   const depReviewed = new Set<string>();
+  const postReviewed = new Set<string>();
   for (const line of lines) {
     if (line.step !== "sweep.disposed" || line.acted !== true) continue;
     const pr = typeof line.pr_number === "number" ? line.pr_number : undefined;
@@ -875,15 +903,19 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
           depReviewed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         }
         break;
+      case "post-review":
+        postReviewed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
+        break;
     }
   }
-  return { armed, fixed, closed, escalated, depReviewed };
+  return { armed, fixed, closed, escalated, depReviewed, postReviewed };
 }
 
 const ZERO_COUNTS = (): Record<Disposition, number> => ({
   mergeable: 0,
   "blocked-fixable": 0,
   "dep-review": 0,
+  "post-review": 0,
   stale: 0,
   "blocked-ambiguous": 0,
 });
@@ -941,6 +973,9 @@ export async function runSweep(
         break;
       case "dep-review":
         alreadyDone = prior.depReviewed.has(`${pr.prNumber}@${pr.headSha}`);
+        break;
+      case "post-review":
+        alreadyDone = prior.postReviewed.has(`${pr.prNumber}@${pr.headSha}`);
         break;
       default:
         alreadyDone = false;
@@ -1012,6 +1047,14 @@ export async function runSweep(
           } else {
             acted = false;
             standDownReason = "no depReview dep wired — dependabot PR left for the operator lane";
+          }
+          break;
+        case "post-review":
+          if (deps.postReview) {
+            await deps.postReview(pr);
+          } else {
+            acted = false;
+            standDownReason = "no postReview dep wired — ungated PR left for the operator lane";
           }
           break;
       }

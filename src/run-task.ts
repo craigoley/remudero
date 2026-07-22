@@ -5027,7 +5027,7 @@ function buildSweepEffects(
   plan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
-): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview"> {
+): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = ghIssueGateway(owner, repo);
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
@@ -5046,6 +5046,15 @@ function buildSweepEffects(
         .filter((l) => l.step === "dep-review.decided" && l.task_id === `dep-review-PR${pr.prNumber}`)
         .at(-1);
       return typeof decided?.decision === "string" ? decided.decision : "unknown";
+    },
+
+    // POST-REVIEW ROUTING (the #584 stall): a checks-green PR with NO posted
+    // remudero-review gets the SAME reviewCommand the operator verb runs. The
+    // posted verdict drives the NEXT sweep pass (success -> arm, failure ->
+    // fix/escalate); a criteria-less PR posts FAIL fail-closed — a legible
+    // gate state instead of a needs-human clarification issue.
+    postReview: async (pr) => {
+      await reviewCommand(String(pr.prNumber), ["--repo", repo]);
     },
 
     close: (pr, reason) => {
