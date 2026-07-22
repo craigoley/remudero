@@ -207,10 +207,11 @@ import { buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import {
   buildBatchedGithub,
+  createDispatchBreakerCache,
   deriveStatus,
+  evaluateDispatchBreaker,
   ghGateway,
   ghRequiredStatusCheckContexts,
-  isDispatchBreakerTripped,
   projectPlan,
   readLedgerLines,
   type DeriveDeps,
@@ -3703,8 +3704,11 @@ function readUsageSnapshot(config: Config): UsageSnapshot | undefined {
 
 /**
  * P29(ii)'s escalation side — called once `nextRunnable`'s `isCircuitTripped`
- * (status.ts's `isDispatchBreakerTripped`) reports a task has been dispatched
- * the policy-capped number of times with no new owned PR since. DEDUPED: a
+ * (status.ts's `evaluateDispatchBreaker`, via this file's `breakerGateFor`) reports a
+ * task has been dispatched the policy-capped number of times with no new owned PR
+ * since — never called merely on "indeterminate" (an absent/rotated ledger read,
+ * handled instead by `isIndeterminate` as a skip-and-retry, not an escalation; see
+ * `evaluateDispatchBreaker`'s doc). DEDUPED: a
  * task escalates AT MOST ONCE (checked via this module's OWN `dispatch.
  * circuit_broken.escalated` ledger line — never `escalation.issue_opened`
  * alone, which a genuine_blocker escalation for the SAME task could also have
@@ -3768,6 +3772,29 @@ export function escalateCircuitBreak(
     issue_url: issueUrl,
     delivered: issueUrl !== null,
   });
+}
+
+/**
+ * W1-T206: shared dispatch-breaker gate for drainCommand/daemonCommand — ONE
+ * {@link DispatchBreakerCache} per invocation (never rebuilt per tick/per task, so a
+ * same-process rotation gets caught as it happens — see the cache's own doc), memoized
+ * per (taskId, this tick) since `nextRunnable` calls `isIndeterminate` then, only if that
+ * was false, `isCircuitTripped` for the SAME task in the same pass; without the memo the
+ * breaker's full ledger re-read would run twice per task per tick for no reason.
+ */
+function breakerGateFor(ledgerPath: string): { isIndeterminate: (taskId: string) => boolean; isTripped: (taskId: string) => boolean } {
+  const cache = createDispatchBreakerCache();
+  let memo: { taskId: string; state: "tripped" | "clear" | "indeterminate" } | undefined;
+  const stateFor = (taskId: string) => {
+    if (memo?.taskId !== taskId) {
+      memo = { taskId, state: evaluateDispatchBreaker(ledgerPath, taskId, cache) };
+    }
+    return memo.state;
+  };
+  return {
+    isIndeterminate: (taskId) => stateFor(taskId) === "indeterminate",
+    isTripped: (taskId) => stateFor(taskId) === "tripped",
+  };
 }
 
 /**
@@ -3899,9 +3926,16 @@ async function drainCommand(
     const p = lastProj?.get(id);
     return p?.prState === "OPEN" ? p.prNumber : undefined;
   };
+  // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd drain` invocation.
+  const breakerGate = breakerGateFor(ledgerPath);
   // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
-  // `refreshMerged` just derived, never a second GitHub read path.
-  const isIndeterminate = (id: string) => lastProj?.get(id)?.indeterminate === true;
+  // `refreshMerged` just derived, never a second GitHub read path. W1-T206: ALSO
+  // indeterminate when the ledger's dispatch-breaker read for this task cannot be
+  // trusted (absent/rotated ledger reading as fewer dispatches than a live process
+  // already knows about) — nextRunnable already skips-and-retries on indeterminate
+  // rather than escalating, exactly the behavior a torn read needs here too.
+  const isIndeterminate = (id: string) =>
+    lastProj?.get(id)?.indeterminate === true || breakerGate.isIndeterminate(id);
 
   if (dryRun) {
     const merged = refreshMerged();
@@ -3972,8 +4006,11 @@ async function drainCommand(
         isIndeterminate,
         // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
         // ledger every call — persists across drain/daemon process restarts,
-        // unlike the daemon's in-memory per-tick block flag.
-        isCircuitTripped: (taskId) => isDispatchBreakerTripped(readLedgerLines(ledgerPath), taskId),
+        // unlike the daemon's in-memory per-tick block flag. W1-T206: routed through
+        // breakerGate/evaluateDispatchBreaker so a torn/rotated read reports
+        // "indeterminate" (handled above by isIndeterminate) rather than a false
+        // "clear" that would silently untrip an already-tripped task.
+        isCircuitTripped: (taskId) => breakerGate.isTripped(taskId),
         onCircuitBreak: (t) => escalateCircuitBreak(t, { owner, repo, ledgerPath, runId }),
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale }),
         readUsage: () => readUsageSnapshot(config),
@@ -4147,9 +4184,16 @@ async function daemonCommand(rest: string[]): Promise<number> {
     const p = lastProj?.get(id);
     return p?.prState === "OPEN" ? p.prNumber : undefined;
   };
+  // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd daemon` invocation.
+  const breakerGate = breakerGateFor(ledgerPath);
   // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
-  // `refreshMerged` just derived, never a second GitHub read path.
-  const isIndeterminate = (id: string) => lastProj?.get(id)?.indeterminate === true;
+  // `refreshMerged` just derived, never a second GitHub read path. W1-T206: ALSO
+  // indeterminate when the ledger's dispatch-breaker read for this task cannot be
+  // trusted (absent/rotated ledger reading as fewer dispatches than a live process
+  // already knows about) — nextRunnable already skips-and-retries on indeterminate
+  // rather than escalating, exactly the behavior a torn read needs here too.
+  const isIndeterminate = (id: string) =>
+    lastProj?.get(id)?.indeterminate === true || breakerGate.isIndeterminate(id);
 
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
@@ -4237,8 +4281,11 @@ async function daemonCommand(rest: string[]): Promise<number> {
         isIndeterminate,
         // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
         // ledger every call — persists across daemon restarts, unlike this
-        // loop's own in-memory per-tick block-reasoning flag.
-        isCircuitTripped: (taskId) => isDispatchBreakerTripped(readLedgerLines(ledgerPath), taskId),
+        // loop's own in-memory per-tick block-reasoning flag. W1-T206: routed through
+        // breakerGate/evaluateDispatchBreaker so a torn/rotated read reports
+        // "indeterminate" (handled above by isIndeterminate) rather than a false
+        // "clear" that would silently untrip an already-tripped task.
+        isCircuitTripped: (taskId) => breakerGate.isTripped(taskId),
         onCircuitBreak: (t) => escalateCircuitBreak(t, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         runOne: (taskId) =>
           runTask(taskId, {

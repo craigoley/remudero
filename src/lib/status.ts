@@ -420,30 +420,59 @@ const realLedgerFs: LedgerFsDeps = {
   readFileSync: (path, encoding) => fs.readFileSync(path, encoding),
 };
 
+/**
+ * {@link readLedgerLines}' return type: a plain `Array<Record<string, unknown>>` for every
+ * existing consumer (dozens of call sites type it that way — `deps.readLedger?: (path) =>
+ * Array<Record<string, unknown>>` and friends — so this stays structurally assignable to
+ * that with zero call-site churn), PLUS a `torn` count attached as a NON-ENUMERABLE own
+ * property (W1-T206). Non-enumerable specifically so `assert.deepEqual`/`deepStrictEqual`
+ * against a plain array literal — used throughout the existing test suite to assert on
+ * ledger content — keeps working unchanged: `Object.keys`/`JSON.stringify`/`for..in`/the
+ * generic own-enumerable-property walk `assert.deepEqual` does for any object never see it,
+ * exactly like a real array's own `.length` is also non-enumerable and invisible to that
+ * same walk. A consumer that specifically wants to know whether a line was lost THIS read
+ * reads `.torn` by direct property access (which does not care about enumerability) instead
+ * of having no way to find out short of scraping stderr.
+ */
+export type LedgerLines = Array<Record<string, unknown>> & {
+  /** Count of unparseable/torn lines dropped THIS read (0 when every line parsed clean). */
+  readonly torn: number;
+};
+
+function withTornCount(out: Array<Record<string, unknown>>, torn: number): LedgerLines {
+  Object.defineProperty(out, "torn", { value: torn, enumerable: false, configurable: true });
+  return out as LedgerLines;
+}
+
 /** Default NDJSON ledger reader: one JSON object per non-blank line. Reads the ledger
  * file directly via the injected (real, by default) fs — never copies it anywhere first.
- * A line that fails to parse (e.g. a torn append — this ledger's writer gives no
- * atomicity guarantee) is LOUD, not silent: it is `console.error`-logged with the
- * offending path and raw text and then DROPPED, never fabricated as a synthetic `{}`
- * standing in for the lost record. This ledger backs the per-task dispatch circuit
- * breaker (`isDispatchBreakerTripped`/`dispatchesWithoutNewOwnedPr` below) as well as
- * provenance, so silently manufacturing an empty record for lost data — rather than
- * surfacing that data was lost — could previously mask a torn `pr.opened` (falsely
- * leaving the breaker tripped) or a torn `run.start` (undercounting toward it) with
- * zero operator-visible signal either way. */
-export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedgerFs): Array<Record<string, unknown>> {
-  if (!ledgerFs.existsSync(path)) return [];
+ * A line that fails to parse (e.g. a torn append — see ledger.ts's `appendLedger` doc for
+ * why that should be rare in practice, but a crash mid-write can still truncate the final
+ * line, and no write-side mechanism can fully rule that out) is
+ * LOUD, not silent, in TWO ways (W1-T206): `console.error`-logged with the offending path
+ * and raw text for a human watching stderr, AND counted into the returned array's `.torn`
+ * property for a CONSUMER that has no stderr to watch — the previous fabricated-`{}`-per-
+ * torn-line behavior left no way for either audience to tell a line was lost at all. This
+ * ledger backs the per-task dispatch circuit breaker (`isDispatchBreakerTripped`/
+ * `dispatchesWithoutNewOwnedPr` below) as well as provenance, so a torn `pr.opened` (falsely
+ * leaving the breaker tripped) or a torn `run.start` (undercounting toward it) both need to
+ * be visible, not silently absorbed into an empty record no consumer could distinguish from
+ * a genuinely uneventful line. */
+export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedgerFs): LedgerLines {
   const out: Array<Record<string, unknown>> = [];
+  if (!ledgerFs.existsSync(path)) return withTornCount(out, 0);
+  let torn = 0;
   for (const raw of ledgerFs.readFileSync(path, "utf8").split("\n")) {
     const l = raw.trim();
     if (!l) continue;
     try {
       out.push(JSON.parse(l) as Record<string, unknown>);
     } catch {
+      torn++;
       console.error(`ledger: dropping unparseable line in ${path}: ${l}`);
     }
   }
-  return out;
+  return withTornCount(out, torn);
 }
 
 /**
@@ -487,10 +516,15 @@ export interface LedgerTailCache {
   pending: string;
   /** @internal — cumulative parsed lines; never re-parsed once minted. */
   lines: Array<Record<string, unknown>>;
+  /** Cumulative count of unparseable/torn lines dropped across every read this cache has ever
+   *  done (W1-T206) — never re-derived, only ever incremented, so it survives everything
+   *  `lines` survives (including a rotation event that freezes rather than wipes `lines` —
+   *  see {@link readLedgerTail}'s doc). */
+  torn: number;
 }
 
 export function createLedgerTailCache(): LedgerTailCache {
-  return { offset: 0, pending: "", lines: [] };
+  return { offset: 0, pending: "", lines: [], torn: 0 };
 }
 
 /**
@@ -653,6 +687,75 @@ export function isDispatchBreakerTripped(
   maxDispatches: number = DEFAULT_MAX_TASK_DISPATCHES,
 ): boolean {
   return dispatchesWithoutNewOwnedPr(lines, taskId) >= maxDispatches;
+}
+
+/**
+ * Per-process, cross-tick memory {@link evaluateDispatchBreaker} uses to notice an
+ * impossible regression (W1-T206): the ledger's dispatch count for a task dropping
+ * without the `pr.opened` line that would legitimately explain it. Held by the caller
+ * (drain.ts/daemon.ts's dispatch loop) across every tick of ONE process's lifetime —
+ * mirroring {@link LedgerTailCache}'s "one per long-lived route" shape, not rebuilt per
+ * task. SCOPE NOTE: this is in-memory only, so a daemon/drain PROCESS RESTART starts
+ * with an empty baseline and cannot catch a rotation that happens to land in that
+ * exact window — {@link isDispatchBreakerTripped} above already covers the cross-
+ * restart case for the ORDINARY (non-rotated) ledger; this cache adds the narrower,
+ * complementary "caught it happening under a live process" guarantee `dispatchesWith
+ * outNewOwnedPr` alone cannot provide, since a pure re-derive-from-ledger function has
+ * no memory of what the ledger used to say.
+ */
+export interface DispatchBreakerCache {
+  /** @internal highest per-task `dispatchesWithoutNewOwnedPr` count ever observed
+   *  while the ledger was genuinely readable and consistent. */
+  lastCounts: Map<string, number>;
+}
+
+export function createDispatchBreakerCache(): DispatchBreakerCache {
+  return { lastCounts: new Map() };
+}
+
+/**
+ * Tri-state read of the dispatch breaker for `taskId` (W1-T206): `"tripped"` /
+ * `"clear"` behave exactly like {@link isDispatchBreakerTripped}'s boolean, but a third
+ * state, `"indeterminate"`, fires instead of a false `"clear"` in the two situations
+ * where trusting a freshly-computed count of 0-ish would be trusting an ABSENCE as
+ * proof of no dispatches rather than what it actually is — missing information:
+ *
+ *   1. The ledger file does not exist at read time. On a genuinely fresh checkout this
+ *      is fine (there is really nothing to know yet) — `cache.lastCounts` has no entry
+ *      for `taskId` either, so it is trusted as `"clear"`. But once THIS cache has ever
+ *      observed a nonzero count for `taskId` from a real read, a SUBSEQUENT absence can
+ *      no longer be telling the truth — it reads `"indeterminate"`.
+ *   2. The ledger exists but its freshly-computed count for `taskId` is LOWER than
+ *      `cache.lastCounts` already recorded, AND the fresh read carries no `pr.opened`
+ *      line for `taskId` that would legitimately explain the drop (the only way
+ *      `dispatchesWithoutNewOwnedPr` is supposed to ever go down). That combination —
+ *      count fell, with nothing in the ledger to justify it — is a torn/rotated/
+ *      truncated ledger caught in the act, not forward progress.
+ *
+ * The caller (run-task.ts's drain/daemon dispatch loop) must treat `"indeterminate"`
+ * the same way `nextRunnable`'s existing `isIndeterminate` gate already treats a
+ * GitHub-read failure: skip dispatch THIS tick, re-check next tick, never escalate on
+ * it alone — never fold it into `isCircuitTripped`, whose `true` means "escalate now".
+ */
+export function evaluateDispatchBreaker(
+  ledgerPath: string,
+  taskId: string,
+  cache: DispatchBreakerCache,
+  opts: { maxDispatches?: number; ledgerFs?: LedgerFsDeps } = {},
+): "tripped" | "clear" | "indeterminate" {
+  const maxDispatches = opts.maxDispatches ?? DEFAULT_MAX_TASK_DISPATCHES;
+  const ledgerFs = opts.ledgerFs ?? realLedgerFs;
+  const lines = readLedgerLines(ledgerPath, ledgerFs);
+  const freshCount = dispatchesWithoutNewOwnedPr(lines, taskId);
+  const priorCount = cache.lastCounts.get(taskId);
+  const hasNewOwnedPr = lastPrOpened(lines, taskId) !== undefined;
+
+  if (priorCount !== undefined && freshCount < priorCount && !hasNewOwnedPr) {
+    return "indeterminate"; // count regressed with nothing in the ledger to explain it
+  }
+
+  cache.lastCounts.set(taskId, freshCount);
+  return freshCount >= maxDispatches ? "tripped" : "clear";
 }
 
 /** Escape a string for literal use inside a `RegExp` (dot/hyphen-safe task ids). */
