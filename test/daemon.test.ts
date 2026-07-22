@@ -5,15 +5,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPlan, type Plan, type Task } from "../src/lib/plan.js";
 import type { RunResult } from "../src/run-task.js";
-import type { UsageSnapshot } from "../src/lib/headroom.js";
+import { HEADROOM_LIMIT_PCT, type UsageSnapshot } from "../src/lib/headroom.js";
 import {
   DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_UNREADABLE_DEGRADED_LIMIT,
+  buildDefaultHeadroomPolicy,
+  canonicalizeResetInstant,
   daemonBoot,
+  daemonExitCode,
+  formatResetInstant,
   parseOrphanedBranch,
+  parseResetInstant,
   reconstructOrphan,
   reconstructState,
+  resolveHeadroomLimitPct,
   runDaemon,
   type DaemonDeps,
+  type DaemonStopReason,
+  type HeadroomPolicy,
   type OrphanedRun,
 } from "../src/lib/daemon.js";
 import { pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
@@ -416,12 +425,21 @@ test("PAUSE (drain-and-hold): issued mid-run, the in-flight task still reaches m
 
 // ── headroom (W1-T4) ─────────────────────────────────────────────────────────
 
+// A `now` far from any weekday-name ambiguity: fixed, injected, never the
+// real wall clock — every headroom test below is deterministic regardless of
+// which real calendar day the suite happens to run on.
+const JUL_20_2026_2200 = () => new Date(2026, 6, 20, 22, 0, 0, 0); // Mon 2026-07-20 22:00 local
+const JUL_19_2026_2200 = () => new Date(2026, 6, 19, 22, 0, 0, 0); // Sun 2026-07-19 22:00 local — 26h from the same reset
+
 test("headroom: a near-limit reading is an IN-PROCESS idle heartbeat, never a stop — no spawn while over the limit", async () => {
   const plan = fixturePlan();
+  // resets_at is FAR from `now` (5 days out) so the time-aware ceiling holds
+  // at the default reserve throughout — this test is about the idle-loop
+  // SHAPE, not the time-aware relaxation (covered separately below).
   const nearLimit: UsageSnapshot = {
     billingMode: "subscription",
     session: { percentUsed: 42, resetsAt: "3pm" },
-    weekly: [{ label: "all models", percentUsed: 98, resetsAt: "Monday" }],
+    weekly: [{ label: "all models", percentUsed: 98, resetsAt: "Jul 25 at 12am" }],
   };
   let spawned = 0;
   const root = mkdtempSync(join(tmpdir(), "daemon-headroom-"));
@@ -438,6 +456,7 @@ test("headroom: a near-limit reading is an IN-PROCESS idle heartbeat, never a st
     refreshMerged: () => NONE_MERGED,
     runOne: async (id) => { spawned++; return okResult(id); },
     readUsage: () => nearLimit,
+    now: JUL_20_2026_2200,
     checkStop: () => stopDetail(root),
     sleep,
     log: (step, extra = {}) => lines.push({ step, extra }),
@@ -445,7 +464,11 @@ test("headroom: a near-limit reading is an IN-PROCESS idle heartbeat, never a st
   // The daemon HALTS here only because the fake "operator" issued STOP above —
   // headroom exhaustion by itself never ends the loop (KeepAlive would just
   // relaunch a process that exits, restart-looping every idle poll instead of
-  // sleeping through the window's actual reset).
+  // sleeping through the window's actual reset). This is also the FALSIFIER
+  // for "the daemon does not relaunch-storm while a KNOWN-DURATION condition
+  // holds": ticks accumulate WITHIN this one process/summary across every
+  // heartbeat below, rather than resetting to 0 the way a launchd relaunch
+  // (a fresh process) would — proving no boot-cycle occurred.
   assert.equal(s.stopReason, "stopped");
   assert.equal(spawned, 0, "no task is spawned while any window is at/near its limit");
   assert.ok(s.ticks >= 3, "the loop idle-heartbeated via the injected clock rather than exiting on headroom");
@@ -454,12 +477,166 @@ test("headroom: a near-limit reading is an IN-PROCESS idle heartbeat, never a st
   assert.ok(heartbeats.length >= 3, "one daemon.headroom heartbeat logged per idle tick");
   assert.equal(heartbeats[0].extra.window, "weekly (all models)");
   assert.equal(heartbeats[0].extra.percent_used, 98);
-  assert.equal(heartbeats[0].extra.resets_at, "Monday");
+  assert.equal(heartbeats[0].extra.limit_pct, HEADROOM_LIMIT_PCT, "far from reset, the ceiling holds at the reserve");
 });
 
-test("headroom unreadable (undefined) does NOT halt — best-effort, the daemon continues", async () => {
+test("headroom exhaustion resumes ON ITS OWN once the underlying window actually resets — no exit either side", async () => {
+  // Proves acceptance criterion (a): "the daemon does not exit at all... it
+  // RESUMES after the clock passes resets_at". readUsage is a fresh call
+  // every tick (never cached), so once the real subscription window resets
+  // and /usage starts reporting a fresh low percentage, the VERY NEXT poll
+  // picks it up automatically — no separate "wake at resets_at" timer is
+  // needed, and the process never terminated in between.
   const plan = fixturePlan();
   const merged = new Set<string>();
+  let simNowMs = JUL_20_2026_2200().getTime();
+  const RESET_AT_MS = new Date(2026, 6, 21, 0, 0, 0, 0).getTime(); // 2h after simNow starts
+  // The window's OWN reset (per its raw resetsAt text) is deliberately far
+  // away (8 days) — this test isolates "keeps polling until the underlying
+  // reading changes" from the SEPARATE time-aware-ceiling behaviour (covered
+  // by its own tests below); the simulated /usage flip at RESET_AT_MS models
+  // an actual subscription reset landing mid-poll, independent of what the
+  // ceiling itself would have permitted.
+  const exhausted: UsageSnapshot = {
+    billingMode: "subscription",
+    session: { percentUsed: 10, resetsAt: "x" },
+    weekly: [{ label: "all models", percentUsed: 98, resetsAt: "Jul 28 at 12am" }],
+  };
+  const fresh: UsageSnapshot = {
+    billingMode: "subscription",
+    session: { percentUsed: 10, resetsAt: "x" },
+    weekly: [{ label: "all models", percentUsed: 3, resetsAt: "Jul 28 at 12am" }],
+  };
+  let sleeps = 0;
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => { merged.add(id); return okResult(id); },
+      readUsage: () => (simNowMs < RESET_AT_MS ? exhausted : fresh),
+      now: () => new Date(simNowMs),
+      sleep: async (ms) => {
+        sleeps++;
+        simNowMs += ms; // the loop's own pacing clock advances the simulated wall clock
+      },
+    },
+    { max: 1, pollIntervalMs: 30 * 60_000 }, // 30-min polls cross the 2h gap in a few ticks
+  );
+  assert.equal(s.stopReason, "max_reached", "dispatch resumed once the window reset, with no process exit in between");
+  assert.deepEqual(s.merged, ["A"]);
+  assert.ok(sleeps >= 3, "idled across multiple ticks while exhausted before the reset landed");
+});
+
+// ── time-aware ceiling (operator ruling 2026-07-21: policy DATA, not a code constant) ─
+
+test("resolveHeadroomLimitPct: unknown (null) hours-to-reset is READ CONSERVATIVELY — never the relaxed final-day rung", () => {
+  assert.equal(resolveHeadroomLimitPct(null), HEADROOM_LIMIT_PCT);
+  assert.equal(resolveHeadroomLimitPct(NaN), HEADROOM_LIMIT_PCT);
+});
+
+test("resolveHeadroomLimitPct: inside the final day (<=24h) relaxes to 100%; every other day holds at the reserve", () => {
+  const policy = buildDefaultHeadroomPolicy();
+  assert.equal(resolveHeadroomLimitPct(1, policy), 100);
+  assert.equal(resolveHeadroomLimitPct(24, policy), 100);
+  assert.equal(resolveHeadroomLimitPct(24.01, policy), HEADROOM_LIMIT_PCT);
+  assert.equal(resolveHeadroomLimitPct(24 * 6, policy), HEADROOM_LIMIT_PCT);
+});
+
+test("buildDefaultHeadroomPolicy: the HOLD rung is DATA, not hardcoded — a custom reserve threads through", () => {
+  const policy = buildDefaultHeadroomPolicy(80);
+  assert.equal(resolveHeadroomLimitPct(100, policy), 80);
+  assert.equal(resolveHeadroomLimitPct(1, policy), 100); // final-day relax is unaffected
+});
+
+test("headroom: the SAME percent_used(98%) — inside the window's final day, dispatch PROCEEDS; earlier, it idles", async () => {
+  // FALSIFIER for the fixture in this task's rationale: on Monday 2026-07-20
+  // the fleet parked 22:22-00:00 EDT, 56 consecutive headroom_exhausted stops
+  // over ~98 minutes, protecting 95%-exhausted headroom that EXPIRED at the
+  // midnight reset regardless. Same window, same percent_used, same
+  // resets_at string — only `now` (hours-to-reset) differs between the two
+  // runs below.
+  const plan = fixturePlan();
+  const snapAt98 = (): UsageSnapshot => ({
+    billingMode: "subscription",
+    session: { percentUsed: 10, resetsAt: "x" },
+    weekly: [{ label: "all models", percentUsed: 98, resetsAt: "Jul 21 at 12am" }],
+  });
+
+  // Two hours to reset (inside the final day) ⇒ the ceiling relaxes to 100%,
+  // 98% no longer binds, dispatch proceeds.
+  const insideFinalDay = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => okResult(id),
+      readUsage: snapAt98,
+      now: JUL_20_2026_2200, // 2026-07-20 22:00, resets Jul 21 00:00 ⇒ 2h away
+      sleep: async () => {},
+    },
+    { max: 1 },
+  );
+  assert.equal(insideFinalDay.stopReason, "max_reached", "relaxed ceiling let the task dispatch");
+  assert.deepEqual(insideFinalDay.merged, ["A"]);
+
+  // 26 hours to the SAME reset (outside the final day) ⇒ the ceiling holds
+  // at the reserve, 98% binds, the daemon idles instead of dispatching.
+  let spawned = 0;
+  const root = mkdtempSync(join(tmpdir(), "daemon-headroom-timeaware-"));
+  let calls = 0;
+  const outsideFinalDay = await runDaemon(plan, {
+    refreshMerged: () => NONE_MERGED,
+    runOne: async (id) => { spawned++; return okResult(id); },
+    readUsage: snapAt98,
+    now: JUL_19_2026_2200, // 2026-07-19 22:00, resets Jul 21 00:00 ⇒ 26h away
+    checkStop: () => stopDetail(root),
+    sleep: async () => {
+      calls++;
+      if (calls >= 2) requestStop(root, "outside-final-day proof done");
+    },
+  });
+  assert.equal(outsideFinalDay.stopReason, "stopped");
+  assert.equal(spawned, 0, "held ceiling ⇒ 98% still binds ⇒ no dispatch, 26h from the same reset");
+});
+
+test("headroom policy is OVERRIDABLE DATA — a custom curve changes behaviour without touching source", async () => {
+  const plan = fixturePlan();
+  const snapAt80 = (): UsageSnapshot => ({
+    billingMode: "subscription",
+    session: { percentUsed: 10, resetsAt: "x" },
+    weekly: [{ label: "all models", percentUsed: 80, resetsAt: "Jul 21 at 12am" }],
+  });
+  // A custom policy (plain data, constructed entirely in the TEST, not in
+  // daemon.ts) that holds a much tighter reserve (50%) regardless of
+  // time-to-reset — proves the curve is consulted, not a hardcoded 95/100.
+  const tightPolicy: HeadroomPolicy = [{ maxHoursToReset: Infinity, limitPct: 50 }];
+  let spawned = 0;
+  const root = mkdtempSync(join(tmpdir(), "daemon-headroom-policy-"));
+  let calls = 0;
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => { spawned++; return okResult(id); },
+      readUsage: snapAt80,
+      now: JUL_20_2026_2200, // inside the final day of the DEFAULT policy — would normally relax to 100%
+      checkStop: () => stopDetail(root),
+      sleep: async () => {
+        calls++;
+        if (calls >= 2) requestStop(root, "custom-policy proof done");
+      },
+    },
+    { headroomPolicy: tightPolicy },
+  );
+  assert.equal(s.stopReason, "stopped");
+  assert.equal(spawned, 0, "80% >= the custom policy's 50% reserve ⇒ idles, even inside what the default curve treats as the final day");
+});
+
+// ── unreadable headroom: BOUNDED degraded mode (recon R-7: unreadable ~78% of the time) ─
+
+test("headroom unreadable (undefined), WITHIN the bounded allowance, does not silently continue — it dispatches under an explicit, logged policy", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const clock = fakeClock();
   const s = await runDaemon(
     plan,
@@ -468,11 +645,170 @@ test("headroom unreadable (undefined) does NOT halt — best-effort, the daemon 
       runOne: async (id) => { merged.add(id); return okResult(id); },
       readUsage: () => undefined,
       sleep: clock.sleep,
+      log: (step, extra = {}) => lines.push({ step, extra }),
     },
     { max: 1 },
   );
   assert.equal(s.stopReason, "max_reached");
-  assert.deepEqual(s.merged, ["A"]);
+  assert.deepEqual(s.merged, ["A"], "still dispatches within the bounded degraded-mode allowance");
+  const unavailable = lines.filter((l) => l.step === "daemon.headroom.unavailable");
+  assert.ok(unavailable.length >= 1, "an unreadable read is logged as an explicit, distinguishable condition — never silent");
+  assert.equal(unavailable[0].extra.consecutive_unreadable, 1);
+  assert.equal(unavailable[0].extra.degraded_limit, DEFAULT_UNREADABLE_DEGRADED_LIMIT);
+  assert.equal(lines.some((l) => l.step === "daemon.headroom.degraded"), false, "the bound was never exceeded, so it never escalates");
+});
+
+test("headroom unreadable BEYOND the bounded allowance ESCALATES to the in-process idle heartbeat — it stops dispatching", async () => {
+  const plan = fixturePlan();
+  const root = mkdtempSync(join(tmpdir(), "daemon-headroom-degraded-"));
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let spawned = 0;
+  let calls = 0;
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => { spawned++; return okResult(id); },
+      readUsage: () => undefined, // NEVER readable — the "78% of the time" fixture, worst case
+      checkStop: () => stopDetail(root),
+      sleep: async () => {
+        calls++;
+        if (calls >= 6) requestStop(root, "degraded-escalation proof done");
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { unreadableDegradedLimit: 2 }, // small bound so the test doesn't need many ticks
+  );
+  assert.equal(s.stopReason, "stopped");
+  // First 2 misses stay within the bound and dispatch (A, then D — both have
+  // no deps and B/C are gated behind A). Once misses exceed the bound, the
+  // daemon must stop spawning new work and idle instead — READING THE
+  // UNREADABLE STATE AS "PROCEED AS IF UNLIMITED" (the fail-open polarity
+  // this criterion forbids) would keep spawning forever instead.
+  assert.ok(spawned <= 2, "spawning stopped once the unreadable streak exceeded its bound");
+  const degraded = lines.filter((l) => l.step === "daemon.headroom.degraded");
+  assert.ok(degraded.length >= 1, "the escalation is logged as a distinct, named condition");
+  assert.equal(degraded[0].extra.degraded_limit, 2);
+  assert.ok((degraded[0].extra.consecutive_unreadable as number) > 2);
+});
+
+test("a single successful read RESETS the consecutive-unreadable counter — it does not accumulate across a good read", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  // undefined, undefined, GOOD READ (headroom clear), undefined, undefined —
+  // never 3 CONSECUTIVE misses, so with a degraded limit of 2 this must
+  // never escalate. Bounded to EXACTLY these 5 reads via a read-count-based
+  // checkStop (not `max`, which would stop after the first dispatch, before
+  // the sequence plays out; not a real temp-dir stop file, which this doesn't
+  // need) — no `no_runnable`/hang risk either way since checkStop is
+  // evaluated at the top of every iteration regardless of that iteration's
+  // dispatch-or-idle outcome.
+  const reads: Array<UsageSnapshot | undefined> = [
+    undefined,
+    undefined,
+    { billingMode: "subscription", session: { percentUsed: 1, resetsAt: "x" }, weekly: [{ label: "all models", percentUsed: 1, resetsAt: "y" }] },
+    undefined,
+    undefined,
+  ];
+  let readCount = 0;
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => { merged.add(id); return okResult(id); },
+      readUsage: () => reads[readCount++],
+      checkStop: () => (readCount >= reads.length ? "read the whole scripted sequence" : undefined),
+      sleep: async () => {},
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { unreadableDegradedLimit: 2 },
+  );
+  assert.equal(s.stopReason, "stopped");
+  assert.equal(readCount, reads.length, "exercised exactly the scripted sequence, no more");
+  assert.equal(lines.some((l) => l.step === "daemon.headroom.degraded"), false, "the good read in between reset the streak — never 3 in a row");
+});
+
+// ── resets_at canonical rendering (this task's SECOND, smaller defect) ──────
+
+test("parseResetInstant: recognizes every /usage shape observed in this task's rationale", () => {
+  const now = JUL_20_2026_2200();
+  assert.deepEqual(parseResetInstant("Jul 21 at 12am", now), new Date(2026, 6, 21, 0, 0, 0, 0));
+  assert.deepEqual(parseResetInstant("Jul 20 at 11:59pm", now), new Date(2026, 6, 20, 23, 59, 0, 0));
+  assert.deepEqual(parseResetInstant("Jul 14, 8:00pm", now), new Date(2027, 6, 14, 20, 0, 0, 0)); // already past ⇒ next year
+  assert.equal(parseResetInstant("not a recognized shape at all", now), null);
+});
+
+test("resets_at renders IDENTICALLY for the same reset instant across boots — the observed 'Jul 21 at 12am' vs 'Jul 20 at 11:59pm' defect", () => {
+  const now = JUL_20_2026_2200();
+  const a = parseResetInstant("Jul 21 at 12am", now)!;
+  const b = parseResetInstant("Jul 20 at 11:59pm", now)!;
+  // Different raw text, 60 real seconds apart — but the same MEANINGFUL
+  // reset moment; canonicalizing rounds the sub-hour jitter away so both
+  // render identically.
+  assert.equal(formatResetInstant(a), formatResetInstant(b));
+  assert.deepEqual(canonicalizeResetInstant(a), canonicalizeResetInstant(b));
+});
+
+test("headroom heartbeat: two boots reading the SAME window a minute apart log the IDENTICAL resets_at string", async () => {
+  const plan = fixturePlan();
+  const snapWith = (resetsAt: string): UsageSnapshot => ({
+    billingMode: "subscription",
+    session: { percentUsed: 10, resetsAt: "x" },
+    weekly: [{ label: "all models", percentUsed: 98, resetsAt }],
+  });
+  const runOnce = async (resetsAt: string, now: () => Date) => {
+    const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+    const root = mkdtempSync(join(tmpdir(), "daemon-headroom-canon-"));
+    let calls = 0;
+    await runDaemon(plan, {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => okResult(id),
+      readUsage: () => snapWith(resetsAt),
+      now,
+      checkStop: () => stopDetail(root),
+      sleep: async () => {
+        calls++;
+        if (calls >= 1) requestStop(root, "one heartbeat is enough");
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    });
+    return lines.find((l) => l.step === "daemon.headroom")?.extra.resets_at;
+  };
+  // Same `now` in both (as two consecutive real boots minutes apart would
+  // share) — only the /usage WORDING of the SAME reset instant differs,
+  // exactly the observed defect. `now` is deliberately OUTSIDE the final day
+  // (26h from the reset) so the 98% reading still binds the (unrelaxed)
+  // reserve and a heartbeat actually fires — the time-aware ceiling itself is
+  // covered by a separate test above.
+  const boot1 = await runOnce("Jul 21 at 12am", JUL_19_2026_2200);
+  const boot2 = await runOnce("Jul 20 at 11:59pm", JUL_19_2026_2200);
+  assert.ok(boot1, "first boot logged a heartbeat");
+  assert.equal(boot1, boot2, "the SAME reset instant renders identically regardless of /usage's wording that boot");
+});
+
+// ── daemonExitCode: the pure stop-reason -> exit-code mapping (Rule 18) ─────
+
+test("daemonExitCode: stopped/max_reached are the ONLY clean (zero) exits", () => {
+  const zero: DaemonStopReason[] = ["stopped", "max_reached"];
+  const nonzero: DaemonStopReason[] = ["blocked", "paused", "error"];
+  for (const r of zero) assert.equal(daemonExitCode(r), 0, `${r} should exit 0`);
+  for (const r of nonzero) assert.equal(daemonExitCode(r), 1, `${r} should exit nonzero`);
+});
+
+test("daemonExitCode: a genuine crash (stopReason='error') STILL exits nonzero — preserving the KeepAlive restart the kill -9 drill verified", async () => {
+  // Belt-and-suspenders: exercise the SAME path runDaemon actually returns on
+  // an unexpected throw, then feed that real stopReason through the mapping
+  // — not just a literal "error" string constructed by hand.
+  const plan = fixturePlan();
+  const clock = fakeClock();
+  const s = await runDaemon(plan, {
+    refreshMerged: () => NONE_MERGED,
+    runOne: async () => { throw new Error("boom — a genuine crash, not a policy stop"); },
+    sleep: clock.sleep,
+  });
+  assert.equal(s.stopReason, "error");
+  assert.equal(daemonExitCode(s.stopReason), 1, "a real crash must still map to a nonzero exit so launchd's KeepAlive restarts it");
 });
 
 // ── stop-on-block v1 (block-REASONING is W1-T46, a successor built on this) ─

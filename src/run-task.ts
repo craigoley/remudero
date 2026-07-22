@@ -40,7 +40,14 @@ import {
   type MergedSet,
   type OpenPrCheck,
 } from "./lib/drain.js";
-import { DEFAULT_POLL_INTERVAL_MS, daemonBoot, runDaemon, type DaemonOpts, type DaemonSummary } from "./lib/daemon.js";
+import {
+  DEFAULT_POLL_INTERVAL_MS,
+  daemonBoot,
+  daemonExitCode,
+  runDaemon,
+  type DaemonOpts,
+  type DaemonSummary,
+} from "./lib/daemon.js";
 import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
 import { DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, launchdPlistPath } from "./lib/launchd.js";
 import { buildDigest, sendDigest } from "./lib/digest.js";
@@ -3836,13 +3843,20 @@ function renderDaemonSummary(s: DaemonSummary): string {
  * (W1-T12a; lib/daemon.ts owns the logic, this only wires the real defaults —
  * same GitHub-derived status, same run-task path, same fleet control +
  * headroom + locks as `rmd drain`). Unlike `rmd drain`, it does not stop on
- * "nothing runnable right now" OR on headroom-exhausted — both are in-process
- * idle states: it paces itself with a real `setTimeout` sleep and keeps
- * polling (logging a heartbeat each tick), since new work can land later and a
- * usage window resets on its own. Exiting on either would just restart-loop
- * under launchd's KeepAlive (SuccessfulExit:false relaunches on ANY exit,
- * clean or not). It DOES still stop on STOP, PAUSE, a block (v1
- * stop-on-block — reasoning about the block is W1-T46), or an unexpected
+ * "nothing runnable right now" OR on headroom-exhausted (confirmed OR merely
+ * unreadable) — all three are in-process idle states: it paces itself with a
+ * real `setTimeout` sleep and keeps polling (logging a heartbeat each tick),
+ * since new work can land later and a usage window resets on its own.
+ * Exiting on any of them would just restart-loop under launchd's KeepAlive
+ * (SuccessfulExit:false relaunches on ANY exit, clean or not). The headroom
+ * ceiling itself is TIME-AWARE (lib/daemon.ts's `HeadroomPolicy`, policy DATA
+ * — relaxes toward 100% on a window's final day rather than wasting
+ * capacity that is destroyed unused at reset), and an unreadable `/usage`
+ * runs under a BOUNDED degraded-mode allowance (a handful of consecutive
+ * misses still dispatch, logged explicitly; beyond that it escalates to the
+ * same idle heartbeat) rather than either halting on the first miss or
+ * silently dispatching forever. It DOES still stop on STOP, PAUSE, a block
+ * (v1 stop-on-block — reasoning about the block is W1-T46), or an unexpected
  * error.
  *
  * Shares the SAME single-instance drain lock as `rmd drain` (state/drain.lock)
@@ -4041,6 +4055,11 @@ async function daemonCommand(rest: string[]): Promise<number> {
         checkStop: () => stopDetail(config.root),
         checkPause: () => pauseDetail(config.root),
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        // The real wall clock backing the TIME-AWARE headroom ceiling (see
+        // lib/daemon.ts's HeadroomPolicy) — resolves each window's own
+        // hours-to-reset. Explicit here (though `runDaemon` defaults the same
+        // way when omitted) so the real wiring is as self-documenting as `sleep`.
+        now: () => new Date(),
         // LEVEL-TRIGGERED PR-PIPELINE RECONCILER (W1-T77): the SAME runSweep the
         // `rmd sweep` CLI invokes, run once per poll iteration so no open PR
         // strands open-and-orphaned (#111/#113/#123). Best-effort by contract.
@@ -4080,12 +4099,14 @@ async function daemonCommand(rest: string[]): Promise<number> {
       opts,
     );
     console.log("\n" + renderDaemonSummary(summary));
-    // Exit 0 only on a clean stop (STOP requested / max reached); a block or
-    // error is a non-zero exit so a supervising wrapper (or launchd, W1-T12b)
-    // notices. Headroom exhaustion never reaches here as a stopReason — it is
-    // an in-process idle state inside runDaemon (lib/daemon.ts), never a
-    // process exit.
-    return summary.stopReason === "stopped" || summary.stopReason === "max_reached" ? 0 : 1;
+    // The pure stop-reason -> exit-code mapping lives in lib/daemon.ts
+    // (`daemonExitCode`), unit-tested there with no process spawn (Rule 18):
+    // 0 only on a clean stop (STOP requested / max reached); a block, a
+    // pause, or an error is non-zero so a supervising wrapper (or launchd,
+    // W1-T12b) notices. Headroom exhaustion never reaches here as a
+    // stopReason at all — it is an in-process idle state inside runDaemon,
+    // never a process exit.
+    return daemonExitCode(summary.stopReason);
   } finally {
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
