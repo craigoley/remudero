@@ -23,5 +23,5 @@ raw: "LATENT BUG (fail-open polarity on a cannot-observe path — the daemon's f
   back-off, vs the daemon which idles after the bounded allowance."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null

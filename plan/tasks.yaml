@@ -674,6 +674,85 @@
     risk:high - credential plumbing plus a boot-time unlock, whose failure direction is a fleet that cannot
     spawn at all (fail-closed, which is why the gate caught it) or an operator keychain unlocked more widely
     than intended. The scripted locked-spawn test is the guard."
+- id: W1-T236
+  title: "port the daemon's bounded-degraded headroom ceiling to the DRAIN — drain.ts:544-554 still fails OPEN on an unreadable /usage (over=null -> keep dispatching), the polarity W1-T197 fixed on the daemon consumer only"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "VERIFIED AT SOURCE at triage, 2026-07-22. daemon.ts now carries the bounded degraded mode
+    (DEFAULT_UNREADABLE_DEGRADED_LIMIT = 3, daemon.ts:282; the consecutive-unreadable counter escalates to the
+    idle heartbeat at daemon.ts:646-669) — W1-T197's third acceptance claim, landed. drain.ts:544-554 is the
+    UNPORTED MIRROR of the same defect, and the plan already knew it was a mirror: W1-T197's recon R-7
+    amendment records 'daemon.ts:286, mirrored at drain.ts:554' but scoped its files to daemon.ts/test only, so
+    the drain consumer was never covered by any task. Both consumers share the same readUsageSnapshot reader
+    (run-task.ts, correctly returns undefined on an unreadable /usage); the polarity fix landed on one of its
+    two call sites.
+    THE LIVE BEHAVIOR TODAY: drain.ts:548-549 takes snap===undefined -> over=null -> NO stop, logs
+    'usage unreadable — continuing (best-effort)' (drain.ts:554), and keeps dispatching workers. With /usage
+    unreadable ~78% of the time (recon R-7: 197 of 253 checks blind), a drain coinciding with real headroom
+    exhaustion keeps spawning against an exhausted pool with no back-pressure — only --max and the maxBudgetUsd
+    tripwire bound it, and both can be large. This is the cannot-observe-rendered-as-permissive family the
+    corpus explicitly rejects (W1-T197's claim: the spending layer 'must never render as
+    proceed-as-if-unlimited'; same family as W1-T181's gateway-[] and W1-T179's regress-to-queued).
+    THE ASYMMETRY IS TEST-ENSHRINED, which is what made it easy to miss: test/drain.test.ts:613 asserts
+    'headroom unreadable (undefined) does NOT halt — best-effort, the drain continues'. That test locks in the
+    fail-open polarity and must be revisited (rewritten to assert the bounded allowance, not deleted silently)."
+  design: |
+    PORT, DO NOT REINVENT. The daemon already holds the settled shape (W1-T197 amendment, recon T6): on an
+    unreadable reading, CONTINUE under a bounded allowance of K consecutive unreadable ticks; beyond K,
+    fail CLOSED. Naive always-fail-closed is explicitly rejected there — a guard blind 78% of the time that
+    halts on every blind read halts the fleet most of the time. The bounded degraded mode is the decided
+    middle, and the drain gets the SAME polarity, not a new one.
+    SHARE THE CONSTANT AND THE COUNTER SHAPE. Reuse DEFAULT_UNREADABLE_DEGRADED_LIMIT (daemon.ts:282) — or
+    hoist it somewhere both consumers import — rather than minting a second limit that can drift. A
+    per-consumer copy of a polarity constant is how this asymmetry happened in the first place.
+    THE FAIL-CLOSED POSTURE DIFFERS BY CONSUMER SHAPE, and that is fine: the daemon is a long-lived loop, so
+    it idles with a heartbeat; the drain is a finite operation, so beyond the allowance it STOPS with a NAMED
+    summary reason (a distinguishable headroom_unreadable-family stop, not the generic headroom_exhausted and
+    not a silent return). The invariant both must satisfy is identical: N-consecutive-unreadable beyond the
+    allowance never renders as proceed.
+    LEDGER BOTH SIDES OF THE ALLOWANCE, mirroring daemon.ts:654-669: within the allowance, log the
+    consecutive count and the limit alongside the existing drain.headroom.unavailable line; beyond it, log the
+    escalation with the count and limit before stopping. A READABLE snapshot RESETS the counter.
+    REVISIT test/drain.test.ts:613. Rewrite it to assert the bounded allowance (unreadable within K ticks
+    still dispatches — best-effort survives), and add the falsifying check as a new test: runDrain with
+    readUsage() -> undefined for more than K consecutive ticks and a large --max stops with the named reason
+    instead of dispatching every tick. Under current code that test dispatches every tick — that is the
+    falsifier.
+    SCOPE: the drain consumer only. Do not touch daemon.ts behavior (already fixed) or readUsageSnapshot
+    (correct — returning undefined is the honest read; the polarity belongs to the consumers).
+  acceptance:
+    - claim: "beyond K consecutive unreadable /usage reads the drain STOPS with a named, distinguishable reason — cannot-read-the-budget is never rendered as proceed-as-if-unlimited on the drain path"
+      proof: "unit test in test/drain.test.ts: runDrain with an injected readUsage returning undefined on every tick and a --max far above the degraded limit stops after the bounded allowance with the named unreadable-family stop reason, having dispatched at most the allowance. FALSIFIER, verified at source 2026-07-22: current drain.ts:548-554 takes over=null on snap===undefined and dispatches EVERY tick to --max with no back-off — the exact run this test performs"
+    - claim: "within the bounded allowance the drain still dispatches — best-effort survives, so a transiently unreadable /usage does not halt the fleet"
+      proof: "unit test: readUsage undefined for fewer than K consecutive ticks then readable again dispatches normally throughout and never stops on the unreadable reason. FALSIFIER: recon R-7's 197-of-253 blind reads — naive always-fail-closed would have halted the fleet on ~78% of checks, the outcome W1-T197's amendment explicitly rejects"
+    - claim: "a readable snapshot RESETS the consecutive-unreadable counter, and both sides of the allowance are ledgered with the count and the limit"
+      proof: "unit test: an unreadable/readable/unreadable interleaving never accumulates to the limit; the drain.headroom.unavailable line carries consecutive_unreadable and degraded_limit within the allowance, and the escalation line is ledgered before the stop — mirroring daemon.ts:654-669"
+    - claim: "the drain and the daemon share ONE degraded-limit constant, so the polarity cannot drift apart again"
+      proof: "unit test or import assertion: both consumers resolve their default from the same exported DEFAULT_UNREADABLE_DEGRADED_LIMIT. FALSIFIER: this task exists because the constant and the counter lived in daemon.ts only, and the mirror site drifted"
+    - claim: "test/drain.test.ts:613 no longer enshrines unconditional fail-open — it is rewritten to assert the bounded allowance, not deleted"
+      proof: "the suite contains no test asserting that unbounded consecutive unreadable reads continue; the bounded-allowance test replaces it and the falsifying check above is present and green"
+  risk: medium
+  origin: feedback#fb-1784732685925-86544b
+  plan_refs: ["§4", "§9"]
+  files: [src/lib/drain.ts, test/drain.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-22 at intake triage of fb-1784732685925-86544b. NOT a re-decision: the polarity and the
+    bounded-degraded shape were settled by W1-T197's recon-R-7 amendment; this task only extends the settled
+    fix to the second consumer that amendment itself named ('mirrored at drain.ts:554') but did not cover —
+    W1-T197's files are daemon-only and all its criteria say 'the daemon'. Verified at triage that daemon.ts
+    carries unreadableDegradedLimit/DEFAULT_UNREADABLE_DEGRADED_LIMIT and drain.ts:544-554 does not.
+    No depends_on edge on W1-T197: the daemon-side code this ports from is already merged into daemon.ts, and
+    a dangling edge onto a queued-in-yaml task fails the linter closed (the W1-T233 sequencing precedent —
+    express ordering in prose when the edge would dangle). If W1-T197's remaining daemon criteria are still
+    in flight, they touch daemon.ts only and cannot conflict with this drain-scoped diff.
+    risk:medium not high — the change is confined to one guard clause plus tests, the failure direction of
+    getting it wrong is a drain that stops too eagerly (fail-closed, visible, restartable), and the shared
+    reader is untouched."
 - id: W1-T121
   title: QUEUE GOVERNOR — a WIP limit on DISPATCH only; flow control throttles intake, never drainage
     (the 23-open-PR incident)
