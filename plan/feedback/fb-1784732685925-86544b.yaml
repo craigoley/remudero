@@ -24,4 +24,4 @@ raw: "LATENT BUG (fail-open polarity on a cannot-observe path — the daemon's f
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/557
