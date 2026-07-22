@@ -1,6 +1,7 @@
 {
-  "_comment": "Coverage ratchet floor (W1-T25, MASTER-PLAN §5 TIER 2 gate 1/4). Captured from remudero's own test suite (src/** only, test/** excluded) via `node --experimental-test-coverage --test-coverage-exclude=test/** --test-reporter=lcov`. Never lower these numbers to make a PR pass -- raise them (ratchet up) when coverage genuinely improves; a coverage-lowering PR must go CI-red on scripts/coverage-ratchet.mjs.",
-  "capturedAt": "2026-07-17",
-  "linesPct": 89.64,
-  "branchesPct": 87.61
+  "_comment": "Coverage ratchet floor (W1-T25, MASTER-PLAN \u00a75 TIER 2 gate 1/4). Captured from remudero's own test suite (src/** only, test/** excluded) via `node --enable-source-maps --experimental-test-coverage --test-coverage-exclude=test/** --test-reporter=lcov`. Never lower these numbers to make a PR pass -- raise them (ratchet up) when coverage genuinely improves; a coverage-lowering PR must go CI-red on scripts/coverage-ratchet.mjs.",
+  "capturedAt": "2026-07-22",
+  "linesPct": 82.75,
+  "branchesPct": 88.55,
+  "_rebased": "2026-07-22 (W1-T210 round 2): re-captured under --enable-source-maps, which maps V8 coverage to real .ts lines instead of compiled-output positions. Not comparable across the instrument change: the SAME suite on the SAME tree measured lines 83.31 / branches 88.65 in CI and 82.83 / 88.61 locally (cross-environment delta). Floor set just under both honest measurements (82.75 / 88.55) so the ratchet still catches any real coverage-lowering PR without environment-flake reds. A re-basing, not a regression."
 }
