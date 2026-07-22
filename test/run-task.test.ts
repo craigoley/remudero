@@ -2169,6 +2169,23 @@ test("W1-T192: `rmd inbox`'s drafting predicate (proposalsNeedingDraft) is UNTHR
   );
 });
 
+// ── W1-T193: the console must never render nothing for a proposal legitimately mid-draft ──
+
+test("W1-T193: buildInboxDraftHook writes state/inbox-draft-inflight.json BEFORE spawning the draft batch, and clears it in a `finally` regardless of outcome", () => {
+  const hookBody = extractFunctionBody(runTaskSrc, "function buildInboxDraftHook(");
+  assert.match(hookBody, /inbox-draft-inflight\.json/, "must write the in-flight cache the console's GET /v1/inbox reads");
+  const writeIdx = hookBody.indexOf("inbox-draft-inflight.json");
+  const spawnIdx = hookBody.indexOf("draftProposalBatch(");
+  const finallyIdx = hookBody.indexOf("} finally {");
+  assert.ok(writeIdx >= 0 && spawnIdx > writeIdx, "the in-flight file must be written BEFORE the batch spawns, not after");
+  assert.ok(finallyIdx > spawnIdx, "the in-flight file must be cleared in a finally AFTER the spawn, whether it throws or not");
+});
+
+test("W1-T193: rmd serve wires panel-graph's ratifyCliGateway into PanelGraphDeps.ratify — the console's APPROVE/REFRAME routes are reachable from the real CLI, not left with no gateway", () => {
+  assert.match(runTaskSrc, /import \{ ratifyCliGateway \} from ".\/lib\/panel-graph\.js";/);
+  assert.match(runTaskSrc, /ratify: ratifyCliGateway\(/);
+});
+
 // W1-T192 review-floor proof-text fixture (composite, additive alongside the two granular
 // tests above — same convention W1-T185's review round 3 established): the review floor's
 // `unit test:` dialect name-filters the WHOLE suite using a criterion's proof body VERBATIM,

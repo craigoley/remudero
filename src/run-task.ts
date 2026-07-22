@@ -75,6 +75,7 @@ import {
 } from "./lib/feedback.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
+import { ratifyCliGateway } from "./lib/panel-graph.js";
 import {
   buildServeServer,
   resolveServeHosts,
@@ -4647,6 +4648,11 @@ async function serveCommand(rest: string[]): Promise<number> {
       ledgerPath,
       github: ghTraceGateway(self.owner, self.repo),
       statusGithub: boardGithub,
+      // W1-T193: APPROVE/REFRAME from the console hand off to the REAL `bin/rmd approve`/
+      // `bin/rmd reframe` CLI, detached — see RatifyCliGateway's own doc (panel-graph.ts) for
+      // why. Logs land under config.root's state/ (config.root === fleetControlRoot below),
+      // the same root every other rmd-serve state file already lives under.
+      ratify: ratifyCliGateway(repoRoot, join(config.root, "state", "logs")),
     },
     ledgerPath,
     issues: ghIssueCloser(),
@@ -6409,7 +6415,26 @@ function buildInboxDraftHook(
       const due = draftsDueOnDaemon(proposals, drafts, attempts);
       if (due.length === 0) return;
 
-      const outcomes = await draftProposalBatch(due, config, owner, repo, runId, log);
+      // W1-T193: the console must render a proposal as DRAFTING (with its spawn time) for the
+      // whole window an Architect worker is actually running for it — "never lies about its
+      // own state", the same bar W1-T156 set for liveness. Written BEFORE the batch spawns and
+      // cleared in the `finally` below regardless of outcome, so a crash mid-draft is the only
+      // way this file can go stale (self-corrects: a stuck entry is overwritten the next time
+      // ANY draft batch runs, since this rung always writes its own full `due` set, never
+      // merges onto a stale one).
+      const inflightPath = join(config.root, "state", "inbox-draft-inflight.json");
+      const spawnedAt = new Date().toISOString();
+      writeFileSync(inflightPath, JSON.stringify(Object.fromEntries(due.map((p) => [p.id, spawnedAt])), null, 2), "utf8");
+
+      let outcomes: DraftRungOutcome[];
+      try {
+        outcomes = await draftProposalBatch(due, config, owner, repo, runId, log);
+      } finally {
+        // Only one draft rung runs at a time (this hook is awaited to completion by the
+        // daemon's own serial sweep tick before the next one can start), so it is always safe
+        // to clear the WHOLE file here rather than surgically remove just `due`'s ids.
+        writeFileSync(inflightPath, JSON.stringify({}, null, 2), "utf8");
+      }
 
       const nextDrafts: DraftCache = { ...drafts };
       const nextAttempts: DraftAttemptCache = { ...attempts };

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,7 +13,9 @@ import {
   buildProposalDecisionRoute,
   buildSubmitFeedbackRoute,
   buildTraceRoute,
+  ratifyCliGateway,
   type PanelGraphDeps,
+  type RatifyCliGateway,
 } from "../src/lib/panel-graph.js";
 import { bearerTokenId } from "../src/lib/panel-actions.js";
 import { captureFeedback, feedbackEntryPath, readFeedbackEntry, setFeedbackStatus, type FeedbackEntry } from "../src/lib/feedback.js";
@@ -100,8 +102,25 @@ function emptyPlanPath(root: string): string {
   return writePlan(root, "[]\n");
 }
 
+/** Fake {@link RatifyCliGateway} — records calls rather than spawning a real `bin/rmd` child
+ *  process (W1-T193). */
+function fakeRatifyGateway(): RatifyCliGateway & { approved: string[]; reframed: Array<{ proposalId: string; feedback: string }> } {
+  const approved: string[] = [];
+  const reframed: Array<{ proposalId: string; feedback: string }> = [];
+  return {
+    approved,
+    reframed,
+    approve(proposalId: string) {
+      approved.push(proposalId);
+    },
+    reframe(proposalId: string, feedback: string) {
+      reframed.push({ proposalId, feedback });
+    },
+  };
+}
+
 function depsFor(root: string, planPath: string, github: TraceGithub = fakeGithub()): PanelGraphDeps {
-  return { root, inboxRoot: root, planPath, ledgerPath: ledgerPathFor(root), github, statusGithub: fakeStatusGithub() };
+  return { root, inboxRoot: root, planPath, ledgerPath: ledgerPathFor(root), github, statusGithub: fakeStatusGithub(), ratify: fakeRatifyGateway() };
 }
 
 async function withService<T>(deps: PanelGraphDeps, fn: (baseUrl: string) => Promise<T>): Promise<T> {
@@ -428,7 +447,7 @@ test("GET /v1/trace?id=<feedback-id>: FORWARD chain -- feedback -> proposal PR -
     "https://github.com/o/r/pull/51": { number: 51, url: "https://github.com/o/r/pull/51", state: "OPEN" },
   });
   const ledgerPath = ledgerPathFor(root);
-  const deps: PanelGraphDeps = { root, inboxRoot: root, planPath, ledgerPath, github, statusGithub: fakeStatusGithub() };
+  const deps: PanelGraphDeps = { root, inboxRoot: root, planPath, ledgerPath, github, statusGithub: fakeStatusGithub(), ratify: fakeRatifyGateway() };
   // seed the run's ledger lines directly (mirrors test/board.test.ts's convention).
   const { appendLedger } = await import("../src/lib/ledger.js");
   appendLedger(ledgerPath, { run_id: "W9-T1-1000", task_id: "W9-T1", step: "pr.opened", pr_url: "https://github.com/o/r/pull/51" });
@@ -727,6 +746,237 @@ test("GET /v1/inbox: a genuinely un-ratified proposal with no drafted candidate 
     const body = (await res.json()) as { ready: Array<{ proposalId: string }> };
     assert.deepEqual(body.ready, []);
   });
+});
+
+// ── W1-T193: PROPOSAL CARDS MUST BE ACTIONABLE — draft summary, APPROVE/REFRAME wired through
+// the write-token API, a DRAFTING tier carrying its spawn timestamp ──────────────────────────
+
+/** A lint-clean, dep-clean, no-external-deps fragment -- mirrors test/inbox.test.ts's own
+ *  CLEAN_FRAGMENT shape, but with `depends_on: []` so classifying it READY needs no merged-
+ *  dependency fixture machinery, just an empty base plan. */
+const READY_FRAGMENT = `
+- id: W1-T900
+  title: "drafted task one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  origin: architect
+  acceptance:
+    - claim: "the candidate does the thing"
+      proof: "unit test: fixture X -> observable Y"
+- id: W1-T901
+  title: "drafted task two"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  origin: architect
+  acceptance:
+    - claim: "the candidate does the other thing"
+      proof: "unit test: fixture Y -> observable Z"
+`;
+
+function seedReadyProposal(root: string, proposalId: string): void {
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: proposalId, summary: "a ready proposal", evidenceAnchors: [] }] }));
+  writeFileSync(
+    join(root, "state", "inbox-drafts.json"),
+    JSON.stringify({
+      [proposalId]: {
+        proposalId,
+        fragmentYaml: READY_FRAGMENT,
+        stampLine: `- ${proposalId} (plan) — RATIFIED 2026-07-21 -> W1-T900, W1-T901.`,
+        anchorFingerprint: "",
+      },
+    }),
+  );
+}
+
+test("GET /v1/inbox: a READY item's draftedTasks carry each drafted task's REAL id and title (never just the opaque proposal id, acceptance 1)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  seedReadyProposal(root, "P900");
+
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await get(base, "/v1/inbox", READ_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ready: Array<{ proposalId: string; draftedTasks: Array<{ id: string; title: string }> }>; drafting: unknown[] };
+    assert.equal(body.ready.length, 1);
+    assert.equal(body.ready[0].proposalId, "P900");
+    assert.deepEqual(body.ready[0].draftedTasks, [
+      { id: "W1-T900", title: "drafted task one" },
+      { id: "W1-T901", title: "drafted task two" },
+    ]);
+    assert.deepEqual(body.drafting, []);
+  });
+});
+
+test("GET /v1/inbox: a proposal with an in-flight draft (state/inbox-draft-inflight.json) renders under `drafting`, carrying its spawn timestamp, and NEVER under `ready` (acceptance 5)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: "P901", summary: "mid-draft", evidenceAnchors: [] }] }));
+  const spawnedAt = "2026-07-22T10:00:00.000Z";
+  writeFileSync(join(root, "state", "inbox-draft-inflight.json"), JSON.stringify({ P901: spawnedAt }));
+
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await get(base, "/v1/inbox", READ_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ready: unknown[]; drafting: Array<{ proposalId: string; spawnedAt: string }> };
+    assert.deepEqual(body.ready, []);
+    assert.deepEqual(body.drafting, [{ proposalId: "P901", summary: "mid-draft", spawnedAt }]);
+  });
+});
+
+test("POST /v1/inbox/approve, POST /v1/inbox/reframe are write-scoped", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  seedReadyProposal(root, "P900");
+  await withService(depsFor(root, planPath), async (base) => {
+    assert.equal((await post(base, "/v1/inbox/approve", READ_TOKEN, { proposalId: "P900" })).status, 403);
+    assert.equal((await post(base, "/v1/inbox/reframe", READ_TOKEN, { proposalId: "P900", feedback: "x" })).status, 403);
+  });
+});
+
+test("POST /v1/inbox/approve: a genuinely READY proposal hands off to RatifyCliGateway.approve and ledgers panel.proposal_approve_requested with the panel's bearer as origin (acceptance 2)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  seedReadyProposal(root, "P900");
+  const ratify = fakeRatifyGateway();
+
+  await withService({ ...depsFor(root, planPath), ratify }, async (base) => {
+    const res = await post(base, "/v1/inbox/approve", WRITE_TOKEN, { proposalId: "P900" });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true, proposalId: "P900", started: true });
+    assert.deepEqual(ratify.approved, ["P900"]);
+  });
+
+  const lines = readLedgerLines(ledgerPathFor(root));
+  const line = lines.find((l) => l.step === "panel.proposal_approve_requested");
+  assert.ok(line, "must ledger panel.proposal_approve_requested");
+  assert.equal(line!.task_id, "P900");
+  assert.equal(line!.origin, writerId);
+});
+
+test("POST /v1/inbox/approve: a NOT-READY proposal is REFUSED with 409 naming why, and the gateway is NEVER called (acceptance 6 -- no action the backend would refuse)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  mkdirSync(join(root, "state"), { recursive: true });
+  // no cached draft at all -> classifies not_ready ("no drafted candidate available yet").
+  writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: "P902", summary: "no draft yet", evidenceAnchors: [] }] }));
+  const ratify = fakeRatifyGateway();
+
+  await withService({ ...depsFor(root, planPath), ratify }, async (base) => {
+    const res = await post(base, "/v1/inbox/approve", WRITE_TOKEN, { proposalId: "P902" });
+    assert.equal(res.status, 409);
+    const body = (await res.json()) as { error: string; detail: string };
+    assert.equal(body.error, "not_ready");
+    assert.match(body.detail, /NOT READY/);
+  });
+  assert.deepEqual(ratify.approved, [], "the gateway must never be called for a non-ready proposal");
+});
+
+test("POST /v1/inbox/approve: an unknown proposal id -> 404, gateway never called", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [] }));
+  const ratify = fakeRatifyGateway();
+
+  await withService({ ...depsFor(root, planPath), ratify }, async (base) => {
+    const res = await post(base, "/v1/inbox/approve", WRITE_TOKEN, { proposalId: "P-NOPE" });
+    assert.equal(res.status, 404);
+  });
+  assert.deepEqual(ratify.approved, []);
+});
+
+test("POST /v1/inbox/reframe: valid for ANY registered proposal regardless of readiness -- captures feedback VERBATIM, hands off to RatifyCliGateway.reframe, ledgers panel.proposal_reframe_requested (acceptance 3)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  mkdirSync(join(root, "state"), { recursive: true });
+  // not-ready (no draft) -- reframe must still be accepted; it is feedback, never a ratification.
+  writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: "P903", summary: "needs feedback", evidenceAnchors: [] }] }));
+  const ratify = fakeRatifyGateway();
+  const feedback = "please cite the real evidence anchor, not a vibe";
+
+  await withService({ ...depsFor(root, planPath), ratify }, async (base) => {
+    const res = await post(base, "/v1/inbox/reframe", WRITE_TOKEN, { proposalId: "P903", feedback });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true, proposalId: "P903", started: true });
+    assert.deepEqual(ratify.reframed, [{ proposalId: "P903", feedback }]);
+  });
+
+  const lines = readLedgerLines(ledgerPathFor(root));
+  const line = lines.find((l) => l.step === "panel.proposal_reframe_requested");
+  assert.ok(line, "must ledger panel.proposal_reframe_requested");
+  assert.equal(line!.task_id, "P903");
+  assert.equal(line!.feedback, feedback);
+  assert.equal(line!.origin, writerId);
+});
+
+test("POST /v1/inbox/reframe: empty/missing feedback -> 400, gateway never called", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  seedReadyProposal(root, "P900");
+  const ratify = fakeRatifyGateway();
+
+  await withService({ ...depsFor(root, planPath), ratify }, async (base) => {
+    assert.equal((await post(base, "/v1/inbox/reframe", WRITE_TOKEN, { proposalId: "P900" })).status, 400);
+    assert.equal((await post(base, "/v1/inbox/reframe", WRITE_TOKEN, { proposalId: "P900", feedback: "   " })).status, 400);
+  });
+  assert.deepEqual(ratify.reframed, []);
+});
+
+test("POST /v1/inbox/reframe: an unknown proposal id -> 404, gateway never called", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [] }));
+  const ratify = fakeRatifyGateway();
+
+  await withService({ ...depsFor(root, planPath), ratify }, async (base) => {
+    const res = await post(base, "/v1/inbox/reframe", WRITE_TOKEN, { proposalId: "P-NOPE", feedback: "x" });
+    assert.equal(res.status, 404);
+  });
+  assert.deepEqual(ratify.reframed, []);
+});
+
+test("ratifyCliGateway: a REAL detached spawn of <repoRoot>/bin/rmd with the exact CLI args, cwd=repoRoot, stdout/stderr appended to a log file under logDir (never a synchronous git/gh pipeline)", async () => {
+  const root = tmpRoot();
+  mkdirSync(join(root, "bin"), { recursive: true });
+  const markerPath = join(root, "marker.txt");
+  writeFileSync(join(root, "bin", "rmd"), `#!/usr/bin/env bash\necho "$@" > "${markerPath}"\necho "cwd=$(pwd)" >> "${markerPath}"\n`, { mode: 0o755 });
+  const logDir = join(root, "state", "logs");
+
+  const gateway = ratifyCliGateway(root, logDir);
+  gateway.reframe("P900", "please cite a real anchor");
+
+  // The spawn is detached/unref'd -- the whole point is the caller never awaits it (see
+  // RatifyCliGateway's own doc: an HTTP response must not block on rmd approve/reframe's own
+  // multi-minute tail). Poll briefly for the marker file rather than awaiting the child.
+  const deadline = Date.now() + 5000;
+  while (!existsSync(markerPath) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.ok(existsSync(markerPath), "the real bin/rmd script must actually have been spawned");
+  const marker = readFileSync(markerPath, "utf8");
+  assert.match(marker, /^reframe P900 --feedback please cite a real anchor/);
+  // macOS's tmpdir() sits under a /var symlink to /private/var -- bash's own `pwd` builtin
+  // resolves it, Node's raw path does not, so compare against the REAL (symlink-resolved)
+  // path rather than asserting an exact string match against `root` itself.
+  assert.match(marker, new RegExp(`cwd=${realpathSync(root)}`));
+
+  assert.ok(existsSync(logDir), "the log directory must be created");
+  const logFiles = readdirSync(logDir);
+  assert.equal(logFiles.length, 1);
+  assert.match(logFiles[0], /^reframe-P900-\d+\.log$/);
 });
 
 // bearerTokenId parity check (never the raw secret leaked as ledger origin).

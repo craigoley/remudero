@@ -175,7 +175,7 @@ function depsFor(root: string, plan: ReturnType<typeof planOf>, github: GitHub):
   const planPath = writePlanFile(root, planYaml(plan));
   return {
     board: { plan, ledgerPath, github },
-    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github },
+    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github, ratify: { approve() {}, reframe() {} } },
     ledgerPath,
     issues: fakeIssueCloser(),
     fleetControlRoot: root,
