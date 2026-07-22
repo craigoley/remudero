@@ -288,13 +288,20 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
   const runner = opts.runner ?? defaultSecurityRunner;
   const exists = opts.exists ?? existsSync;
 
-  let password: string;
-  if (exists(opts.passwordPath)) {
-    password = readFileSync(opts.passwordPath, "utf8");
-  } else {
-    password = randomBytes(32).toString("hex");
-    mkdirSync(dirname(opts.passwordPath), { recursive: true });
-    writeFileSync(opts.passwordPath, password, { mode: 0o600 });
+  // ATOMIC create-or-read (CodeQL alert #71, js/file-system-race): a check-then-act
+  // (existsSync → write) let two concurrent first-provisioners (daemon boot racing a
+  // spawn) each generate a DIFFERENT password — last writer wins the file, and the
+  // keychain ends up keyed to a password the file no longer holds. `flag: "wx"`
+  // (O_CREAT|O_EXCL) makes creation exclusive in ONE syscall, mode 0600 applied at
+  // create: the loser gets EEXIST and reads the winner's password instead of
+  // inventing a second one. No exists() check — there is nothing to go stale.
+  let password = randomBytes(32).toString("hex");
+  mkdirSync(dirname(opts.passwordPath), { recursive: true });
+  try {
+    writeFileSync(opts.passwordPath, password, { mode: 0o600, flag: "wx" });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+    password = readFileSync(opts.passwordPath, "utf8"); // a concurrent provisioner won — converge on its password
   }
 
   let provisioned = false;

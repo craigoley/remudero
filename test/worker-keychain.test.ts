@@ -251,6 +251,30 @@ test("claim 2: provisioning copies the credential item WITH its account and gran
   }
 });
 
+test("claim 2 (CodeQL #71, js/file-system-race): concurrent first-provisioning converges on ONE password — the second provisioner hits EEXIST and adopts the winner's password, and the keychain unlocks with it", () => {
+  const root = tmp();
+  try {
+    const paths = workerKeychainPaths(join(root, "state"));
+    // FIRST provisioner: no password file, no keychain — creates both.
+    const first = fakeRunner(unlockedLoginHandlers());
+    ensureWorkerKeychain({ ...paths, loginKeychainPath: LOGIN, runner: first.runner, exists: () => false });
+    const winnerPw = readFileSync(paths.passwordPath, "utf8");
+    const firstUnlock = first.calls.find((a) => a[0] === "unlock-keychain");
+    assert.ok(firstUnlock!.includes(winnerPw), "the keychain is keyed to the winner's password");
+
+    // SECOND provisioner racing the same first-boot window (its exists() still
+    // reports no keychain, exactly the stale-check hazard): its exclusive create
+    // gets EEXIST and it must READ the winner's password, never invent a second.
+    const second = fakeRunner(unlockedLoginHandlers());
+    ensureWorkerKeychain({ ...paths, loginKeychainPath: LOGIN, runner: second.runner, exists: () => false });
+    const secondUnlock = second.calls.find((a) => a[0] === "unlock-keychain");
+    assert.ok(secondUnlock!.includes(winnerPw), "the second provisioner unlocks with the SAME password the file holds");
+    assert.equal(readFileSync(paths.passwordPath, "utf8"), winnerPw, "the winner's password file is never overwritten");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ── Claim 3: a locked-keychain spawn no longer renders as blocked_containment —
 // ── it either succeeds (above) or fails with a credential-NAMED reason ─────
 
