@@ -25,11 +25,17 @@
  */
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
+import { reapableTmpPrefix } from "./reapable-prefix.js";
 
 const created: Array<string | Buffer> = [];
 const originalMkdtempSync = fs.mkdtempSync;
 
 fs.mkdtempSync = ((...args: Parameters<typeof fs.mkdtempSync>) => {
+  // Normalize a bare fixture prefix to a boot-sweep-reapable `rmd-test-` one, so a
+  // SIGKILL'd test process (which skips the exit handler below) still leaves a dir
+  // src/lib/tmp.ts's boot sweep can reclaim. No-op unless the prefix is a direct
+  // child of os.tmpdir() and not already `rmd-` prefixed (see ./reapable-prefix.ts).
+  if (typeof args[0] === "string") args[0] = reapableTmpPrefix(args[0]);
   const dir = (originalMkdtempSync as (...a: Parameters<typeof fs.mkdtempSync>) => string | Buffer)(...args);
   created.push(dir);
   return dir;
