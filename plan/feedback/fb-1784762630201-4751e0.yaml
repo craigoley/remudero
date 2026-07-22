@@ -1,0 +1,14 @@
+id: fb-1784762630201-4751e0
+ts: 2026-07-22T23:23:50.201Z
+raw: "FEEDBACK-ONLY PRS FAIL REVIEW CLOSED — a plan/feedback/-only PR carries no
+  task trailer and no acceptance criteria, so remudero-review fails closed
+  ('criteria from NONE', observed on #591 at 1f990d2); the W1-T205 carve-out
+  covers plan/tasks-touching PRs only. Need: extend the deterministic data-only
+  carve-out to plan/feedback/-only PRs (gated by lint of the yaml shape +
+  file-existence), or have the landing path generate explicit file-existence
+  acceptance criteria. This is a hard prerequisite for W1-T243's automated
+  bridge — its PRs must be mergeable through the gate unattended."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
