@@ -235,7 +235,14 @@ export type TriageDecision =
  * fails loud rather than silently trusting either signal alone.
  */
 export function decideTriage(input: DecideTriageInput): TriageDecision {
-  const nonPlan = input.changedFiles.filter((f) => !f.startsWith("plan/"));
+  // MASTER-PLAN.md is a plan file BY THE PROMPT'S OWN CONTRACT (the PROPOSED
+  // instruction above names "plan/tasks.yaml and/or MASTER-PLAN.md") but lives
+  // at the repo root, so a bare `plan/`-prefix filter classified it non-plan
+  // and fail-closed every proposal that touched it — first reachable 2026-07-22
+  // once #550 let the worker actually edit (feedback 728bc1: "triage worker
+  // touched non-plan file(s): MASTER-PLAN.md; leaving no PR"). The guard and
+  // the prompt must agree on what "plan file" means.
+  const nonPlan = input.changedFiles.filter((f) => !f.startsWith("plan/") && f !== "MASTER-PLAN.md");
   if (nonPlan.length > 0) {
     return { action: "error", reason: `triage worker touched non-plan file(s): ${nonPlan.join(", ")}` };
   }
@@ -298,9 +305,12 @@ export function decideTriage(input: DecideTriageInput): TriageDecision {
  * which a retro's narrower guard already covers, plus plan/tasks.yaml and plan/feedback/*).
  */
 export function nonPlanFilesInDiff(diff: string): string[] {
+  // Same "plan file" definition as decideTriage's guard above: this function's
+  // own doc already said "a triage may legitimately touch MASTER-PLAN.md" while
+  // the filter contradicted it (the 728bc1 fail-close, 2026-07-22).
   return [...diff.matchAll(/^\+\+\+ b\/(\S+)/gm)]
     .map((m) => m[1])
-    .filter((f) => !f.startsWith("plan/"));
+    .filter((f) => !f.startsWith("plan/") && f !== "MASTER-PLAN.md");
 }
 
 /** Whether a diff carries the `feedback#<id>` provenance token the PROPOSED contract requires. */
