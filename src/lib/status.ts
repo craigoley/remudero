@@ -1259,7 +1259,20 @@ export function projectPlan(
       note: "Machine-owned projection derived from GitHub. tasks.yaml is never rewritten.",
       tasks: Object.fromEntries([...byId].map(([id, p]) => [id, p])),
     };
-    fs.writeFileSync(cachePath, JSON.stringify(projection, null, 2) + "\n");
+    // ATOMIC WRITE (this task): four call sites (run-task.ts) share this one write path,
+    // and a 250ms-polled reader (readCachedProjections above, plus any external tailer of
+    // state/status.json) can land its read mid-`writeFileSync` -- a plain truncating write
+    // is not atomic, so a torn read sees a truncated prefix, JSON.parse throws, and
+    // readCachedProjections fails soft to `undefined`, silently discarding the very
+    // "last successfully observed projection" W1-T179's monotonic-under-darkness fallback
+    // depends on. Write to a sibling temp file, then rename onto `cachePath`: POSIX rename
+    // is atomic within the same directory, so a concurrent reader always observes either the
+    // old complete file or the new complete file, never a partial one. The temp name is
+    // salted with pid + a random suffix so two writers targeting the same cachePath (e.g. two
+    // run-task.ts processes racing on the same plan) never collide on the same temp file.
+    const tmpPath = `${cachePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(projection, null, 2) + "\n");
+    fs.renameSync(tmpPath, cachePath);
   }
   return byId;
 }
