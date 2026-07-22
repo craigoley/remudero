@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   claudeScratchRoot,
+  DEFAULT_SCRATCH_SWEEP_MAX_AGE_MS,
+  DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS,
   isReapableScratchTarget,
   reapWorkerScratch,
   scratchSlugForCwd,
@@ -158,6 +161,95 @@ test("boundedness backstop: the boot sweep reaps a STALE orphan but preserves a 
     assert.ok(existsSync(live), "the live session's scratch is preserved (recent mtime)");
     assert.ok(!existsSync(orphan), "the stale orphan is gone");
     assert.equal(readdirSync(root).length, before - 1, `before=${before}, after=${readdirSync(root).length}`);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// ── per-teardown accumulation sweep (the killed-fixture-orphan fix) ─────────────
+
+test("DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS: above the longest task (92.3min) yet under the 24h boot ceiling", () => {
+  const maxTaskMs = 92.3 * 60 * 1000; // longest observed task wall-time (rmd ledger, 512 runs)
+  assert.ok(
+    DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS > maxTaskMs,
+    "must exceed the longest observed task so a concurrent live fixture is never reaped mid-run",
+  );
+  assert.ok(
+    DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS < DEFAULT_SCRATCH_SWEEP_MAX_AGE_MS,
+    "must be shorter than the 24h boot ceiling to curb between-boot accumulation",
+  );
+});
+
+test("worktreeRemove wires the teardown sweep alongside the per-slug reap", () => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "worker.ts"), "utf8");
+  const start = src.indexOf("export function worktreeRemove(");
+  const body = src.slice(start, src.indexOf("\n}", start));
+  assert.ok(body.includes("reapWorkerScratch(worktreePath)"), "keeps the #559 per-slug reap");
+  assert.ok(body.includes("sweepStaleWorkerScratch({"), "adds the teardown accumulation sweep");
+  assert.ok(body.includes("DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS"), "uses the distinct teardown ceiling, not the 24h boot one");
+});
+
+test("teardown sweep: a fixture YOUNGER than the teardown ceiling survives; one OLDER is reaped", () => {
+  const base = mkdtempSync(join(tmpdir(), "rmd-teardown-age-"));
+  const opts = { env: { CLAUDE_CODE_TMPDIR: base }, uid: UID, platform: "linux" as const };
+  try {
+    mkdirSync(join(base, `claude-${UID}`), { recursive: true });
+    const root = claudeScratchRoot(opts)!;
+    const ceil = DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS;
+    const seed = (name: string, ageMs: number) => {
+      const d = join(root, name);
+      mkdirSync(d, { recursive: true });
+      const past = new Date(Date.now() - ageMs);
+      utimesSync(d, past, past);
+      return d;
+    };
+    const live = seed("rmd-w219-grep-Live", ceil - 60 * 60 * 1000); // 1h under the ceiling — a recent/live fixture
+    const orphan = seed("rmd-fixrung-Orphan", ceil + 60 * 60 * 1000); // 1h over — a killed orphan
+    const summary = sweepStaleWorkerScratch({ ...opts, maxAgeMs: ceil });
+    assert.deepEqual(summary.removed, ["rmd-fixrung-Orphan"]);
+    assert.ok(existsSync(live), "a fixture younger than the ceiling (possibly live) survives");
+    assert.ok(!existsSync(orphan), "a fixture older than the ceiling (a killed orphan) is reaped");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("teardown sweep: a SIGKILLed test's rmd-* fixture orphan is reaped within the cycle (before/after)", () => {
+  const base = mkdtempSync(join(tmpdir(), "rmd-teardown-orphan-"));
+  const opts = { env: { CLAUDE_CODE_TMPDIR: base }, uid: UID, platform: "linux" as const };
+  try {
+    mkdirSync(join(base, `claude-${UID}`), { recursive: true });
+    const root = claudeScratchRoot(opts)!;
+    // A killed `npm test`: a populated rmd-* fixture left behind, stale (> the teardown ceiling).
+    const orphan = join(root, "rmd-drain-gw-root-Killed");
+    mkdirSync(orphan, { recursive: true });
+    writeFileSync(join(orphan, "leaked.bin"), "x".repeat(4096));
+    const stale = new Date(Date.now() - (DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS + 60_000));
+    utimesSync(orphan, stale, stale);
+    const before = readdirSync(root).length;
+    sweepStaleWorkerScratch({ ...opts, maxAgeMs: DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS });
+    const after = readdirSync(root).length;
+    assert.ok(!existsSync(orphan), "the killed-test orphan is reaped at teardown, not left for the 24h boot sweep");
+    assert.equal(after, before - 1, `before=${before}, after=${after}`);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("teardown sweep: a task's OWN fresh SDK <slug> scratchpad AND a fresh fixture both survive (non-interference)", () => {
+  const base = mkdtempSync(join(tmpdir(), "rmd-teardown-noninterf-"));
+  const opts = { env: { CLAUDE_CODE_TMPDIR: base }, uid: UID, platform: "linux" as const };
+  try {
+    mkdirSync(join(base, `claude-${UID}`), { recursive: true });
+    const root = claudeScratchRoot(opts)!;
+    const slugDir = join(root, "-Users-live-worktrees-run-W1-T999-1"); // a live worker's OWN SDK scratchpad (fresh mtime)
+    mkdirSync(slugDir, { recursive: true });
+    const liveFixture = join(root, "rmd-w227-Fresh"); // a fresh fixture from a still-running test
+    mkdirSync(liveFixture, { recursive: true });
+    const summary = sweepStaleWorkerScratch({ ...opts, maxAgeMs: DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS });
+    assert.deepEqual(summary.removed, [], "nothing fresh is reaped");
+    assert.ok(existsSync(slugDir), "the live worker's own SDK <slug> scratchpad survives (fresh, < ceiling)");
+    assert.ok(existsSync(liveFixture), "a fresh (live) fixture survives (< ceiling)");
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
