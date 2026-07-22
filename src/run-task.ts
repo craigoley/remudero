@@ -708,6 +708,15 @@ async function runReview(args: {
    */
   headCheckoutDir?: string;
   /**
+   * W1-T233: the NAMED reason `headCheckoutDir` is absent because a worktree
+   * materialization attempt failed (rather than simply never having been
+   * attempted) — carried to the CAPPED verdict's posted description and the
+   * `review.posted` ledger line's `degraded_reason`/`degraded_reason_class`
+   * fields, so a degraded verdict never says only "unavailable" with no way
+   * to tell why. Absent when materialization was never attempted at all.
+   */
+  materializationFailure?: MaterializationFailure;
+  /**
    * W1-T178 (verdict stability): the run's ledger path, so a semantic-lane
    * downgrade on an UNCHANGED head sha whose deterministic floor still passes
    * can be suppressed against the most recent `review.posted` verdict for this
@@ -835,6 +844,11 @@ async function runReview(args: {
     );
   }
 
+  // W1-T233: a CAPPED verdict caused by a materialization failure carries the
+  // named reason on the posted description itself — the operator reading the
+  // commit status (not just the ledger) sees WHY, never only "unavailable".
+  const description = reviewPostedDescription(verdict, args.materializationFailure);
+
   // W1-T228: the ONLY call path that posts `remudero-review` from here on —
   // acquires the per-task serialization lock, re-reads the ledger + live PR
   // lifecycle INSIDE it, and refuses (ledgering the refusal) rather than
@@ -846,7 +860,7 @@ async function runReview(args: {
     repo,
     sha: headSha,
     state: verdict.state,
-    description: verdict.summary,
+    description,
     taskId: task.id,
     evidence: reviewEvidenceStrength(verdict.criteria),
     ledgerPath: args.ledgerPath,
@@ -891,6 +905,12 @@ async function runReview(args: {
     // was WRITTEN to be runnable (house dialect). NO blocking-behavior change:
     // `state` above is exactly what it always was.
     floor_degraded: verdict.floorDegraded,
+    // W1-T233: the named reason (+ class) `headCheckoutDir` was absent, when
+    // it is absent because materialization was ATTEMPTED and failed — queryable
+    // directly rather than only readable from prose, so a degraded verdict
+    // never again says only "unavailable". See degradedReasonLedgerFields's
+    // own doc for why this is a shared function, not hand-copied fields.
+    ...degradedReasonLedgerFields(args.materializationFailure),
     // W1-T185 (criterion 5): `capped` — computed UNCONDITIONALLY, never forcing
     // `state`/`floor_state` (CAPPED IS NOT FAIL); consequential only via the
     // SEPARATE auto-merge arming path (decideAutoMergeArm, below), which
@@ -2765,6 +2785,13 @@ export interface ReviewWorktreeDeps {
   fetch: (repoDir: string) => void;
   addWorktree: (repoDir: string, worktreePath: string, branch: string) => void;
   revParseHead: (worktreePath: string) => string;
+  /** Best-effort teardown of a worktree THIS attempt itself just created, used
+   * only when a LATER step of the SAME attempt fails (W1-T233: a failed
+   * materialization must leave the workspace exactly as it found it, never
+   * strand what step 1 already created). Optional — defaults to the same
+   * {@link worktreeRemove} every other teardown site in this file uses;
+   * tests override it to observe the cleanup call without touching git. */
+  removeWorktree?: (repoDir: string, worktreePath: string) => void;
 }
 
 const realReviewWorktreeDeps: ReviewWorktreeDeps = {
@@ -2779,13 +2806,68 @@ const realReviewWorktreeDeps: ReviewWorktreeDeps = {
     execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { stdio: "pipe" }).toString().trim(),
 };
 
+/** Named CLASS of a materialization failure (W1-T233) — carried alongside the
+ * raw message so a pattern is visible across runs (grep the class) without
+ * parsing git's prose: `worktree-collision` (another worktree already holds
+ * this ref — the defect W1-T232 removed from the common path; still reachable
+ * via a race), `fetch-failure` (network/auth, thrown by `deps.fetch`), or
+ * `other` (disk, permissions, or any other `deps.addWorktree`/`revParseHead`
+ * failure). */
+export type MaterializationErrorClass = "worktree-collision" | "fetch-failure" | "other";
+
+/** The named reason a materialization attempt failed — never a bare, thrown-
+ * away Error. Carried to every surface that reports the degradation: the
+ * console line, the CAPPED verdict description, and the `review.posted`
+ * ledger's `degraded_reason`/`degraded_reason_class` fields. */
+export interface MaterializationFailure {
+  errorClass: MaterializationErrorClass;
+  message: string;
+}
+
+/** Result of {@link materializeReviewWorktree}: either a usable path, or a
+ * clean workspace (nothing left behind) plus the named reason it failed. */
+export type MaterializeReviewWorktreeResult =
+  | { worktreePath: string; failure?: undefined }
+  | { worktreePath: undefined; failure: MaterializationFailure };
+
+/** The posted CAPPED description, carrying the named materialization-failure
+ * reason (W1-T233) — a capped verdict caused by a failed materialization
+ * names WHY on the commit status itself, not only in the ledger. A non-capped
+ * verdict, or a capped one with no materialization failure at all (rmd
+ * review's checkout was simply never attempted), is returned unchanged. */
+export function reviewPostedDescription(
+  verdict: Pick<ReviewVerdict, "summary" | "capped">,
+  materializationFailure?: MaterializationFailure,
+): string {
+  return verdict.capped && materializationFailure
+    ? `${verdict.summary} — degraded: ${materializationFailure.errorClass}: ${materializationFailure.message}`
+    : verdict.summary;
+}
+
+/** The `review.posted` ledger line's degraded-reason fields (W1-T233) —
+ * mirrors {@link reviewLedgerLegibilityFields}'s pattern: one function the
+ * real log call AND a unit test both read the SAME two fields through, so
+ * they can never hand-drift apart. Both fields are simply absent (dropped by
+ * `JSON.stringify`) when materialization was never attempted at all. */
+export function degradedReasonLedgerFields(materializationFailure?: MaterializationFailure): {
+  degraded_reason?: string;
+  degraded_reason_class?: MaterializationErrorClass;
+} {
+  return {
+    degraded_reason: materializationFailure?.message,
+    degraded_reason_class: materializationFailure?.errorClass,
+  };
+}
+
 /**
  * Materialize a throwaway worktree at a PR's head branch so `rmd review` can
  * execute whitelisted proofs exactly like the automated fix rung does.
- * Returns the worktree path on success; `undefined` on an ORDINARY
- * materialization failure (network, disk, a detached/deleted head) — the
+ * Returns `{ worktreePath }` on success; on an ORDINARY materialization
+ * failure (network, disk, a detached/deleted head) returns `{ worktreePath:
+ * undefined, failure }` naming the error CLASS + message (W1-T233) — the
  * caller then falls back to a keyword-only, CAPPED verdict (acceptance
- * criterion 5), never a thrown command reaching the operator.
+ * criterion 5), never a thrown command reaching the operator, and never a
+ * bare discarded reason.
  *
  * A materialized tip that does NOT match `headSha`, though, is not an
  * ordinary failure — it means the fetch was stale or the ref moved out from
@@ -2795,9 +2877,16 @@ const realReviewWorktreeDeps: ReviewWorktreeDeps = {
  * verdict at all (W1-T232, criterion "tip mismatch after fetch fails
  * materialization loudly").
  *
- * Teardown is the CALLER's responsibility (`reviewCommand`'s `finally`), so a
- * throw from `runReview` itself still tears the worktree down (criterion 6)
- * — this function only ever creates.
+ * W1-T233: THIS function owns teardown of whatever IT creates. A worktree
+ * `deps.addWorktree` already registered on disk is removed, best-effort,
+ * before any failure return AND before the tip-mismatch throw — a failed (or
+ * discarded) attempt leaves the workspace exactly as it found it, rather than
+ * stranding a `review-PR*` worktree (39 were found stranded on 2026-07-21,
+ * one per failed attempt, because this used to return/throw with the
+ * worktree still on disk and `withMaterializedWorktree`'s teardown keyed on a
+ * truthy path it was never given). Teardown of a SUCCESSFULLY returned path
+ * remains the CALLER's responsibility (`reviewCommand`'s `withMaterializedWorktree`),
+ * so a throw from `runReview` itself still tears that one down (criterion 6).
  */
 export function materializeReviewWorktree(
   config: Config,
@@ -2806,23 +2895,63 @@ export function materializeReviewWorktree(
   headRefName: string,
   headSha: string,
   deps: ReviewWorktreeDeps = realReviewWorktreeDeps,
-): string | undefined {
+): MaterializeReviewWorktreeResult {
   const worktreePath = join(worktreesDir(config), `review-PR${prNumber}-${Date.now()}`);
-  let tip: string;
+  const removeWorktree = deps.removeWorktree ?? worktreeRemove;
+
   try {
     deps.fetch(repoDir);
-    deps.addWorktree(repoDir, worktreePath, headRefName);
-    tip = deps.revParseHead(worktreePath);
-  } catch {
-    return undefined;
+  } catch (e) {
+    // Nothing was created yet — no cleanup needed, only a named reason.
+    return {
+      worktreePath: undefined,
+      failure: { errorClass: "fetch-failure", message: String((e as Error)?.message ?? e) },
+    };
   }
+
+  let created = false;
+  let tip: string;
+  try {
+    deps.addWorktree(repoDir, worktreePath, headRefName);
+    created = true; // the worktree is now on disk — any exit from here must clean it up.
+    tip = deps.revParseHead(worktreePath);
+  } catch (e) {
+    if (created) cleanupMaterializedWorktree(removeWorktree, repoDir, worktreePath);
+    const message = String((e as Error)?.message ?? e);
+    const errorClass: MaterializationErrorClass = /already used by worktree/.test(message)
+      ? "worktree-collision"
+      : "other";
+    return { worktreePath: undefined, failure: { errorClass, message } };
+  }
+
   if (tip !== headSha) {
+    cleanupMaterializedWorktree(removeWorktree, repoDir, worktreePath);
     throw new Error(
       `materialized worktree at ${worktreePath} is at ${tip}, not the PR head ${headSha} — ` +
         "a stale fetch or a moved ref; refusing to review a possibly-wrong tree rather than posting a false verdict",
     );
   }
-  return worktreePath;
+  return { worktreePath };
+}
+
+/** Best-effort removal of a worktree a materialization attempt itself just
+ * created, on that SAME attempt's failure — swallows a removal error rather
+ * than masking the materialization failure/mismatch that triggered it (the
+ * console still hears about a removal failure, mirroring {@link
+ * withMaterializedWorktree}'s own teardown-failure handling). */
+function cleanupMaterializedWorktree(
+  remove: (repoDir: string, worktreePath: string) => void,
+  repoDir: string,
+  worktreePath: string,
+): void {
+  try {
+    remove(repoDir, worktreePath);
+  } catch (e) {
+    console.error(
+      `(worktree teardown failed for ${worktreePath} after a materialization failure: ` +
+        `${String((e as Error)?.message ?? e)})`,
+    );
+  }
 }
 
 /**
@@ -2913,12 +3042,18 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
   // W1-T185 (Gap 2): materialize a throwaway worktree at the PR head so
   // whitelisted proofs actually EXECUTE on this manual path, matching what
   // the automated fix rung observes for the same PR/proofs (acceptance
-  // criterion 4). On ANY failure this returns undefined and the review falls
-  // back to keyword-only — EXPLICITLY marked (criterion 5), never silently.
-  const worktreePath = materializeReviewWorktree(config, repoRoot, view.number, view.headRefName, view.headRefOid);
-  if (!worktreePath) {
-    console.log("(worktree materialization unavailable — this verdict will post keyword-only)");
+  // criterion 4). On ANY failure this leaves worktreePath undefined and the
+  // review falls back to keyword-only — EXPLICITLY marked (criterion 5),
+  // never silently, and (W1-T233) the console line below now NAMES why,
+  // instead of a bare "unavailable" with the real reason thrown away.
+  const materialized = materializeReviewWorktree(config, repoRoot, view.number, view.headRefName, view.headRefOid);
+  if (materialized.worktreePath === undefined) {
+    console.log(
+      `(worktree materialization failed [${materialized.failure.errorClass}]: ` +
+        `${materialized.failure.message} — this verdict will post keyword-only)`,
+    );
   }
+  const worktreePath = materialized.worktreePath;
 
   // W1-T185 (Gap 2, criterion 6): withMaterializedWorktree guarantees teardown
   // on EVERY exit path, including a throw from runReview itself — never just
@@ -2946,6 +3081,10 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
       // makes `judgeReview` mark the verdict `keywordOnly`+`capped`, exactly
       // the documented fallback (criterion 5) — never silent.
       headCheckoutDir: worktreePath,
+      // W1-T233: the named reason materialization failed (absent ⇒ it was
+      // never attempted at all) — carried onto the posted CAPPED description
+      // and the review.posted ledger line's degraded_reason fields.
+      materializationFailure: materialized.failure,
       ledgerPath,
       runId,
     }),
