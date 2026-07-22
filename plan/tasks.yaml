@@ -7106,12 +7106,22 @@
       proof: "a seeded double-failure produces a diagnose run in the ledger, never a third blind patch"
     - claim: "runDiagnoseThenRetry has a LIVE call site in the run path"
       proof: "grep proof: run-task.ts (or daemon.ts) imports AND calls runDiagnoseThenRetry on the strike path; a test drives a second strike through it to a diagnose dispatch"
-  risk: medium
-  origin: architect
+  risk: high
+  origin: feedback#fb-1784732687221-3be743
   plan_refs: ["§4"]
   files: [src/run-task.ts, src/lib/classify.ts]
   status: queued
   attempts: 0
+  note: "risk:high — graded UP from medium at intake triage of feedback#fb-1784732687221-3be743 (originally
+    filed origin: architect), after rmd lint-plan flagged a Rule-19 [sizing] span (classify/daemon/run-task)
+    that would go verdict=blocked_illformed at the fail-closed pre-dispatch guard (task-linter.ts /
+    run-task.ts) the instant drain selects it — rmd trace shows 'no runs yet', so this is a LATENT wall, not
+    a moot re-fire. Recorded as a regrade, not a workaround, because the honest reading supports it: this
+    wires a live dispatch into the runner's strike path, and the failure direction is either a third blind
+    patch (the exact class the two-strikes rule exists to kill) or a broken strike path that blocks every
+    retry. ONE concern (the call site is the deliverable — rule 14), so decomposition would be artificial.
+    NOT covered by W1-T198, which fixes the self-reference false positive + merged-task over-gating, not
+    undispatched sizing flags."
 
 # Item 8 — commissioning-deltas drill: closes the two W1-T12d deltas + hosts the LIVE goldens the
 # headless redesigns (items 6/7) moved out VERBATIM (rule 16 — nothing dropped, only redistributed).
@@ -7881,13 +7891,22 @@
       proof: "grep tsconfig.json for both flags true; this PR's ci (typecheck) passes"
     - claim: "the six flagged unused-local sites and the spike.ts:262 dead assignment are gone"
       proof: "grep: the flagged identifiers no longer present at worker.ts/drain-lock.ts/inflight-lock.ts/the two test files; spike.ts:262's assigned-never-read local removed"
-  risk: medium
-  origin: architect
+  risk: high
+  origin: feedback#fb-1784732687221-3be743
   plan_refs: ["§5"]
   files: [tsconfig.json, src/spike.ts, src/lib/worker.ts, src/lib/drain-lock.ts, src/lib/inflight-lock.ts, test/learnings-injection-w1t6.test.ts, test/drain-lock.test.ts]
   status: queued
   attempts: 0
-  note: "Alert backlog triage 2026-07-16: code-scanning alerts #17-#23. ONE concern (one defect class) despite the file spread — the files: list is the alert inventory, not a multi-subsystem scope."
+  note: "Alert backlog triage 2026-07-16: code-scanning alerts #17-#23. ONE concern (one defect class) despite the file spread — the files: list is the alert inventory, not a multi-subsystem scope.
+    risk:high — graded UP from medium at intake triage of feedback#fb-1784732687221-3be743 (originally filed
+    origin: architect): rmd lint-plan flags a Rule-19 [sizing] span here (rmd trace: 'no runs yet'), which
+    becomes verdict=blocked_illformed at the fail-closed pre-dispatch guard the instant drain selects this
+    task — a real latent wall, not the moot merged-task class. Regraded rather than decomposed because the
+    note above is the honest reading: splitting a single compiler-flag flip per-file would be artificial.
+    The regrade is also honest on its own terms (effort and risk are different axes): the compiler will flag
+    a SUPERSET of the known sites, the diff touches the frozen WS-0 spike.ts record, and a wrongly-deleted
+    'unused' local is a silent behavior change. NOT covered by W1-T198 (self-reference/merged-task
+    over-gating only). SEPARATE FINDING, not resolved here: this task also carries grep-prose proofs."
 
 # Ratifies P16 (captured #101): deriveStatus rung (c) credits a merged PR off a punctuation-loose body
 # search with no line-anchor and no ownership check — the READ side that gates DISPATCH (third consumer of
@@ -8038,15 +8057,24 @@
       proof: "unit test: assemble→serialize→re-assemble over the same ledger -> byte-equal; a single mutated ground-truth ledger field yields a different receipt (the gate would catch drift)"
     - claim: "the v2 rungs are deferred, not entangled — no signing dependency ships and the predicate shape is a standalone artifact"
       proof: "grep: zero sigstore/cosign import in src/lib/receipt.ts; the predicate type/JSON shape is exported standalone (WS-12 can publish it) with no signing coupling"
-  risk: medium
-  origin: architect
+  risk: high
+  origin: feedback#fb-1784732687221-3be743
   plan_refs: ["§8A", "§2"]
   files: [src/lib/receipt.ts, src/run-task.ts]
   status: queued
   attempts: 0
   note: "Ratifies P17 (captured #108). First rung = the deterministic generator + byte-equal golden;
     Sigstore signing + the WS-12 schema publish are DEFERRED v2 rungs. Live 'a receipt is posted on every
-    merged agent PR' is operator-observed (Rule 18), not an auto-verify criterion here."
+    merged agent PR' is operator-observed (Rule 18), not an auto-verify criterion here.
+    risk:high — graded UP from medium at intake triage of feedback#fb-1784732687221-3be743 (originally filed
+    origin: architect): rmd lint-plan flags a Rule-19 [sizing] span (receipt.ts + run-task.ts; rmd trace:
+    'no runs yet'), a latent verdict=blocked_illformed wall at the fail-closed pre-dispatch guard. Regraded
+    rather than decomposed: the design already confines the run-task.ts edit to ONE spawn-time emission line
+    and null-with-reason keeps the halves decoupled, so a split task would be a one-line orphan. The regrade
+    is honest on its own terms: the receipt is a THIRD-PARTY-facing provenance artifact, where a wrong
+    determinism/ground-truth claim is worse than no receipt at all. NOT covered by W1-T198
+    (self-reference/merged-task over-gating only). SEPARATE FINDING, not resolved here: this task also
+    carries grep-prose proofs."
 
 # W1-T65 follow-up pair (relayed from the operator's second Architect thread 2026-07-16): the proof-executing
 # floor's guarantee is CONDITIONAL AND SILENT — the extractor parses two strict shapes and returns null for
@@ -8175,14 +8203,23 @@
       proof: "grep the retro prompt template for the grep-highest/next-unused/REPORT-the-mapping instruction text"
     - claim: "ratified/retired stamps do not false-positive"
       proof: "unit test: a fixture with 'P15 ... RATIFIED -> W1-T65' and a retired P10 alongside active ids -> no duplicate reported"
-  risk: medium
-  origin: architect
+  risk: high
+  origin: feedback#fb-1784732687221-3be743
   plan_refs: ["§Self-improvement", "§12"]
   files: [src/run-task.ts, test/plan-proposals.test.ts]
   status: queued
   attempts: 0
   note: "Filed from the #128 worker's root-cause flag. The uniqueness test is the gate; the template line
-    is courtesy — a colliding retro PR now goes RED at its own ci instead of merging ambiguity."
+    is courtesy — a colliding retro PR now goes RED at its own ci instead of merging ambiguity.
+    risk:high — graded UP from medium at intake triage of feedback#fb-1784732687221-3be743 (originally filed
+    origin: architect): rmd lint-plan flags a Rule-19 [sizing] span (run-task.ts + the new ci-gating test;
+    rmd trace: 'no runs yet'), a latent verdict=blocked_illformed wall at the fail-closed pre-dispatch
+    guard. Regraded rather than decomposed: the design names TWO halves of ONE concern (proposal-id
+    integrity), and shipping the courtesy prompt line without its gate (or vice versa) would recreate the
+    weak-half/strong-half split rule 2 warns against. The regrade is honest on its own terms: it edits the
+    retro prompt template inside run-task.ts (the runner's highest-traffic file) and adds a test that runs
+    in the REQUIRED ci context on EVERY PR — a wrong uniqueness parse goes red fleet-wide. NOT covered by
+    W1-T198 (self-reference/merged-task over-gating only)."
 
 # Ratifies P9's live remainder: operator corrections must be SUPREME in deriveStatus. W1-T20c was hand-fixed
 # (#134) but deriveStatus still lists it runnable — rung (a) returns the CLOSED superseded run's pr.opened

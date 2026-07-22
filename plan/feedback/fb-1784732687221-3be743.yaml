@@ -19,5 +19,5 @@ raw: "PLAN HYGIENE (lint-plan 8-failing baseline — assessed). OBSERVED. 4 of t
   finding)."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
