@@ -30,4 +30,4 @@ raw: "LATENT BUG (TOCTOU in the lock-RECLAIM path — the #143/#145/W1-T7
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/554
