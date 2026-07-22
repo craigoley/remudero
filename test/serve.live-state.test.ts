@@ -343,6 +343,81 @@ test("poll failures: a transient 'reconnecting' indicator, escalating to a visib
   });
 });
 
+// ── W1-T189 FOLLOW-UP (rule 21): T156's own criterion 4 was certified pre-#414 by keyword
+// coverage and never actually executed against a real browser client -- these are the bars an
+// operator screenshot proved it missed. Deliberately seeded (route.abort()/a hung route), never a
+// real slow server, so the fix is verifiable with W1-T187's latency defect still present. ────────
+
+test("poll failures alongside a healthy SSE connection: staleness is gated on genuine data freshness, not a blind failure tally -- freshness and the stale escalation must never contradict", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })]);
+  await withShell(deps, async (base) => {
+    const context = await browser.newContext();
+    // /v1/status (the REST poll) is broken for the WHOLE test -- but /v1/status/stream (SSE) is
+    // left alone, so a genuine ledger change still reaches the client via the OTHER transport.
+    await context.route("**/v1/status", (route) => route.abort());
+    const page = await context.newPage();
+    try {
+      await page.goto(`${base}/?token=${READ_TOKEN}`);
+      await page.waitForFunction(() => document.getElementById("top-status")?.getAttribute("data-poll-state") === "reconnecting", null, {
+        timeout: 5000,
+      });
+
+      // a real SSE delta lands almost immediately -- the board's DATA is genuinely fresh even
+      // though the /v1/status poll keeps failing outright.
+      appendFileSync(deps.board.ledgerPath, runStart("W1-T1"));
+      await page.waitForFunction(() => (document.querySelector("#now-list .detail")?.textContent ?? "").includes("phase: recon"), null, {
+        timeout: 5000,
+      });
+
+      // Past the ORIGINAL 3-consecutive-failure threshold (~9s at the 3s poll cadence) -- pre-fix,
+      // a blind failure tally alone flips pollState to "stale" here regardless of the SSE delta
+      // that just landed. With genuinely fresh data on screen, it must NOT -- the freshness stamp
+      // and the stale escalation must read the SAME clock (the operator-observed contradiction:
+      // "live · updated 8s ago" directly above "STALE — showing last known data").
+      await new Promise((resolve) => setTimeout(resolve, 8500));
+      const midway = await page.evaluate(() => ({
+        pollState: document.getElementById("top-status")?.getAttribute("data-poll-state"),
+        staleHidden: (document.getElementById("stale-badge") as HTMLElement)?.hidden,
+      }));
+      assert.notEqual(midway.pollState, "stale", "an SSE delta just landed -- a raw consecutive-failure count must not override that with a contradicting STALE claim");
+      assert.equal(midway.staleHidden, true);
+
+      // ... and once THAT data genuinely goes stale too (no further SSE, the poll still failing),
+      // the escalation must still eventually fire -- this proves a freshness GATE, not a disabled
+      // (always-false) staleness check.
+      await page.waitForFunction(() => document.getElementById("top-status")?.getAttribute("data-poll-state") === "stale", null, { timeout: 8000 });
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+test("a /v1/status fetch that hangs (never resolves -- W1-T187's real 35-58s stall, seeded here) lands in the SAME reconnecting lifecycle as an HTTP error, and never leaks a raw exception string", async () => {
+  const root = tmpRoot();
+  await withShell(fixtureDeps(root, [task({ id: "W1-T1" })]), async (base) => {
+    const context = await browser.newContext();
+    // deliberately never call route.continue()/fulfill()/abort() -- the request is reachable but
+    // never settles, distinct from a network error (abort) or an HTTP error response.
+    await context.route("**/v1/status", () => {});
+    const page = await context.newPage();
+    try {
+      await page.goto(`${base}/?token=${READ_TOKEN}`);
+      // must land in the SAME "reconnecting" lifecycle within a bounded time -- never hang
+      // indefinitely waiting on a request that (per W1-T187) would not return for 35-58 REAL
+      // seconds, and never leave the header on its initial "loading…" text with no verdict at all.
+      await page.waitForFunction(() => document.getElementById("top-status")?.getAttribute("data-poll-state") === "reconnecting", null, {
+        timeout: 12000,
+      });
+      const text = await page.textContent("#top-status");
+      assert.doesNotMatch(text ?? "", /TypeError|Failed to fetch|\[object/i, "no raw exception vocabulary reaches the operator");
+      assert.match(text ?? "", /reconnecting/);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
 // ── (6) GitHub-gateway outage: a VISIBLE "GitHub unreachable since <t>" stamp, keyed off the
 // existing per-task indeterminate/throttled signal (W1-T119) -- see this file's header for why
 // this does NOT depend on W1-T155's not-yet-implemented monotonic/last-good mechanism ──────────
