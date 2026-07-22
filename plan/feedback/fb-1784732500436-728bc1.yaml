@@ -27,4 +27,4 @@ raw: "LATENT BUG (write-atomicity family, sibling to W1-T206/207/208 which stop
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/588
