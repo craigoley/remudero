@@ -113,10 +113,12 @@ test("the retro's gh-pr-create fallback is guarded by commitsAhead — an empty 
   const body = runTaskSrc.slice(start, runTaskSrc.indexOf("\nasync function", start + 1));
 
   const guardIdx = body.search(/if\s*\(\s*commitsAhead\(worktreePath,\s*"origin\/main"\)\s*===\s*0\s*\)/);
-  const prCreateIdx = body.indexOf('"pr", "create"');
+  // The PR-create call now routes through the ghPrCreateFillCommand builder (which pins
+  // gh's cwd to the run worktree); the guard-ordering intent is unchanged.
+  const prCreateIdx = body.indexOf("ghPrCreateFillCommand(");
   assert.ok(guardIdx >= 0, "retroCommand must guard on commitsAhead(worktreePath, \"origin/main\") === 0");
-  assert.ok(prCreateIdx >= 0, "retroCommand must still call gh pr create on the non-empty-branch path");
-  assert.ok(guardIdx < prCreateIdx, "the commitsAhead guard must run BEFORE the gh pr create fallback, never after");
+  assert.ok(prCreateIdx >= 0, "retroCommand must still open the PR (via ghPrCreateFillCommand) on the non-empty-branch path");
+  assert.ok(guardIdx < prCreateIdx, "the commitsAhead guard must run BEFORE the gh pr create call, never after");
   // The no-op path must never fall through to the PR call — it returns straight away.
   assert.match(body, /commitsAhead\(worktreePath, "origin\/main"\) === 0\) \{\s*\n\s*log\("retro\.no_op"/);
 });
