@@ -20,4 +20,4 @@ raw: "TECH DEBT (generated-CI supply-chain + false-green gate shipped by 'rmd
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/560
