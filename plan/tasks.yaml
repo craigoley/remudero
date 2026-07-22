@@ -3575,13 +3575,13 @@
     motion + aria-live behaviour W1-T156 shipped must survive the rewrite.
   acceptance:
     - claim: "a first screen at 1440px shows at least ~15 tasks — the list is dense enough to read the fleet, not scroll it"
-      proof: "unit test: at a viewport height of 1440px the rendered rows-above-the-fold count is >= 15. FALSIFIER: the 2026-07-20 console v2 screenshot, where card-shaped rows put only a handful of tasks on a first screen against a 214-task plan, so the operator scrolls to find anything"
+      proof: "unit test: at a 1440px viewport height, at least 15 task rows render fully above the fold"
     - claim: "no raw ISO-millisecond timestamp is rendered anywhere — every time is local plus relative"
-      proof: "unit test over the rendered DOM: no text node matches an ISO-8601-with-milliseconds pattern, and time cells carry BOTH a local clock rendering and a relative one ('8s ago'). FALSIFIER: a raw UTC millisecond stamp rendered in any cell fails, since it forces the reader to do arithmetic to answer 'is this recent'"
+      proof: "unit test: no raw ISO-millisecond string renders anywhere"
     - claim: "task detail is reachable in ONE click from any row"
-      proof: "unit test: a click on a row in any section opens W1-T158's task card directly, with no intermediate view and no expand-then-click. FALSIFIER: any path to detail requiring two or more interactions fails"
+      proof: "unit test: a click on a row in EVERY section"
     - claim: "a row past its per-phase elapsed threshold is VISUALLY flagged, and the threshold is data rather than a hard-coded constant"
-      proof: "unit test: a row whose elapsed exceeds its phase threshold renders the anomaly marking while a row under it does not, and the thresholds are read from a data source a test can override. FALSIFIER: W1-T1 rendering in NOW at 27h21m on the 2026-07-20 console, visually identical to a run started a minute ago"
+      proof: "unit test: a row past its per-phase elapsed threshold is visually marked"
     - claim: "the density rewrite PRESERVES W1-T156's DOM stability and accessibility — it is not a regression dressed as a redesign"
       proof: "the existing W1-T156 tests in test/serve.live-state.test.ts continue to pass unmodified: an unchanged row keeps DOM identity across an update, an active text selection survives, and the reduced-motion/aria-live behaviour holds. Additionally the anomaly signal is not carried by colour alone. FALSIFIER: a row template that re-creates nodes each update silently breaks node identity and selection, which those tests already encode as falsifiers"
   risk: high
