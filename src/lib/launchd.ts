@@ -299,3 +299,85 @@ ${stringArray(programArguments)}
 </plist>
 `;
 }
+
+// ── The deploy SUPERVISOR unit (out-of-process daemon self-update, option C) ────
+//
+// A periodic one-shot (NOT KeepAlive): every StartInterval seconds launchd runs
+// `rmd deploy-run`, which is ONE {@link runDeployCycle} — a no-op unless a deploy is
+// triggered AND the daemon is idle. The supervisor kickstarts the SEPARATE daemon
+// job; the daemon is never modified and never self-restarts (the KeepAlive
+// self-restart trap, daemon.ts:90-91, is sidestepped entirely by an external
+// kickstart). Same ANTHROPIC-clean closed-env allowlist as the daemon/digest units.
+
+/** Default launchd label for the deploy supervisor. */
+export const SUPERVISOR_LABEL = "com.remudero.supervisor";
+/** Default supervisor tick pace: one deploy cycle every 2 minutes. */
+export const DEFAULT_SUPERVISOR_INTERVAL_S = 120;
+
+export interface SupervisorLaunchdPlistOpts {
+  /** Absolute path to `bin/rmd`. Never resolved from PATH. */
+  rmdBin: string;
+  /** Workspace root (config.root) — absolute. WorkingDirectory + logs derive from it. */
+  root: string;
+  /** launchd label. Default {@link SUPERVISOR_LABEL}. */
+  label?: string;
+  /** Explicit PATH. Default {@link DEFAULT_LAUNCHD_PATH}. */
+  path?: string;
+  /** HOME. Default `os.homedir()`. */
+  home?: string;
+  /** Seconds between ticks (each tick = one `rmd deploy-run`). Default 120; min 30. */
+  intervalSeconds?: number;
+}
+
+export function generateSupervisorLaunchdPlist(opts: SupervisorLaunchdPlistOpts): string {
+  assertAbsolute(opts.rmdBin, "rmdBin");
+  assertAbsolute(opts.root, "root");
+  if (opts.home !== undefined) assertAbsolute(opts.home, "home");
+
+  const label = opts.label ?? SUPERVISOR_LABEL;
+  const path = opts.path ?? DEFAULT_LAUNCHD_PATH;
+  const home = opts.home ?? homedir();
+  const interval = opts.intervalSeconds ?? DEFAULT_SUPERVISOR_INTERVAL_S;
+  if (!Number.isInteger(interval) || interval < 30) {
+    throw new LaunchdPlistError(
+      `generateSupervisorLaunchdPlist: intervalSeconds must be an integer >= 30, got ${JSON.stringify(opts.intervalSeconds)}`,
+    );
+  }
+  const logDir = join(opts.root, "state", "logs");
+  const stdoutPath = join(logDir, "supervisor.out.log");
+  const stderrPath = join(logDir, "supervisor.err.log");
+
+  const environment: Record<string, string> = { PATH: path, HOME: home };
+  assertNoAnthropicKeys(environment, "generateSupervisorLaunchdPlist");
+
+  const programArguments = [opts.rmdBin, "deploy-run"];
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${escapeXml(label)}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${escapeXml(path)}</string>
+    <key>HOME</key>
+    <string>${escapeXml(home)}</string>
+  </dict>
+  <key>ProgramArguments</key>
+  <array>
+${stringArray(programArguments)}
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${escapeXml(opts.root)}</string>
+  <key>StartInterval</key>
+  <integer>${interval}</integer>
+  <key>StandardOutPath</key>
+  <string>${escapeXml(stdoutPath)}</string>
+  <key>StandardErrorPath</key>
+  <string>${escapeXml(stderrPath)}</string>
+</dict>
+</plist>
+`;
+}
