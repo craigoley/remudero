@@ -2118,6 +2118,16 @@ export function checkRefactorHonesty(diff: string, report?: string): RubricItemR
  * Modules that constitute "user-visible behavior" in the §12A sense — CLI
  * surface, config, gate, or verdicts. Diff-scoped path heuristic, same spirit
  * as {@link concernStem}: coarse, not a semantic understanding of the change.
+ *
+ * W1-T212 (recon R-15): a diff that edits WHAT a quality gate measures — a CI
+ * workflow, a ratchet script, or a ratchet's recorded baseline/threshold — is
+ * exactly as "user-visible" as editing the gate code itself: it can weaken the
+ * measurement the gate is trusted to enforce, silently, with no reviewer
+ * prompted to notice. Before this, `.github/workflows/`, `scripts/*-ratchet.mjs`,
+ * every `scripts/*-baseline.json` floor, and `stryker.conf.json`'s mutation
+ * scope were ALL outside this regex, so a PR lowering a coverage/mutation floor
+ * or deleting a required check from `ci-gate.yml` cleared docs-awareness
+ * silently (`no CLI/config/gate/verdict surface changed`).
  */
 const USER_VISIBLE_SURFACE_RE = new RegExp(
   [
@@ -2127,6 +2137,11 @@ const USER_VISIBLE_SURFACE_RE = new RegExp(
     "^src/lib/(config|settings|mounts)\\.ts$", // config surface
     "^src/lib/(review|task-linter)\\.ts$", // gate surface
     "^src/lib/(run-result|status|ledger|flight-judge)\\.ts$", // verdict surface
+    "^\\.github/workflows/", // CI workflow surface — gates are wired/required here
+    "^scripts/[^/]*-ratchet\\.mjs$", // ratchet gate scripts
+    "^scripts/[^/]*-baseline\\.json$", // ratchet floor/cap configs
+    "^scripts/mutation-relevant-paths\\.json$", // mutation-ratchet's diff-scoping config
+    "^stryker\\.conf\\.json$", // mutation ratchet's mutate scope/config
   ].join("|"),
 );
 

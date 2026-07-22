@@ -78,6 +78,16 @@ mechanism that ties the two together: it flags exactly that class of diff,
 described further in [task-lifecycle.md](task-lifecycle.md#the-review-gate)
 and `MASTER-PLAN.md` §12A (the fuller Tier A/Tier B split this seeds).
 
+The same principle extends to whatever DEFINES a quality gate's measurement,
+not just the gate's own code (W1-T212, recon R-15): a diff editing
+`.github/workflows/`, a `scripts/*-ratchet.mjs` script, a ratchet's recorded
+`scripts/*-baseline.json` floor, `scripts/mutation-relevant-paths.json`, or
+`stryker.conf.json` is exactly as "user-visible" as editing `review.ts`
+itself — it can weaken the measurement a gate is trusted to enforce (lower a
+coverage floor, drop a required check from `ci-gate.yml`'s REQUIRED list, …)
+with no reviewer prompted to notice. `USER_VISIBLE_SURFACE_RE` treats all of
+those paths as surface for exactly that reason.
+
 ## Fleet control
 
 `src/lib/fleet-control.ts` exposes `rmd stop|pause|resume` as two flag files
