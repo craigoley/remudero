@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  COMMIT_BODY_MAX_LINE,
+  fitAcceptanceBullet,
+  wrapBodyLine,
   buildGrillEscalation,
   decideTriage,
   diffCitesFeedback,
@@ -15,6 +18,7 @@ import {
   type TriageDecision,
 } from "../src/lib/triage.js";
 import type { FeedbackEntry } from "../src/lib/feedback.js";
+import { parseAcceptanceBlock } from "../src/lib/review.js";
 import { TRIAGE_WORKER_TOOLS } from "../src/run-task.js";
 import { escalate, renderIssueBody, type IssueGateway } from "../src/lib/escalate.js";
 
@@ -647,4 +651,68 @@ test("the triage worker's tool grant includes Edit, so a triage-propose path can
   for (const t of ["Read", "Write", "Grep", "Glob"]) {
     assert.ok(TRIAGE_WORKER_TOOLS.includes(t), `${t} stays granted — Edit is additive, not a swap`);
   }
+});
+
+// ── commit-BODY line budget (the 2026-07-22 triage-lane commitlint outage) ──
+
+const LONG_DETAIL =
+  "rewrite the ten false-verdict criteria across W1-T7B and W1-T68 so the proof floor executes them " +
+  "instead of walling on keyword coverage, citing the 2026-07-19 baseline and the operator screenshots";
+const LONG_ID = "fb-1784732686356-8d739e";
+
+test("triageCommitMessage: EVERY body line fits commitlint's 100-char budget, for all three decision shapes", () => {
+  const messages = [
+    triageCommitMessage({
+      decision: { action: "no_task", status: "rejected", detail: LONG_DETAIL },
+      feedbackId: LONG_ID,
+      taskId: "TRIAGE-x",
+    }),
+    triageCommitMessage({
+      decision: {
+        action: "grill",
+        status: "grilling",
+        detail: LONG_DETAIL,
+        options: [{ label: "a", detail: "aa" }, { label: "b", detail: "bb" }],
+        recommendation: "a",
+      },
+      feedbackId: LONG_ID,
+      taskId: "TRIAGE-x",
+      grillIssueUrl: "https://github.com/craigoley/remudero/issues/9999",
+    }),
+    triageCommitMessage({
+      decision: { action: "propose", status: "proposed", detail: LONG_DETAIL, files: ["plan/tasks.yaml"] },
+      feedbackId: LONG_ID,
+      taskId: "TRIAGE-x",
+    }),
+  ];
+  for (const msg of messages) {
+    const [, ...body] = msg.split("\n");
+    for (const line of body) {
+      assert.ok(
+        line.length <= COMMIT_BODY_MAX_LINE,
+        `body line blows the commitlint budget (${line.length} > ${COMMIT_BODY_MAX_LINE}): ${line}`,
+      );
+    }
+  }
+});
+
+test("triageCommitMessage: the Acceptance block still parses as exactly ONE single-line criterion after budgeting", () => {
+  const msg = triageCommitMessage({
+    decision: { action: "propose", status: "proposed", detail: LONG_DETAIL, files: ["plan/tasks.yaml"] },
+    feedbackId: LONG_ID,
+    taskId: "TRIAGE-x",
+  });
+  const criteria = parseAcceptanceBlock(msg);
+  assert.equal(criteria.length, 1, "a wrapped/orphaned bullet would break the PR-body gate parse");
+  assert.ok(criteria[0].claim.includes(`feedback#${LONG_ID}`));
+  assert.ok(criteria[0].proof.length > 0, "claim|proof split survives");
+});
+
+test("wrapBodyLine wraps prose to the budget; fitAcceptanceBullet caps a bullet to ONE line", () => {
+  const wrapped = wrapBodyLine("word ".repeat(40).trim());
+  assert.ok(wrapped.length >= 2);
+  for (const l of wrapped) assert.ok(l.length <= COMMIT_BODY_MAX_LINE);
+  const bullet = fitAcceptanceBullet("- " + "x".repeat(300) + " | proof");
+  assert.equal(bullet.length, COMMIT_BODY_MAX_LINE);
+  assert.ok(!bullet.includes("\n"));
 });

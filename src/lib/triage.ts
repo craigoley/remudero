@@ -310,6 +310,42 @@ export function diffCitesFeedback(diff: string, feedbackId: string): boolean {
 
 // ── Commit message / PR body authorship (harness-owned, deterministic) ──────────────────────
 
+
+// ── Commit-BODY line budget (the 2026-07-22 triage-lane commitlint outage) ──────────────────
+// `shapeCommitMessage` protects the HEADER (W1-T136), but commitlint also enforces
+// body-max-line-length (100) over every body line, and the templates below interpolate LLM
+// free text (`decision.detail`) plus 23-char feedback ids — six triage PRs in one batch went
+// ci-gate-red on exactly this. Two shapes, two tools: free-standing PROSE lines word-wrap
+// across lines; an `Acceptance:` BULLET must stay ONE line (parseAcceptanceBlock ends the
+// block at the first non-bullet line, so a wrapped bullet would orphan every later criterion)
+// and is therefore truncated with an ellipsis instead. Truncation only trims keyword-floor
+// prose — the full detail always appears (wrapped) in the body above the block.
+
+/** commitlint's body-max-line-length bound, mirrored from commitlint.config.mjs. */
+export const COMMIT_BODY_MAX_LINE = 100;
+
+/** Word-wrap one prose line to the body budget (never used on Acceptance bullets). */
+export function wrapBodyLine(line: string, max: number = COMMIT_BODY_MAX_LINE): string[] {
+  if (line.length <= max) return [line];
+  const out: string[] = [];
+  let cur = "";
+  for (const word of line.split(" ")) {
+    if (cur && (cur + " " + word).length > max) {
+      out.push(cur);
+      cur = word;
+    } else {
+      cur = cur ? cur + " " + word : word;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+/** Hard-cap an Acceptance bullet to ONE line within the budget (ellipsis, never wrapped). */
+export function fitAcceptanceBullet(bullet: string, max: number = COMMIT_BODY_MAX_LINE): string {
+  return bullet.length <= max ? bullet : bullet.slice(0, max - 1) + "\u2026";
+}
+
 /**
  * The commit message (and, via `gh pr create --fill`, the PR title+body) the HARNESS authors for
  * a triage outcome — never the LLM, so the `Acceptance:`/`Remudero-Task:` contract can never be
@@ -332,10 +368,12 @@ export function triageCommitMessage(opts: {
     return [
       `chore(triage): feedback#${feedbackId} — already decided, no task`,
       "",
-      `Grounding found this already answered: ${decision.detail}`,
+      ...wrapBodyLine(`Grounding found this already answered — adds NO redundant task: ${decision.detail}`),
       "",
       "Acceptance:",
-      `- feedback#${feedbackId} is already decided and adds NO redundant task | ${decision.detail}; this diff touches only plan/feedback/${feedbackId}.yaml (status: rejected), never plan/tasks.yaml`,
+      fitAcceptanceBullet(
+        `- feedback#${feedbackId} already decided, NO task | feedback yaml flips to rejected`,
+      ),
       "",
       `Remudero-Task: ${taskId}`,
     ].join("\n");
@@ -344,12 +382,16 @@ export function triageCommitMessage(opts: {
     return [
       `chore(triage): feedback#${feedbackId} — ambiguous, parked for the grill`,
       "",
-      `Open question: ${decision.detail}`,
+      ...wrapBodyLine(`Open question: ${decision.detail}`),
       "",
-      `Grill (needs-human, ${decision.options.length} options, recommends "${decision.recommendation}"): ${grillIssueUrl ?? "(see run ledger — issue open failed to record here)"}`,
+      ...wrapBodyLine(
+        `Grill (needs-human, ${decision.options.length} options, recommends "${decision.recommendation}"): ${grillIssueUrl ?? "(see run ledger — issue open failed to record here)"}`,
+      ),
       "",
       "Acceptance:",
-      `- feedback#${feedbackId} is ambiguous, opens a needs-human issue with options + a recommendation, and adds NO redundant task | the grill issue (${grillIssueUrl ?? "see run ledger"}) carries ${decision.options.length} OPTION lines and recommends "${decision.recommendation}"; plan/feedback/${feedbackId}.yaml status is set to grilling; this diff touches only that file`,
+      fitAcceptanceBullet(
+        `- feedback#${feedbackId} grilled: ambiguous, NO task | needs-human issue; grilling`,
+      ),
       "",
       `Remudero-Task: ${taskId}`,
     ].join("\n");
@@ -361,10 +403,12 @@ export function triageCommitMessage(opts: {
   return [
     shapedHeader,
     "",
-    `Proposed by the intake triage: ${decision.detail}`,
+    ...wrapBodyLine(`Proposed by the intake triage (origin: feedback#${feedbackId}): ${decision.detail}`),
     "",
     "Acceptance:",
-    `- feedback#${feedbackId} produced a plan-only proposal carrying its provenance | this diff's plan/tasks.yaml/MASTER-PLAN.md changes include \`origin: feedback#${feedbackId}\`, and plan/feedback/${feedbackId}.yaml status is set to proposed with proposal_pr recorded`,
+    fitAcceptanceBullet(
+      `- feedback#${feedbackId} plan-only proposal | in-diff provenance; status proposed`,
+    ),
     "",
     `Remudero-Task: ${taskId}`,
   ].join("\n");
