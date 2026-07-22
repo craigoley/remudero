@@ -1295,6 +1295,70 @@ export function decideAutoMergeArmAtSha(entry: ReviewStatusEntry | undefined, tr
   };
 }
 
+// ── THE LEDGER-KEYED ARM DECISION (W1-T230 — THE STATUS CHANNEL PROVED DECORATIVE) ──
+//
+// #449's incident: the `remudero-review` commit status took SEVEN contradictory
+// writes on one sha (including a keyword-only CAPPED success overwriting an
+// executed failure), with one write 85 SECONDS AFTER the PR merged. GitHub's
+// commit-status API is a mutable, last-write-wins channel that anything holding
+// `gh` can post to — the W1-T203 provenance gate above closes one forge vector,
+// but it is DARK in production (REVIEWER_IDENTITY_ENV is unset), so today the
+// channel is exactly as trusted as before W1-T203 shipped. The house doctrine
+// already answers this in the other direction: task status derives from GitHub
+// rather than tasks.yaml because the yaml field proved decorative. Here the fix
+// runs the other way — the arm decision derives from the orchestrator's OWN
+// ledgered verdict because the status channel proved decorative AND writable,
+// strictly worse than decorative. The status stays posted (branch protection,
+// display) but from here on it is never an INPUT to this decision.
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * THE ARM DECISION (W1-T230). Given the most recent `review.posted` verdict
+ * this orchestrator itself ledgered for a task ({@link priorReviewVerdictFromLedger})
+ * and the CURRENT live head sha, decide whether to arm auto-merge. Pure — the
+ * whole point is that a fresh process can re-derive this identically from
+ * nothing but the ledger + the live head, never from in-process memory
+ * (acceptance criterion 3: a resumed pass arms from the prior pass's ledgered
+ * verdict, with no in-memory state).
+ *
+ * - No record at all → refuse. FAIL CLOSED: a head with no ledgered verdict is
+ *   left unarmed, the same shape as "no verdict yet" (acceptance criterion 1 —
+ *   a forged/live-only `remudero-review` success with no ledger backing must
+ *   arm nothing).
+ * - A record for a DIFFERENT sha → refuse. This is the sha binding that makes
+ *   push-invalidates-review real at the decision layer, not only at display
+ *   (acceptance criterion 4): a verdict ledgered before a subsequent push must
+ *   never arm the new head.
+ * - A record for THIS sha whose state isn't "success" → refuse (a genuine
+ *   ledgered failure blocks exactly as before).
+ * - A record for THIS sha that is "success" → arm — regardless of whatever the
+ *   live status channel currently says, including a stubbed-unavailable read
+ *   (acceptance criterion 2).
+ */
+export function decideArmFromLedgerVerdict(prior: PriorReviewVerdict | undefined, headSha: string): ArmDecision {
+  if (!prior) {
+    return {
+      arm: false,
+      reason: "no ledgered review.posted verdict found for this task — arming withheld (W1-T230, fail closed)",
+    };
+  }
+  if (prior.headSha !== headSha) {
+    return {
+      arm: false,
+      reason:
+        `ledgered verdict is for a different head (${prior.headSha.slice(0, 7)}), not the current head ` +
+        `(${headSha.slice(0, 7)}) — a push after the verdict was posted must not arm the new head (W1-T230)`,
+    };
+  }
+  if (prior.state !== "success") {
+    return { arm: false, reason: "the ledgered verdict for this exact head is not success (W1-T230)" };
+  }
+  return {
+    arm: true,
+    reason: `ledgered review.posted verdict for this exact head (${headSha.slice(0, 7)}) is success (W1-T230)`,
+  };
+}
+
 /**
  * Recover the most recent `automerge.capped_override_granted` ledger line for
  * `taskId`, "last one wins" — the SAME scanning idiom {@link
