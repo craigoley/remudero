@@ -5619,7 +5619,15 @@ async function feedbackCommand(rest: string[]): Promise<number> {
  * `needs-human` GitHub issue (escalate.ts, MASTER-PLAN §4) carrying options + a recommendation —
  * the grill's one and only mechanism.
  */
-const TRIAGE_WORKER_TOOLS = ["Read", "Write", "Grep", "Glob", "WebSearch"];
+// "Edit" is load-bearing (the 2026-07-22 materialization gap): the triage prompt
+// (triage.ts) instructs the PROPOSED path to "Edit ONLY plan files", and
+// plan/tasks.yaml is ~11k lines — without the Edit tool the worker cannot make a
+// surgical change (whole-file Write is not viable at that size), so it emitted
+// PROPOSED with an EMPTY diff and decideTriage fail-closed it as inconsistent
+// (observed live: feedback 04eac2 + 728bc1, both INCONSISTENT with empty diffs).
+// PLAN_WORKER_TOOLS (below) already grants Edit for the same job — this matches it.
+// Exported for the behavioral test (test/triage.test.ts) that pins the grant.
+export const TRIAGE_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "WebSearch"];
 
 /**
  * `rmd triage <feedback-id>` — the Architect intake worker (MASTER-PLAN §7B, W1-T41).

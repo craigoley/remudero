@@ -15,6 +15,7 @@ import {
   type TriageDecision,
 } from "../src/lib/triage.js";
 import type { FeedbackEntry } from "../src/lib/feedback.js";
+import { TRIAGE_WORKER_TOOLS } from "../src/run-task.js";
 import { escalate, renderIssueBody, type IssueGateway } from "../src/lib/escalate.js";
 
 function tempLedgerPath(): string {
@@ -631,4 +632,19 @@ test("SEEDED: a NEEDLESS grill on an unambiguous item is a failure — clear cas
     if (decision.action === "grill") grillEventsFired++; // dead by construction — the assert above already failed if reached
   }
   assert.equal(grillEventsFired, 0);
+});
+
+// ── the triage worker's tool grant (the 2026-07-22 Edit-gap materialization fix) ──
+
+test("the triage worker's tool grant includes Edit, so a triage-propose path can produce a non-empty plan-file change", () => {
+  // The prompt (triage.ts) instructs the PROPOSED path to "Edit ONLY plan files",
+  // and plan/tasks.yaml is ~11k lines — whole-file Write is not a viable way to
+  // make a surgical change at that size. Without the Edit tool the worker emitted
+  // PROPOSED with an EMPTY diff and decideTriage fail-closed it as inconsistent
+  // (observed live: feedback 04eac2 and 728bc1). The grant is the fix; this test
+  // pins it so a future grant edit cannot silently reopen the gap.
+  assert.ok(TRIAGE_WORKER_TOOLS.includes("Edit"), "triage must be able to Edit plan files, not just Write whole files");
+  for (const t of ["Read", "Write", "Grep", "Glob"]) {
+    assert.ok(TRIAGE_WORKER_TOOLS.includes(t), `${t} stays granted — Edit is additive, not a swap`);
+  }
 });
