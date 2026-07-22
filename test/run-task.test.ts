@@ -11,6 +11,7 @@ import {
   checkPrOwnership,
   ciGateFromRollup,
   commitsAhead,
+  degradedReasonLedgerFields,
   deriveFixMode,
   deriveStrikeHistory,
   dispatchFixPreflightStandDown,
@@ -20,6 +21,7 @@ import {
   isTransientResult,
   materializeReviewWorktree,
   renderFixPrompt,
+  reviewPostedDescription,
   resolveReviewTarget,
   withMaterializedWorktree,
   resolveDaemonTarget,
@@ -345,14 +347,16 @@ test("ACCEPTANCE (criterion 4, unit slice): materializeReviewWorktree fetches, a
       return "cafef00d";
     },
   };
-  const path = materializeReviewWorktree(config, "/repo", 411, "run-W1-T185-123", "cafef00d", deps);
+  const result = materializeReviewWorktree(config, "/repo", 411, "run-W1-T185-123", "cafef00d", deps);
+  const path = result.worktreePath;
   assert.ok(path, "materialization reports success");
+  assert.equal(result.failure, undefined, "a success carries no failure");
   assert.ok(path!.startsWith(join(config.root, "worktrees")), "path lives under worktreesDir(config)");
   assert.ok(path!.includes("review-PR411-"), "path is scoped to the PR number");
   assert.deepEqual(calls, [`fetch:/repo`, `add:/repo:${path}:run-W1-T185-123`, `rev-parse:${path}`]);
 });
 
-test("materializeReviewWorktree returns undefined (never throws) when fetch fails — network unavailable is a FALLBACK trigger, not a crash", () => {
+test("materializeReviewWorktree returns a NAMED fetch-failure reason (never throws) when fetch fails — network unavailable is a FALLBACK trigger, not a crash", () => {
   const config = drainFixtureConfig();
   const deps: ReviewWorktreeDeps = {
     fetch: () => {
@@ -361,10 +365,13 @@ test("materializeReviewWorktree returns undefined (never throws) when fetch fail
     addWorktree: () => assert.fail("addWorktree must not be reached when fetch already failed"),
     revParseHead: () => assert.fail("revParseHead must not be reached when fetch already failed"),
   };
-  assert.equal(materializeReviewWorktree(config, "/repo", 391, "some-branch", "cafef00d", deps), undefined);
+  const result = materializeReviewWorktree(config, "/repo", 391, "some-branch", "cafef00d", deps);
+  assert.equal(result.worktreePath, undefined);
+  assert.equal(result.failure?.errorClass, "fetch-failure");
+  assert.equal(result.failure?.message, "network unreachable");
 });
 
-test("materializeReviewWorktree returns undefined (never throws) when the worktree add fails — a detached/deleted head is a FALLBACK trigger, not a crash", () => {
+test("materializeReviewWorktree returns a NAMED (\"other\") reason (never throws) when the worktree add fails — a detached/deleted head is a FALLBACK trigger, not a crash", () => {
   const config = drainFixtureConfig();
   const deps: ReviewWorktreeDeps = {
     fetch: () => {},
@@ -373,7 +380,92 @@ test("materializeReviewWorktree returns undefined (never throws) when the worktr
     },
     revParseHead: () => assert.fail("revParseHead must not be reached when addWorktree already failed"),
   };
-  assert.equal(materializeReviewWorktree(config, "/repo", 397, "deleted-branch", "cafef00d", deps), undefined);
+  const result = materializeReviewWorktree(config, "/repo", 397, "deleted-branch", "cafef00d", deps);
+  assert.equal(result.worktreePath, undefined);
+  assert.equal(result.failure?.errorClass, "other");
+  assert.match(result.failure?.message ?? "", /deleted-branch/);
+});
+
+test("materializeReviewWorktree classifies a worktree-collision distinctly from other add failures, by the git error text", () => {
+  const config = drainFixtureConfig();
+  const deps: ReviewWorktreeDeps = {
+    fetch: () => {},
+    addWorktree: () => {
+      throw new Error("fatal: 'held-branch' is already used by worktree at '/repo/../holding-worktree'");
+    },
+    revParseHead: () => assert.fail("revParseHead must not be reached when addWorktree already failed"),
+  };
+  const result = materializeReviewWorktree(config, "/repo", 398, "held-branch", "cafef00d", deps);
+  assert.equal(result.worktreePath, undefined);
+  assert.equal(result.failure?.errorClass, "worktree-collision");
+});
+
+// W1-T233, acceptance criterion 1: "an injected failure occurring AFTER
+// worktree creation leaves zero new worktrees registered" — a step-2-class
+// throw (addWorktree succeeds, then revParseHead fails) must clean up the
+// worktree addWorktree already registered, not strand it (the 39-leaked-
+// worktree defect: withMaterializedWorktree's own teardown never runs here,
+// because this function never returns a path for it to key on).
+test("W1-T233 (criterion 1): a failure AFTER worktree creation (revParseHead throws) removes the just-created worktree before returning the named failure", () => {
+  const config = drainFixtureConfig();
+  const removeCalls: string[] = [];
+  const deps: ReviewWorktreeDeps = {
+    fetch: () => {},
+    addWorktree: () => {},
+    revParseHead: () => {
+      throw new Error("fatal: not a git repository");
+    },
+    removeWorktree: (repoDir, worktreePath) => removeCalls.push(`${repoDir}:${worktreePath}`),
+  };
+  const result = materializeReviewWorktree(config, "/repo", 399, "some-branch", "cafef00d", deps);
+  assert.equal(result.worktreePath, undefined);
+  assert.equal(result.failure?.errorClass, "other");
+  assert.match(result.failure?.message ?? "", /not a git repository/);
+  assert.equal(removeCalls.length, 1, "the worktree step 1 created is torn down exactly once");
+  assert.ok(removeCalls[0].startsWith("/repo:"), "cleanup targets the SAME repoDir/worktreePath step 1 used");
+});
+
+test("W1-T233: a fetch failure never attempts a removal — nothing was created for step 1 to have registered", () => {
+  const config = drainFixtureConfig();
+  const removeCalls: string[] = [];
+  const deps: ReviewWorktreeDeps = {
+    fetch: () => {
+      throw new Error("network unreachable");
+    },
+    addWorktree: () => assert.fail("addWorktree must not be reached when fetch already failed"),
+    revParseHead: () => assert.fail("revParseHead must not be reached when fetch already failed"),
+    removeWorktree: (repoDir, worktreePath) => removeCalls.push(`${repoDir}:${worktreePath}`),
+  };
+  materializeReviewWorktree(config, "/repo", 400, "some-branch", "cafef00d", deps);
+  assert.deepEqual(removeCalls, []);
+});
+
+test("W1-T233: a removal failure during cleanup is swallowed (logged), never masking the original materialization failure it was cleaning up after", () => {
+  const config = drainFixtureConfig();
+  const originalConsoleError = console.error;
+  const errors: string[] = [];
+  console.error = (msg: string) => errors.push(msg);
+  try {
+    const deps: ReviewWorktreeDeps = {
+      fetch: () => {},
+      addWorktree: () => {},
+      revParseHead: () => {
+        throw new Error("original failure: rev-parse exploded");
+      },
+      removeWorktree: () => {
+        throw new Error("removal also failed");
+      },
+    };
+    const result = materializeReviewWorktree(config, "/repo", 401, "some-branch", "cafef00d", deps);
+    assert.equal(result.worktreePath, undefined);
+    assert.match(result.failure?.message ?? "", /original failure: rev-parse exploded/);
+    assert.ok(
+      errors.some((e) => /removal also failed/.test(e)),
+      "the removal failure is still surfaced somewhere (console), not silently dropped",
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
 });
 
 // W1-T232, acceptance: "a tip mismatch after fetch fails materialization loudly
@@ -393,6 +485,61 @@ test("materializeReviewWorktree THROWS (does not return undefined) when the mate
   );
 });
 
+// W1-T233 (criterion 1 also covers the THROW path): a tip-mismatch throw is
+// not an "ordinary" failure, but the worktree it discards was created just as
+// really — it must be torn down before the throw, too.
+test("W1-T233: a tip-mismatch throw ALSO removes the just-created worktree before throwing — the discarded tree never strands either", () => {
+  const config = drainFixtureConfig();
+  const removeCalls: string[] = [];
+  const deps: ReviewWorktreeDeps = {
+    fetch: () => {},
+    addWorktree: () => {},
+    revParseHead: () => "stale0ld",
+    removeWorktree: (repoDir, worktreePath) => removeCalls.push(`${repoDir}:${worktreePath}`),
+  };
+  assert.throws(() => materializeReviewWorktree(config, "/repo", 403, "moved-branch", "cafef00d", deps));
+  assert.equal(removeCalls.length, 1, "the mismatched worktree is torn down exactly once before the throw");
+});
+
+// W1-T233, acceptance criterion 2: "the verdict description and the
+// review.posted record name the error class and message verbatim" — these two
+// pure helpers are what `runReview` composes both surfaces through, so a unit
+// test on them IS a unit test on what gets posted/ledgered, without spawning
+// `gh`/a reviewer.
+test("W1-T233 (criterion 2): reviewPostedDescription appends the error class + message VERBATIM to a CAPPED verdict's description", () => {
+  const verdict = { summary: "remudero-review: CAPPED — 0/3 proofs executed", capped: true };
+  const failure = { errorClass: "worktree-collision" as const, message: "fatal: 'x' is already used by worktree at '/y'" };
+  const description = reviewPostedDescription(verdict, failure);
+  assert.match(description, /^remudero-review: CAPPED — 0\/3 proofs executed/);
+  assert.match(description, /worktree-collision/);
+  assert.match(description, /fatal: 'x' is already used by worktree at '\/y'/);
+});
+
+test("W1-T233: reviewPostedDescription leaves the summary UNCHANGED when the verdict is not capped, even with a materialization failure present", () => {
+  const verdict = { summary: "remudero-review: PASS", capped: false };
+  const failure = { errorClass: "fetch-failure" as const, message: "network unreachable" };
+  assert.equal(reviewPostedDescription(verdict, failure), "remudero-review: PASS");
+});
+
+test("W1-T233: reviewPostedDescription leaves the summary UNCHANGED when there is no materialization failure at all (capped for an unrelated reason)", () => {
+  const verdict = { summary: "remudero-review: CAPPED — 0/3 proofs executed", capped: true };
+  assert.equal(reviewPostedDescription(verdict, undefined), "remudero-review: CAPPED — 0/3 proofs executed");
+});
+
+test("W1-T233 (criterion 2): degradedReasonLedgerFields names the error class and message verbatim for the review.posted ledger line", () => {
+  const failure = { errorClass: "fetch-failure" as const, message: "network unreachable" };
+  assert.deepEqual(degradedReasonLedgerFields(failure), {
+    degraded_reason: "network unreachable",
+    degraded_reason_class: "fetch-failure",
+  });
+});
+
+test("W1-T233: degradedReasonLedgerFields yields both fields undefined (absent once ledgered) when materialization was never attempted", () => {
+  const fields = degradedReasonLedgerFields(undefined);
+  assert.equal(fields.degraded_reason, undefined);
+  assert.equal(fields.degraded_reason_class, undefined);
+});
+
 test("ACCEPTANCE (criterion 4, full chain): an operator-path review over a PR whose proofs are executable reports a NON-EMPTY executed set — materialize -> headCheckoutDir -> judgeReview EXECUTES, exactly the fix rung's own wiring for the same PR/proofs", () => {
   const config = drainFixtureConfig();
   // `addWorktree` here plays the role `git worktree add` really does: it
@@ -409,7 +556,8 @@ test("ACCEPTANCE (criterion 4, full chain): an operator-path review over a PR wh
     },
     revParseHead: () => "cafef00d",
   };
-  const worktreePath = materializeReviewWorktree(config, "/repo", 411, "run-W1-T185-fixture", "cafef00d", deps);
+  const worktreePath = materializeReviewWorktree(config, "/repo", 411, "run-W1-T185-fixture", "cafef00d", deps)
+    .worktreePath;
   assert.ok(worktreePath, "materialization succeeded");
   try {
     const criteria = [
@@ -445,7 +593,7 @@ test("W1-T232: realReviewWorktreeDeps.addWorktree yields a DETACHED worktree at 
   const headSha = execFileSync("git", ["-C", localDir, "rev-parse", "feature-x"], { encoding: "utf8" }).trim();
 
   const config = drainFixtureConfig();
-  const worktreePath = materializeReviewWorktree(config, localDir, 500, "feature-x", headSha);
+  const worktreePath = materializeReviewWorktree(config, localDir, 500, "feature-x", headSha).worktreePath;
   assert.ok(worktreePath, "materialization succeeded against real git");
   try {
     // `checkout -B <branch>` would leave HEAD as a SYMBOLIC ref to
@@ -483,7 +631,7 @@ test("W1-T232: materialization SUCCEEDS (no collision) while another real worktr
   const config = drainFixtureConfig();
   let worktreePath: string | undefined;
   try {
-    worktreePath = materializeReviewWorktree(config, localDir, 501, "held-branch", headSha);
+    worktreePath = materializeReviewWorktree(config, localDir, 501, "held-branch", headSha).worktreePath;
     assert.ok(worktreePath, "materialization succeeds even though another worktree holds the branch");
 
     const criteria = [{ claim: "the held marker is present", proof: "grep: held elsewhere in held.txt" }];
