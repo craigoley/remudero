@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { renderFixPrompt } from "../src/run-task.js";
 import {
   CI_LOG_FENCE_CLOSE,
-  FIX_WORKER_TOOLS,
   CI_LOG_FENCE_OPEN,
+  FIX_WORKER_TOOLS,
   neutralizeFenceMarkers,
-  renderFixPrompt,
-} from "../src/run-task.js";
+} from "../src/lib/fix-fence.js";
 
 // W1-T210 (plan/tasks.yaml, RECON R-19): `gh run view --log-failed` output — the
 // failing check's NAME and its log tail — is attacker-influenceable (anyone who
