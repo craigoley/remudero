@@ -1695,6 +1695,95 @@ test("W1-T229 acceptance criterion 2: the plan-only-PR-emitting flows (retro/tri
   );
 });
 
+// ── W1-T205: THE PLAN-ONLY CARVE-OUT on the W1-T229 raised floor ────────────
+//
+// The operator's standing rider: a plan-only PR is STRUCTURALLY capped — it
+// files or amends a task, never implements one, so it has no code to run a
+// proof against. These fixtures cover the case the test above does NOT: a
+// plan-only DIFF reaching `judgeReview`/`decideAutoMergeArm` through the
+// ordinary "implement" flow's own call site (e.g. an Architect task whose
+// `files:` happen to be entirely under `plan/`), not through the dedicated
+// retro/triage/plan/approve/dep-review commands that already bypass the gate
+// by construction.
+
+// Touches ONLY plan/tasks.yaml.
+const PLAN_ONLY_DIFF = `
+diff --git a/plan/tasks.yaml b/plan/tasks.yaml
++++ b/plan/tasks.yaml
+@@
++- id: W1-T999
++  title: "a filed task, not yet implemented"
+`.trim();
+
+// Touches plan/tasks.yaml AND a src file — the dangerous "smuggled code change" shape.
+const MIXED_PLAN_AND_CODE_DIFF = `
+diff --git a/plan/tasks.yaml b/plan/tasks.yaml
++++ b/plan/tasks.yaml
+@@
++- id: W1-T999
++  title: "a filed task"
+diff --git a/src/lib/widget.ts b/src/lib/widget.ts
++++ b/src/lib/widget.ts
+@@
++export function frobnicate() {}
+`.trim();
+
+test("W1-T205 THE OPERATOR'S FALSIFIER: a plan-only PR with zero executed proofs still arms auto-merge, so the raised floor does not stall the plan lane", () => {
+  const v = judgeReview(CRITERIA, { diff: PLAN_ONLY_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(v.planOnly, true);
+  assert.equal(v.capped, true); // structurally capped: zero proofs executed, permanently
+  assert.equal(v.state, "success");
+  const decision = decideAutoMergeArm(v, false); // tddStrict=false, no override
+  assert.equal(decision.arm, true);
+  assert.match(decision.reason, /plan-only/i);
+});
+
+test("W1-T205 acceptance criterion 2: a PR mixing plan files with a src file is NOT plan-only and faces the full executed-proof floor — ambiguity resolves toward the stricter floor, never toward the exemption", () => {
+  const v = judgeReview(CRITERIA, { diff: MIXED_PLAN_AND_CODE_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(v.planOnly, false);
+  assert.equal(v.capped, true); // still zero-executed (no headCheckoutDir), but not plan-only
+  const decision = decideAutoMergeArm(v, false);
+  assert.equal(
+    decision.arm,
+    false,
+    "a code change smuggled into an otherwise plan-only PR must not inherit the plan-only carve-out",
+  );
+});
+
+test("W1-T205 acceptance criterion 3: a non-tdd:strict CODE PR (not plan-only) with zero executed proofs still does NOT arm — the floor genuinely raised for the work it was raised for is untouched by the carve-out", () => {
+  const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(v.planOnly, false);
+  assert.equal(v.capped, true);
+  assert.equal(decideAutoMergeArm(v, false).arm, false);
+});
+
+test("W1-T205 acceptance criterion 4: a plan-only PR's passing verdict reads as deterministically gated, never as proof-executed, so the status never overstates what was checked", () => {
+  const v = judgeReview(CRITERIA, { diff: PLAN_ONLY_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(v.state, "success");
+  assert.match(v.summary, /gated deterministically/i);
+  assert.doesNotMatch(v.summary, /substantiated/i);
+  assert.doesNotMatch(v.summary, /CAPPED/);
+});
+
+test("W1-T205: an empty diff is NOT plan-only — fails closed rather than treating 'nothing changed' as evidence of plan-only", () => {
+  const v = judgeReview(CRITERIA, { diff: "", report: RESPONSIVE_REPORT });
+  assert.equal(v.planOnly, false);
+});
+
+test("W1-T205: resolveAutoMergeArm never misattributes a plan-only arm to an override, even when one happens to be supplied alongside it", () => {
+  const logged: unknown[] = [];
+  const log = (step: string, extra?: Record<string, unknown>) => logged.push({ step, extra });
+  const v = judgeReview(CRITERIA, { diff: PLAN_ONLY_DIFF, report: RESPONSIVE_REPORT });
+  const decision = resolveAutoMergeArm(v, false, { by: "craig", reason: "just in case" }, log);
+  assert.equal(decision.arm, true);
+  assert.match(decision.reason, /plan-only/i);
+  assert.equal(
+    logged.length,
+    0,
+    "the carve-out decided this, not the override — nothing should be ledgered as an override use",
+  );
+});
+
 test("cappedOverrideFromLedger: 'last one wins', scoped to task_id, well-formed lines only", () => {
   const lines = [
     { step: "automerge.capped_override_granted", task_id: "W1-T1", by: "alice", reason: "first" },

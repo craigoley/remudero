@@ -1102,6 +1102,7 @@ function fakeReview(
     floorDegraded: false,
     capped: false,
     keywordOnly: false,
+    planOnly: false,
     headSha: "deadbeef",
     reviewerOutcome: "success",
   };
