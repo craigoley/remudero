@@ -25,7 +25,7 @@ import {
   type HeadroomPolicy,
   type OrphanedRun,
 } from "../src/lib/daemon.js";
-import { pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
+import { pauseDetail, requestPause, requestStop, resumeFleet, stopDetail } from "../src/lib/fleet-control.js";
 import type { MergedSet, OpenPrCheck } from "../src/lib/drain.js";
 import { deriveStatus, type GitHub, type PrRef } from "../src/lib/status.js";
 
@@ -397,12 +397,21 @@ test("STOP takes precedence over PAUSE when both flags are set", async () => {
   assert.equal(s.stopReason, "stopped");
 });
 
-test("PAUSE (drain-and-hold): issued mid-run, the in-flight task still reaches merged; no new spawn follows", async () => {
+test("PAUSE (drain-and-hold): issued mid-run, the in-flight task still reaches merged, no new spawn follows — and the loop IDLES IN-PROCESS (heartbeat per tick), never exiting on the pause itself", async () => {
   const plan = fixturePlan();
   const merged = new Set<string>();
   const root = mkdtempSync(join(tmpdir(), "daemon-pause-"));
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const clock = fakeClock();
+  let sleeps = 0;
+  const sleep: DaemonDeps["sleep"] = async (_ms) => {
+    sleeps++;
+    // The 2026-07-22 storm falsifier: pre-fix, the loop RETURNED "paused" (exit 1)
+    // and KeepAlive relaunched a fresh process every ~10s. Here a "test operator"
+    // issues a hard STOP only after several paused heartbeats — the loop reaching
+    // sleep #3 with ticks accumulating IN THIS ONE SUMMARY proves it was idling
+    // in-process, not exiting (a launchd relaunch starts a fresh process at tick 0).
+    if (sleeps >= 3) requestStop(root, "test done polling — pause never cleared");
+  };
   const s = await runDaemon(plan, {
     refreshMerged: () => (id) => merged.has(id),
     runOne: async (id) => {
@@ -414,13 +423,54 @@ test("PAUSE (drain-and-hold): issued mid-run, the in-flight task still reaches m
     },
     checkStop: () => stopDetail(root),
     checkPause: () => pauseDetail(root),
-    sleep: clock.sleep,
+    sleep,
     log: (step, extra = {}) => lines.push({ step, extra }),
   });
-  assert.equal(s.stopReason, "paused");
+  // STOP is what ended the loop — PAUSE alone never does (and STOP during a
+  // pause still terminates cleanly: checked first, exit 0 via daemonExitCode).
+  assert.equal(s.stopReason, "stopped");
+  assert.equal(daemonExitCode(s.stopReason), 0, "a hard STOP during a pause is a clean exit — no KeepAlive relaunch");
   assert.deepEqual(s.merged, ["A"]); // A still reaches merged (drain-and-hold)
-  assert.deepEqual(s.attempted, ["A"]); // B (A's dependent) never spawns
-  assert.ok(lines.some((l) => l.step === "daemon.pause"), "a daemon.pause ledger line was emitted");
+  assert.deepEqual(s.attempted, ["A"]); // B (A's dependent) never spawns while paused
+  const heartbeats = lines.filter((l) => l.step === "daemon.pause");
+  assert.ok(heartbeats.length >= 3, "one daemon.pause heartbeat per idle tick, all within ONE process");
+  assert.equal(heartbeats[0].extra.detail, "PAUSE requested: quiet hours");
+  assert.ok(typeof heartbeats[0].extra.poll_interval_ms === "number", "the heartbeat names its own pacing");
+  assert.ok(s.ticks >= 3, "ticks accumulate across the pause — proof no relaunch/boot-cycle occurred");
+});
+
+test("PAUSE clears via rmd resume and the SAME process resumes dispatching on its next tick — no exit, no relaunch on either side", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const root = mkdtempSync(join(tmpdir(), "daemon-resume-"));
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  requestPause(root, "starts paused"); // the daemon boots INTO an already-paused fleet
+  let sleeps = 0;
+  const sleep: DaemonDeps["sleep"] = async (_ms) => {
+    sleeps++;
+    // The "operator" runs `rmd resume` (flag deleted) after two paused heartbeats.
+    if (sleeps === 2) resumeFleet(root); // the real `rmd resume` verb — deletes the PAUSE flag
+  };
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => {
+        merged.add(id);
+        return okResult(id);
+      },
+      checkStop: () => stopDetail(root),
+      checkPause: () => pauseDetail(root),
+      sleep,
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 2 },
+  );
+  assert.equal(s.stopReason, "max_reached", "the run ended by max — never by the pause");
+  assert.deepEqual(s.attempted, ["A", "B"], "dispatch resumed in the SAME process once the flag cleared");
+  const heartbeats = lines.filter((l) => l.step === "daemon.pause");
+  assert.equal(heartbeats.length, 2, "exactly one heartbeat per paused tick before resume");
+  assert.ok(s.ticks >= 2, "the paused ticks and the dispatching ticks share one summary — one process throughout");
 });
 
 // ── headroom (W1-T4) ─────────────────────────────────────────────────────────
@@ -791,7 +841,7 @@ test("headroom heartbeat: two boots reading the SAME window a minute apart log t
 
 test("daemonExitCode: stopped/max_reached are the ONLY clean (zero) exits", () => {
   const zero: DaemonStopReason[] = ["stopped", "max_reached"];
-  const nonzero: DaemonStopReason[] = ["blocked", "paused", "error"];
+  const nonzero: DaemonStopReason[] = ["blocked", "error"];
   for (const r of zero) assert.equal(daemonExitCode(r), 0, `${r} should exit 0`);
   for (const r of nonzero) assert.equal(daemonExitCode(r), 1, `${r} should exit nonzero`);
 });
