@@ -5028,6 +5028,7 @@ function buildSweepEffects(
               floorDegraded: false,
               capped: false,
               keywordOnly: false,
+              planOnly: false,
               headSha: pr.headSha,
               reviewerOutcome: "sweep-reconstructed-ci-log",
             }
@@ -5039,6 +5040,7 @@ function buildSweepEffects(
               floorDegraded: false,
               capped: false,
               keywordOnly: false,
+              planOnly: false,
               headSha: pr.headSha,
               reviewerOutcome: "sweep-reconstructed",
             };

@@ -4,6 +4,7 @@ import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { appendLedger } from "./ledger.js";
+import { isInPlanScope } from "./plan-architect.js";
 import type { AcceptanceCriterion } from "./plan.js";
 import { readLedgerLines } from "./status.js";
 
@@ -195,6 +196,29 @@ export interface ReviewVerdict {
    * behavior for every criterion whose proof is free prose.
    */
   keywordOnly: boolean;
+  /**
+   * W1-T205 (the operator's standing rider on W1-T229's raised floor): true when
+   * the diff touches ONLY plan-scope files (`plan/**`/`MASTER-PLAN.md` —
+   * {@link isInPlanScope}, the SAME predicate `rmd plan`'s PROPOSED-outcome check
+   * and the W1-T136 filing-PR emitter already use) and at least one file. A
+   * plan-only PR files or amends a task; it never carries the code the task
+   * describes, so it has NO executable proof to run — it is STRUCTURALLY and
+   * PERMANENTLY `capped`, not degraded. FAILS CLOSED: an empty diff, or a diff
+   * mixing even one src/test/other file into an otherwise plan-only change, is
+   * NOT plan-only — the dangerous shape is a code change smuggled into a plan PR
+   * to inherit the exemption below, so ambiguity resolves toward the full floor.
+   *
+   * The one place `planOnly` is consequential: {@link decideAutoMergeArm} treats
+   * a `planOnly` CAPPED verdict as armable without an operator override — the
+   * carve-out is an exemption from PROOF EXECUTION only, never from `state`
+   * itself (a plan-only PR whose criteria are genuinely unmet still fails like
+   * any other), and never from the deterministic gates that already bind a plan
+   * PR (lint-plan, the emitter's own structural checks, plan-index regeneration,
+   * commitlint). It also changes the RENDERING of a capped success (see
+   * {@link planOnlySummary}) so the posted status reads as deterministically
+   * gated rather than as proof-executed — never overstating what was checked.
+   */
+  planOnly: boolean;
 }
 
 // ── Tokenisation (deterministic, dependency-free) ──────────────────────────
@@ -960,19 +984,47 @@ export function judgeReview(
   // plainly rather than let a keyword-only PASS read as an observed one.
   const keywordOnly = execCtx === undefined;
 
+  // W1-T205: PLAN-ONLY CLASSIFICATION. Reuses the review path's OWN existing
+  // diff-walker (`changedFiles(walkDiff(...))` — the same one {@link
+  // checkOneConcern} already uses to name a diff's changed files) plus
+  // plan-architect's own plan-scope predicate ({@link isInPlanScope} — the SAME
+  // guard `rmd plan`'s PROPOSED-outcome check and the W1-T136 filing-PR emitter
+  // use) rather than inventing a third, divergent notion of "plan-only". FAILS
+  // CLOSED: an empty diff, or one touching even a single file outside
+  // `plan/**`/`MASTER-PLAN.md`, is NOT plan-only — see {@link
+  // ReviewVerdict.planOnly}'s doc for why that direction is load-bearing.
+  const diffFiles = changedFiles(walkDiff(evidence.diff));
+  const planOnly = diffFiles.length > 0 && diffFiles.every(isInPlanScope);
+
   // A capped `state: "success"` NEVER uses passSummary's "substantiated"/"no
   // test theater" wording (criterion 1) — neither claim was measured. A
   // capped `state: "failure"` already renders via failSummary, which carries
   // its own specific unmet-criterion reason and never those two phrases
-  // either, so no extra branch is needed there.
+  // either, so no extra branch is needed there. A capped PLAN-ONLY success
+  // renders via {@link planOnlySummary} instead of {@link cappedSummary} — see
+  // {@link ReviewVerdict.planOnly}'s doc (W1-T205): "0 proofs executed" is not
+  // a degradation for a PR with nothing executable to point at, so the status
+  // must read as deterministically gated, never as an uncertified claim.
   const summary =
     state === "success"
       ? capped
-        ? cappedSummary(verdicts.length, keywordOnly)
+        ? planOnly
+          ? planOnlySummary(verdicts.length)
+          : cappedSummary(verdicts.length, keywordOnly)
         : passSummary(verdicts.length, keywordOnly)
       : failSummary(unmet.map((v) => v.claim), testTheater, noCriteria);
 
-  return { state, criteria: verdicts, testTheater, summary, floorDegraded, floorState, capped, keywordOnly };
+  return {
+    state,
+    criteria: verdicts,
+    testTheater,
+    summary,
+    floorDegraded,
+    floorState,
+    capped,
+    keywordOnly,
+    planOnly,
+  };
 }
 
 /** The exact PASS status-description text, shared by {@link judgeReview} and a
@@ -1007,6 +1059,25 @@ function cappedSummary(criteriaCount: number, keywordOnly = false): string {
     `remudero-review: CAPPED — 0/${criteriaCount} proofs executed; not certified ` +
     `(a keyword match is a claim, not evidence)` +
     (keywordOnly ? " (keyword-only: no proof was executed on the PR head)" : "")
+  );
+}
+
+/** The PLAN-ONLY status-description text (W1-T205) — posted in place of {@link
+ * cappedSummary} whenever a capped success's diff is plan-only (see {@link
+ * ReviewVerdict.planOnly}). Deliberately never says "CAPPED" or "not certified":
+ * those words read as something going wrong, and for a plan-only PR nothing
+ * did — filing or amending a task has no code to run a proof against, so "0
+ * proofs executed" is its permanent, correct shape, not a degradation. Names
+ * what actually gated the PR (lint-plan + the W1-T136 plan-PR emitter's own
+ * structural checks + plan-index regeneration) so an operator reading the
+ * status is told the truth either way (standing rule 22: state the verdict
+ * honestly, claimed versus evidenced) — never that a proof executed, but also
+ * never that this PR's honest structural shape is a failure mode. */
+function planOnlySummary(criteriaCount: number): string {
+  return (
+    `remudero-review: PASS — plan-only PR (${criteriaCount} criteria), gated deterministically ` +
+    `(lint-plan + the plan-PR emitter + plan-index checks); no proof execution attempted, ` +
+    `by design (W1-T205)`
   );
 }
 
@@ -1197,14 +1268,26 @@ export interface ArmDecision {
  *   between zero executed proof and an unattended merge, and tdd:strict is
  *   not the default. `tddStrict` is retained purely for override-provenance
  *   bookkeeping ({@link resolveAutoMergeArm}), never for gating.
- * - An override permits arming, on any capped verdict. Whether the caller
- *   actually LEDGERS that override is {@link resolveAutoMergeArm}'s job, not
- *   this pure predicate's — keeping this function side-effect-free is what
- *   makes "refuses without an override; permits with one" a single unit
- *   fixture (acceptance criterion 2), independent of ledger/CLI plumbing.
+ * - W1-T205 (the operator's standing rider on W1-T229): a `planOnly` CAPPED
+ *   verdict arms WITHOUT needing an override. Checked BEFORE the override
+ *   branch so a plan-only PR's arm reason always names the carve-out, never
+ *   an override that was never actually consulted (also why {@link
+ *   resolveAutoMergeArm} excludes `planOnly` from its override-ledgering
+ *   condition — logging "override used" for a decision an override never
+ *   drove would misattribute it). Plan-only PRs are STRUCTURALLY capped —
+ *   filing or amending a task has no code to run a proof against — so
+ *   "capped never arms without an override" would block every retro, approve
+ *   and filing PR forever; this is an exemption from PROOF EXECUTION only,
+ *   never from `state` (an unmet plan-only PR still refuses above).
+ * - An override permits arming, on any other capped verdict. Whether the
+ *   caller actually LEDGERS that override is {@link resolveAutoMergeArm}'s
+ *   job, not this pure predicate's — keeping this function side-effect-free
+ *   is what makes "refuses without an override; permits with one" a single
+ *   unit fixture (acceptance criterion 2), independent of ledger/CLI
+ *   plumbing.
  */
 export function decideAutoMergeArm(
-  verdict: Pick<ReviewVerdict, "state" | "capped">,
+  verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
   tddStrict: boolean,
   override?: CappedOverride,
 ): ArmDecision {
@@ -1213,6 +1296,15 @@ export function decideAutoMergeArm(
   }
   if (!verdict.capped) {
     return { arm: true, reason: "verdict is a full PASS" };
+  }
+  if (verdict.planOnly) {
+    return {
+      arm: true,
+      reason:
+        "plan-only PR — structurally has no executable proof (filing/amending a task, not implementing " +
+        "one); gated deterministically by lint-plan + the plan-PR emitter + plan-index checks, not by " +
+        "proof execution (W1-T205 carve-out on the W1-T229 floor)",
+    };
   }
   if (override) {
     return { arm: true, reason: `CAPPED override granted by ${override.by}: ${override.reason}` };
@@ -1238,13 +1330,16 @@ export function decideAutoMergeArm(
  * is the real caller.
  */
 export function resolveAutoMergeArm(
-  verdict: Pick<ReviewVerdict, "state" | "capped">,
+  verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
   tddStrict: boolean,
   override: CappedOverride | undefined,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): ArmDecision {
   const decision = decideAutoMergeArm(verdict, tddStrict, override);
-  if (decision.arm && override && verdict.capped) {
+  // W1-T205: excludes `planOnly` — decideAutoMergeArm checks the carve-out BEFORE the
+  // override branch, so a planOnly arm never actually consulted `override` even when one
+  // happens to be present; logging "override used" here would misattribute the decision.
+  if (decision.arm && override && verdict.capped && !verdict.planOnly) {
     log("automerge.capped_override_used", { by: override.by, reason: override.reason });
   }
   return decision;
