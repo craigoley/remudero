@@ -1353,6 +1353,24 @@ function ghLiveStateByNumber(owner: string, repo: string, prNumber: number): str
 }
 
 /**
+ * Least-privilege tool allowlist for the fix worker (W1-T210). In `ci-log`
+ * mode, `renderFixPrompt` interpolates a `gh run view --log-failed` tail
+ * VERBATIM into this worker's prompt (see `summarizeCiFailure`/the `ci-log`
+ * branch above) — text a CI job (test output, a build script, a dependency's
+ * install log) fully controls, not something Remudero authored. Unlike the
+ * Architect workers above (TRIAGE_WORKER_TOOLS/PLAN_WORKER_TOOLS), which read
+ * operator-authored feedback/briefs and legitimately need WebSearch/WebFetch
+ * for research, this worker's job is narrow — read the failing code, edit it,
+ * commit, push — so it gets exactly those tools and NOTHING web-facing: a
+ * prompt-injection payload riding in the log tail still can't make this
+ * worker exfiltrate data or pull further instructions over the network. Bash
+ * stays in the set (git commit/push per the fix contract's footer, and
+ * running the project's own test/build commands are the worker's actual job)
+ * — restricting it further would break the rung, not just the injection.
+ */
+export const FIX_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"];
+
+/**
  * Dispatch ONE bounded fix worker per strike, up to `strikeCap` (config,
  * default 2), on a `blocked_review` verdict. Every dispatch receives the FULL
  * unmet_criteria set + the reviewer's reasons at once (never one criterion at
@@ -1528,6 +1546,12 @@ export async function runFixRung(opts: {
       config: opts.config,
       prompt,
       resumeSessionId: round === "resume" ? sessionToResume : undefined,
+      // W1-T210: ci-log mode's prompt carries an untrusted CI log tail
+      // (renderFixPrompt, above) — restrict this worker to the tools its
+      // fix-and-push job actually needs (FIX_WORKER_TOOLS) so a
+      // prompt-injection payload riding in that log can't reach the
+      // network via WebFetch/WebSearch.
+      tools: FIX_WORKER_TOOLS,
     };
 
     const fixResult = deps.account(await deps.spawn(fixArgs));
