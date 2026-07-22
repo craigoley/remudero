@@ -61,6 +61,297 @@
 #   operator-kicked (the daemon drains the sandbox), so this is the authoritative kick guide, NOT a
 #   physical reordering of the entries below (a contiguous block-move can't produce this interleaving).
 
+- id: W1-T230
+  title: "the arm decision trusts the status channel, which is writable and proved decorative - it must key off the orchestrator's own ledgered verdict for the exact head SHA"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "2026-07-21. The remudero-review status channel took SEVEN contradictory writes on one SHA
+    (PR 449, head 833561d), including a keyword-only CAPPED success overwriting an executed failure, and one
+    write 85 seconds AFTER the PR merged. Two PRs merged riding transient green windows on that channel.
+    W1-T203 fences the ROUTINE writer - hooks/deny-floor.sh refuses a worker gh api POST to a statuses
+    endpoint - but the arm path still trusts the channel, so any process outside the hook restores the surface.
+    A worker was live under the pause carve-out that same day.
+    THE HOUSE DOCTRINE ALREADY ANSWERS THIS, in the other direction. Task status derives from GitHub rather
+    than tasks.yaml because the yaml status field proved decorative. The arm decision should derive from the
+    orchestrator's own ledgered verdict because the status channel proved decorative AND writable - strictly
+    worse than decorative.
+    VERIFIED FROM SOURCE AT FILING, and two of these correct what a reader would assume.
+    (a) SEVEN arm call sites exist, all reaching armAutoMerge (run-task.ts:442), which ends in
+    `gh pr merge --auto --squash` (run-task.ts:464): lines 2611, 2987, 3368, 4562 (the sweep hook), 5526, 5721
+    and 6168.
+    (b) FOUR of those sites compute a review result and then arm UNCONDITIONALLY - the shape is
+    `const reviewCode = await reviewCommand(prNum); armAutoMerge(prUrl);` at 3368, 5526, 5721 and 6168. The
+    verdict is not consulted before arming. Merge safety today rests ENTIRELY on GitHub evaluating the required
+    check, which is the writable channel this task removes from the decision.
+    (c) The record this task needs already exists: the judge writes a review.posted ledger line carrying
+    head_sha, state, proof_exec and floor_degraded, appended by the orchestrator and readable from any other
+    process. Nothing new has to be invented to key off it.
+    (d) W1-T203's provenance check is currently INERT in production - it is wrapped in
+    `if (trustedLogin)` reading REMUDERO_REVIEWER_LOGIN (run-task.ts:443), and that variable is unset on this
+    host. So the status channel is, today, exactly as trusted as it was before W1-T203 merged."
+  design: |
+    EVERY ARM POINT KEYS OFF AN ORCHESTRATOR-WRITTEN LEDGER VERDICT FOR THE EXACT HEAD SHA. Not the status API,
+    not in-memory state. The status remains posted for branch protection and for display, but it becomes
+    strictly downstream of the decision and is never an input to it.
+    NO RECORD MEANS NO ARM. Fail closed. A PR whose head has no ledgered verdict is left unarmed, which is the
+    same shape as no verdict yet - it waits, it does not merge.
+    A RESUMED PASS READS THE LEDGER, NOT ITS OWN MEMORY. A fix rung resuming at strike N in a fresh process must
+    recover the prior pass's verdict from the ledger record for that head, so process death between passes
+    cannot silently downgrade the evidence a later arm relies on.
+    THE SHA BINDING IS THE WHOLE POINT. A verdict ledgered for a different SHA must not arm the current head.
+    This is what makes push-invalidates-review real at the decision layer rather than only at the display layer.
+    FIX THE UNCONDITIONAL ARM SITES AS PART OF THIS. The four sites at 3368, 5526, 5721 and 6168 currently arm
+    regardless of the review result. Keying the decision off the ledger record is what makes them conditional,
+    and an implementation that adds a ledger read while leaving those four unconditional has not done the task.
+    THIS MAKES LEDGER WRITE-INTEGRITY MERGE-LOAD-BEARING. Named here so the implementer sequences it: once the
+    arm decision reads the ledger, a torn or lost ledger line is a merge-correctness bug, which couples this to
+    the write-side atomicity family (standing rule 23, W1-T206).
+  acceptance:
+    - claim: "a remudero-review success status on the head with NO corresponding ledger verdict record arms nothing"
+      proof: "unit test: seeded forged status, arm declines"
+    - claim: "a ledgered passing verdict for the head arms even with the status read stubbed unavailable"
+      proof: "unit test"
+    - claim: "a resumed pass in a fresh process arms from the prior pass's ledgered verdict for an unchanged head, with no in-memory state"
+      proof: "unit test: seeded ledger record, no in-memory state"
+    - claim: "a ledgered verdict for a DIFFERENT sha does not arm the current head"
+      proof: "unit test"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§12", "P22"]
+  files: [src/run-task.ts, src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 after a read-only arm-path recon. Citations verified at origin/main a18fdeb rather
+    than assumed, and the recon corrected two things a reader would otherwise get wrong: there are SEVEN arm
+    sites (not one), and FOUR of them arm without consulting the review result at all.
+    NO BLOCKING FLOW FOUND: the recon looked for a legitimate path arming on a status this orchestrator did not
+    write - an operator hand-post or an external re-post with no ledger record to key off. None exists.
+    `rmd review` posts through the same judge and writes the same review.posted record, so the ledger-keyed
+    decision covers the operator path too.
+    COUPLES TO W1-T228 (status write-integrity). That task hardens the channel as a DISPLAY. This one removes
+    the channel from the DECISION. Both are wanted: one stops the board lying to the operator, the other stops
+    a lie merging code."
+- id: W1-T228
+  title: "the review status channel is last-write-wins across uncoordinated posters - a CAPPED success overwrote an executed failure, and a status was written 85s after merge"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OBSERVED 2026-07-21 across three PRs. Head 833561d of PR 449 took SEVEN remudero-review writes in
+    one day, oscillating failure to success and back with no intervening push. Two of them are the shape that
+    matters: an executed verdict at 18:02:31 reporting 2 of 6 proofs executed and FAILED, then a keyword-only
+    CAPPED success at 18:10:42 reporting 0 of 6 executed. Weaker evidence overwrote stronger evidence on an
+    identical SHA, and the channel kept the later write.
+    A THIRD WRITE LANDED AT 18:16:20, roughly 85 seconds AFTER the PR merged at 18:14:55. The channel accepts
+    writes against a closed lifecycle.
+    PRs 452 and 479 showed the same failure-to-success flip on unchanged heads the same afternoon. Three
+    instances, one mechanism: multiple posters, no precedence rule, no serialization, last write wins.
+    THIS IS HARDENED REGARDLESS OF THE ARM PATH. A companion filing moves the arm decision off this channel and
+    onto the orchestrator's own ledgered verdict, which removes the channel from the MERGE path. It does not
+    make a lying channel harmless: the posted status is what branch protection reads, what the board renders,
+    and what an operator opens a PR to see. A display that reports 0 of 6 proofs executed when 2 of 6 ran and
+    failed still misleads the person deciding whether to intervene."
+  design: |
+    ONE POST SITE ENFORCES THREE RULES. All three belong at the single writer (postReviewStatus and its caller),
+    never spread across callers - a rule a caller can forget to apply is a rule that will be forgotten.
+    (i) PRECEDENCE: a keyword-only or CAPPED verdict never overwrites an executed-evidence verdict for the same
+    SHA. Executed may overwrite executed - a later real run supersedes an earlier one, which is how a fix rung
+    is supposed to work. The asymmetry is deliberate: evidence outranks its absence, and only in that direction.
+    (ii) LIFECYCLE: no status writes to a merged or closed PR. Refuse, and ledger the refusal - a write arriving
+    after merge is a signal about a live process nobody is tracking, and swallowing it silently loses that.
+    (iii) SERIALIZATION: per-PR, via the O_EXCL lock pattern this codebase already uses for the inflight and
+    drain locks. VERIFY that pattern from source and reuse it rather than writing a second locking discipline.
+    READ BEFORE WRITE, AND STATE THE RACE HONESTLY. Precedence needs the current status, so the writer must
+    fetch then decide then write. That is itself a race; the per-PR lock is what closes it. An implementation
+    with precedence but no lock has narrowed the window rather than closed it, and should not claim otherwise.
+    EVERY ATTEMPT IS LEDGERED, including refused ones. The reason this defect took a day to characterise is
+    that the channel keeps only the winner. A refused write that leaves no trace is the same blindness in a
+    new place.
+  acceptance:
+    - claim: "a CAPPED success posted over an executed_fail on the SAME SHA is refused, and the prior status is left intact"
+      proof: "unit test: refused post, prior status intact"
+    - claim: "a post to a merged or closed PR is refused and the refusal is ledgered"
+      proof: "unit test with seeded merged state"
+    - claim: "N concurrent posters on one PR serialize to a precedence-consistent final state, with every attempt ledgered including the losers"
+      proof: "unit test: concurrent attempts, single winner, every attempt ledgered"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "§12"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 from the verdict-oscillation incident. Fixtures: PR 449 head 833561d (seven writes,
+    CAPPED-over-executed at 18:02:31 to 18:10:42, post-merge write at 18:16:20), PRs 452 and 479 (same-SHA
+    failure-to-success flips).
+    RELATED, NOT DUPLICATE: W1-T227 narrows proof runs so the timeout race fires less often. That reduces how
+    frequently a CAPPED verdict is produced at all. It does not make the overwrite safe, which is this task.
+    COUPLES TO STANDING RULE 23 (write-side atomicity): the per-PR lock here is the same discipline the ledger
+    and status.json tasks owe, applied to the status channel."
+- id: W1-T227
+  title: "the judge runs every name-pattern proof against the FULL test glob, so the same proof coins executed or exec_error depending on machine load"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "MEASURED 2026-07-21 on origin/main. review.ts:333 documents the name-filtered shape as running
+    `node --test --import tsx --test-name-pattern <name> test/**/*.test.ts` - the whole suite, filtered. Node
+    still LOADS every test file before filtering by name, so the cost is the full suite load regardless of how
+    few tests match.
+    THE NUMBERS, taken by hand on a scratch clone of main: a narrowed run of one W1-T182 proof against
+    test/status.test.ts alone completes in 0.2 SECONDS. The same two files whole are 1.51s (status, 94 tests)
+    and 4.72s (board, 36 tests). A full-glob load is roughly 22s on an idle machine, against
+    DEFAULT_PROOF_TIMEOUT_MS of 30_000 (review.ts:538).
+    THAT MARGIN IS THE DEFECT. Twenty-two seconds against a thirty-second cap leaves no headroom on a machine
+    running workers. The same proof, unchanged, coins executed_pass on an idle host and exec_error on a loaded
+    one - and exec_error DEGRADES to the keyword floor, which is how one SHA reports 0/6 proofs executed in one
+    pass and 2/6 in another. That oscillation was observed on PR 449 the same day, and it is not a flake in the
+    tests: it is a timeout race in the harness that runs them.
+    THE PROOFS THEMSELVES ARE SOUND. All six dialect proofs across W1-T182 and W1-T184 were re-run narrowed on
+    main and every one is EXECUTED-PASS against a test named verbatim after its own acceptance criterion. The
+    contract works. Only its invocation is too expensive to be reliable."
+  design: |
+    RESOLVE CANDIDATE FILES FIRST, THEN RUN ONLY THOSE. Take a distinctive fixed-string fragment of the pattern,
+    grep test/ for it (fixed-string, never regex - a pattern body is architect prose and contains characters a
+    regex would misread), and run node --test against the matched file or files alone.
+    ZERO CANDIDATES CHANGES NOTHING. If no file matches, the existing behaviour stands: the run reports only the
+    file wrapper, nameFilteredOutcome's wrapper filter finds no real result, and the proof fails as a zero-match
+    (review.ts:641-653). Narrowing is an optimisation of the executed path, never a new way to pass.
+    TIMEOUT STAYS exec_error, BUT STOPS BEING SILENT. Keep the 30s cap and the exec_error mapping. Add the
+    invocation and the measured wall time to what is logged, so the next time a proof coins differently on two
+    passes an operator can see which one timed out instead of inferring it from a verdict diff.
+    VERIFY THE GLOB CLAIM FROM SOURCE before building. This task cites review.ts:333 as documentation of the
+    invocation shape - read the actual argv construction and correct the citation if the code differs from its
+    comment.
+  acceptance:
+    - claim: "a proof matching tests in exactly one file executes against only that file"
+      proof: "unit test: built argv contains the single file, not the glob"
+    - claim: "no name-pattern invocation carries the full glob"
+      proof: "unit test on the command builder"
+    - claim: "zero-candidate patterns still fail as zero-match"
+      proof: "unit test: nameFilteredOutcome path unchanged"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21. Measurements taken by hand on a scratch clone of origin/main a9ef3b9, not estimated:
+    0.2s narrowed, 1.51s and 4.72s whole-file, against a 30s cap.
+    THIS IS THE HARNESS HALF of the same-SHA proof_exec oscillation. The verdict-write half - a CAPPED result
+    overwriting an executed one - is filed separately, because narrowing the runs reduces how often the race
+    fires without making the overwrite safe."
+- id: W1-T229
+  title: "a capped verdict with ZERO proofs executed still arms auto-merge for any non-tdd:strict task - prose is the default merge floor"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "RECON R-2, and recon T1-AC3. A CAPPED verdict means zero proofs were executed and the pass rests
+    entirely on keyword coverage - a claim, never evidence. Today that still arms auto-merge unless the task is
+    marked tdd:strict, and tdd:strict is not the default. So the DEFAULT merge floor for this system is prose.
+    THE CEILING IS STRONG AND THE FLOOR IS NOT. Executed proofs, the awareness surface, the ratchets and the
+    review judge are all real, and on a tdd:strict task they bind. The recon's summary of the gap is exact: the
+    ceiling is strong, the floor is prose, and most work rides the floor.
+    THIS SESSION SUPPLIED THE FIXTURES WITHOUT MEANING TO. Every remudero-review verdict posted by hand on
+    2026-07-21 came back CAPPED at 0 proofs executed, because worktree materialization was unavailable, and
+    those PRs armed and merged on that basis. The mechanism is not hypothetical and it is not rare - it was the
+    normal case for a full day of merges."
+  design: |
+    decideAutoMergeArm RETURNS arm:false FOR A CAPPED VERDICT REGARDLESS OF TDD TIER. One conditional, at the
+    decision function rather than at its callers, so every arm point inherits it - Phase-1 enumeration found
+    seven distinct armAutoMerge call sites, and a rule applied per-caller would be applied per-caller wrong.
+    VERIFY THE PLAN-ONLY CARVE-OUT SURVIVES. W1-T205 carries the operator's standing rider: a plan-only PR is
+    STRUCTURALLY capped, because the task it files has no code and therefore no executable proof. If this
+    change makes capped-never-arms unconditional without that exemption, every retro, approve and filing PR
+    stalls forever. Read W1-T205 before implementing, and treat its falsifier as binding here.
+    EXPECT THIS TO BITE IMMEDIATELY, AND SIZE FOR IT. Once capped stops arming, work whose proofs cannot execute
+    stops merging - which is the point, and which is also a throughput cliff if proof execution is unreliable.
+    W1-T227 (narrow the proof runs so they stop timing out) is the task that makes this survivable. Sequence
+    accordingly rather than landing this into a harness that coins exec_error under load.
+  acceptance:
+    - claim: "decideAutoMergeArm with a capped verdict and tddStrict false returns arm false"
+      proof: "unit test: case added to test/review.test.ts"
+    - claim: "a plan-only PR still arms under the raised floor, so the plan lane does not stall"
+      proof: "unit test: case added to test/review.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "P22"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21. Recon R-2 / T1-AC3.
+    THE PLAN-ONLY CARVE-OUT IS NOT OPTIONAL and is carried as the second criterion rather than left to the
+    implementer to remember - W1-T205 records the operator's rider verbatim, and a floor raised without it
+    halts every machine-emitted plan PR.
+    SEQUENCING: land W1-T227 first. Raising the floor while the proof harness still times out under load turns
+    an evidence gate into a throughput stop."
+- id: W1-T231
+  title: "the review prompt still tells the worker to POST the status the deny-floor now refuses - prompt and enforcement disagree"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "W1-T203 closed the forge surface at the ENFORCEMENT layer and left the INSTRUCTION untouched.
+    buildReviewPrompt still hands every review worker a literal command to post the gating status
+    (src/lib/review.ts:1406-1408, verified on main at a18fdeb):
+      gh api -X POST repos/<owner>/<repo>/statuses/<headSha> -f context=<ctx> -f state=<state> ...
+    and hooks/deny-floor.sh:60-61 then refuses exactly that call, exiting 2 to block the tool use.
+    SO THE SYSTEM ASKS A WORKER TO DO SOMETHING AND THEN STOPS IT. That is not merely untidy. A worker
+    following its instructions burns a turn on a refused call and reads a denial it was never warned about,
+    and any worker NOT spawned under the hook - a different harness, a future runner, a hand invocation -
+    restores the forge surface by doing exactly what the prompt told it to do. The prompt is a second,
+    contradictory source of truth about who may post the merge gate.
+    THE PRECONDITION IS VERIFIED, so removing the instruction breaks nothing. The judge is the authoritative
+    poster (run-task.ts:796-797), the reviewer's semantic outcome travels by REPORT through
+    reviewerOutcome({attempted, subtype, spawnError}) (run-task.ts:790-794), and the floor's proof execution
+    is wired to the PR head so the gate observes repo state whether or not the reviewer ever completed
+    (run-task.ts:799-801). No leg depends on the worker's POST succeeding.
+    ENFORCEMENT PLACEMENT BEATS RULE EXISTENCE - and its converse holds too: an instruction that contradicts
+    enforcement is a rule that will eventually be followed somewhere the enforcement is not."
+  design: |
+    buildReviewPrompt EMITS NO STATUSES-POST INSTRUCTION. Delete the `post` helper and its uses from the
+    rendered prompt. The worker reports its outcome and the orchestrator remains the sole poster.
+    TELL THE WORKER WHAT TO DO INSTEAD, EXPLICITLY. A reviewer that is no longer asked to post needs to know
+    how its verdict reaches the gate - otherwise the prompt is merely quieter, not clearer, and a capable
+    worker may reach for `gh` anyway. State that the orchestrator posts, and that the worker's job ends at
+    reporting.
+    LEAVE THE DENY-FLOOR RULE IN PLACE. This is defence in depth, not a replacement. The hook stays because a
+    prompt is guidance and a hook is enforcement, and W1-T203 exists because guidance is not a gate.
+    KEEP THE ORCHESTRATOR'S OWN POST PATH UNTOUCHED. postReviewStatus is not the target and must keep working;
+    the change is confined to prompt TEXT.
+  acceptance:
+    - claim: "the rendered review prompt contains no statuses POST instruction"
+      proof: "unit test on buildReviewPrompt output"
+    - claim: "the orchestrator's own postReviewStatus path is unchanged and still posts the verdict"
+      proof: "unit test on buildReviewPrompt output"
+  risk: low
+  origin: architect
+  plan_refs: ["§4A", "§5C"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21, last of the post-W1-T203 set. Precondition verified from source rather than assumed:
+    the judge's verdict travels by report and no leg depends on the worker POST, so the instruction can be
+    removed without changing any behaviour the gate relies on.
+    THIS IS THE INSTRUCTION HALF of sole-poster. W1-T203 delivered the ability half - the deny-floor refusal
+    and the arm-time creator.login check. Until both land, the honest description of the system is
+    ability-level only, because the prompt still asks for the forbidden thing.
+    NOTE FOR WHOEVER SEQUENCES THIS: W1-T203's arm-time provenance check is currently INERT in production - it
+    is wrapped in a trustedLogin guard reading REMUDERO_REVIEWER_LOGIN, which is unset on this host. That is a
+    configuration gap, not this task's scope, but it means the deny-floor is presently the only live half of
+    sole-poster."
 - id: W1-T121
   title: QUEUE GOVERNOR — a WIP limit on DISPATCH only; flow control throttles intake, never drainage
     (the 23-open-PR incident)
@@ -455,13 +746,36 @@
       proof: "unit test over the service serve path: given a checkout whose current branch is NOT main, it exits non-zero WITHOUT binding, naming the off-main branch; with the override flag it binds; on main it binds normally — the falsifier being a serve that binds off-main and quietly serves un-shipped code (the exact way an operator gets lied to; the ctrl+C-off-a-branch incident)"
     - claim: "the restart path cannot EADDRINUSE-race — it WAITS for port release (or binds SO_REUSEADDR-safely) so a kill->relaunch does not silently fail to bind"
       proof: "unit/integration test: a kill->immediate-relaunch sequence where the OLD process has not yet released the port does NOT fail with EADDRINUSE — the restart path either WAITS for the port to be released before binding OR binds SO_REUSEADDR-safely and takes over; a relaunch that EADDRINUSE-races into a silent death FAILS (the falsifier — today's sequence: kill+immediate-relaunch raced with no reap wait -> the NEW process died EADDRINUSE into an unread log -> the OLD process kept serving stale code -> the old process eventually exited -> console down with nothing listening)"
+    - claim: "the generated serve plist carries KeepAlive AND ThrottleInterval, so a crash-looping serve is rate-limited rather than relaunching without bound"
+      proof: "unit test on generated plist content"
+    - claim: "plist generation succeeds and references no daemon label or daemon paths with the daemon uninstalled"
+      proof: "unit test"
+    - claim: "the log writer creates serve.log with mode 0600"
+      proof: "unit test on the writer"
   risk: high
   origin: architect
   plan_refs: ["§7", "§9"]
   files: [src/run-task.ts, src/lib/launchd.ts]
   status: queued
   attempts: 0
-  note: "Fixture: the operator ctrl+C'd serve to reclaim his shell twice in one morning. Mirrors rmd daemon-plist
+  note: "AMENDED 2026-07-21 with three lessons from incidents that POSTDATE this filing. Task verified
+    QUEUED first - zero merged PRs carry its Remudero-Task trailer - so amendment is the correct instrument and
+    standing rule 21 does not apply.
+    (i) THROTTLEINTERVAL, not KeepAlive alone. This task predates the R-1 relaunch storm: 438 daemon boots
+    between Jul 19 and Jul 21, one per minute at its worst, because KeepAlive restarts on any nonzero exit and
+    nothing rate-limited it. A serve LaunchAgent generated with KeepAlive and no ThrottleInterval inherits that
+    exact shape. The daemon plist has since been hardened with ThrottleInterval 60 and the generator should
+    emit the same.
+    (ii) DAEMON-INDEPENDENCE IS A REQUIREMENT, not an implementation detail. On 2026-07-21 the daemon was
+    deliberately stopped for containment while the operator still needed the board. If serve supervision
+    references daemon artifacts, or is a daemon child, then stopping the fleet for safety also blinds the
+    operator at exactly the moment they most need to see it. The generated plist must reference no daemon
+    label and no daemon paths, and must install and run with the daemon absent.
+    (iii) LOGS AT 0600. This task says logs to state/serve.log without a mode. R-5 landed after: serve's
+    startup banner prints a token, both bearer tokens were found in a world-readable 0644 serve.log, and the
+    tokens had to be rotated. The banner now prints the read-scope token only, but a token in a world-readable
+    file is the defect standing rule 24 names, so the writer creates the file 0600.
+    ORIGINAL NOTE FOLLOWS. Fixture: the operator ctrl+C'd serve to reclaim his shell twice in one morning. Mirrors rmd daemon-plist
     (W1-T12b / generateLaunchdPlist). Composes W1-T139 (serve), W1-T151 (install-freshness), W1-T143 (line-buffered
     logs). Loading the generated unit is the operator's single step (a --write + a printed load line), not an
     auto-verify criterion — the generator + the two hooks are what this task builds and proves."
@@ -2963,6 +3277,229 @@
     risk:high — it rewrites the row template every section shares, and W1-T156's DOM-stability and accessibility
     criteria are easy to regress silently while 'only changing the layout'. Those existing tests passing
     unmodified is a load-bearing criterion, not a formality."
+- id: W1-T200
+  title: "SKELETON LIFECYCLE (rule-21 follow-up to W1-T154) — skeletons render ONLY before first data arrival; a successful section render REPLACES the whole section with exactly the data, including an honest empty state, never residual placeholders"
+  repo: remudero
+  depends_on: [W1-T154, W1-T183]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR SCREENSHOTS, 2026-07-21 04:52: NOW, NEEDS ME and RECENT each rendered REAL ROWS sitting
+    above PERPETUAL SHIMMER SLOTS. The sections had received their data — actual tasks were listed — and the
+    skeleton placeholders were still there underneath, animating forever.
+    A skeleton is a promise that data is COMING. Left rendered after the data has arrived it becomes a lie about
+    the section's own state: the operator cannot tell whether the list is complete or still filling, so a
+    three-row NOW section reads as 'three so far, more loading' when in fact three is the answer. That is the
+    same class W1-T156 exists to prevent — a surface that misreports its own liveness — expressed as layout
+    rather than as a banner.
+    AN HONEST EMPTY STATE IS PART OF THE CONTRACT, and is the case most likely to be missed: when the data
+    arrives and is EMPTY, the section must say so ('nothing in flight', 'nothing needs you') rather than falling
+    back to skeletons. Skeletons standing in for emptiness is how a quiet fleet reads as a loading fleet, and it
+    is precisely when an operator most wants to know that nothing is wrong.
+    W1-T154 SHIPPED the skeleton and last-snapshot cache; its acceptance covered first-paint speed, not the
+    skeleton's RETIREMENT. That criterion was also certified pre-#414 by keyword coverage, making this a third
+    member of the W1-T188 class after T154's own timing budget and T156's criterion 4 — an acceptance that reads
+    correct, was never executed, and is contradicted by the operator's screen.
+    FILED AS A FOLLOW-UP, NOT AN AMENDMENT: W1-T154 is merged. Standing rule 21 — an amendment to an
+    already-merged task does not re-queue it and spawns nothing."
+  design: |
+    ONE RULE, STATED AS A STATE MACHINE: a section is in exactly one of PRE-FIRST-DATA (skeleton), HAS-DATA
+    (exactly the rows), or HAS-DATA-EMPTY (an honest empty message). There is no state in which skeleton markup
+    and data markup coexist, and the transition out of skeleton is one-way per section until a reload.
+    REPLACE THE SECTION, DO NOT APPEND TO IT. The observed defect is consistent with rendering data INTO a
+    container that still holds its placeholders — so the successful render must clear the container, not add to
+    it. VERIFY the actual mechanism from source before assuming; the bug may equally be a skeleton rendered by a
+    sibling path that the data render never touches.
+    COORDINATION — W1-T183 IS IN FLIGHT AND REBUILDS THESE SECTIONS. The density/IA rewrite replaces the row
+    template for every section, which is exactly the markup this task must correct. Do NOT build against
+    today's DOM: verify W1-T183's LANDED markup first and target the real successor. If W1-T183 has not merged
+    when this is dispatched, the correct action is to wait rather than to fix markup that is about to be
+    replaced — that is why it is a hard dependency rather than a note.
+    PRESERVE W1-T156's DOM STABILITY. Clearing and replacing a section naively destroys node identity and an
+    active text selection, which T156's shipped tests already encode as falsifiers. The replacement must go
+    through the existing reconciliation path, not innerHTML.
+  acceptance:
+    - claim: "no skeleton renders in a section after that section's first successful data render"
+      proof: "unit/DOM test: after a section receives data, the rendered section contains ZERO skeleton/placeholder nodes. FALSIFIER, operator screenshots 2026-07-21 04:52: NOW, NEEDS ME and RECENT each showed real rows above perpetual shimmer slots — the data had arrived and the placeholders were still animating underneath"
+    - claim: "an EMPTY successful result renders an honest empty state, never skeletons"
+      proof: "unit/DOM test: a section whose data arrives EMPTY renders an explicit message ('nothing in flight' / 'nothing needs you') and no placeholder nodes. FALSIFIER: falling back to skeletons on empty makes a quiet fleet read as a loading fleet, which is the reading an operator is least able to distinguish and most needs to trust"
+    - claim: "skeleton and data markup NEVER coexist in one section"
+      proof: "unit/DOM test across the three sections: at every point in a seeded load sequence the section is in exactly one of pre-first-data, has-data, or has-data-empty. FALSIFIER: a section holding both tells the operator the list may still be filling, so a complete three-row NOW section reads as 'three so far'"
+    - claim: "the replacement preserves W1-T156's DOM stability — node identity and active selection survive"
+      proof: "the existing W1-T156 tests in test/serve.live-state.test.ts continue to pass unmodified: an unchanged row keeps DOM identity across an update and an active text selection survives. FALSIFIER: clearing a section with innerHTML destroys both, which those tests already encode as falsifiers — the replacement must go through the existing reconciliation path"
+  risk: high
+  origin: architect
+  plan_refs: ["§7"]
+  files: [src/lib/serve.ts, test/serve.live-state.test.ts]
+  status: queued
+  attempts: 0
+  note: "RULE 21 FOLLOW-UP to the merged W1-T154, which shipped the skeleton but whose acceptance covered
+    first-paint SPEED rather than the skeleton's RETIREMENT.
+    HARD dependency on W1-T183 is deliberate and is a coordination constraint, not a formality: T183 was IN
+    FLIGHT when this was filed and rebuilds the row template for every one of these sections. Building against
+    today's DOM would target markup that is about to be replaced. Verify T183's landed markup first.
+    THIRD member of the W1-T188 class — an acceptance certified pre-#414 by keyword coverage and contradicted by
+    the operator's screen, after T154's own timing budget and T156's criterion 4.
+    risk:high — graded UP from medium after rmd lint-plan flagged the serve/serve.live-state span. Recorded as a
+    regrade with its reason rather than a workaround: this modifies the section render path that W1-T183 is
+    CONCURRENTLY rebuilding, so the coordination risk is real and not merely a filename artifact. The dangerous
+    direction remains a naive clear-and-rebuild that regresses W1-T156's node identity and selection survival,
+    which has its own criterion. (The flag itself is partly a linter artifact — concern is derived from filename
+    stem — but the tests belong beside T156's own lifecycle tests, so relocating them would be the dishonest fix.)"
+- id: W1-T222
+  title: "reaching a task's detail must not mean leaving its row - clicking a row expands a detail card INLINE beneath it, retiring bottom-panel journey navigation"
+  repo: remudero
+  depends_on: [W1-T183]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR FEEDBACK PLUS A RESEARCH PASS, 2026-07-21. The console's current journey affordance
+    navigates to a bottom panel, which means the operator loses the row they were looking at in order to
+    learn about it. In a list whose whole purpose is comparison - which task is stuck, which is oldest, which
+    needs me - navigating away from the row to read its detail defeats the list.
+    THIS IS A RULE-21 SUCCESSOR TO W1-T158, NOT AN AMENDMENT. W1-T158 shipped the panel placement this task
+    retires, and it is DONE - verified at filing that a merged PR carries its Remudero-Task trailer - so
+    standing rule 21 requires a successor task rather than an edit to shipped work. Retiring a shipped
+    decision is exactly the case the rule exists for.
+    DETAILS ON DEMAND AT FOUR DEPTHS. This task is one layer of a single coherent information architecture,
+    not a standalone feature: an overview strip (W1-T159), section summaries (W1-T223), dense rows (W1-T183),
+    an inline drill (this task), and a full journey lazy-loaded inside the drill. Each layer answers a
+    different question at a different cost, and they only work if they compose. AN IMPLEMENTER MUST READ THE
+    SIBLING TASKS' CRITERIA BEFORE BUILDING - these were written together and can collide if built in
+    isolation."
+  design: |
+    THE WHOLE ROW IS THE TRIGGER, with a right-edge chevron as the visible affordance whose direction flips
+    on state. A large target beats a small one, and the chevron exists so the row LOOKS expandable rather
+    than requiring the operator to discover that it is.
+    THE CARD OPENS INLINE, DIRECTLY BELOW ITS OWN ROW. Never a navigation, never a scroll-away. The row stays
+    exactly where it was, and its neighbours stay comparable. Re-click collapses.
+    CARD CONTENT: status, phase, elapsed and spend, PR and issue links, recent ledger events, and the
+    available actions. Actions RENDER PER AUTH SCOPE - a read-only bookmark shows no write affordances at
+    all, rather than showing them and failing on click. That coordinates with W1-T202, which is where the
+    auth model itself is decided, and it inherits standing rule 22: a surface owes the reader which state it
+    is showing, and an action the viewer cannot take must not be rendered as available.
+    THE FULL JOURNEY LAZY-LOADS INSIDE THE EXPANSION on demand. It is the fourth and deepest layer, and it
+    must not be fetched merely because a card opened.
+    DETAIL FETCHES ON EXPAND, WITH A W1-T200-COMPLIANT SKELETON - pre-data only, cleared on render, never
+    left standing as decoration. A skeleton that outlives its data is the exact defect W1-T200 exists to fix.
+    DEEP-LINK VIA ?task=<id>, which opens with that row expanded and scrolled into view. This REPLACES the
+    bottom-panel anchor as the addressable target for a single task.
+    KEYBOARD AND ASSISTIVE PARITY: Enter and Space toggle, aria-expanded reflects state, and focus is
+    RETAINED across the toggle rather than being dropped to the document.
+    DOM-STABILITY REACHES INTO EXPANSIONS - W1-T156's doctrine extended, and this is the half most likely to
+    be missed. A background SSE or poll update must not collapse an open expansion, steal focus from inside
+    it, destroy a selection inside it, or jump the viewport. W1-T156 is DONE, so this obligation is carried
+    HERE rather than added there. VERIFY from source how T156 achieved stability for rows before designing
+    it for expansions - the mechanism should be extended, not reinvented beside it.
+  acceptance:
+    - claim: "reaching a task's detail requiring the operator to scroll away from its row FAILS - the detail opens inline directly beneath the row that triggered it"
+      proof: "unit test: test/serve.detail-journey.test.ts"
+    - claim: "expanding or collapsing a card causing a viewport jump FAILS - the triggering row stays put"
+      proof: "unit test: test/serve.detail-journey.test.ts"
+    - claim: "a background SSE or poll update collapsing an OPEN expansion, stealing focus from inside it, or destroying a selection inside it FAILS"
+      proof: "unit test: test/serve.live-state.test.ts"
+    - claim: "the journey affordance navigating to a bottom panel after this lands FAILS - the panel route is retired rather than left beside the inline one"
+      proof: "unit test: test/serve.detail-journey.test.ts"
+    - claim: "a read-only bookmark renders NO write affordances inside the card, rather than rendering them and failing on click"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "?task=<id> opens with that row expanded and scrolled into view, and re-click collapses it"
+      proof: "unit test: test/serve.detail-journey.test.ts"
+    - claim: "Enter and Space toggle the row, aria-expanded reflects state, and focus is retained across the toggle"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "the detail skeleton appears only before data and is cleared on render, never left standing"
+      proof: "unit test: test/serve.first-paint.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/serve.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 from operator feedback plus a research pass. VERIFIED FIRST, per the operator's
+    instruction: W1-T183 is IN FLIGHT (PR 466 open), so this is filed as a coordinated FOLLOW-ON behind it
+    rather than as an amendment to a task mid-flight. W1-T158 and W1-T156 are both DONE - each verified by a
+    merged PR carrying its trailer - so the panel retirement and the DOM-stability extension are carried here
+    as successor obligations under standing rule 21, never as edits to shipped work.
+    ONE COHERENT IA WITH W1-T223, W1-T159 and W1-T183: overview strip, section summaries, dense rows, inline
+    drill, full journey - details on demand at four depths. Read the siblings' criteria before building.
+    SEQUENCING, per the operator's standing decision: this sits in the console feature block BEHIND the
+    safety head (W1-T220, W1-T203 and the write-atomicity family lead), ordered after W1-T183's successor
+    state and W1-T200, ahead of W1-T159 and W1-T184.
+    NOT YET SEQUENCED IN FILE ORDER, stated plainly because it has caught this project repeatedly: this task
+    is a SHARD, and a shard sorts after every task in tasks.yaml, so filing it does not schedule it. It needs
+    promoting into the console block once the in-flight plan PRs land."
+- id: W1-T223
+  title: "a collapsed console section must still inform - every section collapses, and its header carries an always-visible one-line summary from the same projection as its rows"
+  repo: remudero
+  depends_on: [W1-T183]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "OPERATOR FEEDBACK PLUS A RESEARCH PASS, 2026-07-21. The console's sections are all-or-nothing:
+    everything is visible, so nothing is prioritised, and a long RECENT or EVERYTHING ELSE pushes the
+    sections that matter off the screen. Collapsing alone would trade one problem for a worse one - a
+    collapsed section that shows nothing is a section the operator has to open to learn whether it needed
+    opening.
+    THE SUMMARY HEADER IS THE WHOLE POINT, not a decoration on a collapse feature. A collapsed section must
+    still answer its own question: NOW says how many are running and how old the oldest is, NEEDS ME says how
+    many are open and how old the oldest is, UP NEXT names the next task id, RECENT says how many landed
+    today and how long ago the last one was. That is enough to decide whether to expand, which is the only
+    decision a collapsed section needs to support.
+    COUNTS COME FROM THE SAME PROJECTION AS THE ROWS - never a second derivation. This is standing rule 22
+    applied to a summary: a header claiming three items over a list showing four is a surface disagreeing
+    with itself, and the operator has no way to know which is lying. The W1-T181 outage (merged 0 of 160 with
+    every task queued) is what a second, disagreeing derivation looks like when it fails."
+  design: |
+    WHOLE HEADER IS THE TRIGGER, with a chevron affordance, matching W1-T222's row interaction so the console
+    has ONE expand gesture rather than two that differ by region.
+    COLLAPSE STATE PERSISTS ACROSS RELOADS, client-side. Standing rule 24 applies and is not incidental here:
+    persisted UI state must contain NO credential. Collapse state is a layout preference and nothing more.
+    DEFAULTS THAT RESPECT ATTENTION. NEEDS ME auto-expands when it is non-empty, because that is the section
+    the console exists to surface. When a NEEDS ME item arrives while the section is COLLAPSED, its header
+    carries emphasis - otherwise collapsing becomes a way to silently miss the thing most worth seeing, which
+    would make the feature actively harmful. Empty sections default collapsed with an HONEST empty summary,
+    the words nothing needs you rather than a zero that reads like a load failure.
+    NEVER A SKELETON IN A HEADER (W1-T200). A summary with no data yet says so honestly. A skeleton in a
+    collapsed header is indistinguishable from a hung fetch, and W1-T200 exists because a skeleton that
+    outlives its data misleads.
+    ONE COHERENT IA - read the siblings before building. Overview strip (W1-T159), section summaries (this
+    task), dense rows (W1-T183), inline drill (W1-T222), full journey inside the drill. Four depths of
+    details-on-demand. The failure mode if these are built in isolation is duplication: a strip, a header and
+    a row each deriving the same count three ways, which is precisely what the third criterion below forbids.
+  acceptance:
+    - claim: "a collapsed section whose header shows no count or summary FAILS - a collapsed section still answers its own question"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "collapse state lost on reload FAILS, and the persisted state contains no credential"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "a header summary disagreeing with its own expanded rows FAILS - the count comes from the same projection as the rows, never a second derivation"
+      proof: "unit test: test/serve.live-state.test.ts"
+    - claim: "a NEEDS ME item arriving while that section is collapsed with NO header emphasis FAILS - collapsing must not become a way to silently miss it"
+      proof: "unit test: test/serve.live-state.test.ts"
+    - claim: "NEEDS ME auto-expands when non-empty, and an empty section defaults collapsed with an honest empty summary rather than a skeleton or a bare zero"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "the header expand gesture matches the row expand gesture, so the console has one interaction rather than two that differ by region"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/serve.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21 from operator feedback plus a research pass. VERIFIED FIRST, per the operator's
+    instruction: W1-T183 is IN FLIGHT (PR 466 open), so this is a coordinated FOLLOW-ON behind it rather than
+    an amendment to a task mid-flight. W1-T158 is DONE (merged PR carries its trailer), so this is a new task
+    under standing rule 21 rather than an edit to it.
+    ONE COHERENT IA WITH W1-T222, W1-T159 and W1-T183 - overview strip, section summaries, dense rows, inline
+    drill, full journey. Read the siblings' criteria before building so the layers compose rather than
+    collide. The specific collision risk here is three surfaces deriving the same count three ways.
+    SEQUENCING, per the operator's standing decision: console feature block BEHIND the safety head (W1-T220,
+    W1-T203 and write-atomicity lead), ordered after W1-T183's successor state and W1-T200, beside W1-T222,
+    ahead of W1-T159 and W1-T184.
+    NOT YET SEQUENCED IN FILE ORDER: this is a SHARD and a shard sorts after every task in tasks.yaml, so
+    filing it does not schedule it. It needs promoting into the console block once the in-flight plan PRs
+    land."
 - id: W1-T184
   title: "LEDGER-FIRST RENDERING — RECENT becomes an activity feed sourced from the LOCAL ledger (merges, verdicts, fix outcomes, escalations, spend), NOW rows carry live per-run spend and turns, and GitHub DECORATES rather than gates: the feed reads identically during a GitHub outage"
   repo: remudero

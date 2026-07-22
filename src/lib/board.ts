@@ -26,9 +26,18 @@
  */
 
 import type { ServerResponse } from "node:http";
-import type { Plan, TaskRisk } from "./plan.js";
+import type { Plan, Task, TaskRisk } from "./plan.js";
 import { TASK_STATUSES } from "./plan.js";
-import { deriveStatus, projectPlan, readLedgerLines, type DeriveDeps, type StatusProjection } from "./status.js";
+import {
+  createLedgerTailCache,
+  deriveStatus,
+  projectPlan,
+  readLedgerLines,
+  readLedgerTail,
+  type DeriveDeps,
+  type LedgerTailCache,
+  type StatusProjection,
+} from "./status.js";
 import type { Route, SseRoute, SseSend } from "./service.js";
 
 /** Ledger poll pace for the SSE stream — comfortably under the 2s acceptance budget. */
@@ -53,6 +62,18 @@ export interface BoardRow extends StatusProjection {
   risk: TaskRisk;
   /** ISO-8601 `ts` of the last ledger line naming this task; absent when the task has no ledger line at all. */
   lastActivityAt?: string;
+  /**
+   * LIVE ACCUMULATED SPEND (W1-T184), summed from `cost_usd` on every `implement.done`/
+   * `fix.done` ledger line belonging to this task's CURRENT run (since its latest
+   * `run.start`). Present only alongside {@link StatusProjection.phase} (an in-flight run) —
+   * a terminal task's total cost lives on its `verdict` line instead (surfaced via the task
+   * card's run history, W1-T158), not here. VOLATILE: ticks upward as further lines are
+   * appended, exactly like `elapsedMs` — the shell's flip-detector excludes it from
+   * "did this task's status change" the same way it already excludes `elapsedMs`.
+   */
+  liveSpendUsd?: number;
+  /** LIVE ACCUMULATED TURN COUNT (W1-T184) — the `num_turns` counterpart to {@link liveSpendUsd}. */
+  liveTurns?: number;
 }
 
 /** GET /v1/status's body — one {@link BoardRow} per plan task, as of `generated_at`. */
@@ -66,20 +87,20 @@ export interface BoardDeps extends DeriveDeps {
 }
 
 /**
- * The last ledger line naming each task id — its append INDEX (recency ordering) and `ts`
- * (the board's `lastActivityAt`). ONE scan, shared by {@link computeBoardSnapshot} (which wants
- * the timestamp) and {@link computeRecentOutcomes} (which wants the index), rather than
- * duplicating the ledger walk in each — factored out per W1-T157's design note.
+ * The `ts` of the last ledger line naming each task id (the board's `lastActivityAt`, W1-T157) —
+ * factored out so {@link computeBoardSnapshot} doesn't duplicate this scan inline. (W1-T184: the
+ * RECENT feed used to share this same helper for its own recency ordering via `computeRecentOutcomes`;
+ * that function is gone — {@link computeRecentActivity} orders the feed by ledger-append order
+ * directly, via its own {@link RecentActivityState.scannedLines} tail cursor, not this map.)
  */
 interface LedgerActivity {
-  idx: number;
   ts?: string;
 }
 function lastActivityByTask(lines: Array<Record<string, unknown>>): Map<string, LedgerActivity> {
   const out = new Map<string, LedgerActivity>();
-  lines.forEach((line, i) => {
+  lines.forEach((line) => {
     if (typeof line.task_id === "string") {
-      out.set(line.task_id, { idx: i, ts: typeof line.ts === "string" ? line.ts : undefined });
+      out.set(line.task_id, { ts: typeof line.ts === "string" ? line.ts : undefined });
     }
   });
   return out;
@@ -94,9 +115,17 @@ function lastActivityByTask(lines: Array<Record<string, unknown>>): Map<string, 
  * a {@link BoardRow} (see that interface's note for why the join lives here, not on the shared type).
  */
 export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
-  const byId = projectPlan(deps.plan, deps);
+  // READ THE LEDGER ONCE (W1-T184, extending W1-T187's same discipline): this function used
+  // to read+parse the ledger TWICE — once inside `projectPlan` (itself already amortized to a
+  // single read across every task, per that task's own header) and once more here for
+  // `lastActivityByTask`. `liveRunSpend` below needs the same lines a third time. Read once and
+  // hand `projectPlan` an overriding `readLedger` so its own internal amortization sees the SAME
+  // already-parsed array, rather than re-reading a file that cannot have changed mid-call.
   const readLedger = deps.readLedger ?? readLedgerLines;
-  const lastActivity = lastActivityByTask(readLedger(deps.ledgerPath));
+  const lines = readLedger(deps.ledgerPath);
+  const effectiveDeps: BoardDeps = { ...deps, readLedger: () => lines };
+  const byId = projectPlan(deps.plan, effectiveDeps);
+  const lastActivity = lastActivityByTask(lines);
   const tasks: BoardRow[] = [...byId.values()].map((p) => {
     // Every projection's taskId is one of the plan's own tasks (projectPlan derives from
     // deps.plan.tasks), so this lookup is always present — the join is total, never partial.
@@ -104,9 +133,138 @@ export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
     const row: BoardRow = { ...p, title: task.title, risk: task.risk };
     const ts = lastActivity.get(p.taskId)?.ts;
     if (ts) row.lastActivityAt = ts;
+    if (p.phase) {
+      const spend = liveRunSpend(lines, p.taskId);
+      if (spend) {
+        row.liveSpendUsd = spend.spendUsd;
+        row.liveTurns = spend.turns;
+      }
+    }
     return row;
   });
   return { generated_at: new Date().toISOString(), tasks };
+}
+
+/**
+ * LIVE ACCUMULATED SPEND/TURNS (W1-T184): sum `cost_usd`/`num_turns` over every
+ * `implement.done`/`fix.done` line for `taskId` SINCE its latest `run.start` — mirroring {@link
+ * deriveRunState}'s OWN reset rule (task_id + `run.start`/`verdict`, never `run_id`), not a
+ * separate narrower one. A prior version of this scan required every summed line to carry the
+ * SAME `run_id` as the `run.start` line — which silently dropped every cold fix-rung dispatch
+ * (rmd sweep's `dispatchFix`/rmd fix's bootstrap, run-task.ts's `buildSweepEffects`): those stamp
+ * their `fix.dispatch`/`fix.done` lines with the OUTER sweep/fix invocation's OWN pseudo `run_id`
+ * ("SWEEP-<ts>"/"FIX-<ts>"), never the original run's — while still carrying the task's REAL
+ * `task_id`, which is exactly what {@link deriveRunState} keys its own inFlight/phase scan on.
+ * The result: a task correctly rendered `phase: "fix-rung"` (in flight) while its live spend
+ * silently stayed frozen at the ORIGINAL run's total, invisible for the whole fix-rung duration —
+ * the exact "tonight's post-merge burn was invisible on an open console" falsifier (two fix
+ * rungs, ~1.24 USD/38 turns then ~1.30 USD/38 turns, ~2.54 USD/76 turns total, every line
+ * present in the ledger as it happened). Deliberately narrow to those two step names (never a
+ * blanket sum of every `cost_usd` field) — `budget.warning`/`verdict` lines log the RUNNING
+ * TOTAL, not an incremental amount, so summing those too would double-count exactly the spend
+ * `implement.done`/`fix.done` already report (verified against run-task.ts's own `log(...)` call
+ * sites, not assumed). Returns undefined only when the task has no run currently in flight — the
+ * phase/inFlight taxonomy above already guarantees one exists whenever this is called.
+ */
+function liveRunSpend(lines: Array<Record<string, unknown>>, taskId: string): { spendUsd: number; turns: number } | undefined {
+  let inFlight = false;
+  let spendUsd = 0;
+  let turns = 0;
+  for (const line of lines) {
+    if (line.task_id !== taskId) continue;
+    if (line.step === "run.start") {
+      inFlight = true;
+      spendUsd = 0;
+      turns = 0;
+      continue;
+    }
+    if (line.step === "verdict") {
+      inFlight = false;
+      continue;
+    }
+    if (!inFlight) continue;
+    if (line.step !== "implement.done" && line.step !== "fix.done") continue;
+    if (typeof line.cost_usd === "number") spendUsd += line.cost_usd;
+    if (typeof line.num_turns === "number") turns += line.num_turns;
+  }
+  return inFlight ? { spendUsd, turns } : undefined;
+}
+
+/**
+ * Memoized {@link computeBoardSnapshot} (W1-T184, the GET /v1/status recompute-cadence
+ * criteria): a recompute (re-deriving every task's status — `projectPlan`'s O(tasks) `gh`/ledger
+ * work) only happens when something the projection actually depends on has changed; an unchanged
+ * input returns the SAME cached snapshot instantly, however many times `.get()` is called. This
+ * is the fix for the 2026-07-20 latency outage (GET /v1/status at 58.7s/54.0s/34.5s, measured
+ * with a ledger polled every {@link DEFAULT_POLL_MS} but never cached across requests). Because
+ * every consumer here is synchronous (the real {@link GitHub} gateways shell `gh` via
+ * `execFileSync`, which blocks Node's single event-loop thread for its whole duration), no two
+ * recomputes can ever be truly concurrent — so this same memo also satisfies "N requests
+ * arriving during a recompute window trigger ONE computation": by construction, every request
+ * whose handler runs while the cache is still valid is a cache hit, and only ONE recompute ever
+ * runs to produce the next one.
+ *
+ * NOT ledger-length-only, and DELIBERATELY NOT time/TTL-based either: a clock-based expiry
+ * either recomputes needlessly often (a TTL short enough to catch a GitHub-only change quickly
+ * defeats the whole point across a burst of poll ticks spaced at or above that TTL) or too
+ * rarely (a TTL long enough to survive a poll burst misses a GitHub-only change for that whole
+ * window) — and either way makes the cache's behavior a function of WALL-CLOCK TIMING, which a
+ * test has no reliable way to pin down. The actual second input `derivePrPrecedence`'s rungs
+ * (b)/(c) depend on is the live {@link GitHub} gateway's OBSERVABLE HEALTH — `readFailed()` —
+ * which can flip with NO new ledger line at all (the gateway itself recovers/fails). So the
+ * cache key is `(ledger line count, readFailed())`: unchanged on BOTH -> cache hit, no matter how
+ * much time passes or how many ticks land; either one changes -> exactly one fresh recompute. A
+ * test proves exactly the GitHub-only case (a GitHub-outage banner that must clear on the
+ * gateway's next successful read, ledger untouched throughout) deterministically, with no sleep.
+ */
+export interface BoardSnapshotCache {
+  get(deps: BoardDeps): BoardSnapshot;
+}
+
+/**
+ * `github.readFailed?.()` guarded (W1-T184 hardening): every OTHER {@link GitHub} method this
+ * module calls into GitHub through is already wrapped where it matters (see
+ * {@link decoratePrTitle}'s own note on why a defensive try/catch is load-bearing here, not
+ * merely tidy) — this ONE call sat outside any guard, so a gateway that throws from
+ * `readFailed()` itself (not merely a fail-soft null/false, the exact malformed-gateway shape
+ * the RECENT feed's own throwing-gateway test already covers for `prByRef`) would blow up the
+ * cache-key computation and 500 the WHOLE /v1/status request rather than degrade one field. Fails
+ * CLOSED (treats an unreadable health signal as "GitHub is having a bad day") rather than open,
+ * since the whole point of `readFailed()` is never to under-report an outage.
+ */
+function safeReadFailed(github: BoardDeps["github"]): boolean {
+  try {
+    return github.readFailed?.() ?? false;
+  } catch {
+    return true;
+  }
+}
+
+export function createBoardSnapshotCache(): BoardSnapshotCache {
+  let cached: { ledgerLen: number; ghFailed: boolean; snapshot: BoardSnapshot } | undefined;
+  // ONE persistent tail cursor for this route's whole lifetime (never reconstructed per request,
+  // mirroring RecentActivityCache/the SSE stream's own `lastLineCount`) — see readLedgerTail's
+  // own doc for why this is the fix for a cache HIT still paying a full ledger re-read+re-parse
+  // just to compute `ledgerLen`, which degraded exactly like the 2026-07-20 GET /v1/status outage
+  // (58.7s/54.0s/34.5s, never improving) as the ledger grew without bound.
+  const tail = createLedgerTailCache();
+  return {
+    get(deps: BoardDeps): BoardSnapshot {
+      const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, tail));
+      const ledgerLen = readLedger(deps.ledgerPath).length;
+      // readFailed() is itself cheap/idempotent here: ghGateway's is a sticky flag read (no `gh`
+      // call), and buildBatchedGithub's own index() is already TTL-cached internally — neither
+      // gateway shells out again just because THIS check asked.
+      const ghFailed = safeReadFailed(deps.github);
+      if (cached && cached.ledgerLen === ledgerLen && cached.ghFailed === ghFailed) return cached.snapshot;
+      // Hand computeBoardSnapshot the SAME already-resolved reader (and, on the default path, the
+      // SAME already-read `lines` array `readLedger` above just produced) rather than letting it
+      // re-resolve `deps.readLedger ?? readLedgerLines` on its own — one read, not two.
+      const snapshot = computeBoardSnapshot({ ...deps, readLedger });
+      cached = { ledgerLen, ghFailed, snapshot };
+      return snapshot;
+    },
+  };
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -114,70 +272,221 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-/** GET /v1/status — the board snapshot, read-scoped. */
+/** GET /v1/status — the board snapshot, read-scoped, memoized per {@link createBoardSnapshotCache}. */
 export function buildStatusRoute(deps: BoardDeps): Route {
+  const cache = createBoardSnapshotCache();
   return {
     method: "GET",
     path: "/v1/status",
     scope: "read",
     handler: (_req, res) => {
-      sendJson(res, 200, computeBoardSnapshot(deps));
+      sendJson(res, 200, cache.get(deps));
     },
   };
 }
 
-// ── GET /v1/recent — the last ~10 merges/blocks, PR-linked (W1-T153's RECENT section) ──────
+// ── GET /v1/recent — the LEDGER-FIRST activity feed (W1-T184, W1-T153's RECENT section) ───────
 //
-// W1-T141's `buildRundown` (drain.ts) renders a rundown ONLY from a just-completed
-// `DrainSummary` — a live in-memory value a single drain run produces, never persisted or
-// queryable after the fact (verified from source, not assumed). RECENT needs a rundown-shaped
-// answer to "what happened lately" from a COLD HTTP request, with no live drain run to ask, so
-// this reuses W1-T141's own outcome vocabulary (`merged`/`blocked`) over data this module
-// already owns: `computeBoardSnapshot`'s per-task terminal status/PR fields, ordered by RECENCY
-// via the ledger's own append order (the last ledger line naming a task is the most recent
-// thing that happened to it) rather than re-deriving a second timeline.
+// FIXTURE 1 (2026-07-20): RECENT used to be sourced from `computeBoardSnapshot`'s GitHub-derived
+// terminal status, so a batched-gateway outage (the W1-T181 ENOBUFS incident) rendered "no
+// recent outcomes yet" over a week containing ~100 merges — the ledger held every one of those
+// merges the entire time. FIXTURE 2 (2026-07-20): a post-merge burn (two fix rungs, ~2.54 USD /
+// 76 turns) was INVISIBLE on an open console even though every event was in the ledger as it
+// happened, because RECENT only ever showed a task's FINAL state, never its per-event spend.
+//
+// THE FIX: RECENT is now an activity FEED over the ledger's own event classes — merges/verdicts
+// (`verdict` lines), fix-rung outcomes (`fix.dispatch`/`fix.done`/`fix.exhausted`), escalations
+// (`escalation.issue_opened`), and spend checkpoints (`implement.done`) — never routed through
+// `deriveStatus`/`projectPlan`'s GitHub-gated precedence rungs at all. GitHub is consulted ONLY
+// to DECORATE a row that already carries a PR link (the PR's title, via the SAME `prByRef` every
+// other caller uses) — a failed/absent decoration marks the row `githubUnavailable`, it never
+// removes it (see {@link decoratePrTitle}).
 
-export type RecentOutcome = "merged" | "blocked";
+export type RecentActivityVerb = "merged" | "verdict" | "fix" | "escalated" | "spend";
 
-/** One RECENT row — a terminal task, PR-linked, in the vocabulary W1-T141's rundown already established. */
-export interface RecentEntry {
+/** One RECENT row: a single ledger EVENT (not a task's final state) — see this section's header. */
+export interface RecentActivityEntry {
   taskId: string;
-  outcome: RecentOutcome;
+  /** The plan task's own title — RECENT names WHAT a row is, not just its id (2026-07-20 operator report). */
+  title: string;
+  verb: RecentActivityVerb;
+  /** ISO-8601 `ts` of the originating ledger line — the feed's relative-timestamp source. */
+  ts: string;
+  /** The originating step's own outcome label (e.g. a `verdict` string, an escalation `class`). */
+  detail?: string;
+  /** Present wherever the originating ledger line carries `cost_usd` (design note: "spend where the ledger has it"). */
+  costUsd?: number;
+  numTurns?: number;
   prNumber?: number;
   prUrl?: string;
+  /** GitHub DECORATION (never a gate) — the PR's title, present only when a read actually resolved it. */
+  prTitle?: string;
+  /** GitHub DECORATION attempted and FAILED for this row's own `prUrl` — the row still renders, ledger-only. */
+  githubUnavailable?: true;
+}
+
+/** Bounded rolling history a {@link RecentActivityCache} holds — large enough that `max` (the
+ *  feed's visible window) is always a small tail slice of it, never the whole thing. */
+const RECENT_ACTIVITY_HISTORY_CAP = 200;
+
+interface RecentActivityState {
+  /** How many ledger lines have already been scanned/classified — the SAME tail-cursor idiom
+   *  {@link buildStatusStream}'s `lastLineCount` already uses, reused here (not reinvented) so a
+   *  render never re-classifies (and never re-fetches GitHub for) a line it has already minted
+   *  an entry from — the "no full re-read/re-derive per render" performance criterion. */
+  scannedLines: number;
+  /** Minted entries, oldest first, capped to {@link RECENT_ACTIVITY_HISTORY_CAP}. */
+  entries: RecentActivityEntry[];
+  /** `run_id` -> its `pr.opened` PR url — carries a run's OWN PR forward onto later lines (e.g.
+   *  `verdict`/`fix.done`) that name no `pr_url` of their own. */
+  prByRun: Map<string, string>;
+  /** The FILE-LEVEL tail cursor {@link readLedgerTail} reads/writes — one layer below
+   *  `scannedLines`' line-level cursor. `scannedLines` alone stops this module from
+   *  re-decorating/re-classifying an already-seen LINE, but every call still paid a full
+   *  `readFileSync`+re-parse of the WHOLE ledger to produce that line array in the first place;
+   *  this is what makes even THAT read O(new bytes), not O(history) — see readLedgerTail's doc. */
+  ledgerTail: LedgerTailCache;
+}
+
+/** Opaque handle a caller holds across requests (one per `buildRecentRoute` instance, mirroring
+ *  {@link BoardSnapshotCache}) — never reconstructed per render, or the tail-cursor is pointless. */
+export interface RecentActivityCache {
+  /** @internal — read/written only by {@link computeRecentActivity}. */
+  state: RecentActivityState;
+}
+
+export function createRecentActivityCache(): RecentActivityCache {
+  return { state: { scannedLines: 0, entries: [], prByRun: new Map(), ledgerTail: createLedgerTailCache() } };
+}
+
+function prNumberFromUrl(url: string): number | undefined {
+  const n = Number(url.match(/\/pull\/(\d+)/)?.[1]);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** GitHub DECORATION (never a gate, W1-T184's central rule): resolve `prUrl`'s title via the
+ *  SAME `prByRef` every other precedence rung already calls — no new GitHub surface. A missing
+ *  title (PR not found, or the gateway simply doesn't carry one) is silent (the row already
+ *  renders fine ledger-only); a gateway that reports `readFailed()` marks the row explicitly,
+ *  per W1-T181's marked-failure signal, so the operator sees "GitHub unreachable" rather than a
+ *  row that merely looks a little sparser than usual. */
+function decoratePrTitle(entry: RecentActivityEntry, deps: BoardDeps): RecentActivityEntry {
+  if (!entry.prUrl) return entry;
+  // FAIL-SOFT BY CONSTRUCTION, not merely by convention: every real gateway's methods are
+  // documented fail-soft (null on error, never a throw), but this decoration is the ONE place
+  // in the codebase where a GitHub read result feeds straight into an HTTP response with no
+  // caller-side derivation layer to absorb a surprise throw. A defensive try/catch here is the
+  // difference between "one row degrades" and "the whole /v1/recent request 500s" — which would
+  // itself reproduce the empty-RECENT fixture this task exists to fix, just via a crash instead
+  // of an empty array. BOTH github calls below (`prByRef` AND `readFailed`) live inside this SAME
+  // try — an earlier version only guarded `prByRef`, so a gateway that throws from `readFailed()`
+  // itself (rather than merely reporting it, fail-soft) still 500'd the whole request and emptied
+  // the feed, uncaught past this function's own return.
+  try {
+    const pr = deps.github.prByRef(entry.prUrl);
+    if (pr?.title) return { ...entry, prTitle: pr.title };
+    if (deps.github.readFailed?.()) return { ...entry, githubUnavailable: true };
+    return entry;
+  } catch {
+    return { ...entry, githubUnavailable: true };
+  }
 }
 
 /**
- * The last `max` merged/blocked tasks, most-recent-first. "Most recent" = the LAST ledger line
- * mentioning that task id (any step) — a task with no ledger line at all (e.g. a yaml-decorated
- * `status: blocked` with no run ever attempted) sorts after every task the ledger has actually
- * seen, never crowding out a task the operator watched happen.
+ * The activity feed's own event classification — ONE ledger line in, at most ONE
+ * {@link RecentActivityEntry} out (or `undefined` for every step name this feed does not
+ * surface). Pure and separate from the stateful scan below so the mapping itself is easy to
+ * audit against the design note's event-class list.
  */
-export function computeRecentOutcomes(deps: BoardDeps, max = 10): RecentEntry[] {
-  const snapshot = computeBoardSnapshot(deps);
-  const readLedger = deps.readLedger ?? readLedgerLines;
-  const lastActivity = lastActivityByTask(readLedger(deps.ledgerPath));
-  const terminal = snapshot.tasks.filter((t) => t.status === "merged" || t.status === "done" || t.status === "blocked");
-  return terminal
-    .map((t) => ({ t, idx: lastActivity.get(t.taskId)?.idx ?? -1 }))
-    .sort((a, b) => b.idx - a.idx)
-    .slice(0, max)
-    .map(({ t }) => ({
-      taskId: t.taskId,
-      outcome: (t.status === "blocked" ? "blocked" : "merged") as RecentOutcome,
-      prNumber: t.prNumber,
-      prUrl: t.prUrl,
-    }));
+function classifyLine(
+  line: Record<string, unknown>,
+  taskId: string,
+  title: string,
+  ts: string,
+  prUrl: string | undefined,
+): RecentActivityEntry | undefined {
+  const prNumber = prUrl ? prNumberFromUrl(prUrl) : undefined;
+  const costUsd = typeof line.cost_usd === "number" ? line.cost_usd : undefined;
+  const numTurns = typeof line.num_turns === "number" ? line.num_turns : undefined;
+  switch (line.step) {
+    case "verdict": {
+      const verdict = typeof line.verdict === "string" ? line.verdict : "unknown";
+      return { taskId, title, ts, verb: verdict === "merged" ? "merged" : "verdict", detail: verdict, costUsd, prUrl, prNumber };
+    }
+    case "fix.dispatch":
+      return { taskId, title, ts, verb: "fix", detail: `dispatched (strike ${String(line.strike ?? "?")})`, prUrl, prNumber };
+    case "fix.done":
+      return { taskId, title, ts, verb: "fix", detail: `done (strike ${String(line.strike ?? "?")})`, costUsd, numTurns, prUrl, prNumber };
+    case "fix.exhausted":
+      return { taskId, title, ts, verb: "fix", detail: `exhausted (${String(line.strikes ?? "?")} strikes)`, prUrl, prNumber };
+    case "escalation.issue_opened":
+      return { taskId, title, ts, verb: "escalated", detail: typeof line.class === "string" ? line.class : undefined, prUrl, prNumber };
+    case "implement.done":
+      return { taskId, title, ts, verb: "spend", costUsd, numTurns, prUrl, prNumber };
+    default:
+      return undefined;
+  }
 }
 
-/** GET /v1/recent — the RECENT section's data, read-scoped. */
+/**
+ * The RECENT activity feed (W1-T184): tails `cache`'s already-scanned position, classifies only
+ * the NEW ledger lines since then (see {@link RecentActivityState.scannedLines}), decorates each
+ * fresh entry with GitHub ONCE at mint time (never re-decorated on a later render — the "avoid
+ * re-fetching GitHub for old, already-seen lines" half of the performance criterion), and returns
+ * the most recent `max`, newest first. GITHUB OUTAGE PARITY: every entry's verb/task/title/PR-
+ * number/spend comes from the ledger alone; a `deps.github` that fails every call still returns
+ * the IDENTICAL entries, just without `prTitle` (and with `githubUnavailable: true` wherever a
+ * PR link exists) — GitHub decorates, it never gates (see {@link decoratePrTitle}).
+ */
+export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCache, max = 20): RecentActivityEntry[] {
+  const state = cache.state;
+  // Default reader is INCREMENTAL (readLedgerTail, keyed off this SAME cache's own persistent
+  // ledgerTail cursor) — an unchanged ledger costs one statSync, and a grown one reads only the
+  // NEW bytes, never the whole file again. `state.scannedLines` below then further limits which
+  // of those (already cheaply-obtained) lines get re-classified/re-decorated — two independent
+  // tail cursors, one at the file-I/O layer, one at the classification layer.
+  const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, state.ledgerTail));
+  const lines = readLedger(deps.ledgerPath);
+  // A shorter ledger than last scanned should never happen (append-only) -- degrade safely by
+  // rescanning from scratch rather than slicing with a negative/nonsensical offset.
+  if (lines.length < state.scannedLines) {
+    state.scannedLines = 0;
+    state.entries = [];
+    state.prByRun = new Map();
+  }
+  const newLines = lines.slice(state.scannedLines);
+  state.scannedLines = lines.length;
+
+  for (const line of newLines) {
+    const runId = typeof line.run_id === "string" ? line.run_id : undefined;
+    if (line.step === "pr.opened" && runId && typeof line.pr_url === "string") {
+      state.prByRun.set(runId, line.pr_url);
+    }
+    const taskId = typeof line.task_id === "string" ? line.task_id : undefined;
+    if (!taskId) continue;
+    const task = deps.plan.byId.get(taskId);
+    if (!task) continue; // a pseudo-id (DAEMON/SWEEP/DRAIN/RETRO/inbox/…), never a real plan task.
+    const ts = typeof line.ts === "string" ? line.ts : new Date().toISOString();
+    const prUrl = typeof line.pr_url === "string" ? line.pr_url : runId ? state.prByRun.get(runId) : undefined;
+    const entry = classifyLine(line, taskId, task.title, ts, prUrl);
+    if (!entry) continue;
+    state.entries.push(decoratePrTitle(entry, deps));
+    if (state.entries.length > RECENT_ACTIVITY_HISTORY_CAP) state.entries.shift();
+  }
+
+  return state.entries.slice(-max).reverse();
+}
+
+/** GET /v1/recent — the RECENT section's data, read-scoped. One {@link RecentActivityCache} per
+ *  route instance (built once, reused by every request), mirroring {@link buildStatusRoute}. */
 export function buildRecentRoute(deps: BoardDeps): Route {
+  const cache = createRecentActivityCache();
   return {
     method: "GET",
     path: "/v1/recent",
     scope: "read",
     handler: (_req, res) => {
-      sendJson(res, 200, { entries: computeRecentOutcomes(deps) });
+      sendJson(res, 200, { entries: computeRecentActivity(deps, cache) });
     },
   };
 }
@@ -202,13 +511,41 @@ export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): Ss
     path: "/v1/status/stream",
     scope: "read",
     subscribe: (send: SseSend) => {
-      const readLedger = deps.readLedger ?? readLedgerLines;
-      let lastLineCount = readLedger(deps.ledgerPath).length;
-      // Prime `lastSent` with EVERY task's current projection (the same baseline GET
-      // /v1/status would return right now), not an empty map — otherwise the first ledger
+      // ONE persistent tail cursor for this connection's whole lifetime (never reconstructed per
+      // tick) — see readLedgerTail's own doc: an unchanged ledger between ticks (the common case
+      // at a 250ms cadence) costs one statSync, not a full re-read+re-parse of the whole file.
+      const tail = createLedgerTailCache();
+      const readLedger = deps.readLedger ?? ((path: string) => readLedgerTail(path, tail));
+      // Hand deriveStatus (via deriveForStream below) the SAME resolved reader, so its own
+      // internal ledger read reuses this tick's already-read `lines` instead of re-resolving
+      // `deps.readLedger ?? readLedgerLines` (a fresh full read) once per task, every tick.
+      const effectiveDeps: BoardDeps = { ...deps, readLedger };
+
+      // LIVE SPEND/TURNS OVER SSE (W1-T184 fix): the SSE payload used to be a bare
+      // `deriveStatus(task, deps)` — never carrying `liveSpendUsd`/`liveTurns` at all, even
+      // though this is the client's PRIMARY low-latency transport (the REST poll is a 3s
+      // fallback/resync). Worse, the client's `ingestProjection` spreads each incoming SSE
+      // payload over the previously-known row, so an SSE flip with no spend fields silently
+      // WIPED whatever spend the last REST poll had shown — the "tonight's burn was invisible"
+      // fixture reproduced by the fix rung's OWN status-changing ledger lines. Enrich the SAME
+      // way `computeBoardSnapshot` does, off the SAME already-read `lines` this tick already has.
+      const deriveForStream = (
+        task: Task,
+        lines: Array<Record<string, unknown>>,
+      ): StatusProjection & { liveSpendUsd?: number; liveTurns?: number } => {
+        const projection = deriveStatus(task, effectiveDeps);
+        if (!projection.phase) return projection;
+        const spend = liveRunSpend(lines, task.id);
+        return spend ? { ...projection, liveSpendUsd: spend.spendUsd, liveTurns: spend.turns } : projection;
+      };
+
+      // Prime `lastSent` with EVERY task's current (enriched) projection (the same baseline
+      // GET /v1/status would return right now), not an empty map — otherwise the first ledger
       // line touching a task would always look like a "flip" even when deriveStatus lands
       // on the exact state the client already has.
-      const lastSent = new Map<string, string>(deps.plan.tasks.map((t) => [t.id, JSON.stringify(deriveStatus(t, deps))]));
+      const primingLines = readLedger(deps.ledgerPath);
+      let lastLineCount = primingLines.length;
+      const lastSent = new Map<string, string>(deps.plan.tasks.map((t) => [t.id, JSON.stringify(deriveForStream(t, primingLines))]));
 
       const tick = () => {
         const lines = readLedger(deps.ledgerPath);
@@ -219,9 +556,11 @@ export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): Ss
         for (const taskId of taskIdsOf(newLines)) {
           const task = deps.plan.byId.get(taskId);
           if (!task) continue; // a ledger line for a task not (or no longer) in the plan.
-          const projection = deriveStatus(task, deps);
+          // Re-derive off the FULL `lines` (not just `newLines`) — liveRunSpend needs the
+          // task's whole current run, and deriveStatus itself always re-reads the ledger too.
+          const projection = deriveForStream(task, lines);
           const serialized = JSON.stringify(projection);
-          if (lastSent.get(taskId) === serialized) continue; // no actual flip — don't spam.
+          if (lastSent.get(taskId) === serialized) continue; // no actual flip (incl. spend) — don't spam.
           lastSent.set(taskId, serialized);
           send("status", projection);
         }

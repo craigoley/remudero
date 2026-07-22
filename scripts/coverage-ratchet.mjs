@@ -56,16 +56,20 @@ export function parseLcovTotals(lcovText) {
 export function evaluateRatchet(actual, baseline, epsilon = 1e-9) {
   const violations = [];
   if (typeof baseline.linesPct === 'number' && actual.linesPct < baseline.linesPct - epsilon) {
+    const delta = actual.linesPct - baseline.linesPct;
     violations.push(
-      `lines coverage ${actual.linesPct.toFixed(2)}% < baseline ${baseline.linesPct.toFixed(2)}%`,
+      `lines coverage ${actual.linesPct.toFixed(2)}% < baseline ${baseline.linesPct.toFixed(2)}% ` +
+        `(delta ${delta.toFixed(2)}pts)`,
     );
   }
   if (
     typeof baseline.branchesPct === 'number' &&
     actual.branchesPct < baseline.branchesPct - epsilon
   ) {
+    const delta = actual.branchesPct - baseline.branchesPct;
     violations.push(
-      `branches coverage ${actual.branchesPct.toFixed(2)}% < baseline ${baseline.branchesPct.toFixed(2)}%`,
+      `branches coverage ${actual.branchesPct.toFixed(2)}% < baseline ${baseline.branchesPct.toFixed(2)}% ` +
+        `(delta ${delta.toFixed(2)}pts)`,
     );
   }
   return violations;

@@ -304,6 +304,38 @@ components:
         issueUrl:
           type: string
 
+    MarkEscalationHandledRequest:
+      type: object
+      description: >
+        POST /v1/escalation/mark-handled's body (W1-T182) -- the NEEDS ME affordance an
+        ESCALATION row (any class: BLOCKED/MANUAL/HARD_STOP/GRILL) actually supports, distinct
+        from ApproveManualRequest's MANUAL-queue check-off: "approve" has no defined verb for an
+        escalation. Closes the named `needs-human`-labeled GitHub issue (src/lib/escalate.ts);
+        the name is deliberately "mark handled", not "approve" or "resolve" -- closing the issue
+        does not, by itself, imply the underlying block is fixed.
+      required:
+        - taskId
+        - issueUrl
+      properties:
+        taskId:
+          type: string
+        issueUrl:
+          type: string
+
+    MarkEscalationHandledResult:
+      type: object
+      required:
+        - ok
+        - taskId
+        - issueUrl
+      properties:
+        ok:
+          type: boolean
+        taskId:
+          type: string
+        issueUrl:
+          type: string
+
     # ── W3-T6 (MASTER-PLAN §7B) -- the plan->task->PR graph + interactive plan adjustment:
     # submit feedback, answer grills, accept/reject a proposal. Built over the SAME feedback
     # inbox (src/lib/feedback.ts) and trace chain (src/lib/trace.ts, W1-T43) already documented
@@ -854,6 +886,41 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApproveManualResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/escalation/mark-handled:
+    post:
+      summary: Mark an ESCALATION row handled -- closes its GitHub issue.
+      description: >
+        W1-T182: the NEEDS ME affordance an ESCALATION row (any class) actually supports --
+        distinct from /v1/manual/approve's MANUAL-queue check-off, since "approve" has no
+        defined verb for an escalation. Closes the named `needs-human`-labeled issue
+        (src/lib/escalate.ts) FIRST, then ledgers `panel.escalation_marked_handled` -- a close
+        that fails never produces a false-handled ledger line. Closing the issue does not, by
+        itself, resolve the underlying block (the issue body says so); the row clears on the
+        NEXT poll once GET /v1/status's live join (src/lib/status.ts) reads it CLOSED.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MarkEscalationHandledRequest"
+      responses:
+        "200":
+          description: The issue was closed and the action recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarkEscalationHandledResult"
         "400":
           $ref: "#/components/responses/InvalidRequest"
         "401":

@@ -1,0 +1,48 @@
+- id: W1-T238
+  title: "the decisive stderr existed in memory on all four failing spawns and was discarded - persist WorkerResult.stderr and error-result text at every spawn site"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "collectWorkerResult captures the child's stderr into stderrChunks and, on a swallowed
+    error-result throw, pushes the SDK message onto it too (the 'error-result throw swallowed' line). The
+    containment probe joins that into a transcript and then DISCARDS it - it is never written to disk. So the
+    one artifact that would have named this incident's cause, 'Not logged in - Please run /login', lived only
+    in memory and died with each of the four failing spawns.
+    THE COST WAS PAID TWICE THIS INCIDENT. Two production spawns failed at 20:59 and 21:15, and their stderr was
+    unrecoverable - the cause had to be reconstructed by a scripted repro that re-captured the same stderr that
+    the real runs had already produced and thrown away. A spawn that fails must leave its own explanation on
+    disk, or every failure becomes an archaeology exercise."
+  design: |
+    AT EVERY SPAWN CALL SITE, persist WorkerResult.stderr and the error-result text to the run's ledger or log
+    surface when the spawn fails or returns isError. Bounded - cap the length so a runaway transcript cannot
+    bloat the ledger - but never silently dropped. VERIFY the spawn call sites from source rather than assuming
+    one: the containment probe, the fix rung, the review path and the drain/daemon dispatch each spawn workers.
+    KEY IT TO THE RUN so a later reader can find the stderr for a specific failed spawn by run id, the same way
+    every other ledgered step is keyed.
+    DO NOT LEAK SECRETS. Worker stderr can contain tokens or credential text; the persisted surface must respect
+    the same 0600 and no-token discipline the serve-log and token work established. A credential error message
+    is safe ('Not logged in'), but the cap and the destination must assume stderr can carry more.
+    COORDINATE WITH THE NAMED-REASON SHARD: that task names the credential failure in the verdict; this one
+    keeps the raw evidence behind it. Both are wanted - one is the label, the other is the receipt."
+  acceptance:
+    - claim: "a spawn returning isError=true leaves its stderr and result text recoverable from disk after the run, keyed to the run id"
+      proof: "unit test: test/worker-stderr-persist.test.ts"
+    - claim: "the persisted stderr is length-capped, so a large transcript cannot bloat the ledger"
+      proof: "unit test: test/worker-stderr-persist.test.ts"
+    - claim: "a clean spawn does not spam the surface - persistence fires on failure or isError, not on every success"
+      proof: "unit test: test/worker-stderr-persist.test.ts"
+  risk: low
+  origin: architect
+  plan_refs: ["§4A", "§12"]
+  files: [src/lib/worker.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-21. Citation verified at origin/main 2d33735: collectWorkerResult's swallow site is the
+    catch block at worker.ts:392-398, with the stderr push at :398 (the brief said ~391-397 - the region is
+    right, the push lands at 398). containment.ts:127 joins [probe.text, probe.blocks, probe.stderr] and drops
+    it.
+    JUSTIFIED TWICE THIS INCIDENT - both failing production spawns lost their stderr, and the cause was only
+    recovered by re-running a repro that reproduced the same discarded output."

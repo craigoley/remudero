@@ -44,7 +44,26 @@ if printf '%s' "$haystack" | grep -Eq '(^|[^A-Za-z0-9_])FORBIDDEN_PROBE'; then
   deny "FORBIDDEN_PROBE path"
 fi
 
-# 4) operator's machine-specific protected paths (one glob/substring per line).
+# 4) POST a commit status via `gh api` (W1-T203 — THE FORGE ATTACK). `gh` runs
+#    outside the OS sandbox with the operator's own ambient credential, so any
+#    worker (implementer, reviewer, anything spawned) that can reach this floor
+#    could otherwise post its own remudero-review=success and satisfy its own
+#    merge gate. The ORCHESTRATOR's own poster (postReviewStatus, src/lib/
+#    review.ts) calls `gh` via execFileSync directly from the `rmd run-task`
+#    process — never through a Claude Code Bash tool call — so it never
+#    reaches this hook at all; only a spawned worker's Bash call does. Matches
+#    regardless of flag order (`-X POST` vs `--method POST` vs the args before
+#    or after the endpoint) and regardless of context (not just
+#    remudero-review — any commit status is the same forge surface).
+if printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+api\b'; then
+  if printf '%s' "$cmd" | grep -Eq '(-X|--method)[[:space:]]+POST'; then
+    if printf '%s' "$cmd" | grep -Eq 'repos/[^[:space:]]*/statuses(/|[[:space:]]|$)'; then
+      deny "gh api POST to a commit-status endpoint (remudero-review provenance, W1-T203)"
+    fi
+  fi
+fi
+
+# 5) operator's machine-specific protected paths (one glob/substring per line).
 deny_local="${HOME}/.config/remudero/deny.local"
 if [ -f "$deny_local" ]; then
   while IFS= read -r pat || [ -n "$pat" ]; do
