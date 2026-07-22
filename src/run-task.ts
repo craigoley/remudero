@@ -178,17 +178,19 @@ import {
   cappedAnnotation,
   cappedOverrideFromLedger,
   decideArmFromLedgerVerdict,
+  fetchPrLifecycle,
   floorDegradedAnnotation,
   isTddStrict,
   judgeReview,
   keywordOnlyAnnotation,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
-  postReviewStatus,
+  postReviewStatusGuarded,
   priorReviewVerdictFromLedger,
   resolveAutoMergeArm,
   reviewerOutcome,
   reviewerVerdictContract,
+  reviewEvidenceStrength,
   reviewLedgerLegibilityFields,
   type CappedOverride,
   type CriterionVerdict,
@@ -702,11 +704,22 @@ async function runReview(args: {
    * W1-T178 (verdict stability): the run's ledger path, so a semantic-lane
    * downgrade on an UNCHANGED head sha whose deterministic floor still passes
    * can be suppressed against the most recent `review.posted` verdict for this
-   * task — see {@link applyVerdictStability}. Every real caller passes it;
-   * absent ⇒ no prior to compare against, so the rule never fires (identical to
-   * pre-W1-T178 behavior) rather than crashing.
+   * task — see {@link applyVerdictStability}.
+   *
+   * W1-T228: also REQUIRED (no longer optional) — it is where {@link
+   * postReviewStatusGuarded} reads the prior posted evidence-strength from and
+   * where its per-task serialization lock lives (a sibling
+   * `review-status-locks/` dir next to this file). Every real caller already
+   * passes it; there is no longer a "skip the guard" path.
    */
-  ledgerPath?: string;
+  ledgerPath: string;
+  /**
+   * W1-T228: the run's ledger `run_id` — carried on the `review.post_refused`
+   * ledger line {@link postReviewStatusGuarded} writes when a post is
+   * refused, so a refusal is attributable to the SAME run every other ledger
+   * line for this call already is.
+   */
+  runId: string;
 }): Promise<ReviewVerdict & { headSha: string; reviewerOutcome: string }> {
   const { owner, repo, prUrl, task, report, log, say } = args;
   const view = ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string };
@@ -815,7 +828,34 @@ async function runReview(args: {
     );
   }
 
-  postReviewStatus({ owner, repo, sha: headSha, state: verdict.state, description: verdict.summary });
+  // W1-T228: the ONLY call path that posts `remudero-review` from here on —
+  // acquires the per-task serialization lock, re-reads the ledger + live PR
+  // lifecycle INSIDE it, and refuses (ledgering the refusal) rather than
+  // overwrite an executed-evidence verdict with a weaker one, or write
+  // against an already-merged/closed PR. See lib/review.ts's W1-T228 block
+  // comment for the full design.
+  const posted = await postReviewStatusGuarded({
+    owner,
+    repo,
+    sha: headSha,
+    state: verdict.state,
+    description: verdict.summary,
+    taskId: task.id,
+    evidence: reviewEvidenceStrength(verdict.criteria),
+    ledgerPath: args.ledgerPath,
+    runId: args.runId,
+    fetchLifecycle: () => fetchPrLifecycle(prUrl),
+  });
+  if (!posted.posted) {
+    // REFUSED, NOT SWALLOWED: postReviewStatusGuarded already ledgered
+    // `review.post_refused` with the full reason; this is the loud console
+    // twin so a refusal is as visible as an ordinary posted verdict is.
+    say(
+      `remudero-review: post REFUSED for ${headSha.slice(0, 7)} (verdict computed: ${verdict.state}) — ` +
+        `${posted.reason} (W1-T228 — see the review.post_refused ledger line)`,
+    );
+    return { ...verdict, headSha, reviewerOutcome: outcome };
+  }
   const unmet = verdict.criteria.filter((c) => !c.met);
   const unmetClaims = unmet.map((c) => c.claim);
   const reasons = unmet.map((c) => c.reason);
@@ -1482,6 +1522,7 @@ export async function runFixRung(opts: {
       reviewerMount: opts.reviewBase.reviewerMount,
       headCheckoutDir: opts.reviewBase.headCheckoutDir,
       ledgerPath: deps.ledgerPath,
+      runId: opts.runId,
     });
     // W1-T100: a real review verdict now exists for THIS head — the CURRENT
     // strike stays review-mode from here. W1-T138: this can still flip back
@@ -2438,6 +2479,7 @@ async function runTask(
       // the deterministic floor observes THIS run's repo state, not report prose.
       headCheckoutDir: worktreePath,
       ledgerPath,
+      runId,
     });
 
     // ── THE blocked_review FIX RUNG (W1-T76, absorbs P21; §3's fixing state).
@@ -2860,6 +2902,7 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
       // the documented fallback (criterion 5) — never silent.
       headCheckoutDir: worktreePath,
       ledgerPath,
+      runId,
     }),
   );
 
@@ -2963,32 +3006,70 @@ async function depReviewCommand(prArg: string, rest: string[] = []): Promise<num
     return 1;
   }
   if (result.decision === "arm") {
-    postReviewStatus({
+    // W1-T228: guarded post — decideDepReview never executes a proof, so
+    // this attempt's evidence is always "no_evidence"; the guard still
+    // refuses it if a STRONGER (executed) verdict is already posted for this
+    // exact sha, or if the PR is already merged/closed.
+    const posted = await postReviewStatusGuarded({
       owner,
       repo,
       sha: view.headRefOid,
       state: "success",
       description: `remudero-review: PASS — ${result.semverLevel} dependency bump, confined + gates green`,
+      taskId,
+      evidence: "no_evidence",
+      ledgerPath,
+      runId,
+      fetchLifecycle: () => fetchPrLifecycle(view.url),
     });
+    if (!posted.posted) {
+      console.log(`no remudero-review posted (refused: ${posted.reason}): ${view.url}`);
+      return 1;
+    }
     // W1-T230: armAutoMerge no longer trusts the live status just posted above
     // (display/branch-protection only from here on) — it keys off this
     // orchestrator's OWN ledgered `review.posted` verdict. This second judge
     // (decideDepReview) must ledger its own verdict in that SAME shape so
     // armAutoMerge has a record to find for this task/head.
-    log("review.posted", { context: REVIEW_CONTEXT, state: "success", head_sha: view.headRefOid, dep_review: true });
+    log("review.posted", {
+      context: REVIEW_CONTEXT,
+      state: "success",
+      head_sha: view.headRefOid,
+      dep_review: true,
+      proof_exec: [], // W1-T228: never executes a proof — explicit so lastPostedReviewStatusFromLedger reads "no_evidence"
+    });
     armAutoMerge(view.url, taskId);
     log("automerge.armed", {});
     console.log(`remudero-review=success posted + auto-merge armed: ${view.url}`);
     return 0;
   }
   // escalate: post failure (NEVER auto-merge for a major) + open the MANUAL issue.
-  postReviewStatus({
+  const postedFailure = await postReviewStatusGuarded({
     owner,
     repo,
     sha: view.headRefOid,
     state: "failure",
     description: `remudero-review: FAIL — ${result.reason}`, // postReviewStatus truncates to 140
+    taskId,
+    evidence: "no_evidence",
+    ledgerPath,
+    runId,
+    fetchLifecycle: () => fetchPrLifecycle(view.url),
   });
+  if (postedFailure.posted) {
+    // W1-T228: ledger this verdict too (the pre-existing code never did) — a
+    // failure posted here but never ledgered would be INVISIBLE to a later
+    // attempt's precedence check, exactly the blind spot this task closes.
+    log("review.posted", {
+      context: REVIEW_CONTEXT,
+      state: "failure",
+      head_sha: view.headRefOid,
+      dep_review: true,
+      proof_exec: [],
+    });
+  } else {
+    console.log(`remudero-review=failure NOT posted (refused: ${postedFailure.reason}) — still escalating: ${view.url}`);
+  }
   const escalation = buildDepReviewEscalation({
     prUrl: view.url,
     prNumber: view.number,

@@ -1,7 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { hostname } from "node:os";
+import { dirname, join } from "node:path";
+import { defaultIsPidAlive } from "./drain-lock.js";
+import { appendLedger } from "./ledger.js";
 import type { AcceptanceCriterion } from "./plan.js";
+import { readLedgerLines } from "./status.js";
 
 /**
  * The JUDGE (MASTER-PLAN §12 rule 4 / rule 3B; task W1-T1C).
@@ -2146,4 +2150,349 @@ export function postReviewStatus(opts: {
   const reviewerToken = process.env[REVIEWER_TOKEN_ENV];
   const env = reviewerToken ? { ...process.env, GH_TOKEN: reviewerToken, GITHUB_TOKEN: reviewerToken } : process.env;
   execFileSync("gh", args, { stdio: "pipe", env });
+}
+
+// ── W1-T228: the status CHANNEL is last-write-wins across uncoordinated
+// posters ────────────────────────────────────────────────────────────────
+//
+// GROUND TRUTH this hardens (plan/tasks.yaml W1-T228): PR 449 head 833561d
+// took SEVEN `remudero-review` writes in one day. An EXECUTED verdict (2/6
+// proofs run, FAILED) at 18:02:31 was overwritten by a KEYWORD-ONLY CAPPED
+// success (0/6 executed) at 18:10:42 — weaker evidence clobbered stronger
+// evidence on an IDENTICAL sha. A THIRD write landed at 18:16:20, ~85s AFTER
+// the PR merged at 18:14:55 — the channel accepted a write against a closed
+// lifecycle. W1-T230 already took the ARM decision off this channel onto the
+// orchestrator's own ledger; this hardens the CHANNEL itself, regardless of
+// the arm path, because the posted status is what branch protection reads,
+// what the board renders, and what an operator opens a PR to see.
+//
+// ONE POST SITE enforces THREE RULES — {@link postReviewStatusGuarded} is the
+// only call path `run-task.ts` uses from here on (the raw {@link
+// postReviewStatus} above becomes an internal implementation detail + the
+// injectable "real poster" in tests):
+//   (i)   PRECEDENCE — a keyword-only/CAPPED verdict (no criterion's proof
+//         actually EXECUTED) never overwrites an executed-evidence verdict
+//         for the SAME sha. Executed may overwrite executed (a later real
+//         run supersedes an earlier one) — {@link decideReviewStatusPost}.
+//   (ii)  LIFECYCLE — no status writes to a merged or closed PR. Refused,
+//         and the refusal is ledgered (never silently dropped).
+//   (iii) SERIALIZATION — per task (== per PR; every real caller already
+//         keys its `review.posted` ledger lines by task id), via the SAME
+//         O_EXCL create-or-fail primitive drain-lock.ts/inflight-lock.ts use
+//         ({@link acquireReviewStatusLock}) — adapted from a SINGLETON GUARD
+//         (refuse a second concurrent holder) to a MUTEX (wait for the
+//         holder, then proceed): the drain/inflight locks guard a whole RUN;
+//         this guards one short read-decide-write critical section.
+// READ BEFORE WRITE, HONESTLY: precedence needs the CURRENT posted state, so
+// {@link postReviewStatusGuarded} reads the ledger and the live PR lifecycle
+// AFTER acquiring the lock, never before — a read taken before the lock is
+// exactly the TOCTOU gap the lock exists to close.
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Whether ANY criterion's proof actually EXECUTED on this sha ("executed"),
+ * or the verdict rests entirely on the ABSENCE of that evidence
+ * ("no_evidence" — keyword-only and CAPPED are both this tier: neither ever
+ * observed the repo state). Evidence outranks its absence, one-directionally
+ * — see {@link decideReviewStatusPost}.
+ */
+export type ReviewEvidenceStrength = "executed" | "no_evidence";
+
+export function reviewEvidenceStrength(
+  criteria: ReadonlyArray<Pick<CriterionVerdict, "proof_exec">>,
+): ReviewEvidenceStrength {
+  const executed = criteria.some((c) => c.proof_exec === "executed_pass" || c.proof_exec === "executed_fail");
+  return executed ? "executed" : "no_evidence";
+}
+
+/**
+ * The most recent `review.posted` line's sha/state/evidence for `taskId` —
+ * {@link decideReviewStatusPost}'s `prior` argument. Deliberately separate
+ * from {@link PriorReviewVerdict} (the W1-T178/W1-T230 shape): those
+ * consumers never needed evidence strength, and giving this task its own
+ * type keeps their contracts untouched. Same "last one wins" scan idiom as
+ * {@link priorReviewVerdictFromLedger} and `unmetFromLedger` (run-task.ts) —
+ * `evidence` is derived from the SAME `proof_exec` array `run-task.ts`
+ * already ledgers on every `review.posted` line (no new ledger field).
+ */
+export interface PostedReviewStatusRecord {
+  headSha: string;
+  state: ReviewState;
+  evidence: ReviewEvidenceStrength;
+}
+
+export function lastPostedReviewStatusFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+): PostedReviewStatusRecord | undefined {
+  let prior: PostedReviewStatusRecord | undefined;
+  for (const line of lines) {
+    if (line.step !== "review.posted" || line.task_id !== taskId) continue;
+    if (typeof line.head_sha !== "string") continue;
+    if (line.state !== "success" && line.state !== "failure") continue;
+    const proofExec: unknown[] = Array.isArray(line.proof_exec) ? (line.proof_exec as unknown[]) : [];
+    const executed = proofExec.some((p) => p === "executed_pass" || p === "executed_fail");
+    prior = { headSha: line.head_sha, state: line.state, evidence: executed ? "executed" : "no_evidence" };
+  }
+  return prior;
+}
+
+/**
+ * The CURRENT PR lifecycle {@link decideReviewStatusPost}'s LIFECYCLE rule
+ * checks against — fetched FRESH (never a snapshot from before ci/the
+ * reviewer spawn ran) by {@link postReviewStatusGuarded}.
+ */
+export interface PrLifecycleState {
+  merged: boolean;
+  closed: boolean;
+}
+
+/**
+ * Real fetcher: shells to `gh` (untested by unit — it shells out, same as
+ * {@link postReviewStatus}'s own `gh api` call) — {@link
+ * postReviewStatusGuarded}'s default; tests inject a fake instead.
+ */
+export function fetchPrLifecycle(prUrl: string): PrLifecycleState {
+  const out = execFileSync("gh", ["pr", "view", prUrl, "--json", "state"], { encoding: "utf8" });
+  const state = String((JSON.parse(out) as { state?: string }).state ?? "").toUpperCase();
+  return { merged: state === "MERGED", closed: state === "CLOSED" };
+}
+
+/** One posting attempt {@link decideReviewStatusPost} judges. */
+export interface ReviewStatusPostAttempt {
+  headSha: string;
+  state: ReviewState;
+  evidence: ReviewEvidenceStrength;
+}
+
+export type ReviewStatusDecision = { post: true } | { post: false; reason: string };
+
+/**
+ * THE PURE W1-T228 GATE — the falsifier this task exists to prove is a unit
+ * fixture, exactly like {@link judgeReview}/{@link decideArmFromLedgerVerdict}.
+ * Order matters: LIFECYCLE is checked FIRST — a merged/closed PR refuses
+ * regardless of precedence, since arguing about which verdict is "stronger"
+ * on a PR nobody can act on anymore is moot.
+ */
+export function decideReviewStatusPost(
+  attempt: ReviewStatusPostAttempt,
+  prior: PostedReviewStatusRecord | undefined,
+  lifecycle: PrLifecycleState,
+): ReviewStatusDecision {
+  if (lifecycle.merged || lifecycle.closed) {
+    return {
+      post: false,
+      reason:
+        `PR is already ${lifecycle.merged ? "merged" : "closed"} — refusing to post remudero-review against ` +
+        `a closed lifecycle (W1-T228 lifecycle rule)`,
+    };
+  }
+  if (
+    prior !== undefined &&
+    prior.headSha === attempt.headSha &&
+    prior.evidence === "executed" &&
+    attempt.evidence === "no_evidence"
+  ) {
+    return {
+      post: false,
+      reason:
+        `refusing to overwrite an executed-evidence ${prior.state} verdict for ${attempt.headSha.slice(0, 7)} ` +
+        `with a keyword-only/CAPPED verdict (W1-T228 precedence: evidence outranks its absence)`,
+    };
+  }
+  return { post: true };
+}
+
+// ── W1-T228 serialization: an O_EXCL MUTEX (not a singleton guard) ────────
+
+export interface ReviewStatusLockInfo {
+  pid: number;
+  host: string;
+  startedAt: string;
+}
+
+export class ReviewStatusLockTimeoutError extends Error {
+  constructor(
+    public readonly lockPath: string,
+    public readonly holder: ReviewStatusLockInfo,
+  ) {
+    super(
+      `timed out waiting for the review-status lock ${lockPath} (held by pid ${holder.pid} on ` +
+        `${holder.host}, since ${holder.startedAt})`,
+    );
+    this.name = "ReviewStatusLockTimeoutError";
+  }
+}
+
+function readReviewStatusLock(lockPath: string): ReviewStatusLockInfo | null {
+  try {
+    const o = JSON.parse(readFileSync(lockPath, "utf8"));
+    if (typeof o?.pid === "number") return o as ReviewStatusLockInfo;
+    return null;
+  } catch {
+    return null; // missing, unreadable, or garbage → treat as "no valid holder"
+  }
+}
+
+function reviewStatusLockDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export interface AcquireReviewStatusLockOpts {
+  /** Override the recorded holder identity (tests). Defaults to this process. */
+  info?: Partial<ReviewStatusLockInfo>;
+  /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */
+  isPidAlive?: (pid: number) => boolean;
+  /** Poll cadence while a LIVE holder blocks acquisition (tests speed this up). */
+  retryMs?: number;
+  /** Give up and throw {@link ReviewStatusLockTimeoutError} after this long. */
+  timeoutMs?: number;
+}
+
+export interface ReviewStatusLockHandle {
+  readonly path: string;
+  /** Remove the lock. Idempotent — safe to call from a finally. */
+  release(): void;
+}
+
+/**
+ * Acquire the per-task review-status MUTEX — the SAME O_EXCL create-or-fail
+ * primitive {@link import("./drain-lock.js").acquireDrainLock}/{@link
+ * import("./inflight-lock.js").acquireInflightLock} use (creation is atomic,
+ * so two racing acquirers cannot both win; a stale lock — holder pid dead, or
+ * the file unreadable/garbage — is reclaimed), adapted from a SINGLETON
+ * GUARD to a MUTEX: where those THROW immediately when a live holder is
+ * found, this WAITS (bounded by `timeoutMs`) and retries — the callers here
+ * are N uncoordinated posters that must all eventually run their own
+ * read-decide-write, never a second run of the same long-lived task that
+ * should simply refuse to start.
+ */
+export async function acquireReviewStatusLock(
+  lockPath: string,
+  opts: AcquireReviewStatusLockOpts = {},
+): Promise<ReviewStatusLockHandle> {
+  const isAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  const retryMs = opts.retryMs ?? 50;
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const info: ReviewStatusLockInfo = {
+    pid: opts.info?.pid ?? process.pid,
+    host: opts.info?.host ?? hostname(),
+    startedAt: opts.info?.startedAt ?? new Date().toISOString(),
+  };
+  mkdirSync(dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + timeoutMs;
+
+  for (;;) {
+    try {
+      // O_EXCL: create-or-fail. Winner writes its identity; there is no TOCTOU gap.
+      const fd = openSync(lockPath, "wx");
+      writeSync(fd, JSON.stringify(info, null, 2));
+      closeSync(fd);
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const held = readReviewStatusLock(lockPath);
+      if (held && isAlive(held.pid)) {
+        if (Date.now() >= deadline) throw new ReviewStatusLockTimeoutError(lockPath, held);
+        await reviewStatusLockDelay(retryMs); // MUTEX: wait + retry, never throw on a live holder
+        continue;
+      }
+      try {
+        unlinkSync(lockPath); // stale (dead pid / garbage) → clear and loop to re-create
+      } catch {
+        // another actor may have cleared it concurrently; retry the create
+      }
+    }
+  }
+
+  let released = false;
+  return {
+    path: lockPath,
+    release() {
+      if (released) return;
+      released = true;
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // already gone — idempotent
+      }
+    },
+  };
+}
+
+// ── W1-T228: the single guarded post site ─────────────────────────────────
+
+export interface PostReviewStatusGuardedOpts {
+  owner: string;
+  repo: string;
+  sha: string;
+  state: ReviewState;
+  description?: string;
+  /** The PR the lock/ledger key off — every real caller already keys its
+   * `review.posted` ledger lines by this same id (the task id, or the
+   * `dep-review-PR<n>`/`PR-<n>` synthetic ids `run-task.ts` falls back to). */
+  taskId: string;
+  evidence: ReviewEvidenceStrength;
+  ledgerPath: string;
+  runId: string;
+  /**
+   * Fresh lifecycle read for THIS attempt — real callers pass
+   * `() => fetchPrLifecycle(prUrl)`; tests inject a fake. Called INSIDE the
+   * lock, never before (see the module doc comment above).
+   */
+  fetchLifecycle: () => PrLifecycleState;
+  /** Injected raw poster (tests). Defaults to {@link postReviewStatus}. */
+  post?: (o: { owner: string; repo: string; sha: string; state: ReviewState; description?: string }) => void;
+  lockOpts?: AcquireReviewStatusLockOpts;
+}
+
+export interface PostReviewStatusGuardedResult {
+  posted: boolean;
+  /** Present only when `posted` is false — see {@link decideReviewStatusPost}. */
+  reason?: string;
+}
+
+/**
+ * THE single call path for posting `remudero-review` from here on (W1-T228).
+ * Acquires the per-task lock, reads the ledger + live PR lifecycle FRESH
+ * (inside the lock — read-before-write, honestly racy without it), decides
+ * via the pure {@link decideReviewStatusPost}, and either posts (delegating
+ * to the raw {@link postReviewStatus}) or refuses — EVERY attempt is
+ * ledgered, including refusals (`review.post_refused`), so a refused write
+ * leaves a trace instead of the same silent blindness this task fixes.
+ */
+export async function postReviewStatusGuarded(
+  opts: PostReviewStatusGuardedOpts,
+): Promise<PostReviewStatusGuardedResult> {
+  const post = opts.post ?? postReviewStatus;
+  const lockDir = join(dirname(opts.ledgerPath), "review-status-locks");
+  const lockPath = join(lockDir, `${opts.taskId}.lock`);
+  const handle = await acquireReviewStatusLock(lockPath, opts.lockOpts);
+  try {
+    // READ BEFORE WRITE, INSIDE THE LOCK — a read taken before acquiring the
+    // lock would leave open exactly the TOCTOU gap the lock exists to close.
+    const prior = lastPostedReviewStatusFromLedger(readLedgerLines(opts.ledgerPath), opts.taskId);
+    const lifecycle = opts.fetchLifecycle();
+    const decision = decideReviewStatusPost(
+      { headSha: opts.sha, state: opts.state, evidence: opts.evidence },
+      prior,
+      lifecycle,
+    );
+    if (!decision.post) {
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId,
+        task_id: opts.taskId,
+        step: "review.post_refused",
+        head_sha: opts.sha,
+        attempted_state: opts.state,
+        evidence: opts.evidence,
+        reason: decision.reason,
+      });
+      return { posted: false, reason: decision.reason };
+    }
+    post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, state: opts.state, description: opts.description });
+    return { posted: true };
+  } finally {
+    handle.release();
+  }
 }
