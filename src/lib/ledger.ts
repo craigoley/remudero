@@ -107,10 +107,34 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  *                                              fix rung's own strike cap.
  *   - "dep-review.decided"                  → sweep.ts's depReview readback — the terminal
  *                                              arm/escalate/refuse decision for a Dependabot PR.
+ *   - "review.posted"                       → run-task.ts's currentStrikeRegimeFor (the
+ *                                              keyword-vs-executed fix-strike amnesty regime)
+ *                                              AND review.ts's priorReviewVerdictFromLedger /
+ *                                              lastPostedReviewStatusFromLedger — the W1-T178
+ *                                              verdict-stability anti-flap rule and the review
+ *                                              evidence-strength precedence, both "last one
+ *                                              wins" scans over this exact step.
+ *   - "automerge.capped_override_granted"   → review.ts's cappedOverrideFromLedger — the
+ *                                              operator-granted, head-pinned override that lets
+ *                                              auto-merge arm despite a CAPPED verdict; losing
+ *                                              this line silently revokes a human's decision.
  *
  * Deliberately EXCLUDES pure telemetry/polling noise (`ci.polling`, `pr.polling`,
  * `ops.alerts_polled`, `issues.polled`, `inbox.polled`, ...) — exactly the high-frequency,
- * no-decision-consequence lines that drove the measured growth and are safe to archive.
+ * no-decision-consequence lines that drove the measured growth and are safe to archive — AND
+ * excludes the handful of steps ("recon.done", "implement.resumed", "implement.done" as a
+ * phase transition, "fix.resolved") that status.ts's `deriveRunState` reads ONLY to label a
+ * cosmetic `phase`/`elapsedMs` for the board/status display: `daemon.ts`'s `reconstructOrphan`
+ * proves those never gate a real decision — its `&& projection.prUrl` guard is a no-op for
+ * every case a `run.start`/`pr.opened` line (both already covered above) didn't already set.
+ *
+ * THIS LIST IS NOT SELF-CERTIFYING. It failed once already — "review.posted" and
+ * "automerge.capped_override_granted" were both real deciding reads this list omitted until
+ * the review round that caught it — which is exactly the "hardcoded to a stale list" failure
+ * mode this task exists to close. `test/ledger-rotation.test.ts`'s "derived from consumers,
+ * not hardcoded" test re-derives the expected step set from the actual source of every
+ * consumer file named above on every run and fails if this Set falls behind it again; treat
+ * that test, not this comment, as the source of truth for completeness.
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
@@ -126,6 +150,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "fix.dispatch",
   "fix.review",
   "dep-review.decided",
+  "review.posted",
+  "automerge.capped_override_granted",
 ]);
 
 /** True iff `raw` parses as JSON with a `step` in {@link DECISION_RELEVANT_LEDGER_STEPS}. A

@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   DECISION_RELEVANT_LEDGER_STEPS,
   LedgerLine,
@@ -37,6 +38,65 @@ function noiseLine(n: number): string {
   // padded so a handful of these alone can cross a small test ceiling.
   return JSON.stringify({ step: "ci.polling", run_id: `noise-${n}`, task_id: "W1-NOISE", detail: "x".repeat(64) });
 }
+
+// ── "DERIVED FROM ITS CONSUMERS RATHER THAN HARDCODED TO A STALE LIST" (this task's own
+// acceptance claim, plan/tasks.yaml). A hand-maintained comment asserting "this is every
+// deciding read, verified at the time this task was implemented" is exactly the stale-list
+// failure mode the claim warns against — and it already happened once: "review.posted" (read
+// by run-task.ts's currentStrikeRegimeFor and review.ts's priorReviewVerdictFromLedger /
+// lastPostedReviewStatusFromLedger) and "automerge.capped_override_granted" (review.ts's
+// cappedOverrideFromLedger) were both real deciding reads the original hardcoded set omitted.
+// This test re-derives the expected step set from the ACTUAL SOURCE of every file this
+// module's own doc names as a deciding reader, on every run — not from a copy of the
+// constant, and not from the doc comment above it — so a future consumer that reads a new
+// `.step === "..."` (or a new `case "...":` in a `switch (line.step)`) without updating
+// DECISION_RELEVANT_LEDGER_STEPS fails HERE, rather than shipping a breaker/dedup that
+// silently resets on the next rotation. ───────────────────────────────────────────────────
+test("DECISION_RELEVANT_LEDGER_STEPS: derived from consumers, not hardcoded — every step a real deciding reader consults is present", () => {
+  // Every file this module's own doc names as reading a ledger `step` to decide something
+  // (the dispatch breaker, escalation/credit/ratify/sweep dedup, the fix-strike amnesty
+  // regime, and the review verdict-stability / capped-override reads).
+  const consumerFiles = [
+    "../src/lib/status.ts",
+    "../src/run-task.ts",
+    "../src/lib/sweep.ts",
+    "../src/lib/inbox.ts",
+    "../src/lib/ops.ts",
+    "../src/lib/drain.ts",
+    "../src/lib/review.ts",
+  ];
+
+  // VERIFIED non-deciding despite living in a deciding-reader file: status.ts's
+  // deriveRunState reads these only to label a cosmetic phase/elapsedMs for the
+  // board/status display. daemon.ts's reconstructOrphan proves they never gate a real
+  // decision on their own — its `&& projection.prUrl` guard is a no-op for any case a
+  // run.start/pr.opened line (both already decision-relevant, independently) did not
+  // already establish. See DECISION_RELEVANT_LEDGER_STEPS's own doc comment for the proof.
+  const verifiedDisplayOnly = new Set(["recon.done", "implement.resumed", "implement.done", "fix.resolved"]);
+
+  const equalityRead = /\.step\s*(?:===|!==)\s*["']([^"']+)["']/g;
+  const switchOnStep = /switch\s*\(\s*(?:line|l|record)\.step\s*\)\s*\{([\s\S]*?)\n\}/g;
+  const caseLiteral = /case\s*["']([^"']+)["']\s*:/g;
+
+  const discovered = new Set<string>();
+  for (const rel of consumerFiles) {
+    const src = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
+    for (const m of src.matchAll(equalityRead)) discovered.add(m[1]);
+    for (const sw of src.matchAll(switchOnStep)) {
+      for (const m of sw[1].matchAll(caseLiteral)) discovered.add(m[1]);
+    }
+  }
+  assert.ok(discovered.size > 10, "sanity: the scan actually found reads, not an empty/broken pattern");
+
+  const expectedDecisionRelevant = [...discovered].filter((step) => !verifiedDisplayOnly.has(step));
+  const missing = expectedDecisionRelevant.filter((step) => !DECISION_RELEVANT_LEDGER_STEPS.has(step));
+  assert.deepEqual(
+    missing,
+    [],
+    `DECISION_RELEVANT_LEDGER_STEPS is missing step(s) a real consumer reads to decide ` +
+      `something (derived from source, not from the hardcoded list itself): ${missing.join(", ")}`,
+  );
+});
 
 test("ledgerExceedsRotationCeiling: a ledger over the ceiling with no archived roll present reports true (FAILS the check)", () => {
   const dir = tmpDir();
