@@ -2738,6 +2738,23 @@ export function resolveReviewTarget(
 // `dispatchFix` path already uses for the SAME purpose (see that function,
 // above), never new machinery. Teardown is the CALLER's job (a `finally` in
 // `reviewCommand`, below) so it covers every exit path.
+//
+// W1-T232: the original shape here ALSO ran `git checkout -B <branch>
+// origin/<branch>` after the `worktree add`, purely to give the throwaway
+// worktree a branch NAME — nothing downstream ever reads it; proof execution
+// only reads files at the checked-out tip, which `worktree add` alone already
+// provides (as a DETACHED HEAD — confirmed by hand: `git worktree add <path>
+// origin/<branch>` prints "Preparing worktree (detached HEAD ...)" with no
+// second command). `checkout -B` FORCE-CREATES/RESETS a local branch of that
+// name, which THROWS the moment any other worktree already holds it — e.g.
+// the operator's own filing worktrees, or simply another `rmd review` in
+// flight on the same branch. That collision was reproduced verbatim on
+// 2026-07-21 and cost five PRs a keyword-only CAPPED verdict for a reason
+// that had nothing to do with whether the review could actually run.
+// Dropping the branch pin removes an implicit freshness check, so this now
+// asserts the materialized tip equals the PR head SHA and fails LOUDLY
+// (throws, no verdict posted) on a mismatch — reviewing the wrong tree
+// silently would be worse than not reviewing at all.
 // ────────────────────────────────────────────────────────────────────────────
 
 /** Injected git operations for {@link materializeReviewWorktree} — real
@@ -2747,41 +2764,65 @@ export function resolveReviewTarget(
 export interface ReviewWorktreeDeps {
   fetch: (repoDir: string) => void;
   addWorktree: (repoDir: string, worktreePath: string, branch: string) => void;
+  revParseHead: (worktreePath: string) => string;
 }
 
 const realReviewWorktreeDeps: ReviewWorktreeDeps = {
   fetch: (repoDir) => execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" }),
-  addWorktree: (repoDir, worktreePath, branch) => {
-    execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`], { stdio: "pipe" });
-    execFileSync("git", ["-C", worktreePath, "checkout", "-B", branch, `origin/${branch}`], { stdio: "pipe" });
-  },
+  // NO `checkout -B` — `worktree add <path> origin/<branch>` alone already
+  // leaves `<path>` at the right commit, DETACHED, and detached is all a
+  // review's file reads ever need. A named local branch here only exists to
+  // collide with whatever else holds that name (see the block comment above).
+  addWorktree: (repoDir, worktreePath, branch) =>
+    execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`], { stdio: "pipe" }),
+  revParseHead: (worktreePath) =>
+    execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { stdio: "pipe" }).toString().trim(),
 };
 
 /**
  * Materialize a throwaway worktree at a PR's head branch so `rmd review` can
  * execute whitelisted proofs exactly like the automated fix rung does.
- * Returns the worktree path on success; `undefined` on ANY failure (network,
- * disk, a detached/deleted head) — the caller then falls back to a
- * keyword-only, CAPPED verdict (acceptance criterion 5), never a thrown
- * command reaching the operator. Teardown is the CALLER's responsibility
- * (`reviewCommand`'s `finally`), so a throw from `runReview` itself still
- * tears the worktree down (criterion 6) — this function only ever creates.
+ * Returns the worktree path on success; `undefined` on an ORDINARY
+ * materialization failure (network, disk, a detached/deleted head) — the
+ * caller then falls back to a keyword-only, CAPPED verdict (acceptance
+ * criterion 5), never a thrown command reaching the operator.
+ *
+ * A materialized tip that does NOT match `headSha`, though, is not an
+ * ordinary failure — it means the fetch was stale or the ref moved out from
+ * under us, and reviewing that tree would silently produce a verdict against
+ * the WRONG code. That case throws (uncaught by this function) rather than
+ * degrading to keyword-only, so `reviewCommand` fails loudly and posts no
+ * verdict at all (W1-T232, criterion "tip mismatch after fetch fails
+ * materialization loudly").
+ *
+ * Teardown is the CALLER's responsibility (`reviewCommand`'s `finally`), so a
+ * throw from `runReview` itself still tears the worktree down (criterion 6)
+ * — this function only ever creates.
  */
 export function materializeReviewWorktree(
   config: Config,
   repoDir: string,
   prNumber: number,
   headRefName: string,
+  headSha: string,
   deps: ReviewWorktreeDeps = realReviewWorktreeDeps,
 ): string | undefined {
   const worktreePath = join(worktreesDir(config), `review-PR${prNumber}-${Date.now()}`);
+  let tip: string;
   try {
     deps.fetch(repoDir);
     deps.addWorktree(repoDir, worktreePath, headRefName);
-    return worktreePath;
+    tip = deps.revParseHead(worktreePath);
   } catch {
     return undefined;
   }
+  if (tip !== headSha) {
+    throw new Error(
+      `materialized worktree at ${worktreePath} is at ${tip}, not the PR head ${headSha} — ` +
+        "a stale fetch or a moved ref; refusing to review a possibly-wrong tree rather than posting a false verdict",
+    );
+  }
+  return worktreePath;
 }
 
 /**
@@ -2874,7 +2915,7 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
   // the automated fix rung observes for the same PR/proofs (acceptance
   // criterion 4). On ANY failure this returns undefined and the review falls
   // back to keyword-only — EXPLICITLY marked (criterion 5), never silently.
-  const worktreePath = materializeReviewWorktree(config, repoRoot, view.number, view.headRefName);
+  const worktreePath = materializeReviewWorktree(config, repoRoot, view.number, view.headRefName, view.headRefOid);
   if (!worktreePath) {
     console.log("(worktree materialization unavailable — this verdict will post keyword-only)");
   }
