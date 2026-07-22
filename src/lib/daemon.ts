@@ -450,9 +450,34 @@ export function daemonBoot(
   env: NodeJS.ProcessEnv = process.env,
   sweepTmp?: () => { removed: string[]; kept: string[] },
   sweepLocks?: () => { reaped: string[]; kept: string[] },
+  unlockWorkerKeychain?: () => { keychainPath: string; provisioned: boolean; unlocked: true },
 ): BootAssertion {
   const assertion = assertCleanBoot(env);
   log("daemon.boot", { env_clean: assertion.env_clean, billing_mode: assertion.billing_mode });
+  // W1-T235 (WS-7 keychain-unlock gate): the boot-time worker-keychain unlock,
+  // EXPLICIT AND LEDGERED — the fleet's credential store comes up unlocked as a
+  // named boot step, never as a side effect of unlocking the operator's login
+  // keychain. Injected like the sweeps above (the real command wires
+  // worker-home.ts's ensureWorkerKeychain). A failure here is ledgered with its
+  // credential-named class and the boot CONTINUES (T197 doctrine: the daemon
+  // sleeps through problems) — each spawn re-runs the rung and fails
+  // credential-named at the spawn boundary, never as a $0 containment mystery.
+  if (unlockWorkerKeychain) {
+    try {
+      const kc = unlockWorkerKeychain();
+      log("daemon.worker_keychain", {
+        keychain_path: kc.keychainPath,
+        provisioned: kc.provisioned,
+        unlocked: kc.unlocked,
+      });
+    } catch (err) {
+      log("daemon.worker_keychain", {
+        unlocked: false,
+        error_class: (err as { reasonClass?: string })?.reasonClass ?? "unknown",
+        error: String((err as Error)?.message ?? err),
+      });
+    }
+  }
   if (sweepTmp) {
     const swept = sweepTmp();
     log("daemon.tmp_sweep", { removed: swept.removed.length, kept: swept.kept.length });

@@ -1,4 +1,6 @@
-import { existsSync, lstatSync, mkdirSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 /**
@@ -97,13 +99,31 @@ export interface WorkerHomePlan {
   symlinks: Array<{ from: string; to: string; reason: string }>;
 }
 
-export function workerHomePlan(opts: { workerHome: string; realHome: string }): WorkerHomePlan {
+/** The HOME-relative slot Claude Code resolves its keychain through. */
+const LOGIN_KEYCHAIN_REL = join("Library", "Keychains", "login.keychain-db");
+
+export function workerHomePlan(opts: {
+  workerHome: string;
+  realHome: string;
+  /**
+   * W1-T235 (WS-7 keychain-unlock gate): when set, the redirected HOME's
+   * `Library/Keychains/login.keychain-db` slot resolves to this DEDICATED,
+   * always-unlocked worker keychain instead of the operator's real login
+   * keychain — breaking the single-inode coupling under which a LOCKED login
+   * keychain killed every headless spawn "Not logged in" at $0 (fired live
+   * 2026-07-21). Unset ⇒ the pre-T235 grant to the real login keychain.
+   */
+  workerKeychainPath?: string;
+}): WorkerHomePlan {
   return {
     workerHome: opts.workerHome,
     rcFiles: WORKER_HOME_RC_FILES.map((f) => join(opts.workerHome, f)),
     symlinks: WORKER_HOME_SYMLINKS.map((s) => ({
       from: join(opts.workerHome, s.relPath),
-      to: join(opts.realHome, s.relPath),
+      to:
+        opts.workerKeychainPath && s.relPath === LOGIN_KEYCHAIN_REL
+          ? opts.workerKeychainPath
+          : join(opts.realHome, s.relPath),
       reason: s.reason,
     })),
   };
@@ -122,7 +142,12 @@ export function workerHomePlan(opts: { workerHome: string; realHome: string }): 
  * (idempotent across repeated spawns in the same run); one pointing anywhere
  * else is replaced (self-healing if the real HOME path moved).
  */
-export function materializeWorkerHome(opts: { workerHome: string; realHome: string }): WorkerHomePlan {
+export function materializeWorkerHome(opts: {
+  workerHome: string;
+  realHome: string;
+  /** See {@link workerHomePlan} — the W1-T235 dedicated worker keychain. */
+  workerKeychainPath?: string;
+}): WorkerHomePlan {
   const plan = workerHomePlan(opts);
 
   mkdirSync(plan.workerHome, { recursive: true });
@@ -156,4 +181,192 @@ export function materializeWorkerHome(opts: { workerHome: string; realHome: stri
   }
 
   return plan;
+}
+
+// ── W1-T235: the dedicated worker keychain (WS-7 keychain-unlock gate) ──────
+//
+// The login keychain holds the `Claude Code-credentials` OAuth item and locks
+// with the operator's session (cold boot, `security lock-keychain`, screen
+// policy). Under the pre-T235 symlink the redirected HOME resolved the REAL
+// login keychain, so a lock killed every headless spawn "Not logged in" at $0
+// before any turn — and, because a credential-dead worker makes zero writes,
+// the death rendered as the generic "containment UNPROVEN" misdiagnosis
+// (fired live 2026-07-21, two spawns, two days of theory).
+//
+// This section provisions a DEDICATED keychain holding a COPY of the item,
+// configured to never auto-lock and unlocked by the harness itself with a
+// password persisted 0600 under the config state dir. The operator's login
+// keychain is READ exactly once (at provisioning, while it is unlocked) and
+// is NEVER unlocked by the fleet — option (i) of the task's design space,
+// chosen for the smallest blast radius. Every failure path out of this rung
+// throws a {@link WorkerKeychainError} carrying a named reason CLASS, so a
+// credential failure can never again render as a containment finding.
+
+/** The generic-password service name Claude Code stores its OAuth token under. */
+export const WORKER_KEYCHAIN_SERVICE = "Claude Code-credentials";
+
+/** Named failure classes for the credential rung — queryable, not prose. */
+export type WorkerKeychainReasonClass =
+  | "login-keychain-locked"
+  | "credential-item-missing"
+  | "worker-keychain-unlock-failed"
+  | "provision-failed";
+
+/**
+ * A credential-NAMED failure out of the worker-keychain rung. Thrown BEFORE
+ * any worker spawns, so a locked/missing credential fails loudly at the spawn
+ * boundary instead of spawning a credential-dead worker whose zero-write death
+ * reads as "containment UNPROVEN" (the 2026-07-21 misdiagnosis).
+ */
+export class WorkerKeychainError extends Error {
+  override name = "WorkerKeychainError";
+  constructor(
+    public readonly reasonClass: WorkerKeychainReasonClass,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export interface WorkerKeychainPaths {
+  /** The dedicated worker keychain DB file. */
+  keychainPath: string;
+  /** The 0600 file persisting the keychain's password across boots. */
+  passwordPath: string;
+}
+
+/** Canonical locations under the config state dir (`<config.root>/state`). */
+export function workerKeychainPaths(stateDir: string): WorkerKeychainPaths {
+  return {
+    keychainPath: join(stateDir, "remudero-worker.keychain-db"),
+    passwordPath: join(stateDir, "worker-keychain-password"),
+  };
+}
+
+/** Injectable `security(1)` invoker — tests record argv; the default shells out. */
+export type SecurityRunner = (argv: string[]) => string;
+
+const defaultSecurityRunner: SecurityRunner = (argv) =>
+  execFileSync("security", argv, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+export interface EnsureWorkerKeychainOpts extends WorkerKeychainPaths {
+  /** The operator's real login keychain (read ONCE, at provisioning only). */
+  loginKeychainPath: string;
+  /** Apps granted per-item access to the copied credential (`-T`), e.g. the
+   * claude binary. Never `-A` (any-app). */
+  grantApps?: string[];
+  runner?: SecurityRunner;
+  exists?: (path: string) => boolean;
+}
+
+export interface WorkerKeychainSummary {
+  keychainPath: string;
+  /** `true` when THIS call created + populated the keychain. */
+  provisioned: boolean;
+  unlocked: true;
+}
+
+function classifyLoginReadError(err: unknown): WorkerKeychainReasonClass {
+  const text = String((err as Error)?.message ?? err);
+  if (/interaction is not allowed/i.test(text)) return "login-keychain-locked";
+  if (/could not be found/i.test(text)) return "credential-item-missing";
+  return "provision-failed";
+}
+
+/**
+ * Guarantee the dedicated worker keychain exists, holds the credential item,
+ * never auto-locks, and is UNLOCKED — the invariant a headless spawn needs.
+ *
+ * Provisioning (first call only) reads the item out of the login keychain,
+ * which therefore must be unlocked AT THAT MOMENT (an interactive session, or
+ * the explicit operator provisioning step in this task's PR). Every later
+ * call — including a cold-boot daemon while the login keychain is LOCKED —
+ * touches only the worker keychain. Failures throw {@link WorkerKeychainError}
+ * with a named class; the password never rides an error message.
+ */
+export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeychainSummary {
+  const runner = opts.runner ?? defaultSecurityRunner;
+  const exists = opts.exists ?? existsSync;
+
+  // ATOMIC create-or-read (CodeQL alert #71, js/file-system-race): a check-then-act
+  // (existsSync → write) let two concurrent first-provisioners (daemon boot racing a
+  // spawn) each generate a DIFFERENT password — last writer wins the file, and the
+  // keychain ends up keyed to a password the file no longer holds. `flag: "wx"`
+  // (O_CREAT|O_EXCL) makes creation exclusive in ONE syscall, mode 0600 applied at
+  // create: the loser gets EEXIST and reads the winner's password instead of
+  // inventing a second one. No exists() check — there is nothing to go stale.
+  let password = randomBytes(32).toString("hex");
+  mkdirSync(dirname(opts.passwordPath), { recursive: true });
+  try {
+    writeFileSync(opts.passwordPath, password, { mode: 0o600, flag: "wx" });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+    password = readFileSync(opts.passwordPath, "utf8"); // a concurrent provisioner won — converge on its password
+  }
+
+  let provisioned = false;
+  if (!exists(opts.keychainPath)) {
+    // Read the item (attributes, then secret) BEFORE creating anything, so a
+    // locked/missing credential leaves no half-provisioned keychain behind.
+    let attrs: string;
+    let secret: string;
+    try {
+      attrs = runner(["find-generic-password", "-s", WORKER_KEYCHAIN_SERVICE, opts.loginKeychainPath]);
+      secret = runner([
+        "find-generic-password",
+        "-s",
+        WORKER_KEYCHAIN_SERVICE,
+        "-w",
+        opts.loginKeychainPath,
+      ]).replace(/\n$/, "");
+    } catch (err) {
+      const reasonClass = classifyLoginReadError(err);
+      throw new WorkerKeychainError(
+        reasonClass,
+        `worker-keychain provisioning could not read the '${WORKER_KEYCHAIN_SERVICE}' item from the login keychain ` +
+          `(${reasonClass}): ${String((err as Error)?.message ?? err)}. ` +
+          `Provision while the login keychain is unlocked (an interactive session), then headless spawns no longer need it.`,
+      );
+    }
+    const account = attrs.match(/"acct"<blob>="([^"]*)"/)?.[1] ?? "";
+    try {
+      runner(["create-keychain", "-p", password, opts.keychainPath]);
+      // No -l (lock on sleep) / no -u (lock after timeout): never auto-locks.
+      runner(["set-keychain-settings", opts.keychainPath]);
+      const grants = (opts.grantApps ?? []).flatMap((app) => ["-T", app]);
+      runner([
+        "add-generic-password",
+        "-a",
+        account,
+        "-s",
+        WORKER_KEYCHAIN_SERVICE,
+        "-w",
+        secret,
+        ...grants,
+        opts.keychainPath,
+      ]);
+      provisioned = true;
+    } catch (err) {
+      throw new WorkerKeychainError(
+        "provision-failed",
+        `worker-keychain provisioning failed while creating/populating ${opts.keychainPath}: ` +
+          String((err as Error)?.message ?? err),
+      );
+    }
+  }
+
+  try {
+    runner(["unlock-keychain", "-p", password, opts.keychainPath]);
+    // Re-pin on every call: settings are state, and a drifted auto-lock would
+    // resurrect the exact failure this rung exists to remove.
+    runner(["set-keychain-settings", opts.keychainPath]);
+  } catch (err) {
+    const raw = String((err as Error)?.message ?? err);
+    throw new WorkerKeychainError(
+      "worker-keychain-unlock-failed",
+      `worker keychain ${opts.keychainPath} could not be unlocked: ` + raw.split(password).join("<redacted>"),
+    );
+  }
+
+  return { keychainPath: opts.keychainPath, provisioned, unlocked: true };
 }

@@ -8,7 +8,7 @@ import { detectCompactionEvents, isQualitySuspect, type CompactionEvent } from "
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { buildWorkerEnv } from "./env.js";
 import { validateWorkerSettingsFile } from "./settings.js";
-import { materializeWorkerHome } from "./worker-home.js";
+import { ensureWorkerKeychain, materializeWorkerHome, workerKeychainPaths } from "./worker-home.js";
 
 /**
  * Aggregate token usage off the SDK result envelope's `usage` field (verified
@@ -225,7 +225,22 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // with the few paths a worker legitimately needs symlinked back in. Best-
   // effort/idempotent — safe to call before every spawn. See worker-home.ts.
   const workerHome = workerHomeDir(config);
-  materializeWorkerHome({ workerHome, realHome: process.env.HOME ?? homedir() });
+  const realHome = process.env.HOME ?? homedir();
+  // W1-T235 (WS-7 keychain-unlock gate, macOS only): guarantee the DEDICATED
+  // always-unlocked worker keychain before any spawn, and point the redirected
+  // HOME's keychain slot at it — a LOCKED login keychain can no longer kill the
+  // spawn "Not logged in" at $0. A credential problem throws WorkerKeychainError
+  // HERE, pre-spawn, with a named reason class — never a $0 worker whose
+  // zero-write death reads as "containment UNPROVEN" (the 2026-07-21 incident).
+  let workerKeychainPath: string | undefined;
+  if (process.platform === "darwin") {
+    workerKeychainPath = ensureWorkerKeychain({
+      ...workerKeychainPaths(join(config.root, "state")),
+      loginKeychainPath: join(realHome, "Library", "Keychains", "login.keychain-db"),
+      grantApps: [config.claudeBin, "/usr/bin/security"],
+    }).keychainPath;
+  }
+  materializeWorkerHome({ workerHome, realHome, workerKeychainPath });
 
   // Shell isolation (resolved from config, never hardcoded) so a worker sources
   // no operator rc: HOME is redirected (above) so CLAUDE_CODE_SHELL's Bash-tool

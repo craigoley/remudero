@@ -261,6 +261,7 @@ import {
   type SpawnWorkerArgs,
   type WorkerResult,
 } from "./lib/worker.js";
+import { ensureWorkerKeychain, workerKeychainPaths } from "./lib/worker-home.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "./lib/drain-lock.js";
 import { acquireInflightLock, InflightLockError, sweepStaleInflightLocks } from "./lib/inflight-lock.js";
 import { classifyFailure, MAX_TRANSIENT_RETRIES, type FailureSignal } from "./lib/classify.js";
@@ -4207,6 +4208,21 @@ async function daemonCommand(rest: string[]): Promise<number> {
     process.env,
     () => sweepStaleTempDirs(),
     () => sweepStaleInflightLocks(join(config.root, "state", "inflight")),
+    // W1-T235: the boot-time worker-keychain unlock, explicit and ledgered
+    // (`daemon.worker_keychain`) — macOS only; elsewhere the rung is absent.
+    process.platform === "darwin"
+      ? () =>
+          ensureWorkerKeychain({
+            ...workerKeychainPaths(join(config.root, "state")),
+            loginKeychainPath: join(
+              process.env.HOME ?? homedir(),
+              "Library",
+              "Keychains",
+              "login.keychain-db",
+            ),
+            grantApps: [config.claudeBin, "/usr/bin/security"],
+          })
+      : undefined,
   );
 
   try {
