@@ -94,8 +94,17 @@ jobs:
       # (packages/daemon-client-smoke) needs no new required check here: it typechecks for free
       # under the already-required `ci` job (tsconfig.json's `include` covers
       # `packages/*/src/**/*.ts`).
+      # `scan-pr / osv-scan` (W1-T211, §5 Tier-1 security stack) added: osv-scanner-pr.yml is the
+      # ONLY scanner in the stack configured `fail-on-vuln: true` (CodeQL/Semgrep/Scorecard are
+      # advisory-only SARIF uploads by design) — a hard-failing check that ci-gate never listed
+      # was invisible to branch protection once protection was flipped to require only `ci-gate` +
+      # `remudero-review` (see the file header above), so a planted/real CVE could turn this check
+      # run red and still merge. Same UNCONDITIONAL shape — no path filter, runs every PR. The
+      # check-run name is namespaced by GitHub as `<caller job> / <reusable workflow job>` because
+      # osv-scanner-pr.yml calls google/osv-scanner-action's reusable workflow instead of running
+      # inline (verified against a live PR's check-runs API response, not assumed from the yaml).
       REQUIRED: >-
-        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet", "jscpd-gate", "claims", "learnings-budget-ratchet", "refactor-campaign", "commitlint", "api-client-drift", "no-hand-rolled-fetch"]
+        ["ci", "lint-plan", "depcruise", "containment-probe", "coverage-ratchet", "mutation-ratchet", "jscpd-gate", "claims", "learnings-budget-ratchet", "refactor-campaign", "commitlint", "api-client-drift", "no-hand-rolled-fetch", "scan-pr / osv-scan"]
       # Not quality gates — never wait on or fail for these (ci-gate is self; remudero-review is
       # a separate required context posted directly by the orchestrator, not a check-run).
       IGNORE: >-
