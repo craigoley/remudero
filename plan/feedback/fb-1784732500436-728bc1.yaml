@@ -1,0 +1,30 @@
+id: fb-1784732500436-728bc1
+ts: 2026-07-22T15:01:40.436Z
+raw: "LATENT BUG (write-atomicity family, sibling to W1-T206/207/208 which stop
+  at ledger/status.json/run.lock). Three MORE shared-state files under state/
+  take non-atomic writeFileSync with a genuine concurrent multi-writer path, and
+  NONE is covered by an open task. OBSERVED. (1) state/inbox-proposals.json: 4
+  plain writers — panel-graph.ts:448 (runs INSIDE the long-lived 'rmd serve'
+  daemon), run-task.ts:6284 (rmd inbox heal), :6454 (rmd approve prune), :6553
+  (rmd reframe); each is a read-modify-write off a prior read with no tmp+rename
+  and no lock. serve + a concurrent 'rmd approve/reframe/inbox' = lost update or
+  a torn file that parseProposalRegistry reads as empty or resurrects a consumed
+  proposal. (2) state/inbox-drafts.json + state/inbox-draft-attempts.json:
+  run-task.ts:6169 then :6170 write the PAIR non-atomically in the daemon draft
+  rung — a crash between the two lines records an attempt without its draft (or
+  vice versa), defeating the W1-T192 idempotence the comment claims; also
+  written at :6245/:6554. (3) state/last-retro.json: run-task.ts:3614 plain
+  write; reader loadMarker (retro.ts:712) does catch{return undefined}, so a
+  torn write is INDISTINGUISHABLE FROM ABSENT -> the next retro treats it as
+  first-ever and REPROCESSES the whole already-consumed run window
+  (double-counts SHIPPED/learnings). FIX: same tmp-write+renameSync (or wx) the
+  atomicity family already prescribes. FALSIFYING CHECK: grep -n
+  'inbox-proposals\\|inbox-drafts\\|last-retro\\|renameSync' src/run-task.ts
+  src/lib/panel-graph.ts — the write sites above have no sibling renameSync;
+  confirm panel-graph inbox route is mounted in serve. COVERED-BY: none (grep
+  plan/ for these filenames + 'atomic' is empty; W1-T201/T173 touch these files
+  for cadence/fence-strip, not atomicity)."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

@@ -1,0 +1,33 @@
+id: fb-1784732585507-04eac2
+ts: 2026-07-22T15:03:05.507Z
+raw: "LATENT BUG (TOCTOU in the lock-RECLAIM path — the #143/#145/W1-T7
+  double-run race resurfacing in the stale-holder branch). OBSERVED code /
+  INFERRED race; covered-by: NONE. All three single-instance locks share one
+  reclaim shape: on openSync(wx)->EEXIST, read the lock, and if the holder pid
+  is DEAD, UNCONDITIONALLY unlinkSync(lockPath) then loop to re-create —
+  inflight-lock.ts:99-101, drain-lock.ts:94-96, review.ts:2489. The create is
+  O_EXCL-atomic (no gap) but the RECLAIM is not: the unlink is not conditional
+  on the file still being the same dead lock that was read. Two reclaimers
+  racing a dead lock P: A reads dead, B reads dead, A unlinks+creates (A holds),
+  B's unlink now deletes A's FRESH LIVE lock, B creates (B holds) -> both
+  believe they hold it -> concurrent run (two drains, or two runs of one task,
+  or a double review-status post). The swallowed catch on the unlink
+  (inflight-lock.ts:102 etc.) hides that a live competitor's lock was removed,
+  so it leaves no trace. Common trigger: a crashed run leaves a stale lock and
+  two retriers (drain + manual run-task, or two drains) collide. SAME
+  read-then-unlink reap race in sweepStaleInflightLocks
+  (inflight-lock.ts:175-182, run at daemon boot daemon.ts:459): a real acquire
+  between the read and the unlink gets its live lock reaped. FIX (one shared):
+  compare-and-delete (re-verify the file is still the dead one under an
+  exclusive hold) or reclaim via atomic rename rather than unlink+create.
+  FALSIFYING CHECK: a two-acquirer unit test against a pre-seeded dead-pid lock,
+  interleaving A's unlink+recreate BEFORE B's unlink, asserting both
+  openSync(wx) cannot both succeed — existing tests (inflight-lock.test.ts:71,
+  drain-lock.test.ts:50, review-status-gate.test.ts:186) exercise only a SINGLE
+  reclaimer so the race is unfalsified. MINOR SIBLING (low): reclaim checks
+  isAlive(held.pid) but ignores the recorded host field (inflight-lock.ts:99) —
+  cross-host false reclaim if lock dirs are ever on a shared FS."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
