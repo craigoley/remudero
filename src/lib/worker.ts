@@ -1,5 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
@@ -751,7 +760,23 @@ export function runLockPath(worktreePath: string): string {
 }
 
 export function writeRunLock(worktreePath: string, info: RunLockInfo): void {
-  writeFileSync(runLockPath(worktreePath), JSON.stringify(info, null, 2));
+  // ATOMIC OVERWRITE (W1-T208): write to a sibling temp file, then rename() into place.
+  // The prior direct writeFileSync(target) let a concurrent readRunLock() (pruneStaleRuns
+  // runs in a DIFFERENT process, on its own schedule) observe a partially-written file —
+  // JSON.parse then throws, readRunLock catches it and returns null, and null is exactly
+  // what "no lock at all" also looks like. That misclassified a live, mid-write run as
+  // abandoned debris, handing pruneStaleRuns a green light to --force remove its worktree
+  // (the same class of bug DIAGNOSIS.md/drain-concurrency already called out for the
+  // no-lock case). rename(2) atomically swaps the directory entry on a POSIX filesystem,
+  // so a reader can only ever see the complete old content or the complete new content —
+  // never a torn intermediate — which removes the ambiguity at its source instead of
+  // trying to distinguish "torn" from "absent" after the fact. The temp name embeds pid +
+  // timestamp so two writers racing on the same lock path never clobber each other's
+  // in-flight temp file.
+  const target = runLockPath(worktreePath);
+  const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify(info, null, 2));
+  renameSync(tmp, target);
 }
 
 export function readRunLock(worktreePath: string): RunLockInfo | null {
