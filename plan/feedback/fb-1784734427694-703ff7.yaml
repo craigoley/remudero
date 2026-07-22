@@ -23,4 +23,4 @@ raw: "PIPELINE DEFECT (durable-inbox -> triage has no commit bridge). OBSERVED.
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/599
