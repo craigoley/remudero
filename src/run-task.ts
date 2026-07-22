@@ -886,9 +886,10 @@ async function runReview(args: {
     floor_degraded: verdict.floorDegraded,
     // W1-T185 (criterion 5): `capped` — computed UNCONDITIONALLY, never forcing
     // `state`/`floor_state` (CAPPED IS NOT FAIL); consequential only via the
-    // SEPARATE auto-merge arming path (decideAutoMergeArm, below) on a
-    // tdd:strict task — and `keyword_only` — true when NO PR-head checkout was
-    // given at all (e.g. `rmd review`'s manual-PR path). Read off `verdict`
+    // SEPARATE auto-merge arming path (decideAutoMergeArm, below), which
+    // refuses ANY capped verdict since W1-T229 — and `keyword_only` — true
+    // when NO PR-head checkout was given at all (e.g. `rmd review`'s
+    // manual-PR path). Read off `verdict`
     // through `reviewLedgerLegibilityFields` so the ledger line names EXACTLY
     // the same two facts the posted status description rendered, never a
     // hand-copied projection that could drift from it.
@@ -2568,16 +2569,19 @@ async function runTask(
       }
     }
 
-    // ── W1-T185 (Gap 1, criteria 2-3): THE AUTO-MERGE ARMING PATH refuses a
-    // CAPPED verdict on a tdd:strict task, unattended — the #411 shape (0/5
-    // proofs executed, posted as an uncapped PASS, merged with no human
-    // reading the diff). No autonomous run carries an operator override of
-    // its own: an override is a HUMAN decision, granted out of band via
-    // `rmd review <pr> --override-capped-by/--override-capped-reason` and
-    // recovered here from the SAME ledger every other precedence check in
-    // this file reads (readLedgerLines). A non-tdd:strict task, or a verdict
-    // that isn't capped, arms exactly as before this task — decideAutoMergeArm
-    // only ever REFUSES the one shape rule 22's fixture (iii) named.
+    // ── W1-T185 (Gap 1, criteria 2-3), raised by W1-T229: THE AUTO-MERGE
+    // ARMING PATH refuses ANY CAPPED verdict, unattended — the #411 shape
+    // (0/5 proofs executed, posted as an uncapped PASS, merged with no human
+    // reading the diff). W1-T229 removed the tdd:strict exemption this used
+    // to carry: a capped, non-tdd:strict PR previously armed exactly as if it
+    // were an ordinary PASS, which made prose the DEFAULT merge floor (since
+    // `{tdd: strict}` is opt-in, not the default). No autonomous run carries
+    // an operator override of its own: an override is a HUMAN decision,
+    // granted out of band via `rmd review <pr> --override-capped-by/
+    // --override-capped-reason` and recovered here from the SAME ledger every
+    // other precedence check in this file reads (readLedgerLines). A verdict
+    // that isn't capped arms exactly as before — decideAutoMergeArm only ever
+    // REFUSES the one shape rule 22's fixture (iii) named.
     //
     // KNOWN RESIDUAL GAP (explicitly out of this task's stated file scope,
     // `plan/tasks.yaml` W1-T185 `files:`): `sweep.ts`'s independent
@@ -2586,8 +2590,7 @@ async function runTask(
     // UNARMED, but a later sweep poll could still arm it via that separate
     // path. Left for a follow-up task rather than widened here unreviewed.
     const tddStrict = isTddStrict(task.principles);
-    const cappedOverride =
-      review.capped && tddStrict ? cappedOverrideFromLedger(readLedgerLines(ledgerPath), taskId) : undefined;
+    const cappedOverride = review.capped ? cappedOverrideFromLedger(readLedgerLines(ledgerPath), taskId) : undefined;
     const armDecision = resolveAutoMergeArm(review, tddStrict, cappedOverride, (s, extra) => log(s, extra));
     if (!armDecision.arm) {
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
@@ -2596,10 +2599,10 @@ async function runTask(
           class: "BLOCKED",
           taskId,
           runId,
-          summary: `CAPPED verdict on a tdd:strict task — auto-merge refused unattended — ${prUrl}`,
+          summary: `CAPPED verdict — auto-merge refused unattended — ${prUrl}`,
           detail:
-            `remudero-review posted CAPPED (0 of ${review.criteria.length} proofs executed) on a task ` +
-            `whose principles are {tdd: strict}. ${armDecision.reason}\n\nAuto-merge was NOT armed.`,
+            `remudero-review posted CAPPED (0 of ${review.criteria.length} proofs executed). ` +
+            `${armDecision.reason}\n\nAuto-merge was NOT armed.`,
           options: [
             {
               label: "add-proof",
@@ -2621,12 +2624,12 @@ async function runTask(
       log("verdict", {
         verdict: "blocked",
         pr_url: prUrl,
-        reason: "capped verdict on tdd:strict task refused auto-merge",
+        reason: "capped verdict refused auto-merge",
         issue_url: issueUrl,
         cost_usd: costUsd,
         billing_mode: "subscription",
       });
-      say(`verdict: blocked — CAPPED verdict on tdd:strict task, escalated: ${issueUrl}`);
+      say(`verdict: blocked — CAPPED verdict, escalated: ${issueUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
     }
 
@@ -2830,11 +2833,6 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
   // Criteria: task trailer → tasks.yaml; else the PR body's Acceptance: block.
   let criteria: AcceptanceCriterion[] = [];
   let source = "NONE (fail closed — nothing to judge is never a pass)";
-  // W1-T185: the trailer-resolved task's `principles` (e.g. `{tdd: strict}`) —
-  // consulted below to decide whether a CAPPED verdict here can accept an
-  // operator override, and whether to hint at one. Absent when no task id
-  // resolves (a plan/doc PR with only a body Acceptance: block).
-  let principles: Record<string, unknown> | undefined;
   const taskId = body.match(/Remudero-Task:\s*(\S+)/)?.[1];
   if (taskId) {
     try {
@@ -2843,7 +2841,6 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
       if (t?.acceptance?.length) {
         criteria = t.acceptance;
         source = `plan/tasks.yaml task ${taskId} (${criteria.length} criteria)`;
-        principles = t.principles;
       }
     } catch {
       // A bad/absent plan is not the reviewer's concern; fall through to the body.
@@ -2912,10 +2909,12 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
       (verdict.capped ? " — CAPPED: not certified (0 proofs executed)" : ""),
   );
 
-  // W1-T185 (Gap 1, criterion 2): the operator override — a LEDGERED,
-  // attributable decision to arm a capped tdd:strict verdict anyway. Granted
-  // here (the manual escape hatch, an operator-run command) rather than
-  // inferred: an override is a decision someone made, and it must name who.
+  // W1-T185 (Gap 1, criterion 2), raised by W1-T229: the operator override —
+  // a LEDGERED, attributable decision to arm a capped verdict anyway.
+  // Granted here (the manual escape hatch, an operator-run command) rather
+  // than inferred: an override is a decision someone made, and it must name
+  // who. No `principles`/tdd-tier check gates this note since W1-T229 — a
+  // CAPPED verdict refuses to arm regardless of tdd tier.
   const overrideBy = flagValue(rest, "--override-capped-by");
   const overrideReason = flagValue(rest, "--override-capped-reason");
   if (overrideBy && overrideReason) {
@@ -2928,11 +2927,10 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
       log("automerge.capped_override_granted", { by: overrideBy, reason: overrideReason, pr_url: view.url });
       console.log(`CAPPED override recorded — by ${overrideBy}: ${overrideReason} (task ${taskId})`);
     }
-  } else if (verdict.capped && isTddStrict(principles)) {
+  } else if (verdict.capped) {
     console.log(
-      `NOTE: this task declares tdd:strict — a CAPPED verdict cannot arm auto-merge without executed ` +
-        `proof or an operator override: rmd review ${view.number} --override-capped-by <name> ` +
-        `--override-capped-reason <text>`,
+      `NOTE: a CAPPED verdict cannot arm auto-merge without executed proof or an operator override: ` +
+        `rmd review ${view.number} --override-capped-by <name> --override-capped-reason <text>`,
     );
   }
 
@@ -6798,7 +6796,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "review",
     usage:
-      "rmd review <pr-number> [--repo <name>] [--override-capped-by <name> --override-capped-reason <text>]   # post remudero-review on a hand-opened PR; materializes a worktree at the PR head so proofs EXECUTE (W1-T185), falling back to an explicit keyword-only CAPPED verdict if materialization fails; --override-capped-by/--override-capped-reason ledgers an attributable operator override so a CAPPED verdict on a tdd:strict task can arm auto-merge",
+      "rmd review <pr-number> [--repo <name>] [--override-capped-by <name> --override-capped-reason <text>]   # post remudero-review on a hand-opened PR; materializes a worktree at the PR head so proofs EXECUTE (W1-T185), falling back to an explicit keyword-only CAPPED verdict if materialization fails; --override-capped-by/--override-capped-reason ledgers an attributable operator override so a CAPPED verdict can arm auto-merge",
   },
   {
     name: "dep-review",

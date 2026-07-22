@@ -169,12 +169,14 @@ export interface ReviewVerdict {
    * says so honestly instead of dressing it as certified.
    *
    * The one place `capped` IS consequential: {@link decideAutoMergeArm} refuses
-   * to arm auto-merge on a `capped` verdict for a task whose `principles` are
-   * `{tdd: strict}`, unless an explicit, ledgered {@link CappedOverride} is
-   * supplied — a separate decision layer from this verdict's own `state`, so a
-   * capped verdict can still post as a non-blocking commit status (criterion 3)
-   * while the ARMING path still refuses it (criterion 2). A non-tdd:strict task
-   * is unaffected either way. Distinct from `floorDegraded` (W1-T72,
+   * to arm auto-merge on ANY `capped` verdict (W1-T229 — regardless of the
+   * task's `principles`; a prior version of this gate exempted every
+   * non-tdd:strict task, which made prose the DEFAULT merge floor, since
+   * `{tdd: strict}` is opt-in), unless an explicit, ledgered
+   * {@link CappedOverride} is supplied — a separate decision layer from this
+   * verdict's own `state`, so a capped verdict can still post as a
+   * non-blocking commit status (criterion 3) while the ARMING path still
+   * refuses it (criterion 2). Distinct from `floorDegraded` (W1-T72,
    * legibility-only, gated on a DIALECT-PREFIXED proof specifically): `capped`
    * fires on ANY zero-executed verdict, dialect-prefixed or not.
    */
@@ -1131,8 +1133,8 @@ export function isTddStrict(principles?: Record<string, unknown>): boolean {
 export function cappedAnnotation(criteriaCount: number): string {
   return (
     `CAPPED: 0/${criteriaCount} proofs executed — not certified (a keyword match is a claim, ` +
-    `never evidence). On a tdd:strict task this refuses to arm auto-merge (see decideAutoMergeArm) ` +
-    `until proof executes or an operator grants an explicit, ledgered override.`
+    `never evidence). This refuses to arm auto-merge (see decideAutoMergeArm) until proof ` +
+    `executes or an operator grants an explicit, ledgered override.`
   );
 }
 
@@ -1146,10 +1148,10 @@ export function cappedAnnotation(criteriaCount: number): string {
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
- * An explicit, human-granted exception to "a CAPPED verdict on a tdd:strict
- * task cannot arm auto-merge" (design: "an override is a decision someone
- * made, and it must be attributable"). Never inferred, never anonymous — `by`
- * names WHO. Granted via `rmd review <pr> --override-capped-by/
+ * An explicit, human-granted exception to "a CAPPED verdict cannot arm
+ * auto-merge" (design: "an override is a decision someone made, and it must
+ * be attributable"). Never inferred, never anonymous — `by` names WHO.
+ * Granted via `rmd review <pr> --override-capped-by/
  * --override-capped-reason` (run-task.ts) and recovered from the ledger by
  * {@link cappedOverrideFromLedger}.
  */
@@ -1171,15 +1173,18 @@ export interface ArmDecision {
  *
  * - `state !== "success"` → refuse. The ordinary required-check gate;
  *   unrelated to capping (a genuinely failing review was ALWAYS refused).
- * - CAPPED IS NOT FAIL (criterion 3): a capped verdict never refuses arming on
- *   its own. Only on a `tdd: strict` task, and only absent an override, does
- *   capping refuse — a non-tdd:strict PR arms exactly as if this were an
- *   ordinary PASS.
- * - An override permits arming. Whether the caller actually LEDGERS that
- *   override is {@link resolveAutoMergeArm}'s job, not this pure predicate's —
- *   keeping this function side-effect-free is what makes "refuses without an
- *   override; permits with one" a single unit fixture (acceptance criterion
- *   2), independent of ledger/CLI plumbing.
+ * - W1-T229: A CAPPED verdict (zero proofs executed) refuses to arm
+ *   UNCONDITIONALLY, regardless of `tddStrict` — a prior version of this
+ *   function armed any capped, non-tdd:strict PR exactly as if it were an
+ *   ordinary PASS, which made "declare tdd:strict" the ONLY thing standing
+ *   between zero executed proof and an unattended merge, and tdd:strict is
+ *   not the default. `tddStrict` is retained purely for override-provenance
+ *   bookkeeping ({@link resolveAutoMergeArm}), never for gating.
+ * - An override permits arming, on any capped verdict. Whether the caller
+ *   actually LEDGERS that override is {@link resolveAutoMergeArm}'s job, not
+ *   this pure predicate's — keeping this function side-effect-free is what
+ *   makes "refuses without an override; permits with one" a single unit
+ *   fixture (acceptance criterion 2), independent of ledger/CLI plumbing.
  */
 export function decideAutoMergeArm(
   verdict: Pick<ReviewVerdict, "state" | "capped">,
@@ -1189,11 +1194,8 @@ export function decideAutoMergeArm(
   if (verdict.state !== "success") {
     return { arm: false, reason: "remudero-review is not success" };
   }
-  if (!verdict.capped || !tddStrict) {
-    return {
-      arm: true,
-      reason: verdict.capped ? "capped, but the task is not tdd:strict" : "verdict is a full PASS",
-    };
+  if (!verdict.capped) {
+    return { arm: true, reason: "verdict is a full PASS" };
   }
   if (override) {
     return { arm: true, reason: `CAPPED override granted by ${override.by}: ${override.reason}` };
@@ -1201,8 +1203,8 @@ export function decideAutoMergeArm(
   return {
     arm: false,
     reason:
-      "CAPPED verdict (zero proofs executed) on a tdd:strict task — refuses to arm auto-merge " +
-      "without executed proof or an explicit, ledgered operator override",
+      "CAPPED verdict (zero proofs executed) — refuses to arm auto-merge without executed proof " +
+      "or an explicit, ledgered operator override",
   };
 }
 
@@ -1210,12 +1212,13 @@ export function decideAutoMergeArm(
  * The auto-merge arming path, WITH its ledger side effect (W1-T185, criterion
  * 2's "writes an attributable ledger line naming the overrider"). Wraps
  * {@link decideAutoMergeArm}: when arming succeeds ONLY because an override
- * was supplied for a genuinely capped, tdd:strict verdict, this logs
- * `automerge.capped_override_used` naming who — an override that arms
- * silently is exactly the #411 hazard this task closes (auto-merge armed
- * unattended, no human reading the diff). `log` is injected so the whole
- * contract — refuse without an override, arm + LEDGER with one — is a single
- * unit fixture; `run-task.ts`'s `runTaskBody` is the real caller.
+ * was supplied for a genuinely capped verdict (W1-T229: any capped verdict,
+ * not just a tdd:strict one), this logs `automerge.capped_override_used`
+ * naming who — an override that arms silently is exactly the #411 hazard
+ * this task closes (auto-merge armed unattended, no human reading the diff).
+ * `log` is injected so the whole contract — refuse without an override, arm +
+ * LEDGER with one — is a single unit fixture; `run-task.ts`'s `runTaskBody`
+ * is the real caller.
  */
 export function resolveAutoMergeArm(
   verdict: Pick<ReviewVerdict, "state" | "capped">,
@@ -1224,7 +1227,7 @@ export function resolveAutoMergeArm(
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): ArmDecision {
   const decision = decideAutoMergeArm(verdict, tddStrict, override);
-  if (decision.arm && override && tddStrict && verdict.capped) {
+  if (decision.arm && override && verdict.capped) {
     log("automerge.capped_override_used", { by: override.by, reason: override.reason });
   }
   return decision;
@@ -1436,7 +1439,7 @@ export function decideArmFromLedgerVerdict(prior: PriorReviewVerdict | undefined
  * codebase already use. Written by `rmd review <pr>
  * --override-capped-by/--override-capped-reason` (run-task.ts); consulted by
  * the arming path ({@link decideAutoMergeArm}) before refusing a CAPPED
- * tdd:strict verdict.
+ * verdict.
  */
 export function cappedOverrideFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,

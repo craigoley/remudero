@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import {
   REVIEW_CONTEXT,
@@ -42,6 +43,12 @@ import {
   type ProofExecutor,
   type WhitelistedProof,
 } from "../src/lib/review.js";
+
+// W1-T229: source text of run-task.ts, read once, so the plan-only carve-out
+// falsifier below can verify by STRUCTURE (call-site count) rather than by
+// spawning the real CLI — matches the pattern test/isolation-wiring.test.ts
+// and test/mounts-wiring.test.ts already use for this exact file.
+const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
 // ── Recorded fixtures (acceptance #2, the FALSIFIER) ────────────────────────
 // The verdict LOGIC is a PURE function so the falsifier is a unit fixture: a
@@ -1517,36 +1524,40 @@ test("FALSIFIER (criterion 3): a capped verdict never renders as a failing check
   assert.equal(capped.state, "success"); // never forced to failure by capping alone
 });
 
-test("FALSIFIER (criterion 3): a capped verdict never blocks a NON-tdd:strict PR's auto-merge arming path", () => {
+test("W1-T229 FALSIFIER: a capped verdict with ZERO proofs executed does NOT arm auto-merge for a non-tdd:strict task — prose is no longer the default merge floor", () => {
   const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
   assert.equal(v.capped, true);
   const decision = decideAutoMergeArm(v, false); // tddStrict=false — the task never declared it
-  assert.equal(decision.arm, true);
+  assert.equal(decision.arm, false);
 });
 
 // W1-T185 acceptance criterion 3's own proof text IS this test's name (see the
 // comment on criterion 1's renamed test, above, for why: the mechanical floor
-// name-filters the whole suite on exactly this string). Composes the two
-// granular falsifiers just above into the single fixture the criterion states.
-test("a capped verdict does not render as a failing check and does not block a non-tdd:strict PR from proceeding. FALSIFIER: mapping capped to failure would red every PR the moment one proof is unparseable, halting the fleet — a worse failure than the uncertified-PASS it replaces, and it would punish authors for the dialect gap instead of surfacing it", () => {
+// name-filters the whole suite on exactly this string). CAPPED IS NOT FAIL
+// still holds (the check state is never forced red) — but since W1-T229, a
+// capped verdict on ANY task (tdd:strict or not) refuses to ARM auto-merge.
+// Those are two separate layers (posted state vs. arming decision, as this
+// file's own W1-T185 comments document) and only the first survives here.
+test("a capped verdict does not render as a failing check, on ANY task — but it DOES refuse to arm auto-merge on a non-tdd:strict PR since W1-T229 (arming and posted state are separate decisions). FALSIFIER: mapping capped to failure would red every PR the moment one proof is unparseable, halting the fleet — a worse failure than the uncertified-PASS it replaces, and it would punish authors for the dialect gap instead of surfacing it", () => {
   const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
   assert.equal(v.capped, true);
   // does not render as a failing check on its own:
   assert.equal(v.state, "success");
-  // does not block a non-tdd:strict PR from proceeding:
-  assert.equal(decideAutoMergeArm(v, false).arm, true);
+  // W1-T229: DOES refuse to arm a non-tdd:strict PR too — capped never arms unattended:
+  assert.equal(decideAutoMergeArm(v, false).arm, false);
 });
 
-// ── W1-T185 (Gap 1, criterion 2): THE AUTO-MERGE ARMING PATH refuses a ──
-// capped verdict on a tdd:strict task without executed proof or a LEDGERED
-// operator override; supplying one permits arming AND is attributable.
+// ── W1-T185 (Gap 1, criterion 2), raised by W1-T229: THE AUTO-MERGE ARMING ──
+// PATH refuses ANY capped verdict — regardless of tdd tier, since W1-T229 —
+// without executed proof or a LEDGERED operator override; supplying one
+// permits arming AND is attributable.
 
 test("FALSIFIER (criterion 2, the #411 shape): a capped verdict on a tdd:strict task refuses to arm — no operator override, no unattended arm", () => {
   const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
   assert.equal(v.capped, true);
   const decision = decideAutoMergeArm(v, true); // tddStrict=true, no override
   assert.equal(decision.arm, false);
-  assert.match(decision.reason, /tdd:strict/);
+  assert.match(decision.reason, /CAPPED verdict/);
 });
 
 test("an explicit operator override permits arming a capped, tdd:strict verdict", () => {
@@ -1556,7 +1567,7 @@ test("an explicit operator override permits arming a capped, tdd:strict verdict"
   assert.match(decision.reason, /craig/);
 });
 
-test("resolveAutoMergeArm writes an ATTRIBUTABLE ledger line naming the overrider — ONLY when the override was actually consulted (capped + tdd:strict + arm)", () => {
+test("resolveAutoMergeArm writes an ATTRIBUTABLE ledger line naming the overrider — ONLY when the override was actually consulted (capped + arm; W1-T229 dropped the tdd:strict requirement from this condition too)", () => {
   const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const log = (step: string, extra?: Record<string, unknown>) => logged.push({ step, extra });
   const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
@@ -1592,7 +1603,7 @@ test("with a capped verdict on a task whose principles are {tdd: strict}, the au
   assert.equal(logged[0].extra?.by, "craig");
 });
 
-test("resolveAutoMergeArm logs NOTHING when there is nothing to override — a full PASS, or a non-tdd:strict task, arms silently exactly as before this task", () => {
+test("resolveAutoMergeArm logs NOTHING when there is nothing to override — a full PASS arms silently, and a capped non-tdd:strict task REFUSES silently (W1-T229: no override was consulted in either case, so nothing is logged)", () => {
   const logged: unknown[] = [];
   const log = (step: string, extra?: Record<string, unknown>) => logged.push({ step, extra });
   const executed: AcceptanceCriterion[] = [{ claim: "x", proof: "grep: frobnicate in src/lib/widget.ts" }];
@@ -1605,10 +1616,64 @@ test("resolveAutoMergeArm logs NOTHING when there is nothing to override — a f
   });
   assert.equal(resolveAutoMergeArm(fullPass, true, undefined, log).arm, true);
 
+  // W1-T229: a capped, non-tdd:strict verdict now REFUSES (prose is no longer the default
+  // merge floor) — and refusing without an override logs nothing, same as it always did.
   const cappedNonStrict = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
-  assert.equal(resolveAutoMergeArm(cappedNonStrict, false, undefined, log).arm, true);
+  assert.equal(resolveAutoMergeArm(cappedNonStrict, false, undefined, log).arm, false);
 
   assert.equal(logged.length, 0);
+});
+
+// ── W1-T229: the arming path's floor now binds on EVERY task, not just ──
+// tdd:strict ones — and an override works the same way regardless of tier.
+
+test("W1-T229: decideAutoMergeArm with a capped verdict and tddStrict false returns arm false (acceptance criterion 1, verbatim)", () => {
+  const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(v.capped, true);
+  assert.equal(decideAutoMergeArm(v, false).arm, false);
+});
+
+test("W1-T229: an operator override arms a capped, NON-tdd:strict verdict too (the override escape hatch is not tdd:strict-gated) and is still ledgered attributably", () => {
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const log = (step: string, extra?: Record<string, unknown>) => logged.push({ step, extra });
+  const v = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
+
+  const decision = decideAutoMergeArm(v, false, { by: "craig", reason: "manually verified the diff" });
+  assert.equal(decision.arm, true);
+
+  const resolved = resolveAutoMergeArm(v, false, { by: "craig", reason: "manually verified the diff" }, log);
+  assert.equal(resolved.arm, true);
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0].step, "automerge.capped_override_used");
+  assert.equal(logged[0].extra?.by, "craig");
+});
+
+// W1-T229 acceptance criterion 2, verbatim: "a plan-only PR still arms under the raised
+// floor, so the plan lane does not stall". PLAN-ONLY PRs (retro/triage/plan/approve/
+// dep-review) never route through decideAutoMergeArm/resolveAutoMergeArm at all — they
+// call armAutoMerge DIRECTLY (see run-task.ts). Only runTask's "implement" flow (a task
+// that produces code, never a plan-only PR) consults the arm-decision gate this task
+// raises. So the raised floor structurally cannot stall the plan lane: there is nothing
+// for it to refuse. This falsifier verifies that invariant by STRUCTURE, so a future
+// change that starts routing plan-only PRs through decideAutoMergeArm without adding an
+// explicit carve-out (W1-T205) trips this test instead of silently stalling every retro/
+// triage/plan/approve PR.
+test("W1-T229 acceptance criterion 2: the plan-only-PR-emitting flows (retro/triage/plan/approve/dep-review) arm auto-merge directly, never through the raised decideAutoMergeArm/resolveAutoMergeArm floor — so the plan lane does not stall", () => {
+  const resolveCallCount = (runTaskSrc.match(/resolveAutoMergeArm\(/g) ?? []).length;
+  // Exactly one production call site: runTask's own "implement" flow, right before its
+  // own direct armAutoMerge(...) call. Every OTHER armAutoMerge(...) call in the file
+  // (retro/triage/plan/approve/dep-review/sweep) must NOT be preceded by a
+  // resolveAutoMergeArm/decideAutoMergeArm gate — i.e. must arm unconditionally.
+  assert.equal(resolveCallCount, 1, "resolveAutoMergeArm must have exactly one call site (runTask's implement flow) — a second call site means a plan-only-PR-emitting command may now route through the raised floor and needs the W1-T205 carve-out first");
+
+  const armAutoMergeCallCount = (runTaskSrc.match(/\barmAutoMerge\(/g) ?? []).length;
+  // 1 definition + 7 direct call sites (runTask's own post-decision call, dep-review,
+  // retro, the sweep arm effect, triage, plan, approve) — at least 6 call sites beyond
+  // the definition confirms the plan-only-PR-emitting commands arm unconditionally.
+  assert.ok(
+    armAutoMergeCallCount >= 7,
+    "expected multiple direct armAutoMerge call sites (retro/triage/plan/approve/dep-review/sweep) bypassing decideAutoMergeArm entirely",
+  );
 });
 
 test("cappedOverrideFromLedger: 'last one wins', scoped to task_id, well-formed lines only", () => {
