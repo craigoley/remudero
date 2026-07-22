@@ -184,3 +184,144 @@ test("cycle #4 — clean-tree guard: a conflicting dirty file ⇒ abort, alert, 
   assert.ok(!r.calls.includes("pullFf") && !r.calls.includes("kickstart"));
   assert.ok(r.alerts.length === 1 && /conflict/.test(r.alerts[0]));
 });
+
+// ── realDeployDeps + marker helpers (adapter coverage; injected exec + real temp fs) ──
+
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  deployAutoPath,
+  deployFailedAlertPath,
+  deployLastFailedPath,
+  deployMarkerPath,
+  realDeployDeps,
+  requestDeploy,
+} from "../src/lib/deployer.js";
+
+function withTemp(fn: (root: string) => void): void {
+  const root = mkdtempSync(join(tmpdir(), "rmd-deployer-real-"));
+  try {
+    fn(root);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("marker helpers: requestDeploy writes DEPLOY_REQUESTED; the path helpers resolve under state/", () => {
+  withTemp((root) => {
+    assert.equal(deployMarkerPath(root), join(root, "state", "DEPLOY_REQUESTED"));
+    assert.equal(deployAutoPath(root), join(root, "state", "DEPLOY_AUTO"));
+    assert.equal(deployLastFailedPath(root), join(root, "state", "DEPLOY_LAST_FAILED"));
+    assert.equal(deployFailedAlertPath(root), join(root, "state", "DEPLOY_FAILED"));
+    requestDeploy(root, "ship it");
+    assert.ok(existsSync(deployMarkerPath(root)));
+    assert.match(readFileSync(deployMarkerPath(root), "utf8"), /ship it/);
+  });
+});
+
+test("realDeployDeps: git/pgrep/launchctl route through the injected exec with the right argv", () => {
+  withTemp((root) => {
+    const calls: string[][] = [];
+    const exec = (cmd: string, args: string[]): string => {
+      calls.push([cmd, ...args]);
+      if (args.includes("rev-parse") && args.includes("HEAD")) return "aaa111\n";
+      if (args.includes("rev-parse") && args.includes("origin/main")) return "bbb222\n";
+      if (args.includes("status")) return " M DECISIONS.md\n?? new.ts\n";
+      if (args.includes("diff")) return "src/x.ts\nsrc/y.ts\n";
+      if (cmd === "pgrep") throw new Error("exit 1: no matches"); // no live workers
+      return "";
+    };
+    const deps = realDeployDeps({
+      installPath: "/inst",
+      stateRoot: root,
+      daemonLabel: "com.remudero.daemon",
+      uid: 502,
+      ledgerPath: join(root, "ledger.ndjson"),
+      log: () => {},
+      execFile: exec,
+      sleep: () => {},
+      healthWindowMs: 6,
+      healthPollMs: 3,
+    });
+
+    assert.equal(deps.installHead(), "aaa111");
+    assert.equal(deps.originMain(), "bbb222");
+    assert.deepEqual(deps.dirtyFiles(), ["DECISIONS.md", "new.ts"]);
+    assert.deepEqual(deps.incomingFiles("aaa111", "bbb222"), ["src/x.ts", "src/y.ts"]);
+    deps.fetch();
+    deps.pullFf();
+    deps.resetHard("aaa111");
+    deps.kickstart();
+    assert.ok(calls.some((c) => c.join(" ") === "git -C /inst fetch origin --quiet"));
+    assert.ok(calls.some((c) => c.join(" ") === "git -C /inst merge --ff-only origin/main"));
+    assert.ok(calls.some((c) => c.join(" ") === "git -C /inst reset --hard aaa111"));
+    assert.ok(calls.some((c) => c.join(" ") === "launchctl kickstart -k gui/502/com.remudero.daemon"), "kickstarts the daemon job");
+
+    // probeIdle: pgrep threw ⇒ 0 workers; lock counts come from the real temp fs.
+    mkdirSync(join(root, "state", "inflight"), { recursive: true });
+    writeFileSync(join(root, "state", "inflight", "W1-T1.lock"), "{}");
+    mkdirSync(join(root, "worktrees"), { recursive: true });
+    writeFileSync(join(root, "worktrees", "run-x.lock"), "{}");
+    assert.deepEqual(deps.probeIdle(), { workers: 0, inflightLocks: 1, worktreeLocks: 1 });
+  });
+});
+
+test("realDeployDeps: waitBootHealth reads daemon.boot heartbeats after the kickstart instant", () => {
+  withTemp((root) => {
+    const ledger = join(root, "ledger.ndjson");
+    const since = Date.parse("2026-07-22T20:00:00.000Z");
+    // one boot BEFORE the kickstart (ignored) + one AFTER (a clean single boot)
+    writeFileSync(
+      ledger,
+      [
+        '{"ts":"2026-07-22T19:59:59.000Z","step":"daemon.boot"}',
+        '{"ts":"2026-07-22T20:00:05.000Z","step":"daemon.boot"}',
+        "",
+      ].join("\n"),
+    );
+    const deps = realDeployDeps({
+      installPath: "/inst",
+      stateRoot: root,
+      daemonLabel: "d",
+      uid: 1,
+      ledgerPath: ledger,
+      log: () => {},
+      execFile: () => "",
+      sleep: () => {},
+      healthWindowMs: 6,
+      healthPollMs: 3,
+    });
+    const h = deps.waitBootHealth(since);
+    assert.deepEqual(h, { bootObserved: true, crashCount: 0 });
+  });
+});
+
+test("realDeployDeps: alert writes DEPLOY_FAILED + DEPLOY_LAST_FAILED; clearMarker removes the request; lastFailedHead round-trips", () => {
+  withTemp((root) => {
+    const deps = realDeployDeps({
+      installPath: "/inst",
+      stateRoot: root,
+      daemonLabel: "d",
+      uid: 1,
+      ledgerPath: join(root, "l"),
+      log: () => {},
+      execFile: () => "",
+      sleep: () => {},
+    });
+    assert.equal(deps.lastFailedHead(), undefined);
+    deps.alert("boom", "badsha");
+    assert.match(readFileSync(deployFailedAlertPath(root), "utf8"), /boom/);
+    assert.equal(deps.lastFailedHead(), "badsha");
+    // marker present/auto reflect the fs
+    assert.equal(deps.markerPresent(), false);
+    requestDeploy(root, undefined);
+    assert.equal(deps.markerPresent(), true);
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(deployAutoPath(root), "");
+    assert.equal(deps.autoMode(), true);
+    deps.clearMarker();
+    assert.equal(deps.markerPresent(), false);
+    deps.clearMarker(); // idempotent when already gone
+  });
+});

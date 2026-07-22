@@ -55,15 +55,13 @@ export interface Decision {
 
 /** Deploy IFF a trigger is present AND the install is actually behind origin/main. */
 export function decideDeployTrigger(i: TriggerInputs): Decision {
-  if (i.installHead === i.originMain) return { deploy: false, reason: "up-to-date (install HEAD == origin/main)" };
+  const behind = i.installHead !== i.originMain;
+  const alreadyFailed = i.lastFailedHead !== undefined && i.originMain === i.lastFailedHead;
+  if (!behind) return { deploy: false, reason: "up-to-date (install HEAD == origin/main)" };
   if (i.markerPresent) return { deploy: true, reason: "operator marker present + install behind origin/main" };
-  if (i.autoMode) {
-    if (i.lastFailedHead && i.originMain === i.lastFailedHead) {
-      return { deploy: false, reason: `auto: origin/main (${short(i.originMain)}) already failed health-check + rolled back — not retried` };
-    }
-    return { deploy: true, reason: "auto mode + install behind origin/main" };
-  }
-  return { deploy: false, reason: "install behind origin/main but no operator marker (human-gated; run `rmd deploy`)" };
+  if (i.autoMode && alreadyFailed) return { deploy: false, reason: "auto: origin/main already failed health-check + rolled back — not retried" };
+  if (i.autoMode) return { deploy: true, reason: "auto mode + install behind origin/main" };
+  return { deploy: false, reason: "install behind origin/main but no operator marker (human-gated; run rmd deploy)" };
 }
 
 export interface IdleProbe {
@@ -97,16 +95,20 @@ export interface TreeFfResult {
   conflicting: string[];
 }
 
-/**
- * Fast-forward is safe IFF no locally-modified file is ALSO in the incoming diff. A
- * benign local mod the ff doesn't touch (e.g. DECISIONS.md) is preserved and fine; a
- * modified file the ff wants to change would abort git, so we abort + alert first and
- * NEVER force/reset the operator's checkout.
- */
+/** Fast-forward is safe IFF no locally-modified file is ALSO in the incoming diff.
+ * A benign local mod the ff doesn't touch (e.g. DECISIONS.md) is preserved; a modified
+ * file the ff wants to change would abort git, so we abort + alert first and NEVER
+ * force/reset the operator's checkout. */
 export function treeFfSafe(i: TreeFfInputs): TreeFfResult {
   const incoming = new Set(i.incomingFiles);
-  const conflicting = i.dirtyFiles.filter((f) => incoming.has(f));
-  return { ok: conflicting.length === 0, conflicting };
+  const conflicting: string[] = [];
+  for (const f of i.dirtyFiles) {
+    if (incoming.has(f)) {
+      conflicting.push(f);
+    }
+  }
+  const ok = conflicting.length === 0;
+  return { ok, conflicting };
 }
 
 export interface HealthInputs {
@@ -306,25 +308,26 @@ export interface RealDeployOpts {
   healthPollMs?: number;
   /** Injected blocking sleep (tests fake it; real = a busy-wait-free sleep). */
   sleep?: (ms: number) => void;
-}
-
-function git(installPath: string, args: string[]): string {
-  return execFileSync("git", ["-C", installPath, ...args], { encoding: "utf8" }).trim();
-}
-
-function realSleep(ms: number): void {
-  execFileSync("sleep", [String(Math.ceil(ms / 1000))]);
+  /** Injected subprocess runner (tests fake it; default = execFileSync, utf8, RAW —
+   * callers trim, because `git status --porcelain`'s leading status column is
+   * significant). Throws on a non-zero exit, exactly like execFileSync — callers catch
+   * where a non-zero exit is expected (e.g. `pgrep` with no matches). */
+  execFile?: (cmd: string, args: string[]) => string;
 }
 
 /**
- * Wire {@link runDeployCycle}'s side effects to the real world. The one non-obvious
- * bit is health: after kickstart we watch the ledger for `daemon.boot` heartbeats
- * newer than the kickstart instant — exactly ONE means a clean boot; SEVERAL in the
- * window means KeepAlive is restart-storming a broken daemon (crashCount = extra
- * boots). Absent-and-none means it never came up.
+ * Wire {@link runDeployCycle}'s side effects to the real world (every subprocess via
+ * one injectable `execFile`, every file op via node:fs against `stateRoot`, so the
+ * whole adapter is unit-testable without a real daemon/git/launchctl). The one
+ * non-obvious bit is health: after kickstart we watch the ledger for `daemon.boot`
+ * heartbeats newer than the kickstart instant — exactly ONE means a clean boot;
+ * SEVERAL in the window means KeepAlive is restart-storming a broken daemon
+ * (crashCount = extra boots). Absent-and-none means it never came up.
  */
 export function realDeployDeps(o: RealDeployOpts): DeployDeps {
-  const sleep = o.sleep ?? realSleep;
+  const exec = o.execFile ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
+  const git = (args: string[]): string => exec("git", ["-C", o.installPath, ...args]);
+  const sleep = o.sleep ?? ((ms: number) => exec("sleep", [String(Math.ceil(ms / 1000))]));
   const windowMs = o.healthWindowMs ?? 45_000;
   const pollMs = o.healthPollMs ?? 3_000;
 
@@ -346,10 +349,10 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     log: o.log,
     now: () => Date.now(),
     fetch: () => {
-      execFileSync("git", ["-C", o.installPath, "fetch", "origin", "--quiet"], { stdio: "pipe" });
+      git(["fetch", "origin", "--quiet"]);
     },
-    installHead: () => git(o.installPath, ["rev-parse", "HEAD"]),
-    originMain: () => git(o.installPath, ["rev-parse", "origin/main"]),
+    installHead: () => git(["rev-parse", "HEAD"]).trim(),
+    originMain: () => git(["rev-parse", "origin/main"]).trim(),
     markerPresent: () => existsSync(deployMarkerPath(o.stateRoot)),
     autoMode: () => existsSync(deployAutoPath(o.stateRoot)),
     lastFailedHead: () => {
@@ -360,22 +363,22 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       }
     },
     dirtyFiles: () =>
-      git(o.installPath, ["status", "--porcelain"])
+      git(["status", "--porcelain"])
         .split("\n")
         .map((l) => l.slice(3).trim())
         .filter(Boolean),
     incomingFiles: (from, to) =>
-      git(o.installPath, ["diff", "--name-only", `${from}..${to}`]).split("\n").map((l) => l.trim()).filter(Boolean),
+      git(["diff", "--name-only", `${from}..${to}`]).split("\n").map((l) => l.trim()).filter(Boolean),
     pullFf: () => {
-      execFileSync("git", ["-C", o.installPath, "merge", "--ff-only", "origin/main"], { stdio: "pipe" });
+      git(["merge", "--ff-only", "origin/main"]);
     },
     resetHard: (ref) => {
-      execFileSync("git", ["-C", o.installPath, "reset", "--hard", ref], { stdio: "pipe" });
+      git(["reset", "--hard", ref]);
     },
     probeIdle: () => {
       let workers = 0;
       try {
-        workers = execFileSync("pgrep", ["-f", "claude --output-format"], { encoding: "utf8" }).trim().split("\n").filter(Boolean).length;
+        workers = exec("pgrep", ["-f", "claude --output-format"]).split("\n").filter(Boolean).length;
       } catch {
         workers = 0; // pgrep exits 1 when there are no matches
       }
@@ -393,7 +396,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       };
     },
     kickstart: () => {
-      execFileSync("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.daemonLabel}`], { stdio: "pipe" });
+      exec("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.daemonLabel}`]);
     },
     waitBootHealth: (sinceMs) => {
       let waited = 0;
