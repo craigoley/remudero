@@ -675,7 +675,7 @@
     spawn at all (fail-closed, which is why the gate caught it) or an operator keychain unlocked more widely
     than intended. The scripted locked-spawn test is the guard."
 
-- id: W1-T236
+- id: W1-T242
   title: "Generated-CI hardening in rmd project init — pin setup-dotnet by a VERIFIED SHA + de-green the vacuous arch-fitness placeholder (onboarding output must meet the bar it installs)"
   repo: remudero
   depends_on: [W1-T27]
