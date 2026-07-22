@@ -122,9 +122,24 @@ jobs:
         # to stdout runs alongside the existing `lcov` pair; this leaves the lcov artifact the ratchet
         # step consumes byte-for-byte unchanged (same flag, same destination), it only adds a second,
         # human-legible reporter the CI log actually shows.
+        #
+        # W1-T210 round 2: `--enable-source-maps` is REQUIRED here, not optional. Without it, Node's
+        # `--experimental-test-coverage` reports DA:<line> positions against the tsx/esbuild-TRANSPILED
+        # JS (comments and type-only lines stripped), not the original .ts file it names in `SF:` --
+        # verified empirically: a source (e.g. `neutralizeFenceMarkers`) at true line 1120 was reported
+        # at line 506 without this flag, and every line from that offset onward was wrong by a growing
+        # amount (more JSDoc between two points ⇒ a bigger offset). `coverage-ratchet.mjs`'s aggregate
+        # sum tolerates this (it never reads line numbers, only totals), but `diff-coverage.mjs`
+        # (W1-T212) reads `git diff`'s ORIGINAL-file line numbers and looks them up directly in lcov's
+        # DA: map -- with the offset bug, that lookup silently hits some UNRELATED older line's hit
+        # count instead of the new line's, which blocked this exact PR's own new code with a false
+        # "uncovered" verdict even though every added line the diff touched was fully exercised by a
+        # passing, asserting test. `--enable-source-maps` makes Node translate V8 coverage positions
+        # through tsx's inline source map back to the real .ts line before emitting DA: records, so the
+        # two line-numbering schemes (git diff vs. lcov) finally agree.
         run: |
           mkdir -p coverage
-          node --experimental-test-coverage --test-coverage-exclude="test/**" \
+          node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
             --test --import tsx "test/**/*.test.ts"
