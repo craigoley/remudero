@@ -674,6 +674,61 @@
     risk:high - credential plumbing plus a boot-time unlock, whose failure direction is a fleet that cannot
     spawn at all (fail-closed, which is why the gate caught it) or an operator keychain unlocked more widely
     than intended. The scripted locked-spawn test is the guard."
+
+- id: W1-T236
+  title: "Generated-CI hardening in rmd project init — pin setup-dotnet by a VERIFIED SHA + de-green the vacuous arch-fitness placeholder (onboarding output must meet the bar it installs)"
+  repo: remudero
+  depends_on: [W1-T27]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Feedback observed (verified at filing): (1) project-init.ts:111 SETUP_DOTNET_UNPINNED emits
+    'actions/setup-dotnet@v4' — a MOVING major-version tag — into every dotnet-profile onboarded repo's
+    generated ci.yml. This is the exact supply-chain vector the plan's own settled policy forbids ('SHA-pinned
+    because a moved tag is a supply-chain vector', W1-T23/§5; W1-T27's design says the provisioned workflows
+    are SHA-pinned) — shipped on the ONBOARDING output path, where it multiplies across the fleet. The inline
+    justification (:106-110, 'no fleet-verified SHA to reuse') was an implementer judgment call never ratified
+    in DECISIONS.md; it dissolves under the discipline the SAME file already applies to its other refs: resolve
+    the upstream release tag to a full commit SHA and carry the '# vX.Y.Z' provenance comment.
+    (2) project-init.ts:409-413 emits an 'Architecture fitness (placeholder)' step whose body is
+    echo 'This placeholder always succeeds ...' — an ACTIVE-but-VACUOUS gate: green while asserting nothing
+    until an operator hand-wires NetArchTest. A green check that means nothing is a false-green risk on every
+    fresh dotnet repo, the failure mode the whole gate stack exists to prevent."
+  design: |
+    (a) SETUP_DOTNET pin: resolve the current actions/setup-dotnet v4 release tag to its FULL 40-char commit
+    SHA against the upstream repo (record the tag->SHA resolution in the PR body — that record IS the
+    'fleet-verified' provenance the old comment said was missing), and emit
+    'actions/setup-dotnet@<sha>  # vX.Y.Z' exactly like the file's existing pinned refs (CODEQL/OSV/
+    DEPENDENCY_REVIEW pattern at :104-105). Delete the TODO(operator) escape hatch — the operator must not
+    inherit an unpinned action with a homework note.
+    (b) Placeholder de-greening, implementer chooses WITH EVIDENCE from this space: (i) emit the step
+    COMMENTED-OUT (visible scaffolding, zero check surface) with the NetArchTest wiring instructions from
+    architecture-fitness.stub.cs; (ii) emit it with an explicit `if: false` + a name that says INERT; or
+    (iii) make it a warning-annotating step that does NOT participate in any required/aggregated context.
+    The invariant, whichever is chosen: NO generated step may report success while asserting nothing —
+    a fresh dotnet repo's checks page must not show a green 'Architecture fitness' that is vacuous.
+    Update fitnessRuleDescription (:413) to match the chosen shape. Do NOT hand-author real NetArchTest
+    rules for hypothetical repos — the gap being HONEST (skipped/inert/absent) is the deliverable, not a
+    rule set nobody designed.
+  acceptance:
+    - claim: "the dotnet profile's generated ci.yml pins actions/setup-dotnet by full commit SHA with a version provenance comment; no moving tag survives"
+      proof: "unit test: the generated dotnet ci.yml's setup-dotnet ref matches actions/setup-dotnet@[0-9a-f]{40} with a trailing '# v' comment; grep of src/lib/project-init.ts finds no 'setup-dotnet@v' moving-tag literal and no TODO(operator) pin escape hatch"
+    - claim: "no generated CI step reports green while asserting nothing — the arch-fitness placeholder is inert/skipped/commented, never an unconditionally-succeeding run step"
+      proof: "unit test with falsifier: the generated dotnet ci.yml contains no step whose body is a bare echo that 'always succeeds'; re-seeding the old always-succeeds step body into a fixture makes the assertion FAIL (proving the test detects the vacuous-green shape, not just the current text)"
+  risk: medium
+  origin: feedback#fb-1784732686801-a1d4df
+  plan_refs: ["§5", "§5A"]
+  files: [src/lib/project-init.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-22 from intake triage of fb-1784732686801-a1d4df. Both observations verified against
+    src/lib/project-init.ts at filing (:111 unpinned literal, :409-413 vacuous step, :106-110 inline
+    justification, :413 fitnessRuleDescription). Neither DECISIONS.md nor LEARNINGS.md nor any task covered
+    the generated-CI (onboarding output) path — W1-T66 hardens remudero's OWN workflows only. Depends on
+    W1-T27 because it amends that task's deliverable; if W1-T27's PR is already merged this lands as a
+    follow-up on the same file, and W2-T2 (fleet campaign) must not fan out the dotnet profile before this
+    lands — the whole point is that the multiplier path ships clean."
 - id: W1-T121
   title: QUEUE GOVERNOR — a WIP limit on DISPATCH only; flow control throttles intake, never drainage
     (the 23-open-PR incident)
