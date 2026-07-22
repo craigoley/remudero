@@ -1,0 +1,26 @@
+id: fb-1784734427694-703ff7
+ts: 2026-07-22T15:33:47.695Z
+raw: "PIPELINE DEFECT (durable-inbox -> triage has no commit bridge). OBSERVED.
+  rmd feedback (feedbackCommand, run-task.ts:5577) and rmd ops write
+  plan/feedback/<id>.yaml as UNTRACKED local files and never commit them; rmd
+  triage grounds the entry by reading it from a FRESH origin/main worktree
+  (run-task.ts:5660 worktreeAdd ...origin/main, :5669
+  readFeedbackEntry(worktreePath)), deliberately NOT the operator checkout. No
+  step between capture and triage commits the feedback to origin/main, so EVERY
+  filed entry reports 'no such feedback entry: <id>' at triage until a human
+  manually lands it. Proven live 2026-07-22: 7 recon entries (fb-1784732*) + the
+  whole fb-alert-* ops batch sit untracked; rmd triage fb-1784732585507-04eac2
+  exited 2 with 'no such feedback entry' after checking out origin/main. Only
+  feedback on origin/main today is a single test FIXTURE shipped by W1-T40's own
+  PR #238 (not a triaged item). FIX OPTIONS to weigh: (a) rmd feedback/ops open
+  (or append to) a gated plan-only feedback-landing PR on write; (b) a daemon
+  feedback-intake rung that batches+commits new plan/feedback/*.yaml via a gated
+  PR; (c) rmd triage reads the entry from the operator checkout working tree
+  (fail-closed if dirty) rather than origin/main. FALSIFYING CHECK: git ls-tree
+  origin/main plan/feedback/ shows only the fixture; git status shows all real
+  captures untracked; rmd triage <any-uncommitted-id> returns exit 2 'no such
+  feedback entry'."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

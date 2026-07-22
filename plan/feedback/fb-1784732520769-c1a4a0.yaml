@@ -1,0 +1,28 @@
+id: fb-1784732520769-c1a4a0
+ts: 2026-07-22T15:02:00.769Z
+raw: "ISOLATION DEBT (new angle, adjacent to but NOT named by W1-T239/W1-T235).
+  OBSERVED. workerHomeDir(config) (config.ts:193-194) returns a SINGLE shared
+  path '<root>/worker-home' with NO per-worker/per-run discriminator, and
+  worker.ts:227 materializes every worker's redirected HOME there.
+  materializeWorkerHome (worker-home.ts:125-159) then creates FOUR symlinks from
+  that one shared HOME back into the operator's REAL home: .claude
+  (worker-home.ts:77), .config/gh (:78 — the operator's real GitHub token,
+  plaintext-readable), .gitconfig (:79), and Library/Keychains/login.keychain-db
+  (:81, a live handle to the operator's real login keychain, PR #102's debt).
+  CONSEQUENCE: all CONCURRENT workers share the same redirected HOME and the
+  same four real-home grants — there is no per-worker isolation of these
+  credentials; any worker can read the operator's real gh token and reach the
+  real keychain/.claude/.gitconfig, and two workers writing HOME-relative state
+  collide. W1-T239 audits the symlink SET and W1-T235 breaks the keychain
+  coupling, but neither names the shared-single-dir/concurrency gap (grep of
+  W1-T239 for shared/concurrent/per-worker is empty). FALSIFYING CHECK: grep -n
+  'workerHomeDir' src/lib/config.ts src/lib/worker.ts (one shared derivation, no
+  run id); ls -la <root>/worker-home shows the four symlinks; two simultaneous
+  workers observe the same inode for login.keychain-db (stat -f %i). RECOMMEND:
+  fold a per-worker (or per-run) worker-home root into W1-T239's scope, or file
+  as its own task. COVERED-BY: partial (W1-T239 symlink audit / W1-T235
+  keychain) — the concurrency/shared-dir angle is uncovered."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

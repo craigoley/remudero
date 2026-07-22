@@ -1,0 +1,32 @@
+id: fb-1784732686356-8d739e
+ts: 2026-07-22T15:04:46.356Z
+raw: "PLAN/PROCESS GAP (prose-dialect acceptance proofs that WALL THE PROOF
+  FLOOR — the W1-T197/T232 class, pre-fix so a future dispatch certifies).
+  OBSERVED across many OPEN/queued tasks; covered-by: partial W1-T180 only (the
+  WARN-on-unparseable-proof linter — but its OWN proofs are offenders, so it
+  can't self-certify). Mechanism (review.ts): a 'unit test: <prose>' body that
+  is not an exact test/*.test.ts path becomes --test-name-pattern <escaped
+  prose> -> 0 matches -> not_executable (keyword floor, post-#540); a 'grep:
+  <prose>' body becomes a literal grep pattern -> a negative/absence claim
+  matches 0 -> executed_fail, OR a prose substring that happens to exist ->
+  FALSE executed_pass. HIGHEST RISK = the 10 'grep:' prose proofs (false
+  verdicts, not just floor), all queued: W1-T4 (tasks.yaml:5144 'no window
+  arithmetic references total_cost_usd' — inverted negative -> false
+  executed_fail), W1-T66 (:7804), W1-T67 (:7832), W1-T68 (:7862 'no longer
+  present'), W1-T71 (:8019 'zero ... import'), W1-T77 (:8315), W1-T78 (:8350),
+  W1-T87 (:8655), W1-T90 (:8766), W1-T107 (:9295). NEXT = tasks.d 'unit test:
+  <prose>' proofs (degrade to keyword floor, can't certify) in
+  W1-T173/174/175/176/180/186/191/194/195/196/198/201, and WORST W1-T234 whose
+  proofs are the bare strings 'unit test' / 'unit test on the snapshot content
+  list' / 'unit test on the failure path'. SYSTEMIC: 231 of 329 'unit test:'
+  proofs in tasks.yaml are prose, not a test path (all degrade identically).
+  FIX: rewrite each grep proof to 'grep: <token> in src/lib/<file>.ts' (positive
+  match) and each unit-test proof to 'unit test: test/<file>.test.ts' or a real
+  test-title substring; land W1-T180 (with its own proofs fixed first) as the
+  systemic linter. FALSIFYING CHECK: node --test --test-name-pattern '<body>'
+  matches 0 tests for any listed proof; parseDialectGrep (review.ts:428) passes
+  the whole prose body as one argv pattern."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

@@ -1,0 +1,23 @@
+id: fb-1784732686801-a1d4df
+ts: 2026-07-22T15:04:46.801Z
+raw: "TECH DEBT (generated-CI supply-chain + false-green gate shipped by 'rmd
+  project init'). OBSERVED; covered-by: NONE found. (1) project-init.ts:111
+  SETUP_DOTNET_UNPINNED = 'actions/setup-dotnet@v4  # TODO(operator): pin to a
+  SHA — no fleet-verified pin exists yet' — every onboarded repo gets an
+  UNPINNED third-party GitHub Action in its generated CI, the exact supply-chain
+  exposure the repo's own SHA-pin gates (W1-T66 class) exist to prevent, but on
+  the ONBOARDING output path. (2) project-init.ts:409-413 emits an 'Architecture
+  fitness (placeholder)' CI step that runs echo 'This placeholder always
+  succeeds ...' — an ACTIVE-but-VACUOUS gate: it reports green while asserting
+  nothing until an operator hand-wires NetArchTest (:249-264, :413
+  fitnessRuleDescription). A green arch-fitness check that means nothing is a
+  false-green risk on every fresh repo. FALSIFYING CHECK: grep -n
+  'setup-dotnet@v4' src/lib/project-init.ts (unpinned, has a TODO); grep -n
+  'always succeeds' src/lib/project-init.ts (the vacuous step body). RECOMMEND:
+  a task to (a) pin setup-dotnet to a fleet-verified SHA, (b) make the
+  placeholder arch-fitness step neutral/skipped rather than green, or track it
+  as a known-inert onboarding gap."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

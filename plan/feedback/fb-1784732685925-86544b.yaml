@@ -1,0 +1,27 @@
+id: fb-1784732685925-86544b
+ts: 2026-07-22T15:04:45.925Z
+raw: "LATENT BUG (fail-open polarity on a cannot-observe path — the daemon's fix
+  was never ported to the drain). OBSERVED, test-enshrined; covered-by: NONE.
+  drain.ts:544-554: reads /usage, and if the snapshot is unreadable
+  (snap===undefined) it takes over=null -> NO stop -> the drain keeps
+  dispatching workers. The comment concedes 'an unreadable /usage does not halt
+  the whole drain'. This is the SAME 'usage unreadable -> continue' family the
+  daemon EXPLICITLY rejects: daemon.ts (unreadableDegradedLimit /
+  DEFAULT_UNREADABLE_DEGRADED_LIMIT) idles fail-CLOSED after N consecutive
+  unreadable reads, calling out that the spending layer 'must never render as
+  proceed-as-if-unlimited'. Both consumers share the same readUsageSnapshot
+  reader (run-task.ts:3686, correctly returns undefined) — the polarity fix
+  landed on the daemon consumer only. Given /usage is unreadable a large
+  fraction of the time, a drain that coincides with real headroom exhaustion
+  keeps spawning against an exhausted pool with no back-pressure; only --max and
+  the maxBudgetUsd tripwire bound it (which can be large). The asymmetry is
+  locked in by a test (drain.test.ts:613 asserts 'the drain continues'), which
+  is what makes it easy to miss. FIX: port the daemon's bounded-degraded ceiling
+  to drain.ts:554 (fail-closed after K unreadable ticks) and revisit that test.
+  FALSIFYING CHECK: run runDrain with readUsage()->undefined for
+  K>degraded-limit ticks + large max; it dispatches every tick with no idle
+  back-off, vs the daemon which idles after the bounded allowance."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

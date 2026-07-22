@@ -1,0 +1,23 @@
+id: fb-1784732687221-3be743
+ts: 2026-07-22T15:04:47.221Z
+raw: "PLAN HYGIENE (lint-plan 8-failing baseline — assessed). OBSERVED. 4 of the
+  8 are MOOT (task already merged, violation re-fires harmlessly, Standing rule
+  21 blocks re-dispatch): W1-T20c (self-reference false positive — covered by
+  W1-T198, which also fixes the blast-radius that froze 27 dependents), and
+  W1-T9b / W1-T12a / W1-T12b (sizing/headless on merged tasks). But 4 are
+  UNDISPATCHED (rmd trace: 'no runs yet') and carry a Rule-19 [sizing] violation
+  that becomes verdict=blocked_illformed at the fail-closed pre-dispatch guard
+  (task-linter.ts / run-task.ts) the instant drain/daemon selects them: W1-T7B
+  (3 concerns: classify/daemon/run-task), W1-T68 (6 concerns), W1-T71 (2),
+  W1-T74 (2). These are real latent pre-dispatch walls, not advisory. NOT
+  covered (W1-T198 addresses the self-reference/blast-radius mechanic, not these
+  tasks' oversizing). RECOMMEND: decompose each into one-concern tasks or raise
+  to risk:high per Rule 19 before they reach the drain front. FALSIFYING CHECK:
+  rmd lint-plan shows the 4 [sizing] violations; rmd trace W1-T7B/T68/T71/T74
+  shows 'no runs yet' (live), while T9b/T12a/T12b/T20c show verdict=merged
+  (moot). NOTE W1-T68 and W1-T71 ALSO carry grep-prose proofs (separate
+  finding)."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
