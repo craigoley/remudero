@@ -421,21 +421,29 @@ const realLedgerFs: LedgerFsDeps = {
 };
 
 /** Default NDJSON ledger reader: one JSON object per non-blank line. Reads the ledger
- * file directly via the injected (real, by default) fs — never copies it anywhere first. */
+ * file directly via the injected (real, by default) fs — never copies it anywhere first.
+ * A line that fails to parse (e.g. a torn append — this ledger's writer gives no
+ * atomicity guarantee) is LOUD, not silent: it is `console.error`-logged with the
+ * offending path and raw text and then DROPPED, never fabricated as a synthetic `{}`
+ * standing in for the lost record. This ledger backs the per-task dispatch circuit
+ * breaker (`isDispatchBreakerTripped`/`dispatchesWithoutNewOwnedPr` below) as well as
+ * provenance, so silently manufacturing an empty record for lost data — rather than
+ * surfacing that data was lost — could previously mask a torn `pr.opened` (falsely
+ * leaving the breaker tripped) or a torn `run.start` (undercounting toward it) with
+ * zero operator-visible signal either way. */
 export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedgerFs): Array<Record<string, unknown>> {
   if (!ledgerFs.existsSync(path)) return [];
-  return ledgerFs
-    .readFileSync(path, "utf8")
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0)
-    .map((l) => {
-      try {
-        return JSON.parse(l) as Record<string, unknown>;
-      } catch {
-        return {};
-      }
-    });
+  const out: Array<Record<string, unknown>> = [];
+  for (const raw of ledgerFs.readFileSync(path, "utf8").split("\n")) {
+    const l = raw.trim();
+    if (!l) continue;
+    try {
+      out.push(JSON.parse(l) as Record<string, unknown>);
+    } catch {
+      console.error(`ledger: dropping unparseable line in ${path}: ${l}`);
+    }
+  }
+  return out;
 }
 
 /**
@@ -531,7 +539,9 @@ export function readLedgerTail(
     try {
       cache.lines.push(JSON.parse(line) as Record<string, unknown>);
     } catch {
-      cache.lines.push({});
+      // Loud, not silent — see readLedgerLines' doc: a torn append must never be
+      // masked as a fabricated `{}` standing in for the lost record.
+      console.error(`ledger: dropping unparseable line in ${path}: ${line}`);
     }
   }
   return cache.lines;

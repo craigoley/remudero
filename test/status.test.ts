@@ -14,6 +14,7 @@ import {
   ghGateway,
   isDispatchBreakerTripped,
   projectPlan,
+  readLedgerLines,
   readLedgerTail,
   DEFAULT_MAX_TASK_DISPATCHES,
   type BatchedIssue,
@@ -1670,6 +1671,22 @@ test("readLedgerTail: reads new lines incrementally as the file grows; an unchan
   assert.equal(afterB, afterA, "the SAME array, appended to in place -- never rebuilt from scratch");
 });
 
+test("readLedgerLines: malformed JSON on a line is dropped (never fabricated as {}) and logged loud, never throws", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-status-lines-"));
+  const p = join(dir, "ledger.ndjson");
+  writeFileSync(p, "not json at all\n" + JSON.stringify({ step: "ok" }) + "\n");
+  const originalError = console.error;
+  const logged: string[] = [];
+  console.error = (msg: string) => logged.push(msg);
+  try {
+    assert.deepEqual(readLedgerLines(p), [{ step: "ok" }], "the torn line is dropped, not fabricated as a phantom {}");
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(logged.length, 1, "the torn line is surfaced via console.error, not silently swallowed");
+  assert.match(logged[0], /not json at all/);
+});
+
 test("readLedgerTail: a not-yet-newline-terminated partial write is buffered, not parsed until the newline lands", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-status-tail-"));
   const p = join(dir, "ledger.ndjson");
@@ -1684,12 +1701,21 @@ test("readLedgerTail: a not-yet-newline-terminated partial write is buffered, no
   assert.deepEqual(readLedgerTail(p, cache), [{ step: "run.start", task_id: "W1-T1" }]);
 });
 
-test("readLedgerTail: malformed JSON on a line degrades to {} — same discipline as readLedgerLines, never throws", () => {
+test("readLedgerTail: malformed JSON on a line is dropped (never fabricated as {}) and logged loud, never throws", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-status-tail-"));
   const p = join(dir, "ledger.ndjson");
   writeFileSync(p, "not json at all\n" + JSON.stringify({ step: "ok" }) + "\n");
   const cache = createLedgerTailCache();
-  assert.deepEqual(readLedgerTail(p, cache), [{}, { step: "ok" }]);
+  const originalError = console.error;
+  const logged: string[] = [];
+  console.error = (msg: string) => logged.push(msg);
+  try {
+    assert.deepEqual(readLedgerTail(p, cache), [{ step: "ok" }], "the torn line is dropped, not fabricated as a phantom {}");
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(logged.length, 1, "the torn line is surfaced via console.error, not silently swallowed");
+  assert.match(logged[0], /not json at all/);
 });
 
 test("readLedgerTail: a file shorter than last observed (rotation/truncation) rescans from byte 0 rather than throwing or slicing negative", () => {
