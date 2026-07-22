@@ -1,0 +1,36 @@
+id: fb-1784731575322-753af9
+ts: 2026-07-22T14:46:15.322Z
+raw: "PLAYWRIGHT-PROOF PATTERN for console visual criteria (Session 5 console
+  recon, 2026-07-22). CONTEXT: W1-T183/#466's three 'unmet' criteria were
+  instrument artifacts - name-filtered proof runs matching zero tests rendered
+  as false executed_fail (fixed by #540/#541, PR then PASSed and merged). But
+  the floor still cannot certify COMPUTED VISIBILITY: the live board today shows
+  'live - updated 2s ago' beside 'STALE - showing last known data' because
+  #stale-badge's unconditional 'display: inline-block' (serve.ts:313 on main)
+  overrides the hidden attribute - an attribute-level assertion passes while the
+  pixel-level truth fails. PATTERN - each visual criterion gets a proof that (a)
+  boots 'rmd serve' against a fixture state dir, (b) drives headless chromium
+  via Playwright at an EXPLICIT viewport, (c) asserts COMPUTED state
+  (isVisible/getComputedStyle/boundingBox), never attributes. CONCRETE PROOFS:
+  [T183-density] viewport 1440x900, count page.locator('.row-list li.row') with
+  (await el.boundingBox()).y+height <= 900, assert >= 15. [T183-one-click] click
+  li.row[data-task-id] body (not interior a/button), assert task-card locator
+  visible with zero intermediate navigations (page.on('framenavigated') count
+  0). [T183-anomaly] fixture task elapsed > phase threshold (threshold injected
+  via the data source), assert row locator has anomaly marker visible AND a
+  control row under threshold does not. [T189-one-truth] assert NOT
+  (locator('.conn-badge[data-state=connected]').isVisible() AND
+  locator('#stale-badge').isVisible()) - this exact assertion catches today's
+  live CSS-override bug that hidden-attribute checks miss. [T189-count-parity]
+  parse '#summary' running count, assert === count of '#now-list li.row' (one
+  predicate, two surfaces). [T189-fleet-truth] with no daemon heartbeat in
+  fixture ledger, assert '#controls-status' text != 'fleet is running' (requires
+  /v1/control/status to carry daemon liveness - currently flags-only,
+  serve.ts:1498 on main). RUNNER: playwright is already a repo devDependency
+  class via MCP usage; proofs belong in test/serve.playwright.test.ts behind the
+  existing node:test runner, tagged so the review floor's name-filtered runs
+  execute them per W1-T227."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

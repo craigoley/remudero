@@ -1,0 +1,21 @@
+id: fb-1784749981468-a531e5
+ts: 2026-07-22T19:53:01.468Z
+raw: "WORKER OAUTH TOKEN-EXPIRY AUTO-RECOVERY (keychain arc, follow-on to
+  W1-T235). W1-T235 fixed LOCKED-login-keychain spawn death by copying the OAuth
+  token into a dedicated worker keychain — but the COPIED token expires
+  independently and cannot refresh, so spawns eventually die $0 with 'OAuth
+  session expired and could not be refreshed' (observed live 2026-07-22 ~19:20Z;
+  recovery required a manual: unlock login keychain, rm
+  ~/Remudero/state/remudero-worker.keychain-db + worker-keychain-password, next
+  spawn re-provisions). The daemon will silently wall on this unattended and may
+  burn fix strikes. Need: (a) detect the credential-expiry failure distinctly at
+  preflight (like the T237 named-reason doctrine — 'spawn_credential_expired',
+  not blocked_containment), and (b) auto-recover — re-provision the worker
+  keychain from the live login token when expiry is detected, or refresh the
+  copied token in place, so an unattended daemon self-heals instead of stalling.
+  Evidence anchors: worker-home.ts (ensureWorkerKeychain, the copy+password
+  provisioning), the W1-T235 PR #539, the 19:20Z ledger OAuth failures."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

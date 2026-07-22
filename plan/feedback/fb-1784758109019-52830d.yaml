@@ -1,0 +1,18 @@
+id: fb-1784758109019-52830d
+ts: 2026-07-22T22:08:29.019Z
+raw: "TRIAGE MUST EMIT GATE-GREEN PLANS — the triage Architect authored three
+  risk:medium tasks (W1-T240/241/242 on PR #588, from fb-1784732500436-728bc1)
+  that each span 2-3 subsystems, and the plan's own Rule 19 sizing linter
+  rejected all three; the re-triage pipeline still produces gate-red plan PRs
+  after five prior triage-defect fixes. Need: the triage authoring step runs rmd
+  lint-plan on its drafted tasks BEFORE opening the PR, and on any Rule 19
+  failure it decomposes per-subsystem (with an explicit depends_on spine) or
+  raises to risk:high with a written rationale — whichever the task's semantics
+  support — iterating until lint-green, so a triage PR is gate-green by
+  construction. Evidence: PR #588 lint-plan job failure 2026-07-22, rmd
+  lint-plan '23 checked - 3 failing', Rule 19 messages naming (inbox,
+  panel-graph, run-task) / (inbox, run-task) / (retro, run-task)."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
