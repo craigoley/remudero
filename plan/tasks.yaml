@@ -674,7 +674,7 @@
     risk:high - credential plumbing plus a boot-time unlock, whose failure direction is a fleet that cannot
     spawn at all (fail-closed, which is why the gate caught it) or an operator keychain unlocked more widely
     than intended. The scripted locked-spawn test is the guard."
-- id: W1-T236
+- id: W1-T240
   title: "Lock RECLAIM is TOCTOU-racy — dead-holder reclaim unlinks UNCONDITIONALLY, so two reclaimers can both win (the #143/#145 double-run class resurfacing in the stale-holder branch)"
   repo: remudero
   depends_on: []
