@@ -64,3 +64,41 @@
     deadlock a merge."
   plan_section: "docs/review-gate.md#required-contexts"
   assertion: 'grep -qF ''required_status_checks.contexts = ["ci-gate", "remudero-review"]'' docs/review-gate.md'
+
+# Added by W1-T213 (RECON R-30): plan/claims.yaml's original six claims point at code/tests and,
+# for prose, only at docs/review-gate.md -- README.md, CONTRIBUTING.md and the operator guide
+# were entirely unguarded, and drifted from the code on four counts (the WS-stage claim, the
+# required-check name, --repo coverage, and the operator guide's verb list). These four claims
+# close that gap; test/docs-claims.test.ts's falsifier fixtures prove each one actually turns RED.
+
+- id: docs-ws-stage-not-ws0-spike
+  claim: "README.md does not claim the repo is still the WS-0 spike, or that run-task.ts becomes
+    real in WS-1 -- WS-1 closed 2026-07-15 and run-task.ts is real, dispatched code today."
+  plan_section: "README.md#whats-here-today"
+  assertion: 'node --test --import tsx --test-name-pattern "README.md does not claim the repo currently contains the WS-0 spike" test/docs-claims.test.ts'
+
+- id: docs-required-check-name
+  claim: "CONTRIBUTING.md names ci-gate, not bare ci, as the required aggregator status check --
+    matching docs/review-gate.md and live branch protection."
+  plan_section: "CONTRIBUTING.md#required-status-checks"
+  assertion: 'node --test --import tsx --test-name-pattern "CONTRIBUTING.md names ci-gate \(not bare ci\) as the required aggregator check" test/docs-claims.test.ts'
+
+- id: docs-repo-flag-coverage
+  claim: "docs/operator-guide.md documents the --repo flag, a real flag parsed by run-task.ts
+    (resolveReviewTarget and the drain/daemon/sweep/fix call sites)."
+  plan_section: "docs/operator-guide.md#the-commands-rmd-binrmd"
+  assertion: 'node --test --import tsx --test-name-pattern "docs/operator-guide.md documents the --repo flag" test/docs-claims.test.ts'
+
+- id: docs-verb-coverage
+  claim: "docs/operator-guide.md's command table names every verb in the COMMANDS registry
+    (src/run-task.ts, W1-T47) -- derived from the registry so a verb added later is caught
+    automatically instead of needing this task done again."
+  plan_section: "docs/operator-guide.md#the-commands-rmd-binrmd"
+  assertion: 'node --test --import tsx --test-name-pattern "docs/operator-guide.md.s command table covers every COMMANDS registry verb" test/docs-claims.test.ts'
+
+- id: docs-ci-gate-md-removed
+  claim: "docs/ci-gate.md does not exist as a one-line CI-probe artifact masquerading as
+    documentation -- its real content (the ci-gate aggregator mechanics) lives in
+    docs/review-gate.md."
+  plan_section: "docs/review-gate.md#ci-gate-aggregator-w1-t24"
+  assertion: '! test -f docs/ci-gate.md'
