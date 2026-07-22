@@ -1,0 +1,31 @@
+id: fb-1784738087007-8ad0f3
+ts: 2026-07-22T16:34:47.008Z
+raw: "TRIAGE DEFECT (triage-propose materialization is structurally broken —
+  PROPOSED verdicts never produce a PR). OBSERVED live. The triage worker is
+  granted TRIAGE_WORKER_TOOLS (run-task.ts:5606) = [Read, Write, Grep, Glob,
+  WebSearch] with NO Edit, yet triage.ts:123 instructs it to 'Edit ONLY plan
+  files (plan/tasks.yaml and/or MASTER-PLAN.md)'. plan/tasks.yaml is ~10k lines,
+  so Write (whole-file overwrite) is not a viable way to add one task, and the
+  worker has no Edit — so it emits its PROPOSED: verdict line but makes no
+  plan-file change. decideTriage (triage.ts:286) then returns action=error
+  'PROPOSED but no plan files were changed' -> triage inconsistent -> no PR, no
+  issue, feedback left status:new. CONFIRMED on two independent runs 2026-07-22:
+  rmd triage fb-1784732585507-04eac2 and fb-1784732500436-728bc1 BOTH ended
+  'triage inconsistent — PROPOSED but no plan files were changed; leaving no
+  PR'. The rmd PLAN worker doing the same class of plan-editing job gets
+  PLAN_WORKER_TOOLS (run-task.ts:5837) = [Read, Write, Edit, Grep, Glob,
+  WebSearch, WebFetch] — it HAS Edit; triage was simply never given the same
+  tool. IMPACT: EVERY feedback that grounds to a PROPOSE verdict silently
+  produces nothing — the entire triage->plan-PR path is dead for novel proposals
+  (only ALREADY_DECIDED and AMBIGUOUS/grill paths work). MINIMAL FIX: add 'Edit'
+  to TRIAGE_WORKER_TOOLS to match PLAN_WORKER_TOOLS. STRONGER FIX: also point
+  proposals at a NEW plan/tasks.d/<id>.yaml shard (a Write of a new file,
+  conflict-free-by-construction per W1-T122) rather than editing the monolith,
+  and update triage.ts:123 wording accordingly. FALSIFYING CHECK: grep -n
+  'TRIAGE_WORKER_TOOLS =\\|PLAN_WORKER_TOOLS =' src/run-task.ts shows triage
+  lacks Edit; re-run any triage whose finding is novel -> 'PROPOSED but no plan
+  files were changed'."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
