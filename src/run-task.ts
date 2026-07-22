@@ -461,39 +461,113 @@ export function ghPrCreateFillCommand(
  * call: a resumed process recovers the SAME decision from nothing but the
  * ledger + the live head (acceptance criterion 3), never from memory.
  */
-function armAutoMerge(prUrl: string, taskId: string | undefined): void {
+/** Injectable side effects for {@link armAutoMerge} — exported so a behavioral
+ * test drives EVERY branch (incl. the clean-status direct-merge fallback) with
+ * fakes; the real defaults are the same gh calls the function always made. */
+export interface ArmDeps {
+  /** `gh pr view --json headRefOid` for this PR. */
+  headSha: (prUrl: string) => string;
+  /** The ledger lines the W1-T230 verdict gate reads. */
+  ledgerLines: () => Array<Record<string, unknown>>;
+  /** `gh pr merge --auto --squash --delete-branch` — throws on refusal. */
+  armAuto: (prUrl: string) => void;
+  /** `gh pr merge --squash --delete-branch` — the clean-status completion. */
+  mergeDirect: (prUrl: string) => void;
+  say: (msg: string) => void;
+}
+
+export function realArmDeps(): ArmDeps {
+  return {
+    headSha: (prUrl) => (ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string }).headRefOid,
+    ledgerLines: () => readLedgerLines(join(loadConfig().root, "state", "ledger.ndjson")),
+    armAuto: (prUrl) =>
+      execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"], {
+        encoding: "utf8",
+        stdio: "pipe",
+      }) as unknown as void,
+    mergeDirect: (prUrl) =>
+      execFileSync("gh", ["pr", "merge", prUrl, "--squash", "--delete-branch"], {
+        encoding: "utf8",
+        stdio: "pipe",
+      }) as unknown as void,
+    say: (msg) => console.log(msg),
+  };
+}
+
+/** Terminal outcome of one arm attempt — returned so tests assert the branch taken. */
+export type ArmOutcome =
+  | "no-task-id"
+  | "head-unavailable"
+  | "ledger-refused"
+  | "armed"
+  | "direct-merged"
+  | "direct-merge-failed"
+  | "arm-error-ignored";
+
+export function armAutoMerge(
+  prUrl: string,
+  taskId: string | undefined,
+  deps: ArmDeps = realArmDeps(),
+): ArmOutcome {
   if (!taskId) {
-    console.log(`automerge.ledger_refused (W1-T230): no task id resolvable for this PR — arming withheld: ${prUrl}`);
-    return;
+    deps.say(`automerge.ledger_refused (W1-T230): no task id resolvable for this PR — arming withheld: ${prUrl}`);
+    return "no-task-id";
   }
   let headSha: string;
   try {
-    const view = ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string };
-    headSha = view.headRefOid;
+    headSha = deps.headSha(prUrl);
   } catch (e) {
-    console.log(
+    deps.say(
       `automerge.head_sha_unavailable (W1-T230): ${String((e as Error)?.message ?? e)} — arm withheld: ${prUrl}`,
     );
-    return;
+    return "head-unavailable";
   }
-  const config = loadConfig();
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
-  const prior = priorReviewVerdictFromLedger(readLedgerLines(ledgerPath), taskId);
+  const prior = priorReviewVerdictFromLedger(deps.ledgerLines(), taskId);
   const decision = decideArmFromLedgerVerdict(prior, headSha);
   if (!decision.arm) {
-    console.log(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
-    return;
+    deps.say(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
+    return "ledger-refused";
   }
   try {
-    execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"], {
-      encoding: "utf8",
-      stdio: "pipe",
-    });
-  } catch {
-    // On repos with zero required checks, GitHub may merge immediately on arm and
-    // gh can report that as a non-zero "clean status" state. The poll below reads
-    // the true PR state, so arming errors are informational, never fatal.
+    deps.armAuto(prUrl);
+    return "armed";
+  } catch (e) {
+    const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
+    // GitHub REFUSES to enable auto-merge on an ALREADY-mergeable PR ("Pull
+    // request is in clean status"): with every required check green there is
+    // nothing left for auto-merge to wait on — the API's answer is "just merge
+    // it". Every SWEEP-armed PR is in exactly that state (the mergeable row
+    // fires only on checks-green + review-success), so the old
+    // swallow-everything catch made sweep arming a GUARANTEED no-op: the
+    // 2026-07-22 ledger carries 20 mergeable/acted lines with ZERO PRs actually
+    // armed, and every all-green PR (#584/#588/#591) sat until a hand-merge.
+    // The run flow's later poll only papers over this for ITS OWN PRs — the
+    // sweep's arm is fire-and-forget and needs the state resolved HERE.
+    if (armFailureAction(msg) === "direct-merge") {
+      try {
+        deps.mergeDirect(prUrl);
+        deps.say(`automerge.clean_status_direct_merge (already green — merged now): ${prUrl}`);
+        return "direct-merged";
+      } catch (e2) {
+        deps.say(`automerge.direct_merge_failed: ${String((e2 as Error)?.message ?? e2)} — ${prUrl}`);
+        return "direct-merge-failed";
+      }
+    }
+    // Anything else stays informational (a transient gh/network error — the
+    // next sweep pass re-derives and retries; the run flow's poll reads true state).
+    return "arm-error-ignored";
   }
+}
+
+/**
+ * PURE classifier for a failed `gh pr merge --auto` (exported for test): the
+ * "clean status" class means the PR was ALREADY fully mergeable — auto-merge
+ * had nothing to wait on and the correct completion is an immediate direct
+ * merge (the caller only ever arms gated-green PRs). Everything else is
+ * "ignore": informational, retried by the next sweep pass.
+ */
+export function armFailureAction(stderrText: string): "direct-merge" | "ignore" {
+  return /clean status/i.test(stderrText) ? "direct-merge" : "ignore";
 }
 
 /**
@@ -5040,7 +5114,7 @@ function buildCreditCandidates(
  * fail-soft — a reconstruction hiccup escalates rather than crashing the sweep,
  * so one bad PR never strands the reconciler over the rest.
  */
-function buildSweepEffects(
+export function buildSweepEffects(
   owner: string,
   repo: string,
   config: Config,
@@ -5055,7 +5129,9 @@ function buildSweepEffects(
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
 
   return {
-    arm: (pr) => armAutoMerge(pr.prUrl, pr.taskId),
+    arm: (pr) => {
+      armAutoMerge(pr.prUrl, pr.taskId);
+    },
 
     // W1-T54 ROUTED (the 2026-07-22 #533/#534 stall): the SAME depReviewCommand
     // `rmd dep-review` runs by hand, invoked from the sweep so a Dependabot PR
