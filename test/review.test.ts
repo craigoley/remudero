@@ -540,7 +540,7 @@ test("failSummary: names the first unmet, appends (+N more), and truncates a lon
   assert.match(failSummary([], true, false), /test theater/);
 });
 
-test("buildReviewPrompt: fresh, read-only, gh-only, posts remudero-review, never edits", () => {
+test("buildReviewPrompt: fresh, read-only, gh-only, does NOT post the status (orchestrator does), never edits", () => {
   const prompt = buildReviewPrompt({
     task: { id: "W1-T9Z", acceptance: CRITERIA },
     prUrl: "https://github.com/o/r/pull/7",
@@ -551,16 +551,19 @@ test("buildReviewPrompt: fresh, read-only, gh-only, posts remudero-review, never
   assert.match(prompt, /REVIEW worker/i);
   assert.match(prompt, /read-only/i);
   assert.match(prompt, /remudero-review/);
-  assert.match(prompt, /statuses\/abc123/);
+  // W1-T231: the reviewer is NOT told to POST the status itself — the deny-floor
+  // (W1-T203) refuses a worker `gh api -X POST .../statuses/...` call, so the
+  // ORCHESTRATOR posts. The prompt carries no actionable POST-to-head-sha command,
+  // and instructs the worker not to post.
+  assert.doesNotMatch(prompt, /statuses\/abc123/);
+  assert.match(prompt, /Do NOT post/i);
+  assert.match(prompt, /orchestrator/i);
   // The reviewer must be told never to edit code.
   assert.match(prompt, /never (edit|modify)/i);
-  // The stated proofs must be carried into the reviewer's prompt.
-  assert.match(prompt, /context=remudero-review/);
   // The reviewer verifies against REPO STATE: check out the PR head and RUN the
   // proof's test/grep, not verdict on diff+report alone.
   assert.match(prompt, /repo state/i);
   assert.match(prompt, /checkout|check out/i);
-  assert.match(prompt, /statuses\/abc123/); // still posts to the head sha
   // The checkout target is the head sha, and running tests/greps is allowed.
   assert.match(prompt, /gh pr checkout|git fetch origin abc123/);
 });
