@@ -2563,7 +2563,15 @@
     and every ACTIVE proposal silently vanishes from that observation; (ii) a LOST UPDATE — two writers
     each read, modify, and write the whole file, so the second write silently discards the first's change
     (a pruned/consumed proposal is resurrected, or a heal is undone). Standing rule 23 names this shape
-    exactly: read-path integrity is doctrine, write-path atomicity is unowned."
+    exactly: read-path integrity is doctrine, write-path atomicity is unowned.
+    RULE 19 EXIT = RE-RISK TO HIGH, NOT DECOMPOSE (recorded on the merits): the three file-subsystems
+    (inbox, panel-graph, run-task) are not three concerns — they are the ONE registry file's reader plus
+    its four writers, and acceptance claim 3 ('all four write sites reach the SAME single helper') is an
+    invariant that is only true, and only testable, when every writer lands together. Decomposing to
+    'migrate 3 of 4 writers' leaves the lost-update hole (failure mode ii) open — and the rationale shows
+    the serve-daemon writer is precisely what makes the interleaving real — so a per-subsystem split would
+    break the semantics the task exists to guarantee. Genuinely atomic coupling; high honestly reflects the
+    scope rather than hiding it."
   design: |
     TEMP-FILE-PLUS-RENAME IS THE FLOOR, NOT THE WHOLE FIX. Rename fixes the torn read (failure mode i)
     and is the family's standard remedy — in-tree precedent already exists at src/lib/status.ts:1275,
@@ -2587,7 +2595,7 @@
       proof: "unit test: test/inbox-registry-atomic.test.ts"
     - claim: "all four write sites (panel-graph heal, inbox heal, approve prune, reframe) reach the same single writer helper, so a new caller inherits atomicity without remembering it"
       proof: "unit test: test/inbox-registry-atomic.test.ts"
-  risk: medium
+  risk: high
   origin: feedback#fb-1784732500436-728bc1
   plan_refs: ["§12"]
   files: [src/lib/inbox.ts, src/lib/panel-graph.ts, src/run-task.ts]
@@ -2599,7 +2607,8 @@
     not write atomicity). Feedback line numbers were stale (:6284/:6454/:6553 → verified :6508/:6678/:6777);
     panel-graph.ts:448 was exact, and serve.ts:1961 confirms the inbox route is mounted in the daemon.
     Siblings filed from the same feedback: W1-T241 (drafts/attempts pair), W1-T242 (last-retro marker).
-    Split per Rule 19 — different writers, different failure modes, one doctrine."
+    One task per STATE FILE (three files, three arcs) — but each file's fix is atomic across its reader and
+    all its writers, so this carries risk:high per Rule 19's atomic-coupling exit, not a further split."
 - id: W1-T241
   title: "state/inbox-drafts.json and state/inbox-draft-attempts.json are written as a NON-ATOMIC PAIR in the daemon draft rung — a crash between the two writes records an attempt without its draft, defeating the W1-T192 idempotence the code comments claim"
   repo: remudero
@@ -2617,7 +2626,13 @@
     The reverse order of loss (draft without attempt) merely redrafts, which is why the WRITE ORDER and
     the pair boundary both matter. Additional plain single-file writers: run-task.ts:6469 (`rmd inbox`
     drafts write) and :6778 (`rmd reframe` drafts write) — same torn-read exposure, since both cache
-    readers (inbox.ts:670-678, :189-197) collapse a torn file to `{}`, indistinguishable from empty."
+    readers (inbox.ts:670-678, :189-197) collapse a torn file to `{}`, indistinguishable from empty.
+    RULE 19 EXIT = RE-RISK TO HIGH, NOT DECOMPOSE (recorded on the merits): the two file-subsystems
+    (run-task the writers, inbox the cache readers) are the two ends of ONE property — that the drafts/
+    attempts PAIR survives a crash without persisting an attempt whose draft never landed. Acceptance
+    demands the W1-T192 idempotence hold across a simulated crash at every point in the pair write; a split
+    into 'writer atomicity' and 'reader torn-collapse' yields two tasks, neither of which can satisfy that
+    crash-idempotence claim alone. The pair is indivisible, so high is the honest scope, not a dodge."
   design: |
     TEMP-FILE-PLUS-RENAME FOR EACH FILE, reusing the in-tree pattern (status.ts:1275, worker.ts:797,
     ledger.ts:225) — that closes the torn-read half for all four write sites.
@@ -2638,7 +2653,7 @@
       proof: "unit test: test/inbox-draft-pair-atomic.test.ts"
     - claim: "the W1-T192 idempotence property holds across a simulated crash at every point in the pair write, not only on the happy path"
       proof: "unit test: test/inbox-draft-pair-atomic.test.ts"
-  risk: medium
+  risk: high
   origin: feedback#fb-1784732500436-728bc1
   plan_refs: ["§12"]
   files: [src/run-task.ts, src/lib/inbox.ts]
@@ -2666,7 +2681,14 @@
     instance of the write-side cannot-observe ⇒ absent collapse standing rule 23 names, and it lands
     directly under W1-T201's cadence trigger, whose note already flags that a well-formed marker is
     load-bearing for ARMED reads. Single writer, so unlike W1-T240 there is no lost-update mode — this
-    is sized to a cheap rename plus a reader distinction, like W1-T208 was."
+    is sized to a cheap rename plus a reader distinction, like W1-T208 was.
+    RULE 19 EXIT = RE-RISK TO HIGH, NOT DECOMPOSE (recorded on the merits): the two file-subsystems
+    (run-task the writer, retro the reader/loadMarker) are one indivisible fix — the torn write is exactly
+    what the reader must newly distinguish as corrupt-vs-absent, and acceptance requires the atomic write,
+    the corrupt/absent split, AND the unchanged genuine-first-ever path together. Splitting yields a 'write
+    atomically' task that still cannot tell a zero-length marker from absent, and a 'reader distinction'
+    task with no atomic writer to exercise it; neither is independently testable. Atomic coupling, so high
+    states the true scope. (Narrowest of the three — single writer, no lost-update — but still cross-reader.)"
   design: |
     TEMP-FILE-PLUS-RENAME at the single write site, reusing the in-tree pattern (status.ts:1275,
     worker.ts:797, ledger.ts:225).
@@ -2684,7 +2706,7 @@
       proof: "unit test: test/retro-marker-atomic.test.ts"
     - claim: "the genuine first-ever-retro path (marker truly absent) is unchanged"
       proof: "unit test: test/retro-marker-atomic.test.ts"
-  risk: medium
+  risk: high
   origin: feedback#fb-1784732500436-728bc1
   plan_refs: ["§12"]
   files: [src/run-task.ts, src/lib/retro.ts]
