@@ -288,8 +288,14 @@ function proofKeywords(proof: string): string[] {
  * treat the proof as "responsively addressed". A missing/unpasted/non-responsive
  * proof scores near zero; a report that pastes the proof scores near one. This is
  * a FLOOR, not a semantic judge — the LLM reviewer does the real judging on top.
+ *
+ * W1-T219 (recon R-13(i)): was 0.34 — echoing barely a THIRD of a proof's
+ * distinctive tokens read as "responsive", which a report can hit by accident
+ * (shared vocabulary with the claim) with no real engagement with the proof at
+ * all. Raised to a genuine MAJORITY: a report must echo more than half of a
+ * proof's distinctive keywords to count as substantiating it.
  */
-const MIN_COVERAGE = 0.34;
+const MIN_COVERAGE = 0.6;
 
 // ── Test-theater detection over a unified diff ─────────────────────────────
 
@@ -348,13 +354,15 @@ export function detectTestTheater(diff: string): boolean {
 // PLUS the HOUSE DIALECT (W1-T72 — coverage: W1-T67/#123 and #125 both showed
 // proof_exec 0/N because the acceptance proofs are actually written this way, not
 // as fenced commands or bare paths):
-//   (3) `grep: <pattern> [in <path>]` — a leading `grep:` label, the pattern
-//       free text, optionally followed by `in <path>` (a trailing token that
-//       looks like a path — contains `/` or `.`, no whitespace), a FILE or a
-//       DIRECTORY (searched recursively either way). No `in` clause ⇒ search
-//       recursively from the checkout root, excluding `plan/` (where a
-//       proof's own text lives verbatim — an unscoped search would trivially
-//       self-match), `.git/`, `node_modules/`. A literal `*` in the path is
+//   (3) `grep: <pattern> in <path>` — a leading `grep:` label, the pattern
+//       free text, followed by `in <path>` (a trailing token that looks like a
+//       path — contains `/` or `.`, no whitespace), a FILE or a DIRECTORY
+//       (searched recursively either way). REQUIRED (W1-T219, recon R-13(iii)):
+//       no `in <path>` clause is not_executable, never a repo-wide default
+//       search — a pattern matching one incidental line ANYWHERE is not
+//       evidence for a SPECIFIC criterion, and `executed_pass` OVERRIDES
+//       keyword coverage, so an unscoped match used to certify on nothing more
+//       than accidental vocabulary overlap. A literal `*` in the path is
 //       refused (not_executable): execFile never shells out, so nothing
 //       expands a glob — a wildcard target can never resolve to a real file.
 //   (4) `unit test: <file-or-test-name>` — a leading `unit test:` label, then
@@ -432,22 +440,10 @@ export function isDialectPrefixed(proof: string): boolean {
  * the trailing token after the LAST `\s+in\s+` boundary that itself looks like
  * a path/glob (contains `/`, `.`, or `*`, no whitespace) — this keeps
  * multi-word patterns like "wx flag present" intact while still correctly
- * splitting "... in src/lib/config.ts". No such boundary ⇒ the whole body is
- * the pattern and the search defaults to recursive from the checkout root.
+ * splitting "... in src/lib/config.ts". No such boundary ⇒ the body carries no
+ * TARGET at all and {@link parseDialectGrep} refuses it (W1-T219, below).
  */
 const DIALECT_GREP_PATH_RE = /^(.*?)\s+in\s+(\S*[./*]\S*)$/i;
-
-/**
- * Directories excluded from the NO-PATH recursive default (`grep: <pattern>`
- * with no `in <path>` clause). `plan/` is the load-bearing one: it is where
- * every acceptance PROOF's own text lives verbatim (plan/tasks.yaml), so an
- * unscoped repo-root search would trivially self-match a proof's own
- * description string and report `executed_pass` regardless of whether the
- * claimed property holds anywhere in actual code — the false-pass class this
- * whole floor exists to prevent. `.git`/`node_modules` are excluded because
- * they carry no source signal and only cost time on a large checkout.
- */
-const GREP_DEFAULT_EXCLUDES = ["--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=plan"];
 
 function parseDialectGrep(body: string): WhitelistedProof | null {
   const trimmed = body.trim();
@@ -461,26 +457,27 @@ function parseDialectGrep(body: string): WhitelistedProof | null {
   // task fixes (see the module comment above). `--` (below) already stops a
   // pattern from being read as a grep FLAG regardless of its content.
   if (!pattern) return null;
-  if (path !== undefined) {
-    // The grep TARGET is the one place a real hazard survives execFile: path
-    // traversal out of the checkout, still refused.
-    if (path.includes("..")) return null;
-    // No shell here (execFile) ⇒ no glob expansion — a literal '*' target can
-    // never resolve to a real file and would always exit non-zero, silently
-    // manufacturing a spurious executed_fail. Refuse rather than run it.
-    if (path.includes("*")) return null;
-    // "-r" is a no-op on a plain FILE target (confirmed: `grep -rn pat
-    // file.ts` behaves identically to `grep -n pat file.ts`) and is what
-    // makes a DIRECTORY target work at all — always pass it so "in <path>"
-    // covers a file OR a directory without a second branch.
-    return { kind: "grep", command: "grep", args: ["-rn", "--", pattern, path], label: `${pattern} in ${path}` };
-  }
-  return {
-    kind: "grep",
-    command: "grep",
-    args: ["-rn", ...GREP_DEFAULT_EXCLUDES, "--", pattern, "."],
-    label: pattern,
-  };
+  // W1-T219 (recon R-13(iii)): a `grep:` proof with NO `in <path>` clause used
+  // to default to a recursive, whole-repo search — a pattern matching one
+  // incidental line ANYWHERE certified the criterion (`executed_pass`
+  // positively overrides keyword coverage), which is not evidence for a
+  // SPECIFIC criterion. Rather than weaken that override (which is what makes
+  // real observation trustworthy at all — see W1-T65/#100), require an
+  // explicit target: no path ⇒ refuse (null), leaving the proof on the
+  // keyword floor instead of mechanically executing an unscoped match.
+  if (path === undefined) return null;
+  // The grep TARGET is the one place a real hazard survives execFile: path
+  // traversal out of the checkout, still refused.
+  if (path.includes("..")) return null;
+  // No shell here (execFile) ⇒ no glob expansion — a literal '*' target can
+  // never resolve to a real file and would always exit non-zero, silently
+  // manufacturing a spurious executed_fail. Refuse rather than run it.
+  if (path.includes("*")) return null;
+  // "-r" is a no-op on a plain FILE target (confirmed: `grep -rn pat
+  // file.ts` behaves identically to `grep -n pat file.ts`) and is what
+  // makes a DIRECTORY target work at all — always pass it so "in <path>"
+  // covers a file OR a directory without a second branch.
+  return { kind: "grep", command: "grep", args: ["-rn", "--", pattern, path], label: `${pattern} in ${path}` };
 }
 
 /**
@@ -666,14 +663,19 @@ export function narrowNameFilteredArgs(baseArgs: readonly string[], candidateFil
  * The REAL proof executor (production default): run a {@link WhitelistedProof}'s
  * argv, no shell, in `cwd`, with a HARD per-proof timeout — a hanging test must
  * never stall the required check into the absent-check deadlock class. Returns
- * `"pass"` on a clean exit 0; `"fail"` on ANY clean nonzero exit — a failing test,
- * a grep that found no match (exit 1), AND a grep given a since-renamed/missing
- * path (exit 2) all count as "fail": the proof named something the PR head does
- * not observably contain, which is the criterion genuinely unmet, not an
- * environment hiccup. THROWS only when the process never ran to a clean exit at
- * all (a timeout kill, a spawn error like the command itself missing) so the
- * caller surfaces `exec_error` — a timeout must never be misjudged as an
- * observed "fail".
+ * `"pass"` on a clean exit 0; `"fail"` on a genuine clean nonzero exit — a
+ * failing test, or a grep that LOOKED and found no match (exit 1): the proof
+ * named something the PR head does not observably contain, which is the
+ * criterion genuinely unmet, not an environment hiccup. THROWS when the
+ * process never ran to a clean pass/fail exit at all — a timeout kill, a spawn
+ * error like the command itself missing, so the caller surfaces `exec_error`
+ * (a timeout must never be misjudged as an observed "fail") — AND (W1-T219,
+ * recon R-13(iv)) when a `grep` proof exits 2: grep's own convention for
+ * "could not look at all" (a since-renamed/missing target, a read error), as
+ * opposed to exit 1's "looked and found nothing". Treating exit 2 as a genuine
+ * FAIL false-blocked a criterion whose proof merely named a path that moved —
+ * an environment/authoring problem, not evidence the criterion is unmet — so
+ * it degrades to `exec_error` (the keyword floor) exactly like a thrown error.
  *
  * NAME-FILTERED PROOFS ARE THE ONE EXCEPTION to "the exit code is the verdict"
  * (W1-T178, round 2): a bare TEST NAME compiles to `--test-name-pattern` over
@@ -726,6 +728,12 @@ export function execWhitelistedProof(
       const stdout = typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? "");
       return nameFilteredOutcome(stdout);
     }
+    // W1-T219 (recon R-13(iv)): grep exit 2 means it could not even LOOK (a
+    // since-renamed/missing target, a permission/read error) — distinct from
+    // exit 1's "looked, found nothing". Only the latter is genuine evidence of
+    // absence; the former degrades to exec_error (the keyword floor) rather
+    // than false-blocking on an environment/authoring problem.
+    if (whitelisted.kind === "grep" && err.status === 2) throw err;
     return "fail"; // a single-file/grep proof's own nonzero exit is a genuine fail
   }
 }
@@ -847,10 +855,22 @@ export function judgeCriterion(
   let met: boolean;
   let reason: string;
   if (kws.length === 0) {
-    // A proof with no distinctive anchors cannot be mechanically checked; defer
-    // entirely to the semantic layer (fail closed only if the reviewer says so).
-    met = true;
-    reason = "no mechanical anchors in proof; deferred to reviewer judgment";
+    // W1-T219 (recon R-13(ii)): was an UNCONDITIONAL met=true — a proof written
+    // entirely in short/stopword/numeric tokens (no distinctive anchor at all)
+    // auto-passed with no report engagement whatsoever, fail-OPEN and reachable
+    // by any author (accidentally or not; PR #123 had none). This mechanical
+    // floor cannot observe anything for such a proof, so — the same
+    // cannot-observe-implies-do-not-act move this codebase already makes on the
+    // read path (W1-T119's `indeterminate`) — it resolves to UNMET/INDETERMINATE,
+    // never a free pass. Per the module's own law ("a semantic verdict may only
+    // downgrade, never rescue an unpasted proof"), `semantic` cannot rescue this
+    // either: real, WHITELISTED execution below (a `grep:`/`unit test:` dialect
+    // match) is the only thing that can still flip this to executed_pass —
+    // OBSERVED repo-state evidence, never vibes.
+    met = false;
+    reason =
+      "proof unmet: INDETERMINATE — no mechanical anchors in proof text to check the report " +
+      "against (a claim with nothing distinctive to verify is not evidence; requires an executable proof)";
   } else {
     const covered = kws.filter((k) => reportTokens.has(k));
     const coverage = covered.length / kws.length;
@@ -1242,10 +1262,26 @@ export function cappedAnnotation(criteriaCount: number): string {
  * Granted via `rmd review <pr> --override-capped-by/
  * --override-capped-reason` (run-task.ts) and recovered from the ledger by
  * {@link cappedOverrideFromLedger}.
+ *
+ * W1-T219 (recon R-14): `headSha` BINDS the override to the PR head it was
+ * granted against. Before this field existed, the override was an
+ * unauthenticated free string — `cappedOverrideFromLedger` matched on
+ * `task_id` alone, "last one wins" over an append-only, unlocked ledger — so
+ * one appended line armed auto-merge on a CAPPED verdict for ANY later head of
+ * that task, including a different diff the operator never saw when they
+ * granted it. `cappedOverrideFromLedger` now refuses to return an override
+ * whose `headSha` does not match the verdict currently being judged, so a
+ * stale or forged append cannot outlive the diff it was judged on. Optional on
+ * this TYPE only so a caller that already holds a hand-attributed override
+ * (e.g. {@link decideAutoMergeArm}'s own unit fixtures, which test the arming
+ * decision in isolation from ledger recovery) needn't fabricate one — the
+ * binding is actually ENFORCED at recovery time, in
+ * {@link cappedOverrideFromLedger} itself.
  */
 export interface CappedOverride {
   by: string;
   reason: string;
+  headSha?: string;
 }
 
 /** The auto-merge arming path's decision (W1-T185). */
@@ -1552,16 +1588,29 @@ export function decideArmFromLedgerVerdict(prior: PriorReviewVerdict | undefined
  * --override-capped-by/--override-capped-reason` (run-task.ts); consulted by
  * the arming path ({@link decideAutoMergeArm}) before refusing a CAPPED
  * verdict.
+ *
+ * W1-T219 (recon R-14): HEAD-BOUND, mirroring {@link decideArmFromLedgerVerdict}'s
+ * W1-T230 head-pinning above. `headSha` — the CURRENT verdict's head, supplied
+ * by the caller — is now REQUIRED to match the granted line's own `head_sha`
+ * exactly, or the line is skipped as if it were never there. Before this, the
+ * override was scoped to `taskId` alone: on an append-only, unauthenticated
+ * ledger, ANYTHING able to append one `automerge.capped_override_granted` line
+ * armed auto-merge on a CAPPED verdict for every later head of that task —
+ * including a push the operator granting the override never saw. A line
+ * missing `head_sha` (a pre-W1-T219 grant) is likewise never matched: a
+ * binding that cannot be verified is treated as absent, never as a pass.
  */
 export function cappedOverrideFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
+  headSha: string,
 ): CappedOverride | undefined {
   let found: CappedOverride | undefined;
   for (const line of lines) {
     if (line.step !== "automerge.capped_override_granted" || line.task_id !== taskId) continue;
     if (typeof line.by !== "string" || typeof line.reason !== "string") continue;
-    found = { by: line.by, reason: line.reason };
+    if (typeof line.head_sha !== "string" || line.head_sha !== headSha) continue;
+    found = { by: line.by, reason: line.reason, headSha: line.head_sha };
   }
   return found;
 }

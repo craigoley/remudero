@@ -21,6 +21,7 @@ import {
   decideArmFromLedgerVerdict,
   decideAutoMergeArm,
   detectTestTheater,
+  execWhitelistedProof,
   failSummary,
   floorDegradedAnnotation,
   isDialectPrefixed,
@@ -174,6 +175,32 @@ test("NORMALIZE: `maxTurns` in a criterion matches `max_turns` in the report (ca
   // A genuinely-absent term still FAILS — normalization must not manufacture a false PASS.
   const absent = judgeReview(criteria, { diff: "", report: "an unrelated change to the plan loader" });
   assert.equal(absent.state, "failure");
+});
+
+// ── W1-T219 (recon R-13): the mechanical floor's fail-open holes ────────────
+
+test("W1-T219 (recon R-13(i)): MIN_COVERAGE raised past a third — echoing only 1 of 3 distinctive keywords (34%) no longer substantiates a proof; echoing a genuine majority (2/3) still does", () => {
+  const criterion = { claim: "x", proof: "alpha bravo charlie" };
+  const oneThird = judgeCriterion(criterion, new Set(["alpha"]));
+  assert.equal(oneThird.met, false, "a ~third-echo must no longer pass (was the pre-W1-T219 0.34 floor)");
+  const majority = judgeCriterion(criterion, new Set(["alpha", "bravo"]));
+  assert.equal(majority.met, true, "echoing a genuine majority of the proof's keywords substantiates it");
+});
+
+test("W1-T219 (recon R-13(ii)): a proof with NO distinctive mechanical keywords resolves to UNMET/INDETERMINATE, never an unconditional auto-pass", () => {
+  // Only stopwords, sub-4-char tokens, and bare numbers — no anchor the floor can check.
+  const criterion = { claim: "the thing works", proof: "it was for the was not any 12 3" };
+  const v = judgeCriterion(criterion, new Set(["irrelevant", "tokens", "entirely"]));
+  assert.equal(v.met, false, "a proof with nothing distinctive to verify must never silently pass");
+  assert.match(v.reason, /INDETERMINATE/);
+});
+
+test("W1-T219: semantic cannot rescue a zero-keyword proof either — 'a semantic verdict may only downgrade, never rescue' applies here too", () => {
+  const criterion = { claim: "the thing works", proof: "it was for the was not any 12 3" };
+  const rescued = judgeCriterion(criterion, new Set(), true); // semantic=true
+  assert.equal(rescued.met, false, "semantic:true must not upgrade an unobservable proof to met");
+  const downgraded = judgeCriterion(criterion, new Set(), false); // semantic=false
+  assert.equal(downgraded.met, false, "semantic:false stays unmet, as it always was");
 });
 
 test("satisfied_by (Architect-only): a criterion already met by an earlier PR is MET, cited to that PR", () => {
@@ -939,6 +966,35 @@ test("parseWhitelistedProof: a test path with '..' is refused (no traversal out 
   assert.equal(parseWhitelistedProof("run `test/../../etc/evil.test.ts`"), null);
 });
 
+// ── W1-T219 (recon R-13(iv)): execWhitelistedProof's grep exit-code semantics,
+// against a REAL grep process (deliberately not an injected fake — this is the
+// one place in this file the distinction between exit 1 and exit 2 itself gets
+// proven, not just the plumbing that reads whichever outcome an executor hands
+// back).
+
+test("W1-T219: execWhitelistedProof — a grep that LOOKS and finds nothing (real exit 1) is a genuine 'fail'", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w219-grep-"));
+  writeFileSync(join(dir, "present.txt"), "nothing interesting in here\n");
+  const wp: WhitelistedProof = {
+    kind: "grep",
+    command: "grep",
+    args: ["-rn", "--", "NEEDLE_NOT_PRESENT", "present.txt"],
+    label: "NEEDLE_NOT_PRESENT in present.txt",
+  };
+  assert.equal(execWhitelistedProof(wp, dir), "fail");
+});
+
+test("W1-T219 (recon R-13(iv)): execWhitelistedProof — a grep that CANNOT look at all (real exit 2, e.g. a since-renamed/missing path) THROWS, degrading to exec_error rather than a false 'fail'", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w219-grep-"));
+  const wp: WhitelistedProof = {
+    kind: "grep",
+    command: "grep",
+    args: ["-rn", "--", "NEEDLE", "this-path-was-renamed-away.ts"],
+    label: "NEEDLE in this-path-was-renamed-away.ts",
+  };
+  assert.throws(() => execWhitelistedProof(wp, dir), "exit 2 (could not look) must throw, not return 'fail'");
+});
+
 // A criterion whose proof names a whitelisted test, but whose CLAIM/PROOF share no
 // keywords with the report at all (so the keyword floor alone would fail it).
 const T100_CRITERIA: AcceptanceCriterion[] = [
@@ -1099,19 +1155,8 @@ test("parseWhitelistedProof: house-dialect 'grep: <pattern> in <path>' compiles 
   assert.deepEqual(wp!.args, ["-rn", "--", "wx flag present", "src/lib/config.ts"]);
 });
 
-test("parseWhitelistedProof: house-dialect 'grep: <pattern>' with no 'in <path>' defaults to a recursive search that excludes plan/ (self-match), .git/, node_modules/", () => {
-  const wp = parseWhitelistedProof("grep: O_EXCL");
-  assert.ok(wp);
-  assert.equal(wp!.kind, "grep");
-  assert.deepEqual(wp!.args, [
-    "-rn",
-    "--exclude-dir=.git",
-    "--exclude-dir=node_modules",
-    "--exclude-dir=plan",
-    "--",
-    "O_EXCL",
-    ".",
-  ]);
+test("W1-T219 (recon R-13(iii)): house-dialect 'grep: <pattern>' with NO 'in <path>' is refused (null), never a pathless repo-wide default — a pattern matching one incidental line anywhere is not evidence for a specific criterion", () => {
+  assert.equal(parseWhitelistedProof("grep: O_EXCL"), null);
 });
 
 test("parseWhitelistedProof: a dialect grep 'in <path>' containing a literal glob '*' is refused (null) — execFile never shells, so nothing expands it", () => {
@@ -1294,17 +1339,9 @@ test("parseWhitelistedProof (W1-T128): a dialect grep whose pattern contains pro
   assert.equal(withSemicolon!.kind, "grep");
   assert.deepEqual(withSemicolon!.args, ["-rn", "--", "foo; rm -rf /", "src/lib/config.ts"]);
 
-  const withSubshell = parseWhitelistedProof("grep: $(whoami)");
+  const withSubshell = parseWhitelistedProof("grep: $(whoami) in src/lib/config.ts");
   assert.ok(withSubshell);
-  assert.deepEqual(withSubshell!.args, [
-    "-rn",
-    "--exclude-dir=.git",
-    "--exclude-dir=node_modules",
-    "--exclude-dir=plan",
-    "--",
-    "$(whoami)",
-    ".",
-  ]);
+  assert.deepEqual(withSubshell!.args, ["-rn", "--", "$(whoami)", "src/lib/config.ts"]);
 });
 
 test("parseWhitelistedProof (W1-T128): a dialect unit-test NAME with prose-style shell metacharacters EXECUTES (name-filtered) — same argv-array reasoning as the grep case", () => {
@@ -1784,19 +1821,65 @@ test("W1-T205: resolveAutoMergeArm never misattributes a plan-only arm to an ove
   );
 });
 
-test("cappedOverrideFromLedger: 'last one wins', scoped to task_id, well-formed lines only", () => {
+const HEAD_SHA_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const HEAD_SHA_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+test("cappedOverrideFromLedger: 'last one wins', scoped to task_id AND head_sha, well-formed lines only", () => {
   const lines = [
-    { step: "automerge.capped_override_granted", task_id: "W1-T1", by: "alice", reason: "first" },
+    { step: "automerge.capped_override_granted", task_id: "W1-T1", by: "alice", reason: "first", head_sha: HEAD_SHA_A },
     { step: "review.posted", task_id: "W1-T1", state: "success" }, // unrelated step, ignored
-    { step: "automerge.capped_override_granted", task_id: "W1-T2", by: "bob", reason: "wrong task" },
-    { step: "automerge.capped_override_granted", task_id: "W1-T1", by: "alice", reason: "second, wins" },
+    { step: "automerge.capped_override_granted", task_id: "W1-T2", by: "bob", reason: "wrong task", head_sha: HEAD_SHA_A },
+    {
+      step: "automerge.capped_override_granted",
+      task_id: "W1-T1",
+      by: "alice",
+      reason: "second, wins",
+      head_sha: HEAD_SHA_A,
+    },
   ];
-  assert.deepEqual(cappedOverrideFromLedger(lines, "W1-T1"), { by: "alice", reason: "second, wins" });
-  assert.equal(cappedOverrideFromLedger(lines, "W1-T9"), undefined);
+  assert.deepEqual(cappedOverrideFromLedger(lines, "W1-T1", HEAD_SHA_A), {
+    by: "alice",
+    reason: "second, wins",
+    headSha: HEAD_SHA_A,
+  });
+  assert.equal(cappedOverrideFromLedger(lines, "W1-T9", HEAD_SHA_A), undefined);
   assert.equal(
-    cappedOverrideFromLedger([{ step: "automerge.capped_override_granted", task_id: "W1-T1", by: 42 }], "W1-T1"),
+    cappedOverrideFromLedger(
+      [{ step: "automerge.capped_override_granted", task_id: "W1-T1", by: 42, head_sha: HEAD_SHA_A }],
+      "W1-T1",
+      HEAD_SHA_A,
+    ),
     undefined,
   );
+});
+
+test("W1-T219 (recon R-14): a capped-verdict override GRANTED against one head does NOT arm a LATER, DIFFERENT head — a stale or appended override line cannot outlive the diff it was judged on", () => {
+  const lines = [
+    {
+      step: "automerge.capped_override_granted",
+      task_id: "W1-T1",
+      by: "alice",
+      reason: "verified the original diff",
+      head_sha: HEAD_SHA_A,
+    },
+  ];
+  // The exact head it was granted against still resolves the override.
+  assert.deepEqual(cappedOverrideFromLedger(lines, "W1-T1", HEAD_SHA_A), {
+    by: "alice",
+    reason: "verified the original diff",
+    headSha: HEAD_SHA_A,
+  });
+  // A later push changes the head — the SAME ledger line must not resolve for it.
+  assert.equal(
+    cappedOverrideFromLedger(lines, "W1-T1", HEAD_SHA_B),
+    undefined,
+    "an override granted against a different head must never arm this one",
+  );
+});
+
+test("W1-T219 (recon R-14): a pre-migration override line with no head_sha at all is never honoured — an unverifiable binding is treated as absent, not as a pass", () => {
+  const lines = [{ step: "automerge.capped_override_granted", task_id: "W1-T1", by: "alice", reason: "old grant" }];
+  assert.equal(cappedOverrideFromLedger(lines, "W1-T1", HEAD_SHA_A), undefined);
 });
 
 // ── W1-T185 (Gap 2, criteria 4-6): keywordOnly — `rmd review`'s manual-PR ──
