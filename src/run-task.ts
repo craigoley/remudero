@@ -265,6 +265,7 @@ import {
   type WorkerResult,
 } from "./lib/worker.js";
 import { ensureWorkerKeychain, workerKeychainPaths } from "./lib/worker-home.js";
+import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, FIX_WORKER_TOOLS, neutralizeFenceMarkers } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "./lib/drain-lock.js";
 import { acquireInflightLock, InflightLockError, sweepStaleInflightLocks } from "./lib/inflight-lock.js";
 import { classifyFailure, MAX_TRANSIENT_RETRIES, type FailureSignal } from "./lib/classify.js";
@@ -1155,9 +1156,24 @@ export function renderFixPrompt(opts: {
 
   if (mode === "ci-log") {
     const failures = opts.evidence.ciFailures ?? [];
+    // W1-T210: the check NAME and log tail both come from `gh run view
+    // --log-failed` — attacker-influenceable CI output — so BOTH (never just
+    // the tail) are neutralized against the fence marker and rendered INSIDE
+    // the fence, labelled as data, rather than spliced bare between narrative
+    // instruction lines. `check: `/`log tail:` labels stay OUTSIDE the value
+    // but INSIDE the fence, matching the pre-existing `check: <name>` shape
+    // the mode-fixture test above already asserts on.
     const rendered =
       failures.length > 0
-        ? failures.map((f, i) => `${i + 1}. check: ${f.name}\n   log tail:\n${f.logTail}`).join("\n\n")
+        ? failures
+            .map(
+              (f, i) =>
+                `${i + 1}. ${CI_LOG_FENCE_OPEN}\n` +
+                `   check: ${neutralizeFenceMarkers(f.name)}\n` +
+                `   log tail:\n${neutralizeFenceMarkers(f.logTail)}\n` +
+                CI_LOG_FENCE_CLOSE,
+            )
+            .join("\n\n")
         : "(no failing check detail was captured — re-check `gh pr checks` for the current state.)";
     return [
       header,
@@ -1529,6 +1545,12 @@ export async function runFixRung(opts: {
       config: opts.config,
       prompt,
       resumeSessionId: round === "resume" ? sessionToResume : undefined,
+      // W1-T210: ci-log mode's prompt carries an untrusted CI log tail
+      // (renderFixPrompt, above) — restrict this worker to the tools its
+      // fix-and-push job actually needs (FIX_WORKER_TOOLS) so a
+      // prompt-injection payload riding in that log can't reach the
+      // network via WebFetch/WebSearch.
+      tools: FIX_WORKER_TOOLS,
     };
 
     const fixResult = deps.account(await deps.spawn(fixArgs));

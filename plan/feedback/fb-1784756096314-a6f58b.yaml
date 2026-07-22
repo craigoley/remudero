@@ -1,0 +1,19 @@
+id: fb-1784756096314-a6f58b
+ts: 2026-07-22T21:34:56.314Z
+raw: "CONSOLE NEEDS-ME DECISION QUEUE UX — the console's needs-me surface
+  mirrors the raw open-issue set, so on 2026-07-22 it showed 31 items of which
+  26 were stale and only 4 were genuine operator decisions; the operator reports
+  decisions are not surfaced to him effectively. Need: (a) group escalations by
+  task/arc instead of one row per issue (W1-T189 alone produced 5 issues for one
+  arc); (b) derive and display live resolution state per escalation — the
+  console already derives task status from GitHub, extend the same derivation to
+  each escalation's referenced PR so stale items render as
+  resolved-pending-close, not open decisions; (c) one-tap batch-close of stale
+  items with auto-generated citation comments; (d) pin genuinely-open decisions
+  at top with the question, options, and links inline so the operator rules from
+  the console without archaeology. Depends on / pairs with the escalation
+  lifecycle reconciler filing (same session) and W1-T186 blocker-naming."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

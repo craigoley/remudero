@@ -2543,6 +2543,263 @@
     on the very !lock state a torn read produces). Filed anyway because the remedy is cheap and the failure
     mode is destructive, but SIZED to that honest reading rather than to the report's.
     THIRD MEMBER of the WRITE-SIDE ATOMICITY family (MASTER-PLAN §12), with W1-T206 and W1-T207."
+- id: W1-T240
+  title: "state/inbox-proposals.json has FOUR plain read-modify-write writers — one inside the long-lived serve daemon — so a concurrent CLI command can lose an update or leave a torn file the reader silently parses as an empty registry"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "FEEDBACK fb-1784732500436-728bc1, VERIFIED at source during triage (the feedback's run-task.ts
+    line numbers were stale by ~200 lines; every site exists). Four plain writeFileSync writers, each a
+    read-modify-write off a prior read with no temp file, no rename, no lock: src/lib/panel-graph.ts:448
+    (the /v1/inbox route's registry heal — runs INSIDE the long-lived `rmd serve` daemon),
+    src/run-task.ts:6508 (`rmd inbox` heal), :6678 (`rmd approve` prune), :6777 (`rmd reframe`).
+    THE MULTI-WRITER PATH IS GENUINE, not theoretical: serve is a daemon, so any concurrent
+    `rmd approve` / `rmd reframe` / `rmd inbox` overlaps it by construction. Two failure modes, and they
+    are DIFFERENT: (i) a torn file — the reader (parseProposalRegistry, src/lib/inbox.ts:657-666) wraps
+    JSON.parse in `catch { return [] }`, so a mid-write read is INDISTINGUISHABLE from an empty registry
+    and every ACTIVE proposal silently vanishes from that observation; (ii) a LOST UPDATE — two writers
+    each read, modify, and write the whole file, so the second write silently discards the first's change
+    (a pruned/consumed proposal is resurrected, or a heal is undone). Standing rule 23 names this shape
+    exactly: read-path integrity is doctrine, write-path atomicity is unowned.
+    RULE 19 EXIT = RE-RISK TO HIGH, NOT DECOMPOSE (recorded on the merits): the three file-subsystems
+    (inbox, panel-graph, run-task) are not three concerns — they are the ONE registry file's reader plus
+    its four writers, and acceptance claim 3 ('all four write sites reach the SAME single helper') is an
+    invariant that is only true, and only testable, when every writer lands together. Decomposing to
+    'migrate 3 of 4 writers' leaves the lost-update hole (failure mode ii) open — and the rationale shows
+    the serve-daemon writer is precisely what makes the interleaving real — so a per-subsystem split would
+    break the semantics the task exists to guarantee. Genuinely atomic coupling; high honestly reflects the
+    scope rather than hiding it."
+  design: |
+    TEMP-FILE-PLUS-RENAME IS THE FLOOR, NOT THE WHOLE FIX. Rename fixes the torn read (failure mode i)
+    and is the family's standard remedy — in-tree precedent already exists at src/lib/status.ts:1275,
+    src/lib/worker.ts:797 and src/lib/ledger.ts:225, so reuse the pattern rather than reinventing it.
+    But rename does NOTHING for the lost update (failure mode ii): two atomic whole-file writes still
+    let the second discard the first. Be honest about which mode each mechanism addresses.
+    FOR THE LOST UPDATE, VERIFY FROM SOURCE before choosing between an advisory lock around the
+    read-modify-write and funnelling all registry writes through a single writer function/process.
+    Do not import a lock library for an interleaving that source shows cannot occur — but the
+    serve-daemon writer makes at least one interleaving real, so do not wave it away either.
+    ONE WRITER FUNCTION, NOT FOUR PATCHES (the W1-T207 lesson): all four sites should reach one
+    registry-write helper (natural home: src/lib/inbox.ts beside parseProposalRegistry), so a fifth
+    caller inherits the property.
+    DO NOT WEAKEN THE READER TO COMPENSATE, and note (do NOT fix here) that parseProposalRegistry's
+    torn-vs-absent collapse mirrors the read-side distinction W1-T208 draws for run.lock — if a
+    corrupt-vs-absent split is added, it must not break the normal pre-population empty state.
+  acceptance:
+    - claim: "a reader interleaved with a registry writer never observes a partial inbox-proposals.json, asserted against a test that FAILS on the current truncate-and-write implementation"
+      proof: "unit test: test/inbox-registry-atomic.test.ts"
+    - claim: "two concurrent read-modify-write registry updates (e.g. a serve-side heal and a CLI prune) do not silently discard either change — the lost-update interleaving is either prevented or loudly detected"
+      proof: "unit test: test/inbox-registry-atomic.test.ts"
+    - claim: "all four write sites (panel-graph heal, inbox heal, approve prune, reframe) reach the same single writer helper, so a new caller inherits atomicity without remembering it"
+      proof: "unit test: test/inbox-registry-atomic.test.ts"
+  risk: high
+  origin: feedback#fb-1784732500436-728bc1
+  plan_refs: ["§12"]
+  files: [src/lib/inbox.ts, src/lib/panel-graph.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "FOURTH WRITE-TARGET of the WRITE-SIDE ATOMICITY family (standing rule 23), from feedback
+    fb-1784732500436-728bc1 — the family's recon fixtures stopped at ledger/status.json/run.lock and no
+    open task owned these files for atomicity (W1-T177/T193 touch the registry for status/heal semantics,
+    not write atomicity). Feedback line numbers were stale (:6284/:6454/:6553 → verified :6508/:6678/:6777);
+    panel-graph.ts:448 was exact, and serve.ts:1961 confirms the inbox route is mounted in the daemon.
+    Siblings filed from the same feedback: W1-T241 (drafts/attempts pair), W1-T242 (last-retro marker).
+    One task per STATE FILE (three files, three arcs) — but each file's fix is atomic across its reader and
+    all its writers, so this carries risk:high per Rule 19's atomic-coupling exit, not a further split."
+- id: W1-T241
+  title: "state/inbox-drafts.json and state/inbox-draft-attempts.json are written as a NON-ATOMIC PAIR in the daemon draft rung — a crash between the two writes records an attempt without its draft, defeating the W1-T192 idempotence the code comments claim"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "FEEDBACK fb-1784732500436-728bc1, VERIFIED at source during triage. The daemon draft rung
+    writes the PAIR back-to-back with plain truncating writeFileSync: src/run-task.ts:6393 (drafts) then
+    :6394 (attempts) — feedback's :6169/:6170 were stale but the adjacency is exact. A crash or kill
+    between the two lines persists an attempt with no draft: the attempt key (parseDraftAttemptCache,
+    src/lib/inbox.ts:189-197) says 'already tried, do not redraft' while the draft it gates never landed —
+    exactly the state W1-T192's attempt-cache exists to prevent, silently reintroduced one layer down.
+    The reverse order of loss (draft without attempt) merely redrafts, which is why the WRITE ORDER and
+    the pair boundary both matter. Additional plain single-file writers: run-task.ts:6469 (`rmd inbox`
+    drafts write) and :6778 (`rmd reframe` drafts write) — same torn-read exposure, since both cache
+    readers (inbox.ts:670-678, :189-197) collapse a torn file to `{}`, indistinguishable from empty.
+    RULE 19 EXIT = RE-RISK TO HIGH, NOT DECOMPOSE (recorded on the merits): the two file-subsystems
+    (run-task the writers, inbox the cache readers) are the two ends of ONE property — that the drafts/
+    attempts PAIR survives a crash without persisting an attempt whose draft never landed. Acceptance
+    demands the W1-T192 idempotence hold across a simulated crash at every point in the pair write; a split
+    into 'writer atomicity' and 'reader torn-collapse' yields two tasks, neither of which can satisfy that
+    crash-idempotence claim alone. The pair is indivisible, so high is the honest scope, not a dodge."
+  design: |
+    TEMP-FILE-PLUS-RENAME FOR EACH FILE, reusing the in-tree pattern (status.ts:1275, worker.ts:797,
+    ledger.ts:225) — that closes the torn-read half for all four write sites.
+    THE PAIR IS THE INTERESTING HALF. True two-file atomicity is not available from rename alone; do not
+    pretend otherwise. VERIFY FROM SOURCE which one-sided survivor is harmless and ORDER THE WRITES so
+    the crash window leaves only that state — an orphan DRAFT costs one redundant redraft, an orphan
+    ATTEMPT suppresses a draft forever. If the current order persists the attempt first (or the
+    semantics say otherwise on inspection), fix the order and assert it in a test, so a later refactor
+    cannot quietly swap the lines back. Consider whether the two caches should simply be ONE file —
+    but only if source shows no reader needs them independently; do not smuggle a schema migration
+    into an atomicity task.
+    DO NOT WEAKEN THE READERS: fail-soft-to-{} on genuinely absent files is the normal pre-population
+    state and must survive.
+  acceptance:
+    - claim: "a reader interleaved with a drafts or attempts writer never observes a partial file, asserted against a test that FAILS on the current truncate-and-write implementation"
+      proof: "unit test: test/inbox-draft-pair-atomic.test.ts"
+    - claim: "a crash between the pair's two writes can no longer persist an attempt whose draft never landed — the surviving one-sided state is the one that self-heals (at worst a redundant redraft), asserted on write order"
+      proof: "unit test: test/inbox-draft-pair-atomic.test.ts"
+    - claim: "the W1-T192 idempotence property holds across a simulated crash at every point in the pair write, not only on the happy path"
+      proof: "unit test: test/inbox-draft-pair-atomic.test.ts"
+  risk: high
+  origin: feedback#fb-1784732500436-728bc1
+  plan_refs: ["§12"]
+  files: [src/run-task.ts, src/lib/inbox.ts]
+  status: queued
+  attempts: 0
+  note: "FIFTH WRITE-TARGET of the WRITE-SIDE ATOMICITY family (standing rule 23), from feedback
+    fb-1784732500436-728bc1. W1-T173 touches state/inbox-drafts.json for fence-stripping and W1-T192 for
+    attempt-cache semantics — neither owns write atomicity. Sibling filings from the same feedback:
+    W1-T240 (proposal registry), W1-T242 (last-retro marker). Feedback's line numbers were stale
+    (:6169/:6170/:6245/:6554 → verified :6393/:6394/:6469/:6778)."
+- id: W1-T242
+  title: "state/last-retro.json is written non-atomically and its reader collapses a torn marker to undefined — i.e. to FIRST-EVER-RETRO — so a torn read reprocesses the entire already-consumed run window and double-counts SHIPPED/learnings"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  rationale: "FEEDBACK fb-1784732500436-728bc1, VERIFIED at source during triage. The writer is a plain
+    truncating writeFileSync at src/run-task.ts:3652 (feedback's :3614 was stale); the reader, loadMarker
+    (src/lib/retro.ts:712-717), wraps JSON.parse in `catch { return undefined }`, and undefined is
+    documented at :711 as 'first-ever retro'. So a torn or zero-length marker is INDISTINGUISHABLE from
+    no retro ever having run: the next retro treats the whole prior window as unconsumed and re-mines
+    runs already credited — double-counted SHIPPED totals and duplicate learnings. This is the purest
+    instance of the write-side cannot-observe ⇒ absent collapse standing rule 23 names, and it lands
+    directly under W1-T201's cadence trigger, whose note already flags that a well-formed marker is
+    load-bearing for ARMED reads. Single writer, so unlike W1-T240 there is no lost-update mode — this
+    is sized to a cheap rename plus a reader distinction, like W1-T208 was.
+    RULE 19 EXIT = RE-RISK TO HIGH, NOT DECOMPOSE (recorded on the merits): the two file-subsystems
+    (run-task the writer, retro the reader/loadMarker) are one indivisible fix — the torn write is exactly
+    what the reader must newly distinguish as corrupt-vs-absent, and acceptance requires the atomic write,
+    the corrupt/absent split, AND the unchanged genuine-first-ever path together. Splitting yields a 'write
+    atomically' task that still cannot tell a zero-length marker from absent, and a 'reader distinction'
+    task with no atomic writer to exercise it; neither is independently testable. Atomic coupling, so high
+    states the true scope. (Narrowest of the three — single writer, no lost-update — but still cross-reader.)"
+  design: |
+    TEMP-FILE-PLUS-RENAME at the single write site, reusing the in-tree pattern (status.ts:1275,
+    worker.ts:797, ledger.ts:225).
+    DISTINGUISH CORRUPT FROM ABSENT — the W1-T208 lesson, verbatim: undefined should mean 'no retro has
+    ever run'. An unparseable marker is a DIFFERENT observation, and per rule 23 it must read as
+    indeterminate (skip/defer the retro, surface the corruption) rather than as licence to reprocess a
+    consumed window. VERIFY FROM SOURCE how W1-T201's trigger consumes the marker before choosing the
+    shape, so the fix does not break the genuine first-ever path.
+    THE FALSIFIER IS THE POINT: the corrupt-marker test must FAIL against the current
+    catch-return-undefined reader, otherwise it is not testing the collapse.
+  acceptance:
+    - claim: "a reader interleaved with the marker writer never observes a partial last-retro.json"
+      proof: "unit test: test/retro-marker-atomic.test.ts"
+    - claim: "an unparseable marker is reported DISTINCTLY from an absent one and does NOT trigger first-ever-retro reprocessing of an already-consumed window, asserted against a test that FAILS on the current catch-return-undefined reader"
+      proof: "unit test: test/retro-marker-atomic.test.ts"
+    - claim: "the genuine first-ever-retro path (marker truly absent) is unchanged"
+      proof: "unit test: test/retro-marker-atomic.test.ts"
+  risk: high
+  origin: feedback#fb-1784732500436-728bc1
+  plan_refs: ["§12"]
+  files: [src/run-task.ts, src/lib/retro.ts]
+  status: queued
+  attempts: 0
+  note: "SIXTH WRITE-TARGET of the WRITE-SIDE ATOMICITY family (standing rule 23), from feedback
+    fb-1784732500436-728bc1. W1-T201 owns the cadence TRIGGER that reads this marker, not the marker's
+    write atomicity — coordinate but do not merge: whichever lands second must not undo the other's
+    reader semantics. Siblings from the same feedback: W1-T240 (proposal registry), W1-T241
+    (drafts/attempts pair)."
+- id: W1-T243
+  title: "THE FEEDBACK INBOX HAS NO COMMIT BRIDGE — every captureFeedback() call site writes an UNTRACKED file into the operator checkout, while rmd triage deliberately reads the entry from a fresh origin/main worktree, so EVERY captured entry exits triage 2 with 'no such feedback entry' until a human lands it by hand"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "FEEDBACK fb-1784734427694-703ff7, VERIFIED at source during triage (the feedback's run-task.ts
+    line numbers were stale by ~240 lines; the mechanism is exact). captureFeedback (src/lib/feedback.ts:205)
+    is a PURE FILESYSTEM WRITE — no git operation anywhere in feedback.ts — and it has FIVE call sites, so
+    the gap spans every origin, not just the CLI: rmd feedback (run-task.ts:5822), the panel UI
+    (panel-graph.ts:205), ops alert intake (ops.ts:453), issues intake (issues-intake.ts:203), and the
+    panel grill (panel-skill-run.ts:244). Meanwhile triageCommand reads the entry from a FRESH origin/main
+    worktree — worktreeAdd(..., 'origin/main') at run-task.ts:5906, readFeedbackEntry(worktreePath, ...) at
+    :5915, with the comment at :5911 naming that as deliberate fail-closed discipline ('not repoRoot, which
+    may be a stale checkout') — and exits 2 with 'no such feedback entry' (:5918-5920) when the entry is not
+    on origin/main. NO STEP BETWEEN CAPTURE AND TRIAGE COMMITS THE ENTRY. Proven live 2026-07-22: the
+    feedback reports 7 recon entries plus the whole fb-alert-* ops batch sitting untracked, and rmd triage
+    fb-1784732585507-04eac2 exiting 2 after checking out origin/main; the working tree here shows 15
+    plan/feedback/*.yaml entries of which origin/main carries only the W1-T40 probe fixture
+    (fb-1784433603527-48134e, shipped by PR #238). This is the FEEDBACK-INBOX INSTANCE of the
+    W1-T191 class (durable artifact written to the operator checkout that no PR is ever cut from):
+    §7B's load-bearing promise — 'a durable, diffable inbox... never lost in a chat scrollback' — is
+    false today, because an untracked file is destroyed by routine git hygiene (git clean -fd) and
+    exists on exactly one machine. Worse than W1-T191: here the missing commit doesn't merely lose the
+    audit record, it DEADLOCKS THE ENTIRE §7B intake loop — capture works, triage works, and the pipe
+    between them does not exist."
+  design: |
+    VERIFY FROM SOURCE FIRST, then build ONE choke point, not five patches (the W1-T207/W1-T240 lesson):
+    whatever lands must cover all five captureFeedback call sites by construction, so a sixth caller
+    inherits the bridge without remembering it.
+    Options to weigh, not a prescription (the feedback names all three):
+      (a) LAND ON WRITE: rmd feedback / ops / issues-intake open (or append to) a single gated plan-only
+          feedback-landing PR when they capture. Strongest durability (the entry is pushed within seconds
+          of capture) and it reuses the existing gate; but capture becomes network-dependent (a capture
+          MUST still succeed offline — the local write is the durable buffer, the landing is best-effort
+          with the daemon sweeping stragglers), and per-capture PRs must dedupe/batch onto one open
+          landing PR rather than spamming.
+      (b) DAEMON LANDING RUNG: a serve/drain rung batches any plan/feedback/*.yaml present locally but
+          absent from origin/main into a gated plan-only landing PR. Fits the daemon-sole-writer shape and
+          batches naturally; but feedback captured on a machine not running the daemon waits forever, and
+          triage stays broken until the rung's next pass + gate merge.
+      (c) TRIAGE READS THE OPERATOR CHECKOUT (fail-closed if dirty in non-plan paths). Unblocks triage
+          with no new PR machinery — but (c) ALONE IS NOT A FIX: it abandons §7B's durability promise
+          (the entry remains an untracked file destroyable by git clean), breaks multi-machine and
+          panel/daemon capture, and discards the deliberate fail-closed grounding discipline the code
+          comment at run-task.ts:5911 records. At most a complement: triage MAY fall back to the local
+          entry IFF it commits that entry into its own proposal/grill PR so the entry lands with its
+          triage verdict.
+    Whichever mechanism ships: the landing path goes through a GATED PR — never a direct push to main
+    (the §2 gate invariant; the Architect proposes, merges nothing). The 'no such feedback entry' failure
+    must become honest: when the id exists locally but not on origin/main, say so and name the pending
+    landing PR (or the missing rung) instead of implying the id is a typo. RESCUE THE BACKLOG: the ~15
+    already-captured entries observed 2026-07-22 must land via the shipped mechanism, not by hand.
+  acceptance:
+    - claim: "a captured feedback entry becomes triage-able WITHOUT any human git command — end to end: capture, the bridge lands the entry on origin/main via a gated plan-only PR, rmd triage finds it and proceeds"
+      proof: "integration test: test/feedback-landing.test.ts — seeded capture -> landing PR (plan-only diff, gated, never a direct push to main) -> merged fixture -> triage's readFeedbackEntry resolves the entry from the origin/main worktree. FALSIFIER, observed live 2026-07-22: rmd triage fb-1784732585507-04eac2 exited 2 'no such feedback entry' because nothing between captureFeedback and triage commits"
+    - claim: "the bridge covers ALL captureFeedback call sites (cli, panel ui, ops alerts, issues intake, panel grill) at one choke point, so a new caller inherits landing without remembering it"
+      proof: "unit test: test/feedback-landing.test.ts — the landing mechanism keys off the inbox directory / capture primitive, not per-caller wiring; a capture from a fixture caller not named in the implementation still lands"
+    - claim: "capture NEVER fails because landing is unavailable — the local write remains the durable buffer when offline/gh-less, and the bridge sweeps stragglers later instead of dropping them"
+      proof: "unit test: test/feedback-landing.test.ts — captureFeedback with the landing path stubbed to fail still writes the entry and returns success; a later bridge pass picks the stranded entry up"
+    - claim: "triage on an id that exists locally but not on origin/main reports the PENDING-LANDING state (naming the landing PR or rung) instead of the misleading 'no such feedback entry'"
+      proof: "unit test: test/feedback-landing.test.ts — seeded local-only entry -> triage exit message distinguishes not-yet-landed from genuinely-unknown id. FALSIFIER: today both cases print the identical 'no such feedback entry: <id>' at run-task.ts:5918"
+    - claim: "the already-captured backlog is landed by the shipped mechanism, not assumed away"
+      proof: "the untracked plan/feedback/*.yaml entries observed 2026-07-22 (the recon + fb-alert-* batch) are on origin/main after this task ships, landed via the bridge's own gated path"
+  risk: high
+  origin: feedback#fb-1784734427694-703ff7
+  plan_refs: ["§7B", "§2"]
+  files: [src/lib/feedback.ts, src/run-task.ts, src/lib/ops.ts, src/lib/issues-intake.ts, src/lib/panel-graph.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-22 from feedback fb-1784734427694-703ff7, verified at source during triage: no git
+    call exists in src/lib/feedback.ts; run-task.ts:5906/:5915/:5918 confirm triage reads a fresh
+    origin/main worktree and exits 2 when the entry is absent there. SIBLING OF W1-T191 (DECISIONS.md
+    never committed) — same repoRoot-write/no-PR class, but here the loss is not only the record: the
+    §7B intake loop is structurally DEAD without the bridge, which is why this is not folded into
+    W1-T191 (different artifact, different consumer, and the fix must serve triage's read path, not
+    just durability). Coordinate with W1-T57 (issues intake) and the ops alert batch — both already
+    call captureFeedback and inherit whichever bridge ships. risk:high — it introduces a new
+    autonomous commit/PR-opening path from capture-time code including the serve daemon, and the
+    realistic failure modes (PR spam without batching, capture hard-failing when gh/network is down,
+    landing racing triage's own status writes) are exactly what the acceptance claims pin."
 - id: W1-T205
   title: "raising the proof floor must CARVE OUT plan-only PRs — they are structurally always capped, and a floor that ignores this stalls every retro, approve and filing PR forever"
   repo: remudero

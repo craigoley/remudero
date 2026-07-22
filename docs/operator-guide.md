@@ -167,3 +167,116 @@ Your console bookmark changes every time you rotate, because the token is in the
 Rotate whenever a token has been exposed. Treat *exposed* broadly: a token that reached a log
 file, a terminal transcript, a screenshot, or a chat window is compromised and must be rotated
 rather than merely un-shared.
+
+## Crisis runbook: the procedures you need at 3am
+
+The rest of this guide is about reading state. These four are the ones you need when you have
+to *act* — restarting the supervised daemon, rotating tokens, standing up a new machine, and
+knowing where the billing boundary sits. Until now these existed only as tribal knowledge in
+session notes, unchecked, so they rotted; `test/runbook-coverage.test.ts` now fails the build if
+any of the four goes missing or is reduced to a stub heading, and a later-added procedure is
+appended to `src/lib/runbook-coverage.ts`'s named list, not discovered by hand.
+
+### Restarting the supervised daemon
+
+The daemon (`rmd daemon`, loaded via `~/Library/LaunchAgents/com.remudero.daemon.plist`, label
+`com.remudero.daemon`) loads its code once at start and dispatches in-process — a merged fix on
+`origin/main` does **nothing** until the process actually restarts. See
+[deploy-supervisor.md](deploy-supervisor.md) for the full mechanism; two ways to trigger it:
+
+- **Let the supervisor do it (preferred).** `rmd deploy --reason "<why>"` marks a deploy
+  request; the supervisor (a separate launchd job) fast-forwards the checkout and restarts at
+  the next **verified idle gap** (no worker running, `state/inflight/` empty, no worktree
+  lock — re-checked in the same breath as the restart to close the poll race), then
+  health-checks the new boot and rolls back on a crash loop. No manual kill, no race.
+- **Force it by hand (crisis-only — this skips the idle gate).**
+  ```sh
+  rmd stop --reason "manual restart"                          # halt any in-flight drain/daemon tick
+  launchctl kickstart -k gui/$(id -u)/com.remudero.daemon      # hard-kill + relaunch from the plist
+  ```
+  This is the SAME primitive the deploy supervisor uses, run without the idle check — confirm
+  `state/inflight/` is actually empty first, because a mid-task kill SIGKILLs the worker (the
+  #559/#581 orphan class the automated path exists to avoid). Confirm the restart landed by
+  tailing `state/logs/daemon.out`/`daemon.err` for a fresh `daemon.boot` line.
+
+**The reap-wait, if the same host also runs `rmd serve`.** Killing a process does not instantly
+free the port it held — the OS can hold it in `TIME_WAIT` briefly — so a kill-then-immediately-
+restart of `rmd serve` can still hit `EADDRINUSE` even though `kill` already returned. Poll for
+the port to actually clear before rebinding, rather than racing a fixed sleep against the OS's
+own cleanup:
+```sh
+lsof -ti :4317        # empty output = the port is free, safe to `rmd serve` again
+```
+
+### Rotating the service tokens
+
+Covered in full just above (["The console: what it binds, and rotating its
+tokens"](#the-console-what-it-binds-and-rotating-its-tokens)): token generation is
+create-once/read-thereafter, so rotation is kill the bound process, delete
+`~/Remudero/state/service-tokens.json`, and restart `rmd serve` to mint a fresh 0600 pair. Your
+console bookmark changes every time, because the token lives in the URL. Rotate whenever a token
+has been exposed — a log file, a terminal transcript, a screenshot, a chat window — treated
+broadly rather than narrowly.
+
+### First-run setup on a new machine
+
+Prerequisites, established elsewhere in this repo but not previously collected in one place:
+
+- The `claude` CLI installed and logged in via **subscription OAuth** (`claude login`) — never
+  via `ANTHROPIC_API_KEY` (see "The billing boundary" below). `which claude` must resolve the
+  real on-disk binary, not a shell function or alias (FIELD FINDING 2/3).
+- The `gh` CLI installed and authenticated (`gh auth login`) with a token scoped to this repo
+  (Standing rule 6: workers carry scoped PATs only, never a blanket personal token).
+- `git` and a Node/npm matching this repo's toolchain on `PATH`.
+
+Then, in order:
+
+1. Clone the repo and run `npm install`.
+2. Run any `rmd` command once (`rmd --help` is enough). `loadConfig()`
+   (`src/lib/config.ts`) exclusive-creates `~/.config/remudero/config.json` on first touch,
+   resolving the real `claude` binary via `which` and defaulting `root` to `~/Remudero` — it
+   never overwrites a config that already exists, so this step is safe to repeat.
+3. `rmd init [--tier <pro|max5x|max20x>]` — the headless-safe first-run tier wizard. An explicit
+   `--tier` wins outright; otherwise it detects your tier from usage evidence and falls back to
+   the safe `pro` default rather than blocking when no TTY is present (Standing rule 18).
+4. Commission the unattended units. Each `<cmd>-plist --write` only writes the plist file;
+   `launchctl load` is a deliberate, separate operator action, never automatic:
+   ```sh
+   rmd daemon-plist --repo <target-repo> --write
+   launchctl load ~/Library/LaunchAgents/com.remudero.daemon.plist
+   rmd deploy-plist --write
+   launchctl load ~/Library/LaunchAgents/com.remudero.supervisor.plist
+   rmd digest-plist --write
+   launchctl load ~/Library/LaunchAgents/com.remudero.digest.plist
+   ```
+5. Verify before trusting the loaded units: `rmd daemon --repo <target-repo> --dry-run` resolves
+   the target and prints the planned sequence, spawning nothing — confirm it names the repo you
+   expect.
+
+### The billing boundary: where ANTHROPIC_* stops
+
+This fleet runs on Claude **subscription** OAuth, never `ANTHROPIC_API_KEY` billing, and the
+boundary is enforced in code, not by convention (`src/lib/env.ts`, FIELD FINDING 1, MASTER-PLAN
+§9). `ANTHROPIC_API_KEY` exported from an operator's login shell **takes precedence** over the
+OAuth login — any process that inherits it silently bills metered API rates instead of the
+subscription. `buildWorkerEnv` constructs every worker's environment from an explicit allowlist
+(`PATH`/`HOME`/`TMPDIR`/`LANG`/`USER`) and **throws** if any `ANTHROPIC_*` key survives,
+including one passed in explicitly — a leak fails loud at construction, never silently on an
+invoice. The same check applies to the daemon's own boot environment in `src/lib/launchd.ts`.
+
+**Where the boundary actually sits.** `launchd` never sources `~/.zshrc`, so a daemon loaded via
+`launchctl load` is clean by construction. The risk case is a daemon started from a **dev
+shell** for local testing: if that shell exports `ANTHROPIC_API_KEY` (common alongside other
+CLI/SDK work), the daemon *process itself* is contaminated even though every worker it spawns
+still gets a clean env via `buildWorkerEnv`. Check before running a dev-shell daemon:
+```sh
+env | grep -i ^ANTHROPIC_    # must print nothing before you `rmd daemon`/`rmd drain` from a shell
+```
+**Why the dollar figures are tripwires, not charges.** Every budget number in this system
+(`budget_usd`, the $25 soft-budget warning, the $100 default hard cap) is **notional** under
+subscription billing, which strips `ANTHROPIC_*` — there is no metered invoice for these runs to
+accumulate against. They exist to catch a runaway loop, not to track spend. The one path where a
+dollar figure becomes real money is the deliberate overflow valve (`overflow: "api_key"` in
+`~/.config/remudero/config.json`), and `validateConfig` refuses to accept that setting without a
+paired `dailyCapUsd` — an uncapped API-billed run is a rejected config, never a silent
+possibility.

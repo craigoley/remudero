@@ -1,0 +1,21 @@
+id: fb-1784756088300-6a481e
+ts: 2026-07-22T21:34:48.300Z
+raw: "ESCALATION LIFECYCLE RECONCILER — the sweep raises needs-human issues but
+  nothing ever closes them when their blocker resolves. Observed 2026-07-22: 26
+  of 31 open needs-human issues were stale (84% noise) — every one referenced a
+  fix PR that later merged through its normal gate (e.g. #544 stale once #534
+  merged; #450/#451/#496 stale once #449 merged; the W1-T189 five-issue arc
+  stale once #574 merged). The escalation channel is fire-and-forget while task
+  state is level-triggered. Need: a sweep rung that, for each open needs-human
+  issue, derives the referenced PR/task's current GitHub state and auto-closes
+  the issue with a citation comment (fixing PR + merge sha) when the blocker is
+  gone — same level-triggered reconciliation doctrine as sweep.credit_backfill,
+  applied to the sweep's own escalation exhaust. Relationship: W1-T186 makes
+  escalations name their blocker (which makes this closer's derivation trivial),
+  W1-T195 dedups at creation; this is the missing third leg — closure. Success
+  metric: steady-state open needs-human count equals genuinely-open decisions
+  only."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
