@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readdirSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { escalateCommand, digestCommand, pushDrainRundown,
+import { type GitRunner, materializeOriginShards, escalateCommand, digestCommand, pushDrainRundown,
   armAutoMerge,
   armFailureAction,
   buildSweepEffects,
@@ -67,6 +67,7 @@ import type { Mount } from "../src/lib/mounts.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import { worktreesDir } from "../src/lib/worker.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { loadPlan } from "../src/lib/plan.js";
 import { loadPlanIndex, renderPlanIndex } from "../src/lib/plan-index.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
@@ -1148,6 +1149,32 @@ test("syncPlanFromOrigin: --allow-stale still fails closed when origin/main has 
   execFileSync("git", ["init", "--quiet", "-b", "main"], { cwd: root });
   execFileSync("git", ["remote", "add", "origin", "/no/such/path"], { cwd: root });
   assert.throws(() => syncPlanFromOrigin(root, "plan/tasks.yaml", { allowStale: true }), GitFetchError);
+});
+
+test("syncPlanFromOrigin: a shard-only task under origin/main's plan/tasks.d/ is NOT shard-blind — it dispatches alongside the monolith", () => {
+  const { originDir, localDir } = gitFixture();
+  mkdirSync(join(originDir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(
+    join(originDir, "plan", "tasks.d", "T2-shard.yaml"),
+    "- id: T2\n  title: \"SHARD-ONLY\"\n  repo: remudero\n  type: implement\n",
+    "utf8",
+  );
+  execFileSync("git", ["-C", originDir, "add", "."]);
+  execFileSync("git", ["-C", originDir, "commit", "--quiet", "-m", "add shard"]);
+
+  const { plan, staleDispatch } = syncPlanFromOrigin(localDir, "plan/tasks.yaml");
+
+  assert.equal(staleDispatch, false);
+  const ids = plan.tasks.map((t) => t.id).sort();
+  assert.deepEqual(ids, ["T1", "T2"], "both the monolith task and the tasks.d/ shard task must be visible");
+  assert.equal(plan.byId.get("T2")?.title, "SHARD-ONLY");
+});
+
+test("syncPlanFromOrigin: no plan/tasks.d/ at origin/main is a plain no-shards case, not an error", () => {
+  const { localDir } = gitFixture(); // origin never gets a tasks.d/ directory
+  const { plan, staleDispatch } = syncPlanFromOrigin(localDir, "plan/tasks.yaml");
+  assert.equal(staleDispatch, false);
+  assert.deepEqual(plan.tasks.map((t) => t.id), ["T1"]);
 });
 
 test("syncPlanOrRefuse: a hard fetch failure ledgers a NAMED git_fetch_failed error and refuses (no plan, no spawn) unless allowStale", () => {
@@ -3330,4 +3357,81 @@ test("escalateCommand (W1-T144): a MANUAL escalation's real-time ping threads th
     rmSync(root, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+// ── materializeOriginShards: the two defensive git-failure paths (W1-T245, injected runner) ──
+
+test("materializeOriginShards: a failing ls-tree (no tasks.d/ at origin/main) is the plain no-shards case — returns [], writes nothing", () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), "shard-nolist-"));
+  const runGit: GitRunner = (args) => {
+    if (args[0] === "ls-tree") throw new Error("fatal: not a tree object");
+    return "";
+  };
+  const got = materializeOriginShards("/repo", "plan", tmpDir, runGit);
+  assert.deepEqual(got, [], "a throwing ls-tree yields no shards, never propagates");
+  assert.equal(existsSync(join(tmpDir, "tasks.d")), false, "no shard dir is created when there are none");
+  rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test("materializeOriginShards: a shard that LISTS but fails to `git show` throws GitFetchError loudly — a torn read never silently drops a task", () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), "shard-torn-"));
+  const runGit: GitRunner = (args) => {
+    if (args[0] === "ls-tree") return "plan/tasks.d/W1-T9.yaml\n";
+    throw new Error("fatal: bad object origin/main:plan/tasks.d/W1-T9.yaml");
+  };
+  assert.throws(
+    () => materializeOriginShards("/repo", "plan", tmpDir, runGit),
+    /git show origin\/main:plan\/tasks\.d\/W1-T9\.yaml failed/,
+  );
+  rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test("materializeOriginShards: a listed shard is copied into <tmpDir>/tasks.d verbatim from the origin blob", () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), "shard-ok-"));
+  const runGit: GitRunner = (args) =>
+    args[0] === "ls-tree" ? "plan/tasks.d/W1-T9.yaml\n" : "- id: W1-T9\n  title: shard task\n";
+  const got = materializeOriginShards("/repo", "plan", tmpDir, runGit);
+  assert.deepEqual(got, ["plan/tasks.d/W1-T9.yaml"]);
+  assert.equal(readFileSync(join(tmpDir, "tasks.d", "W1-T9.yaml"), "utf8"), "- id: W1-T9\n  title: shard task\n");
+  rmSync(tmpDir, { recursive: true, force: true });
+});
+
+// ── W1-T245 remaining criteria: deep-compare vs real checkout, dup-id through synced, temp cleanup ──
+
+test("syncPlanFromOrigin: the synced plan's task-id SEQUENCE equals loadPlan over a real checkout of origin/main — monolith entries first, shards appended", () => {
+  const { originDir, localDir } = gitFixture();
+  mkdirSync(join(originDir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(originDir, "plan", "tasks.d", "T2-shard.yaml"), "- id: T2\n  title: shard\n  repo: remudero\n  type: implement\n", "utf8");
+  writeFileSync(join(originDir, "plan", "tasks.d", "T3-shard.yaml"), "- id: T3\n  title: shard3\n  repo: remudero\n  type: implement\n", "utf8");
+  execFileSync("git", ["-C", originDir, "add", "."]);
+  execFileSync("git", ["-C", originDir, "commit", "--quiet", "-m", "shards"]);
+  // A real checkout of origin/main: clone + loadPlan over its on-disk plan/tasks.yaml.
+  const checkout = mkdtempSync(join(tmpdir(), "rmd-checkout-"));
+  execFileSync("git", ["clone", "--quiet", originDir, checkout], { encoding: "utf8" });
+  const viaCheckout = loadPlan(join(checkout, "plan", "tasks.yaml")).tasks.map((t) => t.id);
+  const viaSync = syncPlanFromOrigin(localDir, "plan/tasks.yaml").plan.tasks.map((t) => t.id);
+  assert.deepEqual(viaSync, viaCheckout, "the synced view must byte-equal a real checkout's loadPlan id sequence");
+  rmSync(checkout, { recursive: true, force: true });
+});
+
+test("syncPlanFromOrigin: a duplicate id across tasks.yaml and a shard on origin/main still FAILS loudly through the synced path — the W1-T122 uniqueness guard is intact", () => {
+  const { originDir, localDir } = gitFixture();
+  mkdirSync(join(originDir, "plan", "tasks.d"), { recursive: true });
+  // T1 already exists in the monolith fixture; a shard re-declaring it must fail loadPlan.
+  writeFileSync(join(originDir, "plan", "tasks.d", "dup.yaml"), "- id: T1\n  title: dup\n  repo: remudero\n  type: implement\n", "utf8");
+  execFileSync("git", ["-C", originDir, "add", "."]);
+  execFileSync("git", ["-C", originDir, "commit", "--quiet", "-m", "dup shard"]);
+  assert.throws(() => syncPlanFromOrigin(localDir, "plan/tasks.yaml"), /duplicate task id 'T1'/);
+});
+
+test("syncPlanFromOrigin: the rmd- temp dir (holding tasks.yaml AND tasks.d) is removed even when loadPlan THROWS (duplicate-id fixture)", () => {
+  const { originDir, localDir } = gitFixture();
+  mkdirSync(join(originDir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(originDir, "plan", "tasks.d", "dup.yaml"), "- id: T1\n  title: dup\n  repo: remudero\n  type: implement\n", "utf8");
+  execFileSync("git", ["-C", originDir, "add", "."]);
+  execFileSync("git", ["-C", originDir, "commit", "--quiet", "-m", "dup"]);
+  const before = readdirSync(tmpdir()).filter((d) => d.startsWith("rmd-plan"));
+  assert.throws(() => syncPlanFromOrigin(localDir, "plan/tasks.yaml"));
+  const after = readdirSync(tmpdir()).filter((d) => d.startsWith("rmd-plan"));
+  assert.deepEqual(after, before, "no rmd-plan temp dir survives a loadPlan failure — cleaned on every exit path");
 });
