@@ -16,4 +16,4 @@ raw: "LEDGER ROTATION IS DIVERGENT — rotation must converge: after any rotatio
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/617
