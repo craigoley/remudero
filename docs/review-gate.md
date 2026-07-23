@@ -366,6 +366,19 @@ positions. Two consequences, both deliberate:
   comment, which used to false-block any new file that opens with one. A genuinely uncovered
   added *code* line still blocks (fixture-proven in `test/diff-coverage.test.ts`).
 
+### coverage-ratchet: out-of-repo temp-dir records excluded (2026-07-23, W1-T220)
+
+`scripts/coverage-ratchet.mjs`'s `parseLcovTotals` now counts a coverage record only
+when its `SF:` path lives inside the repo checkout; a path that starts with `../` or is
+absolute is dropped (and the excluded count is printed). Several tests `mkdtemp` a dir,
+copy a repo script into it, and spawn node — and because `NODE_V8_COVERAGE` is inherited
+by children, those low-coverage temp copies merged into the aggregate lcov under
+randomized `/private/var/folders/.../T/rmd-*` paths, whose per-run count jittered the
+aggregate branch percentage by a few hundredths of a point and false-blocked test-only /
+plan-only PRs (#614/#622/#632). Only the repo's own `src/**` gates now; the per-diff
+`diff-coverage` check still polices newly-added source lines. Falsifier: the
+`temp-dir-polluted.lcov` fixture blocks pre-filter and accepts post-filter.
+
 ### diff-coverage round 3 (2026-07-23): FNDA-aware declaration lines + closer furniture
 
 Two more source-map artifact classes recognised (instrument-only change, own PR):
