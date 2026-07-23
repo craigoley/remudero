@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { captureFeedback, feedbackEntryPath, readFeedbackEntry } from "../src/lib/feedback.js";
 import { LANDING_BRANCH, LANDING_PR_TITLE, findPendingLandingPr, landFeedback } from "../src/lib/feedback-landing.js";
 import { missingFeedbackMessage } from "../src/lib/triage.js";
+import { triageCommand } from "../src/run-task.js";
 
 // commitlint (W1-T136 class) — same subprocess pattern as test/orientation.test.ts.
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -327,6 +328,214 @@ test("missingFeedbackMessage: FALSIFIER FIXED — an id captured locally but not
 test("missingFeedbackMessage: names the pending landing PR url when known", () => {
   const msg = missingFeedbackMessage("fb-x", { existsLocally: true, landingPrUrl: "https://github.com/o/r/pull/42" });
   assert.match(msg, /pending landing PR https:\/\/github\.com\/o\/r\/pull\/42/);
+});
+
+// ── Acceptance claim 5: the WIRING itself, not just the two helper functions in isolation ──
+//
+// missingFeedbackMessage() and findPendingLandingPr() are proven above in isolation — but the
+// actual falsifier this task fixes is run-task.ts's `triageCommand` catch branch, the one real
+// call site that stitches them together (existsSync(feedbackEntryPath(...)) -> the conditional
+// findPendingLandingPr() call -> the ledgered log() -> the say() the operator actually reads).
+// Drive `triageCommand` itself, for real, end to end: a REAL git worktree (a local bare "origin",
+// no network — same fixture helpers as claim 1 above), a REAL `loadConfig()` (HOME overridden to
+// an throwaway fixture directory so nothing here touches the operator's real ~/.config/remudero
+// or ~/Remudero), and the REAL module-level `repoRoot` (this actual checkout) — the only thing
+// this test controls is WHERE `config.root/repos/<repo>` points, by pre-seeding it as a fresh
+// clone with no `plan/feedback/<id>.yaml` on `main`, so `readFeedbackEntry` genuinely throws and
+// the catch branch this task added is the one that actually runs.
+/**
+ * Everything `triageCommand` needs before it reaches the catch branch this task added: a real
+ * `config.root/repos/<repo>` (pre-seeded so the real `gh repo clone` is skipped) sitting at
+ * exactly the path `resolveOwnerRepo()` (THIS checkout's real origin url) resolves, and a real
+ * `loadConfig()` (HOME overridden to a throwaway fixture dir so nothing here ever touches the
+ * operator's real `~/.config/remudero` or `~/Remudero`). Caller must restore `process.env.HOME`
+ * and rm the two returned dirs in a `finally`.
+ */
+function setupTriageWiringFixture(): { home: string; configRoot: string; savedHome: string | undefined } {
+  const bareOrigin = makeBareOrigin(); // plan/feedback/<id>.yaml genuinely absent from `main`
+  const home = mkdtempSync(join(tmpdir(), "rmd-triage-wiring-home-"));
+  const configRoot = mkdtempSync(join(tmpdir(), "rmd-triage-wiring-root-"));
+  const savedHome = process.env.HOME;
+
+  // Seed a complete config.json up front so loadConfig() takes its EEXIST/read path (no
+  // `which claude` shell-out, no write race) — same fixture discipline as test/config.test.ts's
+  // "EEXIST fallback READS the existing config" test.
+  const configDir = join(home, ".config", "remudero");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot }, null, 2));
+  process.env.HOME = home;
+
+  // `triageCommand` resolves `repo` from THIS actual checkout's real origin url
+  // (resolveOwnerRepo() shells `git -C repoRoot config --get remote.origin.url`) — replicate
+  // that same resolution so the fixture repo lands exactly where it will look, at
+  // `config.root/repos/<repo>`, pre-existing so it skips the real `gh repo clone`.
+  const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], { encoding: "utf8" }).trim();
+  const repoMatch = originUrl.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/);
+  assert.ok(repoMatch, "sanity: this checkout must have a parseable origin url");
+  const repoName = repoMatch![2];
+  const destRepoDir = join(configRoot, "repos", repoName);
+  mkdirSync(dirname(destRepoDir), { recursive: true });
+  execFileSync("git", ["clone", "--quiet", bareOrigin, destRepoDir], { encoding: "utf8", env: GIT_ENV });
+
+  return { home, configRoot, savedHome };
+}
+
+function teardownTriageWiringFixture(f: { home: string; configRoot: string; savedHome: string | undefined }): void {
+  if (f.savedHome === undefined) delete process.env.HOME;
+  else process.env.HOME = f.savedHome;
+  rmSync(f.home, { recursive: true, force: true });
+  rmSync(f.configRoot, { recursive: true, force: true });
+}
+
+test("W1-T243 TRIAGE WIRING: triageCommand's real catch branch runs end-to-end (real worktree, real loadConfig) and exits 2 — genuinely unknown id", async () => {
+  const fixture = setupTriageWiringFixture();
+  try {
+    const feedbackId = `fb-w1t243-wiring-${Date.now()}-nonexistent`;
+    assert.ok(
+      !existsSync(feedbackEntryPath(REPO_ROOT, feedbackId)),
+      "sanity: this made-up id must not already exist locally in the real checkout either",
+    );
+
+    const exitCode = await triageCommand([feedbackId]);
+    assert.equal(exitCode, 2, "a genuinely-missing feedback id still exits 2, exactly as before this task");
+  } finally {
+    teardownTriageWiringFixture(fixture);
+  }
+});
+
+test("W1-T243 TRIAGE WIRING: triageCommand's real catch branch runs end-to-end — id captured locally but not yet landed", async () => {
+  const fixture = setupTriageWiringFixture();
+  const feedbackId = `fb-w1t243-wiring-pending-${Date.now()}`;
+  const entryPath = feedbackEntryPath(REPO_ROOT, feedbackId);
+  try {
+    // Write a REAL entry into THIS checkout's own plan/feedback/ (repoRoot is a module-level
+    // constant `triageCommand` cannot be handed a fixture path for) — the exact "captured
+    // locally, not yet landed on origin/main" shape this task's catch branch distinguishes.
+    // Cleaned up in `finally` regardless of outcome; the fresh worktree it reads from (a clone
+    // of `bareOrigin`) never sees it either, so `readFeedbackEntry` still genuinely throws.
+    mkdirSync(dirname(entryPath), { recursive: true });
+    writeFileSync(
+      entryPath,
+      [
+        `id: ${feedbackId}`,
+        "ts: '2026-07-23T00:00:00.000Z'",
+        "raw: fixture entry for the triage-wiring existsLocally:true branch",
+        "attachments: []",
+        "origin: cli",
+        "status: new",
+        "proposal_pr: null",
+        "",
+      ].join("\n"),
+    );
+    assert.ok(existsSync(entryPath), "sanity: the fixture entry really is on disk in this checkout");
+
+    // No `gh` override here — `findPendingLandingPr()` runs with the REAL default `gh` (same
+    // call triageCommand itself makes), best-effort and swallowed on any failure/no-auth/offline.
+    const exitCode = await triageCommand([feedbackId]);
+    assert.equal(exitCode, 2, "captured-but-unlanded still exits 2 — only the message text distinguishes it");
+  } finally {
+    rmSync(entryPath, { force: true });
+    teardownTriageWiringFixture(fixture);
+  }
+});
+
+// ── landFeedback: the remaining edge branches (dir-absent, ids-empty, non-Error throws) ────
+
+test("landFeedback: a root that never captured anything (plan/feedback/ doesn't even exist) lands nothing, without ever creating it", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  assert.ok(!existsSync(join(root, "plan", "feedback")), "sanity: nothing captured here yet");
+
+  const { gh, createCount } = fakeGh("https://github.com/o/r/pull/10");
+  const result = landFeedback(root, { gh });
+  assert.deepEqual(result, { landed: false, files: [] });
+  assert.equal(createCount(), 0, "an absent plan/feedback/ dir must never open a PR");
+});
+
+test("landFeedback: an unlanded file that isn't a plan/feedback/*.yaml entry (e.g. a stray non-yaml file) still lands, via the non-ids PR body branch", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  // Written directly, bypassing captureFeedback — a file plan/feedback/** carries that is not
+  // itself a top-level `<id>.yaml` entry (missingFeedbackMessage's `ids` filter excludes it), so
+  // the PR-body ternary's OTHER branch (unlanded.map, not ids.map) is the one that must fire.
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(root, "plan", "feedback", "NOTES.md"), "not a feedback entry, just a stray file\n");
+
+  const { gh, calls } = fakeGh("https://github.com/o/r/pull/11");
+  const result = landFeedback(root, { gh });
+  assert.equal(result.landed, true);
+  assert.deepEqual(result.files, ["plan/feedback/NOTES.md"]);
+  const createCall = calls.find((c) => c[0] === "pr" && c[1] === "create");
+  assert.ok(createCall, "sanity: a PR-create call happened");
+  const body = createCall![createCall!.indexOf("--body") + 1];
+  assert.match(body, /plan\/feedback\/NOTES\.md lands durably on origin\/main/, "the non-ids fallback body line named the file directly");
+});
+
+test("landFeedback: captured entries nested under plan/feedback/attachments/<id>/ are walked recursively (a real local-file attachment)", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  const attachmentSrc = join(mkdtempSync(join(tmpdir(), "rmd-feedback-landing-attach-")), "screenshot.png");
+  writeFileSync(attachmentSrc, "not really a png, just fixture bytes");
+
+  const { gh } = fakeGh("https://github.com/o/r/pull/12");
+  const entry = captureFeedback(root, { raw: "see the attached screenshot", attachments: [attachmentSrc], land: { gh } });
+  assert.equal(entry.attachments.length, 1);
+  assert.match(entry.attachments[0], /^plan\/feedback\/attachments\//);
+
+  const onBranch = execFileSync(
+    "git",
+    ["--git-dir", bareOrigin, "ls-tree", "-r", "--name-only", LANDING_BRANCH],
+    { encoding: "utf8" },
+  );
+  assert.match(onBranch, /plan\/feedback\/attachments\/.*\/screenshot\.png/, "the nested attachment file landed too — the walk recursed into its directory");
+});
+
+test("landFeedback: `gh pr create` throwing a NON-Error value (no `.message`) still reports landed:true, folding the raw value into `error`", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(root, "plan", "feedback", "fb-1.yaml"), "id: fb-1\nraw: x\n");
+
+  const gh = (args: string[]): string => {
+    if (args[0] === "pr" && args[1] === "list") return "[]";
+    // eslint-disable-next-line no-throw-literal -- deliberately a non-Error, proving the `?? e`
+    // fallback in `String((e as Error)?.message ?? e)` (a real Error always has `.message`).
+    throw "gh: command not found, no message property at all";
+  };
+
+  const result = landFeedback(root, { gh });
+  assert.equal(result.landed, true, "the push already succeeded — only PR-open failed");
+  assert.match(result.error ?? "", /gh: command not found, no message property at all/);
+});
+
+test("landFeedback: `gh pr merge` throwing is swallowed (best-effort auto-merge arm) — still landed:true with the PR url", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(root, "plan", "feedback", "fb-1.yaml"), "id: fb-1\nraw: x\n");
+
+  const gh = (args: string[]): string => {
+    if (args[0] === "pr" && args[1] === "list") return "[]";
+    if (args[0] === "pr" && args[1] === "create") return "Creating pull request\nhttps://github.com/o/r/pull/13\n";
+    if (args[0] === "pr" && args[1] === "merge") throw new Error("simulated: auto-merge arming failed");
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+
+  const result = landFeedback(root, { gh });
+  assert.equal(result.landed, true, "a failed best-effort auto-merge arm must never turn a successful push+PR into a failure");
+  assert.equal(result.prUrl, "https://github.com/o/r/pull/13");
+});
+
+test("landFeedback: a git failure that throws a NON-Error value still resolves to landed:false, folding the raw value into `error` (the outer catch's `?? e` fallback)", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-feedback-landing-nonerror-git-")); // never even a git repo
+  const failingGit = (): string => {
+    // eslint-disable-next-line no-throw-literal
+    throw "totally not a git repo, and this is a bare string, not an Error";
+  };
+  const result = landFeedback(root, { git: failingGit });
+  assert.deepEqual(result.files, []);
+  assert.equal(result.landed, false);
+  assert.match(result.error ?? "", /totally not a git repo, and this is a bare string/);
 });
 
 // ── The landing commit message passes the REAL commitlint CLI (W1-T136 class) ──────────────

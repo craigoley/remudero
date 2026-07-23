@@ -6008,7 +6008,7 @@ export const TRIAGE_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "We
  * harness eats first" split `regenerateOrientation` established for the retro's docs write), so
  * the LLM can never skip the Acceptance:/Remudero-Task: contract or open a PR touching code.
  */
-async function triageCommand(rest: string[]): Promise<number> {
+export async function triageCommand(rest: string[]): Promise<number> {
   const parsed = parseTriageArgs(rest);
   if ("error" in parsed) {
     console.error(parsed.error + "\n" + USAGE);
