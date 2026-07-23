@@ -1,0 +1,16 @@
+id: fb-1784773321502-86793d
+ts: 2026-07-23T02:22:01.502Z
+raw: "MERGED-TASK KICK PREFLIGHT — rmd run-task <id> dispatches the named task
+  even when the projection already shows it merged (observed 2026-07-23: W1-T112
+  kicked by id while status.json, written 23ms before run.start, said
+  source:ledger merged=true via PR #491; the worker ran anyway, pushed an empty
+  branch, claimed the old PR, and the ownership guard returned
+  pr_attribution_failed — a guaranteed failure that cost $1.30). Need: run-task
+  consults the projection it already builds and REFUSES an already-merged task
+  with the named reason task_already_merged, with an explicit --rerun flag as
+  the deliberate override. Zero new derivation required — the projection is
+  computed lines later in the same path."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
