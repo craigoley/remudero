@@ -103,6 +103,16 @@ export function outputContractLines(taskId: string): string[] {
     "  write scope, WS-0 FF10f), and open a PR with `gh pr create --fill --base main`.",
     ...commitMessageContractLines(),
     `- Include this exact trailer as the LAST line of the PR body: Remudero-Task: ${taskId}`,
+    // W1-T81/T82 class (PRs #677/#683): a correct, fully-tested PR still FAILED review because
+    // its body did not engage each acceptance PROOF — remudero-review executes each proof and,
+    // when a proof is not executable, judges the body against that proof's own text (a keyword
+    // floor). This guidance lived ONLY in the fix rung (renderFixPrompt), so every first attempt
+    // on a prose-proof task predictably stalled at review. Stated here, at turn 0, the first PR
+    // clears the floor. Same requirement the fix rung repeats — kept in sync deliberately.
+    "- Your PR body MUST substantiate EVERY task acceptance criterion: for each, say how the",
+    "  diff satisfies it and NAME the test or grep that proves it. remudero-review executes each",
+    "  proof and, when a proof is not executable, judges your body against that proof's own text —",
+    "  a body that does not engage each proof is scored UNMET even when the work is correct.",
     "- End with a REPORT whose LAST line is exactly: PR_URL: <the pull request url>",
   ];
 }
