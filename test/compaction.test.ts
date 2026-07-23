@@ -125,6 +125,12 @@ test("renderAnchorBlock: carries the GOAL (task prompt, with ${RUN_ID}/${TASK_ID
   assert.ok(anchor.includes("unit test over a recorded fixture"), "acceptance proof present");
 });
 
+test("outputContractLines: the OUTPUT CONTRACT tells the worker to substantiate EVERY acceptance proof in the PR body (W1-T81/T82 class — a first attempt must clear the review floor, not only the fix rung)", () => {
+  const contract = outputContractLines("W1-T999").join("\n");
+  assert.match(contract, /substantiate EVERY task acceptance criterion/);
+  assert.match(contract, /judges your body against that proof's own text/);
+});
+
 test("renderAnchorBlock: the hard-constraints tail is BYTE-IDENTICAL to outputContractLines(task.id) — never paraphrased", () => {
   const t = task();
   const anchor = renderAnchorBlock(t, "RUN-1");
