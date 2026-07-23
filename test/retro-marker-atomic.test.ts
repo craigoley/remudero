@@ -348,9 +348,13 @@ function setupFakeRetroFixture(
     /** Omit MASTER-PLAN.md from the fixture repo -- regenerateOrientation throws (ENOENT),
      *  exercising its best-effort catch. */
     missingMasterPlan?: boolean;
-    /** Omit scripts/generate-plan-index.mjs -- regeneratePlanIndexAndCommit throws
-     *  (ENOENT spawning the generator), exercising its best-effort catch. */
-    missingGeneratorScript?: boolean;
+    /** Copy the REAL scripts/generate-plan-index.mjs into the fixture repo and let
+     *  regeneratePlanIndexAndCommit actually run it. Default false (absent): every
+     *  invocation spawns a REAL node subprocess whose OWN coverage gets tallied under
+     *  a fresh, unmerged random-tmp-path SF: record each time (a coverage-ratchet
+     *  measurement artifact, not a real regression) -- only the variants that
+     *  specifically need to prove the real regen path opt in. */
+    includeGeneratorScript?: boolean;
     /** Seed a malformed plan/tasks.yaml -- loadPlan throws inside the best-effort
      *  "next runnable task" lookup, exercising ITS catch. */
     badPlan?: boolean;
@@ -402,7 +406,7 @@ function setupFakeRetroFixture(
   // deliberately-malformed plan instead makes loadPlan throw, exercising its own catch.
   writeFileSync(join(seed, "plan", "tasks.yaml"), opts.badPlan ? "not_a_task_list: true\n" : "[]\n");
   writeFileSync(join(seed, "plan", "plan-index.json"), "{}\n");
-  if (!opts.missingGeneratorScript) {
+  if (opts.includeGeneratorScript) {
     mkdirSync(join(seed, "scripts"), { recursive: true });
     // The REAL generator script (self-contained: no src/ imports) -- never a reimplementation.
     copyFileSync(join(process.cwd(), "scripts", "generate-plan-index.mjs"), join(seed, "scripts", "generate-plan-index.mjs"));
@@ -534,7 +538,11 @@ function setupFakeRetroFixture(
 }
 
 test("retroCommand: a clean run reaches the REAL saveMarker call at the end of the success path and lands a valid marker", async (t) => {
-  const fx = setupFakeRetroFixture(t);
+  // The ONE variant that opts into the REAL scripts/generate-plan-index.mjs subprocess
+  // (every other variant below defaults to skipping it -- see includeGeneratorScript's
+  // doc) so the "regen actually committed" branches stay covered exactly once, not
+  // once per variant.
+  const fx = setupFakeRetroFixture(t, { includeGeneratorScript: true });
   await fx.run(async () => {
     const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
     // ci went "red" on the first poll (fake gh above) -> retroCommand returns 1 right
@@ -550,6 +558,10 @@ test("retroCommand: a clean run reaches the REAL saveMarker call at the end of t
     assert.ok(
       ledgerLines.some((l) => l.step === "retro.marker.advanced"),
       "retro.marker.advanced must be ledgered once the marker is actually saved",
+    );
+    assert.ok(
+      ledgerLines.some((l) => l.step === "plan_index.regenerated"),
+      "the real generator script must have actually run and committed a change",
     );
   });
 });
@@ -645,7 +657,7 @@ test("retroCommand: a missing MASTER-PLAN.md degrades docs/ORIENTATION.md regene
 });
 
 test("retroCommand: a missing plan-index generator script degrades plan-index.json regeneration gracefully (best-effort) and still reaches the marker advance", async (t) => {
-  const fx = setupFakeRetroFixture(t, { missingGeneratorScript: true });
+  const fx = setupFakeRetroFixture(t); // includeGeneratorScript defaults to false (absent)
   await fx.run(async () => {
     const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
     assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
@@ -705,7 +717,7 @@ test("retroCommand: a transient `gh pr edit` failure during the acceptance-repai
 });
 
 test("retroCommand: the Architect commits NOTHING (no PR_URL, ORIENTATION.md/plan-index.json both degrade) -- the no-op guard exits before any PR, marker untouched", async (t) => {
-  const fx = setupFakeRetroFixture(t, { noPrUrl: true, missingMasterPlan: true, missingGeneratorScript: true });
+  const fx = setupFakeRetroFixture(t, { noPrUrl: true, missingMasterPlan: true }); // includeGeneratorScript defaults to false
   await fx.run(async () => {
     const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
     assert.equal(exitCode, 1, "0 commits ahead of origin/main means nothing to PR -- retro.no_op, exit 1");
