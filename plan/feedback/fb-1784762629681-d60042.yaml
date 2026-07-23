@@ -1,0 +1,14 @@
+id: fb-1784762629681-d60042
+ts: 2026-07-22T23:23:49.681Z
+raw: "TRIAGE AUTO-ARM NEEDS POLICY CONTROL (P41 ANCHOR) — rmd triage arms
+  auto-merge on its own green PRs, so every green triage plan-PR self-merges
+  (observed: #599/W1-T243 merged 23:04:40Z with no operator action; #588 was
+  hand-gated only because lint-plan was red). This defeats hand-gated
+  serialization when the operator wants it. Route to P41 (merge-policy controls:
+  global arm toggle, path-scoped ratify, no-arm-while-anomaly; verify its
+  W1-T230 precondition at ratification) rather than a one-off flag; interim
+  option: a --no-arm path on triage."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

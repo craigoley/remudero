@@ -3,7 +3,9 @@
 Every change lands through a PR against `main`, gated by two **required** status
 checks:
 
-- **`ci`** — typecheck + the full test suite.
+- **`ci-gate`** — an always-reporting aggregator over every other check-run on the
+  PR (including the granular `ci` typecheck+test job); it fails only on a real
+  failure, so a legitimately skipped sibling job can never deadlock a merge.
 - **`remudero-review`** — an acceptance verdict (Standing rule 4: green CI is not
   evidence that a change did what it claims). See [docs/review-gate.md](docs/review-gate.md).
 
@@ -12,12 +14,12 @@ GitHub merges a PR only when BOTH are green. Auto-merge is safe to leave armed.
 ## Automated PRs (`rmd run-task`)
 
 `rmd run-task <task-id>` posts `remudero-review` automatically as part of its flow
-(after `ci` is green, before it arms auto-merge). Nothing extra to do.
+(after CI is green, before it arms auto-merge). Nothing extra to do.
 
 ## Plan edits (`MASTER-PLAN.md`, `plan/tasks.yaml`) — PR only, never scp
 
 The plan is the one artifact whose edit history matters most. It lands **only**
-through a branch + PR, gated by the same `ci` + `remudero-review` checks as
+through a branch + PR, gated by the same `ci-gate` + `remudero-review` checks as
 code — never scp'd, rsync'd, or manually copied into the tree. See
 [docs/plan-sync.md](docs/plan-sync.md) for the full flow.
 

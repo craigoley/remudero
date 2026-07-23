@@ -1,0 +1,12 @@
+id: fb-1784762618336-8211ab
+ts: 2026-07-22T23:23:38.337Z
+raw: "INSTRUMENT-CHANGES-RIDE-ALONE — coverage/measurement-instrument changes
+  (coverage flags, diff-coverage text-awareness, baseline re-capture) rode
+  inside task fix chains in the #585/#586 arc, entangling instrument trust with
+  task verdicts. Need: a rule plus lint that instrument-affecting changes ship
+  in their own one-concern PR, so a task's green is never partly self-graded by
+  an instrument it just changed."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

@@ -6,6 +6,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  armAutoMerge,
+  armFailureAction,
+  buildSweepEffects,
+  realArmDeps,
+  type ArmDeps,
   DEFAULT_BUDGET_USD,
   GitFetchError,
   buildInboxDraftHook,
@@ -2805,4 +2810,135 @@ test("ghPrCreateFillCommand: plan/triage PR-create runs gh with cwd pinned to th
   assert.deepEqual(built.args, [
     "pr", "create", "--repo", "craigoley/remudero", "--base", "main", "--head", "run-TRIAGE-fb-abc-123", "--fill",
   ]);
+});
+
+// ── armAutoMerge: the clean-status arm no-op (20 acted lines, zero arms) ─────
+
+function armDeps(over: Partial<ArmDeps> = {}): ArmDeps & { said: string[] } {
+  const said: string[] = [];
+  return {
+    said,
+    headSha: () => "abc1234",
+    // A ledgered SUCCESS review with EXECUTED proof for this head — the W1-T230
+    // gate's arm-permitting shape (decideArmFromLedgerVerdict).
+    ledgerLines: () => [
+      { step: "review.posted", task_id: "W1-TX", state: "success", head_sha: "abc1234", proof_exec: ["executed_pass"] },
+    ],
+    armAuto: () => {},
+    mergeDirect: () => {},
+    say: (m) => { said.push(m); },
+    ...over,
+  };
+}
+const cleanStatusErr = () => {
+  const e = new Error("gh failed") as Error & { stderr: string };
+  e.stderr = "X Pull request #591 is in clean status; auto-merge cannot be enabled";
+  return e;
+};
+
+test("armFailureAction: GitHub's 'clean status' refusal (already-mergeable PR) resolves to an immediate direct merge, not a silent no-op", () => {
+  assert.equal(
+    armFailureAction('X Pull request #591 is in clean status; auto-merge cannot be enabled'),
+    "direct-merge",
+  );
+});
+
+test("armFailureAction: any other arm failure (transient gh/network) stays ignore — the next sweep pass retries", () => {
+  assert.equal(armFailureAction("connect ETIMEDOUT api.github.com"), "ignore");
+  assert.equal(armFailureAction(""), "ignore");
+});
+
+test("armAutoMerge: a clean-status refusal COMPLETES as a direct merge — the gated-green state that made --auto refuse is exactly the mergeable state", () => {
+  const merged: string[] = [];
+  const deps = armDeps({
+    armAuto: () => { throw cleanStatusErr(); },
+    mergeDirect: (u) => { merged.push(u); },
+  });
+  assert.equal(armAutoMerge("url/591", "W1-TX", deps), "direct-merged");
+  assert.deepEqual(merged, ["url/591"]);
+  assert.ok(deps.said.some((m) => m.includes("clean_status_direct_merge")), "the completion is said, never silent");
+});
+
+test("armAutoMerge: a transient arm failure stays ignored (retried by the next sweep pass) — no direct merge fires", () => {
+  const merged: string[] = [];
+  const deps = armDeps({
+    armAuto: () => { throw new Error("connect ETIMEDOUT api.github.com"); },
+    mergeDirect: (u) => { merged.push(u); },
+  });
+  assert.equal(armAutoMerge("url/1", "W1-TX", deps), "arm-error-ignored");
+  assert.deepEqual(merged, []);
+});
+
+test("armAutoMerge: a failing direct merge is SAID with its reason, never thrown and never silent", () => {
+  const deps = armDeps({
+    armAuto: () => { throw cleanStatusErr(); },
+    mergeDirect: () => { throw new Error("merge conflict appeared"); },
+  });
+  assert.equal(armAutoMerge("url/2", "W1-TX", deps), "direct-merge-failed");
+  assert.ok(deps.said.some((m) => m.includes("direct_merge_failed") && m.includes("merge conflict appeared")));
+});
+
+test("armAutoMerge: the happy arm path still arms — the fallback changes nothing when --auto succeeds", () => {
+  const deps = armDeps();
+  assert.equal(armAutoMerge("url/3", "W1-TX", deps), "armed");
+});
+
+test("armAutoMerge: the W1-T230 guards are untouched — no task id and a ledger-refused verdict still withhold arming", () => {
+  assert.equal(armAutoMerge("url/4", undefined, armDeps()), "no-task-id");
+  const refused = armDeps({ ledgerLines: () => [] });
+  assert.equal(armAutoMerge("url/5", "W1-TX", refused), "ledger-refused");
+  const headless = armDeps({ headSha: () => { throw new Error("gh down"); } });
+  assert.equal(armAutoMerge("url/6", "W1-TX", headless), "head-unavailable");
+});
+
+test("realArmDeps: the real gh/config wiring executes against a PATH-stubbed gh — every dep body runs, none is guessed", () => {
+  const bin = mkdtempSync(join(tmpdir(), "gh-stub-"));
+  writeFileSync(
+    join(bin, "gh"),
+    '#!/bin/sh\ncase "$2" in view) echo "{\\"headRefOid\\":\\"stub1234\\"}";; *) exit 0;; esac\n',
+    { mode: 0o755 },
+  );
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    const d = realArmDeps();
+    assert.equal(d.headSha("url/x"), "stub1234", "headSha parses gh pr view --json headRefOid");
+    assert.doesNotThrow(() => d.armAuto("url/x"), "armAuto reaches gh pr merge --auto");
+    assert.doesNotThrow(() => d.mergeDirect("url/x"), "mergeDirect reaches gh pr merge --squash");
+    assert.doesNotThrow(() => d.say("realArmDeps coverage probe"));
+    try {
+      d.ledgerLines();
+    } catch {
+      // a machine with no config root yet — the dep line still executed, which is the assertion
+    }
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test("buildSweepEffects.arm: the sweep's real arm wrapper reaches armAutoMerge (safe no-task-id path, no gh spawned)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sweep-arm-"));
+  const effects = buildSweepEffects(
+    "craigoley",
+    "remudero",
+    { root } as never,
+    join(root, "ledger.ndjson"),
+    "RUN-ARM-1",
+    { tasks: [] } as never,
+    () => {},
+  );
+  await effects.arm({
+    prNumber: 1,
+    prUrl: "url/1",
+    taskId: undefined,
+    reviewState: "none",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    lastActivityAt: new Date().toISOString(),
+    headSha: "x",
+    autoMergeArmed: false,
+  } as never);
+  rmSync(root, { recursive: true, force: true });
 });

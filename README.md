@@ -28,19 +28,26 @@ anything you care about.
 
 ## What's here today
 
-This repo currently contains the **WS-0 spike**: a one-shot proof that the
-primitive loop closes end-to-end against a sandbox repo — fully headless, under
-OS containment, on subscription OAuth. See:
+WS-0 (the one-shot spike proving the primitive loop closed end-to-end,
+headless, under OS containment, on subscription OAuth) shipped and closed; the
+repo then ran WS-1 through its entire backlog and closed that too
+(2026-07-15: the daemon runs itself, unattended, self-hosting its own PRs).
+`src/run-task.ts` — the CLI orchestrator (`rmd`) — is not a future promise, it
+is real code: run-task/drain/daemon/review/sweep/fix/serve and the rest of the
+`rmd` command surface, over six thousand lines. See:
 
 - **[MASTER-PLAN.md](./MASTER-PLAN.md)** — the full design; this document is the product.
-- **[FINDINGS.md](./FINDINGS.md)** — the spike's per-verdict proofs and installed-version ground truth.
+- **[docs/operator-guide.md](./docs/operator-guide.md)** — the day-to-day view: what to type, what to watch.
+- **[FINDINGS.md](./FINDINGS.md)** — the WS-0 spike's per-verdict proofs and installed-version ground truth.
 - **[DECISIONS.md](./DECISIONS.md)** — auto-choose decision log (append-only).
-- `src/lib/` — the reusable primitives (`config`, `env`, `worker`) that become
-  `run-task.ts` in WS-1.
+- `src/run-task.ts` — the orchestrator; `bin/rmd` is a thin `exec` wrapper into it.
+- `src/lib/` — the reusable primitives (`config`, `env`, `worker`, …) `run-task.ts` is built on.
+- `src/spike.ts` — the original WS-0 spike script, kept for the record (`npm run spike`).
 - `settings/worker.json` + `hooks/deny-floor.sh` — the worker containment policy.
 
-Run the primitives' unit tests with `npm test`. The spike itself
-(`npm run spike`) requires a configured instance (see `MASTER-PLAN.md`).
+Run the unit tests with `npm test`. Run the CLI itself with `rmd --help` (or
+`bin/rmd --help` from a checkout) for the full, generated command list — see
+`docs/cli-reference.md`.
 
 ## License
 
