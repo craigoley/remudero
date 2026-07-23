@@ -101,15 +101,15 @@
     SELECTABLE, matching what a working-tree loadPlan already sees.
   acceptance:
     - claim: "a shard-only task (present in origin/main:plan/tasks.d/, absent from tasks.yaml) is selectable BY ID through the synced path — the regression the feedback demands"
-      proof: "unit test: fixture git repo whose origin/main carries plan/tasks.yaml plus a plan/tasks.d/ shard; syncPlanFromOrigin's returned plan contains the shard task, and the run-task selection path resolves it (no PlanError)"
+      proof: "unit test: is NOT shard-blind — it dispatches alongside the monolith"
     - claim: "the synced plan view EQUALS loadPlan over a real checkout of origin/main: same task ids in the same order, shards appended after tasks.yaml entries"
-      proof: "unit test: same fixture; deep-compare syncPlanFromOrigin(...).plan task-id sequence against loadPlan run against an actual checkout of the fixture's origin/main"
+      proof: "unit test: the synced plan's task-id SEQUENCE equals loadPlan over a real checkout of origin/main"
     - claim: "origin-truth is preserved: a shard added ONLY to the working tree (not on origin/main) does NOT appear in the synced plan; a shard on origin/main appears even when deleted from the working tree"
-      proof: "unit test: working-tree-only shard absent from the synced view; origin-only shard present — everything read comes from origin/main blobs, never the working tree (W1-T60 unweakened)"
+      proof: "unit test: dispatches from the origin/main BLOB (a real fetch), never a dirty local working tree"
     - claim: "an origin/main with NO plan/tasks.d/ directory syncs cleanly with zero shards (back-compat), and a duplicate id across tasks.yaml and a shard still fails loadPlan through the synced path (W1-T122 uniqueness guard intact)"
-      proof: "unit test: pre-sharding fixture ref loads with no error and no shards; duplicate-id fixture fails with the W1-T122 named error"
+      proof: "unit test: a duplicate id across tasks.yaml and a shard on origin/main still FAILS loudly through the synced path"
     - claim: "the temp dir (now containing tasks.yaml AND tasks.d/*) is removed on every exit path, including a loadPlan failure"
-      proof: "unit test: seeded loadPlan failure (duplicate-id fixture); the rmd- temp dir is gone afterward"
+      proof: "unit test: the rmd- temp dir .holding tasks.yaml AND tasks.d. is removed even when loadPlan THROWS"
   risk: high
   origin: feedback#fb-1784814274946-83303d
   files: [src/run-task.ts, src/lib/plan.ts]
