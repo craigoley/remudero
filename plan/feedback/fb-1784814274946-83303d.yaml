@@ -15,4 +15,4 @@ raw: "SYNCED DISPATCH IS SHARD-BLIND — syncPlanFromOrigin materializes only
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/650
