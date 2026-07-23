@@ -15,5 +15,5 @@ raw: "LEDGER ROTATION IS DIVERGENT — rotation must converge: after any rotatio
   ceiling, append once, assert exactly one rotation and live < ceiling."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/617

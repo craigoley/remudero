@@ -86,7 +86,17 @@ function ledgerPathFor(root: string): string {
 
 function planYaml(plan: Plan): string {
   if (plan.tasks.length === 0) return "[]\n";
-  return plan.tasks.map((t) => `- id: ${t.id}\n  title: "${t.title}"\n  repo: ${t.repo}\n  type: ${t.type}\n`).join("");
+  // W1-T223: `status`/`verify`/`depends_on` are now serialized too -- GET /v1/drain/preview
+  // (panel-graph.ts's buildDrainPreviewRoute) reads the plan FRESH from planPath on every
+  // request, never the in-memory `Plan` a fixture builds, so a Task-level override of any of
+  // these that this helper dropped was previously invisible to drain-preview specifically
+  // (silently defaulting to status:queued/verify:auto/depends_on:[] on the YAML round-trip).
+  return plan.tasks
+    .map((t) => {
+      const deps = t.depends_on.length ? `\n  depends_on: [${t.depends_on.join(", ")}]` : "";
+      return `- id: ${t.id}\n  title: "${t.title}"\n  repo: ${t.repo}\n  type: ${t.type}\n  status: ${t.status}\n  verify: ${t.verify}${deps}\n`;
+    })
+    .join("");
 }
 
 function writePlan(root: string, yamlBody: string): string {
@@ -236,18 +246,28 @@ test("density: a realistic 214-task, mostly-queued plan (no NOW/NEEDS-ME/RECENT 
 
 test("one-click drill: a task reachable only via the 'everything else' corpus opens its card in ONE click, no prior expand", async () => {
   const root = tmpRoot();
-  const deps = fixtureDeps(root, [task({ id: "W1-T1", title: "only in the rest corpus" })]);
+  // `status: "blocked"` -- nextRunnable explicitly skips a blocked task (drain.ts), so it never
+  // enters the drain preview's simulated-forward sequence (which otherwise pulls in ANY task
+  // reachable via a merge chain, not just currently-runnable ones); no escalation/phase/ledger
+  // event puts it in NOW/NEEDS ME/RECENT either, so it is reachable via NO priority section --
+  // only "everything else"/FIND (W1-T223: REST's own header now defaults collapsed when its
+  // complement is genuinely EMPTY, so this fixture must keep the "only in rest" premise real).
+  const deps = fixtureDeps(root, [task({ id: "W1-T1", title: "only in the rest corpus", status: "blocked" })]);
   await withShell(deps, async (base) => {
     const { context, page } = await openShell(base);
     try {
       await page.waitForFunction(() => document.querySelectorAll("#rest-list li[data-key]").length === 1);
       // the section must already be visible -- no expand click before the row is even clickable.
       assert.equal(await page.evaluate(() => (document.getElementById("rest-detail") as HTMLElement)?.hidden), false);
-      assert.equal(await page.evaluate(() => document.getElementById("task-detail")?.hidden), true);
+      assert.equal(await page.evaluate(() => document.querySelector(".row-detail") !== null), false);
 
       await page.click('#rest-list li[data-task-id="W1-T1"] .task-id');
-      await page.waitForFunction(() => document.getElementById("task-detail")?.hidden === false, null, { timeout: 5000 });
-      await page.waitForFunction(() => (document.getElementById("task-detail-title")?.textContent ?? "").includes("only in the rest corpus"), null, { timeout: 5000 });
+      await page.waitForFunction(
+        () => document.querySelector('#rest-list li[data-task-id="W1-T1"]')?.getAttribute("aria-expanded") === "true",
+        null,
+        { timeout: 5000 },
+      );
+      await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").includes("only in the rest corpus"), null, { timeout: 5000 });
     } finally {
       await context.close();
     }
@@ -309,12 +329,16 @@ test("one-click drill: clicking a dense NOW row opens W1-T158's task card direct
     const { context, page } = await openShell(base);
     try {
       await page.waitForFunction(() => (document.querySelector("#now-list .detail")?.textContent ?? "").includes("phase: recon"));
-      assert.equal(await page.evaluate(() => document.getElementById("task-detail")?.hidden), true);
+      assert.equal(await page.evaluate(() => document.querySelector(".row-detail") !== null), false);
 
-      // ONE click, on the row itself (never on the Journey button/PR link/etc).
+      // ONE click, on the row itself (never the chevron/PR link/etc -- it's the whole row's own affordance).
       await page.click('#now-list li[data-task-id="W1-T1"] .task-id');
-      await page.waitForFunction(() => document.getElementById("task-detail")?.hidden === false, null, { timeout: 5000 });
-      await page.waitForFunction(() => (document.getElementById("task-detail-title")?.textContent ?? "").includes("dense row target"), null, { timeout: 5000 });
+      await page.waitForFunction(
+        () => document.querySelector('#now-list li[data-task-id="W1-T1"]')?.getAttribute("aria-expanded") === "true",
+        null,
+        { timeout: 5000 },
+      );
+      await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").includes("dense row target"), null, { timeout: 5000 });
     } finally {
       await context.close();
     }
@@ -331,7 +355,13 @@ test("one-click drill: a click on a row in EVERY section (NOW/NEEDS ME/UP NEXT/R
   const needsMe = task({ id: "W1-T2", title: "needs me section target" });
   const upNext = task({ id: "W1-T3", title: "up next section target" });
   const recent = task({ id: "W1-T4", title: "recent section target" });
-  const rest = task({ id: "W1-T5", title: "rest section target" });
+  // W1-T223: REST's own header now defaults collapsed when its complement is genuinely EMPTY, so
+  // this row must be reachable via NO priority section -- a plain queued task with no deps would
+  // ALSO surface in UP NEXT's drain preview (which simulates a forward merge chain, so even an
+  // UNMET dependency does not exclude it). `status: "blocked"` is what nextRunnable itself skips
+  // outright (drain.ts), keeping this row in REST/FIND alone, matching this test's own "rest
+  // section target" premise.
+  const rest = task({ id: "W1-T5", title: "rest section target", status: "blocked" });
   const prUrl = "https://github.com/o/r/pull/4";
   const byRef = { [prUrl]: { number: 4, url: prUrl, state: "MERGED" } };
   const github = fakeGitHub(byRef);
@@ -360,14 +390,18 @@ test("one-click drill: a click on a row in EVERY section (NOW/NEEDS ME/UP NEXT/R
       ];
       for (const s of sections) {
         await page.waitForFunction((sel) => !!document.querySelector(sel), `#${s.list} li[data-task-id="${s.taskId}"]`, { timeout: 5000 });
-        await page.evaluate(() => { const el = document.getElementById("task-detail"); if (el) el.hidden = true; });
         // ONE click, on the row's own task-id, scoped to THIS section (rows can legitimately also
         // appear in the "everything else" FIND corpus, which searches the whole board -- scoping
-        // to the section under test keeps each check unambiguous about which row fired).
+        // to the section under test keeps each check unambiguous about which row fired). No prior
+        // collapse needed -- clicking a DIFFERENT row's own affordance closes whatever else was open.
         await page.click(`#${s.list} li[data-task-id="${s.taskId}"] .task-id`);
-        await page.waitForFunction(() => document.getElementById("task-detail")?.hidden === false, null, { timeout: 5000 });
         await page.waitForFunction(
-          (t) => (document.getElementById("task-detail-title")?.textContent ?? "").includes(t),
+          (sel) => document.querySelector(sel)?.getAttribute("aria-expanded") === "true",
+          `#${s.list} li[data-task-id="${s.taskId}"]`,
+          { timeout: 5000 },
+        );
+        await page.waitForFunction(
+          (t) => (document.querySelector(".row-detail")?.textContent ?? "").includes(t),
           s.title,
           { timeout: 5000 },
         );

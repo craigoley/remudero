@@ -256,6 +256,45 @@ test("rotateLedger: sweep's credit-backfill dedup still suppresses a duplicate c
   }
 });
 
+test("rotateLedger: a malformed (non-JSON) line is archived, never retained live and never thrown on", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const taskId = "W1-MALFORMED";
+
+    // A genuinely unparseable line -- e.g. a torn append this or a prior crash mid-write left
+    // behind (see appendLedger's own doc). isDecisionRelevantRawLine must treat this as
+    // non-decision-relevant (JSON.parse throws, caught, false) rather than letting the parse
+    // error escape and abort the whole rotation.
+    writeFileSync(ledgerPath, "{not valid json at all\n", { flag: "a" });
+    appendLedger(ledgerPath, { run_id: "r0", task_id: taskId, step: "run.start" } as LedgerLine, {
+      ceilingBytes: Number.MAX_SAFE_INTEGER,
+    });
+    for (let n = 0; n < 250; n++) {
+      writeFileSync(ledgerPath, noiseLine(n) + "\n", { flag: "a" });
+    }
+
+    const ceiling = 2000;
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "test setup sanity: padded past the ceiling");
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling });
+    assert.equal(result.rotated, true);
+
+    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    assert.ok(archiveContent.includes("{not valid json at all"), "the malformed line survives verbatim in the archive");
+
+    const liveContent = readFileSync(ledgerPath, "utf8");
+    assert.ok(!liveContent.includes("{not valid json at all"), "a malformed line is never retained in the live view");
+
+    const linesAfter = readLedgerLines(ledgerPath);
+    assert.ok(
+      linesAfter.some((l) => l.task_id === taskId && l.step === "run.start"),
+      "the decision-relevant line right next to the malformed one still survives",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── THE FALSIFIER (review round 1's unmet criterion): the tests above prove rotateLedger's
 // OUTPUT matches a self-referential expectation, which is non-responsive to "a rotation that
 // drops a decision-relevant line FAILS" — that claim needs an observed FAILURE when a line is

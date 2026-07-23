@@ -38,6 +38,7 @@ import {
   runDrain,
   type CuratedSelection,
   type DrainOpts,
+  type DrainSummary,
   type MergedSet,
   type OpenPrCheck,
 } from "./lib/drain.js";
@@ -62,7 +63,7 @@ import {
   type EscalationOption,
   type IssueGateway,
 } from "./lib/escalate.js";
-import { imessageChannel, notify } from "./lib/notify.js";
+import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
 import { ghAlertGateway, pollAlerts, renderAlertsSummary } from "./lib/ops.js";
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
 import { loadManagedRepos, ManagedReposError } from "./lib/managed-repos.js";
@@ -128,6 +129,7 @@ import {
   runDraftRung,
   summarizeInboxPoll,
   updateProposalRegistry,
+  writeDraftAttemptPair,
   type DraftAttemptCache,
   type DraftCache,
   type DraftRungOutcome,
@@ -144,10 +146,11 @@ import {
   buildGather,
   calibrationTable,
   codeFilesInDiff,
-  loadMarker,
   parseLedger,
   probeGithubThrottle,
   renderGather,
+  resolveMarkerForGather,
+  saveMarker,
   type ShippedGithub,
 } from "./lib/retro.js";
 import { regenerateOrientation } from "./lib/orientation.js";
@@ -3524,15 +3527,42 @@ async function lintPlanCommand(rest: string[]): Promise<number> {
  * then state/last-retro.json advances. Generation (this) is separated from
  * publication (the gate + the human) [research].
  */
-async function retroCommand(rest: string[]): Promise<number> {
+async function retroCommand(
+  rest: string[],
+  opts: {
+    /** Injectable worker-spawn (mirrors {@link runTask}'s `opts.spawn`) — lets a test drive
+     *  the retro success path (through the atomic marker-advance, W1-T242) without a real
+     *  Architect spawn. Default: the real {@link spawnWorker}. */
+    spawn?: typeof spawnWorker;
+  } = {},
+): Promise<number> {
   const dryRun = rest.includes("--dry-run");
+  const spawn = opts.spawn ?? spawnWorker;
   const config = loadConfig();
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const markerPath = join(config.root, "state", "last-retro.json");
   const learningsPath = join(repoRoot, "LEARNINGS.md");
   const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
   const learningsMd = existsSync(learningsPath) ? readFileSync(learningsPath, "utf8") : "";
-  const marker = loadMarker(markerPath);
+  // W1-T242: a corrupt-but-present marker (e.g. a torn write from a crash, or a manual
+  // edit) MUST NOT be silently treated as "no marker" — that would replay the whole
+  // already-consumed run window and double-count SHIPPED/learnings. resolveMarkerForGather
+  // distinguishes "absent" (the genuine first-ever-retro signal) from "corrupt" (fail
+  // closed); branch on it BEFORE any gather/spawn work, never collapse back to
+  // `marker | undefined` the way the pre-fix reader did.
+  const markerResolution = resolveMarkerForGather(markerPath);
+  if (markerResolution.kind === "corrupt") {
+    console.error(`\n### [retro] ${markerResolution.error.message}`);
+    appendLedger(ledgerPath, {
+      run_id: `RETRO-${Date.now()}`,
+      task_id: "RETRO",
+      step: "retro.marker.corrupt",
+      error: markerResolution.error.message,
+      marker_path: markerPath,
+    });
+    return 1;
+  }
+  const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
   // W1-T132: resolved EARLY (a pure git-config read, no spawn) so the SHIPPED
   // union (W1-T51's shippedSince) can be wired into the gather from the start —
   // omitting `github` here degrades `shipped` to the ledger-only list, which is
@@ -3633,7 +3663,7 @@ async function retroCommand(rest: string[]): Promise<number> {
 
   const prompt = retroPrompt(report, calibrationTable(gather.byType), runId);
   try {
-    const worker = await spawnWorker({
+    const worker = await spawn({
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
       settingsFile,
@@ -3778,7 +3808,7 @@ async function retroCommand(rest: string[]): Promise<number> {
 
     // Advance the marker (the retro RAN — the gather is now consumed).
     const nextMarker = { ts: new Date().toISOString(), learnings_count: gather.learningsNow, runs_seen: gather.totalRuns };
-    writeFileSync(markerPath, JSON.stringify(nextMarker, null, 2) + "\n");
+    saveMarker(markerPath, nextMarker);
     log("retro.marker.advanced", nextMarker);
 
     // Gate: ci green → post remudero-review → arm auto-merge.
@@ -3968,6 +3998,31 @@ function breakerGateFor(ledgerPath: string): { isIndeterminate: (taskId: string)
  * logic over GitHub-derived status; it STOPS ON ANY BLOCK (v1); it is headroom-aware
  * and bounded. See lib/drain.ts for the loop; this only wires the real defaults.
  */
+/**
+ * The post-drain rundown PUSH (W1-T141/W1-T144), extracted from drainCommand so the glue —
+ * build the classified rundown, print it, and push it through the SAME digest channel
+ * escalations use (never a second transport) — is unit-covered with a fake channel + fixture
+ * summary, the #606 interior-glue discipline. Returns the pushed text. `print` is injectable
+ * (defaults to console.log) so a test asserts the rundown without capturing stdout.
+ */
+export function pushDrainRundown(
+  summary: DrainSummary,
+  ledgerLines: Array<Record<string, unknown>>,
+  config: Config,
+  deps: { channel: NotifyChannel; ledgerPath: string; runId: string; print?: (s: string) => void },
+): string {
+  const rundown = buildRundown(summary, ledgerLines);
+  (deps.print ?? ((line: string) => console.log(line)))("\n" + renderRundown(rundown));
+  // W1-T144: the SAME sendRundown -> notify() path rmd digest/MANUAL/HARD_STOP escalations
+  // ride, each non-merged line deep-linking to its console card via consoleUrl(config).
+  return sendRundown(rundown, consoleUrl(config), {
+    channel: deps.channel,
+    ledgerPath: deps.ledgerPath,
+    runId: deps.runId,
+    taskId: "DRAIN",
+  });
+}
+
 async function drainCommand(
   rest: string[],
   deps: {
@@ -3982,6 +4037,10 @@ async function drainCommand(
      *  gateway for `remudero-sandbox`, not a hardcoded literal (W1-T53) — without a network
      *  round-trip. */
     githubFactory?: (owner: string, repo: string) => GitHub;
+    /** W1-T144: injectable notify channel for the post-drain rundown push — a behavioral
+     *  test supplies a recording fake so the push glue runs without a real osascript send.
+     *  Defaults to the operator's iMessage channel. */
+    notifyChannel?: NotifyChannel;
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE touching config/locks/spawns (a malformed control command
@@ -4190,17 +4249,10 @@ async function drainCommand(
     // task — "what happened" at task grain, not just the aggregate summary above. Re-reads the
     // ledger fresh so a same-run escalation (BLOCKED class, two-strikes-exhausted) is visible to
     // the classifier — the SAME ledger file `log` above just finished writing into.
-    const rundown = buildRundown(summary, readLedgerLines(ledgerPath));
-    console.log("\n" + renderRundown(rundown));
-    // W1-T144: PUSH the same rundown through the digest channel (lib/digest.ts's `sendRundown`
-    // — the SAME `notify()` call `rmd digest`/MANUAL/HARD_STOP escalations already go through,
-    // not a second transport) so an operator who is not watching this terminal still learns
-    // what a drain did, each non-merged line deep-linking to its console card.
-    sendRundown(rundown, consoleUrl(config), {
-      channel: imessageChannel(notifyRecipient(config)),
+    pushDrainRundown(summary, readLedgerLines(ledgerPath), config, {
+      channel: deps.notifyChannel ?? imessageChannel(notifyRecipient(config)),
       ledgerPath,
       runId,
-      taskId: "DRAIN",
     });
     // Exit 0 only on a clean drain (target reached / max reached / nothing left);
     // a block/headroom/error stop is a non-zero exit so an unattended wrapper notices.
@@ -5878,7 +5930,10 @@ const ESCALATION_CLASSES: EscalationClass[] = ["BLOCKED", "MANUAL", "HARD_STOP"]
  * Opens the `needs-human` labeled issue (escalate.ts) and, for MANUAL/HARD_STOP
  * ONLY, also fires a real-time iMessage ping (§4: BLOCKED collapses to the digest).
  */
-async function escalateCommand(rest: string[]): Promise<number> {
+export async function escalateCommand(
+  rest: string[],
+  deps: { issues?: IssueGateway; notifyChannel?: NotifyChannel } = {},
+): Promise<number> {
   const cls = flagValue(rest, "--class");
   const taskId = flagValue(rest, "--task");
   const summary = flagValue(rest, "--summary");
@@ -5900,14 +5955,14 @@ async function escalateCommand(rest: string[]): Promise<number> {
       options: parseOptionFlags(rest),
       recommendation: flagValue(rest, "--recommendation") ?? "",
     },
-    { issues: ghIssueGateway(owner, repo), ledgerPath, runId },
+    { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId },
   );
   console.log(url);
   if (cls === "MANUAL" || cls === "HARD_STOP") {
     // W1-T144: the real-time ping deep-links to the console card alongside the GitHub
     // issue URL, same as the digest's own escalations line (digest.ts's renderDigest).
     notify(`[${cls}] ${taskId}: ${summary}\n${url}\n${consoleCardUrl(consoleUrl(config), taskId)}`, {
-      channel: imessageChannel(notifyRecipient(config)),
+      channel: deps.notifyChannel ?? imessageChannel(notifyRecipient(config)),
       ledgerPath,
       runId,
       taskId,
@@ -6582,8 +6637,10 @@ export function buildInboxDraftHook(
         nextAttempts[outcome.proposalId] = draftAttemptKey(proposal);
         if (outcome.ok) nextDrafts[outcome.proposalId] = outcome.candidate;
       }
-      writeFileSync(draftsPath, JSON.stringify(nextDrafts, null, 2), "utf8");
-      writeFileSync(attemptsPath, JSON.stringify(nextAttempts, null, 2), "utf8");
+      // ATOMIC PAIR (W1-T241): see lib/inbox.ts's `writeDraftAttemptPair` doc for the
+      // torn-file/wedged-idempotence hazard this closes and why drafts commits before
+      // attempts.
+      writeDraftAttemptPair(draftsPath, attemptsPath, nextDrafts, nextAttempts);
     } catch (e) {
       log("inbox.draft_rung.error", { error: String((e as Error)?.message ?? e) });
     }
@@ -7007,7 +7064,10 @@ export async function reframeCommand(rest: string[], deps: { config?: Config } =
  * (default: 24h ago) into one message (digest.ts) and send it over iMessage;
  * `--dry-run` prints the text without sending.
  */
-async function digestCommand(rest: string[]): Promise<number> {
+export async function digestCommand(
+  rest: string[],
+  deps: { notifyChannel?: NotifyChannel } = {},
+): Promise<number> {
   const since = flagValue(rest, "--since") ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const config = loadConfig();
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
@@ -7019,7 +7079,7 @@ async function digestCommand(rest: string[]): Promise<number> {
     ledgerPath,
     since,
     {
-      channel: imessageChannel(notifyRecipient(config)),
+      channel: deps.notifyChannel ?? imessageChannel(notifyRecipient(config)),
       ledgerPath,
       runId: `DIGEST-${Date.now()}`,
       taskId: "DIGEST",

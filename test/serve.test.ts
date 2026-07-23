@@ -491,6 +491,17 @@ test("resolveServiceTokens: generates once and persists across calls (stable bea
   assert.deepEqual(second, first); // same file, not regenerated
 });
 
+test("resolveServiceTokens: a non-EEXIST open failure is rethrown, never swallowed as if raced", () => {
+  const root = tmpRoot();
+  const p = serviceTokensPath(root);
+  // A DIRECTORY sitting at the tokens path (rather than a racing sibling process's file) makes
+  // the exclusive-create `openSync(p, "wx")` fail with EISDIR, not EEXIST -- the catch block's
+  // `code !== "EEXIST"` branch must rethrow this rather than treating it as "someone else already
+  // created the file", which would otherwise silently mask a real misconfiguration.
+  mkdirSync(p, { recursive: true });
+  assert.throws(() => resolveServiceTokens(root), /EISDIR/);
+});
+
 // ── (2) a ledger status flip reaches the SSE stream within 2s, through the FULL assembler ──
 
 test("GET /v1/status/stream (assembled server): a ledger flip arrives as `status` within 2s", async () => {
@@ -598,17 +609,32 @@ test("shell nav uses in-shell PANELS (buttons + authorized fetch), not <a href> 
 });
 
 // ── W1-T158: the v0 id-textbox trace panel is RETIRED; every task row instead carries its own
-// explicit Journey affordance, and GET /v1/task backs a new row-click card. ────────────────────
+// inline expand affordance, and GET /v1/task backs a new row-click card. W1-T222 (a RULE-21
+// successor to W1-T158, not an amendment) then retires W1-T158's OWN #task-detail/#journey-view
+// bottom-panel pair in turn — the card now opens INLINE, directly beneath its own row. ──────────
 
 test("W1-T158: the v0 'Plan→task→PR graph' id-textbox panel is retired — no graph-btn/trace-id/trace-btn in the shell", () => {
   const html = renderShellHtml();
   assert.doesNotMatch(html, /id="graph-btn"/);
   assert.doesNotMatch(html, /id="trace-id"/);
   assert.doesNotMatch(html, /id="trace-btn"/);
-  // its replacement: a per-row journey button + a card/journey panel pair, keyed on data-task-id.
-  assert.match(html, /class="row-journey-btn" data-task-id=/);
-  assert.match(html, /id="task-detail"/);
-  assert.match(html, /id="journey-view"/);
+  // its replacement: every row is itself the expand trigger (a chevron affordance, keyed off the
+  // row's own aria-expanded), never a per-row Journey button or a bottom-panel pair.
+  assert.match(html, /class="row-chevron"/);
+});
+
+test("W1-T222: the bottom-panel #task-detail/#journey-view pair W1-T158 shipped is retired — the card opens INLINE, as a sibling '.row-detail' beneath its own row", () => {
+  const html = renderShellHtml();
+  assert.doesNotMatch(html, /id="task-detail"/);
+  assert.doesNotMatch(html, /id="journey-view"/);
+  assert.doesNotMatch(html, /class="row-journey-btn"/);
+  // its replacement: reconcileRows glues a SINGLE open '.row-detail[data-detail-for]' sibling to
+  // its own row and never lets a background render collapse it (see reconcileRows's own doc).
+  assert.match(html, /row\.className = "row-detail"|detailEl\.className = "row-detail"/);
+  assert.match(html, /data-detail-for/);
+  // the journey view lazy-loads INSIDE that card on demand, never eagerly and never its own panel.
+  assert.match(html, /class="card-journey-toggle"/);
+  assert.match(html, /class="card-journey-body"/);
 });
 
 test("the panel data routes are header-only (bare navigation 401s) — the shell must fetch, never link them", async () => {
@@ -947,7 +973,7 @@ test("W1-T193: a DRAFTING proposal renders a distinct state carrying its spawn t
 // requires launching a real headless browser; this test proves the exact same claim (the
 // issue's real ask + a direct link + no free-text/URL input of any kind, not merely no
 // `type="url"` one) by extracting the row template's own small, pure helper functions
-// (escapeHtml/statusBadge/prLink/journeyButtonHtml/needsMeTaskRowHtml — none of them touch
+// (escapeHtml/statusBadge/prLink/rowChevronHtml/needsMeTaskRowHtml — none of them touch
 // `document`) straight out of the served shell and calling them with real StatusProjection
 // shapes, so the proof runs anywhere Node does, no browser required.
 test("W1-T182: needsMeTaskRowHtml's ACTUAL rendered output shows the issue's real ask + a direct link, and contains NO <input> of any kind — never solicits data the ledger (escalation.issue_opened's issue_url) already holds", () => {
@@ -957,13 +983,13 @@ test("W1-T182: needsMeTaskRowHtml's ACTUAL rendered output shows the issue's rea
     escapeHtml: html.match(/function escapeHtml\(text\) \{[\s\S]*?\n  \}/)?.[0],
     statusBadge: html.match(/function statusBadge\(key\) \{[\s\S]*?\n  \}/)?.[0],
     prLink: html.match(/function prLink\(t\) \{[\s\S]*?\n  \}/)?.[0],
-    journeyButtonHtml: html.match(/function journeyButtonHtml\(taskId\) \{[\s\S]*?\n  \}/)?.[0],
+    rowChevronHtml: html.match(/function rowChevronHtml\(\) \{[\s\S]*?\n  \}/)?.[0],
     needsMeTaskRowHtml: html.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0],
   };
   for (const [name, src] of Object.entries(parts)) assert.ok(src, `${name} must exist in the shell's inline script`);
 
   const renderRow = new Function(
-    `${parts.STATUS_LABELS}\n${parts.escapeHtml}\n${parts.statusBadge}\n${parts.prLink}\n${parts.journeyButtonHtml}\n${parts.needsMeTaskRowHtml}\nreturn needsMeTaskRowHtml(arguments[0]);`,
+    `${parts.STATUS_LABELS}\n${parts.escapeHtml}\n${parts.statusBadge}\n${parts.prLink}\n${parts.rowChevronHtml}\n${parts.needsMeTaskRowHtml}\nreturn needsMeTaskRowHtml(arguments[0]);`,
   ) as (t: Record<string, unknown>) => string;
 
   // A CONFIRMED-open escalation, live issue title flowing through escalationTitle.

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import {
+import { escalateCommand, digestCommand, pushDrainRundown,
   armAutoMerge,
   armFailureAction,
   buildSweepEffects,
@@ -2941,4 +2941,129 @@ test("buildSweepEffects.arm: the sweep's real arm wrapper reaches armAutoMerge (
     autoMergeArmed: false,
   } as never);
   rmSync(root, { recursive: true, force: true });
+});
+
+// ── pushDrainRundown: the extracted post-drain push glue (W1-T144, #606 discipline) ──
+
+test("pushDrainRundown builds the classified rundown, prints it, and pushes ONE message through the injected channel — each non-merged line carrying its console deep link", () => {
+  const sent: string[] = [];
+  const printed: string[] = [];
+  const channel = { send: (msg: string) => { sent.push(msg); return true; } };
+  const root = mkdtempSync(join(tmpdir(), "push-rundown-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  // A ledger line the classifier reads to mark W1-B escalated (BLOCKED) with its issue URL.
+  writeFileSync(
+    ledgerPath,
+    JSON.stringify({ step: "escalation.issue_opened", task_id: "W1-B", issue_url: "https://github.com/craigoley/remudero/issues/9", class: "BLOCKED" }) + "\n",
+  );
+  const summary = {
+    attempted: ["W1-A", "W1-B"],
+    merged: ["W1-A"],
+    stopReason: "blocked" as const,
+    costUsd: 1.25,
+    resumeCommand: "rmd drain",
+  };
+  const config = { root, consoleUrl: "http://100.64.1.2:4317" } as never;
+  try {
+    const text = pushDrainRundown(summary, [{ step: "escalation.issue_opened", task_id: "W1-B", issue_url: "https://github.com/craigoley/remudero/issues/9", class: "BLOCKED" }], config, {
+      channel: channel as never,
+      ledgerPath,
+      runId: "DRAIN-TEST",
+      print: (s) => { printed.push(s); },
+    });
+    assert.equal(sent.length, 1, "exactly ONE push through the channel — one transport, not two");
+    assert.equal(sent[0], text, "the returned text is exactly what was sent");
+    assert.ok(printed.length >= 1, "the rundown is also printed to the terminal");
+    // The deep link consoleUrl(config) + consoleCardUrl builds for the blocked task.
+    assert.match(text, /http:\/\/100\.64\.1\.2:4317\/#task=W1-B/, "the escalated line carries ITS OWN console deep link");
+    rmSync(root, { recursive: true, force: true });
+  } catch (e) {
+    rmSync(root, { recursive: true, force: true });
+    throw e;
+  }
+});
+
+// ── W1-T144: the three CLI command call-sites that thread the console URL, behaviorally ──
+// covered with a temp config root + a PATH-stubbed osascript so notify() is a no-op. An empty
+// plan reaches drainCommand's post-drain push WITHOUT spawning any worker.
+
+function withStubbedNotify<T>(fn: () => T): T {
+  const bin = mkdtempSync(join(tmpdir(), "osa-stub-"));
+  writeFileSync(join(bin, "osascript"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    return fn();
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+  }
+}
+
+test("drainCommand (W1-T144): a completed drain over an empty plan reaches the post-drain rundown push — the pushDrainRundown call site executes, no worker spawned", async () => {
+  const config = { claudeBin: "/bin/true", root: mkdtempSync(join(tmpdir(), "rmd-drain-push-")), consoleUrl: "http://100.64.1.2:4317" } as Config;
+  const planPath = join(mkdtempSync(join(tmpdir(), "rmd-drain-push-plan-")), "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const sent: string[] = [];
+  const code = await drainCommand([], {
+    config, planPath, skipGitSync: true, githubFactory: () => OFFLINE_GITHUB,
+    notifyChannel: { send: (m: string) => { sent.push(m); return true; } } as never,
+  });
+  assert.equal(code, 0, "an empty plan is a clean drain (nothing runnable) — exit 0, and the rundown push ran");
+  assert.equal(sent.length, 1, "the post-drain rundown pushed exactly once through the injected channel");
+  rmSync(config.root, { recursive: true, force: true });
+});
+
+test("digestCommand (W1-T144): --dry-run threads consoleUrl(config) into buildDigest and prints", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-digest-"));
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "state", "ledger.ndjson"), "");
+  const oldHome = process.env.HOME;
+  const home = mkdtempSync(join(tmpdir(), "rmd-digest-home-"));
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root, consoleUrl: "http://100.64.1.2:4317" }));
+  process.env.HOME = home;
+  try {
+    const sent: string[] = [];
+    const chan = { send: (m: string) => { sent.push(m); return true; } } as never;
+    const dry = await digestCommand(["--dry-run"], { notifyChannel: chan });
+    assert.equal(dry, 0, "--dry-run prints buildDigest with the console URL, sends nothing");
+    const code = await digestCommand([], { notifyChannel: chan });
+    assert.equal(sent.length, 1, "the real digest send threads consoleUrl through the injected channel");
+    assert.equal(code, 0);
+  } finally {
+    process.env.HOME = oldHome;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("escalateCommand (W1-T144): a MANUAL escalation's real-time ping threads the console deep link (notify no-op via stub), issue open is best-effort", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-esc-"));
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "state", "ledger.ndjson"), "");
+  const oldHome = process.env.HOME;
+  const home = mkdtempSync(join(tmpdir(), "rmd-esc-home-"));
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root, consoleUrl: "http://100.64.1.2:4317" }));
+  process.env.HOME = home;
+  try {
+    // gh issue open will fail offline; the console-link ping line executes before/around it.
+    // The assertion is that the command runs its console-threading path without throwing here.
+    const sent: string[] = [];
+    const code = await escalateCommand(
+      ["--class", "MANUAL", "--task", "W1-TX", "--summary", "probe", "--option", "fix-it|do the fix", "--recommendation", "fix-it"],
+      {
+        issues: { create: () => "https://github.com/craigoley/remudero/issues/1" } as never,
+        notifyChannel: { send: (m: string) => { sent.push(m); return true; } } as never,
+      },
+    );
+    assert.equal(code, 0);
+    assert.equal(sent.length, 1, "the MANUAL ping fired once through the injected channel");
+    assert.match(sent[0], /#task=W1-TX/, "the ping carries the console deep link for the escalated task");
+  } finally {
+    process.env.HOME = oldHome;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
 });

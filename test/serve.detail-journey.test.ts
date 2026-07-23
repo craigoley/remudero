@@ -1,14 +1,23 @@
-// test/serve.detail-journey.test.ts — W1-T158 (DETAIL + JOURNEY layer), the acceptance bars that
-// can only be proven against a REAL browser client (learnings#probe-must-exercise-the-real-
-// consuming-client). Covers, over a real Chromium page against a real assembled `rmd serve`:
-//   (1) a row-click task CARD renders title/rationale/acceptance/dependency-chain/run-history
-//       (cost + verdict)/PR links (the zero-extra-GitHub-calls half of this same acceptance bar
-//       is proven at the HTTP/gateway level in test/task-card.test.ts, over a real
-//       buildBatchedGithub counting gateway — this suite proves the DOM half).
-//   (2) a blocked fixture's JOURNEY (rmd trace, W1-T43) surfaces the FAILING step.
-//   (3) the card's dependency chain is LINKED and navigable (click a dep -> that dep's own card).
-//   (4) every task row carries an explicit one-click Journey affordance + a PR deep-link, and the
-//       v0 id-textbox "Plan→task→PR graph" panel is RETIRED.
+// test/serve.detail-journey.test.ts — W1-T222 (INLINE DETAIL layer, a RULE-21 successor to
+// W1-T158 that retires its bottom-panel placement, not an amendment to it) plus the still-live
+// W1-T158 acceptance bars this suite always covered. Proven over a REAL Chromium page against a
+// real assembled `rmd serve` (learnings#probe-must-exercise-the-real-consuming-client). Covers:
+//   (1) a row-click task CARD opens INLINE, as a sibling `<li class="row-detail">` directly
+//       beneath the row that triggered it -- never a scroll-away section -- and renders
+//       title/rationale/acceptance/dependency-chain/run-history (cost + verdict)/PR links (the
+//       zero-extra-GitHub-calls half of this same acceptance bar is proven at the HTTP/gateway
+//       level in test/task-card.test.ts, over a real buildBatchedGithub counting gateway -- this
+//       suite proves the DOM half).
+//   (2) a blocked fixture's JOURNEY (rmd trace, W1-T43) LAZY-LOADS inside that same open card on
+//       an explicit "Show journey" click -- never fetched merely because the card opened, and
+//       never its own bottom panel -- and surfaces the FAILING step.
+//   (3) the card's dependency chain is LINKED and navigable (click a dep -> that dep's OWN row
+//       expands in place, wherever it lives on the board).
+//   (4) every task row is itself the one-click expand affordance (a chevron, never a per-row
+//       "Journey" button) + carries a PR deep-link; the v0 id-textbox "Plan→task→PR graph" panel
+//       AND W1-T158's own #task-detail/#journey-view bottom-panel pair are both RETIRED.
+//   (5) expanding/collapsing never scrolls the page out from under the row that triggered it.
+//   (6) `?task=<id>` deep-links straight to that row, expanded and scrolled into view; re-click collapses.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -159,35 +168,56 @@ after(async () => {
   await browser.close();
 });
 
-async function openShell(base: string, token: string = READ_TOKEN): Promise<Page> {
+async function openShell(base: string, token: string = READ_TOKEN, qs = ""): Promise<Page> {
   const context = await browser.newContext();
   const page = await context.newPage();
-  await page.goto(`${base}/?token=${token}`);
+  await page.goto(`${base}/?token=${token}${qs}`);
   await page.waitForFunction(() => !document.getElementById("top-status")?.textContent?.includes("loading"));
   return page;
 }
 
-// ── (1) + (3): row-click card renders every field; the dep chain is LINKED and navigable ───────
+// ── (1) + (3) + (5): row-click card opens INLINE beneath the row, no viewport jump, every field
+// renders, and the dep chain is LINKED and navigable to the dep's OWN row ──────────────────────
 
-test("clicking a task row expands its own card: title, rationale, acceptance, run history (cost+verdict), PR link — and its dep chain link navigates to that dep's own card", async () => {
+test("clicking a task row expands its own card INLINE, directly beneath that row, with no viewport jump: title, rationale, acceptance, run history (cost+verdict), PR link — and its dep chain link expands the dep's OWN row in place", async () => {
   const root = tmpRoot();
   await withShell(fixtureDeps(root), async (base) => {
     const page = await openShell(base);
     try {
       await page.waitForFunction(() => (document.querySelector("#recent-list")?.textContent ?? "").includes("W1-T2"));
-      // click the task-id text of W1-T2's RECENT row -- never its .row-journey-btn/PR <a>.
-      await page.click('#recent-list li[data-task-id="W1-T2"] .task-id');
-      // wait for the LOADED card, not the "Task W1-T2" placeholder openCard paints immediately.
-      await page.waitForFunction(() => (document.getElementById("task-detail-title")?.textContent ?? "").includes("frobnicator"));
 
-      const card = await page.evaluate(() => ({
-        title: document.getElementById("task-detail-title")?.textContent ?? "",
-        body: document.getElementById("task-detail-body")?.textContent ?? "",
-        prHref: document.querySelector('#task-detail-body a[href*="pull/2"]')?.getAttribute("href") ?? null,
-        depBtn: document.querySelector('#task-detail-body .card-dep-link[data-dep-id="W1-T1"]')?.textContent ?? null,
-      }));
-      assert.match(card.title, /W1-T2/);
-      assert.match(card.title, /the frobnicator/);
+      const rowTopBefore = await page.evaluate(
+        () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')!.getBoundingClientRect().top,
+      );
+      const scrollYBefore = await page.evaluate(() => window.scrollY);
+
+      // click the task-id text of W1-T2's RECENT row -- never its chevron/PR <a>.
+      await page.click('#recent-list li[data-task-id="W1-T2"] .task-id');
+      // wait for the LOADED card, not the pre-data skeleton the expand paints immediately.
+      await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").includes("frobnicator"));
+
+      const rowTopAfter = await page.evaluate(
+        () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')!.getBoundingClientRect().top,
+      );
+      const scrollYAfter = await page.evaluate(() => window.scrollY);
+      assert.equal(rowTopAfter, rowTopBefore, "the triggering row must stay exactly where it was -- no viewport jump");
+      assert.equal(scrollYAfter, scrollYBefore, "expanding a card must never scroll the page on its own");
+
+      const card = await page.evaluate(() => {
+        const row = document.querySelector('#recent-list li[data-task-id="W1-T2"]')!;
+        const detail = row.nextElementSibling as HTMLElement;
+        return {
+          isImmediateSibling: detail?.classList.contains("row-detail") ?? false,
+          ariaExpanded: row.getAttribute("aria-expanded"),
+          body: detail?.textContent ?? "",
+          prHref: detail?.querySelector('a[href*="pull/2"]')?.getAttribute("href") ?? null,
+          depBtn: detail?.querySelector('.card-dep-link[data-dep-id="W1-T1"]')?.textContent ?? null,
+        };
+      });
+      assert.ok(card.isImmediateSibling, "the card must be the row's OWN next sibling <li>, not a section elsewhere in the page");
+      assert.equal(card.ariaExpanded, "true");
+      assert.match(card.body, /W1-T2/);
+      assert.match(card.body, /the frobnicator/);
       assert.match(card.body, /operators need the frobnicator widgeted/); // rationale
       assert.match(card.body, /it frobnicates/); // acceptance claim
       assert.match(card.body, /a test frobnicates/); // acceptance proof
@@ -196,50 +226,75 @@ test("clicking a task row expands its own card: title, rationale, acceptance, ru
       assert.equal(card.prHref, "https://github.com/o/r/pull/2"); // PR link
       assert.equal(card.depBtn, "W1-T1"); // the dep chain is LINKED (a real button naming the dep)
 
-      // (3) navigate the dep chain: clicking W1-T1's dep link opens W1-T1's OWN card.
-      await page.click('#task-detail-body .card-dep-link[data-dep-id="W1-T1"]');
-      await page.waitForFunction(() => (document.getElementById("task-detail-title")?.textContent ?? "").includes("root dependency"));
-      const depTitle = await page.textContent("#task-detail-title");
-      assert.match(depTitle ?? "", /W1-T1/);
-      assert.match(depTitle ?? "", /root dependency/);
+      // (3) navigate the dep chain: clicking W1-T1's dep link expands W1-T1's OWN row's card --
+      // W1-T2's card must close (only one card open at a time, board-wide).
+      // .row-detail is the row's own SIBLING <li>, never a descendant of it.
+      await page.click('#recent-list .row-detail .card-dep-link[data-dep-id="W1-T1"]');
+      await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").includes("root dependency"));
+      const after = await page.evaluate(() => ({
+        w1t2Expanded: document.querySelector('#recent-list li[data-task-id="W1-T2"]')?.getAttribute("aria-expanded"),
+        openCards: document.querySelectorAll(".row-detail").length,
+      }));
+      assert.equal(after.w1t2Expanded, "false", "expanding a dependency's own card must collapse the previous one");
+      assert.equal(after.openCards, 1, "only ONE card may be open at a time, board-wide");
     } finally {
       await page.context().close();
     }
   });
 });
 
-// ── (2): a blocked fixture's journey surfaces the FAILING step ─────────────────────────────────
+// ── (2): journey LAZY-LOADS inside the open card, never eagerly, and surfaces the FAILING step ─
 
-test("a blocked task's Journey (opened via its own per-row action) renders the provenance chain and surfaces the FAILING step", async () => {
+test("a blocked task's Journey lazy-loads INSIDE its already-open card (never fetched merely because the card opened) and surfaces the FAILING step", async () => {
   const root = tmpRoot();
   await withShell(fixtureDeps(root), async (base) => {
     const page = await openShell(base);
+    const traceRequests: string[] = [];
+    page.on("request", (req) => {
+      if (req.url().includes("/v1/trace")) traceRequests.push(req.url());
+    });
     try {
       await page.waitForFunction(() => (document.querySelector("#recent-list")?.textContent ?? "").includes("W1-T3"));
-      await page.click('#recent-list li[data-task-id="W1-T3"] .row-journey-btn');
-      await page.waitForFunction(() => (document.getElementById("journey-body")?.textContent ?? "").includes("blocked_review"));
+      await page.click('#recent-list li[data-task-id="W1-T3"] .task-id');
+      await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").includes("the blocked task"));
+
+      assert.equal(traceRequests.length, 0, "opening the card alone must not fetch the journey");
+      const toggleBefore = await page.evaluate(() => document.querySelector(".card-journey-toggle")?.getAttribute("aria-expanded"));
+      assert.equal(toggleBefore, "false");
+
+      await page.click(".card-journey-toggle");
+      await page.waitForFunction(() => (document.querySelector(".card-journey-body")?.textContent ?? "").includes("blocked_review"));
+      assert.equal(traceRequests.length, 1, "the explicit 'Show journey' click fetches the journey exactly once");
 
       const journey = await page.evaluate(() => ({
-        title: document.getElementById("journey-title")?.textContent ?? "",
-        body: document.getElementById("journey-body")?.textContent ?? "",
-        failingSteps: document.querySelectorAll("#journey-body .journey-fail").length,
-        failingText: document.querySelector("#journey-body .journey-fail")?.textContent ?? "",
+        toggleExpanded: document.querySelector(".card-journey-toggle")?.getAttribute("aria-expanded"),
+        body: document.querySelector(".card-journey-body")?.textContent ?? "",
+        failingSteps: document.querySelectorAll(".card-journey-body .journey-fail").length,
+        failingText: document.querySelector(".card-journey-body .journey-fail")?.textContent ?? "",
       }));
-      assert.match(journey.title, /W1-T3/); // keyed on the row's OWN id, never typed
+      assert.equal(journey.toggleExpanded, "true");
       assert.match(journey.body, /task/); // renders the task node
       assert.match(journey.body, /W1-T3-1/); // renders the run node (the provenance chain)
       assert.equal(journey.failingSteps, 1, "the journey must mark exactly the blocked run as the FAILING step");
       assert.match(journey.failingText, /BLOCKING/);
       assert.match(journey.body, /blocked_review/); // the block's own cause, named
+
+      // re-toggle hides it WITHOUT a second fetch (cached once per card open).
+      await page.click(".card-journey-toggle");
+      await page.waitForFunction(() => (document.querySelector(".card-journey-body") as HTMLElement)?.hidden === true);
+      await page.click(".card-journey-toggle");
+      await page.waitForFunction(() => (document.querySelector(".card-journey-body") as HTMLElement)?.hidden === false);
+      assert.equal(traceRequests.length, 1, "re-toggling the SAME open card must reuse the cached journey, never re-fetch");
     } finally {
       await page.context().close();
     }
   });
 });
 
-// ── (4): every task row carries an explicit Journey affordance + PR deep-link; v0 retired ──────
+// ── (4): every task row is itself the expand affordance + a PR deep-link; the v0 id-textbox
+// panel AND W1-T158's own bottom #task-detail/#journey-view panel pair are both retired ────────
 
-test("every task row exposes an explicit one-click Journey action + a PR deep-link; the v0 id-textbox trace panel is gone", async () => {
+test("every task row is itself a one-click expand affordance (a chevron, never a per-row Journey button) + a PR deep-link; the v0 id-textbox trace panel AND the bottom-panel #task-detail/#journey-view pair are both gone", async () => {
   const root = tmpRoot();
   await withShell(fixtureDeps(root), async (base) => {
     const page = await openShell(base);
@@ -249,19 +304,68 @@ test("every task row exposes an explicit one-click Journey action + a PR deep-li
       const state = await page.evaluate(() => ({
         graphBtn: document.getElementById("graph-btn"),
         traceId: document.getElementById("trace-id"),
-        journeyButtons: document.querySelectorAll(".row-journey-btn").length,
-        w1t2JourneyKey: document.querySelector('#recent-list li[data-task-id="W1-T2"] .row-journey-btn')?.getAttribute("data-task-id"),
+        taskDetailPanel: document.getElementById("task-detail"),
+        journeyViewPanel: document.getElementById("journey-view"),
+        rowJourneyButtons: document.querySelectorAll(".row-journey-btn").length,
+        chevrons: document.querySelectorAll("#recent-list .row-chevron").length,
         prAnchor: document.querySelector('#recent-list li[data-task-id="W1-T2"] a[href*="pull/2"]')?.getAttribute("href"),
       }));
       assert.equal(state.graphBtn, null, "the v0 'Plan→task→PR graph' id-textbox button must be gone");
       assert.equal(state.traceId, null, "the v0 free-text trace-id input must be gone");
-      assert.ok(state.journeyButtons > 0, "every task row must carry a Journey button");
-      assert.equal(state.w1t2JourneyKey, "W1-T2", "the Journey button is keyed on ITS OWN row's task id, never a typed one");
+      assert.equal(state.taskDetailPanel, null, "W1-T158's own bottom #task-detail panel must be retired");
+      assert.equal(state.journeyViewPanel, null, "W1-T158's own bottom #journey-view panel must be retired");
+      assert.equal(state.rowJourneyButtons, 0, "the per-row Journey BUTTON is retired -- the whole row is the affordance now");
+      assert.ok(state.chevrons > 0, "every task row must carry the chevron expand affordance");
       assert.equal(state.prAnchor, "https://github.com/o/r/pull/2", "the PR cell must deep-link to the PR");
 
-      // Clicking the Journey button opens THAT row's journey directly -- no id ever typed.
-      await page.click('#recent-list li[data-task-id="W1-T2"] .row-journey-btn');
-      await page.waitForFunction(() => (document.getElementById("journey-title")?.textContent ?? "").includes("W1-T2"));
+      // clicking anywhere on the row (never on the PR link itself) opens THAT row's own card inline.
+      await page.click('#recent-list li[data-task-id="W1-T2"] .task-id');
+      await page.waitForFunction(
+        () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')?.getAttribute("aria-expanded") === "true",
+      );
+      const detail = await page.evaluate(
+        () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')!.nextElementSibling?.className,
+      );
+      assert.equal(detail, "row-detail");
+
+      // clicking the SAME row again collapses it.
+      await page.click('#recent-list li[data-task-id="W1-T2"] .task-id');
+      await page.waitForFunction(
+        () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')?.getAttribute("aria-expanded") === "false",
+      );
+      const openCards = await page.evaluate(() => document.querySelectorAll(".row-detail").length);
+      assert.equal(openCards, 0, "re-clicking an open row must collapse its card");
+    } finally {
+      await page.context().close();
+    }
+  });
+});
+
+// ── (6): ?task=<id> deep-links straight to that row, expanded + scrolled into view; re-click collapses ─
+
+test("?task=<id> opens the shell with that row already expanded and scrolled into view; a subsequent click on it collapses", async () => {
+  const root = tmpRoot();
+  await withShell(fixtureDeps(root), async (base) => {
+    const page = await openShell(base, READ_TOKEN, "&task=W1-T2");
+    try {
+      await page.waitForFunction(
+        () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')?.getAttribute("aria-expanded") === "true",
+        null,
+        { timeout: 5000 },
+      );
+      await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").includes("frobnicator"));
+      const inView = await page.evaluate(() => {
+        const r = document.querySelector('#recent-list li[data-task-id="W1-T2"]')!.getBoundingClientRect();
+        return r.top >= 0 && r.top <= window.innerHeight;
+      });
+      assert.ok(inView, "the deep-linked row must be scrolled into view");
+
+      await page.click('#recent-list li[data-task-id="W1-T2"] .task-id');
+      await page.waitForFunction(
+        () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')?.getAttribute("aria-expanded") === "false",
+      );
+      const openCards = await page.evaluate(() => document.querySelectorAll(".row-detail").length);
+      assert.equal(openCards, 0);
     } finally {
       await page.context().close();
     }
@@ -274,9 +378,9 @@ test("every task row exposes an explicit one-click Journey action + a PR deep-li
 // number is unreadable as an activity feed — it names WHAT changed but not what it WAS." Every
 // row must carry: the event VERB, the task id AND its title, a PR link carrying the PR's TITLE
 // (not a bare number), a relative timestamp, a spend figure wherever the ledger has one, and
-// still be a W1-T158 drill target (clicking it opens the task card).
+// still be a W1-T158/W1-T222 drill target (clicking it opens the task card inline).
 
-test("W1-T184: a RECENT row carries the verb, task id AND title, a PR link with the PR's TITLE, a relative timestamp, and spend — and is still a drill target into the task card", async () => {
+test("W1-T184: a RECENT row carries the verb, task id AND title, a PR link with the PR's TITLE, a relative timestamp, and spend — and is still a drill target into the inline task card", async () => {
   const root = tmpRoot();
   await withShell(fixtureDeps(root), async (base) => {
     const page = await openShell(base);
@@ -309,9 +413,13 @@ test("W1-T184: a RECENT row carries the verb, task id AND title, a PR link with 
       assert.ok(row.timestamp && row.timestamp.length > 0, "a relative timestamp must render");
       assert.ok(row.timestampDatetime, "the timestamp carries a machine-readable datetime too");
 
-      // still a W1-T158 drill target: clicking the row (its task-id text) opens the task card.
+      // still a drill target: clicking the row (its task-id text) opens the card INLINE beneath it.
       await page.click('#recent-list li[data-task-id="W1-T2"] .task-id');
-      await page.waitForFunction(() => (document.getElementById("task-detail-title")?.textContent ?? "").includes("frobnicator"));
+      await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").includes("frobnicator"));
+      const isImmediateSibling = await page.evaluate(
+        () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')!.nextElementSibling?.classList.contains("row-detail") ?? false,
+      );
+      assert.ok(isImmediateSibling);
     } finally {
       await page.context().close();
     }
