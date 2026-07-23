@@ -491,6 +491,17 @@ test("resolveServiceTokens: generates once and persists across calls (stable bea
   assert.deepEqual(second, first); // same file, not regenerated
 });
 
+test("resolveServiceTokens: a non-EEXIST open failure is rethrown, never swallowed as if raced", () => {
+  const root = tmpRoot();
+  const p = serviceTokensPath(root);
+  // A DIRECTORY sitting at the tokens path (rather than a racing sibling process's file) makes
+  // the exclusive-create `openSync(p, "wx")` fail with EISDIR, not EEXIST -- the catch block's
+  // `code !== "EEXIST"` branch must rethrow this rather than treating it as "someone else already
+  // created the file", which would otherwise silently mask a real misconfiguration.
+  mkdirSync(p, { recursive: true });
+  assert.throws(() => resolveServiceTokens(root), /EISDIR/);
+});
+
 // ── (2) a ledger status flip reaches the SSE stream within 2s, through the FULL assembler ──
 
 test("GET /v1/status/stream (assembled server): a ledger flip arrives as `status` within 2s", async () => {
