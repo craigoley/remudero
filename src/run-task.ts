@@ -127,6 +127,7 @@ import {
   runDraftRung,
   summarizeInboxPoll,
   updateProposalRegistry,
+  writeDraftAttemptPair,
   type DraftAttemptCache,
   type DraftCache,
   type DraftRungOutcome,
@@ -6568,8 +6569,10 @@ export function buildInboxDraftHook(
         nextAttempts[outcome.proposalId] = draftAttemptKey(proposal);
         if (outcome.ok) nextDrafts[outcome.proposalId] = outcome.candidate;
       }
-      writeFileSync(draftsPath, JSON.stringify(nextDrafts, null, 2), "utf8");
-      writeFileSync(attemptsPath, JSON.stringify(nextAttempts, null, 2), "utf8");
+      // ATOMIC PAIR (W1-T241): see lib/inbox.ts's `writeDraftAttemptPair` doc for the
+      // torn-file/wedged-idempotence hazard this closes and why drafts commits before
+      // attempts.
+      writeDraftAttemptPair(draftsPath, attemptsPath, nextDrafts, nextAttempts);
     } catch (e) {
       log("inbox.draft_rung.error", { error: String((e as Error)?.message ?? e) });
     }
