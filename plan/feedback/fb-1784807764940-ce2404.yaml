@@ -1,0 +1,19 @@
+id: fb-1784807764940-ce2404
+ts: 2026-07-23T11:56:04.940Z
+raw: "W1-T144 PR #614 BLOCKED BY UNTESTED digestCommand CLI GLUE —
+  coverage-ratchet diff-coverage blocks #614 on src/run-task.ts:7024-7030, the
+  digestCommand handler's real-I/O wiring
+  (imessageChannel(notifyRecipient(config)), ledgerPath, consoleUrl(config),
+  console.log) that unit tests do not exercise; the feature and its unit-tested
+  core are green, only the thin CLI-glue call is uncovered. FIX: add a unit test
+  that drives digestCommand with injected deps and asserts it wires
+  channel/ledgerPath/consoleUrl and returns 0 (mirroring how other CLI command
+  handlers are covered), OR a scoped diff-coverage allowance for pure CLI
+  command-dispatch glue. Once landed and W1-T144 re-runs (or the coverage is
+  added on-branch), #614 goes green and the daemon auto-merges. Root cause: the
+  blocked_ci fix-rung re-runs the worker but does not author diff-coverage for
+  uncovered CLI-glue lines, so a glue-only coverage gap loops until escalation."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
