@@ -20,8 +20,8 @@
  * a fleet-wide event, not a task's — so its row is a bare summary line, with no card link.
  */
 
-import type { Plan } from "./plan.js";
 import { collectSince } from "./digest.js";
+import type { Plan } from "./plan.js";
 
 /** One ledger line, loosely typed like every other module's own `LedgerLine`. */
 type LedgerLine = Record<string, unknown>;
