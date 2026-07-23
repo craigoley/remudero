@@ -144,10 +144,10 @@ import {
   buildGather,
   calibrationTable,
   codeFilesInDiff,
-  loadMarker,
   parseLedger,
   probeGithubThrottle,
   renderGather,
+  resolveMarkerForGather,
   saveMarker,
   type ShippedGithub,
 } from "./lib/retro.js";
@@ -3533,7 +3533,25 @@ async function retroCommand(rest: string[]): Promise<number> {
   const learningsPath = join(repoRoot, "LEARNINGS.md");
   const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
   const learningsMd = existsSync(learningsPath) ? readFileSync(learningsPath, "utf8") : "";
-  const marker = loadMarker(markerPath);
+  // W1-T242: a corrupt-but-present marker (e.g. a torn write from a crash, or a manual
+  // edit) MUST NOT be silently treated as "no marker" — that would replay the whole
+  // already-consumed run window and double-count SHIPPED/learnings. resolveMarkerForGather
+  // distinguishes "absent" (the genuine first-ever-retro signal) from "corrupt" (fail
+  // closed); branch on it BEFORE any gather/spawn work, never collapse back to
+  // `marker | undefined` the way the pre-fix reader did.
+  const markerResolution = resolveMarkerForGather(markerPath);
+  if (markerResolution.kind === "corrupt") {
+    console.error(`\n### [retro] ${markerResolution.error.message}`);
+    appendLedger(ledgerPath, {
+      run_id: `RETRO-${Date.now()}`,
+      task_id: "RETRO",
+      step: "retro.marker.corrupt",
+      error: markerResolution.error.message,
+      marker_path: markerPath,
+    });
+    return 1;
+  }
+  const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
   // W1-T132: resolved EARLY (a pure git-config read, no spawn) so the SHIPPED
   // union (W1-T51's shippedSince) can be wired into the gather from the start —
   // omitting `github` here degrades `shipped` to the ledger-only list, which is
