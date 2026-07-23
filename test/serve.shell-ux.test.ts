@@ -353,3 +353,125 @@ test("W1-T222: a read-only bookmark's inline card renders NO write affordance (M
     assert.equal(await markHandledPresence(WRITE_TOKEN), true, "a write-scoped token's card DOES render the write affordance");
   });
 });
+
+// ── W1-T223: a collapsed console section must still inform -- every section collapses, and its
+// header carries an always-visible one-line summary from the SAME projection as its rows ────────
+
+test("W1-T223: an empty section defaults collapsed with an honest summary; a collapsed section's header still shows it, never a bare zero", async () => {
+  const root = tmpRoot();
+  // W1-T1 merged, W1-T2 blocked (no escalation -- NOW/NEEDS ME are genuinely empty), W1-T3 queued.
+  await withShell(fixtureDeps(root), async (base) => {
+    const page = await openShell(base);
+    try {
+      await page.waitForFunction(() => (document.getElementById("now-summary")?.textContent ?? "") !== "…");
+      const state = await page.evaluate(() => ({
+        nowExpanded: document.getElementById("now-toggle")?.getAttribute("aria-expanded"),
+        nowBodyHidden: (document.getElementById("now-body") as HTMLElement)?.hidden,
+        nowSummary: document.getElementById("now-summary")?.textContent,
+        needsMeExpanded: document.getElementById("needs-me-toggle")?.getAttribute("aria-expanded"),
+        needsMeSummary: document.getElementById("needs-me-summary")?.textContent,
+      }));
+      assert.equal(state.nowExpanded, "false", "an empty section defaults COLLAPSED");
+      assert.equal(state.nowBodyHidden, true, "collapsed means its rows are actually hidden");
+      assert.match(state.nowSummary ?? "", /nothing in flight/, "the collapsed header still carries an honest summary, never a blank or a bare 0");
+      assert.equal(state.needsMeExpanded, "false");
+      assert.match(state.needsMeSummary ?? "", /nothing needs you/, "the SAME honest empty vocabulary already used for the row list's own empty state");
+    } finally {
+      await page.context().close();
+    }
+  });
+});
+
+test("W1-T223: NEEDS ME auto-expands by default when non-empty (the same collapsed-iff-empty rule, not a special case)", async () => {
+  const root = tmpRoot();
+  const issueUrl = "https://github.com/o/r/issues/771";
+  const github = stubEscalationGithubForCard(issueUrl, "needs a decision on W1-T9");
+  const plan = planOf([task({ id: "W1-T9", status: "blocked" })]);
+  const ledgerPath = ledgerPathFor(root);
+  const planPath = writePlan(root, planYaml(plan));
+  appendFileSync(
+    ledgerPath,
+    JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T9", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" }) + "\n",
+  );
+  const deps: ServeDeps = {
+    board: { plan, ledgerPath, github },
+    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github, ratify: { approve() {}, reframe() {} } },
+    ledgerPath,
+    issues: fakeIssueCloser(),
+    fleetControlRoot: root,
+    questionsRoot: root,
+    tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    pollMs: 50,
+  };
+  await withShell(deps, async (base) => {
+    const page = await openShell(base);
+    try {
+      await page.waitForFunction(() => (document.getElementById("needs-me-summary")?.textContent ?? "") !== "…");
+      const state = await page.evaluate(() => ({
+        expanded: document.getElementById("needs-me-toggle")?.getAttribute("aria-expanded"),
+        bodyHidden: (document.getElementById("needs-me-body") as HTMLElement)?.hidden,
+        summary: document.getElementById("needs-me-summary")?.textContent,
+      }));
+      assert.equal(state.expanded, "true", "NEEDS ME auto-expands when non-empty");
+      assert.equal(state.bodyHidden, false);
+      assert.match(state.summary ?? "", /1 open/);
+    } finally {
+      await page.context().close();
+    }
+  });
+});
+
+test("W1-T223: collapse state persists across a reload, and the persisted state carries no credential", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root);
+  // a real "merged" verdict line -- makes RECENT genuinely non-empty, so it defaults EXPANDED
+  // (the same collapsed-iff-empty rule NOW/NEEDS ME defaulted collapsed under, above).
+  appendFileSync(deps.board.ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r9", task_id: "W1-T1", step: "verdict", verdict: "merged" }) + "\n");
+  await withShell(deps, async (base) => {
+    const page = await openShell(base);
+    try {
+      await page.waitForFunction(() => document.getElementById("recent-toggle")?.getAttribute("aria-expanded") === "true");
+      await page.click("#recent-toggle");
+      await page.waitForFunction(() => document.getElementById("recent-toggle")?.getAttribute("aria-expanded") === "false");
+
+      const stored = await page.evaluate(() => localStorage.getItem("rmd-console-sections-v1"));
+      assert.ok(stored, "collapse state must be persisted client-side");
+      assert.doesNotMatch(stored ?? "", new RegExp(READ_TOKEN), "persisted UI state must carry no credential (standing rule 24)");
+      assert.doesNotMatch(stored ?? "", /token/i);
+
+      await page.reload();
+      await page.waitForFunction(() => !document.getElementById("top-status")?.textContent?.includes("loading"));
+      await page.waitForFunction(() => document.getElementById("recent-toggle")?.getAttribute("aria-expanded") !== null);
+      assert.equal(await page.getAttribute("#recent-toggle", "aria-expanded"), "false", "the explicit collapse must survive a reload");
+    } finally {
+      await page.context().close();
+    }
+  });
+});
+
+test("W1-T223: the section header is the whole click/keyboard toggle target -- the SAME gesture as a row's own expand (click, Enter, Space; chevron flips with aria-expanded)", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root);
+  // a real "merged" verdict line -- makes RECENT genuinely non-empty, so it defaults EXPANDED.
+  appendFileSync(deps.board.ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r9", task_id: "W1-T1", step: "verdict", verdict: "merged" }) + "\n");
+  await withShell(deps, async (base) => {
+    const page = await openShell(base);
+    try {
+      await page.waitForFunction(() => document.getElementById("recent-toggle")?.getAttribute("aria-expanded") === "true");
+
+      await page.click("#recent-toggle");
+      await page.waitForFunction(() => document.getElementById("recent-toggle")?.getAttribute("aria-expanded") === "false");
+      assert.equal(await page.evaluate(() => (document.getElementById("recent-body") as HTMLElement)?.hidden), true);
+
+      await page.locator("#recent-toggle").focus();
+      await page.keyboard.press("Enter");
+      await page.waitForFunction(() => document.getElementById("recent-toggle")?.getAttribute("aria-expanded") === "true");
+      assert.equal(await page.evaluate(() => (document.getElementById("recent-body") as HTMLElement)?.hidden), false);
+
+      await page.keyboard.press(" ");
+      await page.waitForFunction(() => document.getElementById("recent-toggle")?.getAttribute("aria-expanded") === "false");
+    } finally {
+      await page.context().close();
+    }
+  });
+});
