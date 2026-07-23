@@ -424,11 +424,22 @@ test("wipeTestCommand: with `deps` omitted entirely, falls through to the REAL l
 // relies on. process.exit is mocked (never actually exits the test process); process.argv is
 // restored in `finally` regardless of outcome.
 
+// process.exit is mocked to THROW (never merely record-and-return) -- a no-op mock would let
+// main()'s flat if-ladder fall through and evaluate EVERY remaining `cmd === "<sibling>"` check
+// after ours, which (empirically verified) decomposes ~30 unrelated, pre-existing sibling
+// dispatch branches into the branch-coverage report -- none ever true in this test, which tanks
+// the aggregate coverage-ratchet for commands this task never touched. A throwing mock halts
+// main() at the FIRST process.exit call, exactly like the real process would, so only the
+// dispatch checks main() actually walks THROUGH before reaching wipe-test's own are evaluated.
+class ProcessExitCalled extends Error {
+  constructor(public code: number | undefined) {
+    super(`process.exit(${code})`);
+  }
+}
+
 test("main(): `rmd wipe-test <id> --repo remudero` (no --allow-non-sandbox) dispatches to wipeTestCommand and exits 2", async (t) => {
-  const exitCalls: Array<number | undefined> = [];
   const exitMock = ((code?: number): never => {
-    exitCalls.push(code);
-    return undefined as never;
+    throw new ProcessExitCalled(code);
   }) as typeof process.exit;
   t.mock.method(process, "exit", exitMock);
   t.mock.method(console, "error", () => {});
@@ -437,10 +448,15 @@ test("main(): `rmd wipe-test <id> --repo remudero` (no --allow-non-sandbox) disp
   const originalArgv = process.argv;
   process.argv = ["node", "run-task.js", "wipe-test", "W1-T86", "--repo", "remudero"];
   try {
-    await main();
+    await assert.rejects(
+      () => main(),
+      (e: unknown) => {
+        assert.ok(e instanceof ProcessExitCalled, "main() must reach process.exit, not some other throw");
+        assert.equal(e.code, 2, "the wipe-test dispatch branch is reached and propagates wipeTestCommand's refusal exit code");
+        return true;
+      },
+    );
   } finally {
     process.argv = originalArgv;
   }
-
-  assert.equal(exitCalls[0], 2, "the wipe-test dispatch branch is reached and propagates wipeTestCommand's refusal exit code");
 });

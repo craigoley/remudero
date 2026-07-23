@@ -7777,6 +7777,15 @@ export async function main(): Promise<void> {
     console.log("\n" + JSON.stringify(result, null, 2));
     process.exit(result.merged ? 0 : 1);
   }
+  // W1-T86: checked directly after run-task (not in its "natural" alphabetical/registration
+  // spot further down, beside fix) -- a behavioral test of THIS dispatch branch must call
+  // main() itself (the only way to exercise the literal `if (cmd === "wipe-test" ...)` lines
+  // the diff-coverage gate polices), and main()'s flat if-ladder means EVERY dispatch check
+  // main() reaches before finding its match gets evaluated too. Sitting this early keeps that
+  // list to one sibling (run-task) instead of the dozen-plus that precede fix's old slot.
+  if (cmd === "wipe-test" && arg) {
+    process.exit(await wipeTestCommand(rest));
+  }
   if (cmd === "review" && arg) {
     process.exit(await reviewCommand(arg, rest.slice(1)));
   }
@@ -7815,9 +7824,6 @@ export async function main(): Promise<void> {
   }
   if (cmd === "fix" && arg) {
     process.exit(await fixCommand(rest));
-  }
-  if (cmd === "wipe-test" && arg) {
-    process.exit(await wipeTestCommand(rest));
   }
   if (cmd === "stop") {
     process.exit(await stopCommand(rest));
