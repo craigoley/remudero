@@ -495,3 +495,42 @@ test("main(): `rmd wipe-test --help` prints the per-command help and exits 0 BEF
   const code = await callMain(t, ["node", "run-task.js", "wipe-test", "--help"]);
   assert.equal(code, 0);
 });
+
+// W1-T79 refused-exit (run-task.ts:8028-8029): a "refused" freshness result must print its
+// message and exit 1, never falling through to dispatch. In CI the real check returns "guarded"
+// (never "refused"), so this branch is only reachable via the injected-freshness seam on main().
+test("main(): a 'refused' freshness result prints the exact remedy message and exits 1 (never dispatches)", async (t) => {
+  const errs: string[] = [];
+  t.mock.method(
+    process,
+    "exit",
+    ((code?: number): never => {
+      throw new ProcessExitCalled(code);
+    }) as typeof process.exit,
+  );
+  t.mock.method(console, "error", (...a: unknown[]) => {
+    errs.push(a.map(String).join(" "));
+  });
+  const originalArgv = process.argv;
+  process.argv = ["node", "run-task.js", "status"];
+  try {
+    let caught: unknown;
+    await main({
+      checkFreshness: () => ({
+        status: "refused",
+        reason: "diverged",
+        message: "### rmd self-sync: STALE-DIVERGED remedy line",
+      }),
+    }).catch((e) => {
+      caught = e;
+    });
+    assert.ok(caught instanceof ProcessExitCalled, "the refused branch must reach process.exit");
+    assert.equal((caught as ProcessExitCalled).code, 1, "refused exits 1");
+    assert.ok(
+      errs.some((e) => e.includes("STALE-DIVERGED remedy line")),
+      "the refused message (the operator's remedy) is printed to stderr",
+    );
+  } finally {
+    process.argv = originalArgv;
+  }
+});

@@ -8000,7 +8000,12 @@ function commandSyntax(name: string): string {
 }
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
-export async function main(): Promise<void> {
+export async function main(
+  // W1-T79/W1-T221: the freshness check is injectable so a `callMain` test can drive the
+  // "refused" branch below (its console.error+process.exit can't otherwise be covered — in CI
+  // the real check returns "guarded", never "refused"). Default = the real self-sync check.
+  deps: { checkFreshness?: typeof checkCliFreshness } = {},
+): Promise<void> {
   const [, , cmd, ...rest] = process.argv;
   const arg = rest[0];
   if (cmd === "--help" || cmd === "-h" || cmd === "help") {
@@ -8023,7 +8028,7 @@ export async function main(): Promise<void> {
   // clean+behind auto-ff-pulls and re-execs once; dirty/diverged refuses with the exact
   // remedy and never mutates; up-to-date and the loop-guarded re-exec's child are both
   // total no-ops). A "refused" result must never fall through to dispatch below.
-  const freshness = checkCliFreshness(repoRoot, process.env);
+  const freshness = (deps.checkFreshness ?? checkCliFreshness)(repoRoot, process.env);
   if (freshness.status === "refused") {
     console.error(freshness.message);
     process.exit(1);

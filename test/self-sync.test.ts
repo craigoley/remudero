@@ -230,6 +230,23 @@ test("checkCliFreshness: a fetch failure degrades to 'do not block the command' 
   assert.equal(reexecCalls, 0);
 });
 
+test("checkCliFreshness: a rev-parse failure AFTER a clean fetch also degrades (the HEAD/origin resolution branch), never blocks", () => {
+  // fetch succeeds, but resolving HEAD/origin/main throws — a corrupt/absent ref must degrade,
+  // not refuse the command (same best-effort contract as the fetch-failure path above).
+  const git: GitRunner = (args) => {
+    if (args[0] === "fetch") return "";
+    throw new Error(`rev-parse unavailable: ${args.join(" ")}`);
+  };
+  let reexecCalls = 0;
+  const result = checkCliFreshness("/some/repo", {}, { git, reexec: () => (reexecCalls += 1) });
+
+  assert.equal(result.status, "degraded");
+  if (result.status === "degraded") {
+    assert.match(result.reason, /could not resolve HEAD\/origin\/main/);
+  }
+  assert.equal(reexecCalls, 0, "a degraded resolution never re-execs");
+});
+
 // ── W1-T79 CI guard: the CLI-entry auto-sync must NEVER run in CI (the checkout is a PR ref,
 // always "diverged"; without this guard every rmd invocation a CI job makes exits 1) ─────────
 test("isCiEnv: true for GitHub Actions / the CI convention, false when unset or explicitly falsey", () => {

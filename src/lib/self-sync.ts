@@ -220,6 +220,8 @@ function shortSha(sha: string): string {
  * child's exit code, so it never falls through to dispatch itself (the freshly pulled code,
  * not this stale one, must be what actually runs).
  */
+// diff-cov: process-boundary — re-execs process.execArgv and exits with the child's code; a real
+// re-exec cannot carry a coverage hit without forking the suite (W1-T221, see docs/review-gate.md).
 function defaultReexec(env: NodeJS.ProcessEnv | Record<string, string | undefined>): void {
   const result = spawnSync(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
     stdio: "inherit",
