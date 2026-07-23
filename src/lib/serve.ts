@@ -435,6 +435,40 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   @media (prefers-reduced-motion: reduce) {
     .row-chevron { transition: none; }
   }
+  /* W1-T223: every section collapses, and the WHOLE HEADER is the trigger -- a real <button>
+     wrapped in its own <h2> (the WAI-ARIA disclosure pattern), so it keeps native Enter/Space +
+     click for free AND still reads as a heading for screen-reader heading navigation. Same
+     click/keyboard/chevron-flip gesture as a row (W1-T222), so the console has ONE expand
+     interaction rather than two that differ by region. The summary line stays visible in BOTH
+     states -- collapsing a section must never also hide the one line that answers its question. */
+  .panel-section > h2 { margin: 0 0 0.25rem; }
+  .section-header {
+    display: flex; align-items: center; gap: 0.5rem; width: 100%;
+    background: none; border: none; padding: 0; margin: 0;
+    font: inherit; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim);
+    text-align: left; cursor: pointer;
+  }
+  .section-summary {
+    font-size: 0.8rem; font-weight: 400; text-transform: none; letter-spacing: normal;
+    color: var(--text-dim); flex: 1 1 auto; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+  .section-chevron {
+    margin-left: auto; font-size: 0.9rem; color: var(--text-faint);
+    transition: transform 0.15s ease; display: inline-block; flex-shrink: 0;
+  }
+  .section-header[aria-expanded="true"] .section-chevron { transform: rotate(90deg); color: var(--accent); }
+  @media (prefers-reduced-motion: reduce) {
+    .section-chevron { transition: none; }
+  }
+  /* NEEDS ME: an item arriving while the section is COLLAPSED must not be silently missed --
+     collapsing must never become a way to miss the thing the console exists to surface, so the
+     header itself carries emphasis until the operator actually expands it. */
+  .section-header.section-emphasis {
+    border: 1px solid var(--status-needs-human); border-radius: 6px; padding: 0.2rem 0.4rem;
+    background: rgba(255, 184, 77, 0.12);
+  }
+  .section-header.section-emphasis .section-summary { color: var(--status-needs-human); font-weight: 600; }
   /* the card itself: a distinct sibling <li>, indented + accent-bordered so it visibly BELONGS
      to the row directly above it rather than reading as one more row in the same list. */
   .row-detail {
@@ -475,40 +509,55 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
 </header>
 
 <section id="now" class="panel-section" aria-label="Now">
-  <h2>Now</h2>
-  <ul id="now-list" class="row-list">${skeletonRows(2)}</ul>
+  <h2><button type="button" class="section-header" id="now-toggle" aria-expanded="true" aria-controls="now-body">
+    <span>Now</span><span class="section-summary" id="now-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
+  </button></h2>
+  <div id="now-body">
+    <ul id="now-list" class="row-list">${skeletonRows(2)}</ul>
+  </div>
 </section>
 
 <section id="needs-me" class="panel-section" aria-label="Needs me">
-  <h2>Needs me</h2>
-  <ul id="needs-me-list" class="row-list">${skeletonRows(2)}</ul>
+  <h2><button type="button" class="section-header" id="needs-me-toggle" aria-expanded="true" aria-controls="needs-me-body">
+    <span>Needs me</span><span class="section-summary" id="needs-me-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
+  </button></h2>
+  <div id="needs-me-body">
+    <ul id="needs-me-list" class="row-list">${skeletonRows(2)}</ul>
+  </div>
 </section>
 
 <section id="up-next" class="panel-section" aria-label="Up next">
-  <h2>Up next</h2>
-  <ul id="up-next-list" class="row-list">${skeletonRows(3)}</ul>
+  <h2><button type="button" class="section-header" id="up-next-toggle" aria-expanded="true" aria-controls="up-next-body">
+    <span>Up next</span><span class="section-summary" id="up-next-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
+  </button></h2>
+  <div id="up-next-body">
+    <ul id="up-next-list" class="row-list">${skeletonRows(3)}</ul>
+  </div>
 </section>
 
 <section id="recent" class="panel-section" aria-label="Recent">
-  <h2>Recent</h2>
-  <ul id="recent-list" class="row-list">${skeletonRows(3)}</ul>
+  <h2><button type="button" class="section-header" id="recent-toggle" aria-expanded="true" aria-controls="recent-body">
+    <span>Recent</span><span class="section-summary" id="recent-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
+  </button></h2>
+  <div id="recent-body">
+    <ul id="recent-list" class="row-list">${skeletonRows(3)}</ul>
+  </div>
 </section>
 
 <section id="rest" class="panel-section" aria-label="Everything else">
-  <h2>Everything else</h2>
-  <!-- W1-T183: EXPANDED BY DEFAULT. W1-T153's original v0 IA hid this whole corpus behind an
-       "Expand" click, which is exactly what fails this task's own density/one-click bars against
-       a realistic (mostly queued, low-activity) fleet: NOW/NEEDS ME/RECENT are near-empty and UP
-       NEXT caps at 5, so under a couple hundred plain tasks a collapsed rest section left a first
-       screen with a handful of rows, and any task living only in "everything else" needed an
-       expand-THEN-click (two interactions) to reach its card. Rendering these as DENSE
-       single-line rows (see .row-list .row CSS) removed the original space cost that motivated
-       collapsing them, so the corpus now renders open -- "Collapse" remains available for anyone
-       who wants the compact grouped-count summary instead. -->
-  <div class="btn-row">
-    <span id="rest-counts" class="counts">…</span>
-    <button id="rest-toggle" type="button" aria-expanded="true" aria-controls="rest-detail">Collapse</button>
-  </div>
+  <h2><button type="button" class="section-header" id="rest-toggle" aria-expanded="true" aria-controls="rest-detail">
+    <span>Everything else</span><span class="section-summary" id="rest-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
+  </button></h2>
+  <!-- W1-T183: EXPANDED BY DEFAULT while non-empty (W1-T223 formalizes this per-section, below:
+       every section defaults collapsed ONLY while genuinely empty). W1-T153's original v0 IA hid
+       this whole corpus behind an "Expand" click, which is exactly what fails this task's own
+       density/one-click bars against a realistic (mostly queued, low-activity) fleet: NOW/NEEDS
+       ME/RECENT are near-empty and UP NEXT caps at 5, so under a couple hundred plain tasks a
+       collapsed rest section left a first screen with a handful of rows, and any task living only
+       in "everything else" needed an expand-THEN-click (two interactions) to reach its card.
+       Rendering these as DENSE single-line rows (see .row-list .row CSS) removed the original
+       space cost that motivated collapsing them, so a non-empty corpus still renders open --
+       the header remains available for anyone who wants the compact grouped-count summary instead. -->
   <div id="rest-detail">
     <!-- W1-T157 FIND layer: instant client-side fuzzy search (id + title), faceted filters with
          LIVE counts, sortable columns, all persisted to the URL (shareable / survives reload). -->
@@ -871,6 +920,148 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   let latestUpNextCards = [];
   let latestRecentEntries = [];
 
+  // ── W1-T223: SECTION COLLAPSE + SUMMARY -- every one of the five sections collapses, and its
+  // header carries an ALWAYS-VISIBLE one-line summary derived from the SAME array its own
+  // render*() below already built the rows from (never a second query over tasksById/latest* --
+  // standing rule 22: a header claiming a different count than its own rows is a surface
+  // disagreeing with itself, the W1-T181 "merged 0 of 160" outage being what that looks like when
+  // it fails). Collapse state is a layout preference ONLY -- persisted client-side (standing rule
+  // 24: no credential in persisted state) -- and is applied in two layers: an explicit persisted
+  // preference (set ONLY by the operator's own click, below) always wins; absent one, each section
+  // defaults ONCE per page load to collapsed iff it is genuinely empty at that point (this is the
+  // whole of "NEEDS ME auto-expands when non-empty" -- it is not a special case, just this same
+  // rule applied to the one section that is rarely empty on a busy fleet). ──────────────────────
+  const SECTION_IDS = ["now", "needs-me", "up-next", "recent", "rest"];
+  const SECTION_BODY_ID = { now: "now-body", "needs-me": "needs-me-body", "up-next": "up-next-body", recent: "recent-body", rest: "rest-detail" };
+  const SECTION_TOGGLE_ID = { now: "now-toggle", "needs-me": "needs-me-toggle", "up-next": "up-next-toggle", recent: "recent-toggle", rest: "rest-toggle" };
+  const SECTION_PREFS_KEY = "rmd-console-sections-v1";
+  function loadSectionPrefs() {
+    try {
+      const raw = localStorage.getItem(SECTION_PREFS_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  }
+  let sectionPrefs = loadSectionPrefs(); // {sectionId: collapsed:boolean} -- ONLY ever written by an explicit operator toggle, below
+  const sectionDefaulted = new Set(); // sections whose one-time auto default has already been applied THIS page load
+  // NEEDS ME emphasis: null until this section's first REAL render this page load (never flags
+  // emphasis off that first sighting -- there is no "arrival" to react to yet, just a paint).
+  // Thereafter, a row key present now but absent from the last-known set is a genuine new arrival.
+  let needsMeKnownKeys = null;
+  // Gates ensureSectionDefault/summary text until the console has a FULL real picture (mirrors
+  // applyDeepLinkIfNeeded's own "never off the status-only first pass" discipline, below) -- the
+  // status-only pass's RECENT/UP NEXT/feedback/inbox arrays are still their initial empty [],
+  // and defaulting (or summarizing) off THAT would be exactly the "second, disagreeing derivation"
+  // this task exists to forbid. Until then the header keeps its honest "…" (never a skeleton).
+  let sectionDefaultsReady = false;
+
+  function setSectionSummary(id, text) {
+    const el = document.getElementById(\`\${id}-summary\`);
+    if (el) el.textContent = text;
+  }
+  function applySectionCollapsed(id, collapsed) {
+    const body = document.getElementById(SECTION_BODY_ID[id]);
+    const toggle = document.getElementById(SECTION_TOGGLE_ID[id]);
+    if (!body || !toggle) return;
+    body.hidden = collapsed;
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+  }
+  function setSectionCollapsed(id, collapsed, { persist } = { persist: false }) {
+    applySectionCollapsed(id, collapsed);
+    if (persist) {
+      sectionPrefs = { ...sectionPrefs, [id]: collapsed };
+      try {
+        localStorage.setItem(SECTION_PREFS_KEY, JSON.stringify(sectionPrefs));
+      } catch {
+        /* a full/blocked localStorage must not break the toggle itself -- the preference just
+           won't survive a reload, which is strictly better than throwing out of a click handler. */
+      }
+    }
+  }
+  /** Applied ONCE per section per page load -- an explicit persisted preference always wins;
+   *  absent one, collapsed iff \`isEmpty\` (design: "empty sections default collapsed... NEEDS ME
+   *  auto-expands when non-empty" -- the SAME rule, not two). Never re-applied after this: once a
+   *  section's state is established (by default or by the operator), later data changes must not
+   *  silently re-collapse or re-expand it out from under an operator who is looking at it -- see
+   *  needsMeSummaryText's own "emphasis, never a forced reopen" doctrine, below. */
+  function ensureSectionDefault(id, isEmpty) {
+    if (sectionDefaulted.has(id)) return;
+    sectionDefaulted.add(id);
+    const collapsed = Object.prototype.hasOwnProperty.call(sectionPrefs, id) ? sectionPrefs[id] : isEmpty;
+    applySectionCollapsed(id, collapsed);
+  }
+  /** The tail end of every render*() below: update the header's summary line (from the SAME rows
+   *  the caller just built) and let this section settle its one-time default -- both gated on
+   *  \`sectionDefaultsReady\` so neither ever runs off the status-only pass's still-empty arrays. */
+  function finishSectionRender(id, isEmpty, textFn) {
+    if (!sectionDefaultsReady) return;
+    setSectionSummary(id, textFn());
+    ensureSectionDefault(id, isEmpty);
+  }
+  /** "12m ago"/"3h ago" for whichever of \`items\` carries the earliest parseable timestamp --
+   *  \`tsOf\` reads whatever field that item type actually carries (never fabricated for a type
+   *  that doesn't -- e.g. an inbox-ready proposal has no timestamp at all, so it is silently
+   *  skipped for AGE purposes while still counting toward the header's own N). */
+  function oldestAgoText(items, tsOf) {
+    let oldest;
+    for (const it of items) {
+      const raw = tsOf(it);
+      if (!raw) continue;
+      const t = Date.parse(raw);
+      if (!Number.isFinite(t)) continue;
+      if (oldest === undefined || t < oldest) oldest = t;
+    }
+    return oldest === undefined ? null : formatAgo(new Date(oldest).toISOString());
+  }
+  function isSameLocalDay(a, b) {
+    return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  }
+  function nowSummaryText(inFlight) {
+    if (inFlight.length === 0) return "nothing in flight";
+    const ago = oldestAgoText(inFlight, (t) => t.startedAt);
+    return \`\${inFlight.length} running\${ago ? \` · oldest \${ago}\` : ""}\`;
+  }
+  function needsMeSummaryText(rows) {
+    if (rows.length === 0) return "nothing needs you";
+    const ago = oldestAgoText(rows, (r) => r.ts);
+    return \`\${rows.length} open\${ago ? \` · oldest \${ago}\` : ""}\`;
+  }
+  function upNextSummaryText(head) {
+    if (head.length === 0) return "drain queue is empty";
+    const more = head.length > 1 ? \` (+\${head.length - 1} more)\` : "";
+    return \`next: \${head[0].id}\${more}\`;
+  }
+  function recentSummaryText(list) {
+    if (list.length === 0) return "no recent activity yet";
+    const landedToday = list.filter((e) => e.verb === "merged" && isSameLocalDay(new Date(e.ts), new Date())).length;
+    return \`\${landedToday} landed today · last \${formatAgo(list[0].ts)}\`;
+  }
+  /** Whichever of the five section bodies DOM-contains \`el\` -- expands it (never persisted: this
+   *  is a navigational reveal, e.g. a dep-link/deep-link jump, not the operator's own layout
+   *  preference) if it is currently collapsed. A jump/deep-link into a row that lives in a
+   *  collapsed section must not land the operator on an invisible (\`hidden\`) target -- the exact
+   *  new failure mode collapsing these four sections at all would otherwise introduce. */
+  function revealSectionOf(el) {
+    for (const id of SECTION_IDS) {
+      const body = document.getElementById(SECTION_BODY_ID[id]);
+      if (body && body.contains(el)) {
+        if (body.hidden) setSectionCollapsed(id, false, { persist: false });
+        return;
+      }
+    }
+  }
+  function wireSectionToggle(id, onExpand) {
+    const toggle = document.getElementById(SECTION_TOGGLE_ID[id]);
+    if (!toggle) return;
+    toggle.addEventListener("click", () => {
+      const expandedNow = toggle.getAttribute("aria-expanded") === "true";
+      setSectionCollapsed(id, expandedNow, { persist: true }); // flip: collapse iff it WAS expanded
+      toggle.classList.remove("section-emphasis"); // any pending NEEDS ME emphasis clears on interaction
+      if (!expandedNow && onExpand) onExpand();
+    });
+  }
+
   /** A projection minus its VOLATILE, non-status fields -- \`elapsedMs\` (changes every second,
    *  rendered by the separate ticking timer below) and \`lastActivityAt\` (a board-only ledger
    *  timestamp, not part of the status taxonomy the operator is announced about). A row whose
@@ -957,6 +1148,9 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     latestInboxDrafting = snapshot.inboxDrafting ?? [];
     latestUpNextCards = snapshot.upNextCards ?? [];
     latestRecentEntries = snapshot.recentEntries ?? [];
+    // W1-T223: the cache-restore path carries FULL side-data (see the deep-link comment just
+    // below) -- safe to let every section settle its one-time default/summary off THIS paint.
+    sectionDefaultsReady = true;
     paintFromTasksById();
     applyControlStatus(snapshot.controlStatus ?? { paused: false, stopped: false, quietHours: false });
     // W1-T222: the cache-restore path already carries FULL side-data (recent/up-next/feedback),
@@ -998,6 +1192,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     const rows = inFlight.map((t) => ({ key: t.taskId, html: nowRowHtml(t), taskId: t.taskId }));
     reconcileRows(document.getElementById("now-list"), rows, "nothing in flight");
     tickElapsed(); // paint newly (re)rendered elapsed spans immediately, not after the next 1s tick
+    finishSectionRender("now", inFlight.length === 0, () => nowSummaryText(inFlight));
     return new Set(inFlight.map((t) => t.taskId));
   }
 
@@ -1107,17 +1302,38 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     for (const t of tasks) {
       if (!t.needsHuman) continue;
       shown.add(t.taskId);
-      rows.push({ key: \`task:\${t.taskId}\`, html: needsMeTaskRowHtml(t), taskId: t.taskId });
+      rows.push({ key: \`task:\${t.taskId}\`, html: needsMeTaskRowHtml(t), taskId: t.taskId, ts: t.startedAt });
     }
     for (const e of feedbackEntries ?? []) {
-      if (e.status === "grilling") rows.push({ key: \`fbg:\${e.id}\`, html: needsMeGrillHtml(e) });
-      else if (e.status === "proposed") rows.push({ key: \`fbp:\${e.id}\`, html: needsMeProposedHtml(e) });
+      if (e.status === "grilling") rows.push({ key: \`fbg:\${e.id}\`, html: needsMeGrillHtml(e), ts: e.ts });
+      else if (e.status === "proposed") rows.push({ key: \`fbp:\${e.id}\`, html: needsMeProposedHtml(e), ts: e.ts });
     }
     for (const p of inboxReady ?? []) rows.push({ key: \`inbox:\${p.proposalId}\`, html: needsMeInboxHtml(p) });
-    for (const p of inboxDrafting ?? []) rows.push({ key: \`inbox-drafting:\${p.proposalId}\`, html: needsMeDraftingHtml(p) });
+    for (const p of inboxDrafting ?? []) rows.push({ key: \`inbox-drafting:\${p.proposalId}\`, html: needsMeDraftingHtml(p), ts: p.spawnedAt });
     reconcileRows(document.getElementById("needs-me-list"), rows, "nothing needs you right now");
     tickElapsed(); // paint the DRAFTING row's freshly-(re)rendered elapsed span immediately, same as renderNow does
+    updateNeedsMeArrivalEmphasis(rows);
+    finishSectionRender("needs-me", rows.length === 0, () => needsMeSummaryText(rows));
     return shown;
+  }
+  /** W1-T223: "a NEEDS ME item arriving while the section is collapsed must not be silently
+   *  missed" -- gated on \`sectionDefaultsReady\` for the SAME reason \`finishSectionRender\` is (the
+   *  status-only first pass's feedback/inbox rows are not real yet, so treating them as "arrivals"
+   *  would flag emphasis off data that was never actually absent). Never force-reopens the section
+   *  -- an operator's own collapse (explicit or defaulted) is respected; this only makes the
+   *  header itself carry emphasis until they act on it. */
+  function updateNeedsMeArrivalEmphasis(rows) {
+    if (!sectionDefaultsReady) return;
+    const keys = new Set(rows.map((r) => r.key));
+    const isFirstRealRender = needsMeKnownKeys === null;
+    const hasNewArrival = !isFirstRealRender && [...keys].some((k) => !needsMeKnownKeys.has(k));
+    needsMeKnownKeys = keys;
+    if (!hasNewArrival) return;
+    const toggle = document.getElementById("needs-me-toggle");
+    if (toggle && toggle.getAttribute("aria-expanded") === "false") {
+      toggle.classList.add("section-emphasis");
+      announce("Needs me: a new item needs your attention.");
+    }
   }
 
   // ── UP NEXT — the drain head, first ~5 runnable (W1-T140 preview/curation) ──────────────
@@ -1129,6 +1345,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
       taskId: c.id,
     }));
     reconcileRows(document.getElementById("up-next-list"), rows, "drain queue is empty");
+    finishSectionRender("up-next", head.length === 0, () => upNextSummaryText(head));
     return new Set(head.map((c) => c.id));
   }
 
@@ -1199,6 +1416,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     // per task (W1-T156's DOM-stability reconciliation needs a key unique PER ROW, not per task).
     const rows = list.map((e, i) => ({ key: \`\${e.taskId}:\${e.ts}:\${i}\`, html: recentRowHtml(e), taskId: e.taskId }));
     reconcileRows(document.getElementById("recent-list"), rows, "no recent activity yet");
+    finishSectionRender("recent", list.length === 0, () => recentSummaryText(list));
     return new Set(list.map((e) => e.taskId));
   }
 
@@ -1408,36 +1626,36 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     writeFindStateToUrl();
   }
 
-  function renderRest(tasks, shownIds) {
-    findTasks = tasks; // the FIND corpus is the whole board (see the section header note)
-    // The collapsed grouped-count line still summarizes the COMPLEMENT — "everything else" not
-    // already surfaced in one of the four priority sections above.
-    const complement = tasks.filter((t) => !shownIds.has(t.taskId));
+  /** REST's summary derives from \`complement\` -- the SAME array \`findTasks\`/the FIND corpus is
+   *  built from just below -- never a second filter pass. It summarizes the COMPLEMENT ("everything
+   *  else" not already surfaced in one of the four priority sections above), which stays the
+   *  right number even while the FIND search/facets narrow what actually RENDERS inside; that is
+   *  a further, separately-labelled view (#find-count) over this same corpus, not a disagreement. */
+  function restSummaryText(complement) {
+    if (complement.length === 0) return "nothing else to show";
     const queued = complement.filter((t) => statusColorKey(t) === "queued").length;
     const merged = complement.filter((t) => statusColorKey(t) === "merged").length;
     const other = complement.length - queued - merged;
-    document.getElementById("rest-counts").textContent = \`queued: \${queued} · merged: \${merged} · other: \${other} (\${complement.length} total)\`;
+    return \`queued: \${queued} · merged: \${merged} · other: \${other} (\${complement.length} total)\`;
+  }
+  function renderRest(tasks, shownIds) {
+    findTasks = tasks; // the FIND corpus is the whole board (see the section header note)
+    const complement = tasks.filter((t) => !shownIds.has(t.taskId));
+    finishSectionRender("rest", complement.length === 0, () => restSummaryText(complement));
     if (!document.getElementById("rest-detail").hidden) renderFindView();
   }
 
   function expandRest() {
     const detail = document.getElementById("rest-detail");
     if (!detail.hidden) return;
-    detail.hidden = false;
-    const toggle = document.getElementById("rest-toggle");
-    toggle.setAttribute("aria-expanded", "true");
-    toggle.textContent = "Collapse";
+    setSectionCollapsed("rest", false, { persist: false });
     renderFindView();
   }
-  document.getElementById("rest-toggle").addEventListener("click", () => {
-    const detail = document.getElementById("rest-detail");
-    const toggle = document.getElementById("rest-toggle");
-    const expanded = !detail.hidden;
-    detail.hidden = expanded;
-    toggle.setAttribute("aria-expanded", String(!expanded));
-    toggle.textContent = expanded ? "Expand" : "Collapse";
-    if (!expanded) renderFindView();
-  });
+  wireSectionToggle("rest", () => renderFindView());
+  wireSectionToggle("now");
+  wireSectionToggle("needs-me");
+  wireSectionToggle("up-next");
+  wireSectionToggle("recent");
   document.getElementById("find-search").addEventListener("input", (e) => {
     findState.q = e.target.value;
     applyFindState();
@@ -1889,6 +2107,9 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
       row = findRowByTaskId(taskId);
     }
     if (!row) return false;
+    // W1-T223: the row's own SECTION can now be collapsed (previously only "everything else"
+    // could be) -- reveal it first, or this would land the operator on a hidden target.
+    revealSectionOf(row);
     if (expandedRowKey !== row.dataset.key) {
       collapseExpanded();
       expandRow(row, row.dataset.key, taskId);
@@ -2094,6 +2315,10 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
       latestInboxDrafting = inboxSnap.drafting ?? [];
       latestUpNextCards = upNextSnap.cards ?? [];
       latestRecentEntries = recentSnap.entries ?? [];
+      // W1-T223: ONLY here (never off the status-only pass above) -- see finishSectionRender's
+      // own doc for why defaulting/summarizing off still-empty feedback/inbox/up-next/recent
+      // arrays would be exactly the "second, disagreeing derivation" this task forbids.
+      sectionDefaultsReady = true;
       paintFromTasksById(); // re-run NOW/NEEDS ME/rest now that feedback/inbox/up-next/recent are current
       // W1-T222: ONLY here (never off the status-only pass above) -- a task that legitimately
       // lives in RECENT/UP NEXT would otherwise be judged "not found yet" before those resolve

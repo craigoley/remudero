@@ -568,6 +568,86 @@ test("W1-T182: an escalation row renders the issue's real ask + a direct link + 
   });
 });
 
+// ── W1-T223: a collapsed console section must still inform -- its header summary must NEVER
+// disagree with its own rows (the count comes from the SAME projection, never a second
+// derivation), and a NEEDS ME arrival while collapsed must carry emphasis, never a silent miss ──
+
+test("W1-T223: a section's header summary NEVER disagrees with its own rows across a live SSE update -- the claimed count always matches the rendered row count", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" }), task({ id: "W1-T2" })]);
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => (document.getElementById("now-summary")?.textContent ?? "") !== "…");
+      async function agrees() {
+        return page.evaluate(() => {
+          const summary = document.getElementById("now-summary")?.textContent ?? "";
+          const rowCount = document.querySelectorAll("#now-list li[data-key]").length;
+          const m = /^(\d+) running/.exec(summary);
+          const claimed = m ? Number(m[1]) : summary.includes("nothing in flight") ? 0 : NaN;
+          return { claimed, rowCount, summary };
+        });
+      }
+
+      let a = await agrees();
+      assert.equal(a.claimed, a.rowCount, `header claims ${a.claimed} but rows show ${a.rowCount} ("${a.summary}")`);
+      assert.equal(a.rowCount, 0);
+
+      appendFileSync(deps.board.ledgerPath, runStart("W1-T1"));
+      await page.waitForFunction(() => (document.querySelector("#now-list .detail")?.textContent ?? "").includes("phase:"));
+      a = await agrees();
+      assert.equal(a.claimed, a.rowCount, `header claims ${a.claimed} but rows show ${a.rowCount} ("${a.summary}")`);
+      assert.equal(a.rowCount, 1);
+
+      appendFileSync(deps.board.ledgerPath, runStart("W1-T2", "r2"));
+      await page.waitForFunction(() => document.querySelectorAll("#now-list li[data-key]").length === 2);
+      a = await agrees();
+      assert.equal(a.claimed, a.rowCount, `header claims ${a.claimed} but rows show ${a.rowCount} ("${a.summary}")`);
+      assert.equal(a.rowCount, 2);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+test("W1-T223: a NEEDS ME item arriving while the section is collapsed adds header emphasis -- never a forced reopen, never a silent miss", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })]); // no escalation yet -- NEEDS ME starts empty, defaults collapsed
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => document.getElementById("needs-me-toggle")?.getAttribute("aria-expanded") === "false");
+      assert.equal(
+        await page.evaluate(() => document.getElementById("needs-me-toggle")?.classList.contains("section-emphasis")),
+        false,
+        "no emphasis before anything has arrived",
+      );
+
+      appendFileSync(
+        deps.board.ledgerPath,
+        JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "escalation.issue_opened", issue_url: "https://github.com/o/r/issues/1", class: "BLOCKED" }) + "\n",
+      );
+      await page.waitForFunction(() => document.getElementById("needs-me-toggle")?.classList.contains("section-emphasis") === true, null, {
+        timeout: 5000,
+      });
+      // the falsifier this proves: collapsing must never become a way to silently miss the item --
+      // but the fix is EMPHASIS, never a forced reopen the operator didn't ask for.
+      assert.equal(await page.evaluate(() => document.getElementById("needs-me-toggle")?.getAttribute("aria-expanded")), "false");
+      assert.equal(await page.evaluate(() => (document.getElementById("needs-me-body") as HTMLElement)?.hidden), true);
+
+      await page.click("#needs-me-toggle");
+      await page.waitForFunction(() => document.getElementById("needs-me-toggle")?.getAttribute("aria-expanded") === "true");
+      assert.equal(
+        await page.evaluate(() => document.getElementById("needs-me-toggle")?.classList.contains("section-emphasis")),
+        false,
+        "expanding the section clears the emphasis -- the operator has now seen it",
+      );
+    } finally {
+      await context.close();
+    }
+  });
+});
+
 test("W1-T182: clicking 'Mark handled' closes the issue via the real route, and the row drops off the NEXT poll once the issue reads CLOSED", async () => {
   const root = tmpRoot();
   const issueUrl = "https://github.com/o/r/issues/401";
