@@ -7,6 +7,7 @@ import type { LearningEntry } from "../src/lib/learnings.js";
 import type { Config } from "../src/lib/config.js";
 import type { RunResult } from "../src/lib/run-result.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import { main, wipeTestCommand } from "../src/run-task.js";
 import {
   aggregateWipeTestPairs,
@@ -451,6 +452,13 @@ async function callMain(t: import("node:test").TestContext, argv: string[]): Pro
 
   const originalArgv = process.argv;
   process.argv = argv;
+  // W1-T79: main() now runs a real CLI self-freshness check (src/lib/self-sync.ts) right after
+  // the help preamble, on every call — which, with real default deps, does a REAL `git fetch
+  // origin` against this worktree's actual origin remote. That's a live-network dependency this
+  // test isn't about (it's testing wipe-test/--help dispatch, not git freshness), so set the
+  // SAME loop-guard env a real re-exec sets to make checkCliFreshness a total no-op here too.
+  const originalGuardEnv = process.env[SELF_SYNC_GUARD_ENV];
+  process.env[SELF_SYNC_GUARD_ENV] = "1";
   try {
     let caught: unknown;
     await main().catch((e) => {
@@ -460,6 +468,11 @@ async function callMain(t: import("node:test").TestContext, argv: string[]): Pro
     return (caught as ProcessExitCalled).code;
   } finally {
     process.argv = originalArgv;
+    if (originalGuardEnv === undefined) {
+      delete process.env[SELF_SYNC_GUARD_ENV];
+    } else {
+      process.env[SELF_SYNC_GUARD_ENV] = originalGuardEnv;
+    }
   }
 }
 
