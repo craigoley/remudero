@@ -19,8 +19,10 @@ import {
   parseOnboardArgs,
   parseOwnerRepoFromRemoteUrl,
   realOnboardFsDeps,
+  realOnboardGhGateway,
   resolveTargetOwnerRepo,
   runOnboardInventory,
+  type GhExec,
   type Known,
   type OnboardGhGateway,
 } from "../src/lib/onboard/inventory.js";
@@ -291,6 +293,83 @@ test("parseOnboardArgs accepts --owner/--repo overrides and the sole known phase
     assert.deepEqual(result.args, { targetDir: "/some/dir", phase: "inventory", owner: "acme-corp", repo: "widget-fixture" });
   }
   assert.deepEqual(KNOWN_ONBOARD_PHASES, ["inventory"]);
+});
+
+// ── realOnboardGhGateway — the REAL `gh api` gateway, via its injectable `opts.exec` seam ──
+//
+// Mirrors status.ts's `ghGateway(owner, repo, { exec })` pattern (W1-T119): a fake `exec`
+// stands in for the actual `gh` subprocess, so every branch of ghRepoInfo/ghBranchProtection/
+// ghOpenIssueCount/ghMilestoneCount (success, a knowable 404, and a genuinely unresolved
+// failure) is exercised deterministically, with NO real `gh` invocation and no network call.
+
+/** A fake `GhExec` that throws a `{stderr}`-shaped error carrying an HTTP status, the same
+ *  shape `gh`'s own "gh: <message> (HTTP <code>)" stderr line takes. */
+function throwingExec(stderr: string): GhExec {
+  return () => {
+    throw { stderr };
+  };
+}
+
+test("realOnboardGhGateway().repoInfo: a 200 resolves known:true with the repo's default_branch", () => {
+  const exec: GhExec = () => JSON.stringify({ default_branch: "trunk" });
+  const gateway = realOnboardGhGateway({ exec });
+  assert.deepEqual(gateway.repoInfo("acme-corp", "widget"), { known: true, value: { exists: true, defaultBranch: "trunk" } });
+});
+
+test("realOnboardGhGateway().repoInfo: a 404 resolves known:true, exists:false (knowable, not unknown)", () => {
+  const gateway = realOnboardGhGateway({ exec: throwingExec("gh: Not Found (HTTP 404)") });
+  assert.deepEqual(gateway.repoInfo("ghost-org", "ghost-repo"), { known: true, value: { exists: false, defaultBranch: "" } });
+});
+
+test("realOnboardGhGateway().repoInfo: a non-404 failure (auth/network) resolves known:false", () => {
+  const gateway = realOnboardGhGateway({ exec: throwingExec("gh: authentication required") });
+  assert.deepEqual(gateway.repoInfo("acme-corp", "widget"), { known: false });
+});
+
+test("realOnboardGhGateway().branchProtection: a 200 resolves known:true, value:true", () => {
+  const exec: GhExec = () => "{}";
+  const gateway = realOnboardGhGateway({ exec });
+  assert.deepEqual(gateway.branchProtection("acme-corp", "widget", "main"), { known: true, value: true });
+});
+
+test("realOnboardGhGateway().branchProtection: a 404 resolves known:true, value:false (not protected IS knowable)", () => {
+  const gateway = realOnboardGhGateway({ exec: throwingExec("gh: Branch not protected (HTTP 404)") });
+  assert.deepEqual(gateway.branchProtection("acme-corp", "widget", "main"), { known: true, value: false });
+});
+
+test("realOnboardGhGateway().branchProtection: a non-404 failure resolves known:false, never guessed", () => {
+  const gateway = realOnboardGhGateway({ exec: throwingExec("gh: rate limit exceeded") });
+  assert.deepEqual(gateway.branchProtection("acme-corp", "widget", "main"), { known: false });
+});
+
+test("realOnboardGhGateway().openIssueCount: filters pull requests out of the issues-list response, same contract as issues-intake.ts", () => {
+  const exec: GhExec = () => JSON.stringify([{ number: 1 }, { number: 2, pull_request: {} }, { number: 3 }]);
+  const gateway = realOnboardGhGateway({ exec });
+  assert.deepEqual(gateway.openIssueCount("acme-corp", "widget"), { known: true, value: 2 });
+});
+
+test("realOnboardGhGateway().openIssueCount: a failed/unparseable read resolves known:false", () => {
+  const gateway = realOnboardGhGateway({ exec: throwingExec("gh: network error") });
+  assert.deepEqual(gateway.openIssueCount("acme-corp", "widget"), { known: false });
+});
+
+test("realOnboardGhGateway().milestoneCount: counts the milestones array", () => {
+  const exec: GhExec = () => JSON.stringify([{ number: 1 }, { number: 2 }]);
+  const gateway = realOnboardGhGateway({ exec });
+  assert.deepEqual(gateway.milestoneCount("acme-corp", "widget"), { known: true, value: 2 });
+});
+
+test("realOnboardGhGateway().milestoneCount: a failed/unparseable read resolves known:false", () => {
+  const gateway = realOnboardGhGateway({ exec: throwingExec("gh: network error") });
+  assert.deepEqual(gateway.milestoneCount("acme-corp", "widget"), { known: false });
+});
+
+test("realOnboardGhGateway with no opts.exec still returns a usable gateway shape (the real execFileSync path is only reachable with a live gh binary)", () => {
+  const gateway = realOnboardGhGateway();
+  assert.equal(typeof gateway.repoInfo, "function");
+  assert.equal(typeof gateway.branchProtection, "function");
+  assert.equal(typeof gateway.openIssueCount, "function");
+  assert.equal(typeof gateway.milestoneCount, "function");
 });
 
 test("OnboardError carries the standard Error name for a bad --phase value", () => {

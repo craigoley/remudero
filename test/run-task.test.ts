@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readdirSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, readdirSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -49,7 +49,11 @@ import { type GitRunner, materializeOriginShards, escalateCommand, digestCommand
   currentStrikeRegimeFor,
   ghPrCreateFillCommand,
   reviewCommand,
+  onboardCommand,
+  main,
 } from "../src/run-task.js";
+import { realOnboardFsDeps, type OnboardGhGateway } from "../src/lib/onboard/inventory.js";
+import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import type { Config } from "../src/lib/config.js";
 import { judgeReview } from "../src/lib/review.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
@@ -3434,4 +3438,140 @@ test("syncPlanFromOrigin: the rmd- temp dir (holding tasks.yaml AND tasks.d) is 
   assert.throws(() => syncPlanFromOrigin(localDir, "plan/tasks.yaml"));
   const after = readdirSync(tmpdir()).filter((d) => d.startsWith("rmd-plan"));
   assert.deepEqual(after, before, "no rmd-plan temp dir survives a loadPlan failure — cleaned on every exit path");
+});
+
+// ── W1-T82: `rmd onboard <target-dir> --phase inventory` CLI wrapper ────────────────────
+// onboardCommand's own logic is thin (parse args -> resolve owner/repo -> delegate to
+// runOnboardInventory -> print a summary); these tests exercise that wrapper itself
+// (exit codes, the fail-loud arg-parse and OnboardError paths, and the success summary
+// printed to console.log) via its injectable `deps` seam, the same shape reviewCommand's
+// ReviewCommandDeps/drainCommand's deps already use elsewhere in this file.
+
+const ONBOARD_FIXTURE_REPO_DIR = fileURLToPath(new URL("./fixtures/onboard/repo/", import.meta.url));
+
+/** A fixture OnboardGhGateway — canned, resolved facts, no `gh` exec. */
+function fixtureOnboardGhGateway(): OnboardGhGateway {
+  return {
+    repoInfo: () => ({ known: true, value: { exists: true, defaultBranch: "main" } }),
+    branchProtection: () => ({ known: true, value: true }),
+    openIssueCount: () => ({ known: true, value: 3 }),
+    milestoneCount: () => ({ known: true, value: 1 }),
+  };
+}
+
+test("onboardCommand: a bad --phase value (or missing target dir) fails loud — exit 2, zero fs/gh work attempted", async (t) => {
+  const errSpy = t.mock.method(console, "error", () => {});
+  const code = await onboardCommand(["/some/dir", "--phase", "recon"], {
+    fs: realOnboardFsDeps,
+    gh: fixtureOnboardGhGateway(),
+    resolveOwnerRepo: () => {
+      throw new Error("must not be called — arg parsing must fail before any resolution work");
+    },
+  });
+  assert.equal(code, 2);
+  assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /--phase must be one of/);
+});
+
+test("onboardCommand: a target directory that does not exist fails loud through the caught OnboardError — exit 2", async (t) => {
+  const errSpy = t.mock.method(console, "error", () => {});
+  const parentDir = mkdtempSync(join(tmpdir(), "rmd-onboard-cmd-missing-"));
+  const missingTargetDir = join(parentDir, "does-not-exist");
+
+  const code = await onboardCommand([missingTargetDir, "--phase", "inventory"], {
+    fs: realOnboardFsDeps,
+    gh: fixtureOnboardGhGateway(),
+    resolveOwnerRepo: () => ({ owner: "acme-corp", repo: "widget-fixture" }),
+  });
+
+  assert.equal(code, 2);
+  assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /does not exist/);
+});
+
+test("onboardCommand: the fixture repo, --owner/--repo flags supplied, resolves phase 1, exits 0, and prints the full inventory summary", async (t) => {
+  const logSpy = t.mock.method(console, "log", () => {});
+  const targetDir = mkdtempSync(join(tmpdir(), "rmd-onboard-cmd-ok-"));
+  cpSync(ONBOARD_FIXTURE_REPO_DIR, targetDir, { recursive: true });
+
+  const code = await onboardCommand([targetDir, "--phase", "inventory", "--owner", "acme-corp", "--repo", "widget-fixture"], {
+    fs: realOnboardFsDeps,
+    gh: fixtureOnboardGhGateway(),
+    resolveOwnerRepo: () => {
+      throw new Error("--owner/--repo were both supplied — resolveOwnerRepo must never be called");
+    },
+  });
+
+  assert.equal(code, 0);
+  const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
+  assert.match(printed, /rmd onboard .* --phase inventory/);
+  assert.match(printed, /target: acme-corp\/widget-fixture/);
+  assert.match(printed, /languages: /);
+  assert.match(printed, /build systems: /);
+  assert.match(printed, /CI systems: /);
+  assert.match(printed, /docs: /);
+  assert.match(printed, /test signals: /);
+  assert.match(printed, /github: exists=true defaultBranch=main branchProtected=true openIssues=3 milestones=1/);
+  assert.match(printed, /wrote .*inventory\.json/);
+  assert.ok(existsSync(join(targetDir, "plan", "onboarding", "inventory.json")));
+});
+
+test("onboardCommand: owner/repo omitted falls through to the injected resolveOwnerRepo (auto-detection), not a hardcoded default", async (t) => {
+  const logSpy = t.mock.method(console, "log", () => {});
+  const targetDir = mkdtempSync(join(tmpdir(), "rmd-onboard-cmd-resolve-"));
+  cpSync(ONBOARD_FIXTURE_REPO_DIR, targetDir, { recursive: true });
+  let sawTargetDir: string | undefined;
+
+  const code = await onboardCommand([targetDir, "--phase", "inventory"], {
+    fs: realOnboardFsDeps,
+    gh: fixtureOnboardGhGateway(),
+    resolveOwnerRepo: (dir) => {
+      sawTargetDir = dir;
+      return { owner: "resolved-org", repo: "resolved-repo" };
+    },
+  });
+
+  assert.equal(code, 0);
+  assert.equal(sawTargetDir, targetDir);
+  const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
+  assert.match(printed, /target: resolved-org\/resolved-repo/);
+});
+
+// ── main()'s CLI dispatch: `cmd === "onboard"` must actually route to onboardCommand (not
+// just exist as a registry entry — help-registry.test.ts already proves the latter, statically,
+// without ever running main()). Same throwing-process.exit-mock shape wipe-test.test.ts's
+// callMain() uses, duplicated locally rather than imported so this file doesn't reach into
+// another test file's helper.
+class OnboardProcessExitCalled extends Error {
+  constructor(public code: number | undefined) {
+    super(`process.exit(${code})`);
+  }
+}
+
+test("main(): `rmd onboard` with no target-dir dispatches to onboardCommand and exits 2 (fail loud, no fs/gh work)", async (t) => {
+  const exitMock = ((code?: number): never => {
+    throw new OnboardProcessExitCalled(code);
+  }) as typeof process.exit;
+  t.mock.method(process, "exit", exitMock);
+  const errSpy = t.mock.method(console, "error", () => {});
+  t.mock.method(console, "log", () => {});
+
+  const originalArgv = process.argv;
+  process.argv = ["node", "run-task.js", "onboard"];
+  const originalGuardEnv = process.env[SELF_SYNC_GUARD_ENV];
+  process.env[SELF_SYNC_GUARD_ENV] = "1";
+  try {
+    let caught: unknown;
+    await main().catch((e) => {
+      caught = e;
+    });
+    assert.ok(caught instanceof OnboardProcessExitCalled, "main() must reach process.exit via onboardCommand's return value");
+    assert.equal((caught as OnboardProcessExitCalled).code, 2);
+    assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /<target-dir> is required/);
+  } finally {
+    process.argv = originalArgv;
+    if (originalGuardEnv === undefined) {
+      delete process.env[SELF_SYNC_GUARD_ENV];
+    } else {
+      process.env[SELF_SYNC_GUARD_ENV] = originalGuardEnv;
+    }
+  }
 });

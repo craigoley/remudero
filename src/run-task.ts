@@ -26,7 +26,16 @@ export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
 import type { Tier, TierDetection } from "./lib/tier.js";
 import { buildProjectInit, parseProjectInitArgs } from "./lib/project-init.js";
-import { OnboardError, parseOnboardArgs, realOnboardFsDeps, realOnboardGhGateway, resolveTargetOwnerRepo, runOnboardInventory } from "./lib/onboard/inventory.js";
+import {
+  OnboardError,
+  parseOnboardArgs,
+  realOnboardFsDeps,
+  realOnboardGhGateway,
+  resolveTargetOwnerRepo,
+  runOnboardInventory,
+  type OnboardFsDeps,
+  type OnboardGhGateway,
+} from "./lib/onboard/inventory.js";
 import {
   applyCuratedSelection,
   buildRundown,
@@ -7654,7 +7663,19 @@ async function projectCommand(rest: string[]): Promise<number> {
  * ({@link resolveTargetOwnerRepo}) — unresolved leaves every GitHub fact `"unknown"` rather
  * than guessing an owner/repo to query.
  */
-async function onboardCommand(rest: string[]): Promise<number> {
+interface OnboardCommandDeps {
+  fs?: OnboardFsDeps;
+  gh?: OnboardGhGateway;
+  resolveOwnerRepo?: typeof resolveTargetOwnerRepo;
+}
+
+export async function onboardCommand(rest: string[], deps: OnboardCommandDeps = {}): Promise<number> {
+  const { fs: fsDep, gh: ghDep, resolveOwnerRepo } = {
+    fs: realOnboardFsDeps,
+    gh: realOnboardGhGateway(),
+    resolveOwnerRepo: resolveTargetOwnerRepo,
+    ...deps,
+  };
   const parsed = parseOnboardArgs(rest);
   if (!parsed.ok) {
     console.error(parsed.error + "\n" + USAGE);
@@ -7662,13 +7683,13 @@ async function onboardCommand(rest: string[]): Promise<number> {
   }
   const { targetDir, owner: ownerFlag, repo: repoFlag } = parsed.args;
 
-  const resolved = ownerFlag && repoFlag ? undefined : resolveTargetOwnerRepo(targetDir);
+  const resolved = ownerFlag && repoFlag ? undefined : resolveOwnerRepo(targetDir);
   const owner = ownerFlag ?? resolved?.owner;
   const repo = repoFlag ?? resolved?.repo;
 
   let inventory, writtenPath;
   try {
-    ({ inventory, writtenPath } = runOnboardInventory(targetDir, { owner, repo }, { fs: realOnboardFsDeps, gh: realOnboardGhGateway() }));
+    ({ inventory, writtenPath } = runOnboardInventory(targetDir, { owner, repo }, { fs: fsDep, gh: ghDep }));
   } catch (e) {
     if (e instanceof OnboardError) {
       console.error(e.message);
@@ -8230,7 +8251,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   });
 }
 
-export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, retroCommand, initCommand, projectCommand, onboardCommand };
+export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, retroCommand, initCommand, projectCommand };
 // Exported for a behavioral test of the drain gateway-targeting fix (W1-T53): drainCommand's
 // injectable deps (config/planPath/skipGitSync/githubFactory) let a test prove `--repo` scopes
 // the merged-status gateway to the NAMED repo, not a hardcoded literal — logic unchanged, export

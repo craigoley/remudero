@@ -206,15 +206,21 @@ export interface OnboardGhGateway {
   milestoneCount(owner: string, repo: string): Known<number>;
 }
 
+/** Injectable stand-in for the raw `gh api <args>` invocation — mirrors `opts.exec` on
+ *  `ghGateway()` in status.ts (W1-T119): real callers omit it and get the actual
+ *  `execFileSync("gh", ["api", ...args], ...)` call; unit tests inject a fake that returns
+ *  canned JSON or throws a `{stderr}`-shaped error to exercise the 404-vs-unknown split
+ *  deterministically, WITHOUT shelling out to a real `gh` binary or hitting the network. */
+export type GhExec = (args: string[]) => string;
+
+const defaultGhExec: GhExec = (args) => execFileSync("gh", ["api", ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
 /** `gh api <args>` -> parsed JSON, classifying the failure mode (HTTP status parsed off
  *  `gh`'s own "gh: <message> (HTTP <code>)" stderr format when present) so callers can
  *  tell a genuine 404 (knowable) apart from anything else (unknown). */
-function ghApiJson<T>(args: string[]): { ok: true; value: T } | { ok: false; httpStatus?: number } {
+function ghApiJson<T>(args: string[], exec: GhExec): { ok: true; value: T } | { ok: false; httpStatus?: number } {
   try {
-    const raw = execFileSync("gh", ["api", ...args], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const raw = exec(args);
     return { ok: true, value: JSON.parse(raw) as T };
   } catch (e) {
     const err = e as { stderr?: unknown; message?: string };
@@ -224,15 +230,15 @@ function ghApiJson<T>(args: string[]): { ok: true; value: T } | { ok: false; htt
   }
 }
 
-function ghRepoInfo(owner: string, repo: string): Known<RepoExistenceInfo> {
-  const r = ghApiJson<{ default_branch?: string }>([`repos/${owner}/${repo}`]);
+function ghRepoInfo(owner: string, repo: string, exec: GhExec): Known<RepoExistenceInfo> {
+  const r = ghApiJson<{ default_branch?: string }>([`repos/${owner}/${repo}`], exec);
   if (r.ok) return { known: true, value: { exists: true, defaultBranch: r.value.default_branch ?? "main" } };
   if (r.httpStatus === 404) return { known: true, value: { exists: false, defaultBranch: "" } };
   return { known: false };
 }
 
-function ghBranchProtection(owner: string, repo: string, branch: string): Known<boolean> {
-  const r = ghApiJson<unknown>([`repos/${owner}/${repo}/branches/${branch}/protection`]);
+function ghBranchProtection(owner: string, repo: string, branch: string, exec: GhExec): Known<boolean> {
+  const r = ghApiJson<unknown>([`repos/${owner}/${repo}/branches/${branch}/protection`], exec);
   if (r.ok) return { known: true, value: true };
   if (r.httpStatus === 404) return { known: true, value: false };
   return { known: false };
@@ -241,12 +247,9 @@ function ghBranchProtection(owner: string, repo: string, branch: string): Known<
 /** GitHub's issues-list endpoint returns pull requests too; filtered out exactly like
  *  issues-intake.ts's `normalizeIssue`/`ghIssueListGateway` (presence of `pull_request`
  *  regardless of value is the documented way to tell them apart). */
-function ghOpenIssueCount(owner: string, repo: string): Known<number> {
+function ghOpenIssueCount(owner: string, repo: string, exec: GhExec): Known<number> {
   try {
-    const raw = execFileSync("gh", ["api", `repos/${owner}/${repo}/issues?state=open`, "--paginate"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const raw = exec([`repos/${owner}/${repo}/issues?state=open`, "--paginate"]);
     const parsed = JSON.parse(raw) as unknown;
     const arr = Array.isArray(parsed) ? (parsed as Array<{ pull_request?: unknown }>) : [];
     return { known: true, value: arr.filter((i) => i.pull_request === undefined).length };
@@ -255,12 +258,9 @@ function ghOpenIssueCount(owner: string, repo: string): Known<number> {
   }
 }
 
-function ghMilestoneCount(owner: string, repo: string): Known<number> {
+function ghMilestoneCount(owner: string, repo: string, exec: GhExec): Known<number> {
   try {
-    const raw = execFileSync("gh", ["api", `repos/${owner}/${repo}/milestones`, "--paginate"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const raw = exec([`repos/${owner}/${repo}/milestones`, "--paginate"]);
     const parsed = JSON.parse(raw) as unknown;
     return { known: true, value: Array.isArray(parsed) ? parsed.length : 0 };
   } catch {
@@ -268,13 +268,15 @@ function ghMilestoneCount(owner: string, repo: string): Known<number> {
   }
 }
 
-/** Real gateway — `gh api`, never Octokit (matches ops.ts/escalate.ts/status.ts/issues-intake.ts). */
-export function realOnboardGhGateway(): OnboardGhGateway {
+/** Real gateway — `gh api`, never Octokit (matches ops.ts/escalate.ts/status.ts/issues-intake.ts).
+ *  `opts.exec` is the same injectable seam as {@link GhExec} above — real callers omit it. */
+export function realOnboardGhGateway(opts: { exec?: GhExec } = {}): OnboardGhGateway {
+  const exec = opts.exec ?? defaultGhExec;
   return {
-    repoInfo: ghRepoInfo,
-    branchProtection: ghBranchProtection,
-    openIssueCount: ghOpenIssueCount,
-    milestoneCount: ghMilestoneCount,
+    repoInfo: (owner, repo) => ghRepoInfo(owner, repo, exec),
+    branchProtection: (owner, repo, branch) => ghBranchProtection(owner, repo, branch, exec),
+    openIssueCount: (owner, repo) => ghOpenIssueCount(owner, repo, exec),
+    milestoneCount: (owner, repo) => ghMilestoneCount(owner, repo, exec),
   };
 }
 
