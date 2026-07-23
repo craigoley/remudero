@@ -1,6 +1,6 @@
-import type { LayeredLearningsHomes } from "./learnings.js";
 import { loadLayeredLearningsForTaskFiles, renderMatchedLearnings, selectLearnings } from "./learnings.js";
 import { appendLedger } from "./ledger.js";
+import type { LayeredLearningsHomes } from "./learnings.js";
 import type { RunResult } from "./run-result.js";
 import type { ProofExecOutcome } from "./review.js";
 

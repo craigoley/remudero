@@ -5735,7 +5735,20 @@ async function fixCommand(rest: string[]): Promise<number> {
  * operator treats as signal; this command runs and ledgers exactly one pair per
  * invocation, by design (repeat it to accumulate pairs).
  */
-async function wipeTestCommand(rest: string[]): Promise<number> {
+export async function wipeTestCommand(
+  rest: string[],
+  deps: {
+    config?: Config;
+    /** Injectable dispatch — the real (default) is this module's own {@link runTask}. A
+     *  behavioral test swaps in a fake returning canned {@link RunResult}s so a `wipe-test`
+     *  invocation can be exercised end-to-end WITHOUT spawning two real workers. */
+    runTaskFn?: typeof runTask;
+    /** Injectable subprocess runner for the non-self clone/fetch step — same seam
+     *  `drainCommand`'s `githubFactory` provides for its own network calls. Default: the
+     *  real {@link execFileSync}. */
+    execFileSyncFn?: typeof execFileSync;
+  } = {},
+): Promise<number> {
   const taskId = rest[0];
   const badArg = unknownArgError("wipe-test", rest.slice(1), ["--repo"], ["--allow-non-sandbox"]);
   if (!taskId || badArg) {
@@ -5751,7 +5764,9 @@ async function wipeTestCommand(rest: string[]): Promise<number> {
   }
   const { repo } = resolved.target;
 
-  const config = loadConfig();
+  const config = deps.config ?? loadConfig();
+  const runTaskFn = deps.runTaskFn ?? runTask;
+  const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const self = resolveOwnerRepo();
   const isSelf = repo === self.repo;
@@ -5765,18 +5780,18 @@ async function wipeTestCommand(rest: string[]): Promise<number> {
     const repoDir = join(reposDir, repo);
     if (!existsSync(repoDir)) {
       mkdirSync(dirname(repoDir), { recursive: true });
-      execFileSync("gh", ["repo", "clone", `${self.owner}/${repo}`, repoDir], { stdio: "inherit" });
+      execFileSyncFn("gh", ["repo", "clone", `${self.owner}/${repo}`, repoDir], { stdio: "inherit" });
     } else {
-      execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
-      execFileSync("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
+      execFileSyncFn("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
+      execFileSyncFn("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
     }
   }
 
   const runId = `WIPETEST-${Date.now()}`;
   console.log(`### rmd wipe-test — ${taskId} on ${self.owner}/${repo}: arm A (learnings ON)`);
-  const rawArmA = await runTask(taskId, { planPath, config, skipGitSync: true });
+  const rawArmA = await runTaskFn(taskId, { planPath, config, skipGitSync: true });
   console.log(`### rmd wipe-test — ${taskId} on ${self.owner}/${repo}: arm B (learnings MASKED)`);
-  const rawArmB = await runTask(taskId, { planPath, config, skipGitSync: true, maskLearnings: true });
+  const rawArmB = await runTaskFn(taskId, { planPath, config, skipGitSync: true, maskLearnings: true });
 
   const ledgerLines = readLedgerLines(ledgerPath);
   const pair: WipeTestPair = {
@@ -7737,7 +7752,7 @@ function commandSyntax(name: string): string {
 }
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const [, , cmd, ...rest] = process.argv;
   const arg = rest[0];
   if (cmd === "--help" || cmd === "-h" || cmd === "help") {

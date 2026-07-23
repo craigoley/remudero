@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { LearningEntry } from "../src/lib/learnings.js";
+import type { Config } from "../src/lib/config.js";
+import type { RunResult } from "../src/lib/run-result.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import { main, wipeTestCommand } from "../src/run-task.js";
 import {
   aggregateWipeTestPairs,
   computeMatchedLearningsForArm,
   computeWipeTestDelta,
+  deriveWipeTestRunResult,
   ledgerWipeTestPair,
   resolveWipeTestTarget,
   WIPE_TEST_PAIR_STEP,
@@ -215,4 +219,228 @@ test("resolveWipeTestTarget: --repo remudero --allow-non-sandbox is honored (exp
 test("resolveWipeTestTarget: an explicit --repo naming the sandbox itself is never refused", () => {
   const resolved = resolveWipeTestTarget(["--repo", WIPE_TEST_SANDBOX_DEFAULT]);
   assert.ok("target" in resolved);
+});
+
+// ── deriveWipeTestRunResult: turn a real RunResult + the ledger into the richer shape
+// computeWipeTestDelta needs — best-effort glue the CLI path uses (module doc above). ──
+
+function realRunResult(over: Partial<RunResult>): RunResult {
+  return {
+    taskId: "W1-T86",
+    runId: "R-DERIVE",
+    merged: true,
+    costUsd: 1.25,
+    verdict: "merged",
+    ...over,
+  };
+}
+
+test("deriveWipeTestRunResult: sums num_turns over THIS run's own DONE_STEPS ledger lines, ignoring other run_ids", () => {
+  const result = realRunResult({ runId: "R-DERIVE" });
+  const ledgerLines = [
+    { run_id: "R-DERIVE", step: "recon.done", num_turns: 3 },
+    { run_id: "R-DERIVE", step: "implement.done", num_turns: 5 },
+    { run_id: "R-DERIVE", step: "implement.resumed", num_turns: 2 },
+    { run_id: "OTHER-RUN", step: "implement.done", num_turns: 99 }, // must NOT be summed in
+    { run_id: "R-DERIVE", step: "some.other.step", num_turns: 1000 }, // not a DONE step — ignored
+    { run_id: "R-DERIVE", step: "implement.done", num_turns: "not-a-number" }, // non-numeric — treated as 0
+  ];
+  const derived = deriveWipeTestRunResult(result, ledgerLines);
+  assert.equal(derived.taskId, "W1-T86");
+  assert.equal(derived.runId, "R-DERIVE");
+  assert.equal(derived.verdict, "merged");
+  assert.equal(derived.costUsd, 1.25);
+  assert.equal(derived.numTurns, 10, "3 + 5 + 2, other run_ids/non-DONE-steps/non-numeric turns excluded");
+});
+
+test("deriveWipeTestRunResult: counts fix.dispatch strikes task-scoped (by task_id, not run_id)", () => {
+  const result = realRunResult({ taskId: "W1-T86", runId: "R-DERIVE" });
+  const ledgerLines = [
+    { task_id: "W1-T86", step: "fix.dispatch", strike: 1 },
+    { task_id: "W1-T86", step: "fix.dispatch", strike: 2 },
+    { task_id: "W1-T86", step: "fix.dispatch", strike: "not-a-number" }, // not counted — strike must be a number
+    { task_id: "OTHER-TASK", step: "fix.dispatch", strike: 3 }, // different task — excluded
+    { task_id: "W1-T86", step: "recon.done" }, // wrong step — excluded
+  ];
+  const derived = deriveWipeTestRunResult(result, ledgerLines);
+  assert.equal(derived.strikes, 2);
+});
+
+test("deriveWipeTestRunResult: proofExec takes the LAST review.posted line for this task (current posted verdict wins)", () => {
+  const result = realRunResult({ taskId: "W1-T86" });
+  const ledgerLines = [
+    { task_id: "W1-T86", step: "review.posted", proof_exec: ["executed_fail"] },
+    { task_id: "OTHER-TASK", step: "review.posted", proof_exec: ["executed_pass", "executed_pass"] },
+    { task_id: "W1-T86", step: "review.posted", proof_exec: ["executed_pass", "not_executable"] },
+  ];
+  const derived = deriveWipeTestRunResult(result, ledgerLines);
+  assert.deepEqual(derived.proofExec, ["executed_pass", "not_executable"], "the LAST matching line wins, not the first");
+});
+
+test("deriveWipeTestRunResult: zero matching ledger lines yields zero turns, zero strikes, empty proofExec", () => {
+  const result = realRunResult({ taskId: "W1-T999", runId: "R-NONE" });
+  const derived = deriveWipeTestRunResult(result, []);
+  assert.equal(derived.numTurns, 0);
+  assert.equal(derived.strikes, 0);
+  assert.deepEqual(derived.proofExec, []);
+});
+
+// ── wipeTestCommand: the CLI glue (arg validation, sandbox refusal, non-self clone/fetch,
+// two dispatches via the injectable runTaskFn, then derive+ledger the pair). Real config root
+// under a tmp dir; runTaskFn/execFileSyncFn are injected so no worker actually spawns and no
+// subprocess actually runs (mirrors drainCommand's config/githubFactory injection seam). ──
+
+function wipeTestFixtureConfig(): Config {
+  return { claudeBin: "/bin/true", root: mkdtempSync(join(tmpdir(), "rmd-wipe-test-cmd-root-")) };
+}
+
+function fakeRunTaskFn(byArm: { A: RunResult; B: RunResult }): typeof import("../src/run-task.js").runTask {
+  let calls = 0;
+  return (async (_taskId: string, opts: { maskLearnings?: boolean } = {}) => {
+    calls++;
+    return opts.maskLearnings ? byArm.B : byArm.A;
+  }) as unknown as typeof import("../src/run-task.js").runTask;
+}
+
+test("wipeTestCommand: no task-id argument fails loud (exit 2), no config/dispatch touched", async () => {
+  const code = await wipeTestCommand([]);
+  assert.equal(code, 2);
+});
+
+test("wipeTestCommand: an unrecognized flag fails loud (exit 2)", async () => {
+  const code = await wipeTestCommand(["W1-T86", "--bogus-flag"]);
+  assert.equal(code, 2);
+});
+
+test("wipeTestCommand: a non-sandbox --repo without --allow-non-sandbox is refused (exit 2), never dispatches", async () => {
+  let dispatched = 0;
+  const code = await wipeTestCommand(["W1-T86", "--repo", "remudero"], {
+    config: wipeTestFixtureConfig(),
+    runTaskFn: (async () => {
+      dispatched++;
+      return realRunResult({});
+    }) as unknown as typeof import("../src/run-task.js").runTask,
+  });
+  assert.equal(code, 2);
+  assert.equal(dispatched, 0, "a refused target must never reach either arm's dispatch");
+});
+
+test("wipeTestCommand: self-target (--repo remudero) runs BOTH arms via runTaskFn and ledgers one wipetest.pair line", async () => {
+  const config = wipeTestFixtureConfig();
+  const armA = realRunResult({ taskId: "W1-T86", runId: "RUN-A", costUsd: 2, verdict: "merged" });
+  const armB = realRunResult({ taskId: "W1-T86", runId: "RUN-B", costUsd: 3, verdict: "merged" });
+  const seenMask: Array<boolean | undefined> = [];
+  const runTaskFn = (async (_taskId: string, opts: { maskLearnings?: boolean } = {}) => {
+    seenMask.push(opts.maskLearnings);
+    return opts.maskLearnings ? armB : armA;
+  }) as unknown as typeof import("../src/run-task.js").runTask;
+
+  const code = await wipeTestCommand(["W1-T86", "--repo", "remudero", "--allow-non-sandbox"], {
+    config,
+    runTaskFn,
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(seenMask, [undefined, true], "arm A dispatches unmasked, arm B dispatches with maskLearnings:true");
+
+  const ledgerLines = readLedgerLines(join(config.root, "state", "ledger.ndjson"));
+  const pairLines = ledgerLines.filter((l) => l.step === WIPE_TEST_PAIR_STEP && l.task_id === "W1-T86");
+  assert.equal(pairLines.length, 1, "exactly one wipetest.pair line ledgered for one invocation");
+  assert.equal(pairLines[0].verdict_a, "merged");
+  assert.equal(pairLines[0].verdict_b, "merged");
+});
+
+test("wipeTestCommand: a non-self target CLONES via execFileSyncFn when the repo dir does not yet exist", async () => {
+  const config = wipeTestFixtureConfig();
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  const execFileSyncFn = ((bin: string, args: string[]) => {
+    calls.push({ bin, args });
+    return Buffer.from("");
+  }) as unknown as typeof import("node:child_process").execFileSync;
+  const runTaskFn = fakeRunTaskFn({ A: realRunResult({ runId: "RA" }), B: realRunResult({ runId: "RB" }) });
+
+  const code = await wipeTestCommand(["W1-T86", "--repo", "wipe-test-fixture-repo", "--allow-non-sandbox"], {
+    config,
+    runTaskFn,
+    execFileSyncFn,
+  });
+
+  assert.equal(code, 0);
+  assert.equal(calls.length, 1, "a missing repo dir clones exactly once, never fetch+reset");
+  assert.equal(calls[0].bin, "gh");
+  assert.deepEqual(calls[0].args.slice(0, 2), ["repo", "clone"]);
+  assert.ok(!existsSync(join(config.root, "repos", "wipe-test-fixture-repo")), "the injected fake never actually clones anything to disk");
+});
+
+test("wipeTestCommand: a non-self target FETCH+RESETs via execFileSyncFn when the repo dir already exists", async () => {
+  const config = wipeTestFixtureConfig();
+  const repoDir = join(config.root, "repos", "wipe-test-fixture-repo-2");
+  mkdirSync(repoDir, { recursive: true });
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  const execFileSyncFn = ((bin: string, args: string[]) => {
+    calls.push({ bin, args });
+    return Buffer.from("");
+  }) as unknown as typeof import("node:child_process").execFileSync;
+  const runTaskFn = fakeRunTaskFn({ A: realRunResult({ runId: "RA2" }), B: realRunResult({ runId: "RB2" }) });
+
+  const code = await wipeTestCommand(["W1-T86", "--repo", "wipe-test-fixture-repo-2", "--allow-non-sandbox"], {
+    config,
+    runTaskFn,
+    execFileSyncFn,
+  });
+
+  assert.equal(code, 0);
+  assert.equal(calls.length, 2, "an existing repo dir fetches THEN resets, never clones");
+  assert.equal(calls[0].bin, "git");
+  assert.deepEqual(calls[0].args.slice(2, 4), ["fetch", "--quiet"]);
+  assert.equal(calls[1].bin, "git");
+  assert.deepEqual(calls[1].args.slice(2, 4), ["reset", "--hard"]);
+});
+
+test("wipeTestCommand: with `deps` omitted entirely, falls through to the REAL loadConfig() AND the REAL runTask default -- an unknown task id throws (selectTask) before any lock/spawn, never a network round-trip", async () => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-wipe-test-realhome-"));
+  const root = join(home, "remudero-root");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }), "utf8");
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    await assert.rejects(
+      () => wipeTestCommand(["W1-T-DOES-NOT-EXIST-99999", "--repo", "remudero", "--allow-non-sandbox"]),
+      /no task with id/,
+      "the REAL runTask (no injected runTaskFn) reads the REAL plan and refuses an unknown task id synchronously",
+    );
+  } finally {
+    process.env.HOME = originalHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// ── main()'s CLI dispatch: `cmd === "wipe-test"` must actually route to wipeTestCommand
+// (not just exist as a registry entry — help-registry.test.ts already proves the latter).
+// Driven through a REFUSED (non-sandbox, no --allow-non-sandbox) invocation so this reaches
+// wipeTestCommand's real refusal path and returns BEFORE any config/ledger/dispatch I/O —
+// same "fails loud before touching anything" shape every other dispatch test in this suite
+// relies on. process.exit is mocked (never actually exits the test process); process.argv is
+// restored in `finally` regardless of outcome.
+
+test("main(): `rmd wipe-test <id> --repo remudero` (no --allow-non-sandbox) dispatches to wipeTestCommand and exits 2", async (t) => {
+  const exitCalls: Array<number | undefined> = [];
+  const exitMock = ((code?: number): never => {
+    exitCalls.push(code);
+    return undefined as never;
+  }) as typeof process.exit;
+  t.mock.method(process, "exit", exitMock);
+  t.mock.method(console, "error", () => {});
+  t.mock.method(console, "log", () => {});
+
+  const originalArgv = process.argv;
+  process.argv = ["node", "run-task.js", "wipe-test", "W1-T86", "--repo", "remudero"];
+  try {
+    await main();
+  } finally {
+    process.argv = originalArgv;
+  }
+
+  assert.equal(exitCalls[0], 2, "the wipe-test dispatch branch is reached and propagates wipeTestCommand's refusal exit code");
 });
