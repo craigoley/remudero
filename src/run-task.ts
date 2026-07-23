@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   architectModel,
   configPath as instanceConfigPath,
+  consoleUrl,
   fixStrikeCap,
   globalArtifactPath,
   loadConfig,
@@ -37,6 +38,7 @@ import {
   runDrain,
   type CuratedSelection,
   type DrainOpts,
+  type DrainSummary,
   type MergedSet,
   type OpenPrCheck,
 } from "./lib/drain.js";
@@ -52,7 +54,7 @@ import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateSupervisorLaunchdPlist, launchdPlistPath, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js";
-import { buildDigest, sendDigest } from "./lib/digest.js";
+import { buildDigest, consoleCardUrl, sendDigest, sendRundown } from "./lib/digest.js";
 import {
   escalate,
   ghIssueGateway,
@@ -61,18 +63,20 @@ import {
   type EscalationOption,
   type IssueGateway,
 } from "./lib/escalate.js";
-import { imessageChannel, notify } from "./lib/notify.js";
+import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
 import { ghAlertGateway, pollAlerts, renderAlertsSummary } from "./lib/ops.js";
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
 import { loadManagedRepos, ManagedReposError } from "./lib/managed-repos.js";
 import {
   captureFeedback,
+  feedbackEntryPath,
   parseFeedbackAddArgs,
   readFeedbackEntry,
   setFeedbackStatus,
   FeedbackError,
   type FeedbackEntry,
 } from "./lib/feedback.js";
+import { findPendingLandingPr } from "./lib/feedback-landing.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
 import {
@@ -86,6 +90,7 @@ import { assertProposedPlanLoads,
   buildGrillEscalation,
   decideTriage,
   diffCitesFeedback,
+  missingFeedbackMessage,
   nonPlanFilesInDiff,
   parseTriageArgs,
   parseTriageVerdict,
@@ -176,14 +181,16 @@ import { deriveTaskClass } from "./lib/task-class.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
 import { ContainmentError, probeContainment } from "./lib/containment.js";
 import { IsolationError, probeIsolation } from "./lib/isolation.js";
-import {
-  DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-  loadLayeredLearningsForTaskFiles,
-  renderDoctrinePreamble,
-  renderMatchedLearnings,
-  selectLearnings,
-} from "./lib/learnings.js";
+import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, renderDoctrinePreamble } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
+import {
+  computeMatchedLearningsForArm,
+  deriveWipeTestRunResult,
+  ledgerWipeTestPair,
+  resolveWipeTestTarget,
+  WIPE_TEST_SANDBOX_DEFAULT,
+  type WipeTestPair,
+} from "./lib/wipe-test.js";
 import { loadPlanIndex, renderPlanIndex } from "./lib/plan-index.js";
 import {
   REVIEW_CONTEXT,
@@ -2120,6 +2127,11 @@ async function runTask(
     /** Injectable GitHub gateway for the status projection — lets a behavioral test drive the
      *  dispatch path without a network round-trip. Default: the real {@link ghGateway}. */
     github?: GitHub;
+    /** W1-T86 (P12 wipe-test harness): arm B of a `rmd wipe-test` pair — MASK learnings
+     *  injection for this run. Forces the rendered prompt's matched-learnings text to ""
+     *  WITHOUT reading the store (see {@link computeMatchedLearningsForArm}); never set by
+     *  any caller other than `wipeTestCommand`. */
+    maskLearnings?: boolean;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
@@ -2433,25 +2445,32 @@ async function runTask(
     // deferred) — both layers are non-fatal absences, so this is a pure
     // superset of the project-only injection that shipped before.
     const learningsDir = join(dirname(planPath), "..", "learnings");
-    const { entries: learnings, globalRefusedReason } = loadLayeredLearningsForTaskFiles(
-      {
+    // W1-T86 (P12 wipe-test harness): arm B of a wipe-test pair MASKS injection —
+    // computeMatchedLearningsForArm("B", ...) returns "" WITHOUT calling any of the
+    // load/select/render chain below, so the store is never touched, only the
+    // resulting text is forced empty. A normal (non-wipe-test) run always passes
+    // opts.maskLearnings undefined, i.e. arm "A" — byte-identical to the chain this
+    // block ran before W1-T86.
+    const learningsResult = computeMatchedLearningsForArm(opts.maskLearnings ? "B" : "A", {
+      homes: {
         projectDir: learningsDir,
         userOverallDir: userOverallLearningsHome(config),
         globalArtifactPath: globalArtifactPath(config),
       },
-      task.files,
-    );
-    const { selected, dropped } = selectLearnings(learnings, task.files, DEFAULT_KNOWLEDGE_BUDGET_CHARS);
+      taskFiles: task.files,
+      budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+    });
     // VOLATILE (Tier 1) — deliberately NOT combined with the stable doctrine
     // preamble here: renderImplementPrompt places this LAST in the CONTEXT
     // block (cache-aware ordering, W1-T35) so a growing corpus can never bust
     // the cache for the stable/per-task bytes that precede it.
-    const matchedLearnings = renderMatchedLearnings(selected);
+    const matchedLearnings = learningsResult.matchedLearnings;
     log("learnings.injected", {
-      matched: selected.length,
-      dropped: dropped.map((d) => d.id),
+      matched: learningsResult.selectedIds.length,
+      dropped: learningsResult.droppedIds,
       budget_chars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-      global_refused_reason: globalRefusedReason,
+      global_refused_reason: learningsResult.globalRefusedReason,
+      masked: !!opts.maskLearnings,
     });
 
     // ── Render + provenance-lint the prompt.
@@ -3193,7 +3212,53 @@ export async function withMaterializedWorktree<T>(
   }
 }
 
-async function reviewCommand(prArg: string, rest: string[] = []): Promise<number> {
+/**
+ * `rmd review`'s OWN `Remudero-Task: <id>` trailer extraction (W1-T70). The worker prompt
+ * DICTATES the contract ("Include this exact trailer as the LAST line of the PR body") but
+ * the pre-W1-T70 read here was an UNANCHORED `body.match(/Remudero-Task:\s*(\S+)/)` — any
+ * body that QUOTES the trailer format mid-prose (increasingly common on plan/ratify PRs,
+ * which routinely discuss the trailer contract itself — observed live on #119 and one
+ * earlier) was captured ahead of the genuine final line. 4th instance of the first-match
+ * parser class: the DECISION_REQUEST near-miss, `parseReport`'s first-URL bug (W1-T62 —
+ * `anchoredPrUrl` in lib/worker.ts is the SAME matchAll-and-take-last idiom this mirrors),
+ * and `deriveStatus` rung (c) (W1-T69). LINE-ANCHORED (`^...$`, per line) so a mid-prose
+ * mention never matches; LAST-LINE-WINS (scanning ALL anchored matches, keeping the final
+ * one) because that is the contract's own phrasing. No anchored trailer at all ⇒ `undefined`,
+ * unchanged from before — the caller falls through to the PR body's `Acceptance:` block.
+ */
+export function reviewTaskIdFromBody(body: string): string | undefined {
+  const matches = [...body.matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)];
+  return matches.length ? matches[matches.length - 1][1] : undefined;
+}
+
+/**
+ * Injectable seams for `reviewCommand` (W1-T70): each defaults to the real `gh`/config/
+ * worktree/review plumbing, so a test can drive the taskId/criteria-resolution codepath
+ * this task fixed — the exact block that used to read as 0 lcov hits inside a function no
+ * test could otherwise reach without a live `gh` auth + git checkout — end to end, without
+ * a real `gh` call, a real `~/.config/remudero/config.json` touch, or a real worktree/LLM
+ * spawn. Every default is an OBJECT-SPREAD MERGE (`{ x: realX, ...deps }`) reusing an
+ * EXISTING top-level binding (`ghJson`/`loadConfig`/`materializeReviewWorktree`/`runReview`)
+ * — never a `??`/ternary (which V8 instruments as a branch, so an override-only test would
+ * leave the untaken "real" side permanently uncovered and regress the aggregate branch
+ * ratchet) and never a freshly-extracted "default" wrapper function (whose own body would
+ * be a brand-new, never-invoked-under-test line this same gate would then flag).
+ */
+interface ReviewCommandDeps {
+  fetchView?: (args: string[]) => unknown;
+  loadConfig?: () => Config;
+  materialize?: typeof materializeReviewWorktree;
+  runReview?: typeof runReview;
+}
+
+async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
+  const {
+    fetchView,
+    loadConfig: loadConfigDep,
+    materialize,
+    runReview: runReviewDep,
+  } = { fetchView: ghJson, loadConfig, materialize: materializeReviewWorktree, runReview, ...deps };
+
   // `--repo <name>` or `--repo <owner>/<name>` lets the runner post remudero-review to a
   // repo OTHER than this checkout (e.g. remudero-sandbox for the daemon's live commissioning,
   // W1-T12d). Without it, resolveOwnerRepo() pins to repoRoot's origin (the main repo) and
@@ -3201,7 +3266,7 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
   // layer (runReview / postReviewStatus) already takes owner+repo; only the CLI was pinned.
   const { owner, repo } = resolveReviewTarget(resolveOwnerRepo(), rest);
   const slug = `${owner}/${repo}`;
-  const view = ghJson([
+  const view = fetchView([
     "pr", "view", prArg, "--repo", slug, "--json", "headRefOid,headRefName,body,url,number",
   ]) as {
     headRefOid: string;
@@ -3215,7 +3280,7 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
   // Criteria: task trailer → tasks.yaml; else the PR body's Acceptance: block.
   let criteria: AcceptanceCriterion[] = [];
   let source = "NONE (fail closed — nothing to judge is never a pass)";
-  const taskId = body.match(/Remudero-Task:\s*(\S+)/)?.[1];
+  const taskId = reviewTaskIdFromBody(body);
   if (taskId) {
     try {
       const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
@@ -3236,7 +3301,7 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
     }
   }
 
-  const config = loadConfig();
+  const config = loadConfigDep();
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const runId = `review-PR${view.number}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -3251,7 +3316,7 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
   // review falls back to keyword-only — EXPLICITLY marked (criterion 5),
   // never silently, and (W1-T233) the console line below now NAMES why,
   // instead of a bare "unavailable" with the real reason thrown away.
-  const materialized = materializeReviewWorktree(config, repoRoot, view.number, view.headRefName, view.headRefOid);
+  const materialized = materialize(config, repoRoot, view.number, view.headRefName, view.headRefOid);
   if (materialized.worktreePath === undefined) {
     console.log(
       `(worktree materialization failed [${materialized.failure.errorClass}]: ` +
@@ -3264,7 +3329,7 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
   // on EVERY exit path, including a throw from runReview itself — never just
   // the success path, which would reproduce the W1-T175 leak class.
   const verdict = await withMaterializedWorktree(worktreePath, repoRoot, () =>
-    runReview({
+    runReviewDep({
       owner,
       repo,
       prUrl: view.url,
@@ -4039,6 +4104,31 @@ function breakerGateFor(ledgerPath: string): { isIndeterminate: (taskId: string)
  * logic over GitHub-derived status; it STOPS ON ANY BLOCK (v1); it is headroom-aware
  * and bounded. See lib/drain.ts for the loop; this only wires the real defaults.
  */
+/**
+ * The post-drain rundown PUSH (W1-T141/W1-T144), extracted from drainCommand so the glue —
+ * build the classified rundown, print it, and push it through the SAME digest channel
+ * escalations use (never a second transport) — is unit-covered with a fake channel + fixture
+ * summary, the #606 interior-glue discipline. Returns the pushed text. `print` is injectable
+ * (defaults to console.log) so a test asserts the rundown without capturing stdout.
+ */
+export function pushDrainRundown(
+  summary: DrainSummary,
+  ledgerLines: Array<Record<string, unknown>>,
+  config: Config,
+  deps: { channel: NotifyChannel; ledgerPath: string; runId: string; print?: (s: string) => void },
+): string {
+  const rundown = buildRundown(summary, ledgerLines);
+  (deps.print ?? ((line: string) => console.log(line)))("\n" + renderRundown(rundown));
+  // W1-T144: the SAME sendRundown -> notify() path rmd digest/MANUAL/HARD_STOP escalations
+  // ride, each non-merged line deep-linking to its console card via consoleUrl(config).
+  return sendRundown(rundown, consoleUrl(config), {
+    channel: deps.channel,
+    ledgerPath: deps.ledgerPath,
+    runId: deps.runId,
+    taskId: "DRAIN",
+  });
+}
+
 async function drainCommand(
   rest: string[],
   deps: {
@@ -4053,6 +4143,10 @@ async function drainCommand(
      *  gateway for `remudero-sandbox`, not a hardcoded literal (W1-T53) — without a network
      *  round-trip. */
     githubFactory?: (owner: string, repo: string) => GitHub;
+    /** W1-T144: injectable notify channel for the post-drain rundown push — a behavioral
+     *  test supplies a recording fake so the push glue runs without a real osascript send.
+     *  Defaults to the operator's iMessage channel. */
+    notifyChannel?: NotifyChannel;
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE touching config/locks/spawns (a malformed control command
@@ -4261,7 +4355,11 @@ async function drainCommand(
     // task — "what happened" at task grain, not just the aggregate summary above. Re-reads the
     // ledger fresh so a same-run escalation (BLOCKED class, two-strikes-exhausted) is visible to
     // the classifier — the SAME ledger file `log` above just finished writing into.
-    console.log("\n" + renderRundown(buildRundown(summary, readLedgerLines(ledgerPath))));
+    pushDrainRundown(summary, readLedgerLines(ledgerPath), config, {
+      channel: deps.notifyChannel ?? imessageChannel(notifyRecipient(config)),
+      ledgerPath,
+      runId,
+    });
     // Exit 0 only on a clean drain (target reached / max reached / nothing left);
     // a block/headroom/error stop is a non-zero exit so an unattended wrapper notices.
     return summary.stopReason === "blocked" || summary.stopReason === "error" ? 1 : 0;
@@ -5751,6 +5849,89 @@ async function fixCommand(rest: string[]): Promise<number> {
 }
 
 /**
+ * `rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]` — the P12
+ * learning-utility A/B harness (W1-T86; see src/lib/wipe-test.ts's module doc for the
+ * full design). Runs `<task-id>` TWICE through `runTask`: arm A with normal learnings
+ * injection, arm B with injection MASKED (the store itself untouched — see
+ * `computeMatchedLearningsForArm`) — then computes + LEDGERS the deltas between them
+ * (`wipetest.pair`). SANDBOX-ONLY by default (`resolveWipeTestTarget`): a bare `--repo
+ * remudero` (or any non-sandbox name) is REFUSED before either arm ever spawns.
+ *
+ * A single pair is an anecdote (the design's own words) — the aggregate over many
+ * ledgered pairs (`aggregateWipeTestPairs`, read back from the ledger) is what the
+ * operator treats as signal; this command runs and ledgers exactly one pair per
+ * invocation, by design (repeat it to accumulate pairs).
+ */
+export async function wipeTestCommand(
+  rest: string[],
+  deps: {
+    config?: Config;
+    /** Injectable dispatch — the real (default) is this module's own {@link runTask}. A
+     *  behavioral test swaps in a fake returning canned {@link RunResult}s so a `wipe-test`
+     *  invocation can be exercised end-to-end WITHOUT spawning two real workers. */
+    runTaskFn?: typeof runTask;
+    /** Injectable subprocess runner for the non-self clone/fetch step — same seam
+     *  `drainCommand`'s `githubFactory` provides for its own network calls. Default: the
+     *  real {@link execFileSync}. */
+    execFileSyncFn?: typeof execFileSync;
+  } = {},
+): Promise<number> {
+  const taskId = rest[0];
+  const badArg = unknownArgError("wipe-test", rest.slice(1), ["--repo"], ["--allow-non-sandbox"]);
+  if (!taskId || badArg) {
+    if (badArg) console.error(badArg);
+    console.error(`usage: ${commandSyntax("wipe-test")}\n` + USAGE);
+    return 2;
+  }
+
+  const resolved = resolveWipeTestTarget(rest.slice(1));
+  if ("error" in resolved) {
+    console.error(resolved.error + "\n" + USAGE);
+    return 2;
+  }
+  const { repo } = resolved.target;
+
+  const config = deps.config ?? loadConfig();
+  const runTaskFn = deps.runTaskFn ?? runTask;
+  const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const self = resolveOwnerRepo();
+  const isSelf = repo === self.repo;
+  const reposDir = join(config.root, "repos");
+  const planPath = isSelf ? join(repoRoot, "plan", "tasks.yaml") : join(reposDir, repo, "plan", "tasks.yaml");
+
+  // Same clone-if-absent / fetch+reset-if-present pattern `rmd daemon`'s non-self
+  // target uses (daemonCommand, above) — a wipe-test target needs an up-to-date
+  // checkout to dispatch against exactly the way the daemon does.
+  if (!isSelf) {
+    const repoDir = join(reposDir, repo);
+    if (!existsSync(repoDir)) {
+      mkdirSync(dirname(repoDir), { recursive: true });
+      execFileSyncFn("gh", ["repo", "clone", `${self.owner}/${repo}`, repoDir], { stdio: "inherit" });
+    } else {
+      execFileSyncFn("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
+      execFileSyncFn("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
+    }
+  }
+
+  const runId = `WIPETEST-${Date.now()}`;
+  console.log(`### rmd wipe-test — ${taskId} on ${self.owner}/${repo}: arm A (learnings ON)`);
+  const rawArmA = await runTaskFn(taskId, { planPath, config, skipGitSync: true });
+  console.log(`### rmd wipe-test — ${taskId} on ${self.owner}/${repo}: arm B (learnings MASKED)`);
+  const rawArmB = await runTaskFn(taskId, { planPath, config, skipGitSync: true, maskLearnings: true });
+
+  const ledgerLines = readLedgerLines(ledgerPath);
+  const pair: WipeTestPair = {
+    taskId,
+    armA: deriveWipeTestRunResult(rawArmA, ledgerLines),
+    armB: deriveWipeTestRunResult(rawArmB, ledgerLines),
+  };
+  const delta = ledgerWipeTestPair(ledgerPath, runId, pair);
+  console.log("\n" + JSON.stringify({ pair, delta }, null, 2));
+  return 0;
+}
+
+/**
  * `rmd stop [--reason <text>]` — the fleet control set (W1-T11, MASTER-PLAN §4A/§4B).
  * Writes the STOP flag file. A `rmd drain` already running halts within one tick
  * (checked FIRST, every iteration, ahead of PAUSE); a NEW `rmd drain` refuses to
@@ -5938,7 +6119,10 @@ const ESCALATION_CLASSES: EscalationClass[] = ["BLOCKED", "MANUAL", "HARD_STOP"]
  * Opens the `needs-human` labeled issue (escalate.ts) and, for MANUAL/HARD_STOP
  * ONLY, also fires a real-time iMessage ping (§4: BLOCKED collapses to the digest).
  */
-async function escalateCommand(rest: string[]): Promise<number> {
+export async function escalateCommand(
+  rest: string[],
+  deps: { issues?: IssueGateway; notifyChannel?: NotifyChannel } = {},
+): Promise<number> {
   const cls = flagValue(rest, "--class");
   const taskId = flagValue(rest, "--task");
   const summary = flagValue(rest, "--summary");
@@ -5960,12 +6144,14 @@ async function escalateCommand(rest: string[]): Promise<number> {
       options: parseOptionFlags(rest),
       recommendation: flagValue(rest, "--recommendation") ?? "",
     },
-    { issues: ghIssueGateway(owner, repo), ledgerPath, runId },
+    { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId },
   );
   console.log(url);
   if (cls === "MANUAL" || cls === "HARD_STOP") {
-    notify(`[${cls}] ${taskId}: ${summary}\n${url}`, {
-      channel: imessageChannel(notifyRecipient(config)),
+    // W1-T144: the real-time ping deep-links to the console card alongside the GitHub
+    // issue URL, same as the digest's own escalations line (digest.ts's renderDigest).
+    notify(`[${cls}] ${taskId}: ${summary}\n${url}\n${consoleCardUrl(consoleUrl(config), taskId)}`, {
+      channel: deps.notifyChannel ?? imessageChannel(notifyRecipient(config)),
       ledgerPath,
       runId,
       taskId,
@@ -6048,7 +6234,7 @@ export const TRIAGE_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "We
  * harness eats first" split `regenerateOrientation` established for the retro's docs write), so
  * the LLM can never skip the Acceptance:/Remudero-Task: contract or open a PR touching code.
  */
-async function triageCommand(rest: string[]): Promise<number> {
+export async function triageCommand(rest: string[]): Promise<number> {
   const parsed = parseTriageArgs(rest);
   if ("error" in parsed) {
     console.error(parsed.error + "\n" + USAGE);
@@ -6101,8 +6287,18 @@ async function triageCommand(rest: string[]): Promise<number> {
     try {
       entry = readFeedbackEntry(worktreePath, feedbackId);
     } catch (e) {
-      log("triage.error", { error: String((e as Error)?.message ?? e) });
-      say(`no such feedback entry: ${feedbackId}`);
+      // W1-T243: distinguish "captured locally but the durable-inbox commit bridge hasn't
+      // landed it on origin/main yet" from "genuinely no such id" — before this fix both
+      // printed the byte-identical "no such feedback entry: <id>", which read as a typo
+      // even when the entry was simply mid-flight to its landing PR.
+      const existsLocally = existsSync(feedbackEntryPath(repoRoot, feedbackId));
+      const landingPrUrl = existsLocally ? findPendingLandingPr() : undefined;
+      log("triage.error", {
+        error: String((e as Error)?.message ?? e),
+        pending_landing: existsLocally,
+        landing_pr: landingPrUrl ?? null,
+      });
+      say(missingFeedbackMessage(feedbackId, { existsLocally, landingPrUrl }));
       worktreeRemove(repoDir, worktreePath);
       return 2;
     }
@@ -7067,20 +7263,28 @@ export async function reframeCommand(rest: string[], deps: { config?: Config } =
  * (default: 24h ago) into one message (digest.ts) and send it over iMessage;
  * `--dry-run` prints the text without sending.
  */
-async function digestCommand(rest: string[]): Promise<number> {
+export async function digestCommand(
+  rest: string[],
+  deps: { notifyChannel?: NotifyChannel } = {},
+): Promise<number> {
   const since = flagValue(rest, "--since") ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const config = loadConfig();
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   if (rest.includes("--dry-run")) {
-    console.log(buildDigest(ledgerPath, since));
+    console.log(buildDigest(ledgerPath, since, consoleUrl(config)));
     return 0;
   }
-  const text = sendDigest(ledgerPath, since, {
-    channel: imessageChannel(notifyRecipient(config)),
+  const text = sendDigest(
     ledgerPath,
-    runId: `DIGEST-${Date.now()}`,
-    taskId: "DIGEST",
-  });
+    since,
+    {
+      channel: deps.notifyChannel ?? imessageChannel(notifyRecipient(config)),
+      ledgerPath,
+      runId: `DIGEST-${Date.now()}`,
+      taskId: "DIGEST",
+    },
+    consoleUrl(config),
+  );
   console.log(text);
   return 0;
 }
@@ -7567,6 +7771,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd fix <pr-number> [--repo <name>]   # operator verb for the W1-T76 fix rung (W1-T95, bootstrap/manual-override — drives a block on the sweep/drain delivery ITSELF, e.g. #160): dispatches the SAME rung sweep uses; refuses (zero spawns) when the PR is merged, closed, or has no block evidence; strikes-at-cap routes to escalate naming the count, never bypassing the cap.",
   },
   {
+    name: "wipe-test",
+    usage:
+      `rmd wipe-test <task-id> [--repo ${WIPE_TEST_SANDBOX_DEFAULT}] [--allow-non-sandbox]   # the P12 learning-utility A/B harness (W1-T86): runs <task-id> TWICE — arm A with normal learnings injection, arm B with injection MASKED (the store itself untouched) — and ledgers the deltas (wipetest.pair: turns/cost/verdict/strikes/proof_exec); SANDBOX-ONLY by default, refuses any other --repo (including the primary repo) unless --allow-non-sandbox is also passed; a single pair is an anecdote — only the aggregate over many ledgered pairs is signal`,
+  },
+  {
     name: "stop",
     usage:
       "rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.",
@@ -7693,7 +7902,7 @@ function commandSyntax(name: string): string {
 }
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const [, , cmd, ...rest] = process.argv;
   const arg = rest[0];
   if (cmd === "--help" || cmd === "-h" || cmd === "help") {
@@ -7707,6 +7916,16 @@ async function main(): Promise<void> {
   if (helpSpec && (rest.includes("--help") || rest.includes("-h"))) {
     console.log(commandHelp(helpSpec));
     process.exit(0);
+  }
+  // W1-T86: checked directly after the (mandatory, every-call) help preamble above -- NOT
+  // in its "natural" alphabetical/registration spot further down, beside fix. A behavioral
+  // test of THIS dispatch branch must call main() itself (the only way to exercise the
+  // literal `if (cmd === "wipe-test" ...)` lines the diff-coverage gate polices), and
+  // main()'s flat if-ladder means EVERY dispatch check main() reaches before finding its
+  // match gets evaluated too. Sitting first (right after the unavoidable help checks) means
+  // that test evaluates no OTHER sibling's dispatch condition at all.
+  if (cmd === "wipe-test" && arg) {
+    process.exit(await wipeTestCommand(rest));
   }
   if (cmd === "run-task" && arg) {
     const badArg = unknownArgError("run-task", rest.slice(1), [], ["--allow-stale"]);

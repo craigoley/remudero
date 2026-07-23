@@ -40,6 +40,7 @@ All logic lives in TypeScript; `bin/rmd` is a thin `exec` wrapper into
 | `rmd serve [--port <n>] [--host <addr>]` | The operator console front door — see [The console](#the-console-what-it-binds-and-rotating-its-tokens) below. |
 | `rmd sweep [--repo <name>] [--dry-run]` | Level-triggered PR-pipeline reconciler: re-derives every open PR's disposition and takes the one gated action (arm merge, fix, close, or escalate). The daemon runs this every poll. |
 | `rmd fix <pr-number> [--repo <name>]` | Operator verb for the fix rung sweep uses — manual override to drive a stuck PR through the same fix path. |
+| `rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]` | The P12 learning-utility A/B harness: runs `<task-id>` twice — normal learnings injection vs masked — and ledgers the turn/cost/verdict/strike deltas. Sandbox-only by default; refuses any other `--repo` (including the primary repo) without `--allow-non-sandbox`. |
 | `rmd ops [--dry-run]` | Alert intake: polls code-scanning/Dependabot/secret-scanning alerts, escalates every new critical/high exactly once, captures a feedback entry per open alert. |
 | `rmd issues [--dry-run]` | Issues intake: polls open issues for every managed repo, captures a feedback entry per issue not already tracked. |
 | `rmd feedback <text...> [--attach <path-or-url>]... [--origin cli\|ui\|issue]` | Durable-inbox async capture: writes a `plan/feedback/<id>.yaml` entry with `status: new`. |

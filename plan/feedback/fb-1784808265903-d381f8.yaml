@@ -1,0 +1,32 @@
+id: fb-1784808265903-d381f8
+ts: 2026-07-23T12:04:25.903Z
+raw: "PROOF-EXECUTABILITY GATE — block prose-dialect proofs at authoring
+  (coordinates W1-T180, origin-class fb-1784732686356-8d739e; prevents the
+  W1-T86/PR #631 CAPPED class). ROOT CAUSE (fable): the review floor's
+  parseWhitelistedProof (src/lib/review.ts:540-574) accepts only executable
+  shapes — 'unit test: test/<f>.test.ts' (path RE :413), 'unit test: <literal
+  test-title substring>' (--test-name-pattern :516-522, regex-escaped so prose
+  matches zero titles), 'grep: <pat> in <path>' (path REQUIRED :446/:468).
+  task-linter.ts proofShapeViolations (:168-180) rejects only vibe proofs, so
+  prose sails through; 231/329 unit-test proofs in tasks.yaml are prose. FIX:
+  extract the parser (review.ts:390-574) into a pure src/lib/proof-dialect.ts
+  (re-exported), add proofExecutabilityViolations(task, strict) to
+  task-linter.ts — a proof is executable iff parseWhitelistedProof!=null AND
+  (name-form body has no ';' / newline / '->'); also block grep bodies starting
+  no/not/zero/never (absence claims false-verdict). Scope like headless-fitness
+  (verify:auto only). CI = BLOCK but scoped to changed-acceptance tasks via
+  lint-plan --base (ci.yml:370-401) so the 231 backlog isn't retro-broken;
+  dispatch assertLintClean = WARN (never freeze the queue). Migration incl.
+  W1-T86: plan-only PR rewriting its 3 proofs to 'unit test:
+  computeMatchedLearningsForArm' / 'unit test: WipeTestPair' / 'unit test:
+  without --allow-non-sandbox is REFUSED' (all VERIFIED to match real passing
+  test titles) — re-greens #631 deterministically. Test: W1-T86's prose strings
+  block under strict; path/name/grep-with-path accept; verify:human unaffected;
+  anti-drift property (linter accept-set subset of parseWhitelistedProof).
+  Files: task-linter.ts, proof-dialect.ts(new), run-task.ts(lintPlan strict
+  flag), test/task-linter.test.ts. Coordinate with W1-T180 (re-point its warn
+  criterion, don't duplicate)."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

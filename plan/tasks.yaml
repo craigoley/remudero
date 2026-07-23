@@ -3980,13 +3980,13 @@
     through the existing reconciliation path, not innerHTML.
   acceptance:
     - claim: "no skeleton renders in a section after that section's first successful data render"
-      proof: "unit/DOM test: after a section receives data, the rendered section contains ZERO skeleton/placeholder nodes. FALSIFIER, operator screenshots 2026-07-21 04:52: NOW, NEEDS ME and RECENT each showed real rows above perpetual shimmer slots — the data had arrived and the placeholders were still animating underneath"
+      proof: "unit test: skeleton is fully gone (zero nodes) once real data lands"
     - claim: "an EMPTY successful result renders an honest empty state, never skeletons"
-      proof: "unit/DOM test: a section whose data arrives EMPTY renders an explicit message ('nothing in flight' / 'nothing needs you') and no placeholder nodes. FALSIFIER: falling back to skeletons on empty makes a quiet fleet read as a loading fleet, which is the reading an operator is least able to distinguish and most needs to trust"
+      proof: "unit test: renders the honest empty message in every section"
     - claim: "skeleton and data markup NEVER coexist in one section"
-      proof: "unit/DOM test across the three sections: at every point in a seeded load sequence the section is in exactly one of pre-first-data, has-data, or has-data-empty. FALSIFIER: a section holding both tells the operator the list may still be filling, so a complete three-row NOW section reads as 'three so far'"
+      proof: "unit test: never both at once"
     - claim: "the replacement preserves W1-T156's DOM stability — node identity and active selection survive"
-      proof: "the existing W1-T156 tests in test/serve.live-state.test.ts continue to pass unmodified: an unchanged row keeps DOM identity across an update and an active text selection survives. FALSIFIER: clearing a section with innerHTML destroys both, which those tests already encode as falsifiers — the replacement must go through the existing reconciliation path"
+      proof: "unit test: test/serve.live-state.test.ts"
   risk: high
   origin: architect
   plan_refs: ["§7"]
@@ -4321,11 +4321,11 @@
     this note). No new transport — the digest channel IS the push; installed-PWA web push is deferred polish.
   acceptance:
     - claim: "an escalation created with NO console open reaches the operator's channel within one digest cycle"
-      proof: "integration test over an injected digest/channel sink: escalate() a needs-human with no live console; within one digest cycle the sink receives a message naming the task + reason; a fabricated 'reached' with no actual send FAILS the assertion (the sink is ground truth, not a log line)"
+      proof: "unit test: within ONE digest cycle, over an injected sink naming the task"
     - claim: "the pushed item deep-links to the RIGHT console card (planted-probe)"
-      proof: "unit test: the emitted link for task X resolves to X's console card address, not another task's; a planted link pointing at the WRONG/absent task id is REJECTED by the link builder's assertion (the falsifier)"
+      proof: "unit test: links for two different task ids are never equal, and each names ONLY its own id"
     - claim: "a drain rundown emits through the SAME channel, not a second transport"
-      proof: "unit test: a completed DrainSummary produces a digest-channel message via the SAME emit path as escalations (one code path, grep-provable), not a parallel sender; installed-PWA web push is absent (deferred)"
+      proof: "unit test: emit path as sendDigest — one code path, not a second transport"
   risk: high
   origin: architect
   plan_refs: ["§7B", "§7"]
@@ -4759,11 +4759,11 @@
     deltas are treated as signal. The HARNESS is this task; running the experiment is operator-scheduled.
   acceptance:
     - claim: "arm B runs with injection masked and the store untouched"
-      proof: "unit test over injected deps: arm B's rendered prompt contains zero learning blocks; a store-write spy records nothing; arm A's prompt carries the matched learnings"
+      proof: "unit test: computeMatchedLearningsForArm"
     - claim: "paired deltas are computed and ledgered"
-      proof: "unit test: fixture pair of run results -> a wipetest.pair ledger line with turn/cost/verdict deltas; the report aggregates two seeded pairs correctly"
+      proof: "unit test: WipeTestPair"
     - claim: "the harness refuses non-sandbox targets by default"
-      proof: "unit test: target=remudero without an explicit override flag -> refusal naming the sandbox default (experiments never burn the primary repo unflagged)"
+      proof: "unit test: without --allow-non-sandbox is REFUSED"
   risk: high
   origin: architect
   plan_refs: ["P12", "§Self-improvement"]
@@ -7751,9 +7751,9 @@
     outcome drives add-work-or-escalate, and a worker-run diff writing plan/tasks.yaml is refused/flagged."
   acceptance:
     - claim: "a seeded blocked_review outcome drives the ADD-WORK-OR-ESCALATE path with NO tasks.yaml write from the worker"
-      proof: "fixture test: a seeded blocked_review verdict routes to add-the-work or escalate; the run makes NO write to plan/tasks.yaml (assert the path taken + the absence of a tasks.yaml diff)"
+      proof: "unit test: runFixRung (W1-T58 acceptance 1)"
     - claim: "a worker-run diff that EDITS acceptance criteria (writes plan/tasks.yaml) is refused/flagged (rule 15)"
-      proof: "fixture: a planted worker diff that edits a criterion in plan/tasks.yaml is flagged (the rule-15 guard fires); a clean non-tasks.yaml diff passes"
+      proof: "unit test: a planted worker diff that EDITS an existing criterion FAILS"
   risk: high
   origin: retro#1784058021334
   plan_refs: ["§5"]

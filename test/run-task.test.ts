@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import {
+import { escalateCommand, digestCommand, pushDrainRundown,
   armAutoMerge,
   armFailureAction,
   buildSweepEffects,
@@ -28,6 +28,7 @@ import {
   materializeReviewWorktree,
   renderFixPrompt,
   reviewPostedDescription,
+  reviewTaskIdFromBody,
   resolveReviewTarget,
   withMaterializedWorktree,
   resolveDaemonTarget,
@@ -47,6 +48,7 @@ import {
   priorStrikesFor,
   currentStrikeRegimeFor,
   ghPrCreateFillCommand,
+  reviewCommand,
 } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import { judgeReview } from "../src/lib/review.js";
@@ -531,6 +533,98 @@ test("W1-T233: reviewPostedDescription leaves the summary UNCHANGED when the ver
 test("W1-T233: reviewPostedDescription leaves the summary UNCHANGED when there is no materialization failure at all (capped for an unrelated reason)", () => {
   const verdict = { summary: "remudero-review: CAPPED — 0/3 proofs executed", capped: true };
   assert.equal(reviewPostedDescription(verdict, undefined), "remudero-review: CAPPED — 0/3 proofs executed");
+});
+
+// W1-T70, 4th instance of the first-match parser class: `rmd review` used to
+// extract `Remudero-Task:` with an UNANCHORED, first-match regex, so a PR body
+// quoting the trailer format mid-prose (increasingly common on plan/ratify
+// PRs, which routinely discuss the trailer contract itself) was captured
+// ahead of the genuine, final trailer line. reviewTaskIdFromBody replaces it
+// with the W1-T62 discipline (anchoredPrUrl's idiom): line-anchored, last-
+// line-wins.
+test("W1-T70 (acceptance 1): a body quoting a valid-looking trailer mid-prose with the genuine trailer as the last line extracts the genuine id (the #119 shape)", () => {
+  const body = [
+    "## Summary",
+    "This PR files a plan task. Note the contract requires a line reading",
+    "'Remudero-Task: W1-T20c' as the final trailer, per the worker prompt.",
+    "",
+    "Remudero-Task: W1-T70",
+  ].join("\n");
+  assert.equal(reviewTaskIdFromBody(body), "W1-T70");
+});
+
+test("W1-T70 (acceptance 2): a body with ONLY mid-prose quotations (no anchored trailer line) extracts nothing", () => {
+  const body = [
+    "## Summary",
+    "The contract says to write 'Remudero-Task: W1-T20c' as the last line, but",
+    "this manual plan PR intentionally carries no trailer of its own.",
+  ].join("\n");
+  assert.equal(reviewTaskIdFromBody(body), undefined);
+});
+
+test("W1-T70 (acceptance 3): the plain contract case (trailer as the last line, nothing else mentioning it) is unchanged", () => {
+  const body = ["## Summary", "Implements the thing.", "", "Remudero-Task: W1-T1D"].join("\n");
+  assert.equal(reviewTaskIdFromBody(body), "W1-T1D");
+});
+
+test("W1-T70: multiple anchored trailer lines — the LAST one wins, per the contract's own phrasing", () => {
+  const body = ["Remudero-Task: W1-T1", "some notes", "Remudero-Task: W1-T2"].join("\n");
+  assert.equal(reviewTaskIdFromBody(body), "W1-T2");
+});
+
+test("W1-T70: a trailing-whitespace trailer line still matches (anchored on trimmed content, not exact EOL)", () => {
+  const body = "Remudero-Task: W1-T70   ";
+  assert.equal(reviewTaskIdFromBody(body), "W1-T70");
+});
+
+test("W1-T70: an empty body extracts nothing", () => {
+  assert.equal(reviewTaskIdFromBody(""), undefined);
+});
+
+// W1-T70 (end-to-end): `reviewCommand` itself is where the bug actually lived — the pure
+// `reviewTaskIdFromBody` fixture above proves the REGEX is right, but not that `rmd review`
+// ever calls it correctly. `reviewCommand`'s injectable `deps` (fetchView/loadConfig/
+// materialize/runReview) let this drive the REAL taskId/criteria-resolution codepath, the
+// ledger writes, and the console/override wiring downstream of it, without a live `gh` auth,
+// a real `~/.config/remudero/config.json` touch, or a worktree/LLM spawn.
+test("W1-T70 (end-to-end): reviewCommand resolves the LAST-LINE trailer id (not a mid-prose quote) and threads it to runReview's task.id and the ledger", async () => {
+  const body = [
+    "## Summary",
+    "This PR files a plan task. Note the contract requires a line reading",
+    "'Remudero-Task: W1-T20c' as the final trailer, per the worker prompt.",
+    "",
+    "Remudero-Task: W1-T70",
+  ].join("\n");
+  const configRoot = mkdtempSync(join(tmpdir(), "rmd-review-e2e-"));
+  const view = {
+    headRefOid: "deadbeefcafe",
+    headRefName: "run-W1-T70-e2e",
+    body,
+    url: "https://github.com/acme/remudero/pull/999",
+    number: 999,
+  };
+  let seenTaskId: string | undefined;
+  const exitCode = await reviewCommand("999", ["--override-capped-by", "op", "--override-capped-reason", "manual"], {
+    fetchView: () => view,
+    loadConfig: () => ({ claudeBin: "/bin/true", root: configRoot }) as Config,
+    materialize: () => ({
+      worktreePath: undefined,
+      failure: { errorClass: "fetch-failure", message: "e2e fixture: never actually attempted" },
+    }),
+    runReview: async (args) => {
+      seenTaskId = args.task.id;
+      return { ...fakeReview("success", []), capped: true };
+    },
+  });
+  // The genuine LAST line ("W1-T70"), never the mid-prose quotation ("W1-T20c").
+  assert.equal(seenTaskId, "W1-T70");
+  assert.equal(exitCode, 0);
+  const ledgerLines = readFileSync(join(configRoot, "state", "ledger.ndjson"), "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
+  const overrideLine = ledgerLines.find((l) => l.step === "automerge.capped_override_granted");
+  assert.equal(overrideLine?.task_id, "W1-T70");
 });
 
 test("W1-T233 (criterion 2): degradedReasonLedgerFields names the error class and message verbatim for the review.posted ledger line", () => {
@@ -3081,4 +3175,129 @@ test("buildSweepEffects.arm: the sweep's real arm wrapper reaches armAutoMerge (
     autoMergeArmed: false,
   } as never);
   rmSync(root, { recursive: true, force: true });
+});
+
+// ── pushDrainRundown: the extracted post-drain push glue (W1-T144, #606 discipline) ──
+
+test("pushDrainRundown builds the classified rundown, prints it, and pushes ONE message through the injected channel — each non-merged line carrying its console deep link", () => {
+  const sent: string[] = [];
+  const printed: string[] = [];
+  const channel = { send: (msg: string) => { sent.push(msg); return true; } };
+  const root = mkdtempSync(join(tmpdir(), "push-rundown-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  // A ledger line the classifier reads to mark W1-B escalated (BLOCKED) with its issue URL.
+  writeFileSync(
+    ledgerPath,
+    JSON.stringify({ step: "escalation.issue_opened", task_id: "W1-B", issue_url: "https://github.com/craigoley/remudero/issues/9", class: "BLOCKED" }) + "\n",
+  );
+  const summary = {
+    attempted: ["W1-A", "W1-B"],
+    merged: ["W1-A"],
+    stopReason: "blocked" as const,
+    costUsd: 1.25,
+    resumeCommand: "rmd drain",
+  };
+  const config = { root, consoleUrl: "http://100.64.1.2:4317" } as never;
+  try {
+    const text = pushDrainRundown(summary, [{ step: "escalation.issue_opened", task_id: "W1-B", issue_url: "https://github.com/craigoley/remudero/issues/9", class: "BLOCKED" }], config, {
+      channel: channel as never,
+      ledgerPath,
+      runId: "DRAIN-TEST",
+      print: (s) => { printed.push(s); },
+    });
+    assert.equal(sent.length, 1, "exactly ONE push through the channel — one transport, not two");
+    assert.equal(sent[0], text, "the returned text is exactly what was sent");
+    assert.ok(printed.length >= 1, "the rundown is also printed to the terminal");
+    // The deep link consoleUrl(config) + consoleCardUrl builds for the blocked task.
+    assert.match(text, /http:\/\/100\.64\.1\.2:4317\/#task=W1-B/, "the escalated line carries ITS OWN console deep link");
+    rmSync(root, { recursive: true, force: true });
+  } catch (e) {
+    rmSync(root, { recursive: true, force: true });
+    throw e;
+  }
+});
+
+// ── W1-T144: the three CLI command call-sites that thread the console URL, behaviorally ──
+// covered with a temp config root + a PATH-stubbed osascript so notify() is a no-op. An empty
+// plan reaches drainCommand's post-drain push WITHOUT spawning any worker.
+
+function withStubbedNotify<T>(fn: () => T): T {
+  const bin = mkdtempSync(join(tmpdir(), "osa-stub-"));
+  writeFileSync(join(bin, "osascript"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    return fn();
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+  }
+}
+
+test("drainCommand (W1-T144): a completed drain over an empty plan reaches the post-drain rundown push — the pushDrainRundown call site executes, no worker spawned", async () => {
+  const config = { claudeBin: "/bin/true", root: mkdtempSync(join(tmpdir(), "rmd-drain-push-")), consoleUrl: "http://100.64.1.2:4317" } as Config;
+  const planPath = join(mkdtempSync(join(tmpdir(), "rmd-drain-push-plan-")), "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const sent: string[] = [];
+  const code = await drainCommand([], {
+    config, planPath, skipGitSync: true, githubFactory: () => OFFLINE_GITHUB,
+    notifyChannel: { send: (m: string) => { sent.push(m); return true; } } as never,
+  });
+  assert.equal(code, 0, "an empty plan is a clean drain (nothing runnable) — exit 0, and the rundown push ran");
+  assert.equal(sent.length, 1, "the post-drain rundown pushed exactly once through the injected channel");
+  rmSync(config.root, { recursive: true, force: true });
+});
+
+test("digestCommand (W1-T144): --dry-run threads consoleUrl(config) into buildDigest and prints", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-digest-"));
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "state", "ledger.ndjson"), "");
+  const oldHome = process.env.HOME;
+  const home = mkdtempSync(join(tmpdir(), "rmd-digest-home-"));
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root, consoleUrl: "http://100.64.1.2:4317" }));
+  process.env.HOME = home;
+  try {
+    const sent: string[] = [];
+    const chan = { send: (m: string) => { sent.push(m); return true; } } as never;
+    const dry = await digestCommand(["--dry-run"], { notifyChannel: chan });
+    assert.equal(dry, 0, "--dry-run prints buildDigest with the console URL, sends nothing");
+    const code = await digestCommand([], { notifyChannel: chan });
+    assert.equal(sent.length, 1, "the real digest send threads consoleUrl through the injected channel");
+    assert.equal(code, 0);
+  } finally {
+    process.env.HOME = oldHome;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("escalateCommand (W1-T144): a MANUAL escalation's real-time ping threads the console deep link (notify no-op via stub), issue open is best-effort", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-esc-"));
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "state", "ledger.ndjson"), "");
+  const oldHome = process.env.HOME;
+  const home = mkdtempSync(join(tmpdir(), "rmd-esc-home-"));
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root, consoleUrl: "http://100.64.1.2:4317" }));
+  process.env.HOME = home;
+  try {
+    // gh issue open will fail offline; the console-link ping line executes before/around it.
+    // The assertion is that the command runs its console-threading path without throwing here.
+    const sent: string[] = [];
+    const code = await escalateCommand(
+      ["--class", "MANUAL", "--task", "W1-TX", "--summary", "probe", "--option", "fix-it|do the fix", "--recommendation", "fix-it"],
+      {
+        issues: { create: () => "https://github.com/craigoley/remudero/issues/1" } as never,
+        notifyChannel: { send: (m: string) => { sent.push(m); return true; } } as never,
+      },
+    );
+    assert.equal(code, 0);
+    assert.equal(sent.length, 1, "the MANUAL ping fired once through the injected channel");
+    assert.match(sent[0], /#task=W1-TX/, "the ping carries the console deep link for the escalated task");
+  } finally {
+    process.env.HOME = oldHome;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
 });

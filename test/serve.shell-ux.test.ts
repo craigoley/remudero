@@ -334,14 +334,24 @@ test("W1-T222: a read-only bookmark's inline card renders NO write affordance (M
       const page = await openShell(base, token);
       try {
         await page.waitForFunction(() => (document.getElementById("needs-me-list")?.textContent ?? "").includes("needs a decision"));
+        // W1-T222 flake fix: the write-affordance is gated on the boot `/v1/auth/scope` probe,
+        // which resolves asynchronously. A card expanded BEFORE it resolves renders against
+        // hasWriteScope=false, so the write token's button was intermittently missing -- flaking
+        // this test (worse under --experimental-test-coverage's slower render) and blocking
+        // unrelated PRs. Wait for the probe-resolved marker so the expand always renders against
+        // the settled scope; the button state is then deterministic, no fixed timeout needed.
+        await page.waitForFunction(() => document.body.dataset.writeScopeResolved === "1");
         await page.click('#needs-me-list li[data-task-id="W1-T9"] .task-id');
         await page.waitForFunction(
           () => document.querySelector('#needs-me-list li[data-task-id="W1-T9"]')?.getAttribute("aria-expanded") === "true",
         );
         await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").length > 0);
-        // let any (wrongly-rendered) action button settle before checking for it.
-        await page.waitForTimeout(100);
-        return page.evaluate(
+        // TEARDOWN RACE FIX: `return await`, not a bare `return page.evaluate(...)`. Without the
+        // await, this try block returns the pending evaluate PROMISE, so the `finally` closes the
+        // context BEFORE the evaluate settles -> "Target page ... has been closed", intermittently
+        // (worse under CI/coverage load) failing this test and false-reddening unrelated PRs (#632,
+        // #645). The await makes the finally wait for the evaluate to resolve first.
+        return await page.evaluate(
           () => Array.from(document.querySelectorAll(".row-detail button")).some((b) => b.textContent?.trim() === "Mark handled"),
         );
       } finally {

@@ -73,6 +73,15 @@ export interface Config {
    * worker on the same branch). Optional; defaults to 2 — see {@link fixStrikeCap}.
    */
   fixStrikeCap?: number;
+  /**
+   * Base URL the operator console (`rmd serve`) is reachable at from wherever the
+   * operator reads their message channel (W1-T144 console push) — a tailnet/LAN
+   * address, since "localhost" resolves to nothing on the phone reading a pushed
+   * iMessage. Optional; defaults to `http://localhost:4317` (serve's own default
+   * port — see {@link consoleUrl}), correct only when the digest reader and the
+   * console share one machine.
+   */
+  consoleUrl?: string;
 }
 
 /**
@@ -160,6 +169,17 @@ export function architectModel(config: Config): string {
  */
 export function notifyRecipient(config: Config): string {
   return config.notifyRecipient ?? "craigoley@gmail.com";
+}
+
+/**
+ * Base URL for the operator console's deep links (W1-T144 console push — digest.ts's
+ * `consoleCardUrl`). Default `http://localhost:4317` (serve's own default port, see
+ * `rmd serve`'s help text); override via `consoleUrl` in config.json with a
+ * tailnet/LAN address so a pushed link actually resolves from wherever the message
+ * channel is read, not just from the machine running the console.
+ */
+export function consoleUrl(config: Config): string {
+  return config.consoleUrl ?? "http://localhost:4317";
 }
 
 /**
