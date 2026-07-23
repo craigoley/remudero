@@ -1,0 +1,23 @@
+id: fb-1784821500625-cdcf8b
+ts: 2026-07-23T15:45:00.625Z
+raw: "DIALECT PROOF TEST-NAME SUBSTRINGS ARE SILENTLY REGEX-ESCAPED — a 'unit
+  test: <name>' proof whose substring contains regex-special chars (. ( ) [ ]
+  etc.) is escaped by the review floor (the W1-T112 fix, to stop '[rmd,
+  digest]'-style character-class false-fails), so an author who writes '.' as a
+  wildcard or leaves the test's own parens in gets a LITERAL match that finds
+  nothing -> not_executable -> keyword-floor, and the proof silently never runs
+  (observed W1-T245/#651: 4/5 executed, the 5th used '.' to match the
+  test-name's parens and read not_executable). The escaping is correct but
+  INVISIBLE to the proof author, who has no signal that their substring won't
+  match. Need: (a) the proof-authoring guidance (triage/plan prompts + docs)
+  states that a test-name proof is matched as a LITERAL substring after escaping
+  — use plain prose from the test title, never regex metacharacters; (b)
+  consider a lint (rmd lint-plan) that, for each 'unit test: <name>' proof,
+  resolves the substring against the suite and WARNS when it matches zero or
+  many tests — turning a silent not_executable into a pre-merge signal. Adjacent
+  to fb-8d739e (prose proofs wall the floor) but distinct: this bites even a
+  well-intentioned executable-dialect proof."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
