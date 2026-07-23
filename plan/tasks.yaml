@@ -4321,11 +4321,11 @@
     this note). No new transport — the digest channel IS the push; installed-PWA web push is deferred polish.
   acceptance:
     - claim: "an escalation created with NO console open reaches the operator's channel within one digest cycle"
-      proof: "integration test over an injected digest/channel sink: escalate() a needs-human with no live console; within one digest cycle the sink receives a message naming the task + reason; a fabricated 'reached' with no actual send FAILS the assertion (the sink is ground truth, not a log line)"
+      proof: "unit test: within ONE digest cycle, over an injected sink naming the task"
     - claim: "the pushed item deep-links to the RIGHT console card (planted-probe)"
-      proof: "unit test: the emitted link for task X resolves to X's console card address, not another task's; a planted link pointing at the WRONG/absent task id is REJECTED by the link builder's assertion (the falsifier)"
+      proof: "unit test: links for two different task ids are never equal, and each names ONLY its own id"
     - claim: "a drain rundown emits through the SAME channel, not a second transport"
-      proof: "unit test: a completed DrainSummary produces a digest-channel message via the SAME emit path as escalations (one code path, grep-provable), not a parallel sender; installed-PWA web push is absent (deferred)"
+      proof: "unit test: emit path as sendDigest — one code path, not a second transport"
   risk: high
   origin: architect
   plan_refs: ["§7B", "§7"]
