@@ -308,3 +308,34 @@ test("HEALTH RETENTION — daemon.boot and deploy.* lines within the health wind
 test("DECISION_RELEVANT_LEDGER_STEPS includes daemon.boot", () => {
   assert.ok(DECISION_RELEVANT_LEDGER_STEPS.has("daemon.boot"));
 });
+
+// ── A torn/malformed ledger line (the live ledger IS rotation-damaged and can carry partial
+// writes) must not crash the rotation that reads it: parseLedgerLine falls back to { raw }, so
+// the line is treated as an undated, stepless record — never JSON.parsed twice, never thrown on —
+// and rotation still converges. Without the catch, one torn line would abort every rotation. ──
+test("MALFORMED LINE — a non-JSON ledger line does not break rotation; it is retained-or-shed as an opaque raw line and convergence still holds", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const ceiling = 6000;
+    const base = Date.now() - 3_600_000;
+
+    const lines: string[] = [];
+    for (let i = 0; i < 400; i++) lines.push(rawLine("run.start", `W1-BLOAT-${i}`, base + i));
+    // A torn write in the middle of the core: not valid JSON, no ts, no step.
+    lines.splice(200, 0, '{"ts":"2026-07-23T00:00:00.000Z","step":"run.start"'); // truncated — missing closing brace
+    writeFileSync(ledgerPath, lines.join("\n") + "\n");
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "sanity: padded past the ceiling");
+
+    // The rotation must not throw on the malformed line (this is the parseLedgerLine catch).
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling });
+    assert.equal(result.rotated, true, "rotation still runs to completion despite the torn line");
+    assert.equal(
+      ledgerExceedsRotationCeiling(ledgerPath, ceiling),
+      false,
+      "convergence invariant holds even with an unparseable line in the input",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
