@@ -128,6 +128,30 @@ export interface HealthResult {
   reason: string;
 }
 
+/**
+ * Count `daemon.boot` ledger lines timestamped strictly after `sinceMs`. Extracted as a
+ * standalone, exported, pure-over-the-file function (W1-T244) so a test can assert this
+ * reads IDENTICALLY before and after a ledger rotation — the false-negative that rolled
+ * back a healthy 7abe870 deploy at 00:19Z (feedback fb-1784769525147-13afc6) was exactly
+ * this read silently going to zero because `daemon.boot` wasn't retained across rotation;
+ * see `DECISION_RELEVANT_LEDGER_STEPS`'s companion health-window retention in ledger.ts.
+ * A raw substring/regex scan, not JSON.parse + `.step ===` — matches this file's own
+ * pre-existing read shape, kept unchanged by this extraction. Absent ledger ⇒ 0 boots.
+ */
+export function countLedgerBootsAfter(ledgerPath: string, sinceMs: number): number {
+  let n = 0;
+  try {
+    for (const line of readFileSync(ledgerPath, "utf8").split("\n")) {
+      if (!line.includes('"daemon.boot"') && !line.includes('"step":"daemon.boot"')) continue;
+      const m = line.match(/"ts":"([^"]+)"/);
+      if (m && Date.parse(m[1]) > sinceMs) n++;
+    }
+  } catch {
+    /* no ledger yet — 0 boots observed */
+  }
+  return n;
+}
+
 /** Healthy IFF a fresh boot was seen AND the daemon did not restart-storm. */
 export function assessBootHealth(i: HealthInputs, opts: HealthOpts = {}): HealthResult {
   const threshold = opts.crashThreshold ?? 3;
@@ -331,19 +355,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
   const windowMs = o.healthWindowMs ?? 45_000;
   const pollMs = o.healthPollMs ?? 3_000;
 
-  const countBootsAfter = (sinceMs: number): number => {
-    let n = 0;
-    try {
-      for (const line of readFileSync(o.ledgerPath, "utf8").split("\n")) {
-        if (!line.includes('"daemon.boot"') && !line.includes('"step":"daemon.boot"')) continue;
-        const m = line.match(/"ts":"([^"]+)"/);
-        if (m && Date.parse(m[1]) > sinceMs) n++;
-      }
-    } catch {
-      /* no ledger yet — 0 boots observed */
-    }
-    return n;
-  };
+  const countBootsAfter = (sinceMs: number): number => countLedgerBootsAfter(o.ledgerPath, sinceMs);
 
   return {
     log: o.log,

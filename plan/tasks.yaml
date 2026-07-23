@@ -4759,11 +4759,11 @@
     deltas are treated as signal. The HARNESS is this task; running the experiment is operator-scheduled.
   acceptance:
     - claim: "arm B runs with injection masked and the store untouched"
-      proof: "unit test over injected deps: arm B's rendered prompt contains zero learning blocks; a store-write spy records nothing; arm A's prompt carries the matched learnings"
+      proof: "unit test: computeMatchedLearningsForArm"
     - claim: "paired deltas are computed and ledgered"
-      proof: "unit test: fixture pair of run results -> a wipetest.pair ledger line with turn/cost/verdict deltas; the report aggregates two seeded pairs correctly"
+      proof: "unit test: WipeTestPair"
     - claim: "the harness refuses non-sandbox targets by default"
-      proof: "unit test: target=remudero without an explicit override flag -> refusal naming the sandbox default (experiments never burn the primary repo unflagged)"
+      proof: "unit test: without --allow-non-sandbox is REFUSED"
   risk: high
   origin: architect
   plan_refs: ["P12", "§Self-improvement"]

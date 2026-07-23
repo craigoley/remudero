@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { landFeedback, type LandFeedbackOpts } from "./feedback-landing.js";
 
 /**
  * `plan/feedback/` — the durable, diffable feedback inbox (MASTER-PLAN §7B, W1-T40).
@@ -13,11 +14,18 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
  * new|grilling|proposed|accepted|rejected, proposal_pr}`. Captured async by `rmd feedback`
  * (W1-T40); never lost in a chat scrollback." [MASTER-PLAN §7B]
  *
- * This module is the CAPTURE primitive only — plain filesystem I/O, no network, no LLM call,
- * so `rmd feedback` returns instantly and works offline. The INTAKE LOOP that reads this inbox
- * and moves entries through `grilling`/`proposed` (`rmd triage`, W1-T41) is a separate task; this
- * module exposes {@link setFeedbackStatus} as the write primitive that worker will call, but ships
- * no CLI surface for it — the inbox itself is browsable with plain `ls`/`cat`/`git diff` on
+ * This module's WRITE is plain filesystem I/O, no network, no LLM call — `rmd feedback`
+ * always returns instantly and always works offline; that promise never changes. What DOES
+ * follow the write, since W1-T243, is a best-effort attempt to LAND the entry onto
+ * `origin/main` (see {@link "./feedback-landing.js".landFeedback}) — without it, `rmd triage`
+ * (which deliberately reads from a fresh `origin/main` worktree, never a possibly-stale
+ * `repoRoot`) could never see a freshly captured entry until a human hand-landed it via a
+ * manual `git add`+commit+PR. Landing is swallowed on any failure (offline, no `gh`, no
+ * network) — the local write already IS the durable buffer; landing merely gets the entry to
+ * `origin/main` sooner. The INTAKE LOOP that reads this inbox and moves entries through
+ * `grilling`/`proposed` (`rmd triage`, W1-T41) is a separate task; this module exposes
+ * {@link setFeedbackStatus} as the write primitive that worker will call, but ships no CLI
+ * surface for it — the inbox itself is browsable with plain `ls`/`cat`/`git diff` on
  * `plan/feedback/*.yaml`, which is the point of "diffable" (no bespoke reader required).
  *
  * ONE FILE PER ENTRY (not one big YAML list): matches "one entry per item" literally, and keeps
@@ -194,13 +202,29 @@ export interface CaptureFeedbackOptions {
    * re-run's `existsSync` check on that exact path is the whole dedup mechanism — no second store.
    */
   id?: string;
+  /**
+   * W1-T243 test seam ONLY — passed through verbatim to {@link landFeedback} after the write.
+   * Real callers (the CLI, ops, issues-intake, panel routes) never set this, so they get the
+   * real `git`/`gh` landing attempt; a test can inject a fake `gh` here to exercise the bridge
+   * without hitting real GitHub, while the `git` half still runs for real against a local
+   * bare "origin".
+   */
+  land?: LandFeedbackOpts;
 }
 
 /**
  * Capture one feedback item: writes `plan/feedback/<id>.yaml` with `status: new`, copying any
- * local-path attachments alongside it. Synchronous filesystem I/O only — no network, no LLM —
- * so a headless `rmd feedback` call returns immediately (ASYNC CAPTURE: the operator is never
- * blocked waiting on triage, which runs later and separately, W1-T41).
+ * local-path attachments alongside it. The write itself is synchronous filesystem I/O only —
+ * no network, no LLM — so a headless `rmd feedback` call still returns effectively immediately
+ * (ASYNC CAPTURE: the operator is never blocked waiting on triage, which runs later and
+ * separately, W1-T41).
+ *
+ * Immediately after the write, this ALSO attempts to LAND the entry onto `origin/main` via the
+ * ONE choke point {@link landFeedback} (W1-T243) — every caller of this function inherits the
+ * bridge by construction, with no per-call-site wiring. Landing is best-effort and NEVER
+ * throws: a failure here (offline, no `gh`, no network) never fails the capture — the write
+ * above already is the durable record; landing merely gets it onto `origin/main` sooner so
+ * `rmd triage` can act on it without a human hand-landing it first.
  */
 export function captureFeedback(root: string, opts: CaptureFeedbackOptions): FeedbackEntry {
   const raw = opts.raw.trim();
@@ -224,6 +248,12 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
     proposal_pr: null,
   };
   writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
+  try {
+    landFeedback(root, opts.land ?? {});
+  } catch {
+    // landFeedback already swallows its own failures — this is a defensive second layer so
+    // NOTHING landing-related can ever turn a successful capture into a thrown error.
+  }
   return entry;
 }
 

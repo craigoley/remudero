@@ -135,6 +135,20 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  * not hardcoded" test re-derives the expected step set from the actual source of every
  * consumer file named above on every run and fails if this Set falls behind it again; treat
  * that test, not this comment, as the source of truth for completeness.
+ *
+ * W1-T244 (feedback fb-1784769525147-13afc6, OBSERVED LIVE 2026-07-23) ADDED "daemon.boot":
+ * `deployer.ts`'s `assessBootHealth` reads `daemon.boot` heartbeats straight off the ledger
+ * to decide whether a just-kickstarted deploy came up healthy — a boot line archived away
+ * mid-health-window reads as "never booted" and rolls back a perfectly healthy deploy (this
+ * happened for real: a healthy 7abe870 deploy was rolled back at 00:19Z on exactly this false
+ * negative). UNLIKE every other step above, `daemon.boot` (and every `deploy.*` step — see
+ * {@link isHealthOrDeployStep}, matched by prefix rather than enumerated here so a future
+ * `deploy.*` step is covered without another stale-list edit) is a HEALTH HEARTBEAT, not a
+ * one-shot decision: keeping every one forever is exactly the unbounded-retained-core growth
+ * this same task fixes (a restart-storm logs roughly one `daemon.boot` per minute — see
+ * escalate.ts's own observed 460-line/10-window incident). Both are therefore bounded by
+ * {@link HEALTH_STEP_RETENTION_WINDOW_MS} rather than kept unconditionally like the rest of
+ * this Set — see `rotateLedger`'s retention pipeline.
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
@@ -152,21 +166,41 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "dep-review.decided",
   "review.posted",
   "automerge.capped_override_granted",
+  "daemon.boot",
 ]);
 
-/** True iff `raw` parses as JSON with a `step` in {@link DECISION_RELEVANT_LEDGER_STEPS}. A
- *  torn (unparseable) line is never decision-relevant — same doctrine as readLedgerLines'
- *  own torn-line handling — but is never fabricated into a false positive either. */
-function isDecisionRelevantRawLine(raw: string): boolean {
-  const trimmed = raw.trim();
-  if (!trimmed) return false;
-  try {
-    const parsed = JSON.parse(trimmed) as { step?: unknown };
-    return typeof parsed.step === "string" && DECISION_RELEVANT_LEDGER_STEPS.has(parsed.step);
-  } catch {
-    return false;
-  }
+/** Steps matched by PREFIX rather than enumerated — currently only `deploy.*` (`deploy.skip`,
+ *  `deploy.pulled`, `deploy.kickstart`, `deploy.ok`, `deploy.unhealthy_rollback`, ... — see
+ *  deployer.ts's `runDeployCycle`). Prefix matching means a future `deploy.*` step is covered
+ *  automatically, the same "derived, not a stale hardcoded list" doctrine
+ *  {@link DECISION_RELEVANT_LEDGER_STEPS}'s own doc already applies to its enumerated steps. */
+const HEALTH_RELEVANT_LEDGER_STEP_PREFIXES: readonly string[] = ["deploy."];
+
+/** True for `daemon.boot` and any `deploy.*` step — W1-T244's health-window-bounded steps
+ *  (see {@link DECISION_RELEVANT_LEDGER_STEPS}'s doc for why these are NOT kept unconditionally
+ *  like the rest of the decision-relevant set). */
+function isHealthOrDeployStep(step: string): boolean {
+  return step === "daemon.boot" || HEALTH_RELEVANT_LEDGER_STEP_PREFIXES.some((prefix) => step.startsWith(prefix));
 }
+
+/** How far back (from `rotateLedger`'s own `now`) a health-window-bounded step survives.
+ *  Comfortably larger than any real health window in this codebase (deployer.ts's own default
+ *  `healthWindowMs` is 45s) so `assessBootHealth`/the W1-T215 boot-rate detector never lose a
+ *  line still inside their window, while still bounding a restart-storm's boot count (roughly
+ *  1/minute) to a small, ceiling-safe number instead of retaining it forever. */
+export const HEALTH_STEP_RETENTION_WINDOW_MS = 15 * 60 * 1000;
+
+/** Hard cap on how many lines of any single decision-relevant `step` `rotateLedger` retains,
+ *  EXCLUDING `sweep.disposed` (its own per-`pr@head` dedup below supersedes a flat count cap)
+ *  and the health-window-bounded steps above (already bounded by recency, not count). W1-T244:
+ *  the retained core is otherwise UNBOUNDED — every run appends more `run.start`/`pr.opened`/
+ *  etc., so over enough runs the core alone eventually exceeds the ceiling and every append
+ *  re-rotates forever (feedback fb-1784769525147-13afc6: 80+ archives, bursts of 12
+ *  rotations/second, observed live). Newest-N survive; older ones archive — a consumer here
+ *  (the dispatch breaker, sweep dedup, ...) only ever reads a task's RECENT history, never the
+ *  dawn of the ledger, so this is set generously above any realistic per-task line count
+ *  (default breaker thresholds are single digits) and only bites the pathological case. */
+export const MAX_RETAINED_LINES_PER_STEP = 200;
 
 /** Minimal fs surface {@link ledgerExceedsRotationCeiling}/{@link rotateLedger} need,
  *  injectable for the same reason {@link status.ts}'s `LedgerFsDeps` is: a test proves the
@@ -191,6 +225,30 @@ export function ledgerExceedsRotationCeiling(
 ): boolean {
   if (!fsDeps.existsSync(path)) return false;
   return fsDeps.statSize(path) > ceilingBytes;
+}
+
+/** One snapshot line, parsed ONCE and carried by reference through `rotateLedger`'s whole
+ *  retention pipeline (classify → health-window → sweep dedup → per-step cap → convergence
+ *  shed) so every pass can regroup/reorder freely and the final step still recovers original
+ *  file order by identity, without re-parsing or fuzzy-matching raw text back to a line. */
+interface ParsedLedgerLine {
+  raw: string;
+  json?: Record<string, unknown>;
+  step?: string;
+  /** `Date.parse(json.ts)` when `ts` is a valid ISO string; `undefined` otherwise — a line
+   *  with no parseable timestamp is never guessed at (see the health-window/shed passes). */
+  tsMs?: number;
+}
+
+function parseLedgerLine(raw: string): ParsedLedgerLine {
+  try {
+    const json = JSON.parse(raw.trim()) as Record<string, unknown>;
+    const step = typeof json.step === "string" ? json.step : undefined;
+    const tsMs = typeof json.ts === "string" ? Date.parse(json.ts) : NaN;
+    return { raw, json, step, tsMs: Number.isFinite(tsMs) ? tsMs : undefined };
+  } catch {
+    return { raw };
+  }
 }
 
 function readSyncRange(path: string, start: number, end: number): string {
@@ -281,21 +339,168 @@ export function rotateLedger(
   const archivePath = datedArchivePath(path, opts.now?.() ?? new Date());
   writeFileAtomic(archivePath, snapshot);
 
-  const keptLines: string[] = [];
+  // ONE clock read for the whole rotation — the health-window filter, the shed pointer's size
+  // estimate, and the shed pointer's actual `ts` all agree on the same instant.
+  const nowDate = opts.now?.() ?? new Date();
+  const nowMs = nowDate.getTime();
+  const nowIso = nowDate.toISOString();
   let archivedLineCount = 0;
-  for (const raw of snapshot.split("\n")) {
-    if (!raw.trim()) continue;
-    if (isDecisionRelevantRawLine(raw)) {
-      keptLines.push(raw);
+
+  // Parsed exactly once, in file order — every retention pass below tracks lines by object
+  // identity (never re-parses/re-matches raw text) so original order is always recoverable.
+  const originalOrder: ParsedLedgerLine[] = snapshot
+    .split("\n")
+    .filter((raw) => raw.trim() !== "")
+    .map(parseLedgerLine);
+
+  // ── PASS 1: classify — decision/health-relevant candidates vs pure noise (unchanged from
+  // W1-T209: a torn or non-decision-relevant line is archivable). ─────────────────────────
+  let candidates: ParsedLedgerLine[] = [];
+  for (const parsed of originalOrder) {
+    if (parsed.step && (DECISION_RELEVANT_LEDGER_STEPS.has(parsed.step) || isHealthOrDeployStep(parsed.step))) {
+      candidates.push(parsed);
     } else {
       archivedLineCount++;
     }
   }
 
+  // ── PASS 2: health-window bound — daemon.boot/deploy.* are heartbeats, not one-shot
+  // decisions; only the recent ones (see HEALTH_STEP_RETENTION_WINDOW_MS) are retained, so a
+  // restart-storm's boot spam cannot itself bloat the retained core (W1-T244). A line with no
+  // parseable `ts` is kept rather than guessed away — absence is never proof of staleness. ──
+  candidates = candidates.filter((p) => {
+    if (!p.step || !isHealthOrDeployStep(p.step)) return true;
+    if (p.tsMs === undefined) return true;
+    const withinWindow = nowMs - p.tsMs <= HEALTH_STEP_RETENTION_WINDOW_MS;
+    if (!withinWindow) archivedLineCount++;
+    return withinWindow;
+  });
+
+  // ── PASS 3: sweep.disposed dedup — keep the single ACTED:TRUE line per `pr@head` (the one
+  // line sweep's own idempotence dedup, priorActionsFromLedger, actually consults) if one
+  // exists, else the single most recent line for that key. Every other duplicate for the same
+  // key is a same-outcome re-poll with no decision consequence (W1-T244: this is the loudest
+  // real-world source of retained-core bloat — a still-open PR re-logs the same disposition on
+  // every sweep pass forever). ──────────────────────────────────────────────────────────────
+  const sweepGroups = new Map<string, ParsedLedgerLine[]>();
+  const nonSweepCandidates: ParsedLedgerLine[] = [];
+  for (const p of candidates) {
+    if (p.step === "sweep.disposed" && p.json) {
+      const prNumber = typeof p.json.pr_number === "number" ? p.json.pr_number : "?";
+      const headSha = typeof p.json.head_sha === "string" ? p.json.head_sha : "";
+      const key = `${prNumber}@${headSha}`;
+      const group = sweepGroups.get(key) ?? [];
+      group.push(p);
+      sweepGroups.set(key, group);
+    } else {
+      nonSweepCandidates.push(p);
+    }
+  }
+  const dedupedSweep: ParsedLedgerLine[] = [];
+  for (const group of sweepGroups.values()) {
+    const actedTrue = group.filter((p) => p.json?.acted === true);
+    // group is in file order (push preserves it); the LAST entry of whichever pool applies
+    // is the most recent — the acted:true evidence line if one exists, else the latest poll.
+    dedupedSweep.push(actedTrue.length > 0 ? actedTrue[actedTrue.length - 1] : group[group.length - 1]);
+    archivedLineCount += group.length - 1;
+  }
+  candidates = [...nonSweepCandidates, ...dedupedSweep];
+
+  // ── PASS 4: per-step count cap — bounds every OTHER decision-relevant step (run.start,
+  // pr.opened, ...) to the newest MAX_RETAINED_LINES_PER_STEP lines. W1-T244's root cause: this
+  // set is otherwise unbounded — every run appends more, so over enough runs the retained core
+  // alone eventually exceeds the ceiling and every append re-rotates forever. sweep.disposed
+  // (deduped above) and health/deploy steps (window-bounded above) already have their own
+  // bound and are excluded here. ────────────────────────────────────────────────────────────
+  const byStep = new Map<string, ParsedLedgerLine[]>();
+  for (const p of candidates) {
+    const key = p.step ?? "";
+    const group = byStep.get(key) ?? [];
+    group.push(p);
+    byStep.set(key, group);
+  }
+  const capped: ParsedLedgerLine[] = [];
+  for (const [step, group] of byStep.entries()) {
+    if (step === "sweep.disposed" || isHealthOrDeployStep(step) || group.length <= MAX_RETAINED_LINES_PER_STEP) {
+      capped.push(...group);
+      continue;
+    }
+    // group is in file order (chronological); drop the oldest excess, keep the newest cap.
+    const excess = group.length - MAX_RETAINED_LINES_PER_STEP;
+    archivedLineCount += excess;
+    capped.push(...group.slice(excess));
+  }
+
+  // Restore original file order — every pass above regrouped by key/step, losing it. Filtering
+  // `originalOrder` (parsed once, never cloned) by identity recovers it directly.
+  const survivors = new Set(capped);
+  let keptCandidates = originalOrder.filter((p) => survivors.has(p));
+
   // Catch-up: fold in anything appended to the live path since the snapshot above, so a
   // concurrent appendLedger call landing in that window is never silently dropped.
   const sizeNow = statSync(path).size;
   const tail = sizeNow > size0 ? readSyncRange(path, size0, sizeNow) : "";
+  const tailBytes = Buffer.byteLength(tail, "utf8");
+
+  let keptLines = keptCandidates.map((p) => p.raw);
+  let keptBytes = keptLines.length > 0 ? Buffer.byteLength(keptLines.join("\n") + "\n", "utf8") : 0;
+
+  // ── THE CONVERGENCE INVARIANT (W1-T244, feedback fb-1784769525147-13afc6 — OBSERVED LIVE
+  // 2026-07-23: the retained core alone exceeded the ceiling, so EVERY append re-rotated —
+  // 80+ archive files, bursts of 12 rotations/second, a truncated live ledger). Even after
+  // every bound above, the retained core CAN still exceed the ceiling (many concurrently
+  // in-flight tasks each within their own cap). Post-rotation, the live ledger MUST be
+  // strictly below the ceiling, or rotation cannot terminate — a rotation that cannot make
+  // live < ceiling is a bug, never a steady state. Shed the OLDEST retained lines (by `ts`;
+  // a consumer here only ever reads a task's RECENT history, never the dawn of the ledger) —
+  // never the newest — until the live file converges, and leave a single small pointer line
+  // behind naming the archive, rather than silently retaining an over-ceiling core in a loop. ─
+  let shedCount = 0;
+  if (keptBytes + tailBytes >= ceilingBytes) {
+    // Reserve room for the pointer line itself — sized against a worst-case shed_count
+    // (6 digits) so the one estimate covers any real run without re-measuring per victim.
+    const pointerBytes = Buffer.byteLength(
+      JSON.stringify({
+        ts: nowIso,
+        run_id: "ledger-rotation",
+        task_id: "_ledger",
+        step: "ledger.rotation_shed",
+        shed_count: 999999,
+        archive_path: archivePath,
+      }) + "\n",
+      "utf8",
+    );
+    // Shed down to a TARGET below the ceiling (not to the ceiling's edge) so the freshly
+    // converged live ledger has real headroom — otherwise the very next append could put it
+    // straight back over, forcing another rotation almost immediately. Still strictly enforces
+    // the invariant either way; this just makes "converged" mean something durable rather than
+    // a hair's-width pass.
+    const targetBytes = Math.floor(ceilingBytes * 0.9);
+    const byAge = [...keptCandidates].sort((a, b) => (a.tsMs ?? 0) - (b.tsMs ?? 0));
+    const stillKept = new Set(byAge);
+    for (const victim of byAge) {
+      if (keptBytes + tailBytes + pointerBytes < targetBytes) break;
+      stillKept.delete(victim);
+      keptBytes -= Buffer.byteLength(victim.raw + "\n", "utf8");
+      shedCount++;
+    }
+    keptCandidates = keptCandidates.filter((p) => stillKept.has(p));
+    keptLines = keptCandidates.map((p) => p.raw);
+  }
+
+  if (shedCount > 0) {
+    archivedLineCount += shedCount;
+    keptLines.push(
+      JSON.stringify({
+        ts: nowIso,
+        run_id: "ledger-rotation",
+        task_id: "_ledger",
+        step: "ledger.rotation_shed",
+        shed_count: shedCount,
+        archive_path: archivePath,
+      }),
+    );
+  }
 
   const newLiveContent = (keptLines.length > 0 ? keptLines.join("\n") + "\n" : "") + tail;
   writeFileAtomic(path, newLiveContent);
