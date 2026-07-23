@@ -1,0 +1,10 @@
+diff --git a/boundary-noreason.fxt b/boundary-noreason.fxt
+new file mode 100644
+--- /dev/null
++++ b/boundary-noreason.fxt
+@@ -0,0 +1,5 @@
++const q = 1;
++// diff-cov: process-boundary
++function reexec() {
++  process.exit(spawnSync(process.execPath, []).status);
++}

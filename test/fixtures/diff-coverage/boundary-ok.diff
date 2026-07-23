@@ -1,0 +1,15 @@
+diff --git a/boundary-ok.fxt b/boundary-ok.fxt
+new file mode 100644
+--- /dev/null
++++ b/boundary-ok.fxt
+@@ -0,0 +1,10 @@
++const x = 1;
++// diff-cov: process-boundary — re-exec cannot carry a DA hit without forking the suite
++function defaultReexec(env) {
++  const result = spawnSync(process.execPath, [env]);
++  if (result.error) {
++    console.error(result.error);
++    process.exit(1);
++  }
++  process.exit(result.status);
++}

@@ -1,0 +1,11 @@
+diff --git a/boundary-abuse.fxt b/boundary-abuse.fxt
+new file mode 100644
+--- /dev/null
++++ b/boundary-abuse.fxt
+@@ -0,0 +1,6 @@
++const y = 2;
++// diff-cov: process-boundary — trying to hide plain business logic
++function notABoundary(a) {
++  const z = a + 1;
++  return z * 2;
++}

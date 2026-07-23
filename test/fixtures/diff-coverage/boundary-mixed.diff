@@ -1,0 +1,12 @@
+diff --git a/boundary-mixed.fxt b/boundary-mixed.fxt
+new file mode 100644
+--- /dev/null
++++ b/boundary-mixed.fxt
+@@ -0,0 +1,7 @@
++// diff-cov: process-boundary — re-exec glue
++function reexec() {
++  process.exit(spawnSync(process.execPath, []).status);
++}
++function other(a) {
++  return uncoveredThing(a);
++}
