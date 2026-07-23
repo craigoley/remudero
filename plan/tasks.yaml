@@ -123,6 +123,80 @@
     Filing THIS task as a shard would have been self-parodying twice over: invisible to the synced drain
     AND sorted last. depends_on is empty because both prerequisites (W1-T60 sync, W1-T122 sharding) are
     long merged — this is a correctness fix to their intersection, not new capability."
+
+- id: W1-T246
+  title: "proof-dialect lint: a proof that cannot execute never lands (the dead proof floor, moratorium finding 9)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OBSERVED 2026-07-23 (W1-T79 / PR #662): remudero-review resolves a task's acceptance from
+    tasks.yaml and EXECUTES each `proof:` — but only the `unit test:`/`grep: … in …` dialect executes
+    (parseWhitelistedProof, src/lib/review.ts:559). W1-T79's four proofs are prose, so all four are
+    not_executable -> CAPPED 0/4, and the 0.6 keyword floor (review.ts:317) also redded state -> the PR
+    took a two-step manual rescue (operator --override-capped-by + hand-enriching the body to echo the
+    proof keywords). A worker PR cannot fix its own criteria (Standing rule 15, review.ts:989/2343) and no
+    machine emitter amends an existing proof, so it is operator-hand-only. CENSUS (parseWhitelistedProof
+    over the merged plan, 861 proofs): 45% cannot execute; 96 not-done tasks have ZERO executable proofs
+    and will CAP exactly like W1-T79; even post-sharding filings still leak 26% prose. W1-T79 is the tip.
+    ROOT: nothing at AUTHORING time knows the dialect exists — lintTask's proof-shape check
+    (src/lib/task-linter.ts:146) is only a vibe-phrase blocklist; a 200-token prose proof sails through
+    lint-plan, pre-dispatch, and the inbox draft rung alike."
+  design: |
+    THE FIX IS UPSTREAM, AT AUTHORING — not a third rescue lever on the review side (the 0.6 floor and the
+    CAPPED-is-not-FAIL split are working as designed on inputs that should never have existed; softening
+    either, or letting the override flip `state`, would let one flag both certify AND arm — the
+    self-certification hazard).
+    ADD a `proof-dialect` check to src/lib/task-linter.ts: for each non-`satisfied_by` criterion, a
+    violation iff `parseWhitelistedProof(proof) === null`. REUSE review.ts's exported parseWhitelistedProof
+    + isDialectPrefixed — ONE predicate, never a reimplementation (the linter stays pure; review.ts does no
+    module-scope I/O; run-task.ts already imports both in CI). The message must name the criterion index,
+    quote the proof head, and say WHY: dialect-prefixed-but-refused (e.g. `grep:` with no `in <path>`);
+    near-miss prefix (`unit tests:`/`unit test over`/`integration test:` -> "did you mean `unit test:`");
+    else "free prose — not executable". ALSO warn (never block) when a `unit test:` body is clearly not a
+    test-title substring (contains ` -> `, `; `, or >100 chars) — the W1-T79-criteria-3/4 runtime-no-match
+    shape.
+    SEVERITY PLUMBING (no silent caps anywhere): new LintOpts.proofDialect?: "block" | "warn", default
+    "block". lint-plan --base (CI, new/changed tasks only) and the inbox draft rung (lintDraftFragment ->
+    the redraft loop auto-fixes drafts before they land) use the default and BLOCK. assertLintClean at
+    run-task.ts:2244 passes "warn" — pre-dispatch must NOT brick the ~90-task legacy backlog into
+    blocked_illformed overnight; it logs the warn and dispatches. CI reds a hand-filed offender with the
+    named criteria; the review still caps exactly as today. planHealthSweep (retro.ts:672) needs NO change:
+    once the check blocks by default, every open offender is flagged and a corrective proposal auto-files
+    through the existing retro->inbox pipeline.
+    SUPERSEDES W1-T180's criterion 3 (a warn-only proof-parseability check folded into a two-concern task):
+    record that in W1-T180's note when this lands; W1-T180 keeps its remaining single concern.
+    SUCCESSOR (file separately, depends_on: [W1-T246]): a machine proof-REWRITE amendment that rides the
+    human-ratified `rmd approve` lane — the emitter deterministically asserts only `proof:` lines changed,
+    same criterion count, no `claim:`/`satisfied_by:` touched, and every new proof parses executable; the
+    human RATIFIED stamp stays the authorization (Standing rule 16, plan-only + human-ratified, which the
+    binding gate at review.ts:989 already permits) so rule 15 is undisturbed and a batch of ~40 offenders
+    is one stamp, not forty hand-edited PRs.
+    OUT OF SCOPE (file separately): planTasksCriterionFieldLines (review.ts:2328) matches only
+    plan/tasks.yaml, so a criterion edit inside a tasks.d/ shard is invisible to the rule-15 guard.
+  acceptance:
+    - claim: "a prose proof that cannot execute is a blocking lint violation at filing time, naming the criterion and why"
+      proof: "unit test: W1-T79 criterion-2 prose proof yields a blocking proof-dialect violation naming the criterion"
+    - claim: "a near-miss prefix (unit tests:/unit test over/grep: with no path) is caught with a corrective hint, and a well-formed unit test:/grep: proof passes clean"
+      proof: "unit test: a well-formed unit test: proof yields no proof-dialect violation"
+    - claim: "dispatch-time lint is warn-only — a legacy prose proof surfaces the warning but still returns ok, never blocking the backlog"
+      proof: "unit test: proofDialect warn mode returns ok true with the violation surfaced, never blocking"
+    - claim: "the check reuses review.ts's parseWhitelistedProof predicate, never a reimplementation that could drift from the executor"
+      proof: "grep: parseWhitelistedProof in src/lib/task-linter.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [src/lib/task-linter.ts, src/run-task.ts, test/task-linter.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-23 (fable-analyzed) from the W1-T79/PR #662 dead-proof-floor incident; cross-refs
+    moratorium finding 9 (#271), W1-T181, #123/#125. risk:high because it adds a BLOCKING check to the plan
+    lane (same regrade rationale as W1-T180). Near the front deliberately (file order IS drain priority):
+    it gates the certifiability of ~a third of the open queue. Its OWN proofs are executable dialect — it
+    must pass the very check it files. Single-concern: the machine proof-rewrite lane and the tasks.d
+    rule-15-blindness gap are noted as SEPARATE successor filings, not folded in."
 - id: W1-T230
   title: "the arm decision trusts the status channel, which is writable and proved decorative - it must key off the orchestrator's own ledgered verdict for the exact head SHA"
   repo: remudero
