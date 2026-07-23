@@ -78,6 +78,7 @@ import {
   parseProposalRegistry,
   pruneRatifiedProposals,
   refusalReason,
+  updateProposalRegistry,
   type DraftCache,
   type InboxClassification,
   type Proposal,
@@ -518,9 +519,22 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
       // classifyProposal) sees the corrected state too, not just this request's in-memory
       // override. A no-op write when nothing needs healing (the common, already-clean
       // path never touches disk).
-      const { proposals: healedProposals, prunedIds } = pruneRatifiedProposals(proposals, classifications);
+      //
+      // W1-T240: this route runs inside the long-lived serve daemon, so its heal write is
+      // one of FOUR independent read-modify-writers of this same file (the other three are
+      // `rmd inbox`/`rmd approve`/`rmd reframe`, run-task.ts) racing it with no mutual
+      // exclusion. Reapply the (already-derived, ledger-sourced) prunedIds set against a
+      // FRESH read under lock — never blind-write the `proposals` array this handler read
+      // at the top of the request, which a concurrent CLI writer could have changed by now
+      // — see lib/inbox.ts's `updateProposalRegistry` doc for the lost-update/torn-file
+      // hazard this guards against.
+      const { prunedIds } = pruneRatifiedProposals(proposals, classifications);
       if (prunedIds.length > 0) {
-        writeFileSync(registryPath, JSON.stringify({ proposals: healedProposals }, null, 2), "utf8");
+        const prunedIdSet = new Set(prunedIds);
+        updateProposalRegistry(registryPath, (current) => {
+          const fresh = current.filter((p) => !prunedIdSet.has(p.id));
+          return fresh.length === current.length ? null : fresh;
+        });
       }
       sendJson(res, 200, { ready, drafting });
     },

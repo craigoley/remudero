@@ -1,8 +1,17 @@
 import { execFileSync } from "node:child_process";
+// The DEFAULT export -- a plain, mutable object -- so a test's `t.mock.method` can
+// actually intercept the calls `updateProposalRegistry` makes (named bindings off
+// `node:fs` are non-configurable; mocking them throws "Cannot redefine property"
+// instead of installing a spy). Same import-shape comment as src/lib/worker.ts's
+// run.lock / src/lib/status.ts's projection cache, the two atomic-write precedents this
+// module's own registry writer mirrors.
+import fs from "node:fs";
+import { dirname } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
 import { parseTasksFromYaml, PlanError, unmetDependencies } from "./plan.js";
 import { lintPlan } from "./task-linter.js";
 import { appendLedger } from "./ledger.js";
+import { defaultIsPidAlive } from "./drain-lock.js";
 import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
 import { workerLedgerFields, type WorkerResult } from "./worker.js";
 
@@ -695,7 +704,9 @@ export function renderInboxPollSummary(s: InboxPollSummary): string {
   return `${s.ready} ready`;
 }
 
-// ── State-side registry shapes (harness reads/writes these; this module only types them) ──
+// ── State-side registry shapes (harness reads/writes these; this module types them AND,
+// as of W1-T240, owns the one real write-side helper every writer must share — see
+// updateProposalRegistry below) ─────────────────────────────────────────────────────────
 
 /** `<config.root>/state/inbox-proposals.json` — the ACTIVE-proposal registry. */
 export interface ProposalRegistry {
@@ -719,6 +730,150 @@ export function parseProposalRegistry(text: string | undefined): Proposal[] {
     return r.proposals as Proposal[];
   } catch {
     return [];
+  }
+}
+
+// ── W1-T240: the ONE registry-write helper every writer of state/inbox-proposals.json
+// goes through ─────────────────────────────────────────────────────────────────────────
+//
+// FOUR independent read-modify-write round trips on this file used to exist, each a
+// plain `readFileSync` + `JSON.parse` + `writeFileSync` with no mutual exclusion and no
+// atomicity: `rmd inbox`'s ratified-registry heal, `rmd approve`'s remove-on-ratify,
+// `rmd reframe`'s feedback write (all three run-task.ts), and the serve daemon's OWN
+// `GET /v1/inbox` heal (lib/panel-graph.ts) — the multi-writer path is genuine, not
+// theoretical, because `rmd serve` is a LONG-LIVED daemon, so any concurrent CLI
+// invocation overlaps it by construction. Two DIFFERENT failure modes result:
+//   - TORN FILE — a reader's `readFileSync` lands mid another writer's `writeFileSync`
+//     and observes a truncated/partial blob, which {@link parseProposalRegistry}'s
+//     deliberate fail-soft "malformed → []" discipline turns into a SILENT empty
+//     registry (every active proposal vanishes from `rmd inbox`), not a visible error.
+//   - LOST UPDATE — two updaters both read the same old content, both compute a new
+//     version from it, and whichever writes last wins outright, discarding the other's
+//     change (a pruned/consumed proposal resurrected, or a heal silently undone).
+//
+// {@link updateProposalRegistry} fixes both, and is the ONLY sanctioned way to write
+// this file (a fifth caller inherits the property by construction, never re-deriving
+// it): an O_EXCL lockfile (`${registryPath}.lock`) serializes every call against this
+// SAME path across every process that can write it — CLI invocations are independent OS
+// processes, so an in-process "single writer function" alone cannot prevent a lost
+// update between two of them; only a real inter-process lock can — and the write itself
+// lands via a sibling temp file + `renameSync` (POSIX rename is atomic on the same
+// filesystem, the SAME idiom already proven in this codebase at lib/status.ts's
+// projection cache, lib/worker.ts's run.lock, and lib/ledger.ts's rotation writer), so a
+// reader never observes a partial file. Unlike lib/drain-lock.ts / lib/inflight-lock.ts
+// (both "refuse immediately, a whole SECOND long-running process is the bug" guards),
+// a live holder of THIS lock is polled/retried up to `maxWaitMs` rather than refused —
+// every real critical section here is a synchronous JSON read-transform-write done in
+// microseconds, so a live holder means "wait a beat, it is about to release," not "a
+// second command must not run." A holder whose pid is already dead (a crash mid-update)
+// is reclaimed immediately via the same {@link defaultIsPidAlive} probe those two
+// modules use, so a crash never wedges the lock for the next caller.
+//
+// `update` receives a FRESH parse of whatever is on disk RIGHT NOW (read under the
+// lock), never a value some earlier, unlocked read produced — so a caller whose
+// intended change was computed against a possibly-stale snapshot (e.g. "drop this one
+// proposal id", or a ledger-derived set of ids to prune) still applies correctly
+// against the latest state. Returning `null` skips the write entirely (the common,
+// already-consistent case never touches disk).
+
+export interface UpdateProposalRegistryOpts {
+  /** Give up and throw if the lock can't be acquired within this long (ms). Default
+   *  2000 — every real critical section here is a synchronous JSON read-transform-
+   *  write, done in microseconds; a lock still held after 2s means a crashed holder
+   *  {@link defaultIsPidAlive} somehow missed, not real contention. */
+  maxWaitMs?: number;
+  /** Poll interval while a live holder is waited out (ms). Default 20. */
+  pollIntervalMs?: number;
+  /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */
+  isPidAlive?: (pid: number) => boolean;
+  /** Injectable blocking sleep (tests fake it to skip real delay). Default = a real,
+   *  busy-wait-free sleep (mirrors lib/deployer.ts's own injected-sleep discipline). */
+  sleep?: (ms: number) => void;
+}
+
+interface RegistryLockInfo {
+  pid: number;
+  startedAt: string;
+}
+
+function readRegistryLockInfo(lockPath: string): RegistryLockInfo | null {
+  try {
+    const o = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    if (typeof o?.pid === "number") return o as RegistryLockInfo;
+    return null;
+  } catch {
+    return null; // missing, unreadable, or garbage → no valid holder
+  }
+}
+
+function defaultRegistryLockSleep(ms: number): void {
+  execFileSync("sleep", [String(ms / 1000)]);
+}
+
+/**
+ * Read-modify-write `registryPath` (`state/inbox-proposals.json`), guarded end to end
+ * against the lost-update/torn-file hazard this section's header doc describes. `update`
+ * receives the CURRENT proposals (freshly re-read under the lock); returning the same
+ * reference or a shallow-equal-in-spirit `null` skips the write. Returns the array
+ * actually written, or `null` if nothing was.
+ */
+export function updateProposalRegistry(
+  registryPath: string,
+  update: (current: Proposal[]) => Proposal[] | null,
+  opts: UpdateProposalRegistryOpts = {},
+): Proposal[] | null {
+  const lockPath = `${registryPath}.lock`;
+  const maxWaitMs = opts.maxWaitMs ?? 2000;
+  const pollIntervalMs = opts.pollIntervalMs ?? 20;
+  const isAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  const sleep = opts.sleep ?? defaultRegistryLockSleep;
+  fs.mkdirSync(dirname(lockPath), { recursive: true });
+
+  const deadline = Date.now() + maxWaitMs;
+  for (;;) {
+    try {
+      // O_EXCL: create-or-fail, no TOCTOU gap — same discipline as acquireDrainLock /
+      // acquireInflightLock (lib/drain-lock.ts, lib/inflight-lock.ts).
+      const fd = fs.openSync(lockPath, "wx");
+      fs.writeSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+      fs.closeSync(fd);
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const held = readRegistryLockInfo(lockPath);
+      if (held && isAlive(held.pid)) {
+        if (Date.now() >= deadline) {
+          throw new Error(`updateProposalRegistry: timed out after ${maxWaitMs}ms waiting for ${lockPath} (held by pid ${held.pid})`);
+        }
+        sleep(pollIntervalMs);
+        continue;
+      }
+      try {
+        fs.unlinkSync(lockPath); // stale (dead pid / unreadable) — reclaim and retry
+      } catch {
+        // raced with another reclaimer between the read and the unlink; retry the create
+      }
+    }
+  }
+
+  try {
+    const current = parseProposalRegistry(fs.existsSync(registryPath) ? fs.readFileSync(registryPath, "utf8") : undefined);
+    const next = update(current);
+    if (next === null) return null;
+    // ATOMIC WRITE: sibling temp file + rename (see this section's header doc for the
+    // in-tree precedent this mirrors). Every call is a live `fs.` property lookup (never
+    // a destructured named import) so a test's `t.mock.method(fs, ...)` can intercept it —
+    // see this file's `import fs from "node:fs"` comment.
+    const tmpPath = `${registryPath}.tmp-${process.pid}-${Date.now()}`;
+    fs.writeFileSync(tmpPath, JSON.stringify({ proposals: next }, null, 2), "utf8");
+    fs.renameSync(tmpPath, registryPath);
+    return next;
+  } finally {
+    try {
+      fs.unlinkSync(lockPath);
+    } catch {
+      // already gone — idempotent
+    }
   }
 }
 

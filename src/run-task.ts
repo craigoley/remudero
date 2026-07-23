@@ -126,6 +126,7 @@ import {
   renderRatifyTelemetry,
   runDraftRung,
   summarizeInboxPoll,
+  updateProposalRegistry,
   type DraftAttemptCache,
   type DraftCache,
   type DraftRungOutcome,
@@ -134,6 +135,7 @@ import {
   type Proposal,
   type ReadinessContext,
   type RatifyGateway,
+  type ReframeResult,
 } from "./lib/inbox.js";
 import { parseUsage, type UsageSnapshot } from "./lib/headroom.js";
 import {
@@ -6576,7 +6578,7 @@ export function buildInboxDraftHook(
  * NOTE (W1-T192): the daemon's OWN per-poll draft rung ({@link buildInboxDraftHook}) is what
  * makes a draft exist without this command ever being invoked — see that function's doc.
  */
-async function inboxCommand(rest: string[]): Promise<number> {
+export async function inboxCommand(rest: string[], deps: { config?: Config } = {}): Promise<number> {
   const badArg = unknownArgError("inbox", rest, [], ["--dry-run"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -6584,7 +6586,7 @@ async function inboxCommand(rest: string[]): Promise<number> {
   }
   const dryRun = rest.includes("--dry-run");
 
-  const config = loadConfig();
+  const config = deps.config ?? loadConfig();
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const { owner, repo } = resolveOwnerRepo();
@@ -6649,9 +6651,19 @@ async function inboxCommand(rest: string[]): Promise<number> {
   // any proposal the ledger already ratified is pruned from the registry on THIS pass, the
   // same way approveCommand prunes the common (non-drifted) case, so the correction lands
   // on disk, not just in this run's in-memory classification.
-  const { proposals: healedProposals, prunedIds } = pruneRatifiedProposals(proposals, classifications);
+  const { prunedIds } = pruneRatifiedProposals(proposals, classifications);
   if (prunedIds.length > 0) {
-    writeFileSync(registryPath, JSON.stringify({ proposals: healedProposals }, null, 2), "utf8");
+    // W1-T240: reapply the (already-derived, ledger-sourced) prunedIds set against a
+    // FRESH read of the registry, under lock — never blind-write the `proposals` array
+    // this function read at the top, which a concurrent `rmd approve`/`rmd reframe`/the
+    // daemon's own `GET /v1/inbox` heal could have changed in the meantime. See
+    // lib/inbox.ts's `updateProposalRegistry` doc for the lost-update/torn-file hazard
+    // this guards against.
+    const prunedIdSet = new Set(prunedIds);
+    updateProposalRegistry(registryPath, (current) => {
+      const fresh = current.filter((p) => !prunedIdSet.has(p.id));
+      return fresh.length === current.length ? null : fresh;
+    });
     for (const id of prunedIds) log("inbox.registry_healed", { proposal_id: id });
   }
 
@@ -6711,7 +6723,7 @@ function loadProposalForRatify(
  * {@link approveProposal}; this command is the thin real-world glue (mirrors
  * `inboxCommand`/`planCommand`'s split).
  */
-async function approveCommand(rest: string[]): Promise<number> {
+export async function approveCommand(rest: string[], deps: { config?: Config; gateway?: RatifyGateway } = {}): Promise<number> {
   const proposalId = rest[0];
   const badArg = unknownArgError("approve", rest.slice(1), [], []);
   if (!proposalId || badArg) {
@@ -6719,13 +6731,13 @@ async function approveCommand(rest: string[]): Promise<number> {
     return 2;
   }
 
-  const config = loadConfig();
+  const config = deps.config ?? loadConfig();
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const { owner, repo } = resolveOwnerRepo();
 
-  const { proposal, proposals, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
+  const { proposal, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
   if (!proposal || !classification) {
     console.error(`rmd approve: unknown proposal '${proposalId}' — not in the ACTIVE registry (state/inbox-proposals.json)`);
     return 2;
@@ -6741,7 +6753,7 @@ async function approveCommand(rest: string[]): Promise<number> {
   // Acceptance-criteria auto-authorship below — the closure approach lets openPlanPr's
   // signature (part of the RatifyGateway interface other tests fake) stay unchanged.
   let filedTaskIds: string[] = [];
-  const gateway: RatifyGateway = {
+  const gateway: RatifyGateway = deps.gateway ?? {
     createRatificationBranch(payload) {
       repoDir = join(config.root, "repos", repo);
       if (!existsSync(repoDir)) {
@@ -6820,8 +6832,15 @@ async function approveCommand(rest: string[]): Promise<number> {
   // proposal as READY indefinitely. Mirrors reframeCommand's registry write below (5646+ in
   // this file): this proposal is no longer ACTIVE (see the Proposal interface's doc comment
   // in lib/inbox.ts), so it is removed rather than rewritten in place.
-  const nextProposals = proposals.filter((p) => p.id !== proposalId);
-  writeFileSync(registryPath, JSON.stringify({ proposals: nextProposals }, null, 2), "utf8");
+  // W1-T240: drop `proposalId` from a FRESH read of the registry under lock, never a
+  // stale in-memory array — a concurrent `rmd reframe`/the daemon's own heal write could
+  // have changed the file since `loadProposalForRatify` read it above. See
+  // lib/inbox.ts's `updateProposalRegistry` doc for the lost-update/torn-file hazard
+  // this guards against.
+  updateProposalRegistry(registryPath, (current) => {
+    const next = current.filter((p) => p.id !== proposalId);
+    return next.length === current.length ? null : next;
+  });
 
   if (!repoDir || !worktreePath) {
     // Unreachable in practice — the gateway above always sets these before returning a
@@ -6891,7 +6910,7 @@ async function approveCommand(rest: string[]): Promise<number> {
  * ratification, and opens no PR. State-side only (registry + draft cache + ledger); no
  * clone, no worktree, no `gh` call.
  */
-async function reframeCommand(rest: string[]): Promise<number> {
+export async function reframeCommand(rest: string[], deps: { config?: Config } = {}): Promise<number> {
   const proposalId = rest[0];
   const badArg = unknownArgError("reframe", rest.slice(1), ["--feedback"], []);
   if (!proposalId || badArg) {
@@ -6904,24 +6923,36 @@ async function reframeCommand(rest: string[]): Promise<number> {
     return 2;
   }
 
-  const config = loadConfig();
+  const config = deps.config ?? loadConfig();
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const { owner, repo } = resolveOwnerRepo();
 
   const registryPath = join(config.root, "state", "inbox-proposals.json");
-  const { proposal, proposals, drafts, draftsPath } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
+  const { proposal, drafts, draftsPath } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
   if (!proposal) {
     console.error(`rmd reframe: unknown proposal '${proposalId}' — not in the ACTIVE registry (${registryPath})`);
     return 2;
   }
 
   const runId = `REFRAME-${proposalId}-${Date.now()}`;
-  const result = reframeProposal(proposal, feedback, drafts, { ledgerPath, runId });
-
-  const nextProposals = proposals.map((p) => (p.id === proposalId ? result.proposal : p));
-  writeFileSync(registryPath, JSON.stringify({ proposals: nextProposals }, null, 2), "utf8");
-  writeFileSync(draftsPath, JSON.stringify(result.drafts, null, 2), "utf8");
+  // W1-T240: apply the reframe against a FRESH read of the registry, under lock — never
+  // the `proposal` `loadProposalForRatify` read above, which a concurrent `rmd approve`/
+  // another `rmd reframe`/the daemon's own heal write could have changed (or removed)
+  // since. See lib/inbox.ts's `updateProposalRegistry` doc for the lost-update/torn-file
+  // hazard this guards against.
+  let reframed: ReframeResult | undefined;
+  updateProposalRegistry(registryPath, (current) => {
+    const freshProposal = current.find((p) => p.id === proposalId);
+    if (!freshProposal) return null; // vanished concurrently — nothing left to reframe
+    reframed = reframeProposal(freshProposal, feedback, drafts, { ledgerPath, runId });
+    return current.map((p) => (p.id === proposalId ? reframed!.proposal : p));
+  });
+  if (!reframed) {
+    console.error(`rmd reframe: ${proposalId} was removed from the registry by a concurrent update — nothing to reframe`);
+    return 2;
+  }
+  writeFileSync(draftsPath, JSON.stringify(reframed.drafts, null, 2), "utf8");
 
   console.log(`rmd reframe: ${proposalId} — feedback ledgered, draft invalidated; the next \`rmd inbox\` pass will redraft with it.`);
   return 0;
@@ -7700,6 +7731,14 @@ export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, re
 // the merged-status gateway to the NAMED repo, not a hardcoded literal — logic unchanged, export
 // + injectable seams only (mirrors runTask's identical opts.github/skipGitSync escape hatch).
 export { drainCommand };
+// inboxCommand/approveCommand/reframeCommand are exported directly on their own `async
+// function` declarations above (not re-exported here) -- W1-T240's registry-lock fix added
+// their injectable `deps.config`/`deps.gateway` seams, which a behavioral test now drives
+// through the REAL command dispatch path (mirrors drainCommand's own config/githubFactory
+// escape hatch above); an `export { ... }` statement THIS FAR down the file sits past dead
+// code (the `if (process.argv[1] === ...)` guard just above, never true under `--test`) that
+// throws off this file's tsx/source-map line attribution for every statement after it, so a
+// re-export here would always read as 0-hit in lcov no matter how thoroughly it is tested.
 // Exported for a behavioral test of the retro no-op guard (W1-T64): commitsAhead is the predicate the
 // retro/implement no-op path branches on (=== 0 ⇒ nothing to PR). Logic UNCHANGED — export only.
 export { commitsAhead };
