@@ -580,7 +580,7 @@ test("W1-T223: a section's header summary NEVER disagrees with its own rows acro
     try {
       await page.waitForFunction(() => (document.getElementById("now-summary")?.textContent ?? "") !== "…");
       async function agrees() {
-        return page.evaluate(() => {
+        return await page.evaluate(() => {
           const summary = document.getElementById("now-summary")?.textContent ?? "";
           const rowCount = document.querySelectorAll("#now-list li[data-key]").length;
           const m = /^(\d+) running/.exec(summary);
