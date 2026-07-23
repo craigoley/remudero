@@ -425,3 +425,57 @@ test("W1-T184: a RECENT row carries the verb, task id AND title, a PR link with 
     }
   });
 });
+
+// ── W1-T144: the digest push's #task=<id> HASH deep-link opens the RIGHT card; a planted
+//   WRONG/absent id is REJECTED (opens nothing) — criterion 2's planted-probe, end-to-end.
+
+test("W1-T144: a #task=<id> hash deep-link opens that task's card inline (the digest console link resolving live), and a hashchange to a second id re-targets", async () => {
+  const root = tmpRoot();
+  await withShell(fixtureDeps(root), async (base) => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    try {
+      // The link consoleCardUrl builds: <base>/#task=<id>, on the operator's own token URL.
+      await page.goto(`${base}/?token=${READ_TOKEN}#task=W1-T2`);
+      await page.waitForFunction(() => !document.getElementById("top-status")?.textContent?.includes("loading"));
+      await page.waitForFunction(
+        () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')?.getAttribute("aria-expanded") === "true",
+        null,
+        { timeout: 5000 },
+      );
+      await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").includes("frobnicator"));
+      // A SECOND digest link tapped while the console is already open re-targets live.
+      await page.evaluate(() => { window.location.hash = "#task=W1-T1"; });
+      await page.waitForFunction(
+        () => document.querySelector('[data-task-id="W1-T1"]')?.getAttribute("aria-expanded") === "true",
+        null,
+        { timeout: 5000 },
+      );
+      const openCards = await page.evaluate(() => document.querySelectorAll(".row-detail").length);
+      assert.equal(openCards, 1, "exactly one card open — the re-targeted one, not both");
+    } finally {
+      await page.context().close();
+    }
+  });
+});
+
+test("W1-T144 planted-probe: a #task=<absent-id> hash deep-link is REJECTED — no card opens, no wrong row expands (the falsifier)", async () => {
+  const root = tmpRoot();
+  await withShell(fixtureDeps(root), async (base) => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    try {
+      await page.goto(`${base}/?token=${READ_TOKEN}#task=W1-DOES-NOT-EXIST`);
+      await page.waitForFunction(() => !document.getElementById("top-status")?.textContent?.includes("loading"));
+      // Let the board settle through a full paint so a real target WOULD have expanded by now.
+      await page.waitForFunction(() => (document.querySelector("#recent-list")?.textContent ?? "").includes("W1-T2"));
+      await page.waitForTimeout(500);
+      const openCards = await page.evaluate(() => document.querySelectorAll(".row-detail").length);
+      assert.equal(openCards, 0, "a hash id matching no row must open NOTHING — never a fabricated or wrong card");
+      const anyRowExpanded = await page.evaluate(() => document.querySelectorAll('li[data-task-id][aria-expanded="true"]').length);
+      assert.equal(anyRowExpanded, 0, "no TASK ROW is expanded by a planted absent id (section chevrons are unrelated)");
+    } finally {
+      await page.context().close();
+    }
+  });
+});
