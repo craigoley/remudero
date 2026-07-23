@@ -1,0 +1,45 @@
+id: fb-1784842083584-6cc22a
+ts: 2026-07-23T21:28:03.584Z
+raw: "STUCK-PR PARAMEDIC RUNG — the sweep polls every open PR but its action
+  vocabulary is {arm, direct-merge, close, escalate}: no REPAIR verbs, so any PR
+  whose blocker is not 'needs arming' becomes a needs-human escalation and
+  operator archaeology, and the fix rung's sole verb (re-run the worker) matches
+  almost none of the observed blockers. Observed 2026-07-22/23: ~15 PRs required
+  the operator to type the same recipe (review it, address issues, get to green,
+  ensure it merges, then fix the root cause). Every intervention was one of a
+  SMALL ENUMERABLE vocabulary, mostly already filed: (1) review absent on a
+  green head -> rmd review (built, the #586 lane); (2) flaky-gate red -> one
+  evidence-preserving whole-command re-run with a FLAKE-RETRY record
+  (fb-1784818107548-b32f2b); (3) branch behind main -> update-branch + review
+  re-post (fb-1784762629161-877362); (4) CAPPED with real tests added ->
+  auto-open the rule-15 split proof-rewrite plan PR (fb-1784823091102-09b4c6);
+  (5) keyword-floor unmet with features implemented -> report-substantiation
+  owned by the fix contract (fb-1784770758529-077129); (6) stale ci-gate
+  aggregate holding an old FAILURE with all members green -> re-aggregate
+  (observed on PR 634; this entry also files that class); (7) worker-authored
+  commit header commitlint-terminal -> harness-side range check/rewrite
+  (fb-1784770757962-ea42b0); (8) interrupted approve or lane step -> detect own
+  pushed branch and REST-complete (fb-1784841309112-63054e). NEED: a
+  level-triggered paramedic riding the sweep seam — for each open PR older than
+  a policy-data age (a P37 policy.yaml row), CLASSIFY the blocking surface from
+  evidence (checks x review status x mergeState x ledger verdict), DISPATCH the
+  matching repair with bounded attempts per PR and every action ledgered with
+  the named surface, RE-DISPOSITION, and escalate ONLY on vocabulary exhaustion,
+  naming the classified surface instead of 'needs a clarification'. SAFETY:
+  repairs never bypass gates — the review still judges, the W1-T230 attribution
+  withhold still governs completion, unattributed and hand PRs are repaired to
+  green+gated with the merge remaining the operator's until P41 rules otherwise,
+  and genuine merits or design blocks classify as OPERATOR-DECISION and render
+  as a decision card per fb-1784770111145-cf7c24. SECOND HALF, the operator's
+  standing recipe encoded: every paramedic repair AUTO-FILES root-cause feedback
+  naming the surface and evidence (the W1-T243 bridge lands it durably) — repair
+  the instance, file the class, so each manual category trends to zero.
+  SEQUENCING: core (classify+route) ships with verbs 1, 3, and 6 (existing
+  mechanics); remaining verbs attach as their filed specs build. SIBLING:
+  fb-1784756088300-6a481e — the reconciler closes stale escalations, the
+  paramedic prevents them by repairing instead of shouting; together they end
+  the operator-archaeology channel."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
