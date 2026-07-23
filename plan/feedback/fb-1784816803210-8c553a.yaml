@@ -1,0 +1,56 @@
+id: fb-1784816803210-8c553a
+ts: 2026-07-23T14:26:43.210Z
+raw: "PROOF-EXECUTABILITY: AUTHORING-TIME ROOT CAUSE (fable, supersedes/extends
+  fb-1784808265903-d381f8; the recurring CAP that blocked #631/#622/#635). SCALE
+  (measured via parseWhitelistedProof over the live plan): 369 non-executable
+  proofs across 183 open verify:auto tasks — 46% of all 856 proofs; 25+ distinct
+  unrecognized prefixes (integration test:, unit tests:, fixture test:, unit/DOM
+  test:, a test:, grep proof:, in-process test:...). This is not a 3-task
+  problem; essentially the whole open queue is in the CAP class and every new
+  task re-rolls the dice. ROOT CAUSE (primary=authoring): the dialect contract
+  is enforced at the LAST gate (review parseWhitelistedProof,
+  src/lib/review.ts:540/:420-421) and taught at NONE of the four authoring gates
+  — planArchitectPrompt (plan-architect.ts:180-207), the triage prompt
+  (triage.ts:70-180, ZERO occurrences of 'proof'), the inbox draft prompt
+  (inbox.ts:~480), the retro Architect (run-task.ts:3528ff) — none states what a
+  proof must look like; the implement-worker prompt (run-task.ts:1975-2004)
+  never says 'title your test so the proof body is a verbatim substring'.
+  Secondary: task-linter.ts proofShapeViolations (:168-180) blocks only 14 vibe
+  phrases, so prose-that-sounds-observable sails through lint+dispatch.
+  Tertiary: strict-prefix parser with silent degradation (isDialectPrefixed
+  false for 'fixture test:' → not even the floorDegraded flag fires). FIX
+  (long-term resolution, not late catch): (2a) one shared PROOF_AUTHORING_RULES
+  constant in the new src/lib/proof-dialect.ts, injected verbatim into all 4
+  authoring prompts + a worker-side titling sentence in renderImplementPrompt;
+  (2b) pre-emit self-check in plan-pr-emitter.ts (parse+lintTask the drafted
+  fragment BEFORE gh pr create, one bounded redraft on violation — mirrors the
+  W1-T136 acceptance-repair pass) so a machine author can never emit a
+  non-executable proof; (3) proofExecutabilityViolations(task, block|warn) in
+  task-linter.ts extending d381f8 with the UNRECOGNIZED_PREFIX_RE class (rule 1a
+  grep-without-in-path, 1b unrecognized-prefix — catches fixture test: — 1c bare
+  prose, 2 unit-test body with ;/->/newline, 3 absence-grep), scope verify:auto,
+  message names the fix; anti-drift property: linter accept-set ⊆
+  parseWhitelistedProof. WIRING (no new plumbing): CI=BLOCK already diff-scoped
+  to changedTaskIds (lint-plan --base, ci.yml/run-task.ts:3443-3511) so the 183
+  backlog is untouched; dispatch=WARN (assertLintClean, task-linter.ts:296) so
+  the queue never freezes. Parser aliasing: recommend NO in v1 (aliased prose
+  still zero-matches → not_executable; grows the contract surface). MIGRATION
+  (not mass-rewrite): diff-scoped-CI + retro plan-health sweep emits
+  'non-executable proofs among the next ~15 dispatchable' for the retro
+  Architect to rewrite front-of-queue each cycle (heals just ahead of the drain)
+  + touch-time ratchet. FILING: ONE new task covering 2a/2b/3/5, file in
+  plan/tasks.yaml near the queue front (NOT a tasks.d shard — shards sort last,
+  never reach the drain front, and this is what stops the next CAP); coordinate
+  with W1-T180 (re-point its proof-parseability WARN criterion to satisfied_by
+  this task, do not build twice); mark fb-d381f8 consumed by it. Files:
+  proof-dialect.ts(new), review.ts(re-export), task-linter.ts,
+  run-task.ts(lintPlan block/assertLintClean warn + prompts),
+  plan-architect.ts/triage.ts/inbox.ts(prompt inject),
+  plan-pr-emitter.ts(self-lint), retro.ts(sweep), test/task-linter.test.ts +
+  test/proof-dialect.test.ts. Regression fixtures = the 3 live failures
+  (W1-T86/W1-T200/W1-T58 proofs). Risk medium; single-concern per Rule 19 (split
+  emitter self-check if lint-plan flags the span)."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
