@@ -4,6 +4,7 @@ import { renderAlertsSummary, type AlertsPollSummary } from "./ops.js";
 import { renderIssuesSummary, type IssuesPollSummary } from "./issues-intake.js";
 import { renderInboxPollSummary, type InboxPollSummary } from "./inbox.js";
 import type { RundownLine } from "./drain.js";
+import type { LastSeenStore } from "./last-seen.js";
 
 /**
  * Daily digest (W1-T8 title; assembled here, delivered here, SCHEDULED by the
@@ -192,5 +193,62 @@ export function renderRundownPush(lines: RundownLine[], consoleBaseUrl: string):
 export function sendRundown(lines: RundownLine[], consoleBaseUrl: string, deps: NotifyDeps): string {
   const text = renderRundownPush(lines, consoleBaseUrl);
   notify(text, deps);
+  return text;
+}
+
+// ── W1-T163: the digest becomes MARKER-AWARE, sharing lib/last-seen.ts's per-token marker with
+// the console recap (lib/recap.ts) — so a pushed digest and a pulled recap, read off the SAME
+// token's SAME marker, cover the identical window: "push and pull tell ONE story." ────────────
+
+/** The digest's pre-marker default lookback (unchanged from before this feature existed) — used
+ *  ONLY the very first time a token is seen, so a first-ever digest for a token still reports
+ *  the last day rather than the entire ledger's history. Every later call reads that token's
+ *  OWN previously-advanced marker instead. */
+export function defaultDigestSinceIso(nowIso: string): string {
+  return new Date(Date.parse(nowIso) - 24 * 60 * 60 * 1000).toISOString();
+}
+
+/** The `sinceIso` a marker-aware digest for `tokenId` would use RIGHT NOW, without advancing
+ *  anything — the same value {@link buildMarkerAwareDigest}/{@link sendMarkerAwareDigest} resolve
+ *  internally, exposed so a caller (e.g. a `--dry-run` preview) can show it explicitly. */
+export function resolveMarkerAwareSince(store: LastSeenStore, tokenId: string, nowIso: string): string {
+  return store.get(tokenId) ?? defaultDigestSinceIso(nowIso);
+}
+
+/**
+ * Build (never send, never advance the marker) the digest text for `tokenId` off its CURRENT
+ * marker — a read-only preview, exactly like `buildDigest` but marker-aware instead of taking an
+ * explicit `sinceIso`. Used by `rmd digest --dry-run` so a preview never mutates state.
+ */
+export function buildMarkerAwareDigest(
+  ledgerPath: string,
+  store: LastSeenStore,
+  tokenId: string,
+  nowIso: string,
+  consoleBaseUrl?: string,
+): { text: string; sinceIso: string } {
+  const sinceIso = resolveMarkerAwareSince(store, tokenId, nowIso);
+  return { text: buildDigest(ledgerPath, sinceIso, consoleBaseUrl), sinceIso };
+}
+
+/**
+ * Send a marker-aware digest for `tokenId`: read its CURRENT marker (or the pre-marker 24h
+ * default on a first-ever send), deliver exactly like {@link sendDigest}, then advance the SAME
+ * {@link LastSeenStore} `tokenId` to `nowIso` — the identical store `lib/board.ts`'s `GET
+ * /v1/status` advances on a board view (see lib/last-seen.ts's module header). Whichever of the
+ * two — a digest send or a board view — happens first moves the marker forward; the other then
+ * only ever reports what's left, so the two never double-report or silently skip a window.
+ */
+export function sendMarkerAwareDigest(
+  ledgerPath: string,
+  store: LastSeenStore,
+  tokenId: string,
+  deps: NotifyDeps,
+  nowIso: string,
+  consoleBaseUrl?: string,
+): string {
+  const sinceIso = resolveMarkerAwareSince(store, tokenId, nowIso);
+  const text = sendDigest(ledgerPath, sinceIso, deps, consoleBaseUrl);
+  store.advance(tokenId, nowIso);
   return text;
 }

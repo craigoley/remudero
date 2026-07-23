@@ -40,12 +40,12 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import type { Route } from "./service.js";
 import { appendLedger } from "./ledger.js";
 import { isPaused, isQuietHours, isStopped, pauseDetail, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail } from "./fleet-control.js";
 import { appendQuestionAnswer } from "./worker.js";
+import { hashToken } from "./last-seen.js";
 
 /** Non-task-scoped panel actions (pause/resume/stop/quiet-hours) ledger under this sentinel — mirrors run-task.ts's drainCommand, which ledgers its own fleet-wide lines as `task_id: "DRAIN"`. */
 export const PANEL_TASK_ID = "PANEL";
@@ -77,8 +77,10 @@ export function sendJson(res: ServerResponse, status: number, body: unknown): vo
 export function bearerTokenId(req: IncomingMessage): string {
   const header = req.headers.authorization;
   const token = header ? /^Bearer (.+)$/.exec(header)?.[1] : undefined;
+  // W1-T163: the SAME hash lib/last-seen.ts's LastSeenStore keys its per-token marker by — one
+  // "raw bearer -> stable id" algorithm, not two independently-maintained copies of it.
   if (!token) return "unknown";
-  return createHash("sha256").update(token).digest("hex").slice(0, 12);
+  return hashToken(token);
 }
 
 /** Read + JSON-parse a request body. Rejects (never throws synchronously) on a socket error or malformed JSON — callers turn a rejection into a 400. */

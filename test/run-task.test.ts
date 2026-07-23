@@ -3272,6 +3272,36 @@ test("digestCommand (W1-T144): --dry-run threads consoleUrl(config) into buildDi
   }
 });
 
+test("digestCommand (W1-T163): an EXPLICIT --since is an operator override that bypasses the marker entirely -- both --dry-run and a real send take the pre-existing explicit-since path, and the marker store is never touched", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-digest-since-"));
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "state", "ledger.ndjson"), "");
+  const oldHome = process.env.HOME;
+  const home = mkdtempSync(join(tmpdir(), "rmd-digest-since-home-"));
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root, consoleUrl: "http://100.64.1.2:4317" }));
+  process.env.HOME = home;
+  try {
+    const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const sent: string[] = [];
+    const chan = { send: (m: string) => { sent.push(m); return true; } } as never;
+    const dry = await digestCommand(["--since", since, "--dry-run"], { notifyChannel: chan });
+    assert.equal(dry, 0, "an explicit --since with --dry-run still just prints, sends nothing");
+    assert.equal(sent.length, 0, "--dry-run sends nothing even on the explicit-since path");
+    const code = await digestCommand(["--since", since], { notifyChannel: chan });
+    assert.equal(code, 0);
+    assert.equal(sent.length, 1, "the explicit-since path still sends through the injected channel");
+    // The marker store lives at <root>/state/last-seen.json (lib/last-seen.ts) -- an explicit
+    // --since must never create or touch it (module header: "deliberately never touches the
+    // marker, so a one-off 'show me since <date>' never resets the shared push/pull window").
+    assert.equal(existsSync(join(root, "state", "last-seen.json")), false, "explicit --since never writes the marker store");
+  } finally {
+    process.env.HOME = oldHome;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("escalateCommand (W1-T144): a MANUAL escalation's real-time ping threads the console deep link (notify no-op via stub), issue open is best-effort", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-esc-"));
   mkdirSync(join(root, "state"), { recursive: true });

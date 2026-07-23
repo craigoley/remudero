@@ -31,10 +31,27 @@ export interface components {
         reason: string;
       })[];
     };
-    /** GET /v1/status's body -- one StatusProjection per plan task, as of `generated_at`. */
+    /** GET /v1/status's body -- one StatusProjection per plan task, as of `generated_at`, plus (W1-T163, when the daemon's per-token last-seen marker store is wired) the calling token's own "since you last checked" recap. */
     StatusSnapshot: {
       generated_at: string;
       tasks: (StatusProjection)[];
+      /** W1-T163: every recap-worthy event (src/lib/recap.ts) after this token's PRIOR marker -- absent entirely on a daemon with no last-seen store wired; `[]` on this token's first-ever view (nothing to recap FROM). */
+      recap?: (RecapEvent)[];
+      /** W1-T163: this token's marker value BEFORE this request advanced it -- the timestamp `recap` was computed as-of. Absent alongside `recap` for the same two reasons. */
+      sinceCheckpoint?: string;
+    };
+    /** W1-T163 -- one "since you last checked" row (src/lib/recap.ts): a single ledger event after the caller's per-token marker. */
+    RecapEvent: {
+      kind: "merged" | "blocked" | "escalated" | "question_answered" | "retro";
+      /** The originating ledger line's `task_id` verbatim -- `RETRO` for a fleet-wide retro event. */
+      taskId: string;
+      ts: string;
+      /** A short human-readable detail (verdict string, escalation class, answer text, retro stats). */
+      detail?: string;
+      /** The plan task's own title -- present only when `taskId` names a real plan task. */
+      title?: string;
+      /** A same-page `#task=<id>` hash link into the console's task card -- present ONLY when `taskId` names a real plan task (a fleet-wide event like `retro` has none). */
+      taskCardLink?: string;
     };
     /** POST /v1/control/pause's body -- drain-and-hold, an optional human-readable reason. */
     PauseRequest: {
