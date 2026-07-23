@@ -9,7 +9,13 @@ import fs from "node:fs";
 import { dirname } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
 import { parseTasksFromYaml, PlanError, unmetDependencies } from "./plan.js";
-import { lintPlan } from "./task-linter.js";
+import { lintPlan, lintTask } from "./task-linter.js";
+
+/** A draft-lint finding: the linter's own {@link "./task-linter.js".LintViolation}s (whose
+ *  `check` is a strict LintCheck) PLUS the draft rung's own `draft-parse` finding for a fragment
+ *  that won't even parse — structurally typed so both flow through one path without widening the
+ *  linter's closed check union (and without a type-only line the diff-coverage gate can't cover). */
+export type DraftLintViolation = { check: string; severity: "block" | "warn"; message: string };
 import { appendLedger } from "./ledger.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
@@ -568,19 +574,74 @@ export type DraftRungOutcome =
  * from being attempted. This is what makes the SAME loop safe to call from an unattended
  * daemon poll, not only from a human watching `rmd inbox`'s output. Never throws.
  */
+/** cc71f2: the draft rung's own bounded self-lint. The first attempt is the ordinary draft;
+ *  each further attempt is a redraft carrying the prior fragment's linter violations. Keeps the
+ *  Architect from re-rolling blind while never looping unboundedly. */
+export const MAX_DRAFT_LINT_ATTEMPTS = 3;
+
+/** Lint a drafted fragment exactly as `rmd lint-plan` would: parse it, then collect every
+ *  BLOCK-severity violation across its tasks. A fragment that does not even parse is itself one
+ *  block violation (the P37-class YAMLParseError), so it drives a redraft rather than being
+ *  cached as a permanently-NOT-READY draft. */
+export function lintDraftedFragment(fragmentYaml: string, proposalId: string): DraftLintViolation[] {
+  let tasks;
+  try {
+    tasks = parseTasksFromYaml(fragmentYaml, `inbox draft ${proposalId}`);
+  } catch (e) {
+    return [{ check: "draft-parse", severity: "block", message: `fragment failed to parse — fix before re-emitting: ${String((e as Error)?.message ?? e)}` }];
+  }
+  const violations: DraftLintViolation[] = [];
+  for (const task of tasks) {
+    for (const v of lintTask(task).violations) if (v.severity === "block") violations.push(v);
+  }
+  return violations;
+}
+
+/** The redraft prompt: the failed fragment + its violations + the Rule-19 resolution doctrine
+ *  (the #588 merits test), so the Architect fixes the SPECIFIC failures rather than re-rolling. */
+export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string, violations: DraftLintViolation[]): string {
+  return [
+    `Your drafted plan fragment for ${proposal.id} FAILED the plan's own linter (rmd lint-plan) and CANNOT be cached as-is. Fix EVERY blocking violation below, then re-emit the COMPLETE corrected fragment + stamp in the same FRAGMENT/STAMP marker format.`,
+    "",
+    "BLOCKING VIOLATIONS:",
+    ...violations.map((v) => `  - [${v.check}] ${v.message}`),
+    "",
+    "For a [sizing] (Rule 19) violation apply the #588 MERITS TEST: does that task's acceptance assert ONE cross-file invariant that is unsatisfiable piecewise (a single test needing all its files together)? If YES — raise that task to risk:high and record the one-line rationale in the task. If NO — DECOMPOSE it into one task per subsystem with an explicit depends_on spine preserving order, budgets resized per piece, every resulting task keeping the same origin: provenance. Keep every proof executable ('unit test: <path or exact test-title substring>' or 'grep: <pattern> in <path>').",
+    "",
+    "The fragment you must fix:",
+    fragmentYaml,
+  ].join("\n");
+}
+
 export async function runDraftRung(toDraft: Proposal[], currentPlanText: string, deps: DraftRungDeps, runId: string): Promise<DraftRungOutcome[]> {
   const outcomes: DraftRungOutcome[] = [];
   for (const proposal of toDraft) {
     try {
-      const worker = await deps.spawn(proposal, inboxDraftPrompt(proposal, currentPlanText, runId));
-      deps.log("inbox.draft_synthesized", {
-        proposal_id: proposal.id,
-        session_id: worker.sessionId,
-        cost_usd: worker.costUsd,
-        subtype: worker.subtype,
-        ...workerLedgerFields(worker),
-      });
-      const parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"));
+      let prompt = inboxDraftPrompt(proposal, currentPlanText, runId);
+      let parsed: ReturnType<typeof parseDraftedCandidate> = null;
+      let violations: DraftLintViolation[] = [];
+      // cc71f2 SELF-LINT: draft, lint, and on a blocking violation redraft with the failures
+      // in hand — bounded — so a fired proposal reaches READY without an operator cleanup pass
+      // (the P34/W1-T247 sizing gap that motivated this, and the P37-class YAMLParseError).
+      for (let attempt = 1; attempt <= MAX_DRAFT_LINT_ATTEMPTS; attempt++) {
+        const worker = await deps.spawn(proposal, prompt);
+        deps.log("inbox.draft_synthesized", {
+          proposal_id: proposal.id,
+          attempt,
+          session_id: worker.sessionId,
+          cost_usd: worker.costUsd,
+          subtype: worker.subtype,
+          ...workerLedgerFields(worker),
+        });
+        parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"));
+        if (!parsed) break; // no markers — nothing to lint or usefully retry (handled below)
+        violations = lintDraftedFragment(parsed.fragmentYaml, proposal.id);
+        if (violations.length === 0) break; // lint-clean — cache it
+        if (attempt < MAX_DRAFT_LINT_ATTEMPTS) {
+          deps.log("inbox.draft_relint", { proposal_id: proposal.id, attempt, violations: violations.map((v) => v.message) });
+          prompt = inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations);
+        }
+      }
       if (!parsed) {
         const error = "no FRAGMENT/STAMP markers in worker output";
         deps.log("inbox.draft_error", { proposal_id: proposal.id, error });
@@ -593,7 +654,10 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         stampLine: parsed.stampLine,
         anchorFingerprint: anchorFingerprint(proposal.evidenceAnchors),
       };
-      deps.log("inbox.drafted", { proposal_id: proposal.id });
+      // A still-dirty draft after the bounded retries is cached anyway (the classification will
+      // surface it NOT-READY, exactly as before this rung existed) — but the unresolved set is
+      // named on the ledger so the retro/operator sees the rung tried and what it could not fix.
+      deps.log("inbox.drafted", { proposal_id: proposal.id, lint_clean: violations.length === 0, unresolved_violations: violations.map((v) => v.message) });
       outcomes.push({ proposalId: proposal.id, ok: true, candidate });
     } catch (e) {
       const error = String((e as Error)?.message ?? e);

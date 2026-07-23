@@ -24,6 +24,8 @@ import {
   renderInbox,
   renderInboxPollSummary,
   runDraftRung,
+  lintDraftedFragment,
+  MAX_DRAFT_LINT_ATTEMPTS,
   summarizeInboxPoll,
   type DraftAttemptCache,
   type DraftCache,
@@ -665,10 +667,25 @@ test("renderInboxPollSummary: renders the digest's one-line 'N ready'", () => {
 // call anywhere, the same discipline the rest of this file already holds `classifyProposal`
 // to.
 
+// A lint-CLEAN drafted task: cc71f2's draft self-lint now runs `lintTask` over every drafted
+// fragment before caching, so the fixture must be a realistic, lint-passing task (single file /
+// risk:high ⇒ no Rule-19 sizing; an executable proof ⇒ no proof-shape; origin ⇒ no provenance)
+// or the rung would (correctly) redraft it.
 const VALID_DRAFT_TEXT = [
   "=== FRAGMENT START ===",
   "- id: W1-T900",
   "  title: drafted candidate",
+  "  repo: remudero",
+  "  depends_on: []",
+  "  type: implement",
+  "  verify: auto",
+  "  risk: high",
+  "  files: [src/lib/x.ts]",
+  "  origin: feedback#P1",
+  "  acceptance:",
+  '    - claim: "the drafted candidate does the thing"',
+  '      proof: "unit test: test/x.test.ts"',
+  "  status: queued",
   "=== FRAGMENT END ===",
   "STAMP: - P1 (plan) — RATIFIED 2026-07-21 -> W1-T900.",
 ].join("\n");
@@ -793,6 +810,82 @@ test("runDraftRung: malformed worker output (no FRAGMENT/STAMP markers) is logge
 
   assert.equal(outcomes.length, 1);
   assert.equal(outcomes[0].ok, false);
+});
+
+// ── cc71f2: the draft rung's own Rule-19 (and general lint) self-lint ────────────────────────
+// A task spanning TWO subsystems at risk:medium — the exact Rule-19 sizing violation P34's
+// W1-T247 tripped, and the whole reason a fired proposal used to stall at NOT-READY.
+const SIZING_DIRTY_DRAFT = [
+  "=== FRAGMENT START ===",
+  "- id: W1-T901",
+  "  title: spans two subsystems",
+  "  repo: remudero",
+  "  depends_on: []",
+  "  type: implement",
+  "  verify: auto",
+  "  risk: medium",
+  "  files: [src/lib/inbox.ts, src/lib/retro.ts]",
+  "  origin: feedback#P1",
+  "  acceptance:",
+  '    - claim: "it does the cross-subsystem thing"',
+  '      proof: "unit test: test/x.test.ts"',
+  "  status: queued",
+  "=== FRAGMENT END ===",
+  "STAMP: - P1 (plan) — RATIFIED 2026-07-21 -> W1-T901.",
+].join("\n");
+
+test("lintDraftedFragment: a risk:medium two-subsystem task is a BLOCK sizing violation; a clean task is empty; unparseable ⇒ draft-parse", () => {
+  const dirty = lintDraftedFragment("- id: W1-T901\n  title: x\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: medium\n  files: [src/lib/inbox.ts, src/lib/retro.ts]\n  origin: feedback#P1\n  acceptance:\n    - claim: \"c\"\n      proof: \"unit test: test/x.test.ts\"\n  status: queued\n", "P1");
+  assert.ok(dirty.some((v) => v.check === "sizing" && v.severity === "block"), "medium-risk multi-subsystem ⇒ Rule-19 sizing block");
+  assert.deepEqual(lintDraftedFragment("- id: W1-T900\n  title: x\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: high\n  files: [src/lib/x.ts]\n  origin: feedback#P1\n  acceptance:\n    - claim: \"c\"\n      proof: \"unit test: test/x.test.ts\"\n  status: queued\n", "P1"), []);
+  const parse = lintDraftedFragment("this: is: not: valid: yaml: [", "P1");
+  assert.equal(parse[0]?.check, "draft-parse");
+});
+
+test("runDraftRung: a sizing-violating draft is REDRAFTED with the violation in hand, then cached clean (cc71f2 — reaches READY without operator cleanup)", async () => {
+  const proposal: Proposal = { id: "P1", summary: "s", evidenceAnchors: [{ description: "x", pattern: "landed" }] };
+  const logLines: { step: string; extra?: Record<string, unknown> }[] = [];
+  const prompts: string[] = [];
+  let call = 0;
+  const spawn: DraftSpawn = async (_p, prompt) => {
+    prompts.push(prompt);
+    call += 1;
+    return fakeWorkerResult(call === 1 ? SIZING_DIRTY_DRAFT : VALID_DRAFT_TEXT);
+  };
+
+  const outcomes = await runDraftRung([proposal], "- id: W1-T1\n", { spawn, log: (step, extra) => logLines.push({ step, extra }) }, "run-1");
+
+  assert.equal(call, 2, "the dirty first draft drove exactly one redraft");
+  assert.equal(outcomes[0].ok, true);
+  if (outcomes[0].ok) assert.match(outcomes[0].candidate.fragmentYaml, /W1-T900/, "the CLEAN second fragment is what gets cached");
+  assert.ok(logLines.some((l) => l.step === "inbox.draft_relint"), "the redraft was ledgered");
+  assert.ok(logLines.some((l) => l.step === "inbox.drafted" && l.extra?.lint_clean === true), "cached clean");
+  assert.match(prompts[1], /BLOCKING VIOLATIONS/, "the redraft prompt carried the violations");
+  assert.match(prompts[1], /sizing/i);
+});
+
+test("runDraftRung: an unfixable draft is bounded to MAX_DRAFT_LINT_ATTEMPTS spawns, then cached with unresolved_violations named — never an unbounded loop", async () => {
+  const proposal: Proposal = { id: "P1", summary: "s", evidenceAnchors: [{ description: "x", pattern: "landed" }] };
+  const logLines: { step: string; extra?: Record<string, unknown> }[] = [];
+  let call = 0;
+  const spawn: DraftSpawn = async () => { call += 1; return fakeWorkerResult(SIZING_DIRTY_DRAFT); };
+
+  const outcomes = await runDraftRung([proposal], "- id: W1-T1\n", { spawn, log: (step, extra) => logLines.push({ step, extra }) }, "run-1");
+
+  assert.equal(call, MAX_DRAFT_LINT_ATTEMPTS, "bounded — never loops past the cap (the W1-T177 spend-leak class)");
+  assert.equal(outcomes[0].ok, true, "still cached (the classification surfaces it NOT-READY, as before this rung)");
+  const drafted = logLines.find((l) => l.step === "inbox.drafted");
+  assert.equal(drafted?.extra?.lint_clean, false);
+  assert.ok(Array.isArray(drafted?.extra?.unresolved_violations) && (drafted!.extra!.unresolved_violations as unknown[]).length > 0, "the unresolved set is named on the ledger");
+});
+
+test("runDraftRung: a first-try CLEAN draft spawns exactly ONCE — the self-lint adds no cost to a good draft", async () => {
+  const proposal: Proposal = { id: "P1", summary: "s", evidenceAnchors: [{ description: "x", pattern: "landed" }] };
+  let call = 0;
+  const spawn: DraftSpawn = async () => { call += 1; return fakeWorkerResult(VALID_DRAFT_TEXT); };
+
+  await runDraftRung([proposal], "- id: W1-T1\n", { spawn, log: () => {} }, "run-1");
+  assert.equal(call, 1, "a lint-clean draft is never redrafted");
 });
 
 test("runDraftRung: one proposal's spawn THROWING never strands the rest of the batch — per-proposal isolation (W1-T192 fail-soft)", async () => {
