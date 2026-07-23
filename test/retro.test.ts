@@ -8,13 +8,16 @@ import {
   calibrationTable,
   classCalibrationTable,
   codeFilesInDiff,
+  DEGRADED_SUCCESS_SIGNALS,
   extractStandingRules,
   gatherRuns,
   mergedSince,
+  mineDegradedSuccess,
   mineOverrunClasses,
   ownBranchOf,
   parseLedger,
   planHealthSweep,
+  renderDegradedSuccess,
   renderGather,
   renderOrientation,
   renderOverrunProposals,
@@ -22,6 +25,7 @@ import {
   shippedSince,
   tierOf,
   verdictDistribution,
+  type DegradedSuccessSignal,
   type RunSummary,
   type ShippedGithub,
 } from "../src/lib/retro.js";
@@ -430,6 +434,123 @@ test("renderOverrunProposals names the proposed fix when a class overruns", () =
     run({ runId: "R2", taskId: "W1-T9" }),
   ]);
   assert.match(renderOverrunProposals(proposals), /implement×medium/);
+});
+
+// ── Degraded-success mining (W1-T73) — a PASS that used a weaker path ─────
+
+// The canonical fixture (RETRO-1784213948025/W1-T65): RD1 merged at proof_exec
+// 0/2, floor_degraded (>=1 dialect-prefixed proof present, nothing OBSERVED).
+// RD2 is a fully-observed sibling — N/N executed — that must emit NOTHING.
+const DEGRADED_LEDGER = [
+  `{"ts":"2026-03-01T00:00:00.000Z","run_id":"RD1","task_id":"W1-T200","step":"run.start","type":"implement"}`,
+  `{"ts":"2026-03-01T00:01:00.000Z","run_id":"RD1","task_id":"W1-T200","step":"review.posted","state":"success","proof_exec":["not_executable","not_executable"],"floor_degraded":true}`,
+  `{"ts":"2026-03-01T00:02:00.000Z","run_id":"RD1","task_id":"W1-T200","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/200"}`,
+  `{"ts":"2026-03-02T00:00:00.000Z","run_id":"RD2","task_id":"W1-T201","step":"run.start","type":"implement"}`,
+  `{"ts":"2026-03-02T00:01:00.000Z","run_id":"RD2","task_id":"W1-T201","step":"review.posted","state":"success","proof_exec":["executed_pass","executed_pass"],"floor_degraded":false}`,
+  `{"ts":"2026-03-02T00:02:00.000Z","run_id":"RD2","task_id":"W1-T201","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/201"}`,
+].join("\n");
+
+test("mineDegradedSuccess: a merged run at proof_exec 0/N with a dialect-prefixed proof present (floor_degraded) emits a finding naming the run", () => {
+  const records = parseLedger(DEGRADED_LEDGER);
+  const findings = mineDegradedSuccess(gatherRuns(records), records);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0]!.taskId, "W1-T200");
+  assert.equal(findings[0]!.runId, "RD1");
+  assert.equal(findings[0]!.signal, "zero_executed_dialect");
+});
+
+test("mineDegradedSuccess: a fully-observed merged run (N/N) emits nothing; mining the SAME fixture twice emits no duplicate", () => {
+  const records = parseLedger(DEGRADED_LEDGER);
+  const runs = gatherRuns(records);
+  assert.ok(!mineDegradedSuccess(runs, records).some((f) => f.taskId === "W1-T201"));
+  const first = mineDegradedSuccess(runs, records);
+  const second = mineDegradedSuccess(runs, records);
+  assert.equal(first.length, 1); // one finding, not two — a re-run is not a re-count
+  assert.deepEqual(first, second);
+});
+
+test("mineDegradedSuccess: the signal set is DATA — a caller-supplied second row (reviewer_outcome=error_max_turns) flags a matching run with ZERO executor-code changes", () => {
+  const ledger = [
+    `{"ts":"2026-03-03T00:00:00.000Z","run_id":"RD3","task_id":"W1-T202","step":"run.start","type":"implement"}`,
+    `{"ts":"2026-03-03T00:01:00.000Z","run_id":"RD3","task_id":"W1-T202","step":"review.posted","state":"success","proof_exec":["executed_pass"],"floor_degraded":false,"reviewer_outcome":"error_max_turns"}`,
+    `{"ts":"2026-03-03T00:02:00.000Z","run_id":"RD3","task_id":"W1-T202","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/202"}`,
+  ].join("\n");
+  const records = parseLedger(ledger);
+  const runs = gatherRuns(records);
+  // The shipped row 1 alone doesn't catch it — fully executed, no floor fallback.
+  assert.deepEqual(mineDegradedSuccess(runs, records, [DEGRADED_SUCCESS_SIGNALS[0]!]), []);
+  // A brand-new signal row — no new mining function, no new branch — catches it.
+  const extraRow: DegradedSuccessSignal = {
+    key: "reviewer_error_max_turns",
+    matches: (r) => r.reviewerOutcome === "error_max_turns",
+    describe: () => "reviewer_outcome=error_max_turns",
+  };
+  const findings = mineDegradedSuccess(runs, records, [DEGRADED_SUCCESS_SIGNALS[0]!, extraRow]);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0]!.taskId, "W1-T202");
+  assert.equal(findings[0]!.signal, "reviewer_error_max_turns");
+});
+
+test("mineDegradedSuccess: a run with no review.posted line at all is silently skipped — nothing to mine", () => {
+  const ledger = [
+    `{"ts":"2026-03-04T00:00:00.000Z","run_id":"RD4","task_id":"W1-T203","step":"run.start","type":"implement"}`,
+    `{"ts":"2026-03-04T00:01:00.000Z","run_id":"RD4","task_id":"W1-T203","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/203"}`,
+  ].join("\n");
+  const records = parseLedger(ledger);
+  assert.deepEqual(mineDegradedSuccess(gatherRuns(records), records), []);
+});
+
+test("mineDegradedSuccess: findings are sorted by taskId+signal, not ledger/scan order", () => {
+  // RD-LATER (W1-T210) appears BEFORE RD-EARLIER (W1-T205) in the ledger, so an
+  // unsorted (scan-order) result would list them T210 then T205 — the sort must
+  // reorder them ascending by taskId.
+  const ledger = [
+    `{"ts":"2026-03-05T00:00:00.000Z","run_id":"RD-LATER","task_id":"W1-T210","step":"run.start","type":"implement"}`,
+    `{"ts":"2026-03-05T00:01:00.000Z","run_id":"RD-LATER","task_id":"W1-T210","step":"review.posted","state":"success","proof_exec":["not_executable"],"floor_degraded":true}`,
+    `{"ts":"2026-03-05T00:02:00.000Z","run_id":"RD-LATER","task_id":"W1-T210","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/210"}`,
+    `{"ts":"2026-03-06T00:00:00.000Z","run_id":"RD-EARLIER","task_id":"W1-T205","step":"run.start","type":"implement"}`,
+    `{"ts":"2026-03-06T00:01:00.000Z","run_id":"RD-EARLIER","task_id":"W1-T205","step":"review.posted","state":"success","proof_exec":["not_executable"],"floor_degraded":true}`,
+    `{"ts":"2026-03-06T00:02:00.000Z","run_id":"RD-EARLIER","task_id":"W1-T205","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/205"}`,
+  ].join("\n");
+  const records = parseLedger(ledger);
+  const findings = mineDegradedSuccess(gatherRuns(records), records);
+  assert.equal(findings.length, 2);
+  assert.deepEqual(
+    findings.map((f) => f.taskId),
+    ["W1-T205", "W1-T210"], // ascending, NOT ledger-scan order (T210 then T205)
+  );
+});
+
+test("mineDegradedSuccess: same taskId matching two signals is ordered by signal key (tie-break)", () => {
+  const ledger = [
+    `{"ts":"2026-03-07T00:00:00.000Z","run_id":"RD-MULTI","task_id":"W1-T206","step":"run.start","type":"implement"}`,
+    `{"ts":"2026-03-07T00:01:00.000Z","run_id":"RD-MULTI","task_id":"W1-T206","step":"review.posted","state":"success","proof_exec":["not_executable"],"floor_degraded":true,"reviewer_outcome":"error_max_turns"}`,
+    `{"ts":"2026-03-07T00:02:00.000Z","run_id":"RD-MULTI","task_id":"W1-T206","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/206"}`,
+  ].join("\n");
+  const records = parseLedger(ledger);
+  const findings = mineDegradedSuccess(gatherRuns(records), records);
+  assert.equal(findings.length, 2); // both signals match this single run
+  assert.deepEqual(
+    findings.map((f) => f.signal),
+    ["reviewer_error_max_turns", "zero_executed_dialect"], // sorted, "r" < "z"
+  );
+});
+
+test("renderDegradedSuccess reports 'no signal' when nothing was mined, and names the run + signal otherwise", () => {
+  assert.match(renderDegradedSuccess([]), /No merged run posted/);
+  const rendered = renderDegradedSuccess([
+    { runId: "RD1", taskId: "W1-T200", signal: "zero_executed_dialect", description: "proof_exec 0/2 executed" },
+  ]);
+  assert.match(rendered, /W1-T200 \(RD1\)/);
+  assert.match(rendered, /zero_executed_dialect/);
+});
+
+test("buildGather/renderGather surface degraded-success findings (W1-T73)", () => {
+  const g = buildGather({ ledgerNdjson: DEGRADED_LEDGER, learningsMd: "# L\n" });
+  assert.equal(g.degradedSuccess.length, 1);
+  assert.equal(g.degradedSuccess[0]!.taskId, "W1-T200");
+  assert.match(renderGather(g), /Degraded-success mining/);
+  assert.match(renderGather(g), /W1-T200/);
 });
 
 // ── docs/ORIENTATION.md (W1-T39) ───────────────────────────────────────────
