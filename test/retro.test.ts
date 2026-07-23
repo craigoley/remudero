@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  aggregateByClass,
   aggregateByType,
   assertArchitectAboveWorker,
   buildGather,
   calibrationTable,
+  classCalibrationTable,
   codeFilesInDiff,
   extractStandingRules,
   gatherRuns,
@@ -13,6 +15,7 @@ import {
   ownBranchOf,
   parseLedger,
   planHealthSweep,
+  renderGather,
   renderOrientation,
   renderOverrunProposals,
   renderPlanHealth,
@@ -27,13 +30,13 @@ import type { Task } from "../src/lib/plan.js";
 // A recorded ledger fixture: two implement runs (one merged, one budget-blocked)
 // and a recon run, exactly as run-task.ts writes them.
 const LEDGER = [
-  `{"ts":"2026-01-01T00:00:00.000Z","run_id":"A","task_id":"TA","step":"run.start","type":"implement","budget_usd":100}`,
+  `{"ts":"2026-01-01T00:00:00.000Z","run_id":"A","task_id":"TA","step":"run.start","type":"implement","budget_usd":100,"task_class":"docs"}`,
   `{"ts":"2026-01-01T00:01:00.000Z","run_id":"A","task_id":"TA","step":"recon.done","num_turns":2,"cost_usd":0.2}`,
   `{"ts":"2026-01-01T00:02:00.000Z","run_id":"A","task_id":"TA","step":"implement.done","num_turns":10,"cost_usd":1.5}`,
   `{"ts":"2026-01-01T00:03:00.000Z","run_id":"A","task_id":"TA","step":"pr.opened","pr_url":"https://github.com/o/r/pull/1"}`,
   `{"ts":"2026-01-01T00:04:00.000Z","run_id":"A","task_id":"TA","step":"verdict","verdict":"merged","cost_usd":2.0,"pr_url":"https://github.com/o/r/pull/1"}`,
   `torn line that is not json {{{`,
-  `{"ts":"2026-01-02T00:00:00.000Z","run_id":"B","task_id":"TB","step":"run.start","type":"implement","budget_usd":100}`,
+  `{"ts":"2026-01-02T00:00:00.000Z","run_id":"B","task_id":"TB","step":"run.start","type":"implement","budget_usd":100,"task_class":"src"}`,
   `{"ts":"2026-01-02T00:01:00.000Z","run_id":"B","task_id":"TB","step":"recon.done","num_turns":2}`,
   `{"ts":"2026-01-02T00:02:00.000Z","run_id":"B","task_id":"TB","step":"implement.done","num_turns":30}`,
   `{"ts":"2026-01-02T00:03:00.000Z","run_id":"B","task_id":"TB","step":"verdict","verdict":"blocked_budget","cost_usd":5.0}`,
@@ -57,6 +60,49 @@ test("gatherRuns reduces per-run: type, verdict, cost, summed turns, prUrl", () 
   const b = runs.find((r) => r.runId === "B")!;
   assert.equal(b.verdict, "blocked_budget");
   assert.equal(b.numTurns, 32);
+});
+
+test("gatherRuns reads the W1-T167 task_class off run.start; a run that never logged it has no taskClass", () => {
+  const runs = gatherRuns(parseLedger(LEDGER));
+  assert.equal(runs.find((r) => r.runId === "A")!.taskClass, "docs");
+  assert.equal(runs.find((r) => r.runId === "B")!.taskClass, "src");
+  assert.equal(runs.find((r) => r.runId === "C")!.taskClass, undefined);
+});
+
+test("aggregateByClass (W1-T167): per-class cost/outcome so the retro can evaluate the routing table", () => {
+  const agg = aggregateByClass(gatherRuns(parseLedger(LEDGER)));
+  const docs = agg.find((c) => c.taskClass === "docs")!;
+  assert.equal(docs.runs, 1);
+  assert.equal(docs.totalCostUsd, 2.0);
+  assert.equal(docs.merged, 1);
+  assert.equal(docs.mergeRate, 1);
+  const src = agg.find((c) => c.taskClass === "src")!;
+  assert.equal(src.runs, 1);
+  assert.equal(src.totalCostUsd, 5.0);
+  assert.equal(src.merged, 0);
+  assert.equal(src.mergeRate, 0);
+  // A run that omitted task_class is grouped under "unknown" — NEVER dropped
+  // (W1-T167 acceptance: "a run that omits the class/cost FAILS" — omitting it
+  // from the aggregate entirely would be the same failure by a different name).
+  const unknown = agg.find((c) => c.taskClass === "unknown")!;
+  assert.equal(unknown.runs, 1);
+  assert.equal(unknown.totalCostUsd, 0.3);
+});
+
+test("classCalibrationTable renders a markdown table with a row per class, including merge rate", () => {
+  const table = classCalibrationTable(aggregateByClass(gatherRuns(parseLedger(LEDGER))));
+  assert.match(table, /task_class \| runs \| merged \| merge rate/);
+  assert.match(table, /\| docs \| 1 \| 1 \| 100%/);
+  assert.match(table, /\| src \| 1 \| 0 \| 0%/);
+});
+
+test("buildGather includes byClass (W1-T167) alongside byType, and renderGather prints it", () => {
+  const g = buildGather({ ledgerNdjson: LEDGER, learningsMd: "# L\n" });
+  const docs = g.byClass.find((c) => c.taskClass === "docs")!;
+  assert.equal(docs.runs, 1);
+  assert.equal(docs.merged, 1);
+  assert.match(renderGather(g), /Calibration \(BY TASK CLASS, W1-T167\)/);
+  assert.match(renderGather(g), /\| docs \| 1 \| 1 \| 100%/);
 });
 
 test("aggregateByType is the calibration data mounts.yaml needs (avg cost + turns by type)", () => {

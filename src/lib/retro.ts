@@ -60,6 +60,14 @@ export interface RunSummary {
    *  by {@link mineOverrunClasses} to group overruns by (type, risk) — the same
    *  axis mounts.yaml routes on — rather than by type alone. */
   risk?: string;
+  /**
+   * The task's routing CLASS (W1-T167 — docs / plan-lint / the `src` default)
+   * at `run.start` time, if logged. The third mount-routing axis alongside
+   * type/risk; {@link aggregateByClass} groups on this so the retro can read
+   * per-class cost/merge-rate and evaluate whether the routing table's cheaper
+   * docs/plan-lint mounts are actually cheaper AND still merging.
+   */
+  taskClass?: string;
   /** The worker-error `subtype` off the terminal `verdict` line (e.g.
    *  `error_max_turns`, `error_max_budget_usd`), if the run ended in one. A
    *  clean merge or a non-error verdict carries no subtype. */
@@ -115,6 +123,7 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
       prUrl: correctedUrl ?? claimedPrUrl,
       ...(correctedUrl !== undefined ? { correctedFromPrUrl: claimedPrUrl } : {}),
       ...(typeof start.risk === "string" ? { risk: start.risk } : {}),
+      ...(typeof start.task_class === "string" ? { taskClass: start.task_class } : {}),
       ...(typeof verdictLine?.subtype === "string" ? { subtype: verdictLine.subtype } : {}),
     });
   }
@@ -155,6 +164,59 @@ export function aggregateByType(runs: RunSummary[]): TypeCalibration[] {
     });
   }
   out.sort((a, b) => (a.type < b.type ? -1 : a.type > b.type ? 1 : 0));
+  return out;
+}
+
+/**
+ * Calibration aggregate for one task CLASS (W1-T167 — docs / plan-lint / src) —
+ * the same shape as {@link TypeCalibration}, grouped on the routing table's
+ * THIRD axis instead of the first, plus `mergeRate` (merged/runs) since a
+ * per-class table exists specifically to answer "is this class's cheaper
+ * mount still merging" — the retro needs the rate, not just the raw count, to
+ * evaluate the routing hypothesis (design note: "routing is a hypothesis to
+ * be measured, not asserted").
+ */
+export interface ClassCalibration {
+  taskClass: string;
+  runs: number;
+  totalCostUsd: number;
+  avgCostUsd: number;
+  avgTurns: number;
+  merged: number;
+  mergeRate: number;
+}
+
+/**
+ * Aggregate runs BY TASK CLASS (W1-T167 calibration table) — mirrors {@link
+ * aggregateByType} exactly, grouped by {@link RunSummary.taskClass} instead of
+ * `type`. A run with no `taskClass` (a ledger line predating W1-T167, or any
+ * step that never logged it) is grouped under `"unknown"` rather than dropped
+ * — an omitted class is itself a fact the retro should see, not silently lose.
+ */
+export function aggregateByClass(runs: RunSummary[]): ClassCalibration[] {
+  const byClass = new Map<string, RunSummary[]>();
+  for (const r of runs) {
+    const key = r.taskClass ?? "unknown";
+    const arr = byClass.get(key) ?? [];
+    arr.push(r);
+    byClass.set(key, arr);
+  }
+  const out: ClassCalibration[] = [];
+  for (const [taskClass, rs] of byClass) {
+    const totalCost = rs.reduce((s, r) => s + r.costUsd, 0);
+    const totalTurns = rs.reduce((s, r) => s + r.numTurns, 0);
+    const merged = rs.filter((r) => r.verdict === "merged").length;
+    out.push({
+      taskClass,
+      runs: rs.length,
+      totalCostUsd: round(totalCost),
+      avgCostUsd: round(totalCost / rs.length),
+      avgTurns: round(totalTurns / rs.length),
+      merged,
+      mergeRate: round(merged / rs.length),
+    });
+  }
+  out.sort((a, b) => (a.taskClass < b.taskClass ? -1 : a.taskClass > b.taskClass ? 1 : 0));
   return out;
 }
 
@@ -405,6 +467,10 @@ export interface RetroGather {
   sinceTs?: string;
   totalRuns: number;
   byType: TypeCalibration[];
+  /** W1-T167: per-class (docs / plan-lint / src) cost + merge-rate — the
+   *  measurement half of the routing hypothesis (the table itself is in
+   *  .remudero/mounts.yaml; this is what tells the retro if it's working). */
+  byClass: ClassCalibration[];
   verdicts: Record<string, number>;
   mergedSince: RunSummary[];
   /** The SHIPPED union (W1-T51) — ledger ∪ GitHub-derived, ownership-asserted, correction-aware. */
@@ -451,6 +517,7 @@ export function buildGather(opts: {
     sinceTs: opts.sinceTs,
     totalRuns: scoped.length,
     byType: aggregateByType(scoped),
+    byClass: aggregateByClass(scoped),
     verdicts: verdictDistribution(scoped),
     mergedSince: merged,
     shipped,
@@ -469,6 +536,20 @@ export function calibrationTable(byType: TypeCalibration[]): string {
   return [
     "| task_type | runs | merged | avg $ | avg turns | total $ |",
     "|---|---|---|---|---|---|",
+    ...rows,
+  ].join("\n");
+}
+
+/** Render the per-class calibration table (markdown, W1-T167) — the routing
+ *  table's effectiveness, measured. */
+export function classCalibrationTable(byClass: ClassCalibration[]): string {
+  const rows = byClass.map(
+    (c) =>
+      `| ${c.taskClass} | ${c.runs} | ${c.merged} | ${(c.mergeRate * 100).toFixed(0)}% | $${c.avgCostUsd.toFixed(3)} | ${c.avgTurns} | $${c.totalCostUsd.toFixed(3)} |`,
+  );
+  return [
+    "| task_class | runs | merged | merge rate | avg $ | avg turns | total $ |",
+    "|---|---|---|---|---|---|---|",
     ...rows,
   ].join("\n");
 }
@@ -505,6 +586,9 @@ export function renderGather(g: RetroGather): string {
     "",
     "## Calibration (BY TASK TYPE) — the numbers mounts.yaml (W1-T5) needs",
     calibrationTable(g.byType),
+    "",
+    "## Calibration (BY TASK CLASS, W1-T167) — is the docs/plan-lint routing discount paying off",
+    classCalibrationTable(g.byClass),
     "",
     "## Merged since marker (keyed by Remudero-Task)",
     ...(g.mergedSince.length

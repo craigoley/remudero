@@ -1,10 +1,27 @@
 # Remudero — .remudero/mounts.yaml (mount-routing policy table, v0 — static)
 #
-# MASTER-PLAN §9. A DETERMINISTIC policy table (no per-call LLM judgment): keyed
-# by (task_type × risk) → a mount { model, effort, max_turns, context_budget }.
-# v0 is a STATIC table; the flywheel (WS-8) later proposes downgrades/upgrades as
-# golden-gated PRs — routing is knowledge, so it ships behind the golden suite
-# like every other knowledge change.
+# MASTER-PLAN §9; W1-T167 added the `class` axis. A DETERMINISTIC policy table
+# (no per-call LLM judgment): keyed by (task_type × risk × class) → a mount
+# { model, effort, max_turns, context_budget }. v0 is a STATIC table; the
+# flywheel (WS-8) later proposes downgrades/upgrades as golden-gated PRs —
+# routing is knowledge, so it ships behind the golden suite like every other
+# knowledge change.
+#
+# ── The class axis (W1-T167) ────────────────────────────────────────────────
+# A flat sonnet/high mount for EVERY task regardless of shape prices a
+# docs-only edit the same as a risk:high src change (the $12 W1-T115 run).
+# Every routes.<type>.<risk> cell below is now a mapping of CLASS -> mount,
+# where class comes from src/lib/task-class.ts's deriveTaskClass (a task's
+# declared `files` globs: `docs`, `plan-lint`, or the universal `src` default)
+# — so changing a routing decision is a DATA edit here, never a code change.
+# Every risk cell MUST carry a `src` row (checked at load, src/lib/mounts.ts's
+# parseRiskCell): it is the fallback resolveMountForClass takes — LOUDLY, the
+# caller (run-task.ts) ledgers a `mount.class_fallback` line naming the
+# unmatched class — for any class this table has no row for. Deliberately
+# NOT every (type, risk) cell gets docs/plan-lint rows: risk:high stays
+# src-only on purpose (a risk:high task classified docs/plan-lint is
+# unusual enough to warrant the full mount and a loud fallback line, never a
+# silent discount at a risk band that already flagged concern).
 #
 # Operator params (subscription, thinking_default, metering, …) are per-INSTANCE
 # config gathered by `rmd init`, NEVER plan constants — they do not live here.
@@ -73,26 +90,50 @@ judge:
 # live campaigns burn turns on POLLING the gate, work a cap must never kill.
 # P7-consistent: nothing here is raised to mask over-scoping; the sizer is the linter.
 
-# ── Worker routing table: task_type → risk band → mount ────────────────────────
+# ── Worker routing table: task_type → risk band → class → mount ────────────────
 # Sonnet default for execution; Haiku for mechanical/high-volume; sonnet-high is
-# the worker ceiling (bookend work steps up to it, never to opus).
+# the worker ceiling (bookend work steps up to it, never to opus). Every cell's
+# `src` row is the UNCHANGED pre-W1-T167 default (the same numbers, same
+# behavior for any task classified `src`); `docs`/`plan-lint` rows are NEW,
+# cheaper mounts added only at low/medium risk for `recon`/`implement` — the
+# two types that actually touch a task's declared `files` (W1-T167).
 routes:
   recon:
-    low:    { model: haiku,  effort: medium, max_turns: 400, context_budget: 60000 }
-    medium: { model: sonnet, effort: medium, max_turns: 400, context_budget: 90000 }
-    high:   { model: sonnet, effort: high,   max_turns: 400, context_budget: 120000 }
+    low:
+      src:       { model: haiku,  effort: medium, max_turns: 400, context_budget: 60000 }
+      docs:      { model: haiku,  effort: low,    max_turns: 400, context_budget: 40000 }
+      plan-lint: { model: haiku,  effort: low,    max_turns: 400, context_budget: 40000 }
+    medium:
+      src:       { model: sonnet, effort: medium, max_turns: 400, context_budget: 90000 }
+      docs:      { model: haiku,  effort: medium, max_turns: 400, context_budget: 60000 }
+      plan-lint: { model: haiku,  effort: medium, max_turns: 400, context_budget: 60000 }
+    high:
+      src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 120000 }
   implement:
-    low:    { model: sonnet, effort: medium, max_turns: 400,  context_budget: 120000 }
-    medium: { model: sonnet, effort: high,   max_turns: 400,  context_budget: 160000 }
-    high:   { model: sonnet, effort: high,   max_turns: 400, context_budget: 200000 }
+    low:
+      src:       { model: sonnet, effort: medium, max_turns: 400, context_budget: 120000 }
+      docs:      { model: haiku,  effort: low,    max_turns: 400, context_budget: 60000 }
+      plan-lint: { model: haiku,  effort: low,    max_turns: 400, context_budget: 60000 }
+    medium:
+      src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 160000 }
+      docs:      { model: haiku,  effort: medium, max_turns: 400, context_budget: 90000 }
+      plan-lint: { model: haiku,  effort: medium, max_turns: 400, context_budget: 90000 }
+    high:
+      src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 200000 }
   diagnose:
-    low:    { model: sonnet, effort: high,   max_turns: 400, context_budget: 120000 }
-    medium: { model: sonnet, effort: high,   max_turns: 400, context_budget: 150000 }
-    high:   { model: sonnet, effort: high,   max_turns: 400, context_budget: 180000 }
+    low:
+      src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 120000 }
+    medium:
+      src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 150000 }
+    high:
+      src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 180000 }
   review:
-    low:    { model: haiku,  effort: medium, max_turns: 400, context_budget: 60000 }
-    medium: { model: sonnet, effort: medium, max_turns: 400, context_budget: 90000 }
-    high:   { model: sonnet, effort: high,   max_turns: 400, context_budget: 120000 }
+    low:
+      src:       { model: haiku,  effort: medium, max_turns: 400, context_budget: 60000 }
+    medium:
+      src:       { model: sonnet, effort: medium, max_turns: 400, context_budget: 90000 }
+    high:
+      src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 120000 }
   # `reviewer` — the FRESH advisory reviewer runReview() spawns for the review gate on
   # ANY task's PR (run-task.ts), keyed by the UNDER-REVIEW task's risk. Distinct from
   # `review` above (a plan task whose own type happens to be "review"). W1-T63 (P10):
@@ -105,18 +146,27 @@ routes:
   # never rescuing an unpasted proof, so it must not be under-mounted relative to the
   # work it judges) while staying at the sonnet worker CEILING, never opus (G-17).
   reviewer:
-    low:    { model: sonnet, effort: high, max_turns: 400, context_budget: 120000 }
-    medium: { model: sonnet, effort: high, max_turns: 400, context_budget: 160000 }
-    high:   { model: sonnet, effort: high, max_turns: 400, context_budget: 200000 }
+    low:
+      src:       { model: sonnet, effort: high, max_turns: 400, context_budget: 120000 }
+    medium:
+      src:       { model: sonnet, effort: high, max_turns: 400, context_budget: 160000 }
+    high:
+      src:       { model: sonnet, effort: high, max_turns: 400, context_budget: 200000 }
   # `fix` — a patch/retry attempt after a strike (classify.ts's runDiagnoseThenRetry,
   # W1-T7; not yet wired to a live spawn, but mount-governed from day one so wiring it
   # never reintroduces an undeclared literal). Mirrors `implement`: a fix attempt is the
   # same class of work as the original implementation, riding the same mount per risk.
   fix:
-    low:    { model: sonnet, effort: medium, max_turns: 400, context_budget: 120000 }
-    medium: { model: sonnet, effort: high,   max_turns: 400, context_budget: 160000 }
-    high:   { model: sonnet, effort: high,   max_turns: 400, context_budget: 200000 }
+    low:
+      src:       { model: sonnet, effort: medium, max_turns: 400, context_budget: 120000 }
+    medium:
+      src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 160000 }
+    high:
+      src:       { model: sonnet, effort: high,   max_turns: 400, context_budget: 200000 }
   manual:
-    low:    { model: haiku,  effort: low,    max_turns: 400, context_budget: 40000 }
-    medium: { model: haiku,  effort: medium, max_turns: 400, context_budget: 60000 }
-    high:   { model: sonnet, effort: medium, max_turns: 400, context_budget: 90000 }
+    low:
+      src:       { model: haiku,  effort: low,    max_turns: 400, context_budget: 40000 }
+    medium:
+      src:       { model: haiku,  effort: medium, max_turns: 400, context_budget: 60000 }
+    high:
+      src:       { model: sonnet, effort: medium, max_turns: 400, context_budget: 90000 }

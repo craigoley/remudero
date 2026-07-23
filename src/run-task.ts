@@ -167,7 +167,8 @@ import {
   type Task,
 } from "./lib/plan.js";
 import { assertLintClean, changedTaskIds, lintTask, TaskLintError } from "./lib/task-linter.js";
-import { loadMounts, mountsPath, resolveMount, type Mount } from "./lib/mounts.js";
+import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
+import { deriveTaskClass } from "./lib/task-class.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
 import { ContainmentError, probeContainment } from "./lib/containment.js";
 import { IsolationError, probeIsolation } from "./lib/isolation.js";
@@ -2132,17 +2133,32 @@ async function runTask(
   const budgetUsd = task.budget_usd ?? DEFAULT_BUDGET_USD;
   const softThresholdUsd = softBudgetThreshold(config);
 
-  // ── MOUNT RESOLUTION (§9). The (task_type × risk) routing table OWNS the
-  // model/effort/max_turns a run rides — never a hardcoded literal (the W1-T6
-  // defect: a dead mounts.yaml + a hardcoded 60-turn ceiling, see DIAGNOSIS.md). Resolve
-  // ONCE here and FAIL LOUD on a miss: a missing mount is a config gap, never a
-  // silent fallback to some default number. loadMounts throws on a bad/absent table;
-  // resolveMount throws on an unrouted (type × risk).
+  // ── MOUNT RESOLUTION (§9; class axis W1-T167). The (task_type × risk × class)
+  // routing table OWNS the model/effort/max_turns a run rides — never a
+  // hardcoded literal (the W1-T6 defect: a dead mounts.yaml + a hardcoded
+  // 60-turn ceiling, see DIAGNOSIS.md). Resolve ONCE here and FAIL LOUD on a
+  // type/risk miss: a missing route is a config gap, never a silent fallback
+  // to some default number. loadMounts throws on a bad/absent table;
+  // resolveMountForClass throws on an unrouted (type × risk); an unrouted
+  // CLASS is expected (not every class has a cheap row) and falls back to the
+  // table's `src` default — LOUDLY, via the `mount.class_fallback` line below.
   // The table is a COMMITTED repo artifact (§9, golden-gated), so read it from the
   // repo checkout (repoRoot), NOT the workspace root (config.root = ~/Remudero, which
   // holds worktrees/state, not .remudero/mounts.yaml).
   const mountsTable = loadMounts(mountsPath(repoRoot));
-  const mount: Mount = resolveMount(mountsTable, task.type, task.risk);
+  const taskClass = deriveTaskClass(task);
+  const mountResolution = resolveMountForClass(mountsTable, task.type, task.risk, taskClass);
+  const mount: Mount = mountResolution.mount;
+  if (mountResolution.fellBackToDefault) {
+    // W1-T167 acceptance: a class with no row falls back to the default LOUDLY —
+    // a ledger line NAMING the missing class, never a silent number swap.
+    log("mount.class_fallback", {
+      task_type: task.type,
+      risk: task.risk,
+      requested_class: taskClass,
+      resolved_class: mountResolution.resolvedClass,
+    });
+  }
   // The fresh advisory reviewer (runReview, below) is its OWN mount-governed phase,
   // keyed by task_type="reviewer" — distinct from `mount` above (this task's own
   // implement/recon/etc. work) and from task_type="review" (a plan task whose own
@@ -2160,11 +2176,17 @@ async function runTask(
     repo: task.repo,
     type: task.type,
     risk: task.risk,
+    // W1-T167: the task's routing class (docs / plan-lint / src) and the class
+    // the mount actually resolved to (differs from task_class only on a loud
+    // fallback, logged above) — the pair the retro's per-class calibration
+    // (lib/retro.ts's aggregateByClass) reads alongside this line's cost/verdict.
+    task_class: taskClass,
+    mount_class: mountResolution.resolvedClass,
     budget_usd: budgetUsd,
     soft_threshold_usd: softThresholdUsd,
     mount: { model: mount.model, effort: mount.effort, max_turns: mount.maxTurns, context_budget: mount.contextBudget },
   });
-  say(`run ${runId} — target ${owner}/${task.repo} · mount ${mount.model}/${mount.effort} · ${mount.maxTurns} turns (${task.type}×${task.risk})`);
+  say(`run ${runId} — target ${owner}/${task.repo} · mount ${mount.model}/${mount.effort} · ${mount.maxTurns} turns (${task.type}×${task.risk}×${taskClass})`);
 
   let costUsd = 0;
   let budgetWarned = false;

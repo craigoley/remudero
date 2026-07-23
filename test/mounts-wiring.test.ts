@@ -103,6 +103,30 @@ test("the retro Architect's turn budget, resolved from the real mounts.yaml, is 
   assert.equal(typeof m.architect.effort, "string");
 });
 
+// ── W1-T167: the class axis is WIRED into the spawn path, and a class miss ledgers LOUD ─
+
+test("the spawn path derives the task's class and resolves its mount THROUGH resolveMountForClass, not the class-blind resolveMount", () => {
+  assert.match(runTaskSrc, /import \{ deriveTaskClass \} from "\.\/lib\/task-class\.js";/);
+  assert.match(runTaskSrc, /const taskClass = deriveTaskClass\(task\)/);
+  assert.match(runTaskSrc, /resolveMountForClass\(mountsTable, task\.type, task\.risk, taskClass\)/);
+});
+
+test("a class-miss fallback ledgers a LOUD `mount.class_fallback` line naming the unmatched class — never silent", () => {
+  assert.match(runTaskSrc, /log\("mount\.class_fallback"/);
+  const idx = runTaskSrc.indexOf('log("mount.class_fallback"');
+  const block = runTaskSrc.slice(idx, idx + 300);
+  assert.match(block, /requested_class:\s*taskClass/);
+  assert.match(block, /resolved_class:\s*mountResolution\.resolvedClass/);
+});
+
+test("run.start ledgers task_class + mount_class (W1-T167) — the retro's per-class calibration reads these", () => {
+  const idx = runTaskSrc.indexOf('log("run.start"');
+  assert.ok(idx >= 0);
+  const block = runTaskSrc.slice(idx, idx + 700);
+  assert.match(block, /task_class:\s*taskClass/);
+  assert.match(block, /mount_class:\s*mountResolution\.resolvedClass/);
+});
+
 // ── W1-T64: gh pr create is GUARDED by commitsAhead — never PR'd on an empty branch ─────
 
 test("the retro's gh-pr-create fallback is guarded by commitsAhead — an empty branch takes the no-op path, never the PR call", () => {
