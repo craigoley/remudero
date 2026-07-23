@@ -1,0 +1,18 @@
+id: fb-1784827378793-aa16b6
+ts: 2026-07-23T17:22:58.793Z
+raw: "WORKER SPAWN LAYER DOWN: CLAUDE NATIVE BINARY FAILS TO LAUNCH — every
+  draft/worker spawn since 2026-07-23T17:01Z errors 'Claude Code native binary
+  at ~/.npm-global/bin/claude exists but failed to launch' (SDK suggests
+  pathToClaudeCodeExecutable); last successful spawn 15:57:08Z
+  (inbox.draft_synthesized P34). Observed from BOTH the daemon hook
+  (DAEMON-1784824221274) and operator CLI — host-wide, not sandbox-specific; an
+  earlier session's reviewer-spawn death self-diagnosed as sandbox was likely
+  this incident's leading edge. Cause under diagnosis (binary mtime/arch/version
+  pending). This is W1-T236's exact filed risk (worker binary pin + auto-updater
+  discipline) materialized — W1-T236 should be prioritized with the fix, plus a
+  preflight that names spawn_binary_unlaunchable distinctly per the T237
+  doctrine instead of failing inside the rung."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

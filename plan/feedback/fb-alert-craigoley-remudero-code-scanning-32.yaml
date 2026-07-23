@@ -1,0 +1,12 @@
+id: fb-alert-craigoley-remudero-code-scanning-32
+ts: 2026-07-21T17:40:35.320Z
+raw: >-
+  craigoley/remudero code-scanning alert #32 [medium]: Client-side request
+  forgery
+
+
+  https://github.com/craigoley/remudero/security/code-scanning/32
+attachments: []
+origin: alert#code-scanning-32
+status: new
+proposal_pr: null

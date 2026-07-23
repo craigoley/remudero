@@ -1,0 +1,16 @@
+id: fb-1784825998733-98ef84
+ts: 2026-07-23T16:59:58.733Z
+raw: "INBOX DEP CLASSIFIER CALLS MERGED TASKS UNMET — daemon-side classification
+  of P34 reported dep-unmet for W1-T197 (verdict.merged pr 531 via
+  sweep.credit_backfill 07-22T15:26Z), W1-T163 (#647 2d59f7e), W1-T167 (#606
+  1b39177), all verifiably merged at classification time. classifyProposal is
+  pure over the injected MergedResolver (corrections-supreme deriveStatus by
+  contract) — so either the injected resolver on this path is not the production
+  derivation, or throttled/errored reads are being conflated with not-merged
+  (the W1-T119 class). Evidence: [paste the exact inbox output + timestamp].
+  Need: the resolver injection audited on both daemon and CLI paths, and
+  throttled surfaced as throttled, never as unmet."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

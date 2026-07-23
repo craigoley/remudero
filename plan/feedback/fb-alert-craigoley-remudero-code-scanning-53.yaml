@@ -1,0 +1,12 @@
+id: fb-alert-craigoley-remudero-code-scanning-53
+ts: 2026-07-21T17:40:35.319Z
+raw: >-
+  craigoley/remudero code-scanning alert #53 [high]: Polynomial regular
+  expression used on uncontrolled data
+
+
+  https://github.com/craigoley/remudero/security/code-scanning/53
+attachments: []
+origin: alert#code-scanning-53
+status: new
+proposal_pr: null
