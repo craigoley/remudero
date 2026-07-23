@@ -1,0 +1,30 @@
+id: fb-1784808242839-f6a65c
+ts: 2026-07-23T12:04:02.839Z
+raw: "COVERAGE-RATCHET BRANCH NONDETERMINISM — ROOT CAUSE + FIX (folds into
+  W1-T220; unblocks PR #622, recurred on #617/#618). Diagnosed from real failing
+  runs (fable analysis): branch coverage jitters ~1-3 branches run-to-run (1
+  branch=0.018pts at BRF~5500), so test-only/plan-only PRs false-fail 'branches
+  < baseline' by -0.01 to -0.05pts. TWO channels: (A dominant) parseLcovTotals
+  (scripts/coverage-ratchet.mjs:31-50) sums EVERY SF: record with no path
+  filter, and tests that mkdtemp-copy scripts and spawn node inherit
+  NODE_V8_COVERAGE, so randomized temp-dir copies (~66.7% branch cov, ~BRF 147)
+  merge into the aggregate with per-run variance, dragging it ~0.6pts;
+  --test-coverage-exclude=test/** does not match those ../../T/rmd-*/ paths. (B
+  residual) V8 block-coverage branch attribution is execution-dependent across
+  133 parallel test procs, ±1 branch. Baseline (scripts/coverage-baseline.json
+  branchesPct 88.55) has only 0.06-0.10pt slack; epsilon is 1e-9
+  (scripts/coverage-ratchet.mjs:56). FIX (do NOT drop the gate; diff-coverage is
+  line-only and can't catch weakened tests): (1) in parseLcovTotals skip records
+  whose SF path starts ../ or / (out-of-repo), print skipped count; (2)
+  count-based epsilon in evaluateRatchet = tolerate <=2 branches/2 lines drop
+  (100*2/brf), count-derived so it tightens as code grows; (3) rebaseline ONCE
+  from a CI run (documented env delta). Tests: temp-pollution falsifier (temp SF
+  record must not change totals), jitter falsifier (2-branch drop passes,
+  3-branch blocks), tolerance-tightens property. Files:
+  scripts/coverage-ratchet.mjs:31-50/:56, coverage-baseline.json,
+  ci.yml:141-153. This satisfies W1-T220's 'diagnosed from a REAL failing run' +
+  'plan-only falsifier' acceptance — file as/fold into W1-T220."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

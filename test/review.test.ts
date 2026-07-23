@@ -855,6 +855,33 @@ test("rubric satisfied_by guard: a worker-authored satisfied_by FAILS; a plan-on
   assert.equal(checkSatisfiedByGuard(CLEAN_DIFF).pass, true);
 });
 
+// A diff that EDITS an existing criterion's `claim:` line in plan/tasks.yaml
+// (W1-T58 — broadens the guard beyond ADDED satisfied_by to the full "edits
+// its criteria" shape Standing rule 15 names), mixed with a src file so it
+// reads as a worker's ordinary task diff, never an Architect plan-only PR.
+const EDITED_CRITERION_DIFF = [
+  "diff --git a/plan/tasks.yaml b/plan/tasks.yaml",
+  "+++ b/plan/tasks.yaml",
+  "@@",
+  '-      claim: "the widget renders red"',
+  '+      claim: "the widget renders blue"',
+  "diff --git a/src/lib/widget.ts b/src/lib/widget.ts",
+  "+++ b/src/lib/widget.ts",
+  "@@",
+  "+export function frobnicate() {}",
+].join("\n");
+
+test("rubric satisfied_by guard (W1-T58 acceptance 2): a planted worker diff that EDITS an existing criterion FAILS (the rule-15 guard fires); the same edit in a plan-only human (Architect) PR PASSES; a clean non-tasks.yaml diff still PASSES", () => {
+  const worker = checkSatisfiedByGuard(EDITED_CRITERION_DIFF, { planOnly: false, humanAuthored: false });
+  assert.equal(worker.pass, false);
+  assert.match(worker.reason, /claim\/proof|satisfied_by/);
+  // The SAME edit in a plan-only, human-authored (Architect) PR — a genuine
+  // task correction — is allowed.
+  assert.equal(checkSatisfiedByGuard(EDITED_CRITERION_DIFF, { planOnly: true, humanAuthored: true }).pass, true);
+  // A clean diff touching no plan/tasks.yaml at all never triggers the guard.
+  assert.equal(checkSatisfiedByGuard(CLEAN_DIFF).pass, true);
+});
+
 test("judgeRubric: a clean single-concern diff passes ALL SIX items + the guard", () => {
   const r = judgeRubric({ diff: CLEAN_DIFF, report: CLEAN_REPORT });
   assert.equal(r.pass, true, JSON.stringify(r.failures));
@@ -1819,6 +1846,58 @@ test("W1-T205: resolveAutoMergeArm never misattributes a plan-only arm to an ove
     0,
     "the carve-out decided this, not the override — nothing should be ledgered as an override use",
   );
+});
+
+// ── W1-T58 (ratifies P3 via P8/RETRO-1784058021334, Standing rule 15): the
+// BINDING side of the rule-15 guard — `judgeReview.criteriaTampered` — folded
+// into `state`/`floorState` exactly like `testTheater`. Reuses W1-T205's own
+// PLAN_ONLY_DIFF/MIXED_PLAN_AND_CODE_DIFF shape: a mixed (non-plan-only) diff
+// that ALSO edits an existing criterion is the dangerous "worker edits its own
+// criteria" shape; the same edit inside a genuinely plan-only diff is a
+// legitimate Architect correction and must NOT fail. ───────────────────────
+
+// Mixed plan+code diff (like MIXED_PLAN_AND_CODE_DIFF) but the plan/tasks.yaml
+// hunk EDITS an existing criterion field rather than only adding a new task.
+const MIXED_PLAN_AND_CODE_CRITERION_EDIT_DIFF = `
+diff --git a/plan/tasks.yaml b/plan/tasks.yaml
++++ b/plan/tasks.yaml
+@@
+-      proof: "the old proof"
++      proof: "the new proof, rewritten to match the diff"
+diff --git a/src/lib/widget.ts b/src/lib/widget.ts
++++ b/src/lib/widget.ts
+@@
++export function frobnicate() {}
+`.trim();
+
+// The SAME criterion-field edit, but the diff is PLAN-ONLY (no src file) — a
+// genuine Architect correction shape.
+const PLAN_ONLY_CRITERION_EDIT_DIFF = `
+diff --git a/plan/tasks.yaml b/plan/tasks.yaml
++++ b/plan/tasks.yaml
+@@
+-      proof: "the old proof"
++      proof: "the new proof, corrected by the Architect"
+`.trim();
+
+test("W1-T58 acceptance 2: a non-plan-only diff that edits plan/tasks.yaml's own criteria FORCES remudero-review=failure, even when every NAMED criterion still reads met — the tampering itself is the violation", () => {
+  const v = judgeReview(CRITERIA, { diff: MIXED_PLAN_AND_CODE_CRITERION_EDIT_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(v.planOnly, false);
+  assert.equal(v.criteriaTampered, true);
+  assert.equal(v.state, "failure");
+  assert.equal(v.floorState, "failure", "diff-derived, never suppressible by verdict-stability (W1-T178)");
+  assert.match(v.summary, /Standing rule 15/i);
+});
+
+test("W1-T58: the SAME criterion-field edit, made in a genuinely plan-only diff, is a legitimate Architect correction — never tripped", () => {
+  const v = judgeReview(CRITERIA, { diff: PLAN_ONLY_CRITERION_EDIT_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(v.planOnly, true);
+  assert.equal(v.criteriaTampered, false);
+});
+
+test("W1-T58: a clean diff touching no plan/tasks.yaml at all never trips criteriaTampered", () => {
+  const v = judgeReview(CRITERIA, { diff: MIXED_PLAN_AND_CODE_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(v.criteriaTampered, false, "MIXED_PLAN_AND_CODE_DIFF only ADDS a new task — it edits nothing existing");
 });
 
 const HEAD_SHA_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
