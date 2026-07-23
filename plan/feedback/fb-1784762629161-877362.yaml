@@ -1,0 +1,11 @@
+id: fb-1784762629161-877362
+ts: 2026-07-22T23:23:49.161Z
+raw: "AUTO-UPDATE-BRANCH FOR STALE MERGE-BASES — #585 sat mergeState UNKNOWN
+  behind origin/main after its review passed; a green+reviewed PR that is merely
+  behind main needs an automated update-branch (with review re-post via the #586
+  lane) rather than operator archaeology. Evidence: #585 at 265bfac behind
+  68b6131, 2026-07-22."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

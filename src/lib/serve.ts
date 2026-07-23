@@ -52,7 +52,7 @@ import {
   type IssueCloser,
   type PanelActionDeps,
 } from "./panel-actions.js";
-import { buildPanelGraphRoutes, type PanelGraphDeps } from "./panel-graph.js";
+import { buildPanelGraphRoutes, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
 import { buildTaskCardRoute } from "./task-card.js";
 
 /** Default `rmd serve` port — matches apps/dashboard/src/main.ts's own `?daemon=` default (`http://localhost:4317`), so the shipped dashboard points at a served daemon out of the box. */
@@ -66,8 +66,15 @@ export interface ServeDeps {
    * itself (= `fleetControlRoot`, config.root) the SAME way it already splits `fleetControlRoot`
    * vs `questionsRoot` for panel-actions.ts, so a `ServeDeps` caller names each root exactly
    * once, never a duplicate that could drift from `fleetControlRoot`.
+   *
+   * `ratify` is likewise OPTIONAL here (W1-T193): {@link buildServeRoutes} defaults it to a REAL
+   * {@link ratifyCliGateway} rooted at `panelGraph.root` + `<fleetControlRoot>/state/logs` when
+   * the caller doesn't supply one — the same "the assembler wires the real gateway, a test
+   * injects a fake" split `inboxRoot` above already follows, so `rmd serve`'s own CLI wiring
+   * (run-task.ts's `serveCommand`) never has to construct this gateway itself, and a test can
+   * still inject a fake by supplying `ratify` explicitly.
    */
-  panelGraph: Omit<PanelGraphDeps, "inboxRoot">;
+  panelGraph: Omit<PanelGraphDeps, "inboxRoot" | "ratify"> & { ratify?: PanelGraphDeps["ratify"] };
   /** `<root>/state/ledger.ndjson` — SAME path board.ts tails and every panel route ledgers into. */
   ledgerPath: string;
   /** `gh issue close` gateway shared by every panel-actions write route that needs it. */
@@ -360,17 +367,29 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   button.danger { border-color: var(--status-blocked); color: var(--status-blocked); }
   button.danger.confirming { background: var(--status-blocked); color: #200404; }
+  /* W1-T193: the proposal-card APPROVE button's arm-then-confirm state -- same visual language
+     as STOP's own .confirming (an unmissable state change), a distinct (non-danger) accent since
+     approving is not a destructive action the way STOP is. */
+  button.proposal-approve-btn.confirming { background: var(--accent); color: #04101f; border-color: var(--accent); }
   input[type="text"], input[type="url"] {
     font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 0.3rem 0.5rem; width: 100%; max-width: 24rem;
+  }
+  textarea {
+    font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.3rem 0.5rem; width: 100%; max-width: 28rem; resize: vertical;
   }
   label { display: block; font-size: 0.875rem; color: var(--text-dim); margin: 0.25rem 0; }
   /* W1-T183 round 2: this label reuses W1-T156's existing .sr-only class (defined above) -- still
      in the a11y tree (for=/aria-label parity), just not eating a whole line above the fold for a
      control whose placeholder already names it. */
   form.inline-action { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; flex-basis: 100%; }
-  form.inline-action input { flex: 1 1 12rem; width: auto; }
+  form.inline-action input, form.inline-action textarea { flex: 1 1 12rem; width: auto; }
   .btn-row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+  /* W1-T193: a READY card's drafted-task list -- "render the draft's substance, not just its
+     existence" (design). */
+  .drafted-tasks { flex-basis: 100%; margin: 0.15rem 0 0.15rem 1.1rem; padding: 0; font-size: 0.875rem; color: var(--text-dim); }
+  .drafted-tasks li { list-style: disc; }
   .counts { color: var(--text-dim); font-size: 0.9rem; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   /* W1-T157 FIND layer: faceted filters, sort headers, live counts ─────────────────────────── */
@@ -793,6 +812,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   const tasksById = new Map();
   let latestFeedbackEntries = [];
   let latestInboxReady = [];
+  let latestInboxDrafting = [];
   let latestUpNextCards = [];
   let latestRecentEntries = [];
 
@@ -865,7 +885,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   function paintFromTasksById() {
     const tasks = Array.from(tasksById.values());
     const nowIds = renderNow(tasks);
-    const needsMeIds = renderNeedsMe(tasks, latestFeedbackEntries, latestInboxReady);
+    const needsMeIds = renderNeedsMe(tasks, latestFeedbackEntries, latestInboxReady, latestInboxDrafting);
     const upNextIds = renderUpNext(latestUpNextCards);
     const recentIds = renderRecent(latestRecentEntries);
     renderRest(tasks, new Set([...nowIds, ...needsMeIds, ...upNextIds, ...recentIds]));
@@ -879,6 +899,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     for (const t of snapshot.tasks ?? []) ingestProjection(t);
     latestFeedbackEntries = snapshot.feedbackEntries ?? [];
     latestInboxReady = snapshot.inboxReady ?? [];
+    latestInboxDrafting = snapshot.inboxDrafting ?? [];
     latestUpNextCards = snapshot.upNextCards ?? [];
     latestRecentEntries = snapshot.recentEntries ?? [];
     paintFromTasksById();
@@ -985,13 +1006,43 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
       \`<button type="button" class="needs-me-decide" data-id="\${escapeHtml(e.id)}" data-decision="reject">Reject</button></span>\`
     );
   }
-  function needsMeInboxHtml(p) {
+  // W1-T193: a READY card renders what would ACTUALLY be filed -- the drafted task ids AND
+  // titles (never just the opaque P## proposal id) -- with APPROVE and REFRAME wired to the
+  // write-token API. APPROVE reuses fleet control's OWN arm-then-confirm discipline verbatim
+  // (serve.ts's stop-btn handler, below) via the SAME data-confirming/8s-reset shape, with a
+  // read-back of the drafted task ids in its armed label -- never a second confirm pattern.
+  // REFRAME is a textarea (authored feedback captured VERBATIM), never a link to a terminal --
+  // the wrong asymmetry (agreeing easy, disagreeing hard) a ratification gate must not have.
+  function draftedTasksHtml(draftedTasks) {
+    if (!draftedTasks || draftedTasks.length === 0) return "";
     return (
-      \`\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(p.proposalId)}</span><span class="detail">READY to ratify — \${escapeHtml(p.summary)}</span>\` +
-      \`<span class="detail">run <code>rmd approve \${escapeHtml(p.proposalId)}</code> or <code>rmd reframe \${escapeHtml(p.proposalId)} --feedback "…"</code></span>\`
+      \`<ul class="drafted-tasks">\` +
+      draftedTasks.map((t) => \`<li><span class="task-id">\${escapeHtml(t.id)}</span> \${escapeHtml(t.title)}</li>\`).join("") +
+      \`</ul>\`
     );
   }
-  function renderNeedsMe(tasks, feedbackEntries, inboxReady) {
+  function needsMeInboxHtml(p) {
+    const draftedTasks = p.draftedTasks ?? [];
+    const readBack = draftedTasks.length > 0 ? draftedTasks.map((t) => t.id).join(", ") : p.proposalId;
+    return (
+      \`\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(p.proposalId)}</span><span class="detail">READY to ratify — \${escapeHtml(p.summary)}</span>\` +
+      draftedTasksHtml(draftedTasks) +
+      \`<span class="btn-row"><button type="button" class="proposal-approve-btn" data-proposal-id="\${escapeHtml(p.proposalId)}" data-read-back="\${escapeHtml(readBack)}" data-confirming="false" aria-pressed="false">Approve</button></span>\` +
+      \`<form class="inline-action needs-me-reframe" data-proposal-id="\${escapeHtml(p.proposalId)}">\` +
+      \`<label for="reframe-\${escapeHtml(p.proposalId)}">Reframe (feedback)</label>\` +
+      \`<textarea id="reframe-\${escapeHtml(p.proposalId)}" rows="2" required placeholder="what should change…"></textarea>\` +
+      \`<button type="submit">Reframe</button></form>\`
+    );
+  }
+  // W1-T193: a proposal legitimately mid-draft for minutes (W1-T192's daemon-side rung) must
+  // never render as nothing -- indistinguishable from broken, the same bar W1-T156 set for
+  // liveness -- so this names the state AND carries its spawn time, reusing the SAME live-
+  // ticking .elapsed[data-started] span/tickElapsed() the NOW section already drives (one
+  // implementation, never a second clock).
+  function needsMeDraftingHtml(p) {
+    return \`\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(p.proposalId)}</span><span class="detail">DRAFTING — \${escapeHtml(p.summary)} · running <span class="elapsed" data-started="\${escapeHtml(p.spawnedAt)}">…</span></span>\`;
+  }
+  function renderNeedsMe(tasks, feedbackEntries, inboxReady, inboxDrafting) {
     const rows = [];
     const shown = new Set();
     for (const t of tasks) {
@@ -1004,7 +1055,9 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
       else if (e.status === "proposed") rows.push({ key: \`fbp:\${e.id}\`, html: needsMeProposedHtml(e) });
     }
     for (const p of inboxReady ?? []) rows.push({ key: \`inbox:\${p.proposalId}\`, html: needsMeInboxHtml(p) });
+    for (const p of inboxDrafting ?? []) rows.push({ key: \`inbox-drafting:\${p.proposalId}\`, html: needsMeDraftingHtml(p) });
     reconcileRows(document.getElementById("needs-me-list"), rows, "nothing needs you right now");
+    tickElapsed(); // paint the DRAFTING row's freshly-(re)rendered elapsed span immediately, same as renderNow does
     return shown;
   }
 
@@ -1473,16 +1526,44 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   // ── NEEDS ME row actions (event delegation — rows are re-rendered on every refresh) ─────
   document.getElementById("needs-me-list").addEventListener("submit", async (e) => {
     const answerForm = e.target.closest(".needs-me-answer");
-    if (!answerForm) return;
-    e.preventDefault();
-    const replyTo = answerForm.dataset.replyTo;
-    const answer = answerForm.querySelector("input").value.trim();
-    await postJson("/v1/feedback", { text: answer, replyTo });
-    refreshAll();
+    const reframeForm = e.target.closest(".needs-me-reframe");
+    if (answerForm) {
+      e.preventDefault();
+      const replyTo = answerForm.dataset.replyTo;
+      const answer = answerForm.querySelector("input").value.trim();
+      await postJson("/v1/feedback", { text: answer, replyTo });
+      refreshAll();
+    } else if (reframeForm) {
+      // W1-T193: REFRAME captures the operator's own words VERBATIM -- a textarea, not a link
+      // to a terminal (the wrong asymmetry: agreeing easy, disagreeing hard). Wired to the
+      // SAME write-token API POST /v1/inbox/approve uses, valid for the proposal WHATEVER its
+      // current classification (rmd reframe's own contract -- never gated on still being READY).
+      e.preventDefault();
+      const proposalId = reframeForm.dataset.proposalId;
+      const textarea = reframeForm.querySelector("textarea");
+      const feedback = textarea.value.trim();
+      if (!feedback) return;
+      await postJson("/v1/inbox/reframe", { proposalId, feedback });
+      textarea.value = "";
+      refreshAll();
+    }
   });
+  // W1-T193: one confirm-arm timer PER proposal (a shared single timer, STOP's own shape,
+  // would misfire if two proposal cards were armed at once) -- keyed by proposalId, mirroring
+  // stopConfirmTimer's 8s reset exactly.
+  const approveConfirmTimers = new Map();
+  function resetApproveButton(btn) {
+    btn.dataset.confirming = "false";
+    btn.setAttribute("aria-pressed", "false");
+    btn.classList.remove("confirming");
+    btn.textContent = "Approve";
+    clearTimeout(approveConfirmTimers.get(btn.dataset.proposalId));
+    approveConfirmTimers.delete(btn.dataset.proposalId);
+  }
   document.getElementById("needs-me-list").addEventListener("click", async (e) => {
     const decideBtn = e.target.closest(".needs-me-decide");
     const markHandledBtn = e.target.closest(".needs-me-mark-handled");
+    const approveBtn = e.target.closest(".proposal-approve-btn");
     if (decideBtn) {
       await postJson("/v1/feedback/decision", { id: decideBtn.dataset.id, decision: decideBtn.dataset.decision });
       refreshAll();
@@ -1490,6 +1571,27 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
       // W1-T182: the escalation's own issue_url rides on the row's data attribute -- never an
       // operator-typed input, since the ledger (and now the live join) already holds it.
       await postJson("/v1/escalation/mark-handled", { taskId: markHandledBtn.dataset.taskId, issueUrl: markHandledBtn.dataset.issueUrl });
+      refreshAll();
+    } else if (approveBtn) {
+      // W1-T193: APPROVE reuses fleet control's OWN arm-then-confirm discipline VERBATIM
+      // (stop-btn's handler, below) -- a single click ARMS and does not act; a second click
+      // within the window acts; the armed label reads back the drafted task ids being
+      // approved (never a bare "Confirm?" -- the read-back belongs IN the confirm step).
+      if (approveBtn.dataset.confirming !== "true") {
+        approveBtn.dataset.confirming = "true";
+        approveBtn.setAttribute("aria-pressed", "true");
+        approveBtn.classList.add("confirming");
+        approveBtn.textContent = \`Confirm approve \${approveBtn.dataset.readBack}?\`;
+        clearTimeout(approveConfirmTimers.get(approveBtn.dataset.proposalId));
+        approveConfirmTimers.set(
+          approveBtn.dataset.proposalId,
+          setTimeout(() => resetApproveButton(approveBtn), 8000),
+        );
+        return;
+      }
+      const proposalId = approveBtn.dataset.proposalId;
+      resetApproveButton(approveBtn);
+      await postJson("/v1/inbox/approve", { proposalId });
       refreshAll();
     }
   });
@@ -1794,11 +1896,12 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
         getJson("/v1/recent").catch(() => ({ entries: [] })),
         getJson("/v1/drain/preview?max=5").catch(() => ({ cards: [] })),
         getJson("/v1/feedback").catch(() => ({ entries: [] })),
-        getJson("/v1/inbox").catch(() => ({ ready: [] })),
+        getJson("/v1/inbox").catch(() => ({ ready: [], drafting: [] })),
         getJson("/v1/control/status").catch(() => ({ paused: false, stopped: false, quietHours: false })),
       ]);
       latestFeedbackEntries = feedbackSnap.entries ?? [];
       latestInboxReady = inboxSnap.ready ?? [];
+      latestInboxDrafting = inboxSnap.drafting ?? [];
       latestUpNextCards = upNextSnap.cards ?? [];
       latestRecentEntries = recentSnap.entries ?? [];
       paintFromTasksById(); // re-run NOW/NEEDS ME/rest now that feedback/inbox/up-next/recent are current
@@ -1814,6 +1917,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
         upNextCards: latestUpNextCards,
         feedbackEntries: latestFeedbackEntries,
         inboxReady: latestInboxReady,
+        inboxDrafting: latestInboxDrafting,
         controlStatus,
       });
     } catch (e) {
@@ -1961,7 +2065,14 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
   // panel-graph's GET /v1/inbox needs config.root (inbox-proposals.json/inbox-drafts.json live
   // under state/, same as fleet-control's own flags) -- `fleetControlRoot` IS config.root
   // (module header), so it is the same root, never a THIRD independently-resolved path.
-  const panelGraphDeps = { ...deps.panelGraph, inboxRoot: deps.fleetControlRoot };
+  // W1-T193: `ratify` defaults to a REAL ratifyCliGateway (see ServeDeps.panelGraph's own doc)
+  // when the caller doesn't inject one -- rmd serve's own CLI wiring relies on this default;
+  // a test supplies `ratify` explicitly to inject a fake instead.
+  const panelGraphDeps = {
+    ...deps.panelGraph,
+    inboxRoot: deps.fleetControlRoot,
+    ratify: deps.panelGraph.ratify ?? ratifyCliGateway(deps.panelGraph.root, join(deps.fleetControlRoot, "state", "logs")),
+  };
 
   return [
     buildStatusRoute(deps.board),

@@ -23,6 +23,7 @@ import type { Plan, Task } from "../src/lib/plan.js";
 import { buildBatchedGithub, type GitHub, type PrRef } from "../src/lib/status.js";
 import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
+import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
 
 // ── W1-T139: rmd serve -- the front door ─────────────────────────────────────────────────
 //
@@ -90,6 +91,23 @@ function fakeIssueCloser(): IssueCloser & { closed: string[] } {
   };
 }
 
+/** Fake {@link RatifyCliGateway} — records calls rather than spawning a real `bin/rmd` child
+ *  process, the same fake-the-side-effect discipline `fakeIssueCloser` above uses for `gh`. */
+function fakeRatifyGateway(): RatifyCliGateway & { approved: string[]; reframed: Array<{ proposalId: string; feedback: string }> } {
+  const approved: string[] = [];
+  const reframed: Array<{ proposalId: string; feedback: string }> = [];
+  return {
+    approved,
+    reframed,
+    approve(proposalId: string) {
+      approved.push(proposalId);
+    },
+    reframe(proposalId: string, feedback: string) {
+      reframed.push({ proposalId, feedback });
+    },
+  };
+}
+
 function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "rmd-serve-"));
 }
@@ -120,7 +138,7 @@ function depsFor(root: string, plan: Plan, over: Partial<ServeDeps> = {}): Serve
   const planPath = writePlan(root, planYaml(plan));
   return {
     board: { plan, ledgerPath, github: fakeGitHub() },
-    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: fakeGitHub() },
+    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: fakeGitHub(), ratify: fakeRatifyGateway() },
     ledgerPath,
     issues: fakeIssueCloser(),
     fleetControlRoot: root,
@@ -207,6 +225,63 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2500, stepMs = 10):
     await new Promise((resolve) => setTimeout(resolve, stepMs));
   }
 }
+
+// ── W1-T193: buildServeServer defaults panelGraph.ratify to a REAL ratifyCliGateway ─────────
+//
+// run-task.ts's serveCommand (the ONLY real `rmd serve` CLI wiring) deliberately never
+// constructs a RatifyCliGateway itself — see ServeDeps.panelGraph's own doc (lib/serve.ts):
+// buildServeServer defaults `ratify` to a real ratifyCliGateway, rooted at panelGraph.root +
+// fleetControlRoot/state/logs, whenever the caller omits it. Every OTHER test in this file
+// injects fakeRatifyGateway() explicitly (never exercising the default), so this is the one
+// place that default construction — and the REAL detached `bin/rmd` spawn it wires POST
+// /v1/inbox/approve to — is proven end to end, mirroring test/panel-graph.test.ts's own
+// "ratifyCliGateway: a REAL detached spawn..." proof for the injected-gateway case.
+const READY_FRAGMENT = `
+- id: W1-T900
+  title: "drafted task"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  origin: architect
+  acceptance:
+    - claim: "the candidate does the thing"
+      proof: "unit test: fixture X -> observable Y"
+`;
+
+test("buildServeServer: with panelGraph.ratify OMITTED, POST /v1/inbox/approve on a genuinely READY proposal hands off to a REAL detached bin/rmd spawn — the default is not merely constructed but actually wired all the way to the write route (W1-T193)", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root, planOf([]));
+  const { ratify: _fake, ...panelGraphWithoutRatify } = deps.panelGraph as typeof deps.panelGraph & { ratify: unknown };
+
+  mkdirSync(join(root, "bin"), { recursive: true });
+  const markerPath = join(root, "marker.txt");
+  writeFileSync(join(root, "bin", "rmd"), `#!/usr/bin/env bash\necho "$@" > "${markerPath}"\n`, { mode: 0o755 });
+
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: "P900", summary: "a ready proposal", evidenceAnchors: [] }] }));
+  writeFileSync(
+    join(root, "state", "inbox-drafts.json"),
+    JSON.stringify({
+      P900: { proposalId: "P900", fragmentYaml: READY_FRAGMENT, stampLine: "- P900 (plan) — RATIFIED 2026-07-22 -> W1-T900.", anchorFingerprint: "" },
+    }),
+  );
+
+  await withServeServer({ ...deps, panelGraph: panelGraphWithoutRatify }, async (base) => {
+    const res = await post(base, "/v1/inbox/approve", WRITE_TOKEN, { proposalId: "P900" });
+    assert.equal(res.status, 200, `expected the READY proposal to be approvable: ${await res.text()}`);
+  });
+
+  const deadline = Date.now() + 5000;
+  while (!existsSync(markerPath) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.ok(existsSync(markerPath), "the real bin/rmd script must actually have been spawned by the DEFAULTED gateway");
+  assert.match(readFileSync(markerPath, "utf8"), /^approve P900/);
+});
 
 // ── (1) GET / -- the HTML shell mounts the board + links the panel/graph ────────────────────
 
@@ -297,7 +372,7 @@ test("GET /v1/status over a full 183-task plan: first-paint-to-data under budget
 
   const deps: ServeDeps = {
     board: { plan, ledgerPath, github },
-    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github },
+    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github, ratify: fakeRatifyGateway() },
     ledgerPath,
     issues: fakeIssueCloser(),
     fleetControlRoot: root,
@@ -723,7 +798,7 @@ test("GET /v1/inbox (assembled server): the W1-T110 ratification inbox's READY t
     // no state/inbox-proposals.json yet -> an empty registry, not an error (inbox.ts's own fail-soft convention).
     const res = await get(base, "/v1/inbox", READ_TOKEN);
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { ready: [] });
+    assert.deepEqual(await res.json(), { ready: [], drafting: [] });
     assert.equal((await navigate(base, "/v1/inbox")).status, 401); // header-only, same discipline as every other panel route
   });
 });
@@ -797,18 +872,16 @@ test("W1-T157: palette actions fire through the EXISTING buttons (one implementa
   assert.match(html, /getElementById\("graph-btn"\)\.click\(\)/);
 });
 
-// ── W1-T182: NEEDS ME dispatches the Approve affordance BY ITEM TYPE, never one row template ────
-// for every kind. Structural proof over the two row-template function BODIES (the DOM/behavioral
-// half — a real escalation row rendered live, "Mark handled" actually closing the issue — is
-// test/serve.live-state.test.ts's job, per this codebase's own "exercise the real client" rule;
-// this test proves the CONTRAST the acceptance bar names: an escalation template carries no
-// Approve control at all, while the P## inbox-proposal template still carries its OWN, pre-
-// existing, intentionally CLI-only `rmd approve` affordance (W1-T110/W1-T111's documented scope
-// boundary, panel-graph.ts's buildInboxRoute: a REAL write route needs a RatifyGateway this task
-// does not add — a fake button here would be exactly the "control with no defined action" this
-// task exists to remove, not add a second instance of).
+// ── W1-T182/W1-T193: NEEDS ME dispatches the Approve affordance BY ITEM TYPE, never one row
+// template for every kind. Structural proof over the row-template function BODIES (the DOM/
+// behavioral half — a real escalation row rendered live, "Mark handled" actually closing the
+// issue — is test/serve.live-state.test.ts's job, per this codebase's own "exercise the real
+// client" rule); this test proves the CONTRAST the acceptance bar names: an escalation template
+// carries no Approve control at all, while the P## inbox-proposal template carries a REAL
+// button+form wired to the write-token API (W1-T193 replaces the earlier CLI-only prose --
+// panel-graph.ts's POST /v1/inbox/approve + POST /v1/inbox/reframe now exist).
 
-test("W1-T182: an Approve control NEVER renders on an escalation row, while the P## inbox-proposal row still carries its own (CLI-only, pre-existing) approve affordance", () => {
+test("W1-T182/W1-T193: an Approve control NEVER renders on an escalation row, while the P## inbox-proposal row renders a REAL Approve button + Reframe textarea wired to the write-token API", () => {
   const html = renderShellHtml();
   const taskRowFn = html.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0];
   const inboxRowFn = html.match(/function needsMeInboxHtml\(p\) \{[\s\S]*?\n  \}/)?.[0];
@@ -821,9 +894,52 @@ test("W1-T182: an Approve control NEVER renders on an escalation row, while the 
   assert.match(taskRowFn, /view issue/i, "must render a direct link to the issue");
   assert.match(taskRowFn, /Mark handled/i, "must render the escalation's OWN affordance, not a borrowed one");
 
-  // The P## proposal template: unchanged, and it DOES still carry the word "approve" — the one
-  // item type that word is actually defined for (rmd approve, the ratification-inbox action).
-  assert.match(inboxRowFn, /approve/i, "a P## inbox-proposal row must still carry the defined rmd approve affordance");
+  // The P## proposal template: a REAL Approve button (arm-then-confirm, never CLI prose) and a
+  // REFRAME textarea, never a bare `rmd approve`/`rmd reframe` command string.
+  assert.match(inboxRowFn, /class="proposal-approve-btn"/, "a READY card must render a REAL Approve button, not CLI prose");
+  assert.match(inboxRowFn, /data-confirming="false"/, "the Approve button starts UNARMED");
+  assert.match(inboxRowFn, /data-read-back=/, "the Approve button must carry a read-back of what it approves");
+  assert.match(inboxRowFn, /<textarea[^>]*required/, "REFRAME must be a required textarea, not a link to a terminal");
+  assert.doesNotMatch(inboxRowFn, /<code>rmd (approve|reframe)/, "the CLI-only prose affordance must be gone");
+});
+
+test("W1-T193: a READY card renders each drafted task's id AND title (never just the opaque proposal id)", () => {
+  const html = renderShellHtml();
+  const inboxRowFn = html.match(/function needsMeInboxHtml\(p\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(inboxRowFn, "needsMeInboxHtml must exist");
+  assert.match(inboxRowFn, /draftedTasksHtml/, "must render the drafted-tasks summary");
+
+  const draftedTasksFn = html.match(/function draftedTasksHtml\(draftedTasks\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(draftedTasksFn, "draftedTasksHtml must exist");
+  assert.match(draftedTasksFn, /\.id/);
+  assert.match(draftedTasksFn, /\.title/);
+});
+
+test("W1-T193: the APPROVE click handler ARMS on the first click (data-confirming) and only POSTs /v1/inbox/approve on a second click, mirroring STOP's arm-then-confirm exactly", () => {
+  const html = renderShellHtml();
+  assert.match(html, /class="proposal-approve-btn"/);
+  const clickHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("click", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(clickHandler, "no needs-me-list click handler found");
+  assert.match(clickHandler, /approveBtn\.dataset\.confirming !== "true"/, "first click must only ARM, never act");
+  assert.match(clickHandler, /setTimeout\(\(\) => resetApproveButton\(approveBtn\), 8000\)/, "must reset after 8s, same window as STOP");
+  assert.match(clickHandler, /postJson\("\/v1\/inbox\/approve", \{ proposalId \}\)/, "the second click posts to the write-token API");
+});
+
+test("W1-T193: REFRAME submits the textarea's value VERBATIM to POST /v1/inbox/reframe", () => {
+  const html = renderShellHtml();
+  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(submitHandler, "no needs-me-list submit handler found");
+  assert.match(submitHandler, /needs-me-reframe/);
+  assert.match(submitHandler, /postJson\("\/v1\/inbox\/reframe", \{ proposalId, feedback \}\)/);
+});
+
+test("W1-T193: a DRAFTING proposal renders a distinct state carrying its spawn timestamp, never nothing", () => {
+  const html = renderShellHtml();
+  const draftingFn = html.match(/function needsMeDraftingHtml\(p\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(draftingFn, "needsMeDraftingHtml must exist");
+  assert.match(draftingFn, /DRAFTING/);
+  assert.match(draftingFn, /data-started="\$\{escapeHtml\(p\.spawnedAt\)\}"/, "must carry the real spawn timestamp, live-ticking off the SAME .elapsed mechanism NOW uses");
+  assert.match(html, /renderNeedsMe\(tasks, latestFeedbackEntries, latestInboxReady, latestInboxDrafting\)/);
 });
 
 // ── W1-T182: the row template proven over its ACTUAL RENDERED OUTPUT, not just its source

@@ -1,0 +1,15 @@
+id: fb-1784766965325-c7b673
+ts: 2026-07-23T00:36:05.325Z
+raw: "MINT TASK IDS AT APPROVE TIME, NOT DRAFT TIME — the P34 and P37 drafts
+  independently minted overlapping ids starting at W1-T244 (observed 2026-07-22
+  23:38Z); approving both as-is would collide, and the same class already
+  hard-stopped batch triage (#588 Defect 2). Need: drafts carry placeholder ids;
+  concrete W1-Tnnn ids are minted only at rmd approve, serialized by the
+  operator's approve actions, with the reserved set derived from GitHub (merged
+  plan ∪ open plan-PR minted ids) rather than a state-side registry — one
+  derivation, one doctrine, retiring both the cross-draft and the cross-PR
+  collision classes and the triage serialization workaround."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

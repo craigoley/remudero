@@ -1,0 +1,13 @@
+id: fb-1784762611444-e6bdc0
+ts: 2026-07-22T23:23:31.444Z
+raw: "LOCAL CI-PARITY PREFLIGHT BEFORE PUSH — W1-T210/#585 needed a five-layer
+  fix chain (covering test, --enable-source-maps, fix-fence extraction,
+  diff-coverage non-executable-line fix, baseline re-capture, merge-base
+  refresh) where most layers were discoverable locally before any push. Need:
+  workers run the CI-parity check suite locally and fix to green before the
+  first push, so strikes are spent on real review findings, not CI-infra
+  discovery."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

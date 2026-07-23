@@ -1,0 +1,17 @@
+id: fb-1784766956423-6635d1
+ts: 2026-07-23T00:35:56.423Z
+raw: "DEPLOY TRIGGER MUST COMPARE BOOTED SHA, NOT CHECKOUT SHA —
+  decideDeployTrigger (src/lib/deployer.ts:57-60) reads installHead from the
+  checkout (rev-parse, deployer.ts:354), so the documented bootstrap flow
+  (manually ff-pull to obtain the deployer, then request a deploy) equalizes
+  checkout==origin and the trigger reports 'up-to-date' while the long-lived
+  daemon process still runs pre-pull code. Observed live 2026-07-22 23:33Z:
+  deploy.skip up-to-date with daemon PID 30827 booted on ≤6eeb4ee. Need: the
+  staleness comparison uses the daemon's booted SHA (recorded at daemon.boot, or
+  a written install-SHA marker updated only by the supervisor's own kickstart),
+  so a pre-pulled checkout can never mask a stale process. The level trigger
+  recovering on the next main-advance is a lucky property, not a design."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

@@ -42,19 +42,35 @@ import { pathToFileURL } from 'node:url';
  */
 export function parseLcovHitsByFile(lcovText) {
   const files = new Map();
+  const fnLines = new Map();
+  const fnHits = new Map();
   let current = null;
+  let currentPath = null;
   for (const line of lcovText.split('\n')) {
     if (line.startsWith('SF:')) {
       current = new Map();
-      files.set(line.slice(3).trim(), current);
+      currentPath = line.slice(3).trim();
+      files.set(currentPath, current);
+    } else if (line.startsWith('FN:') && current) {
+      // FN:<line>,<name> — a function DECLARED at <line>. Under --enable-source-maps the
+      // tsx-compiled map scores declaration lines DA:0 even when the function body is fully
+      // covered (observed: FN:62 with FNDA:11 beside DA:62,0) — FNDA is the truth for them.
+      const [ln, name] = line.slice(3).split(',');
+      if (!fnLines.has(currentPath)) fnLines.set(currentPath, new Map());
+      fnLines.get(currentPath).set(Number(ln), name);
+    } else if (line.startsWith('FNDA:') && current) {
+      const [hits, name] = line.slice(5).split(',');
+      if (!fnHits.has(currentPath)) fnHits.set(currentPath, new Map());
+      fnHits.get(currentPath).set(name, Number(hits));
     } else if (line.startsWith('DA:') && current) {
       const [lineNoStr, hitsStr] = line.slice(3).split(',');
       current.set(Number(lineNoStr), Number(hitsStr));
     } else if (line.startsWith('end_of_record')) {
       current = null;
+      currentPath = null;
     }
   }
-  return files;
+  return { hits: files, fnLines, fnHits };
 }
 
 /**
@@ -120,6 +136,7 @@ export function isNonExecutableLine(text) {
   if (t === '') return true;
   if (t.startsWith('//')) return true;
   if (t.startsWith('/*') || t.startsWith('*')) return true; // /** ... * ... *\/ furniture
+  if (/^[}\)\];,]+$/.test(t)) return true; // closer-only punctuation (`};`, `})`, ...) carries no logic
   return false;
 }
 
@@ -129,14 +146,24 @@ export function isNonExecutableLine(text) {
  * @param {Map<string, Map<number, number>>} lcovHits
  * @returns {string[]} `file:line` violations, sorted; empty means the gate is satisfied.
  */
-export function findUncoveredAddedLines(added, lcovHits) {
+export function findUncoveredAddedLines(added, lcov) {
   const violations = [];
+  const lcovHits = lcov.hits ?? lcov; // tolerate the pre-FN Map shape (older callers/tests)
+  const fnLines = lcov.fnLines ?? new Map();
+  const fnHits = lcov.fnHits ?? new Map();
   for (const [file, lines] of added) {
     const hitsByLine = lcovHits.get(file);
     if (!hitsByLine) continue; // lcov never saw this file (e.g. test/**) -- no claim to make.
+    const fnsAt = fnLines.get(file);
+    const fnHit = fnHits.get(file);
+    const declEntered = (ln) => {
+      const name = fnsAt?.get(ln);
+      return name !== undefined && (fnHit?.get(name) ?? 0) > 0;
+    };
     const uncovered = [...lines.keys()]
       .filter((ln) => hitsByLine.has(ln) && hitsByLine.get(ln) === 0)
       .filter((ln) => !isNonExecutableLine(lines.get(ln) ?? ''))
+      .filter((ln) => !declEntered(ln)) // an ENTERED function's declaration line is covered, whatever DA says
       .sort((a, b) => a - b);
     for (const ln of uncovered) violations.push(`${file}:${ln}`);
   }
