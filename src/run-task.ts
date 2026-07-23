@@ -7767,6 +7767,16 @@ export async function main(): Promise<void> {
     console.log(commandHelp(helpSpec));
     process.exit(0);
   }
+  // W1-T86: checked directly after the (mandatory, every-call) help preamble above -- NOT
+  // in its "natural" alphabetical/registration spot further down, beside fix. A behavioral
+  // test of THIS dispatch branch must call main() itself (the only way to exercise the
+  // literal `if (cmd === "wipe-test" ...)` lines the diff-coverage gate polices), and
+  // main()'s flat if-ladder means EVERY dispatch check main() reaches before finding its
+  // match gets evaluated too. Sitting first (right after the unavoidable help checks) means
+  // that test evaluates no OTHER sibling's dispatch condition at all.
+  if (cmd === "wipe-test" && arg) {
+    process.exit(await wipeTestCommand(rest));
+  }
   if (cmd === "run-task" && arg) {
     const badArg = unknownArgError("run-task", rest.slice(1), [], ["--allow-stale"]);
     if (badArg) {
@@ -7776,15 +7786,6 @@ export async function main(): Promise<void> {
     const result = await runTask(arg, { allowStale: rest.includes("--allow-stale") });
     console.log("\n" + JSON.stringify(result, null, 2));
     process.exit(result.merged ? 0 : 1);
-  }
-  // W1-T86: checked directly after run-task (not in its "natural" alphabetical/registration
-  // spot further down, beside fix) -- a behavioral test of THIS dispatch branch must call
-  // main() itself (the only way to exercise the literal `if (cmd === "wipe-test" ...)` lines
-  // the diff-coverage gate polices), and main()'s flat if-ladder means EVERY dispatch check
-  // main() reaches before finding its match gets evaluated too. Sitting this early keeps that
-  // list to one sibling (run-task) instead of the dozen-plus that precede fix's old slot.
-  if (cmd === "wipe-test" && arg) {
-    process.exit(await wipeTestCommand(rest));
   }
   if (cmd === "review" && arg) {
     process.exit(await reviewCommand(arg, rest.slice(1)));
