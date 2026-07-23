@@ -134,6 +134,15 @@ test("W1-T243 END-TO-END: a captured entry is invisible on origin/main until lan
 // ── Acceptance claim 2: ONE choke point covers a caller never named in the implementation ──
 
 test("W1-T243 CHOKE POINT: captureFeedback lands ANY caller's entry — this test calls neither rmd feedback, ops, issues-intake, nor the panel routes, and it still lands", () => {
+  // The FIVE real captureFeedback() call sites this bridge must cover, by construction, at ONE
+  // choke point — never per-caller wiring: (1) cli — run-task.ts's feedbackCommand (`rmd
+  // feedback`); (2) panel ui — panel-graph.ts's POST /v1/feedback route; (3) ops alerts —
+  // ops.ts's pollAlerts(); (4) issues intake — issues-intake.ts's pollIssues(); (5) panel grill —
+  // panel-skill-run.ts's clarify skill route. This test deliberately calls NONE of those five
+  // wrapper functions — it calls captureFeedback() directly, as a "fixture caller not named in
+  // the implementation" would — proving the landing mechanism keys off the inbox
+  // directory/capture primitive itself (feedback.ts's plan/feedback/, via captureFeedback()),
+  // not off per-caller wiring a sixth real caller would otherwise have to remember to add.
   const bareOrigin = makeBareOrigin();
   const root = cloneRoot(bareOrigin);
   const { gh, createCount } = fakeGh("https://github.com/o/r/pull/2");
@@ -149,7 +158,7 @@ test("W1-T243 CHOKE POINT: captureFeedback lands ANY caller's entry — this tes
     { encoding: "utf8" },
   );
   assert.match(onBranch, /fixture caller feedback/);
-  assert.equal(createCount(), 1);
+  assert.equal(createCount(), 1, "landed WITHOUT any of cli/panel-ui/ops-alerts/issues-intake/panel-grill being called in this test");
 });
 
 // ── Acceptance claim 3: capture NEVER fails when landing is unavailable ─────────────────────
@@ -167,6 +176,48 @@ test("W1-T243 OFFLINE: captureFeedback still succeeds when root IS a git repo bu
   const entry = captureFeedback(root, { raw: "captured with a repo but no origin remote configured" });
   assert.equal(entry.raw, "captured with a repo but no origin remote configured");
   assert.ok(existsSync(feedbackEntryPath(root, entry.id)));
+});
+
+test("W1-T243 STRANDED-ENTRY SWEEP: captureFeedback with the landing path STUBBED TO FAIL still writes the entry and returns success — a LATER bridge pass picks the stranded entry up", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+
+  // Stub the git half of THIS capture's landing attempt to fail outright (simulating offline,
+  // no origin reachable, whatever) — captureFeedback must still write the entry and RETURN
+  // SUCCESS regardless.
+  const failingGit = (): string => {
+    throw new Error("simulated network failure — git fetch origin unreachable");
+  };
+  const entry = captureFeedback(root, {
+    raw: "stranded while offline, must not be lost",
+    land: { git: failingGit },
+  });
+  assert.equal(entry.raw, "stranded while offline, must not be lost", "captureFeedback still returns success");
+  assert.ok(
+    existsSync(feedbackEntryPath(root, entry.id)),
+    "the local write is the durable buffer — it happened despite the stubbed landing failure",
+  );
+
+  // Confirm the entry really is STRANDED right now (nothing pushed) — the falsifier this
+  // failure-path must not silently paper over.
+  assert.throws(() =>
+    execFileSync("git", ["--git-dir", bareOrigin, "show", `${LANDING_BRANCH}:plan/feedback/${entry.id}.yaml`], { encoding: "utf8" }),
+  );
+
+  // A LATER bridge pass — e.g. the NEXT real capture on this machine, or a future manual sweep —
+  // this time with a real, un-stubbed git, picks the stranded entry up and lands it. Nothing
+  // about this entry was dropped; it was only ever DEFERRED.
+  const { gh } = fakeGh("https://github.com/o/r/pull/99");
+  const laterPass = landFeedback(root, { gh });
+  assert.equal(laterPass.landed, true, "the later bridge pass lands the previously-stranded entry");
+  assert.deepEqual(laterPass.files, [`plan/feedback/${entry.id}.yaml`]);
+
+  const onBranch = execFileSync(
+    "git",
+    ["--git-dir", bareOrigin, "show", `${LANDING_BRANCH}:plan/feedback/${entry.id}.yaml`],
+    { encoding: "utf8" },
+  );
+  assert.match(onBranch, /stranded while offline, must not be lost/);
 });
 
 test("W1-T243 OFFLINE: landFeedback pushes fine even when `gh pr create` fails (no auth/no network) — reports landed:true with the failure named, never throws", () => {
