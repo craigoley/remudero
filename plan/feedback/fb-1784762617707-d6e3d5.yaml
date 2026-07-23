@@ -1,0 +1,12 @@
+id: fb-1784762617707-d6e3d5
+ts: 2026-07-22T23:23:37.708Z
+raw: "FIX-RUNG STAND-DOWN ON RECENT NON-RUNG AUTHORSHIP — when a human or
+  sibling session has moved a PR branch recently, a fix-rung strike risks
+  clobbering or duplicating in-flight manual work (observed in the #585 arc).
+  Need: before striking, the rung checks recent branch authorship; if the latest
+  commits are not its own, it stands down and escalates with a named reason
+  instead of striking."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
