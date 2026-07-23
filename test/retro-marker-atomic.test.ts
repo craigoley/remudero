@@ -338,6 +338,29 @@ function setupFakeRetroFixture(
     /** `gh pr view --json body` response -- default already carries the trailer AND a
      *  valid Acceptance block so neither repair path fires. */
     body?: string;
+    /** The Architect's fabricated REPORT carries NO `PR_URL:` line -- forces the
+     *  `gh pr create --fill` fallback path (our fake `gh` answers it with a fresh URL). */
+    noPrUrl?: boolean;
+    /** `gh pr view --json headRefName` returns no `headRefName` at all (an UNRESOLVED
+     *  head ref, distinct from a resolved-but-wrong one) -- checkPrOwnership's `?? null`
+     *  fallback. */
+    unresolvedHeadRef?: boolean;
+    /** Omit MASTER-PLAN.md from the fixture repo -- regenerateOrientation throws (ENOENT),
+     *  exercising its best-effort catch. */
+    missingMasterPlan?: boolean;
+    /** Omit scripts/generate-plan-index.mjs -- regeneratePlanIndexAndCommit throws
+     *  (ENOENT spawning the generator), exercising its best-effort catch. */
+    missingGeneratorScript?: boolean;
+    /** Seed a malformed plan/tasks.yaml -- loadPlan throws inside the best-effort
+     *  "next runnable task" lookup, exercising ITS catch. */
+    badPlan?: boolean;
+    /** `gh pr view --json body` returns NO `body` field at all (as opposed to an empty
+     *  string) -- the `view.body ?? ""` fallback, both in ensureTaskTrailer and the
+     *  acceptance-repair pass. */
+    omitBody?: boolean;
+    /** repoDir is NOT pre-cloned -- retroCommand's own `gh repo clone` fires (our fake
+     *  `gh` performs a REAL local clone of the same origin, never a stub). */
+    missingRepoDir?: boolean;
   } = {},
 ): FakeRetroFixture {
   const fakeHome = mkdtempSync(join(tmpdir(), "rmd-retro-success-home-"));
@@ -357,26 +380,32 @@ function setupFakeRetroFixture(
   execFileSync("git", ["clone", "-q", originGit, seed]);
   execFileSync("git", ["-C", seed, "config", "user.email", "retro-test@example.invalid"]);
   execFileSync("git", ["-C", seed, "config", "user.name", "retro-test"]);
-  writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n\n## 1. Intro\n\nfixture.\n");
+  if (!opts.missingMasterPlan) writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER-PLAN\n\n## 1. Intro\n\nfixture.\n");
   mkdirSync(join(seed, "plan"), { recursive: true });
-  writeFileSync(join(seed, "plan", "tasks.yaml"), "[]\n"); // zero tasks -> nextTask lookup makes NO gh calls
+  // zero tasks -> the best-effort "next runnable task" lookup makes NO gh calls; a
+  // deliberately-malformed plan instead makes loadPlan throw, exercising its own catch.
+  writeFileSync(join(seed, "plan", "tasks.yaml"), opts.badPlan ? "not_a_task_list: true\n" : "[]\n");
   writeFileSync(join(seed, "plan", "plan-index.json"), "{}\n");
-  mkdirSync(join(seed, "scripts"), { recursive: true });
-  // The REAL generator script (self-contained: no src/ imports) -- never a reimplementation.
-  copyFileSync(join(process.cwd(), "scripts", "generate-plan-index.mjs"), join(seed, "scripts", "generate-plan-index.mjs"));
+  if (!opts.missingGeneratorScript) {
+    mkdirSync(join(seed, "scripts"), { recursive: true });
+    // The REAL generator script (self-contained: no src/ imports) -- never a reimplementation.
+    copyFileSync(join(process.cwd(), "scripts", "generate-plan-index.mjs"), join(seed, "scripts", "generate-plan-index.mjs"));
+  }
   execFileSync("git", ["-C", seed, "add", "-A"]);
   execFileSync("git", ["-C", seed, "commit", "-q", "-m", "chore: fixture seed"]);
   execFileSync("git", ["-C", seed, "push", "-q", "origin", "main"]);
 
   const repoDir = join(root, "repos", "remudero");
   mkdirSync(join(root, "repos"), { recursive: true });
-  execFileSync("git", ["clone", "-q", originGit, repoDir]);
-  execFileSync("git", ["-C", repoDir, "config", "user.email", "retro-test@example.invalid"]);
-  execFileSync("git", ["-C", repoDir, "config", "user.name", "retro-test"]);
+  if (!opts.missingRepoDir) {
+    execFileSync("git", ["clone", "-q", originGit, repoDir]);
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "retro-test@example.invalid"]);
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "retro-test"]);
+  }
 
   // ── a fake `gh` on PATH: only the handful of subcommands this success path invokes ──
   const fakeGhBody = opts.body ?? "Remudero-Task: RETRO\n\n## Acceptance\n- fixture claim | fixture proof\n";
-  const headRefNameOut = (opts.headRefName ?? ((b: string) => b))(branch);
+  const headRefNameOut = opts.unresolvedHeadRef ? undefined : (opts.headRefName ?? ((b: string) => b))(branch);
   const fakeBinDir = mkdtempSync(join(tmpdir(), "rmd-retro-success-bin-"));
   // The diff body rides in its OWN file (never inlined into the script's shell text) --
   // real newlines matter here (codeFilesInDiff needs a literal `+++ b/...` LINE), and a
@@ -390,10 +419,20 @@ function setupFakeRetroFixture(
       "#!/bin/bash",
       "set -e",
       'args="$*"',
-      // pr view --json body  (ensureTaskTrailer + the acceptance-repair check)
-      `if [[ "$args" == *'--json body'* ]]; then echo '{"body":${JSON.stringify(fakeGhBody)}}'; exit 0; fi`,
-      // pr view --json headRefName  (checkPrOwnership)
-      `if [[ "$args" == *'--json headRefName'* ]]; then echo '{"headRefName":"${headRefNameOut}"}'; exit 0; fi`,
+      // pr view --json body  (ensureTaskTrailer + the acceptance-repair check) -- or a
+      // response with NO `body` field at all (`view.body ?? ""`'s fallback side).
+      opts.omitBody
+        ? `if [[ "$args" == *'--json body'* ]]; then echo '{}'; exit 0; fi`
+        : `if [[ "$args" == *'--json body'* ]]; then echo '{"body":${JSON.stringify(fakeGhBody)}}'; exit 0; fi`,
+      // repo clone  (repoDir absent) -- a REAL local clone of the same origin, never a stub.
+      `if [[ "$args" == *'repo clone'* ]]; then git clone -q ${JSON.stringify(originGit)} "\${!#}"; exit 0; fi`,
+      // pr view --json headRefName  (checkPrOwnership) -- or a body with NO headRefName
+      // field at all, an UNRESOLVED head ref (distinct from a resolved-but-wrong one).
+      headRefNameOut === undefined
+        ? `if [[ "$args" == *'--json headRefName'* ]]; then echo '{}'; exit 0; fi`
+        : `if [[ "$args" == *'--json headRefName'* ]]; then echo '{"headRefName":"${headRefNameOut}"}'; exit 0; fi`,
+      // pr create --fill  (the no-PR_URL-in-report fallback)
+      `if [[ "$args" == *'create'* && "$args" == *'--fill'* ]]; then echo 'https://github.com/craigoley/remudero/pull/424242'; exit 0; fi`,
       // pr view --json statusCheckRollup  (waitForCiGreen) -- RED on the first poll, so
       // retroCommand exits right after the marker-advance line with no further gh calls.
       `if [[ "$args" == *'--json statusCheckRollup'* ]]; then echo '{"statusCheckRollup":[{"name":"ci","conclusion":"FAILURE"}]}'; exit 0; fi`,
@@ -416,7 +455,7 @@ function setupFakeRetroFixture(
     sessionId: "s-retro-fixture",
     costUsd: 0.01,
     numTurns: 1,
-    text: `REPORT\nPR_URL: https://github.com/craigoley/remudero/pull/999999\n`,
+    text: opts.noPrUrl ? "REPORT\n(no PR_URL -- the harness must open the PR itself)\n" : `REPORT\nPR_URL: https://github.com/craigoley/remudero/pull/999999\n`,
     blocks: [],
     stderr: "",
     subtype: "success",
@@ -535,5 +574,81 @@ test("retroCommand: a transient `gh pr diff` failure is caught by the outer catc
     assert.ok(!fsDefault.existsSync(join(fx.root, "state", "last-retro.json")), "a mid-flight failure must NEVER leave a half-advanced marker");
     const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
     assert.ok(ledgerLines.some((l) => l.step === "retro.error"), "the outer catch must ledger retro.error before rethrowing");
+  });
+});
+
+test("retroCommand: no PR_URL in the Architect's report falls back to `gh pr create --fill` and still reaches the marker advance", async (t) => {
+  const fx = setupFakeRetroFixture(t, { noPrUrl: true });
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
+    assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
+    const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
+    assert.ok(marker.ts, "the gh-pr-create-fill fallback must still reach the real saveMarker call");
+  });
+});
+
+test("retroCommand: an UNRESOLVED head ref (gh cannot say what branch the PR is on) fails CLOSED, distinctly from a resolved-but-wrong one", async (t) => {
+  const fx = setupFakeRetroFixture(t, { unresolvedHeadRef: true });
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
+    assert.equal(exitCode, 1, "an unresolved head ref is treated as NOT owned -- fail closed, same as a resolved mismatch");
+    assert.ok(!fsDefault.existsSync(join(fx.root, "state", "last-retro.json")), "an unresolved head ref must NEVER advance the marker");
+  });
+});
+
+test("retroCommand: a missing MASTER-PLAN.md degrades docs/ORIENTATION.md regeneration gracefully (best-effort) and still reaches the marker advance", async (t) => {
+  const fx = setupFakeRetroFixture(t, { missingMasterPlan: true });
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
+    assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
+    const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
+    assert.ok(marker.ts, "a best-effort ORIENTATION.md failure must never prevent the marker from advancing");
+    const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.ok(ledgerLines.some((l) => l.step === "orientation.write.error"), "the missing MASTER-PLAN.md must be ledgered, not silently swallowed");
+  });
+});
+
+test("retroCommand: a missing plan-index generator script degrades plan-index.json regeneration gracefully (best-effort) and still reaches the marker advance", async (t) => {
+  const fx = setupFakeRetroFixture(t, { missingGeneratorScript: true });
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
+    assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
+    const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
+    assert.ok(marker.ts, "a best-effort plan-index.json failure must never prevent the marker from advancing");
+    const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.ok(ledgerLines.some((l) => l.step === "plan_index.regen.error"), "the missing generator script must be ledgered, not silently swallowed");
+  });
+});
+
+test("retroCommand: a malformed plan/tasks.yaml degrades the best-effort 'next runnable task' lookup gracefully and still reaches the marker advance", async (t) => {
+  const fx = setupFakeRetroFixture(t, { badPlan: true });
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
+    assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
+    const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
+    assert.ok(marker.ts, "a best-effort next-task lookup failure must never prevent the marker from advancing");
+    const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.ok(ledgerLines.some((l) => l.step === "orientation.next_task.error"), "the malformed plan must be ledgered, not silently swallowed");
+  });
+});
+
+test("retroCommand: a PR body with NO body field at all (not merely empty) still gets trailer-stamped and repaired", async (t) => {
+  const fx = setupFakeRetroFixture(t, { omitBody: true });
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
+    assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
+    const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
+    assert.ok(marker.ts, "a missing body field is best-effort (ensureTaskTrailer/the repair pass) -- never blocks the marker advance");
+  });
+});
+
+test("retroCommand: repoDir absent triggers a REAL `gh repo clone` and still reaches the marker advance", async (t) => {
+  const fx = setupFakeRetroFixture(t, { missingRepoDir: true });
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
+    assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
+    const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
+    assert.ok(marker.ts, "the gh-repo-clone fallback must still reach the real saveMarker call");
+    assert.ok(fsDefault.existsSync(join(fx.root, "repos", "remudero", ".git")), "gh repo clone must have actually materialized repoDir");
   });
 });
