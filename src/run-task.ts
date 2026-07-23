@@ -179,14 +179,16 @@ import { deriveTaskClass } from "./lib/task-class.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
 import { ContainmentError, probeContainment } from "./lib/containment.js";
 import { IsolationError, probeIsolation } from "./lib/isolation.js";
-import {
-  DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-  loadLayeredLearningsForTaskFiles,
-  renderDoctrinePreamble,
-  renderMatchedLearnings,
-  selectLearnings,
-} from "./lib/learnings.js";
+import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, renderDoctrinePreamble } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
+import {
+  computeMatchedLearningsForArm,
+  deriveWipeTestRunResult,
+  ledgerWipeTestPair,
+  resolveWipeTestTarget,
+  WIPE_TEST_SANDBOX_DEFAULT,
+  type WipeTestPair,
+} from "./lib/wipe-test.js";
 import { loadPlanIndex, renderPlanIndex } from "./lib/plan-index.js";
 import {
   REVIEW_CONTEXT,
@@ -2080,6 +2082,11 @@ async function runTask(
     /** Injectable GitHub gateway for the status projection — lets a behavioral test drive the
      *  dispatch path without a network round-trip. Default: the real {@link ghGateway}. */
     github?: GitHub;
+    /** W1-T86 (P12 wipe-test harness): arm B of a `rmd wipe-test` pair — MASK learnings
+     *  injection for this run. Forces the rendered prompt's matched-learnings text to ""
+     *  WITHOUT reading the store (see {@link computeMatchedLearningsForArm}); never set by
+     *  any caller other than `wipeTestCommand`. */
+    maskLearnings?: boolean;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
@@ -2393,25 +2400,32 @@ async function runTask(
     // deferred) — both layers are non-fatal absences, so this is a pure
     // superset of the project-only injection that shipped before.
     const learningsDir = join(dirname(planPath), "..", "learnings");
-    const { entries: learnings, globalRefusedReason } = loadLayeredLearningsForTaskFiles(
-      {
+    // W1-T86 (P12 wipe-test harness): arm B of a wipe-test pair MASKS injection —
+    // computeMatchedLearningsForArm("B", ...) returns "" WITHOUT calling any of the
+    // load/select/render chain below, so the store is never touched, only the
+    // resulting text is forced empty. A normal (non-wipe-test) run always passes
+    // opts.maskLearnings undefined, i.e. arm "A" — byte-identical to the chain this
+    // block ran before W1-T86.
+    const learningsResult = computeMatchedLearningsForArm(opts.maskLearnings ? "B" : "A", {
+      homes: {
         projectDir: learningsDir,
         userOverallDir: userOverallLearningsHome(config),
         globalArtifactPath: globalArtifactPath(config),
       },
-      task.files,
-    );
-    const { selected, dropped } = selectLearnings(learnings, task.files, DEFAULT_KNOWLEDGE_BUDGET_CHARS);
+      taskFiles: task.files,
+      budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+    });
     // VOLATILE (Tier 1) — deliberately NOT combined with the stable doctrine
     // preamble here: renderImplementPrompt places this LAST in the CONTEXT
     // block (cache-aware ordering, W1-T35) so a growing corpus can never bust
     // the cache for the stable/per-task bytes that precede it.
-    const matchedLearnings = renderMatchedLearnings(selected);
+    const matchedLearnings = learningsResult.matchedLearnings;
     log("learnings.injected", {
-      matched: selected.length,
-      dropped: dropped.map((d) => d.id),
+      matched: learningsResult.selectedIds.length,
+      dropped: learningsResult.droppedIds,
       budget_chars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-      global_refused_reason: globalRefusedReason,
+      global_refused_reason: learningsResult.globalRefusedReason,
+      masked: !!opts.maskLearnings,
     });
 
     // ── Render + provenance-lint the prompt.
@@ -5711,6 +5725,89 @@ async function fixCommand(rest: string[]): Promise<number> {
 }
 
 /**
+ * `rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]` — the P12
+ * learning-utility A/B harness (W1-T86; see src/lib/wipe-test.ts's module doc for the
+ * full design). Runs `<task-id>` TWICE through `runTask`: arm A with normal learnings
+ * injection, arm B with injection MASKED (the store itself untouched — see
+ * `computeMatchedLearningsForArm`) — then computes + LEDGERS the deltas between them
+ * (`wipetest.pair`). SANDBOX-ONLY by default (`resolveWipeTestTarget`): a bare `--repo
+ * remudero` (or any non-sandbox name) is REFUSED before either arm ever spawns.
+ *
+ * A single pair is an anecdote (the design's own words) — the aggregate over many
+ * ledgered pairs (`aggregateWipeTestPairs`, read back from the ledger) is what the
+ * operator treats as signal; this command runs and ledgers exactly one pair per
+ * invocation, by design (repeat it to accumulate pairs).
+ */
+export async function wipeTestCommand(
+  rest: string[],
+  deps: {
+    config?: Config;
+    /** Injectable dispatch — the real (default) is this module's own {@link runTask}. A
+     *  behavioral test swaps in a fake returning canned {@link RunResult}s so a `wipe-test`
+     *  invocation can be exercised end-to-end WITHOUT spawning two real workers. */
+    runTaskFn?: typeof runTask;
+    /** Injectable subprocess runner for the non-self clone/fetch step — same seam
+     *  `drainCommand`'s `githubFactory` provides for its own network calls. Default: the
+     *  real {@link execFileSync}. */
+    execFileSyncFn?: typeof execFileSync;
+  } = {},
+): Promise<number> {
+  const taskId = rest[0];
+  const badArg = unknownArgError("wipe-test", rest.slice(1), ["--repo"], ["--allow-non-sandbox"]);
+  if (!taskId || badArg) {
+    if (badArg) console.error(badArg);
+    console.error(`usage: ${commandSyntax("wipe-test")}\n` + USAGE);
+    return 2;
+  }
+
+  const resolved = resolveWipeTestTarget(rest.slice(1));
+  if ("error" in resolved) {
+    console.error(resolved.error + "\n" + USAGE);
+    return 2;
+  }
+  const { repo } = resolved.target;
+
+  const config = deps.config ?? loadConfig();
+  const runTaskFn = deps.runTaskFn ?? runTask;
+  const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const self = resolveOwnerRepo();
+  const isSelf = repo === self.repo;
+  const reposDir = join(config.root, "repos");
+  const planPath = isSelf ? join(repoRoot, "plan", "tasks.yaml") : join(reposDir, repo, "plan", "tasks.yaml");
+
+  // Same clone-if-absent / fetch+reset-if-present pattern `rmd daemon`'s non-self
+  // target uses (daemonCommand, above) — a wipe-test target needs an up-to-date
+  // checkout to dispatch against exactly the way the daemon does.
+  if (!isSelf) {
+    const repoDir = join(reposDir, repo);
+    if (!existsSync(repoDir)) {
+      mkdirSync(dirname(repoDir), { recursive: true });
+      execFileSyncFn("gh", ["repo", "clone", `${self.owner}/${repo}`, repoDir], { stdio: "inherit" });
+    } else {
+      execFileSyncFn("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
+      execFileSyncFn("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
+    }
+  }
+
+  const runId = `WIPETEST-${Date.now()}`;
+  console.log(`### rmd wipe-test — ${taskId} on ${self.owner}/${repo}: arm A (learnings ON)`);
+  const rawArmA = await runTaskFn(taskId, { planPath, config, skipGitSync: true });
+  console.log(`### rmd wipe-test — ${taskId} on ${self.owner}/${repo}: arm B (learnings MASKED)`);
+  const rawArmB = await runTaskFn(taskId, { planPath, config, skipGitSync: true, maskLearnings: true });
+
+  const ledgerLines = readLedgerLines(ledgerPath);
+  const pair: WipeTestPair = {
+    taskId,
+    armA: deriveWipeTestRunResult(rawArmA, ledgerLines),
+    armB: deriveWipeTestRunResult(rawArmB, ledgerLines),
+  };
+  const delta = ledgerWipeTestPair(ledgerPath, runId, pair);
+  console.log("\n" + JSON.stringify({ pair, delta }, null, 2));
+  return 0;
+}
+
+/**
  * `rmd stop [--reason <text>]` — the fleet control set (W1-T11, MASTER-PLAN §4A/§4B).
  * Writes the STOP flag file. A `rmd drain` already running halts within one tick
  * (checked FIRST, every iteration, ahead of PAUSE); a NEW `rmd drain` refuses to
@@ -7537,6 +7634,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd fix <pr-number> [--repo <name>]   # operator verb for the W1-T76 fix rung (W1-T95, bootstrap/manual-override — drives a block on the sweep/drain delivery ITSELF, e.g. #160): dispatches the SAME rung sweep uses; refuses (zero spawns) when the PR is merged, closed, or has no block evidence; strikes-at-cap routes to escalate naming the count, never bypassing the cap.",
   },
   {
+    name: "wipe-test",
+    usage:
+      `rmd wipe-test <task-id> [--repo ${WIPE_TEST_SANDBOX_DEFAULT}] [--allow-non-sandbox]   # the P12 learning-utility A/B harness (W1-T86): runs <task-id> TWICE — arm A with normal learnings injection, arm B with injection MASKED (the store itself untouched) — and ledgers the deltas (wipetest.pair: turns/cost/verdict/strikes/proof_exec); SANDBOX-ONLY by default, refuses any other --repo (including the primary repo) unless --allow-non-sandbox is also passed; a single pair is an anecdote — only the aggregate over many ledgered pairs is signal`,
+  },
+  {
     name: "stop",
     usage:
       "rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.",
@@ -7663,7 +7765,7 @@ function commandSyntax(name: string): string {
 }
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const [, , cmd, ...rest] = process.argv;
   const arg = rest[0];
   if (cmd === "--help" || cmd === "-h" || cmd === "help") {
@@ -7677,6 +7779,16 @@ async function main(): Promise<void> {
   if (helpSpec && (rest.includes("--help") || rest.includes("-h"))) {
     console.log(commandHelp(helpSpec));
     process.exit(0);
+  }
+  // W1-T86: checked directly after the (mandatory, every-call) help preamble above -- NOT
+  // in its "natural" alphabetical/registration spot further down, beside fix. A behavioral
+  // test of THIS dispatch branch must call main() itself (the only way to exercise the
+  // literal `if (cmd === "wipe-test" ...)` lines the diff-coverage gate polices), and
+  // main()'s flat if-ladder means EVERY dispatch check main() reaches before finding its
+  // match gets evaluated too. Sitting first (right after the unavoidable help checks) means
+  // that test evaluates no OTHER sibling's dispatch condition at all.
+  if (cmd === "wipe-test" && arg) {
+    process.exit(await wipeTestCommand(rest));
   }
   if (cmd === "run-task" && arg) {
     const badArg = unknownArgError("run-task", rest.slice(1), [], ["--allow-stale"]);

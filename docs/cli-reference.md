@@ -29,6 +29,7 @@ usage:
   rmd serve [--port <n>] [--host <addr>]   # the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317 (matches apps/dashboard's own default); --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the console can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM
   rmd sweep [--repo <name>] [--dry-run]   # level-triggered PR-pipeline reconciler (W1-T77, P22): re-derive EVERY open PR's disposition from observed state and take the ONE gated action — mergeable->arm auto-merge; blocked-fixable->W1-T76 fix rung; stale/superseded->close-with-reason; blocked-ambiguous->the W1-T78 clarification-question rung (a specific, decidable operator question to the §2 backlog + escalate() as transport, never a generic needs-human). Idempotent (a second sweep over unchanged state acts on nothing). The daemon runs this every poll; --dry-run previews dispositions and takes nothing.
   rmd fix <pr-number> [--repo <name>]   # operator verb for the W1-T76 fix rung (W1-T95, bootstrap/manual-override — drives a block on the sweep/drain delivery ITSELF, e.g. #160): dispatches the SAME rung sweep uses; refuses (zero spawns) when the PR is merged, closed, or has no block evidence; strikes-at-cap routes to escalate naming the count, never bypassing the cap.
+  rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]   # the P12 learning-utility A/B harness (W1-T86): runs <task-id> TWICE — arm A with normal learnings injection, arm B with injection MASKED (the store itself untouched) — and ledgers the deltas (wipetest.pair: turns/cost/verdict/strikes/proof_exec); SANDBOX-ONLY by default, refuses any other --repo (including the primary repo) unless --allow-non-sandbox is also passed; a single pair is an anecdote — only the aggregate over many ledgered pairs is signal
   rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.
   rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.
   rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume
@@ -167,6 +168,14 @@ rmd fix <pr-number> [--repo <name>]
 ```
 
 operator verb for the W1-T76 fix rung (W1-T95, bootstrap/manual-override — drives a block on the sweep/drain delivery ITSELF, e.g. #160): dispatches the SAME rung sweep uses; refuses (zero spawns) when the PR is merged, closed, or has no block evidence; strikes-at-cap routes to escalate naming the count, never bypassing the cap.
+
+### `rmd wipe-test`
+
+```
+rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]
+```
+
+the P12 learning-utility A/B harness (W1-T86): runs <task-id> TWICE — arm A with normal learnings injection, arm B with injection MASKED (the store itself untouched) — and ledgers the deltas (wipetest.pair: turns/cost/verdict/strikes/proof_exec); SANDBOX-ONLY by default, refuses any other --repo (including the primary repo) unless --allow-non-sandbox is also passed; a single pair is an anecdote — only the aggregate over many ledgered pairs is signal
 
 ### `rmd stop`
 
