@@ -2448,12 +2448,48 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   // AT MOST once per page load: after that, the operator's own clicks own the expand/collapse
   // state.
   let deepLinkApplied = false;
+  // W1-T144: the digest push (lib/digest.ts's consoleCardUrl) deep-links each escalation/
+  // rundown line as \`<base>/#task=<id>\` — a HASH fragment, never sent to the server, so it
+  // layers on the operator's already-token-bearing bookmarked URL. Read the SAME id the
+  // \`?task=\` path reads: the hash wins when present (the fresh click), else the query param
+  // (a bookmarked open-to-this-card URL). Percent-decoded to match consoleCardUrl's
+  // encodeURIComponent. An id that matches no row is left to focusAndExpandTask, which
+  // returns false and expands NOTHING (criterion 2's planted-probe rejection).
+  function deepLinkTaskId() {
+    const hash = window.location.hash || "";
+    const m = hash.match(/^#task=(.+)$/);
+    if (m) {
+      try { return decodeURIComponent(m[1]); } catch { return m[1]; }
+    }
+    return params.get("task");
+  }
   function applyDeepLinkIfNeeded() {
     if (deepLinkApplied) return;
-    const taskId = params.get("task");
+    const fromHash = /^#task=/.test(window.location.hash || "");
+    const taskId = deepLinkTaskId();
     if (!taskId) { deepLinkApplied = true; return; }
+    // PLANTED-PROBE REJECTION (W1-T144 criterion 2): a HASH deep-link (a digest console
+    // link) for an id the board does not KNOW must open NOTHING — never
+    // focusAndExpandTask's find-fallback, which would force-surface a fabricated
+    // "everything else" row for a non-existent task. Once the id is known-absent (the board
+    // has painted real data, not just the status-only first pass), the probe is terminally
+    // rejected, not retried. The ?task= bookmark path keeps its existing force-surface
+    // behavior — a bookmark names a task the operator believes exists.
+    if (fromHash && !tasksById.has(taskId)) {
+      if (tasksById.size > 0) deepLinkApplied = true; // known-absent -> reject; else wait for real data
+      return;
+    }
     if (focusAndExpandTask(taskId)) deepLinkApplied = true; // else: no matching row THIS paint -- retry next paint.
   }
+  // W1-T144: a hash change AFTER load (the operator taps a second digest link while the
+  // console is already open) re-arms and applies the new target immediately — the query-
+  // param path only ever fires once per page load, but a hash link is a live navigation.
+  window.addEventListener("hashchange", () => {
+    if (/^#task=/.test(window.location.hash || "")) {
+      deepLinkApplied = false;
+      applyDeepLinkIfNeeded();
+    }
+  });
 
   // FIRST PAINT, before any network round trip completes (W1-T154): a last-snapshot cache from
   // a previous load, stamped STALE — or, with no cache at all (a true cold start), the skeleton
