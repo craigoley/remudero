@@ -3165,7 +3165,66 @@
   attempts: 0
   note: "INTAKE FIXTURE #1, finding R-9 coupled to R-16, recon T5. Size measured at intake: 9,455,694 bytes.
     The recon's own framing is right that this must be breaker-safe, and that is the whole difficulty - a
-    plain logrotate here is actively dangerous, not merely insufficient."
+    plain logrotate here is actively dangerous, not merely insufficient.
+    AMENDED BY FEEDBACK fb-1784769525147-13afc6: the rotation as observed live is DIVERGENT - see W1-T244
+    for the convergence invariant, retained-set bounds, and daemon.boot/deploy.* retention."
+- id: W1-T244
+  title: "ledger rotation is divergent - the retained core can exceed the rotation ceiling so every append re-rotates forever, and daemon.boot/deploy.* are missing from the retained set, blinding boot-health"
+  repo: remudero
+  depends_on: [W1-T209]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "FEEDBACK fb-1784769525147-13afc6, OBSERVED LIVE 2026-07-23. The rotation that W1-T209 called
+    for exists in code but violates an invariant W1-T209 never stated: AFTER ANY ROTATION THE LIVE LEDGER
+    MUST BE STRICTLY BELOW THE ROTATION CEILING, or rotation cannot terminate. Observed: the retained
+    decision-relevant core alone exceeded the 4MiB ceiling, so EVERY append re-rotated - 80+ archive files,
+    bursts of 12 rotations/second, and a truncated live ledger. Divergence, not hygiene.
+    SECOND, COUPLED DEFECT, ALSO OBSERVED: daemon.boot is absent from DECISION_RELEVANT_LEDGER_STEPS, so a
+    boot heartbeat was archived MID-HEALTH-WINDOW, assessBootHealth returned a false negative, and a healthy
+    7abe870 deploy was rolled back at 00:19Z. deploy.* steps share the same exposure, and W1-T215's planned
+    boot-rate detector reads the same lines, so it inherits the same blindness. This is exactly the failure
+    W1-T209's own acceptance warned about - 'a step this note forgets is a breaker that silently resets' -
+    now demonstrated against health consumers rather than the dispatch breaker."
+  design: |
+    THE CONVERGENCE INVARIANT IS THE LOAD-BEARING PART, ENFORCED IN CODE NOT IN REVIEW. Post-rotation,
+    live ledger size MUST be strictly below the ceiling. If the retained core alone would exceed the
+    ceiling, the rotation must SHED the oldest retained lines to the archive and leave an archived-pointer
+    line in their place, rather than retaining them and looping. A rotation that cannot make live < ceiling
+    is a bug by definition, never a steady state.
+    BOUND THE RETAINED SET so it cannot grow to the ceiling in the first place: keep only the LATEST
+    sweep.disposed per pr@head (older duplicates are archivable), and cap per-step retention. Derive the
+    bounds from what each consumer actually reads - the breaker, sweep dedup, and the health assessors.
+    WIDEN THE RETAINED SET to the consumers the incident exposed: daemon.boot and deploy.* steps are
+    decision-relevant because assessBootHealth and the W1-T215 boot-rate invariant consume them across
+    their health windows. Retention must cover at least the full health window.
+    THE REGRESSION TEST IS PRESCRIBED BY THE INCIDENT: bloat the retained core past the ceiling, append
+    once, and assert EXACTLY ONE rotation occurs and the live ledger ends strictly below the ceiling.
+  acceptance:
+    - claim: "THE CONVERGENCE REGRESSION - with the retained core bloated past the rotation ceiling, a single append triggers EXACTLY ONE rotation and leaves the live ledger strictly below the ceiling"
+      proof: "unit test: test/ledger-rotation-convergence.test.ts"
+    - claim: "when the retained core alone would exceed the ceiling, the oldest retained lines are shed to the archive with an archived-pointer line left behind, rather than retained in a loop"
+      proof: "unit test: test/ledger-rotation-convergence.test.ts"
+    - claim: "the retained set is bounded - only the LATEST sweep.disposed per pr@head survives rotation and per-step retention is capped, asserted against a synthetic ledger with duplicate sweep.disposed lines"
+      proof: "unit test: test/ledger-rotation-convergence.test.ts"
+    - claim: "daemon.boot and deploy.* lines within the health window survive rotation, and assessBootHealth returns an IDENTICAL verdict before and after a rotation - the false-negative that rolled back a healthy deploy cannot recur"
+      proof: "unit test: test/ledger-rotation-convergence.test.ts"
+    - claim: "the W1-T209 breaker invariant still holds under the bounded retained set - the dispatch-breaker verdict is unchanged across a rotation that sheds oldest retained lines"
+      proof: "unit test: test/breaker-survives-rotation.test.ts"
+  risk: high
+  origin: feedback#fb-1784769525147-13afc6
+  plan_refs: ["§12", "P29"]
+  files: [src/lib/ledger.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from feedback fb-1784769525147-13afc6 (cli, 2026-07-23). W1-T209's acceptance required the
+    decision-relevant set be derived from consumers, but neither it nor anything else in the plan stated the
+    convergence invariant (post-rotation live < ceiling), and the health consumers (assessBootHealth,
+    W1-T215's boot-rate detector) were not named as consumers of the retained set. Incident evidence: 80+
+    archives, 12 rotations/s bursts, healthy 7abe870 deploy rolled back 00:19Z on a false-negative boot
+    health read. Depends on W1-T209 because it amends that rotation's contract; W1-T215 is NOT rewired -
+    its detector becomes correct automatically once daemon.boot is retained."
 - id: W1-T210
   title: "a CI log tail is interpolated bare into the write-capable fix-worker prompt, and that worker carries no tool restriction - untrusted text reaching an agent that can push"
   repo: remudero
