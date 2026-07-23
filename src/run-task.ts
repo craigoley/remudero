@@ -3153,6 +3153,25 @@ export async function withMaterializedWorktree<T>(
   }
 }
 
+/**
+ * `rmd review`'s OWN `Remudero-Task: <id>` trailer extraction (W1-T70). The worker prompt
+ * DICTATES the contract ("Include this exact trailer as the LAST line of the PR body") but
+ * the pre-W1-T70 read here was an UNANCHORED `body.match(/Remudero-Task:\s*(\S+)/)` — any
+ * body that QUOTES the trailer format mid-prose (increasingly common on plan/ratify PRs,
+ * which routinely discuss the trailer contract itself — observed live on #119 and one
+ * earlier) was captured ahead of the genuine final line. 4th instance of the first-match
+ * parser class: the DECISION_REQUEST near-miss, `parseReport`'s first-URL bug (W1-T62 —
+ * `anchoredPrUrl` in lib/worker.ts is the SAME matchAll-and-take-last idiom this mirrors),
+ * and `deriveStatus` rung (c) (W1-T69). LINE-ANCHORED (`^...$`, per line) so a mid-prose
+ * mention never matches; LAST-LINE-WINS (scanning ALL anchored matches, keeping the final
+ * one) because that is the contract's own phrasing. No anchored trailer at all ⇒ `undefined`,
+ * unchanged from before — the caller falls through to the PR body's `Acceptance:` block.
+ */
+export function reviewTaskIdFromBody(body: string): string | undefined {
+  const matches = [...body.matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)];
+  return matches.length ? matches[matches.length - 1][1] : undefined;
+}
+
 async function reviewCommand(prArg: string, rest: string[] = []): Promise<number> {
   // `--repo <name>` or `--repo <owner>/<name>` lets the runner post remudero-review to a
   // repo OTHER than this checkout (e.g. remudero-sandbox for the daemon's live commissioning,
@@ -3175,7 +3194,7 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
   // Criteria: task trailer → tasks.yaml; else the PR body's Acceptance: block.
   let criteria: AcceptanceCriterion[] = [];
   let source = "NONE (fail closed — nothing to judge is never a pass)";
-  const taskId = body.match(/Remudero-Task:\s*(\S+)/)?.[1];
+  const taskId = reviewTaskIdFromBody(body);
   if (taskId) {
     try {
       const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
