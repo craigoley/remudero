@@ -500,6 +500,42 @@ test("mineDegradedSuccess: a run with no review.posted line at all is silently s
   assert.deepEqual(mineDegradedSuccess(gatherRuns(records), records), []);
 });
 
+test("mineDegradedSuccess: findings are sorted by taskId+signal, not ledger/scan order", () => {
+  // RD-LATER (W1-T210) appears BEFORE RD-EARLIER (W1-T205) in the ledger, so an
+  // unsorted (scan-order) result would list them T210 then T205 — the sort must
+  // reorder them ascending by taskId.
+  const ledger = [
+    `{"ts":"2026-03-05T00:00:00.000Z","run_id":"RD-LATER","task_id":"W1-T210","step":"run.start","type":"implement"}`,
+    `{"ts":"2026-03-05T00:01:00.000Z","run_id":"RD-LATER","task_id":"W1-T210","step":"review.posted","state":"success","proof_exec":["not_executable"],"floor_degraded":true}`,
+    `{"ts":"2026-03-05T00:02:00.000Z","run_id":"RD-LATER","task_id":"W1-T210","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/210"}`,
+    `{"ts":"2026-03-06T00:00:00.000Z","run_id":"RD-EARLIER","task_id":"W1-T205","step":"run.start","type":"implement"}`,
+    `{"ts":"2026-03-06T00:01:00.000Z","run_id":"RD-EARLIER","task_id":"W1-T205","step":"review.posted","state":"success","proof_exec":["not_executable"],"floor_degraded":true}`,
+    `{"ts":"2026-03-06T00:02:00.000Z","run_id":"RD-EARLIER","task_id":"W1-T205","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/205"}`,
+  ].join("\n");
+  const records = parseLedger(ledger);
+  const findings = mineDegradedSuccess(gatherRuns(records), records);
+  assert.equal(findings.length, 2);
+  assert.deepEqual(
+    findings.map((f) => f.taskId),
+    ["W1-T205", "W1-T210"], // ascending, NOT ledger-scan order (T210 then T205)
+  );
+});
+
+test("mineDegradedSuccess: same taskId matching two signals is ordered by signal key (tie-break)", () => {
+  const ledger = [
+    `{"ts":"2026-03-07T00:00:00.000Z","run_id":"RD-MULTI","task_id":"W1-T206","step":"run.start","type":"implement"}`,
+    `{"ts":"2026-03-07T00:01:00.000Z","run_id":"RD-MULTI","task_id":"W1-T206","step":"review.posted","state":"success","proof_exec":["not_executable"],"floor_degraded":true,"reviewer_outcome":"error_max_turns"}`,
+    `{"ts":"2026-03-07T00:02:00.000Z","run_id":"RD-MULTI","task_id":"W1-T206","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/206"}`,
+  ].join("\n");
+  const records = parseLedger(ledger);
+  const findings = mineDegradedSuccess(gatherRuns(records), records);
+  assert.equal(findings.length, 2); // both signals match this single run
+  assert.deepEqual(
+    findings.map((f) => f.signal),
+    ["reviewer_error_max_turns", "zero_executed_dialect"], // sorted, "r" < "z"
+  );
+});
+
 test("renderDegradedSuccess reports 'no signal' when nothing was mined, and names the run + signal otherwise", () => {
   assert.match(renderDegradedSuccess([]), /No merged run posted/);
   const rendered = renderDegradedSuccess([
