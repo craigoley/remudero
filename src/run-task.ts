@@ -148,6 +148,7 @@ import {
   parseLedger,
   probeGithubThrottle,
   renderGather,
+  saveMarker,
   type ShippedGithub,
 } from "./lib/retro.js";
 import { regenerateOrientation } from "./lib/orientation.js";
@@ -3778,7 +3779,7 @@ async function retroCommand(rest: string[]): Promise<number> {
 
     // Advance the marker (the retro RAN — the gather is now consumed).
     const nextMarker = { ts: new Date().toISOString(), learnings_count: gather.learningsNow, runs_seen: gather.totalRuns };
-    writeFileSync(markerPath, JSON.stringify(nextMarker, null, 2) + "\n");
+    saveMarker(markerPath, nextMarker);
     log("retro.marker.advanced", nextMarker);
 
     // Gate: ci green → post remudero-review → arm auto-merge.

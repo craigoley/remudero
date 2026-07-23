@@ -10,7 +10,8 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
+import { dirname } from "node:path";
 import type { Task } from "./plan.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
 
@@ -799,6 +800,32 @@ export function loadMarker(path: string): RetroMarker | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Save the last-retro marker as ONE atomic unit: staged into a same-directory temp
+ * file with a single writeSync call, then swapped into place with a single
+ * renameSync (atomic on any POSIX filesystem). A plain writeFileSync here would let
+ * a reader (loadMarker) observe a torn/partial file mid-write and — because
+ * loadMarker collapses ANY parse failure to "no marker" — misread that torn file as
+ * FIRST-EVER-RETRO, reprocessing the whole already-consumed run window and
+ * double-counting SHIPPED/learnings. The rename swap makes that torn state
+ * unreachable: a reader only ever sees the whole old file or the whole new one.
+ */
+export function saveMarker(path: string, marker: RetroMarker): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmpPath = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const buf = Buffer.from(JSON.stringify(marker, null, 2) + "\n", "utf8");
+  const fd = openSync(tmpPath, "w");
+  try {
+    const written = writeSync(fd, buf, 0, buf.length);
+    if (written !== buf.length) {
+      throw new Error(`short write staging ${tmpPath} for ${path} (${written}/${buf.length} bytes)`);
+    }
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmpPath, path);
 }
 
 function round(n: number): number {

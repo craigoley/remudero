@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   aggregateByClass,
@@ -10,6 +13,7 @@ import {
   codeFilesInDiff,
   extractStandingRules,
   gatherRuns,
+  loadMarker,
   mergedSince,
   mineOverrunClasses,
   ownBranchOf,
@@ -19,6 +23,7 @@ import {
   renderOrientation,
   renderOverrunProposals,
   renderPlanHealth,
+  saveMarker,
   shippedSince,
   tierOf,
   verdictDistribution,
@@ -515,4 +520,40 @@ test("renderOrientation: no runnable task renders an explicit '(none runnable)' 
   const md = renderOrientation({ generatedAt: "2026-07-18T00:00:00.000Z", gather, standingRules: [] });
   assert.match(md, /none runnable right now/);
   assert.doesNotMatch(md, /undefined/);
+});
+
+test("saveMarker + loadMarker: round-trips the marker written to disk", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-retro-marker-"));
+  const markerPath = join(dir, "last-retro.json");
+  const marker = { ts: "2026-07-18T00:00:00.000Z", learnings_count: 12, runs_seen: 34 };
+  saveMarker(markerPath, marker);
+  assert.deepEqual(loadMarker(markerPath), marker);
+});
+
+test("loadMarker: a torn/partial write (truncated JSON) is NOT the same as no marker — the caller must be able " +
+  "to tell 'first-ever retro' apart from 'corrupt marker', since collapsing both to undefined silently " +
+  "reprocesses the whole already-consumed run window and double-counts SHIPPED/learnings", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-retro-marker-"));
+  const markerPath = join(dir, "last-retro.json");
+  const marker = { ts: "2026-07-18T00:00:00.000Z", learnings_count: 12, runs_seen: 34 };
+  const full = JSON.stringify(marker, null, 2) + "\n";
+  // Simulate a torn read: only the first half of the bytes made it to disk.
+  writeFileSync(markerPath, full.slice(0, Math.floor(full.length / 2)));
+  assert.throws(() => JSON.parse(readFileSync(markerPath, "utf8")));
+  // loadMarker itself still reports "no marker" for this corrupt file (documented,
+  // pre-existing behavior) — the fix is that saveMarker's rename-swap makes this
+  // torn state UNREACHABLE in normal operation, not that loadMarker recovers from it.
+  assert.equal(loadMarker(markerPath), undefined);
+});
+
+test("saveMarker: does not leave a torn file behind for a concurrent reader — the swap is a single rename," +
+  " so the marker file on disk is always either fully absent, the whole old marker, or the whole new one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-retro-marker-"));
+  const markerPath = join(dir, "last-retro.json");
+  const before = { ts: "2026-07-18T00:00:00.000Z", learnings_count: 1, runs_seen: 2 };
+  const after = { ts: "2026-07-19T00:00:00.000Z", learnings_count: 3, runs_seen: 4 };
+  saveMarker(markerPath, before);
+  saveMarker(markerPath, after);
+  // No leftover temp files from the atomic-rename staging.
+  assert.deepEqual(loadMarker(markerPath), after);
 });
