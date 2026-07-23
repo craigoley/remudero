@@ -10,26 +10,33 @@ import {
   codeFilesInDiff,
   DEGRADED_SUCCESS_SIGNALS,
   extractStandingRules,
+  fixDispatchCountByRun,
   gatherRuns,
   mergedSince,
   mineDegradedSuccess,
   mineOverrunClasses,
+  mineProceduralCandidates,
   ownBranchOf,
   parseLedger,
+  phraseProceduralCandidate,
   planHealthSweep,
+  PROCEDURAL_SUCCESS_SIGNALS,
   renderDegradedSuccess,
   renderGather,
   renderOrientation,
   renderOverrunProposals,
   renderPlanHealth,
+  renderProceduralCandidates,
   shippedSince,
   tierOf,
   verdictDistribution,
   type DegradedSuccessSignal,
+  type ProceduralCandidate,
   type RunSummary,
   type ShippedGithub,
 } from "../src/lib/retro.js";
 import type { Task } from "../src/lib/plan.js";
+import { selectLearnings, type LearningEntry } from "../src/lib/learnings.js";
 
 // A recorded ledger fixture: two implement runs (one merged, one budget-blocked)
 // and a recon run, exactly as run-task.ts writes them.
@@ -551,6 +558,142 @@ test("buildGather/renderGather surface degraded-success findings (W1-T73)", () =
   assert.equal(g.degradedSuccess[0]!.taskId, "W1-T200");
   assert.match(renderGather(g), /Degraded-success mining/);
   assert.match(renderGather(g), /W1-T200/);
+});
+
+// ── Procedural-success mining (W1-T87, ratifies P13) — the OTHER half of the
+// flywheel: merged runs are mined for a REUSABLE shape, deterministically. ──
+
+// P1 and P2 share ONE shape: merged, zero fix.dispatch lines (clean single
+// strike), review.posted fully executed (never keyword-floored). P3 shares
+// only HALF that shape (it needed a fix.dispatch) — a single-run shape that
+// must emit NOTHING (the bloat guard: one success is an anecdote).
+const PROCEDURAL_LEDGER = [
+  `{"ts":"2026-04-01T00:00:00.000Z","run_id":"P1","task_id":"W1-T300","step":"run.start","type":"implement"}`,
+  `{"ts":"2026-04-01T00:01:00.000Z","run_id":"P1","task_id":"W1-T300","step":"review.posted","state":"success","proof_exec":["executed_pass","executed_pass"],"floor_degraded":false}`,
+  `{"ts":"2026-04-01T00:02:00.000Z","run_id":"P1","task_id":"W1-T300","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/300"}`,
+  `{"ts":"2026-04-02T00:00:00.000Z","run_id":"P2","task_id":"W1-T301","step":"run.start","type":"implement"}`,
+  `{"ts":"2026-04-02T00:01:00.000Z","run_id":"P2","task_id":"W1-T301","step":"review.posted","state":"success","proof_exec":["executed_pass"],"floor_degraded":false}`,
+  `{"ts":"2026-04-02T00:02:00.000Z","run_id":"P2","task_id":"W1-T301","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/301"}`,
+  `{"ts":"2026-04-03T00:00:00.000Z","run_id":"P3","task_id":"W1-T302","step":"run.start","type":"implement"}`,
+  `{"ts":"2026-04-03T00:01:00.000Z","run_id":"P3","task_id":"W1-T302","step":"fix.dispatch","strike":1,"strike_cap":3,"unmet_count":1,"round":"fresh"}`,
+  `{"ts":"2026-04-03T00:02:00.000Z","run_id":"P3","task_id":"W1-T302","step":"review.posted","state":"success","proof_exec":["executed_pass"],"floor_degraded":false}`,
+  `{"ts":"2026-04-03T00:03:00.000Z","run_id":"P3","task_id":"W1-T302","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/302"}`,
+].join("\n");
+
+test("mineProceduralCandidates: two merged runs sharing a procedure shape yield ONE candidate citing both runs; a single-run shape yields NOTHING", () => {
+  const records = parseLedger(PROCEDURAL_LEDGER);
+  const runs = gatherRuns(records);
+  const candidates = mineProceduralCandidates(runs, records);
+  assert.equal(candidates.length, 1);
+  const c = candidates[0]!;
+  assert.equal(c.kind, "procedural");
+  assert.equal(c.taskType, "implement");
+  assert.deepEqual(c.signals, ["clean_single_strike", "fully_executed_proof"]);
+  assert.deepEqual(c.runIds, ["P1", "P2"]);
+  assert.deepEqual(c.taskIds, ["W1-T300", "W1-T301"]);
+  assert.equal(c.supportingRuns, 2);
+  // W1-T302 (P3) needed a fix.dispatch — a DIFFERENT, single-run shape — never proposed.
+  assert.ok(!candidates.some((x) => x.taskIds.includes("W1-T302")));
+});
+
+test("mineProceduralCandidates: a shape below threshold (a single success) proposes NOTHING", () => {
+  const records = parseLedger(
+    [
+      `{"ts":"2026-04-05T00:00:00.000Z","run_id":"S1","task_id":"W1-T310","step":"run.start","type":"implement"}`,
+      `{"ts":"2026-04-05T00:01:00.000Z","run_id":"S1","task_id":"W1-T310","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/310"}`,
+    ].join("\n"),
+  );
+  assert.deepEqual(mineProceduralCandidates(gatherRuns(records), records), []);
+});
+
+test("mineProceduralCandidates: the signal set is DATA — a caller-supplied signal groups runs with ZERO executor-code changes", () => {
+  const records = parseLedger(PROCEDURAL_LEDGER);
+  const runs = gatherRuns(records);
+  // Every one of P1/P2/P3 is a "fast" run under a made-up threshold — a signal
+  // row supplied by the CALLER, not a new mining function or branch.
+  const fastRow = { key: "fast", matches: () => true, describe: () => "fast" };
+  const candidates = mineProceduralCandidates(runs, records, { signals: [fastRow], threshold: 3 });
+  assert.equal(candidates.length, 1);
+  assert.deepEqual(candidates[0]!.taskIds, ["W1-T300", "W1-T301", "W1-T302"]);
+  assert.equal(candidates[0]!.supportingRuns, 3);
+});
+
+test("fixDispatchCountByRun: counts fix.dispatch lines per run_id; a run with none reads as absent (zero)", () => {
+  const counts = fixDispatchCountByRun(parseLedger(PROCEDURAL_LEDGER));
+  assert.equal(counts.get("P3"), 1);
+  assert.equal(counts.get("P1") ?? 0, 0);
+});
+
+test("renderProceduralCandidates reports 'no shape' when nothing was mined, and names the shape + tasks otherwise", () => {
+  assert.match(renderProceduralCandidates([]), /No shape shared by/);
+  const rendered = renderProceduralCandidates(
+    mineProceduralCandidates(gatherRuns(parseLedger(PROCEDURAL_LEDGER)), parseLedger(PROCEDURAL_LEDGER)),
+  );
+  assert.match(rendered, /implement/);
+  assert.match(rendered, /W1-T300, W1-T301/);
+});
+
+test("buildGather/renderGather surface procedural-success candidates (W1-T87/P13)", () => {
+  const g = buildGather({ ledgerNdjson: PROCEDURAL_LEDGER, learningsMd: "# L\n" });
+  assert.equal(g.proceduralCandidates.length, 1);
+  assert.deepEqual(g.proceduralCandidates[0]!.taskIds, ["W1-T300", "W1-T301"]);
+  assert.match(renderGather(g), /Procedural-success mining/);
+});
+
+test("phraseProceduralCandidate: evidence is deterministic — the LLM stub receives ONLY the pre-detected candidate, never raw ledger records", async () => {
+  const candidate: ProceduralCandidate = {
+    kind: "procedural",
+    shapeKey: "implement:clean_single_strike+fully_executed_proof",
+    taskType: "implement",
+    signals: ["clean_single_strike", "fully_executed_proof"],
+    runIds: ["P1", "P2"],
+    taskIds: ["W1-T300", "W1-T301"],
+    supportingRuns: 2,
+  };
+  let received: unknown;
+  const draft = await phraseProceduralCandidate(candidate, {
+    phrase: (c) => {
+      received = c; // captured — must be the CANDIDATE ONLY (deep-equal), no ledger records/other candidates
+      return "Recon-first, single-strike shape: a fully-observed proof pass with no fix rung needed.";
+    },
+  });
+  assert.deepEqual(received, candidate);
+  assert.equal(draft.subsystem, "procedural");
+  assert.equal(draft.fact, "Recon-first, single-strike shape: a fully-observed proof pass with no fix rung needed.");
+  assert.match(draft.src, /W1-T300, W1-T301/);
+});
+
+test("phraseProceduralCandidate's draft rides the EXISTING learnings pipeline — selectLearnings injects it like any other entry (no parallel store)", async () => {
+  const candidate: ProceduralCandidate = {
+    kind: "procedural",
+    shapeKey: "implement:clean_single_strike+fully_executed_proof",
+    taskType: "implement",
+    signals: ["clean_single_strike", "fully_executed_proof"],
+    runIds: ["P1", "P2"],
+    taskIds: ["W1-T300", "W1-T301"],
+    supportingRuns: 2,
+  };
+  const draft = await phraseProceduralCandidate(candidate, { phrase: () => "A clean single-strike merge shape." });
+  const entry: LearningEntry = {
+    id: draft.id,
+    subsystem: draft.subsystem,
+    lifecycle: "active",
+    files: ["src/lib/retro.ts"],
+    fact: draft.fact,
+    src: draft.src,
+  };
+  // The W1-T19 matcher (learnings.ts's selectLearnings) — UNTOUCHED by this task —
+  // selects the drafted entry exactly like any ordinary factual entry: no `kind`
+  // special-casing, no second store, no new injection path.
+  const { selected } = selectLearnings([entry], ["src/lib/retro.ts"]);
+  assert.deepEqual(selected, [entry]);
+});
+
+test("PROCEDURAL_SUCCESS_SIGNALS: shipped signal set names 'clean_single_strike' and 'fully_executed_proof' exactly (design note)", () => {
+  assert.deepEqual(
+    PROCEDURAL_SUCCESS_SIGNALS.map((s) => s.key),
+    ["clean_single_strike", "fully_executed_proof"],
+  );
 });
 
 // ── docs/ORIENTATION.md (W1-T39) ───────────────────────────────────────────
