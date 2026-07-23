@@ -1,0 +1,19 @@
+id: fb-1784769525147-13afc6
+ts: 2026-07-23T01:18:45.147Z
+raw: "LEDGER ROTATION IS DIVERGENT — rotation must converge: after any rotation
+  the live ledger MUST be strictly below the rotation ceiling, or rotation loops
+  forever. Observed 2026-07-23: retained core > 4MiB ceiling → every append
+  re-rotates (80+ archives, bursts of 12/s, live ledger truncated); daemon.boot
+  absent from DECISION_RELEVANT_LEDGER_STEPS → boot heartbeat archived
+  mid-health-window → assessBootHealth false-negative → healthy 7abe870 deploy
+  rolled back 00:19Z; W1-T215 boot-rate detector reads the same lines and is
+  equally blind. FIX: (a) bound the retained set — e.g. keep only the LATEST
+  sweep.disposed per pr@head and cap per-step retention; (b) enforce the
+  convergence invariant in code (post-rotation size < ceiling or shed oldest
+  retained with an archived pointer); (c) add daemon.boot and deploy.* steps to
+  the retained set; (d) regression test: bloat the retained core past the
+  ceiling, append once, assert exactly one rotation and live < ceiling."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
