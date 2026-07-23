@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   assertLintClean,
   budgetSanityWarning,
   changedTaskIds,
+  HEADLESS_FORBIDDEN_LEXICON,
   headlessFitnessViolations,
   lintPlan,
   lintTask,
@@ -14,7 +16,7 @@ import {
   subsystemsOf,
   TaskLintError,
 } from "../src/lib/task-linter.js";
-import { loadPlanFromYaml, type Task } from "../src/lib/plan.js";
+import { loadPlan, loadPlanFromYaml, type Task } from "../src/lib/plan.js";
 
 /** A minimal, otherwise-clean Task fixture — every test overrides only what it needs. */
 function task(over: Partial<Task> & { id: string }): Task {
@@ -184,6 +186,242 @@ test("the SAME criterion on a verify:human task is NOT flagged — headless-fitn
     acceptance: [{ claim: "overnight drain, killed and recovered manually", proof: "operator transcript" }],
   });
   assert.equal(headlessFitnessViolations(t).length, 0);
+});
+
+// ── new phrase-level lexicon rows (RECALL, the #146 sweep) — one direct hit each ──
+
+test("headless lexicon catches phrase-level 'paste the X, then revert'", () => {
+  const t = task({
+    id: "FIX-paste-then-revert",
+    acceptance: [{ claim: "the gate goes CI-red on a planted regression", proof: "paste the red check, then revert" }],
+  });
+  assert.equal(headlessFitnessViolations(t).length, 1);
+});
+
+test("headless lexicon catches phrase-level 'run against <live/sandbox repo>'", () => {
+  const t = task({
+    id: "FIX-against-live-repo",
+    acceptance: [{ claim: "rmd project init is run against remudero-sandbox and the first PR goes green", proof: "some proof" }],
+  });
+  assert.equal(headlessFitnessViolations(t).length, 1);
+});
+
+test("headless lexicon catches phrase-level 'operator observes'", () => {
+  const t = task({
+    id: "FIX-operator-observes",
+    acceptance: [{ claim: "the operator observes the live drain complete end to end", proof: "some proof" }],
+  });
+  assert.equal(headlessFitnessViolations(t).length, 1);
+});
+
+// ── negation / self-reference precision (W1-T81, the #146 false-positive pair) ──
+//
+// A naive whole-word-anywhere scan false-positives on a hit inside a NEGATION
+// ('NO real overnight run') and on a SELF-DESCRIBING criterion that names the
+// lexicon to describe the check itself, not to instruct a live action.
+
+test("negation exempts a hit ONLY within the same clause — an unrelated negation in an earlier clause does not exempt a later live claim", () => {
+  const t = task({
+    id: "NEG-SCOPE-SYNTH",
+    acceptance: [{ claim: "no manual step is required for setup", proof: "the daemon then runs overnight, unattended" }],
+  });
+  assert.equal(headlessFitnessViolations(t).length, 1);
+});
+
+test("a lexicon hit fully inside a quoted excerpt does not flag (discussing the term, not instructing it)", () => {
+  const t = task({
+    id: "QUOTE-SYNTH",
+    acceptance: [
+      {
+        claim: "the docs explain why a criterion saying 'a launchctl load' is rejected",
+        proof: "grep: docs/task-lifecycle.md contains the quoted example",
+      },
+    ],
+  });
+  assert.equal(headlessFitnessViolations(t).length, 0);
+});
+
+test("the SAME term OUTSIDE any quotes still flags — a possessive apostrophe is not mistaken for a quote", () => {
+  const t = task({
+    id: "QUOTE-SYNTH-OUTSIDE",
+    acceptance: [{ claim: "the plist is loaded via launchctl on the operator's machine", proof: "some proof" }],
+  });
+  assert.equal(headlessFitnessViolations(t).length, 1);
+});
+
+test("a bare-'/' enumeration of >=2 lexicon terms is a quoted/listed excerpt, not an instruction — does not flag", () => {
+  const t = task({
+    id: "ENUM-SYNTH",
+    acceptance: [{ claim: "the lexicon covers reboot/killed/overnight as forbidden terms", proof: "unit test asserts the lexicon table has these entries" }],
+  });
+  assert.equal(headlessFitnessViolations(t).length, 0);
+});
+
+test("two lexicon terms joined by a SPACED slash still flag — only a BARE '/' (no surrounding spaces) counts as an enumeration", () => {
+  const t = task({
+    id: "ENUM-SYNTH-SPACED",
+    acceptance: [{ claim: "the live drill covers reboot / killed scenarios on the operator's laptop", proof: "some proof" }],
+  });
+  assert.equal(headlessFitnessViolations(t).length, 1);
+});
+
+// ── W1-T81 ACCEPTANCE 1: the three #146 false positives, loaded VERBATIM from the
+// real plan, no longer flag ──────────────────────────────────────────────────
+
+const REAL_PLAN = loadPlan(fileURLToPath(new URL("../plan/tasks.yaml", import.meta.url)));
+
+function realTask(id: string): Task {
+  const t = REAL_PLAN.tasks.find((x) => x.id === id);
+  assert.ok(t, `expected ${id} in the real plan`);
+  return t as Task;
+}
+
+test("W1-T81 ACCEPTANCE 1a: W1-T12a's negation criterion ('NO real ... overnight run') does not flag, verbatim from the plan", () => {
+  const t = realTask("W1-T12a");
+  assert.match(t.acceptance![0].proof, /\bNO real overnight run\b/);
+  assert.equal(headlessFitnessViolations(t).length, 0);
+});
+
+test("W1-T81 ACCEPTANCE 1b: W1-T12b's negation criterion ('NOT a real ... launchctl load') does not flag, verbatim from the plan", () => {
+  const t = realTask("W1-T12b");
+  assert.match(t.acceptance![0].proof, /\bNOT a real launchctl load\b/);
+  assert.equal(headlessFitnessViolations(t).length, 0);
+});
+
+test("W1-T81 ACCEPTANCE 1c: W1-T20c's self-description criterion (its claim IS the lexicon, 'overnight/launchctl/killed') does not flag, verbatim from the plan", () => {
+  const t = realTask("W1-T20c");
+  const selfDescribing = t.acceptance!.find((c) => c.claim.includes("overnight/launchctl/killed"));
+  assert.ok(selfDescribing, "expected W1-T20c to still carry its self-describing criterion verbatim");
+  assert.equal(headlessFitnessViolations({ ...t, acceptance: [selfDescribing!] }).length, 0);
+  // the WHOLE task, every criterion together, stays clean too
+  assert.equal(headlessFitnessViolations(t).length, 0);
+});
+
+// ── W1-T81 ACCEPTANCE 2: the W1-T25-class pre-sweep live proofs now flag — the
+// #146 false negative. Verbatim from commit 123491a (PR #146, "headless-fitness
+// backlog sweep"), the "-" side of plan/tasks.yaml's diff for W1-T25/26/27/28 —
+// BEFORE that PR converted their live 'paste the X, then revert' / 'run against
+// <repo>' proofs to fixtures. No single lexicon WORD appears in any of these
+// (they're PHRASES), so the original word-only lexicon never matched them; that
+// is exactly the no_pr-at-122-turns gap this task closes. ─────────────────────
+
+const PRE_SWEEP_T25 = task({
+  id: "PRE-SWEEP-T25",
+  acceptance: [
+    {
+      claim: "the coverage ratchet BLOCKS a coverage-lowering PR (live)",
+      proof:
+        "a PR deleting a covered test drops coverage below the recorded baseline and goes CI-red on the ratchet job; paste the red check, then revert",
+    },
+    {
+      claim: "a mutation-testing baseline is established with a recorded score",
+      proof: "Stryker runs in CI and the mutation score is recorded as the baseline (paste the score + config)",
+    },
+    {
+      claim: "the jscpd duplication threshold BLOCKS a planted duplicate",
+      proof: "a branch duplicating a code block over the threshold goes CI-red on jscpd; paste the red, then revert",
+    },
+    {
+      claim: "TypeScript strict is proven ACTIVE by a planted probe that MUST fail",
+      proof:
+        "a planted strict-only violation (e.g. an unchecked index / implicit any) makes typecheck FAIL; a bare 0-violations without the probe is NOT accepted as proof (neon-drift lesson)",
+    },
+  ],
+});
+
+const PRE_SWEEP_T26 = task({
+  id: "PRE-SWEEP-T26",
+  acceptance: [
+    {
+      claim: "a dependency-cruiser rule BLOCKS a planted layering violation",
+      proof:
+        "a branch adding an import of src/spike.ts (or src/run-task.ts) into src/lib goes CI-red on the depcruise job with the named rule; paste the red, then revert",
+    },
+    {
+      claim: "the fitness ruleset is declared and runs in CI",
+      proof: "a .dependency-cruiser config is present with the src/lib-imports-no-spike/CLI rule and the depcruise job appears in the CI run",
+    },
+  ],
+});
+
+const PRE_SWEEP_T27 = task({
+  id: "PRE-SWEEP-T27",
+  acceptance: [
+    {
+      claim: "rmd project init provisions the full stack on remudero-sandbox and its first gated PR is green",
+      proof:
+        "run against remudero-sandbox; paste gh api .../branches/main/protection contexts (single aggregator + remudero-review), the .github/workflows list, and the url of a green first gated PR",
+    },
+    {
+      claim: "ratchet baselines are captured at onboarding (no repo starts at zero)",
+      proof: "sandbox .remudero/principles.yaml (or a baselines file) shows non-empty coverage/mutation/dup floors captured from the repo — paste it",
+    },
+  ],
+});
+
+const PRE_SWEEP_T28 = task({
+  id: "PRE-SWEEP-T28",
+  acceptance: [
+    {
+      claim: "a planted containment-weakening diff is BLOCKED",
+      proof:
+        "a branch moving allowedDomains from sandbox.network to the sandbox root (the WS-0 silent-drop typo) makes the containment check FAIL and the PR non-mergeable; paste the failing check + blocked state, then revert",
+    },
+    {
+      claim: "the containment check is REQUIRED (via the aggregator) for sandbox/hooks/env/deny-floor diffs",
+      proof: "the containment job is a needs: of the ci-gate aggregator and a touching-diff PR shows it ran; paste the workflow wiring",
+    },
+  ],
+});
+
+for (const [id, fx] of [
+  ["W1-T25", PRE_SWEEP_T25],
+  ["W1-T26", PRE_SWEEP_T26],
+  ["W1-T27", PRE_SWEEP_T27],
+  ["W1-T28", PRE_SWEEP_T28],
+] as const) {
+  test(`W1-T81 ACCEPTANCE 2: ${id}'s pre-sweep live proof now flags — the #146 false negative`, () => {
+    const v = headlessFitnessViolations(fx);
+    assert.ok(v.length > 0, `expected ${id}'s pre-sweep criteria to flag`);
+    assert.match(v[0].message, /'(paste-then-revert|against-live-repo)'/);
+  });
+}
+
+test("W1-T81 ACCEPTANCE 2: the named example ('goes CI-red...paste the red check, then revert') flags naming the matched phrase", () => {
+  const t = task({
+    id: "PRE-SWEEP-NAMED-EXAMPLE",
+    acceptance: [
+      {
+        claim: "the coverage ratchet BLOCKS a coverage-lowering PR (live)",
+        proof:
+          "a PR deleting a covered test drops coverage below the recorded baseline and goes CI-red on the ratchet job; paste the red check, then revert",
+      },
+    ],
+  });
+  const v = headlessFitnessViolations(t);
+  assert.equal(v.length, 1);
+  assert.match(v[0].message, /'paste-then-revert'/);
+});
+
+// ── W1-T81 ACCEPTANCE 3: post-sweep fixtures stay clean; the signal set is DATA ──
+
+test("W1-T81 ACCEPTANCE 3: the post-sweep W1-T25/26/27/28-family tasks in the REAL plan stay clean", () => {
+  for (const id of ["W1-T25", "W1-T26", "W1-T27", "W1-T28"]) {
+    const t = realTask(id);
+    assert.equal(headlessFitnessViolations(t).length, 0, `expected ${id} to stay clean post-sweep`);
+  }
+});
+
+test("W1-T81 ACCEPTANCE 3: adding a new phrase row to the patterns table flags a seeded criterion — ZERO changes to headlessFitnessViolations itself", () => {
+  const extendedLexicon = [...HEADLESS_FORBIDDEN_LEXICON, { tag: "confetti-cannon", pattern: /\bfire the confetti cannon\b/i }];
+  const seeded = task({
+    id: "SEEDED-NEW-PHRASE",
+    acceptance: [{ claim: "the launch party proof", proof: "fire the confetti cannon live on stage" }],
+  });
+  assert.equal(headlessFitnessViolations(seeded).length, 0, "the DEFAULT lexicon must not know this phrase yet");
+  const v = headlessFitnessViolations(seeded, extendedLexicon);
+  assert.equal(v.length, 1);
+  assert.match(v[0].message, /'confetti-cannon'/);
 });
 
 // ── PROOF-SHAPE — acceptance criterion 4 ──────────────────────────────────────
