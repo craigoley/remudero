@@ -1579,6 +1579,146 @@ test("runFixRung: a second block after N strikes escalates rather than looping (
   );
 });
 
+// ── W1-T58 (ratifies P3 via P8/RETRO-1784058021334, Standing rule 15): the
+// blocked_review golden — a run either ADDS THE WORK or ESCALATES, NEVER
+// edits its own criteria. T3E's guard covers the REVIEWER side (a worker-
+// authored satisfied_by is flagged at judge time); these two fixtures cover
+// the RUN-LOOP side runFixRung owns. ───────────────────────────────────────
+
+test("runFixRung (W1-T58 acceptance 1): an ORDINARY seeded blocked_review (no criteria tampering) routes to add-the-work or escalate — the run makes NO write to plan/tasks.yaml, and neither the fix worker's prompt nor the escalation issue ever references the plan file", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const stillFailing = fakeReview("failure", [
+    criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" }),
+  ]);
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const ledgerPath = tmpLedgerPath();
+
+  // ADD-THE-WORK path: strike 1 resolves the review — a normal fix dispatch.
+  const passing = fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })]);
+  const fixed = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: stillFailing,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: "fix-session-1" });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => passing,
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath,
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+  assert.equal(fixed.outcome, "fixed", "ADD-THE-WORK: an ordinary blocked_review dispatches a fix worker");
+  assert.equal(spawnCalls.length, 1);
+  assert.doesNotMatch(
+    spawnCalls[0].prompt,
+    /plan\/tasks\.yaml/,
+    "the fix worker is never directed at plan/tasks.yaml — the work it adds is never a plan edit",
+  );
+  assert.equal(issueCalls.length, 0);
+
+  // ESCALATE path: strikes exhaust without resolving — no third spawn, no
+  // rule-15 refusal (this is an ORDINARY exhaustion, not a tampered diff).
+  const escSpawnCalls: SpawnWorkerArgs[] = [];
+  const escIssueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const escLedgerPath = tmpLedgerPath();
+  const escalated = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: stillFailing,
+    deps: {
+      spawn: async (args) => {
+        escSpawnCalls.push(args);
+        return result({ sessionId: `fix-session-${escSpawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => stillFailing, // never resolves
+      push: () => {},
+      issues: fakeIssues(escIssueCalls),
+      ledgerPath: escLedgerPath,
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+  assert.equal(escalated.outcome, "escalated", "ESCALATE: exhaustion routes to the SAME two-outcome taxonomy");
+  assert.equal(escSpawnCalls.length, 2, "strikeCap spawns — an ordinary exhaustion, not a rule-15 short-circuit");
+  assert.equal(escIssueCalls.length, 1);
+  assert.doesNotMatch(
+    escIssueCalls[0].body,
+    /plan\/tasks\.yaml/,
+    "an ordinary exhaustion escalation never mentions the plan file either",
+  );
+  const escLedgerLines = readFileSync(escLedgerPath, "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
+  assert.ok(
+    !escLedgerLines.some((l) => l.step === "fix.rule15_violation"),
+    "an ordinary blocked_review never trips the rule-15 refusal path",
+  );
+});
+
+test("runFixRung (W1-T58 acceptance 2, the negative control): a blocked_review verdict whose diff TAMPERS with plan/tasks.yaml's own criteria is REFUSED — zero fix-worker spawns, an immediate escalation naming Standing rule 15 (proves the assertion above is not vacuous)", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const ledgerPath = tmpLedgerPath();
+
+  // A worker-authored diff that edited plan/tasks.yaml's OWN criteria — the
+  // review verdict `runReview`/`judgeReview` would compute for such a diff
+  // (ReviewVerdict.criteriaTampered, review.ts, W1-T58).
+  const tampered = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: true })]);
+  tampered.criteriaTampered = true;
+  tampered.summary = "remudero-review: FAIL — diff edits plan/tasks.yaml's own acceptance criteria — Standing rule 15";
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: tampered,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: "should-never-spawn" });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => tampered,
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath,
+      log: (step, extra) => logged.push({ step, extra }),
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(spawnCalls.length, 0, "a tampered diff is NEVER eligible for an ordinary add-the-work fix dispatch");
+  assert.equal(outcome.outcome, "escalated");
+  assert.equal(outcome.strikes, 0, "no strike is spent on a diff the rung refuses to act on");
+  assert.equal(issueCalls.length, 1);
+  assert.ok(issueCalls[0].labels.includes("escalation-blocked"));
+  assert.match(issueCalls[0].body, /Standing rule 15/);
+  assert.match(issueCalls[0].body, /plan\/tasks\.yaml/);
+  assert.ok(
+    logged.some((l) => l.step === "fix.rule15_violation"),
+    "the refusal is ledgered distinctly from an ordinary exhaustion",
+  );
+  const ledgerLines = readFileSync(ledgerPath, "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
+  assert.ok(
+    ledgerLines.some((l) => l.step === "escalation.issue_opened"),
+    "the escalation itself is still ledgered via the SAME escalate() machinery every other exhaustion uses",
+  );
+});
+
 test("runFixRung: a CI regression after a fix attempt does not stall the rung — it is treated as still-failing and consumes the next strike", async () => {
   const spawnCalls: SpawnWorkerArgs[] = [];
   const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "r" })]);
