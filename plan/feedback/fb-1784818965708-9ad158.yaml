@@ -1,0 +1,23 @@
+id: fb-1784818965708-9ad158
+ts: 2026-07-23T15:02:45.708Z
+raw: "WORKERS UNDER-COVER THEIR OWN DEFENSIVE BRANCHES → diff-coverage blocks
+  auto-merge (recurring, observed #606/#651 + others 2026-07-23). A worker
+  builds a feature correctly but adds defensive error paths (a catch that
+  returns a fallback, a throw on a torn read) that its happy-path test never
+  exercises; diff-coverage then blocks the PR on those exact lines and it cannot
+  arm/merge, requiring a manual #606-style extraction (pull the glue into a
+  helper with an injectable runner, unit-test both failure branches). #651 (the
+  shard-blindness fix) is the latest: its ls-tree-catch and per-shard-show-throw
+  were uncovered until extracted into materializeOriginShards(runGit
+  injectable). Need: (a) the implement/fix worker's contract requires that every
+  ADDED source branch (catch/throw/early-return) be covered before opening — run
+  the diff-coverage gate locally (the CI-parity preflight,
+  fb-1784762611444-e6bdc0) and, for defensive glue inside a large command, apply
+  the extract-with-injectable-runner pattern by default; (b) consider a lint
+  that flags a new try/catch or throw with no covering test in the same diff.
+  This is the single most frequent reason run/triage PRs stall at the gate this
+  session."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
