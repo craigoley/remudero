@@ -347,7 +347,13 @@ section already guards against.
 
 The pasted `gh api` outputs for each of these live in the W1-T1D PR that wired the
 gate; the verdict logic itself is covered by the `test/review.test.ts` falsifiers
-(non-responsive report, test theater, empty criteria, semantic downgrade).
+(non-responsive report, test theater, empty criteria, semantic downgrade, and —
+W1-T58, Standing rule 15 — a non-plan-only diff that edits `plan/tasks.yaml`'s
+own acceptance criteria: `ReviewVerdict.criteriaTampered` forces
+`remudero-review=failure` exactly like test theater does, and the `blocked_review`
+FIX RUNG (`runFixRung`, run-task.ts) refuses to dispatch an ordinary fix worker
+against it — it escalates immediately instead, since a worker cannot legitimately
+"fix" its own criteria).
 
 ## Coverage measurement re-based under `--enable-source-maps` (2026-07-22, W1-T210 round 2)
 

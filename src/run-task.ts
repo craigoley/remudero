@@ -1584,6 +1584,49 @@ export async function runFixRung(opts: {
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown}`);
       return { outcome: "stood_down", review, strikes, standDownReason: preStrikeStandDown };
     }
+
+    // W1-T58 (ratifies P3 via P8/RETRO-1784058021334, Standing rule 15): a diff
+    // whose review verdict is tampered — it edits plan/tasks.yaml's OWN
+    // acceptance criteria (see ReviewVerdict.criteriaTampered, review.ts) — is
+    // NEVER eligible for an ordinary "add the work" fix dispatch: a worker may
+    // never correct its own criteria, so no fix worker can legitimately
+    // resolve this by writing more code. REFUSE the strike and escalate
+    // immediately (zero strikes spent on it) — the run-loop side of the T3E
+    // guard (which flags the diff at the REVIEWER layer); this is the RUN-LOOP
+    // never treating that flag as ordinary fixable work.
+    if (review.criteriaTampered) {
+      deps.log("fix.rule15_violation", { strike: strikes, summary: review.summary });
+      deps.say(
+        `fix rung: REFUSED — the diff itself edits plan/tasks.yaml's acceptance criteria (Standing rule 15); ` +
+          `escalating rather than dispatching a fix worker: ${opts.prUrl}`,
+      );
+      const issueUrl = escalate(
+        {
+          class: "BLOCKED",
+          taskId: opts.taskId,
+          runId: opts.runId,
+          summary: `blocked_review: diff edits plan/tasks.yaml's own acceptance criteria (Standing rule 15) — ${opts.prUrl}`,
+          detail:
+            `The blocked_review FIX RUNG (W1-T76) refused to dispatch a fix worker: the PR's diff itself edits ` +
+            `plan/tasks.yaml's acceptance criteria (an added satisfied_by, or an edited/removed claim/proof/` +
+            `satisfied_by field) — Standing rule 15: only the Architect may correct a mis-specified task, via a ` +
+            `plan-only PR; a worker may never. Review summary: ${review.summary}`,
+          options: [
+            {
+              label: "hand-fix",
+              detail: "revert the plan/tasks.yaml edit on the same branch, then re-run `rmd review` to re-post the gate.",
+            },
+            { label: "close", detail: "close the PR; if the criteria genuinely need correcting, file a plan PR instead." },
+          ],
+          recommendation: "hand-fix",
+        },
+        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+      );
+      deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "rule15_violation" });
+      deps.say(`fix rung: escalated (rule 15 violation) — ${issueUrl}`);
+      return { outcome: "escalated", review, strikes, issueUrl };
+    }
+
     strikes++;
     const round: "resume" | "fresh" = strikes === 1 ? "resume" : "fresh";
     const unmet = review.criteria.filter((c) => !c.met);

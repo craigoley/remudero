@@ -219,6 +219,25 @@ export interface ReviewVerdict {
    * gated rather than as proof-executed — never overstating what was checked.
    */
   planOnly: boolean;
+  /**
+   * W1-T58 (ratifies P3 via P8/RETRO-1784058021334, Standing rule 15 — "a worker
+   * may never [edit its own criteria]"): true when the diff ITSELF adds a
+   * `satisfied_by:` line or removes an existing criterion field (`claim:`/
+   * `proof:`/`satisfied_by:`) in `plan/tasks.yaml` — see {@link
+   * checkSatisfiedByGuard}, the same diff-derived predicate — while ALSO
+   * touching something outside `plan/**` (`!planOnly`; the only Architect-vs-
+   * worker signal this pure function has — a worker's own task diff is never
+   * plan-only in this codebase, only `rmd plan` produces one, and that path
+   * never reaches this field's consequence — see run-task.ts's `runFixRung`).
+   * FORCES `state`/`floorState` to `"failure"` exactly like `testTheater`: the
+   * tampering itself is the violation, independent of whether any NAMED
+   * criterion mechanically passes (a worker could edit `plan/tasks.yaml` to
+   * match its diff and still have every original criterion read "met"). Never
+   * suppressible by {@link applyVerdictStability} (folded into `floorState`
+   * too) — this is a deterministic diff fact, not a semantic reviewer opinion.
+   * A genuine Architect correction (plan-only) never trips it.
+   */
+  criteriaTampered?: boolean;
 }
 
 // ── Tokenisation (deterministic, dependency-free) ──────────────────────────
@@ -959,18 +978,31 @@ export function judgeReview(
   );
   const testTheater = detectTestTheater(evidence.diff);
 
+  // W1-T205's own planOnly, computed EARLY (moved up from below) so the W1-T58
+  // guard right below it can consult it before `state` is rolled up.
+  const diffFiles = changedFiles(walkDiff(evidence.diff));
+  const planOnly = diffFiles.length > 0 && diffFiles.every(isInPlanScope);
+
+  // W1-T58 (Standing rule 15 — RATIFIES P3): see {@link ReviewVerdict.criteriaTampered}'s
+  // doc for the full design. `!planOnly` is the exemption — a genuine Architect
+  // plan-only correction is never this function's business to fail.
+  const criteriaTampered = !planOnly && criterionFieldTampered(evidence.diff);
+
   const unmet = verdicts.filter((v) => !v.met);
   const noCriteria = criteria.length === 0;
-  const state: ReviewState = noCriteria || unmet.length > 0 || testTheater ? "failure" : "success";
+  const state: ReviewState =
+    noCriteria || unmet.length > 0 || testTheater || criteriaTampered ? "failure" : "success";
 
   // W1-T178 (verdict stability): the SAME rollup, but ignoring semantic entirely
   // — every criterion judged on its `floorMet` (mechanical/executed, pre-
-  // downgrade). `testTheater`/`noCriteria` are structural (diff-derived), never
-  // semantic, so they bind the floor exactly as they bind `state`. This is the
-  // anchor a re-review of an unchanged head checks before trusting a downgrade.
+  // downgrade). `testTheater`/`noCriteria`/`criteriaTampered` are structural
+  // (diff-derived), never semantic, so they bind the floor exactly as they bind
+  // `state` — a criteriaTampered failure can never be suppressed by verdict
+  // stability (W1-T178), which only ever forgives a SEMANTIC downgrade. This is
+  // the anchor a re-review of an unchanged head checks before trusting a downgrade.
   const floorUnmet = verdicts.filter((v) => !(v.floorMet ?? v.met));
   const floorState: ReviewState =
-    noCriteria || floorUnmet.length > 0 || testTheater ? "failure" : "success";
+    noCriteria || floorUnmet.length > 0 || testTheater || criteriaTampered ? "failure" : "success";
 
   // W1-T72 (W1-T65 follow-up, legibility): nothing was OBSERVED on the PR head
   // anywhere in this review, yet at least one proof was WRITTEN to be runnable
@@ -1004,17 +1036,16 @@ export function judgeReview(
   // plainly rather than let a keyword-only PASS read as an observed one.
   const keywordOnly = execCtx === undefined;
 
-  // W1-T205: PLAN-ONLY CLASSIFICATION. Reuses the review path's OWN existing
-  // diff-walker (`changedFiles(walkDiff(...))` — the same one {@link
-  // checkOneConcern} already uses to name a diff's changed files) plus
-  // plan-architect's own plan-scope predicate ({@link isInPlanScope} — the SAME
-  // guard `rmd plan`'s PROPOSED-outcome check and the W1-T136 filing-PR emitter
-  // use) rather than inventing a third, divergent notion of "plan-only". FAILS
-  // CLOSED: an empty diff, or one touching even a single file outside
+  // W1-T205: PLAN-ONLY CLASSIFICATION (`diffFiles`/`planOnly` — computed above,
+  // ahead of `state`, so the W1-T58 guard could consult it). Reuses the review
+  // path's OWN existing diff-walker (`changedFiles(walkDiff(...))` — the same
+  // one {@link checkOneConcern} already uses to name a diff's changed files)
+  // plus plan-architect's own plan-scope predicate ({@link isInPlanScope} — the
+  // SAME guard `rmd plan`'s PROPOSED-outcome check and the W1-T136 filing-PR
+  // emitter use) rather than inventing a third, divergent notion of "plan-only".
+  // FAILS CLOSED: an empty diff, or one touching even a single file outside
   // `plan/**`/`MASTER-PLAN.md`, is NOT plan-only — see {@link
   // ReviewVerdict.planOnly}'s doc for why that direction is load-bearing.
-  const diffFiles = changedFiles(walkDiff(evidence.diff));
-  const planOnly = diffFiles.length > 0 && diffFiles.every(isInPlanScope);
 
   // A capped `state: "success"` NEVER uses passSummary's "substantiated"/"no
   // test theater" wording (criterion 1) — neither claim was measured. A
@@ -1032,7 +1063,7 @@ export function judgeReview(
           ? planOnlySummary(verdicts.length)
           : cappedSummary(verdicts.length, keywordOnly)
         : passSummary(verdicts.length, keywordOnly)
-      : failSummary(unmet.map((v) => v.claim), testTheater, noCriteria);
+      : failSummary(unmet.map((v) => v.claim), testTheater, noCriteria, criteriaTampered);
 
   return {
     state,
@@ -1044,6 +1075,7 @@ export function judgeReview(
     capped,
     keywordOnly,
     planOnly,
+    criteriaTampered,
   };
 }
 
@@ -1657,13 +1689,23 @@ const FAIL_PREFIX = "remudero-review: FAIL — ";
  * full or truncated with an ellipsis, plus `(+N more)` when others are unmet, kept
  * within the status-description length limit. The full unmet list lives in the
  * ledger `review.posted` line and the PR review comment (run-task.ts).
+ *
+ * `criteriaTampered` (W1-T58, Standing rule 15) takes priority over the
+ * `unmetClaims.length === 0` test-theater fallback below it — a diff can trip
+ * the rule-15 guard alone, with every NAMED criterion still reading "met" and
+ * `testTheater` false, so that fallback's assumption ("empty unmet ⇒ it must be
+ * test theater") no longer holds unconditionally.
  */
 export function failSummary(
   unmetClaims: string[],
   testTheater: boolean,
   noCriteria: boolean,
+  criteriaTampered = false,
 ): string {
   if (noCriteria) return `${FAIL_PREFIX}no acceptance criteria to judge (fail closed)`;
+  if (criteriaTampered) {
+    return `${FAIL_PREFIX}diff edits plan/tasks.yaml's own acceptance criteria — Standing rule 15 (a worker may never)`;
+  }
   if (unmetClaims.length === 0) return `${FAIL_PREFIX}test theater: added tests assert nothing`;
   const more = unmetClaims.length > 1 ? ` (+${unmetClaims.length - 1} more)` : "";
   const theater = testTheater ? "; test theater" : "";
@@ -2278,33 +2320,63 @@ export function checkTroubleshootingCoverage(diff: string, report?: string): Rub
   };
 }
 
-// ── The GUARD: no worker-authored satisfied_by ─────────────────────────────
+// ── The GUARD: no worker-authored criteria edit (rule 15) ──────────────────
+
+/** plan/tasks.yaml lines belonging to a criterion's own field, of the given diff kind. */
+function planTasksCriterionFieldLines(lines: DiffLine[], kind: "add" | "del"): DiffLine[] {
+  return lines.filter(
+    (l) => l.kind === kind && /(^|\/)plan\/tasks\.yaml$/.test(l.file) && /^\s*(claim|proof|satisfied_by)\s*:/.test(l.text),
+  );
+}
 
 /**
- * THE SATISFIED_BY GUARD: `satisfied_by` is Architect-only (plan.ts / Standing rule
- * 15). A diff that ADDS a `satisfied_by:` line to plan/tasks.yaml FAILS unless the PR
- * is plan-only AND human-authored — a worker adding it to its own blocking criterion
- * is "editing the criteria to match the diff", a failed task, not a merge.
+ * RULE 15's shared diff-derived predicate (W1-T58, ratifies P3 via P8/
+ * RETRO-1784058021334; originally W1-T3E's narrower `satisfied_by`-only check):
+ * true when a diff either ADDS a `satisfied_by:` line, or REMOVES an existing
+ * criterion field line (`claim:`/`proof:`/`satisfied_by:`), in `plan/tasks.yaml`.
+ * A removed field line is present whether the field's TEXT changed (an edit) or
+ * the whole criterion was deleted — both read as "the criteria no longer say
+ * what the Architect wrote". Diff-derived ONLY: callers apply their OWN
+ * exemption on top ({@link checkSatisfiedByGuard}: `planOnly && humanAuthored`;
+ * {@link judgeReview}: `planOnly` alone — the one signal that pure function has).
+ */
+function criterionFieldTampered(diff: string): boolean {
+  const lines = walkDiff(diff);
+  const addedSatisfiedBy = planTasksCriterionFieldLines(lines, "add").some((l) =>
+    /^\s*satisfied_by\s*:/.test(l.text),
+  );
+  const removedField = planTasksCriterionFieldLines(lines, "del").length > 0;
+  return addedSatisfiedBy || removedField;
+}
+
+/**
+ * THE RULE-15 GUARD: `satisfied_by` and criteria text are Architect-only
+ * (plan.ts / Standing rule 15 — "a worker may never [correct a mis-specified
+ * task]"). A diff that ADDS a `satisfied_by:` line, OR EDITS/REMOVES an
+ * existing criterion's `claim:`/`proof:`/`satisfied_by:` field, in
+ * `plan/tasks.yaml` FAILS unless the PR is plan-only AND human-authored — a
+ * worker doing either to its own blocking criterion is "editing the criteria
+ * to match the diff", a failed task, not a merge. W1-T58 broadens this from
+ * W1-T3E's original add-only `satisfied_by` check to cover the full "edits its
+ * criteria" shape the rule actually names.
  */
 export function checkSatisfiedByGuard(diff: string, meta: RubricPrMeta = {}): RubricItemResult {
-  const adds = walkDiff(diff).filter(
-    (l) => l.kind === "add" && /(^|\/)plan\/tasks\.yaml$/.test(l.file) && /^\s*satisfied_by\s*:/.test(l.text),
-  );
-  if (adds.length === 0) {
-    return { key: "satisfied-by-guard", pass: true, reason: "no satisfied_by added to plan/tasks.yaml" };
+  if (!criterionFieldTampered(diff)) {
+    return { key: "satisfied-by-guard", pass: true, reason: "no criterion field added or edited in plan/tasks.yaml" };
   }
   if (meta.planOnly && meta.humanAuthored) {
     return {
       key: "satisfied-by-guard",
       pass: true,
-      reason: "satisfied_by added in a plan-only, human-authored PR (Architect-only — allowed)",
+      reason: "criterion field added/edited in a plan-only, human-authored PR (Architect-only — allowed)",
     };
   }
   return {
     key: "satisfied-by-guard",
     pass: false,
     reason:
-      "worker-authored satisfied_by: adding it to plan/tasks.yaml outside a plan-only human PR is editing the criteria to match the diff (Standing rule 15)",
+      "worker-authored edit to plan/tasks.yaml's acceptance criteria (an added satisfied_by, or an edited/removed " +
+      "claim/proof/satisfied_by field) outside a plan-only human PR is editing the criteria to match the diff (Standing rule 15)",
   };
 }
 
