@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   architectModel,
   configPath as instanceConfigPath,
+  consoleUrl,
   fixStrikeCap,
   globalArtifactPath,
   loadConfig,
@@ -52,7 +53,7 @@ import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateSupervisorLaunchdPlist, launchdPlistPath, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js";
-import { buildDigest, sendDigest } from "./lib/digest.js";
+import { buildDigest, consoleCardUrl, sendDigest, sendRundown } from "./lib/digest.js";
 import {
   escalate,
   ghIssueGateway,
@@ -4189,7 +4190,18 @@ async function drainCommand(
     // task — "what happened" at task grain, not just the aggregate summary above. Re-reads the
     // ledger fresh so a same-run escalation (BLOCKED class, two-strikes-exhausted) is visible to
     // the classifier — the SAME ledger file `log` above just finished writing into.
-    console.log("\n" + renderRundown(buildRundown(summary, readLedgerLines(ledgerPath))));
+    const rundown = buildRundown(summary, readLedgerLines(ledgerPath));
+    console.log("\n" + renderRundown(rundown));
+    // W1-T144: PUSH the same rundown through the digest channel (lib/digest.ts's `sendRundown`
+    // — the SAME `notify()` call `rmd digest`/MANUAL/HARD_STOP escalations already go through,
+    // not a second transport) so an operator who is not watching this terminal still learns
+    // what a drain did, each non-merged line deep-linking to its console card.
+    sendRundown(rundown, consoleUrl(config), {
+      channel: imessageChannel(notifyRecipient(config)),
+      ledgerPath,
+      runId,
+      taskId: "DRAIN",
+    });
     // Exit 0 only on a clean drain (target reached / max reached / nothing left);
     // a block/headroom/error stop is a non-zero exit so an unattended wrapper notices.
     return summary.stopReason === "blocked" || summary.stopReason === "error" ? 1 : 0;
@@ -5892,7 +5904,9 @@ async function escalateCommand(rest: string[]): Promise<number> {
   );
   console.log(url);
   if (cls === "MANUAL" || cls === "HARD_STOP") {
-    notify(`[${cls}] ${taskId}: ${summary}\n${url}`, {
+    // W1-T144: the real-time ping deep-links to the console card alongside the GitHub
+    // issue URL, same as the digest's own escalations line (digest.ts's renderDigest).
+    notify(`[${cls}] ${taskId}: ${summary}\n${url}\n${consoleCardUrl(consoleUrl(config), taskId)}`, {
       channel: imessageChannel(notifyRecipient(config)),
       ledgerPath,
       runId,
@@ -6998,15 +7012,20 @@ async function digestCommand(rest: string[]): Promise<number> {
   const config = loadConfig();
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   if (rest.includes("--dry-run")) {
-    console.log(buildDigest(ledgerPath, since));
+    console.log(buildDigest(ledgerPath, since, consoleUrl(config)));
     return 0;
   }
-  const text = sendDigest(ledgerPath, since, {
-    channel: imessageChannel(notifyRecipient(config)),
+  const text = sendDigest(
     ledgerPath,
-    runId: `DIGEST-${Date.now()}`,
-    taskId: "DIGEST",
-  });
+    since,
+    {
+      channel: imessageChannel(notifyRecipient(config)),
+      ledgerPath,
+      runId: `DIGEST-${Date.now()}`,
+      taskId: "DIGEST",
+    },
+    consoleUrl(config),
+  );
   console.log(text);
   return 0;
 }

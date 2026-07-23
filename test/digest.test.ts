@@ -3,7 +3,17 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildDigest, collectSince, renderDigest, sendDigest, summarize } from "../src/lib/digest.js";
+import {
+  buildDigest,
+  collectSince,
+  consoleCardUrl,
+  renderDigest,
+  renderRundownPush,
+  sendDigest,
+  sendRundown,
+  summarize,
+} from "../src/lib/digest.js";
+import type { RundownLine } from "../src/lib/drain.js";
 import type { NotifyChannel } from "../src/lib/notify.js";
 
 function ledgerFile(lines: Array<Record<string, unknown>>): string {
@@ -192,4 +202,86 @@ test("sendDigest delivers the built text over the notify channel and ledgers it"
   assert.equal(channel.sent[0], text);
   const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   assert.ok(lines.some((l) => l.step === "notify.sent"));
+});
+
+// ── W1-T144: console push — deep links + the drain-rundown push ──────────────────────────────
+
+test("consoleCardUrl: a HASH route naming exactly the given task id, tolerating a trailing slash on the base", () => {
+  assert.equal(consoleCardUrl("http://100.64.1.2:4317", "W1-T3"), "http://100.64.1.2:4317/#task=W1-T3");
+  assert.equal(consoleCardUrl("http://100.64.1.2:4317/", "W1-T3"), "http://100.64.1.2:4317/#task=W1-T3");
+});
+
+test("consoleCardUrl: percent-encodes the task id so a link for task X can never collide with another id", () => {
+  assert.equal(consoleCardUrl("http://localhost:4317", "W1/T3"), "http://localhost:4317/#task=W1%2FT3");
+});
+
+test("consoleCardUrl (falsifier): links for two different task ids are never equal, and each names ONLY its own id", () => {
+  const a = consoleCardUrl("http://localhost:4317", "W1-T3");
+  const b = consoleCardUrl("http://localhost:4317", "W1-T9");
+  assert.notEqual(a, b);
+  assert.match(a, /task=W1-T3$/);
+  assert.doesNotMatch(a, /W1-T9/);
+});
+
+test("renderDigest: with no consoleBaseUrl, the escalations line renders EXACTLY as before W1-T144 (no link appended)", () => {
+  const s = summarize(LINES, "2026-07-14T00:00:00.000Z");
+  const text = renderDigest(s);
+  assert.match(text, /escalations: \[BLOCKED\] W1-T3 — https:\/\/github\.com\/craigoley\/remudero\/issues\/5$/m);
+});
+
+test("renderDigest: a consoleBaseUrl appends that task's console deep link to its escalation line", () => {
+  const s = summarize(LINES, "2026-07-14T00:00:00.000Z");
+  const text = renderDigest(s, "http://100.64.1.2:4317");
+  assert.match(
+    text,
+    /escalations: \[BLOCKED\] W1-T3 — https:\/\/github\.com\/craigoley\/remudero\/issues\/5 — http:\/\/100\.64\.1\.2:4317\/#task=W1-T3/,
+  );
+});
+
+test("buildDigest/sendDigest: consoleBaseUrl threads through to the delivered text", () => {
+  const path = ledgerFile(LINES);
+  const viaBuild = buildDigest(path, "2026-07-14T00:00:00.000Z", "http://100.64.1.2:4317");
+  assert.match(viaBuild, /#task=W1-T3/);
+
+  const channel = fakeChannel();
+  const sent = sendDigest(path, "2026-07-14T00:00:00.000Z", { channel, ledgerPath: path, runId: "D-1", taskId: "DIGEST" }, "http://100.64.1.2:4317");
+  assert.equal(channel.sent[0], sent);
+  assert.match(sent, /#task=W1-T3/);
+});
+
+const RUNDOWN_LINES: RundownLine[] = [
+  { taskId: "W1-T1", outcome: "merged" },
+  { taskId: "W1-T2", outcome: "blocked", detail: "W1-T2 → blocked_ci" },
+  { taskId: "W1-T3", outcome: "escalated", escalation: { issueUrl: "https://github.com/craigoley/remudero/issues/5", class: "BLOCKED" } },
+];
+
+test("renderRundownPush: merged stays a bare confirmation; blocked/escalated each carry the console deep link for THEIR OWN task", () => {
+  const text = renderRundownPush(RUNDOWN_LINES, "http://100.64.1.2:4317");
+  assert.match(text, /merged     : W1-T1$/m);
+  assert.doesNotMatch(text.split("\n").find((l) => l.includes("W1-T1")) ?? "", /#task=/);
+  assert.match(text, /blocked    : W1-T2 — W1-T2 → blocked_ci — http:\/\/100\.64\.1\.2:4317\/#task=W1-T2/);
+  assert.match(
+    text,
+    /escalated  : W1-T3 — \[BLOCKED\] https:\/\/github\.com\/craigoley\/remudero\/issues\/5 — http:\/\/100\.64\.1\.2:4317\/#task=W1-T3/,
+  );
+});
+
+test("renderRundownPush: nothing attempted renders the same empty state as the pull-view renderRundown", () => {
+  assert.match(renderRundownPush([], "http://localhost:4317"), /\(no tasks attempted\)/);
+});
+
+test("sendRundown: delivers over the SAME notify() emit path as sendDigest — one code path, not a second transport", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-digest-rundown-"));
+  const path = join(dir, "ledger.ndjson");
+  writeFileSync(path, "");
+  const channel = fakeChannel();
+  const text = sendRundown(RUNDOWN_LINES, "http://100.64.1.2:4317", { channel, ledgerPath: path, runId: "DRAIN-1", taskId: "DRAIN" });
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0], text);
+  assert.match(text, /#task=W1-T2/);
+  assert.match(text, /#task=W1-T3/);
+  // notify() itself ledgers `notify.sent` — the same trace a digest send leaves — proving
+  // this went through the identical emit path, not a bespoke sender.
+  const ledgerLines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.ok(ledgerLines.some((l) => l.step === "notify.sent" && l.task_id === "DRAIN"));
 });

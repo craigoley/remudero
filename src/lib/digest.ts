@@ -3,6 +3,7 @@ import { notify, type NotifyDeps } from "./notify.js";
 import { renderAlertsSummary, type AlertsPollSummary } from "./ops.js";
 import { renderIssuesSummary, type IssuesPollSummary } from "./issues-intake.js";
 import { renderInboxPollSummary, type InboxPollSummary } from "./inbox.js";
+import type { RundownLine } from "./drain.js";
 
 /**
  * Daily digest (W1-T8 title; assembled here, delivered here, SCHEDULED by the
@@ -99,8 +100,27 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
   return summary;
 }
 
-/** Render a {@link DigestSummary} as the digest text — what a human reads, once a day. */
-export function renderDigest(s: DigestSummary): string {
+/**
+ * Deep-link a task id to its console card (W1-T144, MASTER-PLAN §7B). A HASH route —
+ * `#task=<id>` — so the link never leaves the client: no bearer token rides along in
+ * message-app history, and it layers cleanly on top of whatever base URL (and its own
+ * `?token=`, per apps/dashboard's `readConfig`) the operator already has bookmarked.
+ * `consoleBaseUrl` is a full origin (e.g. `http://100.x.x.x:4317`, config.ts's
+ * `consoleUrl`); a trailing slash is tolerated. `taskId` is percent-encoded so a link
+ * for task X can never be mistaken for — or collide with — a link for a different id.
+ */
+export function consoleCardUrl(consoleBaseUrl: string, taskId: string): string {
+  return `${consoleBaseUrl.replace(/\/+$/, "")}/#task=${encodeURIComponent(taskId)}`;
+}
+
+/**
+ * Render a {@link DigestSummary} as the digest text — what a human reads, once a day.
+ * `consoleBaseUrl`, when given, appends a W1-T144 console deep link to each escalation
+ * line so a needs-human item read off the message channel jumps straight to its task
+ * card. Omitted (the default), the escalations line renders EXACTLY as before this
+ * field existed — no caller that predates W1-T144 sees any change.
+ */
+export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string {
   const lines = [
     `Remudero daily digest — since ${s.sinceIso}`,
     `merged: ${s.merged.length ? s.merged.join(", ") : "(none)"}`,
@@ -108,7 +128,11 @@ export function renderDigest(s: DigestSummary): string {
       s.blocked.length ? s.blocked.map((b) => `${b.taskId} (${b.verdict}${b.prUrl ? ` — ${b.prUrl}` : ""})`).join(", ") : "(none)"
     }`,
     `escalations: ${
-      s.escalations.length ? s.escalations.map((e) => `[${e.class}] ${e.taskId} — ${e.issueUrl}`).join(", ") : "(none)"
+      s.escalations.length
+        ? s.escalations
+            .map((e) => `[${e.class}] ${e.taskId} — ${e.issueUrl}${consoleBaseUrl ? ` — ${consoleCardUrl(consoleBaseUrl, e.taskId)}` : ""}`)
+            .join(", ")
+        : "(none)"
     }`,
     `alerts: ${s.alerts ? renderAlertsSummary(s.alerts) : "(no poll this window)"}`,
     `issues reviewed: ${s.issues ? renderIssuesSummary(s.issues) : "(no poll this window)"}`,
@@ -122,14 +146,51 @@ export function renderDigest(s: DigestSummary): string {
   return lines.join("\n");
 }
 
-/** Build the digest text straight from a ledger file, as of `sinceIso`. */
-export function buildDigest(ledgerPath: string, sinceIso: string): string {
-  return renderDigest(summarize(readLedgerLines(ledgerPath), sinceIso));
+/**
+ * Build the digest text straight from a ledger file, as of `sinceIso`. `consoleBaseUrl`
+ * threads through to {@link renderDigest} — see its doc for the W1-T144 deep-link contract.
+ */
+export function buildDigest(ledgerPath: string, sinceIso: string, consoleBaseUrl?: string): string {
+  return renderDigest(summarize(readLedgerLines(ledgerPath), sinceIso), consoleBaseUrl);
 }
 
 /** Build the digest from `ledgerPath` and deliver it over the SAME notify channel as real-time pings. */
-export function sendDigest(ledgerPath: string, sinceIso: string, deps: NotifyDeps): string {
-  const text = buildDigest(ledgerPath, sinceIso);
+export function sendDigest(ledgerPath: string, sinceIso: string, deps: NotifyDeps, consoleBaseUrl?: string): string {
+  const text = buildDigest(ledgerPath, sinceIso, consoleBaseUrl);
+  notify(text, deps);
+  return text;
+}
+
+/**
+ * Render a post-drain {@link RundownLine} array as ONE digest-channel message (W1-T144):
+ * the PUSH counterpart to `drain.ts`'s own `renderRundown` (a pull-view printed to the
+ * terminal that kicked the drain off). Every non-merged line — `blocked`/`escalated`,
+ * the outcomes an operator who stepped away actually needs to see — carries a
+ * {@link consoleCardUrl} deep link to that task's card; a `merged` line stays a bare
+ * confirmation, since there is nothing to act on. Mirrors `renderRundown`'s own
+ * "(no tasks attempted)" empty-state text so the two views never disagree on shape.
+ */
+export function renderRundownPush(lines: RundownLine[], consoleBaseUrl: string): string {
+  const body =
+    lines.length === 0
+      ? ["(no tasks attempted)"]
+      : lines.map((l) => {
+          if (l.outcome === "merged") return `merged     : ${l.taskId}`;
+          const link = consoleCardUrl(consoleBaseUrl, l.taskId);
+          if (l.outcome === "escalated") return `escalated  : ${l.taskId} — [${l.escalation!.class}] ${l.escalation!.issueUrl} — ${link}`;
+          return `blocked    : ${l.taskId}${l.detail ? ` — ${l.detail}` : ""} — ${link}`;
+        });
+  return ["Remudero drain rundown", ...body].join("\n");
+}
+
+/**
+ * Deliver a post-drain rundown over the SAME notify channel as {@link sendDigest} and
+ * `run-task.ts`'s MANUAL/HARD_STOP escalation pings (grep-provable: this is the ONE call
+ * to `notify()` a drain's push runs through, not a second/parallel sender — W1-T144
+ * acceptance "a drain rundown emits through the SAME channel, not a second transport").
+ */
+export function sendRundown(lines: RundownLine[], consoleBaseUrl: string, deps: NotifyDeps): string {
+  const text = renderRundownPush(lines, consoleBaseUrl);
   notify(text, deps);
   return text;
 }
