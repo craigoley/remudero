@@ -114,7 +114,7 @@ function fixtureDeps(root: string): ServeDeps {
   });
   return {
     board: { plan, ledgerPath, github },
-    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github },
+    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github, ratify: { approve() {}, reframe() {} } },
     ledgerPath,
     issues: fakeIssueCloser(),
     fleetControlRoot: root,

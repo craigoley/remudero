@@ -103,7 +103,7 @@ function fixtureDeps(root: string): ServeDeps {
   const github = fakeGitHub({ "https://github.com/o/r/pull/1": { number: 1, url: "https://github.com/o/r/pull/1", state: "MERGED" } });
   return {
     board: { plan, ledgerPath, github },
-    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github },
+    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github, ratify: { approve() {}, reframe() {} } },
     ledgerPath,
     issues: fakeIssueCloser(),
     fleetControlRoot: root,

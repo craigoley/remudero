@@ -89,7 +89,7 @@ function fixtureDeps(root: string, tasks: Task[]): ServeDeps {
   const github = fakeGitHub();
   return {
     board: { plan, ledgerPath, github },
-    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github },
+    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github, ratify: { approve() {}, reframe() {} } },
     ledgerPath,
     issues: fakeIssueCloser(),
     fleetControlRoot: root,

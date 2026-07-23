@@ -216,6 +216,31 @@ export function draftsDueOnDaemon(proposals: Proposal[], drafts: DraftCache, att
   return proposalsNeedingDraft(proposals, drafts).filter((p) => attempts[p.id] !== draftAttemptKey(p));
 }
 
+/** `<config.root>/state/inbox-draft-inflight.json` — proposal id -> ISO spawn timestamp,
+ *  for whichever proposals the daemon's draft rung (buildInboxDraftHook, run-task.ts)
+ *  currently has an Architect worker running for (W1-T193). Written just before the batch's
+ *  {@link runDraftRung} call and cleared in a `finally` once it resolves (win or lose), so a
+ *  crash mid-draft is the only way an entry here can go stale — the same "never lies about
+ *  its own state" bar W1-T156 set for liveness. Distinct from {@link DraftAttemptCache}
+ *  (records the LAST-ATTEMPTED cause, kept indefinitely) — this cache only ever names what
+ *  is happening RIGHT NOW. */
+export interface DraftInFlightCache {
+  [proposalId: string]: string;
+}
+
+/** Parse a {@link DraftInFlightCache} JSON blob; `{}` on missing/malformed input (mirrors
+ *  {@link parseDraftAttemptCache}'s fail-soft-to-empty discipline). */
+export function parseDraftInFlightCache(text: string | undefined): DraftInFlightCache {
+  if (!text) return {};
+  try {
+    const raw = JSON.parse(text) as unknown;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+    return raw as DraftInFlightCache;
+  } catch {
+    return {};
+  }
+}
+
 // ── The readiness predicate (rule 2, policy-as-data) ───────────────────────────────────────
 
 export type FailingPredicate = "drafted" | "deps_merged" | "evidence_anchors" | "lint_clean" | "no_conflict";
@@ -225,7 +250,7 @@ export interface PredicateFailure {
   detail: string;
 }
 
-export type InboxState = "ready" | "not_ready" | "deferred_with_trigger" | "ratified";
+export type InboxState = "ready" | "not_ready" | "deferred_with_trigger" | "ratified" | "drafting";
 
 export interface InboxClassification {
   proposalId: string;
@@ -238,6 +263,10 @@ export interface InboxClassification {
   draftStale?: boolean;
   /** Present iff state === "ready" — the reasoning rides with the recommendation. */
   draft?: DraftedCandidate;
+  /** Present iff state === "drafting" — when the in-flight Architect worker for this
+   *  proposal's draft was spawned (W1-T193's "never renders nothing during a legitimate
+   *  multi-minute mid-draft window" bar). */
+  draftSpawnedAt?: string;
 }
 
 export interface ReadinessContext {
@@ -262,6 +291,14 @@ export interface ReadinessContext {
    * fixes is exactly a registry entry that drifted from an already-ledgered `ratify.approved`.
    */
   isRatified: (proposalId: string) => boolean;
+  /**
+   * Present iff the daemon's draft rung currently has an Architect worker running for this
+   * proposal id (W1-T193) — returns the ISO spawn timestamp, or `undefined` when no draft
+   * attempt is in flight for it. Real implementations derive this from
+   * {@link DraftInFlightCache} (`state/inbox-draft-inflight.json`); optional so every existing
+   * fixture/caller that never had a reason to think about drafting-in-flight is unaffected.
+   */
+  draftSpawnedAt?: (proposalId: string) => string | undefined;
 }
 
 /**
@@ -355,6 +392,17 @@ export function classifyProposal(
   // what heals an EXISTING drifted entry, since it never trusts a stored flag at all.
   if (ctx.isRatified(proposal.id)) {
     return { proposalId: proposal.id, state: "ratified", reasons: [] };
+  }
+  // W1-T193: an Architect worker currently drafting this proposal is checked next, before the
+  // ordinary not-ready/deferred predicates below — a proposal legitimately mid-draft for
+  // minutes (W1-T192's daemon-side rung) must never render as "not ready" (indistinguishable
+  // from broken) or fall through to a NOT_READY "no drafted candidate yet" that will be stale
+  // the moment the draft lands. In practice this never collides with the trigger check below —
+  // `proposalsNeedingDraft` already excludes an unfired-trigger proposal from ever being
+  // selected for drafting — but the order here is defensive, not load-bearing on that fact.
+  const draftSpawnedAt = ctx.draftSpawnedAt?.(proposal.id);
+  if (draftSpawnedAt) {
+    return { proposalId: proposal.id, state: "drafting", reasons: [], draftSpawnedAt };
   }
   if (proposal.trigger && !proposal.trigger.fired) {
     return {
@@ -591,15 +639,23 @@ export function renderInbox(classifications: InboxClassification[]): string {
   const deferred = classifications.filter((c) => c.state === "deferred_with_trigger");
   const notReady = classifications.filter((c) => c.state === "not_ready");
   const ratified = classifications.filter((c) => c.state === "ratified");
+  const drafting = classifications.filter((c) => c.state === "drafting");
 
   lines.push(
-    `rmd inbox: ${ready.length} READY, ${notReady.length} not ready, ${deferred.length} deferred-with-trigger, ${ratified.length} already ratified.`,
+    `rmd inbox: ${ready.length} READY, ${notReady.length} not ready, ${deferred.length} deferred-with-trigger, ` +
+      `${drafting.length} drafting, ${ratified.length} already ratified.`,
   );
   for (const c of ready) {
     lines.push("");
     lines.push(`READY — ${c.proposalId}`);
     lines.push(`  stamp: ${c.draft?.stampLine ?? ""}`);
     lines.push(`  drafted tasks:\n${(c.draft?.fragmentYaml ?? "").replace(/^/gm, "    ")}`);
+  }
+  // W1-T193: a proposal currently mid-draft is named, with its spawn time — the same
+  // never-render-nothing-during-a-legitimate-window bar the console's card carries.
+  for (const c of drafting) {
+    lines.push("");
+    lines.push(`DRAFTING — ${c.proposalId} (spawned ${c.draftSpawnedAt ?? "unknown time"})`);
   }
   for (const c of notReady) {
     lines.push("");
@@ -914,6 +970,9 @@ export function refusalReason(c: InboxClassification): string {
   }
   if (c.state === "deferred_with_trigger") {
     return `${c.proposalId} is DEFERRED-WITH-TRIGGER (trigger not fired: ${c.trigger?.description ?? "unnamed trigger"}) — never approvable`;
+  }
+  if (c.state === "drafting") {
+    return `${c.proposalId} is currently DRAFTING (spawned ${c.draftSpawnedAt ?? "unknown time"}) — not yet approvable`;
   }
   const reasons = c.reasons.map((r) => `[${r.predicate}] ${r.detail}`).join("; ");
   return `${c.proposalId} is NOT READY — ${reasons || "no drafted candidate available yet"}`;

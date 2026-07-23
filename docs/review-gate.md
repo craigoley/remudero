@@ -365,3 +365,11 @@ positions. Two consequences, both deliberate:
   the compiled module preamble maps `DA:<line>,0` records onto a new file's leading doc
   comment, which used to false-block any new file that opens with one. A genuinely uncovered
   added *code* line still blocks (fixture-proven in `test/diff-coverage.test.ts`).
+
+### diff-coverage round 3 (2026-07-23): FNDA-aware declaration lines + closer furniture
+
+Two more source-map artifact classes recognised (instrument-only change, own PR):
+a function **declaration line** whose lcov `FNDA` count shows the function was entered is
+covered regardless of its `DA:0` (observed: `FN:62`/`FNDA:11` beside `DA:62,0`); and a
+**closer-only punctuation line** (`};`, `})`) is non-executable furniture. An unentered
+function (`FNDA:0`) still blocks on its body — the carve-outs rescue artifacts, never dead code.
