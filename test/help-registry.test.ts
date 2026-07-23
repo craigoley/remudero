@@ -69,9 +69,15 @@ test("`rmd <cmd> --help` is checked BEFORE any command's business-logic dispatch
 // the failure below; remove it, get green again).
 
 function mainBody(): string {
-  const start = runTaskSrc.indexOf("async function main(): Promise<void> {");
+  // `async function main(` — then its body opens at the FIRST `): Promise<void> {` after it
+  // (tolerant of an optional injectable deps parameter, single- or multi-line — W1-T79).
+  const sigIdx = runTaskSrc.indexOf("async function main(");
+  const start = runTaskSrc.indexOf("): Promise<void> {", sigIdx);
   const end = runTaskSrc.indexOf("// Only run when invoked directly", start);
-  assert.ok(start >= 0 && end > start, "could not locate main()'s body in run-task.ts — has it been renamed?");
+  assert.ok(
+    sigIdx >= 0 && start >= 0 && end > start,
+    "could not locate main()'s body in run-task.ts — has it been renamed?",
+  );
   return runTaskSrc.slice(start, end);
 }
 

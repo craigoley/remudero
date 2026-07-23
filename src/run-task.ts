@@ -280,6 +280,7 @@ import {
 import { ensureWorkerKeychain, workerKeychainPaths } from "./lib/worker-home.js";
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, FIX_WORKER_TOOLS, neutralizeFenceMarkers } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "./lib/drain-lock.js";
+import { checkCliFreshness } from "./lib/self-sync.js";
 import { acquireInflightLock, InflightLockError, sweepStaleInflightLocks } from "./lib/inflight-lock.js";
 import { classifyFailure, MAX_TRANSIENT_RETRIES, type FailureSignal } from "./lib/classify.js";
 import { shouldRecordDecision } from "./lib/risk-score.js";
@@ -7999,7 +8000,12 @@ function commandSyntax(name: string): string {
 }
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
-export async function main(): Promise<void> {
+export async function main(
+  // W1-T79/W1-T221: the freshness check is injectable so a `callMain` test can drive the
+  // "refused" branch below (its console.error+process.exit can't otherwise be covered — in CI
+  // the real check returns "guarded", never "refused"). Default = the real self-sync check.
+  deps: { checkFreshness?: typeof checkCliFreshness } = {},
+): Promise<void> {
   const [, , cmd, ...rest] = process.argv;
   const arg = rest[0];
   if (cmd === "--help" || cmd === "-h" || cmd === "help") {
@@ -8013,6 +8019,19 @@ export async function main(): Promise<void> {
   if (helpSpec && (rest.includes("--help") || rest.includes("-h"))) {
     console.log(commandHelp(helpSpec));
     process.exit(0);
+  }
+  // W1-T79: CLI self-freshness, checked directly after the (mandatory, every-call) help
+  // preamble above and BEFORE any command's real dispatch — the #138 incident shape: `rmd
+  // correct` existed on origin/main, but the OPERATOR's own invocation was a stale checkout
+  // that predated the merge and printed the old usage instead. "rmd should be managing git
+  // for me" is the requirement, verbatim (see src/lib/self-sync.ts for the full contract:
+  // clean+behind auto-ff-pulls and re-execs once; dirty/diverged refuses with the exact
+  // remedy and never mutates; up-to-date and the loop-guarded re-exec's child are both
+  // total no-ops). A "refused" result must never fall through to dispatch below.
+  const freshness = (deps.checkFreshness ?? checkCliFreshness)(repoRoot, process.env);
+  if (freshness.status === "refused") {
+    console.error(freshness.message);
+    process.exit(1);
   }
   // W1-T86: checked directly after the (mandatory, every-call) help preamble above -- NOT
   // in its "natural" alphabetical/registration spot further down, beside fix. A behavioral

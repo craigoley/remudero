@@ -7,6 +7,7 @@ import type { LearningEntry } from "../src/lib/learnings.js";
 import type { Config } from "../src/lib/config.js";
 import type { RunResult } from "../src/lib/run-result.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import { main, wipeTestCommand } from "../src/run-task.js";
 import {
   aggregateWipeTestPairs,
@@ -451,6 +452,13 @@ async function callMain(t: import("node:test").TestContext, argv: string[]): Pro
 
   const originalArgv = process.argv;
   process.argv = argv;
+  // W1-T79: main() now runs a real CLI self-freshness check (src/lib/self-sync.ts) right after
+  // the help preamble, on every call — which, with real default deps, does a REAL `git fetch
+  // origin` against this worktree's actual origin remote. That's a live-network dependency this
+  // test isn't about (it's testing wipe-test/--help dispatch, not git freshness), so set the
+  // SAME loop-guard env a real re-exec sets to make checkCliFreshness a total no-op here too.
+  const originalGuardEnv = process.env[SELF_SYNC_GUARD_ENV];
+  process.env[SELF_SYNC_GUARD_ENV] = "1";
   try {
     let caught: unknown;
     await main().catch((e) => {
@@ -460,6 +468,11 @@ async function callMain(t: import("node:test").TestContext, argv: string[]): Pro
     return (caught as ProcessExitCalled).code;
   } finally {
     process.argv = originalArgv;
+    if (originalGuardEnv === undefined) {
+      delete process.env[SELF_SYNC_GUARD_ENV];
+    } else {
+      process.env[SELF_SYNC_GUARD_ENV] = originalGuardEnv;
+    }
   }
 }
 
@@ -481,4 +494,43 @@ test("main(): `rmd --help` prints USAGE and exits 0 -- the mandatory top-of-ladd
 test("main(): `rmd wipe-test --help` prints the per-command help and exits 0 BEFORE the wipe-test dispatch itself", async (t) => {
   const code = await callMain(t, ["node", "run-task.js", "wipe-test", "--help"]);
   assert.equal(code, 0);
+});
+
+// W1-T79 refused-exit (run-task.ts:8028-8029): a "refused" freshness result must print its
+// message and exit 1, never falling through to dispatch. In CI the real check returns "guarded"
+// (never "refused"), so this branch is only reachable via the injected-freshness seam on main().
+test("main(): a 'refused' freshness result prints the exact remedy message and exits 1 (never dispatches)", async (t) => {
+  const errs: string[] = [];
+  t.mock.method(
+    process,
+    "exit",
+    ((code?: number): never => {
+      throw new ProcessExitCalled(code);
+    }) as typeof process.exit,
+  );
+  t.mock.method(console, "error", (...a: unknown[]) => {
+    errs.push(a.map(String).join(" "));
+  });
+  const originalArgv = process.argv;
+  process.argv = ["node", "run-task.js", "status"];
+  try {
+    let caught: unknown;
+    await main({
+      checkFreshness: () => ({
+        status: "refused",
+        reason: "diverged",
+        message: "### rmd self-sync: STALE-DIVERGED remedy line",
+      }),
+    }).catch((e) => {
+      caught = e;
+    });
+    assert.ok(caught instanceof ProcessExitCalled, "the refused branch must reach process.exit");
+    assert.equal((caught as ProcessExitCalled).code, 1, "refused exits 1");
+    assert.ok(
+      errs.some((e) => e.includes("STALE-DIVERGED remedy line")),
+      "the refused message (the operator's remedy) is printed to stderr",
+    );
+  } finally {
+    process.argv = originalArgv;
+  }
 });
