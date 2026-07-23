@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
@@ -6568,8 +6568,21 @@ export function buildInboxDraftHook(
         nextAttempts[outcome.proposalId] = draftAttemptKey(proposal);
         if (outcome.ok) nextDrafts[outcome.proposalId] = outcome.candidate;
       }
-      writeFileSync(draftsPath, JSON.stringify(nextDrafts, null, 2), "utf8");
-      writeFileSync(attemptsPath, JSON.stringify(nextAttempts, null, 2), "utf8");
+      // ATOMIC PAIR (sibling temp file + rename per file, mirroring lib/inbox.ts's
+      // `updateProposalRegistry` precedent): both temp files are fully staged BEFORE either
+      // commits, so a crash can never land either file as a torn/partial write, and the two
+      // renames commit in the SAME safe order the plain writes used to (drafts before
+      // attempts) — a crash between them can only ever leave a fresh draft with a stale
+      // attempts entry (self-heals: proposalsNeedingDraft sees the cached draft is no longer
+      // stale and stops selecting it next poll), never the reverse (an attempt recorded with
+      // no draft to show for it, which would wedge draftsDueOnDaemon on this cause forever —
+      // only a manual `rmd inbox` force, which never consults DraftAttemptCache, would notice).
+      const draftsTmpPath = `${draftsPath}.tmp-${process.pid}-${Date.now()}`;
+      const attemptsTmpPath = `${attemptsPath}.tmp-${process.pid}-${Date.now()}`;
+      writeFileSync(draftsTmpPath, JSON.stringify(nextDrafts, null, 2), "utf8");
+      writeFileSync(attemptsTmpPath, JSON.stringify(nextAttempts, null, 2), "utf8");
+      renameSync(draftsTmpPath, draftsPath);
+      renameSync(attemptsTmpPath, attemptsPath);
     } catch (e) {
       log("inbox.draft_rung.error", { error: String((e as Error)?.message ?? e) });
     }
