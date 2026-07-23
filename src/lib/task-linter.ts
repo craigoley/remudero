@@ -106,8 +106,35 @@ export function sizingViolation(task: Task): LintViolation | undefined {
 // no operator, so a criterion needing one can never pass (W1-T9's readline-
 // reproduction death spiral; W1-T12's overnight-drain / launchctl-load / live-
 // kill criteria).
+//
+// PRECISION vs RECALL (the #146 sweep, W1-T81): a naive whole-word-anywhere scan
+// is wrong in BOTH directions on the SAME rule.
+//   - FALSE POSITIVE #1 — negation: 'NO real overnight run' (W1-T12a) and 'NOT a
+//     real launchctl load' (W1-T12b) contain a forbidden word but explicitly deny
+//     the live action. A hit whose CLAUSE (bounded by . , ; : ( ) or an em-dash)
+//     opens with a negation cue (no/not/never/without/non/isn't/doesn't/won't/
+//     cannot/can't/nor) BEFORE the match does not flag.
+//   - FALSE POSITIVE #2 — self-reference: W1-T20c's own criterion literally names
+//     the lexicon ('a criterion containing overnight/launchctl/killed...') to
+//     describe the CHECK, not to instruct a live action. Exempted by CONTENT
+//     SHAPE, never a task-id allowlist (an id allowlist rots): (a) forbidden
+//     terms directly enumerated back-to-back with a bare '/' between them (no
+//     surrounding spaces) are a quoted/listed lexicon excerpt, not an
+//     instruction; (b) a hit fully inside a quoted span ('...' or "...", the
+//     quote not itself a contraction/possessive apostrophe) is a quoted excerpt
+//     under discussion, not an instruction.
+//   - FALSE NEGATIVE — the genuinely headless-unfit proofs the check was BUILT to
+//     catch ('paste the red check, then revert' — the W1-T25 no_pr incident,
+//     122 turns before verdict=no_pr) are PHRASES, not lexicon words, so the
+//     original word-only lexicon never matched them. Phrase-level signals below
+//     close this gap.
 
-export const HEADLESS_FORBIDDEN_LEXICON: ReadonlyArray<{ tag: string; pattern: RegExp }> = [
+export interface LexiconEntry {
+  tag: string;
+  pattern: RegExp;
+}
+
+export const HEADLESS_FORBIDDEN_LEXICON: ReadonlyArray<LexiconEntry> = [
   { tag: "overnight", pattern: /\bovernight\b/i },
   { tag: "reboot", pattern: /\breboot\b/i },
   { tag: "launchctl", pattern: /\blaunchctl\b/i },
@@ -116,15 +143,119 @@ export const HEADLESS_FORBIDDEN_LEXICON: ReadonlyArray<{ tag: string; pattern: R
   { tag: "operator-confirms", pattern: /\boperator\s+confirms?\b/i },
   { tag: "user-selects", pattern: /\buser\s+selects?\b/i },
   { tag: "manual-eyeball", pattern: /\bmanual[- ]eyeball(?:ed|ing)?\b/i },
+  // Phrase-level live-demonstration signals (RECALL, the #146 sweep) — an
+  // imperative demonstration no headless worker can perform, regardless of
+  // whether any single WORD above appears: 'paste the <red|green|score|check>
+  // [...], then revert' (W1-T25/26/28 pre-sweep), 'run against <a live/sandbox
+  // repo>' (W1-T27 pre-sweep: 'run against remudero-sandbox'), and 'operator
+  // observes'. NOT included: a bare 'screenshot' — checked against the LIVE
+  // plan (255 tasks) before landing, it false-positived on W1-T153's Lighthouse
+  // artifact (an AUTOMATED headless-browser capture attached to the PR, not a
+  // live action) and on W1-T184's '(operator screenshot, 2026-07-20)' — a
+  // FALSIFIER citing PAST evidence, not an instruction to the worker. The word
+  // alone doesn't distinguish "a headless worker can produce this" from "a
+  // human must be there" — exactly the false-positive failure mode this task
+  // exists to fix, so it stays out until a precise phrase shape is found.
+  {
+    tag: "paste-then-revert",
+    pattern: /\bpaste\s+the\s+(?:\w+\s+){0,2}(?:red|green|score|check)\b[\s\S]{0,40}?\bthen\s+revert\b/i,
+  },
+  {
+    tag: "against-live-repo",
+    pattern: /\brun\b[\s\S]{0,15}\bagainst\b[\s\S]{0,30}\b(?:sandbox|repo|repository)\b/i,
+  },
+  { tag: "operator-observes", pattern: /\boperator\s+observ(?:es?|ing|ed)\b/i },
 ];
 
-/** Every criterion of an auto-verify task that hits the forbidden lexicon. */
-export function headlessFitnessViolations(task: Task): LintViolation[] {
+/** Clause-boundary punctuation that scopes how far left a negation cue can reach. */
+const CLAUSE_BOUNDARY = /[.,;:()—]/;
+
+/** no/not/never/without/... — a negation cue, scanned within the SAME clause as a hit. */
+const NEGATION_CUE = /\b(?:no|not|never|without|non|isn't|doesn't|won't|cannot|can't|nor)\b/i;
+
+/** A quoted span: '...' or "...", excluding a contraction/possessive apostrophe (no
+ *  letter immediately outside either delimiter — 'isn't' and 'daemon's' don't count). */
+const QUOTE_SPAN = /(?<![\w])['"]([^'"]{2,200}?)['"](?![\w])/g;
+
+interface LexiconHit {
+  tag: string;
+  start: number;
+  end: number;
+}
+
+/** Every occurrence of every lexicon entry in `text`, sorted by position. */
+function findLexiconHits(text: string, lexicon: ReadonlyArray<LexiconEntry>): LexiconHit[] {
+  const hits: LexiconHit[] = [];
+  for (const entry of lexicon) {
+    const flags = entry.pattern.flags.includes("g") ? entry.pattern.flags : `${entry.pattern.flags}g`;
+    const re = new RegExp(entry.pattern.source, flags);
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) {
+      hits.push({ tag: entry.tag, start: m.index, end: m.index + m[0].length });
+      if (m[0].length === 0) re.lastIndex++; // never loop on a zero-width match
+    }
+  }
+  hits.sort((a, b) => a.start - b.start);
+  return hits;
+}
+
+/** Indices of `hits` that are part of a bare-'/'-joined enumeration (>=2 terms,
+ *  e.g. 'overnight/launchctl/killed') — a quoted/listed lexicon excerpt, not an
+ *  instruction (W1-T20c's self-description). */
+function enumerationExemptIndices(hits: LexiconHit[], text: string): Set<number> {
+  const exempt = new Set<number>();
+  for (let i = 1; i < hits.length; i++) {
+    if (text.slice(hits[i - 1].end, hits[i].start) === "/") {
+      exempt.add(i - 1);
+      exempt.add(i);
+    }
+  }
+  return exempt;
+}
+
+/** True iff [start, end) falls entirely inside a quoted span of `text`. */
+function isQuoted(text: string, start: number, end: number): boolean {
+  QUOTE_SPAN.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = QUOTE_SPAN.exec(text))) {
+    if (start >= m.index && end <= m.index + m[0].length) return true;
+  }
+  return false;
+}
+
+/** True iff a negation cue precedes `start` within the SAME clause. */
+function isNegationScoped(text: string, start: number): boolean {
+  let clauseStart = 0;
+  for (let i = start - 1; i >= 0; i--) {
+    if (CLAUSE_BOUNDARY.test(text[i])) {
+      clauseStart = i + 1;
+      break;
+    }
+  }
+  return NEGATION_CUE.test(text.slice(clauseStart, start));
+}
+
+/** Every criterion of an auto-verify task that hits `lexicon` outside a negation
+ *  scope, a quoted span, or a bare-'/' lexicon enumeration. Defaults to
+ *  {@link HEADLESS_FORBIDDEN_LEXICON}; the `lexicon` param exists so the DATA
+ *  table can grow (a new phrase row) with ZERO changes to this function. */
+export function headlessFitnessViolations(
+  task: Task,
+  lexicon: ReadonlyArray<LexiconEntry> = HEADLESS_FORBIDDEN_LEXICON,
+): LintViolation[] {
   if (task.verify !== "auto") return []; // only an auto-verify task is dispatched headless
   const violations: LintViolation[] = [];
   (task.acceptance ?? []).forEach((c, i) => {
-    const text = `${c.claim ?? ""} ${c.proof ?? ""}`;
-    const hit = HEADLESS_FORBIDDEN_LEXICON.find((entry) => entry.pattern.test(text));
+    // Joined with an em-dash — a CLAUSE_BOUNDARY char — so a negation cue or a
+    // quoted span in one field can never leak into the OTHER field (claim vs
+    // proof are logically separate clauses; W1-T81).
+    const text = `${c.claim ?? ""} — ${c.proof ?? ""}`;
+    const hits = findLexiconHits(text, lexicon);
+    if (hits.length === 0) return;
+    const enumExempt = enumerationExemptIndices(hits, text);
+    const hit = hits.find(
+      (h, idx) => !enumExempt.has(idx) && !isQuoted(text, h.start, h.end) && !isNegationScoped(text, h.start),
+    );
     if (hit) {
       violations.push({
         check: "headless-fitness",
