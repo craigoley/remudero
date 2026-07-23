@@ -243,11 +243,15 @@ test("one-click drill: a task reachable only via the 'everything else' corpus op
       await page.waitForFunction(() => document.querySelectorAll("#rest-list li[data-key]").length === 1);
       // the section must already be visible -- no expand click before the row is even clickable.
       assert.equal(await page.evaluate(() => (document.getElementById("rest-detail") as HTMLElement)?.hidden), false);
-      assert.equal(await page.evaluate(() => document.getElementById("task-detail")?.hidden), true);
+      assert.equal(await page.evaluate(() => document.querySelector(".row-detail") !== null), false);
 
       await page.click('#rest-list li[data-task-id="W1-T1"] .task-id');
-      await page.waitForFunction(() => document.getElementById("task-detail")?.hidden === false, null, { timeout: 5000 });
-      await page.waitForFunction(() => (document.getElementById("task-detail-title")?.textContent ?? "").includes("only in the rest corpus"), null, { timeout: 5000 });
+      await page.waitForFunction(
+        () => document.querySelector('#rest-list li[data-task-id="W1-T1"]')?.getAttribute("aria-expanded") === "true",
+        null,
+        { timeout: 5000 },
+      );
+      await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").includes("only in the rest corpus"), null, { timeout: 5000 });
     } finally {
       await context.close();
     }
@@ -309,12 +313,16 @@ test("one-click drill: clicking a dense NOW row opens W1-T158's task card direct
     const { context, page } = await openShell(base);
     try {
       await page.waitForFunction(() => (document.querySelector("#now-list .detail")?.textContent ?? "").includes("phase: recon"));
-      assert.equal(await page.evaluate(() => document.getElementById("task-detail")?.hidden), true);
+      assert.equal(await page.evaluate(() => document.querySelector(".row-detail") !== null), false);
 
-      // ONE click, on the row itself (never on the Journey button/PR link/etc).
+      // ONE click, on the row itself (never the chevron/PR link/etc -- it's the whole row's own affordance).
       await page.click('#now-list li[data-task-id="W1-T1"] .task-id');
-      await page.waitForFunction(() => document.getElementById("task-detail")?.hidden === false, null, { timeout: 5000 });
-      await page.waitForFunction(() => (document.getElementById("task-detail-title")?.textContent ?? "").includes("dense row target"), null, { timeout: 5000 });
+      await page.waitForFunction(
+        () => document.querySelector('#now-list li[data-task-id="W1-T1"]')?.getAttribute("aria-expanded") === "true",
+        null,
+        { timeout: 5000 },
+      );
+      await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").includes("dense row target"), null, { timeout: 5000 });
     } finally {
       await context.close();
     }
@@ -360,14 +368,18 @@ test("one-click drill: a click on a row in EVERY section (NOW/NEEDS ME/UP NEXT/R
       ];
       for (const s of sections) {
         await page.waitForFunction((sel) => !!document.querySelector(sel), `#${s.list} li[data-task-id="${s.taskId}"]`, { timeout: 5000 });
-        await page.evaluate(() => { const el = document.getElementById("task-detail"); if (el) el.hidden = true; });
         // ONE click, on the row's own task-id, scoped to THIS section (rows can legitimately also
         // appear in the "everything else" FIND corpus, which searches the whole board -- scoping
-        // to the section under test keeps each check unambiguous about which row fired).
+        // to the section under test keeps each check unambiguous about which row fired). No prior
+        // collapse needed -- clicking a DIFFERENT row's own affordance closes whatever else was open.
         await page.click(`#${s.list} li[data-task-id="${s.taskId}"] .task-id`);
-        await page.waitForFunction(() => document.getElementById("task-detail")?.hidden === false, null, { timeout: 5000 });
         await page.waitForFunction(
-          (t) => (document.getElementById("task-detail-title")?.textContent ?? "").includes(t),
+          (sel) => document.querySelector(sel)?.getAttribute("aria-expanded") === "true",
+          `#${s.list} li[data-task-id="${s.taskId}"]`,
+          { timeout: 5000 },
+        );
+        await page.waitForFunction(
+          (t) => (document.querySelector(".row-detail")?.textContent ?? "").includes(t),
           s.title,
           { timeout: 5000 },
         );
