@@ -1,0 +1,21 @@
+id: fb-1784807764506-a307b6
+ts: 2026-07-23T11:56:04.506Z
+raw: "W1-T86 ACCEPTANCE PROOFS ARE PROSE-DIALECT, UNCERTIFIABLE (blocks PR #631)
+  — W1-T86 (rmd wipe-test) has 25 passing tests in test/wipe-test.test.ts and
+  green CI, but remudero-review CAPs 0/3 because W1-T86's three acceptance
+  proofs in plan/tasks.yaml are prose descriptions with embedded semicolons and
+  '->' clauses ('unit test over injected deps: arm B rendered prompt contains
+  zero learning blocks; a store-write spy records nothing; arm A carries matched
+  learnings') that the proof executor cannot map to a runnable test, so they
+  classify not_executable/exec_error and the verdict fail-closes. FIX
+  (plan-only): rewrite W1-T86's three proofs to executable form — 'unit test:
+  test/wipe-test.test.ts' or exact test-name substrings of the real passing
+  tests — so the review executes them and certifies; the implementation is done
+  and verified (25/25 green). Once landed, the daemon re-reviews #631 and
+  auto-merges. Root cause of the escape: the task was authored before
+  proof-shape hardening; lint-plan's proof-shape check rejects only empty/vibe
+  proofs, not prose that names no runnable test."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

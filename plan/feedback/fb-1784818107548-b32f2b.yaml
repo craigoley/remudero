@@ -1,0 +1,57 @@
+id: fb-1784818107548-b32f2b
+ts: 2026-07-23T14:48:27.548Z
+raw: "CI FLAKE RESILIENCE — bounded evidence-preserving retry (fable; the
+  durable fix for flaky-test-blocks-unrelated-PR, observed on #622/#634/#646 +
+  the W1-T220 coverage class). ROOT CAUSE (systemic): the gate runs the ~90-file
+  suite TWICE per PR with zero tolerance for nondeterminism and zero memory of
+  it — the ci job (npm test, package.json:30) and the coverage-ratchet job
+  (ci.yml:140-145, same glob under --experimental-test-coverage) are BOTH
+  required (ci-gate.yml:107), so one nondeterministic test gets two chances to
+  red the aggregate regardless of the diff, and node --test has NO native retry
+  (grep finds none). The 6 Chromium serve tests (test/serve.*.test.ts, one
+  chromium.launch per before-hook) are the flake-prone population, worse under
+  coverage instrumentation's slower render; they are fixture-only, so no
+  data-only diff can move their outcome. Today's cost of one flake on a
+  data-only PR: 2 red checks + red ci-gate + operator re-run (no record) OR an
+  LLM ci-log fix-rung burning a strike (sweep.ts:475); W1-T220 noted the flake
+  erases its own evidence (a re-run OVERWRITES the conclusion). W1-T222 FIX IS
+  COMPLETE (fable probe: 30/30 green at current tip incl. coverage + contended
+  parallel; the ~1/3 isolated flake predated #648's return-await teardown fix).
+  RECOMMENDATION option (b), defer quarantine(c)/diff-scoping(d): ONE bounded
+  whole-command CI retry. CHANGE: (1) scripts/test-with-retry.mjs (new) — spawn
+  the given full test command; on non-zero exit, parse failing test names, emit
+  a greppable 'FLAKE-RETRY: first attempt failed — <names>' to stdout AND , then
+  re-run the IDENTICAL whole command exactly once, final exit = 2nd run
+  (whole-command so the coverage job's lcov stays one coherent artifact); env
+  kill-switch TEST_RETRY=0. (2) package.json: new test:ci script — npm test
+  STAYS retry-free (Stryker re-runs npm test per mutant, stryker.conf.json:4-7,
+  a retry there doubles mutation cost + blurs kills). (3) ci.yml: point the ci
+  Test step (:47) and the coverage test step (:140-145) at the wrapper. (4)
+  hygiene (tiny, same PR): fold the writeScopeResolved wait into a shared
+  openShell boot barrier used by all 6 serve files, and make the boot wait
+  require #top-status to EXIST with non-'loading' text (kills the vacuous-true
+  barrier at serve.shell-ux.test.ts:141). WHY IT CAN'T MASK A REAL BREAK: a
+  deterministic regression fails both attempts → red unchanged; a
+  nondeterministic real bug must slip BOTH independent suite runs (ci +
+  coverage) to merge, and every slip leaves a FLAKE-RETRY record naming the test
+  — making the previously-impossible flake-counting greppable (a test named
+  twice = a standing fix task + the admission ticket to a future quarantine).
+  RISKS: masking a low-p race (bounded; strictly better than today's record-less
+  manual re-run); doubled wall-time only on a red first attempt (where today's
+  cost is already a manual re-run); wrapper-turns-red-green (the falsifiers
+  guard exactly that). TESTS (test/test-with-retry.test.ts, driving the wrapper
+  as a subprocess over fixture suites): deterministic-fail → fails both →
+  non-zero (can't hide a break); flake-once (state-file fail-then-pass) → exit 0
+  AND names the first-run failure (evidence preserved); all-green → spawned
+  EXACTLY once (no double cost on green); TEST_RETRY=0 → flake-once stays red
+  (kill-switch). FILING: ONE task, Rule-19 single-concern (wrapper + wiring +
+  boot-barrier hygiene + falsifiers; NO quarantine registry, NO diff-scoped
+  skipping, NO daemon change), near the FRONT of plan/tasks.yaml (drain priority
+  is file order; a tasks.d shard sorts last), depends_on:[], verify:auto;
+  cross-ref W1-T220/T222 as the two observed instances it generalizes and
+  W1-T226 (the fix-rung's flake disposition consumes fewer strikes once CI
+  self-absorbs single flakes)."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

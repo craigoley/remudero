@@ -1,0 +1,15 @@
+id: fb-1784826522421-1d57e9
+ts: 2026-07-23T17:08:42.421Z
+raw: "FEEDBACK BRIDGE IS EDGE-TRIGGERED ONLY — feedback-landing lands captures
+  made while it is live, but performs no level-triggered sweep of pre-existing
+  untracked plan/feedback files, so filings made before its activation are
+  stranded forever (observed 2026-07-23: fb-b32f2b filed 14:48Z never landed
+  while fb-cdcf8b filed 15:45Z landed via #658 at 16:09Z; rmd triage refused
+  b32f2b as not-on-origin at 16:59Z). Need: a boot-time and periodic sweep in
+  the landing rung that reconciles ALL untracked plan/feedback/*.yaml, same
+  level-triggered doctrine as sweep.credit_backfill — an organ that only reacts
+  to edges repeats the escalation-channel mistake."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

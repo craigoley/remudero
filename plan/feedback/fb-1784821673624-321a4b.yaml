@@ -1,0 +1,15 @@
+id: fb-1784821673624-321a4b
+ts: 2026-07-23T15:47:53.624Z
+raw: "NO_PR RUNS DISCARD THE WORKER'S RATIONALE — a no_pr verdict persists only
+  the harness classification; the worker's final message explaining WHY
+  (work-already-exists vs give-up vs spec-mismatch) is written nowhere (observed
+  2026-07-23: run W1-T163-1784820207394's reasoning unrecoverable;
+  daemon.out.log ended earlier; only worker-settings survived). Need: persist
+  the worker's final message and last N transcript lines alongside every non-PR
+  verdict (no_pr, blocked, pr_attribution_failed) as a per-run artifact —
+  sibling of W1-T238 (persist worker stderr). This is exactly the evidence
+  dispositions need and could not get."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
