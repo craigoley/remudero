@@ -1,0 +1,30 @@
+id: fb-1784770185732-e025c1
+ts: 2026-07-23T01:29:45.732Z
+raw: "CONSUMED FEEDBACK RENDERS AS PENDING FOREVER — distinct defect found
+  verifying fb-1784770111145-cf7c24's stale-card question (OBSERVED at source).
+  The NEEDS-ME surface renders an Accept/Reject decision card for EVERY feedback
+  entry whose status === 'proposed' (src/lib/serve.ts:1004 → needsMeProposedHtml
+  at src/lib/serve.ts:981). status is read from the LOCAL CHECKOUT —
+  listFeedback(deps.root) at src/lib/panel-graph.ts:129, deps.root = the repo
+  root plan/feedback/ lives under (panel-graph.ts:82) — NOT origin/main and NOT
+  a cache; a direct readdirSync of plan/feedback/*.yaml. ROOT CAUSE: nothing
+  ever advances a feedback entry out of 'proposed' when its proposal_pr MERGES.
+  rmd triage sets status: proposed (with proposal_pr set); the ONLY transition
+  off 'proposed' is the manual POST /v1/feedback/decision accept/reject
+  (panel-graph.ts:288-309, 400s unless status==='proposed'). A grep for any
+  proposed->done/consumed/ratified/merged reconciler returns empty. So
+  fb-1784732500436-728bc1 (PR #588 merged, W1-T240-242 landed) and
+  fb-1784734427694-703ff7 (PR #599 merged, W1-T243 landed) stay 'proposed' and
+  keep rendering as pending decisions the operator already effectively made by
+  letting the plan PR merge. FIX: a merge-driven reconciler that advances a
+  'proposed' entry to a terminal state (e.g. 'ratified'/'consumed') once its
+  proposal_pr is MERGED (derive from GitHub like task status is derived), OR the
+  NEEDS-ME filter must exclude 'proposed' entries whose proposal_pr is merged.
+  Sibling to fb-1784756088300-6a481e (escalation lifecycle reconciler) but
+  distinct: that closes needs-human ISSUES; this advances feedback ENTRY status.
+  Regression: a 'proposed' entry with a merged proposal_pr must NOT appear in
+  NEEDS-ME."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
