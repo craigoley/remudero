@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -76,4 +76,26 @@ test("depcruise is a clean fixture (no spike/CLI import from src/lib): zero exit
 test("depcruise over remudero's OWN src tree is clean today (the rule is live, not just fixture-tested)", () => {
   const { status, output } = runDepcruise(repoRoot);
   assert.equal(status, 0, `expected remudero's real src/lib to be clean, got ${status}. output:\n${output}`);
+});
+
+// ── Playwright teardown-race guard (the #632/#645 flake): a `return page.<method>(...)` inside a
+// test that ALSO closes the page/context in a `finally` returns the PENDING promise, so the
+// finally tears down BEFORE it settles -> "Target page ... has been closed", flaking the test and
+// false-reddening unrelated PRs. The fix is `return await`. This guard forbids the bare form
+// across the browser-driven serve suites so the class cannot silently regress.
+
+test("no serve test returns a bare (un-awaited) page.<method>(...) — the teardown-race anti-pattern is forbidden fleet-wide", () => {
+  const testDir = join(fileURLToPath(new URL("..", import.meta.url)), "test");
+  const offenders: string[] = [];
+  for (const file of readdirSync(testDir)) {
+    if (!/^serve.*\.test\.ts$/.test(file)) continue;
+    const lines = readFileSync(join(testDir, file), "utf8").split("\n");
+    lines.forEach((line, i) => {
+      // a `return page.<something>(` that is NOT `return await page.` — the un-awaited return.
+      if (/^\s*return\s+page\.\w+\s*\(/.test(line) && !/^\s*return\s+await\s+page\./.test(line)) {
+        offenders.push(`${file}:${i + 1}: ${line.trim()}`);
+      }
+    });
+  }
+  assert.deepEqual(offenders, [], `un-awaited \`return page.…\` in a serve test races the finally teardown; use \`return await\`:\n${offenders.join("\n")}`);
 });
