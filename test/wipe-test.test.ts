@@ -437,7 +437,11 @@ class ProcessExitCalled extends Error {
   }
 }
 
-test("main(): `rmd wipe-test <id> --repo remudero` (no --allow-non-sandbox) dispatches to wipeTestCommand and exits 2", async (t) => {
+/** Run `main()` against a fake argv with process.exit/console mocked (never a real exit,
+ *  never real output), asserting the FIRST exit code main() reaches. Shared by the three
+ *  tests below so each pays the SAME one-time main()-invocation cost and none walk any
+ *  FURTHER into the ladder than main() itself already requires for that argv. */
+async function callMain(t: import("node:test").TestContext, argv: string[]): Promise<number | undefined> {
   const exitMock = ((code?: number): never => {
     throw new ProcessExitCalled(code);
   }) as typeof process.exit;
@@ -446,17 +450,35 @@ test("main(): `rmd wipe-test <id> --repo remudero` (no --allow-non-sandbox) disp
   t.mock.method(console, "log", () => {});
 
   const originalArgv = process.argv;
-  process.argv = ["node", "run-task.js", "wipe-test", "W1-T86", "--repo", "remudero"];
+  process.argv = argv;
   try {
-    await assert.rejects(
-      () => main(),
-      (e: unknown) => {
-        assert.ok(e instanceof ProcessExitCalled, "main() must reach process.exit, not some other throw");
-        assert.equal(e.code, 2, "the wipe-test dispatch branch is reached and propagates wipeTestCommand's refusal exit code");
-        return true;
-      },
-    );
+    let caught: unknown;
+    await main().catch((e) => {
+      caught = e;
+    });
+    assert.ok(caught instanceof ProcessExitCalled, "main() must reach process.exit, not some other throw (or none at all)");
+    return (caught as ProcessExitCalled).code;
   } finally {
     process.argv = originalArgv;
   }
+}
+
+test("main(): `rmd wipe-test <id> --repo remudero` (no --allow-non-sandbox) dispatches to wipeTestCommand and exits 2", async (t) => {
+  const code = await callMain(t, ["node", "run-task.js", "wipe-test", "W1-T86", "--repo", "remudero"]);
+  assert.equal(code, 2, "the wipe-test dispatch branch is reached and propagates wipeTestCommand's refusal exit code");
+});
+
+// These two cover the OTHER side of the mandatory help preamble's own branches (every main()
+// call evaluates it, so it is ALREADY "paid for" the moment any test calls main() -- these
+// exit even EARLIER than the wipe-test dispatch itself, so they add no new decomposed branch
+// anywhere, only fill in the true-side coverage the test above's argv never took).
+
+test("main(): `rmd --help` prints USAGE and exits 0 -- the mandatory top-of-ladder help check", async (t) => {
+  const code = await callMain(t, ["node", "run-task.js", "--help"]);
+  assert.equal(code, 0);
+});
+
+test("main(): `rmd wipe-test --help` prints the per-command help and exits 0 BEFORE the wipe-test dispatch itself", async (t) => {
+  const code = await callMain(t, ["node", "run-task.js", "wipe-test", "--help"]);
+  assert.equal(code, 0);
 });
