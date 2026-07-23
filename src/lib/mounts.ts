@@ -1,14 +1,30 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { DEFAULT_TASK_CLASS } from "./task-class.js";
 
 /**
- * .remudero/mounts.yaml loader + validator (mount-routing v0, MASTER-PLAN §9).
+ * .remudero/mounts.yaml loader + validator (mount-routing v0, MASTER-PLAN §9;
+ * W1-T167 added the `class` axis).
  *
  * A DETERMINISTIC policy table (no per-call LLM judgment): keyed by
- * (task_type × risk) → a {@link Mount}. This module only READS, VALIDATES, and
- * RESOLVES; it never writes the table (routing changes ship as golden-gated PRs,
- * §9). v0 is a static table.
+ * (task_type × risk × class) → a {@link Mount}. This module only READS,
+ * VALIDATES, and RESOLVES; it never writes the table (routing changes ship as
+ * golden-gated PRs, §9). v0 is a static table.
+ *
+ * ── The class axis (W1-T167) ────────────────────────────────────────────────
+ * A flat sonnet/high mount for every task, regardless of shape, prices a
+ * docs-only edit the same as a risk:high src change (the $12 W1-T115 run).
+ * Every `routes.<type>.<risk>` cell is now itself a mapping of CLASS →
+ * {@link Mount} — `class` comes from {@link import("./task-class.js").deriveTaskClass}
+ * (a task's declared `files` globs, e.g. `docs` / `plan-lint` / the universal
+ * `src` default) — so a cheaper mount for docs/plan-lint work is a DATA edit to
+ * this file, never a code branch. Every risk cell MUST define a
+ * `src` row (checked at load, {@link parseRiskCell}): it is the fallback
+ * {@link resolveMountForClass} takes — LOUDLY, the caller ledgers it — when the
+ * task's derived class has no row of its own (e.g. a risk:high docs task, which
+ * this table deliberately leaves unmapped so it never silently rides a
+ * cheapened mount at a risk band that warrants the full one).
  *
  * ── The Tier Invariant (G-17) ────────────────────────────────────────────────
  * The Architect (main agent) ALWAYS rides a higher-thinking mount than the
@@ -70,8 +86,9 @@ export interface Mounts {
   architect: Mount;
   /** The Layer-2 flight-judge mount (W1-T21) — strictly above every worker below. */
   judge: Mount;
-  /** Worker routing: task_type → risk band → mount. */
-  routes: Record<string, Record<string, Mount>>;
+  /** Worker routing: task_type → risk band → class (W1-T167) → mount. Every
+   *  risk band carries at least a {@link DEFAULT_TASK_CLASS} row. */
+  routes: Record<string, Record<string, Record<string, Mount>>>;
 }
 
 /** The plan-authorship effort floor the Architect must meet or exceed (§9). */
@@ -140,23 +157,26 @@ function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
   // architect.tier > max(worker.tier): strict model-tier dominance.
   // judge.tier > max(worker.tier): the Layer-2 flight judge (W1-T21) must ALSO
   // ride strictly above every worker it may supervise — same enforcement shape,
-  // a separate entity.
+  // a separate entity. W1-T167: descends into the class layer too — a cheapened
+  // docs/plan-lint row is still a worker mount and must clear the SAME floor.
   for (const [type, byRisk] of Object.entries(m.routes)) {
-    for (const [risk, mount] of Object.entries(byRisk)) {
-      const workerTier = m.tiers[mount.model];
-      if (workerTier >= architectTier) {
-        throw new TierInvariantError(
-          `Tier Invariant (G-17) violated: worker routes.${type}.${risk} rides '${mount.model}' ` +
-            `(tier ${workerTier}) which is not strictly below the Architect '${m.architect.model}' (tier ${architectTier}). ` +
-            `The Architect must ride a higher tier than every worker.`,
-        );
-      }
-      if (workerTier >= judgeTier) {
-        throw new TierInvariantError(
-          `Tier Invariant (G-17) violated: worker routes.${type}.${risk} rides '${mount.model}' ` +
-            `(tier ${workerTier}) which is not strictly below the flight judge '${m.judge.model}' (tier ${judgeTier}). ` +
-            `The Layer-2 judge must ride a higher tier than every worker it supervises.`,
-        );
+    for (const [risk, byClass] of Object.entries(byRisk)) {
+      for (const [cls, mount] of Object.entries(byClass)) {
+        const workerTier = m.tiers[mount.model];
+        if (workerTier >= architectTier) {
+          throw new TierInvariantError(
+            `Tier Invariant (G-17) violated: worker routes.${type}.${risk}.${cls} rides '${mount.model}' ` +
+              `(tier ${workerTier}) which is not strictly below the Architect '${m.architect.model}' (tier ${architectTier}). ` +
+              `The Architect must ride a higher tier than every worker.`,
+          );
+        }
+        if (workerTier >= judgeTier) {
+          throw new TierInvariantError(
+            `Tier Invariant (G-17) violated: worker routes.${type}.${risk}.${cls} rides '${mount.model}' ` +
+              `(tier ${workerTier}) which is not strictly below the flight judge '${m.judge.model}' (tier ${judgeTier}). ` +
+              `The Layer-2 judge must ride a higher tier than every worker it supervises.`,
+          );
+        }
       }
     }
   }
@@ -187,6 +207,39 @@ function enforceTierInvariant(m: Mounts, thinkingDefault?: string): void {
   }
 }
 
+/**
+ * Validate one `routes.<type>.<risk>` cell: a mapping of class → {@link Mount}
+ * (W1-T167). MUST define a {@link DEFAULT_TASK_CLASS} ("src") row — the
+ * fallback {@link resolveMountForClass} takes when a task's derived class has
+ * no row of its own, so a table missing it could resolve nothing to fall back
+ * to. A legacy FLAT mount cell (the pre-W1-T167 shape — `model`/`effort` keys
+ * directly under the risk band) is REJECTED here, not silently upgraded: the
+ * `model` field of such a cell fails {@link parseMount}'s own object check,
+ * naming the offending path, so a stale hand-edit fails loud at load rather
+ * than resolving into a nonsense class named "model".
+ */
+function parseRiskCell(
+  raw: unknown,
+  where: string,
+  tiers: Record<string, number>,
+  efforts: Record<string, number>,
+): Record<string, Mount> {
+  if (!isObject(raw)) throw new MountsError(`'${where}' must be a mapping of class → mount.`);
+  const classes = Object.keys(raw);
+  if (classes.length === 0) throw new MountsError(`'${where}' must not be empty.`);
+  const out: Record<string, Mount> = {};
+  for (const cls of classes) {
+    out[cls] = parseMount(raw[cls], `${where}.${cls}`, tiers, efforts);
+  }
+  if (!(DEFAULT_TASK_CLASS in out)) {
+    throw new MountsError(
+      `'${where}' must define a '${DEFAULT_TASK_CLASS}' class row — the fallback every other ` +
+        `class' miss resolves to (W1-T167); have classes: ${classes.join(", ")}.`,
+    );
+  }
+  return out;
+}
+
 /** Options for {@link validateMounts} / {@link loadMounts}. */
 export interface MountsOptions {
   /** Operator `thinking_default` (per-instance config, §9); enforces the floor. */
@@ -205,18 +258,18 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   const architect = parseMount(raw.architect, "architect", tiers, efforts);
   const judge = parseMount(raw.judge, "judge", tiers, efforts);
 
-  if (!isObject(raw.routes)) throw new MountsError("'routes' must be a mapping of task_type → risk → mount.");
-  const routes: Record<string, Record<string, Mount>> = {};
+  if (!isObject(raw.routes)) throw new MountsError("'routes' must be a mapping of task_type → risk → class → mount.");
+  const routes: Record<string, Record<string, Record<string, Mount>>> = {};
   const routeTypes = Object.keys(raw.routes);
   if (routeTypes.length === 0) throw new MountsError("'routes' must not be empty.");
   for (const type of routeTypes) {
     const byRisk = raw.routes[type];
-    if (!isObject(byRisk)) throw new MountsError(`'routes.${type}' must be a mapping of risk → mount.`);
+    if (!isObject(byRisk)) throw new MountsError(`'routes.${type}' must be a mapping of risk → class → mount.`);
     const risks = Object.keys(byRisk);
     if (risks.length === 0) throw new MountsError(`'routes.${type}' must not be empty.`);
     routes[type] = {};
     for (const risk of risks) {
-      routes[type][risk] = parseMount(byRisk[risk], `routes.${type}.${risk}`, tiers, efforts);
+      routes[type][risk] = parseRiskCell(byRisk[risk], `routes.${type}.${risk}`, tiers, efforts);
     }
   }
 
@@ -237,14 +290,59 @@ export function loadMounts(path: string, opts: MountsOptions = {}): Mounts {
 }
 
 /**
- * Resolve the mount for a (task_type, risk) — the deterministic routing lookup.
- * Throws {@link MountsError} when the table has no cell for that key (routing is
- * a policy, so a miss is a config gap, not a silent fallback).
+ * Resolve the mount for a (task_type, risk) at the {@link DEFAULT_TASK_CLASS}
+ * — the pre-W1-T167 call shape, still used by every caller that has no class
+ * to route on (the fresh reviewer, the fix rung, the Architect/judge spawns).
+ * Throws {@link MountsError} when the table has no cell for that key (routing
+ * is a policy, so a miss is a config gap, not a silent fallback). Equivalent to
+ * `resolveMountForClass(m, taskType, risk, DEFAULT_TASK_CLASS).mount`, which
+ * can never itself fall back (the default class IS the fallback target).
  */
 export function resolveMount(m: Mounts, taskType: string, risk: string): Mount {
+  return resolveMountForClass(m, taskType, risk, DEFAULT_TASK_CLASS).mount;
+}
+
+/** What {@link resolveMountForClass} resolved, including whether it had to fall back. */
+export interface MountClassResolution {
+  mount: Mount;
+  /** The class the caller asked for. */
+  requestedClass: string;
+  /** The class the returned mount actually belongs to — differs from
+   *  `requestedClass` only when `fellBackToDefault` is true. */
+  resolvedClass: string;
+  /** True when `requestedClass` had no row and the {@link DEFAULT_TASK_CLASS}
+   *  row was used instead. The CALLER is responsible for ledgering this LOUDLY
+   *  (W1-T167 acceptance: a class miss must never be a silent fallback) — this
+   *  function is a pure resolver, no I/O, matching resolveMount's own shape. */
+  fellBackToDefault: boolean;
+}
+
+/**
+ * Resolve the mount for a (task_type, risk, class) — the W1-T167 routing
+ * lookup. An unrouted task_type or risk is a config gap (throws
+ * {@link MountsError}, same as {@link resolveMount}). An unrouted CLASS is
+ * different: it falls back to the risk cell's {@link DEFAULT_TASK_CLASS} row
+ * (guaranteed present by {@link parseRiskCell} at load) rather than throwing,
+ * because an unanticipated class is expected — the table only carries cheap
+ * rows for the classes it has evidence for — but the caller MUST ledger the
+ * fallback loudly (`fellBackToDefault`), never silently.
+ */
+export function resolveMountForClass(m: Mounts, taskType: string, risk: string, taskClass: string): MountClassResolution {
   const byRisk = m.routes[taskType];
   if (!byRisk) throw new MountsError(`no route for task_type '${taskType}' (have: ${Object.keys(m.routes).join(", ")}).`);
-  const mount = byRisk[risk];
-  if (!mount) throw new MountsError(`no route for task_type '${taskType}' at risk '${risk}' (have: ${Object.keys(byRisk).join(", ")}).`);
-  return mount;
+  const byClass = byRisk[risk];
+  if (!byClass) throw new MountsError(`no route for task_type '${taskType}' at risk '${risk}' (have: ${Object.keys(byRisk).join(", ")}).`);
+  const exact = byClass[taskClass];
+  if (exact) return { mount: exact, requestedClass: taskClass, resolvedClass: taskClass, fellBackToDefault: false };
+  const fallback = byClass[DEFAULT_TASK_CLASS];
+  if (!fallback) {
+    // Unreachable for any table that passed validateMounts (parseRiskCell requires
+    // this row) — guarded anyway so a hand-built Mounts (a test fixture bypassing
+    // validateMounts) fails loud instead of returning undefined.
+    throw new MountsError(
+      `no route for task_type '${taskType}' at risk '${risk}' class '${taskClass}', and no ` +
+        `'${DEFAULT_TASK_CLASS}' fallback either (have: ${Object.keys(byClass).join(", ")}).`,
+    );
+  }
+  return { mount: fallback, requestedClass: taskClass, resolvedClass: DEFAULT_TASK_CLASS, fellBackToDefault: true };
 }

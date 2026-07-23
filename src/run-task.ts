@@ -169,7 +169,8 @@ import {
   type Task,
 } from "./lib/plan.js";
 import { assertLintClean, changedTaskIds, lintTask, TaskLintError } from "./lib/task-linter.js";
-import { loadMounts, mountsPath, resolveMount, type Mount } from "./lib/mounts.js";
+import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
+import { deriveTaskClass } from "./lib/task-class.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
 import { ContainmentError, probeContainment } from "./lib/containment.js";
 import { IsolationError, probeIsolation } from "./lib/isolation.js";
@@ -2025,6 +2026,39 @@ export function softBudgetWarning(
   return !alreadyWarned && costUsd >= thresholdUsd;
 }
 
+/** One resolved bundle of every mount a run needs (W1-T167 class routing included),
+ * with the loud class-fallback ledgering inside — exported so fixture tables cover
+ * every branch, including the fallback a complete committed table cannot reach. */
+export function resolveRunMounts(
+  repoRootDir: string,
+  task: Pick<Task, "type" | "risk" | "files">,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): { mount: Mount; reviewerMount: Mount; fixMount: Mount; taskClass: string; mountClass: string } {
+  const mountsTable = loadMounts(mountsPath(repoRootDir));
+  const taskClass = deriveTaskClass(task);
+  const mountResolution = resolveMountForClass(mountsTable, task.type, task.risk, taskClass);
+  if (mountResolution.fellBackToDefault) {
+    // W1-T167 acceptance: a class with no row falls back to the default LOUDLY —
+    // a ledger line NAMING the missing class, never a silent number swap.
+    log("mount.class_fallback", {
+      task_type: task.type,
+      risk: task.risk,
+      requested_class: taskClass,
+      resolved_class: mountResolution.resolvedClass,
+    });
+  }
+  // The fresh advisory reviewer is its OWN mount-governed phase (task_type="reviewer",
+  // W1-T63/P10); the blocked_review fix rung rides its own "fix" row (W1-T76) —
+  // both resolved here alongside the task's own mount, never an undeclared literal.
+  return {
+    mount: mountResolution.mount,
+    reviewerMount: resolveMount(mountsTable, "reviewer", task.risk),
+    fixMount: resolveMount(mountsTable, "fix", task.risk),
+    taskClass,
+    mountClass: mountResolution.resolvedClass,
+  };
+}
+
 async function runTask(
   taskId: string,
   opts: {
@@ -2134,39 +2168,35 @@ async function runTask(
   const budgetUsd = task.budget_usd ?? DEFAULT_BUDGET_USD;
   const softThresholdUsd = softBudgetThreshold(config);
 
-  // ── MOUNT RESOLUTION (§9). The (task_type × risk) routing table OWNS the
-  // model/effort/max_turns a run rides — never a hardcoded literal (the W1-T6
-  // defect: a dead mounts.yaml + a hardcoded 60-turn ceiling, see DIAGNOSIS.md). Resolve
-  // ONCE here and FAIL LOUD on a miss: a missing mount is a config gap, never a
-  // silent fallback to some default number. loadMounts throws on a bad/absent table;
-  // resolveMount throws on an unrouted (type × risk).
-  // The table is a COMMITTED repo artifact (§9, golden-gated), so read it from the
-  // repo checkout (repoRoot), NOT the workspace root (config.root = ~/Remudero, which
-  // holds worktrees/state, not .remudero/mounts.yaml).
-  const mountsTable = loadMounts(mountsPath(repoRoot));
-  const mount: Mount = resolveMount(mountsTable, task.type, task.risk);
-  // The fresh advisory reviewer (runReview, below) is its OWN mount-governed phase,
-  // keyed by task_type="reviewer" — distinct from `mount` above (this task's own
-  // implement/recon/etc. work) and from task_type="review" (a plan task whose own
-  // type happens to be "review"). W1-T63/P10: previously ungoverned (an undeclared
-  // 12-turn cap, no model/effort), it walled `error_max_turns` on every
-  // substantive code PR.
-  const reviewerMount: Mount = resolveMount(mountsTable, "reviewer", task.risk);
-  // The blocked_review FIX RUNG's mount (W1-T76, absorbs P21) — its own
-  // task_type="fix" row (§9), distinct from `mount` (the original implement
-  // attempt). Resolved once here, alongside every other mount, even though it
-  // is only USED if the review gate ever fails — a fix spawn must never ride
-  // an undeclared literal any more than the reviewer used to (W1-T63/P10).
-  const fixMount: Mount = resolveMount(mountsTable, "fix", task.risk);
+  // ── MOUNT RESOLUTION (§9; class axis W1-T167). The (task_type × risk × class)
+  // routing table OWNS the model/effort/max_turns a run rides — never a
+  // hardcoded literal (the W1-T6 defect: a dead mounts.yaml + a hardcoded
+  // 60-turn ceiling, see DIAGNOSIS.md). Resolve ONCE here and FAIL LOUD on a
+  // type/risk miss: a missing route is a config gap, never a silent fallback
+  // to some default number. loadMounts throws on a bad/absent table;
+  // resolveMountForClass throws on an unrouted (type × risk); an unrouted
+  // CLASS is expected (not every class has a cheap row) and falls back to the
+  // table's `src` default — LOUDLY, via the `mount.class_fallback` line below.
+  // The table is a COMMITTED repo artifact (§9, golden-gated), read from the repo
+  // checkout — resolution + the loud class-fallback ledgering live in
+  // resolveRunMounts (exported, above) so every branch, including the fallback a
+  // COMPLETE committed table can never reach, is unit-covered with fixture tables.
+  const { mount, reviewerMount, fixMount, taskClass, mountClass } = resolveRunMounts(repoRoot, task, log);
   log("run.start", {
     repo: task.repo,
     type: task.type,
     risk: task.risk,
+    // W1-T167: the task's routing class (docs / plan-lint / src) and the class
+    // the mount actually resolved to (differs from task_class only on a loud
+    // fallback, logged above) — the pair the retro's per-class calibration
+    // (lib/retro.ts's aggregateByClass) reads alongside this line's cost/verdict.
+    task_class: taskClass,
+    mount_class: mountClass,
     budget_usd: budgetUsd,
     soft_threshold_usd: softThresholdUsd,
     mount: { model: mount.model, effort: mount.effort, max_turns: mount.maxTurns, context_budget: mount.contextBudget },
   });
-  say(`run ${runId} — target ${owner}/${task.repo} · mount ${mount.model}/${mount.effort} · ${mount.maxTurns} turns (${task.type}×${task.risk})`);
+  say(`run ${runId} — target ${owner}/${task.repo} · mount ${mount.model}/${mount.effort} · ${mount.maxTurns} turns (${task.type}×${task.risk}×${taskClass})`);
 
   let costUsd = 0;
   let budgetWarned = false;
