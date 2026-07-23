@@ -61,6 +61,68 @@
 #   operator-kicked (the daemon drains the sandbox), so this is the authoritative kick guide, NOT a
 #   physical reordering of the entries below (a contiguous block-move can't produce this interleaving).
 
+- id: W1-T245
+  title: "SYNCED DISPATCH IS SHARD-BLIND — syncPlanFromOrigin materializes only origin/main:plan/tasks.yaml, so loadPlan sees zero tasks.d/ shards and every shard task is undispatchable through the synced path"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OBSERVED 2026-07-23 (feedback fb-1784814274946-83303d): `rmd run-task W1-T173` fails with
+    PlanError 'no task with id W1-T173' even though plan/tasks.d/W1-T173-inbox-draft-strip-fences.yaml
+    exists on origin/main. Zero shard tasks have EVER run through the daemon or run-task, and no CLI
+    bypass exists. ROOT CAUSE VERIFIED AT SOURCE (src/run-task.ts:347-375): syncPlanFromOrigin fetches,
+    reads ONLY the `origin/main:plan/tasks.yaml` blob via `git show`, writes it as tmpDir/tasks.yaml, and
+    calls loadPlan(tmpFile). loadPlan (W1-T122) globs a `tasks.d/` directory BESIDE the plan file — the
+    temp dir has none, so the back-compat path yields zero shards, silently. This is the collision of two
+    individually-correct decisions: W1-T60 (origin-truth: read the plan from the origin/main blob, never
+    the working tree) predates W1-T122 (sharding: the plan is tasks.yaml PLUS tasks.d/*), and the sync
+    path was never taught that the plan became more than one file. Distinct from the known
+    shard-ORDERING learning (shards sort after tasks.yaml in the drain) — that is a priority problem;
+    this is total invisibility: the task cannot be selected even BY EXPLICIT ID."
+  design: |
+    THE INVARIANT: the synced plan view MUST equal loadPlan over a real checkout of origin/main — same
+    tasks, same ids, same order (tasks.yaml entries first, then every tasks.d/ shard, per W1-T122's merge
+    semantics). Any future divergence between 'what loadPlan sees locally' and 'what sync materializes'
+    is this same bug reborn, so the fix should materialize the plan SUBTREE, not enumerate known files.
+    MECHANISM: after writing tmpDir/tasks.yaml from the origin/main blob, materialize
+    origin/main:plan/tasks.d/* beside it — `git ls-tree --name-only origin/main plan/tasks.d/` +
+    `git show origin/main:<path>` per shard into tmpDir/tasks.d/, or equivalently `git archive
+    origin/main plan/` extracted into the temp dir. A MISSING tasks.d/ on origin/main is NOT an error
+    (back-compat: pre-sharding refs, and repos that never sharded) — zero shards then means zero shards
+    truly. A shard that EXISTS but fails to read IS an error (fail closed, GitFetchError family), not a
+    silent omission — silent omission is the defect being fixed.
+    MUST NOT WEAKEN W1-T60: everything materialized still comes from origin/main blobs — never the
+    working tree, never local branch refs. The fetch-fail-closed / --allow-stale semantics are untouched.
+    The temp dir is still removed on every exit path (W1-T115 withTempDir discipline, same try/finally).
+    NOTE: fixing visibility does NOT fix drain PRIORITY — shards still sort after tasks.yaml (the known
+    W1-T122 ordering learning). That remains by design and is out of scope here; this task makes shards
+    SELECTABLE, matching what a working-tree loadPlan already sees.
+  acceptance:
+    - claim: "a shard-only task (present in origin/main:plan/tasks.d/, absent from tasks.yaml) is selectable BY ID through the synced path — the regression the feedback demands"
+      proof: "unit test: fixture git repo whose origin/main carries plan/tasks.yaml plus a plan/tasks.d/ shard; syncPlanFromOrigin's returned plan contains the shard task, and the run-task selection path resolves it (no PlanError)"
+    - claim: "the synced plan view EQUALS loadPlan over a real checkout of origin/main: same task ids in the same order, shards appended after tasks.yaml entries"
+      proof: "unit test: same fixture; deep-compare syncPlanFromOrigin(...).plan task-id sequence against loadPlan run against an actual checkout of the fixture's origin/main"
+    - claim: "origin-truth is preserved: a shard added ONLY to the working tree (not on origin/main) does NOT appear in the synced plan; a shard on origin/main appears even when deleted from the working tree"
+      proof: "unit test: working-tree-only shard absent from the synced view; origin-only shard present — everything read comes from origin/main blobs, never the working tree (W1-T60 unweakened)"
+    - claim: "an origin/main with NO plan/tasks.d/ directory syncs cleanly with zero shards (back-compat), and a duplicate id across tasks.yaml and a shard still fails loadPlan through the synced path (W1-T122 uniqueness guard intact)"
+      proof: "unit test: pre-sharding fixture ref loads with no error and no shards; duplicate-id fixture fails with the W1-T122 named error"
+    - claim: "the temp dir (now containing tasks.yaml AND tasks.d/*) is removed on every exit path, including a loadPlan failure"
+      proof: "unit test: seeded loadPlan failure (duplicate-id fixture); the rmd- temp dir is gone afterward"
+  risk: high
+  origin: feedback#fb-1784814274946-83303d
+  files: [src/run-task.ts, src/lib/plan.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-23 from feedback fb-1784814274946-83303d, root cause verified at source before
+    filing (src/run-task.ts:361-371: single-blob `git show origin/main:<relPath>` into tmpDir/tasks.yaml,
+    then loadPlan — no tasks.d/ materialization exists). POSITIONED AT THE FRONT of tasks.yaml
+    deliberately: file order IS drain priority, and this bug gates the dispatchability of EVERY task in
+    plan/tasks.d/ (20 shards at filing time, including W1-T173 whose selection failure surfaced it).
+    Filing THIS task as a shard would have been self-parodying twice over: invisible to the synced drain
+    AND sorted last. depends_on is empty because both prerequisites (W1-T60 sync, W1-T122 sharding) are
+    long merged — this is a correctness fix to their intersection, not new capability."
 - id: W1-T230
   title: "the arm decision trusts the status channel, which is writable and proved decorative - it must key off the orchestrator's own ledgered verdict for the exact head SHA"
   repo: remudero

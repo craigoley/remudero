@@ -14,5 +14,5 @@ raw: "SYNCED DISPATCH IS SHARD-BLIND — syncPlanFromOrigin materializes only
   the working tree."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
