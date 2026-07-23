@@ -259,3 +259,46 @@ test("183-task plan, REAL browser client: first-paint-to-data (navigation -> the
     await context.close();
   });
 });
+
+// ── (e, W1-T222) the inline card's OWN skeleton: pre-data only, cleared on render, never left
+// standing -- W1-T200's own bar, extended to the row-expansion layer. ──────────────────────────
+
+test("W1-T222: expanding a row shows a skeleton ONLY before its card's data arrives, cleared the instant it renders", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1", title: "skeleton target" })]);
+  // an in-flight run puts W1-T1 in #now-list deterministically (never dependent on drain-preview
+  // curation or RECENT/rest placement, which this fixture doesn't otherwise control).
+  appendFileSync(deps.board.ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "run.start" }) + "\n");
+  await withShell(deps, async (base) => {
+    const context: BrowserContext = await browser.newContext();
+    const page: Page = await context.newPage();
+    await page.route("**/v1/task*", async (route) => {
+      await sleep(800);
+      await route.continue();
+    });
+    await page.goto(`${base}/?token=${READ_TOKEN}`);
+    await page.waitForFunction(() => (document.querySelector("#now-list .detail")?.textContent ?? "").includes("phase:"));
+    await page.click('#now-list li[data-task-id="W1-T1"] .task-id');
+
+    // Well within the 800ms delay: the card must show a skeleton, never blank, never real content yet.
+    await sleep(200);
+    const during = await page.evaluate(() => ({
+      skeletonCount: document.querySelectorAll(".row-detail .skeleton-bar").length,
+      hasTitle: document.querySelector(".row-detail-title") !== null,
+      detailEmpty: (document.querySelector(".row-detail") as HTMLElement)?.innerHTML.trim() === "",
+    }));
+    assert.ok(during.skeletonCount > 0, "the open card must show a skeleton before its data arrives, not a blank block");
+    assert.equal(during.hasTitle, false, "real content must not render before the fetch resolves");
+    assert.equal(during.detailEmpty, false);
+
+    // Once the delayed fetch resolves, the skeleton must be GONE -- never left standing beside data.
+    await page.waitForFunction(() => document.querySelector(".row-detail-title") !== null, null, { timeout: 5000 });
+    const after = await page.evaluate(() => ({
+      skeletonCount: document.querySelectorAll(".row-detail .skeleton-bar").length,
+      title: document.querySelector(".row-detail-title")?.textContent ?? "",
+    }));
+    assert.equal(after.skeletonCount, 0, "the skeleton must be cleared the instant real content renders");
+    assert.match(after.title, /skeleton target/);
+    await context.close();
+  });
+});
