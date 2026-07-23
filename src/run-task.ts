@@ -54,7 +54,8 @@ import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateSupervisorLaunchdPlist, launchdPlistPath, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js";
-import { buildDigest, consoleCardUrl, sendDigest, sendRundown } from "./lib/digest.js";
+import { buildDigest, buildMarkerAwareDigest, consoleCardUrl, sendDigest, sendMarkerAwareDigest, sendRundown } from "./lib/digest.js";
+import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
 import {
   escalate,
   ghIssueGateway,
@@ -7216,30 +7217,68 @@ export async function reframeCommand(rest: string[], deps: { config?: Config } =
 }
 
 /**
- * `rmd digest [--since <iso>] [--dry-run]` — roll up the ledger since `--since`
- * (default: 24h ago) into one message (digest.ts) and send it over iMessage;
- * `--dry-run` prints the text without sending.
+ * `rmd digest [--since <iso>] [--dry-run]` — roll up the ledger since `--since` into one message
+ * (digest.ts) and send it over iMessage; `--dry-run` prints the text without sending.
+ *
+ * W1-T163 (MARKER-AWARE by default): with NO `--since`, the window is the operator's own
+ * `lib/last-seen.ts` marker — the SAME per-token marker the console's `GET /v1/status` recap
+ * advances on a board view (lib/board.ts) — keyed off the write token's id (the write token is
+ * the operator's real credential; a read-only caller never sends this digest). A first-ever send
+ * (no marker yet) falls back to the pre-existing 24h-ago default. Sending (never `--dry-run`,
+ * which previews without any side effect) then ADVANCES that same marker to now, so "push and
+ * pull tell one story": whichever of a digest send or a console view happens next only reports
+ * what's left since THIS send, never re-reporting what it already covered.
+ *
+ * An EXPLICIT `--since` is an operator-directed override/inspection tool — it builds/sends
+ * exactly that window (old behavior, unchanged) and deliberately never touches the marker, so a
+ * one-off "show me since <date>" never resets the shared push/pull window out from under it.
  */
 export async function digestCommand(
   rest: string[],
   deps: { notifyChannel?: NotifyChannel } = {},
 ): Promise<number> {
-  const since = flagValue(rest, "--since") ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const explicitSince = flagValue(rest, "--since");
   const config = loadConfig();
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
-  if (rest.includes("--dry-run")) {
-    console.log(buildDigest(ledgerPath, since, consoleUrl(config)));
+
+  if (explicitSince !== undefined) {
+    if (rest.includes("--dry-run")) {
+      console.log(buildDigest(ledgerPath, explicitSince, consoleUrl(config)));
+      return 0;
+    }
+    const text = sendDigest(
+      ledgerPath,
+      explicitSince,
+      {
+        channel: deps.notifyChannel ?? imessageChannel(notifyRecipient(config)),
+        ledgerPath,
+        runId: `DIGEST-${Date.now()}`,
+        taskId: "DIGEST",
+      },
+      consoleUrl(config),
+    );
+    console.log(text);
     return 0;
   }
-  const text = sendDigest(
+
+  const tokenId = hashToken(resolveServiceTokens(config.root).write);
+  const store = createLastSeenStore(lastSeenPath(config.root));
+  const nowIso = new Date().toISOString();
+  if (rest.includes("--dry-run")) {
+    console.log(buildMarkerAwareDigest(ledgerPath, store, tokenId, nowIso, consoleUrl(config)).text);
+    return 0;
+  }
+  const text = sendMarkerAwareDigest(
     ledgerPath,
-    since,
+    store,
+    tokenId,
     {
       channel: deps.notifyChannel ?? imessageChannel(notifyRecipient(config)),
       ledgerPath,
       runId: `DIGEST-${Date.now()}`,
       taskId: "DIGEST",
     },
+    nowIso,
     consoleUrl(config),
   );
   console.log(text);

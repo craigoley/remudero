@@ -24,6 +24,7 @@ import {
 } from "../src/lib/board.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
+import { createLastSeenStore, hashToken, type LastSeenStore } from "../src/lib/last-seen.js";
 
 // ── W3-T2: the read-only live board's daemon-side wiring (MASTER-PLAN §7, WS-5a) ────────────
 //
@@ -82,6 +83,25 @@ async function withBoardService<T>(deps: BoardDeps, pollMs: number, fn: (baseUrl
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
     routes: [buildStatusRoute(deps)],
     sse: [buildStatusStream(deps, pollMs)],
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    return await fn(`http://127.0.0.1:${port}`);
+  } finally {
+    server.close();
+  }
+}
+
+/** Same as {@link withBoardService}, but wires `buildStatusRoute`'s W1-T163 `lastSeen` param too. */
+async function withMarkerAwareBoardService<T>(
+  deps: BoardDeps,
+  lastSeen: LastSeenStore,
+  fn: (baseUrl: string) => Promise<T>,
+): Promise<T> {
+  const server = createService({
+    tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    routes: [buildStatusRoute(deps, lastSeen)],
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
@@ -1133,4 +1153,108 @@ test("GET /v1/recent: reachable through the real assembled route (not just the p
   } finally {
     server.close();
   }
+});
+
+// ── W1-T163: GET /v1/status becomes marker-aware — a per-token "since you last checked" recap,
+// advancing that SAME token's marker on every view (lib/last-seen.ts). ─────────────────────────
+
+test("W1-T163: a token's FIRST-EVER view establishes its marker and recaps NOTHING (there is no prior marker to recap from)", async () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1", title: "a task" })]);
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2020-01-01T00:00:00.000Z", task_id: "W1-T1", step: "verdict", verdict: "merged" }) + "\n");
+  const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub() };
+  const store = createLastSeenStore(join(mkdtempSync(join(tmpdir(), "rmd-last-seen-")), "last-seen.json"));
+
+  await withMarkerAwareBoardService(deps, store, async (base) => {
+    const res = await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { recap: unknown[]; sinceCheckpoint?: string; generated_at: string };
+    assert.deepEqual(body.recap, []);
+    assert.equal(body.sinceCheckpoint, undefined);
+    // the marker is now established, for THIS token, at the snapshot's own generated_at.
+    assert.equal(store.get(hashToken(READ_TOKEN)), body.generated_at);
+  });
+});
+
+test("W1-T163: viewing the board ADVANCES the marker — an immediate reload from the SAME token yields an EMPTY recap", async () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1", title: "a task" })]);
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2020-01-01T00:00:00.000Z", task_id: "W1-T1", step: "verdict", verdict: "merged" }) + "\n");
+  const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub() };
+  const store = createLastSeenStore(join(mkdtempSync(join(tmpdir(), "rmd-last-seen-")), "last-seen.json"));
+
+  await withMarkerAwareBoardService(deps, store, async (base) => {
+    const first = await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    assert.equal(((await first.json()) as { recap: unknown[] }).recap.length, 0);
+
+    // reload, no new ledger activity in between.
+    const second = await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    const body = (await second.json()) as { recap: unknown[]; sinceCheckpoint?: string };
+    assert.ok(body.sinceCheckpoint, "the second view must see a real prior marker (from the first view)");
+    assert.deepEqual(body.recap, [], "a reload with NOTHING new since the last view must recap nothing — a non-empty recap here FAILS");
+  });
+});
+
+test(
+  "W1-T163: a SECOND view recaps events strictly BETWEEN the two views; an event before the FIRST view's marker never appears (the falsifier)",
+  async () => {
+    const ledgerPath = tmpLedgerPath();
+    const plan = planOf([task({ id: "W1-T1", title: "before" }), task({ id: "W1-T2", title: "between" })]);
+    appendFileSync(ledgerPath, JSON.stringify({ ts: "2020-01-01T00:00:00.000Z", task_id: "W1-T1", step: "verdict", verdict: "merged" }) + "\n");
+    const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub() };
+    const store = createLastSeenStore(join(mkdtempSync(join(tmpdir(), "rmd-last-seen-")), "last-seen.json"));
+
+    await withMarkerAwareBoardService(deps, store, async (base) => {
+      // First view: establishes the marker; the pre-existing W1-T1 merge is invisible (first-ever
+      // view recaps nothing — see the dedicated test above) but this is the marker every LATER
+      // view's window opens from.
+      await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+
+      // New activity strictly AFTER the first view.
+      appendFileSync(
+        ledgerPath,
+        JSON.stringify({ ts: new Date(Date.now() + 1000).toISOString(), task_id: "W1-T2", step: "verdict", verdict: "merged" }) + "\n",
+      );
+
+      const second = await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+      const body = (await second.json()) as { recap: Array<{ taskId: string }> };
+      assert.equal(body.recap.length, 1, "exactly the ONE event between the two views");
+      assert.equal(body.recap[0].taskId, "W1-T2");
+      assert.ok(
+        !body.recap.some((e) => e.taskId === "W1-T1"),
+        "the falsifier: W1-T1's merge predates even the FIRST view's marker and must never appear",
+      );
+    });
+  },
+);
+
+test("W1-T163: two different tokens each get their OWN marker/recap — one token's view never advances another's", async () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1", title: "a task" })]);
+  const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub() };
+  const store = createLastSeenStore(join(mkdtempSync(join(tmpdir(), "rmd-last-seen-")), "last-seen.json"));
+
+  await withMarkerAwareBoardService(deps, store, async (base) => {
+    // WRITE_TOKEN views first (establishing ITS marker only).
+    await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${WRITE_TOKEN}` } });
+
+    appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), task_id: "W1-T1", step: "verdict", verdict: "merged" }) + "\n");
+
+    // READ_TOKEN's FIRST-EVER view still recaps nothing (it has no marker of its own yet), even
+    // though WRITE_TOKEN already has one and new activity landed since.
+    const res = await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    const body = (await res.json()) as { recap: unknown[] };
+    assert.deepEqual(body.recap, []);
+  });
+});
+
+test("W1-T163 (backward compatibility): buildStatusRoute with NO lastSeen store carries no recap/sinceCheckpoint field at all", async () => {
+  const ledgerPath = tmpLedgerPath();
+  const deps: BoardDeps = { plan: planOf([task({ id: "W1-T1" })]), ledgerPath, github: fakeGitHub() };
+  await withBoardService(deps, 1000, async (base) => {
+    const res = await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.ok(!("recap" in body));
+    assert.ok(!("sinceCheckpoint" in body));
+  });
 });

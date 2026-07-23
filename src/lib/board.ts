@@ -39,6 +39,9 @@ import {
   type StatusProjection,
 } from "./status.js";
 import type { Route, SseRoute, SseSend } from "./service.js";
+import { bearerTokenId } from "./panel-actions.js";
+import type { LastSeenStore } from "./last-seen.js";
+import { buildRecapEvents, type RecapEvent } from "./recap.js";
 
 /** Ledger poll pace for the SSE stream — comfortably under the 2s acceptance budget. */
 export const DEFAULT_POLL_MS = 250;
@@ -272,15 +275,55 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-/** GET /v1/status — the board snapshot, read-scoped, memoized per {@link createBoardSnapshotCache}. */
-export function buildStatusRoute(deps: BoardDeps): Route {
+/**
+ * `GET /v1/status`'s body — the memoized {@link BoardSnapshot} plus, when `lastSeen` is wired
+ * (W1-T163), the caller token's own "since you last checked" recap. `recap`/`sinceCheckpoint` are
+ * BOTH absent when `buildStatusRoute` is built with no `lastSeen` store at all, so a caller that
+ * predates W1-T163 sees an UNCHANGED response shape — never a new required field to ignore.
+ */
+export interface StatusResponse extends BoardSnapshot {
+  /** Every recap-worthy event (lib/recap.ts) after this token's PRIOR marker — `[]` on this
+   *  token's first-ever view (there is no prior marker to recap FROM, so nothing renders rather
+   *  than the token's entire ledger history dumped as though it all happened "since" nothing). */
+  recap?: RecapEvent[];
+  /** This token's marker value BEFORE this request advanced it — the timestamp {@link recap} was
+   *  computed as-of. `undefined` on a first-ever view (no prior marker existed). */
+  sinceCheckpoint?: string;
+}
+
+/**
+ * GET /v1/status — the board snapshot, read-scoped, memoized per {@link createBoardSnapshotCache}.
+ * W1-T163: when `lastSeen` (lib/last-seen.ts) is supplied, EVERY view also (a) reads the calling
+ * token's own recap off its CURRENT marker, folded into the response, then (b) advances that SAME
+ * marker to `snapshot.generated_at` — "viewing the board advances the marker" (the task's own
+ * acceptance bar), so an immediate reload from the same token recaps nothing (the falsifier: a
+ * reload still showing pre-view events). `lastSeen` is OPTIONAL and defaults to undefined (no
+ * recap at all) so a caller that hasn't wired a store yet keeps today's exact response shape.
+ */
+export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Route {
   const cache = createBoardSnapshotCache();
   return {
     method: "GET",
     path: "/v1/status",
     scope: "read",
-    handler: (_req, res) => {
-      sendJson(res, 200, cache.get(deps));
+    handler: (req, res) => {
+      const snapshot = cache.get(deps);
+      if (!lastSeen) {
+        sendJson(res, 200, snapshot);
+        return;
+      }
+      const tokenId = bearerTokenId(req);
+      const sinceCheckpoint = lastSeen.get(tokenId);
+      const recap =
+        sinceCheckpoint === undefined
+          ? []
+          : buildRecapEvents(deps.readLedger?.(deps.ledgerPath) ?? readLedgerLines(deps.ledgerPath), sinceCheckpoint, deps.plan);
+      // Advance AFTER computing the recap, off the SAME timestamp the snapshot itself claims to
+      // be current as of -- never `Date.now()` a second time, which could race a hair ahead of
+      // what this response actually reflects.
+      lastSeen.advance(tokenId, snapshot.generated_at);
+      const body: StatusResponse = { ...snapshot, recap, sinceCheckpoint };
+      sendJson(res, 200, body);
     },
   };
 }

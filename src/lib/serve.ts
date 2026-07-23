@@ -54,6 +54,7 @@ import {
 } from "./panel-actions.js";
 import { buildPanelGraphRoutes, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
 import { buildTaskCardRoute } from "./task-card.js";
+import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 
 /** Default `rmd serve` port — matches apps/dashboard/src/main.ts's own `?daemon=` default (`http://localhost:4317`), so the shipped dashboard points at a served daemon out of the box. */
 export const DEFAULT_SERVE_PORT = 4317;
@@ -105,6 +106,16 @@ export interface ServeDeps {
   phaseElapsedThresholdsMs?: Record<string, number>;
   /** Forwarded to `createService` — one ledger line per auth decision/SSE lifecycle/handler error. */
   log?: ServiceOptions["log"];
+  /**
+   * W1-T163: the per-token "since you last checked" marker store (lib/last-seen.ts), shared with
+   * `rmd digest`'s own marker-aware send (lib/digest.ts's `sendMarkerAwareDigest`) so a pushed
+   * digest and the console's pulled recap read/advance the SAME per-token state — "push and pull
+   * tell one story." OPTIONAL here the same way `panelGraph.ratify` is (see that field's own
+   * doc): {@link buildServeRoutes} defaults it to a REAL store rooted at `<fleetControlRoot>/
+   * state/last-seen.json` when the caller doesn't supply one, so `rmd serve`'s CLI wiring never
+   * has to construct it itself, and a test can still inject a fake by supplying it explicitly.
+   */
+  lastSeen?: LastSeenStore;
 }
 
 /** Matches {@link buildBatchedGithub}'s own default `ttlMs` (status.ts) — kept as one named
@@ -507,6 +518,11 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
        reader users get "task flipped" news without a sighted user's visual flash/highlight. -->
   <div id="aria-announcer" class="sr-only" role="status" aria-live="polite"></div>
 </header>
+
+<section id="recap" class="panel-section" aria-label="Since you last checked" hidden>
+  <h2><span>Since you last checked</span></h2>
+  <ul id="recap-list" class="row-list"></ul>
+</section>
 
 <section id="now" class="panel-section" aria-label="Now">
   <h2><button type="button" class="section-header" id="now-toggle" aria-expanded="true" aria-controls="now-body">
@@ -1420,6 +1436,36 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     return new Set(list.map((e) => e.taskId));
   }
 
+  // ── W1-T163: "since you last checked" — a ONE-TIME recap, rendered off THIS page load's
+  // FIRST /v1/status response and never again (see refreshAll's \`recapRendered\` gate, below).
+  // Every subsequent poll's own \`recap\` field reflects an ALREADY-ADVANCED marker (board.ts
+  // advances this token's marker on every view, per lib/last-seen.ts) — re-rendering off it would
+  // make the section collapse to near-empty a few seconds after the operator opened the tab,
+  // which is the opposite of "since you last checked". A plain \`<a href="#task=...">\` reuses the
+  // SAME hash deep-link route \`applyDeepLinkIfNeeded\`/\`deepLinkTaskId\` already parse — no new
+  // navigation mechanism. Unlike RECENT/NOW, this section is never DOM-reconciled afterward, so
+  // a plain innerHTML build (not reconcileRows) is enough.
+  const RECAP_KIND_LABEL = { merged: "merged", blocked: "blocked", escalated: "escalated", question_answered: "answered", retro: "retro run" };
+  function recapRowHtml(e) {
+    const label = RECAP_KIND_LABEL[e.kind] ?? e.kind;
+    const detail = e.detail ? \` — \${escapeHtml(e.detail)}\` : "";
+    const name = e.taskCardLink
+      ? \`<a href="\${escapeHtml(e.taskCardLink)}">\${escapeHtml(e.title ? \`\${e.taskId} — \${e.title}\` : e.taskId)}</a>\`
+      : escapeHtml(e.taskId);
+    return \`<li>\${escapeHtml(label)}: \${name}\${detail} · \${escapeHtml(formatAgo(e.ts))}</li>\`;
+  }
+  function renderRecapSection(recap) {
+    const section = document.getElementById("recap");
+    const list = document.getElementById("recap-list");
+    if (!section || !list) return;
+    if (!Array.isArray(recap) || recap.length === 0) {
+      section.hidden = true;
+      return;
+    }
+    list.innerHTML = recap.map(recapRowHtml).join("");
+    section.hidden = false;
+  }
+
   // ── everything else — the FIND layer (W1-T157): fuzzy search + faceted filters + sort ─────
   //
   // Client-side, instant, and URL-persisted. The FIND corpus is the WHOLE board (\`findTasks\`),
@@ -2230,6 +2276,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   let pollFailures = 0;
   let lastSuccessAt = null;
   let lastLiveAt = null; // last successful data of ANY kind -- a poll success OR an SSE event.
+  let recapRendered = false; // W1-T163: renders off THIS page load's FIRST /v1/status only -- see renderRecapSection's own doc.
 
   function touchFreshness() {
     lastLiveAt = Date.now();
@@ -2301,6 +2348,12 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     const tasks = statusSnap.tasks ?? [];
     for (const t of tasks) ingestProjection(t);
     paintFromTasksById();
+    // W1-T163: ONE-TIME, off this load's first snapshot only -- see renderRecapSection's doc for
+    // why re-rendering off every later poll's own (by-then-mostly-consumed) recap would be wrong.
+    if (!recapRendered) {
+      recapRendered = true;
+      renderRecapSection(statusSnap.recap);
+    }
 
     try {
       const [recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus] = await Promise.all([
@@ -2581,8 +2634,10 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     ratify: deps.panelGraph.ratify ?? ratifyCliGateway(deps.panelGraph.root, join(deps.fleetControlRoot, "state", "logs")),
   };
 
+  const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
+
   return [
-    buildStatusRoute(deps.board),
+    buildStatusRoute(deps.board, lastSeen),
     buildRecentRoute(deps.board),
     buildControlStatusRoute(fleetControlDeps),
     buildPauseRoute(fleetControlDeps),

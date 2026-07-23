@@ -5,17 +5,24 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   buildDigest,
+  buildMarkerAwareDigest,
   collectSince,
   consoleCardUrl,
+  defaultDigestSinceIso,
   renderDigest,
   renderRundownPush,
+  resolveMarkerAwareSince,
   sendDigest,
+  sendMarkerAwareDigest,
   sendRundown,
   summarize,
 } from "../src/lib/digest.js";
 import type { RundownLine } from "../src/lib/drain.js";
 import type { NotifyChannel } from "../src/lib/notify.js";
 import { escalate, type Escalation, type IssueGateway } from "../src/lib/escalate.js";
+import { createLastSeenStore } from "../src/lib/last-seen.js";
+import { buildRecapEvents } from "../src/lib/recap.js";
+import type { Plan, Task } from "../src/lib/plan.js";
 
 function ledgerFile(lines: Array<Record<string, unknown>>): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-digest-"));
@@ -334,4 +341,129 @@ test("INTEGRATION falsifier: a task NEVER actually escalated never appears in th
   // The sink is ground truth, not a log line: it can only ever contain what notify() actually
   // sent, so a task that was never escalated can never fraudulently show up as "reached".
   assert.doesNotMatch(sink.sent[0], /W1-T99/, "a task that was never escalated must never appear as though it reached the operator");
+});
+
+// ── W1-T163: the digest becomes MARKER-AWARE, sharing lib/last-seen.ts's per-token marker with
+// the console recap (lib/recap.ts) — "push and pull tell ONE story." ─────────────────────────
+
+function task(over: Partial<Task> = {}): Task {
+  return {
+    id: "W1-TX",
+    title: "t",
+    repo: "remudero",
+    depends_on: [],
+    type: "implement",
+    risk: "medium",
+    verify: "auto",
+    status: "queued",
+    attempts: 0,
+    ...over,
+  };
+}
+
+function planOf(tasks: Task[]): Plan {
+  return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+}
+
+function lastSeenTmpPath(): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-digest-marker-"));
+  return join(dir, "last-seen.json");
+}
+
+test("defaultDigestSinceIso: exactly 24h before the given nowIso — the pre-marker fallback, unchanged", () => {
+  assert.equal(defaultDigestSinceIso("2026-07-21T12:00:00.000Z"), "2026-07-20T12:00:00.000Z");
+});
+
+test("resolveMarkerAwareSince: a never-seen token falls back to the 24h default; a seen token uses ITS marker", () => {
+  const store = createLastSeenStore(lastSeenTmpPath());
+  const nowIso = "2026-07-21T12:00:00.000Z";
+  assert.equal(resolveMarkerAwareSince(store, "tok-a", nowIso), defaultDigestSinceIso(nowIso));
+
+  store.advance("tok-a", "2026-07-21T09:00:00.000Z");
+  assert.equal(resolveMarkerAwareSince(store, "tok-a", nowIso), "2026-07-21T09:00:00.000Z");
+});
+
+test(
+  "W1-T163 acceptance: a digest and a console recap built from the SAME per-token marker over the SAME ledger cover the IDENTICAL event set — a digest computed off a different/stale window would disagree",
+  () => {
+    const plan = planOf([task({ id: "W1-T1", title: "one" }), task({ id: "W1-T2", title: "two" })]);
+    const marker = "2026-07-20T00:00:00.000Z";
+    const lines = [
+      { ts: "2026-07-19T00:00:00.000Z", step: "verdict", task_id: "W1-T1", verdict: "merged" }, // BEFORE the marker
+      { ts: "2026-07-20T01:00:00.000Z", step: "verdict", task_id: "W1-T1", verdict: "merged" },
+      { ts: "2026-07-20T02:00:00.000Z", step: "verdict", task_id: "W1-T2", verdict: "blocked_ci" },
+      {
+        ts: "2026-07-20T03:00:00.000Z",
+        step: "escalation.issue_opened",
+        task_id: "W1-T2",
+        class: "BLOCKED",
+        issue_url: "https://github.com/craigoley/remudero/issues/9",
+      },
+    ];
+    const path = ledgerFile(lines);
+
+    const store = createLastSeenStore(lastSeenTmpPath());
+    const tokenId = "operator-token";
+    store.advance(tokenId, marker); // the console already advanced this token's marker to `marker`
+
+    // The PULL: the console recap, off the SAME marker.
+    const recapEvents = buildRecapEvents(lines, resolveMarkerAwareSince(store, tokenId, "irrelevant-if-marker-present"), plan);
+
+    // The PUSH: a marker-aware digest for the SAME token, over the SAME ledger.
+    const digestSince = resolveMarkerAwareSince(store, tokenId, "irrelevant-if-marker-present");
+    const digestSummary = summarize(readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l)), digestSince);
+
+    // Same window: the digest's own sinceIso is literally the recap's marker.
+    assert.equal(digestSince, marker);
+
+    // Same event set: every merged/blocked/escalated task the recap saw, the digest saw too --
+    // and NEITHER saw the before-marker W1-T1 merge.
+    assert.deepEqual(
+      recapEvents.filter((e) => e.kind === "merged").map((e) => e.taskId),
+      digestSummary.merged,
+    );
+    assert.deepEqual(
+      recapEvents.filter((e) => e.kind === "blocked").map((e) => e.taskId),
+      digestSummary.blocked.map((b) => b.taskId),
+    );
+    assert.deepEqual(
+      recapEvents.filter((e) => e.kind === "escalated").map((e) => e.taskId),
+      digestSummary.escalations.map((e) => e.taskId),
+    );
+  },
+);
+
+test("sendMarkerAwareDigest: sends off the token's CURRENT marker (or the 24h default on a first-ever send), then ADVANCES that marker to nowIso", () => {
+  const lines = [{ ts: "2026-07-14T09:00:00.000Z", step: "verdict", task_id: "W1-T7", verdict: "merged" }];
+  const path = ledgerFile(lines);
+  const store = createLastSeenStore(lastSeenTmpPath());
+  const channel = fakeChannel();
+  const nowIso = "2026-07-14T10:00:00.000Z";
+
+  const text = sendMarkerAwareDigest(path, store, "tok-a", { channel, ledgerPath: path, runId: "DIGEST-1", taskId: "DIGEST" }, nowIso);
+  assert.equal(channel.sent[0], text);
+  assert.match(text, /merged: W1-T7/); // first-ever send used the 24h-ago default, which covers this line
+
+  assert.equal(store.get("tok-a"), nowIso, "sending must advance THIS token's marker to nowIso");
+
+  // A SECOND send, right after, with no new activity: the marker now excludes the line above.
+  const secondNow = "2026-07-14T11:00:00.000Z";
+  const secondText = sendMarkerAwareDigest(path, store, "tok-a", { channel, ledgerPath: path, runId: "DIGEST-2", taskId: "DIGEST" }, secondNow);
+  assert.match(secondText, /merged: \(none\)/, "the second send's window opens at the first send's nowIso, which is after the only merge");
+});
+
+test("buildMarkerAwareDigest: a read-only preview — resolves the SAME sinceIso sendMarkerAwareDigest would, but never advances the marker", () => {
+  const lines = [{ ts: "2026-07-14T09:00:00.000Z", step: "verdict", task_id: "W1-T7", verdict: "merged" }];
+  const path = ledgerFile(lines);
+  const store = createLastSeenStore(lastSeenTmpPath());
+  const nowIso = "2026-07-14T10:00:00.000Z";
+
+  const preview = buildMarkerAwareDigest(path, store, "tok-a", nowIso);
+  assert.match(preview.text, /merged: W1-T7/);
+  assert.equal(preview.sinceIso, defaultDigestSinceIso(nowIso));
+  assert.equal(store.get("tok-a"), undefined, "a dry-run preview must never mutate the marker");
+
+  // Rebuilding the preview again is byte-identical -- proving nothing was consumed/advanced.
+  const again = buildMarkerAwareDigest(path, store, "tok-a", nowIso);
+  assert.equal(again.text, preview.text);
 });

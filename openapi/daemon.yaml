@@ -165,7 +165,9 @@ components:
     StatusSnapshot:
       type: object
       description: >
-        GET /v1/status's body -- one StatusProjection per plan task, as of `generated_at`.
+        GET /v1/status's body -- one StatusProjection per plan task, as of `generated_at`, plus
+        (W1-T163, when the daemon's per-token last-seen marker store is wired) the calling
+        token's own "since you last checked" recap.
       required:
         - generated_at
         - tasks
@@ -176,6 +178,54 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/StatusProjection"
+        recap:
+          type: array
+          description: >
+            W1-T163: every recap-worthy event (src/lib/recap.ts) after this token's PRIOR
+            marker -- absent entirely on a daemon with no last-seen store wired; `[]` on this
+            token's first-ever view (nothing to recap FROM).
+          items:
+            $ref: "#/components/schemas/RecapEvent"
+        sinceCheckpoint:
+          type: string
+          description: >
+            W1-T163: this token's marker value BEFORE this request advanced it -- the timestamp
+            `recap` was computed as-of. Absent alongside `recap` for the same two reasons.
+
+    RecapEvent:
+      type: object
+      description: >
+        W1-T163 -- one "since you last checked" row (src/lib/recap.ts): a single ledger event
+        after the caller's per-token marker.
+      required:
+        - kind
+        - taskId
+        - ts
+      properties:
+        kind:
+          type: string
+          enum:
+            - merged
+            - blocked
+            - escalated
+            - question_answered
+            - retro
+        taskId:
+          type: string
+          description: The originating ledger line's `task_id` verbatim -- `RETRO` for a fleet-wide retro event.
+        ts:
+          type: string
+        detail:
+          type: string
+          description: A short human-readable detail (verdict string, escalation class, answer text, retro stats).
+        title:
+          type: string
+          description: The plan task's own title -- present only when `taskId` names a real plan task.
+        taskCardLink:
+          type: string
+          description: >
+            A same-page `#task=<id>` hash link into the console's task card -- present ONLY
+            when `taskId` names a real plan task (a fleet-wide event like `retro` has none).
 
     # ── W3-T5 (MASTER-PLAN §7, human-in-the-loop panel actions) -- request/result shapes for
     # the six write routes src/lib/panel-actions.ts registers. Every one is write-scoped and
