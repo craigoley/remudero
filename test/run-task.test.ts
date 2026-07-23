@@ -48,6 +48,7 @@ import {
   priorStrikesFor,
   currentStrikeRegimeFor,
   ghPrCreateFillCommand,
+  reviewCommand,
 } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import { judgeReview } from "../src/lib/review.js";
@@ -578,6 +579,52 @@ test("W1-T70: a trailing-whitespace trailer line still matches (anchored on trim
 
 test("W1-T70: an empty body extracts nothing", () => {
   assert.equal(reviewTaskIdFromBody(""), undefined);
+});
+
+// W1-T70 (end-to-end): `reviewCommand` itself is where the bug actually lived — the pure
+// `reviewTaskIdFromBody` fixture above proves the REGEX is right, but not that `rmd review`
+// ever calls it correctly. `reviewCommand`'s injectable `deps` (fetchView/loadConfig/
+// materialize/runReview) let this drive the REAL taskId/criteria-resolution codepath, the
+// ledger writes, and the console/override wiring downstream of it, without a live `gh` auth,
+// a real `~/.config/remudero/config.json` touch, or a worktree/LLM spawn.
+test("W1-T70 (end-to-end): reviewCommand resolves the LAST-LINE trailer id (not a mid-prose quote) and threads it to runReview's task.id and the ledger", async () => {
+  const body = [
+    "## Summary",
+    "This PR files a plan task. Note the contract requires a line reading",
+    "'Remudero-Task: W1-T20c' as the final trailer, per the worker prompt.",
+    "",
+    "Remudero-Task: W1-T70",
+  ].join("\n");
+  const configRoot = mkdtempSync(join(tmpdir(), "rmd-review-e2e-"));
+  const view = {
+    headRefOid: "deadbeefcafe",
+    headRefName: "run-W1-T70-e2e",
+    body,
+    url: "https://github.com/acme/remudero/pull/999",
+    number: 999,
+  };
+  let seenTaskId: string | undefined;
+  const exitCode = await reviewCommand("999", ["--override-capped-by", "op", "--override-capped-reason", "manual"], {
+    fetchView: () => view,
+    loadConfig: () => ({ claudeBin: "/bin/true", root: configRoot }) as Config,
+    materialize: () => ({
+      worktreePath: undefined,
+      failure: { errorClass: "fetch-failure", message: "e2e fixture: never actually attempted" },
+    }),
+    runReview: async (args) => {
+      seenTaskId = args.task.id;
+      return { ...fakeReview("success", []), capped: true };
+    },
+  });
+  // The genuine LAST line ("W1-T70"), never the mid-prose quotation ("W1-T20c").
+  assert.equal(seenTaskId, "W1-T70");
+  assert.equal(exitCode, 0);
+  const ledgerLines = readFileSync(join(configRoot, "state", "ledger.ndjson"), "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
+  const overrideLine = ledgerLines.find((l) => l.step === "automerge.capped_override_granted");
+  assert.equal(overrideLine?.task_id, "W1-T70");
 });
 
 test("W1-T233 (criterion 2): degradedReasonLedgerFields names the error class and message verbatim for the review.posted ledger line", () => {

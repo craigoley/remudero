@@ -3172,7 +3172,34 @@ export function reviewTaskIdFromBody(body: string): string | undefined {
   return matches.length ? matches[matches.length - 1][1] : undefined;
 }
 
-async function reviewCommand(prArg: string, rest: string[] = []): Promise<number> {
+/**
+ * Injectable seams for `reviewCommand` (W1-T70): each defaults to the real `gh`/config/
+ * worktree/review plumbing, so a test can drive the taskId/criteria-resolution codepath
+ * this task fixed — the exact block that used to read as 0 lcov hits inside a function no
+ * test could otherwise reach without a live `gh` auth + git checkout — end to end, without
+ * a real `gh` call, a real `~/.config/remudero/config.json` touch, or a real worktree/LLM
+ * spawn. Every default is an OBJECT-SPREAD MERGE (`{ x: realX, ...deps }`) reusing an
+ * EXISTING top-level binding (`ghJson`/`loadConfig`/`materializeReviewWorktree`/`runReview`)
+ * — never a `??`/ternary (which V8 instruments as a branch, so an override-only test would
+ * leave the untaken "real" side permanently uncovered and regress the aggregate branch
+ * ratchet) and never a freshly-extracted "default" wrapper function (whose own body would
+ * be a brand-new, never-invoked-under-test line this same gate would then flag).
+ */
+interface ReviewCommandDeps {
+  fetchView?: (args: string[]) => unknown;
+  loadConfig?: () => Config;
+  materialize?: typeof materializeReviewWorktree;
+  runReview?: typeof runReview;
+}
+
+async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
+  const {
+    fetchView,
+    loadConfig: loadConfigDep,
+    materialize,
+    runReview: runReviewDep,
+  } = { fetchView: ghJson, loadConfig, materialize: materializeReviewWorktree, runReview, ...deps };
+
   // `--repo <name>` or `--repo <owner>/<name>` lets the runner post remudero-review to a
   // repo OTHER than this checkout (e.g. remudero-sandbox for the daemon's live commissioning,
   // W1-T12d). Without it, resolveOwnerRepo() pins to repoRoot's origin (the main repo) and
@@ -3180,7 +3207,7 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
   // layer (runReview / postReviewStatus) already takes owner+repo; only the CLI was pinned.
   const { owner, repo } = resolveReviewTarget(resolveOwnerRepo(), rest);
   const slug = `${owner}/${repo}`;
-  const view = ghJson([
+  const view = fetchView([
     "pr", "view", prArg, "--repo", slug, "--json", "headRefOid,headRefName,body,url,number",
   ]) as {
     headRefOid: string;
@@ -3215,7 +3242,7 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
     }
   }
 
-  const config = loadConfig();
+  const config = loadConfigDep();
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const runId = `review-PR${view.number}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -3230,7 +3257,7 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
   // review falls back to keyword-only — EXPLICITLY marked (criterion 5),
   // never silently, and (W1-T233) the console line below now NAMES why,
   // instead of a bare "unavailable" with the real reason thrown away.
-  const materialized = materializeReviewWorktree(config, repoRoot, view.number, view.headRefName, view.headRefOid);
+  const materialized = materialize(config, repoRoot, view.number, view.headRefName, view.headRefOid);
   if (materialized.worktreePath === undefined) {
     console.log(
       `(worktree materialization failed [${materialized.failure.errorClass}]: ` +
@@ -3243,7 +3270,7 @@ async function reviewCommand(prArg: string, rest: string[] = []): Promise<number
   // on EVERY exit path, including a throw from runReview itself — never just
   // the success path, which would reproduce the W1-T175 leak class.
   const verdict = await withMaterializedWorktree(worktreePath, repoRoot, () =>
-    runReview({
+    runReviewDep({
       owner,
       repo,
       prUrl: view.url,
