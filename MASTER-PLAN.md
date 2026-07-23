@@ -2285,3 +2285,4 @@ already scrubbed to that standard.
 - Cross-agent support (Codex exec) — explicitly parked; Claude-first keeps contracts tight.
 - Tournament dispatch (two approaches, reviewer picks) for high-risk tasks — expensive, park until
   verdict calibration proves the reviewer.
+- P37 (TIER-1 policy file — operating constants become schema-bounded, lint-gated plan data; proof timeout lifted at current 60000, ThrottleInterval added net-new) — RATIFIED 2026-07-23 -> W1-T246, W1-T247.

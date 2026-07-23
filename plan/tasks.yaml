@@ -11638,4 +11638,129 @@
     rather than regraded, because the honest reading supports it: the design states the two-level auth
     model does not change, so service.ts is READ to verify the token comparison and is never edited. The
     deliverable is confined to the shell's credential channel in serve.ts."
+- id: W1-T246
+  title: "TIER-1 POLICY FILE (P37) — operating constants become schema-bounded gated plan data: plan/policy.yaml + a validate-at-load loader whose BOUNDS live in the schema + a lint-plan gate that reds an out-of-bounds value, with the proof timeout as the first live consumer lifted at its CURRENT 60000 (never the stale 30000)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Ratifies P37. LINEAGE: the P34 ruling that the fleet's operating envelope belongs in policy
+    data, not code constants. FIXTURE 2026-07-21: DEFAULT_PROOF_TIMEOUT_MS and DEFAULT_PRUNE_GRACE_MS are
+    literals in source, and the proof timeout was measured this session to be the difference between
+    executed_pass and exec_error under load — a value that governs whether the review floor executes at all
+    is buried in a constant, changeable by an unreviewed code edit instead of a gated plan PR.
+    OPERATOR RULING 2026-07-23, correction (i), binding: the initial proof-timeout value is the OBSERVED
+    CURRENT 60000 (src/lib/review.ts:587) — the 30000 figure predates a merged change; THE POLICY FILE
+    LIFTS THE CURRENT SOURCE VALUES AS INITIAL DATA AND NEVER REGRESSES THEM. Lifting 30000 would silently
+    halve the measured-load timeout the merged change widened.
+    Rule 2 (policy-as-data) is the doctrine; the in-repo precedents are real: W1-T5 built mounts.yaml as
+    schema-bounded, validate-at-load policy data, and W1-T121 put the queue-governor WIP limit into
+    DEFAULT_SWEEP_POLICY as the first policy-data ROW rather than a constant. This task generalizes that to
+    the whole operating envelope, starting with the one constant whose miscalibration is already an observed
+    incident. The point of P37: a value change becomes a reviewed, schema-BOUNDED plan PR that the review
+    floor and the lint gate see, not an edit to a constant that nothing reviews."
+  design: |
+    THIS TASK BUILDS THE MECHANISM AND PROVES IT END-TO-END ON ONE LIVE CONSUMER; W1-T247 migrates the rest
+    of the envelope. Do NOT ship a policy file that no code reads — a dead policy file provides none of P37's
+    guarantee, so the proof-timeout READ is part of this task's deliverable, not deferred.
+    (i) plan/policy.yaml: the operating envelope as gated plan data. Seeded with the proof-timeout row at
+        its CURRENT source value.
+    (ii) src/lib/policy.ts: a schema whose FIELD DEFINITIONS carry the BOUNDS (min/max/enum), and a
+        loadPolicy that VALIDATES-AT-LOAD — an out-of-bounds or missing-required value is REFUSED with a
+        named error before any consumer reads it (the W1-T5 validate-before-use discipline). Fail closed.
+    (iii) LIFT THE PROOF TIMEOUT AT ITS CURRENT VALUE. VERIFY src/lib/review.ts's DEFAULT_PROOF_TIMEOUT_MS
+        literal and its line from source FIRST (distrust this note; the ruling cites :587 = 60000) — the
+        initial policy datum is whatever the source constant currently is, never a guessed default and never
+        the stale 30000. Replace the literal with a loadPolicy read.
+    (iv) LINT GATE: extend the plan linter (task-linter, §5C Layer A) so a plan PR whose policy.yaml carries
+        an out-of-bounds value REDS the plan check, naming the field and the violated bound. After this, a
+        value change is a schema-bounded, reviewed plan PR — the P37 guarantee, enforced.
+    VERIFY from source before building: the review.ts proof-timeout literal, the mounts.yaml schema/validate
+    pattern (src/lib/mounts.ts), and the lint-plan integration point (src/lib/task-linter.ts).
+  acceptance:
+    - claim: "the proof timeout is READ from plan/policy.yaml at its CURRENT source value 60000, not a code literal — and lifting the stale fixture value 30000 is rejected as a regression"
+      proof: "unit test: test/policy.test.ts"
+    - claim: "loadPolicy VALIDATES AT LOAD — an out-of-bounds value is REFUSED with a named error before any consumer reads it, while an in-bounds value loads cleanly (the W1-T5 fail-closed discipline)"
+      proof: "unit test: test/policy.test.ts"
+    - claim: "a plan PR whose policy.yaml carries an out-of-bounds value REDS the lint-plan check, naming the field and the violated bound"
+      proof: "unit test: test/policy.test.ts"
+    - claim: "the initial policy datum equals the CURRENT source constant verified from source, never a guessed default and never a regressed prior value"
+      proof: "unit test: test/policy.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["P37", "P34", "§9", "§5C"]
+  files: [plan/policy.yaml, src/lib/policy.ts, src/lib/review.ts, src/lib/task-linter.ts, test/policy.test.ts]
+  status: queued
+  attempts: 0
+  note: "Ratifies P37 core, filed 2026-07-23 under the current binary (fence-strip + self-lint live) per the
+    operator's redraft directive. Minted strictly above main's current max task id (W1-T245). Standing rule
+    21 does not apply — this is a brand-new task, not an amendment to a merged one. risk:high reflects the
+    genuine schema/loader/lint/consumer coupling across policy.ts + review.ts + task-linter.ts (a policy file
+    nobody reads is dead, so the proof-timeout read is in scope), not a sizing dodge. Correction (i) is
+    encoded as a load-bearing criterion + falsifier: 60000 is lifted, 30000 is rejected. W1-T247 migrates
+    the remaining envelope constants and adds the net-new ThrottleInterval surface (correction ii)."
 
+- id: W1-T247
+  title: "TIER-1 POLICY FILE (P37) migration — the remaining operating constants read from plan/policy.yaml (prune grace 120000, poll 60000, headroom curve ≤24h→100%/else 95% + reserve 95, sweep staleDays 14/strikeCap 2/wipLimit 10, fixStrikeCap 2, drain max 10), and launchd ThrottleInterval is ADDED as NET-NEW schema-bounded surface — no src literal is lifted for it"
+  repo: remudero
+  depends_on: [W1-T246]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Completes P37 on the operating envelope W1-T246's mechanism opened. Each remaining constant —
+    the prune grace and poll interval, the headroom ceiling curve and reserve, the sweep thresholds, the fix
+    strike cap, and the drain width — is currently a code literal changeable without review; this task moves
+    each to a schema-BOUNDED read from plan/policy.yaml, so the whole envelope becomes gated plan data (the
+    P34 ruling, fully applied).
+    OPERATOR RULING 2026-07-23, correction (ii), binding: launchd ThrottleInterval is NET-NEW SURFACE — no
+    literal exists in src to lift — so it is DECLARED into the schema with a bound and an initial value, NOT
+    lifted from a constant. This is the one field of the set that is added rather than migrated, and the
+    distinction is load-bearing: the policy file must never claim a source literal it does not have.
+    INITIAL VALUES = the CURRENT source constants named in the 2026-07-23 decision brief: fixStrikeCap 2,
+    prune grace 120000, poll 60000, headroom curve ≤24h-to-reset→100% / else→95% with reserve 95, sweep
+    staleDays 14 / strikeCap 2 / wipLimit 10, drain max 10. The W1-T246 non-regression discipline holds for
+    every one: lift what source currently says, never a guessed or stale value."
+  design: |
+    Move each remaining envelope constant to a loadPolicy read (W1-T246's loader), each carrying its BOUNDS
+    in the schema. VERIFY each literal's current value and site from source FIRST (distrust this note) and
+    lift THAT value — never regress:
+    (i) prune grace — worker.ts DEFAULT_PRUNE_GRACE_MS (initial 120000).
+    (ii) poll interval — daemon.ts poll (initial 60000).
+    (iii) headroom envelope — daemon.ts HEADROOM_LIMIT_PCT / the P34 clause-(c) curve, encoded AS DATA:
+        time-to-reset ≤24h → 100%, else → 95%, with operator reserve 95. A curve edit must change behavior
+        with no source change (the W1-T197 policy-as-data requirement, satisfied here).
+    (iv) sweep thresholds — DEFAULT_SWEEP_POLICY rows staleDays 14, strikeCap 2, wipLimit 10 (W1-T121 put
+        wipLimit here as data; this brings its siblings under the same policy file with BOUNDS).
+    (v) fix strike cap 2 and drain max 10.
+    (vi) LAUNCHD ThrottleInterval — NET-NEW. Add a ThrottleInterval field to the schema with a bound and an
+        initial value; the daemon-plist generator READS it from the policy. Do NOT claim a src literal as its
+        source — it is declared, not lifted (correction ii). If the current plist emits a hard-coded
+        ThrottleInterval, that emission is REPLACED by the policy read; if none exists, it is introduced.
+    Every value stays bounded, so W1-T246's lint gate reds an out-of-bounds migration value automatically.
+    VERIFY from source: worker.ts prune-grace, daemon.ts poll/headroom, sweep.ts DEFAULT_SWEEP_POLICY, the
+    fix/drain constants, and the launchd plist generator, before editing.
+  acceptance:
+    - claim: "each migrated constant is READ from plan/policy.yaml at its CURRENT source value (prune grace 120000, poll 60000, sweep staleDays 14 / strikeCap 2 / wipLimit 10, fixStrikeCap 2, drain max 10) with no code literal remaining at its site"
+      proof: "unit test: test/policy.test.ts"
+    - claim: "the headroom ceiling is policy DATA — the ≤24h→100% / else→95% curve with reserve 95 is loaded from policy, and editing the curve changes the ceiling with no source change (the P34 clause-(c) requirement)"
+      proof: "unit test: test/policy.test.ts"
+    - claim: "launchd ThrottleInterval is ADDED as NET-NEW schema-bounded surface — the generated daemon plist reads its value from the policy, and NO pre-existing src literal is claimed as its source (declared, not lifted, per operator correction ii)"
+      proof: "unit test: test/policy.test.ts"
+    - claim: "every migrated and net-new value is bounded by the schema — an out-of-bounds value REDS the lint-plan gate naming the field, and each initial datum equals the current source constant, never a regressed value"
+      proof: "unit test: test/policy.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["P37", "P34", "§9", "§4B"]
+  files: [plan/policy.yaml, src/lib/policy.ts, src/lib/worker.ts, src/lib/daemon.ts, src/lib/sweep.ts, src/lib/launchd.ts, test/policy.test.ts]
+  status: queued
+  attempts: 0
+  note: "Ratifies the remainder of P37, filed 2026-07-23. Hard depends_on W1-T246 because it needs that
+    task's policy loader + schema + lint gate; the edge is within-plan (not dangling) so the linter is
+    satisfied and the drain sequences it after the core lands. risk:high per the rule-19 atomic-coupling
+    exit: the migration touches worker/daemon/sweep/launchd but is ONE concern — bringing the operating
+    envelope under one schema-bounded policy read — and splitting it per-subsystem would fragment the schema
+    it shares. Correction (ii) (ThrottleInterval net-new, not lifted) and the non-regression discipline
+    (lift current source values, never stale ones) are encoded as load-bearing criteria + falsifiers."
