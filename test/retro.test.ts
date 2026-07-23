@@ -516,3 +516,8 @@ test("renderOrientation: no runnable task renders an explicit '(none runnable)' 
   assert.match(md, /none runnable right now/);
   assert.doesNotMatch(md, /undefined/);
 });
+
+// The saveMarker/loadMarker atomicity + corrupt-vs-absent-marker coverage for W1-T242
+// lives in test/retro-marker-atomic.test.ts, mirroring test/ledger-atomic.test.ts and
+// test/status-atomic-write.test.ts's precedent of one dedicated file per atomic-write
+// surface (not folded into this module's general render/gather tests).

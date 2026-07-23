@@ -10,7 +10,14 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+// The DEFAULT export -- a plain, mutable object -- so a test's `t.mock.method` can
+// actually intercept the marker's read/write calls: named bindings off `node:fs` are
+// non-configurable and mock.method/defineProperty against them throws "Cannot redefine
+// property" instead of installing a spy. See the identical import comment atop
+// src/lib/status.ts (W1-T207) -- saveMarker/loadMarker below call `fsMarker.*` as live
+// property lookups at call time for exactly this reason (test/retro-marker-atomic.test.ts).
+import fsMarker from "node:fs";
+import { dirname } from "node:path";
 import type { Task } from "./plan.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
 
@@ -792,13 +799,103 @@ export interface RetroMarker {
   runs_seen: number;
 }
 
-/** Load the last-retro marker; returns undefined on first-ever retro. */
-export function loadMarker(path: string): RetroMarker | undefined {
-  try {
-    return JSON.parse(readFileSync(path, "utf8")) as RetroMarker;
-  } catch {
-    return undefined;
+/**
+ * Thrown by loadMarker when state/last-retro.json EXISTS but fails to parse -- a torn
+ * write, manual corruption, or a foreign format. This is DISTINCT from the marker
+ * being genuinely absent (RetroMarker | undefined, the only legitimate
+ * first-ever-retro signal): a corrupt-but-present marker must never be silently
+ * collapsed into "no marker" the way the pre-fix reader did, because that replays the
+ * whole already-consumed run window and double-counts SHIPPED/learnings. Every caller
+ * MUST fail closed on this (abort the retro), never catch-and-treat-as-undefined.
+ */
+export class MarkerCorruptError extends Error {
+  readonly markerPath: string;
+  constructor(path: string, cause: unknown) {
+    super(
+      `retro marker at ${path} exists but is not parseable JSON (${String((cause as Error)?.message ?? cause)})` +
+        " -- refusing to treat a corrupt marker as first-ever-retro (that would reprocess the whole" +
+        " already-consumed run window and double-count SHIPPED/learnings); fix or remove it manually",
+    );
+    this.name = "MarkerCorruptError";
+    this.markerPath = path;
   }
+}
+
+/**
+ * Load the last-retro marker.
+ *  - File absent (ENOENT)         -> undefined (the ONLY legitimate first-ever-retro signal).
+ *  - File present, unparseable    -> throws MarkerCorruptError. NEVER undefined -- see the
+ *                                     class doc for why collapsing this to undefined is the bug.
+ *  - File present, parseable      -> the RetroMarker.
+ */
+export function loadMarker(path: string): RetroMarker | undefined {
+  let raw: string;
+  try {
+    raw = fsMarker.readFileSync(path, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+    throw e;
+  }
+  try {
+    return JSON.parse(raw) as RetroMarker;
+  } catch (e) {
+    throw new MarkerCorruptError(path, e);
+  }
+}
+
+/** The three states `resolveMarkerForGather` distinguishes for a retro caller. */
+export type MarkerResolution =
+  | { kind: "absent" }
+  | { kind: "corrupt"; error: MarkerCorruptError }
+  | { kind: "ok"; marker: RetroMarker };
+
+/**
+ * Resolve the last-retro marker for the gather step. A caller (retroCommand) MUST
+ * branch on `.kind` rather than reduce this back to `marker | undefined`, because
+ * "absent" and "corrupt" require OPPOSITE handling:
+ *  - "absent"  — genuinely no marker has ever been written. The ONLY state that
+ *                legitimately widens the gather to the full run history
+ *                (sinceTs=undefined) — this is the real first-ever-retro case.
+ *  - "corrupt" — the marker file exists but failed to parse (a torn write, manual
+ *                edit, ...). MUST fail closed and abort — never fall through to
+ *                "absent"'s full-history gather, which would reprocess the run
+ *                window the corrupt marker already recorded as consumed and
+ *                double-count SHIPPED/learnings.
+ *  - "ok"      — a valid marker; gather scopes to sinceTs = marker.ts.
+ */
+export function resolveMarkerForGather(path: string): MarkerResolution {
+  try {
+    const marker = loadMarker(path);
+    return marker === undefined ? { kind: "absent" } : { kind: "ok", marker };
+  } catch (e) {
+    if (e instanceof MarkerCorruptError) return { kind: "corrupt", error: e };
+    throw e;
+  }
+}
+
+/**
+ * Save the last-retro marker as ONE atomic unit: staged into a same-directory temp
+ * file with a single writeSync call, then swapped into place with a single
+ * renameSync (atomic on any POSIX filesystem). A plain writeFileSync here would let
+ * a reader (loadMarker) observe a torn/partial file mid-write and — pre-fix — that
+ * torn read was misread as FIRST-EVER-RETRO, reprocessing the whole already-consumed
+ * run window and double-counting SHIPPED/learnings. The rename swap makes that torn
+ * state unreachable: a reader only ever sees the whole old file or the whole new one.
+ */
+export function saveMarker(path: string, marker: RetroMarker): void {
+  fsMarker.mkdirSync(dirname(path), { recursive: true });
+  const tmpPath = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const buf = Buffer.from(JSON.stringify(marker, null, 2) + "\n", "utf8");
+  const fd = fsMarker.openSync(tmpPath, "w");
+  try {
+    const written = fsMarker.writeSync(fd, buf, 0, buf.length);
+    if (written !== buf.length) {
+      throw new Error(`short write staging ${tmpPath} for ${path} (${written}/${buf.length} bytes)`);
+    }
+  } finally {
+    fsMarker.closeSync(fd);
+  }
+  fsMarker.renameSync(tmpPath, path);
 }
 
 function round(n: number): number {

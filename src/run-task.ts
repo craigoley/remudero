@@ -144,10 +144,11 @@ import {
   buildGather,
   calibrationTable,
   codeFilesInDiff,
-  loadMarker,
   parseLedger,
   probeGithubThrottle,
   renderGather,
+  resolveMarkerForGather,
+  saveMarker,
   type ShippedGithub,
 } from "./lib/retro.js";
 import { regenerateOrientation } from "./lib/orientation.js";
@@ -3524,15 +3525,42 @@ async function lintPlanCommand(rest: string[]): Promise<number> {
  * then state/last-retro.json advances. Generation (this) is separated from
  * publication (the gate + the human) [research].
  */
-async function retroCommand(rest: string[]): Promise<number> {
+async function retroCommand(
+  rest: string[],
+  opts: {
+    /** Injectable worker-spawn (mirrors {@link runTask}'s `opts.spawn`) — lets a test drive
+     *  the retro success path (through the atomic marker-advance, W1-T242) without a real
+     *  Architect spawn. Default: the real {@link spawnWorker}. */
+    spawn?: typeof spawnWorker;
+  } = {},
+): Promise<number> {
   const dryRun = rest.includes("--dry-run");
+  const spawn = opts.spawn ?? spawnWorker;
   const config = loadConfig();
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const markerPath = join(config.root, "state", "last-retro.json");
   const learningsPath = join(repoRoot, "LEARNINGS.md");
   const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
   const learningsMd = existsSync(learningsPath) ? readFileSync(learningsPath, "utf8") : "";
-  const marker = loadMarker(markerPath);
+  // W1-T242: a corrupt-but-present marker (e.g. a torn write from a crash, or a manual
+  // edit) MUST NOT be silently treated as "no marker" — that would replay the whole
+  // already-consumed run window and double-count SHIPPED/learnings. resolveMarkerForGather
+  // distinguishes "absent" (the genuine first-ever-retro signal) from "corrupt" (fail
+  // closed); branch on it BEFORE any gather/spawn work, never collapse back to
+  // `marker | undefined` the way the pre-fix reader did.
+  const markerResolution = resolveMarkerForGather(markerPath);
+  if (markerResolution.kind === "corrupt") {
+    console.error(`\n### [retro] ${markerResolution.error.message}`);
+    appendLedger(ledgerPath, {
+      run_id: `RETRO-${Date.now()}`,
+      task_id: "RETRO",
+      step: "retro.marker.corrupt",
+      error: markerResolution.error.message,
+      marker_path: markerPath,
+    });
+    return 1;
+  }
+  const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
   // W1-T132: resolved EARLY (a pure git-config read, no spawn) so the SHIPPED
   // union (W1-T51's shippedSince) can be wired into the gather from the start —
   // omitting `github` here degrades `shipped` to the ledger-only list, which is
@@ -3633,7 +3661,7 @@ async function retroCommand(rest: string[]): Promise<number> {
 
   const prompt = retroPrompt(report, calibrationTable(gather.byType), runId);
   try {
-    const worker = await spawnWorker({
+    const worker = await spawn({
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
       settingsFile,
@@ -3778,7 +3806,7 @@ async function retroCommand(rest: string[]): Promise<number> {
 
     // Advance the marker (the retro RAN — the gather is now consumed).
     const nextMarker = { ts: new Date().toISOString(), learnings_count: gather.learningsNow, runs_seen: gather.totalRuns };
-    writeFileSync(markerPath, JSON.stringify(nextMarker, null, 2) + "\n");
+    saveMarker(markerPath, nextMarker);
     log("retro.marker.advanced", nextMarker);
 
     // Gate: ci green → post remudero-review → arm auto-merge.
