@@ -35,6 +35,17 @@ function runDiffCoverage(lcovFixture: string, diffFixture: string) {
   ]);
 }
 
+// The `process-boundary` directive reads the CHECKED-OUT source file (the diff carries only added
+// lines, not the surrounding declaration/close), resolved relative to CWD -- so these fixtures ship
+// a `.fxt` source beside the lcov/diff and the CLI runs with cwd=FIXTURES.
+function runDiffCoverageInFixtures(lcovFixture: string, diffFixture: string) {
+  return spawnSync(
+    process.execPath,
+    [SCRIPT, "--lcov", join(FIXTURES, lcovFixture), "--diff", join(FIXTURES, diffFixture)],
+    { cwd: FIXTURES },
+  );
+}
+
 test("diff-coverage CLI: a diff adding an UNCOVERED source line (lcov DA:<line>,0) -> non-zero exit (the gate BLOCKS), naming file:line", () => {
   const result = runDiffCoverage("uncovered.lcov", "added-line.diff");
   assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
@@ -133,4 +144,63 @@ test("diff-coverage CLI: an UNENTERED function (FNDA:0) still blocks on its unco
   const result = runDiffCoverage("fnda-uncalled.lcov", "fnda-decl.diff");
   assert.notEqual(result.status, 0);
   assert.match(result.stderr.toString(), /src\/lib\/newfn\.ts:4/);
+});
+
+// ── W1-T221: the `// diff-cov: process-boundary — <reason>` directive ────────
+//
+// Re-exec/exit glue (`spawnSync(process.execPath, …)` then `process.exit(…)`) cannot carry a
+// DA:<line>,N>0 hit without forking a real subprocess -- unit tests can't cover a process boundary,
+// so the diff gate blocked it forever (fb-1784807764940-ce2404 / W1-T144 digest glue; W1-T79 /
+// PR #662 defaultReexec). The directive exempts ONE such function, and only such a function: it is
+// honoured only above a declaration whose body has a process-boundary call and stays small.
+
+test("diff-coverage: a valid `process-boundary` directive over re-exec/exit glue -> exit 0, and EVERY exempted line is logged (no silent caps)", () => {
+  const result = runDiffCoverageInFixtures("boundary-ok.lcov", "boundary-ok.diff");
+  assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  const out = result.stdout.toString();
+  assert.match(out, /exempt \(process-boundary\) boundary-ok\.fxt:4/);
+  assert.match(out, /exempt \(process-boundary\) boundary-ok\.fxt:9/);
+});
+
+test("diff-coverage: a `process-boundary` directive over a function with NO boundary call -> exit 1 (fails CLOSED), naming the invalid directive — abuse cannot hide business logic", () => {
+  const result = runDiffCoverageInFixtures("boundary-abuse.lcov", "boundary-abuse.diff");
+  assert.notEqual(result.status, 0, result.stdout?.toString());
+  assert.match(result.stderr.toString(), /INVALID process-boundary directive/);
+  assert.match(result.stderr.toString(), /boundary-abuse\.fxt:2/);
+});
+
+test("diff-coverage: a `process-boundary` directive over a too-large region (> 15 executable lines) -> exit 1 (fails CLOSED)", () => {
+  const result = runDiffCoverageInFixtures("boundary-toobig.lcov", "boundary-toobig.diff");
+  assert.notEqual(result.status, 0, result.stdout?.toString());
+  assert.match(result.stderr.toString(), /INVALID process-boundary directive/);
+  assert.match(result.stderr.toString(), /executable lines/);
+});
+
+test("diff-coverage: a directive exempts its own region, but an uncovered line OUTSIDE it still BLOCKS — the directive rescues process boundaries, never neighbouring code", () => {
+  const result = runDiffCoverageInFixtures("boundary-mixed.lcov", "boundary-mixed.diff");
+  assert.notEqual(result.status, 0, result.stdout?.toString());
+  assert.match(result.stdout.toString(), /exempt \(process-boundary\) boundary-mixed\.fxt:3/);
+  assert.match(result.stderr.toString(), /BLOCKED/);
+  assert.match(result.stderr.toString(), /boundary-mixed\.fxt:6/);
+});
+
+test("diff-coverage: a `process-boundary` directive with NO `— <reason>` -> exit 1 (a mandatory reason, fails CLOSED)", () => {
+  const result = runDiffCoverageInFixtures("boundary-noreason.lcov", "boundary-noreason.diff");
+  assert.notEqual(result.status, 0, result.stdout?.toString());
+  assert.match(result.stderr.toString(), /INVALID process-boundary directive/);
+  assert.match(result.stderr.toString(), /requires "— <reason>"/);
+});
+
+test("diff-coverage: a `process-boundary` directive with no declaration after it -> exit 1 (fails CLOSED)", () => {
+  const result = runDiffCoverageInFixtures("boundary-nodecl.lcov", "boundary-nodecl.diff");
+  assert.notEqual(result.status, 0, result.stdout?.toString());
+  assert.match(result.stderr.toString(), /INVALID process-boundary directive/);
+  assert.match(result.stderr.toString(), /no declaration follows/);
+});
+
+test("diff-coverage: a `process-boundary` directive whose declaration never closes at its indent -> exit 1 (fails CLOSED)", () => {
+  const result = runDiffCoverageInFixtures("boundary-noend.lcov", "boundary-noend.diff");
+  assert.notEqual(result.status, 0, result.stdout?.toString());
+  assert.match(result.stderr.toString(), /INVALID process-boundary directive/);
+  assert.match(result.stderr.toString(), /could not find the end/);
 });

@@ -1,0 +1,9 @@
+diff --git a/boundary-nodecl.fxt b/boundary-nodecl.fxt
+new file mode 100644
+--- /dev/null
++++ b/boundary-nodecl.fxt
+@@ -0,0 +1,4 @@
++function real() {
++  return uncovered();
++}
++// diff-cov: process-boundary — dangling directive at end of file

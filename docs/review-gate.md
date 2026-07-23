@@ -392,3 +392,28 @@ a function **declaration line** whose lcov `FNDA` count shows the function was e
 covered regardless of its `DA:0` (observed: `FN:62`/`FNDA:11` beside `DA:62,0`); and a
 **closer-only punctuation line** (`};`, `})`) is non-executable furniture. An unentered
 function (`FNDA:0`) still blocks on its body — the carve-outs rescue artifacts, never dead code.
+
+### diff-coverage round 4 (2026-07-23, W1-T221): the `process-boundary` directive
+
+Re-exec/exit glue can never carry a `DA:<line>,N>0` hit — you cannot unit-test a `process.exit`
+or a `spawnSync(process.execPath, …)` re-exec without forking a real subprocess (which itself
+merges nondeterministic child coverage, the W1-T220 flake class). So the diff gate blocked such
+lines forever: observed at **fb-1784807764940-ce2404 / W1-T144 / PR #614** (digest CLI wiring) and
+**W1-T79 / PR #662** (`defaultReexec` at `src/lib/self-sync.ts` + `main()`'s refused-exit branch).
+
+An author may mark ONE such function with a comment directly above its declaration:
+
+```
+// diff-cov: process-boundary — <mandatory reason>
+function defaultReexec(env) { … spawnSync(process.execPath, …); process.exit(…); }
+```
+
+honoured (`computeBoundaryRanges`) only when the guarded declaration (a) contains a
+process-boundary call (`spawnSync`/`execFileSync(process.execPath …)` or `process.exit`) and
+(b) has ≤ `MAX_BOUNDARY_EXEC_LINES` (15) executable lines. Any other use is an **INVALID directive
+that fails the gate CLOSED** — abuse blocks the PR harder, never softer — and every honoured
+exemption is printed (`diff-coverage: exempt (process-boundary) file:line — reason`) so no line is
+ever silently waved through (it is also diff-visible to the review gate and the human). It rescues
+process boundaries only: a neighbouring uncovered line, or `main()`-internal dispatch glue (e.g.
+the refused-exit branch), still blocks — cover those in-process via the `callMain()` seam
+(`test/wipe-test.test.ts`) with an injected dependency, which yields real DA hits at near-zero cost.

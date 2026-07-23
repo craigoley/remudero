@@ -1,0 +1,9 @@
+diff --git a/boundary-noend.fxt b/boundary-noend.fxt
+new file mode 100644
+--- /dev/null
++++ b/boundary-noend.fxt
+@@ -0,0 +1,4 @@
++const w = 1;
++// diff-cov: process-boundary — declaration never closes at its own indent
++  function weird() {
++    process.exit(spawnSync(process.execPath, []).status);

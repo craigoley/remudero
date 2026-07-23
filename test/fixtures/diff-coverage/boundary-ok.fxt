@@ -1,0 +1,10 @@
+const x = 1;
+// diff-cov: process-boundary — re-exec cannot carry a DA hit without forking the suite
+function defaultReexec(env) {
+  const result = spawnSync(process.execPath, [env]);
+  if (result.error) {
+    console.error(result.error);
+    process.exit(1);
+  }
+  process.exit(result.status);
+}
