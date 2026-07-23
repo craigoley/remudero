@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   architectModel,
   configPath as instanceConfigPath,
+  consoleUrl,
   fixStrikeCap,
   globalArtifactPath,
   loadConfig,
@@ -37,6 +38,7 @@ import {
   runDrain,
   type CuratedSelection,
   type DrainOpts,
+  type DrainSummary,
   type MergedSet,
   type OpenPrCheck,
 } from "./lib/drain.js";
@@ -52,7 +54,7 @@ import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateSupervisorLaunchdPlist, launchdPlistPath, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js";
-import { buildDigest, sendDigest } from "./lib/digest.js";
+import { buildDigest, consoleCardUrl, sendDigest, sendRundown } from "./lib/digest.js";
 import {
   escalate,
   ghIssueGateway,
@@ -61,7 +63,7 @@ import {
   type EscalationOption,
   type IssueGateway,
 } from "./lib/escalate.js";
-import { imessageChannel, notify } from "./lib/notify.js";
+import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
 import { ghAlertGateway, pollAlerts, renderAlertsSummary } from "./lib/ops.js";
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
 import { loadManagedRepos, ManagedReposError } from "./lib/managed-repos.js";
@@ -4013,6 +4015,31 @@ function breakerGateFor(ledgerPath: string): { isIndeterminate: (taskId: string)
  * logic over GitHub-derived status; it STOPS ON ANY BLOCK (v1); it is headroom-aware
  * and bounded. See lib/drain.ts for the loop; this only wires the real defaults.
  */
+/**
+ * The post-drain rundown PUSH (W1-T141/W1-T144), extracted from drainCommand so the glue —
+ * build the classified rundown, print it, and push it through the SAME digest channel
+ * escalations use (never a second transport) — is unit-covered with a fake channel + fixture
+ * summary, the #606 interior-glue discipline. Returns the pushed text. `print` is injectable
+ * (defaults to console.log) so a test asserts the rundown without capturing stdout.
+ */
+export function pushDrainRundown(
+  summary: DrainSummary,
+  ledgerLines: Array<Record<string, unknown>>,
+  config: Config,
+  deps: { channel: NotifyChannel; ledgerPath: string; runId: string; print?: (s: string) => void },
+): string {
+  const rundown = buildRundown(summary, ledgerLines);
+  (deps.print ?? ((line: string) => console.log(line)))("\n" + renderRundown(rundown));
+  // W1-T144: the SAME sendRundown -> notify() path rmd digest/MANUAL/HARD_STOP escalations
+  // ride, each non-merged line deep-linking to its console card via consoleUrl(config).
+  return sendRundown(rundown, consoleUrl(config), {
+    channel: deps.channel,
+    ledgerPath: deps.ledgerPath,
+    runId: deps.runId,
+    taskId: "DRAIN",
+  });
+}
+
 async function drainCommand(
   rest: string[],
   deps: {
@@ -4027,6 +4054,10 @@ async function drainCommand(
      *  gateway for `remudero-sandbox`, not a hardcoded literal (W1-T53) — without a network
      *  round-trip. */
     githubFactory?: (owner: string, repo: string) => GitHub;
+    /** W1-T144: injectable notify channel for the post-drain rundown push — a behavioral
+     *  test supplies a recording fake so the push glue runs without a real osascript send.
+     *  Defaults to the operator's iMessage channel. */
+    notifyChannel?: NotifyChannel;
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE touching config/locks/spawns (a malformed control command
@@ -4235,7 +4266,11 @@ async function drainCommand(
     // task — "what happened" at task grain, not just the aggregate summary above. Re-reads the
     // ledger fresh so a same-run escalation (BLOCKED class, two-strikes-exhausted) is visible to
     // the classifier — the SAME ledger file `log` above just finished writing into.
-    console.log("\n" + renderRundown(buildRundown(summary, readLedgerLines(ledgerPath))));
+    pushDrainRundown(summary, readLedgerLines(ledgerPath), config, {
+      channel: deps.notifyChannel ?? imessageChannel(notifyRecipient(config)),
+      ledgerPath,
+      runId,
+    });
     // Exit 0 only on a clean drain (target reached / max reached / nothing left);
     // a block/headroom/error stop is a non-zero exit so an unattended wrapper notices.
     return summary.stopReason === "blocked" || summary.stopReason === "error" ? 1 : 0;
@@ -5995,7 +6030,10 @@ const ESCALATION_CLASSES: EscalationClass[] = ["BLOCKED", "MANUAL", "HARD_STOP"]
  * Opens the `needs-human` labeled issue (escalate.ts) and, for MANUAL/HARD_STOP
  * ONLY, also fires a real-time iMessage ping (§4: BLOCKED collapses to the digest).
  */
-async function escalateCommand(rest: string[]): Promise<number> {
+export async function escalateCommand(
+  rest: string[],
+  deps: { issues?: IssueGateway; notifyChannel?: NotifyChannel } = {},
+): Promise<number> {
   const cls = flagValue(rest, "--class");
   const taskId = flagValue(rest, "--task");
   const summary = flagValue(rest, "--summary");
@@ -6017,12 +6055,14 @@ async function escalateCommand(rest: string[]): Promise<number> {
       options: parseOptionFlags(rest),
       recommendation: flagValue(rest, "--recommendation") ?? "",
     },
-    { issues: ghIssueGateway(owner, repo), ledgerPath, runId },
+    { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId },
   );
   console.log(url);
   if (cls === "MANUAL" || cls === "HARD_STOP") {
-    notify(`[${cls}] ${taskId}: ${summary}\n${url}`, {
-      channel: imessageChannel(notifyRecipient(config)),
+    // W1-T144: the real-time ping deep-links to the console card alongside the GitHub
+    // issue URL, same as the digest's own escalations line (digest.ts's renderDigest).
+    notify(`[${cls}] ${taskId}: ${summary}\n${url}\n${consoleCardUrl(consoleUrl(config), taskId)}`, {
+      channel: deps.notifyChannel ?? imessageChannel(notifyRecipient(config)),
       ledgerPath,
       runId,
       taskId,
@@ -7134,20 +7174,28 @@ export async function reframeCommand(rest: string[], deps: { config?: Config } =
  * (default: 24h ago) into one message (digest.ts) and send it over iMessage;
  * `--dry-run` prints the text without sending.
  */
-async function digestCommand(rest: string[]): Promise<number> {
+export async function digestCommand(
+  rest: string[],
+  deps: { notifyChannel?: NotifyChannel } = {},
+): Promise<number> {
   const since = flagValue(rest, "--since") ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const config = loadConfig();
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   if (rest.includes("--dry-run")) {
-    console.log(buildDigest(ledgerPath, since));
+    console.log(buildDigest(ledgerPath, since, consoleUrl(config)));
     return 0;
   }
-  const text = sendDigest(ledgerPath, since, {
-    channel: imessageChannel(notifyRecipient(config)),
+  const text = sendDigest(
     ledgerPath,
-    runId: `DIGEST-${Date.now()}`,
-    taskId: "DIGEST",
-  });
+    since,
+    {
+      channel: deps.notifyChannel ?? imessageChannel(notifyRecipient(config)),
+      ledgerPath,
+      runId: `DIGEST-${Date.now()}`,
+      taskId: "DIGEST",
+    },
+    consoleUrl(config),
+  );
   console.log(text);
   return 0;
 }
