@@ -11712,4 +11712,201 @@
     rather than regraded, because the honest reading supports it: the design states the two-level auth
     model does not change, so service.ts is READ to verify the token comparison and is never edited. The
     deliverable is confined to the shell's credential channel in serve.ts."
+- id: W1-T248
+  title: "P34 clause (b) — a lightweight RISK JUDGE on the dispatch path assesses each candidate CHANGE (never the static risk: field, a sizing artifact): low-risk proceeds, high-risk OR LOW-CONFIDENCE escalates with reasons stated, judge-unavailable falls back to ESCALATE and never silent-proceeds; verdict + reasons + self-reported confidence ledgered VERBATIM per decision, stable on unchanged input, built REUSABLE for P28"
+  repo: remudero
+  depends_on: [W1-T5]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    Ratifies P34 clause (b) against the operator's round-3 envelope (SOLE authority; rounds 1-2 discarded).
+    DISPATCH IS NOT PRESENCE-GATED (clause a) — the control surface is gates + escalations + console, evidenced
+    by the 2026-07-20 operating day (operator input: 6 bug reports, 6 verdicts, 2 commands). The judge is the
+    control this envelope adds ON that path, not a presence gate.
+    WHAT IT JUDGES: each candidate CHANGE, NOT the static `risk:` field. The risk: field is a SIZING ARTIFACT set
+    by subsystem-span counting and says nothing about a change's danger. The judge weighs gates state, coherence
+    with the plan, drift risk, and alignment with established practice. Low-risk PROCEEDS. High-risk OR
+    LOW-CONFIDENCE ESCALATES for manual input with reasons stated — the W1-T186 emitter discipline: name the
+    OBSERVED blocker, not an inferred symptom.
+    CONSTRAINTS (round ii): the cheapest mount tier (haiku-class) resolved from mounts.yaml (W1-T5); verdict AND
+    reasons ledgered per decision; CONFIDENCE remains the judge's self-report initially but MUST be ledgered
+    VERBATIM per judgment so a numeric threshold can be derived from accumulated data later; STABLE on unchanged
+    input (W1-T178 doctrine); judge-unavailable falls back to ESCALATE, NEVER silent-proceed — the
+    cannot-observe→wait polarity (W1-T130), applied to the judge itself.
+    REUSABLE BY CONSTRUCTION: this is the same organ P28's graduated auto-ratification will need — its interface
+    takes a candidate {change, gates state, plan context} and returns {verdict, reasons, confidence} with no
+    dispatch-only coupling, so P28 can call the same judge rather than growing a second one.
+  design: |
+    A judge module (src/lib/risk-judge.ts) invoked on the dispatch path (drain.ts/run-task.ts) per candidate
+    change: assessRisk({change, gatesState, planContext}) -> {verdict: low|high, reasons[], confidence}. The
+    judge runs on the haiku-class mount resolved via W1-T5's resolveMount for the judge task-class (a cheap-model
+    routing decision that belongs to the P34 family, W1-T167). Low + confident -> PROCEED; high OR
+    below-confidence -> ESCALATE with the observed blocker named (W1-T186 emitter discipline). The judge NEVER
+    reads the static task.risk field for this decision. Every decision ledgers risk_judge.decision carrying the
+    verdict, the reasons, AND the confidence VERBATIM (round ii) so a numeric confidence threshold is derivable
+    from accumulated data. Judge-unavailable (spawn error, timeout, no snapshot) -> ESCALATE, never proceed.
+    VERIFY the dispatch-decision site and resolveMount from source before wiring (distrust this note).
+  acceptance:
+    - claim: "a candidate change the judge assesses low-risk-and-confident PROCEEDS; the static risk: field is never consulted for this decision (it is a sizing artifact, not a danger signal)"
+      proof: "unit test: test/risk-judge.test.ts"
+    - claim: "a high-risk OR LOW-CONFIDENCE candidate ESCALATES for manual input with the OBSERVED blocker named (W1-T186 emitter discipline), and does NOT dispatch"
+      proof: "unit test: test/risk-judge.test.ts"
+    - claim: "the judge UNAVAILABLE falls back to ESCALATE and never silent-proceeds — the cannot-observe→wait polarity (W1-T130) applied to the judge itself"
+      proof: "unit test: test/risk-judge.test.ts"
+    - claim: "verdict AND reasons AND the judge's self-reported confidence are ledgered VERBATIM per decision, so a numeric confidence threshold can be derived from accumulated data (round ii)"
+      proof: "unit test: test/risk-judge.test.ts"
+    - claim: "the judge is STABLE on unchanged input (the same candidate change twice yields the same verdict, W1-T178 doctrine) and runs on the cheapest mount tier (haiku-class) resolved from mounts.yaml (W1-T5)"
+      proof: "unit test: test/risk-judge.test.ts"
+    - claim: "the judge is REUSABLE — its interface takes {change, gatesState, planContext} and returns {verdict, reasons, confidence} with no dispatch-only coupling, so P28's graduated auto-ratification can call the same organ"
+      proof: "unit test: test/risk-judge.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["P34", "§4B", "§9", "P28"]
+  files: [src/lib/risk-judge.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "P34 clause (b), ratified 2026-07-23 per round-3 envelope + round-ii judge ruling. Presence×risk dispatch
+    matrix from rounds 1-2 is DEAD — this judge is the dispatch-path control, not a presence gate. Built reusable
+    for P28's graduated auto-ratification. The W1-T186 emitter discipline (name the observed blocker) governs the
+    escalation reasons; W1-T178's stability doctrine governs unchanged-input behavior."
 
+- id: W1-T249
+  title: "P34 clause (c) — budget is subscription HEADROOM, not dollars: track remaining WEEKLY capacity, continue while headroom is ABOVE the operator reserve (5% / HEADROOM_LIMIT_PCT=95 initial policy), approaching the reserve pauses DISPATCH ONLY (in-flight finishes, existing rmd pause drain-and-hold) and escalates; imputed ledger dollar figures gate NOTHING; VERIFY FROM SOURCE how headroom is read"
+  repo: remudero
+  depends_on: [W1-T197]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    Ratifies P34 clause (c). The operator runs on Anthropic Max 20x, so every ledger dollar figure is IMPUTED
+    (an API-equivalent meter, not billed spend) and MUST NOT gate anything — distinct from the per-task
+    budget_usd runaway tripwire, which stays a pathology cliff. The real constraint is the WEEKLY subscription
+    window.
+    THE RESERVE (round i): the operator's own usage must never be crowded out. Operator reserve = 5% of weekly
+    subscription capacity (ceiling 95%), matching HEADROOM_LIMIT_PCT=95 as the INITIAL policy value; adjustable
+    later via the P37 policy file, revisit when P43 telemetry exists. Continue while headroom remains ABOVE the
+    reserve. APPROACHING the reserve pauses DISPATCH ONLY — in-flight work FINISHES — using the EXISTING rmd
+    pause drain-and-hold semantics (W1-T11), and escalates.
+    HEADROOM READING: W1-T197 already reads headroom (daemon.headroom {window: weekly (all models), percent_used,
+    resets_at}, a HEADROOM_LIMIT_PCT default, billing_mode subscription) and its note explicitly hands this
+    clause its verify-from-source obligation. THE IMPLEMENTER MUST VERIFY FROM SOURCE how headroom is actually
+    read (Claude Code usage surface / account endpoint / local token-accounting fallback) — DO NOT invent an API.
+    An UNREADABLE headroom read must NOT silently proceed as if unlimited (W1-T130 / W1-T197's bounded-degraded
+    posture) — on a subscription the budget IS the constraint, so cannot-read-the-budget is never rendered as
+    proceed-as-if-unlimited.
+  design: |
+    A dispatch-gate check reading weekly headroom (reuse W1-T197's reader; do not add a second). While remaining
+    weekly headroom is ABOVE the operator reserve, dispatch continues. On APPROACHING the reserve
+    (percent_used reaching HEADROOM_LIMIT_PCT, i.e. within the 5% reserve), pause DISPATCH ONLY via the existing
+    rmd pause drain-and-hold (W1-T11) so in-flight runs finish, and escalate. The reserve/ceiling is POLICY DATA
+    (rule 2), 5%/95% initial, overridable via the P37 policy file with no code edit. Imputed ledger dollar figures
+    are never read on this path. VERIFY FROM SOURCE the headroom read path + the pause drain-and-hold semantics
+    before wiring (distrust this note).
+  acceptance:
+    - claim: "with weekly headroom ABOVE the operator reserve, dispatch continues; imputed ledger dollar figures gate NOTHING on this path"
+      proof: "unit test: test/headroom-reserve.test.ts"
+    - claim: "APPROACHING the reserve (percent_used reaching HEADROOM_LIMIT_PCT=95, i.e. within the 5% reserve) pauses DISPATCH ONLY via the existing rmd pause drain-and-hold — in-flight work FINISHES — and escalates"
+      proof: "unit test: test/headroom-reserve.test.ts"
+    - claim: "the reserve/ceiling is POLICY DATA (5% / ceiling 95% initial, HEADROOM_LIMIT_PCT=95), overridable via the P37 policy file with zero code edit"
+      proof: "unit test: test/headroom-reserve.test.ts"
+    - claim: "an UNREADABLE headroom read does NOT silent-proceed as if unlimited — cannot-read-the-budget is rendered as the bounded-degraded/escalate posture, never proceed-as-if-unlimited (W1-T130 / W1-T197 falsifier)"
+      proof: "unit test: test/headroom-reserve.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["P34", "§9", "§4B"]
+  files: [src/lib/daemon.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "P34 clause (c), ratified 2026-07-23. Reserve = 5% weekly / HEADROOM_LIMIT_PCT=95 (round i), P37-tunable,
+    P43-revisitable. Builds on W1-T197 (which already reads headroom and carries the verify-from-source mandate)
+    and reuses W1-T11 pause drain-and-hold. The round-1 per-unattended-window DOLLAR CEILING is DISCARDED IN FULL
+    (round 3): imputed dollars gate nothing; headroom is the only constraint."
+
+- id: W1-T250
+  title: "P34 clause (d) — MODEL EFFICIENCY is part of the envelope: per-class weekly-limit burn accounting, cheap models for plan-only filings / sweeps / judge calls and capable models for implementation, routing objective = weekly-limit burn per model class; genuinely ATOMIC cross-file coupling (.remudero/mounts.yaml per-class rows + src/lib/retro.ts accounting), one invariant proven by a single test/class-burn.test.ts"
+  repo: remudero
+  depends_on: [W1-T167]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    Ratifies P34 clause (d). Pull W1-T167 (mounts.yaml model/effort as policy data) into the P34 family: route by
+    task class — plan-only filings, sweeps, and judge calls (W1-T248) on CHEAP models; implementation on CAPABLE
+    ones. The routing OBJECTIVE is weekly-limit burn per model class (not imputed dollars — clause c).
+    SIZING (round 5, PR 588 merits test — RE-RISK TO HIGH, do NOT decompose): this touches .remudero/mounts.yaml
+    (the per-class rows) and src/lib/retro.ts (the accounting that reads them), but its acceptance asserts ONE
+    cross-file invariant — per-class burn accounted as a SHARE of the weekly subscription window — proven by a
+    single test/class-burn.test.ts. That invariant is UNSATISFIABLE PIECEWISE: the mounts.yaml class rows alone
+    account nothing, and the retro accounting alone has no class rows to account against, so splitting yields two
+    tasks neither independently testable. This is genuinely atomic cross-file coupling (same shape as PR 588 tasks
+    W1-T240/W1-T241/W1-T242), so it is risk:high with that rationale recorded, rather than a per-subsystem split.
+  design: |
+    Extend W1-T167's per-class routing so mount rows carry a task-class -> {model, effort} mapping (plan-only /
+    sweep / judge -> cheap; implement -> capable), and extend src/lib/retro.ts's per-class accounting to account
+    each class's burn as a SHARE OF THE WEEKLY SUBSCRIPTION WINDOW (clause c's headroom, not imputed dollars). The
+    two files are one concern: the rows define the classes, the accounting measures them against the weekly
+    window. VERIFY W1-T167's mount-row shape and the retro's per-class cost read from source before editing
+    (distrust this note).
+  acceptance:
+    - claim: "per-class weekly-limit burn is accounted as a SHARE of the weekly subscription window — the mounts.yaml class rows read by the retro accounting, the single cross-file invariant"
+      proof: "unit test: test/class-burn.test.ts"
+    - claim: "task-class routing sends plan-only filings, sweeps, and judge calls to CHEAP models and implementation to CAPABLE ones as policy data (W1-T167 rows), objective = weekly-limit burn per class, never imputed dollars"
+      proof: "unit test: test/class-burn.test.ts"
+    - claim: "the invariant is UNSATISFIABLE PIECEWISE — the mounts.yaml class rows alone account nothing and the retro accounting alone has no rows to account against (the atomic-coupling falsifier, PR 588 merits test)"
+      proof: "unit test: test/class-burn.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["P34", "§9"]
+  files: [.remudero/mounts.yaml, src/lib/retro.ts]
+  status: queued
+  attempts: 0
+  note: "P34 clause (d), ratified 2026-07-23. risk:high per round 5's PR-588 merits test: atomic cross-file
+    coupling (mounts.yaml per-class rows + retro.ts accounting), one invariant, one test/class-burn.test.ts — NOT
+    decomposed. Extends W1-T167 (per-class routing as policy data). Weekly-limit burn per class is the routing
+    objective; imputed dollars gate nothing (clause c)."
+
+- id: W1-T251
+  title: "P34 clause (e) — AWAY-MODE ESCALATION DELIVERY: an operator presence signal batches escalations into the recap (W1-T163) for ASYNC verdict rather than expecting sync answers; nothing waits on real-time presence except STOP and pause, which already do; dispatch is NOT presence-gated and the presence×risk dispatch matrix from rounds 1-2 is DEAD"
+  repo: remudero
+  depends_on: [W1-T163]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    Ratifies P34 clause (e), and enforces clause (a). Per round iii, presence keys ONLY escalation DELIVERY and
+    STOP/pause — the presence×risk dispatch matrix from rounds 1-2 is DEAD, discarded in full.
+    AWAY MODE: escalations BATCH into the recap (W1-T163) for async verdict, rather than expecting sync answers.
+    ATTENDED MODE: escalations deliver as today, unchanged. Nothing waits on real-time presence EXCEPT STOP and
+    pause, which already do (W1-T11).
+    CLAUSE (a) ENFORCEMENT: dispatch is NOT presence-gated. No dispatch decision consults presence; the control
+    surface stays gates + escalations + console (the risk judge, W1-T248, is that control on the dispatch path).
+    A presence signal that ever gated dispatch would resurrect the dead matrix.
+  design: |
+    An operator presence/away signal (an operator-set mode, default attended). The escalation delivery path
+    (escalate.ts) branches on it: AWAY -> route the escalation into the W1-T163 recap batch for async verdict,
+    never a sync-answer expectation; ATTENDED -> deliver as today. STOP and pause remain the ONLY real-time
+    presence waits and are untouched. The dispatch decision NEVER reads presence. VERIFY the escalate delivery
+    site, the W1-T163 recap batching surface, and the fleet-control STOP/pause path from source before wiring
+    (distrust this note).
+  acceptance:
+    - claim: "in AWAY mode an escalation is BATCHED into the recap (W1-T163) for async verdict, not delivered as a sync-answer expectation"
+      proof: "unit test: test/away-mode-delivery.test.ts"
+    - claim: "in ATTENDED mode escalations deliver exactly as today — away-mode routing changes NOTHING attended (the falsifier)"
+      proof: "unit test: test/away-mode-delivery.test.ts"
+    - claim: "presence keys ONLY escalation delivery — no dispatch decision consults the presence signal, the presence×risk dispatch matrix is absent (dead), and STOP + pause remain the only real-time-presence waits"
+      proof: "unit test: test/away-mode-delivery.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["P34", "§7B", "§4"]
+  files: [src/lib/escalate.ts, src/lib/digest.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "P34 clause (e) + clause (a) enforcement, ratified 2026-07-23. risk:high (touches the escalation delivery
+    path and the presence signal; round 6 names the away-mode delivery task risk:high). Presence keys ONLY
+    delivery + STOP/pause (round iii); the presence×risk dispatch matrix is dead. Batches into the W1-T163 recap
+    for async verdict. STOP/pause (W1-T11) are the only real-time-presence waits."
