@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 // intercepts the REAL fs.writeFileSync/fs.renameSync calls saveMarker makes, never a
 // reimplementation.
 import fsDefault from "node:fs";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -364,11 +364,24 @@ function setupFakeRetroFixture(
     /** `gh pr edit` (the acceptance-repair pass's own repair write-back) fails -- its
      *  OWN best-effort catch, distinct from the outer catch `diffFails` exercises. */
     repairEditFails?: boolean;
+    /** Pre-register a REAL, lockless `run-*` git worktree well past pruneStaleRuns'
+     *  grace window -- exercises its force-remove branch (`pruned.worktrees.length`). */
+    staleWorktree?: boolean;
   } = {},
 ): FakeRetroFixture {
   const fakeHome = mkdtempSync(join(tmpdir(), "rmd-retro-success-home-"));
-  const root = mkdtempSync(join(tmpdir(), "rmd-retro-success-root-"));
-  const FIXED_TS = 1784000000000 + Math.floor(Math.random() * 1_000_000); // distinct per fixture instance
+  // realpathSync: macOS's tmpdir() is a symlink (/var -> /private/var); `git worktree
+  // list --porcelain` reports the RESOLVED path, so a prefix check against the
+  // unresolved one (pruneStaleRuns' `curPath.startsWith(worktreesRoot)`) would never
+  // match and silently skip every worktree under it.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-retro-success-root-")));
+  // `staleWorktree` mocks Date.now WELL INTO THE FUTURE relative to the real wall clock
+  // (rather than a fixed 2026-07-14-ish constant) so pruneStaleRuns' `now() - mtimeMs`
+  // age check -- which reads the SAME mocked Date.now -- sees the worktree this fixture
+  // creates at REAL "now" (below) as comfortably past DEFAULT_PRUNE_GRACE_MS (120s).
+  const FIXED_TS = opts.staleWorktree
+    ? Date.now() + 10 * 60_000
+    : 1784000000000 + Math.floor(Math.random() * 1_000_000); // distinct per fixture instance
   const branch = `run-RETRO-${FIXED_TS}`;
 
   if (opts.seedMarker) {
@@ -404,6 +417,16 @@ function setupFakeRetroFixture(
     execFileSync("git", ["clone", "-q", originGit, repoDir]);
     execFileSync("git", ["-C", repoDir, "config", "user.email", "retro-test@example.invalid"]);
     execFileSync("git", ["-C", repoDir, "config", "user.name", "retro-test"]);
+  }
+  if (opts.staleWorktree) {
+    // A REAL, registered `git worktree` (pruneStaleRuns reads `git worktree list
+    // --porcelain`, not just directory names) on a `run-*` branch, with no run.lock --
+    // exactly the "crashed before cleanup" shape pruneStaleRuns exists to reap.
+    mkdirSync(join(root, "worktrees"), { recursive: true });
+    execFileSync("git", [
+      "-C", repoDir, "worktree", "add", "-b", "run-STALE-leftover",
+      join(root, "worktrees", "run-STALE-leftover"), "main",
+    ]);
   }
 
   // ── a fake `gh` on PATH: only the handful of subcommands this success path invokes ──
@@ -689,5 +712,20 @@ test("retroCommand: the Architect commits NOTHING (no PR_URL, ORIENTATION.md/pla
     assert.ok(!fsDefault.existsSync(join(fx.root, "state", "last-retro.json")), "a no-op retro (nothing committed) must NEVER advance the marker");
     const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
     assert.ok(ledgerLines.some((l) => l.step === "retro.no_op"), "the no-op path must be ledgered");
+  });
+});
+
+test("retroCommand: a stale lockless leftover worktree is force-removed by pruneStaleRuns before this run's own worktree is added", async (t) => {
+  const fx = setupFakeRetroFixture(t, { staleWorktree: true });
+  const stalePath = join(fx.root, "worktrees", "run-STALE-leftover");
+  assert.ok(fsDefault.existsSync(stalePath), "sanity: the stale worktree must exist BEFORE retroCommand runs");
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
+    assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
+    const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
+    assert.ok(marker.ts, "pruning a stale sibling worktree must never prevent THIS run's own marker advance");
+    assert.ok(!fsDefault.existsSync(stalePath), "the stale worktree must actually be gone -- pruneStaleRuns really ran, not just logged");
+    const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.ok(ledgerLines.some((l) => l.step === "worktree.prune"), "the prune must be ledgered");
   });
 });
