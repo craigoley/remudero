@@ -3525,8 +3525,17 @@ async function lintPlanCommand(rest: string[]): Promise<number> {
  * then state/last-retro.json advances. Generation (this) is separated from
  * publication (the gate + the human) [research].
  */
-async function retroCommand(rest: string[]): Promise<number> {
+async function retroCommand(
+  rest: string[],
+  opts: {
+    /** Injectable worker-spawn (mirrors {@link runTask}'s `opts.spawn`) — lets a test drive
+     *  the retro success path (through the atomic marker-advance, W1-T242) without a real
+     *  Architect spawn. Default: the real {@link spawnWorker}. */
+    spawn?: typeof spawnWorker;
+  } = {},
+): Promise<number> {
   const dryRun = rest.includes("--dry-run");
+  const spawn = opts.spawn ?? spawnWorker;
   const config = loadConfig();
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const markerPath = join(config.root, "state", "last-retro.json");
@@ -3652,7 +3661,7 @@ async function retroCommand(rest: string[]): Promise<number> {
 
   const prompt = retroPrompt(report, calibrationTable(gather.byType), runId);
   try {
-    const worker = await spawnWorker({
+    const worker = await spawn({
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
       settingsFile,
