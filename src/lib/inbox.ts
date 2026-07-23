@@ -877,6 +877,41 @@ export function updateProposalRegistry(
   }
 }
 
+// ── W1-T241: the ONE atomic-write helper for the daemon draft rung's cache PAIR ───────────
+//
+// buildInboxDraftHook (run-task.ts) used to write `state/inbox-drafts.json` and
+// `state/inbox-draft-attempts.json` (the two caches above) as two independent plain
+// `writeFileSync` calls — each individually torn-write-prone (a reader's `readFileSync`
+// landing mid the write observes a truncated/partial blob, the same hazard
+// {@link updateProposalRegistry}'s own header doc describes for the registry), and the PAIR
+// itself non-atomic: a crash between the two calls could leave one file reflecting this
+// poll's outcome while the other still reflects the previous one.
+//
+// {@link writeDraftAttemptPair} fixes both. Each file lands via a sibling temp file +
+// `renameSync` — the SAME idiom {@link updateProposalRegistry} uses above — so a reader never
+// observes anything but a complete, previous-OR-next file, never a torn one. The two renames
+// then commit in a FIXED, safe order: drafts before attempts. That order is what makes a
+// crash BETWEEN the two renames self-healing rather than wedging: the only one-sided state it
+// can land is a fresh draft cached with no matching attempts entry yet — {@link
+// proposalsNeedingDraft} sees that cached draft as no longer stale and simply stops selecting
+// the proposal, so nothing re-attempts it — never the reverse (an attempt recorded with no
+// draft to show for it, which would let {@link draftsDueOnDaemon} throttle that cause FOREVER
+// with nothing ever having landed — exactly the idempotence violation this task closes). A
+// FAILED-outcome proposal whose attempts entry is lost to the same crash window merely gets
+// re-attempted next poll — a redundant redraft, never a stall.
+export function writeDraftAttemptPair(draftsPath: string, attemptsPath: string, nextDrafts: DraftCache, nextAttempts: DraftAttemptCache): void {
+  const draftsTmpPath = `${draftsPath}.tmp-${process.pid}-${Date.now()}`;
+  const attemptsTmpPath = `${attemptsPath}.tmp-${process.pid}-${Date.now()}`;
+  // Both temp files are fully staged BEFORE either commits (see this section's header doc
+  // above). Every call here is a live `fs.` property lookup (never a destructured named
+  // import) so a test's `t.mock.method(fs, ...)` can intercept it — see this file's `import
+  // fs from "node:fs"` comment.
+  fs.writeFileSync(draftsTmpPath, JSON.stringify(nextDrafts, null, 2), "utf8");
+  fs.writeFileSync(attemptsTmpPath, JSON.stringify(nextAttempts, null, 2), "utf8");
+  fs.renameSync(draftsTmpPath, draftsPath);
+  fs.renameSync(attemptsTmpPath, attemptsPath);
+}
+
 /** Parse a {@link DraftCache} JSON blob; `{}` on missing/malformed input. */
 export function parseDraftCache(text: string | undefined): DraftCache {
   if (!text) return {};
