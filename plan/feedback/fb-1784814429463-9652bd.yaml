@@ -1,0 +1,36 @@
+id: fb-1784814429463-9652bd
+ts: 2026-07-23T13:47:09.463Z
+raw: "AMENDED FINDING — SWEEP DIRECT-MERGE WITHHOLD-BYPASS HYPOTHESIS REFUTED
+  (no fix warranted). Investigated 2026-07-23 the claim that #597's clean-status
+  direct-squash-merge path completes an unattributed PR without re-applying the
+  W1-T230 no-task-id withhold, using PR #632 (hand-class, no Remudero-Task
+  trailer) as the exhibit. REFUTED on both axes. (1) CODE: the direct-merge is
+  NOT a separate branch — it lives INSIDE armAutoMerge, in the catch of
+  deps.armAuto (src/run-task.ts:551-559), which is strictly DOWNSTREAM of the
+  no-task-id withhold that returns 'no-task-id' at src/run-task.ts:517-519
+  BEFORE any arm/merge. pr.taskId is trailer-only (taskIdFromBody,
+  run-task.ts:4937-4938, line-anchored Remudero-Task match, NO branch-name
+  fallback), so a trailerless PR yields undefined and armAutoMerge withholds
+  before it can reach the direct-merge. The sweep's arm dep
+  (run-task.ts:5200-5201) passes pr.taskId through, so the withhold DOES gate
+  completion for both arm and direct-merge. (2) ATTRIBUTION: #632's auto-merge
+  (enabledAt/mergedBy 2026-07-23T13:10:38Z, cao825) was a MANUAL operator-agent
+  arm (gh pr merge 632 --squash --auto) during the prior 4-PR remediation, AFTER
+  an Acceptance block was added and a review posted — NOT the sweep. Evidence:
+  (a) no DAEMON/sweep ledger activity in the 13:0x-13:15 window; (b) the sweep
+  only ever dispositioned #632 blocked-fixable acted=False ('required checks red
+  — ci-log fix'), never mergeable, never armed; (c)
+  automerge.clean_status_direct_merge has NEVER fired in any ledger; (d) audit
+  of all 10 merges since #597 deployed (11:27Z) found #632 the ONLY no-trailer
+  merge, and it was manual. RESIDUAL (benign, the actual root of the
+  misattribution): 'enabledBy cao825' does not distinguish a manual
+  operator-agent arm from a sweep arm (same token). A real, small improvement —
+  the sweep could ledger a distinct automerge.armed/clean_status_direct_merge
+  line naming the sweep run + PR at the arm site, so a hand-merged PR is never
+  mistaken for a swept one. This is an observability gap, not the asserted
+  withhold bypass. Pairs with fb-…d60042 (P41 merge-policy controls) as the
+  policy home for attested manual-merge exceptions."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

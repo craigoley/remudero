@@ -1,0 +1,13 @@
+id: fb-1784772988510-da3712
+ts: 2026-07-23T02:16:28.510Z
+raw: "CONSOLE URL VERB — no rmd command prints the console URL with its token;
+  the operator must extract state/service-tokens.json by hand. Need: rmd
+  console-url printing the read-token navigation URL for each bound interface
+  (loopback + the RMD_SERVE_HOST tailnet address), with the write token only
+  behind an explicit --write flag, and never logging tokens (serve.ts rotation
+  doctrine: any token reaching a log or transcript is compromised). Sibling of
+  the console UX arc, fb-1784770111145-cf7c24."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
