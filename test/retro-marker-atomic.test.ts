@@ -173,6 +173,28 @@ test(
   },
 );
 
+test("resolveMarkerForGather: a NON-MarkerCorruptError failure (e.g. a permissions error, not a parse failure) is rethrown, never silently reclassified", (t) => {
+  const dir = tmpDir();
+  const markerPath = join(dir, "last-retro.json");
+  const realReadFileSync = fsDefault.readFileSync.bind(fsDefault);
+  const eacces = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+  t.mock.method(fsDefault, "readFileSync", (target: unknown, ...rest: unknown[]) => {
+    if (target === markerPath) throw eacces;
+    return realReadFileSync(target as string, ...(rest as []));
+  });
+  assert.throws(() => resolveMarkerForGather(markerPath), (e: unknown) => e === eacces);
+});
+
+test("MarkerCorruptError: a non-Error cause (never actually thrown by JSON.parse, but the constructor must not assume one) still produces a readable message", () => {
+  // loadMarker's real catch always hands MarkerCorruptError a genuine SyntaxError (which
+  // has a .message), so this constructor's `(cause as Error)?.message ?? cause` fallback
+  // is unreachable through loadMarker itself -- exercised directly here instead.
+  const err = new MarkerCorruptError("/fixture/path/last-retro.json", "a raw string cause, not an Error instance");
+  assert.match(err.message, /a raw string cause, not an Error instance/);
+  assert.match(err.message, /\/fixture\/path\/last-retro\.json/);
+  assert.equal(err.markerPath, "/fixture/path/last-retro.json");
+});
+
 test(
   "claim 3: the genuine first-ever-retro path (marker truly absent) is unchanged -- " +
     "resolves to 'absent' with no error payload, and buildGather still scopes to the FULL run history",
