@@ -339,8 +339,15 @@ test("W1-T222: a read-only bookmark's inline card renders NO write affordance (M
           () => document.querySelector('#needs-me-list li[data-task-id="W1-T9"]')?.getAttribute("aria-expanded") === "true",
         );
         await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").length > 0);
-        // let any (wrongly-rendered) action button settle before checking for it.
-        await page.waitForTimeout(100);
+        // Let any (wrongly-rendered) action button settle before checking for it. Under
+        // `--experimental-test-coverage` the instrumented render is several times slower, and a
+        // 100ms fixed wait raced the button paint -- flaking THIS test only in the coverage job
+        // (never in `ci`) and intermittently blocking unrelated PRs. First wait for the card's
+        // action row to exist (deterministic), then a short settle for any late button paint.
+        await page.waitForFunction(
+          () => document.querySelector('#needs-me-list li[data-task-id="W1-T9"] .row-detail') !== null,
+        );
+        await page.waitForTimeout(600);
         return page.evaluate(
           () => Array.from(document.querySelectorAll(".row-detail button")).some((b) => b.textContent?.trim() === "Mark handled"),
         );
