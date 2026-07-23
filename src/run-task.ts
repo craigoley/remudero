@@ -67,12 +67,14 @@ import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issue
 import { loadManagedRepos, ManagedReposError } from "./lib/managed-repos.js";
 import {
   captureFeedback,
+  feedbackEntryPath,
   parseFeedbackAddArgs,
   readFeedbackEntry,
   setFeedbackStatus,
   FeedbackError,
   type FeedbackEntry,
 } from "./lib/feedback.js";
+import { findPendingLandingPr } from "./lib/feedback-landing.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
 import {
@@ -86,6 +88,7 @@ import { assertProposedPlanLoads,
   buildGrillEscalation,
   decideTriage,
   diffCitesFeedback,
+  missingFeedbackMessage,
   nonPlanFilesInDiff,
   parseTriageArgs,
   parseTriageVerdict,
@@ -6102,7 +6105,7 @@ export const TRIAGE_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "We
  * harness eats first" split `regenerateOrientation` established for the retro's docs write), so
  * the LLM can never skip the Acceptance:/Remudero-Task: contract or open a PR touching code.
  */
-async function triageCommand(rest: string[]): Promise<number> {
+export async function triageCommand(rest: string[]): Promise<number> {
   const parsed = parseTriageArgs(rest);
   if ("error" in parsed) {
     console.error(parsed.error + "\n" + USAGE);
@@ -6155,8 +6158,18 @@ async function triageCommand(rest: string[]): Promise<number> {
     try {
       entry = readFeedbackEntry(worktreePath, feedbackId);
     } catch (e) {
-      log("triage.error", { error: String((e as Error)?.message ?? e) });
-      say(`no such feedback entry: ${feedbackId}`);
+      // W1-T243: distinguish "captured locally but the durable-inbox commit bridge hasn't
+      // landed it on origin/main yet" from "genuinely no such id" — before this fix both
+      // printed the byte-identical "no such feedback entry: <id>", which read as a typo
+      // even when the entry was simply mid-flight to its landing PR.
+      const existsLocally = existsSync(feedbackEntryPath(repoRoot, feedbackId));
+      const landingPrUrl = existsLocally ? findPendingLandingPr() : undefined;
+      log("triage.error", {
+        error: String((e as Error)?.message ?? e),
+        pending_landing: existsLocally,
+        landing_pr: landingPrUrl ?? null,
+      });
+      say(missingFeedbackMessage(feedbackId, { existsLocally, landingPrUrl }));
       worktreeRemove(repoDir, worktreePath);
       return 2;
     }

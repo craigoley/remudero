@@ -67,6 +67,33 @@ export function parseTriageArgs(rest: string[]): ParsedTriageArgs | { error: str
   return { feedbackId: positionals[0] };
 }
 
+// ── The "no such feedback entry" message (W1-T243) ───────────────────────────
+
+/**
+ * Build `rmd triage`'s exit-2 message when `feedbackId` is absent from the fresh
+ * `origin/main` worktree it reads from. Before W1-T243 this printed the byte-identical
+ * "no such feedback entry: <id>" whether the id was a genuine typo OR simply not yet
+ * landed by the durable-inbox commit bridge (feedback-landing.ts) — indistinguishable and
+ * misleading, since a captured entry can sit locally for a while before its landing PR
+ * merges. Pure (no I/O) so the two branches are unit-testable without spawning `gh`;
+ * `triageCommand` (run-task.ts) supplies `existsLocally` (a plain `existsSync` check
+ * against `repoRoot`) and `landingPrUrl` (best-effort, via
+ * {@link "./feedback-landing.js".findPendingLandingPr}).
+ */
+export function missingFeedbackMessage(
+  feedbackId: string,
+  opts: { existsLocally: boolean; landingPrUrl?: string },
+): string {
+  if (!opts.existsLocally) return `no such feedback entry: ${feedbackId}`;
+  const where = opts.landingPrUrl
+    ? `pending landing PR ${opts.landingPrUrl}`
+    : "a pending landing (the durable-inbox commit bridge has not opened its PR yet)";
+  return (
+    `feedback#${feedbackId} exists locally but has not landed on origin/main yet — ${where}. ` +
+    `Re-run \`rmd triage ${feedbackId}\` once it merges.`
+  );
+}
+
 // ── The Architect prompt ─────────────────────────────────────────────────────
 
 /**
