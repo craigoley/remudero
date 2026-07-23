@@ -123,3 +123,14 @@ test("diff-coverage CLI: the comment carve-out rescues ONLY non-executable lines
   assert.notEqual(result.status, 0);
   assert.match(result.stderr.toString(), /src\/lib\/newmod\.ts:5/);
 });
+
+test("diff-coverage CLI: an ENTERED function's declaration line (FNDA>0 beside DA:0 — the source-map decl artifact) does NOT block; the closer-only `}` line is furniture", () => {
+  const result = runDiffCoverage("fnda-decl.lcov", "fnda-decl.diff");
+  assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+});
+
+test("diff-coverage CLI: an UNENTERED function (FNDA:0) still blocks on its uncovered body — FNDA-awareness rescues declarations, never dead code", () => {
+  const result = runDiffCoverage("fnda-uncalled.lcov", "fnda-decl.diff");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr.toString(), /src\/lib\/newfn\.ts:4/);
+});
