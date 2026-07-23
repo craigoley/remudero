@@ -1,0 +1,10 @@
+id: fb-alert-craigoley-remudero-code-scanning-11
+ts: 2026-07-21T17:40:35.321Z
+raw: |-
+  craigoley/remudero code-scanning alert #11 [low]: CII-Best-Practices
+
+  https://github.com/craigoley/remudero/security/code-scanning/11
+attachments: []
+origin: alert#code-scanning-11
+status: new
+proposal_pr: null

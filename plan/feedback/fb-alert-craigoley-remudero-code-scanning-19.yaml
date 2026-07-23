@@ -1,0 +1,12 @@
+id: fb-alert-craigoley-remudero-code-scanning-19
+ts: 2026-07-21T17:40:35.320Z
+raw: >-
+  craigoley/remudero code-scanning alert #19 [low]: Unused variable, import,
+  function or class
+
+
+  https://github.com/craigoley/remudero/security/code-scanning/19
+attachments: []
+origin: alert#code-scanning-19
+status: new
+proposal_pr: null

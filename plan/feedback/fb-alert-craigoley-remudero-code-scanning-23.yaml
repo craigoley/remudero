@@ -1,0 +1,12 @@
+id: fb-alert-craigoley-remudero-code-scanning-23
+ts: 2026-07-21T17:40:35.320Z
+raw: >-
+  craigoley/remudero code-scanning alert #23 [medium]: Useless assignment to
+  local variable
+
+
+  https://github.com/craigoley/remudero/security/code-scanning/23
+attachments: []
+origin: alert#code-scanning-23
+status: new
+proposal_pr: null

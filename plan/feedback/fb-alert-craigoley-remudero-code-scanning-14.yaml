@@ -1,0 +1,10 @@
+id: fb-alert-craigoley-remudero-code-scanning-14
+ts: 2026-07-21T17:40:35.321Z
+raw: |-
+  craigoley/remudero code-scanning alert #14 [medium]: Fuzzing
+
+  https://github.com/craigoley/remudero/security/code-scanning/14
+attachments: []
+origin: alert#code-scanning-14
+status: new
+proposal_pr: null

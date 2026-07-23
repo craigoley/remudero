@@ -1,0 +1,12 @@
+id: fb-alert-craigoley-remudero-code-scanning-60
+ts: 2026-07-21T17:40:35.319Z
+raw: >-
+  craigoley/remudero code-scanning alert #60 [high]: Potential file system race
+  condition
+
+
+  https://github.com/craigoley/remudero/security/code-scanning/60
+attachments: []
+origin: alert#code-scanning-60
+status: new
+proposal_pr: null
