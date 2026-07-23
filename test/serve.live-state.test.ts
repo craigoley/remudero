@@ -670,3 +670,123 @@ test("W1-T182: clicking 'Mark handled' closes the issue via the real route, and 
     }
   });
 });
+
+// ── W1-T200 SKELETON LIFECYCLE (rule-21 follow-up to the merged W1-T154, retested here rather
+// than as an amendment per standing rule 21): a section is in exactly one of PRE-FIRST-DATA
+// (skeleton), HAS-DATA (exactly the rows), or HAS-DATA-EMPTY (an honest empty message) — never
+// skeleton markup coexisting with either. FALSIFIER, operator screenshots 2026-07-21 04:52: NOW,
+// NEEDS ME and RECENT each rendered real rows sitting ABOVE perpetually-animating skeleton
+// placeholders left over from the very first paint. NOTE: GET /v1/status/stream primes its own
+// "last known" baseline silently on connect (board.ts's buildStatusStream) and sends nothing
+// until a LATER ledger append — so the very first data a client ever paints comes from the GET
+// /v1/status poll alone, making that poll's response the one seam to hold open below.
+const SKELETON_SECTIONS = [
+  { list: "now-list", emptyText: "nothing in flight" },
+  { list: "needs-me-list", emptyText: "nothing needs you right now" },
+  { list: "recent-list", emptyText: "no recent activity yet" },
+];
+
+test("skeleton lifecycle: NOW/NEEDS ME/RECENT show ONLY their first-paint skeleton before the first poll resolves, and the skeleton is fully gone (zero nodes) once real data lands -- never both at once, in either the has-data or has-data-empty outcome", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })]);
+  appendFileSync(deps.board.ledgerPath, runStart("W1-T1")); // NOW gets real data; NEEDS ME/RECENT stay empty
+  await withShell(deps, async (base) => {
+    const context = await browser.newContext();
+    let releaseFirstPoll = () => {};
+    const firstPollHeld = new Promise<void>((resolve) => (releaseFirstPoll = resolve));
+    let firstRequestSeen = false;
+    await context.route("**/v1/status", async (route) => {
+      if (!firstRequestSeen) {
+        firstRequestSeen = true;
+        await firstPollHeld; // hold the FIRST poll response open so the pre-data DOM is inspectable
+      }
+      await route.continue();
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(`${base}/?token=${READ_TOKEN}`);
+
+      // PRE-FIRST-DATA: the static skeleton the shell ships in its initial HTML, and ONLY that --
+      // no data-key rows, no empty-state message, in any of the three sections yet.
+      const preData = await page.evaluate(
+        (sections) =>
+          sections.map(({ list }) => {
+            const el = document.getElementById(list)!;
+            return {
+              list,
+              skeletons: el.querySelectorAll(".skeleton, .skeleton-bar").length,
+              dataRows: el.querySelectorAll("li[data-key]").length,
+              emptyMarkers: el.querySelectorAll("li.empty").length,
+            };
+          }),
+        SKELETON_SECTIONS,
+      );
+      for (const s of preData) {
+        assert.ok(s.skeletons > 0, `${s.list} must show its skeleton before the first poll resolves`);
+        assert.equal(s.dataRows, 0, `${s.list} must not show data rows before the first poll resolves`);
+        assert.equal(s.emptyMarkers, 0, `${s.list} must not show the empty-state message before the first poll resolves`);
+      }
+
+      releaseFirstPoll();
+      await page.waitForFunction(() => (document.querySelector("#now-list .detail")?.textContent ?? "").includes("phase: recon"));
+      await page.waitForFunction(() => (document.getElementById("needs-me-list")?.textContent ?? "").includes("nothing needs you"));
+      await page.waitForFunction(() => (document.getElementById("recent-list")?.textContent ?? "").includes("no recent activity"));
+
+      // POST-FIRST-DATA: zero skeleton nodes remain, in EITHER the has-data (NOW) or the
+      // has-data-empty (NEEDS ME, RECENT) outcome -- and the section is EXACTLY one or the other,
+      // never both a real/empty marker AND a leftover skeleton.
+      const postData = await page.evaluate(
+        (sections) =>
+          sections.map(({ list, emptyText }) => {
+            const el = document.getElementById(list)!;
+            return {
+              list,
+              skeletons: el.querySelectorAll(".skeleton, .skeleton-bar").length,
+              children: el.children.length,
+              isHonestEmpty: el.children.length === 1 && el.firstElementChild?.classList.contains("empty") && el.firstElementChild?.textContent === emptyText,
+              hasDataRow: el.querySelectorAll("li[data-key]").length,
+            };
+          }),
+        SKELETON_SECTIONS,
+      );
+      const [now, needsMe, recent] = postData;
+      for (const s of postData) {
+        assert.equal(s.skeletons, 0, `${s.list} must have ZERO skeleton nodes once its first successful render lands`);
+      }
+      assert.equal(now.hasDataRow, 1, "NOW received real data -- exactly one data row, no skeleton, no empty marker");
+      assert.equal(now.children, 1, "NOW's list must contain ONLY the one real row -- no residual skeleton siblings");
+      assert.ok(needsMe.isHonestEmpty, "NEEDS ME's empty successful result must render the honest empty message, not a skeleton");
+      assert.ok(recent.isHonestEmpty, "RECENT's empty successful result must render the honest empty message, not a skeleton");
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+test("skeleton lifecycle: an EMPTY successful poll (no in-flight tasks, no escalations, no recent activity) renders the honest empty message in every section, never a leftover skeleton", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })]); // queued, never started -- no ledger activity at all
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      const state = await page.evaluate(
+        (sections) =>
+          sections.map(({ list, emptyText }) => {
+            const el = document.getElementById(list)!;
+            return {
+              list,
+              skeletons: el.querySelectorAll(".skeleton, .skeleton-bar").length,
+              isHonestEmpty: el.children.length === 1 && el.firstElementChild?.classList.contains("empty") && el.firstElementChild?.textContent === emptyText,
+            };
+          }),
+        SKELETON_SECTIONS,
+      );
+      for (const s of state) {
+        assert.equal(s.skeletons, 0, `${s.list} must have zero skeleton nodes once its (empty) first successful render lands`);
+        assert.ok(s.isHonestEmpty, `${s.list} must render its honest empty message, not fall back to skeletons`);
+      }
+    } finally {
+      await context.close();
+    }
+  });
+});
