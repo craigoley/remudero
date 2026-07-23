@@ -7751,9 +7751,9 @@
     outcome drives add-work-or-escalate, and a worker-run diff writing plan/tasks.yaml is refused/flagged."
   acceptance:
     - claim: "a seeded blocked_review outcome drives the ADD-WORK-OR-ESCALATE path with NO tasks.yaml write from the worker"
-      proof: "fixture test: a seeded blocked_review verdict routes to add-the-work or escalate; the run makes NO write to plan/tasks.yaml (assert the path taken + the absence of a tasks.yaml diff)"
+      proof: "unit test: runFixRung (W1-T58 acceptance 1)"
     - claim: "a worker-run diff that EDITS acceptance criteria (writes plan/tasks.yaml) is refused/flagged (rule 15)"
-      proof: "fixture: a planted worker diff that edits a criterion in plan/tasks.yaml is flagged (the rule-15 guard fires); a clean non-tasks.yaml diff passes"
+      proof: "unit test: a planted worker diff that EDITS an existing criterion FAILS"
   risk: high
   origin: retro#1784058021334
   plan_refs: ["§5"]

@@ -346,15 +346,11 @@ test("W1-T222: a read-only bookmark's inline card renders NO write affordance (M
           () => document.querySelector('#needs-me-list li[data-task-id="W1-T9"]')?.getAttribute("aria-expanded") === "true",
         );
         await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").length > 0);
-        // W1-T163 CI fix: MUST be `return await`, not a bare `return`, despite the usual
-        // no-return-await guidance -- the `finally` below closes the context, and a bare `return
-        // page.evaluate(...)` hands back an UNSETTLED promise that only gets chained onto this
-        // function's own return value AFTER `finally` runs. That races page.evaluate's in-flight
-        // CDP round-trip against page.context().close(): the close wins, aborting the evaluate
-        // with "Target page, context or browser has been closed", and because the rejection
-        // attaches to the outer promise on a LATER microtask than V8 first observes it, node:test
-        // logs it as an `unhandledRejection` failure instead of a normal awaited rejection.
-        // Awaiting it HERE settles it inside the `try`, before `finally` ever closes anything.
+        // TEARDOWN RACE FIX: `return await`, not a bare `return page.evaluate(...)`. Without the
+        // await, this try block returns the pending evaluate PROMISE, so the `finally` closes the
+        // context BEFORE the evaluate settles -> "Target page ... has been closed", intermittently
+        // (worse under CI/coverage load) failing this test and false-reddening unrelated PRs (#632,
+        // #645). The await makes the finally wait for the evaluate to resolve first.
         return await page.evaluate(
           () => Array.from(document.querySelectorAll(".row-detail button")).some((b) => b.textContent?.trim() === "Mark handled"),
         );
