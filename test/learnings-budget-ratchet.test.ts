@@ -71,6 +71,13 @@ test("learnings-budget-ratchet CLI: a QUARANTINED entry contributes ZERO chars -
   assert.match(result.stdout, /1 active \/ 2 total entries/);
 });
 
+test("learnings-budget-ratchet CLI: a CONTESTED entry (W1-T88/P14) contributes ZERO chars -- passes the same tight cap", () => {
+  const result = run("lifecycle-contested", "tight-baseline.json");
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /active corpus 41 chars \(cap 41 chars\)/);
+  assert.match(result.stdout, /1 active \/ 2 total entries/);
+});
+
 test("learnings-budget-ratchet CLI: the COUNTERFACTUAL -- the identical beta bytes, but ACTIVE -- blows the same cap the superseded/quarantined fixtures passed", () => {
   const result = run("lifecycle-both-active", "tight-baseline.json");
   assert.notEqual(result.status, 0, result.stdout + result.stderr);
@@ -127,7 +134,7 @@ test("an entry missing the required 'fact' field is rejected", () => {
 test("an entry with an invalid 'lifecycle' value is rejected", () => {
   const result = run("malformed-invalid-lifecycle", "under-baseline.json");
   assert.notEqual(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stderr, /'lifecycle' must be 'active', 'superseded', or 'quarantined'/);
+  assert.match(result.stderr, /'lifecycle' must be 'active', 'superseded', 'quarantined', or 'contested'/);
 });
 
 test("a missing corpus directory is zero entries, not an error", () => {

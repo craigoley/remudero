@@ -3,15 +3,20 @@ import { test } from "node:test";
 import {
   aggregateByClass,
   aggregateByType,
+  applyContestedLifecycle,
+  applyContradictionResolution,
   assertArchitectAboveWorker,
   buildGather,
   calibrationTable,
   classCalibrationTable,
   codeFilesInDiff,
+  contradictionQuestion,
   DEGRADED_SUCCESS_SIGNALS,
   extractStandingRules,
   fixDispatchCountByRun,
+  flagContradictions,
   gatherRuns,
+  keyContradictionCandidates,
   mergedSince,
   mineDegradedSuccess,
   mineOverrunClasses,
@@ -21,6 +26,7 @@ import {
   phraseProceduralCandidate,
   planHealthSweep,
   PROCEDURAL_SUCCESS_SIGNALS,
+  renderContradictions,
   renderDegradedSuccess,
   renderGather,
   renderOrientation,
@@ -30,6 +36,7 @@ import {
   shippedSince,
   tierOf,
   verdictDistribution,
+  type ContradictionCandidatePair,
   type DegradedSuccessSignal,
   type ProceduralCandidate,
   type RunSummary,
@@ -694,6 +701,164 @@ test("PROCEDURAL_SUCCESS_SIGNALS: shipped signal set names 'clean_single_strike'
     PROCEDURAL_SUCCESS_SIGNALS.map((s) => s.key),
     ["clean_single_strike", "fully_executed_proof"],
   );
+});
+
+// ── Consolidation contradiction detection (W1-T88, ratifies P14, extends W1-T33) ──
+
+const BUDGET_A: LearningEntry = {
+  id: "budget-dollar-ceiling",
+  subsystem: "budget",
+  lifecycle: "active",
+  files: ["src/lib/inbox.ts"],
+  fact: "Unattended-window budget is a per-window dollar ceiling.",
+  src: "P34 round 1",
+};
+
+const BUDGET_B: LearningEntry = {
+  id: "budget-subscription-headroom",
+  subsystem: "budget",
+  lifecycle: "active",
+  files: ["src/lib/inbox.ts"],
+  fact: "Unattended-window budget is subscription headroom, never a dollar ceiling.",
+  src: "P34 round 3",
+};
+
+/** A deterministic "opposing" stub judge — flags exactly the two named ids, nothing else. */
+function opposingJudge(idA: string, idB: string) {
+  return {
+    judge: (pair: ContradictionCandidatePair): { opposing: boolean; reasoning?: string } => {
+      const ids = [pair.a.id, pair.b.id].sort();
+      const expected = [idA, idB].sort();
+      return ids[0] === expected[0] && ids[1] === expected[1]
+        ? { opposing: true, reasoning: "mutually-exclusive budget models" }
+        : { opposing: false };
+    },
+  };
+}
+
+test("keyContradictionCandidates: two active entries sharing subsystem + a files glob pair up; a third with no shared glob does not", () => {
+  const unrelated: LearningEntry = {
+    id: "unrelated",
+    subsystem: "budget",
+    lifecycle: "active",
+    files: ["src/lib/other.ts"],
+    fact: "Something else entirely.",
+    src: "PR#1",
+  };
+  const pairs = keyContradictionCandidates([BUDGET_A, BUDGET_B, unrelated]);
+  assert.equal(pairs.length, 1);
+  assert.equal(pairs[0].key, "budget:src/lib/inbox.ts");
+  assert.deepEqual([pairs[0].a.id, pairs[0].b.id].sort(), ["budget-dollar-ceiling", "budget-subscription-headroom"]);
+});
+
+test("keyContradictionCandidates: different subsystems never pair, even with identical files globs", () => {
+  const otherSubsystem: LearningEntry = { ...BUDGET_B, id: "ci-fact", subsystem: "ci" };
+  assert.deepEqual(keyContradictionCandidates([BUDGET_A, otherSubsystem]), []);
+});
+
+test("keyContradictionCandidates: a superseded/quarantined/contested entry is never re-proposed as a candidate", () => {
+  const decided: LearningEntry = { ...BUDGET_B, lifecycle: "superseded", supersededBy: BUDGET_A.id };
+  assert.deepEqual(keyContradictionCandidates([BUDGET_A, decided]), []);
+});
+
+test("ACCEPTANCE: a seeded contradicting pair is marked contested, excluded from injection, and surfaced as a decidable question", async () => {
+  const pairs = keyContradictionCandidates([BUDGET_A, BUDGET_B]);
+  const findings = await flagContradictions(pairs, opposingJudge(BUDGET_A.id, BUDGET_B.id));
+  assert.equal(findings.length, 1);
+
+  const updated = applyContestedLifecycle([BUDGET_A, BUDGET_B], findings);
+  const a = updated.find((e) => e.id === BUDGET_A.id)!;
+  const b = updated.find((e) => e.id === BUDGET_B.id)!;
+  assert.equal(a.lifecycle, "contested");
+  assert.equal(b.lifecycle, "contested");
+  assert.equal(a.contestedWith, BUDGET_B.id);
+  assert.equal(b.contestedWith, BUDGET_A.id);
+
+  // the matcher (learnings.ts's selectLearnings) skips BOTH contested entries
+  const { selected } = selectLearnings(updated, ["src/lib/inbox.ts"]);
+  assert.deepEqual(selected, []);
+
+  // the retro report carries BOTH texts
+  const report = renderContradictions(findings);
+  assert.match(report, /CONTESTED/);
+  assert.match(report, new RegExp(BUDGET_A.fact.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(report, new RegExp(BUDGET_B.fact.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  // the question carries both texts and names the decision ("which governs?")
+  const question = contradictionQuestion(findings[0], "2026-07-23T00:00:00.000Z");
+  assert.equal(question.task, "retro");
+  assert.match(question.question, /which governs\?/);
+  assert.match(question.question, new RegExp(BUDGET_A.fact.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(question.question, new RegExp(BUDGET_B.fact.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("ACCEPTANCE: a refining (non-opposing) newer learning supersedes exactly as today — no contested flag", async () => {
+  const pairs = keyContradictionCandidates([BUDGET_A, BUDGET_B]);
+  // the judge sees the pair but finds it a REFINEMENT, not a contradiction
+  const findings = await flagContradictions(pairs, { judge: () => ({ opposing: false }) });
+  assert.deepEqual(findings, []);
+
+  const updated = applyContestedLifecycle([BUDGET_A, BUDGET_B], findings);
+  assert.deepEqual(updated, [BUDGET_A, BUDGET_B], "nothing is flipped when the judge finds no opposition");
+
+  // ordinary recency-overwrite (a human/Architect marking the elder superseded) is untouched
+  const recencySuperseded: LearningEntry[] = [BUDGET_A, { ...BUDGET_B, lifecycle: "superseded", supersededBy: BUDGET_A.id }];
+  const { selected } = selectLearnings(recencySuperseded, ["src/lib/inbox.ts"]);
+  assert.deepEqual(selected.map((e) => e.id), [BUDGET_A.id]);
+});
+
+test("ACCEPTANCE: resolution is Architect-authored and ledgered — re-admits the winner, marks the loser superseded, and no code path auto-resolves", async () => {
+  const pairs = keyContradictionCandidates([BUDGET_A, BUDGET_B]);
+  const findings = await flagContradictions(pairs, opposingJudge(BUDGET_A.id, BUDGET_B.id));
+  const contested = applyContestedLifecycle([BUDGET_A, BUDGET_B], findings);
+
+  const ledgerLines: Array<{ path: string; line: Record<string, unknown> }> = [];
+  const resolved = applyContradictionResolution(
+    contested,
+    { activeId: BUDGET_B.id, supersededId: BUDGET_A.id, by: "architect", reason: "P34 round 3 ratified" },
+    {
+      ledgerPath: "/tmp/fixture-ledger.ndjson",
+      writeLedger: (path, line) => {
+        ledgerLines.push({ path, line: line as Record<string, unknown> });
+      },
+    },
+  );
+
+  const winner = resolved.find((e) => e.id === BUDGET_B.id)!;
+  const loser = resolved.find((e) => e.id === BUDGET_A.id)!;
+  assert.equal(winner.lifecycle, "active", "the named winner is re-admitted to injection");
+  assert.equal(winner.contestedWith, undefined);
+  assert.equal(loser.lifecycle, "superseded");
+  assert.equal(loser.supersededBy, BUDGET_B.id);
+  assert.equal(loser.contestedWith, undefined);
+
+  // re-admitted: the matcher selects the winner again, never the loser
+  const { selected } = selectLearnings(resolved, ["src/lib/inbox.ts"]);
+  assert.deepEqual(selected.map((e) => e.id), [BUDGET_B.id]);
+
+  // the resolution is ledgered
+  assert.equal(ledgerLines.length, 1);
+  assert.equal(ledgerLines[0].path, "/tmp/fixture-ledger.ndjson");
+  assert.equal(ledgerLines[0].line.step, "contradiction.resolved");
+  assert.equal(ledgerLines[0].line.active_id, BUDGET_B.id);
+  assert.equal(ledgerLines[0].line.superseded_id, BUDGET_A.id);
+  assert.equal(ledgerLines[0].line.by, "architect");
+});
+
+test("flagContradictions: judge receives ONLY the candidate pair — never the whole corpus, never sibling pairs", async () => {
+  const received: ContradictionCandidatePair[] = [];
+  const pairs = keyContradictionCandidates([BUDGET_A, BUDGET_B]);
+  await flagContradictions(pairs, {
+    judge: (pair) => {
+      received.push(pair);
+      return { opposing: false };
+    },
+  });
+  assert.deepEqual(received, pairs);
+});
+
+test("renderContradictions: reports 'no contradicting pair' when nothing was found", () => {
+  assert.match(renderContradictions([]), /No contradicting pair found/);
 });
 
 // ── docs/ORIENTATION.md (W1-T39) ───────────────────────────────────────────

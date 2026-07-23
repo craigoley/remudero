@@ -36,7 +36,11 @@ import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-const VALID_LIFECYCLES = new Set(["active", "superseded", "quarantined"]);
+// W1-T88/P14: "contested" is a fourth valid lifecycle (a consolidation-detected
+// contradiction) -- accepted here so a real corpus carrying one never crashes this script;
+// planMutations below treats it like "superseded" (settled elsewhere, nothing to verify --
+// see the skip below).
+const VALID_LIFECYCLES = new Set(["active", "superseded", "quarantined", "contested"]);
 
 /**
  * Parse one shard YAML file into the fields this script needs (id, lifecycle, assertion,
@@ -135,9 +139,11 @@ export function restoreEntryInText(text, id) {
 
 /**
  * Run every assertion in every `*.yaml` shard under `dir` and plan the mutations needed to make
- * the committed corpus match a fresh re-verification. `superseded` entries and entries with no
- * `assertion` are never evaluated (nothing to verify, nothing to plan). `assertionCwd` is the
- * directory assertions execute from (repo root in real use; a fixture dir in tests).
+ * the committed corpus match a fresh re-verification. `superseded` and `contested` (W1-T88/P14 --
+ * a consolidation-detected contradiction, resolved ONLY by an Architect-authored decision, never
+ * by this script) entries and entries with no `assertion` are never evaluated (nothing to verify,
+ * nothing to plan). `assertionCwd` is the directory assertions execute from (repo root in real
+ * use; a fixture dir in tests).
  */
 export function planMutations(dir, assertionCwd) {
   const filenames = readdirSync(dir)
@@ -149,7 +155,7 @@ export function planMutations(dir, assertionCwd) {
     const path = join(dir, filename);
     const entries = loadShardEntries(path);
     for (const entry of entries) {
-      if (!entry.assertion || entry.lifecycle === "superseded") continue;
+      if (!entry.assertion || entry.lifecycle === "superseded" || entry.lifecycle === "contested") continue;
       const verdict = runAssertion(entry.assertion, assertionCwd);
       results.push({ filename, id: entry.id, assertion: entry.assertion, lifecycle: entry.lifecycle, verdict });
       if (entry.lifecycle === "active" && !verdict.ok) {

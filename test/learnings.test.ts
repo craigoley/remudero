@@ -282,7 +282,7 @@ test("a bare entry (no lifecycle:) defaults to active", () => {
 
 test("loadLearnings rejects an invalid lifecycle value", () => {
   const path = writeCorpus("- id: bad\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  lifecycle: retired\n");
-  assert.throws(() => loadLearnings(path), /'lifecycle' must be 'active', 'superseded', or 'quarantined'/);
+  assert.throws(() => loadLearnings(path), /'lifecycle' must be 'active', 'superseded', 'quarantined', or 'contested'/);
 });
 
 // ── operator_impact (W1-T50): a failures entry obligating a troubleshooting entry ──
@@ -342,6 +342,50 @@ test("loadLearnings accepts lifecycle: quarantined with a quarantined_reason", (
   const [entry] = loadLearnings(path);
   assert.equal(entry.lifecycle, "quarantined");
   assert.equal(entry.quarantinedReason, "assertion failed");
+});
+
+// ── CONTRADICTION DETECTION (W1-T88, ratifies P14, extends W1-T33) ─────────
+
+test("loadLearnings rejects contested_with set without lifecycle: contested", () => {
+  const path = writeCorpus(
+    "- id: bad\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  contested_with: other\n",
+  );
+  assert.throws(() => loadLearnings(path), /'contested_with' is set but 'lifecycle' is not 'contested'/);
+});
+
+test("loadLearnings accepts lifecycle: contested with a contested_with partner id", () => {
+  const path = writeCorpus(
+    "- id: c\n  files: [a.ts]\n  fact: a fact\n  src: PR#1\n  lifecycle: contested\n  contested_with: other\n",
+  );
+  const [entry] = loadLearnings(path);
+  assert.equal(entry.lifecycle, "contested");
+  assert.equal(entry.contestedWith, "other");
+});
+
+test("CONTRADICTION: a contested entry is NEVER selected, even when its files: match exactly — excluded exactly like superseded/quarantined", () => {
+  const entries: LearningEntry[] = [
+    {
+      id: "fact-a",
+      subsystem: "budget",
+      lifecycle: "contested",
+      contestedWith: "fact-b",
+      files: ["src/lib/x.ts"],
+      fact: "Budget is metered in dollars per unattended window.",
+      src: "P34 round 1",
+    },
+    {
+      id: "fact-b",
+      subsystem: "budget",
+      lifecycle: "contested",
+      contestedWith: "fact-a",
+      files: ["src/lib/x.ts"],
+      fact: "Budget is subscription headroom, never a dollar ceiling.",
+      src: "P34 round 3",
+    },
+  ];
+  const { selected, dropped } = selectLearnings(entries, ["src/lib/x.ts"]);
+  assert.deepEqual(selected, [], "neither half of a contested pair is ever selected");
+  assert.deepEqual(dropped, [], "contested is filtered before ranking, not dropped for budget");
 });
 
 test("QUARANTINE: a quarantined entry is NEVER selected, even when its files: match exactly (acceptance §2)", () => {

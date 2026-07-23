@@ -12,11 +12,12 @@
 // and names the overage; a healthy PR (at or under cap) exits clean. Raising the cap is a
 // deliberate, reviewed change (like the coverage floor) -- never lower it to make a red PR pass.
 //
-// SUPERSEDED / QUARANTINED entries do NOT count: `lifecycle` != "active" means
+// SUPERSEDED / QUARANTINED / CONTESTED entries do NOT count: `lifecycle` != "active" means
 // src/lib/learnings.ts's `selectLearnings` never injects it (W1-T33 supersession / W1-T34
-// quarantine), so it carries zero context-tax weight and this ratchet excludes it from the sum --
-// only INJECTABLE weight is capped, not the corpus's raw byte size (a superseded entry is kept for
-// provenance, not context; see learnings/platform.yaml's header for the full lifecycle contract).
+// quarantine / W1-T88 contradiction-detected contest), so it carries zero context-tax weight and
+// this ratchet excludes it from the sum -- only INJECTABLE weight is capped, not the corpus's raw
+// byte size (a superseded/contested entry is kept for provenance, not context; see
+// learnings/platform.yaml's header for the full lifecycle contract).
 //
 // This script is deliberately self-contained (no import from src/lib/learnings.ts, which is
 // TypeScript and outside plain `node scripts/*.mjs` execution -- same convention as
@@ -40,7 +41,11 @@ import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-const VALID_LIFECYCLES = new Set(["active", "superseded", "quarantined"]);
+// W1-T88/P14: "contested" is a fourth valid lifecycle (a consolidation-detected
+// contradiction, excluded from injection exactly like superseded/quarantined until an
+// Architect resolves it) -- accepted here so a real corpus carrying one never crashes
+// this gate; computeActiveChars below already excludes anything != "active" from the sum.
+const VALID_LIFECYCLES = new Set(["active", "superseded", "quarantined", "contested"]);
 
 /**
  * Parse one shard YAML file into the fields this gate needs (id, lifecycle, fact) -- intentionally
@@ -68,7 +73,7 @@ export function loadShardEntries(path) {
     const lifecycle = entry.lifecycle ?? "active";
     if (!VALID_LIFECYCLES.has(lifecycle)) {
       throw new Error(
-        `learnings-budget-ratchet: ${path} entry '${entry.id}': 'lifecycle' must be 'active', 'superseded', or 'quarantined', got ${JSON.stringify(entry.lifecycle)}`,
+        `learnings-budget-ratchet: ${path} entry '${entry.id}': 'lifecycle' must be 'active', 'superseded', 'quarantined', or 'contested', got ${JSON.stringify(entry.lifecycle)}`,
       );
     }
     return { id: entry.id, fact: entry.fact, lifecycle };
