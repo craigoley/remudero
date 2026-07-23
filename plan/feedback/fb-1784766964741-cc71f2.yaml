@@ -1,0 +1,16 @@
+id: fb-1784766964741-cc71f2
+ts: 2026-07-23T00:36:04.741Z
+raw: "INBOX DRAFT RUNG NEEDS RULE-19 SELF-LINT — the P34 draft minted W1-T247
+  spanning (mounts, retro) at risk:medium, failing the plan's own sizing rule at
+  classification time; the draft rung authors tasks with no self-lint pass, the
+  same gap filed for triage in fb-1784758109019-52830d. Need: the draft worker
+  runs rmd lint-plan on its fragment and resolves Rule 19 (decompose
+  per-subsystem with a depends_on spine, or re-risk to high with written
+  rationale — the merits test is whether acceptance asserts a cross-file
+  invariant unsatisfiable piecewise, per the #588 precedent) BEFORE the fragment
+  is cached, so a fired proposal can reach READY without an operator cleanup
+  pass."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
