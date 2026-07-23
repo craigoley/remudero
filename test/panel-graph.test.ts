@@ -13,6 +13,7 @@ import {
   buildProposalDecisionRoute,
   buildSubmitFeedbackRoute,
   buildTraceRoute,
+  draftedTaskSummaries,
   ratifyCliGateway,
   type PanelGraphDeps,
   type RatifyCliGateway,
@@ -818,6 +819,16 @@ test("GET /v1/inbox: a READY item's draftedTasks carry each drafted task's REAL 
   });
 });
 
+// draftedTaskSummaries backs the READY-item rendering above; its catch branch is
+// defense-in-depth (see the function's own doc: a READY classification's fragment has ALREADY
+// passed classifyProposal's own parse+lint checks, so the HTTP route above never reaches it in
+// practice) — proven directly here rather than contorting a real /v1/inbox request into
+// reaching an unreachable-by-design branch.
+test("draftedTaskSummaries: a fragment that fails to re-parse (PlanError) yields [] rather than throwing — defense-in-depth, never trusting two derivations of the same text to agree forever", () => {
+  assert.deepEqual(draftedTaskSummaries("not a valid task list", "P900"), []);
+  assert.deepEqual(draftedTaskSummaries("- id: DUP\n  title: a\n- id: DUP\n  title: b\n", "P900"), []);
+});
+
 test("GET /v1/inbox: a proposal with an in-flight draft (state/inbox-draft-inflight.json) renders under `drafting`, carrying its spawn timestamp, and NEVER under `ready` (acceptance 5)", async () => {
   const root = tmpRoot();
   const planPath = emptyPlanPath(root);
@@ -977,6 +988,28 @@ test("ratifyCliGateway: a REAL detached spawn of <repoRoot>/bin/rmd with the exa
   const logFiles = readdirSync(logDir);
   assert.equal(logFiles.length, 1);
   assert.match(logFiles[0], /^reframe-P900-\d+\.log$/);
+});
+
+test("ratifyCliGateway.approve: the SAME real detached bin/rmd spawn, distinct CLI args from reframe's (`approve <id>`, no --feedback)", async () => {
+  const root = tmpRoot();
+  mkdirSync(join(root, "bin"), { recursive: true });
+  const markerPath = join(root, "marker.txt");
+  writeFileSync(join(root, "bin", "rmd"), `#!/usr/bin/env bash\necho "$@" > "${markerPath}"\n`, { mode: 0o755 });
+  const logDir = join(root, "state", "logs");
+
+  const gateway = ratifyCliGateway(root, logDir);
+  gateway.approve("P901");
+
+  const deadline = Date.now() + 5000;
+  while (!existsSync(markerPath) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.ok(existsSync(markerPath), "the real bin/rmd script must actually have been spawned");
+  assert.match(readFileSync(markerPath, "utf8"), /^approve P901$/m);
+
+  const logFiles = readdirSync(logDir);
+  assert.equal(logFiles.length, 1);
+  assert.match(logFiles[0], /^approve-P901-\d+\.log$/);
 });
 
 // bearerTokenId parity check (never the raw secret leaked as ledger origin).

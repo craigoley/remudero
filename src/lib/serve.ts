@@ -52,7 +52,7 @@ import {
   type IssueCloser,
   type PanelActionDeps,
 } from "./panel-actions.js";
-import { buildPanelGraphRoutes, type PanelGraphDeps } from "./panel-graph.js";
+import { buildPanelGraphRoutes, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
 import { buildTaskCardRoute } from "./task-card.js";
 
 /** Default `rmd serve` port — matches apps/dashboard/src/main.ts's own `?daemon=` default (`http://localhost:4317`), so the shipped dashboard points at a served daemon out of the box. */
@@ -66,8 +66,15 @@ export interface ServeDeps {
    * itself (= `fleetControlRoot`, config.root) the SAME way it already splits `fleetControlRoot`
    * vs `questionsRoot` for panel-actions.ts, so a `ServeDeps` caller names each root exactly
    * once, never a duplicate that could drift from `fleetControlRoot`.
+   *
+   * `ratify` is likewise OPTIONAL here (W1-T193): {@link buildServeRoutes} defaults it to a REAL
+   * {@link ratifyCliGateway} rooted at `panelGraph.root` + `<fleetControlRoot>/state/logs` when
+   * the caller doesn't supply one — the same "the assembler wires the real gateway, a test
+   * injects a fake" split `inboxRoot` above already follows, so `rmd serve`'s own CLI wiring
+   * (run-task.ts's `serveCommand`) never has to construct this gateway itself, and a test can
+   * still inject a fake by supplying `ratify` explicitly.
    */
-  panelGraph: Omit<PanelGraphDeps, "inboxRoot">;
+  panelGraph: Omit<PanelGraphDeps, "inboxRoot" | "ratify"> & { ratify?: PanelGraphDeps["ratify"] };
   /** `<root>/state/ledger.ndjson` — SAME path board.ts tails and every panel route ledgers into. */
   ledgerPath: string;
   /** `gh issue close` gateway shared by every panel-actions write route that needs it. */
@@ -2058,7 +2065,14 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
   // panel-graph's GET /v1/inbox needs config.root (inbox-proposals.json/inbox-drafts.json live
   // under state/, same as fleet-control's own flags) -- `fleetControlRoot` IS config.root
   // (module header), so it is the same root, never a THIRD independently-resolved path.
-  const panelGraphDeps = { ...deps.panelGraph, inboxRoot: deps.fleetControlRoot };
+  // W1-T193: `ratify` defaults to a REAL ratifyCliGateway (see ServeDeps.panelGraph's own doc)
+  // when the caller doesn't inject one -- rmd serve's own CLI wiring relies on this default;
+  // a test supplies `ratify` explicitly to inject a fake instead.
+  const panelGraphDeps = {
+    ...deps.panelGraph,
+    inboxRoot: deps.fleetControlRoot,
+    ratify: deps.panelGraph.ratify ?? ratifyCliGateway(deps.panelGraph.root, join(deps.fleetControlRoot, "state", "logs")),
+  };
 
   return [
     buildStatusRoute(deps.board),

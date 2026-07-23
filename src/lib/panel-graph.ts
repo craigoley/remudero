@@ -420,13 +420,14 @@ export interface InboxDraftingItem {
  *  passed classifyProposal's own parse+lint checks (a fragment that failed either would have
  *  classified not_ready instead, never ready), so this re-parse is expected to always succeed
  *  — the catch is defense-in-depth (never assume two derivations of the same text agree
- *  forever), not an expected-failure path. */
-function draftedTaskSummaries(fragmentYaml: string, proposalId: string): InboxDraftedTask[] {
+ *  forever), not an expected-failure path. Exported so that defense-in-depth branch is directly
+ *  unit-testable — the READY path it guards against never exercises it in practice by design. */
+export function draftedTaskSummaries(fragmentYaml: string, proposalId: string): InboxDraftedTask[] {
   try {
     return parseTasksFromYaml(fragmentYaml, `inbox draft ${proposalId}`).map((t) => ({ id: t.id, title: t.title }));
   } catch (e) {
-    if (e instanceof PlanError) return [];
-    throw e;
+    if (!(e instanceof PlanError)) throw e;
+    return [];
   }
 }
 

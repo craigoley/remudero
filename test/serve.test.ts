@@ -226,6 +226,63 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2500, stepMs = 10):
   }
 }
 
+// ── W1-T193: buildServeServer defaults panelGraph.ratify to a REAL ratifyCliGateway ─────────
+//
+// run-task.ts's serveCommand (the ONLY real `rmd serve` CLI wiring) deliberately never
+// constructs a RatifyCliGateway itself — see ServeDeps.panelGraph's own doc (lib/serve.ts):
+// buildServeServer defaults `ratify` to a real ratifyCliGateway, rooted at panelGraph.root +
+// fleetControlRoot/state/logs, whenever the caller omits it. Every OTHER test in this file
+// injects fakeRatifyGateway() explicitly (never exercising the default), so this is the one
+// place that default construction — and the REAL detached `bin/rmd` spawn it wires POST
+// /v1/inbox/approve to — is proven end to end, mirroring test/panel-graph.test.ts's own
+// "ratifyCliGateway: a REAL detached spawn..." proof for the injected-gateway case.
+const READY_FRAGMENT = `
+- id: W1-T900
+  title: "drafted task"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  origin: architect
+  acceptance:
+    - claim: "the candidate does the thing"
+      proof: "unit test: fixture X -> observable Y"
+`;
+
+test("buildServeServer: with panelGraph.ratify OMITTED, POST /v1/inbox/approve on a genuinely READY proposal hands off to a REAL detached bin/rmd spawn — the default is not merely constructed but actually wired all the way to the write route (W1-T193)", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root, planOf([]));
+  const { ratify: _fake, ...panelGraphWithoutRatify } = deps.panelGraph as typeof deps.panelGraph & { ratify: unknown };
+
+  mkdirSync(join(root, "bin"), { recursive: true });
+  const markerPath = join(root, "marker.txt");
+  writeFileSync(join(root, "bin", "rmd"), `#!/usr/bin/env bash\necho "$@" > "${markerPath}"\n`, { mode: 0o755 });
+
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: "P900", summary: "a ready proposal", evidenceAnchors: [] }] }));
+  writeFileSync(
+    join(root, "state", "inbox-drafts.json"),
+    JSON.stringify({
+      P900: { proposalId: "P900", fragmentYaml: READY_FRAGMENT, stampLine: "- P900 (plan) — RATIFIED 2026-07-22 -> W1-T900.", anchorFingerprint: "" },
+    }),
+  );
+
+  await withServeServer({ ...deps, panelGraph: panelGraphWithoutRatify }, async (base) => {
+    const res = await post(base, "/v1/inbox/approve", WRITE_TOKEN, { proposalId: "P900" });
+    assert.equal(res.status, 200, `expected the READY proposal to be approvable: ${await res.text()}`);
+  });
+
+  const deadline = Date.now() + 5000;
+  while (!existsSync(markerPath) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.ok(existsSync(markerPath), "the real bin/rmd script must actually have been spawned by the DEFAULTED gateway");
+  assert.match(readFileSync(markerPath, "utf8"), /^approve P900/);
+});
+
 // ── (1) GET / -- the HTML shell mounts the board + links the panel/graph ────────────────────
 
 test("GET /: 200, HTML shell referencing the board mount and panel/graph links", async () => {
