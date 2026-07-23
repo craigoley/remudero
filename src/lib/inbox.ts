@@ -501,6 +501,9 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "risk/status/attempts/acceptance/origin at minimum) between the two FRAGMENT markers below,",
     "then ONE stamp line for MASTER-PLAN.md's proposal list between the two markers below that —",
     "the same shape as an existing RATIFIED stamp (`- P## (...) — RATIFIED <date> -> <task ids>.`).",
+    "RAW YAML ONLY between the FRAGMENT markers — do NOT wrap it in a markdown code fence",
+    "(no ```yaml or ``` line before or after it); the harness parses the fragment as YAML",
+    "verbatim, and a fence around it fails that parse.",
     "",
     "=== FRAGMENT START ===",
     "<the new tasks.yaml entries as YAML — a list of task mappings>",
@@ -518,20 +521,66 @@ export interface ParsedDraft {
 
 const FRAGMENT_RE = /=== FRAGMENT START ===\r?\n([\s\S]*?)\r?\n=== FRAGMENT END ===/g;
 const STAMP_RE = /^[ \t]*STAMP:[ \t]*(.+)$/gim;
+const FENCE_LINE_RE = /^```[A-Za-z0-9_+-]*[ \t]*$/;
+
+/**
+ * Strip a markdown code fence wrapping an Architect-drafted fragment — a ```yaml (or bare
+ * ```) opening line and its matching ``` closing line — so a FENCED draft parses as plain
+ * YAML instead of falsely failing draft-rung's `lint_clean` predicate (W1-T173; the P19
+ * fixture: the inbox's own INAUGURAL ratification arrived fenced and was rejected as
+ * draft-unclean even though its YAML content was perfectly well-formed — an LLM emitting
+ * fenced YAML is the overwhelmingly common case, not an edge case). {@link inboxDraftPrompt}
+ * now also instructs raw-YAML-only output, so this strip is a safety net, not the sole guard.
+ *
+ * A NO-OP when the fragment isn't fenced at all — returned byte-identical, so an already-
+ * clean draft is untouched. FAILS LOUD (throws {@link PlanError}) on a malformed fence — an
+ * opening ``` with no matching close, or a stray ``` line elsewhere in the document — rather
+ * than guessing where the real content ends: a silent partial strip could truncate real
+ * tasks unseen, which is strictly worse than a loud, named parse failure.
+ */
+export function stripMarkdownFence(fragmentYaml: string): string {
+  const lines = fragmentYaml.split(/\r?\n/);
+  // An Architect's fragment may have incidental leading/trailing blank lines around the
+  // fence itself — only the first/last NON-blank line counts as a candidate fence marker.
+  let start = 0;
+  while (start < lines.length && lines[start].trim() === "") start++;
+  let end = lines.length - 1;
+  while (end >= 0 && lines[end].trim() === "") end--;
+  if (start > end) return fragmentYaml; // all-blank: nothing to strip, nothing to parse either
+
+  if (!FENCE_LINE_RE.test(lines[start].trim())) return fragmentYaml; // no opening fence at all
+
+  const closeIsFence = start !== end && lines[end].trim() === "```";
+  if (!closeIsFence) {
+    throw new PlanError("draft fragment has an opening ``` fence with no matching closing ``` — refusing to guess where it ends");
+  }
+  // A stray standalone ``` line strictly BETWEEN open and close is a malformed/nested fence
+  // — fail loud rather than silently picking the first/last markers and truncating content.
+  for (let i = start + 1; i < end; i++) {
+    if (FENCE_LINE_RE.test(lines[i].trim())) {
+      throw new PlanError(`draft fragment has a stray \`\`\` fence marker mid-document at line ${i + 1} — refusing to guess where it ends`);
+    }
+  }
+  return lines.slice(start + 1, end).join("\n");
+}
 
 /**
  * Extract the worker's FRAGMENT + STAMP off its concatenated output text. LAST-marker-wins
  * (mirrors lib/triage.ts's `parseTriageVerdict` / lib/plan-architect.ts's `parsePlanVerdict`
  * discipline — a worker's final answer, after any scratch reasoning, is the one that counts).
  * Returns `null` when either marker is missing — a malformed draft is never silently treated
- * as a candidate.
+ * as a candidate. The captured fragment is run through {@link stripMarkdownFence} BEFORE it
+ * ever reaches `safeParseFragment`/`parseTasksFromYaml`/the draft cache (W1-T173) — a fence
+ * a worker wraps around otherwise-valid YAML must never masquerade as draft-unclean; a
+ * malformed fence throws {@link PlanError} out of this function instead (every caller —
+ * {@link runDraftRung} — already isolates one proposal's parse in its own try/catch).
  */
 export function parseDraftedCandidate(text: string): ParsedDraft | null {
   const fragments = [...text.matchAll(FRAGMENT_RE)];
   const stamps = [...text.matchAll(STAMP_RE)];
   if (fragments.length === 0 || stamps.length === 0) return null;
   return {
-    fragmentYaml: fragments[fragments.length - 1][1].trim(),
+    fragmentYaml: stripMarkdownFence(fragments[fragments.length - 1][1].trim()),
     stampLine: stamps[stamps.length - 1][1].trim(),
   };
 }

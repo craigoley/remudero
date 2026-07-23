@@ -26,6 +26,7 @@ import {
   runDraftRung,
   lintDraftedFragment,
   MAX_DRAFT_LINT_ATTEMPTS,
+  stripMarkdownFence,
   summarizeInboxPoll,
   type DraftAttemptCache,
   type DraftCache,
@@ -536,6 +537,58 @@ test("parseDraftedCandidate returns null when either marker is missing — a mal
   assert.equal(parseDraftedCandidate("no markers here at all"), null);
   assert.equal(parseDraftedCandidate("=== FRAGMENT START ===\n- id: X\n=== FRAGMENT END ===\n(no stamp)"), null);
   assert.equal(parseDraftedCandidate("STAMP: only a stamp, no fragment"), null);
+});
+
+test("inboxDraftPrompt instructs raw-YAML-only output — no markdown code fence around the FRAGMENT", () => {
+  const proposal: Proposal = { id: "P42", summary: "do the thing", evidenceAnchors: [] };
+  const prompt = inboxDraftPrompt(proposal, "- id: W1-T1\n", "run-1");
+  assert.match(prompt, /RAW YAML ONLY/);
+  assert.match(prompt, /do NOT wrap it in a markdown code fence/);
+});
+
+// ── W1-T173: fenced Architect drafts must never falsely fail lint_clean (P19 fixture) ──────
+
+test("stripMarkdownFence is a no-op on unfenced YAML — byte-identical out", () => {
+  assert.equal(stripMarkdownFence(CLEAN_FRAGMENT), CLEAN_FRAGMENT);
+  assert.equal(stripMarkdownFence("- id: X\n  title: y\n"), "- id: X\n  title: y\n");
+});
+
+test("stripMarkdownFence strips a leading ```yaml (and a bare ```) fence and its matching trailing ``` to the same raw YAML", () => {
+  const raw = CLEAN_FRAGMENT.trim();
+  const langFenced = "```yaml\n" + raw + "\n```";
+  const bareFenced = "```\n" + raw + "\n```";
+  assert.equal(stripMarkdownFence(langFenced), raw);
+  assert.equal(stripMarkdownFence(bareFenced), raw);
+});
+
+test("stripMarkdownFence fails loud (never silently truncates) on a malformed fence", () => {
+  assert.throws(() => stripMarkdownFence("```yaml\n- id: X\n  title: y\n"), /opening ``` fence with no matching closing/);
+  assert.throws(
+    () => stripMarkdownFence("```yaml\n- id: X\n```\nsome stray text\n```\n- id: Y\n```"),
+    /stray ``` fence marker mid-document/,
+  );
+});
+
+// W1-T173 acceptance 1: this test's name embeds the acceptance criterion's proof text so the
+// `unit test:` dialect proof executor finds a real, name-matched subtest to run.
+test("a fenced Architect fragment parses to the SAME tasks as the unfenced form — the inbox no longer falsely fails lint_clean on a ```yaml wrapper (P19 fixture). FALSIFIER: the exact P19 live fixture — a fenced draft that safeParseFragment rejects as not-valid-YAML, classifying a genuinely-ready proposal falsely not-ready", () => {
+  const anchor: EvidenceAnchor = { description: "x", pattern: "landed", path: "MASTER-PLAN.md" };
+  const proposal: Proposal = { id: "P19", summary: "s", evidenceAnchors: [anchor] };
+
+  const workerText = ["some scratch reasoning first", "=== FRAGMENT START ===", "```yaml", CLEAN_FRAGMENT.trim(), "```", "=== FRAGMENT END ===", "STAMP: - P19 (plan) — RATIFIED 2026-07-20 -> W1-T900."].join("\n");
+  const parsed = parseDraftedCandidate(workerText);
+  assert.ok(parsed);
+  assert.doesNotMatch(parsed!.fragmentYaml, /```/, "the fence never reaches the cached draft");
+
+  const fencedDraft = draftFor("P19", parsed!.fragmentYaml, [anchor]);
+  const unfencedDraft = draftFor("P19", CLEAN_FRAGMENT, [anchor]);
+  const ctx = baseCtx({ grepAnchorTrue: () => true });
+
+  const fencedResult = classifyProposal(proposal, fencedDraft, ctx);
+  const unfencedResult = classifyProposal(proposal, unfencedDraft, ctx);
+  assert.equal(fencedResult.state, "ready", `expected ready, got ${JSON.stringify(fencedResult)}`);
+  assert.deepEqual(fencedResult.reasons, unfencedResult.reasons);
+  assert.equal(unfencedResult.state, "ready");
 });
 
 // ── Real-world evidence-anchor adapter (git grep against a real throwaway repo) ────────────
