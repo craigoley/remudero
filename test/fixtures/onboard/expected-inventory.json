@@ -1,0 +1,36 @@
+{
+  "generatedAt": "2026-07-23T00:00:00.000Z",
+  "target": {
+    "owner": "acme-corp",
+    "repo": "widget-fixture"
+  },
+  "languages": [
+    "typescript",
+    "node"
+  ],
+  "buildSystems": [
+    "npm"
+  ],
+  "ciSystems": [
+    "github-actions"
+  ],
+  "docs": {
+    "readme": true,
+    "contributing": false,
+    "agentsMd": false,
+    "claudeMd": false,
+    "adrs": false,
+    "roadmap": true,
+    "todo": true
+  },
+  "testSignals": [
+    "test-directory"
+  ],
+  "github": {
+    "repoExists": true,
+    "defaultBranch": "main",
+    "branchProtected": true,
+    "openIssueCount": 2,
+    "milestoneCount": 1
+  }
+}

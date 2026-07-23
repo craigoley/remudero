@@ -26,6 +26,7 @@ export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
 import type { Tier, TierDetection } from "./lib/tier.js";
 import { buildProjectInit, parseProjectInitArgs } from "./lib/project-init.js";
+import { OnboardError, parseOnboardArgs, realOnboardFsDeps, realOnboardGhGateway, resolveTargetOwnerRepo, runOnboardInventory } from "./lib/onboard/inventory.js";
 import {
   applyCuratedSelection,
   buildRundown,
@@ -7636,6 +7637,63 @@ async function projectCommand(rest: string[]): Promise<number> {
 }
 
 /**
+ * `rmd onboard <target-dir> --phase inventory [--owner <o> --repo <r>]` — phase 1 of the
+ * four-phase `rmd onboard` family (MASTER-PLAN ★P24(1), W1-T82): a DETERMINISTIC, NO-LLM
+ * repo inventory over a TARGET checkout — languages, build/CI systems, docs presence,
+ * branch-protection state, issue/milestone counts, test-signal presence — via policy-as-data
+ * detector tables (src/lib/onboard/inventory.ts) plus `gh api` reads. Read-only against the
+ * target checkout + GitHub; the ONLY write is `<target-dir>/plan/onboarding/inventory.json`.
+ * GitHub facts this command could not resolve (auth/network failure) render as the literal
+ * `"unknown"` — never guessed or silently defaulted. `--phase` is REQUIRED and today ONLY
+ * `inventory` is implemented — recon/session/synthesis are W1-T83/84/85, separate future
+ * tasks not built here; an unknown `--phase` value fails loud (usage + non-zero exit, zero
+ * work done) before any fs/gh call, the same `parseProjectInitArgs`-style validate-first
+ * discipline `rmd project init` already applies (Standing rule / LEARNINGS.md
+ * control-surface-fail-loud-stop-one-shot). `--owner`/`--repo` override auto-detection;
+ * omitted, they are derived from the target checkout's own `git remote.origin.url`
+ * ({@link resolveTargetOwnerRepo}) — unresolved leaves every GitHub fact `"unknown"` rather
+ * than guessing an owner/repo to query.
+ */
+async function onboardCommand(rest: string[]): Promise<number> {
+  const parsed = parseOnboardArgs(rest);
+  if (!parsed.ok) {
+    console.error(parsed.error + "\n" + USAGE);
+    return 2;
+  }
+  const { targetDir, owner: ownerFlag, repo: repoFlag } = parsed.args;
+
+  const resolved = ownerFlag && repoFlag ? undefined : resolveTargetOwnerRepo(targetDir);
+  const owner = ownerFlag ?? resolved?.owner;
+  const repo = repoFlag ?? resolved?.repo;
+
+  let inventory, writtenPath;
+  try {
+    ({ inventory, writtenPath } = runOnboardInventory(targetDir, { owner, repo }, { fs: realOnboardFsDeps, gh: realOnboardGhGateway() }));
+  } catch (e) {
+    if (e instanceof OnboardError) {
+      console.error(e.message);
+      return 2;
+    }
+    throw e;
+  }
+
+  console.log(`### rmd onboard ${targetDir} --phase inventory`);
+  console.log(`target: ${inventory.target.owner}/${inventory.target.repo}`);
+  console.log(`languages: ${inventory.languages.join(", ") || "(none detected)"}`);
+  console.log(`build systems: ${inventory.buildSystems.join(", ") || "(none detected)"}`);
+  console.log(`CI systems: ${inventory.ciSystems.join(", ") || "(none detected)"}`);
+  console.log(`docs: ${Object.entries(inventory.docs).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+  console.log(`test signals: ${inventory.testSignals.join(", ") || "(none detected)"}`);
+  console.log(
+    `github: exists=${inventory.github.repoExists} defaultBranch=${inventory.github.defaultBranch} ` +
+      `branchProtected=${inventory.github.branchProtected} openIssues=${inventory.github.openIssueCount} ` +
+      `milestones=${inventory.github.milestoneCount}`,
+  );
+  console.log(`\nwrote ${writtenPath}`);
+  return 0;
+}
+
+/**
  * `rmd skill list` — the §5B skill-registry reader (W1-T44). Setup, Plan,
  * Feedback/triage, Retro, Review, Refactor, and Design Review are ALL the same
  * ground->research->grill-or-produce primitive, differing only by a
@@ -7924,6 +7982,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>   # fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps, does not push/PR/arm protection itself",
   },
   {
+    name: "onboard",
+    usage:
+      "rmd onboard <target-dir> --phase inventory [--owner <o> --repo <r>]   # phase 1 of the `rmd onboard` family (MASTER-PLAN \u2605P24(1), W1-T82): a deterministic, no-LLM repo inventory over a TARGET checkout \u2014 languages, build/CI systems, docs presence (README/CONTRIBUTING/AGENTS.md/CLAUDE.md/ADRs/ROADMAP/TODO), branch-protection state, issue/milestone counts, test-signal presence \u2014 via policy-as-data detector tables (src/lib/onboard/inventory.ts); read-only against the target + gh api, writes ONLY <target-dir>/plan/onboarding/inventory.json; unresolved GitHub facts render as the literal \"unknown\", never guessed; --phase is REQUIRED and today ONLY inventory is implemented (recon/session/synthesis are W1-T83/84/85, not yet built) \u2014 any other value fails loud, spawning/writing nothing",
+  },
+  {
     name: "feedback",
     usage:
       "rmd feedback <text...> [--attach <path-or-url>]... [--origin cli|ui|issue]   # durable-inbox async capture (MASTER-PLAN \u00a77B, W1-T40): writes plan/feedback/<id>.yaml with status: new; --attach copies a local screenshot/terminal-dump into plan/feedback/attachments/<id>/ or records an http(s) link verbatim; browse the inbox with plain ls/cat/git diff, no bespoke reader",
@@ -8134,6 +8197,9 @@ export async function main(
   if (cmd === "project") {
     process.exit(await projectCommand(rest));
   }
+  if (cmd === "onboard") {
+    process.exit(await onboardCommand(rest));
+  }
   if (cmd === "skill") {
     process.exit(await skillCommand(rest));
   }
@@ -8164,7 +8230,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   });
 }
 
-export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, retroCommand, initCommand, projectCommand };
+export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, retroCommand, initCommand, projectCommand, onboardCommand };
 // Exported for a behavioral test of the drain gateway-targeting fix (W1-T53): drainCommand's
 // injectable deps (config/planPath/skipGitSync/githubFactory) let a test prove `--repo` scopes
 // the merged-status gateway to the NAMED repo, not a hardcoded literal — logic unchanged, export

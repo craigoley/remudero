@@ -42,6 +42,7 @@ usage:
   rmd issues [--dry-run]   # issues intake (W1-T57, §5D lane 3): poll open issues for every repo in .remudero/managed-repos.json via gh api, create a plan/feedback/<id>.yaml entry (origin: issue#<n>) for each one not already captured, fold an issues-reviewed count into the next digest; id-deduped so a re-poll never double-creates; --dry-run previews, creates nothing
   rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard
   rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>   # fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps, does not push/PR/arm protection itself
+  rmd onboard <target-dir> --phase inventory [--owner <o> --repo <r>]   # phase 1 of the `rmd onboard` family (MASTER-PLAN ★P24(1), W1-T82): a deterministic, no-LLM repo inventory over a TARGET checkout — languages, build/CI systems, docs presence (README/CONTRIBUTING/AGENTS.md/CLAUDE.md/ADRs/ROADMAP/TODO), branch-protection state, issue/milestone counts, test-signal presence — via policy-as-data detector tables (src/lib/onboard/inventory.ts); read-only against the target + gh api, writes ONLY <target-dir>/plan/onboarding/inventory.json; unresolved GitHub facts render as the literal "unknown", never guessed; --phase is REQUIRED and today ONLY inventory is implemented (recon/session/synthesis are W1-T83/84/85, not yet built) — any other value fails loud, spawning/writing nothing
   rmd feedback <text...> [--attach <path-or-url>]... [--origin cli|ui|issue]   # durable-inbox async capture (MASTER-PLAN §7B, W1-T40): writes plan/feedback/<id>.yaml with status: new; --attach copies a local screenshot/terminal-dump into plan/feedback/attachments/<id>/ or records an http(s) link verbatim; browse the inbox with plain ls/cat/git diff, no bespoke reader
   rmd triage <feedback-id>   # the Architect intake worker (MASTER-PLAN §7B, W1-T41): GROUNDS a plan/feedback/<id> entry against MASTER-PLAN/plan/LEARNINGS/DECISIONS, RESEARCHES via server-side WebSearch, then either reports 'already decided' (no task), GRILLS an ambiguous item by opening a needs-human GitHub issue with options + a recommendation (W1-T42, parks status 'grilling'), or opens a plan-only PR carrying origin: feedback#<id> provenance, gated by ci-gate+remudero-review like everything else
   rmd skill list   # §5B skill-registry reader (W1-T44): resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); adding a skill is a config entry, no source change
@@ -272,6 +273,14 @@ rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct 
 ```
 
 fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps, does not push/PR/arm protection itself
+
+### `rmd onboard`
+
+```
+rmd onboard <target-dir> --phase inventory [--owner <o> --repo <r>]
+```
+
+phase 1 of the `rmd onboard` family (MASTER-PLAN ★P24(1), W1-T82): a deterministic, no-LLM repo inventory over a TARGET checkout — languages, build/CI systems, docs presence (README/CONTRIBUTING/AGENTS.md/CLAUDE.md/ADRs/ROADMAP/TODO), branch-protection state, issue/milestone counts, test-signal presence — via policy-as-data detector tables (src/lib/onboard/inventory.ts); read-only against the target + gh api, writes ONLY <target-dir>/plan/onboarding/inventory.json; unresolved GitHub facts render as the literal "unknown", never guessed; --phase is REQUIRED and today ONLY inventory is implemented (recon/session/synthesis are W1-T83/84/85, not yet built) — any other value fails loud, spawning/writing nothing
 
 ### `rmd feedback`
 
