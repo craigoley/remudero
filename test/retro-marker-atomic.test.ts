@@ -11,7 +11,7 @@ import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFil
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { buildGather, loadMarker, MarkerCorruptError, resolveMarkerForGather, saveMarker, type RetroMarker } from "../src/lib/retro.js";
 import { configPath } from "../src/lib/config.js";
 import { retroCommand } from "../src/run-task.js";
@@ -238,6 +238,13 @@ test("retroCommand: a corrupt state/last-retro.json fails CLOSED (exit 1, ledger
   const root = mkdtempSync(join(tmpdir(), "rmd-retro-command-root-"));
   mkdirSync(join(root, "state"), { recursive: true });
   writeFileSync(join(root, "state", "last-retro.json"), '{ "ts": "2026-07-21T00:00:00.000Z", "learnings_count": 4, "run');
+  // A pre-existing ledger (retroCommand reads it BEFORE the marker check, regardless of
+  // outcome) -- exercises the `existsSync(ledgerPath) ? readFileSync(...) : ""` ternary's
+  // true side too, not just the "no ledger yet" default every other retroCommand test hits.
+  writeFileSync(
+    join(root, "state", "ledger.ndjson"),
+    JSON.stringify({ ts: "2020-01-01T00:00:00.000Z", run_id: "R0", task_id: "W1-T0", step: "run.start" }) + "\n",
+  );
 
   const savedHome = process.env.HOME;
   process.env.HOME = fakeHome; // configPath()/loadConfig() are HOME-relative
@@ -267,22 +274,81 @@ test("retroCommand: a corrupt state/last-retro.json fails CLOSED (exit 1, ledger
   }
 });
 
+// A cheap, standalone `--dry-run` pass: builds the SAME gather the success-path test below
+// drives all the way through a real PR, but exits right after printing the report -- no
+// worktree, no gh, no spawn. Kept here (not folded into the corrupt-marker test above)
+// because it needs an ABSENT marker (genuine first-ever-retro), the opposite precondition
+// from the corrupt-marker test.
+test("retroCommand: --dry-run builds the gather and returns 0 without ever touching a worker", async (t) => {
+  const fakeHome = mkdtempSync(join(tmpdir(), "rmd-retro-dryrun-home-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-retro-dryrun-root-"));
+
+  const savedHome = process.env.HOME;
+  process.env.HOME = fakeHome;
+  const cfgPath = configPath();
+  mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
+  writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
+
+  const logSpy = t.mock.method(console, "log", () => {});
+  try {
+    const exitCode = await retroCommand(["--dry-run"]);
+    assert.equal(exitCode, 0, "--dry-run never fails a genuinely-first-ever retro");
+    assert.ok(
+      logSpy.mock.calls.some((c) => String(c.arguments[0]).includes("Retro gather")),
+      "--dry-run must print the deterministic gather report",
+    );
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+  }
+});
+
 // ── W1-T242 round 2: retroCommand's SUCCESS path reaches the atomic marker-advance ──
 //
-// The corrupt-marker test above proves the fail-closed branch. This one proves the OTHER
-// half stays correct: a clean retro run (empty ledger ⇒ genuinely first-ever, an
-// ABSENT marker) still reaches `saveMarker` at the tail of the real success path -- the
-// exact call site round 1 made atomic -- and it actually lands a real, valid marker on
-// disk. Every git/gh boundary is a REAL local git repo or a PATH-shimmed `gh` script (never
-// a reimplementation of retroCommand's own logic); only the Architect spawn itself is
-// injected (retroCommand's `opts.spawn`, mirroring runTask's existing `opts.spawn` DI).
-test("retroCommand: a clean run reaches the REAL saveMarker call at the end of the success path and lands a valid marker", async (t) => {
+// The corrupt-marker test above proves the fail-closed branch. The tests below prove the
+// OTHER half stays correct: a clean retro run still reaches `saveMarker` at the tail of the
+// real success path -- the exact call site round 1 made atomic -- and actually lands a real,
+// valid marker on disk. Every git/gh boundary is a REAL local git repo or a PATH-shimmed `gh`
+// script (never a reimplementation of retroCommand's own logic); only the Architect spawn
+// itself is injected (retroCommand's `opts.spawn`, mirroring runTask's existing
+// `opts.spawn` DI). `setupFakeRetroFixture` is the shared scaffolding three variant tests
+// below drive through DIFFERENT branches of the same success path (a valid PRE-EXISTING
+// marker; an ownership mismatch; a diff that touches code) without re-authoring the whole
+// fixture per branch.
+interface FakeRetroFixture {
+  root: string;
+  branch: string;
+  fakeSpawn: () => Promise<WorkerResult>;
+  /** Swaps HOME/PATH/Date.now in, runs `body`, and ALWAYS restores them after -- even on throw. */
+  run<T>(body: () => Promise<T>): Promise<T>;
+}
+
+function setupFakeRetroFixture(
+  t: TestContext,
+  opts: {
+    /** Seed a valid marker BEFORE the run (exercises the "ok" marker-resolution branch). */
+    seedMarker?: RetroMarker;
+    /** `gh pr view --json headRefName` response -- default is this run's OWN branch. */
+    headRefName?: (branch: string) => string;
+    /** `gh pr diff` response -- default is an empty (plan-only) diff. */
+    diff?: string;
+    /** `gh pr diff` EXITS NON-ZERO instead of returning a diff -- a transient `gh` failure
+     *  partway through the success path, exercising retroCommand's outer catch. */
+    diffFails?: boolean;
+    /** `gh pr view --json body` response -- default already carries the trailer AND a
+     *  valid Acceptance block so neither repair path fires. */
+    body?: string;
+  } = {},
+): FakeRetroFixture {
   const fakeHome = mkdtempSync(join(tmpdir(), "rmd-retro-success-home-"));
   const root = mkdtempSync(join(tmpdir(), "rmd-retro-success-root-"));
-  const savedHome = process.env.HOME;
-  const savedPath = process.env.PATH;
-  const FIXED_TS = 1784000000000;
+  const FIXED_TS = 1784000000000 + Math.floor(Math.random() * 1_000_000); // distinct per fixture instance
   const branch = `run-RETRO-${FIXED_TS}`;
+
+  if (opts.seedMarker) {
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(join(root, "state", "last-retro.json"), JSON.stringify(opts.seedMarker, null, 2) + "\n");
+  }
 
   // ── a real local "origin" (bare) + a pre-cloned repoDir (skips `gh repo clone`) ──
   const originGit = mkdtempSync(join(tmpdir(), "rmd-retro-success-origin-"));
@@ -309,8 +375,14 @@ test("retroCommand: a clean run reaches the REAL saveMarker call at the end of t
   execFileSync("git", ["-C", repoDir, "config", "user.name", "retro-test"]);
 
   // ── a fake `gh` on PATH: only the handful of subcommands this success path invokes ──
-  const fakeGhBody = "Remudero-Task: RETRO\n\n## Acceptance\n- fixture claim | fixture proof\n";
+  const fakeGhBody = opts.body ?? "Remudero-Task: RETRO\n\n## Acceptance\n- fixture claim | fixture proof\n";
+  const headRefNameOut = (opts.headRefName ?? ((b: string) => b))(branch);
   const fakeBinDir = mkdtempSync(join(tmpdir(), "rmd-retro-success-bin-"));
+  // The diff body rides in its OWN file (never inlined into the script's shell text) --
+  // real newlines matter here (codeFilesInDiff needs a literal `+++ b/...` LINE), and a
+  // shell-quoted/`printf`-escaped inline string would mangle them.
+  const diffPath = join(fakeBinDir, "diff-body.txt");
+  writeFileSync(diffPath, opts.diff ?? "");
   const fakeGhPath = join(fakeBinDir, "gh");
   writeFileSync(
     fakeGhPath,
@@ -321,12 +393,17 @@ test("retroCommand: a clean run reaches the REAL saveMarker call at the end of t
       // pr view --json body  (ensureTaskTrailer + the acceptance-repair check)
       `if [[ "$args" == *'--json body'* ]]; then echo '{"body":${JSON.stringify(fakeGhBody)}}'; exit 0; fi`,
       // pr view --json headRefName  (checkPrOwnership)
-      `if [[ "$args" == *'--json headRefName'* ]]; then echo '{"headRefName":"${branch}"}'; exit 0; fi`,
+      `if [[ "$args" == *'--json headRefName'* ]]; then echo '{"headRefName":"${headRefNameOut}"}'; exit 0; fi`,
       // pr view --json statusCheckRollup  (waitForCiGreen) -- RED on the first poll, so
       // retroCommand exits right after the marker-advance line with no further gh calls.
       `if [[ "$args" == *'--json statusCheckRollup'* ]]; then echo '{"statusCheckRollup":[{"name":"ci","conclusion":"FAILURE"}]}'; exit 0; fi`,
-      // pr diff  (the plan-only guard, codeFilesInDiff) -- an empty diff, no code files.
-      `if [[ "$args" == *'diff'* ]]; then echo ''; exit 0; fi`,
+      // pr diff  (the plan-only guard, codeFilesInDiff) -- or a transient `gh` FAILURE,
+      // to exercise retroCommand's outer catch (W1-T242 round 2 branch-coverage sweep).
+      opts.diffFails
+        ? `if [[ "$args" == *'diff'* ]]; then echo 'fixture: gh pr diff transient failure' >&2; exit 1; fi`
+        : `if [[ "$args" == *'diff'* ]]; then cat ${JSON.stringify(diffPath)}; exit 0; fi`,
+      // pr edit  (ensureTaskTrailer / the acceptance-repair path, when either fires)
+      `if [[ "$args" == *'edit'* ]]; then exit 0; fi`,
       // Anything else (repo clone / api rate_limit / pr list ...) this path might probe:
       // fail closed -- every one of those callers already tolerates a `gh` failure.
       'exit 1',
@@ -334,15 +411,6 @@ test("retroCommand: a clean run reaches the REAL saveMarker call at the end of t
     ].join("\n"),
   );
   chmodSync(fakeGhPath, 0o755);
-
-  const errorSpy = t.mock.method(console, "error", () => {});
-  const logSpy = t.mock.method(console, "log", () => {});
-  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
-  process.env.HOME = fakeHome;
-  process.env.PATH = `${fakeBinDir}:${savedPath}`;
-  const cfgPath = configPath();
-  mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
-  writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
 
   const fakeSpawn = async (): Promise<WorkerResult> => ({
     sessionId: "s-retro-fixture",
@@ -364,28 +432,108 @@ test("retroCommand: a clean run reaches the REAL saveMarker call at the end of t
     qualitySuspect: false,
   });
 
-  try {
-    const exitCode = await retroCommand([], { spawn: fakeSpawn });
+  async function run<T>(body: () => Promise<T>): Promise<T> {
+    const savedHome = process.env.HOME;
+    const savedPath = process.env.PATH;
+    const errorSpy = t.mock.method(console, "error", () => {});
+    const logSpy = t.mock.method(console, "log", () => {});
+    const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+    process.env.HOME = fakeHome;
+    process.env.PATH = `${fakeBinDir}:${savedPath}`;
+    const cfgPath = configPath();
+    mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
+    writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
+    try {
+      return await body();
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+      process.env.PATH = savedPath;
+      dateNowSpy.mock.restore?.();
+      void errorSpy;
+      void logSpy;
+    }
+  }
+
+  return { root, branch, fakeSpawn, run };
+}
+
+test("retroCommand: a clean run reaches the REAL saveMarker call at the end of the success path and lands a valid marker", async (t) => {
+  const fx = setupFakeRetroFixture(t);
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
     // ci went "red" on the first poll (fake gh above) -> retroCommand returns 1 right
     // after the marker-advance line, without ever reaching reviewCommand/armAutoMerge.
     assert.equal(exitCode, 1, "a red ci gate leaves the PR open (exit 1) -- but ONLY after the marker already advanced");
 
-    const markerRaw = readFileSync(join(root, "state", "last-retro.json"), "utf8");
+    const markerRaw = readFileSync(join(fx.root, "state", "last-retro.json"), "utf8");
     const marker = JSON.parse(markerRaw) as RetroMarker;
     assert.ok(marker.ts, "the REAL saveMarker call (run-task.ts's success-path call site) must have landed a valid marker");
     assert.equal(marker.runs_seen, 0, "an empty ledger's gather sees zero runs -- this run itself is not ledger-recorded");
 
-    const ledgerLines = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
     assert.ok(
       ledgerLines.some((l) => l.step === "retro.marker.advanced"),
       "retro.marker.advanced must be ledgered once the marker is actually saved",
     );
-  } finally {
-    if (savedHome === undefined) delete process.env.HOME;
-    else process.env.HOME = savedHome;
-    process.env.PATH = savedPath;
-    dateNowSpy.mock.restore?.();
-    void errorSpy;
-    void logSpy;
-  }
+  });
+});
+
+test("retroCommand: a clean run with a PRE-EXISTING valid marker still resolves it 'ok' and scopes the gather to it", async (t) => {
+  const fx = setupFakeRetroFixture(t, {
+    seedMarker: { ts: "2026-01-01T00:00:00.000Z", learnings_count: 2, runs_seen: 3 },
+  });
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
+    assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants");
+    const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
+    assert.ok(new Date(marker.ts).getTime() > new Date("2026-01-01T00:00:00.000Z").getTime(), "the marker really advanced past the seeded one");
+  });
+});
+
+test("retroCommand: an ownership mismatch (claimed PR head branch != this run's own branch) fails CLOSED before the marker ever advances", async (t) => {
+  const fx = setupFakeRetroFixture(t, { headRefName: () => "some-other-branch-entirely" });
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
+    assert.equal(exitCode, 1, "pr_attribution_failed is a fail-closed exit 1, same as any other refused retro");
+    assert.ok(!fsDefault.existsSync(join(fx.root, "state", "last-retro.json")), "an ownership mismatch must NEVER advance the marker");
+  });
+});
+
+test("retroCommand: a diff that touches src/ fails the plan-only guard before the marker ever advances", async (t) => {
+  const fx = setupFakeRetroFixture(t, {
+    diff: "diff --git a/src/lib/retro.ts b/src/lib/retro.ts\n--- a/src/lib/retro.ts\n+++ b/src/lib/retro.ts\n+// not plan-only\n",
+  });
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
+    assert.equal(exitCode, 1, "a code-touching retro PR is left OPEN for inspection -- exit 1");
+    assert.ok(!fsDefault.existsSync(join(fx.root, "state", "last-retro.json")), "a plan-only violation must NEVER advance the marker");
+  });
+});
+
+test("retroCommand: a PR body missing an Acceptance block gets the harness-side repair pass (W1-T136)", async (t) => {
+  // No `## Acceptance` block -- only the trailer -- so ensureTaskTrailer's own check is
+  // still satisfied but the acceptance-repair pass's `parseAcceptanceBlock(...).length === 0`
+  // branch fires and `gh pr edit` is invoked to fix it up (our fake `gh` accepts any `edit`).
+  const fx = setupFakeRetroFixture(t, { body: "Remudero-Task: RETRO\n" });
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
+    assert.equal(exitCode, 1, "same red-ci exit as the other success-path variants -- the repair itself never blocks the retro");
+    const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
+    assert.ok(marker.ts, "the repair pass is best-effort -- it must never prevent the marker from advancing");
+  });
+});
+
+test("retroCommand: a transient `gh pr diff` failure is caught by the outer catch, logged, and rethrown -- the marker never advances", async (t) => {
+  const fx = setupFakeRetroFixture(t, { diffFails: true });
+  await fx.run(async () => {
+    await assert.rejects(
+      () => retroCommand([], { spawn: fx.fakeSpawn }),
+      /transient failure/,
+      "the outer catch re-throws (never swallows) an unexpected mid-flight gh failure",
+    );
+    assert.ok(!fsDefault.existsSync(join(fx.root, "state", "last-retro.json")), "a mid-flight failure must NEVER leave a half-advanced marker");
+    const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.ok(ledgerLines.some((l) => l.step === "retro.error"), "the outer catch must ledger retro.error before rethrowing");
+  });
 });
