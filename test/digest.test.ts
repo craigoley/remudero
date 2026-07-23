@@ -15,6 +15,7 @@ import {
 } from "../src/lib/digest.js";
 import type { RundownLine } from "../src/lib/drain.js";
 import type { NotifyChannel } from "../src/lib/notify.js";
+import { escalate, type Escalation, type IssueGateway } from "../src/lib/escalate.js";
 
 function ledgerFile(lines: Array<Record<string, unknown>>): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-digest-"));
@@ -284,4 +285,53 @@ test("sendRundown: delivers over the SAME notify() emit path as sendDigest — o
   // this went through the identical emit path, not a bespoke sender.
   const ledgerLines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   assert.ok(ledgerLines.some((l) => l.step === "notify.sent" && l.task_id === "DRAIN"));
+});
+
+// ── W1-T144 acceptance (round-1 fix): "an escalation created with NO console open reaches the
+// operator's channel within one digest cycle" — an INTEGRATION test wired end-to-end through
+// escalate() (lib/escalate.ts, a fake IssueGateway standing in for GitHub — the escalation
+// never opens or touches any console/browser session) and sendDigest (lib/digest.ts) over an
+// INJECTED digest/channel sink (fakeChannel's `.sent` array). The sink is GROUND TRUTH: every
+// assertion below reads the ACTUAL message text the channel received, never a boolean/log-line
+// "it was sent" flag — the companion falsifier proves a claim of reaching the operator that
+// isn't backed by a real ledgered escalation never shows up in that sink. ─────────────────────
+
+test("INTEGRATION: escalate() a needs-human with NO live console reaches the operator's channel within ONE digest cycle, over an injected sink naming the task + reason", () => {
+  const path = ledgerFile([]); // fresh ledger — no console session ever opened against it
+  const issues: IssueGateway = { create: () => "https://github.com/craigoley/remudero/issues/42" };
+  const escalation: Escalation = {
+    class: "BLOCKED",
+    taskId: "W1-T99",
+    summary: "two strikes exhausted on CI",
+    detail: "the diagnose-armed retry still failed CI — needs a human call.",
+    options: [{ label: "retry", detail: "resume with a fresh worker" }],
+    recommendation: "retry",
+  };
+  // escalate() itself: opens the needs-human issue against the fake gateway + ledgers it.
+  // No console is open anywhere in this call — it touches only the gateway and the ledger file.
+  const issueUrl = escalate(escalation, { issues, ledgerPath: path, runId: "ESCALATE-1" });
+
+  // The NEXT digest cycle: sendDigest re-reads the SAME ledger and delivers over an INJECTED
+  // NotifyChannel sink — never Messages.app/osascript inside a test.
+  const sink = fakeChannel();
+  const sinceIso = "2020-01-01T00:00:00.000Z"; // window opens well before the escalation
+  const delivered = sendDigest(path, sinceIso, { channel: sink, ledgerPath: path, runId: "DIGEST-1", taskId: "DIGEST" });
+
+  // GROUND TRUTH: the sink actually received exactly one message, and that message NAMES the
+  // task and the reason it needed a human — reading the real array content, not a flag.
+  assert.equal(sink.sent.length, 1, "the sink must have actually received a send, not merely a log line claiming it did");
+  assert.equal(sink.sent[0], delivered);
+  assert.match(sink.sent[0], /W1-T99/, "the pushed message must name the escalated task");
+  assert.match(sink.sent[0], /BLOCKED/, "the pushed message must name the escalation class/reason");
+  assert.ok(sink.sent[0].includes(issueUrl), "the pushed message must carry the escalation's own issue link");
+});
+
+test("INTEGRATION falsifier: a task NEVER actually escalated never appears in the sink — a fabricated 'reached' with no real send FAILS this exact assertion", () => {
+  const path = ledgerFile([]); // nothing escalated, nothing sent — there is no real event to fake
+  const sink = fakeChannel();
+  sendDigest(path, "2020-01-01T00:00:00.000Z", { channel: sink, ledgerPath: path, runId: "DIGEST-2", taskId: "DIGEST" });
+  assert.equal(sink.sent.length, 1); // a digest cycle still fires once, even with nothing to report
+  // The sink is ground truth, not a log line: it can only ever contain what notify() actually
+  // sent, so a task that was never escalated can never fraudulently show up as "reached".
+  assert.doesNotMatch(sink.sent[0], /W1-T99/, "a task that was never escalated must never appear as though it reached the operator");
 });
