@@ -34,6 +34,7 @@ All logic lives in TypeScript; `bin/rmd` is a thin `exec` wrapper into
 | `rmd digest-plist [--hour <h>] [--write]` | Generate the `launchd` unit for the daily `rmd digest` pulse (default 8am local). Loading it is an operator action. |
 | `rmd init [--tier <pro\|max5x\|max20x>] [--yes]` | Headless-safe first-run tier wizard. `--tier` wins outright; confident evidence writes with no prompt; a prompt fires **only** with a real TTY; a TTY-absent run never blocks (Standing rule 18). |
 | `rmd project init <repo> [--profile ts-node\|ts-web\|python\|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>` | Fleet-inheritance onboarding: generates the target repo's whole gate stack with the given numbers as ratchet floors. Prints next steps; does not push/PR/arm protection itself. |
+| `rmd onboard <target-dir> --phase inventory [--owner <o> --repo <r>]` | Phase 1 of the `rmd onboard` family (brownfield repo onboarding): a deterministic, no-LLM inventory of a target checkout — languages, build/CI systems, docs presence, branch-protection state, issue/milestone counts, test-signal presence. Read-only against the target + `gh api`; writes only `<target-dir>/plan/onboarding/inventory.json`. Phases 2-4 (recon, planning session, synthesis) are future work, not yet built. |
 | `rmd deploy [--reason <text>]` | Operator trigger for the deploy supervisor (human-gated): requests a fast-forward + daemon restart at the next idle gap, health-checked with rollback on failure. |
 | `rmd deploy-run [--dry-run]` | One deploy-supervisor cycle (what the `launchd` unit runs on its interval): no-op unless a deploy is triggered AND the daemon is idle. |
 | `rmd deploy-plist [--interval <s>] [--write]` | Generate the deploy-supervisor `launchd` unit (default every 120s). Loading it is an operator action. |
@@ -128,6 +129,20 @@ ratchet floors so the new repo never onboards at zero. It prints the file list
 and the manual steps (arming branch protection is a human, admin-run act, same
 reasoning as the branch-protection flip described in
 [review-gate.md](review-gate.md)'s "CI-gate aggregator" section).
+
+`rmd onboard <target-dir> --phase inventory` is a separate, EARLIER primitive —
+the front door for turning an EXISTING (brownfield) repo into a stewarded plan.
+Phase 1 (the only phase built today) is a deterministic, no-LLM inventory of
+the target checkout: languages, build/CI systems, docs presence (README,
+CONTRIBUTING, AGENTS.md, CLAUDE.md, ADRs, ROADMAP, TODO), branch-protection
+state, issue/milestone counts, and test-signal presence, via policy-as-data
+detector tables (a new detector is a data row, never a code branch). It reads
+the target checkout plus `gh api`, and writes ONLY
+`<target-dir>/plan/onboarding/inventory.json`; a GitHub fact it could not
+resolve (auth/network failure) is recorded as the literal `"unknown"`, never
+guessed. Phases 2-4 (recon over the target, the interactive planning session,
+and synthesis into a draft PR against the target repo) are separate future
+work, not yet built.
 
 ## The console: what it binds, and rotating its tokens
 

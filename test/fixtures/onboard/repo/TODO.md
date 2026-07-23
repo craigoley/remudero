@@ -1,0 +1,2 @@
+- [ ] wire up the widget
+- [ ] wire up the gadget
