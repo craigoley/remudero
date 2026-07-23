@@ -361,6 +361,9 @@ function setupFakeRetroFixture(
     /** repoDir is NOT pre-cloned -- retroCommand's own `gh repo clone` fires (our fake
      *  `gh` performs a REAL local clone of the same origin, never a stub). */
     missingRepoDir?: boolean;
+    /** `gh pr edit` (the acceptance-repair pass's own repair write-back) fails -- its
+     *  OWN best-effort catch, distinct from the outer catch `diffFails` exercises. */
+    repairEditFails?: boolean;
   } = {},
 ): FakeRetroFixture {
   const fakeHome = mkdtempSync(join(tmpdir(), "rmd-retro-success-home-"));
@@ -418,33 +421,43 @@ function setupFakeRetroFixture(
     [
       "#!/bin/bash",
       "set -e",
-      'args="$*"',
-      // pr view --json body  (ensureTaskTrailer + the acceptance-repair check) -- or a
-      // response with NO `body` field at all (`view.body ?? ""`'s fallback side).
+      // Matched on POSITIONAL args ($1 subcommand, $2 verb, $5 the --json field name),
+      // NEVER a substring of the whole "$*" -- a `--body <repaired text>` value can
+      // itself legitimately contain words like "diff" (ensureJudgeableBody's own proof
+      // text does), which a whole-string substring match would misfire on.
+      // repo clone <slug> <dest>  (repoDir absent) -- a REAL local clone, never a stub.
+      `if [[ "$1" == 'repo' && "$2" == 'clone' ]]; then git clone -q ${JSON.stringify(originGit)} "$4"; exit 0; fi`,
+      // pr view <url> --json <field>
+      `if [[ "$1" == 'pr' && "$2" == 'view' ]]; then`,
+      // --json body  (ensureTaskTrailer + the acceptance-repair check) -- or a response
+      // with NO `body` field at all (`view.body ?? ""`'s fallback side).
       opts.omitBody
-        ? `if [[ "$args" == *'--json body'* ]]; then echo '{}'; exit 0; fi`
-        : `if [[ "$args" == *'--json body'* ]]; then echo '{"body":${JSON.stringify(fakeGhBody)}}'; exit 0; fi`,
-      // repo clone  (repoDir absent) -- a REAL local clone of the same origin, never a stub.
-      `if [[ "$args" == *'repo clone'* ]]; then git clone -q ${JSON.stringify(originGit)} "\${!#}"; exit 0; fi`,
-      // pr view --json headRefName  (checkPrOwnership) -- or a body with NO headRefName
-      // field at all, an UNRESOLVED head ref (distinct from a resolved-but-wrong one).
+        ? `  if [[ "$5" == 'body' ]]; then echo '{}'; exit 0; fi`
+        : `  if [[ "$5" == 'body' ]]; then echo '{"body":${JSON.stringify(fakeGhBody)}}'; exit 0; fi`,
+      // --json headRefName  (checkPrOwnership) -- or NO headRefName field at all, an
+      // UNRESOLVED head ref (distinct from a resolved-but-wrong one).
       headRefNameOut === undefined
-        ? `if [[ "$args" == *'--json headRefName'* ]]; then echo '{}'; exit 0; fi`
-        : `if [[ "$args" == *'--json headRefName'* ]]; then echo '{"headRefName":"${headRefNameOut}"}'; exit 0; fi`,
-      // pr create --fill  (the no-PR_URL-in-report fallback)
-      `if [[ "$args" == *'create'* && "$args" == *'--fill'* ]]; then echo 'https://github.com/craigoley/remudero/pull/424242'; exit 0; fi`,
-      // pr view --json statusCheckRollup  (waitForCiGreen) -- RED on the first poll, so
+        ? `  if [[ "$5" == 'headRefName' ]]; then echo '{}'; exit 0; fi`
+        : `  if [[ "$5" == 'headRefName' ]]; then echo '{"headRefName":"${headRefNameOut}"}'; exit 0; fi`,
+      // --json statusCheckRollup  (waitForCiGreen) -- RED on the first poll, so
       // retroCommand exits right after the marker-advance line with no further gh calls.
-      `if [[ "$args" == *'--json statusCheckRollup'* ]]; then echo '{"statusCheckRollup":[{"name":"ci","conclusion":"FAILURE"}]}'; exit 0; fi`,
-      // pr diff  (the plan-only guard, codeFilesInDiff) -- or a transient `gh` FAILURE,
-      // to exercise retroCommand's outer catch (W1-T242 round 2 branch-coverage sweep).
+      `  if [[ "$5" == 'statusCheckRollup' ]]; then echo '{"statusCheckRollup":[{"name":"ci","conclusion":"FAILURE"}]}'; exit 0; fi`,
+      `fi`,
+      // pr create --fill ...  (the no-PR_URL-in-report fallback)
+      `if [[ "$1" == 'pr' && "$2" == 'create' ]]; then echo 'https://github.com/craigoley/remudero/pull/424242'; exit 0; fi`,
+      // pr diff <url>  (the plan-only guard, codeFilesInDiff) -- or a transient `gh`
+      // FAILURE, to exercise retroCommand's outer catch (W1-T242 round 2 sweep).
       opts.diffFails
-        ? `if [[ "$args" == *'diff'* ]]; then echo 'fixture: gh pr diff transient failure' >&2; exit 1; fi`
-        : `if [[ "$args" == *'diff'* ]]; then cat ${JSON.stringify(diffPath)}; exit 0; fi`,
-      // pr edit  (ensureTaskTrailer / the acceptance-repair path, when either fires)
-      `if [[ "$args" == *'edit'* ]]; then exit 0; fi`,
-      // Anything else (repo clone / api rate_limit / pr list ...) this path might probe:
-      // fail closed -- every one of those callers already tolerates a `gh` failure.
+        ? `if [[ "$1" == 'pr' && "$2" == 'diff' ]]; then echo 'fixture: gh pr diff transient failure' >&2; exit 1; fi`
+        : `if [[ "$1" == 'pr' && "$2" == 'diff' ]]; then cat ${JSON.stringify(diffPath)}; exit 0; fi`,
+      // pr edit <url> --body <text>  (ensureTaskTrailer / the acceptance-repair path) --
+      // or a transient failure, to exercise the acceptance-repair pass's OWN best-effort
+      // catch (distinct from the outer catch `diffFails` exercises).
+      opts.repairEditFails
+        ? `if [[ "$1" == 'pr' && "$2" == 'edit' ]]; then echo 'fixture: gh pr edit transient failure' >&2; exit 1; fi`
+        : `if [[ "$1" == 'pr' && "$2" == 'edit' ]]; then exit 0; fi`,
+      // Anything else (api rate_limit / pr list ...) this path might probe: fail
+      // closed -- every one of those callers already tolerates a `gh` failure.
       'exit 1',
       "",
     ].join("\n"),
@@ -650,5 +663,31 @@ test("retroCommand: repoDir absent triggers a REAL `gh repo clone` and still rea
     const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
     assert.ok(marker.ts, "the gh-repo-clone fallback must still reach the real saveMarker call");
     assert.ok(fsDefault.existsSync(join(fx.root, "repos", "remudero", ".git")), "gh repo clone must have actually materialized repoDir");
+  });
+});
+
+test("retroCommand: a transient `gh pr edit` failure during the acceptance-repair pass is caught by ITS OWN best-effort catch, not the outer one", async (t) => {
+  // No Acceptance block (forces the repair attempt) AND the repair's own `gh pr edit`
+  // fails -- distinct from `diffFails` (which fails a DIFFERENT gh call, caught by the
+  // outer catch and rethrown instead).
+  const fx = setupFakeRetroFixture(t, { body: "Remudero-Task: RETRO\n", repairEditFails: true });
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
+    assert.equal(exitCode, 1, "the repair failure is best-effort -- it must NOT propagate as an uncaught rejection");
+    const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
+    assert.ok(marker.ts, "a failed repair attempt must never prevent the marker from advancing");
+    const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.ok(ledgerLines.some((l) => l.step === "acceptance.repair.error"), "the repair failure must be ledgered by its OWN catch");
+  });
+});
+
+test("retroCommand: the Architect commits NOTHING (no PR_URL, ORIENTATION.md/plan-index.json both degrade) -- the no-op guard exits before any PR, marker untouched", async (t) => {
+  const fx = setupFakeRetroFixture(t, { noPrUrl: true, missingMasterPlan: true, missingGeneratorScript: true });
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], { spawn: fx.fakeSpawn });
+    assert.equal(exitCode, 1, "0 commits ahead of origin/main means nothing to PR -- retro.no_op, exit 1");
+    assert.ok(!fsDefault.existsSync(join(fx.root, "state", "last-retro.json")), "a no-op retro (nothing committed) must NEVER advance the marker");
+    const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.ok(ledgerLines.some((l) => l.step === "retro.no_op"), "the no-op path must be ledgered");
   });
 });
