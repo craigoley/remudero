@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { checkCliFreshness, SELF_SYNC_GUARD_ENV, type GitRunner } from "../src/lib/self-sync.js";
+import { checkCliFreshness, isCiEnv, SELF_SYNC_GUARD_ENV, type GitRunner } from "../src/lib/self-sync.js";
 
 // ── W1-T79: CLI self-freshness at entry (the #138 incident shape — the runner correct on
 // main, but the OPERATOR'S invocation was a stale checkout that predated the merge). Real,
@@ -227,5 +227,30 @@ test("checkCliFreshness: a fetch failure degrades to 'do not block the command' 
   assert.equal(result.status, "degraded");
   assert.equal(sayCalls.length, 0);
   assert.equal(warnCalls.length, 0);
+  assert.equal(reexecCalls, 0);
+});
+
+// ── W1-T79 CI guard: the CLI-entry auto-sync must NEVER run in CI (the checkout is a PR ref,
+// always "diverged"; without this guard every rmd invocation a CI job makes exits 1) ─────────
+test("isCiEnv: true for GitHub Actions / the CI convention, false when unset or explicitly falsey", () => {
+  assert.equal(isCiEnv({ CI: "true" }), true);
+  assert.equal(isCiEnv({ GITHUB_ACTIONS: "true" }), true);
+  assert.equal(isCiEnv({ CI: "1" }), true);
+  assert.equal(isCiEnv({}), false);
+  assert.equal(isCiEnv({ CI: "" }), false);
+  assert.equal(isCiEnv({ CI: "false" }), false);
+  assert.equal(isCiEnv({ CI: "0" }), false);
+});
+
+test("checkCliFreshness: in CI it SKIPS entirely — returns guarded, never fetches, never re-execs (W1-T79 must not break its own gate)", () => {
+  let gitCalls = 0;
+  const throwingGit: GitRunner = (args) => {
+    gitCalls += 1;
+    throw new Error(`git must not be called in CI, got: ${args.join(" ")}`);
+  };
+  let reexecCalls = 0;
+  const result = checkCliFreshness("/nonexistent", { CI: "true" }, { git: throwingGit, reexec: () => (reexecCalls += 1) });
+  assert.equal(result.status, "guarded");
+  assert.equal(gitCalls, 0, "no git call — not even a fetch — so a normal PR checkout never reads as a refusal");
   assert.equal(reexecCalls, 0);
 });

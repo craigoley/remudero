@@ -109,6 +109,16 @@ const REMEDY_COMMAND = "git pull --ff-only";
  *                 production passes `process.env`, tests pass a plain object).
  * @param deps     Injectable git/say/warn/reexec; all default to real implementations.
  */
+/** True in a CI / non-interactive runner (GitHub Actions + the common `CI` convention). The
+ *  CLI-entry auto-sync is an interactive-operator convenience for the operator's own `main`
+ *  checkout; a CI job checks out a specific ref it owns, so the sync must never run there — and
+ *  must never read that (always-"diverged") ref as a refusal that exits the command non-zero. */
+export function isCiEnv(env: NodeJS.ProcessEnv | Record<string, string | undefined>): boolean {
+  const truthy = (v: string | undefined): boolean =>
+    v !== undefined && v !== "" && v !== "0" && v.toLowerCase() !== "false";
+  return truthy(env.CI) || truthy(env.GITHUB_ACTIONS);
+}
+
 export function checkCliFreshness(
   repoDir: string,
   env: NodeJS.ProcessEnv | Record<string, string | undefined>,
@@ -117,6 +127,14 @@ export function checkCliFreshness(
   if (env[SELF_SYNC_GUARD_ENV] === "1") {
     // The loop guard: skip EVERYTHING, not even a fetch — this is what a real re-exec's
     // child sees, and it must never be able to talk itself into a second sync attempt.
+    return { status: "guarded" };
+  }
+  if (isCiEnv(env)) {
+    // CI/non-interactive: the runner checks out a SPECIFIC ref (a PR merge/head SHA), which
+    // is ALWAYS "diverged" from origin/main — auto-sync is an interactive-operator convenience
+    // for the operator's own `main` checkout, never CI. Without this guard, every `rmd`
+    // invocation a CI job makes (lint-plan, claims, …) reads its normal PR checkout as a
+    // `refused` divergence and exits 1 — W1-T79 would break its own gate on every PR.
     return { status: "guarded" };
   }
 
