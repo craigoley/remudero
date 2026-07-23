@@ -33,7 +33,26 @@ export function parseLcovTotals(lcovText) {
   let lh = 0;
   let brf = 0;
   let brh = 0;
+  let skippedRecords = 0;
+  // W1-T220: a coverage record is counted only when its source file lives INSIDE
+  // the repo checkout. A record whose `SF:` path escapes the checkout (starts with
+  // `../` or is absolute) is child-process coverage from a temp copy: several tests
+  // `mkdtemp` a dir, copy a repo script into it, and spawn node -- and because
+  // `NODE_V8_COVERAGE` is inherited by children, those low-coverage temp copies
+  // merge into the aggregate lcov under randomized `/private/var/folders/.../T/rmd-*`
+  // paths. Their count varies run-to-run (which fixtures ran, whether each child
+  // flushed before exit), which flaked the aggregate branch percentage by a few
+  // hundredths of a point and false-blocked test-only/plan-only PRs. Only the
+  // repo's own `src/**` should gate.
+  let inRepo = true;
   for (const line of lcovText.split('\n')) {
+    if (line.startsWith('SF:')) {
+      const path = line.slice(3).trim();
+      inRepo = !(path.startsWith('../') || path.startsWith('/'));
+      if (!inRepo) skippedRecords += 1;
+      continue;
+    }
+    if (!inRepo) continue;
     if (line.startsWith('LF:')) lf += Number(line.slice(3));
     else if (line.startsWith('LH:')) lh += Number(line.slice(3));
     else if (line.startsWith('BRF:')) brf += Number(line.slice(4));
@@ -46,6 +65,7 @@ export function parseLcovTotals(lcovText) {
     lh,
     brf,
     brh,
+    skippedRecords,
   };
 }
 
@@ -91,7 +111,10 @@ function main(argv) {
 
   console.log(
     `coverage-ratchet: lines ${actual.linesPct.toFixed(2)}% (baseline ${(baseline.linesPct ?? 0).toFixed(2)}%), ` +
-      `branches ${actual.branchesPct.toFixed(2)}% (baseline ${(baseline.branchesPct ?? 0).toFixed(2)}%)`,
+      `branches ${actual.branchesPct.toFixed(2)}% (baseline ${(baseline.branchesPct ?? 0).toFixed(2)}%)` +
+      (actual.skippedRecords > 0
+        ? ` [excluded ${actual.skippedRecords} out-of-repo record(s) from temp-dir child coverage]`
+        : ''),
   );
 
   if (violations.length > 0) {

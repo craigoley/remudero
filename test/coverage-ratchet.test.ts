@@ -46,6 +46,18 @@ test("coverage-ratchet CLI: AT-baseline fixture (exact match) -> zero exit (the 
   assert.match(result.stdout.toString(), /OK -- at or above baseline/);
 });
 
+test("coverage-ratchet CLI (W1-T220 falsifier): an out-of-repo temp-dir record is EXCLUDED, so an in-repo-above-baseline suite is not false-blocked by child-process coverage pollution", () => {
+  // temp-dir-polluted.lcov: an in-repo record (src/fixture-a.ts, 95%/90% — above the
+  // 90/85 baseline) plus one record whose SF path escapes the checkout
+  // (../../../.../T/rmd-*/generate-plan-index.mjs, 10%/10%). WITHOUT the filter the
+  // aggregate is 52.50%/50.00% and the gate BLOCKS (this is the live #614/#622/#632
+  // flake). WITH the filter the out-of-repo record is dropped and the gate ACCEPTS.
+  const result = runRatchet("temp-dir-polluted.lcov");
+  assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stdout.toString(), /excluded 1 out-of-repo record/);
+  assert.match(result.stdout.toString(), /OK -- at or above baseline/);
+});
+
 test("coverage-ratchet CLI: ABOVE-baseline fixture -> zero exit (the gate ACCEPTS)", () => {
   const result = runRatchet("above-baseline.lcov");
   assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
