@@ -147,6 +147,18 @@ test("acceptance 1: a correction-credited task is honoured with ZERO gateway cal
   assert.equal(proj.prNumber, 2);
 });
 
+test("prNumber decoration degrades to undefined (never the merged verdict) when the correction's own URL text has no trailing digits", () => {
+  const t = task();
+  // A shorthand ref with no trailing digit at all — `prNumberFromRef` must return
+  // `undefined` rather than a bogus number; this must NEVER affect `merged`, which
+  // is unconditional and decided before `prNumberFromRef` is ever called.
+  const ledgerPath = CORRECTED_LEDGER(t.id, "https://github.com/o/r/settled-elsewhere");
+  const proj = deriveStatus(t, { ledgerPath, github: throwingGithub() });
+  assert.equal(proj.source, "correction");
+  assert.equal(proj.merged, true);
+  assert.equal(proj.prNumber, undefined);
+});
+
 test("acceptance 2a: a correction-credited task stays non-dispatchable under a THROTTLED read", () => {
   const t = task();
   const ledgerPath = CORRECTED_LEDGER(t.id, "https://github.com/o/r/pull/2");
