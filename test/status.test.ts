@@ -298,21 +298,24 @@ test("source (c) correction-awareness (pure debunk, no replacement named): a cor
   assert.equal(proj.merged, false);
 });
 
-test("W1-T75 un-credit direction: a correction naming an actual_pr_url that GitHub cannot resolve (closed/absent) SUPREMELY derives NOT merged — it never falls through to rung (c)'s otherwise-valid trailer credit", () => {
+test("W1-T130 SUPREME OFFLINE: a correction naming an actual_pr_url derives MERGED unconditionally, with ZERO gateway calls — GitHub is never asked to resolve/confirm/contradict it, so no throttle or error can demote it back to dispatchable", () => {
   const fixture = ownedTrailerFixture("W1-TX", "W1-TX-1730000000000");
   const github = fakeGitHub({
     byTrailer: { "W1-TX": { number: 12, url: "u/12", state: "MERGED" } },
     headRefByUrl: { "u/12": fixture.headRefName },
     bodyByUrl: { "u/12": fixture.body },
-    // byRef deliberately omits "u/99": gh cannot resolve the correction's target.
+    // byRef deliberately omits "u/99": if it were ever consulted, gh could not
+    // resolve the correction's target — proving the read is off the path
+    // entirely, not merely tolerant of this particular failure.
   });
   const ledgerPath = ledgerFile([
     { step: "correction.provenance", task_id: "W1-TX", claimed_pr_url: "u/12", actual_pr_url: "u/99" },
   ]);
   const proj = deriveStatus(task(), { ledgerPath, github });
   assert.equal(proj.source, "correction");
-  assert.equal(proj.merged, false);
-  assert.ok(!github.calls.includes("trailer:W1-TX"), "supreme correction must short-circuit before rung (c) is ever consulted");
+  assert.equal(proj.merged, true);
+  assert.equal(proj.prNumber, 99); // decoration parsed from the ref's own text, never re-resolved
+  assert.deepEqual(github.calls, [], "a correction-credited task must be honoured with ZERO gateway calls");
 });
 
 test("precedence: ledger (a) is consulted before pr: (b)", () => {

@@ -243,6 +243,70 @@ test("update cycle: an unchanged row keeps DOM identity, and an active text sele
   });
 });
 
+// ── W1-T222: DOM-STABILITY REACHES INTO EXPANSIONS -- a background poll/SSE update must not
+// collapse an OPEN inline card, steal focus from inside it, or destroy a selection inside it,
+// even when the update lands on the SAME list the open card's row lives in. W1-T156's doctrine
+// (the test directly above) extended, per this task's own design note: "the mechanism should be
+// extended, not reinvented beside it." ──────────────────────────────────────────────────────────
+
+test("W1-T222: a background update to a DIFFERENT row in the same list does not collapse an open card, steal focus from inside it, or destroy a selection inside it", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" }), task({ id: "W1-T2" })]);
+  appendFileSync(deps.board.ledgerPath, runStart("W1-T1"));
+  appendFileSync(deps.board.ledgerPath, runStart("W1-T2"));
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => document.querySelectorAll("#now-list li[data-key]").length === 2);
+
+      // Open W1-T1's card, focus a control INSIDE it, and select text inside its title.
+      await page.click('#now-list li[data-key="W1-T1"] .task-id');
+      await page.waitForFunction(
+        () => document.querySelector('#now-list li[data-key="W1-T1"]')?.getAttribute("aria-expanded") === "true",
+      );
+      await page.waitForFunction(() => (document.querySelector(".row-detail-title")?.textContent ?? "").length > 0);
+      await page.evaluate(() => {
+        document.querySelector(".row-detail")!.setAttribute("data-test-mark", "open-card");
+        (document.querySelector(".card-journey-toggle") as HTMLElement)!.focus();
+        const target = document.querySelector(".row-detail-title")!;
+        const range = document.createRange();
+        range.selectNodeContents(target);
+        const sel = window.getSelection()!;
+        sel.removeAllRanges();
+        sel.addRange(range);
+      });
+      const focusedBefore = await page.evaluate(() => document.activeElement?.className);
+      assert.equal(focusedBefore, "card-journey-toggle");
+
+      // Background update: flip W1-T2's phase -- a DIFFERENT row in the SAME #now-list, so
+      // renderNow/reconcileRows runs its full pass over the list W1-T1's open card lives in.
+      appendFileSync(deps.board.ledgerPath, reconDone("W1-T2"));
+      await page.waitForFunction(
+        () => (document.querySelector('#now-list li[data-key="W1-T2"] .detail')?.textContent ?? "").includes("phase: implement"),
+        null,
+        { timeout: 5000 },
+      );
+
+      const after = await page.evaluate(() => ({
+        expanded: document.querySelector('#now-list li[data-key="W1-T1"]')?.getAttribute("aria-expanded"),
+        cardMark: document.querySelector(".row-detail")?.getAttribute("data-test-mark"),
+        cardCount: document.querySelectorAll(".row-detail").length,
+        focused: document.activeElement?.className,
+        selection: window.getSelection()?.toString(),
+        selectionConnected: window.getSelection()?.anchorNode?.isConnected ?? false,
+      }));
+      assert.equal(after.expanded, "true", "a background update elsewhere must never collapse an open card");
+      assert.equal(after.cardMark, "open-card", "the open card must be the SAME DOM node, not recreated");
+      assert.equal(after.cardCount, 1);
+      assert.equal(after.focused, "card-journey-toggle", "focus inside the open card must survive the update");
+      assert.match(after.selection ?? "", /^W1-T1/, "a selection inside the open card must survive the update");
+      assert.equal(after.selectionConnected, true);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
 // ── (3) prefers-reduced-motion: a static badge, no animation; status changes are announced ────
 
 test("prefers-reduced-motion: the animated live indicator is replaced by a static badge, and a status flip is announced via aria-live", async () => {
@@ -498,6 +562,86 @@ test("W1-T182: an escalation row renders the issue's real ask + a direct link + 
       assert.equal(row.hasUrlInput, false, "the ledger already holds the issue_url -- never solicit it from the operator");
       assert.equal(row.viewIssueHref, issueUrl, "a DIRECT link to the issue");
       assert.equal(row.hasMarkHandled, true);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+// ── W1-T223: a collapsed console section must still inform -- its header summary must NEVER
+// disagree with its own rows (the count comes from the SAME projection, never a second
+// derivation), and a NEEDS ME arrival while collapsed must carry emphasis, never a silent miss ──
+
+test("W1-T223: a section's header summary NEVER disagrees with its own rows across a live SSE update -- the claimed count always matches the rendered row count", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" }), task({ id: "W1-T2" })]);
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => (document.getElementById("now-summary")?.textContent ?? "") !== "…");
+      async function agrees() {
+        return page.evaluate(() => {
+          const summary = document.getElementById("now-summary")?.textContent ?? "";
+          const rowCount = document.querySelectorAll("#now-list li[data-key]").length;
+          const m = /^(\d+) running/.exec(summary);
+          const claimed = m ? Number(m[1]) : summary.includes("nothing in flight") ? 0 : NaN;
+          return { claimed, rowCount, summary };
+        });
+      }
+
+      let a = await agrees();
+      assert.equal(a.claimed, a.rowCount, `header claims ${a.claimed} but rows show ${a.rowCount} ("${a.summary}")`);
+      assert.equal(a.rowCount, 0);
+
+      appendFileSync(deps.board.ledgerPath, runStart("W1-T1"));
+      await page.waitForFunction(() => (document.querySelector("#now-list .detail")?.textContent ?? "").includes("phase:"));
+      a = await agrees();
+      assert.equal(a.claimed, a.rowCount, `header claims ${a.claimed} but rows show ${a.rowCount} ("${a.summary}")`);
+      assert.equal(a.rowCount, 1);
+
+      appendFileSync(deps.board.ledgerPath, runStart("W1-T2", "r2"));
+      await page.waitForFunction(() => document.querySelectorAll("#now-list li[data-key]").length === 2);
+      a = await agrees();
+      assert.equal(a.claimed, a.rowCount, `header claims ${a.claimed} but rows show ${a.rowCount} ("${a.summary}")`);
+      assert.equal(a.rowCount, 2);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+test("W1-T223: a NEEDS ME item arriving while the section is collapsed adds header emphasis -- never a forced reopen, never a silent miss", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })]); // no escalation yet -- NEEDS ME starts empty, defaults collapsed
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => document.getElementById("needs-me-toggle")?.getAttribute("aria-expanded") === "false");
+      assert.equal(
+        await page.evaluate(() => document.getElementById("needs-me-toggle")?.classList.contains("section-emphasis")),
+        false,
+        "no emphasis before anything has arrived",
+      );
+
+      appendFileSync(
+        deps.board.ledgerPath,
+        JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "escalation.issue_opened", issue_url: "https://github.com/o/r/issues/1", class: "BLOCKED" }) + "\n",
+      );
+      await page.waitForFunction(() => document.getElementById("needs-me-toggle")?.classList.contains("section-emphasis") === true, null, {
+        timeout: 5000,
+      });
+      // the falsifier this proves: collapsing must never become a way to silently miss the item --
+      // but the fix is EMPHASIS, never a forced reopen the operator didn't ask for.
+      assert.equal(await page.evaluate(() => document.getElementById("needs-me-toggle")?.getAttribute("aria-expanded")), "false");
+      assert.equal(await page.evaluate(() => (document.getElementById("needs-me-body") as HTMLElement)?.hidden), true);
+
+      await page.click("#needs-me-toggle");
+      await page.waitForFunction(() => document.getElementById("needs-me-toggle")?.getAttribute("aria-expanded") === "true");
+      assert.equal(
+        await page.evaluate(() => document.getElementById("needs-me-toggle")?.classList.contains("section-emphasis")),
+        false,
+        "expanding the section clears the emphasis -- the operator has now seen it",
+      );
     } finally {
       await context.close();
     }

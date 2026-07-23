@@ -601,6 +601,23 @@ function priorPrecedence(p: StatusProjection): StatusProjection {
   return out;
 }
 
+/**
+ * Parse a PR number off the END of a ref/url string (W1-T130) — pure text parsing,
+ * never a gateway call. Backs ONLY the correction rung's `prNumber` decoration: a
+ * correction's `actual_pr_url` is trusted TEXT, never re-resolved via `prByRef`
+ * (see {@link derivePrPrecedence}'s SUPREME OFFLINE note), so there is no `PrRef`
+ * to read `.number` off of. Mirrors board.ts's `prNumberFromUrl` in spirit but
+ * matches trailing digits generally (not just after a literal `/pull/`) since a
+ * real gateway's `PrRef.url` is always `.../pull/<n>` but a test fixture's
+ * shorthand ref (`"u/51"`) is not — undefined when the string doesn't end in
+ * digits, which only ever degrades the decoration, never the (unconditional)
+ * merged verdict above it.
+ */
+function prNumberFromRef(ref: string): number | undefined {
+  const n = Number(ref.match(/(\d+)$/)?.[1]);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 /** Map a GitHub PR state onto a plan status label + the merged predicate. */
 function fromPrState(state: string): { status: TaskStatus; merged: boolean } {
   switch (state.toUpperCase()) {
@@ -856,18 +873,33 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   // the canonical case is a merged PR on a `fix/*` head (#134), which the assert
   // would otherwise reject, making the un-strand impossible by construction.
   //
-  // The un-credit direction (P9-iv): once a correction exists for this task it is
-  // authoritative in BOTH directions and deriveStatus never falls through to a
-  // stale rung below it — including when the correction's own target PR cannot be
-  // resolved (closed/absent/deleted), which derives NOT merged rather than
-  // silently re-crediting whatever rung (a)/(b)/(c) would have said.
+  // SUPREME OFFLINE (W1-T130, ratifying P9-iv, consuming W1-T119's read-failure
+  // distinction rather than re-deriving it): a correction is LEDGER-LOCAL evidence
+  // — `applyCorrection` (correct.ts) already resolved `prRef` via a REAL gateway
+  // call once, at WRITE time, before the line was ever appended, so re-resolving
+  // it here on every derivation buys no new information and puts a gateway call
+  // back on the automated dispatch loop's hot path for every corrected task, every
+  // poll cycle. That is exactly the mechanism the 2026-07-19 incident exploited:
+  // under quota exhaustion `prByRef` returned null for the correction's own
+  // target, this rung fell through to "queued", and the daemon re-dispatched a
+  // task already SATISFIED BY PR #2 (merged 2026-07-14) — sixty run ids, 76 spends,
+  // $206.15 notional, self-reinforcing since each re-dispatch burned more quota.
+  // No read result — healthy, throttled, errored, or absent — may ever demote a
+  // correction-credited task back to dispatchable: supremacy is UNCONDITIONAL, not
+  // best-effort, so this branch returns BEFORE any `deps.github` call at all.
+  // `prNumber` is decoration parsed from the URL's own text (never a gate); a
+  // corrected task is reported `merged` unconditionally, never re-subjected to
+  // whatever GitHub currently says (or fails to say) about `correctedUrl`.
   const correctedUrl = latestActualPrUrl(ledgerLines, task.id);
   if (correctedUrl) {
-    const pr = deps.github.prByRef(correctedUrl);
-    if (pr) {
-      return { taskId: task.id, source: "correction", ...fromPrState(pr.state), prNumber: pr.number, prUrl: pr.url, prState: pr.state };
-    }
-    return { taskId: task.id, status: "queued", merged: false, source: "correction" };
+    return {
+      taskId: task.id,
+      source: "correction",
+      status: "merged",
+      merged: true,
+      prUrl: correctedUrl,
+      prNumber: prNumberFromRef(correctedUrl),
+    };
   }
 
   // (a) ledger `pr.opened` for this task -> query that PR. A MERGED resolution
