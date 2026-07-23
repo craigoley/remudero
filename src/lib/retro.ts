@@ -487,6 +487,10 @@ export interface RetroGather {
   /** W1-T73: every MERGED run whose `review.posted` matched a degraded-success
    *  signal (a claimed PASS that used a weaker path than its criteria named). */
   degradedSuccess: DegradedSuccessFinding[];
+  /** W1-T87/P13: the other half of the flywheel — merged-run shapes shared by
+   *  >=2 runs, mined as procedural-learning candidates for the Architect to
+   *  phrase and ratify (never auto-filed). */
+  proceduralCandidates: ProceduralCandidate[];
   learningsNow: number;
   learningsAtMarker: number;
   /**
@@ -537,6 +541,9 @@ export function buildGather(opts: {
     // bounds, so a degraded-success finding never re-surfaces for a run the
     // marker has already moved past (matches mergedSince's own scoping).
     degradedSuccess: mineDegradedSuccess(merged, records),
+    // W1-T87/P13: same marker-scoped window as degradedSuccess above — a
+    // shape never re-surfaces for a run the marker has already moved past.
+    proceduralCandidates: mineProceduralCandidates(merged, records),
     learningsNow: learningsCount(opts.learningsMd),
     learningsAtMarker: opts.learningsAtMarker ?? 0,
     ...(githubUnavailable ? { githubUnavailable } : {}),
@@ -617,6 +624,8 @@ export function renderGather(g: RetroGather): string {
       : []),
     "",
     renderDegradedSuccess(g.degradedSuccess),
+    "",
+    renderProceduralCandidates(g.proceduralCandidates),
   ].join("\n");
 }
 
@@ -947,6 +956,226 @@ export function renderDegradedSuccess(findings: DegradedSuccessFinding[]): strin
     "",
     ...findings.map((f) => `- ${f.taskId} (${f.runId}): [${f.signal}] ${f.description}`),
   ].join("\n");
+}
+
+// ── Procedural-success mining (W1-T87, ratifies P13) ──────────────────────
+//
+// Everything above mines FAILURE (overruns) or a weaker-than-claimed PASS
+// (degraded success) — half the compounding loop MASTER-PLAN P13 names. The
+// other half is blind: a run that merged CLEAN — first attempt, every
+// acceptance criterion actually OBSERVED, not keyword-floored — is a
+// POSITIVE signal whose shape is captured NOWHERE, so the prompt/recon/fix
+// shape that produced it is never distilled into reusable procedural memory.
+//
+// This mines MERGED runs for that shape, DETERMINISTICALLY (rule 2 — the
+// signal set is DATA, same discipline as OVERRUN_VERDICTS/
+// DEGRADED_SUCCESS_SIGNALS above): every field a {@link ProceduralCandidate}
+// carries is computed here, before any LLM ever sees it.
+// {@link phraseProceduralCandidate} is the ONLY place an LLM enters this
+// pipeline, and it receives nothing but the already-mined candidate — it
+// PHRASES the fact, it never invents the evidence.
+//
+// BLOAT GUARD (design: "one success is an anecdote"): a shape needs
+// `threshold` (default 2) SUPPORTING runs before it becomes a candidate —
+// mirrors {@link mineOverrunClasses}'s identical guard on the failure side.
+//
+// NO PARALLEL STORE: a candidate, once phrased, is a {@link
+// ProceduralLearningDraft} — the SAME shape (`fact`/`src`/`files`) a
+// learnings.ts `LearningEntry` already carries, tagged only by `subsystem:
+// "procedural"`. It rides the EXISTING lifecycle/injection/consolidation
+// machinery (W1-T33/W1-T19) like any other entry; only the Architect writes
+// it into a `learnings/*.yaml` shard (Standing rule 15 — never auto-filed).
+
+/** The reduced facts one {@link ProceduralSuccessSignal} judges a MERGED run against. */
+export interface ProceduralRunContext {
+  runId: string;
+  taskId: string;
+  taskType: string;
+  numTurns: number;
+  /** Count of `fix.dispatch` ledger lines for this run — zero means it never needed a fix rung. */
+  fixDispatchCount: number;
+  /** This run's latest `review.posted` reduction, if any (see {@link latestReviewPostedByRun}). */
+  review?: ReviewPostedSummary;
+}
+
+/**
+ * One deterministic success shape — DATA, not a hardcoded branch (mirrors
+ * {@link DegradedSuccessSignal}): the next reusable-procedure class is a ROW
+ * added here, never new mining code.
+ */
+export interface ProceduralSuccessSignal {
+  key: string;
+  matches: (ctx: ProceduralRunContext) => boolean;
+  describe: (ctx: ProceduralRunContext) => string;
+}
+
+/** The shipped signal table (W1-T87/P13): "single-strike merges" and "proof_exec executed_pass patterns" (design note), named exactly. */
+export const PROCEDURAL_SUCCESS_SIGNALS: ReadonlyArray<ProceduralSuccessSignal> = [
+  {
+    key: "clean_single_strike",
+    matches: (ctx) => ctx.fixDispatchCount === 0,
+    describe: (ctx) => `merged with zero fix.dispatch lines — resolved on the first attempt (${ctx.numTurns} turns)`,
+  },
+  {
+    key: "fully_executed_proof",
+    matches: (ctx) =>
+      ctx.review !== undefined && ctx.review.total > 0 && ctx.review.executed === ctx.review.total && !ctx.review.floorDegraded,
+    describe: (ctx) =>
+      `proof_exec ${ctx.review!.executed}/${ctx.review!.total} executed — every criterion OBSERVED, never keyword-floored`,
+  },
+];
+
+/** Count of `fix.dispatch` ledger lines per `run_id` — zero means a run never needed a fix rung. */
+export function fixDispatchCountByRun(records: LedgerRecord[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const r of records) {
+    if (r.step !== "fix.dispatch" || !r.run_id) continue;
+    const key = String(r.run_id);
+    out.set(key, (out.get(key) ?? 0) + 1);
+  }
+  return out;
+}
+
+/** ONE mined procedural-success candidate — a reusable shape shared by >= `threshold` merged runs. */
+export interface ProceduralCandidate {
+  /** Always `"procedural"` — the tag a drafted learning carries once the Architect ratifies it. */
+  kind: "procedural";
+  /** Deterministic grouping key: `${taskType}:${signals.join("+")}`. */
+  shapeKey: string;
+  taskType: string;
+  /** The matched signal keys this shape shares, sorted. */
+  signals: string[];
+  runIds: string[];
+  taskIds: string[];
+  supportingRuns: number;
+}
+
+/**
+ * MINE merged runs for a procedure shape shared by >= `opts.threshold` runs
+ * (default 2 — a single success is an anecdote, not yet a pattern). Only a
+ * run matching >=1 {@link ProceduralSuccessSignal} is considered at all; a
+ * run matching none has nothing to contribute. Pure over the already-reduced
+ * run summaries plus the raw ledger records (needed only for the
+ * `fix.dispatch` count and the `review.posted` reduction) — no LLM, no I/O;
+ * calling it twice over the SAME fixture returns the SAME candidates.
+ */
+export function mineProceduralCandidates(
+  runs: RunSummary[],
+  records: LedgerRecord[],
+  opts: { threshold?: number; signals?: ReadonlyArray<ProceduralSuccessSignal> } = {},
+): ProceduralCandidate[] {
+  const threshold = opts.threshold ?? 2;
+  const signals = opts.signals ?? PROCEDURAL_SUCCESS_SIGNALS;
+  const fixCounts = fixDispatchCountByRun(records);
+  const reviewByRun = latestReviewPostedByRun(records);
+
+  const byShape = new Map<string, RunSummary[]>();
+  const shapeSignals = new Map<string, string[]>();
+  for (const r of runs) {
+    if (r.verdict !== "merged") continue;
+    const ctx: ProceduralRunContext = {
+      runId: r.runId,
+      taskId: r.taskId,
+      taskType: r.type,
+      numTurns: r.numTurns,
+      fixDispatchCount: fixCounts.get(r.runId) ?? 0,
+      review: reviewByRun.get(r.runId),
+    };
+    const matched = signals
+      .filter((s) => s.matches(ctx))
+      .map((s) => s.key)
+      .sort();
+    if (matched.length === 0) continue; // nothing this run demonstrates — not a candidate
+    const shapeKey = `${r.type}:${matched.join("+")}`;
+    const arr = byShape.get(shapeKey) ?? [];
+    arr.push(r);
+    byShape.set(shapeKey, arr);
+    shapeSignals.set(shapeKey, matched);
+  }
+
+  const out: ProceduralCandidate[] = [];
+  for (const [shapeKey, rs] of byShape) {
+    if (rs.length < threshold) continue; // one success is an anecdote, not a procedure
+    const taskType = shapeKey.slice(0, shapeKey.indexOf(":"));
+    out.push({
+      kind: "procedural",
+      shapeKey,
+      taskType,
+      signals: shapeSignals.get(shapeKey) ?? [],
+      runIds: [...new Set(rs.map((r) => r.runId))].sort(),
+      taskIds: [...new Set(rs.map((r) => r.taskId))].sort(),
+      supportingRuns: rs.length,
+    });
+  }
+  out.sort((a, b) => (a.shapeKey < b.shapeKey ? -1 : a.shapeKey > b.shapeKey ? 1 : 0));
+  return out;
+}
+
+/** Render the mined procedural candidates (markdown) — printed by `--dry-run` and fed to the Architect, which drafts the actual learning (Standing rule 15: only the Architect authors learnings). */
+export function renderProceduralCandidates(candidates: ProceduralCandidate[]): string {
+  if (candidates.length === 0) {
+    return "## Procedural-success mining (P13)\n\nNo shape shared by >=2 merged runs yet.";
+  }
+  return [
+    "## Procedural-success mining (P13) — reusable shapes proposed for a procedural learning",
+    "",
+    ...candidates.map((c) => `- ${c.taskType} × [${c.signals.join(", ")}] — ${c.supportingRuns} run(s): ${c.taskIds.join(", ")}`),
+  ].join("\n");
+}
+
+// ── Phrasing — the ONLY step where an LLM enters (W1-T87/P13) ────────────
+
+/**
+ * Injected phrasing dependency — receives ONLY the already-mined {@link
+ * ProceduralCandidate}, never raw ledger records or other candidates
+ * (mirrors learnings.ts's `PromotionJudgeDeps.judge` shape: evidence is
+ * deterministic, the model only phrases/judges over it).
+ */
+export interface ProceduralPhraseDeps {
+  phrase: (candidate: ProceduralCandidate) => string | Promise<string>;
+}
+
+/**
+ * ONE draft, shaped to become a `LearningEntry` (learnings.ts) once the
+ * Architect ratifies it into a `learnings/*.yaml` shard — same fields, NO
+ * parallel store. `subsystem: "procedural"` is the only tag distinguishing
+ * it; once admitted it rides the EXACT SAME `active|superseded|quarantined`
+ * lifecycle and `selectLearnings` matcher as any other entry.
+ */
+export interface ProceduralLearningDraft {
+  id: string;
+  subsystem: "procedural";
+  fact: string;
+  src: string;
+  files: string[];
+}
+
+/** Deterministic id for a candidate's draft — stable across calls for the same shape. */
+function proceduralDraftId(candidate: ProceduralCandidate): string {
+  return `procedural-${candidate.shapeKey.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "")}`;
+}
+
+/**
+ * PHRASE one mined candidate into a {@link ProceduralLearningDraft}. The
+ * ONLY step in this whole pipeline that touches an LLM — `deps.phrase`
+ * receives NOTHING but the candidate {@link mineProceduralCandidates}
+ * already computed (never the ledger, never sibling candidates), so a
+ * stubbed `deps` proves the evidence/phrasing split by construction: a test
+ * asserting the stub's received argument deep-equals the input candidate is
+ * the falsifier.
+ */
+export async function phraseProceduralCandidate(
+  candidate: ProceduralCandidate,
+  deps: ProceduralPhraseDeps,
+): Promise<ProceduralLearningDraft> {
+  const fact = await deps.phrase(candidate);
+  return {
+    id: proceduralDraftId(candidate),
+    subsystem: "procedural",
+    fact,
+    src: `retro#procedural (${candidate.taskIds.join(", ")})`,
+    files: [],
+  };
 }
 
 // ── The retro marker (state/last-retro.json) ──────────────────────────────
