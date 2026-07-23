@@ -46,7 +46,7 @@ test("W1-T187 criterion 5: GET / and GET /v1/status each answer in UNDER 2000ms 
 
   const deps: ServeDeps = {
     board: { plan, ledgerPath: corpusLedgerPath(), github, now: () => Date.parse(FIXED_NOW_ISO) },
-    panelGraph: { root, planPath, ledgerPath: corpusLedgerPath(), github: fakeTraceGithub(), statusGithub: github },
+    panelGraph: { root, planPath, ledgerPath: corpusLedgerPath(), github: fakeTraceGithub(), statusGithub: github, ratify: { approve() {}, reframe() {} } },
     ledgerPath: corpusLedgerPath(),
     issues: fakeIssueCloser(),
     fleetControlRoot: root,

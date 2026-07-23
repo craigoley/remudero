@@ -15,6 +15,7 @@ import {
   isRatifiedInLedger,
   parseDraftAttemptCache,
   parseDraftCache,
+  parseDraftInFlightCache,
   parseDraftedCandidate,
   parseProposalRegistry,
   proposalsNeedingDraft,
@@ -26,6 +27,7 @@ import {
   summarizeInboxPoll,
   type DraftAttemptCache,
   type DraftCache,
+  type DraftInFlightCache,
   type DraftedCandidate,
   type DraftSpawn,
   type EvidenceAnchor,
@@ -462,6 +464,26 @@ test("refusalReason: a ratified classification names the ratified state, not a g
   assert.doesNotMatch(reason, /NOT READY/);
 });
 
+// W1-T193: a proposal currently mid-draft names the DRAFTING state + its spawn time, never a
+// generic NOT READY — the same "no action is offered the backend would refuse" bar every
+// other non-ready state above already meets.
+test("refusalReason: a drafting classification names DRAFTING + its spawn time, not a generic NOT READY", () => {
+  const c = classifyProposal(
+    { id: "P901", summary: "mid-draft", evidenceAnchors: [] },
+    undefined,
+    baseCtx({ draftSpawnedAt: () => "2026-07-22T10:00:00.000Z" }),
+  );
+  assert.equal(c.state, "drafting");
+  const reason = refusalReason(c);
+  assert.match(reason, /currently DRAFTING \(spawned 2026-07-22T10:00:00\.000Z\)/);
+  assert.doesNotMatch(reason, /NOT READY/);
+});
+
+test("refusalReason: a drafting classification with no spawn timestamp on the classification object still names DRAFTING, falling back to 'unknown time' rather than crashing on `undefined`", () => {
+  const reason = refusalReason({ proposalId: "P902", state: "drafting", reasons: [] });
+  assert.match(reason, /currently DRAFTING \(spawned unknown time\)/);
+});
+
 // W1-T190: same reasoning as the acceptance-2 test above — this test's name embeds
 // acceptance criterion 4's proof text VERBATIM so the `unit test:` dialect proof executor
 // finds a real, name-matched subtest to run rather than falling through to a false fail.
@@ -596,6 +618,23 @@ test("renderInbox: a READY item's rendering carries its drafted tasks and stamp;
   assert.doesNotMatch(rendered, /READY — P-DEFER/);
 });
 
+// W1-T193: a proposal currently mid-draft is named, with its spawn time — `rmd inbox` must
+// never render nothing (or NOT READY) for a proposal legitimately mid-draft.
+test("renderInbox: a drafting item is named DRAFTING with its spawn timestamp, and its summary count is broken out separately from ready/not-ready/deferred/ratified", () => {
+  const rendered = renderInbox([
+    { proposalId: "P-DRAFTING", state: "drafting", reasons: [], draftSpawnedAt: "2026-07-22T10:00:00.000Z" },
+  ]);
+  assert.match(rendered, /1 drafting/);
+  assert.match(rendered, /DRAFTING — P-DRAFTING \(spawned 2026-07-22T10:00:00\.000Z\)/);
+  assert.doesNotMatch(rendered, /READY — P-DRAFTING/);
+  assert.doesNotMatch(rendered, /NOT READY — P-DRAFTING/);
+});
+
+test("renderInbox: a drafting item with no spawn timestamp falls back to 'unknown time' rather than rendering 'undefined'", () => {
+  const rendered = renderInbox([{ proposalId: "P-DRAFTING-2", state: "drafting", reasons: [] }]);
+  assert.match(rendered, /DRAFTING — P-DRAFTING-2 \(spawned unknown time\)/);
+});
+
 // ── The digest's ready-count block (W1-T112 — the morning pulse) ──────────────────────────
 
 test("summarizeInboxPoll: counts only READY classifications, ignoring not_ready and deferred", () => {
@@ -692,6 +731,16 @@ test("parseDraftAttemptCache: missing/malformed input yields {} rather than thro
   assert.deepEqual(parseDraftAttemptCache("[]"), {});
   const cache: DraftAttemptCache = { P1: "fingerprint::0" };
   assert.deepEqual(parseDraftAttemptCache(JSON.stringify(cache)), cache);
+});
+
+// W1-T193: state/inbox-draft-inflight.json — mirrors parseDraftAttemptCache's own fail-soft
+// discipline (the doc on parseDraftInFlightCache says so verbatim).
+test("parseDraftInFlightCache: missing/malformed input yields {} rather than throwing; valid input round-trips", () => {
+  assert.deepEqual(parseDraftInFlightCache(undefined), {});
+  assert.deepEqual(parseDraftInFlightCache("not json"), {});
+  assert.deepEqual(parseDraftInFlightCache("[]"), {});
+  const cache: DraftInFlightCache = { P1: "2026-07-22T10:00:00.000Z" };
+  assert.deepEqual(parseDraftInFlightCache(JSON.stringify(cache)), cache);
 });
 
 test("draftsDueOnDaemon layers the attempt throttle on top of proposalsNeedingDraft — `rmd inbox` itself stays UNTHROTTLED (the manual-force contract)", () => {

@@ -290,6 +290,7 @@ function buildGraphFixtureService(root: string) {
     ledgerPath: join(root, "state", "ledger.ndjson"),
     github: fakeGithub(),
     statusGithub: fakeStatusGithub(),
+    ratify: { approve() {}, reframe() {} },
   };
   return { server: createService({ tokens: { read: READ_TOKEN, write: WRITE_TOKEN }, routes: buildPanelGraphRoutes(deps) }), deps };
 }
@@ -446,6 +447,7 @@ test("createDaemonClient.runSkill(): invoking Refine (plan/clarify) parks a gril
     ledgerPath: skillRunDeps.ledgerPath,
     github: fakeGithub(),
     statusGithub: fakeStatusGithub(),
+    ratify: { approve() {}, reframe() {} },
   };
   const server = createService({
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },

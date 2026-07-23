@@ -51,9 +51,10 @@
  * deferred siblings (lib/triage.ts's grill mechanics, lib/board.ts's un-rendered design panels).
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { loadPlan, type MergedResolver } from "./plan.js";
+import { loadPlan, parseTasksFromYaml, PlanError, type MergedResolver } from "./plan.js";
 import { projectPlan, readLedgerLines, type GitHub } from "./status.js";
 import { buildDrainPreview, type DrainOpts } from "./drain.js";
 import {
@@ -73,9 +74,13 @@ import {
   gitGrepAnchorTrue,
   isRatifiedInLedger,
   parseDraftCache,
+  parseDraftInFlightCache,
   parseProposalRegistry,
   pruneRatifiedProposals,
+  refusalReason,
+  type DraftCache,
   type InboxClassification,
+  type Proposal,
 } from "./inbox.js";
 
 export interface PanelGraphDeps {
@@ -109,6 +114,12 @@ export interface PanelGraphDeps {
    * `fleetControlRoot` it already resolves as config.root.
    */
   inboxRoot: string;
+  /**
+   * W1-T193: the gateway POST /v1/inbox/approve and POST /v1/inbox/reframe hand off to —
+   * see {@link RatifyCliGateway}'s own doc for why this is a detached CLI spawn rather than a
+   * synchronous re-implementation of `rmd approve`'s git/gh side effects.
+   */
+  ratify: RatifyCliGateway;
 }
 
 // ── GET /v1/feedback — the inbox list ───────────────────────────────────────
@@ -377,27 +388,103 @@ function readFileIfExists(path: string): string | undefined {
   }
 }
 
-/** One READY-to-ratify proposal, as the panel renders it — the reasoning (drafted fragment/stamp) stays server-side; the panel gets the one-line ask. */
+/** One task the drafted fragment would file — id + title, so a READY card shows what would
+ *  ACTUALLY be filed rather than an opaque proposal id (W1-T193 design: "RENDER THE DRAFT'S
+ *  SUBSTANCE, not just its existence" — the operator approves a KNOWN change, never a token). */
+export interface InboxDraftedTask {
+  id: string;
+  title: string;
+}
+
+/** One READY-to-ratify proposal, as the panel renders it — the drafted task ids/titles ride
+ *  along (never just the proposal id), so the operator sees exactly what APPROVE would file. */
 export interface InboxReadyItem {
   proposalId: string;
   summary: string;
   stampLine?: string;
+  draftedTasks: InboxDraftedTask[];
+}
+
+/** One proposal currently mid-draft (W1-T193): the daemon's draft rung (W1-T192,
+ *  buildInboxDraftHook) has an Architect worker running for it RIGHT NOW. `spawnedAt` is the
+ *  ISO timestamp it was spawned at — a card must never render nothing during this legitimately
+ *  multi-minute window (indistinguishable from broken otherwise), the same bar W1-T156 set for
+ *  liveness. */
+export interface InboxDraftingItem {
+  proposalId: string;
+  summary: string;
+  spawnedAt: string;
+}
+
+/** The drafted fragment's task ids + titles. A READY classification's fragment has ALREADY
+ *  passed classifyProposal's own parse+lint checks (a fragment that failed either would have
+ *  classified not_ready instead, never ready), so this re-parse is expected to always succeed
+ *  — the catch is defense-in-depth (never assume two derivations of the same text agree
+ *  forever), not an expected-failure path. Exported so that defense-in-depth branch is directly
+ *  unit-testable — the READY path it guards against never exercises it in practice by design. */
+export function draftedTaskSummaries(fragmentYaml: string, proposalId: string): InboxDraftedTask[] {
+  try {
+    return parseTasksFromYaml(fragmentYaml, `inbox draft ${proposalId}`).map((t) => ({ id: t.id, title: t.title }));
+  } catch (e) {
+    if (!(e instanceof PlanError)) throw e;
+    return [];
+  }
 }
 
 /**
- * GET /v1/inbox — read-scoped. The ratification inbox's (W1-T110, lib/inbox.ts) READY tier
- * ONLY — the same tiering `rmd inbox` prints, computed the SAME way (classifyProposal, a pure
- * function, over the ACTIVE-proposal registry + draft cache + a real ReadinessContext), but
- * over HTTP for the shell's NEEDS ME section. NOT-READY / DEFERRED-WITH-TRIGGER proposals are
- * deliberately never returned here (inbox.ts's whole point: only what is genuinely actionable
- * is ever surfaced, "the cure for approval fatigue").
+ * Shared read + classify step every /v1/inbox* route needs (GET /v1/inbox classifies every
+ * proposal to render the list; POST /v1/inbox/approve and /v1/inbox/reframe classify just the
+ * one they're asked about, but need the SAME registry/draft-cache/ledger/in-flight facts to do
+ * it correctly — e.g. the conflict predicate needs every OTHER open proposal id). Assembled in
+ * ONE place so the write routes can never drift from what GET /v1/inbox just rendered.
+ */
+function classifyAllProposals(deps: PanelGraphDeps): {
+  registryPath: string;
+  proposals: Proposal[];
+  classifications: InboxClassification[];
+} {
+  const registryPath = join(deps.inboxRoot, "state", "inbox-proposals.json");
+  const draftsPath = join(deps.inboxRoot, "state", "inbox-drafts.json");
+  const inflightPath = join(deps.inboxRoot, "state", "inbox-draft-inflight.json");
+  const proposals = parseProposalRegistry(readFileIfExists(registryPath));
+  const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
+  const inflight = parseDraftInFlightCache(readFileIfExists(inflightPath));
+
+  const plan = loadPlan(deps.planPath);
+  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
+  const isMerged: MergedResolver = (t) => projection.get(t.id)?.merged ?? false;
+  const allIds = new Set(proposals.map((p) => p.id));
+  // W1-T190: the console must never offer the ratify affordance on a proposal the
+  // ledger already carries `ratify.approved` for, even when the registry entry itself
+  // still looks READY (a drifted write) — re-derived from the ledger on every request,
+  // never trusted from the registry's own state.
+  const ledgerLines = readLedgerLines(deps.ledgerPath);
+
+  const classifications = proposals.map((proposal) =>
+    classifyProposal(proposal, drafts[proposal.id], {
+      plan,
+      isMerged,
+      grepAnchorTrue: (anchor) => gitGrepAnchorTrue(deps.root, "origin/main", anchor),
+      openProposalIds: new Set([...allIds].filter((id) => id !== proposal.id)),
+      isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
+      draftSpawnedAt: (id) => inflight[id],
+    }),
+  );
+  return { registryPath, proposals, classifications };
+}
+
+/**
+ * GET /v1/inbox — read-scoped. The ratification inbox's (W1-T110, lib/inbox.ts) READY and
+ * DRAFTING tiers — the same tiering `rmd inbox` prints, computed the SAME way
+ * (classifyProposal, a pure function, over the ACTIVE-proposal registry + draft cache + a real
+ * ReadinessContext), but over HTTP for the shell's NEEDS ME section. NOT-READY / DEFERRED-
+ * WITH-TRIGGER proposals are deliberately never returned here (inbox.ts's whole point: only
+ * what is genuinely actionable — or, since W1-T193, genuinely IN PROGRESS — is ever surfaced,
+ * "the cure for approval fatigue").
  *
- * `rmd approve <id>` / `rmd reframe <id>` (W1-T111) stay CLI-only here — approveProposal needs
- * a real `RatifyGateway` (git branch + PR side effects), and wiring THAT as a web write route is
- * its own concern (a ratification write surface), not this task's one concern (shell IA/design).
- * A READY item's "action" in the panel is therefore the exact CLI command to run, not a button —
- * an honest affordance over one this PR cannot respond to. See W1-T153's PR body for this scope
- * note.
+ * `rmd approve <id>` / `rmd reframe <id>` (W1-T111) are wired from the card as of W1-T193 — see
+ * `buildApproveProposalRoute`/`buildReframeProposalRoute` below — over the SAME write-token
+ * scope every other panel write action uses, never a second auth story.
  */
 export function buildInboxRoute(deps: PanelGraphDeps): Route {
   return {
@@ -405,34 +492,22 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
     path: "/v1/inbox",
     scope: "read",
     handler: (_req, res) => {
-      const registryPath = join(deps.inboxRoot, "state", "inbox-proposals.json");
-      const draftsPath = join(deps.inboxRoot, "state", "inbox-drafts.json");
-      const proposals = parseProposalRegistry(readFileIfExists(registryPath));
-      const drafts = parseDraftCache(readFileIfExists(draftsPath));
-
-      const plan = loadPlan(deps.planPath);
-      const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
-      const isMerged: MergedResolver = (t) => projection.get(t.id)?.merged ?? false;
-      const allIds = new Set(proposals.map((p) => p.id));
-      // W1-T190: the console must never offer the ratify affordance on a proposal the
-      // ledger already carries `ratify.approved` for, even when the registry entry itself
-      // still looks READY (a drifted write) — re-derived from the ledger on every request,
-      // never trusted from the registry's own state.
-      const ledgerLines = readLedgerLines(deps.ledgerPath);
+      const { registryPath, proposals, classifications } = classifyAllProposals(deps);
 
       const ready: InboxReadyItem[] = [];
-      const classifications: InboxClassification[] = [];
-      for (const proposal of proposals) {
-        const classification = classifyProposal(proposal, drafts[proposal.id], {
-          plan,
-          isMerged,
-          grepAnchorTrue: (anchor) => gitGrepAnchorTrue(deps.root, "origin/main", anchor),
-          openProposalIds: new Set([...allIds].filter((id) => id !== proposal.id)),
-          isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-        });
-        classifications.push(classification);
+      const drafting: InboxDraftingItem[] = [];
+      for (const classification of classifications) {
+        const proposal = proposals.find((p) => p.id === classification.proposalId);
+        if (!proposal) continue; // unreachable — classifications are 1:1 with proposals
         if (classification.state === "ready") {
-          ready.push({ proposalId: proposal.id, summary: proposal.summary, stampLine: classification.draft?.stampLine });
+          ready.push({
+            proposalId: proposal.id,
+            summary: proposal.summary,
+            stampLine: classification.draft?.stampLine,
+            draftedTasks: classification.draft ? draftedTaskSummaries(classification.draft.fragmentYaml, proposal.id) : [],
+          });
+        } else if (classification.state === "drafting") {
+          drafting.push({ proposalId: proposal.id, summary: proposal.summary, spawnedAt: classification.draftSpawnedAt ?? "" });
         }
       }
       // W1-T190 (round 2): a proposal classified "ratified" here is DETECTED off the
@@ -447,8 +522,147 @@ export function buildInboxRoute(deps: PanelGraphDeps): Route {
       if (prunedIds.length > 0) {
         writeFileSync(registryPath, JSON.stringify({ proposals: healedProposals }, null, 2), "utf8");
       }
-      sendJson(res, 200, { ready });
+      sendJson(res, 200, { ready, drafting });
     },
+  };
+}
+
+// ── POST /v1/inbox/approve, POST /v1/inbox/reframe — the operator's ratification bit, wired
+// through the write-token API from the card (W1-T193, MASTER-PLAN P25 ii-iii) ───────────────
+
+/**
+ * The real side effects `rmd approve`/`rmd reframe` (run-task.ts's `approveCommand`/
+ * `reframeCommand`) drive: git clone/worktree/branch/push, `gh pr create`, a poll for CI green,
+ * the remudero-review judge, and arming auto-merge — a multi-minute pipeline. Blocking an HTTP
+ * response on all of that risks a request that never returns, and this codebase has no
+ * existing "detached background op" pattern to build a native re-implementation on. So this
+ * gateway does exactly what an operator's own terminal would do: spawns the REAL `bin/rmd
+ * approve <id>` / `bin/rmd reframe <id> --feedback <text>` CLI as a detached, unref'd child
+ * process — never awaited — reusing 100% of the already-tested, gate-safe CLI flow with zero
+ * duplicated logic. The HTTP response below confirms only that the run was HANDED OFF, not
+ * that it completed; the resulting PR (once one exists) surfaces through the console's own
+ * NOW/RECENT sections via their existing ledger-driven polling, same as any other in-flight
+ * run — see this module's PR body for the fuller reversibility note.
+ */
+export interface RatifyCliGateway {
+  approve(proposalId: string): void;
+  reframe(proposalId: string, feedback: string): void;
+}
+
+/** Real {@link RatifyCliGateway}: shells out to the repo's OWN `bin/rmd`, matching exactly what
+ *  `rmd approve <id>` / `rmd reframe <id> --feedback "<text>"` do from a terminal. stdout/
+ *  stderr are appended to a per-call log file under `<logDir>` (there is no operator terminal
+ *  watching this run) rather than discarded, so a spawn that fails loud still leaves a trace. */
+export function ratifyCliGateway(repoRoot: string, logDir: string): RatifyCliGateway {
+  const rmdBin = join(repoRoot, "bin", "rmd");
+  const spawnDetached = (args: string[], label: string) => {
+    mkdirSync(logDir, { recursive: true });
+    const logFd = openSync(join(logDir, `${label}-${Date.now()}.log`), "a");
+    try {
+      const child = spawn(rmdBin, args, { cwd: repoRoot, detached: true, stdio: ["ignore", logFd, logFd] });
+      child.unref();
+    } finally {
+      closeSync(logFd);
+    }
+  };
+  return {
+    approve(proposalId) {
+      spawnDetached(["approve", proposalId], `approve-${proposalId}`);
+    },
+    reframe(proposalId, feedback) {
+      spawnDetached(["reframe", proposalId, "--feedback", feedback], `reframe-${proposalId}`);
+    },
+  };
+}
+
+interface ApproveProposalInput {
+  proposalId: string;
+}
+
+function validateApproveProposal(body: unknown): { error: string } | ApproveProposalInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.proposalId !== "string" || !body.proposalId.trim()) return { error: "proposalId is required" };
+  return { proposalId: body.proposalId };
+}
+
+/**
+ * POST /v1/inbox/approve — write-scoped. The console's APPROVE affordance: re-classifies the
+ * named proposal LIVE (the SAME `classifyProposal` call GET /v1/inbox just rendered from —
+ * never a cached/stale verdict) and REFUSES with 409 anything not currently READY, naming why
+ * ({@link refusalReason}) — "no action is offered that the backend would refuse" (acceptance
+ * 6) enforced server-side, not merely by the card only rendering the button for a READY item
+ * (a race between the last poll and the operator's confirm click is otherwise possible). A
+ * READY proposal hands off to {@link RatifyCliGateway.approve} — see that interface's doc for
+ * why this is a detached CLI spawn, never a synchronous git/gh pipeline inside this handler.
+ * Ledgers `panel.proposal_approve_requested` immediately (before the spawn even resolves), so
+ * the operator's action is attributed the instant it is accepted, distinct from the spawned
+ * run's OWN later `ratify.approved` ledger line.
+ */
+export function buildApproveProposalRoute(deps: PanelGraphDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/inbox/approve",
+    scope: "write",
+    handler: jsonAction(validateApproveProposal, (input, req, res) => {
+      const { proposals, classifications } = classifyAllProposals(deps);
+      if (!proposals.some((p) => p.id === input.proposalId)) {
+        sendJson(res, 404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
+        return;
+      }
+      const classification = classifications.find((c) => c.proposalId === input.proposalId);
+      if (!classification || classification.state !== "ready") {
+        sendJson(res, 409, {
+          error: "not_ready",
+          detail: classification ? refusalReason(classification) : `${input.proposalId}: classification unavailable`,
+        });
+        return;
+      }
+      const origin = bearerTokenId(req);
+      appendPanelLedger(deps.ledgerPath, "panel.proposal_approve_requested", input.proposalId, origin, {});
+      deps.ratify.approve(input.proposalId);
+      sendJson(res, 200, { ok: true, proposalId: input.proposalId, started: true });
+    }),
+  };
+}
+
+interface ReframeProposalInput {
+  proposalId: string;
+  feedback: string;
+}
+
+function validateReframeProposal(body: unknown): { error: string } | ReframeProposalInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.proposalId !== "string" || !body.proposalId.trim()) return { error: "proposalId is required" };
+  if (typeof body.feedback !== "string" || !body.feedback.trim()) return { error: "feedback is required" };
+  return { proposalId: body.proposalId, feedback: body.feedback };
+}
+
+/**
+ * POST /v1/inbox/reframe — write-scoped. The console's REFRAME affordance: captures the
+ * operator's feedback VERBATIM (never summarized/trimmed beyond the empty-body check) and
+ * hands off to {@link RatifyCliGateway.reframe}. Valid for ANY proposal currently in the
+ * ACTIVE registry, WHATEVER its current classification — reframe is feedback, never a
+ * ratification, and `rmd reframe` itself places no readiness precondition on it (inbox.ts's
+ * own doc: "Valid for ANY proposal already in the registry, whatever its current
+ * classification"). Ledgers `panel.proposal_reframe_requested` (carrying the feedback text)
+ * immediately.
+ */
+export function buildReframeProposalRoute(deps: PanelGraphDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/inbox/reframe",
+    scope: "write",
+    handler: jsonAction(validateReframeProposal, (input, req, res) => {
+      const { proposals } = classifyAllProposals(deps);
+      if (!proposals.some((p) => p.id === input.proposalId)) {
+        sendJson(res, 404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
+        return;
+      }
+      const origin = bearerTokenId(req);
+      appendPanelLedger(deps.ledgerPath, "panel.proposal_reframe_requested", input.proposalId, origin, { feedback: input.feedback });
+      deps.ratify.reframe(input.proposalId, input.feedback);
+      sendJson(res, 200, { ok: true, proposalId: input.proposalId, started: true });
+    }),
   };
 }
 
@@ -461,5 +675,7 @@ export function buildPanelGraphRoutes(deps: PanelGraphDeps): Route[] {
     buildProposalDecisionRoute(deps),
     buildDrainPreviewRoute(deps),
     buildInboxRoute(deps),
+    buildApproveProposalRoute(deps),
+    buildReframeProposalRoute(deps),
   ];
 }

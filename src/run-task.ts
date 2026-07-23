@@ -4715,6 +4715,13 @@ async function serveCommand(rest: string[]): Promise<number> {
     // planPath alone is enough, no snapshot needed here the way board.ts's does.
     // `statusGithub` backs GET /v1/drain/preview's (W1-T140) merged-set derivation --
     // the SAME batched gateway the board route above uses, never a second gateway type.
+    // W1-T193: APPROVE/REFRAME from the console hand off to the REAL `bin/rmd approve`/
+    // `bin/rmd reframe` CLI, detached — see RatifyCliGateway's own doc (panel-graph.ts) for
+    // why. `ratify` is left unset here on purpose: buildServeServer (lib/serve.ts) defaults
+    // it to a real ratifyCliGateway rooted at panelGraph.root + config.root's state/logs
+    // (config.root === fleetControlRoot below, the same root every other rmd-serve state
+    // file already lives under) — see ServeDeps.panelGraph's own doc for why the assembler,
+    // not this CLI-only wiring, owns that construction.
     panelGraph: {
       root: repoRoot,
       planPath,
@@ -6464,12 +6471,25 @@ async function draftProposalBatch(
  * quo, not a regression; `rmd inbox` remains available to force a draft on demand in the
  * meantime.
  */
-function buildInboxDraftHook(
+// Exported, with `draftBatch` an injectable seam defaulting to the real draftProposalBatch
+// (logic UNCHANGED — same mirrors runTask's opts.github escape hatch, drainCommand's
+// githubFactory, etc.): draftProposalBatch itself clones a real worktree and spawns a real
+// Architect worker, so a behavioral test of THIS hook's own inflight-file write/clear
+// discipline (W1-T193) needs a seam to stand in for it without paying that cost.
+export function buildInboxDraftHook(
   owner: string,
   repo: string,
   config: Config,
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  draftBatch: (
+    toDraft: Proposal[],
+    config: Config,
+    owner: string,
+    repo: string,
+    runId: string,
+    log: (step: string, extra?: Record<string, unknown>) => void,
+  ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
 ): () => Promise<void> {
   return async () => {
     try {
@@ -6485,7 +6505,26 @@ function buildInboxDraftHook(
       const due = draftsDueOnDaemon(proposals, drafts, attempts);
       if (due.length === 0) return;
 
-      const outcomes = await draftProposalBatch(due, config, owner, repo, runId, log);
+      // W1-T193: the console must render a proposal as DRAFTING (with its spawn time) for the
+      // whole window an Architect worker is actually running for it — "never lies about its
+      // own state", the same bar W1-T156 set for liveness. Written BEFORE the batch spawns and
+      // cleared in the `finally` below regardless of outcome, so a crash mid-draft is the only
+      // way this file can go stale (self-corrects: a stuck entry is overwritten the next time
+      // ANY draft batch runs, since this rung always writes its own full `due` set, never
+      // merges onto a stale one).
+      const inflightPath = join(config.root, "state", "inbox-draft-inflight.json");
+      const spawnedAt = new Date().toISOString();
+      writeFileSync(inflightPath, JSON.stringify(Object.fromEntries(due.map((p) => [p.id, spawnedAt])), null, 2), "utf8");
+
+      let outcomes: DraftRungOutcome[];
+      try {
+        outcomes = await draftBatch(due, config, owner, repo, runId, log);
+      } finally {
+        // Only one draft rung runs at a time (this hook is awaited to completion by the
+        // daemon's own serial sweep tick before the next one can start), so it is always safe
+        // to clear the WHOLE file here rather than surgically remove just `due`'s ids.
+        writeFileSync(inflightPath, JSON.stringify({}, null, 2), "utf8");
+      }
 
       const nextDrafts: DraftCache = { ...drafts };
       const nextAttempts: DraftAttemptCache = { ...attempts };

@@ -13,6 +13,7 @@ import {
   type ArmDeps,
   DEFAULT_BUDGET_USD,
   GitFetchError,
+  buildInboxDraftHook,
   checkPrOwnership,
   ciGateFromRollup,
   commitsAhead,
@@ -2154,7 +2155,12 @@ test("W1-T192: `rmd inbox` (inboxCommand) and the daemon's draft rung (buildInbo
   assert.match(inboxBody, /draftProposalBatch\(/, "inboxCommand must call the shared draftProposalBatch");
 
   const hookBody = extractFunctionBody(runTaskSrc, "function buildInboxDraftHook(");
-  assert.match(hookBody, /draftProposalBatch\(/, "buildInboxDraftHook must call the SAME draftProposalBatch, never a re-derived spawn loop");
+  // W1-T193: the batch call is now injected (`draftBatch`, a test seam — see the hook's own
+  // doc) rather than calling draftProposalBatch by name directly, but the seam's DEFAULT is
+  // still the SAME draftProposalBatch, and the hook body actually invokes it via that
+  // parameter — never a re-derived spawn loop.
+  assert.match(hookBody, /= draftProposalBatch,/, "buildInboxDraftHook's draftBatch seam must default to the SAME draftProposalBatch");
+  assert.match(hookBody, /await draftBatch\(due,/, "buildInboxDraftHook must actually invoke the (possibly-injected) batch function");
 });
 
 test("W1-T192: buildInboxDraftHook is wrapped in its own try/catch, distinct from buildSweepHook's — a draft-rung hiccup never halts the sweep or the daemon", () => {
@@ -2171,6 +2177,85 @@ test("W1-T192: `rmd inbox`'s drafting predicate (proposalsNeedingDraft) is UNTHR
     inboxBody,
     /draftsDueOnDaemon/,
     "inboxCommand must NOT apply the daemon's idempotence throttle — a human forcing a redraft must never be silently no-op'd",
+  );
+});
+
+// ── W1-T193: the console must never render nothing for a proposal legitimately mid-draft ──
+
+test("W1-T193: buildInboxDraftHook writes state/inbox-draft-inflight.json BEFORE spawning the draft batch, and clears it in a `finally` regardless of outcome", () => {
+  const hookBody = extractFunctionBody(runTaskSrc, "function buildInboxDraftHook(");
+  assert.match(hookBody, /inbox-draft-inflight\.json/, "must write the in-flight cache the console's GET /v1/inbox reads");
+  const writeIdx = hookBody.indexOf("inbox-draft-inflight.json");
+  const spawnIdx = hookBody.indexOf("await draftBatch(due,");
+  const finallyIdx = hookBody.indexOf("} finally {");
+  assert.ok(writeIdx >= 0 && spawnIdx > writeIdx, "the in-flight file must be written BEFORE the batch spawns, not after");
+  assert.ok(finallyIdx > spawnIdx, "the in-flight file must be cleared in a finally AFTER the spawn, whether it throws or not");
+});
+
+// The two tests above prove the SHAPE (reachability + ordering) from source text; the two
+// below actually EXECUTE buildInboxDraftHook end to end, injecting a fake `draftBatch` in
+// place of the real draftProposalBatch (which clones a real worktree and spawns a real
+// Architect worker — far too heavy for a unit test) via the seam added for exactly this
+// purpose (buildInboxDraftHook's own doc).
+function seedDueProposal(root: string, proposalId: string): void {
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: proposalId, summary: "s", evidenceAnchors: [] }] }));
+}
+
+test("W1-T193: buildInboxDraftHook — a REAL execution proves the in-flight file names every due proposal's id BEFORE the batch runs, and is left EMPTY once it resolves successfully", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-inbox-hook-"));
+  seedDueProposal(root, "P1");
+  const config = { root } as Config;
+  const inflightPath = join(root, "state", "inbox-draft-inflight.json");
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const log = (step: string, extra?: Record<string, unknown>) => logs.push({ step, extra });
+
+  let inflightDuringBatch: unknown;
+  const hook = buildInboxDraftHook("owner", "repo", config, "RUN-1", log, async (due) => {
+    inflightDuringBatch = JSON.parse(readFileSync(inflightPath, "utf8"));
+    return due.map((p) => ({
+      proposalId: p.id,
+      ok: true as const,
+      candidate: { proposalId: p.id, fragmentYaml: "- id: X\n  title: t\n", stampLine: "stamp", anchorFingerprint: "" },
+    }));
+  });
+
+  await hook();
+
+  assert.deepEqual(Object.keys(inflightDuringBatch as Record<string, string>), ["P1"], "the in-flight file must name exactly the due proposal(s) before the batch runs");
+  assert.match((inflightDuringBatch as Record<string, string>).P1, /^\d{4}-\d{2}-\d{2}T/, "the spawn timestamp must be a real ISO string");
+  assert.deepEqual(JSON.parse(readFileSync(inflightPath, "utf8")), {}, "the in-flight file must be cleared once the batch resolves");
+  const drafts = JSON.parse(readFileSync(join(root, "state", "inbox-drafts.json"), "utf8"));
+  assert.ok(drafts.P1, "a successful outcome must land in the draft cache");
+  assert.deepEqual(logs, [], "a clean run never ledgers inbox.draft_rung.error");
+});
+
+test("W1-T193: buildInboxDraftHook — the in-flight file is cleared even when the injected batch THROWS, and the failure is caught and ledgered, never thrown up to the caller", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-inbox-hook-"));
+  seedDueProposal(root, "P2");
+  const config = { root } as Config;
+  const inflightPath = join(root, "state", "inbox-draft-inflight.json");
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const log = (step: string, extra?: Record<string, unknown>) => logs.push({ step, extra });
+
+  const hook = buildInboxDraftHook("owner", "repo", config, "RUN-2", log, async () => {
+    throw new Error("simulated worktree failure");
+  });
+
+  await assert.doesNotReject(hook(), "a batch failure must be caught, never thrown up into the sweep/daemon loop");
+  assert.deepEqual(JSON.parse(readFileSync(inflightPath, "utf8")), {}, "the in-flight file must still be cleared on failure");
+  assert.deepEqual(logs, [{ step: "inbox.draft_rung.error", extra: { error: "simulated worktree failure" } }]);
+});
+
+test("W1-T193: rmd serve leaves panelGraph.ratify UNSET in its own CLI wiring — buildServeServer (lib/serve.ts) owns defaulting it to a real ratifyCliGateway, proven behaviorally in test/serve.test.ts; the console's APPROVE/REFRAME routes are reachable from the real CLI, never left with no gateway", () => {
+  const serveBody = extractFunctionBody(runTaskSrc, "async function serveCommand(");
+  assert.match(serveBody, /panelGraph: \{/, "serveCommand must still assemble a panelGraph deps object");
+  assert.doesNotMatch(
+    serveBody,
+    /ratify:/,
+    "serveCommand must NOT construct its own ratify gateway — that would bypass buildServeServer's " +
+      "single default-construction site (lib/serve.ts), the same 'one assembler, not two divergent " +
+      "wiring sites' discipline inboxRoot's own auto-fill already follows",
   );
 });
 
