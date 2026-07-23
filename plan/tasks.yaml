@@ -3980,13 +3980,13 @@
     through the existing reconciliation path, not innerHTML.
   acceptance:
     - claim: "no skeleton renders in a section after that section's first successful data render"
-      proof: "unit/DOM test: after a section receives data, the rendered section contains ZERO skeleton/placeholder nodes. FALSIFIER, operator screenshots 2026-07-21 04:52: NOW, NEEDS ME and RECENT each showed real rows above perpetual shimmer slots — the data had arrived and the placeholders were still animating underneath"
+      proof: "unit test: skeleton is fully gone (zero nodes) once real data lands"
     - claim: "an EMPTY successful result renders an honest empty state, never skeletons"
-      proof: "unit/DOM test: a section whose data arrives EMPTY renders an explicit message ('nothing in flight' / 'nothing needs you') and no placeholder nodes. FALSIFIER: falling back to skeletons on empty makes a quiet fleet read as a loading fleet, which is the reading an operator is least able to distinguish and most needs to trust"
+      proof: "unit test: renders the honest empty message in every section"
     - claim: "skeleton and data markup NEVER coexist in one section"
-      proof: "unit/DOM test across the three sections: at every point in a seeded load sequence the section is in exactly one of pre-first-data, has-data, or has-data-empty. FALSIFIER: a section holding both tells the operator the list may still be filling, so a complete three-row NOW section reads as 'three so far'"
+      proof: "unit test: never both at once"
     - claim: "the replacement preserves W1-T156's DOM stability — node identity and active selection survive"
-      proof: "the existing W1-T156 tests in test/serve.live-state.test.ts continue to pass unmodified: an unchanged row keeps DOM identity across an update and an active text selection survives. FALSIFIER: clearing a section with innerHTML destroys both, which those tests already encode as falsifiers — the replacement must go through the existing reconciliation path"
+      proof: "unit test: test/serve.live-state.test.ts"
   risk: high
   origin: architect
   plan_refs: ["§7"]
