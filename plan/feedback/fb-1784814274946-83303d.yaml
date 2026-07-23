@@ -1,0 +1,18 @@
+id: fb-1784814274946-83303d
+ts: 2026-07-23T13:44:34.946Z
+raw: "SYNCED DISPATCH IS SHARD-BLIND — syncPlanFromOrigin materializes only
+  origin/main:plan/tasks.yaml into a temp dir; loadPlan finds no tmpDir/tasks.d
+  and back-compats to zero shards, so every plan/tasks.d task is undispatchable
+  by the daemon and by rmd run-task (observed: PlanError no task with id
+  W1-T173, 2026-07-23; zero shard tasks have ever run; no CLI bypass exists).
+  FIX INVARIANT: the synced plan view must equal loadPlan over a real checkout
+  of origin/main — materialize origin/main:plan/tasks.d/* beside the temp
+  tasks.yaml (git ls-tree origin/main plan/tasks.d + git show per shard, or
+  archive the plan/ subtree), and add a regression test that selects a
+  shard-only task through the synced path. The fix must not weaken W1-T60's
+  origin-truth guarantee: everything read still comes from origin/main, never
+  the working tree."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
