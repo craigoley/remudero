@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { homedir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   architectModel,
@@ -344,6 +344,14 @@ export interface SyncedPlan {
  * it proceeds on whatever `origin/main` already resolves to locally (the last successful
  * fetch) and reports `staleDispatch: true`; it still throws if `origin/main` can't be
  * resolved AT ALL (nothing to fall back to, e.g. a checkout that has never fetched).
+ *
+ * W1-T245: the monolith blob alone isn't the whole plan — `loadPlan` also merges any
+ * `tasks.d/*.yaml` shards it finds as a SIBLING DIRECTORY ON DISK (src/lib/plan.ts). A plain
+ * `git show origin/main:<relPath>` only ever materializes the single monolith file into an
+ * otherwise-empty temp dir, so a shard-only task on `origin/main` was invisible here even
+ * though `loadPlan` itself is shard-aware. List `tasks.d/` at `origin/main` via `git ls-tree`
+ * and materialize each shard blob alongside the monolith before handing the temp file to
+ * `loadPlan`, so the synced path sees exactly what a real checkout would.
  */
 export function syncPlanFromOrigin(
   repoDir: string,
@@ -369,10 +377,60 @@ export function syncPlanFromOrigin(
   try {
     const tmpFile = join(tmpDir, "tasks.yaml");
     writeFileSync(tmpFile, blob, "utf8");
+    // W1-T245: materialize origin/main's plan/tasks.d/ shards beside the monolith so the synced
+    // view equals loadPlan over a real checkout — everything from origin/main blobs, never the
+    // working tree (W1-T60 unweakened). Extracted so its two defensive git-failure paths are
+    // unit-covered with an injected runner.
+    materializeOriginShards(repoDir, dirname(relPath), tmpDir);
     return { plan: loadPlan(tmpFile), staleDispatch };
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
+}
+
+/** Injectable git invoker for {@link materializeOriginShards} — the real default shells out;
+ *  a test passes a fake that throws to exercise the ls-tree and per-shard-show failure paths. */
+export type GitRunner = (args: string[]) => string;
+
+/**
+ * Copy every `plan/tasks.d/*.yaml` shard on origin/main into `<tmpDir>/tasks.d/` beside the
+ * already-written monolith, so {@link loadPlan}'s sibling-directory shard lookup sees them
+ * (W1-T245: syncPlanFromOrigin was shard-blind). List via `git ls-tree`, read each via
+ * `git show origin/main:<shard>` — origin blobs only, never the working tree. A failing
+ * ls-tree (no tasks.d/ at the ref, or a ref-dir lookup miss) is the plain no-shards case
+ * (matches listShardFiles's ENOENT tolerance); a shard that lists but fails to `git show`
+ * throws {@link GitFetchError} loudly — a torn read must never silently drop a task.
+ */
+export function materializeOriginShards(
+  repoDir: string,
+  planRelDir: string,
+  tmpDir: string,
+  runGit: GitRunner = (args) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8" }),
+): string[] {
+  const shardRelDir = join(planRelDir, "tasks.d");
+  let shardListing: string;
+  try {
+    shardListing = runGit(["ls-tree", "--name-only", "origin/main", `${shardRelDir}/`]);
+  } catch {
+    shardListing = "";
+  }
+  const shardRelPaths = shardListing
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && (line.endsWith(".yaml") || line.endsWith(".yml")));
+  if (shardRelPaths.length === 0) return [];
+  const tmpShardDir = join(tmpDir, "tasks.d");
+  mkdirSync(tmpShardDir, { recursive: true });
+  for (const shardRelPath of shardRelPaths) {
+    let shardBlob: string;
+    try {
+      shardBlob = runGit(["show", `origin/main:${shardRelPath}`]);
+    } catch (err) {
+      throw new GitFetchError(`git show origin/main:${shardRelPath} failed in ${repoDir}: ${String(err)}`);
+    }
+    writeFileSync(join(tmpShardDir, basename(shardRelPath)), shardBlob, "utf8");
+  }
+  return shardRelPaths;
 }
 
 /**
