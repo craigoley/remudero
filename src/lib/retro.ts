@@ -484,6 +484,9 @@ export interface RetroGather {
   shipped: ShippedRecord[];
   /** Every named discrepancy the union found (gate-side additions AND rejected foreign trailers). */
   discrepancies: string[];
+  /** W1-T73: every MERGED run whose `review.posted` matched a degraded-success
+   *  signal (a claimed PASS that used a weaker path than its criteria named). */
+  degradedSuccess: DegradedSuccessFinding[];
   learningsNow: number;
   learningsAtMarker: number;
   /**
@@ -510,7 +513,8 @@ export function buildGather(opts: {
   /** GitHub gateway for the SHIPPED union (W1-T51/P9). Omit to fall back ledger-only. */
   github?: ShippedGithub;
 }): RetroGather {
-  const runs = gatherRuns(parseLedger(opts.ledgerNdjson));
+  const records = parseLedger(opts.ledgerNdjson);
+  const runs = gatherRuns(records);
   const scoped = opts.sinceTs ? runs.filter((r) => r.startTs > opts.sinceTs!) : runs;
   const merged = mergedSince(runs, opts.sinceTs);
   const { shipped, discrepancies } = opts.github
@@ -529,6 +533,10 @@ export function buildGather(opts: {
     mergedSince: merged,
     shipped,
     discrepancies,
+    // W1-T73: mined over the SAME scoped-merged set the marker window already
+    // bounds, so a degraded-success finding never re-surfaces for a run the
+    // marker has already moved past (matches mergedSince's own scoping).
+    degradedSuccess: mineDegradedSuccess(merged, records),
     learningsNow: learningsCount(opts.learningsMd),
     learningsAtMarker: opts.learningsAtMarker ?? 0,
     ...(githubUnavailable ? { githubUnavailable } : {}),
@@ -607,6 +615,8 @@ export function renderGather(g: RetroGather): string {
     ...(g.discrepancies.length
       ? ["", "## Discrepancies (ledger vs GitHub — every gate-side addition and rejected foreign trailer)", ...g.discrepancies.map((d) => `- ${d}`)]
       : []),
+    "",
+    renderDegradedSuccess(g.degradedSuccess),
   ].join("\n");
 }
 
@@ -789,6 +799,154 @@ export function mineOverrunClasses(
 export function renderOverrunProposals(proposals: ClassOverrunProposal[]): string {
   if (proposals.length === 0) return "## Overrun mining\n\nNo class-level pattern found (each class is below threshold).";
   return ["## Overrun mining — CLASS-level fixes proposed", "", ...proposals.map((p) => `- ${p.proposal}`)].join("\n");
+}
+
+// ── Degraded-success mining (W1-T73) ──────────────────────────────────────
+//
+// The overrun mining above reads FAILURE verdicts. It is blind to a run that
+// ended MERGED — a claimed PASS — yet took a WEAKER path than its own
+// acceptance criteria named: `review.posted`'s `proof_exec` array already
+// records, per criterion, whether a proof was OBSERVED (`executed_pass`/
+// `executed_fail`) or fell back to the keyword floor (`not_executable`/
+// `exec_error`) — the field is ALREADY on the ledger (W1-T65/P15) but nothing
+// read it for the retro's own report, so RETRO-1784213948025 gathered the
+// same 2-run ledger that showed `proof_exec 0/N` and logged the run as a
+// closed win without ever surfacing it — the same "claimed work it did not
+// do" class the retro already names for FAILURE, unapplied to the gate's own
+// PASS. The signal set below is DATA (a list of predicates over one run's
+// most-recent `review.posted` line), same discipline as `OVERRUN_VERDICTS`
+// above: the next degraded-success class is a table row, never new mining
+// code.
+
+/** The reduced `review.posted` facts one signal predicate judges against —
+ *  the run's MOST RECENT posting (a run may re-post across fix strikes;
+ *  only its latest posting reflects what actually merged). */
+export interface ReviewPostedSummary {
+  runId: string;
+  taskId: string;
+  /** Count of criteria whose `proof_exec` is `executed_pass`/`executed_fail`. */
+  executed: number;
+  /** Total criteria judged (the ledgered `proof_exec` array's length). */
+  total: number;
+  /** W1-T72's legibility flag — true when EVERY criterion fell back to the
+   *  keyword floor while >=1 proof was WRITTEN in the house dialect. */
+  floorDegraded: boolean;
+  /** W1-T63/P10-a — the advisory reviewer spawn's terminal subtype, when logged
+   *  (e.g. `error_max_turns`, `spawn_error`). Absent if never logged. */
+  reviewerOutcome?: string;
+}
+
+/**
+ * Reduce every `review.posted` ledger line to the LATEST posting per run_id —
+ * a run may post more than once across fix strikes, and only its latest
+ * posting reflects what actually merged. A run that never posted a review
+ * (pre-W1-T65 history, or a synthetic fixture) has no entry — nothing to mine.
+ */
+export function latestReviewPostedByRun(records: LedgerRecord[]): Map<string, ReviewPostedSummary> {
+  const out = new Map<string, ReviewPostedSummary>();
+  for (const r of records) {
+    if (r.step !== "review.posted" || !r.run_id) continue;
+    const proofExec = Array.isArray(r.proof_exec) ? (r.proof_exec as unknown[]) : [];
+    const executed = proofExec.filter((p) => p === "executed_pass" || p === "executed_fail").length;
+    out.set(String(r.run_id), {
+      runId: String(r.run_id),
+      taskId: String(r.task_id ?? ""),
+      executed,
+      total: proofExec.length,
+      floorDegraded: r.floor_degraded === true,
+      ...(typeof r.reviewer_outcome === "string" ? { reviewerOutcome: r.reviewer_outcome } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * One weaker-path-than-claimed signal — DATA, not a hardcoded branch (same
+ * discipline as {@link OVERRUN_VERDICTS}): the next degraded-success class
+ * (e.g. a future capped-but-merged shape) is a ROW added here, never new
+ * executor code.
+ */
+export interface DegradedSuccessSignal {
+  /** Stable identifier, named on every finding this signal produces. */
+  key: string;
+  matches: (r: ReviewPostedSummary) => boolean;
+  /** Human-readable explanation, folded into the finding's rendered line. */
+  describe: (r: ReviewPostedSummary) => string;
+}
+
+/** The shipped signal table. Row 1 is the canonical fixture (RETRO-1784213948025 /
+ *  W1-T65): a merged run whose review posted `proof_exec` entirely unexecuted
+ *  while >=1 proof was written to be runnable (house dialect). Row 2 is the
+ *  W1-T73 design's named second class (a merged run whose advisory reviewer
+ *  never completed a real pass) — proof the set generalizes as data. */
+export const DEGRADED_SUCCESS_SIGNALS: ReadonlyArray<DegradedSuccessSignal> = [
+  {
+    key: "zero_executed_dialect",
+    matches: (r) => r.total > 0 && r.executed === 0 && r.floorDegraded,
+    describe: (r) =>
+      `proof_exec ${r.executed}/${r.total} executed, floor_degraded — >=1 dialect-prefixed proof was ` +
+      `present yet nothing was OBSERVED on the PR head`,
+  },
+  {
+    key: "reviewer_error_max_turns",
+    matches: (r) => r.reviewerOutcome === "error_max_turns",
+    describe: () => "reviewer_outcome=error_max_turns — the advisory reviewer never completed a real pass",
+  },
+];
+
+/** One DEGRADED-SUCCESS finding — a MERGED run whose review.posted matched a signal. */
+export interface DegradedSuccessFinding {
+  runId: string;
+  taskId: string;
+  signal: string;
+  description: string;
+}
+
+/**
+ * Mine MERGED runs for degraded-success telemetry (W1-T73): a run that ended
+ * `verdict: merged` — a claimed PASS — whose most recent `review.posted`
+ * ledger line matches a {@link DegradedSuccessSignal}. Pure over the raw
+ * ledger records + the already-reduced run summaries, so calling it twice
+ * over the SAME fixture returns the SAME findings — never accumulating or
+ * duplicating (each call re-derives from scratch). A run matching more than
+ * one signal emits one finding PER matching signal, naming every weaker-path
+ * class it hit rather than only the first.
+ */
+export function mineDegradedSuccess(
+  runs: RunSummary[],
+  records: LedgerRecord[],
+  signals: ReadonlyArray<DegradedSuccessSignal> = DEGRADED_SUCCESS_SIGNALS,
+): DegradedSuccessFinding[] {
+  const posted = latestReviewPostedByRun(records);
+  const findings: DegradedSuccessFinding[] = [];
+  for (const r of runs) {
+    if (r.verdict !== "merged") continue;
+    const summary = posted.get(r.runId);
+    if (!summary) continue; // no review.posted line for this run — nothing to mine
+    for (const signal of signals) {
+      if (signal.matches(summary)) {
+        findings.push({ runId: r.runId, taskId: r.taskId, signal: signal.key, description: signal.describe(summary) });
+      }
+    }
+  }
+  findings.sort((a, b) => {
+    const ka = a.taskId + a.signal;
+    const kb = b.taskId + b.signal;
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+  });
+  return findings;
+}
+
+/** Render the mined degraded-success findings (markdown) — printed by `--dry-run` and fed to the Architect. */
+export function renderDegradedSuccess(findings: DegradedSuccessFinding[]): string {
+  if (findings.length === 0) {
+    return "## Degraded-success mining\n\nNo merged run posted a weaker-path-than-claimed signal.";
+  }
+  return [
+    "## Degraded-success mining — a PASS that used a weaker path than its criteria named",
+    "",
+    ...findings.map((f) => `- ${f.taskId} (${f.runId}): [${f.signal}] ${f.description}`),
+  ].join("\n");
 }
 
 // ── The retro marker (state/last-retro.json) ──────────────────────────────
