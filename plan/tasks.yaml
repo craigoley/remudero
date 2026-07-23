@@ -109,7 +109,7 @@
     - claim: "an origin/main with NO plan/tasks.d/ directory syncs cleanly with zero shards (back-compat), and a duplicate id across tasks.yaml and a shard still fails loadPlan through the synced path (W1-T122 uniqueness guard intact)"
       proof: "unit test: a duplicate id across tasks.yaml and a shard on origin/main still FAILS loudly through the synced path"
     - claim: "the temp dir (now containing tasks.yaml AND tasks.d/*) is removed on every exit path, including a loadPlan failure"
-      proof: "unit test: the rmd- temp dir .holding tasks.yaml AND tasks.d. is removed even when loadPlan THROWS"
+      proof: "unit test: is removed even when loadPlan THROWS"
   risk: high
   origin: feedback#fb-1784814274946-83303d
   files: [src/run-task.ts, src/lib/plan.ts]
