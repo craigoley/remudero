@@ -2435,7 +2435,11 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   // cardActionsHtml's own doc for why this exists and stays false until this actually succeeds.
   getJson("/v1/auth/scope")
     .then(() => { hasWriteScope = true; })
-    .catch(() => { hasWriteScope = false; });
+    .catch(() => { hasWriteScope = false; })
+    // W1-T222: mark the boot scope probe resolved so a card expanded AFTER this renders its
+    // affordances against the settled scope (and a test can wait on it deterministically instead
+    // of racing a fixed timeout).
+    .finally(() => { document.body.dataset.writeScopeResolved = "1"; });
 
   // W1-T222 DEEP-LINK: \`?task=<id>\` opens with that row expanded and scrolled into view,
   // replacing the bottom-panel anchor W1-T158 used as this console's addressable-single-task
