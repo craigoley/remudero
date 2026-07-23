@@ -320,3 +320,13 @@ test("changing a routing DECISION is a data edit — mutating the raw table chan
   const after = resolveMountForClass(validateMounts(raw), "implement", "low", "docs");
   assert.equal(after.mount.effort, "medium", "a routing-table row edit alone must change the resolved mount");
 });
+
+test("resolveMountForClass: a hand-built Mounts missing BOTH the class row and the default fallback fails LOUD (the guarded unreachable), never returns undefined", () => {
+  const handBuilt = {
+    routes: { implement: { medium: { docs: { model: "haiku", effort: "low", maxTurns: 10, contextBudget: 1 } } } },
+  } as never;
+  assert.throws(
+    () => resolveMountForClass(handBuilt, "implement", "medium", "src"),
+    /and no 'src' fallback either/,
+  );
+});

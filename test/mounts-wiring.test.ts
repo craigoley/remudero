@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { resolveRunMounts } from "../src/run-task.js";
 import { fileURLToPath } from "node:url";
 import { loadMounts, mountsPath, MountsError, resolveMount } from "../src/lib/mounts.js";
 import { loadPlan, TASK_RISKS } from "../src/lib/plan.js";
@@ -124,7 +127,7 @@ test("run.start ledgers task_class + mount_class (W1-T167) — the retro's per-c
   assert.ok(idx >= 0);
   const block = runTaskSrc.slice(idx, idx + 700);
   assert.match(block, /task_class:\s*taskClass/);
-  assert.match(block, /mount_class:\s*mountResolution\.resolvedClass/);
+  assert.match(block, /mount_class:\s*mountClass/);
 });
 
 // ── W1-T64: gh pr create is GUARDED by commitsAhead — never PR'd on an empty branch ─────
@@ -145,4 +148,98 @@ test("the retro's gh-pr-create fallback is guarded by commitsAhead — an empty 
   assert.ok(guardIdx < prCreateIdx, "the commitsAhead guard must run BEFORE the gh pr create call, never after");
   // The no-op path must never fall through to the PR call — it returns straight away.
   assert.match(body, /commitsAhead\(worktreePath, "origin\/main"\) === 0\) \{\s*\n\s*log\("retro\.no_op"/);
+});
+
+// ── resolveRunMounts: the extracted run-mount bundle (all branches, fixture tables) ──
+
+test("resolveRunMounts: the committed table routes implement×medium×docs to the cheap row, no fallback, reviewer+fix mounts resolved alongside", () => {
+  const logged: Array<{ step: string }> = [];
+  const r = resolveRunMounts(repoRoot, { type: "implement", risk: "medium", files: ["docs/x.md"] }, (step) => { logged.push({ step }); });
+  assert.equal(r.taskClass, "docs");
+  assert.equal(r.mountClass, "docs");
+  assert.equal(r.mount.model, "haiku", "docs-class work rides the cheap model per the committed table");
+  assert.ok(r.reviewerMount.maxTurns > 0);
+  assert.ok(r.fixMount.maxTurns > 0);
+  assert.equal(logged.length, 0, "no fallback line when the exact class row exists");
+});
+
+test("resolveRunMounts: a table missing the requested class falls back to the default LOUDLY — one mount.class_fallback ledger line naming it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mounts-fallback-"));
+  mkdirSync(join(dir, ".remudero"), { recursive: true });
+  // Fixture = the REAL committed table minus implement.medium's docs/plan-lint rows —
+  // guaranteed schema-valid (tiers/efforts/architect/... all present) with exactly the
+  // one hole the fallback branch needs.
+  const real = readFileSync(join(repoRoot, ".remudero", "mounts.yaml"), "utf8");
+  const holed = real
+    .split("\n")
+    .filter((l, i, all) => {
+      const inImplMedium = (() => {
+        const implIdx = all.findIndex((x) => /^  implement:/.test(x));
+        const medIdx = all.findIndex((x, j) => j > implIdx && /^    medium:/.test(x));
+        const nextIdx = all.findIndex((x, j) => j > medIdx && /^    \w/.test(x));
+        return i > medIdx && (nextIdx === -1 || i < nextIdx);
+      })();
+      return !(inImplMedium && /^      (docs|plan-lint):/.test(l));
+    })
+    .join("\n");
+  writeFileSync(join(dir, ".remudero", "mounts.yaml"), holed);
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  try {
+    const r = resolveRunMounts(dir, { type: "implement", risk: "medium", files: ["docs/only.md"] }, (step, extra) => {
+      logged.push({ step, extra });
+    });
+    assert.equal(r.taskClass, "docs");
+    assert.equal(r.mountClass, "src", "fell back to the default class row");
+    const fb = logged.find((l) => l.step === "mount.class_fallback");
+    assert.ok(fb, "the fallback is LEDGERED, never a silent number swap");
+    assert.equal(fb!.extra?.requested_class, "docs");
+    assert.equal(fb!.extra?.resolved_class, "src");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runTask resolves the class-routed mount and ledgers run.start with task_class/mount_class (W1-T167) — halting at the spawn boundary, no worker ever launched", async () => {
+  const root = mkdtempSync(join(tmpdir(), "runtask-mount-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(
+    planPath,
+    [
+      "- id: T-MOUNTPROBE",
+      "  title: mount routing probe (docs class)",
+      "  repo: remudero",
+      "  type: implement",
+      "  verify: auto",
+      "  risk: medium",
+      "  files: [docs/probe.md]",
+      "  origin: architect",
+      "  status: queued",
+      "",
+    ].join("\n"),
+  );
+  const config = {
+    claudeBin: join(root, "nonexistent-claude"),
+    root,
+  } as never;
+  const { runTask } = await import("../src/run-task.js");
+  // The spawn boundary throws (no claude binary) — run.start must already be ledgered
+  // by then, carrying the W1-T167 routing pair. The run may either reject or resolve
+  // to a failed result depending on the boundary's error path; both are acceptable —
+  // the assertion is the ledger line, not the failure shape.
+  try {
+    await runTask("T-MOUNTPROBE", { planPath, config, skipGitSync: true } as never);
+  } catch {
+    // expected: the spawn boundary cannot start a worker in this fixture
+  }
+  const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
+  const runStart = ledger
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
+    .find((l) => l.step === "run.start");
+  assert.ok(runStart, "run.start was ledgered before the spawn boundary");
+  assert.equal(runStart.task_class, "docs", "the docs-classed task carries its routing class");
+  assert.equal(runStart.mount_class, "docs", "the committed table has the exact row — no fallback");
+  assert.equal(runStart.mount.model, "haiku", "docs@medium rides the cheap row per the committed table");
+  rmSync(root, { recursive: true, force: true });
 });

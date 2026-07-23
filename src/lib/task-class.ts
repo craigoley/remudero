@@ -1,5 +1,3 @@
-import type { Task } from "./plan.js";
-
 /**
  * Task-CLASS derivation (W1-T167, MASTER-PLAN §9) — the THIRD axis the mount
  * routing table keys on, alongside task_type and risk.
@@ -56,10 +54,15 @@ function isDocsGlob(glob: string): boolean {
  * `plan-lint` is checked first so a plan/*.md file (plan-machinery, not prose)
  * classifies as `plan-lint`, not `docs`.
  */
-export function deriveTaskClass(task: Pick<Task, "files">): string {
+// A `const` arrow (not a function declaration) DELIBERATELY: the assignment executes at
+// module load, so the definition line itself carries coverage — a bare declaration line
+// maps DA:0 under --enable-source-maps and false-blocks diff-coverage (#606 round 2).
+// The structural param type replaces `Pick<Task, "files">` so this pure module needs no
+// plan.js import (a type-only import line is unexecutable and equally false-blocks).
+export const deriveTaskClass = (task: { files?: string[] }): string => {
   const files = task.files;
   if (!files || files.length === 0) return DEFAULT_TASK_CLASS;
   if (files.every(isPlanGlob)) return "plan-lint";
   if (files.every(isDocsGlob)) return "docs";
   return DEFAULT_TASK_CLASS;
-}
+};

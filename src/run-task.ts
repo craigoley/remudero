@@ -2024,6 +2024,39 @@ export function softBudgetWarning(
   return !alreadyWarned && costUsd >= thresholdUsd;
 }
 
+/** One resolved bundle of every mount a run needs (W1-T167 class routing included),
+ * with the loud class-fallback ledgering inside — exported so fixture tables cover
+ * every branch, including the fallback a complete committed table cannot reach. */
+export function resolveRunMounts(
+  repoRootDir: string,
+  task: Pick<Task, "type" | "risk" | "files">,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): { mount: Mount; reviewerMount: Mount; fixMount: Mount; taskClass: string; mountClass: string } {
+  const mountsTable = loadMounts(mountsPath(repoRootDir));
+  const taskClass = deriveTaskClass(task);
+  const mountResolution = resolveMountForClass(mountsTable, task.type, task.risk, taskClass);
+  if (mountResolution.fellBackToDefault) {
+    // W1-T167 acceptance: a class with no row falls back to the default LOUDLY —
+    // a ledger line NAMING the missing class, never a silent number swap.
+    log("mount.class_fallback", {
+      task_type: task.type,
+      risk: task.risk,
+      requested_class: taskClass,
+      resolved_class: mountResolution.resolvedClass,
+    });
+  }
+  // The fresh advisory reviewer is its OWN mount-governed phase (task_type="reviewer",
+  // W1-T63/P10); the blocked_review fix rung rides its own "fix" row (W1-T76) —
+  // both resolved here alongside the task's own mount, never an undeclared literal.
+  return {
+    mount: mountResolution.mount,
+    reviewerMount: resolveMount(mountsTable, "reviewer", task.risk),
+    fixMount: resolveMount(mountsTable, "fix", task.risk),
+    taskClass,
+    mountClass: mountResolution.resolvedClass,
+  };
+}
+
 async function runTask(
   taskId: string,
   opts: {
@@ -2142,36 +2175,11 @@ async function runTask(
   // resolveMountForClass throws on an unrouted (type × risk); an unrouted
   // CLASS is expected (not every class has a cheap row) and falls back to the
   // table's `src` default — LOUDLY, via the `mount.class_fallback` line below.
-  // The table is a COMMITTED repo artifact (§9, golden-gated), so read it from the
-  // repo checkout (repoRoot), NOT the workspace root (config.root = ~/Remudero, which
-  // holds worktrees/state, not .remudero/mounts.yaml).
-  const mountsTable = loadMounts(mountsPath(repoRoot));
-  const taskClass = deriveTaskClass(task);
-  const mountResolution = resolveMountForClass(mountsTable, task.type, task.risk, taskClass);
-  const mount: Mount = mountResolution.mount;
-  if (mountResolution.fellBackToDefault) {
-    // W1-T167 acceptance: a class with no row falls back to the default LOUDLY —
-    // a ledger line NAMING the missing class, never a silent number swap.
-    log("mount.class_fallback", {
-      task_type: task.type,
-      risk: task.risk,
-      requested_class: taskClass,
-      resolved_class: mountResolution.resolvedClass,
-    });
-  }
-  // The fresh advisory reviewer (runReview, below) is its OWN mount-governed phase,
-  // keyed by task_type="reviewer" — distinct from `mount` above (this task's own
-  // implement/recon/etc. work) and from task_type="review" (a plan task whose own
-  // type happens to be "review"). W1-T63/P10: previously ungoverned (an undeclared
-  // 12-turn cap, no model/effort), it walled `error_max_turns` on every
-  // substantive code PR.
-  const reviewerMount: Mount = resolveMount(mountsTable, "reviewer", task.risk);
-  // The blocked_review FIX RUNG's mount (W1-T76, absorbs P21) — its own
-  // task_type="fix" row (§9), distinct from `mount` (the original implement
-  // attempt). Resolved once here, alongside every other mount, even though it
-  // is only USED if the review gate ever fails — a fix spawn must never ride
-  // an undeclared literal any more than the reviewer used to (W1-T63/P10).
-  const fixMount: Mount = resolveMount(mountsTable, "fix", task.risk);
+  // The table is a COMMITTED repo artifact (§9, golden-gated), read from the repo
+  // checkout — resolution + the loud class-fallback ledgering live in
+  // resolveRunMounts (exported, above) so every branch, including the fallback a
+  // COMPLETE committed table can never reach, is unit-covered with fixture tables.
+  const { mount, reviewerMount, fixMount, taskClass, mountClass } = resolveRunMounts(repoRoot, task, log);
   log("run.start", {
     repo: task.repo,
     type: task.type,
@@ -2181,7 +2189,7 @@ async function runTask(
     // fallback, logged above) — the pair the retro's per-class calibration
     // (lib/retro.ts's aggregateByClass) reads alongside this line's cost/verdict.
     task_class: taskClass,
-    mount_class: mountResolution.resolvedClass,
+    mount_class: mountClass,
     budget_usd: budgetUsd,
     soft_threshold_usd: softThresholdUsd,
     mount: { model: mount.model, effort: mount.effort, max_turns: mount.maxTurns, context_budget: mount.contextBudget },
