@@ -429,9 +429,25 @@ test("W1-T243 TRIAGE WIRING: triageCommand's real catch branch runs end-to-end �
     );
     assert.ok(existsSync(entryPath), "sanity: the fixture entry really is on disk in this checkout");
 
-    // No `gh` override here — `findPendingLandingPr()` runs with the REAL default `gh` (same
-    // call triageCommand itself makes), best-effort and swallowed on any failure/no-auth/offline.
-    const exitCode = await triageCommand([feedbackId]);
+    // `findPendingLandingPr()` here runs through the REAL default `gh` (`defaultGh()` in
+    // feedback-landing.ts) — the same call triageCommand itself makes in production, with no
+    // injection point. A REAL `gh` binary's success/auth state differs unpredictably between a
+    // sandboxed local shell and a CI runner (network-reachable/authenticated or not), which
+    // would make this test's OWN coverage non-deterministic across environments. Pin it: shadow
+    // `gh` on PATH with a deterministic shim for the duration of this call only, so the exact
+    // same branch (a successful `pr list --json url` reporting one open PR) fires everywhere.
+    const shimDir = mkdtempSync(join(tmpdir(), "rmd-triage-wiring-ghshim-"));
+    const shimPath = join(shimDir, "gh");
+    writeFileSync(shimPath, '#!/bin/sh\necho \'[{"url":"https://github.com/o/r/pull/424242"}]\'\n', { mode: 0o755 });
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${shimDir}:${savedPath ?? ""}`;
+    let exitCode: number;
+    try {
+      exitCode = await triageCommand([feedbackId]);
+    } finally {
+      process.env.PATH = savedPath;
+      rmSync(shimDir, { recursive: true, force: true });
+    }
     assert.equal(exitCode, 2, "captured-but-unlanded still exits 2 — only the message text distinguishes it");
   } finally {
     rmSync(entryPath, { force: true });
