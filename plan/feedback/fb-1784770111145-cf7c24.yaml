@@ -1,0 +1,28 @@
+id: fb-1784770111145-cf7c24
+ts: 2026-07-23T01:28:31.145Z
+raw: "CONSOLE MUST TRANSLATE, SUMMARIZE, AND SEPARATE — operator directive
+  2026-07-22 with screenshot evidence: the NEEDS-ME surface renders raw
+  triage-architect analysis as decision cards ('really wordy and hard to
+  understand'); the operator needs (1) plain language: every decision card opens
+  with a machine-generated summary — headline ≤15 words, what-happened in one or
+  two sentences, the decision needed stated imperatively, and 2-3 labeled
+  options with one-line consequences — generated at escalation/proposal creation
+  time by a cheap summarizer rung and cached alongside the raw payload, which
+  moves behind an expandable Details; (2) a high-level Plan view: where the
+  workstream stands (done / in-flight / queued derived from GitHub, not yaml),
+  what is running now (task, phase, elapsed, cost), and what is next on the
+  frontier and why; (3) tab separation: Decisions (genuine operator decisions
+  only, stale auto-filtered per fb-1784756088300-6a481e), Now (live runs +
+  daemon + deploy state), Plan (progress + frontier), Feed (the raw firehose,
+  unchanged, for archaeology). Augments fb-1784756096314-a6f58b (grouping, live
+  resolution state, batch-close, pinned decisions). ALSO VERIFY-AND-INCLUDE: the
+  screenshot shows Accept/Reject proposal cards for fb-1784732500436-728bc1 and
+  fb-1784734427694-703ff7 although both were triaged AND their plan PRs merged
+  (W1-T240-242 via #588, W1-T243 via #599) — determine from the console's data
+  source (serve panel-graph / feedback read path, cite file:line) why consumed
+  feedback still renders as pending, and append the finding to this entry via a
+  follow-up rmd feedback if it is a distinct defect."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
