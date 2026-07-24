@@ -47,6 +47,8 @@ function fakeGitHub(opts: {
   headRefByUrl?: Record<string, string>;
   /** raw PR body per PR url — rung (c)'s anchored-trailer verify. */
   bodyByUrl?: Record<string, string>;
+  /** W1-T256: merged PRs per taskId matched by HEAD BRANCH (`run-<taskId>-*`), rung (c2)'s corroboration. */
+  byHeadBranch?: Record<string, PrRef[]>;
   /** W1-T155: auto-merge-armed per PR url. Absent url ⇒ not armed. */
   autoMergeByUrl?: Record<string, boolean>;
   /** W1-T119: simulates every underlying `gh` call in this snapshot having failed. */
@@ -78,6 +80,13 @@ function fakeGitHub(opts: {
     findMergedByTrailer(taskId) {
       calls.push(`trailer:${taskId}`);
       return opts.byTrailer?.[taskId] ?? null;
+    },
+    findMergedByHeadBranch(taskId) {
+      calls.push(`headBranch:${taskId}`);
+      // Mirror the real gateway: a FAILED read returns null (→ W1-T119); a healthy
+      // gateway with no matching branch returns [] (a genuine no-such-branch).
+      if (opts.readFailed) return null;
+      return opts.byHeadBranch?.[taskId] ?? [];
     },
     headRefName(prUrl) {
       calls.push(`headRefName:${prUrl}`);
@@ -234,6 +243,53 @@ test("source (c) ownership-assert: a trailer hit whose head branch is a FOREIGN/
   const proj = deriveStatus(task({ id: "W1-T20c" }), { ledgerPath: ledgerFile([]), github });
   assert.equal(proj.source, "none");
   assert.equal(proj.merged, false);
+});
+
+// ── W1-T256: an EMPTY trailer search is INDETERMINATE, not authoritative ──────
+// Rung (c)'s `findMergedByTrailer` is GitHub's eventually-consistent BODY full-text
+// search. An exit-0 EMPTY result for an ALREADY-MERGED task fell straight through to
+// source:"none", re-dispatching it against its own merged PR — four spurious re-dispatches
+// on 2026-07-24 alone (W1-T1, W1-T12a ×2, W1-T99). Rung (c2) corroborates with a
+// deterministic HEAD-BRANCH read (`run-<taskId>-*`) before concluding none.
+
+test("W1-T256 rung (c2): an EMPTY trailer search + a merged, OWNED head-branch hit resolves merged — the false none that re-dispatched W1-T12a is gone", () => {
+  const url = "https://github.com/craigoley/remudero/pull/61";
+  const github = fakeGitHub({
+    byTrailer: {}, // exit-0 EMPTY: the eventually-consistent body search missed the merged PR
+    byHeadBranch: { "W1-T12a": [{ number: 61, url, state: "MERGED", headRefName: "run-W1-T12a-1784124446138" }] },
+  });
+  const proj = deriveStatus(task({ id: "W1-T12a" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.merged, true, "the head-branch corroboration credits the merged PR the body search missed");
+  assert.equal(proj.source, "head-branch");
+  assert.equal(proj.status, "merged");
+  assert.equal(proj.prNumber, 61);
+});
+
+test("W1-T256 rung (c2): a head-branch hit whose branch is NOT run-<taskId>-* is rejected — ownership is re-asserted exactly as rung (c) does", () => {
+  const github = fakeGitHub({
+    byTrailer: {},
+    // A merged PR surfaced by the head-ref match but on a foreign/hand branch — never credited.
+    byHeadBranch: { "W1-T12a": [{ number: 61, url: "u/61", state: "MERGED", headRefName: "fix/w1-t12a-hand" }] },
+  });
+  const proj = deriveStatus(task({ id: "W1-T12a" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.merged, false, "a non-owned head branch is never credited, even on a head-ref hit");
+  assert.equal(proj.source, "none");
+});
+
+test("W1-T256 rung (c2): EMPTY on BOTH the trailer search AND the head-branch read is genuinely none — never a false merged", () => {
+  const github = fakeGitHub({ byTrailer: {}, byHeadBranch: {} }); // both exit-0 empty, gateway healthy
+  const proj = deriveStatus(task({ id: "W1-T77" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.merged, false);
+  assert.equal(proj.source, "none");
+  assert.ok(!proj.indeterminate, "a healthy double-empty is a confirmed absence, not indeterminate");
+});
+
+test("W1-T256 rung (c2): a FAILED head-branch read (gh throttled) defers via the EXISTING W1-T119 indeterminate skip — never a confirmed none", () => {
+  const github = fakeGitHub({ readFailed: true, byTrailer: {} }); // every gh call fails
+  const proj = deriveStatus(task({ id: "W1-T80" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.indeterminate, true, "an unreadable gateway defers, not a confirmed not-merged");
+  assert.equal(proj.merged, false);
+  assert.equal(proj.source, "throttled");
 });
 
 // ── W1-T76 (absorbs P21): the blocked_review FIX RUNG amends the SAME
@@ -437,6 +493,30 @@ test("an injected gateway returning a clean not-found (zero-exit, empty result) 
   assert.equal(proj.indeterminate, undefined, "the indeterminate path must NOT be taken for a clean not-found");
   assert.equal(proj.unavailableReason, undefined);
   assert.equal(github.readFailed?.(), false);
+});
+
+test("W1-T256: the REAL ghGateway.findMergedByHeadBranch queries merged PRs by the structured head:run-<taskId>- ref (NOT the body index), and credits an owned hit end-to-end", () => {
+  const capturedSearches: string[] = [];
+  const github = ghGateway("craigoley", "remudero", {
+    exec: (args) => {
+      const s = args.includes("--search") ? args[args.indexOf("--search") + 1] : "";
+      if (s) capturedSearches.push(s);
+      if (s.includes("in:body")) return "[]"; // the eventually-consistent body search MISSED it
+      if (s.startsWith("head:")) {
+        // the deterministic head-ref read finds this task's own merged run branch
+        return JSON.stringify([{ number: 61, url: "u/61", state: "MERGED", headRefName: "run-W1-T12a-1784124446138" }]);
+      }
+      return "[]";
+    },
+  });
+  const proj = deriveStatus(task({ id: "W1-T12a" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.merged, true, "the empty body search is corroborated by the head-ref read");
+  assert.equal(proj.source, "head-branch");
+  assert.equal(proj.prNumber, 61);
+  assert.ok(
+    capturedSearches.includes("head:run-W1-T12a-"),
+    `expected a head:run-W1-T12a- ref search (structured, not in:body); saw ${JSON.stringify(capturedSearches)}`,
+  );
 });
 
 test("a ledger PR that 404s falls through to the next source", () => {
