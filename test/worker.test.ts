@@ -15,6 +15,7 @@ import {
   collectWorkerResult,
   evaluateDenyFloor,
   parseDecisionRequest,
+  parseFollowups,
   parseQuestion,
   parseReport,
   spawnWorker,
@@ -532,6 +533,54 @@ test("parseQuestion: impact_if_wrong normalises `low`/`medium` variants and a ba
 
 test("parseQuestion: text with no QUESTION line returns null (the guard does not fire on prose)", () => {
   assert.equal(parseQuestion("REPORT\nchanged: src/foo.ts\nPR_URL: https://x/pull/1"), null);
+});
+
+// ── parseFollowups: the OPTIONAL '## Follow-ups' §2 section (W1-T105) ──────
+// "ensure that if any implementations come back with follow-up research,
+// actions, tasks, etc — they get added to the plan" (operator, verbatim). The
+// contract: one typed entry per line (research: | task: | action:), each
+// line's own text carrying its one-line why; absent section is a no-op.
+
+test("parseFollowups: a report with a typed Follow-ups section parses both entries, typed, why inline", () => {
+  const text = [
+    "REPORT",
+    "Implemented the thing.",
+    "",
+    "## Follow-ups",
+    "research: confirm whether the mutation gate needs the same diff-scope trick — unmeasured here",
+    "task: extend ci-gate.yml's REQUIRED array for the new check — out of this task's one concern",
+    "",
+    "PR_URL: https://github.com/acme/remudero/pull/42",
+  ].join("\n");
+  const entries = parseFollowups(text);
+  assert.ok(entries);
+  assert.equal(entries.length, 2);
+  assert.deepEqual(entries[0], {
+    type: "research",
+    text: "confirm whether the mutation gate needs the same diff-scope trick — unmeasured here",
+  });
+  assert.deepEqual(entries[1], {
+    type: "task",
+    text: "extend ci-gate.yml's REQUIRED array for the new check — out of this task's one concern",
+  });
+});
+
+test("parseFollowups: an ACTION entry, a bulleted line, and case-insensitivity all parse", () => {
+  const entries = parseFollowups(["## follow-ups", "- Action: rotate the leaked test fixture token"].join("\n"));
+  assert.ok(entries);
+  assert.deepEqual(entries, [{ type: "action", text: "rotate the leaked test fixture token" }]);
+});
+
+test("parseFollowups: a report with NO Follow-ups section returns null — a byte-identical no-op", () => {
+  const text = ["REPORT", "Implemented the thing.", "PR_URL: https://github.com/acme/remudero/pull/42"].join("\n");
+  assert.equal(parseFollowups(text), null);
+  // parseReport's own extraction is unaffected by this parser's existence.
+  assert.equal(parseReport(text)?.prUrl, "https://github.com/acme/remudero/pull/42");
+});
+
+test("parseFollowups: an empty/malformed Follow-ups section (no typed lines) returns null, not an empty array", () => {
+  const text = ["REPORT", "## Follow-ups", "Nothing typed here, just prose.", "PR_URL: https://x/pull/1"].join("\n");
+  assert.equal(parseFollowups(text), null);
 });
 
 // ── parseReport: anchored PR_URL extraction (W1-T62) ────────────────────────

@@ -656,6 +656,40 @@ export function parseQuestion(text: string): QuestionReport | null {
   return { raw: text, question, currentAssumption, impactIfWrong };
 }
 
+/** One typed follow-up line off a worker's OPTIONAL `## Follow-ups` §2 section
+ *  (W1-T105) — `text` carries its own one-line why, never a separate field. */
+export interface FollowupEntry {
+  type: "research" | "task" | "action";
+  text: string;
+}
+
+/**
+ * Parse the OPTIONAL `## Follow-ups` section of a worker REPORT (§2 OUTPUT
+ * CONTRACT, W1-T105): "anything discovered that is OUT OF SCOPE for the one
+ * concern goes here, never into the diff." One typed entry per line —
+ * `research:` | `task:` | `action:` (an optional leading `-`/`*` bullet is
+ * tolerated) — each line's own text carries its why, so no separate why field
+ * is ever required. Absent section -> `null`, a byte-identical no-op for
+ * every existing caller (parseReport/parseQuestion are untouched by this
+ * parser and never see it). A line that names none of the three types is
+ * silently skipped, never crashes the whole report over one malformed line.
+ */
+export function parseFollowups(text: string): FollowupEntry[] | null {
+  // (?![\s\S]) — TRUE end-of-string, unaffected by the /m flag the leading `^`
+  // needs (a bare `$` under /m matches before EVERY newline, so the lazy body
+  // would stop at the section's FIRST line instead of running to its end).
+  const section = text.match(/^[ \t]*##[ \t]*Follow-ups[ \t]*\n([\s\S]*?)(?=\n[ \t]*##[ \t]|(?![\s\S]))/im);
+  if (!section) return null;
+  const entries: FollowupEntry[] = [];
+  const lineRe = /^[ \t]*(?:[-*][ \t]*)?(research|task|action)[ \t]*:[ \t]*(.+?)[ \t]*$/gim;
+  let m: RegExpExecArray | null;
+  while ((m = lineRe.exec(section[1]))) {
+    const followupText = m[2].trim();
+    if (followupText) entries.push({ type: m[1].toLowerCase() as FollowupEntry["type"], text: followupText });
+  }
+  return entries.length > 0 ? entries : null;
+}
+
 /**
  * Append a QUESTION to the durable side-channel store, `plan/questions.ndjson`
  * (one JSON object per line — diffable, append-only, no round-trip hazard).

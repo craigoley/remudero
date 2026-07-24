@@ -213,6 +213,7 @@ import {
   loadMastMapping,
   parseLedger,
   probeGithubThrottle,
+  recordFollowupHarvest,
   renderGather,
   resolveMarkerForGather,
   saveMarker,
@@ -322,6 +323,7 @@ import {
   appendQuestion,
   ghJson,
   parseDecisionRequest,
+  parseFollowups,
   parseQuestion,
   parseReconReport,
   parseReport,
@@ -1368,7 +1370,11 @@ export function renderFixPrompt(opts: {
     `branch (only a run-<taskId>-<epochMs> head is creditable). \`git push origin HEAD\` (no`,
     `-u) when done — never force-push. Your PR body must substantiate EVERY task acceptance`,
     `criterion, not only the ones fixed here — the review floor judges the body against the`,
-    `FULL criteria set. End with a REPORT whose last line is exactly: PR_URL: <url>`,
+    `FULL criteria set. Anything you discover here that is OUT OF SCOPE for THIS fix — a`,
+    `research question, a follow-up task, or an action someone should take — goes in an`,
+    `OPTIONAL '## Follow-ups' section of your REPORT (W1-T105), never into the diff: one`,
+    `typed entry per line, \`research:\` | \`task:\` | \`action:\`, its own one-line why inline.`,
+    `End with a REPORT whose last line is exactly: PR_URL: <url>`,
   ];
 
   if (mode === "ci-log") {
@@ -1824,6 +1830,15 @@ export async function runFixRung(opts: {
       num_turns: fixResult.numTurns,
     });
 
+    // The fix rung's own footer carries the same '## Follow-ups' invitation (renderFixPrompt
+    // above); PR provenance included (the fix rung always has one).
+    harvestFollowupsFromReport([fixResult.text, fixResult.blocks.join("\n")].join("\n"), {
+      label: "fix",
+      prUrl: opts.prUrl,
+      log: deps.log,
+      say: deps.say,
+    });
+
     deps.push(opts.worktreePath, opts.branch);
 
     const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
@@ -2089,6 +2104,31 @@ export function isTransientResult(r: WorkerResult): boolean {
   return (r.isError || r.apiError) && classifyFailure(workerSignal(r)) === "transient";
 }
 
+/**
+ * FOLLOW-UP HARVEST (W1-T105, §2 non-blocking, mirrors the QUESTION contract's
+ * parse-then-log discipline). Shared by every call site that can carry a worker's
+ * OPTIONAL '## Follow-ups' section — implement, recon, and the fix rung — so the
+ * parse/ledger/say sequence is written once. Absent section (the common case) is a
+ * silent no-op; present ⇒ ONE `report.followups` ledger line with every typed entry
+ * plus this call's own provenance, for the retro's harvest (lib/retro.ts) to mine
+ * into proposal candidates. Rule 15 stays intact: this ledgers raw declarations, it
+ * never files a task itself.
+ */
+function harvestFollowupsFromReport(
+  text: string,
+  ctx: {
+    label: string;
+    prUrl?: string;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    say: (msg: string) => void;
+  },
+): void {
+  const followups = parseFollowups(text);
+  if (!followups) return;
+  ctx.log("report.followups", { ...(ctx.prUrl ? { pr_url: ctx.prUrl } : {}), entries: followups });
+  ctx.say(`${ctx.label} follow-ups declared: ${followups.map((f) => f.type).join(", ")}`);
+}
+
 /** Commits on the worktree's HEAD ahead of `base` (0 ⇒ the worker committed nothing). */
 function commitsAhead(worktreePath: string, base: string): number {
   try {
@@ -2127,7 +2167,13 @@ export function renderReconPrompt(planIndexBlock: string): string {
     "You are a RECON worker. Do NOT modify anything. Inspect the current git " +
       "repository read-only (git remote -v, git log --oneline -5, ls). Output one report:\n" +
       "RECON REPORT\nOBSERVED: <commands + key output>\nINFERRED: <conclusions>\n" +
-      "COULDN'T-VERIFY: <unconfirmed>",
+      "COULDN'T-VERIFY: <unconfirmed>\n" +
+      // W1-T105: recon is read-only and out-of-scope by construction, so a genuine
+      // discovery worth the plan's attention (not just this task's own INFERRED)
+      // still has a place to land, never invented into a diff you cannot make.
+      "Optionally, after the report, add a '## Follow-ups' section — one typed entry\n" +
+      "per line, its own one-line why inline: `research: <what, why>` | `task: <what, why>` |\n" +
+      "`action: <what, why>` — for anything discovered that is out of THIS recon's scope.",
     planIndexBlock,
   ]
     .filter((s) => s.length > 0)
@@ -2591,6 +2637,10 @@ async function runTask(
     const reconFail = failOnWorkerError(recon, "recon");
     if (reconFail) return reconFail;
 
+    // Recon's own optional '## Follow-ups' section (renderReconPrompt above) — no
+    // `pr_url` (recon never opens one); the retro harvest still cites its run/task.
+    harvestFollowupsFromReport([recon.text, recon.blocks.join("\n")].join("\n"), { label: "recon", log, say });
+
     // ── Promptsmith READ side (W1-T19; SPLIT + INDEX + SUPERSESSION, W1-T33;
     // LAYERED — project + user-overall + global, P32/W1-T145): inject the
     // distrust rule, the autonomy clause, and the task-matched LEARNINGS
@@ -2851,6 +2901,10 @@ async function runTask(
     ensureTaskTrailer(prUrl, taskId);
     log("pr.opened", { pr_url: prUrl });
     say(`PR: ${prUrl}`);
+
+    // The implement worker's own optional '## Follow-ups' section (§2 OUTPUT CONTRACT,
+    // outputContractLines in lib/compaction.ts).
+    harvestFollowupsFromReport(fullText(impl), { label: "implement", prUrl, log, say });
 
     // ── REVIEW GATE (W1-T1D). Wait for `ci` green, then JUDGE the task's
     // acceptance criteria and POST `remudero-review` to the PR head sha — only
@@ -3798,6 +3852,19 @@ export async function lintPlanCommand(rest: string[]): Promise<number> {
   return failing > 0 ? 1 : 0;
 }
 
+/** Best-effort read for the follow-up harvest's dedup source (W1-T105 design iv):
+ *  run `read()`, degrade to `[]` and log a NAMED error on any throw — never abort
+ *  the retro over one dedup-source read hiccup. `label` distinguishes which source
+ *  failed in the ledger/console output. */
+function tryReadFollowupTitles(label: string, read: () => string[]): string[] {
+  try {
+    return read();
+  } catch (e) {
+    console.error(`### [retro] followups.open_titles.${label} — ${String((e as Error)?.message ?? e)}`);
+    return [];
+  }
+}
+
 /**
  * `rmd retro [--dry-run]` — the harness SYNCS ITS OWN PLAN (MASTER-PLAN
  * §Self-improvement). A DETERMINISTIC GATHER (lib/retro.ts, no LLM) reduces the
@@ -3873,6 +3940,30 @@ async function retroCommand(
     headRefName: (prUrl) => baseGithub.headRefName(prUrl),
     unavailable: () => probeGithubThrottle(),
   };
+  // W1-T105 design (iv): the follow-up harvest's dedup source — every existing task
+  // title (any status; a followup matching an already-shipped task is still a dup)
+  // plus every open PROPOSAL's summary line off MASTER-PLAN.md (each written as one
+  // logical line in the source — the regex below matches only that top line, never
+  // a proposal's indented (a)/(b)/(c) continuation bullets). Best-effort: a read/parse
+  // hiccup degrades to "no dedup source" (every followup mints) rather than aborting
+  // the retro — the SAME non-fatal discipline the mast-mapping/orientation reads use.
+  const openTaskTitles = tryReadFollowupTitles("tasks", () => {
+    const tasksYamlPath = join(repoRoot, "plan", "tasks.yaml");
+    return existsSync(tasksYamlPath) ? loadPlan(tasksYamlPath).tasks.map((t) => t.title) : [];
+  });
+  const openProposalLines = tryReadFollowupTitles("proposals", () => {
+    const masterPlanPath = join(repoRoot, "MASTER-PLAN.md");
+    const masterPlanMd = existsSync(masterPlanPath) ? readFileSync(masterPlanPath, "utf8") : "";
+    const lines = masterPlanMd.match(/^-\s+(?:\*\*)?(?:★\s*)?P\d+[A-Za-z]?\b.*$/gm) ?? [];
+    // DEGRADE LOUDLY (W1-T132's discipline): a non-trivial MASTER-PLAN.md yielding
+    // zero proposal-bullet matches is a FORMAT-DRIFT signal (the convention this
+    // regex assumes changed), not a genuine "no open proposals" — visible in the
+    // logs rather than silently emptying half the dedup source.
+    if (lines.length === 0 && masterPlanMd.length > 500) {
+      console.error("### [retro] followups.open_titles.proposals — 0 proposal-bullet matches in a non-trivial MASTER-PLAN.md (format drift?)");
+    }
+    return lines;
+  });
   const gather = buildGather({
     ledgerNdjson,
     learningsMd,
@@ -3881,6 +3972,7 @@ async function retroCommand(
     github,
     mastMapping,
     priorMastCategoryCounts: marker?.mast_category_counts,
+    openTitles: [...openTaskTitles, ...openProposalLines],
   });
   // W1-T111 (P25 iv): the approve/reframe rate is telemetry, not decoration — the field's
   // failure mode is the rubber-stamp queue, so it rides EVERY retro (cumulative, all-time,
@@ -3892,6 +3984,12 @@ async function retroCommand(
     console.log(report);
     return 0;
   }
+
+  // W1-T105: harvest marks are a REAL-RUN-ONLY side effect — mineFollowups (inside
+  // buildGather, above) is pure, so the --dry-run branch above never wrote anything.
+  // This is the ONE place a followup candidate/dedup gets ledger-marked so a later
+  // retro's mineFollowups pass over the now-updated ledger mints neither again.
+  recordFollowupHarvest(gather.followups, { ledgerPath });
 
   // G-17 Tier Invariant: the retro Architect MUST outrank implement workers.
   const arch = architectModel(config);
