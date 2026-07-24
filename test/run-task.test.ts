@@ -51,6 +51,7 @@ import { type GitRunner, materializeOriginShards, escalateCommand, digestCommand
   reviewCommand,
   onboardCommand,
   reconCommand,
+  defaultReconRunLens,
   lintPlanCommand,
   main,
 } from "../src/run-task.js";
@@ -58,6 +59,7 @@ import { realOnboardFsDeps, type OnboardGhGateway } from "../src/lib/onboard/inv
 import { realReconFsDeps, type ReconGhGateway } from "../src/lib/onboard/recon.js";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import type { Config } from "../src/lib/config.js";
+import type { ProbeExecResult } from "../src/lib/containment.js";
 import { judgeReview } from "../src/lib/review.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { GitHub } from "../src/lib/status.js";
@@ -3672,6 +3674,68 @@ test("reconCommand: a bad --phase value (not \"recon\") or missing target dir fa
   });
   assert.equal(code, 2);
   assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /--phase must be "recon"/);
+});
+
+// ── defaultReconRunLens (the REAL, spawn-backed runLens `reconCommand` falls back to when no
+// `deps.runLens` is injected) — driven with a fake `spawn`/`probeExec`/`config` so it never
+// touches `loadConfig()` (unavailable in CI) or shells a real Agent SDK spawn, same DI shape
+// as `runTask`'s own `opts.spawn ?? spawnWorker` / `opts.config ?? loadConfig()`. ────────────
+
+const RECON_LENS_FAKE_CONFIG: Config = { claudeBin: "/usr/bin/true", root: mkdtempSync(join(tmpdir(), "rmd-recon-lens-config-")) };
+
+/** A probeContainment `exec` that always reports the outside write OS-denied — matches
+ *  test/containment.test.ts's own `denyingExec` fixture shape. */
+const reconLensDenyingProbeExec = (token: string): Promise<ProbeExecResult> =>
+  Promise.resolve({
+    transcript: `touch ../${token}.txt: Operation not permitted`,
+    outsideWriteCreated: false,
+    insideWriteCreated: true,
+    costUsd: 0,
+  });
+
+test("defaultReconRunLens: renders settings + probes containment ONCE, then spawns the injected fn per lens, returning its text", async () => {
+  let spawnCalls = 0;
+  const seenSettingsFiles: string[] = [];
+  const runLens = defaultReconRunLens("/some/target-repo", "acme-corp", "widget-fixture", {
+    config: RECON_LENS_FAKE_CONFIG,
+    probeExec: reconLensDenyingProbeExec,
+    spawn: async (opts) => {
+      spawnCalls += 1;
+      seenSettingsFiles.push(opts.settingsFile);
+      return {
+        sessionId: "s", costUsd: 0, numTurns: 1,
+        text: `RECON_FINDING: found by ${opts.input.specialist} (source: a.ts:1)`,
+        blocks: [], stderr: "", subtype: "success", isError: false, apiError: false,
+        permissionDenials: [], childEnvKeys: [], model: "default", effort: "default",
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {},
+        compactionEvents: [], qualitySuspect: false,
+      };
+    },
+  });
+
+  const security = await runLens("security");
+  const testing = await runLens("testing");
+
+  assert.match(security, /found by security/);
+  assert.match(testing, /found by testing/);
+  assert.equal(spawnCalls, 2, "one spawn per lens call");
+  assert.equal(seenSettingsFiles[0], seenSettingsFiles[1], "the rendered settings file is prepared ONCE and reused across lenses");
+});
+
+test("defaultReconRunLens: a spawn failure is advisory-only — returns '' and logs, never throws", async (t) => {
+  const errSpy = t.mock.method(console, "error", () => {});
+  const runLens = defaultReconRunLens("/some/target-repo", "acme-corp", "widget-fixture", {
+    config: RECON_LENS_FAKE_CONFIG,
+    probeExec: reconLensDenyingProbeExec,
+    spawn: async () => {
+      throw new Error("boom — the lens worker died");
+    },
+  });
+
+  const text = await runLens("design");
+
+  assert.equal(text, "");
+  assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /design lens unavailable \(advisory only, continuing\): boom/);
 });
 
 test("onboardCommand: a target directory that does not exist fails loud through the caught OnboardError — exit 2", async (t) => {

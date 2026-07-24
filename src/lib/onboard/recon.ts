@@ -409,15 +409,20 @@ export function buildReconSpecialistSpawnArgs(opts: {
   };
 }
 
-/** Spawn the real, fresh-context recon specialist. Untested by unit — it shells out via the
- *  Agent SDK, exactly like specialist-panel.ts's own `spawnSpecialistWorker`;
- *  {@link buildReconSpecialistSpawnArgs} carries the testable read-only contract. */
+/** Spawn the real, fresh-context recon specialist. `spawn` is injectable — same DI shape
+ *  run-task.ts already uses everywhere it wraps `spawnWorker` (e.g. `runTaskCommand`'s and
+ *  `architectSpawnCommand`'s own `opts.spawn ?? spawnWorker`) — so a unit test can assert
+ *  this delegates {@link buildReconSpecialistSpawnArgs}'s output to the spawn fn and returns
+ *  its result, without shelling out via the Agent SDK for real. Default: the real
+ *  {@link spawnWorker}. */
 export async function spawnReconSpecialist(opts: {
   input: ReconSpecialistPromptInput;
   mount: Mount;
   settingsFile: string;
+  spawn?: typeof spawnWorker;
 }): Promise<WorkerResult> {
-  return spawnWorker(buildReconSpecialistSpawnArgs(opts));
+  const spawn = opts.spawn ?? spawnWorker;
+  return spawn(buildReconSpecialistSpawnArgs(opts));
 }
 
 // ── Parsing a lens's raw text into "inferred" candidates ────────────────────────────────

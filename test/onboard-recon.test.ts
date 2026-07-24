@@ -31,6 +31,7 @@ import {
   ReconError,
   renderFindings,
   runOnboardRecon,
+  spawnReconSpecialist,
   validateCandidate,
   validateCandidates,
   type Candidate,
@@ -39,6 +40,31 @@ import {
 } from "../src/lib/onboard/recon.js";
 import type { GhExec } from "../src/lib/onboard/inventory.js";
 import type { Mount } from "../src/lib/mounts.js";
+import type { WorkerResult } from "../src/lib/worker.js";
+
+/** A minimal {@link WorkerResult} — mirrors test/run-task.test.ts's own `result()` helper. */
+function fakeWorkerResult(over: Partial<WorkerResult>): WorkerResult {
+  return {
+    sessionId: "s",
+    costUsd: 0,
+    numTurns: 1,
+    text: "",
+    blocks: [],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "default",
+    effort: "default",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+    ...over,
+  };
+}
 
 function tmpRoot(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -194,6 +220,25 @@ test("acceptance 2: buildReconSpecialistSpawnArgs excludes every write tool, for
     assert.equal(args.cwd, "/some/target-repo");
     assert.equal(args.permissionMode, "bypassPermissions");
   }
+});
+
+test("acceptance 2: spawnReconSpecialist delegates buildReconSpecialistSpawnArgs's OWN output to the injected spawn fn and returns its result verbatim", async () => {
+  let capturedArgs: unknown;
+  const canned = fakeWorkerResult({ text: "RECON_FINDING: x (source: a.ts:1)" });
+  const args = {
+    input: { specialist: "security" as SpecialistName, targetDir: "/some/target-repo", owner: "acme-corp", repo: "widget-fixture" },
+    mount: MOUNT,
+    settingsFile: "/some/settings.json",
+  };
+  const result = await spawnReconSpecialist({
+    ...args,
+    spawn: async (spawnArgs) => {
+      capturedArgs = spawnArgs;
+      return canned;
+    },
+  });
+  assert.equal(result, canned);
+  assert.deepEqual(capturedArgs, buildReconSpecialistSpawnArgs(args));
 });
 
 test("RECON_LENSES is exactly the four W2-T1 specialist names, in a fixed order", () => {

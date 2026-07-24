@@ -202,7 +202,7 @@ import { assertLintClean, changedTaskIds, lintTask, TaskLintError } from "./lib/
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
 import { deriveTaskClass } from "./lib/task-class.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
-import { ContainmentError, probeContainment } from "./lib/containment.js";
+import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
 import { IsolationError, probeIsolation } from "./lib/isolation.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, renderDoctrinePreamble } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
@@ -7808,8 +7808,26 @@ const RECON_LENS_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 3
 
 /** The real, spawn-backed `runLens`: settings are rendered and containment is
  *  probed ONCE (lazily, on the first lens) and reused for the remaining three — the
- *  invariant containment.ts documents is per-RUN, not per-spawn. */
-function defaultReconRunLens(targetDir: string, owner: string | undefined, repo: string | undefined): (specialist: SpecialistName) => Promise<string> {
+ *  invariant containment.ts documents is per-RUN, not per-spawn.
+ *
+ *  `deps` is injectable — the SAME `opts.spawn ?? spawnWorker` / `opts.config ?? loadConfig()`
+ *  shape `runTask` above already uses, so a unit test can drive both the happy path and the
+ *  advisory-only catch path with a fake `spawn`/`probeExec`, never touching `loadConfig()`
+ *  (which shells `which claude` — unavailable in CI, containment.ts's own documented gotcha)
+ *  or a real Agent SDK spawn. Every field defaults to the real implementation, so the
+ *  production call site below (no `deps` passed) is unchanged. */
+export function defaultReconRunLens(
+  targetDir: string,
+  owner: string | undefined,
+  repo: string | undefined,
+  deps: {
+    config?: Config;
+    spawn?: typeof spawnReconSpecialist;
+    probeExec?: ProbeExecutor;
+  } = {},
+): (specialist: SpecialistName) => Promise<string> {
+  const config = deps.config ?? loadConfig();
+  const spawn = deps.spawn ?? spawnReconSpecialist;
   let preparedSettingsFile: string | undefined;
   return async (specialist) => {
     try {
@@ -7817,13 +7835,13 @@ function defaultReconRunLens(targetDir: string, owner: string | undefined, repo:
         const settingsFile = renderWorkerSettings({
           templatePath: join(repoRoot, "settings", "worker.json"),
           hooksDir: join(repoRoot, "hooks"),
-          outPath: join(loadConfig().root, "tmp", `onboard-recon-settings-${Date.now()}.json`),
+          outPath: join(config.root, "tmp", `onboard-recon-settings-${Date.now()}.json`),
         });
         validateWorkerSettingsFile(settingsFile);
-        await probeContainment({ settingsFile, config: loadConfig() });
+        await probeContainment({ settingsFile, config, exec: deps.probeExec });
         preparedSettingsFile = settingsFile;
       }
-      const result = await spawnReconSpecialist({
+      const result = await spawn({
         input: { specialist, targetDir, owner, repo },
         mount: RECON_LENS_MOUNT,
         settingsFile: preparedSettingsFile,
