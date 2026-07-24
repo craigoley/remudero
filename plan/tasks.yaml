@@ -9051,11 +9051,11 @@
     in the module doc. Unanswered questions persist across invocations (resumable session).
   acceptance:
     - claim: "questions conform to the §2 contract and each names its decision + candidate answers"
-      proof: "unit test: generated questions from the fixture findings validate against the contract shape; a generic question without a named decision fails generation"
+      proof: "unit test: acceptance 1:"
     - claim: "answers are ledgered with provenance"
-      proof: "unit test: an answered session writes answers.json + matching onboard.answered ledger lines (append-only)"
+      proof: "unit test: acceptance 2:"
     - claim: "the session is resumable"
-      proof: "unit test: a second invocation with partial answers re-presents ONLY the unanswered set"
+      proof: "unit test: acceptance 3:"
   risk: high
   origin: architect
   plan_refs: ["P24", "§2", "§7B"]
