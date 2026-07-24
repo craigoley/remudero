@@ -2286,3 +2286,4 @@ already scrubbed to that standard.
 - Tournament dispatch (two approaches, reviewer picks) for high-risk tasks — expensive, park until
   verdict calibration proves the reviewer.
 - P34 (presence-aware autonomy — envelope ratified per round-3: dispatch NOT presence-gated [presence×risk matrix dead]; a lightweight risk judge on the dispatch path [reusable for P28]; budget is subscription HEADROOM not dollars, 5% operator reserve / HEADROOM_LIMIT_PCT=95; model-efficiency per-class weekly-limit burn accounting; away-mode escalation delivery via the W1-T163 recap) — RATIFIED 2026-07-23 -> W1-T248 W1-T249 W1-T250 W1-T251.
+- P37 (TIER-1 policy file — operating constants become schema-bounded, lint-gated plan data; proof timeout 60000 lifted / 30000 rejected; launchd ThrottleInterval net-new) — RATIFIED 2026-07-23 -> W1-T252, W1-T253.

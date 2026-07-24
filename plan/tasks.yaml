@@ -11910,3 +11910,119 @@
     path and the presence signal; round 6 names the away-mode delivery task risk:high). Presence keys ONLY
     delivery + STOP/pause (round iii); the presence×risk dispatch matrix is dead. Batches into the W1-T163 recap
     for async verdict. STOP/pause (W1-T11) are the only real-time-presence waits."
+- id: W1-T252
+  title: "P37 SUBSTRATE — the TIER-1 policy file: plan/policy.yaml lifts the fleet's operating constants as schema-BOUNDED, lint-gated plan data (proof timeout 60000 lifted from the CURRENT source, prune grace 120000, poll 60000, fix strike cap 2, sweep staleDays 14/strikeCap 2/wipLimit 10, drain max 10, headroom curve ≤24h→100% else 95% + reserve 95); launchd ThrottleInterval added as NET-NEW bounded surface, never claimed lifted; 30000 is a stale predating value and is REJECTED as a regression"
+  repo: remudero
+  depends_on: [W1-T20c]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    Ratifies P37's substrate half. LINEAGE: the P34 ruling (2026-07-23) that the operating envelope belongs in
+    policy DATA, not code constants — this task builds the file that envelope lives in. The fleet's operating
+    constants are literals scattered across src (proof timeout, prune grace, launchd throttle, headroom curve,
+    dispatch widths, dedup windows), so a value change is an edit to a constant rather than a reviewed plan PR.
+    This collects them into plan/policy.yaml with BOUNDS expressed in the schema, so a change is a reviewed plan
+    PR and an out-of-bounds value is refused at lint.
+    OPERATOR RULING 2026-07-23, both corrections BINDING and unchanged across the redrafts (rounds 1-4):
+    (i) THE PROOF TIMEOUT INITIAL VALUE IS 60000, lifted from the CURRENT source (src/lib/review.ts:587). The
+    30000 figure in the P37 fixture PREDATES a merged change and is stale — the policy file lifts the CURRENT
+    source values as initial data and NEVER regresses them. A policy carrying 30000 for the proof timeout is a
+    regression below the live source value and must be REFUSED. (The fixture's own observation — that a 30s cap
+    was the difference between executed_pass and exec_error under load — is exactly why regressing to it is
+    forbidden; the current 60000 already reflects that lesson.)
+    (ii) launchd ThrottleInterval is NET-NEW SURFACE — no literal exists in src to lift. It is added to the
+    policy with a schema BOUND and marked origin net-new, and the substrate must never present it as lifted from
+    a nonexistent source constant.
+    INITIAL POLICY VALUES (the cited current source values, 2026-07-23 decision brief): fixStrikeCap 2, proof
+    timeout 60000, headroom curve ≤24h→100% / else 95% with reserve 95, prune grace 120000, poll 60000, sweep
+    staleDays 14 / strikeCap 2 / wipLimit 10, drain max 10.
+  design: |
+    Add plan/policy.yaml (a gated plan-data artifact) carrying the enumerated initial values, and src/lib/policy.ts
+    (a loader + a schema that expresses a BOUND per field). The loader is deterministic and pure; lint-plan
+    (W1-T20c's §5C layer) validates plan/policy.yaml against the schema bounds so a value change rides the plan-PR
+    gate. Each field records its ORIGIN — lifted:<src-site> for the eight lifted constants, net-new for launchd
+    ThrottleInterval — so provenance is legible and the net-new surface can never masquerade as lifted. A lifted
+    field additionally carries a not-below-current-source floor for the proof timeout so a 30000 regression is
+    rejected mechanically. VERIFY the current source values from source before writing the initial data (distrust
+    this note — review.ts:587 is the proof-timeout anchor, worker.ts DEFAULT_PRUNE_GRACE_MS the prune-grace anchor,
+    daemon.ts the poll + headroom anchors, sweep.ts the staleDays/strikeCap/wipLimit anchors, drain the width);
+    this task creates the file and its schema only — WIRING the consumer sites to read it is W1-T253.
+  acceptance:
+    - claim: "plan/policy.yaml lifts the CURRENT source values as initial data — proof timeout 60000, prune grace 120000, poll 60000, fix strike cap 2, sweep staleDays 14 / strikeCap 2 / wipLimit 10, drain max 10, and the headroom curve (≤24h→100% else 95% + reserve 95) — and a policy carrying the stale 30000 proof timeout is REFUSED as a regression below the live source value"
+      proof: "unit test: test/policy.test.ts — the loaded policy proofTimeoutMs equals 60000 and the enumerated fields equal their lifted values; a policy fixture whose proof timeout is 30000 FAILS the not-below-current-source guard (the operator's 30000-rejected falsifier)"
+    - claim: "every policy value carries a schema BOUND and an out-of-bounds value is REFUSED at load and at lint, so a value change is a reviewed plan PR rather than an unbounded edit"
+      proof: "unit test: test/policy.test.ts — a fixture value outside its declared bound fails validation with the field named; a within-bounds edit passes; lint-plan over a bounds-violating plan/policy.yaml fails"
+    - claim: "launchd ThrottleInterval is NET-NEW surface — present with a schema bound and origin net-new, never claimed lifted from a nonexistent src literal"
+      proof: "unit test: test/policy.test.ts — throttleInterval carries a bound and origin=net-new, and the loader asserts no src-literal source is recorded for it; a fixture marking it lifted FAILS"
+    - claim: "the loader is deterministic and the origin of every LIFTED field cites its source site (so provenance is legible and the net-new surface cannot masquerade as lifted)"
+      proof: "unit test: test/policy.test.ts — two loads of the same file yield identical values; each lifted field records origin=lifted:<src-site> and the net-new field records net-new; a lifted field with no source site FAILS"
+  risk: high
+  origin: architect
+  plan_refs: ["P37", "P34", "§5C", "§9"]
+  files: [plan/policy.yaml, src/lib/policy.ts, test/policy.test.ts]
+  status: queued
+  attempts: 0
+  note: "P37 substrate, ratified 2026-07-23 per the operator ruling (rounds 1-4, all corrections in force verbatim:
+    proof timeout 60000 lifted / 30000 rejected as a stale predating regression; launchd ThrottleInterval net-new,
+    bounded, never lifted). Sibling W1-T253 wires the consumer sites — the substrate/consumers split the operator
+    retained. Minted strictly above main's current max task id (W1-T251, after P34's W1-T248-T251 and the parallel
+    W1-T246 triage). depends_on W1-T20c because the schema-bound validation rides the §5C plan-lint layer."
+
+- id: W1-T253
+  title: "P37 CONSUMERS — the operating constants become reads from the loaded policy, not source literals: proof timeout (src/lib/review.ts), prune grace (worker.ts), poll + headroom curve (daemon.ts), sweep staleDays/strikeCap/wipLimit (sweep.ts), drain max (drain.ts), launchd ThrottleInterval into the generated plist (launchd.ts); one invariant — no collected constant remains a literal — unsatisfiable piecewise, so risk:high atomic coupling, not a per-site split"
+  repo: remudero
+  depends_on: [W1-T252]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    Ratifies P37's consumers half — the substrate/consumers split the operator retained (round 4). W1-T252 builds
+    plan/policy.yaml + the loader; this rewires every collected constant's CONSUMER SITE to read from the loaded
+    policy instead of a source literal, which is the whole point: a value change becomes a reviewed plan PR rather
+    than an edit to a constant.
+    SIZING (Rule 19 re-risk-to-high, NOT decompose — the W1-T240/T250 atomic-coupling exit): this touches
+    review.ts, worker.ts, daemon.ts, sweep.ts, drain.ts and launchd.ts, but its invariant is ONE property — no
+    collected operating constant remains a source literal; every consumer reads from the loaded policy — and that
+    invariant is UNSATISFIABLE PIECEWISE. A substrate with no consumers changes nothing; a half-wired consumer set
+    leaves literals as exactly the drift P37 exists to remove. So it is genuinely atomic cross-file coupling proven
+    by a single guard test, and it is risk:high with that rationale recorded rather than a per-subsystem split.
+    THE PROOF TIMEOUT CORRECTION IS LOAD-BEARING HERE TOO: the review executor must read the policy's 60000 and
+    the pre-existing 30000/DEFAULT_PROOF_TIMEOUT_MS literal must no longer gate it — never regress the live value.
+    launchd ThrottleInterval is net-new (W1-T252): the plist GENERATOR reads it from policy; there is no prior
+    literal to remove, so its criterion is emission-from-policy, not literal-removal.
+  design: |
+    Route each consumer site through loadPolicy (W1-T252): review.ts's proof-executor timeout, worker.ts's prune
+    grace, daemon.ts's poll interval + headroom curve/reserve, sweep.ts's staleDays/strikeCap/wipLimit, drain's
+    width/max, and launchd.ts's generated-plist ThrottleInterval. Remove the now-dead literals at the lifted sites;
+    emit the net-new ThrottleInterval from policy. A guard test enumerates the collected-constant sites and fails
+    if any still resolves from a literal. VERIFY each site's current literal and read path from source before
+    editing (distrust this note). HEADROOM COORDINATION: daemon.ts's headroom curve is also owned by W1-T197 (the
+    in-process idle) and the reserve by W1-T249 (P34 clause c) — whichever of the three lands last reads the curve
+    and reserve from policy rather than a literal; this task and those must not each hard-code the ≤24h→100%/95%
+    curve, and the one that lands second wires the other's site to policy rather than reintroducing a constant.
+  acceptance:
+    - claim: "the review proof-executor timeout is READ from policy (the lifted 60000) and the pre-existing 30000/DEFAULT_PROOF_TIMEOUT_MS literal no longer gates it — a policy override changes the executor timeout with zero code edit, and the live value is never regressed to 30000"
+      proof: "unit test: test/policy-consumers.test.ts — the review executor timeout equals the policy proofTimeoutMs (60000); a policy override moves it; a fixture asserting the executor still reads a hardcoded 30000 literal FAILS"
+    - claim: "prune grace (worker.ts), poll interval + headroom curve/reserve (daemon.ts), sweep staleDays/strikeCap/wipLimit (sweep.ts), and drain max (drain.ts) are each read from the loaded policy — a policy edit moves each site's behavior with zero code change"
+      proof: "unit test: test/policy-consumers.test.ts — each site's effective value equals the policy value, and a policy override changes each site's behavior; a site still resolving from its old literal FAILS"
+    - claim: "launchd ThrottleInterval is EMITTED into the generated plist from the policy's net-new bounded value (there is no prior literal to remove) — changing the policy value changes the emitted plist"
+      proof: "unit test: test/policy-consumers.test.ts — the generated plist ThrottleInterval equals the policy value and a policy override changes the emitted plist"
+    - claim: "the invariant is UNSATISFIABLE PIECEWISE — a guard enumerating every collected-constant site FAILS if any still resolves from a source literal rather than the loaded policy (the atomic-coupling falsifier)"
+      proof: "unit test: test/policy-consumers.test.ts — the guard test lists the collected-constant sites and fails when any one resolves from a literal; wiring only a subset leaves the guard red"
+  risk: high
+  origin: architect
+  plan_refs: ["P37", "P34", "§9", "§5C"]
+  files: [src/lib/review.ts, src/lib/worker.ts, src/lib/daemon.ts, src/lib/sweep.ts, src/lib/drain.ts, src/lib/launchd.ts]
+  status: queued
+  attempts: 0
+  note: "P37 consumers, ratified 2026-07-23. risk:high per the Rule 19 atomic-coupling exit (one invariant across
+    six sites, unsatisfiable piecewise), NOT a per-site decomposition. depends_on W1-T252 (the substrate). All
+    operator corrections in force verbatim: proof timeout reads the lifted 60000, the 30000 literal no longer
+    gates the executor and is never regressed; launchd ThrottleInterval is emitted from the net-new bounded policy
+    value with no prior literal to remove. Coordinates with W1-T197 (headroom idle) and W1-T249 (P34 clause c
+    reserve) on daemon.ts's headroom curve — the last of the three to land reads the curve/reserve from policy
+    rather than re-hardcoding it (file-overlap serialization, W1-T171). Minted strictly above main's max task id
+    W1-T251."
