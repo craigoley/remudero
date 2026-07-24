@@ -145,6 +145,59 @@ test("generateLaunchdPlist omits --repo when none is given (no implicit repo bak
   assert.doesNotMatch(plist, /<string>--repo<\/string>/);
 });
 
+// ── Self-target consent gate (W1-T109 — the commissioning crash-loop near-miss): a self-target
+// unit generated WITHOUT --allow-self-target loads fine, but the daemon's OWN runtime guard
+// (resolveDaemonTarget) then refuses to start it, and KeepAlive/SuccessfulExit:false restarts it
+// forever. The generator must refuse at GENERATION instead — the cheapest layer to fail at. ──
+
+test("generateLaunchdPlist: self-target + --allow-self-target bakes the flag into ProgramArguments", () => {
+  const plist = generateLaunchdPlist({ ...VALID, repo: "remudero", isSelfTarget: true, allowSelfTarget: true });
+  assert.match(
+    plist,
+    /<string>--repo<\/string>\s*<string>remudero<\/string>\s*<string>--allow-self-target<\/string>/,
+    "--allow-self-target is baked in right after the self repo it targets",
+  );
+});
+
+test("generateLaunchdPlist: self-target WITHOUT --allow-self-target refuses at generation, naming the flag, emitting no plist", () => {
+  assert.throws(
+    () => generateLaunchdPlist({ ...VALID, repo: "remudero", isSelfTarget: true }),
+    (e) =>
+      e instanceof LaunchdPlistError &&
+      /--allow-self-target/.test(e.message) &&
+      /self/i.test(e.message),
+    "the thrown message names --allow-self-target — no plist string is ever returned",
+  );
+});
+
+test("generateLaunchdPlist: self-target detection also applies with NO --repo given (the CLI's absent-repo-defaults-to-self case) — refuses without the flag", () => {
+  assert.throws(
+    () => generateLaunchdPlist({ ...VALID, isSelfTarget: true }),
+    (e) => e instanceof LaunchdPlistError && /--allow-self-target/.test(e.message),
+  );
+  const plist = generateLaunchdPlist({ ...VALID, isSelfTarget: true, allowSelfTarget: true });
+  assert.match(plist, /<string>--allow-self-target<\/string>/, "consent still bakes in with no --repo baked");
+});
+
+test("generateLaunchdPlist: --allow-self-target is neither required nor baked for a NON-self target, even if passed", () => {
+  const plist = generateLaunchdPlist({ ...VALID, repo: "remudero-sandbox", isSelfTarget: false, allowSelfTarget: true });
+  assert.doesNotMatch(plist, /--allow-self-target/, "a non-self target never bakes the flag, whether or not it was given");
+});
+
+// ── Regression lock: a NON-self --repo target's output is byte-identical to the plist this
+// generator produced before W1-T109 — captured verbatim from the pre-change generator output. ──
+test("generateLaunchdPlist: a non-self --repo target's output is BYTE-IDENTICAL to before W1-T109 (regression lock)", () => {
+  const plist = generateLaunchdPlist({
+    rmdBin: "/Users/op/Remudero/bin/rmd",
+    root: "/Users/op/Remudero",
+    home: "/Users/op",
+    repo: "remudero-sandbox",
+  });
+  const expected =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key>\n  <string>com.remudero.daemon</string>\n  <!-- ANTHROPIC-clean-env boot assertion (W1-T12b, billing boundary, MASTER-PLAN §9):\n       EnvironmentVariables below is a CLOSED allowlist (PATH + HOME only) — launchd\n       never sources ~/.zshrc, so this dict is the WHOLE env the daemon process\n       receives at boot. generateLaunchdPlist() throws if any ANTHROPIC_* key ever\n       lands in it. The daemon process itself re-asserts this at runtime over its\n       OWN live env (lib/daemon.ts daemonBoot, lib/env.ts assertCleanBoot) and logs\n       env_clean=true / billing_mode=subscription — belt-and-suspenders against a\n       future edit to this generator. -->\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n    <key>HOME</key>\n    <string>/Users/op</string>\n  </dict>\n  <key>ProgramArguments</key>\n  <array>\n    <string>/Users/op/Remudero/bin/rmd</string>\n    <string>daemon</string>\n    <string>--repo</string>\n    <string>remudero-sandbox</string>\n  </array>\n  <key>WorkingDirectory</key>\n  <string>/Users/op/Remudero</string>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>\n  <key>StandardOutPath</key>\n  <string>/Users/op/Remudero/state/logs/daemon.out.log</string>\n  <key>StandardErrorPath</key>\n  <string>/Users/op/Remudero/state/logs/daemon.err.log</string>\n</dict>\n</plist>\n";
+  assert.equal(plist, expected);
+});
+
 // ── generateDigestLaunchdPlist: the daily `rmd digest` pulse (W1-T112, the W1-T12b generator
 // pattern applied to a StartCalendarInterval unit instead of RunAtLoad/KeepAlive) ───────────
 

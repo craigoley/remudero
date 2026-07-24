@@ -83,5 +83,9 @@ launchctl load ~/Library/LaunchAgents/com.remudero.daemon.plist
 
 `rmd daemon-plist` **bakes `--repo` into the unit's `ProgramArguments`**, so the launchd
 daemon drains the intended repo — never an implicit default. A plist generated **without**
-`--repo` warns you, and the resulting unit's daemon will refuse to start (self-target guard)
-rather than silently drain its own source repo.
+`--repo` (or with `--repo` pointed at this checkout's own repo) targets the daemon's OWN
+source repo — the same "self" the runtime guard refuses to drain unattended. Generating
+that unit now **refuses at generation** (W1-T109) unless you also pass
+`--allow-self-target`, which bakes the same consent into the unit so it boots already
+acknowledged, rather than silently emitting a unit whose daemon refuses to start and gets
+KeepAlive-restarted forever.

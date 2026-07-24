@@ -69,6 +69,25 @@ export interface LaunchdPlistOpts {
    * source repo. Explicit is safe.
    */
   repo?: string;
+  /**
+   * Whether `repo` (or its absence, which `resolveDaemonTarget` defaults to self at runtime)
+   * targets the daemon's OWN source repo. Passed in already-resolved by the CLI layer (which
+   * has the git origin to compare against) so this module stays a pure string transform — no
+   * shell-out here. Default false (never refuses) so existing non-self callers are unaffected.
+   */
+  isSelfTarget?: boolean;
+  /**
+   * `rmd daemon-plist --allow-self-target` — explicit operator consent to generate a unit that
+   * targets the daemon's own source repo (the W1-T109 commissioning crash-loop near-miss: a
+   * self-target unit generated WITHOUT this flag loads fine, but the daemon's OWN runtime guard
+   * (`resolveDaemonTarget`) then refuses to start, exits non-zero, and
+   * `KeepAlive`/`SuccessfulExit: false` restarts it forever). When {@link isSelfTarget} is true,
+   * this flag is REQUIRED — {@link generateLaunchdPlist} throws instead of emitting a unit that
+   * would crash-loop at boot (fail at the cheapest layer, generation, not boot). When given, it
+   * is baked into `ProgramArguments` so the daemon's own runtime consent gate is satisfied too.
+   * Ignored (never required, never baked) for a non-self target.
+   */
+  allowSelfTarget?: boolean;
 }
 
 /** Thrown by {@link generateLaunchdPlist} when an input violates one of its invariants. */
@@ -131,6 +150,19 @@ export function generateLaunchdPlist(opts: LaunchdPlistOpts): string {
   assertAbsolute(opts.root, "root");
   if (opts.home !== undefined) assertAbsolute(opts.home, "home");
 
+  // Self-target consent gate — FIRST, before any plist text is built, so a refusal generates
+  // nothing (W1-T109: fail at generation, the cheapest layer, not at boot as a KeepAlive
+  // crash-loop). Mirrors the runtime gate `resolveDaemonTarget` applies to `rmd daemon` itself.
+  if (opts.isSelfTarget && !opts.allowSelfTarget) {
+    throw new LaunchdPlistError(
+      `generateLaunchdPlist: refusing to generate a unit that targets the daemon's OWN source ` +
+        `repo${opts.repo ? ` '${opts.repo}'` : " (no --repo given, which defaults to self at runtime)"} ` +
+        `without --allow-self-target. Loaded as-is, the daemon's own runtime guard would refuse to ` +
+        `start it and launchd's KeepAlive would restart it forever. Pass --allow-self-target to bake ` +
+        `explicit consent into the unit, or target a different repo with --repo.`,
+    );
+  }
+
   const label = opts.label ?? DAEMON_LABEL;
   const path = opts.path ?? DEFAULT_LAUNCHD_PATH;
   const home = opts.home ?? homedir();
@@ -144,6 +176,11 @@ export function generateLaunchdPlist(opts: LaunchdPlistOpts): string {
   const programArguments = [opts.rmdBin, "daemon"];
   if (opts.repo !== undefined) {
     programArguments.push("--repo", opts.repo);
+  }
+  if (opts.isSelfTarget && opts.allowSelfTarget) {
+    // Bake the SAME consent the runtime guard (resolveDaemonTarget) requires, so the unit
+    // boots already-consented rather than crash-looping on the daemon's own refusal.
+    programArguments.push("--allow-self-target");
   }
   if (opts.pollIntervalMs !== undefined) {
     programArguments.push("--poll-ms", String(opts.pollIntervalMs));
