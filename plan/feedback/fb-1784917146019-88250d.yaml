@@ -1,0 +1,17 @@
+id: fb-1784917146019-88250d
+ts: 2026-07-24T18:19:06.019Z
+raw: "CI-GATE HOLDS STALE REDS — the aggregate has no per-name dedupe and no
+  re-aggregation trigger, so when a member check re-runs green AFTER ci-gate
+  completed (observed #729: coverage-ratchet red at ci-gate's 17:11 read, green
+  at 17:18), ci-gate holds a failure against a check that is now green, and only
+  a manual re-run or a new SHA clears it; also observed as #634's blocker. NEED:
+  ci-gate re-aggregates on member-check completion events (or, minimally, its
+  evaluation takes the LATEST run per check name rather than first-seen), so a
+  superseded-by-green member can never leave the aggregate red; regression
+  fixture: member red at aggregate time, member re-runs green, aggregate flips
+  without a new SHA. The paramedic's re-aggregate verb (fb-6cc22a verb 6)
+  remains the repair for historical instances; this fixes the gate itself."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
