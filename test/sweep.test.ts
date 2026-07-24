@@ -29,6 +29,7 @@ import {
 import type { CriterionVerdict } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { appendLedger } from "../src/lib/ledger.js";
+import { escalate } from "../src/lib/escalate.js";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -667,10 +668,23 @@ test("renderSweepSummary is a single legible line", () => {
     total: 4,
     byDisposition: { mergeable: 1, "blocked-fixable": 1, stale: 1, "blocked-ambiguous": 1, "dep-review": 0, "post-review": 0 },
     actionsTaken: 4,
+    actionsFailed: 0,
     actions: [],
     noneCount: 0,
   };
   assert.match(renderSweepSummary(s), /4 open PR\(s\) · 4 action\(s\) taken/);
+});
+
+test("renderSweepSummary calls out failed actions distinctly (W1-T99)", () => {
+  const s = {
+    total: 3,
+    byDisposition: { mergeable: 1, "blocked-fixable": 0, stale: 0, "blocked-ambiguous": 1, "dep-review": 0, "post-review": 1 },
+    actionsTaken: 2,
+    actionsFailed: 1,
+    actions: [],
+    noneCount: 0,
+  };
+  assert.match(renderSweepSummary(s), /⚠️ 1 action\(s\) FAILED/);
 });
 
 // ── W1-T78: the CLARIFICATION-QUESTION rung — an ambiguous block yields a
@@ -1204,6 +1218,78 @@ test("runSweep: a throwing action does not abort the pass — later PRs still re
   assert.match(String(throwLine?.action_error ?? ""), /arm boom/, "the throwing PR is attributed on its own ledger line");
   const healthyLine = disposed.find((l) => l.pr_number === 20);
   assert.equal(healthyLine?.acted, true, "the healthy PR still reconciled and was ledgered acted:true");
+});
+
+// ── W1-T99: sweep.action_failed + actionsFailed — one PR's escalate() throwing isolates ──
+
+test("runSweep: a 3-PR fixture where the MIDDLE PR's escalate throws -> sweep.action_failed ledgered for it, the other two reconcile, summary counts the failure", async () => {
+  const escalated: number[] = [];
+  const deps = fakeDeps({
+    escalate: (p) => {
+      if (p.prNumber === 2) throw new Error("gh: label \"escalation-blocked\" not found");
+      escalated.push(p.prNumber);
+    },
+  });
+  const first = strikesExhaustedPr(); // prNumber 13 -> blocked-ambiguous
+  const middle = { ...strikesExhaustedPr(), prNumber: 2, prUrl: "url/2", taskId: "W1-MID", headSha: "cccc333" };
+  const last = { ...strikesExhaustedPr(), prNumber: 3, prUrl: "url/3", taskId: "W1-LAST", headSha: "dddd444" };
+
+  const summary = await runSweep([first, middle, last], deps, DEFAULT_SWEEP_POLICY);
+
+  assert.deepEqual(escalated.sort((a, b) => a - b), [3, 13], "the other two PRs' escalate actions still completed");
+  assert.equal(summary.actionsFailed, 1, "the summary counts exactly one failed action");
+  assert.equal(summary.actionsTaken, 2, "the two successful escalations still count as actions taken");
+
+  const failedLines = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.action_failed");
+  assert.equal(failedLines.length, 1, "exactly one sweep.action_failed line");
+  assert.equal(failedLines[0].pr_number, 2);
+  assert.equal(failedLines[0].disposition, "blocked-ambiguous");
+  assert.match(String(failedLines[0].error), /escalation-blocked.*not found/);
+});
+
+test("runSweep: the canonical 2026-07-17 crash fixture — a single ambiguous PR whose gateway throws label-not-found never escapes runSweep, and the question payload still reached an issue via ENSURE-LABELS+DEGRADE", async () => {
+  // This mirrors the REAL wiring (run-task.ts's sweep escalate closure): the question is
+  // logged to the backlog, then `escalate()` is asked to open the issue. With W1-T99's
+  // ENSURE-LABELS/DEGRADE fix, a gateway whose label provisioning hard-fails degrades the
+  // label rather than throwing — so this real-shaped deps.escalate never throws at all,
+  // and the sweep completes with the question delivered.
+  const loggedQuestions: string[] = [];
+  const issues = {
+    ensureLabel(label: string) {
+      return label !== "escalation-blocked"; // the exact 2026-07-17 shape: this one label is unprovisionable
+    },
+    create(_title: string, _body: string, _labels: string[]) {
+      return "https://github.com/craigoley/remudero/issues/500";
+    },
+  };
+  const sharedLedgerPath = ledgerPath();
+  const deps = fakeDeps({
+    ledgerPath: sharedLedgerPath,
+    escalate: (pr, reason, question) => {
+      loggedQuestions.push(question.question);
+      escalate(
+        {
+          class: "BLOCKED",
+          taskId: pr.taskId ?? "UNKNOWN",
+          summary: `PR ${pr.prUrl} needs a clarification — ${reason}`,
+          detail: reason,
+          options: question.resolutions.map((r) => ({ label: r.label, detail: r.detail })),
+          recommendation: question.resolutions[0].label,
+        },
+        { issues, ledgerPath: sharedLedgerPath, runId: "SWEEP-1" },
+      );
+    },
+  });
+
+  const summary = await runSweep([strikesExhaustedPr()], deps, DEFAULT_SWEEP_POLICY);
+
+  assert.equal(summary.actionsFailed, 0, "no throw escaped runSweep — nothing counted as failed");
+  assert.equal(summary.actionsTaken, 1, "the degraded-but-delivered escalation still counts as acted");
+  assert.equal(loggedQuestions.length, 1, "the question payload was generated and handed to escalate()");
+
+  const opened = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "escalation.issue_opened");
+  assert.equal(opened.length, 1, "the issue was opened despite the unprovisionable label");
+  assert.deepEqual(opened[0].degraded_labels, ["escalation-blocked"]);
 });
 
 // ── W1-T254 light-sweep: the `actionable` guard stands down every dangerous lane ──

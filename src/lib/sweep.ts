@@ -874,6 +874,14 @@ export interface SweepSummary {
   byDisposition: Record<Disposition, number>;
   /** How many gated effects actually fired (deduped ones are excluded). */
   actionsTaken: number;
+  /**
+   * W1-T99: how many gated effects were ATTEMPTED and THREW — distinct from
+   * `actionsTaken` (succeeded) and from PRs that never attempted (deduped/dry-run/
+   * stood-down). Each one also has its own `sweep.action_failed` ledger line and
+   * this PR's `actions[].actionError`; this is the pass-level count a caller reads
+   * at a glance without re-deriving it from `actions`.
+   */
+  actionsFailed: number;
   /** Per-PR detail, in input order. */
   actions: SweepAction[];
   /** INVARIANT proof: PRs that derived no disposition — MUST be 0. */
@@ -986,6 +994,9 @@ export async function runSweep(
   const byDisposition = ZERO_COUNTS();
   const actions: SweepAction[] = [];
   let actionsTaken = 0;
+  // W1-T99: counted distinctly from actionsTaken/noneCount so a caller can tell
+  // "nothing to do" from "something threw" at a glance — see renderSweepSummary.
+  let actionsFailed = 0;
   let noneCount = 0;
 
   for (const pr of openPrs) {
@@ -1126,9 +1137,26 @@ export async function runSweep(
         } catch (e) {
           acted = false;
           actionError = String((e as Error)?.message ?? e);
+          // W1-T99 — the canonical crash this task fixes (2026-07-17: the first live
+          // BLOCKED-class escalation's `gh issue create` threw on a missing label and
+          // took the WHOLE reconciler down with it). This PR's own `sweep.disposed`
+          // line below already carries `action_error`; this is a SEPARATE, distinctly
+          // named step so a failed action is grep-able on its own, never buried inside
+          // the per-pass disposed record. Reached only when !deps.dryRun (acted is
+          // gated on that above), so a preview run still leaves no trace.
+          appendLine(deps.ledgerPath, {
+            run_id: deps.runId,
+            task_id: pr.taskId ?? "SWEEP",
+            step: "sweep.action_failed",
+            pr_number: pr.prNumber,
+            pr_url: pr.prUrl,
+            disposition,
+            error: actionError,
+          });
         }
       }
       if (acted) actionsTaken++;
+      else if (actionError) actionsFailed++;
     }
 
     if (standDownReason) {
@@ -1192,10 +1220,16 @@ export async function runSweep(
     total: openPrs.length,
     byDisposition,
     actionsTaken,
+    actionsFailed,
     actions,
     noneCount,
   };
-  log("sweep.summary", { ...summary.byDisposition, total: summary.total, actions_taken: actionsTaken });
+  log("sweep.summary", {
+    ...summary.byDisposition,
+    total: summary.total,
+    actions_taken: actionsTaken,
+    actions_failed: actionsFailed,
+  });
   return summary;
 }
 
@@ -1206,6 +1240,7 @@ export function renderSweepSummary(s: SweepSummary): string {
     `sweep: ${s.total} open PR(s) · ${s.actionsTaken} action(s) taken · ` +
     `mergeable ${b.mergeable} · blocked-fixable ${b["blocked-fixable"]} · ` +
     `stale ${b.stale} · blocked-ambiguous ${b["blocked-ambiguous"]}` +
+    (s.actionsFailed > 0 ? ` · ⚠️ ${s.actionsFailed} action(s) FAILED (see sweep.action_failed)` : "") +
     (s.noneCount > 0 ? ` · ⚠️ ${s.noneCount} UNDISPOSED (invariant violated)` : "")
   );
 }

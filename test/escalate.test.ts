@@ -8,6 +8,7 @@ import {
   escalate,
   tryEscalate,
   renderIssueBody,
+  ghIssueGateway,
   type Escalation,
   type IssueGateway,
 } from "../src/lib/escalate.js";
@@ -188,4 +189,120 @@ test("tryEscalate: a SUCCESSFUL delivery is byte-identical to escalate() (no beh
   const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   assert.equal(lines.filter((l) => l.step === "escalation.issue_opened").length, 1);
   assert.equal(lines.filter((l) => l.step === "escalation.failed").length, 0);
+});
+
+// ── ENSURE-LABELS + DEGRADE DON'T LOSE (W1-T99) ─────────────────────────────
+// LIVE INCIDENT, 2026-07-17: the first BLOCKED-class escalation ever fired called
+// `gh issue create --label escalation-blocked`, and the label had never been
+// provisioned on the repo — `gh` failed the create OUTRIGHT, losing the rendered
+// question and propagating a throw that killed the whole sweep reconciler.
+
+function fakeIssuesWithLabels(
+  ensure: (label: string) => boolean,
+  url = "https://github.com/craigoley/remudero/issues/99",
+): IssueGateway & { calls: Array<{ title: string; body: string; labels: string[] }>; ensured: string[] } {
+  const calls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const ensured: string[] = [];
+  return {
+    calls,
+    ensured,
+    ensureLabel(label) {
+      ensured.push(label);
+      return ensure(label);
+    },
+    create(title, body, labels) {
+      calls.push({ title, body, labels });
+      return url;
+    },
+  };
+}
+
+test("escalate: ensureLabel is called for every wanted label BEFORE create", () => {
+  const issues = fakeIssuesWithLabels(() => true);
+  escalate(escalation(), { issues, ledgerPath: ledgerPath(), runId: "RUN-1" });
+  assert.deepEqual(issues.ensured, [NEEDS_HUMAN_LABEL, "escalation-blocked"]);
+  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-blocked"], "both labels provisioned -> both attached");
+});
+
+test("escalate: a gateway with no ensureLabel behaves exactly as before (back-compat)", () => {
+  const issues = fakeIssues();
+  const url = escalate(escalation(), { issues, ledgerPath: ledgerPath(), runId: "RUN-1" });
+  assert.equal(url, "https://github.com/craigoley/remudero/issues/99");
+  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-blocked"]);
+});
+
+test("escalate: the canonical 2026-07-17 shape — a label whose provisioning HARD-FAILS degrades, it never loses the escalation", () => {
+  const path = ledgerPath();
+  const issues = fakeIssuesWithLabels((label) => label !== "escalation-blocked"); // simulate the missing/unprovisionable label
+  const url = escalate(escalation(), { issues, ledgerPath: path, runId: "RUN-1" });
+
+  // No throw escaped — the escalation still delivered:
+  assert.equal(url, "https://github.com/craigoley/remudero/issues/99");
+  assert.equal(issues.calls.length, 1);
+  // The degraded label is DROPPED from the attached set, not silently kept:
+  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL], "the unprovisionable label is left off create()");
+  // The drop is noted in the body the human actually reads — the payload survives:
+  assert.match(issues.calls[0].body, /Degraded.*escalation-blocked/s);
+  // ...and on the ledger line, so it's legible without opening GitHub:
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const opened = lines.find((l) => l.step === "escalation.issue_opened");
+  assert.deepEqual(opened.degraded_labels, ["escalation-blocked"]);
+});
+
+// ── ghIssueGateway: the REAL `gh` gateway, exercised via the injectable `opts.exec`
+// stand-in (mirrors ghGateway in status.ts, W1-T119) so the ensureLabel/create wiring
+// below is proven WITHOUT shelling out to a real `gh` binary.
+
+test("ghIssueGateway.ensureLabel: a successful `gh label create` returns true", () => {
+  const calls: string[][] = [];
+  const gateway = ghIssueGateway("craigoley", "remudero", {
+    exec: (args) => {
+      calls.push(args);
+      return "";
+    },
+  });
+  assert.equal(gateway.ensureLabel?.("escalation-blocked"), true);
+  assert.deepEqual(calls, [
+    ["label", "create", "escalation-blocked", "--repo", "craigoley/remudero", "--color", "ededed", "--force"],
+  ]);
+});
+
+test("ghIssueGateway.ensureLabel: a throwing `gh` (rate-limit/auth/network) degrades to false, never throws", () => {
+  const gateway = ghIssueGateway("craigoley", "remudero", {
+    exec: () => {
+      throw new Error("gh: HTTP 403 rate limit exceeded");
+    },
+  });
+  assert.equal(gateway.ensureLabel?.("escalation-blocked"), false);
+});
+
+test("ghIssueGateway.create: builds the gh issue-create args and returns the trimmed URL", () => {
+  const calls: string[][] = [];
+  const gateway = ghIssueGateway("craigoley", "remudero", {
+    exec: (args) => {
+      calls.push(args);
+      return "https://github.com/craigoley/remudero/issues/123\n";
+    },
+  });
+  const url = gateway.create("[BLOCKED] W1-TX: two strikes exhausted", "body text", [
+    NEEDS_HUMAN_LABEL,
+    "escalation-blocked",
+  ]);
+  assert.equal(url, "https://github.com/craigoley/remudero/issues/123");
+  assert.deepEqual(calls, [
+    [
+      "issue",
+      "create",
+      "--repo",
+      "craigoley/remudero",
+      "--title",
+      "[BLOCKED] W1-TX: two strikes exhausted",
+      "--body",
+      "body text",
+      "--label",
+      NEEDS_HUMAN_LABEL,
+      "--label",
+      "escalation-blocked",
+    ],
+  ]);
 });
