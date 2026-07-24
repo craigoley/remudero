@@ -61,6 +61,78 @@
 #   operator-kicked (the daemon drains the sandbox), so this is the authoritative kick guide, NOT a
 #   physical reordering of the entries below (a contiguous block-move can't produce this interleaving).
 
+- id: W1-T254
+  title: "reliable sweep post-review — a green PR whose remudero-review went absent on a new head never silently stalls (light-sweep ticker + outcome-keyed dedup + throw containment)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OBSERVED (PR #707, 2026-07-24, fable-analyzed): remudero-review is a REQUIRED branch-protection
+    commit STATUS posted per-HEAD-SHA (not a check-run). Any new commit invalidates it, so a PR shows all
+    check-runs green while the required STATUS is absent -> 'looks green, won't merge'. The sweep has the
+    right disposition (post-review, sweep.ts:500-515, when checks green + reviewState none) and the re-post
+    path is deterministic (reviewCommand hard-codes spawnReviewer:false, run-task.ts:3468). ROOT CAUSE is
+    CADENCE, not ordering: the daemon loop (daemon.ts:687-937) runs ONE sweep per iteration, and an
+    iteration contains an UNBOUNDED runOne(task). For #707 the daemon swept at 13:12 (armed the OLD head
+    7774b13), entered runOne(W1-T89), and never swept again to see the new head beb92f7 for the whole
+    window — unbounded latency + total invisibility until a manual rmd review. Latent siblings: dedup is
+    ATTEMPT-keyed not outcome-keyed (a postReview that returns without posting — e.g. a guard refusal —
+    dedups the head FOREVER, sweep.ts:906-908/977-979); runSweep has NO per-PR try/catch so one thrown
+    action aborts the rest of the pass as a single un-attributed sweep.error. Recurred as manual re-posts
+    on #689/#698/#662."
+  design: |
+    PRIMARY = make the post-review action RELIABLE, starvation-proof, and always legible. Four edits:
+    1. CADENCE (the #707-changing part): a restricted LIGHT-SWEEP ticker while runOne is in flight.
+       daemon.ts runDaemon: add DaemonDeps.sweepLight?; around `await deps.runOne(next.id)` (daemon.ts:876)
+       start an interval on the INJECTED clock (pollIntervalMs cadence) that awaits deps.sweepLight() (own
+       try/catch -> daemon.sweep_light.failed), cleared when runOne settles. Omitted => unchanged.
+       sweep.ts: add SweepDeps.actionable?: (d: Disposition) => boolean (default true); in the action
+       switch, when !actionable(d): acted=false, standDownReason "deferred to full sweep (light pass)".
+       run-task.ts: wire sweepLight beside buildSweepHook (~5790) as the same buildOpenPrViews + runSweep
+       with actionable: (d) => d === "post-review" — ONLY the deterministic, sha-pinned, mutex-serialized,
+       lifecycle-checked-in-lock re-post runs concurrently with runOne. dispatchFix/close/escalate/depReview/
+       arm STAY strictly non-concurrent (preserves the single-threaded reason — the drain-concurrency class).
+    2. OUTCOME-KEYED DEDUP: priorActionsFromLedger (sweep.ts:906-908) builds postReviewed from
+       review.posted / review.post_refused head_sha (both carry it) instead of `sweep.disposed acted:true`.
+       Retry every pass until a verdict OR an explicit refusal EXISTS for that head; a refusal still dedups;
+       a posted verdict flips reviewState so the row stops matching.
+    3. PER-PR THROW CONTAINMENT: wrap the action switch (sweep.ts:994-1061) in try/catch — on throw
+       acted=false, still append the sweep.disposed line with an action_error field, continue to next PR.
+    4. ATTEMPT LEDGERING + dry-run tag: buildSweepEffects.postReview (run-task.ts:5502) emits
+       sweep.post_review.attempt {pr,head} then sweep.post_review.done {exit} / .failed {error}; and tag the
+       sweep.dispose log line dry_run:true under --dry-run (the exact ambiguity that misread a dry-run line
+       as a daemon action during the #707 diagnosis).
+    RISK (stated): no verdict is ever forwarded — the re-post is a FRESH deterministic judgment of the new
+    head (worktree materialized at head, proofs executed); W1-T228 precedence still binds same-sha only;
+    the dangerous lanes never run concurrently; worst concurrent case is two idempotent same-head status
+    posts serialized by the per-task O_EXCL mutex. Escalation of a PERSISTENT green-but-review-absent PR
+    (K attempts) is a deliberate SEPARATE backstop task, not folded here.
+  acceptance:
+    - claim: "post-review dedup is outcome-keyed — a prior acted:true dispose with no posted/refused verdict for that head still retries; a refusal for the head dedups"
+      proof: "unit test: post-review dedup is outcome-keyed"
+    - claim: "a thrown action does not abort the rest of the sweep pass — later PRs still reconcile and the throwing PR is attributed"
+      proof: "unit test: a throwing action does not abort the pass"
+    - claim: "the light-sweep ticker runs post-review while runOne is in flight, so a green PR with an absent review re-posts within one poll interval"
+      proof: "unit test: light sweep runs while runOne is in flight"
+    - claim: "every post-review attempt and its outcome are ledgered, and a dry-run dispose line is tagged so it is never misread as a daemon action"
+      proof: "grep: sweep.post_review.attempt in src/run-task.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C", "P22"]
+  files: [src/lib/daemon.ts, src/lib/sweep.ts, src/run-task.ts, test/sweep.test.ts, test/daemon.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-24 (fable-analyzed) from PR #707's 'looks green but won't merge' stall (armed the OLD
+    head 7774b13 at 13:12, beb92f7 push invalidated the SHA-pinned remudero-review, ZERO daemon sweeps saw
+    the new head until a manual rmd review at 13:37Z because runOne(W1-T89) held the single-threaded loop).
+    Cross-refs the #689/#698/#662 manual-re-post instances. risk:high — changes the daemon loop to run a
+    RESTRICTED (post-review only) sweep concurrently with runOne, adjacent to the drain-concurrency incident
+    class, so it spans daemon+sweep+run-task and merits high per Rule 19. depends_on empty. Near the FRONT
+    deliberately: this stall silently blocks the whole PR-merge pipeline. A K-attempts ESCALATION backstop
+    is a deliberate separate successor filing, not folded in."
+
 - id: W1-T245
   title: "SYNCED DISPATCH IS SHARD-BLIND — syncPlanFromOrigin materializes only origin/main:plan/tasks.yaml, so loadPlan sees zero tasks.d/ shards and every shard task is undispatchable through the synced path"
   repo: remudero
