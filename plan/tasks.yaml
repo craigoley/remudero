@@ -7558,12 +7558,21 @@
       proof: "a seeded double-failure produces a diagnose run in the ledger, never a third blind patch"
     - claim: "runDiagnoseThenRetry has a LIVE call site in the run path"
       proof: "grep proof: run-task.ts (or daemon.ts) imports AND calls runDiagnoseThenRetry on the strike path; a test drives a second strike through it to a diagnose dispatch"
-  risk: medium
-  origin: architect
+  risk: high
+  origin: feedback#fb-1784732687221-3be743
   plan_refs: ["§4"]
   files: [src/run-task.ts, src/lib/classify.ts]
   status: queued
   attempts: 0
+  note: "Regraded medium->high 2026-07-24 per Rule 19 (origin: feedback#fb-1784732687221-3be743; originally
+    origin: architect). rmd lint-plan flags [sizing]: files: span run-task + classify AND criterion 2's proof
+    names daemon.ts as an OR-alternative ('run-task.ts (or daemon.ts)'), which the subsystem lexicon reads as a
+    third subsystem — so the fail-closed pre-dispatch guard (task-linter.ts sizingViolation, run-task.ts) would
+    return verdict=blocked_illformed the instant the drain selects this UNDISPATCHED task ('no runs yet'). This is
+    ONE concern (wire runDiagnoseThenRetry's live call site, Standing rule 14) and is not decomposable, so the
+    Rule 19 exemption is a recorded regrade to risk:high, NOT a workaround — following the W1-T180 precedent
+    (task-linter/run-task span 'graded UP from an initial medium after rmd lint-plan flagged the span under
+    Rule 19. Recorded as a regrade rather than a workaround'). NOT covered by W1-T198 (self-reference/blast-radius)."
 
 # Item 8 — commissioning-deltas drill: closes the two W1-T12d deltas + hosts the LIVE goldens the
 # headless redesigns (items 6/7) moved out VERBATIM (rule 16 — nothing dropped, only redistributed).
@@ -8333,13 +8342,22 @@
       proof: "grep tsconfig.json for both flags true; this PR's ci (typecheck) passes"
     - claim: "the six flagged unused-local sites and the spike.ts:262 dead assignment are gone"
       proof: "grep: the flagged identifiers no longer present at worker.ts/drain-lock.ts/inflight-lock.ts/the two test files; spike.ts:262's assigned-never-read local removed"
-  risk: medium
-  origin: architect
+  risk: high
+  origin: feedback#fb-1784732687221-3be743
   plan_refs: ["§5"]
   files: [tsconfig.json, src/spike.ts, src/lib/worker.ts, src/lib/drain-lock.ts, src/lib/inflight-lock.ts, test/learnings-injection-w1t6.test.ts, test/drain-lock.test.ts]
   status: queued
   attempts: 0
-  note: "Alert backlog triage 2026-07-16: code-scanning alerts #17-#23. ONE concern (one defect class) despite the file spread — the files: list is the alert inventory, not a multi-subsystem scope."
+  note: "Alert backlog triage 2026-07-16: code-scanning alerts #17-#23. ONE concern (one defect class) despite the
+    file spread — the files: list is the alert inventory, not a multi-subsystem scope.
+    Regraded medium->high 2026-07-24 per Rule 19 (origin: feedback#fb-1784732687221-3be743; originally
+    origin: architect). The sizing check counts modules mechanically (task-linter.ts subsystemsOf), so this
+    janitorial flag-flip's 6-module inventory reads as 6 subsystems and rmd lint-plan flags [sizing] — which the
+    fail-closed pre-dispatch guard turns into verdict=blocked_illformed the instant the drain selects this
+    UNDISPATCHED task ('no runs yet'). Decomposing a single noUnusedLocals flip into per-file tasks is the wrong
+    direction (it fragments one concern), so the Rule 19 exemption is a recorded regrade to risk:high, following
+    the W1-T180 precedent ('graded UP... after rmd lint-plan flagged the span under Rule 19. Recorded as a regrade
+    rather than a workaround'). NOTE: a grep-prose-proof finding on this task is tracked separately."
 
 # Ratifies P16 (captured #101): deriveStatus rung (c) credits a merged PR off a punctuation-loose body
 # search with no line-anchor and no ownership check — the READ side that gates DISPATCH (third consumer of
@@ -8490,15 +8508,21 @@
       proof: "unit test: assemble→serialize→re-assemble over the same ledger -> byte-equal; a single mutated ground-truth ledger field yields a different receipt (the gate would catch drift)"
     - claim: "the v2 rungs are deferred, not entangled — no signing dependency ships and the predicate shape is a standalone artifact"
       proof: "grep: zero sigstore/cosign import in src/lib/receipt.ts; the predicate type/JSON shape is exported standalone (WS-12 can publish it) with no signing coupling"
-  risk: medium
-  origin: architect
+  risk: high
+  origin: feedback#fb-1784732687221-3be743
   plan_refs: ["§8A", "§2"]
   files: [src/lib/receipt.ts, src/run-task.ts]
   status: queued
   attempts: 0
   note: "Ratifies P17 (captured #108). First rung = the deterministic generator + byte-equal golden;
     Sigstore signing + the WS-12 schema publish are DEFERRED v2 rungs. Live 'a receipt is posted on every
-    merged agent PR' is operator-observed (Rule 18), not an auto-verify criterion here."
+    merged agent PR' is operator-observed (Rule 18), not an auto-verify criterion here.
+    Regraded medium->high 2026-07-24 per Rule 19 (origin: feedback#fb-1784732687221-3be743; originally
+    origin: architect). files: span receipt + run-task, so rmd lint-plan flags [sizing] and the fail-closed
+    pre-dispatch guard would return verdict=blocked_illformed the instant the drain selects this UNDISPATCHED
+    task ('no runs yet'). ONE concern (the deterministic receipt generator + its one-line spawn-time
+    prompt_template_hash emission) — not decomposable — so the Rule 19 exemption is a recorded regrade to
+    risk:high, following the W1-T180 precedent. NOTE: a grep-prose-proof finding on this task is tracked separately."
 
 # W1-T65 follow-up pair (relayed from the operator's second Architect thread 2026-07-16): the proof-executing
 # floor's guarantee is CONDITIONAL AND SILENT — the extractor parses two strict shapes and returns null for
@@ -8627,14 +8651,20 @@
       proof: "grep the retro prompt template for the grep-highest/next-unused/REPORT-the-mapping instruction text"
     - claim: "ratified/retired stamps do not false-positive"
       proof: "unit test: a fixture with 'P15 ... RATIFIED -> W1-T65' and a retired P10 alongside active ids -> no duplicate reported"
-  risk: medium
-  origin: architect
+  risk: high
+  origin: feedback#fb-1784732687221-3be743
   plan_refs: ["§Self-improvement", "§12"]
   files: [src/run-task.ts, test/plan-proposals.test.ts]
   status: queued
   attempts: 0
   note: "Filed from the #128 worker's root-cause flag. The uniqueness test is the gate; the template line
-    is courtesy — a colliding retro PR now goes RED at its own ci instead of merging ambiguity."
+    is courtesy — a colliding retro PR now goes RED at its own ci instead of merging ambiguity.
+    Regraded medium->high 2026-07-24 per Rule 19 (origin: feedback#fb-1784732687221-3be743; originally
+    origin: architect). files: span run-task + plan-proposals(.test), so rmd lint-plan flags [sizing] and the
+    fail-closed pre-dispatch guard would return verdict=blocked_illformed the instant the drain selects this
+    UNDISPATCHED task ('no runs yet'). ONE concern (proposal-id integrity: the prevention template line + the
+    uniqueness ci gate — 'TWO halves, one concern' per the design) — not decomposable — so the Rule 19 exemption
+    is a recorded regrade to risk:high, following the W1-T180 precedent."
 
 # Ratifies P9's live remainder: operator corrections must be SUPREME in deriveStatus. W1-T20c was hand-fixed
 # (#134) but deriveStatus still lists it runnable — rung (a) returns the CLOSED superseded run's pr.opened
