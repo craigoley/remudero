@@ -83,10 +83,47 @@ export const SUBSYSTEM_LEXICON: ReadonlyArray<{ tag: string; pattern: RegExp }> 
   { tag: "crash-recovery", pattern: /\bchaos-drill\b|\bcrash-recover(?:y|ed)?\b/i },
 ];
 
-/** The distinct module/subsystem ids a task's `files:` + acceptance criteria imply. */
-export function subsystemsOf(task: Task): Set<string> {
+/**
+ * Non-code data/config file classes DISCOUNTED from the subsystem COUNT (#153,
+ * W1-T92): a code file paired with its OWN data artifact — e.g. `src/lib/retro.ts`
+ * + `plan/mast-mapping.yaml`, the policy-as-data house pattern MASTER-PLAN rule 2
+ * prescribes — must not count as a SECOND subsystem just because the artifact has
+ * a different basename. Each row is a path prefix PLUS an extension, not a branch,
+ * so a new discounted class is a table row with ZERO changes to {@link subsystemsOf}.
+ * The file still appears in `task.files` and in a violation's file list either way —
+ * this table only removes it from the CONCERN tally.
+ */
+export interface DataArtifactClass {
+  tag: string;
+  pathPattern: RegExp;
+  extPattern: RegExp;
+}
+
+export const DATA_ARTIFACT_CLASSES: ReadonlyArray<DataArtifactClass> = [
+  { tag: "plan-data", pathPattern: /^plan\//, extPattern: /\.(?:ya?ml|json|md)$/i },
+  { tag: "config-data", pathPattern: /^config\//, extPattern: /\.(?:ya?ml|json|md)$/i },
+  { tag: "settings-data", pathPattern: /^settings\//, extPattern: /\.(?:ya?ml|json|md)$/i },
+];
+
+/** True iff `path` matches BOTH the path prefix and the extension of some row in
+ *  `classes` — i.e. it's a discounted data/config artifact, not a code subsystem. */
+export function isDataArtifact(
+  path: string,
+  classes: ReadonlyArray<DataArtifactClass> = DATA_ARTIFACT_CLASSES,
+): boolean {
+  return classes.some((c) => c.pathPattern.test(path) && c.extPattern.test(path));
+}
+
+/** The distinct module/subsystem ids a task's `files:` + acceptance criteria imply.
+ *  `dataArtifactClasses` defaults to {@link DATA_ARTIFACT_CLASSES}; the param exists
+ *  so the discount table can grow with ZERO changes to this function. */
+export function subsystemsOf(
+  task: Task,
+  dataArtifactClasses: ReadonlyArray<DataArtifactClass> = DATA_ARTIFACT_CLASSES,
+): Set<string> {
   const ids = new Set<string>();
   for (const f of task.files ?? []) {
+    if (isDataArtifact(f, dataArtifactClasses)) continue; // a data/config artifact, not a concern
     const id = moduleIdFromPath(f);
     if (id) ids.add(id);
   }

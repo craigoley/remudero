@@ -6,6 +6,7 @@ import {
   assertLintClean,
   budgetSanityWarning,
   changedTaskIds,
+  DATA_ARTIFACT_CLASSES,
   HEADLESS_FORBIDDEN_LEXICON,
   headlessFitnessViolations,
   lintPlan,
@@ -77,6 +78,49 @@ test("risk:high is EXEMPT from sizing — the same 3-subsystem spread does NOT f
     files: ["src/lib/daemon.ts", "src/lib/launchd.ts", "src/lib/review.ts"],
   });
   assert.equal(sizingViolation(t), undefined);
+});
+
+// ── W1-T92 ACCEPTANCE — data/config files are not subsystems (#153) ──────────
+
+test("W1-T92 ACCEPTANCE 1: a code file paired with its OWN data artifact (retro.ts + plan/mast-mapping.yaml) at risk:medium is 1 subsystem, NOT flagged", () => {
+  const t = task({
+    id: "FIX-153-CODE-PLUS-YAML",
+    risk: "medium",
+    files: ["src/lib/retro.ts", "plan/mast-mapping.yaml"],
+  });
+  assert.equal(subsystemsOf(t).size, 1);
+  assert.equal(sizingViolation(t), undefined);
+});
+
+test("W1-T92 ACCEPTANCE 2 (regression lock): two GENUINE code subsystems at risk:medium still flag exactly as today", () => {
+  const t = task({
+    id: "FIX-153-TWO-CODE-SUBSYSTEMS",
+    risk: "medium",
+    files: ["src/lib/sweep.ts", "src/run-task.ts"],
+  });
+  assert.equal(subsystemsOf(t).size, 2);
+  const v = sizingViolation(t);
+  assert.ok(v, "expected a sizing violation");
+  assert.equal(v?.severity, "block");
+});
+
+test("W1-T92 ACCEPTANCE 3: the discount set is DATA — adding an extension row discounts a seeded file with ZERO changes to subsystemsOf", () => {
+  const extendedClasses = [
+    ...DATA_ARTIFACT_CLASSES,
+    { tag: "fixture-data", pathPattern: /^fixtures\//, extPattern: /\.csv$/i },
+  ];
+  const seeded = task({
+    id: "FIX-153-SEEDED-NEW-CLASS",
+    risk: "medium",
+    files: ["src/lib/retro.ts", "fixtures/seed.csv"],
+  });
+  assert.equal(subsystemsOf(seeded).size, 2, "the DEFAULT table must not know this class yet");
+  assert.equal(sizingViolation(seeded)?.severity, "block", "still flags under the default table");
+  assert.equal(
+    subsystemsOf(seeded, extendedClasses).size,
+    1,
+    "the fixture/.csv row discounts the seeded file once added",
+  );
 });
 
 // The ACTUAL W1-T4 shape (HeadroomTracker v0 — /usage parser), verbatim from
