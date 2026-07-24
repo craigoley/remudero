@@ -7,8 +7,9 @@ import { isDialectPrefixed, parseWhitelistedProof } from "./review.js";
  * class of malformed task that reached a worker four times (W1-T6, W1-T9, and
  * W1-T12 twice-over) and burned budget before a human noticed: over-scoping
  * (Rule 19), headless-unfitness (Rule 18), vibe proofs, a proof that CANNOT
- * EXECUTE at all (the dead proof floor, moratorium finding 9, W1-T246), and
- * missing provenance (Rules 16/17).
+ * EXECUTE at all (the dead proof floor, moratorium finding 9, W1-T246), a
+ * dialect-prefixed proof that promises executability but names no resolvable
+ * artifact (the W1-T100 0/3, W1-T101), and missing provenance (Rules 16/17).
  *
  * Wired at TWO points, both FAIL-CLOSED:
  *   (i)  a CI check on any PR that edits plan/tasks.yaml (`rmd lint-plan`, see
@@ -21,11 +22,12 @@ import { isDialectPrefixed, parseWhitelistedProof } from "./review.js";
  *        `assertLintClean` called immediately after `assertRunnable`).
  *
  * A BLOCKING violation refuses dispatch. A WARN violation is visibility-only and
- * never blocks — budget-sanity always warns; proof-dialect warns instead of
- * blocking ONLY at the pre-dispatch call site (`opts.proofDialect: "warn"`, so the
- * legacy backlog authored before this check existed does not brick overnight),
- * and always warns (regardless of that option) for a `unit test:` proof whose
- * body reads as a runtime narrative rather than a literal test-title substring.
+ * never blocks — budget-sanity always warns; proof-dialect and proof-resolvability
+ * warn instead of blocking ONLY at the pre-dispatch call site (`opts.proofDialect:
+ * "warn"` / `opts.proofResolvability: "warn"`, so the legacy backlog authored
+ * before either check existed does not brick overnight), and proof-dialect always
+ * warns (regardless of that option) for a `unit test:` proof whose body reads as a
+ * runtime narrative rather than a literal test-title substring.
  */
 
 export type LintCheck =
@@ -33,6 +35,7 @@ export type LintCheck =
   | "headless-fitness"
   | "proof-shape"
   | "proof-dialect"
+  | "proof-resolvability"
   | "provenance"
   | "budget-sanity";
 export type LintSeverity = "block" | "warn";
@@ -448,6 +451,121 @@ export function proofDialectViolations(task: Task, opts: LintOpts = {}): LintVio
   return violations;
 }
 
+// ── PROOF-RESOLVABILITY (W1-T101 — a dialect prefix is a promise) ───────────
+//
+// proofDialectViolations (above, W1-T246) already refuses a dialect body that
+// does not PARSE at all (a `grep:` proof with no `in <path>` clause, etc.) and
+// WARNS when a `unit test:` body reads as a runtime narrative — but never
+// BLOCKS the narrative case, because parseTestTarget (review.ts) deliberately
+// treats ANY non-path `unit test:` body as a valid name-filtered proof, on the
+// theory that the author's own prose might still match a real test's title.
+// The W1-T100 ledger is the gap that permissiveness leaves open: proof_exec
+// [not_executable x3] on two `unit test:`-prefixed proofs, each PARSING as
+// "whitelisted", each resolving to ZERO real tests at review time — a prefix
+// that PROMISED executability with a payload that could never resolve.
+//
+// This rule polices that PROMISE, independent of whether the payload happens
+// to parse: a `unit test:`/`grep:` prefix commits the author to naming a
+// RESOLVABLE artifact — a path-like token or an explicit `::test-name` token
+// for `unit test:`, a pattern plus an `in <path>` clause for `grep:` (DATA,
+// {@link PROOF_PAYLOAD_SHAPES} — companion rows to W1-T81's phrase signals and
+// W1-T92's path classes; a new resolvable shape is a table row, zero engine
+// changes). A proof with NO dialect prefix makes no such promise and is NEVER
+// touched by this rule — prose is legitimate and keyword-bound by design; drop
+// the prefix is always the other valid remedy.
+//
+// A `unit test:` body that carries neither anchor is refused ONLY when it also
+// reads as a multi-clause SCENARIO NARRATIVE, never on a bare single-arrow
+// phrase alone — this repo's OWN test titles idiomatically read `X -> Y` (187
+// real `test("... -> ...")` titles in this suite, e.g. `test("decideAlert
+// Disposition: critical severity -> escalate")`), so a lone arrow is not a red
+// flag. What the W1-T100 corpus actually looks like is SEVERAL independent
+// observations chained together (multiple comma-separated clauses, or a
+// semicolon stacked on top of an enumerated clause) — a shape no single test
+// title plausibly reads as. `grep:` carries no such exception: the dialect's
+// own promise ("a pattern AND an `in <path>` clause") is unconditional.
+
+export interface ProofPayloadShape {
+  tag: string;
+  /** Which dialect prefix this shape resolves. */
+  dialect: "unit test" | "grep";
+  /** Tested against the BODY — the proof text AFTER the dialect prefix. */
+  pattern: RegExp;
+}
+
+/** DATA table — a new resolvable payload SHAPE is a row here, zero engine
+ *  changes (mirrors {@link SUBSYSTEM_LEXICON} / {@link DATA_ARTIFACT_CLASSES} /
+ *  {@link HEADLESS_FORBIDDEN_LEXICON} above). */
+export const PROOF_PAYLOAD_SHAPES: ReadonlyArray<ProofPayloadShape> = [
+  // unit test: a path-like token (test/*.test.ts) anywhere in the body.
+  { tag: "test-path", dialect: "unit test", pattern: /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/ },
+  // unit test: an explicit ::test-name token — a literal '::' followed by a
+  // non-empty name, unambiguous even when the token before it isn't a path.
+  { tag: "test-name-token", dialect: "unit test", pattern: /::\s*\S/ },
+  // grep: a pattern AND a trailing `in <path>` clause — the same shape
+  // parseDialectGrep (review.ts) requires to parse at all, re-declared here as
+  // DATA so the remedy text below stays uniform across both dialects.
+  { tag: "grep-in-path", dialect: "grep", pattern: /\bin\s+\S*[./]\S*\s*$/i },
+];
+
+/** How a proof's TEXT starts when it is written in the executable dialect —
+ *  matched EXACTLY (unlike {@link NEAR_MISS_PREFIX_RE} above, a near-miss
+ *  prefix makes no promise this rule polices; that's its own, separate hint). */
+const RESOLVABILITY_DIALECT_RE = /^(unit test|grep):\s*([\s\S]*)$/i;
+
+/** True iff `body` reads as a multi-clause scenario narrative rather than a
+ *  single test's title — see the module comment above for why a lone arrow
+ *  does not, by itself, qualify. */
+function looksLikeScenarioNarrative(body: string): boolean {
+  const commas = (body.match(/,/g) ?? []).length;
+  return commas >= 2 || (body.includes("; ") && commas >= 1) || body.length > 100;
+}
+
+/** Every criterion whose proof STARTS with the executable dialect (`unit
+ *  test:` | `grep:`) but whose payload matches NONE of {@link
+ *  PROOF_PAYLOAD_SHAPES} for that dialect — a prefix that promises
+ *  executability without naming a resolvable artifact (the W1-T100 0/3). A
+ *  proof with no dialect prefix is never touched (prose is legitimate by
+ *  design). BLOCK by default; `opts.proofResolvability: "warn"` (the
+ *  pre-dispatch call site — the legacy backlog authored before this check
+ *  existed must not brick overnight) demotes every violation here to
+ *  visibility-only, the SAME rollout convention {@link proofDialectViolations}
+ *  already uses.
+ */
+export function proofResolvabilityViolations(
+  task: Task,
+  opts: LintOpts = {},
+  shapes: ReadonlyArray<ProofPayloadShape> = PROOF_PAYLOAD_SHAPES,
+): LintViolation[] {
+  const severity: LintSeverity = opts.proofResolvability ?? "block";
+  const violations: LintViolation[] = [];
+  (task.acceptance ?? []).forEach((c, i) => {
+    if (c.satisfied_by) return; // Architect-only; never expected to be executable prose
+    const proof = c.proof ?? "";
+    const trimmed = proof.trim();
+    const m = trimmed.match(RESOLVABILITY_DIALECT_RE);
+    if (!m) return; // no dialect prefix promised — untouched, prose is legitimate by design
+    const dialect = m[1]!.toLowerCase() as "unit test" | "grep";
+    const body = m[2]!.trim();
+    if (shapes.some((s) => s.dialect === dialect && s.pattern.test(body))) return; // resolvable
+    if (dialect === "unit test" && !looksLikeScenarioNarrative(body)) return; // a plausible single test title
+    const claimHead = (c.claim ?? "").slice(0, 60);
+    const head = trimmed.slice(0, 80) + (trimmed.length > 80 ? "…" : "");
+    const remedy =
+      dialect === "unit test"
+        ? 'name a literal test/*.test.ts path or an explicit ::test-name anchor (e.g. "test/foo.test.ts::exact title")'
+        : 'name a pattern with an `in <path>` clause (e.g. "grep: TODO in src/lib/foo.ts")';
+    violations.push({
+      check: "proof-resolvability",
+      severity,
+      message:
+        `criterion ${i + 1} ("${claimHead}") proof "${head}" is \`${m[1]}:\`-prefixed but names no resolvable ` +
+        `artifact — ${remedy}, or drop the \`${m[1]}:\` prefix and write it as prose`,
+    });
+  });
+  return violations;
+}
+
 // ── PROVENANCE (Rules 16/17) ─────────────────────────────────────────────────
 //
 // `risk:` is already guaranteed present by plan.ts's loader (it validates
@@ -506,10 +624,17 @@ export interface LintOpts {
    *  pre-dispatch call site (run-task.ts's `assertLintClean`) passes "warn" — the legacy
    *  backlog must not brick overnight; CI still reds a hand-filed offender. */
   proofDialect?: LintSeverity;
+  /** Severity for {@link proofResolvabilityViolations}. Default "block" — same rollout
+   *  convention as `proofDialect` above, for the same reason: `rmd run-task`'s pre-dispatch
+   *  call site passes "warn" so the legacy backlog (authored before this check existed)
+   *  does not brick overnight; CI's `lint-plan`, the inbox draft rung, and the retro's
+   *  plan-health sweep all want the default and BLOCK. */
+  proofResolvability?: LintSeverity;
 }
 
 /** Lint one task. Hard checks (sizing/headless-fitness/proof-shape/proof-dialect/
- *  provenance) always run; budget-sanity runs only when `opts.mountMaxTurns` is supplied. */
+ *  proof-resolvability/provenance) always run; budget-sanity runs only when
+ *  `opts.mountMaxTurns` is supplied. */
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task);
@@ -517,6 +642,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...headlessFitnessViolations(task));
   violations.push(...proofShapeViolations(task));
   violations.push(...proofDialectViolations(task, opts));
+  violations.push(...proofResolvabilityViolations(task, opts));
   const prov = provenanceViolation(task);
   if (prov) violations.push(prov);
   if (opts.mountMaxTurns !== undefined) {
