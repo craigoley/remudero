@@ -7,6 +7,7 @@ import { loadPlan, type Plan, type Task } from "../src/lib/plan.js";
 import type { RunResult } from "../src/run-task.js";
 import { HEADROOM_LIMIT_PCT, type UsageSnapshot } from "../src/lib/headroom.js";
 import {
+  DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_UNREADABLE_DEGRADED_LIMIT,
   buildDefaultHeadroomPolicy,
@@ -1069,6 +1070,153 @@ test("an unexpected error from runOne is a terminal 'error' stop, naming the tas
   assert.match(s.stopDetail ?? "", /A: boom/);
 });
 
+// ── W1-T113 DEGRADE, DON'T DIE (the vanished-binary incident): a spawn-
+// INFRASTRUCTURE failure (worker.ts's `ClaudeToolchainBlockedError` shape,
+// duck-typed here via a plain object — daemon.ts never imports worker.ts as a
+// value) must never crash-loop the daemon. Pre-fix shape: error -> process
+// exit -> launchd KeepAlive restart -> the identical failure again, five
+// consecutive polls, zero escalations, zero backoff.
+
+/** The exact duck-typed shape `isSpawnInfraBlocked` classifies — mirrors
+ * worker.ts's `ClaudeToolchainBlockedError` without importing it. */
+function toolchainBlockedError(reason = "claude executable not found or not runnable — searched: npm-global=... (missing)") {
+  return Object.assign(new Error(reason), { reasonClass: "blocked_toolchain" as const });
+}
+
+test("W1-T113: a spawn-infra (blocked_toolchain) failure is NEVER a terminal 'error' stop", async () => {
+  const plan = fixturePlan();
+  const root = mkdtempSync(join(tmpdir(), "daemon-spawn-infra-"));
+  let calls = 0;
+  const sleep = async (_ms: number) => {
+    calls++;
+    if (calls >= 3) requestStop(root, "test done polling");
+  };
+  const s = await runDaemon(plan, {
+    refreshMerged: () => NONE_MERGED,
+    runOne: async () => { throw toolchainBlockedError(); },
+    checkStop: () => stopDetail(root),
+    sleep,
+  });
+  assert.equal(s.stopReason, "stopped", "the loop kept polling until the test itself stopped it");
+  assert.notEqual(s.stopReason, "error", "a spawn-infra failure is degraded state, never a crash");
+  assert.ok(calls >= 3, "the daemon really did back off and re-poll multiple times");
+});
+
+test("W1-T113: repeated spawn-infra failures escalate EXACTLY ONCE per distinct cause, never once per tick", async () => {
+  const plan = fixturePlan();
+  const root = mkdtempSync(join(tmpdir(), "daemon-spawn-infra-dedup-"));
+  const escalations: Array<{ task: string; reason: string }> = [];
+  let calls = 0;
+  const sleep = async (_ms: number) => {
+    calls++;
+    if (calls >= 5) requestStop(root, "test done polling");
+  };
+  await runDaemon(plan, {
+    refreshMerged: () => NONE_MERGED,
+    runOne: async () => { throw toolchainBlockedError("same cause every time"); },
+    onSpawnInfraBlocked: async (info) => { escalations.push({ task: info.task.id, reason: info.reason }); },
+    checkStop: () => stopDetail(root),
+    sleep,
+  });
+  assert.ok(calls >= 5, "the daemon polled (and failed to dispatch) repeatedly");
+  assert.equal(escalations.length, 1, "exactly one escalation for the whole run, despite 5+ identical failures");
+  assert.equal(escalations[0].reason, "same cause every time");
+});
+
+test("W1-T113: a DIFFERENT spawn-infra cause escalates again — dedup is content-keyed, not a blanket one-shot", async () => {
+  const plan = fixturePlan();
+  const root = mkdtempSync(join(tmpdir(), "daemon-spawn-infra-dedup2-"));
+  const escalations: string[] = [];
+  let calls = 0;
+  const sleep = async (_ms: number) => {
+    calls++;
+    if (calls >= 2) requestStop(root, "test done polling");
+  };
+  await runDaemon(plan, {
+    refreshMerged: () => NONE_MERGED,
+    runOne: async () => { throw toolchainBlockedError(calls === 0 ? "cause A" : "cause B"); },
+    onSpawnInfraBlocked: async (info) => { escalations.push(info.reason); },
+    checkStop: () => stopDetail(root),
+    sleep,
+  });
+  assert.deepEqual(escalations, ["cause A", "cause B"], "a genuinely new cause is not suppressed by the prior cause's dedup entry");
+});
+
+test("W1-T113: dispatch backs off with DOUBLING sleeps while sweep keeps running every tick", async () => {
+  const plan = fixturePlan();
+  const root = mkdtempSync(join(tmpdir(), "daemon-spawn-infra-backoff-"));
+  const backoffs: number[] = [];
+  let sweepCalls = 0;
+  const sleep = async (ms: number) => {
+    backoffs.push(ms);
+    if (backoffs.length >= 4) requestStop(root, "test done polling");
+  };
+  await runDaemon(plan, {
+    refreshMerged: () => NONE_MERGED,
+    runOne: async () => { throw toolchainBlockedError(); },
+    sweep: async () => { sweepCalls++; },
+    checkStop: () => stopDetail(root),
+    sleep,
+  }, { pollIntervalMs: 1000 });
+  assert.deepEqual(backoffs, [1000, 2000, 4000, 8000], "each consecutive failure doubles the backoff from pollIntervalMs");
+  assert.ok(sweepCalls >= 4, "the reconciler ran on every tick, even while dispatch itself backed off");
+});
+
+test("W1-T113: the backoff is capped at maxSpawnInfraBackoffMs, never grows unbounded", async () => {
+  const plan = fixturePlan();
+  const root = mkdtempSync(join(tmpdir(), "daemon-spawn-infra-backoff-cap-"));
+  const backoffs: number[] = [];
+  const sleep = async (ms: number) => {
+    backoffs.push(ms);
+    if (backoffs.length >= 6) requestStop(root, "test done polling");
+  };
+  await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async () => { throw toolchainBlockedError(); },
+      checkStop: () => stopDetail(root),
+      sleep,
+    },
+    { pollIntervalMs: 1000, maxSpawnInfraBackoffMs: 3000 },
+  );
+  assert.deepEqual(backoffs, [1000, 2000, 3000, 3000, 3000, 3000], "backoff caps at maxSpawnInfraBackoffMs instead of doubling forever");
+});
+
+test("W1-T113: a THROWING onSpawnInfraBlocked hook does not kill the loop", async () => {
+  const plan = fixturePlan();
+  const root = mkdtempSync(join(tmpdir(), "daemon-spawn-infra-escalation-throws-"));
+  let calls = 0;
+  const sleep = async (_ms: number) => {
+    calls++;
+    if (calls >= 2) requestStop(root, "test done polling");
+  };
+  const s = await runDaemon(plan, {
+    refreshMerged: () => NONE_MERGED,
+    runOne: async () => { throw toolchainBlockedError(); },
+    onSpawnInfraBlocked: () => { throw new Error("gh unreachable"); },
+    checkStop: () => stopDetail(root),
+    sleep,
+  });
+  assert.notEqual(s.stopReason, "error", "an undeliverable spawn-infra escalation is not a daemon error");
+});
+
+test("W1-T113: an unrelated throw (no reasonClass) still terminates as an 'error' stop — only the named infra class degrades", async () => {
+  const plan = fixturePlan();
+  const clock = fakeClock();
+  const s = await runDaemon(plan, {
+    refreshMerged: () => NONE_MERGED,
+    runOne: async () => { throw Object.assign(new Error("disk full"), { reasonClass: "blocked_something_else" }); },
+    sleep: clock.sleep,
+  });
+  assert.equal(s.stopReason, "error", "this daemon does not learn to swallow every throw, only the classified spawn-infra one");
+});
+
+test("W1-T113: DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS is exported policy data, not a buried literal", () => {
+  assert.equal(typeof DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS, "number");
+  assert.ok(DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS > DEFAULT_POLL_INTERVAL_MS);
+});
+
 // ── crash recovery (W1-T12c): reconstruct state from git + GitHub + the
 // ledger over a SEEDED interrupted-run state — NOT a live daemon kill ───────
 
@@ -1395,4 +1543,59 @@ test("daemonBoot: with no lock sweep injected, no daemon.lock_sweep line is writ
   const lines: Array<{ step: string }> = [];
   daemonBoot((step) => lines.push({ step }), { PATH: "/usr/bin" });
   assert.equal(lines.filter((l) => l.step === "daemon.lock_sweep").length, 0);
+});
+
+// ── daemonBoot: W1-T113 part (i) — resolve + log the claude binary ONCE ────
+
+test("daemonBoot: a successful resolveClaudeBin logs daemon.claude_bin with the resolved path, exactly once", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let calls = 0;
+  const resolveClaudeBin = () => {
+    calls++;
+    return "/home/op/.local/bin/claude";
+  };
+  daemonBoot(
+    (step, extra = {}) => lines.push({ step, extra }),
+    { PATH: "/usr/bin" },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    resolveClaudeBin,
+  );
+  assert.equal(calls, 1, "resolved exactly once at boot, not per spawn");
+  const line = lines.find((l) => l.step === "daemon.claude_bin");
+  assert.ok(line, "daemon.claude_bin is logged");
+  assert.equal(line?.extra.blocked, false);
+  assert.equal(line?.extra.path, "/home/op/.local/bin/claude");
+});
+
+test("daemonBoot: a REFUSING resolveClaudeBin logs daemon.claude_bin blocked=true and STILL COMPLETES boot (never throws onward)", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const resolveClaudeBin = (): string => {
+    throw Object.assign(new Error("claude executable not found or not runnable — searched: npm-global=... (missing)"), {
+      reasonClass: "blocked_toolchain",
+    });
+  };
+  const result = daemonBoot(
+    (step, extra = {}) => lines.push({ step, extra }),
+    { PATH: "/usr/bin" },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    resolveClaudeBin,
+  );
+  assert.ok(result, "daemonBoot returns normally — a toolchain refusal never aborts boot itself");
+  const line = lines.find((l) => l.step === "daemon.claude_bin");
+  assert.ok(line, "daemon.claude_bin is logged even on refusal");
+  assert.equal(line?.extra.blocked, true);
+  assert.equal(line?.extra.error_class, "blocked_toolchain");
+  assert.match(String(line?.extra.error), /searched:/);
+});
+
+test("daemonBoot: with no resolveClaudeBin injected, no daemon.claude_bin line is written (pre-W1-T113 behavior unchanged)", () => {
+  const lines: Array<{ step: string }> = [];
+  daemonBoot((step) => lines.push({ step }), { PATH: "/usr/bin" });
+  assert.equal(lines.filter((l) => l.step === "daemon.claude_bin").length, 0);
 });

@@ -6,6 +6,9 @@ import { test } from "node:test";
 import { WorkerSettingsError } from "../src/lib/settings.js";
 import {
   BILLING_MODE,
+  CLAUDE_BIN_ENV_OVERRIDE,
+  CLAUDE_EXECUTABLE_LOCATIONS,
+  ClaudeToolchainBlockedError,
   DEFAULT_EFFORT_LABEL,
   DEFAULT_MODEL_LABEL,
   DENY_FLOOR_FALLBACK_MODE,
@@ -13,11 +16,13 @@ import {
   appendQuestionAnswer,
   cacheTokenLedgerFields,
   collectWorkerResult,
+  createClaudeExecutableCache,
   evaluateDenyFloor,
   parseDecisionRequest,
   parseFollowups,
   parseQuestion,
   parseReport,
+  resolveClaudeExecutable,
   spawnWorker,
   workerLedgerFields,
 } from "../src/lib/worker.js";
@@ -368,6 +373,145 @@ test("workerLedgerFields: an ERROR call's verdict is the SDK's error subtype, no
   assert.equal(fields.effort, "medium");
 });
 
+// ── resolveClaudeExecutable (W1-T113: the vanished-binary incident) ────────
+// Over injected fs/exec — no real binary, no real `which`, no real subprocess.
+
+/** A minimal, fully-controllable set of resolveClaudeExecutable's injectable seams. */
+function fakeToolchain(opts: {
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+  existing?: Set<string>;
+  runnable?: Set<string>;
+  which?: () => string | undefined;
+  locations?: typeof CLAUDE_EXECUTABLE_LOCATIONS;
+}) {
+  const existsCalls: string[] = [];
+  const canExecuteCalls: string[] = [];
+  const whichCalls: number[] = [];
+  const deps = {
+    env: opts.env ?? {},
+    home: opts.home ?? "/home/op",
+    exists: (p: string) => {
+      existsCalls.push(p);
+      return opts.existing?.has(p) ?? false;
+    },
+    which: () => {
+      whichCalls.push(1);
+      return opts.which ? opts.which() : undefined;
+    },
+    canExecute: (p: string) => {
+      canExecuteCalls.push(p);
+      return opts.runnable?.has(p) ?? false;
+    },
+    locations: opts.locations,
+  };
+  return { deps, existsCalls, canExecuteCalls, whichCalls };
+}
+
+test("resolveClaudeExecutable: pinned path absent, table hit — resolves via the location table with the resolved path", () => {
+  const npmGlobal = "/home/op/.npm-global/bin/claude";
+  const native = "/home/op/.local/bin/claude";
+  const { deps } = fakeToolchain({
+    home: "/home/op",
+    existing: new Set([native]), // npm-global is ABSENT (the vanished-binary shape); native-installer IS present
+    runnable: new Set([native]),
+  });
+  const path = resolveClaudeExecutable(createClaudeExecutableCache(), deps);
+  assert.equal(path, native, "falls through the absent npm-global row to the native-installer row");
+  assert.notEqual(npmGlobal, native);
+});
+
+test("resolveClaudeExecutable: everything absent — throws ClaudeToolchainBlockedError naming every searched path", () => {
+  // `which` still resolves to A path (the shell-function/stale-symlink shape MASTER-PLAN
+  // Field Finding 3 documents) — but nothing on disk backs it, same as every table row.
+  const { deps } = fakeToolchain({ home: "/home/op", existing: new Set(), runnable: new Set(), which: () => "/usr/local/bin/claude" });
+  assert.throws(
+    () => resolveClaudeExecutable(createClaudeExecutableCache(), deps),
+    (err: unknown) => {
+      assert.ok(err instanceof ClaudeToolchainBlockedError);
+      assert.equal(err.reasonClass, "blocked_toolchain");
+      const labels = err.searched.map((s) => s.label);
+      assert.ok(labels.includes("PATH"), "PATH is named among the searched candidates");
+      for (const loc of CLAUDE_EXECUTABLE_LOCATIONS) {
+        assert.ok(labels.includes(loc.label), `${loc.label} is named among the searched candidates`);
+      }
+      assert.ok(err.searched.every((s) => s.existed === false), "every candidate is recorded as missing");
+      assert.match(err.message, /searched:/);
+      return true;
+    },
+    "the run is refused cleanly with a structured, named-paths error — never a raw ENOENT",
+  );
+});
+
+test("resolveClaudeExecutable: a candidate that EXISTS but fails --version is distinguished from one that's simply missing", () => {
+  const native = "/home/op/.local/bin/claude";
+  const { deps } = fakeToolchain({ home: "/home/op", existing: new Set([native]), runnable: new Set() });
+  assert.throws(
+    () => resolveClaudeExecutable(createClaudeExecutableCache(), deps),
+    (err: unknown) => {
+      assert.ok(err instanceof ClaudeToolchainBlockedError);
+      const nativeEntry = err.searched.find((s) => s.path === native)!;
+      assert.equal(nativeEntry.existed, true);
+      assert.equal(nativeEntry.ran, false);
+      assert.match(err.message, /exists, --version failed/);
+      return true;
+    },
+  );
+});
+
+test("resolveClaudeExecutable: the location table is DATA — a seeded new row resolves with zero resolution-code changes", () => {
+  const seededPath = "/opt/homebrew/bin/claude";
+  // Override the table wholesale via the SAME `locations` seam every other test above
+  // leaves at its default — the resolution CODE (resolveClaudeExecutable itself) is
+  // byte-identical between this test and the others; only the DATA (the table) differs.
+  const { deps } = fakeToolchain({
+    home: "/home/op",
+    existing: new Set([seededPath]),
+    runnable: new Set([seededPath]),
+    locations: [{ label: "homebrew", resolve: () => seededPath }],
+  });
+  const path = resolveClaudeExecutable(createClaudeExecutableCache(), deps);
+  assert.equal(path, seededPath);
+});
+
+test("resolveClaudeExecutable: env override wins over PATH and the table", () => {
+  const overridePath = "/custom/claude";
+  const { deps } = fakeToolchain({
+    env: { [CLAUDE_BIN_ENV_OVERRIDE]: overridePath },
+    home: "/home/op",
+    existing: new Set([overridePath, "/home/op/.npm-global/bin/claude"]),
+    runnable: new Set([overridePath, "/home/op/.npm-global/bin/claude"]),
+    which: () => "/home/op/.npm-global/bin/claude",
+  });
+  const path = resolveClaudeExecutable(createClaudeExecutableCache(), deps);
+  assert.equal(path, overridePath);
+});
+
+test("resolveClaudeExecutable: live PATH wins over the table when no override is set", () => {
+  const pathBin = "/usr/local/bin/claude";
+  const { deps } = fakeToolchain({
+    home: "/home/op",
+    existing: new Set([pathBin, "/home/op/.npm-global/bin/claude"]),
+    runnable: new Set([pathBin, "/home/op/.npm-global/bin/claude"]),
+    which: () => pathBin,
+  });
+  const path = resolveClaudeExecutable(createClaudeExecutableCache(), deps);
+  assert.equal(path, pathBin);
+});
+
+test("resolveClaudeExecutable: memoized per cache — a second call never re-touches fs/PATH", () => {
+  const native = "/home/op/.local/bin/claude";
+  const { deps, existsCalls, whichCalls } = fakeToolchain({ home: "/home/op", existing: new Set([native]), runnable: new Set([native]) });
+  const cache = createClaudeExecutableCache();
+  const first = resolveClaudeExecutable(cache, deps);
+  const existsCallsAfterFirst = existsCalls.length;
+  const whichCallsAfterFirst = whichCalls.length;
+  const second = resolveClaudeExecutable(cache, deps);
+  assert.equal(second, first);
+  assert.equal(existsCalls.length, existsCallsAfterFirst, "no new exists() calls on the memoized second resolution");
+  assert.equal(whichCalls.length, whichCallsAfterFirst, "no new which() calls on the memoized second resolution");
+});
+
 test("spawnWorker: an invalid settings file is REJECTED at the spawn boundary before any worker launches", async () => {
   // FF10a: the guard must fire structurally, not by caller convention. A settings
   // file with `allowedDomains` misplaced at the sandbox root (the exact WS-0
@@ -388,6 +532,34 @@ test("spawnWorker: an invalid settings file is REJECTED at the spawn boundary be
       }),
     WorkerSettingsError,
     "a misplaced sandbox key must be rejected before spawn, never silently dropped",
+  );
+});
+
+test("spawnWorker: W1-T113 — an all-absent toolchain refuses via the injected claudeExecutable override, before any worker-home/keychain work", async () => {
+  // Proves two things at once: (1) `SpawnWorkerArgs.claudeExecutable` actually
+  // reaches `resolveClaudeExecutable` (the injectable seam the altitude review
+  // asked for, matching the file's existing `config` injection convention);
+  // (2) the toolchain preflight fires BEFORE workerHomeDir/keychain/materialize
+  // — a valid settings file passes the FIRST guard, so a raw ENOENT here would
+  // otherwise surface only deep inside worker-home setup or the SDK spawn.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-worker-toolchain-"));
+  const settingsFile = join(dir, "worker.json");
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+  await assert.rejects(
+    () =>
+      spawnWorker({
+        cwd: dir,
+        permissionMode: "bypassPermissions",
+        settingsFile,
+        prompt: "unreachable — toolchain resolution throws first",
+        config: { claudeBin: "/unused", root: dir },
+        claudeExecutable: {
+          cache: createClaudeExecutableCache(),
+          deps: { env: {}, home: dir, exists: () => false, which: () => undefined, canExecute: () => false, locations: [] },
+        },
+      }),
+    ClaudeToolchainBlockedError,
+    "an all-absent toolchain refuses cleanly via the SAME injectable seam resolveClaudeExecutable's own unit tests use",
   );
 });
 
