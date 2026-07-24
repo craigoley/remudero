@@ -54,4 +54,4 @@ raw: "CI FLAKE RESILIENCE — bounded evidence-preserving retry (fable; the
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/742
