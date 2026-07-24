@@ -1,0 +1,19 @@
+id: fb-1784856771241-14ea45
+ts: 2026-07-24T01:32:51.241Z
+raw: "OPERATOR-CHECKOUT SYNC IS MANUAL TOIL — the W1-T79 auto-sync guard
+  correctly refuses to pull over a dirty tree, but the dirt is almost always the
+  same benign shape (untracked plan/feedback copies of filings the bridge has
+  since landed on main, the uncommitted DECISIONS.md auto-log, untracked
+  questions/state files), and the operator has hand-typed the same
+  dedupe-then-pull recipe five times on 2026-07-23 alone. Need: an rmd sync verb
+  that performs the sanctioned recipe itself — remove untracked files
+  byte-identical to their origin/main version, preserve genuinely-local files
+  aside with a named report (never destroy unlanded content), handle the
+  DECISIONS.md preserve-and-diff case per W1-T191, then ff-pull — refusing only
+  on true divergence. Sibling of fb-1784826522421-1d57e9 (the bridge sweep stops
+  the feedback-dupe accumulation at its source) and of the paramedic doctrine: a
+  recipe the operator types twice is a spec."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

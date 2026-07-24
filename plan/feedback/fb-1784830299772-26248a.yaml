@@ -1,0 +1,15 @@
+id: fb-1784830299772-26248a
+ts: 2026-07-23T18:11:39.772Z
+raw: "AA16B6 ROOT CAUSE (follow-up): the npm-global claude symlink was rewritten
+  2026-07-23T16:05Z to bin/claude.exe — an ASCII-text launcher with no exec bit
+  — breaking every SDK spawn from ~16:14Z (in-flight workers survived; first
+  logged draft_error 17:01Z). The SDK's 'musl/glibc' error text is a misleading
+  canned diagnosis of EACCES-on-a-script. Suspected writer: the CLI auto-updater
+  half-completing (observed version: <paste>, reinstalled to: <paste>). Confirms
+  W1-T236's exact risk — its build should pin the binary path+version, disable
+  or gate auto-update on this host, and add the spawn_binary_unlaunchable
+  preflight naming the real errno."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
