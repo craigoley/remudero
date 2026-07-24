@@ -73,6 +73,7 @@ import { worktreesDir } from "../src/lib/worker.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { loadPlanIndex, renderPlanIndex } from "../src/lib/plan-index.js";
+import { changedTaskIds } from "../src/lib/task-linter.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
@@ -3398,6 +3399,77 @@ test("materializeOriginShards: a listed shard is copied into <tmpDir>/tasks.d ve
   assert.deepEqual(got, ["plan/tasks.d/W1-T9.yaml"]);
   assert.equal(readFileSync(join(tmpDir, "tasks.d", "W1-T9.yaml"), "utf8"), "- id: W1-T9\n  title: shard task\n");
   rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test("materializeOriginShards: an explicit `ref` is used INSTEAD of origin/main in both the ls-tree and git-show invocations (W1-T246)", () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), "shard-ref-"));
+  const seenArgs: string[][] = [];
+  const runGit: GitRunner = (args) => {
+    seenArgs.push(args);
+    return args[0] === "ls-tree" ? "plan/tasks.d/W1-T9.yaml\n" : "- id: W1-T9\n  title: shard task\n";
+  };
+  const got = materializeOriginShards("/repo", "plan", tmpDir, runGit, "abc123def");
+  assert.deepEqual(got, ["plan/tasks.d/W1-T9.yaml"]);
+  assert.ok(seenArgs.some((a) => a[0] === "ls-tree" && a.includes("abc123def")), "ls-tree must target the given ref, not origin/main");
+  assert.ok(
+    seenArgs.some((a) => a[0] === "show" && a[1] === "abc123def:plan/tasks.d/W1-T9.yaml"),
+    "git show must target <ref>:<shard>, not origin/main:<shard>",
+  );
+  assert.ok(
+    seenArgs.every((a) => !a.some((tok) => tok.includes("origin/main"))),
+    "origin/main must never appear when an explicit ref is given",
+  );
+  rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test("materializeOriginShards: ref defaults to origin/main when omitted (back-compat, unchanged from W1-T245)", () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), "shard-default-ref-"));
+  const seenArgs: string[][] = [];
+  const runGit: GitRunner = (args) => {
+    seenArgs.push(args);
+    return args[0] === "ls-tree" ? "" : "";
+  };
+  materializeOriginShards("/repo", "plan", tmpDir, runGit);
+  assert.ok(seenArgs.some((a) => a[0] === "ls-tree" && a.includes("origin/main")));
+  rmSync(tmpDir, { recursive: true, force: true });
+});
+
+// ── W1-T246: `rmd lint-plan --base <ref>` must reconstruct the BASE plan the same shard-aware
+// way loadPlan/syncPlanFromOrigin do — a plain `git show <base>:tasks.yaml` alone is shard-blind
+// (the exact W1-T245 defect, but on the CI/--base path instead of the dispatch/sync path): every
+// shard-only task looked "new/changed" on EVERY PR regardless of whether it touched the plan,
+// silently harmless only because no check ever failed on a shard task before proof-dialect.
+
+test("rmd lint-plan --base scoping: a shard present at BOTH base and head is NOT reported changed (the regression this fix closes)", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-lintplan-shard-"));
+  const git = (args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" });
+  mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(root, "plan", "tasks.yaml"), "- id: T1\n  title: monolith\n  repo: remudero\n  type: implement\n", "utf8");
+  writeFileSync(join(root, "plan", "tasks.d", "T2-shard.yaml"), "- id: T2\n  title: shard\n  repo: remudero\n  type: implement\n", "utf8");
+  git(["init", "--quiet", "-b", "main"]);
+  git(["config", "user.email", "test@example.com"]);
+  git(["config", "user.name", "Test"]);
+  git(["add", "."]);
+  git(["commit", "--quiet", "-m", "base"]);
+  const baseSha = git(["rev-parse", "HEAD"]).trim();
+
+  // Reconstruct the BASE plan exactly the way lintPlanCommand's --base branch does: the
+  // monolith blob via `git show`, plus shards via materializeOriginShards(ref=baseSha).
+  const oldRaw = git(["show", `${baseSha}:plan/tasks.yaml`]);
+  const tmpDir = mkdtempSync(join(tmpdir(), "lint-plan-base-test-"));
+  const tmpFile = join(tmpDir, "tasks.yaml");
+  writeFileSync(tmpFile, oldRaw, "utf8");
+  materializeOriginShards(root, "plan", tmpDir, undefined, baseSha);
+  const oldPlan = loadPlan(tmpFile);
+  const newPlan = loadPlan(join(root, "plan", "tasks.yaml"));
+
+  assert.deepEqual(
+    [...changedTaskIds(oldPlan.tasks, newPlan.tasks)],
+    [],
+    "T2 lives in a shard identical at base and head — it must NOT be reported as changed",
+  );
+  rmSync(tmpDir, { recursive: true, force: true });
+  rmSync(root, { recursive: true, force: true });
 });
 
 // ── W1-T245 remaining criteria: deep-compare vs real checkout, dup-id through synced, temp cleanup ──

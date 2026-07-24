@@ -92,7 +92,7 @@ function writePlanWithTask(root: string, overrides: Record<string, unknown> = {}
     status: "queued",
     attempts: 0,
     origin: "architect",
-    acceptance: [{ claim: "does the thing", proof: "paste the ledger line" }],
+    acceptance: [{ claim: "does the thing", proof: "unit test: does the thing" }],
     ...overrides,
   };
   writeFileSync(planPath, JSON.stringify([task]), { flag: "wx" });
@@ -141,7 +141,7 @@ test("buildClarifyGrill: a linter-flagged task gets its REAL violations back as 
     attempts: 0,
     origin: "architect",
     files: ["src/lib/daemon.ts"],
-    acceptance: [{ claim: "touches the daemon and launchd", proof: "paste the ledger line" }],
+    acceptance: [{ claim: "touches the daemon and launchd", proof: "unit test: does the thing" }],
   } as unknown as Task;
   const lint = lintTask(task);
   assert.equal(lint.ok, false); // sizing: daemon + launchd = 2 subsystems at risk:medium
@@ -163,7 +163,7 @@ test("buildClarifyGrill: a clean task still gets ONE task-specific question, nev
     status: "queued",
     attempts: 0,
     origin: "architect",
-    acceptance: [{ claim: "does the thing", proof: "paste the ledger line" }],
+    acceptance: [{ claim: "does the thing", proof: "unit test: does the thing" }],
   } as unknown as Task;
   const lint = lintTask(task);
   assert.equal(lint.ok, true);
@@ -184,7 +184,7 @@ test("buildClarifyGrill: with grounding notes, leads with what the plan skill's 
     status: "queued",
     attempts: 0,
     origin: "architect",
-    acceptance: [{ claim: "does the thing", proof: "paste the ledger line" }],
+    acceptance: [{ claim: "does the thing", proof: "unit test: does the thing" }],
   } as unknown as Task;
   const lint = lintTask(task);
   const grill = buildClarifyGrill(task, lint, [{ source: "MASTER-PLAN.md", excerpts: ["§9: W9-T3 folds into the mount-tier work"] }]);
@@ -205,7 +205,7 @@ test("buildClarifyGrill: with NO grounding hits, says so plainly rather than sil
     status: "queued",
     attempts: 0,
     origin: "architect",
-    acceptance: [{ claim: "does the thing", proof: "paste the ledger line" }],
+    acceptance: [{ claim: "does the thing", proof: "unit test: does the thing" }],
   } as unknown as Task;
   const lint = lintTask(task);
   const grill = buildClarifyGrill(task, lint, []);
@@ -321,7 +321,7 @@ test("POST /v1/skills/run Refine (plan/clarify): parks a `grilling` feedback ent
   writeSkillYaml(root, "plan");
   const planPath = writePlanWithTask(root, {
     files: ["src/lib/daemon.ts"],
-    acceptance: [{ claim: "touches the daemon and launchd", proof: "paste the ledger line" }],
+    acceptance: [{ claim: "touches the daemon and launchd", proof: "unit test: does the thing" }],
   });
   const deps = depsFor(root, planPath);
   await withService(buildPanelSkillRunRoutes(deps), async (base) => {

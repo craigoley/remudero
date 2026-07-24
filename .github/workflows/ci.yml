@@ -382,8 +382,10 @@ jobs:
     # plan/tasks.yaml is resolvable via `git show`.
     #
     # FAIL-CLOSED: any BLOCKING violation (sizing/headless-fitness/proof-shape/
-    # provenance) on an in-scope task fails this job, which ci-gate's REQUIRED
-    # list waits on before it can pass — see ci-gate.yml.
+    # proof-dialect/provenance) on an in-scope task fails this job, which
+    # ci-gate's REQUIRED list waits on before it can pass — see ci-gate.yml.
+    # proof-dialect (W1-T246, moratorium finding 9): a proof that cannot execute
+    # (parseWhitelistedProof, reused verbatim from src/lib/review.ts) never lands.
     name: lint-plan
     runs-on: ubuntu-latest
     steps:
