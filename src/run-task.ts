@@ -2329,10 +2329,19 @@ async function runTask(
     // blocked_illformed overnight. Log every such warning (visibility, never a refusal)
     // BEFORE the shared assertLintClean gate below runs the SAME check again to decide
     // whether to dispatch — a block-severity violation (any OTHER check) still refuses.
-    for (const v of lintTask(task, { proofDialect: "warn" }).violations) {
-      if (v.check === "proof-dialect" && v.severity === "warn") log("lint.warned", { check: v.check, message: v.message });
+    //
+    // proofResolvability:"warn" — W1-T101, the SAME rollout convention for the SAME
+    // reason: measured against the live queue, the check that a dialect-prefixed proof
+    // names no resolvable artifact trips ~200 already-queued tasks (the `unit test:`
+    // narrative authoring convention long predates this check) — an unconditional block
+    // here would brick most of the open backlog overnight. BLOCKS at filing/plan-health
+    // (the birth gate this check exists for); WARNS pre-dispatch.
+    for (const v of lintTask(task, { proofDialect: "warn", proofResolvability: "warn" }).violations) {
+      if ((v.check === "proof-dialect" || v.check === "proof-resolvability") && v.severity === "warn") {
+        log("lint.warned", { check: v.check, message: v.message });
+      }
     }
-    assertLintClean(task, { proofDialect: "warn" });
+    assertLintClean(task, { proofDialect: "warn", proofResolvability: "warn" });
   } catch (e) {
     if (e instanceof TaskLintError) {
       log("lint.blocked", { violations: e.violations });
