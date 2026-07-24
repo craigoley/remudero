@@ -310,6 +310,13 @@ export interface DaemonOpts {
    * A single successful read resets the count to zero.
    */
   unreadableDegradedLimit?: number;
+  /**
+   * W1-T113: the spawn-infra backoff ceiling in ms (default
+   * {@link DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS}) — consecutive failures double
+   * `pollIntervalMs` up to this cap. POLICY DATA (rule 2), retunable without a
+   * source change.
+   */
+  maxSpawnInfraBackoffMs?: number;
 }
 
 export interface DaemonSummary {
@@ -447,7 +454,42 @@ export interface DaemonDeps {
    * silently continues), it just has no issue opened.
    */
   escalateBlock?: (info: { task: Task; result: RunResult; dependents: string[] }) => void | Promise<void>;
+  /**
+   * W1-T113 part (iii), DEGRADE DON'T DIE (the vanished-binary incident): called
+   * AT MOST ONCE per distinct `reason` for the life of this daemon run — never
+   * once per poll tick, never once per task — when `runOne` throws a spawn-
+   * INFRASTRUCTURE error (worker.ts's `ClaudeToolchainBlockedError`, detected
+   * duck-typed via `reasonClass === "blocked_toolchain"`, never an
+   * `instanceof` import — this module stays decoupled from worker.ts). The
+   * real command wires escalate.ts's `tryEscalate` (BLOCKED class, content-
+   * keyed by `reason` — the W1-T104 discipline: an already-open toolchain
+   * issue for the SAME cause suppresses a repeat) naming every searched path.
+   * Optional — omitted, the loop still survives and backs off, it just opens
+   * no issue.
+   */
+  onSpawnInfraBlocked?: (info: { task: Task; reason: string }) => void | Promise<void>;
 }
+
+/**
+ * Duck-typed classifier for a spawn-INFRASTRUCTURE failure (W1-T113: worker.ts's
+ * `ClaudeToolchainBlockedError`, the vanished-binary class) — checked by a plain
+ * string tag rather than `instanceof` so this module never imports worker.ts as
+ * a value (it stays a PURE module, per this file's header: no fs, no exec, and
+ * now no runtime dependency on the spawn layer either). Any OTHER throw from
+ * `runOne` is still a genuine, unclassified error — this daemon must not learn
+ * to swallow every possible crash, only the one named infrastructure class.
+ */
+function isSpawnInfraBlocked(err: unknown): err is { reasonClass: "blocked_toolchain"; message: string } {
+  return typeof err === "object" && err !== null && (err as { reasonClass?: unknown }).reasonClass === "blocked_toolchain";
+}
+
+/**
+ * The spawn-infra backoff ceiling (POLICY DATA, rule 2): consecutive failures
+ * double `pollIntervalMs` up to this cap rather than hammering a dispatch that
+ * is failing for an infrastructure reason nobody has fixed yet — see the
+ * backoff computation in `runDaemon`, below.
+ */
+export const DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS = 30 * 60_000;
 
 /**
  * THE BOOT-RATE INVARIANT (W1-T215, recon T2-AC2). Two DIFFERENT root causes
@@ -560,6 +602,21 @@ export function detectDaemonCrashLoop(
  * `tryEscalate`, so a loop opens a needs-human issue instead of waiting for a
  * human to notice the boot-timestamp gaps). Omitted ⇒ no check, behavior
  * unchanged from before W1-T215.
+ *
+ * TOOLCHAIN RESOLUTION (W1-T113 part i, "log the resolved path once at daemon
+ * boot"): an optional `resolveClaudeBin` dependency, called once here — the
+ * real command wires worker.ts's `resolveClaudeExecutable` against its
+ * shared, PER-PROCESS `claudeExecutableCache`, so this boot-time resolution
+ * and every later `spawnWorker` call agree on the SAME answer, never a
+ * second, possibly-different resolution. Logged as `daemon.claude_bin` either
+ * way: success names the resolved `path`; a thrown
+ * `ClaudeToolchainBlockedError` (duck-typed via `reasonClass`, same idiom as
+ * `unlockWorkerKeychain`'s catch below) is logged with `blocked: true` and its
+ * `error_class`, and BOOT CONTINUES — a fully-absent toolchain still fails
+ * legibly the moment dispatch actually tries to spawn (this function's own
+ * "the daemon sleeps through problems" doctrine, T197), it just never blocks
+ * boot itself. Omitted ⇒ no resolution attempt here, behavior unchanged from
+ * before W1-T113.
  */
 export function daemonBoot(
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -591,6 +648,7 @@ export function daemonBoot(
      */
     onBreach: (verdict: CrashLoopVerdict) => void;
   },
+  resolveClaudeBin?: () => string,
 ): BootAssertion {
   const assertion = assertCleanBoot(env);
   log("daemon.boot", { env_clean: assertion.env_clean, billing_mode: assertion.billing_mode });
@@ -649,6 +707,21 @@ export function daemonBoot(
     const swept = sweepLocks();
     log("daemon.lock_sweep", { reaped: swept.reaped.length, kept: swept.kept.length });
   }
+  // W1-T113 part (i): resolve — and log — the real `claude` binary ONCE at
+  // boot, see this function's own doc above. A refusal here is logged, never
+  // thrown onward — boot continues (T197: the daemon sleeps through problems).
+  if (resolveClaudeBin) {
+    try {
+      const path = resolveClaudeBin();
+      log("daemon.claude_bin", { blocked: false, path });
+    } catch (err) {
+      log("daemon.claude_bin", {
+        blocked: true,
+        error_class: (err as { reasonClass?: string })?.reasonClass ?? "unknown",
+        error: String((err as Error)?.message ?? err),
+      });
+    }
+  }
   return assertion;
 }
 
@@ -690,6 +763,17 @@ export async function runDaemon(
   // every tick — see drain.ts's `runDrain`, the identical fix for the bounded
   // one-shot loop.
   const circuitEscalated = new Set<string>();
+  // SPAWN-INFRA ESCALATION DEDUP (W1-T113 part iii, the W1-T104 discipline):
+  // content-keyed on the failure's OWN `reason` text, never on task id — the
+  // vanished-binary class blocks dispatch identically for every task, so
+  // task-id keying would still re-escalate once per distinct task hitting the
+  // SAME cause. Persists for the life of this daemon run, mirroring
+  // `circuitEscalated`'s own bound above.
+  const toolchainEscalated = new Set<string>();
+  // CONSECUTIVE spawn-infra failures — backs the backoff below; reset by any
+  // runOne call that does NOT throw this class (success or an unrelated verdict).
+  let consecutiveSpawnInfraFailures = 0;
+  const maxSpawnInfraBackoffMs = opts.maxSpawnInfraBackoffMs ?? DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS;
   // BOUNDED DEGRADED MODE (recon R-7: the live ledger shows /usage unreadable
   // ~78% of the time — an unconditional fail-closed-on-first-miss would halt
   // the fleet most of the time, so this counts CONSECUTIVE misses instead of
@@ -915,20 +999,52 @@ export async function runDaemon(
           }
         })()
       : undefined;
+    // Cleared once runOne settles, on EVERY exit path (success, a fatal throw,
+    // or a degraded spawn-infra throw) — never left running past it, and never
+    // aborted mid-call (a sweepLight() already in flight is allowed to finish
+    // before the ticker stops).
+    const stopTicker = async () => {
+      tickerActive = false;
+      if (ticker) await ticker;
+    };
 
     let result: RunResult;
     try {
       result = await deps.runOne(next.id);
     } catch (e) {
-      tickerActive = false;
-      if (ticker) await ticker;
-      return summary("error", `${next.id}: ${String((e as Error)?.message ?? e)}`);
+      await stopTicker();
+      if (!isSpawnInfraBlocked(e)) {
+        return summary("error", `${next.id}: ${String((e as Error)?.message ?? e)}`);
+      }
+      // DEGRADE, DON'T DIE (W1-T113 part iii, the vanished-binary incident): a
+      // spawn-INFRASTRUCTURE failure is never a fatal crash — the pre-fix shape
+      // was error -> process exit -> launchd KeepAlive restart -> the identical
+      // failure again, five consecutive polls, zero escalations, zero backoff.
+      // Escalate ONCE per distinct cause (content-keyed, W1-T104 discipline),
+      // back off the failing dispatch, and `continue` — sweep/status work above
+      // already ran this tick and runs again next tick, so the loop stays alive
+      // and useful even while dispatch itself is degraded.
+      const reason = e.message;
+      consecutiveSpawnInfraFailures++;
+      log("daemon.spawn_infra_blocked", { task: next.id, reason, consecutive: consecutiveSpawnInfraFailures });
+      if (!toolchainEscalated.has(reason)) {
+        toolchainEscalated.add(reason);
+        try {
+          await deps.onSpawnInfraBlocked?.({ task: next, reason });
+        } catch (escErr) {
+          log("daemon.escalation.failed", { task: next.id, error: String((escErr as Error)?.message ?? escErr) });
+        }
+      }
+      ticks++;
+      const backoffMs = Math.min(pollIntervalMs * 2 ** (consecutiveSpawnInfraFailures - 1), maxSpawnInfraBackoffMs);
+      log("daemon.spawn_infra_backoff", { tick: ticks, backoff_ms: backoffMs, consecutive: consecutiveSpawnInfraFailures });
+      await deps.sleep(backoffMs);
+      continue;
     }
-    // Cleared once runOne settles — never left running past it, and never
-    // aborted mid-call (a sweepLight() already in flight is allowed to
-    // finish before the ticker stops).
-    tickerActive = false;
-    if (ticker) await ticker;
+    // A successful (non-throwing) runOne — including one that returns a
+    // non-spawn-infra blocked verdict — clears the backoff streak.
+    consecutiveSpawnInfraFailures = 0;
+    await stopTicker();
     costUsd += result.costUsd;
 
     if (!result.merged) {

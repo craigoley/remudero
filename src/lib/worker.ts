@@ -21,7 +21,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { buildWorkerEnv } from "./env.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStaleWorkerScratch } from "./worker-scratch.js";
-import { ensureWorkerKeychain, materializeWorkerHome, workerKeychainPaths } from "./worker-home.js";
+import { ensureWorkerKeychain, materializeWorkerHome, workerKeychainPaths, type SecurityRunner } from "./worker-home.js";
 
 /**
  * Aggregate token usage off the SDK result envelope's `usage` field (verified
@@ -184,6 +184,212 @@ export function workerLedgerFields(r: WorkerResult): {
   };
 }
 
+// ── Toolchain resolution (W1-T113: the vanished-binary incident) ───────────
+//
+// `config.claudeBin` is resolved ONCE via `which claude` when
+// `~/.config/remudero/config.json` is first created (config.ts's
+// `resolveClaudeBin`) and then CACHED TO DISK — exactly the "pinned while the
+// toolchain self-updates" shape the incident hit: a Claude Code auto-update
+// (or a manual migration off npm — the upstream README now reads "Installation
+// via npm is deprecated", verified via `gh api repos/anthropics/claude-code`
+// since this checkout has no network path to the hosted setup docs, distrust
+// this prompt's memory / Standing rule 7) can move the real binary out from
+// under that cached path mid-operation. Resolution below runs FRESH at spawn
+// time instead, in priority order: an explicit operator override, a live PATH
+// lookup, then the known install-location table — never the stale disk cache
+// alone. Cached PER PROCESS once resolved (see `ClaudeExecutableCache`), and
+// PREFLIGHT-checked (exists AND runs `--version`) before ever reaching the
+// SDK, so a bad resolution fails loud — before any worker-home/keychain work
+// runs — rather than surfacing deep inside a spawn as "native binary not
+// found" (MASTER-PLAN Field Finding 12).
+
+/** Operator escape hatch: an explicit path always wins over PATH/the table. */
+export const CLAUDE_BIN_ENV_OVERRIDE = "REMUDERO_CLAUDE_BIN";
+
+/**
+ * One row of the install-location table — DATA (W1-T113 acceptance: "the
+ * location table is data" — adding a row here resolves a newly seeded
+ * location with ZERO resolution-code changes). `resolve` returns `undefined`
+ * when a row does not apply; a row that DOES apply is still existence- and
+ * runnability-checked like every other candidate, never trusted blind.
+ */
+export interface ClaudeExecutableCandidate {
+  /** Short label carried into the refusal reason and the boot log. */
+  label: string;
+  resolve: (env: NodeJS.ProcessEnv, home: string) => string | undefined;
+}
+
+/**
+ * The known Claude Code install locations. Verified from the upstream repo
+ * rather than trusted from memory (Standing rule 7): `gh api
+ * repos/anthropics/claude-code` — README.md ("Installation via npm is
+ * deprecated") + CHANGELOG.md, whose 2.1.143 and 2.1.207 entries both name
+ * `~/.local/bin/claude` as the native-installer launcher the auto-updater
+ * manages, distinct from the (deprecated but still real, and this fleet's own
+ * current install method — MASTER-PLAN Field Finding 3) npm-global prefix.
+ * Order matters: the FIRST existing+runnable candidate wins.
+ */
+export const CLAUDE_EXECUTABLE_LOCATIONS: ClaudeExecutableCandidate[] = [
+  { label: "npm-global", resolve: (_env, home) => join(home, ".npm-global", "bin", "claude") },
+  { label: "native-installer (~/.local/bin)", resolve: (_env, home) => join(home, ".local", "bin", "claude") },
+];
+
+/** One resolution attempt, kept for the refusal reason: which label, which
+ * path, whether it existed, and whether it ran (only meaningful if it did). */
+export interface SearchedClaudeCandidate {
+  label: string;
+  path: string;
+  existed: boolean;
+  ran: boolean;
+}
+
+/** `SearchedClaudeCandidate` -> its one-word outcome, for the refusal message. */
+function describeSearched(s: SearchedClaudeCandidate): string {
+  if (!s.existed) return "missing";
+  return s.ran ? "ok" : "exists, --version failed";
+}
+
+/**
+ * Structured refusal (W1-T91 classification: infrastructure, never a task
+ * defect) thrown when NO candidate resolves to an existing, runnable
+ * executable. Carries every searched path — distinguishing "missing" from
+ * "exists but `--version` failed" — so the refusal reason is never a bare
+ * "not found". `reasonClass` is a plain string tag (not `instanceof`) so a
+ * caller in a different module (daemon.ts) can classify this duck-typed,
+ * without importing this class as a value.
+ */
+export class ClaudeToolchainBlockedError extends Error {
+  readonly reasonClass = "blocked_toolchain" as const;
+  readonly searched: SearchedClaudeCandidate[];
+  constructor(searched: SearchedClaudeCandidate[]) {
+    const detail = searched.length
+      ? searched.map((s) => `${s.label}=${s.path} (${describeSearched(s)})`).join("; ")
+      : "(no candidates configured)";
+    super(`claude executable not found or not runnable — searched: ${detail}`);
+    this.name = "ClaudeToolchainBlockedError";
+    this.searched = searched;
+  }
+}
+
+/** Per-process memo (see `createClaudeExecutableCache`) — resolution runs at
+ * most once per process; every later `spawnWorker` call reuses the answer. */
+export interface ClaudeExecutableCache {
+  resolved?: string;
+}
+
+export function createClaudeExecutableCache(): ClaudeExecutableCache {
+  return {};
+}
+
+/**
+ * Injectable seams for `resolveClaudeExecutable` — the real call site defaults
+ * every one of these to the live filesystem/PATH/subprocess; tests inject
+ * fakes so "pinned path absent, table hit" and "everything absent" are
+ * provable over injected fs/exec, with no real binary involved.
+ */
+export interface ResolveClaudeExecutableDeps {
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+  exists?: (path: string) => boolean;
+  /**
+   * A LIVE `which claude` lookup (never PATH resolved once and cached to
+   * disk — that staleness is exactly config.ts's `resolveClaudeBin`, which
+   * this routes around). Returns `undefined` when `claude` is not on PATH.
+   */
+  which?: () => string | undefined;
+  /** Does this path actually run? (`--version`, discarding output.) */
+  canExecute?: (path: string) => boolean;
+  /** The candidate table — DATA, defaults to `CLAUDE_EXECUTABLE_LOCATIONS`. */
+  locations?: ClaudeExecutableCandidate[];
+}
+
+function defaultWhich(): string | undefined {
+  try {
+    const out = execFileSync("which", ["claude"], { encoding: "utf8" }).trim();
+    return out || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function defaultCanExecute(path: string): boolean {
+  try {
+    execFileSync(path, ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve the real `claude` binary at SPAWN time (W1-T113 part i): an
+ * explicit env override, then a live PATH lookup, then the location table —
+ * in that order, memoized in `cache` once an answer is found. Every candidate
+ * is PREFLIGHTED (W1-T113 part ii: exists AND runs `--version`) before being
+ * accepted; a candidate that exists but won't run is recorded as such in the
+ * refusal, distinct from one that's simply missing. Throws
+ * `ClaudeToolchainBlockedError` (never a raw ENOENT) when nothing resolves,
+ * naming every searched path — the run is refused cleanly rather than
+ * crashing on a bare `ENOENT` deep inside the SDK's spawn.
+ */
+export function resolveClaudeExecutable(cache: ClaudeExecutableCache, deps: ResolveClaudeExecutableDeps = {}): string {
+  if (cache.resolved) return cache.resolved;
+  const env = deps.env ?? process.env;
+  const home = deps.home ?? homedir();
+  const exists = deps.exists ?? existsSync;
+  const which = deps.which ?? defaultWhich;
+  const canExecute = deps.canExecute ?? defaultCanExecute;
+  const locations = deps.locations ?? CLAUDE_EXECUTABLE_LOCATIONS;
+
+  // One ordered candidate list (env override, then a live PATH lookup, then the
+  // location table) walked by a single loop — every row is the SAME shape
+  // (`label` + a lazy `resolve`), so PATH's subprocess call and the table's
+  // plain path joins are short-circuited identically: a row is only resolved
+  // once every earlier row has already failed.
+  const candidates: ClaudeExecutableCandidate[] = [
+    { label: `env:${CLAUDE_BIN_ENV_OVERRIDE}`, resolve: (e) => e[CLAUDE_BIN_ENV_OVERRIDE] },
+    { label: "PATH", resolve: () => which() },
+    ...locations,
+  ];
+
+  const searched: SearchedClaudeCandidate[] = [];
+  for (const candidate of candidates) {
+    const path = candidate.resolve(env, home);
+    if (!path) continue;
+    const existed = exists(path);
+    const ran = existed && canExecute(path);
+    searched.push({ label: candidate.label, path, existed, ran });
+    if (ran) {
+      cache.resolved = path;
+      return path;
+    }
+  }
+
+  throw new ClaudeToolchainBlockedError(searched);
+}
+
+/**
+ * The shared, PER-PROCESS cache every real `spawnWorker` call reuses (see
+ * `ClaudeExecutableCache`'s doc). Exported so the daemon's boot routine can
+ * resolve — and log — the SAME answer once at startup rather than a separate,
+ * possibly-different resolution (W1-T113 part i: "log the resolved path once
+ * at daemon boot").
+ */
+export const claudeExecutableCache: ClaudeExecutableCache = createClaudeExecutableCache();
+
+/**
+ * Pure: the macOS keychain grant list (W1-T113) — the FRESHLY resolved `claudeBin`
+ * (never `config.claudeBin`'s stale disk-cached value, exactly the vanished-binary
+ * incident's shape) plus the fixed `/usr/bin/security` helper every worker keychain
+ * grant needs. Extracted so this one-line assembly is unit-testable directly, without
+ * invoking `ensureWorkerKeychain` (a real keychain side effect) or gating a test on
+ * `process.platform` (spawnWorker's darwin-only call site, below, is untestable off
+ * a Linux CI runner by construction).
+ */
+export function workerKeychainGrantApps(claudeBin: string): string[] {
+  return [claudeBin, "/usr/bin/security"];
+}
+
 export interface SpawnWorkerArgs {
   cwd: string;
   permissionMode: PermissionMode;
@@ -208,13 +414,33 @@ export interface SpawnWorkerArgs {
    * (isolation.ts's preflight probe, W1-T17).
    */
   tools?: string[];
+  /**
+   * W1-T113: override the toolchain-resolution cache/seams — same injection
+   * convention `config` above already follows. Omitted ⇒ the shared,
+   * PER-PROCESS `claudeExecutableCache` and live fs/PATH/subprocess (the real
+   * spawn path); tests can inject a fresh cache + fakes here instead of
+   * reaching into the module-level singleton.
+   */
+  claudeExecutable?: { cache?: ClaudeExecutableCache; deps?: ResolveClaudeExecutableDeps };
+  /**
+   * W1-T113: override the darwin-only keychain-provisioning gate/seams —
+   * same injection convention as `config`/`claudeExecutable` above. Omitted
+   * ⇒ the real `process.platform` and `ensureWorkerKeychain`'s own live
+   * `security(1)`/fs defaults. Tests inject `platform: "darwin"` plus a fake
+   * `runner`/`exists` (matching `ensureWorkerKeychain`'s OWN existing
+   * injectable seams, worker-home.ts) to exercise this gate deterministically
+   * off a non-macOS CI runner, with no real keychain touched.
+   */
+  keychain?: { platform?: NodeJS.Platform; runner?: SecurityRunner; exists?: (path: string) => boolean };
 }
 
 /**
  * Spawn one headless Claude Code worker via the Agent SDK.
  *
  * Uses the installed SDK's isolation options as ground truth (SDK 0.3.209):
- *  - `pathToClaudeCodeExecutable` → the absolute binary from config (never PATH).
+ *  - `pathToClaudeCodeExecutable` → resolved FRESH at spawn time (W1-T113: env
+ *    override → live PATH → the install-location table), never `config.claudeBin`'s
+ *    disk-cached value directly and never bare PATH inheritance either.
  *  - `env` → REPLACES the subprocess env entirely (per the SDK contract), so the
  *    allowlisted, ANTHROPIC-stripped env from buildWorkerEnv() is the billing
  *    boundary. No wholesale process.env inheritance.
@@ -233,6 +459,13 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   validateWorkerSettingsFile(args.settingsFile);
 
   const config = args.config ?? loadConfig();
+  // W1-T113 PREFLIGHT: resolve the real binary FRESH (see resolveClaudeExecutable's
+  // doc, above) before any worker-home/keychain work runs. Throws
+  // ClaudeToolchainBlockedError — never a raw ENOENT — naming every searched
+  // path, carrying `reasonClass: "blocked_toolchain"` (the W1-T91 infrastructure
+  // classification, never a task defect) for a caller to classify duck-typed —
+  // see daemon.ts's `isSpawnInfraBlocked`, which does exactly that.
+  const claudeBin = resolveClaudeExecutable(args.claudeExecutable?.cache ?? claudeExecutableCache, args.claudeExecutable?.deps);
   // W1-T18 general isolation mechanism: redirect HOME to a Remudero-controlled
   // scratch dir holding ONLY empty rc files (never the operator's real HOME),
   // with the few paths a worker legitimately needs symlinked back in. Best-
@@ -246,11 +479,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // HERE, pre-spawn, with a named reason class — never a $0 worker whose
   // zero-write death reads as "containment UNPROVEN" (the 2026-07-21 incident).
   let workerKeychainPath: string | undefined;
-  if (process.platform === "darwin") {
+  const platform = args.keychain?.platform ?? process.platform;
+  if (platform === "darwin") {
     workerKeychainPath = ensureWorkerKeychain({
       ...workerKeychainPaths(join(config.root, "state")),
       loginKeychainPath: join(realHome, "Library", "Keychains", "login.keychain-db"),
-      grantApps: [config.claudeBin, "/usr/bin/security"],
+      grantApps: workerKeychainGrantApps(claudeBin),
+      runner: args.keychain?.runner,
+      exists: args.keychain?.exists,
     }).keychainPath;
   }
   materializeWorkerHome({ workerHome, realHome, workerKeychainPath });
@@ -277,7 +513,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   const options: Options = {
     cwd: args.cwd,
     permissionMode: args.permissionMode,
-    pathToClaudeCodeExecutable: config.claudeBin,
+    pathToClaudeCodeExecutable: claudeBin,
     env: childEnv,
     settings: args.settingsFile,
     settingSources: [],
