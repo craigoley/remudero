@@ -5895,8 +5895,20 @@
   principles: {tdd: strict}
   budget_usd: 100.00
   acceptance:
-    - claim: "given an INJECTED clock + INJECTED runner, the loop selects and dispatches tasks in dependency order and stops on STOP / Pause / headroom-exhausted"
-      proof: "unit tests over a fake plan + fake runner assert dispatch order + each stop condition — NO real overnight run, NO real worker spawns"
+    # W1-T246 proof-dialect repointing (rule-15 plan-only): the original single prose
+    # proof could not execute (parseWhitelistedProof === null), so the review floor
+    # CAPPED every re-dispatch at 0/1. Split into four executable `unit test:` proofs,
+    # each resolving to the already-merged (PR #61) test/daemon.test.ts test that proves
+    # that exact condition over an injected clock + runner. The 'NO real overnight run'
+    # negation lives in criterion 1's claim (headless-fitness fixture, W1-T81).
+    - claim: "given an injected clock + injected runner, the loop selects + dispatches tasks in dependency (DAG) order, skipping merged / verify:human tasks — NO real overnight run, NO real worker spawns"
+      proof: "unit test: dispatches in dependency order"
+    - claim: "STOP is checked first every tick and halts within one tick, with no subsequent worker spawns"
+      proof: "unit test: STOP: checked first, every tick"
+    - claim: "PAUSE is drain-and-hold: an in-flight task still reaches merged and the loop idles in-process (heartbeat per tick), never exiting on the pause itself"
+      proof: "unit test: issued mid-run, the in-flight task still reaches merged"
+    - claim: "headroom exhaustion is an in-process idle heartbeat, never a stop — no worker spawn while over the limit"
+      proof: "unit test: a near-limit reading is an IN-PROCESS idle heartbeat"
   risk: high
   origin: architect
   plan_refs: ["§4B"]
