@@ -37,6 +37,19 @@ import {
   type OnboardGhGateway,
 } from "./lib/onboard/inventory.js";
 import {
+  parseReconArgs,
+  realReconFsDeps,
+  realReconGhGateway,
+  RECON_LENSES,
+  RECON_PHASE,
+  ReconError,
+  runOnboardRecon,
+  spawnReconSpecialist,
+  type ReconFsDeps,
+  type ReconGhGateway,
+} from "./lib/onboard/recon.js";
+import type { SpecialistName } from "./lib/specialist-panel.js";
+import {
   applyCuratedSelection,
   buildRundown,
   DEFAULT_MAX as DRAIN_DEFAULT_MAX,
@@ -7686,11 +7699,13 @@ async function projectCommand(rest: string[]): Promise<number> {
  * detector tables (src/lib/onboard/inventory.ts) plus `gh api` reads. Read-only against the
  * target checkout + GitHub; the ONLY write is `<target-dir>/plan/onboarding/inventory.json`.
  * GitHub facts this command could not resolve (auth/network failure) render as the literal
- * `"unknown"` — never guessed or silently defaulted. `--phase` is REQUIRED and today ONLY
- * `inventory` is implemented — recon/session/synthesis are W1-T83/84/85, separate future
- * tasks not built here; an unknown `--phase` value fails loud (usage + non-zero exit, zero
- * work done) before any fs/gh call, the same `parseProjectInitArgs`-style validate-first
- * discipline `rmd project init` already applies (Standing rule / LEARNINGS.md
+ * `"unknown"` — never guessed or silently defaulted. `--phase` is REQUIRED; `inventory`
+ * (this function's own body) and `recon` ({@link reconCommand}, routed to BELOW before
+ * inventory.ts's own parser ever runs — its `KNOWN_ONBOARD_PHASES` stays `["inventory"]`
+ * exactly as W1-T82 shipped it) are implemented — session/synthesis are W1-T84/85, separate
+ * future tasks not built here; any other `--phase` value fails loud (usage + non-zero exit,
+ * zero work done) before any fs/gh call, the same `parseProjectInitArgs`-style
+ * validate-first discipline `rmd project init` already applies (Standing rule / LEARNINGS.md
  * control-surface-fail-loud-stop-one-shot). `--owner`/`--repo` override auto-detection;
  * omitted, they are derived from the target checkout's own `git remote.origin.url`
  * ({@link resolveTargetOwnerRepo}) — unresolved leaves every GitHub fact `"unknown"` rather
@@ -7703,6 +7718,14 @@ interface OnboardCommandDeps {
 }
 
 export async function onboardCommand(rest: string[], deps: OnboardCommandDeps = {}): Promise<number> {
+  // `--phase recon` routes to reconCommand's OWN parser/runner (src/lib/onboard/recon.ts)
+  // BEFORE inventory.ts's parseOnboardArgs ever sees it — inventory.ts's own
+  // KNOWN_ONBOARD_PHASES (and its committed W1-T82 test asserting "recon" is unknown to
+  // THAT parser) stays exactly as shipped; only this command-level routing is new.
+  if (flagValue(rest, "--phase") === RECON_PHASE) {
+    return reconCommand(rest);
+  }
+
   const { fs: fsDep, gh: ghDep, resolveOwnerRepo } = {
     fs: realOnboardFsDeps,
     gh: realOnboardGhGateway(),
@@ -7744,6 +7767,115 @@ export async function onboardCommand(rest: string[], deps: OnboardCommandDeps = 
       `milestones=${inventory.github.milestoneCount}`,
   );
   console.log(`\nwrote ${writtenPath}`);
+  return 0;
+}
+
+/**
+ * `rmd onboard <target-dir> --phase recon [--owner <o> --repo <r>]` — phase 2 of the
+ * four-phase `rmd onboard` family (MASTER-PLAN ★P24(2), W1-T83): mines existing plan
+ * artifacts (ROADMAP/TODO/ADR intents/open issues) deterministically AND consults all four
+ * W2-T1 specialist lenses (security/testing/design/containment — src/lib/specialist-panel.ts),
+ * read-only, pointed at the WHOLE target repo instead of a diff (src/lib/onboard/recon.ts).
+ * Writes ONLY `plan/onboarding/findings.md` + `plan/onboarding/candidates.json`; every
+ * candidate cites its source verbatim, and mined vs inferred stays a labeled distinction end
+ * to end. Candidates are inputs to the phase 3 planning session, never dispatchable tasks
+ * (Standing rule 15). `onboardCommand` above routes `--phase recon` HERE before inventory.ts's
+ * own parser ever runs.
+ *
+ * The default real `runLens` renders the SAME worker-settings template + hooks every task
+ * worker uses (`renderWorkerSettings`/`validateWorkerSettingsFile`, FF10a) and runs the SAME
+ * once-per-run containment preflight (`probeContainment`, containment.ts, W1-T2) before the
+ * first lens spawn — proven empirically, not merely configured, exactly like every other real
+ * spawn in this repo. A lens that fails to spawn, times out, or errors contributes ZERO
+ * inferred candidates (logged, advisory only — Standing rule 12) rather than aborting the
+ * whole recon: the deterministic miner's candidates must never be held hostage to one flaky
+ * LLM call.
+ */
+interface ReconCommandDeps {
+  fs?: ReconFsDeps;
+  gh?: ReconGhGateway;
+  resolveOwnerRepo?: typeof resolveTargetOwnerRepo;
+  /** Injectable per-lens raw-text runner — tests supply canned text; omitted, the real
+   *  spawn-backed default below is used. */
+  runLens?: (specialist: SpecialistName) => Promise<string>;
+}
+
+/** A deliberately modest, fixed mount for the recon lenses — there is no mounts.yaml row for
+ *  an ad hoc whole-repo recon read (that table routes DRAINED plan tasks, W1-T83 is a
+ *  one-off CLI spawn), so this is a conservative, explicit default rather than a borrowed
+ *  task-routing cell. */
+const RECON_LENS_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 30, contextBudget: 150_000 };
+
+/** The real, spawn-backed `runLens`: settings are rendered and containment is
+ *  probed ONCE (lazily, on the first lens) and reused for the remaining three — the
+ *  invariant containment.ts documents is per-RUN, not per-spawn. */
+function defaultReconRunLens(targetDir: string, owner: string | undefined, repo: string | undefined): (specialist: SpecialistName) => Promise<string> {
+  let preparedSettingsFile: string | undefined;
+  return async (specialist) => {
+    try {
+      if (!preparedSettingsFile) {
+        const settingsFile = renderWorkerSettings({
+          templatePath: join(repoRoot, "settings", "worker.json"),
+          hooksDir: join(repoRoot, "hooks"),
+          outPath: join(loadConfig().root, "tmp", `onboard-recon-settings-${Date.now()}.json`),
+        });
+        validateWorkerSettingsFile(settingsFile);
+        await probeContainment({ settingsFile, config: loadConfig() });
+        preparedSettingsFile = settingsFile;
+      }
+      const result = await spawnReconSpecialist({
+        input: { specialist, targetDir, owner, repo },
+        mount: RECON_LENS_MOUNT,
+        settingsFile: preparedSettingsFile,
+      });
+      return result.text;
+    } catch (e) {
+      console.error(`rmd onboard recon: ${specialist} lens unavailable (advisory only, continuing): ${String((e as Error)?.message ?? e)}`);
+      return "";
+    }
+  };
+}
+
+export async function reconCommand(rest: string[], deps: ReconCommandDeps = {}): Promise<number> {
+  const parsed = parseReconArgs(rest);
+  if (!parsed.ok) {
+    console.error(parsed.error + "\n" + USAGE);
+    return 2;
+  }
+  const { targetDir, owner: ownerFlag, repo: repoFlag } = parsed.args;
+
+  const { fs: fsDep, gh: ghDep, resolveOwnerRepo } = {
+    fs: realReconFsDeps,
+    gh: realReconGhGateway(),
+    resolveOwnerRepo: resolveTargetOwnerRepo,
+    ...deps,
+  };
+
+  const resolved = ownerFlag && repoFlag ? undefined : resolveOwnerRepo(targetDir);
+  const owner = ownerFlag ?? resolved?.owner;
+  const repo = repoFlag ?? resolved?.repo;
+
+  const runLens = deps.runLens ?? defaultReconRunLens(targetDir, owner, repo);
+
+  let candidates, findingsPath, candidatesPath;
+  try {
+    ({ candidates, findingsPath, candidatesPath } = await runOnboardRecon(targetDir, { owner, repo }, { fs: fsDep, gh: ghDep, runLens }));
+  } catch (e) {
+    if (e instanceof ReconError) {
+      console.error(e.message);
+      return 2;
+    }
+    throw e;
+  }
+
+  const minedCount = candidates.filter((c) => c.confidence === "mined").length;
+  const inferredCount = candidates.filter((c) => c.confidence === "inferred").length;
+  console.log(`### rmd onboard ${targetDir} --phase recon`);
+  console.log(`target: ${owner ?? "unknown"}/${repo ?? "unknown"}`);
+  console.log(`lenses consulted: ${RECON_LENSES.join(", ")}`);
+  console.log(`candidates: ${candidates.length} (${minedCount} mined, ${inferredCount} inferred)`);
+  console.log(`wrote ${findingsPath}`);
+  console.log(`wrote ${candidatesPath}`);
   return 0;
 }
 
@@ -8038,7 +8170,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "onboard",
     usage:
-      "rmd onboard <target-dir> --phase inventory [--owner <o> --repo <r>]   # phase 1 of the `rmd onboard` family (MASTER-PLAN \u2605P24(1), W1-T82): a deterministic, no-LLM repo inventory over a TARGET checkout \u2014 languages, build/CI systems, docs presence (README/CONTRIBUTING/AGENTS.md/CLAUDE.md/ADRs/ROADMAP/TODO), branch-protection state, issue/milestone counts, test-signal presence \u2014 via policy-as-data detector tables (src/lib/onboard/inventory.ts); read-only against the target + gh api, writes ONLY <target-dir>/plan/onboarding/inventory.json; unresolved GitHub facts render as the literal \"unknown\", never guessed; --phase is REQUIRED and today ONLY inventory is implemented (recon/session/synthesis are W1-T83/84/85, not yet built) \u2014 any other value fails loud, spawning/writing nothing",
+      "rmd onboard <target-dir> --phase inventory|recon [--owner <o> --repo <r>]   # the `rmd onboard` family (MASTER-PLAN \u2605P24, W1-T82/83): --phase inventory is a deterministic, no-LLM repo inventory over a TARGET checkout \u2014 languages, build/CI systems, docs presence (README/CONTRIBUTING/AGENTS.md/CLAUDE.md/ADRs/ROADMAP/TODO), branch-protection state, issue/milestone counts, test-signal presence \u2014 via policy-as-data detector tables (src/lib/onboard/inventory.ts), writing ONLY <target-dir>/plan/onboarding/inventory.json; --phase recon mines existing plan artifacts (ROADMAP/TODO/ADR intents/open issues) deterministically AND consults the four read-only W2-T1 specialist lenses (security/testing/design/containment) pointed at the whole repo (src/lib/onboard/recon.ts), writing ONLY plan/onboarding/findings.md + candidates.json \u2014 every candidate cites its source verbatim and mined vs inferred stays a labeled distinction; session/synthesis are W1-T84/85, not yet built. Read-only against the target + gh api; unresolved GitHub facts render as the literal \"unknown\", never guessed; --phase is REQUIRED \u2014 any other value fails loud, spawning/writing nothing",
   },
   {
     name: "feedback",

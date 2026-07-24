@@ -50,10 +50,12 @@ import { type GitRunner, materializeOriginShards, escalateCommand, digestCommand
   ghPrCreateFillCommand,
   reviewCommand,
   onboardCommand,
+  reconCommand,
   lintPlanCommand,
   main,
 } from "../src/run-task.js";
 import { realOnboardFsDeps, type OnboardGhGateway } from "../src/lib/onboard/inventory.js";
+import { realReconFsDeps, type ReconGhGateway } from "../src/lib/onboard/recon.js";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import type { Config } from "../src/lib/config.js";
 import { judgeReview } from "../src/lib/review.js";
@@ -3559,7 +3561,7 @@ function fixtureOnboardGhGateway(): OnboardGhGateway {
 
 test("onboardCommand: a bad --phase value (or missing target dir) fails loud — exit 2, zero fs/gh work attempted", async (t) => {
   const errSpy = t.mock.method(console, "error", () => {});
-  const code = await onboardCommand(["/some/dir", "--phase", "recon"], {
+  const code = await onboardCommand(["/some/dir", "--phase", "synthesis"], {
     fs: realOnboardFsDeps,
     gh: fixtureOnboardGhGateway(),
     resolveOwnerRepo: () => {
@@ -3568,6 +3570,108 @@ test("onboardCommand: a bad --phase value (or missing target dir) fails loud —
   });
   assert.equal(code, 2);
   assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /--phase must be one of/);
+});
+
+// ── W1-T83: `rmd onboard <target-dir> --phase recon` CLI wrapper ────────────────────────
+// onboardCommand routes `--phase recon` straight to reconCommand (before inventory.ts's own
+// parser ever sees it — that parser keeps rejecting "recon" exactly as W1-T82 committed it,
+// proven separately in test/onboard-inventory.test.ts). These tests exercise reconCommand's
+// own thin wrapper (parse args -> resolve owner/repo -> delegate to runOnboardRecon -> print
+// a summary) via its injectable deps seam, the same shape onboardCommand's own tests use.
+
+const ONBOARD_RECON_FIXTURE_REPO_DIR = fileURLToPath(new URL("./fixtures/onboard-recon/repo/", import.meta.url));
+
+function fixtureReconGhGateway(): ReconGhGateway {
+  return {
+    listOpenIssues: () => ({ known: true, value: [{ number: 1, title: "widget catalog missing SKUs" }] }),
+  };
+}
+
+test("onboardCommand: --phase recon routes to reconCommand — a missing target dir fails loud through reconCommand's OWN parser, not inventory.ts's", async (t) => {
+  const errSpy = t.mock.method(console, "error", () => {});
+  const code = await onboardCommand(["--phase", "recon"]);
+  assert.equal(code, 2);
+  assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /<target-dir> is required/);
+});
+
+test("reconCommand: a target directory that does not exist fails loud through the caught ReconError — exit 2", async (t) => {
+  const errSpy = t.mock.method(console, "error", () => {});
+  const parentDir = mkdtempSync(join(tmpdir(), "rmd-onboard-recon-cmd-missing-"));
+  const missingTargetDir = join(parentDir, "does-not-exist");
+
+  const code = await reconCommand([missingTargetDir, "--phase", "recon"], {
+    fs: realReconFsDeps,
+    gh: fixtureReconGhGateway(),
+    resolveOwnerRepo: () => ({ owner: "acme-corp", repo: "widget-fixture" }),
+    runLens: async () => "",
+  });
+
+  assert.equal(code, 2);
+  assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /does not exist/);
+});
+
+test("reconCommand: the fixture repo, --owner/--repo flags supplied, a canned lens output, exits 0 and prints a mined+inferred summary", async (t) => {
+  const logSpy = t.mock.method(console, "log", () => {});
+  const targetDir = mkdtempSync(join(tmpdir(), "rmd-onboard-recon-cmd-ok-"));
+  cpSync(ONBOARD_RECON_FIXTURE_REPO_DIR, targetDir, { recursive: true });
+
+  const code = await reconCommand([targetDir, "--phase", "recon", "--owner", "acme-corp", "--repo", "widget-fixture"], {
+    fs: realReconFsDeps,
+    gh: fixtureReconGhGateway(),
+    resolveOwnerRepo: () => {
+      throw new Error("--owner/--repo were both supplied — resolveOwnerRepo must never be called");
+    },
+    runLens: async (specialist) => (specialist === "design" ? "RECON_FINDING: no ADR for the cache layer (source: #1)" : ""),
+  });
+
+  assert.equal(code, 0);
+  const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
+  assert.match(printed, /rmd onboard .* --phase recon/);
+  assert.match(printed, /target: acme-corp\/widget-fixture/);
+  assert.match(printed, /lenses consulted: security, testing, design, containment/);
+  assert.match(printed, /candidates: \d+ \(\d+ mined, 1 inferred\)/);
+  assert.match(printed, /wrote .*findings\.md/);
+  assert.match(printed, /wrote .*candidates\.json/);
+  assert.ok(existsSync(join(targetDir, "plan", "onboarding", "findings.md")));
+  assert.ok(existsSync(join(targetDir, "plan", "onboarding", "candidates.json")));
+});
+
+test("reconCommand: owner/repo omitted falls through to the injected resolveOwnerRepo (auto-detection), not a hardcoded default", async (t) => {
+  const logSpy = t.mock.method(console, "log", () => {});
+  const targetDir = mkdtempSync(join(tmpdir(), "rmd-onboard-recon-cmd-resolve-"));
+  cpSync(ONBOARD_RECON_FIXTURE_REPO_DIR, targetDir, { recursive: true });
+  let sawTargetDir: string | undefined;
+
+  const code = await reconCommand([targetDir, "--phase", "recon"], {
+    fs: realReconFsDeps,
+    gh: fixtureReconGhGateway(),
+    resolveOwnerRepo: (dir) => {
+      sawTargetDir = dir;
+      return { owner: "resolved-org", repo: "resolved-repo" };
+    },
+    runLens: async () => "",
+  });
+
+  assert.equal(code, 0);
+  assert.equal(sawTargetDir, targetDir);
+  const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
+  assert.match(printed, /target: resolved-org\/resolved-repo/);
+});
+
+test("reconCommand: a bad --phase value (not \"recon\") or missing target dir fails loud — exit 2, zero fs/gh work attempted", async (t) => {
+  const errSpy = t.mock.method(console, "error", () => {});
+  const code = await reconCommand(["/some/dir", "--phase", "inventory"], {
+    fs: realReconFsDeps,
+    gh: fixtureReconGhGateway(),
+    resolveOwnerRepo: () => {
+      throw new Error("must not be called — arg parsing must fail before any resolution work");
+    },
+    runLens: async () => {
+      throw new Error("must not be called — arg parsing must fail before any lens spawn");
+    },
+  });
+  assert.equal(code, 2);
+  assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /--phase must be "recon"/);
 });
 
 test("onboardCommand: a target directory that does not exist fails loud through the caught OnboardError — exit 2", async (t) => {

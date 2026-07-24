@@ -1,0 +1,27 @@
+[
+  {
+    "number": 1,
+    "title": "widget catalog missing SKUs",
+    "state": "open",
+    "html_url": "https://github.com/acme-corp/widget-fixture/issues/1"
+  },
+  {
+    "number": 2,
+    "title": "gadget catalog missing SKUs",
+    "state": "open",
+    "html_url": "https://github.com/acme-corp/widget-fixture/issues/2"
+  },
+  {
+    "number": 3,
+    "title": "closed already, must not be counted",
+    "state": "closed",
+    "html_url": "https://github.com/acme-corp/widget-fixture/issues/3"
+  },
+  {
+    "number": 4,
+    "title": "a pull request, not an issue, must not be counted",
+    "state": "open",
+    "html_url": "https://github.com/acme-corp/widget-fixture/pull/4",
+    "pull_request": { "url": "https://api.github.com/repos/acme-corp/widget-fixture/pulls/4" }
+  }
+]
