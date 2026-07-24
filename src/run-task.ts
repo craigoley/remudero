@@ -2454,6 +2454,12 @@ async function runTask(
       log("verdict", {
         verdict: "blocked_containment",
         reason: e.message,
+        // W1-T91/P23 (i): structured guard-cause alongside the prose reason — a
+        // guard-fired block reads as INFRASTRUCTURE at retro-read time without
+        // parsing prose (plan/mast-mapping.yaml's infrastructure row).
+        guard: e.guard,
+        check: e.check,
+        observed: e.observed,
         cost_usd: costUsd,
         billing_mode: "subscription",
       });
@@ -2485,6 +2491,11 @@ async function runTask(
       log("verdict", {
         verdict: "blocked_isolation",
         reason: e.message,
+        // W1-T91/P23 (i): structured guard-cause alongside the prose reason — see
+        // the identical comment on the ContainmentError branch above.
+        guard: e.guard,
+        check: e.check,
+        observed: e.observed,
         cost_usd: costUsd,
         billing_mode: "subscription",
       });

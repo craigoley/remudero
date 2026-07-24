@@ -52,8 +52,9 @@ const SEEDED_LEDGER = [
 
 const EXPECTED_CATEGORY_DISTRIBUTION = {
   "inter-agent": 1,
+  infrastructure: 2,
   specification: 3,
-  verification: 6,
+  verification: 4,
 };
 
 const EXPECTED_UNMAPPED = {
@@ -105,6 +106,31 @@ rows:
   const after = mastCategoryDistribution(runs, tempMapping);
   assert.deepEqual(after.byCategory, { "inter-agent": 1 });
   assert.deepEqual(after.unmapped, {});
+});
+
+test("W1-T91 ACCEPTANCE: the mapping's infrastructure row routes BOTH guard classes; removing the row reports them unmapped, never mis-coded into an agent-failure category", () => {
+  const runs = gatherRuns(
+    parseLedger([...line("I", "TI", "blocked_isolation"), ...line("C", "TC", "blocked_containment")].join("\n")),
+  );
+  // With the shipped table: both guard verdicts route to `infrastructure`, not
+  // `verification` (or any other MAST agent-failure category).
+  const before = mastCategoryDistribution(runs, REAL_MAPPING);
+  assert.equal(before.byCategory.infrastructure, 2);
+  assert.equal("verification" in before.byCategory, false);
+  assert.deepEqual(before.unmapped, {});
+
+  // Remove the two infrastructure rows (a temp mapping missing them entirely) —
+  // the runs must report UNMAPPED, never silently fall back into a guessed
+  // agent-failure category. Proves the row IS the classifier (Rule 2).
+  const withoutInfraRows = parseMastMapping(`
+rows:
+  - verdict: blocked_review
+    mast_mode: "FM-3.2 No or Incomplete Verification"
+    category: verification
+`);
+  const after = mastCategoryDistribution(runs, withoutInfraRows);
+  assert.deepEqual(after.byCategory, {});
+  assert.deepEqual(after.unmapped, { blocked_containment: 1, blocked_isolation: 1 });
 });
 
 test("mastRowFor: an exact (verdict, subtype) row wins over that verdict's bare-verdict sibling", () => {

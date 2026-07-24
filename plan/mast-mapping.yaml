@@ -24,8 +24,14 @@
 # `merged` carries no row: success is out of scope for a FAILURE distribution (P18's own
 # framing) — mastCategoryDistribution skips it before ever consulting this table.
 #
-# `provisional: true` marks a row P23's investigation (MASTER-PLAN, ratified via W1-T91) is
-# still refining — a mapping-as-data edit, not a code change, once it lands.
+# `infrastructure` is a FOURTH category, alongside MAST's three (specification/inter-agent/
+# verification): a guard (isolation|containment) firing CORRECTLY is not an agent failure at
+# all -- it is the harness's own preflight catching a HOST condition (an unproven sandbox, a
+# populated ~/.bashrc) before any task work runs. Coding it into `verification` (as if the
+# review/gate step "failed to catch" something) would misattribute a host signal to the task.
+# mastCategoryDistribution counts `infrastructure` in its own `byCategory` bucket like any
+# other category -- data, not special-cased code (W1-T91/P23 part iii) -- and
+# `taskDefectCounts` EXCLUDES it from a task's defect count for the identical reason (part ii).
 
 rows:
   - verdict: blocked_illformed
@@ -79,16 +85,19 @@ rows:
     comment: "the dedup guard found another run already claiming this task/branch"
 
   - verdict: blocked_containment
-    mast_mode: "FM-3.2 No or Incomplete Verification"
-    category: verification
-    provisional: true
+    mast_mode: "N/A -- guard-fired, not an agent failure mode"
+    category: infrastructure
     comment: >-
       P23 (MASTER-PLAN, ratified via W1-T91): the investigated novel blocks were guards firing
-      CORRECTLY, not task defects -- category is a placeholder pending P23's own refined
-      guard-fired bucket; this row is the one line that changes when it lands.
+      CORRECTLY -- the containment preflight (src/lib/containment.ts) proving the sandbox
+      unproven/dropped, before any task worker ran. Resolves W1-T89's provisional placeholder
+      (previously `verification`, marked `provisional: true`) to this explicit non-agent-failure
+      bucket, exactly as that row's own comment said it would -- a row edit, zero code change.
 
   - verdict: blocked_isolation
-    mast_mode: "FM-3.2 No or Incomplete Verification"
-    category: verification
-    provisional: true
-    comment: "P23's pair with blocked_containment above -- same provisional status, same investigation"
+    mast_mode: "N/A -- guard-fired, not an agent failure mode"
+    category: infrastructure
+    comment: >-
+      P23's pair with blocked_containment above -- the isolation preflight
+      (src/lib/isolation.ts) proving operator shell state leaked into a worker, before any task
+      work ran. Same resolution, same investigation.

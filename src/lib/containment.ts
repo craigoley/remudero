@@ -29,9 +29,25 @@ import { reapWorkerScratch } from "./worker-scratch.js";
 
 /** Named error so callers (and tests) can assert the fail-closed fired by type. */
 export class ContainmentError extends Error {
-  constructor(message: string) {
+  /**
+   * STRUCTURED GUARD-CAUSE (W1-T91/P23, ratifies the design's part (i)) — the
+   * containment sibling of {@link import("./isolation.js").IsolationError}'s same
+   * fields. `check` names WHICH gate fired (`sandbox-enabled` for the static
+   * config gate, `outside-cwd-denial` for the empirical probe); `observed`
+   * preserves the three-state epistemology (proven-holding | proven-broken |
+   * UNPROVEN) verbatim rather than collapsing it to a boolean — the literal
+   * "unproven" when no OS-denial was observed (the write may never have been
+   * attempted), a data description when the sandbox was PROVEN to have dropped
+   * (the outside write landed), or a config description for the static gate.
+   */
+  readonly guard = "containment" as const;
+  readonly check: string;
+  readonly observed: string;
+  constructor(message: string, check: string, observed: string) {
     super(message);
     this.name = "ContainmentError";
+    this.check = check;
+    this.observed = observed;
   }
 }
 
@@ -177,6 +193,8 @@ export async function probeContainment(opts: {
   } catch (e) {
     throw new ContainmentError(
       `containment preflight: settings file does not declare an enabled sandbox — ${String((e as Error)?.message ?? e)}`,
+      "sandbox-enabled",
+      "disabled",
     );
   }
 
@@ -205,8 +223,18 @@ export async function probeContainment(opts: {
     cost_usd: costUsd,
   });
   if (!verdict.contained) {
+    // OBSERVED (W1-T91/P23 part i): the write's OWN outcome names which of the two
+    // failure states this was — proven-broken (the outside write LANDED, the
+    // sandbox did not engage) is data-bearing; the no-denial-observed path is
+    // genuinely UNPROVEN (the write may never have been attempted) and reports the
+    // literal "unproven" rather than a fabricated data string.
+    const observed = evidence.outsideWriteCreated
+      ? "outside-cwd write succeeded (sandbox did not engage)"
+      : "unproven";
     throw new ContainmentError(
       `containment UNPROVEN: ${verdict.reason} — FAIL CLOSED, the run does not proceed`,
+      "outside-cwd-denial",
+      observed,
     );
   }
   return { contained: true, reason: verdict.reason, evidence, costUsd };
