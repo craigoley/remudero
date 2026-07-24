@@ -12,7 +12,9 @@ import {
   lintPlan,
   lintTask,
   moduleIdFromPath,
+  PROOF_PAYLOAD_SHAPES,
   proofDialectViolations,
+  proofResolvabilityViolations,
   proofShapeViolations,
   provenanceViolation,
   sizingViolation,
@@ -148,9 +150,11 @@ const W1_T4_SHAPE = task({
 test("ACCEPTANCE 2: a multi-criteria SINGLE-concern task (W1-T4 shape) is NOT flagged — no false positive on raw criterion count", () => {
   assert.equal(sizingViolation(W1_T4_SHAPE), undefined);
   // W1_T4_SHAPE is the REAL, still-open W1-T4's verbatim prose proofs (a live dead-proof-floor
-  // offender, per W1-T246's own census) — proofDialect:"warn" isolates THIS test to what it is
-  // actually about (sizing), matching how the pre-dispatch call site treats the legacy backlog.
-  const res = lintTask(W1_T4_SHAPE, { proofDialect: "warn" });
+  // offender, per W1-T246's own census, and a live proof-resolvability offender too: its
+  // criterion 3 `grep:` proof names no `in <path>` clause) — warn-demoting BOTH checks isolates
+  // THIS test to what it is actually about (sizing), matching how the pre-dispatch call site
+  // treats the legacy backlog.
+  const res = lintTask(W1_T4_SHAPE, { proofDialect: "warn", proofResolvability: "warn" });
   assert.equal(
     res.violations.some((v) => v.check === "sizing"),
     false,
@@ -566,15 +570,23 @@ test("near-miss prefixes (unit tests:/unit test over/grep: with no path) are BLO
   for (const v of [v1[0]!, v2[0]!, v3[0]!, v4[0]!]) assert.equal(v.severity, "block");
 });
 
-test("a unit test: proof whose body reads as a runtime narrative (the W1-T79-criteria-3/4 shape) WARNS but does not block", () => {
+test("a unit test: proof whose body reads as a runtime narrative (the W1-T79-criteria-3/4 shape): proof-dialect itself still only WARNS, but the SAME narrative — carrying no path/::-anchor — is now a proof-resolvability BLOCK (W1-T101)", () => {
   const t = task({
     id: "FIX-DIALECT-NONTITLE",
     acceptance: [{ claim: "up-to-date adds nothing", proof: "unit test: same-sha fixture -> no pull, no re-exec, no output beyond the command's own" }],
   });
-  const violations = proofDialectViolations(t);
-  assert.equal(violations.length, 1);
-  assert.equal(violations[0]!.severity, "warn");
-  assert.equal(lintTask(t).ok, true, "a warn must never block, regardless of opts.proofDialect");
+  // proofDialectViolations (W1-T246) is UNCHANGED — it still only warns on this shape.
+  const dialectViolations = proofDialectViolations(t);
+  assert.equal(dialectViolations.length, 1);
+  assert.equal(dialectViolations[0]!.severity, "warn");
+  // But proofResolvabilityViolations (W1-T101) recognizes this EXACT shape — a `unit
+  // test:` body with two enumerated clauses ("no pull", "no re-exec") and no path/::
+  // anchor — as unresolvable, and BLOCKS it: the gap this task exists to close.
+  const resolvabilityViolations = proofResolvabilityViolations(t);
+  assert.equal(resolvabilityViolations.length, 1);
+  assert.equal(resolvabilityViolations[0]!.check, "proof-resolvability");
+  assert.equal(resolvabilityViolations[0]!.severity, "block");
+  assert.equal(lintTask(t).ok, false, "the aggregate now blocks — a warn-only heuristic is no longer the last word on this shape");
 });
 
 test("W1-T246 ACCEPTANCE 3: unit test: proofDialect warn mode returns ok true with the violation surfaced, never blocking", () => {
@@ -608,6 +620,140 @@ test("a satisfied_by criterion is exempt — Architect-only, never expected to b
     acceptance: [{ claim: "already shipped elsewhere", proof: "free prose, never executed", satisfied_by: "#123" }],
   });
   assert.deepEqual(proofDialectViolations(t), []);
+});
+
+// ── PROOF-RESOLVABILITY (W1-T101 — a dialect prefix is a promise) ────────────
+
+test("ACCEPTANCE 1: the W1-T100 regression corpus — all three verbatim proofs flag, remedy text names both options", () => {
+  // Loaded VERBATIM from the real, still-open plan/tasks.yaml (REAL_PLAN, defined above) —
+  // the EXACT ledger incident (proof_exec [not_executable x3]) that motivated this check.
+  const w1t100 = REAL_PLAN.byId.get("W1-T100");
+  assert.ok(w1t100, "expected W1-T100 in the real plan");
+  const [c1, c2, c3] = w1t100!.acceptance!;
+  assert.match(c1!.proof, /^unit test: the seeded state/, "criterion 1 is dialect-prefixed but names no anchor");
+  assert.match(c2!.proof, /^unit test: same state with strikes at cap/, "criterion 2 is dialect-prefixed but names no anchor");
+  assert.match(
+    c3!.proof,
+    /^existing W1-T93\/W1-T77/,
+    "criterion 3 carries NO dialect prefix — its violation comes from proof-dialect's existing free-prose block, not this rule",
+  );
+
+  assert.equal(lintTask(w1t100!).ok, false);
+
+  // Criteria 1 and 2 ARE dialect-prefixed but unresolvable — THIS rule flags them.
+  const resolvability = proofResolvabilityViolations(w1t100!);
+  assert.equal(resolvability.length, 2, "exactly the two dialect-prefixed, anchor-less proofs — never criterion 3");
+  for (const v of resolvability) {
+    assert.equal(v.severity, "block");
+    assert.match(v.message, /resolvable/i);
+    assert.match(v.message, /name a literal test|name a pattern/i, "remedy names an artifact option");
+    assert.match(v.message, /drop the/i, "remedy names the drop-the-prefix option");
+  }
+  assert.match(resolvability[0]!.message, /criterion 1/);
+  assert.match(resolvability[1]!.message, /criterion 2/);
+
+  // Criterion 3 carries no prefix, so THIS rule leaves it untouched — but the task's
+  // aggregate lint STILL flags it, via the pre-existing (unchanged) proof-dialect
+  // free-prose block, so "violation each" holds across the full three-proof corpus.
+  const c3Violations = lintTask(w1t100!).violations.filter((v) => v.message.includes("criterion 3"));
+  assert.ok(
+    c3Violations.some((v) => v.check === "proof-dialect"),
+    "criterion 3 is still caught, by the existing free-prose block",
+  );
+  assert.ok(
+    !c3Violations.some((v) => v.check === "proof-resolvability"),
+    "criterion 3 makes no dialect promise — untouched by THIS rule",
+  );
+});
+
+test("ACCEPTANCE 2: a resolvable unit test: proof (path + ::test-name), a resolvable grep: proof (pattern + in <path>), and an unprefixed prose proof all pass clean", () => {
+  const resolvableTest = task({
+    id: "FIX-RESOLVABLE-TEST",
+    acceptance: [{ claim: "routes ci-red to blocked-fixable", proof: "unit test: test/sweep.test.ts::routes ci-red to blocked-fixable" }],
+  });
+  assert.deepEqual(proofResolvabilityViolations(resolvableTest), []);
+
+  const resolvableGrep = task({
+    id: "FIX-RESOLVABLE-GREP",
+    acceptance: [{ claim: "the wx flag is present", proof: "grep: the wx flag in src/lib/config.ts" }],
+  });
+  assert.deepEqual(proofResolvabilityViolations(resolvableGrep), []);
+
+  const prose = task({
+    id: "FIX-RESOLVABLE-PROSE",
+    acceptance: [{ claim: "does the thing", proof: "an unprefixed prose proof, with one clause, with two clauses, with three" }],
+  });
+  assert.deepEqual(proofResolvabilityViolations(prose), [], "no dialect prefix -> untouched by this rule, regardless of shape");
+});
+
+test("ACCEPTANCE 3: the resolvable shapes are DATA — a seeded new payload-shape row admits a new form with zero engine changes", () => {
+  const narrativeWithMarker = task({
+    id: "FIX-CUSTOM-SHAPE",
+    acceptance: [
+      { claim: "a custom marker anchors the scenario", proof: "unit test: given state one, given state two, resolves via @custom-marker-42" },
+    ],
+  });
+  // Under the DEFAULT shapes table this is a multi-clause narrative with no path/::
+  // anchor -> blocked.
+  const before = proofResolvabilityViolations(narrativeWithMarker);
+  assert.equal(before.length, 1);
+  assert.equal(before[0]!.severity, "block");
+
+  // Adding ONE new data row (zero changes to proofResolvabilityViolations itself)
+  // admits the new form.
+  const withCustomRow = [...PROOF_PAYLOAD_SHAPES, { tag: "custom-marker", dialect: "unit test" as const, pattern: /@custom-marker-\d+/ }];
+  const after = proofResolvabilityViolations(narrativeWithMarker, {}, withCustomRow);
+  assert.deepEqual(after, []);
+});
+
+test("a well-formed-looking grep: proof missing its in <path> clause is ALSO a proof-resolvability violation (redundant with, not a replacement for, proof-dialect's own refusal)", () => {
+  const t = task({
+    id: "FIX-GREP-NO-PATH-RESOLVABILITY",
+    acceptance: [{ claim: "does the thing", proof: "grep: no callers of the old API remain" }],
+  });
+  const v = proofResolvabilityViolations(t);
+  assert.equal(v.length, 1);
+  assert.equal(v[0]!.severity, "block");
+  assert.match(v[0]!.message, /in <path>/);
+});
+
+test("proofResolvability warn mode returns ok true with the violation surfaced, never blocking — the SAME rollout convention as proofDialect (W1-T246)", () => {
+  const t = task({
+    id: "FIX-RESOLVABILITY-WARN-MODE",
+    acceptance: [{ claim: "does the thing", proof: "unit test: given state one, given state two, given state three" }],
+  });
+  const blockRes = lintTask(t); // default severity is "block"
+  assert.equal(blockRes.ok, false);
+  assert.ok(blockRes.violations.some((v) => v.check === "proof-resolvability" && v.severity === "block"));
+
+  const warnRes = lintTask(t, { proofResolvability: "warn" });
+  assert.equal(warnRes.ok, true, "warn mode must never block dispatch — the legacy backlog must not brick overnight");
+  assert.ok(
+    warnRes.violations.some((v) => v.check === "proof-resolvability" && v.severity === "warn"),
+    "the violation is still surfaced, just demoted",
+  );
+});
+
+test("a single-arrow unit test: body (this repo's idiomatic single-clause test-title shape, e.g. real titles like 'critical severity -> escalate') is NOT flagged, even without a path/::-anchor", () => {
+  const t = task({
+    id: "FIX-SINGLE-ARROW-OK",
+    acceptance: [{ claim: "critical severity escalates", proof: "unit test: critical severity -> escalate" }],
+  });
+  assert.deepEqual(proofResolvabilityViolations(t), []);
+});
+
+test("a satisfied_by criterion is exempt from proof-resolvability too — Architect-only, never expected to be executable prose", () => {
+  const t = task({
+    id: "FIX-RESOLVABILITY-SATISFIED-BY",
+    acceptance: [{ claim: "already shipped elsewhere", proof: "unit test: given one, given two, given three", satisfied_by: "#123" }],
+  });
+  assert.deepEqual(proofResolvabilityViolations(t), []);
+});
+
+test("proofResolvabilityViolations reuses parseWhitelistedProof's sibling dialect shape, never a check that silently drifts from the linter's own module contract", () => {
+  const src = readFileSync(fileURLToPath(new URL("../src/lib/task-linter.ts", import.meta.url)), "utf8");
+  assert.match(src, /PROOF_PAYLOAD_SHAPES/);
+  assert.match(src, /export function proofResolvabilityViolations/);
 });
 
 // ── PROVENANCE (Rules 16/17) ──────────────────────────────────────────────────
@@ -662,10 +808,11 @@ test("ACCEPTANCE 5: assertLintClean THROWS TaskLintError for a malformed task; a
     assert.ok(e.violations.length > 0);
   }
   // W1_T4_SHAPE carries the REAL, still-open W1-T4's verbatim prose proofs — a live
-  // proof-dialect offender (W1-T246), so this ACCEPTANCE-5 check (which predates W1-T246 and
-  // is about sizing/headless-fitness/proof-shape/provenance, not proof-dialect) isolates the
-  // SAME way the pre-dispatch call site does for the legacy backlog: proofDialect:"warn".
-  assert.doesNotThrow(() => assertLintClean(W1_T4_SHAPE, { proofDialect: "warn" }));
+  // proof-dialect AND proof-resolvability offender (its criterion 3 is a `grep:`-prefixed
+  // proof with no `in <path>` clause: W1-T246, then W1-T101), so this ACCEPTANCE-5 check
+  // (which predates both and is about sizing/headless-fitness/proof-shape/provenance)
+  // isolates the SAME way the pre-dispatch call site does for the legacy backlog.
+  assert.doesNotThrow(() => assertLintClean(W1_T4_SHAPE, { proofDialect: "warn", proofResolvability: "warn" }));
 });
 
 // ── ACCEPTANCE 6: the canonical regression fixture ────────────────────────────
