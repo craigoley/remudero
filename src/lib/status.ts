@@ -297,6 +297,18 @@ export interface GitHub {
    */
   findMergedByHeadBranch?(taskId: string): PrRef[] | null;
   /**
+   * BATCHED form of {@link findMergedByHeadBranch} (W1-T257): ONE `gh pr list --state merged`
+   * carrying every merged PR's `headRefName`, so {@link projectPlan} can match `run-<taskId>-*`
+   * CLIENT-SIDE for the whole plan from a single fetch instead of one `gh` call per uncredited
+   * task (#737's per-task cost). Like {@link findMergedByTrailer}'s batched twin in
+   * {@link buildBatchedGithub}, this matches on the STRUCTURED head ref, NEVER the eventually-
+   * consistent body full-text index — reintroducing that index would restore the exact failure
+   * this whole mechanism exists to prevent. Returns the merged PRs (each carrying `headRefName`),
+   * or null if the read FAILED (→ readFailed()/W1-T119). OPTIONAL — omitted ⇒ projectPlan does no
+   * batching and derivation falls back to the per-task {@link findMergedByHeadBranch}.
+   */
+  listMergedHeadBranches?(): PrRef[] | null;
+  /**
    * The PR's head branch name, or undefined if it cannot be resolved. Backs
    * rung (c)'s ownership-assert (MASTER-PLAN P16 / W1-T69) — mirrors
    * run-task.ts's `PrHeadGateway` and retro.ts's `ShippedGithub.headRefName`.
@@ -401,6 +413,19 @@ export interface DeriveDeps {
    * every other optional dependency here already follows.
    */
   previousProjection?: (taskId: string) => StatusProjection | undefined;
+  /**
+   * BATCHED rung (c2) corroboration (W1-T257): a per-task lookup into the merged-PR head-branch
+   * index that {@link projectPlan} fetches ONCE per projection and shares across every task — so
+   * #737's per-task {@link GitHub.findMergedByHeadBranch} call collapses to a single `gh pr list`
+   * per cycle (five 07-23 GraphQL exhaustions were the multiplier this removes). Returns the
+   * OWNED merged candidates for a task (client-side matched from the one fetch, `run-<taskId>-*`),
+   * an EMPTY array when the batch succeeded but the task has no such branch, or `null` when the
+   * BATCHED fetch itself FAILED — in which case {@link derivePrPrecedence} falls back to the
+   * per-task {@link GitHub.findMergedByHeadBranch}, and if THAT also fails, `readFailed()` defers
+   * via W1-T119, never a false none. Omitted ⇒ the per-task fetch is used directly, exactly as
+   * #737 — the same fail-soft discipline every other optional dependency here follows.
+   */
+  mergedHeadBranches?: (taskId: string) => PrRef[] | null;
   /**
    * LIVENESS BOUND (W1-T179 design (ii)): how many milliseconds of ledger silence a
    * dispatched, unresolved run tolerates before it is no longer "running" absent an open
@@ -986,7 +1011,12 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   // resolves merged via the branch. Cost: one extra structured `gh pr list` per not-yet-credited
   // task per projection — bounded, and only on the path that would otherwise conclude "none".
   const corroborateByBranch = (): StatusProjection | undefined => {
-    const cands = deps.github.findMergedByHeadBranch?.(task.id);
+    // BATCHED first (W1-T257): the one-fetch-per-projection index projectPlan injected, if any.
+    // It returns null ONLY when the batched fetch FAILED — then, and only then, fall back to the
+    // per-task #737 fetch; on a batched+per-task failure `readFailed()` defers via W1-T119 below,
+    // never a false none. `undefined` (no batched index provided) also falls back — the exact #737
+    // path for direct deriveStatus callers.
+    const cands = deps.mergedHeadBranches?.(task.id) ?? deps.github.findMergedByHeadBranch?.(task.id);
     if (!cands) return undefined; // null (read failed → W1-T119) or method absent (fixture) — skip
     const debunked = debunkedTrailerUrls(ledgerLines, task.id);
     const hit = cands.find(
@@ -1338,6 +1368,35 @@ export function projectPlan(
   const readLedgerOnce = effectiveDeps.readLedger ?? readLedgerLines;
   const ledgerLinesOnce = readLedgerOnce(effectiveDeps.ledgerPath);
   effectiveDeps = { ...effectiveDeps, readLedger: () => ledgerLinesOnce };
+  // BATCHED rung (c2) CORROBORATION (W1-T257): #737 corroborates an empty trailer search with a
+  // per-task `gh pr list --search head:run-<taskId>-`, which fires for EVERY uncredited task on
+  // EVERY projection (the 07-23 GraphQL-exhaustion multiplier). Fetch every merged PR's head ref
+  // ONCE here — same batch-once-amortize-over-N-tasks shape as the ledger read above (and
+  // buildBatchedGithub) — and hand each task's `deriveStatus` a CLIENT-SIDE `run-<taskId>-\d+`
+  // match into that single fetch. Matches the STRUCTURED head ref, never the body full-text index.
+  // A FAILED batched read yields `null` for every task: derivePrPrecedence then falls back to the
+  // per-task `findMergedByHeadBranch`, and if THAT also fails, `readFailed()` defers via W1-T119 —
+  // never a false none. A gateway that doesn't implement the batched method (`undefined`) is left
+  // untouched, so per-task callers behave exactly as #737.
+  const allMerged = effectiveDeps.github.listMergedHeadBranches?.();
+  if (allMerged !== undefined) {
+    let byTask: Map<string, PrRef[]> | null = null;
+    if (allMerged !== null) {
+      byTask = new Map<string, PrRef[]>();
+      for (const pr of allMerged) {
+        const owner = /^run-(.+)-\d+$/.exec(pr.headRefName ?? "");
+        if (!owner) continue;
+        const existing = byTask.get(owner[1]);
+        if (existing) existing.push(pr);
+        else byTask.set(owner[1], [pr]);
+      }
+    }
+    const captured = byTask;
+    effectiveDeps = {
+      ...effectiveDeps,
+      mergedHeadBranches: captured ? (taskId: string) => captured.get(taskId) ?? [] : () => null,
+    };
+  }
   const byId = new Map<string, StatusProjection>();
   for (const task of plan.tasks) byId.set(task.id, deriveStatus(task, effectiveDeps));
   if (cachePath) {
@@ -1485,6 +1544,15 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
         "pr", "list", "--repo", slug, "--state", "merged",
         "--search", `head:run-${taskId}-`,
         "--json", "number,url,state,headRefName", "--limit", "10",
+      ]);
+    },
+    listMergedHeadBranches() {
+      // ONE list of every merged PR's head ref (W1-T257) — projectPlan matches run-<taskId>-*
+      // CLIENT-SIDE for the whole plan from this single fetch. Deterministic LIST API, NOT the
+      // eventually-consistent body full-text index. null on a `gh` FAILURE (→ readFailed()/W1-T119).
+      return tryJson<PrRef[]>([
+        "pr", "list", "--repo", slug, "--state", "merged",
+        "--json", "number,url,state,headRefName", "--limit", "1000",
       ]);
     },
     headRefName(prUrl) {
@@ -1778,7 +1846,7 @@ export function buildBatchedGithub(
     return cache;
   };
 
-  const asRef = (p: BatchedPr): PrRef => ({ number: p.number, url: p.url, state: p.state, title: p.title });
+  const asRef = (p: BatchedPr): PrRef => ({ number: p.number, url: p.url, state: p.state, title: p.title, headRefName: p.headRefName });
   const lookup = (ref: string | number): BatchedPr | undefined => {
     const idx = index();
     const s = String(ref);
@@ -1794,6 +1862,18 @@ export function buildBatchedGithub(
       const anchored = new RegExp(`^Remudero-Task:\\s*${escapeRegExp(taskId)}\\s*$`, "m");
       const hit = index().mergedNewestFirst.find((p) => anchored.test(p.body ?? ""));
       return hit ? asRef(hit) : null;
+    },
+    findMergedByHeadBranch(taskId) {
+      // W1-T257: client-side head-ref match from the SAME single fetch — zero extra `gh` calls,
+      // and on the STRUCTURED head ref, never the body index. null on a fetch failure (W1-T119).
+      const idx = index();
+      return lastFetchFailed ? null : idx.mergedNewestFirst.filter((p) => ownsBranch(p.headRefName, taskId)).map(asRef);
+    },
+    listMergedHeadBranches() {
+      // W1-T257: every merged PR (with its head ref) from the ONE fetch — projectPlan groups by
+      // run-<taskId>-* client-side. null on a fetch failure (→ readFailed()/W1-T119), never [].
+      const idx = index();
+      return lastFetchFailed ? null : idx.mergedNewestFirst.map(asRef);
     },
     headRefName(prUrl) {
       return index().byUrl.get(prUrl)?.headRefName;
