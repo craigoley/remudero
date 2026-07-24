@@ -73,11 +73,12 @@ test("learnings-assert-check --check: a QUARANTINED entry whose assertion now PA
   assert.match(output, /re-verification restores it/);
 });
 
-test("learnings-assert-check --check: an entry with NO assertion and a SUPERSEDED entry (even with a failing assertion) are never flagged", () => {
+test("learnings-assert-check --check: an entry with NO assertion, a SUPERSEDED entry, and a CONTESTED entry (W1-T88/P14) -- even carrying failing assertions -- are never flagged", () => {
   const result = runCheck(join(FIXTURES, "mixed"));
   const output = result.stdout + result.stderr;
   assert.doesNotMatch(output, /fixture-no-assertion/);
   assert.doesNotMatch(output, /fixture-superseded-with-failing-assertion/);
+  assert.doesNotMatch(output, /fixture-contested-with-failing-assertion/);
 });
 
 test("learnings-assert-check --check: a STILL-quarantined entry (assertion still fails) is not re-flagged (no flip-flop)", () => {

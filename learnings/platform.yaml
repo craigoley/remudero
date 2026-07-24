@@ -13,13 +13,21 @@
 # Schema per entry:
 #   id:                stable slug → the injected citation `[src: learnings#<id>]`
 #   subsystem:         human grouping (advisory; matching is by `files:`, not this)
-#   lifecycle:         active | superseded | quarantined (default active if omitted). A
-#                      SUPERSEDED or QUARANTINED entry is NEVER injected (src/lib/learnings.ts
-#                      filters both out before ranking) — it stays in this file for PROVENANCE
-#                      ONLY. Provenance decays two ways: a human corrects a fact (superseded — see
-#                      `zdotdir-alone-isolates-shells` below for the live example), or a fact stops
-#                      proving itself (quarantined — see `assertion` below).
+#   lifecycle:         active | superseded | quarantined | contested (default active if
+#                      omitted). A SUPERSEDED, QUARANTINED, or CONTESTED entry is NEVER injected
+#                      (src/lib/learnings.ts filters all three out before ranking) — it stays in
+#                      this file for PROVENANCE ONLY. Provenance decays three ways: a human
+#                      corrects a fact (superseded — see `zdotdir-alone-isolates-shells` below for
+#                      the live example), a fact stops proving itself (quarantined — see
+#                      `assertion` below), or consolidation DETECTS this entry opposing another
+#                      active entry (contested, W1-T88/P14 — see `contested_with` below;
+#                      retro.ts's `keyContradictionCandidates`/`flagContradictions`/
+#                      `applyContestedLifecycle` marks BOTH sides of the pair, and only an
+#                      Architect-authored `applyContradictionResolution` — never recency — decides
+#                      which one governs).
 #   superseded_by:     (superseded entries only) the id of the entry that replaced this one.
+#   contested_with:    (contested entries only, W1-T88/P14) the id of the other entry in the pair
+#                      this one was found opposing.
 #   assertion:         (W1-T34, optional) a shell command (`sh -c`, run from the repo root) that
 #                      must exit 0 for this entry's `fact` to still be considered true — e.g. a
 #                      fact pinned to a specific file/SDK shape must not keep being injected once

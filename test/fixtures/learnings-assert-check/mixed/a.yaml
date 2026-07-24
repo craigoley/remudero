@@ -45,6 +45,15 @@
   src: fixture
   assertion: "exit 1"
 
+- id: fixture-contested-with-failing-assertion
+  subsystem: fixture
+  lifecycle: contested
+  contested_with: fixture-active-passing
+  files: [fixture.ts]
+  fact: a contested entry (W1-T88/P14) is never evaluated, even carrying a failing assertion -- only an Architect-authored resolution changes it.
+  src: fixture
+  assertion: "exit 1"
+
 - id: fixture-no-assertion
   subsystem: fixture
   lifecycle: active

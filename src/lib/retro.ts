@@ -18,8 +18,11 @@ import { execFileSync } from "node:child_process";
 // property lookups at call time for exactly this reason (test/retro-marker-atomic.test.ts).
 import fsMarker from "node:fs";
 import { dirname } from "node:path";
+import { appendLedger } from "./ledger.js";
+import type { Lifecycle, LearningEntry } from "./learnings.js";
 import type { Task } from "./plan.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
+import type { QuestionEntry } from "./worker.js";
 
 /** One parsed ledger line (superset of ledger.ts LedgerLine, as read back). */
 export interface LedgerRecord {
@@ -1176,6 +1179,266 @@ export async function phraseProceduralCandidate(
     src: `retro#procedural (${candidate.taskIds.join(", ")})`,
     files: [],
   };
+}
+
+// ── Consolidation contradiction detection (W1-T88, ratifies P14, extends W1-T33) ──
+//
+// W1-T33 gave supersession a LIFECYCLE (active|superseded|quarantined) but
+// marking an entry superseded is MANUAL, and nothing DETECTS when a
+// newly-distilled learning CONTRADICTS an existing one — recency silently
+// wins, which is correct for a REFINEMENT but wrong for a CONTRADICTION (a
+// wrong late lesson could bury a right early one with no signal). This
+// section is the missing DETECTION step, same three-stage discipline as
+// procedural-success mining above: (1) candidate PAIRS are found
+// DETERMINISTICALLY (rule 2 — {@link keyContradictionCandidates} never
+// touches an LLM), (2) an advisory judge is asked, PER PAIR, whether the two
+// facts OPPOSE ({@link flagContradictions} — the ONLY step that touches an
+// LLM, mirroring {@link ProceduralPhraseDeps}'s injected-`deps.judge` shape),
+// (3) an opposing verdict is NEVER auto-resolved — {@link
+// applyContestedLifecycle} flips BOTH entries to `lifecycle: contested`
+// (learnings.ts's `selectLearnings` already excludes anything not
+// `lifecycle === "active"`, so a contested pair is excluded from injection
+// for free — no new filter needed) and the pair is rendered into the retro
+// report ({@link renderContradictions}) and the §2 question backlog
+// ({@link contradictionQuestion}, worker.ts's `QuestionEntry`/
+// `appendQuestion`), naming the decision an Architect must make: which one
+// governs. Resolution is a SEPARATE, explicit, Architect-authored step
+// ({@link applyContradictionResolution}) that ledgers the decision — no code
+// path in this file ever picks a winner itself. A non-opposing (refining)
+// pair is simply never flagged: recency-overwrite for ordinary supersession
+// is completely untouched.
+
+/**
+ * ONE deterministically-keyed candidate pair for opposition judging: two
+ * currently-`active` entries sharing the SAME `subsystem` (the topic key)
+ * with >=1 overlapping `files` glob (exact string overlap — the same
+ * discipline `matchCount` in learnings.ts uses for concrete file matches,
+ * kept simple and auditable rather than a fuzzy glob-intersection). `key` is
+ * the deterministic grouping key (`${subsystem}:${sharedGlobs}`), stable
+ * across calls for the same pair regardless of scan order.
+ */
+export interface ContradictionCandidatePair {
+  key: string;
+  a: LearningEntry;
+  b: LearningEntry;
+}
+
+/** The `files` globs two entries share, sorted (empty ⇒ no overlap, no pair). */
+function sharedFileGlobs(a: string[], b: string[]): string[] {
+  return a.filter((g) => b.includes(g)).sort();
+}
+
+/**
+ * MINE every candidate contradiction pair, PURE and deterministic — no LLM,
+ * no I/O; calling it twice over the SAME corpus returns the SAME pairs. Only
+ * `lifecycle === "active"` entries are considered (a `superseded`/
+ * `quarantined`/already-`contested` entry is never re-proposed — it either
+ * already lost a resolution or was pulled for an unrelated reason). Iterates
+ * entries SORTED BY ID first so pair order — and therefore `key` — never
+ * depends on the corpus's on-disk/array order.
+ */
+export function keyContradictionCandidates(entries: LearningEntry[]): ContradictionCandidatePair[] {
+  const active = entries
+    .filter((e) => e.lifecycle === "active")
+    .slice()
+    .sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  const out: ContradictionCandidatePair[] = [];
+  for (let i = 0; i < active.length; i++) {
+    for (let j = i + 1; j < active.length; j++) {
+      const a = active[i];
+      const b = active[j];
+      if (a.subsystem !== b.subsystem) continue;
+      const shared = sharedFileGlobs(a.files, b.files);
+      if (shared.length === 0) continue;
+      out.push({ key: `${a.subsystem}:${shared.join("+")}`, a, b });
+    }
+  }
+  return out;
+}
+
+/** The advisory judge's verdict on ONE candidate pair — phrasing/judgment only, never new evidence. */
+export interface ContradictionVerdict {
+  /** True iff the two facts give MUTUALLY-EXCLUSIVE guidance (never both true at once). */
+  opposing: boolean;
+  /** Why, for the retro report + question backlog. */
+  reasoning?: string;
+}
+
+/**
+ * Dependencies {@link flagContradictions} needs injected — mirrors {@link
+ * ProceduralPhraseDeps}/learnings.ts's `PromotionJudgeDeps.judge`: evidence
+ * (the candidate pair) is deterministic, the model only JUDGES over it.
+ */
+export interface ContradictionJudgeDeps {
+  /** The advisory opposition eval. Receives ONLY the candidate pair — never the whole corpus, never other pairs. */
+  judge: (pair: ContradictionCandidatePair) => ContradictionVerdict | Promise<ContradictionVerdict>;
+  /** Optional structured-event sink (same shape as flight-judge.ts's `deps.log`); no-op if omitted. */
+  log?: (event: string, data: Record<string, unknown>) => void;
+}
+
+/** ONE confirmed contradiction — a candidate pair the judge flagged `opposing: true`. */
+export interface ContradictionFinding {
+  key: string;
+  aId: string;
+  bId: string;
+  aFact: string;
+  bFact: string;
+  reasoning?: string;
+}
+
+/**
+ * Judge every candidate pair and return ONLY the ones flagged opposing — a
+ * non-opposing (refining) pair produces NO finding, so it never gets marked
+ * contested and ordinary recency-overwrite for it is untouched. Pairs are
+ * judged independently and in order; nothing here mutates `pair.a`/`pair.b`.
+ */
+export async function flagContradictions(
+  pairs: ContradictionCandidatePair[],
+  deps: ContradictionJudgeDeps,
+): Promise<ContradictionFinding[]> {
+  const log = deps.log ?? (() => {});
+  const findings: ContradictionFinding[] = [];
+  for (const pair of pairs) {
+    const verdict = await deps.judge(pair);
+    log("contradiction.verdict", { key: pair.key, a: pair.a.id, b: pair.b.id, opposing: verdict.opposing });
+    if (!verdict.opposing) continue; // a refinement, not a contradiction — recency-overwrite unchanged
+    findings.push({
+      key: pair.key,
+      aId: pair.a.id,
+      bId: pair.b.id,
+      aFact: pair.a.fact,
+      bFact: pair.b.fact,
+      reasoning: verdict.reasoning,
+    });
+  }
+  return findings;
+}
+
+/**
+ * NEVER AUTO-RESOLVED: flip BOTH entries of every confirmed finding to
+ * `lifecycle: contested`, recording each entry's partner via
+ * `contestedWith`. Pure — returns a NEW array, never mutates `entries` — and
+ * leaves every entry untouched by a finding exactly as it was (including an
+ * entry whose `lifecycle` was already `superseded`/`quarantined` for an
+ * unrelated reason; a finding can only originate from an `active` pair per
+ * {@link keyContradictionCandidates}, so this never overwrites a prior
+ * decision). Once flipped, `learnings.ts`'s `selectLearnings` excludes both
+ * from injection automatically — `contested` is filtered exactly like
+ * `superseded`/`quarantined`, no new matcher logic needed.
+ */
+export function applyContestedLifecycle(entries: LearningEntry[], findings: ContradictionFinding[]): LearningEntry[] {
+  const partnerOf = new Map<string, string>();
+  for (const f of findings) {
+    if (!partnerOf.has(f.aId)) partnerOf.set(f.aId, f.bId);
+    if (!partnerOf.has(f.bId)) partnerOf.set(f.bId, f.aId);
+  }
+  return entries.map((e) => {
+    const other = partnerOf.get(e.id);
+    if (!other) return e;
+    const contested: Lifecycle = "contested";
+    return { ...e, lifecycle: contested, contestedWith: other };
+  });
+}
+
+/** Render the confirmed contradictions (markdown) — printed alongside the retro report. */
+export function renderContradictions(findings: ContradictionFinding[]): string {
+  if (findings.length === 0) {
+    return "## Consolidation contradiction detection (P14)\n\nNo contradicting pair found this cycle.";
+  }
+  return [
+    "## Consolidation contradiction detection (P14) — CONTESTED, excluded from injection until an Architect resolves which governs",
+    "",
+    ...findings.flatMap((f) =>
+      [
+        `- CONTESTED (${f.key}): ${f.aId} vs ${f.bId}`,
+        `    - ${f.aId}: ${f.aFact}`,
+        `    - ${f.bId}: ${f.bFact}`,
+        f.reasoning ? `    - why: ${f.reasoning}` : undefined,
+      ].filter((line): line is string => line !== undefined),
+    ),
+  ].join("\n");
+}
+
+/**
+ * Render ONE finding into the §2 QUESTION contract's own shape (worker.ts's
+ * `QuestionEntry`) for the durable question backlog (mirrors sweep.ts's
+ * `toQuestionEntry`) — `current_assumption` names what stays true while the
+ * pair is unresolved: BOTH entries stay excluded from injection, never one
+ * silently winning by recency.
+ */
+export function contradictionQuestion(finding: ContradictionFinding, ts: string): QuestionEntry {
+  return {
+    ts,
+    task: "retro",
+    question:
+      `Consolidation found a CONTESTED learnings pair (${finding.key}) — which governs? ` +
+      `${finding.aId}: "${finding.aFact}" vs ${finding.bId}: "${finding.bFact}"` +
+      (finding.reasoning ? ` — judge: ${finding.reasoning}` : ""),
+    current_assumption: `Both ${finding.aId} and ${finding.bId} stay lifecycle: contested — excluded from injection — until answered.`,
+    impact_if_wrong: "med",
+  };
+}
+
+/**
+ * An Architect-authored decision for ONE contested pair: `activeId` governs
+ * (re-admitted to injection), `supersededId` loses (marked `superseded`,
+ * `supersededBy: activeId`). There is deliberately NO code path that derives
+ * this from the judge's verdict or from recency — a human (or the Architect
+ * worker, standing rule 15) must name the winner explicitly.
+ */
+export interface ContradictionResolution {
+  activeId: string;
+  supersededId: string;
+  by?: string;
+  reason?: string;
+}
+
+/** Dependencies {@link applyContradictionResolution} needs injected — same shape as correct.ts's `writeLedger` override. */
+export interface ContradictionResolutionDeps {
+  /** Absolute path to state/ledger.ndjson. */
+  ledgerPath: string;
+  /** Defaults to the real {@link appendLedger}; tests inject a spy instead of touching disk. */
+  writeLedger?: typeof appendLedger;
+}
+
+/**
+ * APPLY a resolution: `activeId` is re-admitted (`lifecycle: active`,
+ * `contestedWith` cleared), `supersededId` is marked `superseded` +
+ * `supersededBy: activeId` (`contestedWith` cleared there too). Appends ONE
+ * `contradiction.resolved` ledger line naming both ids, `by`, and `reason` —
+ * the durable, ledgered record standing rule 15 requires for any learnings
+ * write. Entries not named in `resolution` are returned untouched. This is
+ * the ONLY function in this module that ever assigns `active`/`superseded`
+ * to a previously-`contested` entry — every other path here only ever
+ * PROPOSES `contested`, never resolves it.
+ */
+export function applyContradictionResolution(
+  entries: LearningEntry[],
+  resolution: ContradictionResolution,
+  deps: ContradictionResolutionDeps,
+): LearningEntry[] {
+  const writeLedger = deps.writeLedger ?? appendLedger;
+  const updated = entries.map((e) => {
+    if (e.id === resolution.activeId) {
+      const active: Lifecycle = "active";
+      return { ...e, lifecycle: active, contestedWith: undefined };
+    }
+    if (e.id === resolution.supersededId) {
+      const superseded: Lifecycle = "superseded";
+      return { ...e, lifecycle: superseded, supersededBy: resolution.activeId, contestedWith: undefined };
+    }
+    return e;
+  });
+  writeLedger(deps.ledgerPath, {
+    run_id: `CONTRADICTION-${resolution.activeId}-${resolution.supersededId}`,
+    task_id: "retro",
+    step: "contradiction.resolved",
+    active_id: resolution.activeId,
+    superseded_id: resolution.supersededId,
+    by: resolution.by ?? "architect",
+    reason: resolution.reason ?? null,
+  });
+  return updated;
 }
 
 // ── The retro marker (state/last-retro.json) ──────────────────────────────

@@ -52,6 +52,23 @@ import { citation } from "./provenance.js";
  * non-shelling lookup. Re-verification (the assertion passing again) is what
  * lets a subsequent `npm run learnings-assert` restore `lifecycle: active`.
  *
+ * CONTRADICTION DETECTION (W1-T88, ratifies P14, extends W1-T33): plain
+ * supersession above is RECENCY-OVERWRITE — a newer entry silently wins.
+ * That is correct for a REFINEMENT but wrong for a CONTRADICTION (a wrong
+ * late lesson could otherwise bury a right early one with no signal). The
+ * consolidation pass (retro.ts's `keyContradictionCandidates` +
+ * `flagContradictions` + `applyContestedLifecycle`) detects a candidate pair
+ * DETERMINISTICALLY (same subsystem + overlapping `files` globs) and asks an
+ * advisory judge whether the pair OPPOSES; an opposing pair is NEVER
+ * auto-resolved — both entries flip to `lifecycle: contested` (filtered out
+ * by `selectLearnings` exactly like `superseded`/`quarantined`) and the pair
+ * surfaces in the retro report and the §2 question backlog until an
+ * Architect-authored, ledgered resolution (retro.ts's
+ * `applyContradictionResolution`) re-admits the winner as `active` and marks
+ * the loser `superseded`. A refining (non-opposing) newer entry still
+ * supersedes exactly as before — contradiction detection narrows
+ * recency-overwrite, it does not replace it.
+ *
  * LAYERS (P32/W1-T145): the corpus this file parses is the PROJECT layer —
  * repo-scoped, everything above. P32 proposes two more: USER-OVERALL
  * (cross-project, one fleet-readable home outside any single repo checkout,
@@ -116,16 +133,24 @@ const AUTONOMY_SRC = "learnings#standing-rule-8";
 export const DEFAULT_KNOWLEDGE_BUDGET_CHARS = 1800;
 
 /**
- * An entry's LIFECYCLE (W1-T33 + W1-T34). `active` (the default) is a
- * candidate for injection. `superseded` means provenance decayed by human
- * correction — a newer entry replaced this fact — and the entry stays in its
- * shard for the historical record. `quarantined` means provenance decayed
- * AUTOMATICALLY: the entry's `assertion` currently fails, so
- * `scripts/learnings-assert-check.mjs` flipped it here. Both `superseded` and
- * `quarantined` entries are filtered out by `selectLearnings` before ranking,
- * so neither can ever be injected into a rendered prompt.
+ * An entry's LIFECYCLE (W1-T33 + W1-T34 + W1-T88/P14). `active` (the
+ * default) is a candidate for injection. `superseded` means provenance
+ * decayed by human correction — a newer entry replaced this fact — and the
+ * entry stays in its shard for the historical record. `quarantined` means
+ * provenance decayed AUTOMATICALLY: the entry's `assertion` currently fails,
+ * so `scripts/learnings-assert-check.mjs` flipped it here. `contested`
+ * (W1-T88, ratifies P14) means the consolidation pass's contradiction
+ * detection (retro.ts's `flagContradictions`/`applyContestedLifecycle`)
+ * found this entry OPPOSING another active entry on the same subsystem/files
+ * — recency-overwrite is explicitly refused for a contradiction (it is
+ * refused ONLY there; a non-opposing refinement still supersedes exactly as
+ * before), so BOTH entries in the pair are marked `contested` until an
+ * Architect resolves which one governs (retro.ts's
+ * `applyContradictionResolution`). ALL FOUR of `superseded`/`quarantined`/
+ * `contested` are filtered out by `selectLearnings` before ranking, so none
+ * can ever be injected into a rendered prompt.
  */
-export type Lifecycle = "active" | "superseded" | "quarantined";
+export type Lifecycle = "active" | "superseded" | "quarantined" | "contested";
 
 /**
  * Which knowledge layer an entry lives at (P32/W1-T145): `project`
@@ -145,10 +170,17 @@ export interface LearningEntry {
   id: string;
   /** Human-facing grouping (e.g. `containment`, `ci`); advisory, not matched. */
   subsystem: string;
-  /** `active` | `superseded` | `quarantined` (default `active`). See {@link Lifecycle}. */
+  /** `active` | `superseded` | `quarantined` | `contested` (default `active`). See {@link Lifecycle}. */
   lifecycle: Lifecycle;
   /** (superseded entries only) the id of the entry that replaced this one. */
   supersededBy?: string;
+  /**
+   * (contested entries only, W1-T88/P14) the id of the OTHER entry this one
+   * was found opposing — set on BOTH members of a contested pair, so a human
+   * reading either entry in its shard can find its counterpart without
+   * cross-referencing the retro report or the question backlog.
+   */
+  contestedWith?: string;
   /**
    * (W1-T34) An optional shell command (run via `sh -c` from the repo root)
    * that must exit 0 for this entry's `fact` to still be considered true.
@@ -259,9 +291,14 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
     }
     let lifecycle: Lifecycle = "active";
     if (e.lifecycle !== undefined) {
-      if (e.lifecycle !== "active" && e.lifecycle !== "superseded" && e.lifecycle !== "quarantined") {
+      if (
+        e.lifecycle !== "active" &&
+        e.lifecycle !== "superseded" &&
+        e.lifecycle !== "quarantined" &&
+        e.lifecycle !== "contested"
+      ) {
         throw new LearningsError(
-          `learnings '${id}': 'lifecycle' must be 'active', 'superseded', or 'quarantined', got ${JSON.stringify(e.lifecycle)} (${sourceLabel}).`,
+          `learnings '${id}': 'lifecycle' must be 'active', 'superseded', 'quarantined', or 'contested', got ${JSON.stringify(e.lifecycle)} (${sourceLabel}).`,
         );
       }
       lifecycle = e.lifecycle;
@@ -270,6 +307,12 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
     if (supersededBy !== undefined && lifecycle !== "superseded") {
       throw new LearningsError(
         `learnings '${id}': 'superseded_by' is set but 'lifecycle' is not 'superseded' (${sourceLabel}).`,
+      );
+    }
+    const contestedWith = typeof e.contested_with === "string" && e.contested_with.length > 0 ? e.contested_with : undefined;
+    if (contestedWith !== undefined && lifecycle !== "contested") {
+      throw new LearningsError(
+        `learnings '${id}': 'contested_with' is set but 'lifecycle' is not 'contested' (${sourceLabel}).`,
       );
     }
     if (e.assertion !== undefined && (typeof e.assertion !== "string" || e.assertion.length === 0)) {
@@ -301,6 +344,7 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
       subsystem: typeof e.subsystem === "string" ? e.subsystem : "",
       lifecycle,
       supersededBy,
+      contestedWith,
       assertion,
       quarantinedReason,
       operatorImpact,
