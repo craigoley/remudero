@@ -184,6 +184,22 @@ test("diff-coverage: a directive exempts its own region, but an uncovered line O
   assert.match(result.stderr.toString(), /boundary-mixed\.fxt:6/);
 });
 
+// W1-T83 / PR #698: the worker-spawn boundary — a thin `return spawnWorker(buildXArgs(opts))`
+// wrapper is the codebase's canonical "arg-builder is the tested contract; the spawn shells out
+// via the Agent SDK, untested by design" pattern (spawnSpecialistWorker, spawnReconSpecialist).
+test("diff-coverage: a thin `spawnWorker(...)` wrapper is a recognised process boundary -> exempt (the untested-by-design spawn pattern)", () => {
+  const result = runDiffCoverageInFixtures("boundary-spawnworker.lcov", "boundary-spawnworker.diff");
+  assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stdout.toString(), /exempt \(process-boundary\) boundary-spawnworker\.fxt:4/);
+});
+
+test("diff-coverage: an INDIRECT spawn caller (calls spawnReconSpecialist, not spawnWorker directly) is NOT a boundary -> INVALID (must earn coverage, never exempt orchestration logic)", () => {
+  const result = runDiffCoverageInFixtures("boundary-indirectspawn.lcov", "boundary-indirectspawn.diff");
+  assert.notEqual(result.status, 0, result.stdout?.toString());
+  assert.match(result.stderr.toString(), /INVALID process-boundary directive/);
+  assert.match(result.stderr.toString(), /no process-boundary call/);
+});
+
 test("diff-coverage: a `process-boundary` directive with NO `— <reason>` -> exit 1 (a mandatory reason, fails CLOSED)", () => {
   const result = runDiffCoverageInFixtures("boundary-noreason.lcov", "boundary-noreason.diff");
   assert.notEqual(result.status, 0, result.stdout?.toString());

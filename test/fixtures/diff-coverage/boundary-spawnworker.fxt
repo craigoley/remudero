@@ -1,0 +1,5 @@
+const x = 1;
+// diff-cov: process-boundary — thin spawnWorker wrapper; buildReconSpecialistSpawnArgs is the tested contract
+export async function spawnReconSpecialist(opts) {
+  return spawnWorker(buildReconSpecialistSpawnArgs(opts));
+}

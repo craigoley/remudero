@@ -417,3 +417,15 @@ ever silently waved through (it is also diff-visible to the review gate and the 
 process boundaries only: a neighbouring uncovered line, or `main()`-internal dispatch glue (e.g.
 the refused-exit branch), still blocks — cover those in-process via the `callMain()` seam
 (`test/wipe-test.test.ts`) with an injected dependency, which yields real DA hits at near-zero cost.
+
+### diff-coverage round 5 (2026-07-23, W1-T83 / PR #698): the worker-spawn boundary
+
+`process-boundary` now also recognises a **worker spawn** — a thin `return spawnWorker(buildXArgs(opts))`
+wrapper — as a boundary call, not just re-exec/`process.exit`. This is the codebase's canonical
+"the arg-builder (`buildXArgs`) carries the testable read-only contract; the one-line spawn
+delegation shells out via the Agent SDK and is untested by design" pattern (`spawnSpecialistWorker`,
+`spawnReconSpecialist`). It stays tightly bounded: the boundary call must be a **direct**
+`spawnWorker(` in the guarded ≤15-line body — a function that instead calls a *wrapper*
+(e.g. `spawnReconSpecialist(…)`) is INVALID and must earn coverage, because such a caller typically
+carries real orchestration (lazy-prepare, containment probing) that a test should exercise with
+injected deps. Every exemption is still logged; the fail-closed validator is unchanged.
