@@ -1,0 +1,26 @@
+id: fb-1784913390318-1fcb63
+ts: 2026-07-24T17:16:30.318Z
+raw: "DAEMON GETS ITS OWN CHECKOUT — the daemon runs from the operator's WIP
+  checkout and both parties dirty it: operator scratch grounded deploys three
+  times on 07-23/24 (the rule-64 dirty-tree class), and the daemon's own exhaust
+  (DECISIONS.md appends, feedback captures, state/logs, plan/questions.ndjson)
+  combined with a main-advance to crash-loop every launchd restart from ~16:09Z
+  2026-07-24 (W1-T79 freshness refusal counts untracked files, self-sync.ts:168;
+  LastExitStatus=256) — the daemon poisons its own restart, and five consecutive
+  PRs needed hand-clearing because the automation was DOWN, not slow.
+  Mitigations landing separately: daemon degrade-and-warn exemption,
+  runtime-artifact gitignore, land-on-capture + W1-T191 auto-commit. THE
+  STRUCTURAL FIX: a dedicated install checkout (e.g. ~/Remudero/daemon-install)
+  written ONLY by the deploy supervisor via ff-only, from which the launchd
+  daemon runs; the operator checkout becomes pure WIP that can never ground the
+  fleet; the supervisor's staleness comparison (fb-6635d1's booted-SHA fix)
+  reads the install checkout; daemon exhaust routes to state/ outside any repo
+  tree so the install tree is clean by construction. ACCEPTANCE: arbitrary
+  operator dirt in ~/Remudero/remudero has zero effect on daemon restart,
+  dispatch, or deploy; a launchd restart with any operator-tree state comes up
+  healthy; proven by test where feasible and by a documented live drill where
+  not."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

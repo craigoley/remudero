@@ -1,0 +1,21 @@
+id: fb-1784901239119-1be356
+ts: 2026-07-24T13:53:59.120Z
+raw: "REVIEW STATUS LIFECYCLE: POST PENDING IMMEDIATELY — remudero-review is
+  posted only in terminal states (success/failure), so between a new head and
+  its (possibly starved) re-post the required status sits as 'Expected' among
+  ~22 green checks and the PR reads green-at-a-glance while the review has not
+  actually run (operator report 2026-07-24: 'looks green rather than in progress
+  while it's running'; observed worst case #707, where the re-post starved 20+
+  minutes behind an unbounded runOne). NEED: (a) every path that detects a head
+  needing review — the run lane, the W1-T254 light-sweep ticker, and rmd
+  review's own start — posts state=pending ('remudero-review: reviewing…')
+  immediately and flips to the terminal state on completion, so GitHub renders
+  the yellow in-progress dot instead of a silent gap; (b) the pending post is
+  idempotent per head and carries the posting run_id, so a stuck pending is
+  traceable to its owner; (c) the console's PR rows render the same three-state
+  — pending is never collapsed into green (fb-1784770111145-cf7c24's Now tab).
+  Complements W1-T254, which fixes the latency; this fixes the legibility."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

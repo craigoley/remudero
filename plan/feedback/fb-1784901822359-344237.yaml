@@ -1,0 +1,31 @@
+id: fb-1784901822359-344237
+ts: 2026-07-24T14:03:42.359Z
+raw: 'DEAD-PROOF-FLOOR RESIDUAL — #693 (worker output-contract "substantiate
+  every acceptance proof") is PRESENT BUT INSUFFICIENT for keyword-dense
+  NARRATIVE proofs. Observed PR #710 / W1-T89 (2026-07-24): remudero-review
+  FAILED on the 0.6 keyword floor (matched 2/13, 2/11, 3/9 of each proof strings
+  distinctive tokens). RULED OUT daemon staleness: the daemon booted 12:00Z
+  today WITH #693 in src/lib/compaction.ts, and the worker ran at 13:29Z — it
+  HAD the substantiate-guidance and still could not clear the floor, because a
+  proof like "unit test: the fixtures blocked_illformed -> specification,
+  attribution-class -> verification, etc." is a keyword-dense NARRATIVE that (a)
+  never matches the real test title so it never EXECUTES, and (b) requires
+  echoing 8+ specific tokens to clear 60%, which a worker report does not
+  reliably reproduce. ROOT: the proofs should be EXECUTABLE-MATCHING test-title
+  substrings (the real test IS titled "W1-T89 ACCEPTANCE: a seeded ledger
+  fixture of known verdicts produces the expected category distribution" — the
+  CLAIM is a substring of it; had the proof been that, it would EXECUTE and
+  pass, no floor). W1-T246 WARNS on the narrative "-> " shape but does NOT
+  block, so narrative proofs still land and fall to the fragile floor + manual
+  body-substantiation (I hand-fixed #710, as with #677/#683/#689/#698). FIX
+  CANDIDATES for W1-T246 implementation: (a) escalate the narrative-proof check
+  from WARN to BLOCK at authoring (tension: bricks the legacy backlog); or (b)
+  sharpen #693 outputContractLines from "substantiate every criterion" to "PASTE
+  each acceptance PROOF verbatim into the PR body"; or (c) Architect prompt
+  authors proofs as literal test-title substrings. Distinct from fb
+  dead-proof-floor filings: this is the POST-#693 residual proving
+  reporting-side guidance alone is not enough.'
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
