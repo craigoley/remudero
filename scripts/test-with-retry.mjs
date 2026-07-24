@@ -77,9 +77,9 @@ function runOnce(cmd, args) {
   });
 }
 
-function recordFlakeEvidence(names) {
+function recordFlakeEvidence(headline, names) {
   const label = names.length > 0 ? names.join(", ") : "(no test name parsed from output)";
-  const line = `FLAKE-RETRY: first attempt failed — ${label}`;
+  const line = `FLAKE-RETRY: ${headline} — ${label}`;
   console.log(line);
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (summaryPath) {
@@ -103,9 +103,15 @@ export async function main(argv) {
     return first.code;
   }
 
-  recordFlakeEvidence(parseFailingTestNames(first.output));
+  recordFlakeEvidence("first attempt failed", parseFailingTestNames(first.output));
 
   const second = await runOnce(cmd, args);
+  // Evidence-preserving on non-recovery too: a retry that ALSO fails (a deterministic break, or a
+  // double flake) must leave its own greppable record rather than only the first attempt's — so a
+  // break the retry did NOT paper over is just as countable as one it did.
+  if (second.code !== 0) {
+    recordFlakeEvidence("retry ALSO failed", parseFailingTestNames(second.output));
+  }
   return second.code;
 }
 

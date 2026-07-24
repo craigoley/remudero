@@ -57,6 +57,17 @@ test("test-with-retry: a deterministic failure fails BOTH attempts and the wrapp
   assert.match(output, /FLAKE-RETRY: first attempt failed/, "the retry attempt must still be recorded even though it also fails");
 });
 
+test("test-with-retry: when the retry ALSO fails, a SECOND greppable record is emitted -- a break the retry did not paper over is just as countable", () => {
+  const r = runWrapper("deterministic-fail", { testName: "non-recovering test" });
+  const output = r.stdout + r.stderr;
+  assert.notEqual(r.status, 0, output);
+  assert.match(
+    r.stdout ?? "",
+    /FLAKE-RETRY: retry ALSO failed — .*non-recovering test/,
+    "a retry that also fails must leave its own record, so a non-recovering break stays greppable, not silent",
+  );
+});
+
 test("test-with-retry: a flake-once suite (fails then passes) exits 0 AND names the first attempt's failing test on stdout", () => {
   const r = runWrapper("flake-once", { testName: "flaky widget test" });
   const output = r.stdout + r.stderr;
