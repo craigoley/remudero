@@ -16,6 +16,7 @@ import { after, before, test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { buildServeServer, DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS, type ServeDeps } from "../src/lib/serve.js";
+import { shellBootReady } from "./setup/open-shell.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
@@ -155,7 +156,7 @@ async function openShell(base: string, opts: { viewport?: { width: number; heigh
   const context = await browser.newContext(opts.viewport ? { viewport: opts.viewport } : {});
   const page = await context.newPage();
   await page.goto(`${base}/?token=${READ_TOKEN}`);
-  await page.waitForFunction(() => !document.getElementById("top-status")?.textContent?.includes("loading"));
+  await page.waitForFunction(shellBootReady);
   return { context, page };
 }
 

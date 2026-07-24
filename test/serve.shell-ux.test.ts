@@ -21,6 +21,7 @@ import { chromium, type Browser, type Page } from "playwright";
 import { AxeBuilder } from "@axe-core/playwright";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { isStopped } from "../src/lib/fleet-control.js";
+import { shellBootReady } from "./setup/open-shell.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
@@ -138,7 +139,7 @@ async function openShell(base: string, token: string = READ_TOKEN): Promise<Page
   await page.goto(`${base}/?token=${token}`);
   // wait for the first poll's real data to land (not the static "loading…" placeholder) —
   // the same "exercise the real consuming client" discipline as the fetch, not a fixed sleep.
-  await page.waitForFunction(() => !document.getElementById("top-status")?.textContent?.includes("loading"));
+  await page.waitForFunction(shellBootReady);
   return page;
 }
 
@@ -450,7 +451,7 @@ test("W1-T223: collapse state persists across a reload, and the persisted state 
       assert.doesNotMatch(stored ?? "", /token/i);
 
       await page.reload();
-      await page.waitForFunction(() => !document.getElementById("top-status")?.textContent?.includes("loading"));
+      await page.waitForFunction(shellBootReady);
       await page.waitForFunction(() => document.getElementById("recent-toggle")?.getAttribute("aria-expanded") !== null);
       assert.equal(await page.getAttribute("#recent-toggle", "aria-expanded"), "false", "the explicit collapse must survive a reload");
     } finally {

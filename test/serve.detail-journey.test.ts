@@ -26,6 +26,7 @@ import { after, before, test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
+import { shellBootReady } from "./setup/open-shell.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
@@ -172,7 +173,7 @@ async function openShell(base: string, token: string = READ_TOKEN, qs = ""): Pro
   const context = await browser.newContext();
   const page = await context.newPage();
   await page.goto(`${base}/?token=${token}${qs}`);
-  await page.waitForFunction(() => !document.getElementById("top-status")?.textContent?.includes("loading"));
+  await page.waitForFunction(shellBootReady);
   return page;
 }
 
@@ -437,7 +438,7 @@ test("W1-T144: a #task=<id> hash deep-link opens that task's card inline (the di
     try {
       // The link consoleCardUrl builds: <base>/#task=<id>, on the operator's own token URL.
       await page.goto(`${base}/?token=${READ_TOKEN}#task=W1-T2`);
-      await page.waitForFunction(() => !document.getElementById("top-status")?.textContent?.includes("loading"));
+      await page.waitForFunction(shellBootReady);
       await page.waitForFunction(
         () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')?.getAttribute("aria-expanded") === "true",
         null,
@@ -466,7 +467,7 @@ test("W1-T144 planted-probe: a #task=<absent-id> hash deep-link is REJECTED — 
     const page = await context.newPage();
     try {
       await page.goto(`${base}/?token=${READ_TOKEN}#task=W1-DOES-NOT-EXIST`);
-      await page.waitForFunction(() => !document.getElementById("top-status")?.textContent?.includes("loading"));
+      await page.waitForFunction(shellBootReady);
       // Let the board settle through a full paint so a real target WOULD have expanded by now.
       await page.waitForFunction(() => (document.querySelector("#recent-list")?.textContent ?? "").includes("W1-T2"));
       await page.waitForTimeout(500);
