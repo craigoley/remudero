@@ -327,7 +327,15 @@ function realTask(id: string): Task {
 
 test("W1-T81 ACCEPTANCE 1a: W1-T12a's negation criterion ('NO real ... overnight run') does not flag, verbatim from the plan", () => {
   const t = realTask("W1-T12a");
-  assert.match(t.acceptance![0].proof, /\bNO real overnight run\b/);
+  // The 'NO real overnight run' negation may live in the criterion's proof OR its
+  // claim (W1-T246 repointed W1-T12a's proofs to the executable `unit test:`
+  // dialect, moving the negation into the claim). Either way the property under
+  // test is unchanged: a legitimate negation of a live-context term must NOT trip
+  // headless-fitness. Read it wherever it sits, still verbatim from the plan.
+  assert.ok(
+    t.acceptance!.some((c) => /\bNO real overnight run\b/.test(`${c.claim ?? ""} ${c.proof ?? ""}`)),
+    "W1-T12a still carries the 'NO real overnight run' negation verbatim in the plan",
+  );
   assert.equal(headlessFitnessViolations(t).length, 0);
 });
 
