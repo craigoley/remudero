@@ -1,0 +1,18 @@
+id: fb-1784841309112-63054e
+ts: 2026-07-23T21:15:09.112Z
+raw: "APPROVE IS NOT ATOMIC AND DIES ON GRAPHQL — rmd approve P37 committed the
+  ratification, pushed the branch, then failed at gh pr create on GraphQL
+  rate-limit exhaustion (observed 2026-07-23T20:47Z,
+  run-APPROVE-P37-1784840840230 stranded pushed with no PR; fifth GraphQL
+  exhaustion of the day, others stalled rmd review on #644/#676 and likely
+  poisoned an inbox dep display). Need: (a) approve resumable — re-running
+  detects its own pushed branch and completes the missing PR instead of refusing
+  or duplicating; (b) PR-create routed through the REST API (gh api
+  repos/../pulls), removing the GraphQL dependency from the ratification path;
+  (c) ratify.approved ledgered only once the PR exists, carrying its number; (d)
+  a session-wide gh budget discipline: rungs back off and surface throttled as
+  throttled rather than burning the shared window."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

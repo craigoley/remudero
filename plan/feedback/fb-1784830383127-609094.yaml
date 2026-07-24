@@ -1,0 +1,18 @@
+id: fb-1784830383127-609094
+ts: 2026-07-23T18:13:03.127Z
+raw: "AA16B6 ROOT CAUSE, COMPLETE: at 16:05-16:06Z on 2026-07-23 the claude-code
+  global package was rewritten to a husk — bin/ contained only a 500-byte
+  non-executable ASCII claude.exe stub, package.json read 2.1.218, the native
+  binary and unix launcher absent — a half-completed update frozen mid-swap,
+  breaking every SDK spawn from ~16:14Z. The first reinstall attempt failed npm
+  ENOTEMPTY on renaming the husk aside; remedy was
+  purge-the-package-dir-and-temp-targets then reinstall. The SDK's musl/glibc
+  error text misdiagnosed EACCES-on-a-script throughout. W1-T236's build should:
+  pin the worker binary path+version and verify it launchable at daemon boot and
+  per-spawn preflight (spawn_binary_unlaunchable, real errno), gate or disable
+  unattended updates of the global CLI on this host, and treat a bin/ containing
+  only claude.exe as the known husk signature."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
