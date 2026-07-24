@@ -1255,7 +1255,7 @@ test("a THROWING sweep does not kill the loop — it logs daemon.sweep.failed an
 // unbounded latency, total invisibility. `sweepLight` ticks ALONGSIDE an
 // in-flight `runOne` to close that gap.
 
-test("W1-T254: the light-sweep ticker runs post-review while runOne is in flight, so a green PR with an absent review re-posts within one poll interval (the #707 fix)", async () => {
+test("W1-T254: the light sweep runs while runOne is in flight, so a green PR with an absent review re-posts within one poll interval (the #707 fix)", async () => {
   const plan = fixturePlan();
   const merged = new Set<string>();
   let lightSweeps = 0;

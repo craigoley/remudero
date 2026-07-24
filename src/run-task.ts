@@ -4589,7 +4589,7 @@ function renderDaemonSummary(s: DaemonSummary): string {
  * Actually LOADING this as a launchd service (so it survives logout/reboot and
  * restarts on crash) is W1-T12b/d — this command is what that service execs.
  */
-async function daemonCommand(rest: string[]): Promise<number> {
+export async function daemonCommand(rest: string[]): Promise<number> {
   // FAIL LOUD on junk args BEFORE any spawn/lock — `rmd daemon install --dry-run` silently
   // ran the daemon (draining W1-T15) because `install`/`--dry-run` were ignored. daemon
   // takes only these flags; anything else prints usage and exits non-zero, spawning nothing.
@@ -4817,13 +4817,14 @@ async function daemonCommand(rest: string[]): Promise<number> {
         // way when omitted) so the real wiring is as self-documenting as `sleep`.
         now: () => new Date(),
         // LEVEL-TRIGGERED PR-PIPELINE RECONCILER (W1-T77): the SAME runSweep the
+        // LEVEL-TRIGGERED PR-PIPELINE RECONCILER (W1-T77): the SAME runSweep the
         // `rmd sweep` CLI invokes, run once per poll iteration so no open PR
         // strands open-and-orphaned (#111/#113/#123). Best-effort by contract.
         sweep: buildSweepHook(target.owner, target.repo, config, ledgerPath, runId, plan, log),
-        // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks
-        // ONLY the deterministic post-review re-post while `runOne` is
-        // unbounded and in flight. See buildSweepLightHook's + daemon.ts's
-        // DaemonDeps.sweepLight doc for the full rationale.
+        // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
+        // the deterministic post-review re-post while `runOne` is unbounded and in
+        // flight, so a green PR whose review went absent re-posts within one poll
+        // interval. Dangerous lanes (fix/close/arm/escalate) stay non-concurrent.
         sweepLight: buildSweepLightHook(target.owner, target.repo, config, ledgerPath, runId, plan, log),
         // W1-T46 block-reasoning: a GENUINE BLOCKER (real downstream work
         // transitively needs the blocked task) opens a `needs-human` issue
@@ -5506,6 +5507,9 @@ export function buildSweepEffects(
   plan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+  // W1-T254: injectable review runner so the post-review effect's attempt/
+  // done/failed logging path is unit-covered without spawning a real review.
+  reviewRunner: (prNumber: number) => Promise<number> = (prNumber) => reviewCommand(String(prNumber), ["--repo", repo]),
 ): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = ghIssueGateway(owner, repo);
@@ -5546,7 +5550,7 @@ export function buildSweepEffects(
     postReview: async (pr) => {
       log("sweep.post_review.attempt", { pr_number: pr.prNumber, head_sha: pr.headSha });
       try {
-        const exit = await reviewCommand(String(pr.prNumber), ["--repo", repo]);
+        const exit = await reviewRunner(pr.prNumber);
         log("sweep.post_review.done", { pr_number: pr.prNumber, head_sha: pr.headSha, exit });
       } catch (e) {
         log("sweep.post_review.failed", {
@@ -5892,7 +5896,7 @@ function buildSweepHook(
  * ALSO wraps this call — see `daemon.sweep_light.failed` — this inner catch
  * just names the failure distinctly on this module's own ledger step).
  */
-function buildSweepLightHook(
+export function buildSweepLightHook(
   owner: string,
   repo: string,
   config: Config,

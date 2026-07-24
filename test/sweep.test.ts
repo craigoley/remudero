@@ -1205,3 +1205,25 @@ test("runSweep: a throwing action does not abort the pass — later PRs still re
   const healthyLine = disposed.find((l) => l.pr_number === 20);
   assert.equal(healthyLine?.acted, true, "the healthy PR still reconciled and was ledgered acted:true");
 });
+
+// ── W1-T254 light-sweep: the `actionable` guard stands down every dangerous lane ──
+
+test("runSweep (light pass): a non-post-review disposition is DEFERRED when actionable restricts to post-review — no dangerous lane fires, re-derived next full sweep", async () => {
+  const lp = ledgerPath();
+  const deps = fakeDeps({ ledgerPath: lp, actionable: (d) => d === "post-review" });
+  // A mergeable PR: its lane is ARM (a dangerous lane the light pass must never fire).
+  await runSweep([mergeablePr()], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(deps.armed.length, 0, "the light pass NEVER arms — a dangerous lane stands down");
+  const disposed = readLedgerLines(lp).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed[0].disposition, "mergeable");
+  assert.equal(disposed[0].acted, false, "deferred, not acted");
+  assert.match(String(disposed[0].stand_down_reason), /deferred to full sweep \(light pass\)/);
+});
+
+test("runSweep (light pass): a post-review disposition IS actionable under the same guard — the ticker's one permitted lane fires", async () => {
+  const lp = ledgerPath();
+  const fired: number[] = [];
+  const deps = fakeDeps({ ledgerPath: lp, actionable: (d) => d === "post-review", postReview: (p) => { fired.push(p.prNumber); } });
+  await runSweep([ungatedGreenPr()], deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(fired, [584], "post-review is the ONE lane the light pass runs");
+});

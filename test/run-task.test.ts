@@ -9,6 +9,8 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   armAutoMerge,
   armFailureAction,
   buildSweepEffects,
+  buildSweepLightHook,
+  daemonCommand,
   realArmDeps,
   type ArmDeps,
   DEFAULT_BUDGET_USD,
@@ -62,6 +64,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   type AlertFixCommandDeps,
   type AlertFixDispatchDeps,
 } from "../src/run-task.js";
+import { requestStop } from "../src/lib/fleet-control.js";
 import type { AlertLaneAlert } from "../src/lib/alert-lane.js";
 import type { AlertGateway } from "../src/lib/ops.js";
 import { realOnboardFsDeps, type Inventory, type OnboardGhGateway } from "../src/lib/onboard/inventory.js";
@@ -4446,5 +4449,111 @@ test("main(): `rmd alert-fix` with an unknown flag dispatches to alertFixCommand
     } else {
       process.env[SELF_SYNC_GUARD_ENV] = originalGuardEnv;
     }
+  }
+});
+
+// ── W1-T254 light-sweep glue: the postReview effect (injected runner) + buildSweepLightHook ──
+
+test("buildSweepEffects.postReview: ledgers attempt then done with the review exit — over an injected review runner (no real review spawned)", async () => {
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const root = mkdtempSync(join(tmpdir(), "rmd-postreview-"));
+  const effects = buildSweepEffects(
+    "craigoley", "remudero", { root } as never, join(root, "ledger.ndjson"), "RUN-PR-1",
+    { tasks: [] } as never,
+    (step, extra) => { logs.push({ step, extra }); },
+    DEFAULT_SWEEP_POLICY,
+    async () => 0, // injected review runner: a clean review
+  );
+  await effects.postReview!({ prNumber: 720, headSha: "deadbeef" } as never);
+  assert.ok(logs.some((l) => l.step === "sweep.post_review.attempt" && l.extra?.pr_number === 720));
+  const done = logs.find((l) => l.step === "sweep.post_review.done");
+  assert.ok(done, "a completed review ledgers post_review.done");
+  assert.equal(done!.extra?.exit, 0);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("buildSweepEffects.postReview: a THROWING review runner ledgers post_review.failed and RETHROWS — runSweep's per-PR containment still marks acted:false", async () => {
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const root = mkdtempSync(join(tmpdir(), "rmd-postreview-fail-"));
+  const effects = buildSweepEffects(
+    "craigoley", "remudero", { root } as never, join(root, "ledger.ndjson"), "RUN-PR-2",
+    { tasks: [] } as never,
+    (step, extra) => { logs.push({ step, extra }); },
+    DEFAULT_SWEEP_POLICY,
+    async () => { throw new Error("review spawn failed"); },
+  );
+  await assert.rejects(async () => { await effects.postReview!({ prNumber: 721, headSha: "cafe" } as never); }, /review spawn failed/);
+  const failed = logs.find((l) => l.step === "sweep.post_review.failed");
+  assert.ok(failed, "the failure is ledgered distinctly before the rethrow");
+  assert.match(String(failed!.extra?.error), /review spawn failed/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("buildSweepLightHook: runs the restricted light sweep over an empty PR set (offline gh) without touching a dangerous lane, best-effort on error", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-lighthook-"));
+  const bin = mkdtempSync(join(tmpdir(), "gh-empty-"));
+  writeFileSync(join(bin, "gh"), '#!/bin/sh\necho "[]"\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  try {
+    const hook = buildSweepLightHook("craigoley", "remudero", { root } as never, join(root, "ledger.ndjson"), "RUN-LH-1", { tasks: [] } as never, (step, extra) => { logs.push({ step, extra }); });
+    await hook(); // empty PR list -> runSweep over nothing; the hook body executes end to end
+    // The pass ran to a clean summary (never the error catch) and, over an empty
+    // set, took NO action — so no dangerous lane (fix/close/arm/escalate) fired.
+    const summary = logs.find((l) => l.step === "sweep.summary");
+    assert.ok(summary, "the light pass ran runSweep to its sweep.summary");
+    assert.equal(summary!.extra?.total, 0, "no open PRs to reconcile");
+    assert.equal(summary!.extra?.actions_taken, 0, "an empty set takes no action");
+    assert.ok(!logs.some((l) => l.step === "sweep_light.error"), "the happy path never hit the error catch");
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("daemonCommand: builds the real daemon deps (sweep + sweepLight wiring) then a present STOP returns exit 0 before any dispatch/sweep/gh (W1-T254)", async () => {
+  // loadConfig() takes no injection and reads $HOME, so redirect HOME at a throwaway
+  // dir: the REAL daemonCommand then runs entirely against tmp state, never the live
+  // daemon's root or drain lock. Pre-write the config so loadConfig takes the read path
+  // (no `which claude` shell-out). A present STOP is consulted FIRST in runDaemon, before
+  // refreshMerged/sweep/dispatch — so the deps object is CONSTRUCTED (covering the
+  // sweep/sweepLight wiring) with zero gh reads and zero spawns.
+  const home = mkdtempSync(join(tmpdir(), "rmd-daemoncmd-"));
+  const oldHome = process.env.HOME;
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n"); // an empty plan; STOP returns before it is ever scheduled
+  process.env.HOME = home;
+  try {
+    requestStop(root, "unit test");
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath]);
+    assert.equal(code, 0, "a present STOP returns a clean exit 0, nothing dispatched or swept");
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("buildSweepLightHook: an internal failure (malformed gh output) is caught + ledgered sweep_light.error, never propagated — the ticker never kills daemon liveness", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-lighthook-err-"));
+  const bin = mkdtempSync(join(tmpdir(), "gh-bad-"));
+  writeFileSync(join(bin, "gh"), '#!/bin/sh\necho "not json {["\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  const logs: Array<{ step: string }> = [];
+  try {
+    const hook = buildSweepLightHook("craigoley", "remudero", { root } as never, join(root, "ledger.ndjson"), "RUN-LH-ERR", { tasks: [] } as never, (step) => { logs.push({ step }); });
+    await hook(); // buildOpenPrViews throws on malformed gh output -> caught, ledgered, not thrown
+    assert.ok(logs.some((l) => l.step === "sweep_light.error"), "the internal failure is ledgered, never propagated");
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
   }
 });
