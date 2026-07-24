@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -24,6 +24,7 @@ import {
   parseReport,
   resolveClaudeExecutable,
   spawnWorker,
+  workerKeychainGrantApps,
   workerLedgerFields,
 } from "../src/lib/worker.js";
 
@@ -510,6 +511,77 @@ test("resolveClaudeExecutable: memoized per cache — a second call never re-tou
   assert.equal(second, first);
   assert.equal(existsCalls.length, existsCallsAfterFirst, "no new exists() calls on the memoized second resolution");
   assert.equal(whichCalls.length, whichCallsAfterFirst, "no new which() calls on the memoized second resolution");
+});
+
+// ── resolveClaudeExecutable's REAL (uninjected) defaults ───────────────────
+// Every test above injects `which`/`canExecute` — proving the resolution LOGIC
+// over fakes, never the two live seams themselves (`defaultWhich`'s real
+// `which claude` subprocess, `defaultCanExecute`'s real `--version` subprocess).
+// These two tests leave both seams at their default (omitted from `deps`) and
+// control the REAL PATH env var + a REAL executable fixture instead, so the
+// live subprocess code paths run deterministically regardless of whether the
+// host actually has `claude` installed.
+
+test("resolveClaudeExecutable: real defaultWhich + defaultCanExecute — a `claude` placed on PATH resolves via a real subprocess lookup", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-which-hit-"));
+  const fakeClaude = join(dir, "claude");
+  writeFileSync(fakeClaude, "#!/bin/sh\nexit 0\n");
+  chmodSync(fakeClaude, 0o755);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${dir}${originalPath ? `:${originalPath}` : ""}`;
+  try {
+    const cache = createClaudeExecutableCache();
+    // No `which`/`canExecute` in deps ⇒ resolveClaudeExecutable falls back to the
+    // real defaultWhich/defaultCanExecute — `which claude` finds `fakeClaude` first
+    // (prepended onto PATH) and `fakeClaude --version` exits 0, so it resolves.
+    const path = resolveClaudeExecutable(cache, { env: {}, home: dir });
+    assert.equal(path, fakeClaude, "the real `which claude` + `--version` preflight resolves the PATH-placed fixture");
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+test("resolveClaudeExecutable: real defaultWhich + defaultCanExecute — PATH miss and a non-runnable candidate both refuse via the real subprocess paths", () => {
+  const emptyPathDir = mkdtempSync(join(tmpdir(), "rmd-which-miss-"));
+  const dir = mkdtempSync(join(tmpdir(), "rmd-canexec-miss-"));
+  const brokenCandidate = join(dir, "claude");
+  writeFileSync(brokenCandidate, "#!/bin/sh\nexit 1\n");
+  chmodSync(brokenCandidate, 0o755);
+  const originalPath = process.env.PATH;
+  // An EMPTY PATH dir (no `claude` anywhere on it) ⇒ the real `which claude` call
+  // fails (non-zero exit, no match) and defaultWhich's catch branch returns
+  // `undefined` — deterministic regardless of whatever the host's real PATH holds.
+  process.env.PATH = emptyPathDir;
+  try {
+    const cache = createClaudeExecutableCache();
+    assert.throws(
+      () =>
+        resolveClaudeExecutable(cache, {
+          env: {},
+          home: dir,
+          locations: [{ label: "broken", resolve: () => brokenCandidate }],
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof ClaudeToolchainBlockedError);
+        // The real defaultCanExecute() ran `brokenCandidate --version` (exit 1) and
+        // caught the non-zero exit, recording it as EXISTS-but-not-runnable, never
+        // simply missing.
+        const entry = err.searched.find((s) => s.path === brokenCandidate)!;
+        assert.equal(entry.existed, true);
+        assert.equal(entry.ran, false);
+        return true;
+      },
+      "a PATH miss + a real exit-1 candidate both refuse cleanly via the live subprocess seams",
+    );
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+// ── workerKeychainGrantApps (W1-T113) ───────────────────────────────────────
+
+test("workerKeychainGrantApps: the freshly resolved claudeBin (never config.claudeBin's stale value) flows into the keychain grant list", () => {
+  assert.deepEqual(workerKeychainGrantApps("/fresh/resolved/claude"), ["/fresh/resolved/claude", "/usr/bin/security"]);
 });
 
 test("spawnWorker: an invalid settings file is REJECTED at the spawn boundary before any worker launches", async () => {

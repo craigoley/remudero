@@ -377,6 +377,19 @@ export function resolveClaudeExecutable(cache: ClaudeExecutableCache, deps: Reso
  */
 export const claudeExecutableCache: ClaudeExecutableCache = createClaudeExecutableCache();
 
+/**
+ * Pure: the macOS keychain grant list (W1-T113) — the FRESHLY resolved `claudeBin`
+ * (never `config.claudeBin`'s stale disk-cached value, exactly the vanished-binary
+ * incident's shape) plus the fixed `/usr/bin/security` helper every worker keychain
+ * grant needs. Extracted so this one-line assembly is unit-testable directly, without
+ * invoking `ensureWorkerKeychain` (a real keychain side effect) or gating a test on
+ * `process.platform` (spawnWorker's darwin-only call site, below, is untestable off
+ * a Linux CI runner by construction).
+ */
+export function workerKeychainGrantApps(claudeBin: string): string[] {
+  return [claudeBin, "/usr/bin/security"];
+}
+
 export interface SpawnWorkerArgs {
   cwd: string;
   permissionMode: PermissionMode;
@@ -460,7 +473,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     workerKeychainPath = ensureWorkerKeychain({
       ...workerKeychainPaths(join(config.root, "state")),
       loginKeychainPath: join(realHome, "Library", "Keychains", "login.keychain-db"),
-      grantApps: [claudeBin, "/usr/bin/security"],
+      grantApps: workerKeychainGrantApps(claudeBin),
     }).keychainPath;
   }
   materializeWorkerHome({ workerHome, realHome, workerKeychainPath });
