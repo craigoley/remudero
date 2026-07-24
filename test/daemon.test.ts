@@ -1247,6 +1247,114 @@ test("a THROWING sweep does not kill the loop — it logs daemon.sweep.failed an
   assert.notEqual(s.stopReason, "error", "a failing reconciler is not a daemon error");
 });
 
+// ── W1-T254 (the #707 fix): the restricted LIGHT-SWEEP TICKER ──────────────
+// `runOne` is unbounded — a long task run holds the daemon inside a single
+// call, during which the outer per-iteration `deps.sweep` above never runs
+// again. #707: the daemon swept at 13:12 (armed the OLD head), entered
+// `runOne`, and never swept again to see the NEW head for the whole window —
+// unbounded latency, total invisibility. `sweepLight` ticks ALONGSIDE an
+// in-flight `runOne` to close that gap.
+
+test("W1-T254: the light sweep runs while runOne is in flight, so a green PR with an absent review re-posts within one poll interval (the #707 fix)", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  let lightSweeps = 0;
+  let sleeps = 0;
+  let releaseRunOne: (() => void) | undefined;
+  const runOneGate = new Promise<void>((resolve) => {
+    releaseRunOne = resolve;
+  });
+  const sleep: DaemonDeps["sleep"] = async (_ms) => {
+    sleeps++;
+    if (sleeps >= 3) releaseRunOne?.();
+  };
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => {
+        // FALSIFIER: pre-fix, nothing ran again to see a new head until this
+        // (unbounded) call finally returned — stays "in flight" here until the
+        // ticker has ticked a few times, proving it runs CONCURRENTLY, not
+        // only before/after.
+        await runOneGate;
+        merged.add(id);
+        return okResult(id);
+      },
+      sweepLight: async () => {
+        lightSweeps++;
+      },
+      sleep,
+    },
+    { max: 1 },
+  );
+  assert.equal(s.stopReason, "max_reached");
+  assert.deepEqual(s.merged, ["A"], "runOne still completed once the ticker's sleeps released it");
+  assert.ok(lightSweeps >= 3, `the light-sweep ticker ran while runOne was in flight (saw ${lightSweeps} tick(s))`);
+});
+
+test("W1-T254: a THROWING sweepLight does not kill the loop — it logs daemon.sweep_light.failed and runOne still completes", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let lightSweeps = 0;
+  let sleeps = 0;
+  let releaseRunOne: (() => void) | undefined;
+  const runOneGate = new Promise<void>((resolve) => {
+    releaseRunOne = resolve;
+  });
+  const sleep: DaemonDeps["sleep"] = async (_ms) => {
+    sleeps++;
+    if (sleeps >= 2) releaseRunOne?.();
+  };
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => {
+        await runOneGate;
+        merged.add(id);
+        return okResult(id);
+      },
+      sweepLight: async () => {
+        lightSweeps++;
+        // FALSIFIER: pre-fix shape (the daemon.sweep.failed containment) applied
+        // to the full sweep only — this proves the SAME containment covers the
+        // light ticker too, so a `gh` hiccup here costs one logged tick, never
+        // the daemon's liveness.
+        throw new Error("gh: HTTP 500");
+      },
+      sleep,
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1 },
+  );
+  assert.equal(s.stopReason, "max_reached", "runOne still completed despite the throwing ticker");
+  assert.ok(lightSweeps >= 2, `the ticker kept retrying THROUGH the failures (saw ${lightSweeps})`);
+  const failLine = lines.find((l) => l.step === "daemon.sweep_light.failed");
+  assert.ok(failLine, "a daemon.sweep_light.failed ledger line was emitted");
+});
+
+test("W1-T254: no sweepLight wired -> the daemon dispatches exactly as before this ticker existed", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const clock = fakeClock();
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => {
+        merged.add(id);
+        return okResult(id);
+      },
+      sleep: clock.sleep,
+    },
+    { max: 4 },
+  );
+  assert.deepEqual(s.merged, ["A", "B", "C", "D"]);
+  assert.equal(s.stopReason, "max_reached");
+});
+
 test("a THROWING onCircuitBreak hook does not kill the loop", async () => {
   const plan = fixturePlan();
   let hookCalls = 0;

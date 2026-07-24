@@ -114,6 +114,12 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  *                                              verdict-stability anti-flap rule and the review
  *                                              evidence-strength precedence, both "last one
  *                                              wins" scans over this exact step.
+ *   - "review.post_refused"                 → sweep.ts's priorActionsFromLedger (W1-T254) — the
+ *                                              OUTCOME-keyed post-review dedup: an explicit
+ *                                              refusal for a head must dedup exactly like a
+ *                                              posted verdict does, or a rotation that drops it
+ *                                              re-opens the SAME head to a repeat post-review
+ *                                              attempt forever (the #707 fix's latent sibling).
  *   - "automerge.capped_override_granted"   → review.ts's cappedOverrideFromLedger — the
  *                                              operator-granted, head-pinned override that lets
  *                                              auto-merge arm despite a CAPPED verdict; losing
@@ -165,6 +171,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "fix.review",
   "dep-review.decided",
   "review.posted",
+  "review.post_refused",
   "automerge.capped_override_granted",
   "daemon.boot",
 ]);

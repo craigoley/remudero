@@ -813,6 +813,20 @@ export interface SweepDeps {
    * fires ONLY on a positive, freshly-observed terminal reading.
    */
   readLiveState?: (pr: OpenPrView) => LiveStateResult | Promise<LiveStateResult>;
+  /**
+   * W1-T254 (the #707 fix's LIGHT-SWEEP restriction): when supplied, gates
+   * which disposition's action is allowed to actually fire THIS pass — a
+   * disposition failing the predicate stands down with
+   * "deferred to full sweep (light pass)" instead of running (still
+   * ledgered every pass, never silently skipped). Omitted ⇒ every
+   * disposition acts, unchanged from before this existed. The daemon's
+   * restricted light-sweep ticker (running CONCURRENTLY with an in-flight
+   * `runOne`) wires `d => d === "post-review"` — only the deterministic,
+   * sha-pinned, mutex-serialized re-post is safe to run alongside a task;
+   * dispatchFix/close/escalate/depReview/arm stay strictly single-threaded,
+   * standing down here until the NEXT full sweep picks them up.
+   */
+  actionable?: (d: Disposition) => boolean;
   /** Absolute path to state/ledger.ndjson — dedup source + sweep.disposed sink. */
   ledgerPath: string;
   /** The sweep's run id (e.g. SWEEP-<epochMs> / DAEMON-<epochMs>). */
@@ -843,6 +857,13 @@ export interface SweepAction {
   acted: boolean;
   /** Set only for `blocked-ambiguous` (W1-T78) — the rendered clarification question. */
   question?: ClarificationQuestion;
+  /**
+   * W1-T254: set when this PR's gated action THREW — `acted` is false, but
+   * this is distinct from dedup/dry-run/stand-down: the action was
+   * attempted and failed, named here rather than propagating out of
+   * `runSweep` and aborting the rest of the pass.
+   */
+  actionError?: string;
 }
 
 /** The whole sweep's outcome — counts per disposition + the per-PR actions. */
@@ -868,7 +889,21 @@ interface PriorActions {
   escalated: Set<number>;
   /** `pr@head` keys whose dep-review reached a TERMINAL outcome (arm/escalate/refuse). */
   depReviewed: Set<string>;
-  /** `pr@head` keys the post-review lane already posted a verdict for. */
+  /**
+   * `taskId@head` keys with an actual OUTCOME for that head — a posted
+   * `review.posted` verdict OR an explicit `review.post_refused` refusal
+   * (W1-T254). NOT keyed off `sweep.disposed acted:true` like every other
+   * set here: an `acted:true` post-review dispose only proves the LANE WAS
+   * INVOKED, never that it reached a verdict (e.g. `postReviewStatusGuarded`
+   * can refuse internally without throwing) — keying dedup on the attempt
+   * used to suppress the SAME head forever after a single no-op invocation
+   * (a latent sibling of the #707 bug). Both ledger steps carry `head_sha`;
+   * a posted verdict ALSO flips the PR's live `reviewState` away from
+   * "none" on the next `buildOpenPrViews` read, so the row stops matching
+   * the post-review disposition rule at all — this set exists mainly to
+   * dedup a REFUSAL, which does not change GitHub's status and would
+   * otherwise re-route to post-review, and re-invoke, every single pass.
+   */
   postReviewed: Set<string>;
 }
 
@@ -880,6 +915,14 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const depReviewed = new Set<string>();
   const postReviewed = new Set<string>();
   for (const line of lines) {
+    // W1-T254: OUTCOME-KEYED, off the review lane's OWN ledger lines — never
+    // `sweep.disposed`. See PriorActions.postReviewed's doc.
+    if (line.step === "review.posted" || line.step === "review.post_refused") {
+      if (typeof line.task_id === "string" && typeof line.head_sha === "string") {
+        postReviewed.add(`${line.task_id}@${line.head_sha}`);
+      }
+      continue;
+    }
     if (line.step !== "sweep.disposed" || line.acted !== true) continue;
     const pr = typeof line.pr_number === "number" ? line.pr_number : undefined;
     if (pr === undefined) continue;
@@ -903,9 +946,8 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
           depReviewed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         }
         break;
-      case "post-review":
-        postReviewed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
-        break;
+      // "post-review" deliberately absent here (W1-T254): see the
+      // `review.posted`/`review.post_refused` branch above.
     }
   }
   return { armed, fixed, closed, escalated, depReviewed, postReviewed };
@@ -975,7 +1017,11 @@ export async function runSweep(
         alreadyDone = prior.depReviewed.has(`${pr.prNumber}@${pr.headSha}`);
         break;
       case "post-review":
-        alreadyDone = prior.postReviewed.has(`${pr.prNumber}@${pr.headSha}`);
+        // W1-T254: OUTCOME-keyed — see PriorActions.postReviewed's doc. Keyed
+        // by taskId (never prNumber — review.posted/review.post_refused carry
+        // no PR number, only the taskId the review lane itself resolved,
+        // matching `lastPostedReviewStatusFromLedger`'s established key).
+        alreadyDone = prior.postReviewed.has(`${pr.taskId ?? ""}@${pr.headSha}`);
         break;
       default:
         alreadyDone = false;
@@ -990,73 +1036,97 @@ export async function runSweep(
     // and from `deps.dryRun` (preview), so the disposed line can name WHY
     // `acted` is false without conflating the three.
     let standDownReason: string | undefined;
+    // W1-T254 — PER-PR THROW CONTAINMENT: a thrown action used to propagate
+    // straight out of `runSweep` as one un-attributed `sweep.error`, aborting
+    // the WHOLE pass (every later PR in `openPrs` went unreconciled this
+    // poll). Named here and ledgered on THIS PR's own `sweep.disposed` line
+    // below instead — the loop always reaches the next PR.
+    let actionError: string | undefined;
 
     if (acted) {
-      switch (disposition) {
-        case "mergeable":
-          await deps.arm(pr);
-          break;
-        case "blocked-fixable": {
-          // W1-T177 — TERMINAL-STATE CHECK AT THE SPENDING SITE: re-read this
-          // PR's state FRESH, right before a fix-rung strike is actually
-          // spent, never the `openPrs` snapshot this whole sweep pass started
-          // from. Optional dep; omitted or an indeterminate read (`ok:false`)
-          // behaves exactly as before — dispatch proceeds (fail OPEN, never
-          // fail-closed-to-stand-down; see `readLiveState`'s own doc).
-          const live = await deps.readLiveState?.(pr);
-          let terminal: string | undefined;
-          if (live) {
-            if (live.ok) {
-              terminal = terminalStateReason(live.state);
-            } else {
-              // FAIL OPEN, ledgered: the read failed/was indeterminate — this
-              // must never be treated as terminal (that would silently halt
-              // every blocked-fixable dispatch on a gh outage). Proceed to
-              // dispatchFix exactly as before this check existed; the failed
-              // read is still legible on the ledger.
-              log("sweep.dispose.indeterminate", { pr_number: pr.prNumber });
+      // W1-T254 — LIGHT-SWEEP RESTRICTION: `actionable` defaults to
+      // "everything" (SweepDeps.actionable is optional), so `rmd sweep` and
+      // the daemon's per-iteration full sweep are unchanged. The daemon's
+      // restricted light-sweep ticker (running CONCURRENTLY with an
+      // in-flight `runOne`) passes `d => d === "post-review"` so only that
+      // deterministic, sha-pinned, mutex-serialized re-post ever runs
+      // alongside a task — every other lane stands down here, re-derived
+      // and re-attempted (never dropped) on the very next full sweep.
+      if (deps.actionable && !deps.actionable(disposition)) {
+        acted = false;
+        standDownReason = "deferred to full sweep (light pass)";
+      } else {
+        try {
+          switch (disposition) {
+            case "mergeable":
+              await deps.arm(pr);
+              break;
+            case "blocked-fixable": {
+              // W1-T177 — TERMINAL-STATE CHECK AT THE SPENDING SITE: re-read this
+              // PR's state FRESH, right before a fix-rung strike is actually
+              // spent, never the `openPrs` snapshot this whole sweep pass started
+              // from. Optional dep; omitted or an indeterminate read (`ok:false`)
+              // behaves exactly as before — dispatch proceeds (fail OPEN, never
+              // fail-closed-to-stand-down; see `readLiveState`'s own doc).
+              const live = await deps.readLiveState?.(pr);
+              let terminal: string | undefined;
+              if (live) {
+                if (live.ok) {
+                  terminal = terminalStateReason(live.state);
+                } else {
+                  // FAIL OPEN, ledgered: the read failed/was indeterminate — this
+                  // must never be treated as terminal (that would silently halt
+                  // every blocked-fixable dispatch on a gh outage). Proceed to
+                  // dispatchFix exactly as before this check existed; the failed
+                  // read is still legible on the ledger.
+                  log("sweep.dispose.indeterminate", { pr_number: pr.prNumber });
+                }
+              }
+              if (terminal) {
+                acted = false;
+                standDownReason = terminal;
+                break;
+              }
+              // W1-T100: the evidence shape follows the SAME `isBlockedCi`
+              // predicate DISPOSITION_RULES routed on (never a second,
+              // independently-hardcoded check) — a failing review carries the
+              // unmet set (review mode), a blocked_ci PR carries ci-log evidence
+              // instead (never a mix; see FixDispatchEvidence).
+              await deps.dispatchFix(
+                pr,
+                isBlockedCi(pr)
+                  ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
+                  : { unmetCriteria: pr.unmetCriteria },
+              );
+              break;
             }
+            case "stale":
+              await deps.close(pr, reason);
+              break;
+            case "blocked-ambiguous":
+              await deps.escalate(pr, reason, question!);
+              break;
+            case "dep-review":
+              if (deps.depReview) {
+                depReviewOutcome = (await deps.depReview(pr)) ?? "unknown";
+              } else {
+                acted = false;
+                standDownReason = "no depReview dep wired — dependabot PR left for the operator lane";
+              }
+              break;
+            case "post-review":
+              if (deps.postReview) {
+                await deps.postReview(pr);
+              } else {
+                acted = false;
+                standDownReason = "no postReview dep wired — ungated PR left for the operator lane";
+              }
+              break;
           }
-          if (terminal) {
-            acted = false;
-            standDownReason = terminal;
-            break;
-          }
-          // W1-T100: the evidence shape follows the SAME `isBlockedCi`
-          // predicate DISPOSITION_RULES routed on (never a second,
-          // independently-hardcoded check) — a failing review carries the
-          // unmet set (review mode), a blocked_ci PR carries ci-log evidence
-          // instead (never a mix; see FixDispatchEvidence).
-          await deps.dispatchFix(
-            pr,
-            isBlockedCi(pr)
-              ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
-              : { unmetCriteria: pr.unmetCriteria },
-          );
-          break;
+        } catch (e) {
+          acted = false;
+          actionError = String((e as Error)?.message ?? e);
         }
-        case "stale":
-          await deps.close(pr, reason);
-          break;
-        case "blocked-ambiguous":
-          await deps.escalate(pr, reason, question!);
-          break;
-        case "dep-review":
-          if (deps.depReview) {
-            depReviewOutcome = (await deps.depReview(pr)) ?? "unknown";
-          } else {
-            acted = false;
-            standDownReason = "no depReview dep wired — dependabot PR left for the operator lane";
-          }
-          break;
-        case "post-review":
-          if (deps.postReview) {
-            await deps.postReview(pr);
-          } else {
-            acted = false;
-            standDownReason = "no postReview dep wired — ungated PR left for the operator lane";
-          }
-          break;
       }
       if (acted) actionsTaken++;
     }
@@ -1076,6 +1146,7 @@ export async function runSweep(
       reason,
       acted,
       question,
+      ...(actionError ? { actionError } : {}),
     });
 
     log("sweep.dispose", {
@@ -1084,6 +1155,13 @@ export async function runSweep(
       acted,
       reason,
       deduped: alreadyDone,
+      ...(actionError ? { action_error: actionError } : {}),
+      // W1-T254: the exact ambiguity that misread a dry-run line as a daemon
+      // action during the #707 diagnosis — THIS line (unlike the ledgered
+      // `sweep.disposed` below) fires unconditionally through the injected
+      // `log`, which the real wiring persists to the SAME ledger regardless
+      // of `--dry-run`. Tagged so a preview pass is never mistaken for one.
+      ...(deps.dryRun ? { dry_run: true } : {}),
     });
 
     // One ledger line per disposition (the INVARIANT). Skipped under --dry-run —
@@ -1103,6 +1181,7 @@ export async function runSweep(
         reason,
         head_sha: pr.headSha,
         ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
+        ...(actionError ? { action_error: actionError } : {}),
         ...(standDownReason ? { stand_down_reason: standDownReason } : {}),
         ...(question ? { question: question.question } : {}),
       });
