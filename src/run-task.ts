@@ -228,7 +228,7 @@ import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount 
 import { deriveTaskClass } from "./lib/task-class.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
-import { IsolationError, probeIsolation } from "./lib/isolation.js";
+import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, renderDoctrinePreamble } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
 import {
@@ -2249,6 +2249,16 @@ async function runTask(
      *  WITHOUT reading the store (see {@link computeMatchedLearningsForArm}); never set by
      *  any caller other than `wipeTestCommand`. */
     maskLearnings?: boolean;
+    /** Injectable containment-probe executor (W1-T91) — behavioral tests drive the REAL
+     *  blocked_containment catch branch (the structured guard/check/observed fields on its
+     *  ledger verdict line) through this seam, the SAME shape `defaultReconRunLens`'s own
+     *  `deps.probeExec` already uses, without touching `loadConfig()` (unavailable in CI) or
+     *  spawning a real sandboxed worker. Default: the real spawn-backed executor. */
+    containmentExec?: ProbeExecutor;
+    /** Injectable isolation-probe executor (W1-T91) — the isolation sibling of
+     *  `containmentExec` above, driving the REAL blocked_isolation catch branch. Default: the
+     *  real spawn-backed executor. */
+    isolationExec?: IsolationProbeExecutor;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
@@ -2446,6 +2456,7 @@ async function runTask(
       config,
       budgetUsd,
       log: (s, extra) => log(s, extra),
+      exec: opts.containmentExec,
     });
     costUsd += probe.costUsd; // meter the probe spawn (notional; the ledger has it)
     say(`containment preflight PASSED — ${probe.reason}`);
@@ -2483,6 +2494,7 @@ async function runTask(
       config,
       budgetUsd,
       log: (s, extra) => log(s, extra),
+      exec: opts.isolationExec,
     });
     costUsd += isoProbe.costUsd; // meter the probe spawn (notional; the ledger has it)
     say(`isolation preflight PASSED — ${isoProbe.reason}`);
