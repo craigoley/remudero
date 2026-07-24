@@ -142,16 +142,24 @@ export function isNonExecutableLine(text) {
 
 /**
  * Recognise the `// diff-cov: process-boundary — <reason>` directive and return the source
- * regions it exempts (W1-T221, fb-1784807764940-ce2404 + W1-T79/PR#662). The re-exec/exit glue
- * that lives at a process boundary -- `spawnSync(process.execPath, ...)` then `process.exit(...)`
- * -- cannot carry a `DA:<line>,N>0` hit without a real subprocess (you cannot unit-test a
- * `process.exit` or a re-exec without forking), so the diff gate would block it forever. This
- * lets an author mark ONE such function, and only such a function: the directive is honoured
+ * regions it exempts (W1-T221, fb-1784807764940-ce2404 + W1-T79/PR#662). Glue that lives at a
+ * process boundary cannot carry a `DA:<line>,N>0` hit without actually forking a subprocess, so
+ * the diff gate would block it forever. Two boundary shapes qualify:
+ *   - RE-EXEC/EXIT: `spawnSync(process.execPath, ...)` then `process.exit(...)` -- you cannot
+ *     unit-test a `process.exit` or a re-exec without forking (W1-T221 / PR #662).
+ *   - WORKER SPAWN: a thin wrapper `return spawnWorker(buildXArgs(opts))` -- the codebase's
+ *     canonical "the arg-builder carries the testable read-only contract; the spawn wrapper is
+ *     untested by design because it shells out via the Agent SDK" pattern (spawnSpecialistWorker,
+ *     spawnReconSpecialist; W1-T83 / PR #698). The tested contract is the arg-builder; the
+ *     one-line spawn delegation around it is the irreducible boundary.
+ * This lets an author mark ONE such function, and only such a function: the directive is honoured
  * only when it immediately precedes a declaration whose body (a) contains a process-boundary
  * call and (b) is small (<= MAX_BOUNDARY_EXEC_LINES executable lines). Anything else is an
  * INVALID directive that fails the gate CLOSED (a directive can never hide business logic --
  * misuse blocks the PR harder, not softer), and every honoured exemption is logged by main()
- * so no line is ever silently waved through.
+ * so no line is ever silently waved through. Note the boundary call must be DIRECT: a function
+ * that calls `spawnReconSpecialist` (itself a wrapper) rather than `spawnWorker` is NOT exempt --
+ * it must earn coverage, because such a caller typically carries real orchestration logic.
  *
  * The exempt region runs from the declaration line to the first `}` at the declaration's own
  * indent -- reliable given the repo's uniform brace style. Reads the checked-out file because
@@ -161,7 +169,7 @@ export function isNonExecutableLine(text) {
  */
 export const MAX_BOUNDARY_EXEC_LINES = 15;
 const BOUNDARY_CALL =
-  /\b(?:spawnSync|execFileSync)\(\s*process\.execPath\b|\bprocess\.exit(?:Code\s*=|\s*\()/;
+  /\b(?:spawnSync|execFileSync)\(\s*process\.execPath\b|\bprocess\.exit(?:Code\s*=|\s*\()|\bspawnWorker\s*\(/;
 export function computeBoundaryRanges(fileText) {
   const lines = fileText.split('\n');
   const ranges = [];

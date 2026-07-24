@@ -1,0 +1,10 @@
+diff --git a/boundary-indirectspawn.fxt b/boundary-indirectspawn.fxt
+new file mode 100644
+--- /dev/null
++++ b/boundary-indirectspawn.fxt
+@@ -0,0 +1,5 @@
++const y = 2;
++// diff-cov: process-boundary — tries to exempt an indirect (non-boundary) spawn caller
++function runLens(opts) {
++  return spawnReconSpecialist(opts);
++}

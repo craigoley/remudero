@@ -1,0 +1,10 @@
+diff --git a/boundary-spawnworker.fxt b/boundary-spawnworker.fxt
+new file mode 100644
+--- /dev/null
++++ b/boundary-spawnworker.fxt
+@@ -0,0 +1,5 @@
++const x = 1;
++// diff-cov: process-boundary — thin spawnWorker wrapper; buildReconSpecialistSpawnArgs is the tested contract
++export async function spawnReconSpecialist(opts) {
++  return spawnWorker(buildReconSpecialistSpawnArgs(opts));
++}
