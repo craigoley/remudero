@@ -53,5 +53,5 @@ raw: "CI FLAKE RESILIENCE — bounded evidence-preserving retry (fable; the
   self-absorbs single flakes)."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
