@@ -2713,7 +2713,13 @@ async function runTask(
     let transientAttempts = 0;
     for (;;) {
       impl = account(
-        await spawnWorker({
+        // `spawn` (opts.spawn ?? the real spawnWorker, exactly like the recon dispatch
+        // above) — not the raw spawnWorker import. Zero behavior change on the real path
+        // (opts.spawn is omitted by every real caller, so this is the same function
+        // object either way); the seam lets a behavioral test drive the implement
+        // dispatch the same way it already can recon (W1-T105's post-PR-open harvest
+        // call site below is otherwise unreachable without a live worker spawn).
+        await spawn({
           cwd: worktreePath,
           permissionMode: "bypassPermissions",
           // model/effort/max_turns come from the MOUNT (task_type × risk, §9), never a
