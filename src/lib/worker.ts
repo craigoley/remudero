@@ -21,7 +21,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { buildWorkerEnv } from "./env.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStaleWorkerScratch } from "./worker-scratch.js";
-import { ensureWorkerKeychain, materializeWorkerHome, workerKeychainPaths } from "./worker-home.js";
+import { ensureWorkerKeychain, materializeWorkerHome, workerKeychainPaths, type SecurityRunner } from "./worker-home.js";
 
 /**
  * Aggregate token usage off the SDK result envelope's `usage` field (verified
@@ -422,6 +422,16 @@ export interface SpawnWorkerArgs {
    * reaching into the module-level singleton.
    */
   claudeExecutable?: { cache?: ClaudeExecutableCache; deps?: ResolveClaudeExecutableDeps };
+  /**
+   * W1-T113: override the darwin-only keychain-provisioning gate/seams —
+   * same injection convention as `config`/`claudeExecutable` above. Omitted
+   * ⇒ the real `process.platform` and `ensureWorkerKeychain`'s own live
+   * `security(1)`/fs defaults. Tests inject `platform: "darwin"` plus a fake
+   * `runner`/`exists` (matching `ensureWorkerKeychain`'s OWN existing
+   * injectable seams, worker-home.ts) to exercise this gate deterministically
+   * off a non-macOS CI runner, with no real keychain touched.
+   */
+  keychain?: { platform?: NodeJS.Platform; runner?: SecurityRunner; exists?: (path: string) => boolean };
 }
 
 /**
@@ -469,11 +479,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // HERE, pre-spawn, with a named reason class — never a $0 worker whose
   // zero-write death reads as "containment UNPROVEN" (the 2026-07-21 incident).
   let workerKeychainPath: string | undefined;
-  if (process.platform === "darwin") {
+  const platform = args.keychain?.platform ?? process.platform;
+  if (platform === "darwin") {
     workerKeychainPath = ensureWorkerKeychain({
       ...workerKeychainPaths(join(config.root, "state")),
       loginKeychainPath: join(realHome, "Library", "Keychains", "login.keychain-db"),
       grantApps: workerKeychainGrantApps(claudeBin),
+      runner: args.keychain?.runner,
+      exists: args.keychain?.exists,
     }).keychainPath;
   }
   materializeWorkerHome({ workerHome, realHome, workerKeychainPath });

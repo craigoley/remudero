@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { WorkerSettingsError } from "../src/lib/settings.js";
+import { WorkerKeychainError } from "../src/lib/worker-home.js";
 import {
   BILLING_MODE,
   CLAUDE_BIN_ENV_OVERRIDE,
@@ -633,6 +634,50 @@ test("spawnWorker: W1-T113 — an all-absent toolchain refuses via the injected 
     ClaudeToolchainBlockedError,
     "an all-absent toolchain refuses cleanly via the SAME injectable seam resolveClaudeExecutable's own unit tests use",
   );
+});
+
+test("spawnWorker: W1-T113 — the darwin-only keychain gate provisions with the FRESHLY resolved claudeBin, via the injected platform/runner/exists seams", async () => {
+  // spawnWorker's keychain-provisioning gate only runs `if (platform === "darwin")`
+  // — real CI is ubuntu, so this exercises it via the SAME injection convention as
+  // `config`/`claudeExecutable` above: force `platform: "darwin"` and hand
+  // `ensureWorkerKeychain` (worker-home.ts) its OWN pre-existing `runner`/`exists`
+  // fakes (never a real `security(1)` call). The fake runner records every argv,
+  // then throws on `unlock-keychain` — a deliberate abort BEFORE spawnWorker ever
+  // reaches materializeWorkerHome/the real SDK `query()`, same "throws before
+  // reaching the SDK" shape the toolchain test above uses.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-worker-keychain-"));
+  const settingsFile = join(dir, "worker.json");
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+  const claudeBin = "/fresh/resolved/claude";
+  const runnerCalls: string[][] = [];
+  const runner = (argv: string[]) => {
+    runnerCalls.push(argv);
+    if (argv[0] === "find-generic-password" && argv.includes("-w")) return "secret\n";
+    if (argv[0] === "find-generic-password") return '"acct"<blob>="worker-account"';
+    if (argv[0] === "unlock-keychain") throw new Error("simulated: abort before any real spawn work");
+    return "";
+  };
+  await assert.rejects(
+    () =>
+      spawnWorker({
+        cwd: dir,
+        permissionMode: "bypassPermissions",
+        settingsFile,
+        prompt: "unreachable — the simulated unlock failure throws first",
+        config: { claudeBin: "/unused", root: dir },
+        claudeExecutable: {
+          cache: createClaudeExecutableCache(),
+          deps: { env: { [CLAUDE_BIN_ENV_OVERRIDE]: claudeBin }, home: dir, exists: () => true, canExecute: () => true, locations: [] },
+        },
+        keychain: { platform: "darwin", runner, exists: () => false },
+      }),
+    WorkerKeychainError,
+    "the simulated unlock-keychain failure surfaces as a named WorkerKeychainError, never a raw throw",
+  );
+  const provisionCall = runnerCalls.find((argv) => argv[0] === "add-generic-password");
+  assert.ok(provisionCall, "the keychain-provisioning add-generic-password call actually ran");
+  assert.ok(provisionCall!.includes(claudeBin), "the FRESHLY resolved claudeBin (not config.claudeBin's stale value) is granted");
+  assert.ok(provisionCall!.includes("/usr/bin/security"), "the fixed /usr/bin/security helper is always granted alongside it");
 });
 
 // ── evaluateDenyFloor: the dontAsk fallback state machine (spike verdict 4) ──
