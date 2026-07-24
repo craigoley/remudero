@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -68,6 +68,20 @@ const FIXTURE_PLAN = `- id: TST-BAD
       proof: "unit test test/daemon.test.ts asserts the thing"
   status: queued
   attempts: 0
+- id: TST-WARN
+  title: "clean sizing, but a grep: proof names no resolvable artifact (W1-T101 warn rollout)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  origin: architect
+  files: [src/lib/daemon.ts]
+  acceptance:
+    - claim: "does the thing"
+      proof: "grep: TODO"
+  status: queued
+  attempts: 0
 `;
 
 /** An offline GitHub gateway: projectPlan runs with zero network round-trips. */
@@ -116,6 +130,53 @@ test("CRITERION 5 (behavioral): a CLEAN task PASSES the pre-dispatch guard (asse
   // assertLintClean is the EXACT guard runTask invokes at dispatch (run-task.ts).
   assert.doesNotThrow(() => assertLintClean(plan.byId.get("TST-OK")!), "a clean task must pass the guard");
   assert.throws(() => assertLintClean(plan.byId.get("TST-BAD")!), /lint|violation/i, "the malformed task must be refused by the same guard");
+});
+
+// ── W1-T101: the proof-resolvability warn rollout is REAL at the pre-dispatch call site ──
+// (not just implemented in the linter) — a task whose only violation is an unresolvable
+// dialect-prefixed proof passes assertLintClean (demoted to warn, same convention proof-dialect
+// already established) AND the pre-dispatch loop LOGS it via `log("lint.warned", ...)` before
+// falling through to the rest of the dispatch path.
+
+test("CRITERION 5 (behavioral): a proof-resolvability-only violation WARNS (never refuses) at pre-dispatch, and the warning is ledgered", async () => {
+  const planPath = fixturePlanPath();
+  const configRoot = mkdtempSync(join(tmpdir(), "rmd-lint-root-"));
+  const config: Config = { claudeBin: "/bin/true", root: configRoot };
+
+  // Pre-seed a LIVE (this process' own pid) in-flight lock for TST-WARN so runTask refuses
+  // with blocked_inflight right after the lint gate — proving the lint guard (and its warn
+  // logging) already ran and PASSED without ever reaching a real worktree/worker spawn.
+  const inflightDir = join(configRoot, "state", "inflight");
+  mkdirSync(inflightDir, { recursive: true });
+  writeFileSync(
+    join(inflightDir, "TST-WARN.lock"),
+    JSON.stringify({ pid: process.pid, run_id: "pre-existing-run", host: "test-host", startedAt: new Date().toISOString() }),
+  );
+
+  let spawnCalls = 0;
+  const spawn = (async () => {
+    spawnCalls++;
+    throw new Error("spawn must never run once the pre-seeded inflight lock refuses the run");
+  }) as typeof spawnWorker;
+
+  const res = await runTask("TST-WARN", {
+    skipGitSync: true,
+    planPath,
+    config,
+    github: OFFLINE_GITHUB,
+    spawn,
+  });
+
+  assert.equal(res.verdict, "blocked_inflight", "the lint gate must PASS (warn, not block) so the run reaches the inflight-lock check next");
+  assert.equal(spawnCalls, 0, "the pre-seeded inflight lock refuses before any worker is spawned");
+
+  const ledgerLines = readFileSync(join(configRoot, "state", "ledger.ndjson"), "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
+  const warned = ledgerLines.find((l) => l.step === "lint.warned" && l.check === "proof-resolvability");
+  assert.ok(warned, "the pre-dispatch loop must ledger a lint.warned line for the demoted proof-resolvability violation");
+  assert.match(warned.message, /names no resolvable/, "the ledgered warning carries the linter's own remedy message");
 });
 
 test("blocked_illformed is a recognized terminal verdict on RunResult", () => {
