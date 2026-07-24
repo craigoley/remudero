@@ -240,6 +240,62 @@ test("runOnboardSynthesize refuses (SynthesizeError) when the phase-1 inventory 
   );
 });
 
+test("runOnboardSynthesize refuses (SynthesizeError) when inventory.json exists but is not valid JSON", async () => {
+  const targetDir = tmpRoot("rmd-onboard-synth-bad-inventory-json-");
+  mkdirSync(join(targetDir, "plan", "onboarding"), { recursive: true });
+  writeFileSync(join(targetDir, "plan", "onboarding", "inventory.json"), "{ not json");
+
+  await assert.rejects(
+    () =>
+      runOnboardSynthesize(targetDir, {
+        fs: realSynthesizeFsDeps,
+        git: recordingGit().gateway,
+        gh: recordingGh().gateway,
+        draft: NEVER_CALLED_DRAFT,
+      }),
+    (e: unknown) => e instanceof SynthesizeError && /inventory\.json exists but is not valid JSON/.test((e as Error).message),
+  );
+});
+
+test("runOnboardSynthesize refuses (SynthesizeError) when answers.json exists but is not valid JSON", async () => {
+  const targetDir = tmpRoot("rmd-onboard-synth-bad-answers-json-");
+  const dir = join(targetDir, "plan", "onboarding");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "inventory.json"), JSON.stringify(fixtureInventory(), null, 2));
+  writeFileSync(join(dir, "answers.json"), "{ not json");
+
+  await assert.rejects(
+    () =>
+      runOnboardSynthesize(targetDir, {
+        fs: realSynthesizeFsDeps,
+        git: recordingGit().gateway,
+        gh: recordingGh().gateway,
+        draft: NEVER_CALLED_DRAFT,
+      }),
+    (e: unknown) => e instanceof SynthesizeError && /answers\.json exists but is not valid JSON/.test((e as Error).message),
+  );
+});
+
+test("runOnboardSynthesize refuses (SynthesizeError) when candidates.json exists but is not valid JSON (past both gates, before drafting)", async () => {
+  const targetDir = tmpRoot("rmd-onboard-synth-bad-candidates-json-");
+  const dir = join(targetDir, "plan", "onboarding");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "inventory.json"), JSON.stringify(fixtureInventory(), null, 2));
+  writeFileSync(join(dir, "answers.json"), JSON.stringify(completeAnswers(), null, 2));
+  writeFileSync(join(dir, "candidates.json"), "{ not json");
+
+  await assert.rejects(
+    () =>
+      runOnboardSynthesize(targetDir, {
+        fs: realSynthesizeFsDeps,
+        git: recordingGit().gateway,
+        gh: recordingGh().gateway,
+        draft: NEVER_CALLED_DRAFT,
+      }),
+    (e: unknown) => e instanceof SynthesizeError && /candidates\.json exists but is not valid JSON/.test((e as Error).message),
+  );
+});
+
 test("runOnboardSynthesize refuses when the target directory itself does not exist", async () => {
   const parentDir = tmpRoot("rmd-onboard-synth-missing-parent-");
   const missingTargetDir = join(parentDir, "does-not-exist");

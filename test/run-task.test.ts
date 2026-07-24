@@ -54,15 +54,18 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   defaultReconRunLens,
   sessionCommand,
   synthesizeCommand,
+  defaultSynthesizeDraft,
   lintPlanCommand,
   main,
 } from "../src/run-task.js";
 import { realOnboardFsDeps, type Inventory, type OnboardGhGateway } from "../src/lib/onboard/inventory.js";
+import type { Candidate } from "../src/lib/onboard/recon.js";
 import { realReconFsDeps, type ReconGhGateway } from "../src/lib/onboard/recon.js";
 import { generateOnboardQuestions, realSessionFsDeps, type OnboardAnswer, type OnboardQuestion } from "../src/lib/onboard/session.js";
 import {
   realSynthesizeFsDeps,
   type SynthesizeDraftFn,
+  type SynthesizeDraftInput,
   type SynthesizeGhGateway,
   type SynthesizeGitGateway,
 } from "../src/lib/onboard/synthesize.js";
@@ -3954,6 +3957,102 @@ const alwaysCleanSynthesizeDraft: SynthesizeDraftFn = async () => ({
   masterPlan: "# MASTER-PLAN.md\n",
   tasksYaml: SYNTHESIZE_CLEAN_TASKS_YAML,
   agentsMd: "# AGENTS.md\n",
+});
+
+// ── defaultSynthesizeDraft (the REAL, spawn-backed `draft` fn `synthesizeCommand` falls back
+// to when no `deps.draft` is injected) — driven with a fake `spawn`/`probeExec`/`config` so it
+// never touches `loadConfig()` (unavailable in CI) or shells a real Agent SDK spawn, same DI
+// shape as `defaultReconRunLens`'s own test above (RECON_LENS_FAKE_CONFIG/reconLensDenyingProbeExec
+// reused). Exercises all three prompt builders (MASTER-PLAN.md / tasks.yaml — with AND without
+// redraft feedback / AGENTS.md) plus the settings-file-prepared-once-and-reused behavior. ──────
+
+function synthesizeDraftFixtureInput(): SynthesizeDraftInput {
+  return {
+    inventory: synthesizeFixtureInventory(),
+    candidates: [
+      { text: "ship a fuzzy search over the board", source: { kind: "file", path: "ROADMAP.md", line: 3 }, confidence: "mined" },
+    ] as Candidate[],
+    answers: completeSynthesizeAnswers(),
+    findings: "SECURITY_FINDING: none found",
+    targetDir: "/some/target-repo",
+    owner: "acme-corp",
+    repo: "widget-fixture",
+  };
+}
+
+test("defaultSynthesizeDraft: renders settings + probes containment ONCE, spawns 3 read-only workers (one per document), and returns their text trimmed", async () => {
+  const seenPrompts: string[] = [];
+  const seenSettingsFiles: string[] = [];
+  const seenCwds: string[] = [];
+  const draft = defaultSynthesizeDraft({
+    config: RECON_LENS_FAKE_CONFIG,
+    probeExec: reconLensDenyingProbeExec,
+    spawn: async (opts: SpawnWorkerArgs): Promise<WorkerResult> => {
+      seenPrompts.push(opts.prompt);
+      seenSettingsFiles.push(opts.settingsFile);
+      seenCwds.push(opts.cwd);
+      return {
+        sessionId: "s", costUsd: 0, numTurns: 1,
+        text: "  drafted for doc  \n",
+        blocks: [], stderr: "", subtype: "success", isError: false, apiError: false,
+        permissionDenials: [], childEnvKeys: [], model: "default", effort: "default",
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {},
+        compactionEvents: [], qualitySuspect: false,
+      };
+    },
+  });
+
+  const input = synthesizeDraftFixtureInput();
+  const result = await draft(input);
+
+  assert.equal(result.masterPlan, "drafted for doc");
+  assert.equal(result.tasksYaml, "drafted for doc");
+  assert.equal(result.agentsMd, "drafted for doc");
+  assert.equal(seenPrompts.length, 3, "one spawn per document");
+  assert.ok(seenCwds.every((cwd) => cwd === input.targetDir), "each spawn runs against the target checkout");
+  assert.equal(seenSettingsFiles[0], seenSettingsFiles[1]);
+  assert.equal(seenSettingsFiles[1], seenSettingsFiles[2], "the rendered settings file is prepared ONCE and reused across all three spawns");
+
+  const masterPlanPrompt = seenPrompts.find((p) => p.includes("Write this target repo's MASTER-PLAN.md"))!;
+  assert.match(masterPlanPrompt, /acme-corp\/widget-fixture/);
+  assert.match(masterPlanPrompt, /READ-ONLY/);
+  assert.match(masterPlanPrompt, /SECURITY_FINDING: none found/);
+  assert.match(masterPlanPrompt, /"widget-fixture"/, "the JSON-stringified inventory target is inlined verbatim");
+
+  const tasksYamlPrompt = seenPrompts.find((p) => p.includes("Draft a CHANGE-LEVEL plan/tasks.yaml SEED"))!;
+  assert.match(tasksYamlPrompt, /fuzzy search over the board/);
+  assert.doesNotMatch(tasksYamlPrompt, /YOUR PREVIOUS DRAFT FAILED/, "no feedback block on a first attempt");
+
+  const agentsMdPrompt = seenPrompts.find((p) => p.includes("Write this target repo's AGENTS.md"))!;
+  assert.match(agentsMdPrompt, /no-touch zones and verify:human boundaries/);
+});
+
+test("defaultSynthesizeDraft: a redraft (feedback present) folds the prior lint-plan violations into the tasks.yaml prompt ONLY", async () => {
+  const seenPrompts: string[] = [];
+  const draft = defaultSynthesizeDraft({
+    config: RECON_LENS_FAKE_CONFIG,
+    probeExec: reconLensDenyingProbeExec,
+    spawn: async (opts: SpawnWorkerArgs): Promise<WorkerResult> => {
+      seenPrompts.push(opts.prompt);
+      return {
+        sessionId: "s", costUsd: 0, numTurns: 1, text: "doc",
+        blocks: [], stderr: "", subtype: "success", isError: false, apiError: false,
+        permissionDenials: [], childEnvKeys: [], model: "default", effort: "default",
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {},
+        compactionEvents: [], qualitySuspect: false,
+      };
+    },
+  });
+
+  await draft(synthesizeDraftFixtureInput(), ["task T-1 origin: is missing", "task T-2 proof: is prose, not executable"]);
+
+  const tasksYamlPrompt = seenPrompts.find((p) => p.includes("Draft a CHANGE-LEVEL plan/tasks.yaml SEED"))!;
+  assert.match(tasksYamlPrompt, /YOUR PREVIOUS DRAFT FAILED `rmd lint-plan`/);
+  assert.match(tasksYamlPrompt, /task T-1 origin: is missing/);
+  assert.match(tasksYamlPrompt, /task T-2 proof: is prose, not executable/);
+
+  const masterPlanPrompt = seenPrompts.find((p) => p.includes("Write this target repo's MASTER-PLAN.md"))!;
+  assert.doesNotMatch(masterPlanPrompt, /YOUR PREVIOUS DRAFT FAILED/, "feedback is scoped to the tasks.yaml prompt only");
 });
 
 test("onboardCommand: --phase synthesize routes to synthesizeCommand — a missing target dir fails loud through synthesizeCommand's OWN parser", async (t) => {
