@@ -179,7 +179,6 @@ import { appendLedger } from "./lib/ledger.js";
 import {
   assertRunnable,
   loadPlan,
-  loadPlanFromYaml,
   selectTask,
   type AcceptanceCriterion,
   type MergedResolver,
@@ -404,24 +403,34 @@ export function syncPlanFromOrigin(
 export type GitRunner = (args: string[]) => string;
 
 /**
- * Copy every `plan/tasks.d/*.yaml` shard on origin/main into `<tmpDir>/tasks.d/` beside the
+ * Copy every `plan/tasks.d/*.yaml` shard at `ref` into `<tmpDir>/tasks.d/` beside the
  * already-written monolith, so {@link loadPlan}'s sibling-directory shard lookup sees them
  * (W1-T245: syncPlanFromOrigin was shard-blind). List via `git ls-tree`, read each via
- * `git show origin/main:<shard>` — origin blobs only, never the working tree. A failing
+ * `git show <ref>:<shard>` — the ref's blobs only, never the working tree. A failing
  * ls-tree (no tasks.d/ at the ref, or a ref-dir lookup miss) is the plain no-shards case
  * (matches listShardFiles's ENOENT tolerance); a shard that lists but fails to `git show`
  * throws {@link GitFetchError} loudly — a torn read must never silently drop a task.
+ *
+ * `ref` defaults to `"origin/main"` (this function's original, single-caller shape); W1-T246's
+ * `lintPlanCommand` passes an ARBITRARY `--base <ref>` — the SAME shard-blindness (W1-T245)
+ * exists there too: a plain `git show <base>:tasks.yaml` only ever materializes the monolith,
+ * so every shard-only task looked "new" on EVERY PR's `lint-plan --base` run regardless of
+ * whether that PR touched it (empirically confirmed live: 20/20 currently-open shards spuriously
+ * in scope against an IDENTICAL base==head commit). That was harmless while no check ever
+ * failed on a shard task; it stops being harmless the moment a new default-BLOCK check (like
+ * proof-dialect) can land on one.
  */
 export function materializeOriginShards(
   repoDir: string,
   planRelDir: string,
   tmpDir: string,
   runGit: GitRunner = (args) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8" }),
+  ref = "origin/main",
 ): string[] {
   const shardRelDir = join(planRelDir, "tasks.d");
   let shardListing: string;
   try {
-    shardListing = runGit(["ls-tree", "--name-only", "origin/main", `${shardRelDir}/`]);
+    shardListing = runGit(["ls-tree", "--name-only", ref, `${shardRelDir}/`]);
   } catch {
     shardListing = "";
   }
@@ -435,9 +444,9 @@ export function materializeOriginShards(
   for (const shardRelPath of shardRelPaths) {
     let shardBlob: string;
     try {
-      shardBlob = runGit(["show", `origin/main:${shardRelPath}`]);
+      shardBlob = runGit(["show", `${ref}:${shardRelPath}`]);
     } catch (err) {
-      throw new GitFetchError(`git show origin/main:${shardRelPath} failed in ${repoDir}: ${String(err)}`);
+      throw new GitFetchError(`git show ${ref}:${shardRelPath} failed in ${repoDir}: ${String(err)}`);
     }
     writeFileSync(join(tmpShardDir, basename(shardRelPath)), shardBlob, "utf8");
   }
@@ -2251,7 +2260,17 @@ async function runTask(
   // worktree, no worker ever spawns. `rmd drain` dispatches every task through
   // this same `runTask` path, so this ONE call site gates both entry points.
   try {
-    assertLintClean(task);
+    // proofDialect:"warn" — W1-T246: the check that a proof cannot execute (the dead
+    // proof floor) BLOCKS at filing (`rmd lint-plan`, the inbox draft rung, the retro's
+    // plan-health sweep — all default to "block") but only WARNS pre-dispatch, so the
+    // ~90-task legacy backlog authored before this check existed does not brick into
+    // blocked_illformed overnight. Log every such warning (visibility, never a refusal)
+    // BEFORE the shared assertLintClean gate below runs the SAME check again to decide
+    // whether to dispatch — a block-severity violation (any OTHER check) still refuses.
+    for (const v of lintTask(task, { proofDialect: "warn" }).violations) {
+      if (v.check === "proof-dialect" && v.severity === "warn") log("lint.warned", { check: v.check, message: v.message });
+    }
+    assertLintClean(task, { proofDialect: "warn" });
   } catch (e) {
     if (e instanceof TaskLintError) {
       log("lint.blocked", { violations: e.violations });
@@ -3634,7 +3653,7 @@ async function depReviewCommand(prArg: string, rest: string[] = []): Promise<num
  * configuration error (exit 2), never a silent fall-back to full-plan or
  * no-op — the control surface never guesses on ambiguous input.
  */
-async function lintPlanCommand(rest: string[]): Promise<number> {
+export async function lintPlanCommand(rest: string[]): Promise<number> {
   const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base"], []);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -3653,16 +3672,30 @@ async function lintPlanCommand(rest: string[]): Promise<number> {
   let scope: Set<string> | undefined;
   if (baseRef) {
     const relPath = relative(repoRoot, planPath);
+    // W1-T246 (recon): a plain `git show <base>:<relPath>` only ever materializes the MONOLITH
+    // — every `plan/tasks.d/*.yaml` shard is invisible to it, so every shard-only task looked
+    // "new/changed" on EVERY `lint-plan --base` run regardless of whether the PR touched it (the
+    // SAME shard-blindness W1-T245 already fixed for syncPlanFromOrigin's dispatch-side sync).
+    // That was harmless while no check ever failed on a shard task; it stops being harmless the
+    // moment a new default-BLOCK check (proof-dialect) can land on one — reuse
+    // materializeOriginShards (parameterized by `ref`, W1-T246) so the reconstructed base plan
+    // matches exactly what `loadPlan` would see from a real checkout at `baseRef`.
+    const tmpDir = makeTempDir("lint-plan-base");
     try {
       const oldRaw = execFileSync("git", ["show", `${baseRef}:${relPath}`], {
         cwd: repoRoot,
         encoding: "utf8",
       });
-      const oldPlan = loadPlanFromYaml(oldRaw, `${baseRef}:${relPath}`);
+      const tmpFile = join(tmpDir, "tasks.yaml");
+      writeFileSync(tmpFile, oldRaw, "utf8");
+      materializeOriginShards(repoRoot, dirname(relPath), tmpDir, undefined, baseRef);
+      const oldPlan = loadPlan(tmpFile);
       scope = changedTaskIds(oldPlan.tasks, plan.tasks);
     } catch (e) {
       console.error(`### rmd lint-plan: cannot resolve --base ${baseRef}: ${(e as Error).message}`);
       return 2;
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
     }
   }
 

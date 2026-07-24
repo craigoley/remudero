@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
@@ -10,6 +11,7 @@ import {
   lintPlan,
   lintTask,
   moduleIdFromPath,
+  proofDialectViolations,
   proofShapeViolations,
   provenanceViolation,
   sizingViolation,
@@ -101,7 +103,10 @@ const W1_T4_SHAPE = task({
 
 test("ACCEPTANCE 2: a multi-criteria SINGLE-concern task (W1-T4 shape) is NOT flagged — no false positive on raw criterion count", () => {
   assert.equal(sizingViolation(W1_T4_SHAPE), undefined);
-  const res = lintTask(W1_T4_SHAPE);
+  // W1_T4_SHAPE is the REAL, still-open W1-T4's verbatim prose proofs (a live dead-proof-floor
+  // offender, per W1-T246's own census) — proofDialect:"warn" isolates THIS test to what it is
+  // actually about (sizing), matching how the pre-dispatch call site treats the legacy backlog.
+  const res = lintTask(W1_T4_SHAPE, { proofDialect: "warn" });
   assert.equal(
     res.violations.some((v) => v.check === "sizing"),
     false,
@@ -451,6 +456,116 @@ test("an observable proof (a grep/test/transcript reference) is NOT flagged", ()
   assert.equal(proofShapeViolations(t).length, 0);
 });
 
+// ── PROOF-DIALECT (moratorium finding 9 — the dead proof floor, W1-T246) ─────
+
+test("W1-T246 ACCEPTANCE 1: unit test: W1-T79 criterion-2 prose proof yields a blocking proof-dialect violation naming the criterion", () => {
+  // Loaded VERBATIM from the real, still-open plan/tasks.yaml (REAL_PLAN, defined above) —
+  // the EXACT incident (W1-T79 / PR #662) that motivated this check, not a synthesized fixture.
+  const w1t79 = REAL_PLAN.byId.get("W1-T79");
+  assert.ok(w1t79, "expected W1-T79 in the real plan");
+  const criterion2 = w1t79!.acceptance![1]!;
+  assert.match(criterion2.proof, /^unit tests:/, "criterion 2's proof is the 'unit tests:' near-miss prose this check exists to catch");
+  const violations = proofDialectViolations(w1t79!);
+  const hit = violations.find((v) => v.check === "proof-dialect" && /criterion 2/.test(v.message));
+  assert.ok(hit, "expected a proof-dialect violation naming criterion 2");
+  assert.equal(hit!.severity, "block");
+  assert.equal(lintTask(w1t79!).ok, false);
+});
+
+test("W1-T246 ACCEPTANCE 2: unit test: a well-formed unit test: proof yields no proof-dialect violation", () => {
+  const clean = task({
+    id: "FIX-DIALECT-CLEAN",
+    acceptance: [{ claim: "does the thing", proof: "unit test: test/foo.test.ts" }],
+  });
+  assert.deepEqual(proofDialectViolations(clean), []);
+  assert.equal(lintTask(clean).ok, true);
+
+  const cleanGrep = task({
+    id: "FIX-DIALECT-CLEAN-GREP",
+    acceptance: [{ claim: "does the thing", proof: "grep: no callers of the old API remain in src/lib/example.ts" }],
+  });
+  assert.deepEqual(proofDialectViolations(cleanGrep), []);
+});
+
+test("near-miss prefixes (unit tests:/unit test over/grep: with no path) are BLOCKED with a corrective hint", () => {
+  const nearMissPlural = task({
+    id: "FIX-DIALECT-NEARMISS-PLURAL",
+    acceptance: [{ claim: "does the thing", proof: "unit tests: dirty -> no pull" }],
+  });
+  const v1 = proofDialectViolations(nearMissPlural);
+  assert.equal(v1.length, 1);
+  assert.match(v1[0]!.message, /near-miss/i);
+
+  const nearMissOver = task({
+    id: "FIX-DIALECT-NEARMISS-OVER",
+    acceptance: [{ claim: "does the thing", proof: "unit test over injected git deps: behind+clean -> ff-pull invoked" }],
+  });
+  const v2 = proofDialectViolations(nearMissOver);
+  assert.equal(v2.length, 1);
+  assert.match(v2[0]!.message, /near-miss/i);
+
+  const grepNoPath = task({
+    id: "FIX-DIALECT-GREP-NOPATH",
+    acceptance: [{ claim: "does the thing", proof: "grep: no callers of the old API remain" }],
+  });
+  const v3 = proofDialectViolations(grepNoPath);
+  assert.equal(v3.length, 1);
+  assert.match(v3[0]!.message, /dialect-prefixed but refused/i);
+
+  const freeProse = task({
+    id: "FIX-DIALECT-FREE-PROSE",
+    acceptance: [{ claim: "does the thing", proof: "the operator eyeballs the output and confirms it looks right" }],
+  });
+  const v4 = proofDialectViolations(freeProse);
+  assert.equal(v4.length, 1);
+  assert.match(v4[0]!.message, /free prose/i);
+  for (const v of [v1[0]!, v2[0]!, v3[0]!, v4[0]!]) assert.equal(v.severity, "block");
+});
+
+test("a unit test: proof whose body reads as a runtime narrative (the W1-T79-criteria-3/4 shape) WARNS but does not block", () => {
+  const t = task({
+    id: "FIX-DIALECT-NONTITLE",
+    acceptance: [{ claim: "up-to-date adds nothing", proof: "unit test: same-sha fixture -> no pull, no re-exec, no output beyond the command's own" }],
+  });
+  const violations = proofDialectViolations(t);
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0]!.severity, "warn");
+  assert.equal(lintTask(t).ok, true, "a warn must never block, regardless of opts.proofDialect");
+});
+
+test("W1-T246 ACCEPTANCE 3: unit test: proofDialect warn mode returns ok true with the violation surfaced, never blocking", () => {
+  const t = task({
+    id: "FIX-DIALECT-WARN-MODE",
+    acceptance: [{ claim: "does the thing", proof: "a prose paragraph describing what happened, not a dialect proof" }],
+  });
+  const blockRes = lintTask(t); // default severity is "block"
+  assert.equal(blockRes.ok, false);
+  assert.ok(blockRes.violations.some((v) => v.check === "proof-dialect" && v.severity === "block"));
+
+  const warnRes = lintTask(t, { proofDialect: "warn" });
+  assert.equal(warnRes.ok, true, "warn mode must never block dispatch — the legacy backlog must not brick overnight");
+  assert.ok(
+    warnRes.violations.some((v) => v.check === "proof-dialect" && v.severity === "warn"),
+    "the violation is still surfaced, just demoted",
+  );
+});
+
+test("W1-T246 ACCEPTANCE 4: grep: parseWhitelistedProof in src/lib/task-linter.ts", () => {
+  // The check reuses review.ts's OWN executed-proof predicate — never a reimplementation that
+  // could drift from what remudero-review actually runs (see the module's design doc).
+  const src = readFileSync(fileURLToPath(new URL("../src/lib/task-linter.ts", import.meta.url)), "utf8");
+  assert.match(src, /parseWhitelistedProof/);
+  assert.match(src, /import\s*\{[^}]*parseWhitelistedProof[^}]*\}\s*from\s*"\.\/review\.js"/);
+});
+
+test("a satisfied_by criterion is exempt — Architect-only, never expected to be executable prose", () => {
+  const t = task({
+    id: "FIX-DIALECT-SATISFIED-BY",
+    acceptance: [{ claim: "already shipped elsewhere", proof: "free prose, never executed", satisfied_by: "#123" }],
+  });
+  assert.deepEqual(proofDialectViolations(t), []);
+});
+
 // ── PROVENANCE (Rules 16/17) ──────────────────────────────────────────────────
 
 test("a task missing origin: is FLAGGED (provenance)", () => {
@@ -502,7 +617,11 @@ test("ACCEPTANCE 5: assertLintClean THROWS TaskLintError for a malformed task; a
     assert.equal(e.taskId, "FIX-MALFORMED");
     assert.ok(e.violations.length > 0);
   }
-  assert.doesNotThrow(() => assertLintClean(W1_T4_SHAPE));
+  // W1_T4_SHAPE carries the REAL, still-open W1-T4's verbatim prose proofs — a live
+  // proof-dialect offender (W1-T246), so this ACCEPTANCE-5 check (which predates W1-T246 and
+  // is about sizing/headless-fitness/proof-shape/provenance, not proof-dialect) isolates the
+  // SAME way the pre-dispatch call site does for the legacy backlog: proofDialect:"warn".
+  assert.doesNotThrow(() => assertLintClean(W1_T4_SHAPE, { proofDialect: "warn" }));
 });
 
 // ── ACCEPTANCE 6: the canonical regression fixture ────────────────────────────
@@ -583,7 +702,7 @@ test("lintPlan runs the same checks across every task in a loaded plan", () => {
   origin: architect
   acceptance:
     - claim: "does the thing"
-      proof: "grep: no old callers remain"
+      proof: "grep: no old callers remain in src/lib/example.ts"
 - id: BAD
   title: broken
   repo: remudero
@@ -601,5 +720,7 @@ test("lintPlan runs the same checks across every task in a loaded plan", () => {
   assert.equal(results.get("CLEAN")?.ok, true);
   assert.equal(results.get("BAD")?.ok, false);
   const badChecks = results.get("BAD")?.violations.map((v) => v.check).sort();
-  assert.deepEqual(badChecks, ["headless-fitness", "proof-shape"]);
+  // "works" is BOTH a vibe (proof-shape) AND unparseable as any executable dialect shape
+  // (proof-dialect, moratorium finding 9) — the SAME defect, seen by two different checks.
+  assert.deepEqual(badChecks, ["headless-fitness", "proof-dialect", "proof-shape"]);
 });

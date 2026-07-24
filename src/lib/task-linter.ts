@@ -1,12 +1,14 @@
 import type { Plan, Task } from "./plan.js";
+import { isDialectPrefixed, parseWhitelistedProof } from "./review.js";
 
 /**
  * Deterministic task linter (MASTER-PLAN §5C Layer A). NO LLM — a PURE function
  * over a loaded {@link Task}/{@link Plan}, no I/O, no side effects. Catches the
  * class of malformed task that reached a worker four times (W1-T6, W1-T9, and
  * W1-T12 twice-over) and burned budget before a human noticed: over-scoping
- * (Rule 19), headless-unfitness (Rule 18), vibe proofs, and missing provenance
- * (Rules 16/17).
+ * (Rule 19), headless-unfitness (Rule 18), vibe proofs, a proof that CANNOT
+ * EXECUTE at all (the dead proof floor, moratorium finding 9, W1-T246), and
+ * missing provenance (Rules 16/17).
  *
  * Wired at TWO points, both FAIL-CLOSED:
  *   (i)  a CI check on any PR that edits plan/tasks.yaml (`rmd lint-plan`, see
@@ -18,11 +20,21 @@ import type { Plan, Task } from "./plan.js";
  *        no worker spawned, no inflight lock even taken (see run-task.ts,
  *        `assertLintClean` called immediately after `assertRunnable`).
  *
- * A BLOCKING violation refuses dispatch; a WARN violation (budget-sanity only)
- * is visibility-only and never blocks.
+ * A BLOCKING violation refuses dispatch. A WARN violation is visibility-only and
+ * never blocks — budget-sanity always warns; proof-dialect warns instead of
+ * blocking ONLY at the pre-dispatch call site (`opts.proofDialect: "warn"`, so the
+ * legacy backlog authored before this check existed does not brick overnight),
+ * and always warns (regardless of that option) for a `unit test:` proof whose
+ * body reads as a runtime narrative rather than a literal test-title substring.
  */
 
-export type LintCheck = "sizing" | "headless-fitness" | "proof-shape" | "provenance" | "budget-sanity";
+export type LintCheck =
+  | "sizing"
+  | "headless-fitness"
+  | "proof-shape"
+  | "proof-dialect"
+  | "provenance"
+  | "budget-sanity";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -310,6 +322,95 @@ export function proofShapeViolations(task: Task): LintViolation[] {
   return violations;
 }
 
+// ── PROOF-DIALECT (moratorium finding 9 — the dead proof floor) ─────────────
+//
+// remudero-review resolves a task's acceptance from tasks.yaml and EXECUTES
+// each `proof:` — but only review.ts's own house dialect actually runs
+// (`parseWhitelistedProof`: `unit test: <path-or-name>` / `grep: <pattern> in
+// <path>`, plus two legacy strict shapes). Anything else is free prose: it
+// never executes, degrades straight to the 0.6 keyword floor, and a task with
+// ZERO executable proofs CAPS on review exactly like W1-T79 (PR #662) did — a
+// two-step manual operator rescue (a worker cannot amend its own criteria,
+// Standing rule 15). CENSUS at filing time: 45% of all plan proofs (390/861)
+// cannot execute; 96 not-done tasks have zero executable proofs. The fix
+// belongs at AUTHORING, not a third rescue lever on the review side — this
+// check REUSES review.ts's own predicate (never a reimplementation that could
+// drift from what the executor actually runs).
+
+/** A near-miss dialect prefix — close enough to the real `unit test:`/`grep:`
+ *  labels that it reads as an authoring TYPO rather than deliberate prose
+ *  (`unit tests:` plural, `unit test over ...:`, `integration test:`), but
+ *  none of these match {@link parseWhitelistedProof}'s exact prefixes, so the
+ *  proof still falls through to free prose. Checked at the START of the
+ *  trimmed proof only — the dialect label is how a proof STARTS (mirrors
+ *  review.ts's own `isDialectPrefixed` doc). */
+const NEAR_MISS_PREFIX_RE = /^(?:unit tests\s*:|unit test over\b|integration test\s*:)/i;
+
+/** True iff a `unit test:` dialect BODY reads as a runtime narrative rather
+ *  than a literal test-title substring — the W1-T79-criteria-3/4 shape
+ *  ("same-sha fixture -> no pull, no re-exec, ..."). `--test-name-pattern`
+ *  is a substring match against the actual test's title, so a compound,
+ *  multi-clause body predictably matches ZERO tests at review time (degrading
+ *  to the keyword floor, W1-T72's `floorDegraded` signal) even though the
+ *  proof parses as executable. WARN-only, regardless of `opts.proofDialect`:
+ *  some real test titles genuinely are long or contain `;`, so this is a
+ *  hint, never a block. */
+function looksLikeNonTitleBody(body: string): boolean {
+  return body.includes(" -> ") || body.includes("; ") || body.length > 100;
+}
+
+/** Every non-`satisfied_by` criterion whose proof does not parse as a
+ *  {@link parseWhitelistedProof} shape — a proof that CANNOT execute never
+ *  lands (the dead proof floor, moratorium finding 9). BLOCK by default;
+ *  `opts.proofDialect: "warn"` (the pre-dispatch call site, run-task.ts —
+ *  the ~90-task legacy backlog must not brick overnight) demotes every
+ *  violation here to visibility-only. A criterion whose proof DOES parse but
+ *  reads as a non-title `unit test:` body (see {@link looksLikeNonTitleBody})
+ *  gets a separate WARN, always, independent of `opts.proofDialect`. */
+export function proofDialectViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const severity: LintSeverity = opts.proofDialect ?? "block";
+  const violations: LintViolation[] = [];
+  (task.acceptance ?? []).forEach((c, i) => {
+    if (c.satisfied_by) return; // Architect-only; never expected to be executable prose
+    const proof = c.proof ?? "";
+    const trimmed = proof.trim();
+    const claimHead = (c.claim ?? "").slice(0, 60);
+    const whitelisted = parseWhitelistedProof(proof);
+    if (whitelisted) {
+      if (whitelisted.kind === "test" && whitelisted.nameFiltered && looksLikeNonTitleBody(whitelisted.label)) {
+        violations.push({
+          check: "proof-dialect",
+          severity: "warn",
+          message:
+            `criterion ${i + 1} ("${claimHead}") \`unit test:\` body "${whitelisted.label.slice(0, 80)}" reads as a ` +
+            "runtime narrative, not a literal test-title substring — the W1-T79-criteria-3/4 shape (0 tests will " +
+            "match at review time, degrading to the keyword floor); name the actual test's title instead",
+        });
+      }
+      return;
+    }
+    const head = trimmed.slice(0, 80) + (trimmed.length > 80 ? "…" : "");
+    let why: string;
+    if (isDialectPrefixed(trimmed)) {
+      why =
+        "dialect-prefixed but refused by parseWhitelistedProof (e.g. a `grep:` proof with no `in <path>` clause, " +
+        "or a path attempting traversal/a glob) — not executable as written";
+    } else if (NEAR_MISS_PREFIX_RE.test(trimmed)) {
+      why = "near-miss dialect prefix — did you mean `unit test:` (or `grep: <pattern> in <path>`)?";
+    } else {
+      why = "free prose — not executable";
+    }
+    violations.push({
+      check: "proof-dialect",
+      severity,
+      message:
+        `criterion ${i + 1} ("${claimHead}") proof "${head}" cannot execute (${why}) — the dead proof floor ` +
+        "(moratorium finding 9): rewrite as `unit test: <path-or-test-title>` or `grep: <pattern> in <path>`",
+    });
+  });
+  return violations;
+}
+
 // ── PROVENANCE (Rules 16/17) ─────────────────────────────────────────────────
 //
 // `risk:` is already guaranteed present by plan.ts's loader (it validates
@@ -363,16 +464,22 @@ export interface LintOpts {
   mountMaxTurns?: number;
   /** The observed class mean, from a real Calibration row — never hardcoded. */
   calibration?: ClassCalibration;
+  /** Severity for {@link proofDialectViolations}. Default "block" (CI's `lint-plan`, the
+   *  inbox draft rung, and the retro's plan-health sweep all want the default). The
+   *  pre-dispatch call site (run-task.ts's `assertLintClean`) passes "warn" — the legacy
+   *  backlog must not brick overnight; CI still reds a hand-filed offender. */
+  proofDialect?: LintSeverity;
 }
 
-/** Lint one task. Hard checks (sizing/headless-fitness/proof-shape/provenance) always
- *  run; budget-sanity runs only when `opts.mountMaxTurns` is supplied. */
+/** Lint one task. Hard checks (sizing/headless-fitness/proof-shape/proof-dialect/
+ *  provenance) always run; budget-sanity runs only when `opts.mountMaxTurns` is supplied. */
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task);
   if (sizing) violations.push(sizing);
   violations.push(...headlessFitnessViolations(task));
   violations.push(...proofShapeViolations(task));
+  violations.push(...proofDialectViolations(task, opts));
   const prov = provenanceViolation(task);
   if (prov) violations.push(prov);
   if (opts.mountMaxTurns !== undefined) {
