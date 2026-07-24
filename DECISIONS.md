@@ -258,6 +258,33 @@ circuit-breaker as the per-task guards. Both prerequisites pulled to the immedia
 - Risk: medium (medium-risk signal in the decision text)
 - Rollback: revert the PR.
 
+## 2026-07-24T16:05:27.000Z — W1-T12a re-dispatch: already-satisfied, no-op close
+- Options: (A) close as already-satisfied, no functional code change (RECOMMENDED) | (B) force a
+  cosmetic edit to `src/lib/daemon.ts` or `src/run-task.ts` just to produce a non-empty diff
+- Chosen (RECOMMENDED, auto): Option A — no functional code change.
+- Rationale: `src/lib/daemon.ts`'s `runDaemon` (the scheduler loop: DAG-select via `nextRunnable`,
+  reused from `drain.ts`; W1-T11 fleet-control STOP/PAUSE gates; the `headroom.ts` HeadroomTracker;
+  drain/inflight locking owned by the CLI wiring) was already built and merged in commit `76ef4ba`
+  ("W1-T12a: daemon core - scheduler loop (DAG select to dispatch)", `remudero` PR #61, merged
+  2026-07-15T14:17:51Z, body trailer `Remudero-Task: W1-T12a`). `plan/tasks.yaml`'s own header
+  documents `status:` as decorative/initial-state only — real merge-state is DERIVED FROM GITHUB by
+  `deriveStatus`, in precedence including "(c) a merged PR whose body carries the trailer
+  `Remudero-Task: <id>`" — which PR #61 satisfies, even though the W1-T12a entry (line 5904) still
+  reads `status: queued`. The acceptance criterion ("given an injected clock + injected runner, the
+  loop selects and dispatches tasks in dependency order and stops on STOP / Pause / headroom-exhausted
+  ... unit tests over a fake plan + fake runner ... NO real overnight run, NO real worker spawns") is
+  proven today by `test/daemon.test.ts` (1290 lines), with tests named exactly for each condition
+  (`"dispatches in dependency order (DAG)..."`, `"STOP: checked first, every tick..."`, `"PAUSE
+  (drain-and-hold)..."`, `"headroom: a near-limit reading is an IN-PROCESS idle heartbeat..."`). 15+
+  follow-on tasks have built directly on this module since (W1-T12b/c, W1-T46, W1-T77, W1-T80,
+  W1-T115, W1-T149, W1-T155, W1-T177, #472, #477, W1-T197, #543, W1-T235, W1-T215). At dispatch time
+  `HEAD` matched `origin/main` with a clean tree — nothing to implement, diff, or PR against the task's
+  actual files. This is the same re-dispatch class already recorded for W1-T1 (see the 2026-07-19
+  entries above): a dispatcher keying off `tasks.yaml`'s decorative `status: queued` field instead of
+  GitHub-derived status re-queues an already-merged task. Fixing that dispatcher logic is outside this
+  task's one-concern scope and is left for a separate task against the dispatch/drain path.
+- Rollback: revert this PR (removes only this DECISIONS.md entry; no runtime code touched).
+
 ## 2026-07-24T17:28:49.000Z — W1-T99 (W1-T99-1784913918134)
 - Options: Task W1-T99 ("Escalation transport resilience — ensure labels exist, and ONE failed action never kills the sweep (the first live escalation's crash)") is already fully implemented and merged — this dispatch is stale/duplicate. | git log shows the fix already sitting on this worktree's own HEAD ancestry: commit 78488ef, "fix(escalate): provision labels before create, isolate sweep action throws (W1-T99) (#729)". | gh pr view 729: state: MERGED, mergedAt: 2026-07-24T17:24:34Z, body ends with the trailer Remudero-Task: W1-T99. | git status --short --branch on this worktree is clean against origin/main — there is no diff to make. | All three of tasks.yaml's own acceptance criteria (line 9548) are satisfied by code + tests already on HEAD: (1) "a missing label no longer loses the escalation or crashes anything" — src/lib/escalate.ts's escalate() now loops `wanted` labels through `deps.issues.ensureLabel` before create() and drops (never throws on) a label that fails provisioning, noting the drop in both the issue body and the `degraded_labels` ledger field; proven by test/escalate.test.ts's "escalate: ensureLabel is called for every wanted label BEFORE create" and "escalate: a gateway with no ensureLabel behaves exactly as before (back-compat)". (2) "one PR's action failure isolates — the sweep reconciles the rest" — src/lib/sweep.ts's runSweep wraps each disposition action per-PR, ledgers a distinct `sweep.action_failed` (pr, disposition, error) line on a throw, and continues; proven verbatim by test/sweep.test.ts's "runSweep: a 3-PR fixture where the MIDDLE PR's escalate throws -> sweep.action_failed ledgered for it, the other two reconcile, summary counts the failure" (asserts summary.actionsFailed === 1, exactly one sweep.action_failed line, and the other two PRs still act). (3) "the canonical crash is the regression fixture" — proven by test/sweep.test.ts's "runSweep: the canonical 2026-07-17 crash fixture — a single ambiguous PR whose gateway throws label-not-found never escapes runSweep, and the question payload still reached an issue via ENSURE-LABELS+DEGRADE" (asserts summary.actionsFailed === 0, the question was generated, and the issue opened with degraded_labels: ["escalation-blocked"]). Ran `npx tsx --test test/escalate.test.ts test/sweep.test.ts` on this worktree: 91/91 pass, 0 fail. | This is the same documented recurring class DECISIONS.md already records for W1-T1 and W1-T12a (task dispatched again after its own PR already merged, sourced from tasks.yaml's decorative `status: queued` field rather than the GitHub-derived truth). | Options: | A. No-op / report stale dispatch. Make no code changes to escalate.ts/sweep.ts, push nothing beyond this decision log, open no code PR. Report that W1-T99 is already merged (PR #729, 2026-07-24) and this dispatch is stale/duplicate. Reversibility: trivial — no functional changes made, nothing to revert. | B. Force a synthetic/cosmetic diff (e.g., a comment tweak in escalate.ts or sweep.ts) purely to produce something committable and satisfy the contract's push/PR mechanics. Reversibility: poor — both files are the exact load-bearing transport/reconciler this task's own incident concerns, already covered by 91 passing tests; a purposeless edit risks unreviewed noise on a critical-path file and would misrepresent to remudero-review that this PR satisfies acceptance criteria actually satisfied minutes earlier by PR #729.
 - Chosen (RECOMMENDED, auto): A. No-op / report stale dispatch. Make no code changes to escalate.ts/sweep.ts, push nothing beyond this decision log, open no code PR. Report that W1-T99 is already merged (PR #729, 2026-07-24) and this dispatch is stale/duplicate — sourced from plan/tasks.yaml's decorative status: queued field being read instead of the GitHub-derived status. Reversibility: trivial — no functional changes made, nothing to revert.
