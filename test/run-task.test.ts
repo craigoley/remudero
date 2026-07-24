@@ -54,6 +54,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   onboardCommand,
   reconCommand,
   defaultReconRunLens,
+  serviceFreshnessGate,
   sessionCommand,
   synthesizeCommand,
   defaultSynthesizeDraft,
@@ -4555,5 +4556,71 @@ test("buildSweepLightHook: an internal failure (malformed gh output) is caught +
     process.env.PATH = oldPath;
     rmSync(bin, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T255: serviceFreshnessGate — assess + ledger, NEVER refuse/exit/re-exec ───────────────
+import type { ServiceFreshness } from "../src/lib/self-sync.js";
+
+function readSteps(ledgerPath: string): string[] {
+  if (!existsSync(ledgerPath)) return [];
+  return readFileSync(ledgerPath, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l).step as string);
+}
+
+test("serviceFreshnessGate: a DIRTY+BEHIND assessment ledgers BOTH daemon.tree_dirty and daemon.stale_code — never a refusal or exit (the daemon crash-loop, now a no-op)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-svc-gate-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const assessed: ServiceFreshness = { status: "assessed", dirty: true, behind: { oldSha: "aaaaaaa", newSha: "bbbbbbb" } };
+  serviceFreshnessGate("daemon", dir, {} as NodeJS.ProcessEnv, { checkServiceFreshness: () => assessed, ledgerPath });
+  const steps = readSteps(ledgerPath);
+  assert.ok(steps.includes("daemon.tree_dirty"), "dirty tree ledgered daemon.tree_dirty");
+  assert.ok(steps.includes("daemon.stale_code"), "behind origin ledgered daemon.stale_code");
+});
+
+test("serviceFreshnessGate: an up-to-date clean assessment ledgers NOTHING (a total no-op)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-svc-gate-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  serviceFreshnessGate("serve", dir, {} as NodeJS.ProcessEnv, {
+    checkServiceFreshness: () => ({ status: "assessed", dirty: false, behind: null }),
+    ledgerPath,
+  });
+  assert.deepEqual(readSteps(ledgerPath), []);
+});
+
+test("serviceFreshnessGate: a guarded/degraded assessment ledgers nothing and never throws (a service is never blocked)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-svc-gate-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  serviceFreshnessGate("daemon", dir, {} as NodeJS.ProcessEnv, { checkServiceFreshness: () => ({ status: "guarded" }), ledgerPath });
+  serviceFreshnessGate("daemon", dir, {} as NodeJS.ProcessEnv, { checkServiceFreshness: () => ({ status: "degraded", reason: "fetch failed" }), ledgerPath });
+  assert.deepEqual(readSteps(ledgerPath), []);
+});
+
+test("main(): a SERVICE command (daemon) runs the freshness GATE — never the interactive refuse-exit — then dispatches; a bad daemon flag still exits 2, proving the service path was taken without exit-1'ing on tree state", async (t) => {
+  const exitMock = ((code?: number): never => {
+    throw new OnboardProcessExitCalled(code);
+  }) as typeof process.exit;
+  t.mock.method(process, "exit", exitMock);
+  t.mock.method(console, "error", () => {});
+  t.mock.method(console, "log", () => {});
+  const originalArgv = process.argv;
+  process.argv = ["node", "run-task.js", "daemon", "--not-a-real-flag"];
+  // Guarded => the service freshness gate is a no-op (no git, no ledger, no loadConfig) — the point
+  // of THIS test is only that main() takes the service branch and NEVER exit-1s on tree state.
+  const originalGuardEnv = process.env[SELF_SYNC_GUARD_ENV];
+  process.env[SELF_SYNC_GUARD_ENV] = "1";
+  try {
+    let caught: unknown;
+    await main().catch((e) => {
+      caught = e;
+    });
+    assert.ok(caught instanceof OnboardProcessExitCalled, "main() reached process.exit via daemonCommand — the service path never refused on tree state");
+    assert.equal((caught as OnboardProcessExitCalled).code, 2, "a bad daemon flag exits 2 (daemonCommand fail-loud), reached only AFTER the service freshness gate ran");
+  } finally {
+    process.argv = originalArgv;
+    if (originalGuardEnv === undefined) delete process.env[SELF_SYNC_GUARD_ENV];
+    else process.env[SELF_SYNC_GUARD_ENV] = originalGuardEnv;
   }
 });

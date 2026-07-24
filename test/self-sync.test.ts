@@ -4,7 +4,13 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { checkCliFreshness, isCiEnv, SELF_SYNC_GUARD_ENV, type GitRunner } from "../src/lib/self-sync.js";
+import {
+  checkCliFreshness,
+  checkServiceFreshness,
+  isCiEnv,
+  SELF_SYNC_GUARD_ENV,
+  type GitRunner,
+} from "../src/lib/self-sync.js";
 
 // ── W1-T79: CLI self-freshness at entry (the #138 incident shape — the runner correct on
 // main, but the OPERATOR'S invocation was a stale checkout that predated the merge). Real,
@@ -270,4 +276,83 @@ test("checkCliFreshness: in CI it SKIPS entirely — returns guarded, never fetc
   assert.equal(result.status, "guarded");
   assert.equal(gitCalls, 0, "no git call — not even a fetch — so a normal PR checkout never reads as a refusal");
   assert.equal(reexecCalls, 0);
+});
+
+// ── W1-T255: a long-running service NEVER exit-1s on tree state ───────────────
+// checkServiceFreshness ASSESSES only — dirty and behind are independent facts the caller ledgers;
+// it never refuses (that crash-looped the daemon), never re-execs (the deploy supervisor's remit).
+
+test("checkServiceFreshness: a DIRTY working tree assesses dirty=true (never a refusal — dirt never blocks a service)", () => {
+  const { localDir } = gitFixture();
+  writeFileSync(join(localDir, "plan", "tasks.yaml"), planYaml("origin-title") + "\n# a daemon-written uncommitted change\n", "utf8");
+  const result = checkServiceFreshness(localDir, {});
+  assert.equal(result.status, "assessed");
+  if (result.status === "assessed") {
+    assert.equal(result.dirty, true, "a dirty tree is reported, never refused");
+    assert.equal(result.behind, null, "same sha as origin — not behind");
+  }
+});
+
+test("checkServiceFreshness: a CLEAN checkout behind origin/main assesses behind (leave catch-up to the deploy supervisor), never re-execs", () => {
+  const { originDir, localDir } = gitFixture();
+  const oldSha = headSha(localDir);
+  publishNewCommit(originDir, "PUBLISHED");
+  const result = checkServiceFreshness(localDir, {});
+  assert.equal(result.status, "assessed");
+  if (result.status === "assessed") {
+    assert.equal(result.dirty, false);
+    assert.ok(result.behind, "behind origin/main is reported");
+    assert.equal(result.behind?.oldSha, oldSha, "local HEAD is UNCHANGED — a service never ff-pulls/re-execs itself");
+    assert.equal(headSha(localDir), oldSha, "no mutation — the working tree HEAD did not move");
+  }
+});
+
+test("checkServiceFreshness: DIRTY AND BEHIND reports both facts (independent) — the exact daemon crash-loop shape, now a no-op", () => {
+  const { originDir, localDir } = gitFixture();
+  publishNewCommit(originDir, "PUBLISHED");
+  writeFileSync(join(localDir, "DECISIONS.md"), "a daemon decision append\n", "utf8"); // its own dirt
+  const result = checkServiceFreshness(localDir, {});
+  assert.equal(result.status, "assessed");
+  if (result.status === "assessed") {
+    assert.equal(result.dirty, true, "dirty reported");
+    assert.ok(result.behind, "behind reported — both at once, neither blocks");
+  }
+});
+
+test("checkServiceFreshness: an up-to-date clean checkout assesses dirty=false, behind=null (a total no-op)", () => {
+  const { localDir } = gitFixture();
+  const result = checkServiceFreshness(localDir, {});
+  assert.equal(result.status, "assessed");
+  if (result.status === "assessed") {
+    assert.equal(result.dirty, false);
+    assert.equal(result.behind, null);
+  }
+});
+
+test("checkServiceFreshness: the loop-guard env / CI short-circuits to guarded (no git, no assessment)", () => {
+  let gitCalls = 0;
+  const throwingGit: GitRunner = () => {
+    gitCalls += 1;
+    throw new Error("git must never be invoked when guarded");
+  };
+  assert.equal(checkServiceFreshness("/x", { [SELF_SYNC_GUARD_ENV]: "1" }, { git: throwingGit }).status, "guarded");
+  assert.equal(checkServiceFreshness("/x", { CI: "true" }, { git: throwingGit }).status, "guarded");
+  assert.equal(gitCalls, 0);
+});
+
+test("checkServiceFreshness: a fetch failure DEGRADES (can't tell) — a service is never blocked by a network hiccup", () => {
+  const { localDir } = gitFixture();
+  execFileSync("git", ["-C", localDir, "remote", "set-url", "origin", "/no/such/path"]);
+  const result = checkServiceFreshness(localDir, {});
+  assert.equal(result.status, "degraded");
+});
+
+test("checkServiceFreshness: a rev-parse failure (after a clean fetch) DEGRADES too — never blocks a service", () => {
+  const git: GitRunner = (args) => {
+    if (args[0] === "fetch") return "";
+    throw new Error(`rev-parse unavailable: ${args.join(" ")}`);
+  };
+  const result = checkServiceFreshness("/some/repo", {}, { git });
+  assert.equal(result.status, "degraded");
+  if (result.status === "degraded") assert.match(result.reason, /could not resolve HEAD\/origin\/main/);
 });

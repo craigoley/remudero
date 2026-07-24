@@ -233,3 +233,57 @@ function defaultReexec(env: NodeJS.ProcessEnv | Record<string, string | undefine
   }
   process.exit(result.status ?? 1);
 }
+
+/**
+ * A LONG-RUNNING SERVICE's freshness ASSESSMENT (`rmd daemon`, `rmd serve`) — W1-T255.
+ *
+ * Unlike {@link checkCliFreshness} (the interactive-operator path that ff-syncs+re-execs on
+ * clean+behind and REFUSES with exit-1 on dirty/diverged), a long-running service must NEVER
+ * exit-1 on tree state and NEVER self-re-exec:
+ *   - DIRT NEVER BLOCKS A SERVICE. The daemon writes into its OWN working tree (DECISIONS.md
+ *     decision records, feedback captures, `state/` runtime exhaust), so a dirty tree is its
+ *     normal steady state — the #707-aftermath incident was checkCliFreshness's dirty-refusal
+ *     crash-looping the daemon on every launchd restart. Dirty => report it, run anyway.
+ *   - BEHIND ORIGIN is the DEPLOY SUPERVISOR's remit (WS-2, {@link ../lib/deployer}), not a
+ *     per-CLI-entry re-exec (which would thundering-herd every service). Behind => report it,
+ *     run the stale code, leave catch-up to the supervisor.
+ *   - GENUINE CORRUPTION (an unreadable/unparseable plan) is NOT this check's job — it still
+ *     fails loudly downstream in loadPlan. Freshness never manufactures a refusal from it.
+ *
+ * This ASSESSES ONLY (no mutation, no re-exec, no refusal); the caller ledgers
+ * `daemon.tree_dirty` / `daemon.stale_code` and proceeds. A fetch/rev-parse failure degrades to
+ * "can't tell" — still run (a service is never blocked by a network hiccup).
+ */
+export type ServiceFreshness =
+  | { status: "guarded" }
+  | { status: "degraded"; reason: string }
+  | { status: "assessed"; dirty: boolean; behind: { oldSha: string; newSha: string } | null };
+
+export function checkServiceFreshness(
+  repoDir: string,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+  deps: SelfSyncDeps = {},
+): ServiceFreshness {
+  if (env[SELF_SYNC_GUARD_ENV] === "1") return { status: "guarded" };
+  if (isCiEnv(env)) return { status: "guarded" };
+
+  const git =
+    deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8" }));
+  try {
+    git(["fetch", "--quiet", "origin"]);
+  } catch (err) {
+    return { status: "degraded", reason: `git fetch origin failed in ${repoDir}: ${String(err)}` };
+  }
+  let headSha: string;
+  let originSha: string;
+  try {
+    headSha = git(["rev-parse", "HEAD"]).trim();
+    originSha = git(["rev-parse", "origin/main"]).trim();
+  } catch (err) {
+    return { status: "degraded", reason: `could not resolve HEAD/origin/main in ${repoDir}: ${String(err)}` };
+  }
+  // dirty and behind are INDEPENDENT facts (a tree can be both) — the caller ledgers each.
+  const dirty = git(["status", "--porcelain"]).trim().length > 0;
+  const behind = headSha !== originSha ? { oldSha: headSha, newSha: originSha } : null;
+  return { status: "assessed", dirty, behind };
+}
