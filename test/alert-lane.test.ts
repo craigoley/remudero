@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -265,6 +265,66 @@ test("validateAlertPolicy: rejects an unknown severity in act_severities", () =>
       }),
     AlertPolicyError,
   );
+});
+
+test("validateAlertPolicy: rejects an empty act_severities array", () => {
+  assert.throws(
+    () =>
+      validateAlertPolicy({
+        act_severities: [],
+        critical_paths: {
+          review: [GOLDEN_CRITICAL_PATH],
+          gate: ["x"],
+          containment: ["x"],
+          ledger: ["x"],
+          status: ["x"],
+        },
+      }),
+    /'act_severities' must be a non-empty array/,
+  );
+});
+
+test("validateAlertPolicy: rejects a critical_paths that is not a mapping", () => {
+  assert.throws(
+    () =>
+      validateAlertPolicy({
+        act_severities: ["medium"],
+        critical_paths: ["not", "a", "mapping"],
+      }),
+    /'critical_paths' must be a mapping of category -> glob\[\]/,
+  );
+});
+
+test("validateAlertPolicy: rejects a critical_paths category whose globs are not all strings", () => {
+  assert.throws(
+    () =>
+      validateAlertPolicy({
+        act_severities: ["medium"],
+        critical_paths: {
+          review: [GOLDEN_CRITICAL_PATH, 42],
+          gate: ["x"],
+          containment: ["x"],
+          ledger: ["x"],
+          status: ["x"],
+        },
+      }),
+    /'critical_paths\.review' must be an array of glob strings/,
+  );
+});
+
+test("loadAlertPolicy: not-valid YAML throws a named AlertPolicyError naming the path", () => {
+  const dir = mkdtempSync(join(tmpdir(), "alert-policy-badyaml-"));
+  const path = join(dir, "alert-policy.yaml");
+  writeFileSync(path, "act_severities: [medium\n  bad: : indent\n");
+  try {
+    assert.throws(() => loadAlertPolicy(path), (e: unknown) => {
+      assert.ok(e instanceof AlertPolicyError);
+      assert.match((e as Error).message, /alert-policy\.yaml is not valid YAML/);
+      return true;
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("REQUIRED_CRITICAL_PATH_CATEGORIES names exactly the five P20 categories", () => {

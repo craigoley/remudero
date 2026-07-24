@@ -111,7 +111,15 @@ import {
   type IssueGateway,
 } from "./lib/escalate.js";
 import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
-import { alertOriginId, alertTaskId, buildAlertEscalation, ghAlertGateway, pollAlerts, renderAlertsSummary } from "./lib/ops.js";
+import {
+  alertOriginId,
+  alertTaskId,
+  buildAlertEscalation,
+  ghAlertGateway,
+  pollAlerts,
+  renderAlertsSummary,
+  type AlertGateway,
+} from "./lib/ops.js";
 import {
   decideAlertDisposition,
   loadAlertPolicy,
@@ -7563,6 +7571,33 @@ function alertFixPrompt(alert: AlertLaneAlert, taskId: string): string {
 }
 
 /**
+ * The effectful collaborators {@link dispatchAlertFixRun} calls through — real defaults below,
+ * injectable so a unit test can drive every branch (success/no-PR/error) without ever shelling
+ * `git worktree`, reading `mounts.yaml`, or spawning the Agent SDK for real (the SAME
+ * fake-the-boundary shape {@link withMaterializedWorktree}'s injected `remove` and
+ * `defaultReconRunLens`'s injected `spawn`/`probeExec` already use in this file).
+ */
+export interface AlertFixDispatchDeps {
+  worktreeAdd: (repoDir: string, worktreePath: string, branch: string, startPoint: string) => void;
+  worktreeRemove: (repoDir: string, worktreePath: string) => void;
+  renderWorkerSettings: typeof renderWorkerSettings;
+  loadMounts: typeof loadMounts;
+  resolveMount: typeof resolveMount;
+  spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+  ensureTaskTrailer: (prUrl: string, taskId: string) => void;
+}
+
+const REAL_ALERT_FIX_DISPATCH_DEPS: AlertFixDispatchDeps = {
+  worktreeAdd,
+  worktreeRemove,
+  renderWorkerSettings,
+  loadMounts,
+  resolveMount,
+  spawn: spawnWorker,
+  ensureTaskTrailer,
+};
+
+/**
  * The real `deps.dispatch` effect {@link runAlertLane} calls for an "act" disposition (W1-T90) —
  * a MINIMAL analog of `buildSweepEffects`'s `dispatchFix` (~line 5546): a fresh branch off
  * `origin/main`, a fresh worker settings file, ONE `spawnWorker` call, teardown. Deliberately
@@ -7571,13 +7606,14 @@ function alertFixPrompt(alert: AlertLaneAlert, taskId: string): string {
  * its own commit/push/PR-open steps (mirrors the retro/triage workers' prompts) via
  * {@link alertFixPrompt}; this function only spawns it and tears the worktree down after.
  */
-async function dispatchAlertFixRun(
+export async function dispatchAlertFixRun(
   owner: string,
   repo: string,
   config: Config,
   alert: AlertLaneAlert,
   ledgerPath: string,
   runId: string,
+  deps: AlertFixDispatchDeps = REAL_ALERT_FIX_DISPATCH_DEPS,
 ): Promise<void> {
   const originId = alertOriginId(alert);
   const taskId = alertTaskId(alert);
@@ -7588,23 +7624,23 @@ async function dispatchAlertFixRun(
   const branch = `alert-fix-${originId}-${Date.now()}`;
   const worktreePath = join(worktreesDir(config), branch);
   try {
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main");
-    const settingsFile = renderWorkerSettings({
+    deps.worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+    const settingsFile = deps.renderWorkerSettings({
       templatePath: join(repoRoot, "settings", "worker.json"),
       hooksDir: join(repoRoot, "hooks"),
       outPath: join(config.root, "tmp", `alert-fix-settings-${taskId}-${Date.now()}.json`),
     });
-    const mountsTable = loadMounts(mountsPath(repoRoot));
+    const mountsTable = deps.loadMounts(mountsPath(repoRoot));
     // W1-T90 rides the SAME "fix" task_type mounts.yaml already routes (§9) — this ephemeral run
     // is scoped down to a single-alert fix, the same shape a fix-rung strike already is. Risk
     // band is pinned at "medium": policy already confined this dispatch to a non-critical-path,
     // medium/low-severity alert (decideAlertDisposition), so a "low"/"high" spend band would
     // either under- or over-provision every dispatch identically — "medium" is the accurate
     // single band for the whole act-eligible severity range this lane ever dispatches.
-    const fixMount: Mount = resolveMount(mountsTable, "fix", "medium");
+    const fixMount: Mount = deps.resolveMount(mountsTable, "fix", "medium");
 
     log("alert-fix.dispatching", { branch, mount: fixMount.model });
-    const worker = await spawnWorker({
+    const worker = await deps.spawn({
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
       settingsFile,
@@ -7623,7 +7659,7 @@ async function dispatchAlertFixRun(
 
     const report = parseReport([worker.text, worker.blocks.join("\n")].join("\n"));
     if (report?.prUrl) {
-      ensureTaskTrailer(report.prUrl, taskId);
+      deps.ensureTaskTrailer(report.prUrl, taskId);
       log("alert-fix.pr_opened", { pr_url: report.prUrl, origin: `alert#${originId}` });
     } else {
       log("alert-fix.no_pr", { subtype: worker.subtype });
@@ -7632,7 +7668,7 @@ async function dispatchAlertFixRun(
     log("alert-fix.error", { error: String((e as Error)?.message ?? e) });
   } finally {
     try {
-      worktreeRemove(repoDir, worktreePath);
+      deps.worktreeRemove(repoDir, worktreePath);
     } catch {
       /* best-effort cleanup */
     }
@@ -7655,22 +7691,32 @@ async function dispatchAlertFixRun(
  *
  * `--dry-run` previews every open alert's disposition; escalates/dispatches NOTHING.
  */
-async function alertFixCommand(rest: string[]): Promise<number> {
+export interface AlertFixCommandDeps {
+  config?: Config;
+  resolveOwnerRepo?: () => { owner: string; repo: string };
+  gateway?: AlertGateway;
+  ledgerPath?: string;
+  runId?: string;
+  escalate?: (alert: AlertLaneAlert) => string | Promise<string>;
+  dispatch?: (alert: AlertLaneAlert) => void | Promise<void>;
+}
+
+export async function alertFixCommand(rest: string[], deps: AlertFixCommandDeps = {}): Promise<number> {
   const badArg = unknownArgError("alert-fix", rest, ["--repo"], ["--dry-run"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
   const dryRun = rest.includes("--dry-run");
-  const config = loadConfig();
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
-  const self = resolveOwnerRepo();
+  const config = deps.config ?? loadConfig();
+  const ledgerPath = deps.ledgerPath ?? join(config.root, "state", "ledger.ndjson");
+  const self = deps.resolveOwnerRepo ? deps.resolveOwnerRepo() : resolveOwnerRepo();
   const repo = flagValue(rest, "--repo") ?? self.repo;
   const owner = self.owner;
-  const runId = `ALERT-FIX-${Date.now()}`;
+  const runId = deps.runId ?? `ALERT-FIX-${Date.now()}`;
 
   const policy = loadAlertPolicy(join(repoRoot, "plan", "alert-policy.yaml"));
-  const gateway = ghAlertGateway();
+  const gateway = deps.gateway ?? ghAlertGateway();
   const open: AlertLaneAlert[] = [
     ...gateway.codeScanning(owner, repo),
     ...gateway.dependabot(owner, repo),
@@ -7688,9 +7734,10 @@ async function alertFixCommand(rest: string[]): Promise<number> {
   const result = await runAlertLane(open, policy, {
     ledgerPath,
     runId,
-    escalate: async (alert) =>
-      escalate(buildAlertEscalation(alert), { issues: ghIssueGateway(owner, repo), ledgerPath, runId }),
-    dispatch: async (alert) => dispatchAlertFixRun(owner, repo, config, alert, ledgerPath, runId),
+    escalate:
+      deps.escalate ??
+      ((alert) => escalate(buildAlertEscalation(alert), { issues: ghIssueGateway(owner, repo), ledgerPath, runId })),
+    dispatch: deps.dispatch ?? (async (alert) => dispatchAlertFixRun(owner, repo, config, alert, ledgerPath, runId)),
   });
 
   console.log(
