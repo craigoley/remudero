@@ -5014,17 +5014,23 @@ export async function daemonCommand(rest: string[]): Promise<number> {
 }
 
 /**
- * `rmd daemon-plist [--poll-ms <n>] [--write]` — GENERATE the launchd unit for
- * `rmd daemon` (W1-T12b; lib/launchd.ts owns the generation, this only wires
- * the real absolute paths). Default: print the .plist to stdout, plus the
- * `launchctl load` invocation the operator would run, and do nothing else.
- * `--write` additionally writes it to `~/Library/LaunchAgents/<label>.plist` —
- * still just a file write, never a `launchctl` call. Actually LOADING it on a
- * real user session is W1-T12d (verify:human) — this command only gets the
- * operator to the point of running `launchctl load` themselves.
+ * `rmd daemon-plist [--repo <name>] [--poll-ms <n>] [--allow-self-target] [--write]` — GENERATE
+ * the launchd unit for `rmd daemon` (W1-T12b; lib/launchd.ts owns the generation, this only
+ * wires the real absolute paths). Default: print the .plist to stdout, plus the `launchctl load`
+ * invocation the operator would run, and do nothing else. `--write` additionally writes it to
+ * `~/Library/LaunchAgents/<label>.plist` — still just a file write, never a `launchctl` call.
+ * Actually LOADING it on a real user session is W1-T12d (verify:human) — this command only gets
+ * the operator to the point of running `launchctl load` themselves.
+ *
+ * Self-target consent (W1-T109, the commissioning crash-loop near-miss): `--repo` omitted, or
+ * given as this checkout's own repo, targets the daemon's OWN source repo — the SAME "self" the
+ * runtime guard (`resolveDaemonTarget`) refuses to drain unattended. Generating that unit
+ * WITHOUT `--allow-self-target` now REFUSES at generation (writes/prints nothing): loaded as-is,
+ * the daemon would refuse to start it and launchd's KeepAlive would restart it forever. Passing
+ * `--allow-self-target` bakes the same explicit consent into the unit's `ProgramArguments`.
  */
-async function daemonPlistCommand(rest: string[]): Promise<number> {
-  const badArg = unknownArgError("daemon-plist", rest, ["--poll-ms", "--repo"], ["--write"]);
+export async function daemonPlistCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("daemon-plist", rest, ["--poll-ms", "--repo"], ["--write", "--allow-self-target"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -5033,16 +5039,13 @@ async function daemonPlistCommand(rest: string[]): Promise<number> {
   const pollIdx = rest.indexOf("--poll-ms");
   const pollIntervalMs = pollIdx >= 0 ? Number(rest[pollIdx + 1]) : undefined;
   const repo = flagValue(rest, "--repo"); // baked into the unit so it drains the intended repo
+  const allowSelfTarget = rest.includes("--allow-self-target");
+  const self = resolveOwnerRepo();
+  // Absent --repo defaults to self at runtime (resolveDaemonTarget) — so it's self-target here too.
+  const isSelfTarget = (repo ?? self.repo) === self.repo;
   const rmdBin = join(repoRoot, "bin", "rmd");
-  const plist = generateLaunchdPlist({ rmdBin, root: config.root, pollIntervalMs, repo });
+  const plist = generateLaunchdPlist({ rmdBin, root: config.root, pollIntervalMs, repo, isSelfTarget, allowSelfTarget });
   const plistPath = launchdPlistPath();
-  if (!repo) {
-    console.warn(
-      `### rmd daemon-plist — WARNING: no --repo given, so the unit runs \`rmd daemon\` with no ` +
-        `target. The daemon's self-target guard will REFUSE to start it (no silent self-drain). ` +
-        `For commissioning: \`rmd daemon-plist --repo remudero-sandbox --write\`.`,
-    );
-  }
 
   if (rest.includes("--write")) {
     mkdirSync(dirname(plistPath), { recursive: true });
@@ -8864,7 +8867,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "daemon-plist",
     usage:
-      "rmd daemon-plist --repo <name> [--poll-ms <n>] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d)",
+      "rmd daemon-plist --repo <name> [--poll-ms <n>] [--allow-self-target] [--write]   # generate the launchd unit for `rmd daemon`, baking in --repo so the unit drains the intended repo (commissioning is W1-T12d); a self-target unit (--repo omitted, or pointed at this checkout's own repo) is refused at generation unless --allow-self-target is also given, which bakes the same consent into the unit (W1-T109)",
   },
   {
     name: "deploy",
