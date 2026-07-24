@@ -1088,7 +1088,7 @@ test("runCreditBackfill: a candidate it ACTUALLY corrects still logs its per-can
 // ── post-review routing: a green-but-ungated PR gets the review lane, not an escalation ──
 
 function ungatedGreenPr(over: Partial<OpenPrView> = {}): OpenPrView {
-  return pr({ prNumber: 584, prUrl: "url/584", taskId: undefined, reviewState: "none", checksState: "green", ...over });
+  return pr({ prNumber: 584, prUrl: "url/584", taskId: "W1-T584", reviewState: "none", checksState: "green", ...over });
 }
 
 test("deriveDisposition: checks green + review never posted -> post-review, NOT the clarification catch-all (the #584 stall)", () => {
@@ -1101,15 +1101,63 @@ test("deriveDisposition: checks PENDING + review none still lands on the catch-a
   assert.equal(deriveDisposition(ungatedGreenPr({ checksState: "pending" }), DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
 });
 
-test("runSweep: the postReview dep is invoked once and deduped per head on the next pass", async () => {
+test("runSweep: the postReview dep is invoked once, and a POSTED verdict for the head dedups the next pass (W1-T254: outcome-keyed, not attempt-keyed)", async () => {
+  const lp = ledgerPath();
   const calls: number[] = [];
-  const first = fakeDeps({ postReview: (p) => { calls.push(p.prNumber); } });
+  const first = fakeDeps({
+    ledgerPath: lp,
+    postReview: (p) => {
+      calls.push(p.prNumber);
+      // Simulates the real effect (buildSweepEffects.postReview -> reviewCommand
+      // -> postReviewStatusGuarded) actually reaching a verdict for this head.
+      appendLedger(lp, { run_id: "SWEEP-1", task_id: p.taskId ?? "", step: "review.posted", head_sha: p.headSha, state: "success" });
+    },
+  });
   await runSweep([ungatedGreenPr()], first, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(calls, [584]);
   const calls2: number[] = [];
-  const second = fakeDeps({ ledgerPath: first.ledgerPath, postReview: (p) => { calls2.push(p.prNumber); } });
+  const second = fakeDeps({ ledgerPath: lp, postReview: (p) => { calls2.push(p.prNumber); } });
   await runSweep([ungatedGreenPr()], second, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(calls2, [], "a posted verdict is per-head — never re-posted for the same sha");
+});
+
+test("runSweep: post-review dedup is outcome-keyed — a prior acted:true dispose with no posted/refused verdict for that head still retries; a refusal for the head dedups (W1-T254)", async () => {
+  const lp = ledgerPath();
+
+  // Pass 1: postReview is invoked and its ATTEMPT is ledgered acted:true, but
+  // the lane reaches NO outcome at all (e.g. a fake that no-ops, or in the
+  // real path a guard refusal that itself throws before ledgering anything).
+  const attempt1: number[] = [];
+  const first = fakeDeps({ ledgerPath: lp, postReview: (p) => { attempt1.push(p.prNumber); } });
+  await runSweep([ungatedGreenPr()], first, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(attempt1, [584]);
+  const disposedAfterFirst = readLedgerLines(lp).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposedAfterFirst[0].acted, true, "the attempt itself was ledgered acted:true");
+
+  // Pass 2: STILL no review.posted/review.post_refused outcome exists for this
+  // head — under the OLD attempt-keyed dedup (`sweep.disposed acted:true`)
+  // this would suppress the head FOREVER; outcome-keyed dedup retries instead.
+  const attempt2: number[] = [];
+  const second = fakeDeps({ ledgerPath: lp, postReview: (p) => { attempt2.push(p.prNumber); } });
+  await runSweep([ungatedGreenPr()], second, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(attempt2, [584], "no posted/refused verdict for this head exists yet — the lane retries");
+
+  // Now an explicit REFUSAL lands for this exact head (postReviewStatusGuarded's
+  // W1-T228 guard declining to post — review.post_refused, carrying task_id + head_sha).
+  appendLedger(lp, {
+    run_id: "SWEEP-3",
+    task_id: "W1-T584",
+    step: "review.post_refused",
+    head_sha: "aaaa111",
+    attempted_state: "failure",
+    reason: "stale lifecycle",
+  });
+
+  // Pass 3: the refusal DOES dedup — no repeat post attempt for the same head.
+  const attempt3: number[] = [];
+  const third = fakeDeps({ ledgerPath: lp, postReview: (p) => { attempt3.push(p.prNumber); } });
+  await runSweep([ungatedGreenPr()], third, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(attempt3, [], "an explicit refusal for this head dedups the post-review lane");
 });
 
 test("runSweep: no postReview dep wired -> ledgered stand-down, no crash, no escalation fires", async () => {
@@ -1119,4 +1167,41 @@ test("runSweep: no postReview dep wired -> ledgered stand-down, no crash, no esc
   const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
   assert.equal(disposed[0].disposition, "post-review");
   assert.equal(disposed[0].acted, false);
+});
+
+// ── W1-T254: per-PR throw containment — one PR's thrown action never aborts the pass ──
+
+test("runSweep: a throwing action does not abort the pass — later PRs still reconcile and the throwing PR is attributed (W1-T254)", async () => {
+  const armedCalls: number[] = [];
+  const deps = fakeDeps({
+    arm: (p) => {
+      if (p.prNumber === 10) throw new Error("arm boom");
+      armedCalls.push(p.prNumber);
+    },
+  });
+  const throwing = mergeablePr(); // prNumber 10
+  const healthy = pr({
+    prNumber: 20,
+    prUrl: "url/20",
+    taskId: "W1-C",
+    reviewState: "success",
+    checksState: "green",
+    headSha: "bbbb222",
+  });
+
+  const summary = await runSweep([throwing, healthy], deps, DEFAULT_SWEEP_POLICY);
+
+  assert.deepEqual(armedCalls, [20], "the later PR still reconciled after the earlier PR's action threw");
+  assert.equal(summary.actionsTaken, 1, "only the successful arm counts toward actionsTaken");
+
+  const throwingAction = summary.actions.find((a) => a.prNumber === 10);
+  assert.equal(throwingAction?.acted, false, "the throwing PR's action is NOT credited as acted");
+  assert.match(throwingAction?.actionError ?? "", /arm boom/);
+
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  const throwLine = disposed.find((l) => l.pr_number === 10);
+  assert.equal(throwLine?.acted, false);
+  assert.match(String(throwLine?.action_error ?? ""), /arm boom/, "the throwing PR is attributed on its own ledger line");
+  const healthyLine = disposed.find((l) => l.pr_number === 20);
+  assert.equal(healthyLine?.acted, true, "the healthy PR still reconciled and was ledgered acted:true");
 });

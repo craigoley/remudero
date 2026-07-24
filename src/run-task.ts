@@ -4820,6 +4820,11 @@ async function daemonCommand(rest: string[]): Promise<number> {
         // `rmd sweep` CLI invokes, run once per poll iteration so no open PR
         // strands open-and-orphaned (#111/#113/#123). Best-effort by contract.
         sweep: buildSweepHook(target.owner, target.repo, config, ledgerPath, runId, plan, log),
+        // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks
+        // ONLY the deterministic post-review re-post while `runOne` is
+        // unbounded and in flight. See buildSweepLightHook's + daemon.ts's
+        // DaemonDeps.sweepLight doc for the full rationale.
+        sweepLight: buildSweepLightHook(target.owner, target.repo, config, ledgerPath, runId, plan, log),
         // W1-T46 block-reasoning: a GENUINE BLOCKER (real downstream work
         // transitively needs the blocked task) opens a `needs-human` issue
         // naming the dependents it protects, via W1-T8's escalation taxonomy
@@ -5529,8 +5534,28 @@ export function buildSweepEffects(
     // posted verdict drives the NEXT sweep pass (success -> arm, failure ->
     // fix/escalate); a criteria-less PR posts FAIL fail-closed — a legible
     // gate state instead of a needs-human clarification issue.
+    //
+    // W1-T254: every attempt is ledgered up front (`sweep.post_review.attempt`)
+    // and its outcome after (`.done` with the exit code, or `.failed` with the
+    // thrown error) — the #707 diagnosis misread a dry-run `sweep.dispose`
+    // line as a daemon action for lack of exactly this kind of attempt/outcome
+    // trail. Rethrows on failure so runSweep's own per-PR throw containment
+    // (sweep.ts) still marks `acted:false` + `action_error` on this PR's
+    // `sweep.disposed` line — this is a MORE SPECIFIC sibling record, not a
+    // replacement for it.
     postReview: async (pr) => {
-      await reviewCommand(String(pr.prNumber), ["--repo", repo]);
+      log("sweep.post_review.attempt", { pr_number: pr.prNumber, head_sha: pr.headSha });
+      try {
+        const exit = await reviewCommand(String(pr.prNumber), ["--repo", repo]);
+        log("sweep.post_review.done", { pr_number: pr.prNumber, head_sha: pr.headSha, exit });
+      } catch (e) {
+        log("sweep.post_review.failed", {
+          pr_number: pr.prNumber,
+          head_sha: pr.headSha,
+          error: String((e as Error)?.message ?? e),
+        });
+        throw e;
+      }
     },
 
     close: (pr, reason) => {
@@ -5846,6 +5871,48 @@ function buildSweepHook(
     // or an invalidated draft gets redrafted here, on the daemon's cadence, with no CLI
     // invocation required.
     await draftHook();
+  };
+}
+
+/**
+ * W1-T254 (the #707 fix) — the daemon's RESTRICTED LIGHT-SWEEP hook, ticked by
+ * `DaemonDeps.sweepLight` WHILE `runOne` is in flight (see daemon.ts's doc on
+ * that field). Wires the SAME `buildOpenPrViews` + `buildSweepEffects` +
+ * `runSweep` the full sweep hook above uses — never a second, independently
+ * built reconciler — but passes `actionable: d => d === "post-review"` so
+ * ONLY the deterministic, sha-pinned, mutex-serialized re-post can fire here;
+ * dispatchFix/close/escalate/depReview/arm always stand down
+ * ("deferred to full sweep (light pass)") and re-derive on the next FULL
+ * sweep instead, preserving the single-threaded reason those lanes exist
+ * for. Deliberately excludes the credit-backfill rung and the inbox-draft
+ * rung the full hook also runs — both are heavier, not concurrency-safe
+ * alongside an in-flight `runOne`, and unrelated to the #707 cadence gap
+ * this ticker exists to close. Best-effort, own try/catch: a hiccup here
+ * costs one logged tick, never the daemon's liveness (the daemon.ts caller
+ * ALSO wraps this call — see `daemon.sweep_light.failed` — this inner catch
+ * just names the failure distinctly on this module's own ledger step).
+ */
+function buildSweepLightHook(
+  owner: string,
+  repo: string,
+  config: Config,
+  ledgerPath: string,
+  runId: string,
+  plan: Plan,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): () => Promise<void> {
+  return async () => {
+    try {
+      const openPrs = buildOpenPrViews(owner, repo, ledgerPath);
+      const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
+      await runSweep(
+        openPrs,
+        { ...effects, ledgerPath, runId, log, actionable: (d) => d === "post-review" },
+        DEFAULT_SWEEP_POLICY,
+      );
+    } catch (e) {
+      log("sweep_light.error", { error: String((e as Error)?.message ?? e) });
+    }
   };
 }
 

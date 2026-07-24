@@ -415,6 +415,29 @@ export interface DaemonDeps {
    */
   sweep?: () => Promise<void> | void;
   /**
+   * W1-T254 (the #707 fix) — the RESTRICTED LIGHT-SWEEP TICKER: `runOne` is
+   * UNBOUNDED (a task can hold the daemon inside one call for a whole
+   * session), and `deps.sweep` above only runs BETWEEN iterations — so a PR
+   * that goes green-but-review-absent after the last full sweep sat
+   * invisible for runOne's entire remaining duration (#707: swept 13:12,
+   * entered `runOne`, never swept the new head again for the whole window —
+   * unbounded latency, total invisibility until a manual `rmd review`).
+   * When supplied, this ticks on the SAME injected clock as idle polling
+   * (`pollIntervalMs` cadence, via `deps.sleep`) WHILE `runOne` is in
+   * flight, and is cleared once `runOne` settles (resolved or thrown) —
+   * never left running past it, never aborted mid-call either (a call
+   * already in flight when `runOne` settles is allowed to finish). The real
+   * wiring passes the SAME `runSweep` entry point as `sweep`, but restricted
+   * via `SweepDeps.actionable` to ONLY the deterministic, sha-pinned,
+   * mutex-serialized post-review re-post — every other lane
+   * (dispatchFix/close/escalate/depReview/arm) must stay strictly
+   * single-threaded, so it never runs from here. Own try/catch, like `sweep`
+   * above (`daemon.sweep_light.failed`) — a ticker hiccup costs one logged
+   * tick, never the daemon's liveness. Optional: omitted ⇒ the loop behaves
+   * exactly as before this ticker existed.
+   */
+  sweepLight?: () => Promise<void> | void;
+  /**
    * W1-T46 block-reasoning: called exactly once, when a block classifies
    * GENUINE BLOCKER (`reasonAboutBlock` in block-reason.ts — one or more
    * tasks transitively depend on the blocked task). The real command wires
@@ -871,12 +894,41 @@ export async function runDaemon(
 
     log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
     attempted.push(next.id);
+
+    // W1-T254 (the #707 fix) — LIGHT-SWEEP TICKER: while THIS `runOne` is
+    // unbounded and in flight, tick the restricted light sweep on the SAME
+    // injected clock/cadence idle polling uses, so a PR that goes
+    // green-but-review-absent mid-run re-posts within one poll interval
+    // instead of sitting invisible until runOne finally returns. See
+    // `DaemonDeps.sweepLight`'s doc for the full rationale.
+    let tickerActive = true;
+    const ticker = deps.sweepLight
+      ? (async () => {
+          while (tickerActive) {
+            await deps.sleep(pollIntervalMs);
+            if (!tickerActive) break;
+            try {
+              await deps.sweepLight!();
+            } catch (e) {
+              log("daemon.sweep_light.failed", { error: String((e as Error)?.message ?? e) });
+            }
+          }
+        })()
+      : undefined;
+
     let result: RunResult;
     try {
       result = await deps.runOne(next.id);
     } catch (e) {
+      tickerActive = false;
+      if (ticker) await ticker;
       return summary("error", `${next.id}: ${String((e as Error)?.message ?? e)}`);
     }
+    // Cleared once runOne settles — never left running past it, and never
+    // aborted mid-call (a sweepLight() already in flight is allowed to
+    // finish before the ticker stops).
+    tickerActive = false;
+    if (ticker) await ticker;
     costUsd += result.costUsd;
 
     if (!result.merged) {
