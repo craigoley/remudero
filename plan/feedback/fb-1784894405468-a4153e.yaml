@@ -1,0 +1,26 @@
+id: fb-1784894405468-a4153e
+ts: 2026-07-24T12:00:05.468Z
+raw: "HEADROOM GOVERNOR BECOMES A FLAG, DEFAULT OFF — OPERATOR RULING
+  2026-07-24, amending P34 clause (c) / W1-T249 and extending W1-T252.
+  Rationale: runaway protection is already owned by the per-run turn limit and
+  the budget_usd tripwire; the operator runs with overflow credits beyond the
+  weekly subscription window (currently 75% used and deliberately willing to
+  exceed 100%), so fleet-wide dispatch throttling on percent_used is not wanted
+  as a default posture. RULING: (1) ALL headroom-based dispatch gating — the
+  live W1-T197 daemon idle curve and the ratified-but-unbuilt W1-T249 reserve
+  gate — sits behind ONE policy flag headroom.enabled: a bounded field W1-T252
+  adds to plan/policy.yaml; until the policy file ships, an equivalent explicit
+  flag at the live daemon.ts curve site, initial value FALSE on this host. (2)
+  When disabled, headroom is still READ and LEDGERED every cycle — telemetry
+  without enforcement — so the console displays weekly burn and the operator
+  flips the flag with data in front of him. (3) The console on/off switch and
+  future parallelism/throughput dials ride the P38/P39/P40 lineage, whose P37
+  trigger is now satisfied; per-lane throughput is P42. (4) UNCHANGED: imputed
+  dollars gate nothing; turn limit and budget_usd remain the runaway guards;
+  unreadable headroom while disabled is absent telemetry, never a hold. (5)
+  W1-T249's acceptance gains the flag criterion: with headroom.enabled=false, no
+  headroom condition pauses dispatch, proven by test."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
