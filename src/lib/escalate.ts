@@ -193,15 +193,26 @@ export function tryEscalate(e: Escalation, deps: EscalateDeps): string | null {
  * W1-T99's design) BEFORE `create()` is ever asked to attach it. A hard failure (no repo
  * access, rate-limited, network partition) returns false so `escalate()` degrades that one
  * label instead of losing the whole issue to it — the 2026-07-17 incident this task fixes.
+ *
+ * `opts.exec` (mirrors {@link ghGateway} in status.ts, W1-T119) is an INJECTABLE stand-in
+ * for the raw `gh` invocation — real callers omit it and get the actual
+ * `execFileSync("gh", args, ...)` call; unit tests inject a fake that returns a canned
+ * string or throws, so both `ensureLabel`'s tolerate-failure branch and `create`'s URL
+ * plumbing are exercised deterministically WITHOUT shelling out.
  */
-export function ghIssueGateway(owner: string, repo: string): IssueGateway {
+export function ghIssueGateway(
+  owner: string,
+  repo: string,
+  opts: { exec?: (args: string[]) => string } = {},
+): IssueGateway {
   const repoArg = `${owner}/${repo}`;
+  const run =
+    opts.exec ??
+    ((args: string[]) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   return {
     ensureLabel(label) {
       try {
-        execFileSync("gh", ["label", "create", label, "--repo", repoArg, "--color", "ededed", "--force"], {
-          stdio: "pipe",
-        });
+        run(["label", "create", label, "--repo", repoArg, "--color", "ededed", "--force"]);
         return true;
       } catch {
         return false;
@@ -210,7 +221,7 @@ export function ghIssueGateway(owner: string, repo: string): IssueGateway {
     create(title, body, labels) {
       const args = ["issue", "create", "--repo", repoArg, "--title", title, "--body", body];
       for (const label of labels) args.push("--label", label);
-      return execFileSync("gh", args, { encoding: "utf8" }).trim();
+      return run(args).trim();
     },
   };
 }

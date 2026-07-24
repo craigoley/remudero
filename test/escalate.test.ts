@@ -8,6 +8,7 @@ import {
   escalate,
   tryEscalate,
   renderIssueBody,
+  ghIssueGateway,
   type Escalation,
   type IssueGateway,
 } from "../src/lib/escalate.js";
@@ -246,4 +247,62 @@ test("escalate: the canonical 2026-07-17 shape — a label whose provisioning HA
   const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   const opened = lines.find((l) => l.step === "escalation.issue_opened");
   assert.deepEqual(opened.degraded_labels, ["escalation-blocked"]);
+});
+
+// ── ghIssueGateway: the REAL `gh` gateway, exercised via the injectable `opts.exec`
+// stand-in (mirrors ghGateway in status.ts, W1-T119) so the ensureLabel/create wiring
+// below is proven WITHOUT shelling out to a real `gh` binary.
+
+test("ghIssueGateway.ensureLabel: a successful `gh label create` returns true", () => {
+  const calls: string[][] = [];
+  const gateway = ghIssueGateway("craigoley", "remudero", {
+    exec: (args) => {
+      calls.push(args);
+      return "";
+    },
+  });
+  assert.equal(gateway.ensureLabel?.("escalation-blocked"), true);
+  assert.deepEqual(calls, [
+    ["label", "create", "escalation-blocked", "--repo", "craigoley/remudero", "--color", "ededed", "--force"],
+  ]);
+});
+
+test("ghIssueGateway.ensureLabel: a throwing `gh` (rate-limit/auth/network) degrades to false, never throws", () => {
+  const gateway = ghIssueGateway("craigoley", "remudero", {
+    exec: () => {
+      throw new Error("gh: HTTP 403 rate limit exceeded");
+    },
+  });
+  assert.equal(gateway.ensureLabel?.("escalation-blocked"), false);
+});
+
+test("ghIssueGateway.create: builds the gh issue-create args and returns the trimmed URL", () => {
+  const calls: string[][] = [];
+  const gateway = ghIssueGateway("craigoley", "remudero", {
+    exec: (args) => {
+      calls.push(args);
+      return "https://github.com/craigoley/remudero/issues/123\n";
+    },
+  });
+  const url = gateway.create("[BLOCKED] W1-TX: two strikes exhausted", "body text", [
+    NEEDS_HUMAN_LABEL,
+    "escalation-blocked",
+  ]);
+  assert.equal(url, "https://github.com/craigoley/remudero/issues/123");
+  assert.deepEqual(calls, [
+    [
+      "issue",
+      "create",
+      "--repo",
+      "craigoley/remudero",
+      "--title",
+      "[BLOCKED] W1-TX: two strikes exhausted",
+      "--body",
+      "body text",
+      "--label",
+      NEEDS_HUMAN_LABEL,
+      "--label",
+      "escalation-blocked",
+    ],
+  ]);
 });
