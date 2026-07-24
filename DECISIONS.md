@@ -298,3 +298,33 @@ circuit-breaker as the per-task guards. Both prerequisites pulled to the immedia
 - FIX (this PR): rung (c2) HEAD-BRANCH CORROBORATION. An exit-0-empty trailer search is now treated as INDETERMINATE, never authoritative. Before concluding `source:"none"`, `deriveStatus` corroborates with a DETERMINISTIC, non-body-index read — `findMergedByHeadBranch` enumerates merged PRs whose head branch is `run-<taskId>-*` (`gh pr list --state merged --search 'head:run-<id>-'`, a structured ref match), re-asserting `run-<taskId>-\d+` ownership on each candidate exactly as rung (c) re-verifies the trailer. Empty on BOTH the trailer search AND the head-branch read is genuinely none; search-empty-but-branch-hit resolves merged via the branch; a `gh` failure on the corroboration returns null and defers via the existing W1-T119 indeterminate skip.
 - COST OF THE BUG: four spurious re-dispatches on 2026-07-24 alone — W1-T1, W1-T12a (×2, PRs #61-era + the no-op #725), and W1-T99 (#729 already merged) — each a no-op PR against an already-merged task.
 - Rollback: revert this PR — restores the empty-search-as-authoritative behavior (src/lib/status.ts + test/status.test.ts only; no schema or CLI surface touched).
+
+## 2026-07-24T23:41:48.000Z — W1-T7 (W1-T7-1784936055138): criterion 2 stays open, deferred to W1-T7B
+- Options: A. Take no action on criterion 2 this run — no functional code change, report the conflict, leave
+  W1-T7's second acceptance criterion honestly unmet exactly as the task's own architect note already states.
+  (RECOMMENDED) | B. Implement `runDiagnoseThenRetry`'s call site now, under W1-T7, to literally satisfy
+  criterion 2's proof text and let W1-T7 close today.
+- Chosen (RECOMMENDED, auto/operator-confirmed): A. Take no action on criterion 2 — no functional code change.
+- Rationale: W1-T7's acceptance has two criteria. Criterion 1 ("network/5xx/CI-flake retries consume NO
+  strike; deterministic failures do") is already merged and proven — PR #48 (`a86cbd1`, 2026-07-15) shipped
+  `src/lib/classify.ts`'s `classifyFailure`/`planRetry`, and `test/classify.test.ts`'s fixture suites
+  (`classifyFailure: recorded TRANSIENT fixtures — …`, `classifyFailure: recorded DETERMINISTIC (STRIKE)
+  fixtures`) already exercise it; `run-task.ts:348` imports `classifyFailure` and uses it at `run-task.ts:2104`.
+  Nothing to do there. Criterion 2 ("two strikes dispatches a DIAGNOSE worker … before any third patch") is
+  NOT satisfied on `main`: `runDiagnoseThenRetry` (src/lib/classify.ts:204) exists and is unit-tested against a
+  MOCKED ledger (`test/classify.test.ts`'s "runDiagnoseThenRetry: a seeded double-failure produces a diagnose
+  run in the ledger, never a third blind patch"), but has ZERO call site in `run-task.ts`/`daemon.ts` — only a
+  comment reference at `src/lib/flight-judge.ts:367`. The task's own architect note says this in as many words:
+  "criterion 2 (diagnose dispatch) is NOT yet reachable … The wiring is W1-T7B (Standing rule 14: the call site
+  is the deliverable) … Criterion 2 stays OPEN (not satisfied) until W1-T7B lands." `W1-T7B` ("Wire the diagnose
+  dispatch — runDiagnoseThenRetry gets a live call site (rule 14)", `depends_on: [W1-T7]`) targets the identical
+  files (`src/run-task.ts`, `src/lib/classify.ts`) and carries the identical acceptance claim, but is
+  deliberately `verify: human`, `risk: high`, with `queue_note: "parked from auto-dispatch per operator ruling
+  2026-07-24 — verify:human is the dispatch gate (drain.ts:112); kick by id when prioritized."` — dated the same
+  day as this dispatch. Implementing the wiring under W1-T7 (`verify: auto`) would land W1-T7B's exact
+  human-gated deliverable without the human ever seeing it, silently defeating a same-day operator ruling. This
+  PR therefore makes NO change to `src/lib/classify.ts` or `src/run-task.ts` and does not attempt to mark
+  criterion 2 satisfied — it stays open on `plan/tasks.yaml`'s own terms, and the real remaining work is left
+  exclusively to W1-T7B, to be kicked by id when the operator prioritizes it.
+- Rollback: revert this PR (removes only this DECISIONS.md entry; no runtime code touched; W1-T7 remains
+  exactly as queued as before).
