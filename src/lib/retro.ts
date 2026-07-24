@@ -83,6 +83,22 @@ export interface RunSummary {
    *  `error_max_turns`, `error_max_budget_usd`), if the run ended in one. A
    *  clean merge or a non-error verdict carries no subtype. */
   subtype?: string;
+  /** The terminal `verdict` line's prose `reason`, when logged. W1-T91/P23:
+   *  the fallback input for {@link resolveGuardCheck} on a run whose verdict
+   *  line predates the structured `guard`/`check`/`observed` fields below. */
+  reason?: string;
+  /** W1-T91/P23 part (i): the guard class (`isolation`|`containment`, ...) off
+   *  the terminal `verdict` line, when a guard-block wrote it structurally.
+   *  Absent on any verdict line predating this task, and on every non-guard
+   *  verdict — {@link resolveGuardCheck} is the reader that tolerates both. */
+  guard?: string;
+  /** W1-T91/P23 part (i): the specific probe/check the guard ran (e.g.
+   *  `inherited-functions`, `outside-cwd-denial`), alongside `guard` above. */
+  check?: string;
+  /** W1-T91/P23 part (i): what the probe OBSERVED, preserving the preflight's
+   *  three-state epistemology (proven-holding | proven-broken | UNPROVEN)
+   *  verbatim — never collapsed to a boolean. */
+  observed?: string;
 }
 
 const DONE_STEPS = new Set(["recon.done", "implement.done", "implement.resumed"]);
@@ -136,6 +152,12 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
       ...(typeof start.risk === "string" ? { risk: start.risk } : {}),
       ...(typeof start.task_class === "string" ? { taskClass: start.task_class } : {}),
       ...(typeof verdictLine?.subtype === "string" ? { subtype: verdictLine.subtype } : {}),
+      ...(typeof verdictLine?.reason === "string" ? { reason: verdictLine.reason } : {}),
+      // W1-T91/P23 (i): the structured guard-cause fields, when the verdict line
+      // carried them (a guard-block written after this task landed).
+      ...(typeof verdictLine?.guard === "string" ? { guard: verdictLine.guard } : {}),
+      ...(typeof verdictLine?.check === "string" ? { check: verdictLine.check } : {}),
+      ...(typeof verdictLine?.observed === "string" ? { observed: verdictLine.observed } : {}),
     });
   }
   // Deterministic order: by start timestamp then run id.
@@ -639,6 +661,185 @@ export function mastDistributionTable(dist: MastCategoryDistribution, priorByCat
   ].join("\n");
 }
 
+// ── W1-T91/P23: guard-fired blocks classify as INFRASTRUCTURE, never a task
+// defect ──────────────────────────────────────────────────────────────────
+//
+// A guard (isolation/containment) firing is the harness's OWN preflight
+// catching a HOST condition before any task work ran — proof the guard
+// WORKED, not evidence the task is broken (MASTER-PLAN P23, investigated:
+// both novel 2026-07-16 blocks were correct fail-closed guard fires). Coded
+// entirely off plan/mast-mapping.yaml's `category: infrastructure` rows
+// (Rule 2 — data, never a hardcoded verdict check) so the row IS the
+// classifier: remove it and these runs report unmapped, never silently
+// mis-coded into an agent-failure category.
+
+/**
+ * DATA fallback table (Rule 2 discipline, same as {@link OVERRUN_VERDICTS}):
+ * a historical `verdict` ledger line that PREDATES this task's structured
+ * `guard`/`check` fields carries only prose in `reason`. Each row names the
+ * verdict class, a pattern the prose must match (defense-in-depth — never
+ * infer guard/check off the bare verdict alone), and the guard/check those
+ * lines code to. The two 2026-07-16 lines (P23's own investigation) are
+ * exactly what this table exists to code retroactively, with zero rewrite of
+ * the ledger itself.
+ */
+export interface GuardReasonFallbackRow {
+  verdict: string;
+  pattern: RegExp;
+  guard: string;
+  check: string;
+}
+
+export const GUARD_REASON_FALLBACK_ROWS: readonly GuardReasonFallbackRow[] = [
+  {
+    verdict: "blocked_isolation",
+    pattern: /isolation_preflight_failed/i,
+    guard: "isolation",
+    check: "inherited-functions",
+  },
+  {
+    verdict: "blocked_containment",
+    pattern: /containment (?:preflight|UNPROVEN)/i,
+    guard: "containment",
+    check: "outside-cwd-denial",
+  },
+];
+
+/**
+ * Resolve a run's guard/check — the structured fields off its own verdict
+ * line when present (every guard-block written after W1-T91 lands), else the
+ * {@link GUARD_REASON_FALLBACK_ROWS} match against its prose `reason` (every
+ * guard-block written before). Returns undefined when NEITHER source
+ * resolves it (the run isn't a guard-block at all, or predates even the
+ * prose shape the fallback table expects) — the caller decides how to
+ * surface that rather than guessing a guard/check that was never observed.
+ */
+export function resolveGuardCheck(r: Pick<RunSummary, "verdict" | "guard" | "check" | "reason">): { guard: string; check: string } | undefined {
+  if (r.guard && r.check) return { guard: r.guard, check: r.check };
+  const row = GUARD_REASON_FALLBACK_ROWS.find((f) => f.verdict === r.verdict && r.reason && f.pattern.test(r.reason));
+  return row ? { guard: row.guard, check: row.check } : undefined;
+}
+
+/** One guard-fired block, classified INFRASTRUCTURE (never a task defect). */
+export interface InfrastructureEvent {
+  runId: string;
+  taskId: string;
+  verdict: string;
+  guard: string;
+  check: string;
+  /** The preflight's observed state (three-state epistemology, never a
+   *  boolean) — carried through when the run logged it structurally; absent
+   *  on a prose-only historical line the fallback table coded by pattern. */
+  observed?: string;
+}
+
+/**
+ * Mine `runs` for every run plan/mast-mapping.yaml codes `category:
+ * infrastructure` — driven entirely by the mapping (Rule 2): a row edit
+ * alone reclassifies a verdict class into or out of this bucket, zero code
+ * change. A run the mapping calls infrastructure but whose guard/check
+ * resolves to neither the structured fields nor the fallback table still
+ * counts (never silently dropped) — named `guard`/`check` "unknown" rather
+ * than excluded, so the bucket's total always matches the mapping's own
+ * count.
+ */
+export function infrastructureEvents(runs: RunSummary[], mapping: MastMapping): InfrastructureEvent[] {
+  const out: InfrastructureEvent[] = [];
+  for (const r of runs) {
+    if (r.verdict === "merged") continue;
+    const row = mastRowFor(mapping, r);
+    if (row?.category !== "infrastructure") continue;
+    const gc = resolveGuardCheck(r) ?? { guard: "unknown", check: "unknown" };
+    out.push({
+      runId: r.runId,
+      taskId: r.taskId,
+      verdict: r.verdict,
+      guard: gc.guard,
+      check: gc.check,
+      ...(r.observed !== undefined ? { observed: r.observed } : {}),
+    });
+  }
+  out.sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
+  return out;
+}
+
+/** Recurrence of ONE (guard, check) pair across runs — "the same check firing
+ *  across N runs on one host IS a host signal" (design note ii): a repeated
+ *  guard/check is worth trending even though NONE of its runs count as a
+ *  task defect. */
+export interface InfrastructureRecurrence {
+  guard: string;
+  check: string;
+  count: number;
+  taskIds: string[];
+  runIds: string[];
+}
+
+/** Group {@link infrastructureEvents} by (guard, check), deterministic order —
+ *  the recurrence trend `renderInfrastructure` names in its report. */
+export function infrastructureRecurrence(events: InfrastructureEvent[]): InfrastructureRecurrence[] {
+  const byKey = new Map<string, InfrastructureEvent[]>();
+  for (const e of events) {
+    const key = `${e.guard} ${e.check}`;
+    const arr = byKey.get(key) ?? [];
+    arr.push(e);
+    byKey.set(key, arr);
+  }
+  const out: InfrastructureRecurrence[] = [...byKey.entries()].map(([key, es]) => {
+    const [guard, check] = key.split(" ");
+    return {
+      guard,
+      check,
+      count: es.length,
+      taskIds: [...new Set(es.map((e) => e.taskId))].sort(),
+      runIds: es.map((e) => e.runId).sort(),
+    };
+  });
+  out.sort((a, b) => (a.guard + a.check < b.guard + b.check ? -1 : a.guard + a.check > b.guard + b.check ? 1 : 0));
+  return out;
+}
+
+/**
+ * Per-task DEFECT count (W1-T91/P23 part ii): every non-merged run for that
+ * task EXCLUDING guard-fired infrastructure events — a guard firing
+ * correctly is a host signal, never evidence the TASK is defective. Driven
+ * by the SAME mapping `category` field {@link infrastructureEvents} reads
+ * (Rule 2 — one classifier, not two), so a mapping row edit alone moves a
+ * verdict class into or out of a task's defect count. A task with zero
+ * qualifying runs never appears in the returned record (absence IS zero,
+ * not a reason to guess a key into existence).
+ */
+export function taskDefectCounts(runs: RunSummary[], mapping: MastMapping): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const r of runs) {
+    if (r.verdict === "merged") continue;
+    const row = mastRowFor(mapping, r);
+    if (row?.category === "infrastructure") continue; // guard-fired, not a task defect
+    out[r.taskId] = (out[r.taskId] ?? 0) + 1;
+  }
+  return sortedCountRecord(out);
+}
+
+/** Render the infrastructure section (markdown) — printed by `--dry-run` and
+ *  fed to the Architect, mirroring {@link mastDistributionTable}'s shape. */
+export function renderInfrastructure(events: InfrastructureEvent[], recurrence: InfrastructureRecurrence[]): string {
+  if (events.length === 0) {
+    return "## Infrastructure events (guard-fired blocks — never a task defect)\n\nNone this cycle.";
+  }
+  const recurLines = recurrence
+    .filter((r) => r.count >= 2)
+    .map((r) => `- ${r.guard}/${r.check}: ${r.count}x across ${r.taskIds.join(", ")} — a HOST signal, not a task signal`);
+  return [
+    "## Infrastructure events (guard-fired blocks — never a task defect)",
+    "",
+    `${events.length} guard-fired block(s) this cycle, excluded from every task's defect count:`,
+    ...events.map((e) => `- ${e.taskId} (${e.runId}): ${e.guard}/${e.check}${e.observed ? ` — observed: ${e.observed}` : ""}`),
+    "",
+    recurLines.length ? "### Recurrence trend (same check firing repeatedly on one host)" : "### Recurrence trend: none (each check fired once)",
+    ...recurLines,
+  ].join("\n");
+}
+
 export interface RetroGather {
   sinceTs?: string;
   totalRuns: number;
@@ -679,6 +880,18 @@ export interface RetroGather {
    *  present so `renderGather` can show a trend without re-reading the marker
    *  itself. Absent on the very first MAST-coded retro. */
   priorMastCategoryCounts?: Record<string, number>;
+  /** W1-T91/P23: every guard-fired block this cycle, classified INFRASTRUCTURE
+   *  (never a task defect) — mined off the SAME `opts.mastMapping` as `mast`
+   *  above, over the same `scoped` window. */
+  infrastructureEvents: InfrastructureEvent[];
+  /** W1-T91/P23: `infrastructureEvents` grouped by (guard, check) — the
+   *  recurrence trend that names a host signal ("the same check firing
+   *  across N runs on one host"). */
+  infrastructureRecurrence: InfrastructureRecurrence[];
+  /** W1-T91/P23: per-task defect counts over `scoped`, EXCLUDING every
+   *  guard-fired infrastructure event — the statistic guard-fired blocks must
+   *  never pollute. */
+  taskDefectCounts: Record<string, number>;
 }
 
 /**
@@ -715,6 +928,10 @@ export function buildGather(opts: {
   // still gets full credit) — a reason here means the read layer itself is not
   // trustworthy, regardless of what shippedSince managed to resolve anyway.
   const githubUnavailable = opts.github?.unavailable?.();
+  // W1-T91/P23: computed once, shared by the events list and its recurrence
+  // trend below — never two independently-scoped reads of the same mapping.
+  const mapping = opts.mastMapping ?? { rows: [] };
+  const infraEvents = infrastructureEvents(scoped, mapping);
   return {
     sinceTs: opts.sinceTs,
     totalRuns: scoped.length,
@@ -737,8 +954,14 @@ export function buildGather(opts: {
     // W1-T89/P18: SAME `scoped` window as verdicts above (the whole cycle's
     // runs, not just the merged subset) — a failure distribution over anything
     // narrower would miss runs mergedSince already excludes by definition.
-    mast: mastCategoryDistribution(scoped, opts.mastMapping ?? { rows: [] }),
+    mast: mastCategoryDistribution(scoped, mapping),
     ...(opts.priorMastCategoryCounts ? { priorMastCategoryCounts: opts.priorMastCategoryCounts } : {}),
+    // W1-T91/P23: SAME `scoped` window + mapping as `mast` above — one
+    // classifier, read twice (category distribution, then the
+    // infrastructure/defect split), never two independently-scoped reads.
+    infrastructureEvents: infraEvents,
+    infrastructureRecurrence: infrastructureRecurrence(infraEvents),
+    taskDefectCounts: taskDefectCounts(scoped, mapping),
   };
 }
 
@@ -817,6 +1040,12 @@ export function renderGather(g: RetroGather): string {
     "",
     "## Failure distribution BY MAST CATEGORY (W1-T89, ratifies P18 — plan/mast-mapping.yaml)",
     mastDistributionTable(g.mast, g.priorMastCategoryCounts),
+    "",
+    // W1-T91/P23: guard-fired blocks, already excluded from `mast`'s agent-
+    // failure categories above (they land in `infrastructure` there too) —
+    // this section is the dedicated per-guard/check view PLUS the per-task
+    // defect exclusion the retro's own defect stats must honor.
+    renderInfrastructure(g.infrastructureEvents, g.infrastructureRecurrence),
     "",
     renderDegradedSuccess(g.degradedSuccess),
     "",
@@ -918,15 +1147,18 @@ export function renderPlanHealth(report: PlanHealthReport): string {
 // was named — the reactive-diagnosis anti-pattern this sweep exists to kill.
 
 /** Terminal verdicts that represent an OVERRUN/blocked outcome worth mining for
- *  a class pattern — every non-merge terminal state a run can end in. DATA, not
- *  hardcoded logic, same pattern as task-linter.ts's lexicons. */
+ *  a class pattern — every non-merge terminal state a run can end in EXCEPT the
+ *  guard-fired classes (W1-T91/P23: `blocked_containment`/`blocked_isolation`
+ *  are the harness's own preflight catching a HOST condition, never evidence a
+ *  (task_type × risk) CLASS is defective — mining them for a class-level fix
+ *  would propose "decompose this task class" over a host's populated
+ *  `~/.bashrc`). DATA, not hardcoded logic, same pattern as task-linter.ts's
+ *  lexicons. */
 export const OVERRUN_VERDICTS: ReadonlySet<string> = new Set([
   "blocked",
   "blocked_ci",
   "blocked_review",
   "blocked_budget",
-  "blocked_containment",
-  "blocked_isolation",
   "blocked_inflight",
   "blocked_git_fetch",
   "blocked_illformed",

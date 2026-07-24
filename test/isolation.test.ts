@@ -227,3 +227,40 @@ test("the invariant is intact: allowlisting pkill does NOT loosen fail-closed �
   const r = parseIsolationReport("REPORT\naliases: 0\nfunctions: 1\nalias_names: -\nfunction_names: claude pkill");
   assert.equal(r?.functionNames, "claude");
 });
+
+// ── W1-T91/P23: structured guard-cause on the thrown IsolationError ─────────
+// (guard/check/observed alongside the prose message, so a reader never has to
+// parse prose to know this was a guard firing CORRECTLY, not a task defect)
+
+test("W1-T91 ACCEPTANCE: IsolationError carries guard=isolation, check=inherited-functions, observed naming the OBSERVED counts", async () => {
+  await assert.rejects(
+    () =>
+      probeIsolation({
+        settingsFile: "unused",
+        exec: async () => ({ transcript: "REPORT\naliases: 0\nfunctions: 2", aliasCount: 0, functionCount: 2 }),
+      }),
+    (e: unknown) => {
+      assert.ok(e instanceof IsolationError);
+      const err = e as IsolationError;
+      assert.equal(err.guard, "isolation");
+      assert.equal(err.check, "inherited-functions");
+      assert.equal(err.observed, "0 aliases, 2 functions");
+      return true;
+    },
+  );
+});
+
+test("IsolationError: an UNPARSEABLE probe report (NaN counts) round-trips as observed='unproven', never a fabricated data string", async () => {
+  await assert.rejects(
+    () =>
+      probeIsolation({
+        settingsFile: "unused",
+        exec: async () => ({ transcript: "no report at all", aliasCount: NaN, functionCount: NaN }),
+      }),
+    (e: unknown) => {
+      assert.ok(e instanceof IsolationError);
+      assert.equal((e as IsolationError).observed, "unproven");
+      return true;
+    },
+  );
+});

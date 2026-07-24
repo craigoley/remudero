@@ -75,9 +75,24 @@ export const CLAUDE_CODE_TOOL_WRAPPERS = [
 
 /** Named error so callers (and tests) can assert the fail-closed fired by type. */
 export class IsolationError extends Error {
-  constructor(message: string) {
+  /**
+   * STRUCTURED GUARD-CAUSE (W1-T91/P23, ratifies the design's part (i)): the guard
+   * class, the specific probe check that fired, and what was OBSERVED — carried
+   * alongside the prose `message` so a reader (the retro's read-side classifier,
+   * chiefly) never has to parse prose to know a block was a GUARD FIRING CORRECTLY,
+   * not a task defect. `guard`/`check` are fixed literals (isolation has exactly
+   * one probe today); `observed` preserves the preflight's three-state epistemology
+   * (proven-holding | proven-broken | UNPROVEN) verbatim — the measured counts when
+   * they exist ("0 aliases, 2 functions"), or the literal "unproven" when the report
+   * itself could not be parsed. Never collapsed to a boolean.
+   */
+  readonly guard = "isolation" as const;
+  readonly check = "inherited-functions" as const;
+  readonly observed: string;
+  constructor(message: string, observed: string) {
     super(message);
     this.name = "IsolationError";
+    this.observed = observed;
   }
 }
 
@@ -326,7 +341,19 @@ export async function probeIsolation(opts: {
       function_names: evidence.functionNames ?? null,
       reason: verdict.reason,
     });
-    throw new IsolationError(`isolation_preflight_failed: ${verdict.reason} — FAIL CLOSED, the run does not proceed`);
+    // OBSERVED (W1-T91/P23 part i): the actual measured counts when both parsed
+    // cleanly (a proven-broken state — nonzero leakage), or the literal "unproven"
+    // when either count was unparseable (NaN) — the SAME unproven state
+    // assessIsolation already fails closed on, now named explicitly for readers
+    // that never see the prose `reason`.
+    const observed =
+      Number.isFinite(evidence.aliasCount) && Number.isFinite(evidence.functionCount)
+        ? `${evidence.aliasCount} aliases, ${evidence.functionCount} functions`
+        : "unproven";
+    throw new IsolationError(
+      `isolation_preflight_failed: ${verdict.reason} — FAIL CLOSED, the run does not proceed`,
+      observed,
+    );
   }
   return { isolated: true, reason: verdict.reason, evidence, costUsd };
 }

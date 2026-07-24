@@ -130,3 +130,70 @@ test("containmentProbePrompt: attempts an OUTSIDE-cwd write then an INSIDE-cwd w
   assert.match(p, /touch probe-ok\.txt/);
   assert.match(p, /OUTSIDE your working directory/i);
 });
+
+// ── W1-T91/P23: structured guard-cause on the thrown ContainmentError ───────
+
+test("W1-T91 ACCEPTANCE: the UNPROVEN containment state (no OS-denial observed) round-trips as observed='unproven'", async () => {
+  await assert.rejects(
+    () =>
+      probeContainment({
+        settingsFile: settingsFile(ENABLED),
+        token: "mytoken",
+        exec: async () => ({
+          transcript: "some unrelated line: Operation not permitted on /elsewhere",
+          outsideWriteCreated: false,
+          insideWriteCreated: true,
+        }),
+      }),
+    (e: unknown) => {
+      assert.ok(e instanceof ContainmentError);
+      const err = e as ContainmentError;
+      assert.equal(err.guard, "containment");
+      assert.equal(err.check, "outside-cwd-denial");
+      assert.equal(err.observed, "unproven");
+      return true;
+    },
+  );
+});
+
+test("ContainmentError: the sandbox-dropped state (outside write LANDED) is a PROVEN-BROKEN observed string, not 'unproven'", async () => {
+  await assert.rejects(
+    () =>
+      probeContainment({
+        settingsFile: settingsFile(ENABLED),
+        token: "xyz",
+        exec: async (token) => ({
+          transcript: `touch ../${token}.txt   # succeeded, no error`,
+          outsideWriteCreated: true,
+          insideWriteCreated: true,
+        }),
+      }),
+    (e: unknown) => {
+      assert.ok(e instanceof ContainmentError);
+      const err = e as ContainmentError;
+      assert.equal(err.guard, "containment");
+      assert.notEqual(err.observed, "unproven");
+      assert.match(err.observed, /sandbox did not engage/i);
+      return true;
+    },
+  );
+});
+
+test("ContainmentError: the static config gate (sandbox disabled) names its own guard-cause", async () => {
+  await assert.rejects(
+    () =>
+      probeContainment({
+        settingsFile: settingsFile({ sandbox: { enabled: false, failIfUnavailable: true } }),
+        exec: async () => ({ transcript: "", outsideWriteCreated: false, insideWriteCreated: false }),
+        token: "t",
+      }),
+    (e: unknown) => {
+      assert.ok(e instanceof ContainmentError);
+      const err = e as ContainmentError;
+      assert.equal(err.guard, "containment");
+      assert.equal(err.check, "sandbox-enabled");
+      assert.equal(err.observed, "disabled");
+      return true;
+    },
+  );
+});
