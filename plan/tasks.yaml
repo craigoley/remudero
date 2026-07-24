@@ -369,6 +369,73 @@
     it gates the certifiability of ~a third of the open queue. Its OWN proofs are executable dialect — it
     must pass the very check it files. Single-concern: the machine proof-rewrite lane and the tasks.d
     rule-15-blindness gap are noted as SEPARATE successor filings, not folded in."
+
+- id: W1-T257
+  title: "CONSUMED FEEDBACK RENDERS AS PENDING FOREVER — nothing advances a 'proposed' entry once its proposal_pr MERGES, so NEEDS ME keeps offering an Accept/Reject decision the operator already made by letting the plan PR land"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OBSERVED AT SOURCE (2026-07-23, feedback fb-1784770185732-e025c1, found while verifying the
+    stale-card question in fb-1784770111145-cf7c24): NEEDS ME renders an Accept/Reject decision card for
+    EVERY feedback entry whose status === 'proposed' (serve.ts:1325 -> needsMeProposedHtml, serve.ts:1272).
+    status comes from the LOCAL CHECKOUT — listFeedback(deps.root), panel-graph.ts:129, deps.root = the repo
+    root plan/feedback/ lives under (panel-graph.ts:88) — a direct read of plan/feedback/*.yaml, NOT
+    origin/main and NOT a stale cache, so this is not a refresh bug. ROOT CAUSE: `rmd triage` writes
+    status: proposed with proposal_pr set, and the ONLY transition off 'proposed' is the MANUAL POST
+    /v1/feedback/decision (panel-graph.ts:308-337, which 400s unless status === 'proposed'). No reconciler
+    advances an entry when its proposal PR MERGES. Live instances: fb-1784732500436-728bc1 (PR #588 merged,
+    W1-T240-242 landed) and fb-1784734427694-703ff7 (PR #599 merged, W1-T243 landed) both still read
+    'proposed' and still render as pending decisions. Same wrong-affordance class W1-T182 removes from NEEDS
+    ME (an action offered for something already resolved), on the feedback rows W1-T182 does not touch."
+  design: |
+    MERGING THE PROPOSAL PR IS THE DECISION. The gate (§2) already reviewed and landed it; a second manual
+    Accept adds nothing and its absence must not pin a consumed entry in the operator's work list.
+    PRIMARY (verify from source before building): reconcile a 'proposed' entry whose proposal_pr is MERGED to
+    the EXISTING terminal status `accepted` — do NOT mint 'ratified'/'consumed'. FEEDBACK_STATUSES
+    (new|grilling|proposed|accepted|rejected) is a closed enum validated on GET /v1/feedback?status=
+    (panel-graph.ts:137) and declared verbatim in MASTER-PLAN §7B; a new member is a schema change across
+    capture, triage, trace and the panel, and buys nothing the existing terminal state does not.
+    MECHANISM — derive, do not double-write: the merged bit is already derivable from GitHub exactly like
+    task status is (PanelGraphDeps.statusGithub / lib/trace.ts's prView, both injected, both batched).
+    Reconcile on the READ that feeds NEEDS ME so no entry can drift, and (if the sweep is the cheaper home)
+    persist the status through lib/feedback.ts's setFeedbackStatus rather than a second ad-hoc writer.
+    Whichever site ships, the panel must NOT fetch per row — reuse the batched-gateway discipline the board
+    already uses (W1-T181/W1-T182), and an entry whose proposal_pr is unset or unparseable stays 'proposed'.
+    FAIL-SAFE DIRECTION (inverts the merged-count case, matching W1-T182's note): when the merge state cannot
+    be READ (GitHub outage), KEEP the row and mark it unverified — hiding a possibly-live decision is worse
+    than showing a resolved one. A CLOSED-unmerged proposal PR is deliberately NOT terminal here (that is a
+    rejected/abandoned proposal, a separate call); only MERGED reconciles.
+    DO NOT WIDEN: W1-T162 owns closing escalation ISSUES whose referent resolved; this owns feedback ENTRY
+    status. W1-T182 owns the escalation row affordances. One concern only.
+  acceptance:
+    - claim: "a 'proposed' entry whose proposal_pr is MERGED reconciles to the existing terminal status 'accepted' — no new enum member is introduced"
+      proof: "unit test: a merged proposal_pr reconciles a proposed entry to accepted"
+    - claim: "such an entry does NOT render an Accept/Reject card in NEEDS ME (the regression this feedback names), asserted against a test that FAILS on today's status === 'proposed' predicate at serve.ts:1325"
+      proof: "unit test: a merged-proposal entry renders no NEEDS ME decision card"
+    - claim: "a 'proposed' entry whose proposal_pr is still OPEN, or is null/unparseable, STAYS proposed and STAYS in NEEDS ME (the falsifier — a live decision must never be swept off the operator's board)"
+      proof: "unit test: an open or missing proposal_pr keeps the entry proposed and in NEEDS ME"
+    - claim: "an UNREADABLE merge state keeps the row (flagged unverified) instead of dropping it, and the reconciliation resolves merge state through ONE batched gateway call, never one fetch per row"
+      proof: "unit test: unreadable merge state keeps the row and resolution is batched"
+    - claim: "the reconciliation is idempotent and applies to the ALREADY-STUCK live entries, not only to future ones"
+      proof: "unit test: reconciliation is idempotent over already-stuck entries"
+  risk: high
+  origin: feedback#fb-1784770185732-e025c1
+  plan_refs: ["§7B", "§7"]
+  files: [src/lib/panel-graph.ts, src/lib/feedback.ts, src/lib/serve.ts, test/panel-graph.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-24 from feedback fb-1784770185732-e025c1, source-verified before filing: serve.ts:1272
+    /1325 (the proposed decision card), panel-graph.ts:129/88 (listFeedback off the local repo root, not a
+    cache), panel-graph.ts:308-337 (the only transition off 'proposed'), and the two live stuck entries
+    (PRs #588, #599 both merged). NOT a re-decision of W1-T182 (escalation rows, status.ts) or W1-T162
+    (closing escalation ISSUES whose referent resolved) — the sibling feedback fb-1784756088300-6a481e is
+    the issue-lifecycle half; this is the ENTRY-status half, and they share no code path. MASTER-PLAN §7B's
+    status enum is deliberately left UNCHANGED (see design): 'accepted' already means decided, and merging
+    the gated proposal PR IS that decision. risk:medium — read-path reconciliation plus one status write,
+    no gate or daemon-loop semantics touched. depends_on empty."
 - id: W1-T230
   title: "the arm decision trusts the status channel, which is writable and proved decorative - it must key off the orchestrator's own ledgered verdict for the exact head SHA"
   repo: remudero
