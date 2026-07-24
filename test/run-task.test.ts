@@ -53,12 +53,19 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   reconCommand,
   defaultReconRunLens,
   sessionCommand,
+  synthesizeCommand,
   lintPlanCommand,
   main,
 } from "../src/run-task.js";
-import { realOnboardFsDeps, type OnboardGhGateway } from "../src/lib/onboard/inventory.js";
+import { realOnboardFsDeps, type Inventory, type OnboardGhGateway } from "../src/lib/onboard/inventory.js";
 import { realReconFsDeps, type ReconGhGateway } from "../src/lib/onboard/recon.js";
-import { realSessionFsDeps, type OnboardQuestion } from "../src/lib/onboard/session.js";
+import { generateOnboardQuestions, realSessionFsDeps, type OnboardAnswer, type OnboardQuestion } from "../src/lib/onboard/session.js";
+import {
+  realSynthesizeFsDeps,
+  type SynthesizeDraftFn,
+  type SynthesizeGhGateway,
+  type SynthesizeGitGateway,
+} from "../src/lib/onboard/synthesize.js";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import type { Config } from "../src/lib/config.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
@@ -3893,6 +3900,129 @@ test("sessionCommand: an interactive (TTY) session answers every question, write
   assert.match(printed, /wrote .*ledger\.ndjson/);
   assert.ok(existsSync(join(targetDir, "plan", "onboarding", "answers.json")));
   assert.ok(existsSync(join(targetDir, "plan", "onboarding", "ledger.ndjson")));
+});
+
+// ── W1-T85: `rmd onboard <target-dir> --phase synthesize` CLI wrapper ───────────────────
+// onboardCommand routes `--phase synthesize` straight to synthesizeCommand (before
+// inventory.ts's own parser ever sees it, mirroring the recon/session routing above).
+// synthesizeCommand's own thin wrapper (parse args -> delegate to runOnboardSynthesize ->
+// print a summary) is exercised here via its injectable deps seam — the module-level gate/
+// draft-loop/git-gh-shape behavior is proven exhaustively in test/onboard-synthesize.test.ts;
+// these tests only prove the CLI plumbing (exit codes, routing, the printed summary).
+
+function synthesizeFixtureInventory(): Inventory {
+  return {
+    generatedAt: "2026-07-23T00:00:00.000Z",
+    target: { owner: "acme-corp", repo: "widget-fixture" },
+    languages: ["typescript"],
+    buildSystems: ["npm"],
+    ciSystems: ["github-actions"],
+    docs: { readme: true },
+    testSignals: ["node:test"],
+    github: { repoExists: true, defaultBranch: "main", branchProtected: true, openIssueCount: 3, milestoneCount: 1 },
+  };
+}
+
+function writeSynthesizeFixtureArtifacts(targetDir: string, answers: Record<string, OnboardAnswer> | undefined): void {
+  const dir = join(targetDir, "plan", "onboarding");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "inventory.json"), JSON.stringify(synthesizeFixtureInventory(), null, 2));
+  if (answers) writeFileSync(join(dir, "answers.json"), JSON.stringify(answers, null, 2));
+}
+
+function completeSynthesizeAnswers(): Record<string, OnboardAnswer> {
+  const questions = generateOnboardQuestions(synthesizeFixtureInventory());
+  return Object.fromEntries(
+    questions.map((q, i) => [q.id, { id: q.id, decision: q.decision, question: q.question, answer: `fixture-answer-${i}` }]),
+  );
+}
+
+const SYNTHESIZE_CLEAN_TASKS_YAML = `
+- id: T-1
+  title: "Ship the widget catalog search"
+  repo: widget-fixture
+  type: implement
+  verify: auto
+  risk: medium
+  origin: "onboard:elicit-priorities"
+  acceptance:
+    - claim: "the widget catalog search ships"
+      proof: "unit test: widget catalog search returns results"
+`.trim();
+
+const alwaysCleanSynthesizeDraft: SynthesizeDraftFn = async () => ({
+  masterPlan: "# MASTER-PLAN.md\n",
+  tasksYaml: SYNTHESIZE_CLEAN_TASKS_YAML,
+  agentsMd: "# AGENTS.md\n",
+});
+
+test("onboardCommand: --phase synthesize routes to synthesizeCommand — a missing target dir fails loud through synthesizeCommand's OWN parser", async (t) => {
+  const errSpy = t.mock.method(console, "error", () => {});
+  const code = await onboardCommand(["--phase", "synthesize"]);
+  assert.equal(code, 2);
+  assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /<target-dir> is required/);
+});
+
+test("synthesizeCommand: a bad --phase value (not \"synthesize\") fails loud — exit 2", async (t) => {
+  const errSpy = t.mock.method(console, "error", () => {});
+  const code = await synthesizeCommand(["/some/dir", "--phase", "session"]);
+  assert.equal(code, 2);
+  assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /--phase must be "synthesize"/);
+});
+
+test("synthesizeCommand: a partial-answers fixture -> non-zero exit naming the unanswered question ids; no branch, no PR", async (t) => {
+  const errSpy = t.mock.method(console, "error", () => {});
+  t.mock.method(console, "log", () => {});
+  const targetDir = mkdtempSync(join(tmpdir(), "rmd-onboard-synth-cmd-partial-"));
+  const partial = completeSynthesizeAnswers();
+  delete partial["elicit-priorities"];
+  writeSynthesizeFixtureArtifacts(targetDir, partial);
+
+  const gitCalls: Array<{ args: string[]; cwd: string }> = [];
+  const git: SynthesizeGitGateway = { exec: (args, cwd) => { gitCalls.push({ args, cwd }); return ""; } };
+  const ghCalls: unknown[] = [];
+  const gh: SynthesizeGhGateway = { openPr: (opts) => { ghCalls.push(opts); return "should-never-be-called"; } };
+
+  const code = await synthesizeCommand([targetDir, "--phase", "synthesize"], {
+    fs: realSynthesizeFsDeps,
+    git,
+    gh,
+    draft: async () => {
+      throw new Error("must not be called — the completeness gate must refuse before any draft");
+    },
+  });
+
+  assert.equal(code, 2);
+  const printedErr = errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
+  assert.match(printedErr, /elicit-priorities/);
+  assert.match(printedErr, /unanswered question/);
+  assert.equal(gitCalls.length, 0);
+  assert.equal(ghCalls.length, 0);
+});
+
+test("synthesizeCommand: a complete-answers fixture with an already-clean draft exits 0 and prints branch + PR summary", async (t) => {
+  const logSpy = t.mock.method(console, "log", () => {});
+  const targetDir = mkdtempSync(join(tmpdir(), "rmd-onboard-synth-cmd-ok-"));
+  writeSynthesizeFixtureArtifacts(targetDir, completeSynthesizeAnswers());
+
+  const git: SynthesizeGitGateway = { exec: () => "" };
+  const gh: SynthesizeGhGateway = { openPr: () => "https://github.com/acme-corp/widget-fixture/pull/7" };
+
+  const code = await synthesizeCommand([targetDir, "--phase", "synthesize"], {
+    fs: realSynthesizeFsDeps,
+    git,
+    gh,
+    draft: alwaysCleanSynthesizeDraft,
+  });
+
+  assert.equal(code, 0);
+  const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
+  assert.match(printed, /rmd onboard .* --phase synthesize/);
+  assert.match(printed, /branch: onboard\/widget-fixture-plan/);
+  assert.match(printed, /wrote .*MASTER-PLAN\.md/);
+  assert.match(printed, /wrote .*tasks\.yaml/);
+  assert.match(printed, /wrote .*AGENTS\.md/);
+  assert.match(printed, /opened draft PR: https:\/\/github\.com\/acme-corp\/widget-fixture\/pull\/7/);
 });
 
 // ── main()'s CLI dispatch: `cmd === "onboard"` must actually route to onboardCommand (not

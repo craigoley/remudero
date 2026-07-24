@@ -48,7 +48,7 @@ import {
   type ReconFsDeps,
   type ReconGhGateway,
 } from "./lib/onboard/recon.js";
-import type { SpecialistName } from "./lib/specialist-panel.js";
+import { SPECIALIST_TOOLS, type SpecialistName } from "./lib/specialist-panel.js";
 import {
   loadOnboardSessionState,
   parseSessionArgs,
@@ -59,6 +59,19 @@ import {
   type OnboardQuestion,
   type SessionFsDeps,
 } from "./lib/onboard/session.js";
+import {
+  parseSynthesizeArgs,
+  realSynthesizeFsDeps,
+  realSynthesizeGhGateway,
+  realSynthesizeGitGateway,
+  runOnboardSynthesize,
+  SYNTHESIZE_PHASE,
+  SynthesizeError,
+  type SynthesizeDraftFn,
+  type SynthesizeFsDeps,
+  type SynthesizeGhGateway,
+  type SynthesizeGitGateway,
+} from "./lib/onboard/synthesize.js";
 import {
   applyCuratedSelection,
   buildRundown,
@@ -7740,6 +7753,9 @@ export async function onboardCommand(rest: string[], deps: OnboardCommandDeps = 
   if (flagValue(rest, "--phase") === SESSION_PHASE) {
     return sessionCommand(rest);
   }
+  if (flagValue(rest, "--phase") === SYNTHESIZE_PHASE) {
+    return synthesizeCommand(rest);
+  }
 
   const { fs: fsDep, gh: ghDep, resolveOwnerRepo } = {
     fs: realOnboardFsDeps,
@@ -8011,6 +8027,191 @@ export async function sessionCommand(rest: string[], deps: SessionCommandDeps = 
   console.log(`questions: ${result.questions.length} total, ${result.newlyAnswered.length} answered this session, ${result.unanswered.length} still unanswered`);
   console.log(`wrote ${result.answersPath}`);
   if (result.newlyAnswered.length > 0) console.log(`wrote ${result.ledgerPath}`);
+  return 0;
+}
+
+/**
+ * `rmd onboard <target-dir> --phase synthesize` — phase 4 (and last) of the four-phase
+ * `rmd onboard` family (MASTER-PLAN ★P24(5)+(6), W1-T85): drafts `MASTER-PLAN.md`,
+ * `plan/tasks.yaml`, and `AGENTS.md` for the TARGET repo as ONE ratifiable draft PR
+ * (src/lib/onboard/synthesize.ts). REFUSES loud (non-zero exit, naming every unanswered
+ * question id) unless the phase-3 session's FULL question set is answered — goals are
+ * never guessed. The drafted `tasks.yaml` is iterated against the REAL `rmd lint-plan`
+ * linter until clean BEFORE a branch/PR is ever opened; opens EXACTLY ONE draft PR
+ * (`onboard/<repo>-plan`), writing nothing outside that branch. `onboardCommand` above
+ * routes `--phase synthesize` HERE before inventory.ts's own parser ever runs.
+ *
+ * Composition: `rmd onboard` (this whole family) produces the BRAIN; `rmd project init`
+ * (W1-T27) installs the BAR; the daemon drains.
+ */
+interface SynthesizeCommandDeps {
+  fs?: SynthesizeFsDeps;
+  git?: SynthesizeGitGateway;
+  gh?: SynthesizeGhGateway;
+  draft?: SynthesizeDraftFn;
+}
+
+/** A deliberately generous, fixed mount for the synthesis Architect worker — like
+ *  RECON_LENS_MOUNT, there is no mounts.yaml row for an ad hoc onboarding draft (a one-off
+ *  CLI spawn, not a drained plan task); higher effort/turns than recon's read-only lenses
+ *  because this worker actually PRODUCES the three documents, not just flags findings. */
+const SYNTHESIZE_MOUNT: Mount = { model: "sonnet", effort: "high", maxTurns: 45, contextBudget: 200_000 };
+
+function buildSynthesizeMasterPlanPrompt(input: Parameters<SynthesizeDraftFn>[0]): string {
+  return [
+    `You are the ARCHITECT worker for \`rmd onboard ${input.targetDir} --phase synthesize\` (MASTER-PLAN`,
+    `★P24(5), W1-T85), drafting a ratifiable onboarding PR for ${input.owner}/${input.repo}. You are`,
+    `READ-ONLY: inspect this checkout, but never edit/write any file yourself — your ENTIRE job is to`,
+    `return ONE document (raw Markdown, no wrapping fences) as your final response text; the harness`,
+    `(never you) writes it to disk on a fresh branch.`,
+    ``,
+    `Write this target repo's MASTER-PLAN.md: its mission (in one or two sentences) and its CONVENTIONS`,
+    `AS FOUND (languages/build/CI/test conventions already present — never invented). Ground every claim`,
+    `in the phase 1-3 onboarding artifacts below; never guess a goal the operator did not ratify.`,
+    ``,
+    `INVENTORY (phase 1, deterministic): ${JSON.stringify(input.inventory)}`,
+    `FINDINGS (phase 2, mined + specialist-inferred): ${input.findings || "(none)"}`,
+    `RATIFIED ANSWERS (phase 3, the operator's own words): ${JSON.stringify(input.answers)}`,
+  ].join("\n");
+}
+
+function buildSynthesizeTasksYamlPrompt(input: Parameters<SynthesizeDraftFn>[0], feedback: string[] | undefined): string {
+  const feedbackBlock =
+    feedback && feedback.length > 0
+      ? [
+          ``,
+          `YOUR PREVIOUS DRAFT FAILED \`rmd lint-plan\` (§5C Layer A) with these BLOCKING violations — fix`,
+          `every one of them in this redraft:`,
+          ...feedback.map((f) => `  - ${f}`),
+        ].join("\n")
+      : "";
+  return [
+    `You are the ARCHITECT worker for \`rmd onboard ${input.targetDir} --phase synthesize\` (MASTER-PLAN`,
+    `★P24(5)+(6), W1-T85), drafting a ratifiable onboarding PR for ${input.owner}/${input.repo}. You are`,
+    `READ-ONLY: inspect this checkout, but never edit/write any file yourself — your ENTIRE job is to`,
+    `return ONE document (a raw YAML list, no wrapping fences) as your final response text.`,
+    ``,
+    `Draft a CHANGE-LEVEL plan/tasks.yaml SEED (progressive adoption — NEVER a big-bang respec) from the`,
+    `ratified goals below. Every task you emit MUST pass \`rmd lint-plan\` (§5C Layer A) AT BIRTH:`,
+    `  - every task needs id/title/repo/type/acceptance, and an origin: field citing the SPECIFIC answer`,
+    `    id or candidate source that justified it (e.g. origin: "onboard:<answer-id>") — never omitted,`,
+    `    never a generic "architect".`,
+    `  - every acceptance criterion's proof: must be EXECUTABLE dialect — "unit test: <literal test`,
+    `    title>" or "grep: <pattern> in <path>" — never free prose, never a vibe phrase ("works"/"correct").`,
+    `  - an auto-verify task's criteria must never require a live human/TTY/overnight action (no`,
+    `    "operator confirms", "reboot", "launchctl", etc.) — use verify: human for anything that does.`,
+    `  - a task spanning ≥2 distinct subsystems must be risk: high or split into one task per concern.`,
+    feedbackBlock,
+    ``,
+    `INVENTORY (phase 1): ${JSON.stringify(input.inventory)}`,
+    `CANDIDATES (phase 2, ${input.candidates.length} mined/inferred goals): ${JSON.stringify(input.candidates)}`,
+    `RATIFIED ANSWERS (phase 3, the operator's own words — goals are NEVER guessed beyond these):`,
+    `  ${JSON.stringify(input.answers)}`,
+  ].join("\n");
+}
+
+function buildSynthesizeAgentsMdPrompt(input: Parameters<SynthesizeDraftFn>[0]): string {
+  return [
+    `You are the ARCHITECT worker for \`rmd onboard ${input.targetDir} --phase synthesize\` (MASTER-PLAN`,
+    `★P24(6), W1-T85), drafting a ratifiable onboarding PR for ${input.owner}/${input.repo}. You are`,
+    `READ-ONLY: inspect this checkout, but never edit/write any file yourself — your ENTIRE job is to`,
+    `return ONE document (raw Markdown, no wrapping fences) as your final response text.`,
+    ``,
+    `Write this target repo's AGENTS.md — the cross-tool convention doc (so any coding agent, not just`,
+    `this one, respects the same constitution this PR proposes): conventions AS FOUND (build/test/lint`,
+    `commands actually present in this checkout), plus the no-touch zones and verify:human boundaries`,
+    `named in the ratified answers below. Never invent a convention this checkout does not evidence.`,
+    ``,
+    `INVENTORY (phase 1): ${JSON.stringify(input.inventory)}`,
+    `RATIFIED ANSWERS (phase 3): ${JSON.stringify(input.answers)}`,
+  ].join("\n");
+}
+
+/** The real, spawn-backed `draft` fn `synthesizeCommand` falls back to when no `deps.draft`
+ *  is injected — NOT unit tested directly (mirrors `defaultReconRunLens`): settings are
+ *  rendered and containment probed ONCE (lazily, on the first call) and reused across every
+ *  attempt of the iterate-until-clean loop. Three independent, read-only spawns per attempt
+ *  (one per document) — simple, deterministic to parse (each worker's `.text` IS the
+ *  document, no fenced-block parsing needed), and a redraft only needs to re-spawn all
+ *  three, never a partial/patchy edit. */
+export function defaultSynthesizeDraft(
+  deps: { config?: Config; spawn?: typeof spawnWorker; probeExec?: ProbeExecutor } = {},
+): SynthesizeDraftFn {
+  const config = deps.config ?? loadConfig();
+  const spawn = deps.spawn ?? spawnWorker;
+  let preparedSettingsFile: string | undefined;
+
+  const ensureSettingsFile = async (): Promise<string> => {
+    if (!preparedSettingsFile) {
+      const settingsFile = renderWorkerSettings({
+        templatePath: join(repoRoot, "settings", "worker.json"),
+        hooksDir: join(repoRoot, "hooks"),
+        outPath: join(config.root, "tmp", `onboard-synthesize-settings-${Date.now()}.json`),
+      });
+      validateWorkerSettingsFile(settingsFile);
+      await probeContainment({ settingsFile, config, exec: deps.probeExec });
+      preparedSettingsFile = settingsFile;
+    }
+    return preparedSettingsFile;
+  };
+
+  return async (input, feedback) => {
+    const settingsFile = await ensureSettingsFile();
+    const runOne = async (prompt: string): Promise<string> => {
+      const result = await spawn({
+        cwd: input.targetDir,
+        permissionMode: "bypassPermissions",
+        settingsFile,
+        prompt,
+        model: SYNTHESIZE_MOUNT.model,
+        effort: SYNTHESIZE_MOUNT.effort,
+        maxTurns: SYNTHESIZE_MOUNT.maxTurns,
+        tools: SPECIALIST_TOOLS,
+      });
+      return result.text.trim();
+    };
+
+    const [masterPlan, tasksYaml, agentsMd] = await Promise.all([
+      runOne(buildSynthesizeMasterPlanPrompt(input)),
+      runOne(buildSynthesizeTasksYamlPrompt(input, feedback)),
+      runOne(buildSynthesizeAgentsMdPrompt(input)),
+    ]);
+    return { masterPlan, tasksYaml, agentsMd };
+  };
+}
+
+export async function synthesizeCommand(rest: string[], deps: SynthesizeCommandDeps = {}): Promise<number> {
+  const parsed = parseSynthesizeArgs(rest);
+  if (!parsed.ok) {
+    console.error(parsed.error + "\n" + USAGE);
+    return 2;
+  }
+  const { targetDir } = parsed.args;
+
+  console.log(`### rmd onboard ${targetDir} --phase synthesize`);
+
+  const fsDep = deps.fs ?? realSynthesizeFsDeps;
+  const gitDep = deps.git ?? realSynthesizeGitGateway();
+  const ghDep = deps.gh ?? realSynthesizeGhGateway();
+  const draftDep = deps.draft ?? defaultSynthesizeDraft();
+
+  let result;
+  try {
+    result = await runOnboardSynthesize(targetDir, { fs: fsDep, git: gitDep, gh: ghDep, draft: draftDep });
+  } catch (e) {
+    if (e instanceof SynthesizeError) {
+      console.error(e.message);
+      return 2;
+    }
+    throw e;
+  }
+
+  console.log(`branch: ${result.branch}`);
+  console.log(`tasks drafted: ${result.tasks.length} (lint-plan clean after ${result.attempts} attempt(s))`);
+  console.log(`wrote ${result.masterPlanPath}`);
+  console.log(`wrote ${result.tasksYamlPath}`);
+  console.log(`wrote ${result.agentsMdPath}`);
+  console.log(`opened draft PR: ${result.prUrl}`);
   return 0;
 }
 
@@ -8305,7 +8506,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "onboard",
     usage:
-      "rmd onboard <target-dir> --phase inventory|recon|session [--owner <o> --repo <r>]   # the `rmd onboard` family (MASTER-PLAN \u2605P24, W1-T82/83/84): --phase inventory is a deterministic, no-LLM repo inventory over a TARGET checkout \u2014 languages, build/CI systems, docs presence (README/CONTRIBUTING/AGENTS.md/CLAUDE.md/ADRs/ROADMAP/TODO), branch-protection state, issue/milestone counts, test-signal presence \u2014 via policy-as-data detector tables (src/lib/onboard/inventory.ts), writing ONLY <target-dir>/plan/onboarding/inventory.json; --phase recon mines existing plan artifacts (ROADMAP/TODO/ADR intents/open issues) deterministically AND consults the four read-only W2-T1 specialist lenses (security/testing/design/containment) pointed at the whole repo (src/lib/onboard/recon.ts), writing ONLY plan/onboarding/findings.md + candidates.json \u2014 every candidate cites its source verbatim and mined vs inferred stays a labeled distinction; --phase session (src/lib/onboard/session.ts) generates a \u00a72-QUESTION-contract set from the inventory's own gaps plus a fixed goal-elicitation set \u2014 every question names its decision and candidate answers \u2014 and drives a resumable CLI answer loop, writing ONLY plan/onboarding/answers.json + appending onboard.answered lines to plan/onboarding/ledger.ndjson; a second invocation re-presents only the unanswered set; no-TTY previews the backlog and never blocks. Synthesis is W1-T85, not yet built. Read-only against the target + gh api; unresolved GitHub facts render as the literal \"unknown\", never guessed; --phase is REQUIRED \u2014 any other value fails loud, spawning/writing nothing",
+      "rmd onboard <target-dir> --phase inventory|recon|session|synthesize [--owner <o> --repo <r>]   # the `rmd onboard` family (MASTER-PLAN \u2605P24, W1-T82/83/84/85): --phase inventory is a deterministic, no-LLM repo inventory over a TARGET checkout \u2014 languages, build/CI systems, docs presence (README/CONTRIBUTING/AGENTS.md/CLAUDE.md/ADRs/ROADMAP/TODO), branch-protection state, issue/milestone counts, test-signal presence \u2014 via policy-as-data detector tables (src/lib/onboard/inventory.ts), writing ONLY <target-dir>/plan/onboarding/inventory.json; --phase recon mines existing plan artifacts (ROADMAP/TODO/ADR intents/open issues) deterministically AND consults the four read-only W2-T1 specialist lenses (security/testing/design/containment) pointed at the whole repo (src/lib/onboard/recon.ts), writing ONLY plan/onboarding/findings.md + candidates.json \u2014 every candidate cites its source verbatim and mined vs inferred stays a labeled distinction; --phase session (src/lib/onboard/session.ts) generates a \u00a72-QUESTION-contract set from the inventory's own gaps plus a fixed goal-elicitation set \u2014 every question names its decision and candidate answers \u2014 and drives a resumable CLI answer loop, writing ONLY plan/onboarding/answers.json + appending onboard.answered lines to plan/onboarding/ledger.ndjson; a second invocation re-presents only the unanswered set; no-TTY previews the backlog and never blocks; --phase synthesize (src/lib/onboard/synthesize.ts) REFUSES (non-zero exit, naming every unanswered question id) unless phase 3's full question set is answered \u2014 goals are never guessed \u2014 then drafts MASTER-PLAN.md + plan/tasks.yaml + AGENTS.md from all four phase 1-3 artifacts, iterates the drafted tasks.yaml against the real `rmd lint-plan` linter (\u00a75C) until clean, and opens EXACTLY ONE draft PR to `onboard/<repo>-plan`, writing nothing outside that branch (never plan/onboarding/). Phases inventory/recon/session are read-only against the target + gh api; unresolved GitHub facts render as the literal \"unknown\", never guessed; --phase is REQUIRED \u2014 any other value fails loud, spawning/writing nothing",
   },
   {
     name: "feedback",
