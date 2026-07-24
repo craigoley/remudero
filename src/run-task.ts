@@ -3653,7 +3653,7 @@ async function depReviewCommand(prArg: string, rest: string[] = []): Promise<num
  * configuration error (exit 2), never a silent fall-back to full-plan or
  * no-op — the control surface never guesses on ambiguous input.
  */
-async function lintPlanCommand(rest: string[]): Promise<number> {
+export async function lintPlanCommand(rest: string[]): Promise<number> {
   const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base"], []);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);

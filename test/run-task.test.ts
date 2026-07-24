@@ -50,6 +50,7 @@ import { type GitRunner, materializeOriginShards, escalateCommand, digestCommand
   ghPrCreateFillCommand,
   reviewCommand,
   onboardCommand,
+  lintPlanCommand,
   main,
 } from "../src/run-task.js";
 import { realOnboardFsDeps, type OnboardGhGateway } from "../src/lib/onboard/inventory.js";
@@ -3470,6 +3471,31 @@ test("rmd lint-plan --base scoping: a shard present at BOTH base and head is NOT
   );
   rmSync(tmpDir, { recursive: true, force: true });
   rmSync(root, { recursive: true, force: true });
+});
+
+test("rmd lint-plan --base HEAD: the reconstruct-base-plan branch (tmpDir, git show, materializeOriginShards, loadPlan, cleanup) runs end to end against this real checkout without throwing", async () => {
+  // Unlike the fixture test above (which replicates lintPlanCommand's --base logic against a
+  // synthetic repo), this drives the actual exported command: `repoRoot` inside run-task.ts is
+  // fixed to THIS checkout, so `--base` only ever resolves against a real ref of it. `HEAD` is
+  // always a valid, side-effect-free choice (base plan == working-copy plan, so scope is empty
+  // and no task is re-linted) while still exercising every line of the try/finally that
+  // reconstructs the base plan (tmpDir creation, `git show HEAD:plan/tasks.yaml`, the shard
+  // materialization call, `loadPlan`, and the `finally` tmpDir cleanup).
+  const origLog = console.log;
+  const origError = console.error;
+  const origWarn = console.warn;
+  console.log = () => {};
+  console.error = () => {};
+  console.warn = () => {};
+  let exitCode: number;
+  try {
+    exitCode = await lintPlanCommand(["--base", "HEAD"]);
+  } finally {
+    console.log = origLog;
+    console.error = origError;
+    console.warn = origWarn;
+  }
+  assert.equal(exitCode, 0, "HEAD vs working-copy plan/tasks.yaml has no diff — scope is empty, nothing fails");
 });
 
 // ── W1-T245 remaining criteria: deep-compare vs real checkout, dup-id through synced, temp cleanup ──
