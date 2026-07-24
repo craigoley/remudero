@@ -189,3 +189,61 @@ test("tryEscalate: a SUCCESSFUL delivery is byte-identical to escalate() (no beh
   assert.equal(lines.filter((l) => l.step === "escalation.issue_opened").length, 1);
   assert.equal(lines.filter((l) => l.step === "escalation.failed").length, 0);
 });
+
+// ── ENSURE-LABELS + DEGRADE DON'T LOSE (W1-T99) ─────────────────────────────
+// LIVE INCIDENT, 2026-07-17: the first BLOCKED-class escalation ever fired called
+// `gh issue create --label escalation-blocked`, and the label had never been
+// provisioned on the repo — `gh` failed the create OUTRIGHT, losing the rendered
+// question and propagating a throw that killed the whole sweep reconciler.
+
+function fakeIssuesWithLabels(
+  ensure: (label: string) => boolean,
+  url = "https://github.com/craigoley/remudero/issues/99",
+): IssueGateway & { calls: Array<{ title: string; body: string; labels: string[] }>; ensured: string[] } {
+  const calls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const ensured: string[] = [];
+  return {
+    calls,
+    ensured,
+    ensureLabel(label) {
+      ensured.push(label);
+      return ensure(label);
+    },
+    create(title, body, labels) {
+      calls.push({ title, body, labels });
+      return url;
+    },
+  };
+}
+
+test("escalate: ensureLabel is called for every wanted label BEFORE create", () => {
+  const issues = fakeIssuesWithLabels(() => true);
+  escalate(escalation(), { issues, ledgerPath: ledgerPath(), runId: "RUN-1" });
+  assert.deepEqual(issues.ensured, [NEEDS_HUMAN_LABEL, "escalation-blocked"]);
+  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-blocked"], "both labels provisioned -> both attached");
+});
+
+test("escalate: a gateway with no ensureLabel behaves exactly as before (back-compat)", () => {
+  const issues = fakeIssues();
+  const url = escalate(escalation(), { issues, ledgerPath: ledgerPath(), runId: "RUN-1" });
+  assert.equal(url, "https://github.com/craigoley/remudero/issues/99");
+  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-blocked"]);
+});
+
+test("escalate: the canonical 2026-07-17 shape — a label whose provisioning HARD-FAILS degrades, it never loses the escalation", () => {
+  const path = ledgerPath();
+  const issues = fakeIssuesWithLabels((label) => label !== "escalation-blocked"); // simulate the missing/unprovisionable label
+  const url = escalate(escalation(), { issues, ledgerPath: path, runId: "RUN-1" });
+
+  // No throw escaped — the escalation still delivered:
+  assert.equal(url, "https://github.com/craigoley/remudero/issues/99");
+  assert.equal(issues.calls.length, 1);
+  // The degraded label is DROPPED from the attached set, not silently kept:
+  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL], "the unprovisionable label is left off create()");
+  // The drop is noted in the body the human actually reads — the payload survives:
+  assert.match(issues.calls[0].body, /Degraded.*escalation-blocked/s);
+  // ...and on the ledger line, so it's legible without opening GitHub:
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const opened = lines.find((l) => l.step === "escalation.issue_opened");
+  assert.deepEqual(opened.degraded_labels, ["escalation-blocked"]);
+});

@@ -45,6 +45,21 @@ export interface Escalation {
 export interface IssueGateway {
   /** Create a labeled issue; returns its URL. */
   create(title: string, body: string, labels: string[]): string;
+  /**
+   * Ensure ONE label exists on the repo (create-if-missing, tolerate-already-exists).
+   * Returns true when the label is now safe to attach, false when provisioning itself
+   * failed. Optional: a gateway that omits this is treated as "every label already
+   * exists" (today's `create()`-only fakes keep working unchanged).
+   *
+   * LIVE INCIDENT (2026-07-17, W1-T99): the first BLOCKED-class escalation ever fired
+   * called `gh issue create --label escalation-blocked`, and the label had never been
+   * provisioned on the repo — `gh` failed the WHOLE create outright, so the rendered
+   * clarification question was generated and then lost, and the throw propagated
+   * through `runSweep` and killed the reconciler for every other open PR. Provisioning
+   * is the transport's job, never the operator's memory — see `escalate()`'s
+   * ENSURE-LABELS step below, which calls this before every `create()`.
+   */
+  ensureLabel?(label: string): boolean;
 }
 
 /** Per-class label, alongside the blanket `needs-human` queue label. */
@@ -89,18 +104,41 @@ export interface EscalateDeps {
  * Open a labeled GitHub issue for one escalation + log the ledger line. Returns the
  * issue URL. An escalation with zero options is refused — bare alerts with no
  * actionable choice are exactly what this taxonomy exists to avoid (§4).
+ *
+ * ENSURE-LABELS, DEGRADE DON'T LOSE (W1-T99): every wanted label is passed through
+ * `deps.issues.ensureLabel` first (a gateway lacking that method is treated as
+ * "already exists"). A label whose provisioning fails is DROPPED from the `create()`
+ * call rather than taking the whole issue down with it — the payload (the options +
+ * recommendation a human needs to act on) outranks its label decoration. The drop is
+ * never silent: it's noted both in the issue body and on this escalation's ledger
+ * line as `degraded_labels`.
  */
 export function escalate(e: Escalation, deps: EscalateDeps): string {
   if (e.options.length === 0) {
     throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
   }
   const title = `[${e.class}] ${e.taskId}: ${e.summary}`;
-  const body = renderIssueBody(e);
-  const labels = [NEEDS_HUMAN_LABEL, CLASS_LABEL[e.class]];
+  const wanted = [NEEDS_HUMAN_LABEL, CLASS_LABEL[e.class]];
+  const labels: string[] = [];
+  const degradedLabels: string[] = [];
+  for (const label of wanted) {
+    if (!deps.issues.ensureLabel || deps.issues.ensureLabel(label)) {
+      labels.push(label);
+    } else {
+      degradedLabels.push(label);
+    }
+  }
+  let body = renderIssueBody(e);
+  if (degradedLabels.length > 0) {
+    body +=
+      `\n\n_Degraded: label(s) ${degradedLabels.join(", ")} could not be provisioned on this repo — ` +
+      `this issue was opened without them so the escalation itself is never lost (W1-T99)._`;
+  }
   const url = deps.issues.create(title, body, labels);
   appendLedger(deps.ledgerPath, {
     run_id: deps.runId,
     task_id: e.taskId,
+    ...(degradedLabels.length > 0 ? { degraded_labels: degradedLabels } : {}),
     step: "escalation.issue_opened",
     class: e.class,
     issue_url: url,
@@ -149,11 +187,28 @@ export function tryEscalate(e: Escalation, deps: EscalateDeps): string | null {
  * Real gateway: `gh issue create`, scoped to `owner/repo`. Runs outside the sandbox
  * (gh is documented to fail TLS verification under Seatbelt, §4A) but still inside
  * bypass + the deny-hook floor, carrying only the scoped PAT.
+ *
+ * `ensureLabel` provisions the label via `gh label create ... --force` (create-or-update,
+ * so an existing label is a no-op rather than an error — the "tolerate-exists" half of
+ * W1-T99's design) BEFORE `create()` is ever asked to attach it. A hard failure (no repo
+ * access, rate-limited, network partition) returns false so `escalate()` degrades that one
+ * label instead of losing the whole issue to it — the 2026-07-17 incident this task fixes.
  */
 export function ghIssueGateway(owner: string, repo: string): IssueGateway {
+  const repoArg = `${owner}/${repo}`;
   return {
+    ensureLabel(label) {
+      try {
+        execFileSync("gh", ["label", "create", label, "--repo", repoArg, "--color", "ededed", "--force"], {
+          stdio: "pipe",
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    },
     create(title, body, labels) {
-      const args = ["issue", "create", "--repo", `${owner}/${repo}`, "--title", title, "--body", body];
+      const args = ["issue", "create", "--repo", repoArg, "--title", title, "--body", body];
       for (const label of labels) args.push("--label", label);
       return execFileSync("gh", args, { encoding: "utf8" }).trim();
     },
