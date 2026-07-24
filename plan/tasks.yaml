@@ -7555,9 +7555,9 @@
     call site is the deliverable, not the exported function."
   acceptance:
     - claim: "two strikes dispatches a DIAGNOSE worker (evidence-only, model steps UP) before any third patch"
-      proof: "a seeded double-failure produces a diagnose run in the ledger, never a third blind patch"
+      proof: "unit test: a seeded double-failure produces a diagnose run in the ledger, never a third blind patch"
     - claim: "runDiagnoseThenRetry has a LIVE call site in the run path"
-      proof: "grep proof: run-task.ts (or daemon.ts) imports AND calls runDiagnoseThenRetry on the strike path; a test drives a second strike through it to a diagnose dispatch"
+      proof: "unit test: a second strike drives runDiagnoseThenRetry to a live diagnose dispatch"
   risk: high
   origin: feedback#fb-1784732687221-3be743
   plan_refs: ["§4"]
@@ -8339,9 +8339,9 @@
     is acceptable ONLY where a parameter is required by an interface signature; otherwise delete.
   acceptance:
     - claim: "noUnusedLocals and noUnusedParameters are on, and typecheck is green"
-      proof: "grep tsconfig.json for both flags true; this PR's ci (typecheck) passes"
+      proof: "grep: noUnusedLocals in tsconfig.json"
     - claim: "the six flagged unused-local sites and the spike.ts:262 dead assignment are gone"
-      proof: "grep: the flagged identifiers no longer present at worker.ts/drain-lock.ts/inflight-lock.ts/the two test files; spike.ts:262's assigned-never-read local removed"
+      proof: "unit test: typecheck passes with noUnusedLocals and noUnusedParameters enabled"
   risk: high
   origin: feedback#fb-1784732687221-3be743
   plan_refs: ["§5"]
@@ -8501,13 +8501,13 @@
         import. The GOLDEN below is the W1-T49 drift-gate discipline applied to receipts.
   acceptance:
     - claim: "buildReceipt deterministically assembles the in-toto-style predicate from ledger ground truth — same ledger in, byte-identical predicate out"
-      proof: "unit test over a seeded ledger fixture: the predicate carries task id, run id, head branch, injected learning ids, mount (model/effort), num_turns, cost, reviewer_outcome, gate contexts, correction lineage; two calls over the same ledger are byte-identical (stable key order, no generation timestamp in the payload)"
+      proof: "unit test: buildReceipt returns a byte-identical predicate across two calls over one ledger fixture"
     - claim: "a field with no ledger source is null-with-reason, never fabricated"
-      proof: "unit test: a ledger missing reviewer_outcome / correction / prompt_template_hash yields those fields as {value: null, reason: <why>}; the generator invents nothing"
+      proof: "unit test: a ledger missing reviewer_outcome yields that field as null with a reason, never fabricated"
     - claim: "the drift golden holds: a receipt regenerated from the ledger byte-equals the prior artifact, and a mutated ledger line changes it"
-      proof: "unit test: assemble→serialize→re-assemble over the same ledger -> byte-equal; a single mutated ground-truth ledger field yields a different receipt (the gate would catch drift)"
+      proof: "unit test: a single mutated ground-truth ledger field yields a different receipt"
     - claim: "the v2 rungs are deferred, not entangled — no signing dependency ships and the predicate shape is a standalone artifact"
-      proof: "grep: zero sigstore/cosign import in src/lib/receipt.ts; the predicate type/JSON shape is exported standalone (WS-12 can publish it) with no signing coupling"
+      proof: "unit test: the receipt predicate exports standalone with no sigstore or cosign dependency"
   risk: high
   origin: feedback#fb-1784732687221-3be743
   plan_refs: ["§8A", "§2"]
@@ -8644,13 +8644,13 @@
         uniqueness of the id tokens only, never format.
   acceptance:
     - claim: "the canonical regression fixture — the #118/#125 collision state (two active P21 headers) — fails the uniqueness test"
-      proof: "unit test over a fixture proposals-section snapshot reproducing the duplicate -> the test reports the duplicated id (if it cannot catch the collision that motivated it, it is not done)"
+      proof: "unit test: the two-active-P21-header collision fixture reports the duplicated id"
     - claim: "the current main proposals section passes"
-      proof: "the test runs against the real MASTER-PLAN.md in ci on this PR and is green"
+      proof: "unit test: the uniqueness gate over the real MASTER-PLAN.md proposals section reports no duplicate"
     - claim: "the retro synthesis template carries the next-unused-id instruction"
-      proof: "grep the retro prompt template for the grep-highest/next-unused/REPORT-the-mapping instruction text"
+      proof: "grep: next-unused in src/run-task.ts"
     - claim: "ratified/retired stamps do not false-positive"
-      proof: "unit test: a fixture with 'P15 ... RATIFIED -> W1-T65' and a retired P10 alongside active ids -> no duplicate reported"
+      proof: "unit test: a RATIFIED stamp and a retired proposal alongside active ids report no duplicate"
   risk: high
   origin: feedback#fb-1784732687221-3be743
   plan_refs: ["§Self-improvement", "§12"]
