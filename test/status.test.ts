@@ -88,6 +88,13 @@ function fakeGitHub(opts: {
       if (opts.readFailed) return null;
       return opts.byHeadBranch?.[taskId] ?? [];
     },
+    listMergedHeadBranches() {
+      calls.push("listMergedHeadBranches");
+      // W1-T257 batched form: null on a failed read (→ W1-T119), else every merged PR with a head
+      // ref. Seeded from the SAME byHeadBranch fixture map (flattened) so a test drives both paths.
+      if (opts.readFailed) return null;
+      return opts.byHeadBranch ? Object.values(opts.byHeadBranch).flat() : [];
+    },
     headRefName(prUrl) {
       calls.push(`headRefName:${prUrl}`);
       return opts.headRefByUrl?.[prUrl];
@@ -290,6 +297,51 @@ test("W1-T256 rung (c2): a FAILED head-branch read (gh throttled) defers via the
   assert.equal(proj.indeterminate, true, "an unreadable gateway defers, not a confirmed not-merged");
   assert.equal(proj.merged, false);
   assert.equal(proj.source, "throttled");
+});
+
+// ── W1-T257: the rung (c2) corroboration is BATCHED — ONE merged-PR head-ref list per
+// projection, not one gh call per uncredited task (#737's per-task multiplier; five 07-23
+// GraphQL exhaustions). projectPlan matches run-<taskId>-\d+ CLIENT-SIDE from the single fetch.
+
+test("W1-T257: ONE batched head-branch list resolves MULTIPLE uncredited tasks in a single projection — no per-task head-branch call fires", () => {
+  const github = fakeGitHub({
+    byTrailer: {}, // every trailer search empty — under #737 each task would make its OWN head-ref fetch
+    byHeadBranch: {
+      "W1-T12a": [{ number: 61, url: "u/61", state: "MERGED", headRefName: "run-W1-T12a-1784124446138" }],
+      "W1-T99": [{ number: 729, url: "u/729", state: "MERGED", headRefName: "run-W1-T99-1784913918134" }],
+    },
+  });
+  const tasks: Task[] = [task({ id: "W1-T12a" }), task({ id: "W1-T99" }), task({ id: "W1-T500" })];
+  const plan: Plan = { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+  const byId = projectPlan(plan, { ledgerPath: ledgerFile([]), github });
+  assert.equal(byId.get("W1-T12a")?.merged, true, "the merged run branch is credited from the batch");
+  assert.equal(byId.get("W1-T12a")?.source, "head-branch");
+  assert.equal(byId.get("W1-T99")?.merged, true, "a SECOND task is resolved from the SAME batch");
+  assert.equal(byId.get("W1-T99")?.source, "head-branch");
+  assert.equal(byId.get("W1-T500")?.merged, false, "a task with no run branch is genuinely none");
+  assert.equal(byId.get("W1-T500")?.source, "none");
+  assert.equal(
+    github.calls.filter((c) => c === "listMergedHeadBranches").length,
+    1,
+    "exactly ONE batched fetch backs all three tasks — not one per uncredited task",
+  );
+  assert.equal(
+    github.calls.filter((c) => c.startsWith("headBranch:")).length,
+    0,
+    "NO per-task head-branch fetch fires when the batch succeeded",
+  );
+});
+
+test("W1-T257: a FAILED batched head-branch read defers via W1-T119 (indeterminate) for every task — never a false none", () => {
+  const github = fakeGitHub({ readFailed: true, byTrailer: {} }); // the batched list fetch fails
+  const tasks: Task[] = [task({ id: "W1-T12a" }), task({ id: "W1-T99" })];
+  const plan: Plan = { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+  const byId = projectPlan(plan, { ledgerPath: ledgerFile([]), github });
+  for (const id of ["W1-T12a", "W1-T99"]) {
+    assert.equal(byId.get(id)?.indeterminate, true, `${id}: a failed batched read defers, never a confirmed none`);
+    assert.equal(byId.get(id)?.merged, false);
+    assert.notEqual(byId.get(id)?.source, "none", `${id}: a failed batched read must NEVER read as a confirmed none`);
+  }
 });
 
 // ── W1-T76 (absorbs P21): the blocked_review FIX RUNG amends the SAME
