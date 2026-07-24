@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { type GitRunner, materializeOriginShards, escalateCommand, digestCommand, pushDrainRundown,
+import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, digestCommand, pushDrainRundown,
   armAutoMerge,
   armFailureAction,
   buildSweepEffects,
@@ -52,11 +52,13 @@ import { type GitRunner, materializeOriginShards, escalateCommand, digestCommand
   onboardCommand,
   reconCommand,
   defaultReconRunLens,
+  sessionCommand,
   lintPlanCommand,
   main,
 } from "../src/run-task.js";
 import { realOnboardFsDeps, type OnboardGhGateway } from "../src/lib/onboard/inventory.js";
 import { realReconFsDeps, type ReconGhGateway } from "../src/lib/onboard/recon.js";
+import { realSessionFsDeps, type OnboardQuestion } from "../src/lib/onboard/session.js";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import type { Config } from "../src/lib/config.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
@@ -3801,6 +3803,98 @@ test("onboardCommand: owner/repo omitted falls through to the injected resolveOw
   assert.match(printed, /target: resolved-org\/resolved-repo/);
 });
 
+// ── W1-T84: `rmd onboard <target-dir> --phase session` CLI wrapper ──────────────────────
+// onboardCommand routes `--phase session` straight to sessionCommand (before inventory.ts's
+// own parser ever sees it, mirroring the recon routing above). These tests exercise
+// sessionCommand's own thin wrapper (parse args -> load/run the session -> print a summary)
+// via its injectable deps seam, INCLUDING the no-TTY-never-blocks path (Standing rule 18).
+
+function writeSessionInventory(targetDir: string): void {
+  mkdirSync(join(targetDir, "plan", "onboarding"), { recursive: true });
+  writeFileSync(
+    join(targetDir, "plan", "onboarding", "inventory.json"),
+    JSON.stringify({
+      generatedAt: "2026-07-23T00:00:00.000Z",
+      target: { owner: "acme-corp", repo: "widget-fixture" },
+      languages: [],
+      buildSystems: [],
+      ciSystems: [],
+      docs: {},
+      testSignals: [],
+      github: { repoExists: "unknown", defaultBranch: "unknown", branchProtected: "unknown", openIssueCount: "unknown", milestoneCount: "unknown" },
+    }),
+  );
+}
+
+test("onboardCommand: --phase session routes to sessionCommand — a missing target dir fails loud through sessionCommand's OWN parser", async (t) => {
+  const errSpy = t.mock.method(console, "error", () => {});
+  const code = await onboardCommand(["--phase", "session"]);
+  assert.equal(code, 2);
+  assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /<target-dir> is required/);
+});
+
+test("sessionCommand: a bad --phase value (not \"session\") fails loud — exit 2, zero fs work attempted", async (t) => {
+  const errSpy = t.mock.method(console, "error", () => {});
+  const code = await sessionCommand(["/some/dir", "--phase", "recon"], {
+    fs: {
+      existsSync: () => {
+        throw new Error("must not be called — arg parsing must fail before any fs work");
+      },
+    } as never,
+  });
+  assert.equal(code, 2);
+  assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /--phase must be "session"/);
+});
+
+test("sessionCommand: the phase-1 inventory artifact missing fails loud through the caught SessionError — exit 2", async (t) => {
+  const errSpy = t.mock.method(console, "error", () => {});
+  const targetDir = mkdtempSync(join(tmpdir(), "rmd-onboard-session-cmd-missing-inventory-"));
+  const code = await sessionCommand([targetDir, "--phase", "session"], { fs: realSessionFsDeps, isTTY: true, ask: async () => "x" });
+  assert.equal(code, 2);
+  assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /--phase inventory/);
+});
+
+test("sessionCommand: no TTY previews the unanswered backlog without ever calling ask, exits 0", async (t) => {
+  const logSpy = t.mock.method(console, "log", () => {});
+  const targetDir = mkdtempSync(join(tmpdir(), "rmd-onboard-session-cmd-notty-"));
+  writeSessionInventory(targetDir);
+
+  const code = await sessionCommand([targetDir, "--phase", "session"], {
+    fs: realSessionFsDeps,
+    isTTY: false,
+    ask: async () => {
+      throw new Error("must not be called — no-TTY must never block on an operator");
+    },
+  });
+
+  assert.equal(code, 0);
+  const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
+  assert.match(printed, /no TTY on stdin/);
+  assert.match(printed, /unanswered/);
+  assert.ok(!existsSync(join(targetDir, "plan", "onboarding", "answers.json")), "no-TTY preview writes nothing");
+});
+
+test("sessionCommand: an interactive (TTY) session answers every question, writes answers.json + ledger.ndjson, exits 0", async (t) => {
+  const logSpy = t.mock.method(console, "log", () => {});
+  const targetDir = mkdtempSync(join(tmpdir(), "rmd-onboard-session-cmd-tty-"));
+  writeSessionInventory(targetDir);
+
+  const code = await sessionCommand([targetDir, "--phase", "session"], {
+    fs: realSessionFsDeps,
+    isTTY: true,
+    ask: async (q) => `operator answer for ${q.id}`,
+  });
+
+  assert.equal(code, 0);
+  const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
+  assert.match(printed, /rmd onboard .* --phase session/);
+  assert.match(printed, /answered this session/);
+  assert.match(printed, /wrote .*answers\.json/);
+  assert.match(printed, /wrote .*ledger\.ndjson/);
+  assert.ok(existsSync(join(targetDir, "plan", "onboarding", "answers.json")));
+  assert.ok(existsSync(join(targetDir, "plan", "onboarding", "ledger.ndjson")));
+});
+
 // ── main()'s CLI dispatch: `cmd === "onboard"` must actually route to onboardCommand (not
 // just exist as a registry entry — help-registry.test.ts already proves the latter, statically,
 // without ever running main()). Same throwing-process.exit-mock shape wipe-test.test.ts's
@@ -3840,4 +3934,36 @@ test("main(): `rmd onboard` with no target-dir dispatches to onboardCommand and 
       process.env[SELF_SYNC_GUARD_ENV] = originalGuardEnv;
     }
   }
+});
+
+// ── W1-T84 coverage: the SessionError error branches + the real readlineAsk (injected streams) ──
+
+test("sessionCommand: a MALFORMED inventory.json fails with a named SessionError, exits 2 (no-TTY path)", async (t) => {
+  const errSpy = t.mock.method(console, "error", () => {});
+  const targetDir = mkdtempSync(join(tmpdir(), "rmd-onboard-session-bad-"));
+  mkdirSync(join(targetDir, "plan", "onboarding"), { recursive: true });
+  writeFileSync(join(targetDir, "plan", "onboarding", "inventory.json"), "{ not valid json", "utf8");
+  const code = await sessionCommand([targetDir, "--phase", "session"], { fs: realSessionFsDeps, isTTY: false });
+  assert.equal(code, 2);
+  assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /exists but is not valid JSON/);
+  rmSync(targetDir, { recursive: true, force: true });
+});
+
+test("readlineAsk: a numeric reply resolves to that candidate answer; free text is accepted verbatim — over injected in-memory streams", async () => {
+  const { Readable, Writable } = await import("node:stream");
+  const sink = () => new Writable({ write(_c, _e, cb) { cb(); } });
+  const question = {
+    id: "q1",
+    prompt: "pick",
+    candidateAnswers: ["first-option", "second-option"],
+  } as unknown as OnboardQuestion;
+
+  const numeric = await readlineAsk(question, { input: Readable.from(["2\n"]), output: sink() });
+  assert.equal(numeric, "second-option", "a numeric reply maps to that candidate's own text");
+
+  const free = await readlineAsk(question, { input: Readable.from(["a custom answer\n"]), output: sink() });
+  assert.equal(free, "a custom answer", "non-numeric input is the verbatim free-text answer");
+
+  const outOfRange = await readlineAsk(question, { input: Readable.from(["9\n"]), output: sink() });
+  assert.equal(outOfRange, "9", "a numeric out of range is not a candidate index — kept verbatim");
 });

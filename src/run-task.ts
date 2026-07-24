@@ -50,6 +50,16 @@ import {
 } from "./lib/onboard/recon.js";
 import type { SpecialistName } from "./lib/specialist-panel.js";
 import {
+  loadOnboardSessionState,
+  parseSessionArgs,
+  realSessionFsDeps,
+  runOnboardSession,
+  SESSION_PHASE,
+  SessionError,
+  type OnboardQuestion,
+  type SessionFsDeps,
+} from "./lib/onboard/session.js";
+import {
   applyCuratedSelection,
   buildRundown,
   DEFAULT_MAX as DRAIN_DEFAULT_MAX,
@@ -7700,10 +7710,11 @@ async function projectCommand(rest: string[]): Promise<number> {
  * target checkout + GitHub; the ONLY write is `<target-dir>/plan/onboarding/inventory.json`.
  * GitHub facts this command could not resolve (auth/network failure) render as the literal
  * `"unknown"` — never guessed or silently defaulted. `--phase` is REQUIRED; `inventory`
- * (this function's own body) and `recon` ({@link reconCommand}, routed to BELOW before
- * inventory.ts's own parser ever runs — its `KNOWN_ONBOARD_PHASES` stays `["inventory"]`
- * exactly as W1-T82 shipped it) are implemented — session/synthesis are W1-T84/85, separate
- * future tasks not built here; any other `--phase` value fails loud (usage + non-zero exit,
+ * (this function's own body), `recon` ({@link reconCommand}), and `session`
+ * ({@link sessionCommand}) — both routed to BELOW before inventory.ts's own parser ever
+ * runs — its `KNOWN_ONBOARD_PHASES` stays `["inventory"]` exactly as W1-T82 shipped it — are
+ * implemented; synthesis is W1-T85, a separate future task not built here; any other
+ * `--phase` value fails loud (usage + non-zero exit,
  * zero work done) before any fs/gh call, the same `parseProjectInitArgs`-style
  * validate-first discipline `rmd project init` already applies (Standing rule / LEARNINGS.md
  * control-surface-fail-loud-stop-one-shot). `--owner`/`--repo` override auto-detection;
@@ -7718,12 +7729,16 @@ interface OnboardCommandDeps {
 }
 
 export async function onboardCommand(rest: string[], deps: OnboardCommandDeps = {}): Promise<number> {
-  // `--phase recon` routes to reconCommand's OWN parser/runner (src/lib/onboard/recon.ts)
-  // BEFORE inventory.ts's parseOnboardArgs ever sees it — inventory.ts's own
-  // KNOWN_ONBOARD_PHASES (and its committed W1-T82 test asserting "recon" is unknown to
-  // THAT parser) stays exactly as shipped; only this command-level routing is new.
+  // `--phase recon`/`--phase session` route to THEIR OWN parser/runner (src/lib/onboard/
+  // recon.ts, src/lib/onboard/session.ts) BEFORE inventory.ts's parseOnboardArgs ever sees
+  // it — inventory.ts's own KNOWN_ONBOARD_PHASES (and its committed W1-T82 test asserting
+  // "recon" is unknown to THAT parser) stays exactly as shipped; only this command-level
+  // routing is new.
   if (flagValue(rest, "--phase") === RECON_PHASE) {
     return reconCommand(rest);
+  }
+  if (flagValue(rest, "--phase") === SESSION_PHASE) {
+    return sessionCommand(rest);
   }
 
   const { fs: fsDep, gh: ghDep, resolveOwnerRepo } = {
@@ -7894,6 +7909,108 @@ export async function reconCommand(rest: string[], deps: ReconCommandDeps = {}):
   console.log(`candidates: ${candidates.length} (${minedCount} mined, ${inferredCount} inferred)`);
   console.log(`wrote ${findingsPath}`);
   console.log(`wrote ${candidatesPath}`);
+  return 0;
+}
+
+/**
+ * `rmd onboard <target-dir> --phase session` — phase 3 of the four-phase `rmd onboard`
+ * family (MASTER-PLAN ★P24(3)+(4), W1-T84): renders the phase-1/2 findings location plus a
+ * §2-contract question set (src/lib/onboard/session.ts) and drives the answer loop.
+ * `onboardCommand` above routes `--phase session` HERE before inventory.ts's own parser
+ * ever runs.
+ *
+ * NO-TTY NEVER BLOCKS (Standing rule 18 / LEARNINGS.md no-live-operator-in-headless-worker):
+ * a headless invocation (no real TTY on stdin — e.g. a drained worker shelling this out)
+ * never reaches `readline`; it prints the unanswered backlog and returns immediately,
+ * exactly as {@link loadOnboardSessionState} left it, so a second, INTERACTIVE invocation
+ * later re-presents that same backlog (resumability, acceptance criterion 3) rather than
+ * this command ever hanging on an operator that may not be there.
+ */
+interface SessionCommandDeps {
+  fs?: SessionFsDeps;
+  isTTY?: boolean;
+  ask?: (question: OnboardQuestion) => Promise<string>;
+}
+
+/** Render one question the same way for both the no-TTY preview and the interactive
+ *  readline prompt — decision, question text, and its named candidate answers. */
+function renderQuestionPrompt(question: OnboardQuestion): string {
+  const options = question.candidateAnswers.map((a, i) => `    ${i + 1}. ${a}`).join("\n");
+  return (
+    `  [${question.id}] decides: ${question.decision}\n` +
+    `  ${question.question}\n${options}\n` +
+    `  (answer with a number above, or type your own answer; blank leaves it unanswered)`
+  );
+}
+
+/** The real, readline-backed `ask` — ONLY ever constructed when `process.stdin.isTTY` is
+ *  true (mirrors `promptForTier`'s own TTY-gated shape). A numeric reply matching a listed
+ *  candidate answer is resolved to that answer's own text; anything else is accepted
+ *  verbatim as a free-text answer. */
+export async function readlineAsk(
+  question: OnboardQuestion,
+  io: { input: NodeJS.ReadableStream; output: NodeJS.WritableStream } = { input: process.stdin, output: process.stdout },
+): Promise<string> {
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: io.input, output: io.output });
+  try {
+    console.log(`\n${renderQuestionPrompt(question)}`);
+    const raw = (await rl.question("> ")).trim();
+    const asIndex = Number(raw);
+    if (Number.isInteger(asIndex) && asIndex >= 1 && asIndex <= question.candidateAnswers.length) {
+      return question.candidateAnswers[asIndex - 1]!;
+    }
+    return raw;
+  } finally {
+    rl.close();
+  }
+}
+
+export async function sessionCommand(rest: string[], deps: SessionCommandDeps = {}): Promise<number> {
+  const parsed = parseSessionArgs(rest);
+  if (!parsed.ok) {
+    console.error(parsed.error + "\n" + USAGE);
+    return 2;
+  }
+  const { targetDir } = parsed.args;
+  const fsDep = deps.fs ?? realSessionFsDeps;
+  const isTTY = deps.isTTY ?? Boolean(process.stdin.isTTY);
+
+  console.log(`### rmd onboard ${targetDir} --phase session`);
+
+  if (!isTTY) {
+    // Never block on an operator that may not exist — preview the backlog and return.
+    let state;
+    try {
+      state = loadOnboardSessionState(targetDir, fsDep);
+    } catch (e) {
+      if (e instanceof SessionError) {
+        console.error(e.message);
+        return 2;
+      }
+      throw e;
+    }
+    console.log(`no TTY on stdin — previewing the question backlog without asking (run interactively to answer):`);
+    console.log(`questions: ${state.questions.length} total, ${state.unanswered.length} unanswered`);
+    for (const q of state.unanswered) console.log(`\n${renderQuestionPrompt(q)}`);
+    return 0;
+  }
+
+  const ask = deps.ask ?? readlineAsk;
+  let result;
+  try {
+    result = await runOnboardSession(targetDir, { fs: fsDep, ask });
+  } catch (e) {
+    if (e instanceof SessionError) {
+      console.error(e.message);
+      return 2;
+    }
+    throw e;
+  }
+
+  console.log(`questions: ${result.questions.length} total, ${result.newlyAnswered.length} answered this session, ${result.unanswered.length} still unanswered`);
+  console.log(`wrote ${result.answersPath}`);
+  if (result.newlyAnswered.length > 0) console.log(`wrote ${result.ledgerPath}`);
   return 0;
 }
 
@@ -8188,7 +8305,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "onboard",
     usage:
-      "rmd onboard <target-dir> --phase inventory|recon [--owner <o> --repo <r>]   # the `rmd onboard` family (MASTER-PLAN \u2605P24, W1-T82/83): --phase inventory is a deterministic, no-LLM repo inventory over a TARGET checkout \u2014 languages, build/CI systems, docs presence (README/CONTRIBUTING/AGENTS.md/CLAUDE.md/ADRs/ROADMAP/TODO), branch-protection state, issue/milestone counts, test-signal presence \u2014 via policy-as-data detector tables (src/lib/onboard/inventory.ts), writing ONLY <target-dir>/plan/onboarding/inventory.json; --phase recon mines existing plan artifacts (ROADMAP/TODO/ADR intents/open issues) deterministically AND consults the four read-only W2-T1 specialist lenses (security/testing/design/containment) pointed at the whole repo (src/lib/onboard/recon.ts), writing ONLY plan/onboarding/findings.md + candidates.json \u2014 every candidate cites its source verbatim and mined vs inferred stays a labeled distinction; session/synthesis are W1-T84/85, not yet built. Read-only against the target + gh api; unresolved GitHub facts render as the literal \"unknown\", never guessed; --phase is REQUIRED \u2014 any other value fails loud, spawning/writing nothing",
+      "rmd onboard <target-dir> --phase inventory|recon|session [--owner <o> --repo <r>]   # the `rmd onboard` family (MASTER-PLAN \u2605P24, W1-T82/83/84): --phase inventory is a deterministic, no-LLM repo inventory over a TARGET checkout \u2014 languages, build/CI systems, docs presence (README/CONTRIBUTING/AGENTS.md/CLAUDE.md/ADRs/ROADMAP/TODO), branch-protection state, issue/milestone counts, test-signal presence \u2014 via policy-as-data detector tables (src/lib/onboard/inventory.ts), writing ONLY <target-dir>/plan/onboarding/inventory.json; --phase recon mines existing plan artifacts (ROADMAP/TODO/ADR intents/open issues) deterministically AND consults the four read-only W2-T1 specialist lenses (security/testing/design/containment) pointed at the whole repo (src/lib/onboard/recon.ts), writing ONLY plan/onboarding/findings.md + candidates.json \u2014 every candidate cites its source verbatim and mined vs inferred stays a labeled distinction; --phase session (src/lib/onboard/session.ts) generates a \u00a72-QUESTION-contract set from the inventory's own gaps plus a fixed goal-elicitation set \u2014 every question names its decision and candidate answers \u2014 and drives a resumable CLI answer loop, writing ONLY plan/onboarding/answers.json + appending onboard.answered lines to plan/onboarding/ledger.ndjson; a second invocation re-presents only the unanswered set; no-TTY previews the backlog and never blocks. Synthesis is W1-T85, not yet built. Read-only against the target + gh api; unresolved GitHub facts render as the literal \"unknown\", never guessed; --phase is REQUIRED \u2014 any other value fails loud, spawning/writing nothing",
   },
   {
     name: "feedback",
