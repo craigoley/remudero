@@ -30,3 +30,12 @@ reports/audit/
 
 # os / editor
 .DS_Store
+
+# runtime exhaust (W1-T256): the daemon/serve write these into their OWN working tree every run —
+# pure append-only/derived state (the ledger, status/marker caches, the clarification-question
+# backlog, launchd's stdout/stderr logs), never committed. Un-ignored they read as "dirt" in a
+# `git status --porcelain`, which (pre-W1-T255) crash-looped the daemon on restart; ignored, this
+# exhaust never counts against a clean tree.
+state/
+plan/questions.ndjson
+*.log
