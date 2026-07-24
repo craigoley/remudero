@@ -19,7 +19,7 @@ import { execFileSync } from "node:child_process";
 import fsMarker from "node:fs";
 import { dirname } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { appendLedger } from "./ledger.js";
+import { appendLedger, type LedgerLine } from "./ledger.js";
 import type { Lifecycle, LearningEntry } from "./learnings.js";
 import type { Task } from "./plan.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
@@ -892,6 +892,10 @@ export interface RetroGather {
    *  guard-fired infrastructure event — the statistic guard-fired blocks must
    *  never pollute. */
   taskDefectCounts: Record<string, number>;
+  /** W1-T105: unharvested worker-declared follow-ups (research | task | action),
+   *  mined over the FULL ledger (never marker-scoped — a discovery from three
+   *  retros ago is still worth surfacing) and deduped against `opts.openTitles`. */
+  followups: FollowupHarvest;
 }
 
 /**
@@ -916,6 +920,10 @@ export function buildGather(opts: {
    *  it under `mast_category_counts`) — threaded through unchanged for the trend
    *  column; buildGather never reads the marker itself. */
   priorMastCategoryCounts?: Record<string, number>;
+  /** W1-T105 design (iv): existing open task titles / open proposal text, for the
+   *  follow-up harvest's dedup — buildGather never reads plan/tasks.yaml or
+   *  MASTER-PLAN.md itself. Omit ⇒ every follow-up mints (no dedup source). */
+  openTitles?: string[];
 }): RetroGather {
   const records = parseLedger(opts.ledgerNdjson);
   const runs = gatherRuns(records);
@@ -962,6 +970,10 @@ export function buildGather(opts: {
     infrastructureEvents: infraEvents,
     infrastructureRecurrence: infrastructureRecurrence(infraEvents),
     taskDefectCounts: taskDefectCounts(scoped, mapping),
+    // W1-T105: the FULL ledger, never `scoped` — a followup must survive past the
+    // marker window (idempotency comes from the followup.harvested/deduped marks
+    // mineFollowups reads back, not from marker-scoping).
+    followups: mineFollowups(records, opts.openTitles ?? []),
   };
 }
 
@@ -1050,6 +1062,8 @@ export function renderGather(g: RetroGather): string {
     renderDegradedSuccess(g.degradedSuccess),
     "",
     renderProceduralCandidates(g.proceduralCandidates),
+    "",
+    renderFollowupCandidates(g.followups),
   ].join("\n");
 }
 
@@ -1548,6 +1562,172 @@ export function renderProceduralCandidates(candidates: ProceduralCandidate[]): s
     "",
     ...candidates.map((c) => `- ${c.taskType} × [${c.signals.join(", ")}] — ${c.supportingRuns} run(s): ${c.taskIds.join(", ")}`),
   ].join("\n");
+}
+
+// ── Follow-up harvest (W1-T105) ────────────────────────────────────────────
+//
+// The operator's requirement, verbatim: "ensure that if any implementations come
+// back with follow-up research, actions, tasks, etc — they get added to the plan."
+// A worker's REPORT may carry an OPTIONAL `## Follow-ups` section (§2 OUTPUT
+// CONTRACT, parsed by `parseFollowups` in worker.ts); run-task.ts ledgers each one
+// as a `report.followups` event, verbatim, with run/task/PR provenance. This
+// module mines that event stream deterministically: rule 15 stays intact — the
+// output is PROPOSAL CANDIDATES for the Architect's retro PR to cite, never an
+// auto-filed task.
+
+/** One followup entry off a `report.followups` ledger event, with its provenance
+ *  and a stable {@link entryId} the harvest-mark ledger lines reference. */
+export interface FollowupCandidate {
+  entryId: string;
+  type: "research" | "task" | "action";
+  text: string;
+  runId: string;
+  taskId: string;
+  prUrl?: string;
+}
+
+/** Pure mining result: what to show the Architect (`candidates`), what was
+ *  recognized as already covered (`deduped`), and the ledger lines the caller
+ *  (retroCommand) must append on a REAL (non-dry-run) pass — never `mineFollowups`
+ *  itself — so a `--dry-run` preview stays a pure read, same discipline as
+ *  {@link buildGather} itself. */
+export interface FollowupHarvest {
+  candidates: FollowupCandidate[];
+  deduped: FollowupCandidate[];
+  harvestLines: LedgerLine[];
+}
+
+/** Significant words only (>=3 chars) — drops "a"/"is"/"to"/"so" noise that would
+ *  otherwise inflate overlap between two otherwise-unrelated sentences. */
+function significantWords(s: string): Set<string> {
+  return new Set((s.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []));
+}
+
+/**
+ * True when `text`'s content is ALREADY substantially covered by `title` — most
+ * of `text`'s own significant words also appear in `titleWords` (>=60%, an
+ * entry that is short relative to a fuller title still matches). Deliberately
+ * asymmetric: a followup note is typically terser than the task/proposal
+ * title it duplicates, so containment is judged FROM the entry's side, never
+ * a strict/symmetric equality. Takes the title's word set PRE-COMPUTED (see
+ * `mineFollowups`) — `openTitles` is invariant across every entry a harvest
+ * pass checks it against, so its per-title tokenization runs once per title,
+ * never once per (entry × title) pair.
+ */
+function followupMatchesTitle(text: string, titleWords: Set<string>): boolean {
+  const textWords = significantWords(text);
+  if (textWords.size === 0) return false;
+  let overlap = 0;
+  for (const w of textWords) if (titleWords.has(w)) overlap++;
+  return overlap / textWords.size >= 0.6;
+}
+
+/**
+ * Mine every `report.followups` event for entries not yet harvested or
+ * deduped — PURE over `records` (idempotent: re-mining the same ledger twice
+ * with no new events yields the same result), never itself writing a ledger
+ * line. An entry already named by a `followup.harvested`/`followup.deduped`
+ * line (matched on {@link FollowupCandidate.entryId}, `${runId}:${index}`
+ * within its source event) is skipped — the mechanism `mineOverrunClasses`'
+ * sibling miners get for free from marker-scoping, but a followup must
+ * survive PAST the marker window (a discovery from three retros ago is still
+ * worth surfacing), so this module tracks it explicitly instead. `openTitles`
+ * (W1-T105 design iv) is the caller-supplied set of existing open task titles
+ * / open proposal text — an entry whose significant-word content is largely
+ * already covered by one of them (see {@link followupMatchesTitle}) is
+ * DEDUPED rather than minted a second time as a candidate for the same work.
+ */
+export function mineFollowups(records: LedgerRecord[], openTitles: string[] = []): FollowupHarvest {
+  const processed = new Set<string>();
+  for (const r of records) {
+    if (r.step === "followup.harvested" || r.step === "followup.deduped") {
+      const id = typeof r.entry_id === "string" ? r.entry_id : undefined;
+      if (id) processed.add(id);
+    }
+  }
+  // Tokenized ONCE per title, not once per (entry × title) comparison below —
+  // `openTitles` is the same set for every entry this pass mines.
+  const openTitleWordSets = openTitles.map(significantWords);
+  const candidates: FollowupCandidate[] = [];
+  const deduped: FollowupCandidate[] = [];
+  const harvestLines: LedgerLine[] = [];
+  for (const r of records) {
+    if (r.step !== "report.followups") continue;
+    const entries = Array.isArray(r.entries) ? (r.entries as Array<{ type?: string; text?: string }>) : [];
+    entries.forEach((e, i) => {
+      const type = e?.type;
+      const text = e?.text;
+      if (type !== "research" && type !== "task" && type !== "action") return;
+      if (typeof text !== "string" || !text.trim()) return;
+      const entryId = `${r.run_id ?? "?"}:${i}`;
+      if (processed.has(entryId)) return;
+      const candidate: FollowupCandidate = {
+        entryId,
+        type,
+        text,
+        runId: String(r.run_id ?? "?"),
+        taskId: String(r.task_id ?? "?"),
+        ...(typeof r.pr_url === "string" ? { prUrl: r.pr_url } : {}),
+      };
+      const isDup = openTitleWordSets.some((titleWords) => followupMatchesTitle(text, titleWords));
+      if (isDup) {
+        deduped.push(candidate);
+        harvestLines.push({ run_id: candidate.runId, task_id: candidate.taskId, step: "followup.deduped", entry_id: entryId, type, text });
+      } else {
+        candidates.push(candidate);
+        harvestLines.push({ run_id: candidate.runId, task_id: candidate.taskId, step: "followup.harvested", entry_id: entryId, type, text });
+      }
+    });
+  }
+  return { candidates, deduped, harvestLines };
+}
+
+/** Dependencies for {@link recordFollowupHarvest} — same injectable-writer shape as
+ *  {@link ContradictionResolutionDeps} (a test spies on `writeLedger` instead of disk). */
+export interface FollowupHarvestDeps {
+  ledgerPath: string;
+  writeLedger?: typeof appendLedger;
+}
+
+/**
+ * Append every {@link FollowupHarvest.harvestLines} entry so a later
+ * {@link mineFollowups} pass over the updated ledger mints neither the
+ * candidate nor the dedup match again. The caller (retroCommand) invokes this
+ * ONLY on a real (non-`--dry-run`) retro — `mineFollowups` itself never
+ * writes, so a dry-run preview stays side-effect-free.
+ */
+export function recordFollowupHarvest(harvest: FollowupHarvest, deps: FollowupHarvestDeps): void {
+  const writeLedger = deps.writeLedger ?? appendLedger;
+  for (const line of harvest.harvestLines) writeLedger(deps.ledgerPath, line);
+}
+
+/** Render the follow-up harvest (markdown) — printed by `--dry-run` and fed to the
+ *  Architect. Rule 15: every line here is a CANDIDATE citing its origin verbatim,
+ *  never an instruction to file a task. */
+export function renderFollowupCandidates(harvest: FollowupHarvest): string {
+  const lines = [
+    "## Follow-up harvest (W1-T105) — PROPOSAL CANDIDATES, never auto-filed (rule 15)",
+    "",
+  ];
+  if (harvest.candidates.length === 0) {
+    lines.push("No unharvested follow-up this cycle.");
+  } else {
+    lines.push(
+      ...harvest.candidates.map(
+        (c) => `- [${c.type}] ${c.text} — from ${c.taskId} (${c.runId}${c.prUrl ? `, ${c.prUrl}` : ""})`,
+      ),
+    );
+  }
+  if (harvest.deduped.length > 0) {
+    lines.push(
+      "",
+      `(${harvest.deduped.length} entr${harvest.deduped.length === 1 ? "y" : "ies"} matched an existing open ` +
+        "title and was not re-minted: " +
+        harvest.deduped.map((d) => `"${d.text}"`).join("; ") +
+        ")",
+    );
+  }
+  return lines.join("\n");
 }
 
 // ── Phrasing — the ONLY step where an LLM enters (W1-T87/P13) ────────────

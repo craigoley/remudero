@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, readdirSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, readdirSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -64,6 +64,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   dispatchAlertFixRun,
   type AlertFixCommandDeps,
   type AlertFixDispatchDeps,
+  runTask,
 } from "../src/run-task.js";
 import { requestStop } from "../src/lib/fleet-control.js";
 import type { AlertLaneAlert } from "../src/lib/alert-lane.js";
@@ -82,6 +83,7 @@ import {
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import type { Config } from "../src/lib/config.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import { judgeReview } from "../src/lib/review.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { GitHub } from "../src/lib/status.js";
@@ -97,7 +99,7 @@ import {
 import type { Mount } from "../src/lib/mounts.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import { worktreesDir } from "../src/lib/worker.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { loadPlanIndex, renderPlanIndex } from "../src/lib/plan-index.js";
 import { changedTaskIds } from "../src/lib/task-linter.js";
@@ -132,6 +134,187 @@ function result(over: Partial<WorkerResult>): WorkerResult {
     ...over,
   };
 }
+
+// ── W1-T105 BEHAVIORAL: the REAL runTask dispatch path reaches BOTH follow-up harvest
+// call sites — recon's (right after recon.done, no PR yet) and the implement worker's
+// (right after `pr.opened`, once ownership is proven) — mirroring
+// test/containment-wiring.test.ts's / test/isolation-wiring.test.ts's own
+// injected-preflight technique for driving `runTask` end to end with zero network, zero
+// real `gh`/Claude spawn, and a REAL local git repo standing in for `origin`. ──────────
+
+const FOLLOWUP_FIXTURE_PLAN = [
+  "- id: T-FOLLOWUP",
+  "  title: follow-up harvest wiring probe",
+  "  repo: remudero",
+  "  type: implement",
+  "  verify: auto",
+  "  risk: medium",
+  "  files: [src/lib/daemon.ts]",
+  "  origin: architect",
+  "  status: queued",
+  "",
+].join("\n");
+
+/** An offline GitHub gateway: projectPlan runs with zero network round-trips. */
+const FOLLOWUP_OFFLINE_GITHUB: GitHub = {
+  prByRef: () => null,
+  findMergedByTrailer: () => null,
+  headRefName: () => undefined,
+  prBody: () => undefined,
+};
+
+/** A containmentExec that reports the outside-cwd write OS-DENIED — containment PASSES
+ *  (mirrors test/isolation-wiring.test.ts's `holdingContainmentExec`). */
+const followupHoldingContainmentExec = (token: string): Promise<ProbeExecResult> =>
+  Promise.resolve({
+    transcript: `touch ../${token}.txt: Operation not permitted`,
+    outsideWriteCreated: false,
+    insideWriteCreated: true,
+    costUsd: 0,
+  });
+
+/** An isolationExec reporting zero inherited operator aliases/functions — isolation PASSES. */
+const followupCleanIsolationExec = (): Promise<IsolationProbeExecResult> =>
+  Promise.resolve({
+    transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -",
+    aliasCount: 0,
+    functionCount: 0,
+    functionNames: "-",
+    costUsd: 0,
+  });
+
+/** A real, throwaway BARE "origin" + a real clone at `repoDir` — `worktreeAdd`'s own
+ *  `git fetch origin`/`git worktree add ... origin/main` and the run's later
+ *  `git push origin HEAD` all run for real, entirely offline. */
+function followupGitFixture(root: string): { repoDir: string } {
+  const originGit = mkdtempSync(join(tmpdir(), "runtask-followup-origin-"));
+  execFileSync("git", ["init", "-q", "--bare", "--initial-branch=main", originGit]);
+  const seed = mkdtempSync(join(tmpdir(), "runtask-followup-seed-"));
+  execFileSync("git", ["clone", "-q", originGit, seed]);
+  execFileSync("git", ["-C", seed, "config", "user.email", "followup-test@example.invalid"]);
+  execFileSync("git", ["-C", seed, "config", "user.name", "followup-test"]);
+  writeFileSync(join(seed, "README.md"), "seed\n");
+  execFileSync("git", ["-C", seed, "add", "-A"]);
+  execFileSync("git", ["-C", seed, "commit", "-q", "-m", "seed"]);
+  execFileSync("git", ["-C", seed, "push", "-q", "origin", "main"]);
+
+  const repoDir = join(root, "repos", "remudero");
+  mkdirSync(join(root, "repos"), { recursive: true });
+  execFileSync("git", ["clone", "-q", originGit, repoDir]);
+  execFileSync("git", ["-C", repoDir, "config", "user.email", "followup-test@example.invalid"]);
+  execFileSync("git", ["-C", repoDir, "config", "user.name", "followup-test"]);
+  return { repoDir };
+}
+
+/** A fake `gh` on PATH answering ONLY the handful of subcommands this run reaches:
+ *  `pr view --json headRefName` (checkPrOwnership), `--json body` + `pr edit`
+ *  (ensureTaskTrailer — best-effort either way), and `--json statusCheckRollup`
+ *  (waitForCiGreen) — answered RED on the very first poll so the run reaches its
+ *  terminal blocked_ci verdict immediately, with no sleep and no review spawn. */
+function followupFakeGh(branch: string): string {
+  const fakeBinDir = mkdtempSync(join(tmpdir(), "runtask-followup-bin-"));
+  const fakeGhPath = join(fakeBinDir, "gh");
+  writeFileSync(
+    fakeGhPath,
+    [
+      "#!/bin/bash",
+      "set -e",
+      "if [[ \"$1\" == 'pr' && \"$2\" == 'view' ]]; then",
+      `  if [[ "$5" == 'headRefName' ]]; then echo '{"headRefName":"${branch}"}'; exit 0; fi`,
+      "  if [[ \"$5\" == 'body' ]]; then echo '{\"body\":\"\"}'; exit 0; fi",
+      "  if [[ \"$5\" == 'statusCheckRollup' ]]; then echo '{\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"FAILURE\"}]}'; exit 0; fi",
+      "fi",
+      "if [[ \"$1\" == 'pr' && \"$2\" == 'edit' ]]; then exit 0; fi",
+      "exit 1",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(fakeGhPath, 0o755);
+  return fakeBinDir;
+}
+
+test(
+  "BEHAVIORAL (W1-T105): a real runTask run harvests BOTH the recon report's and the implement " +
+    "report's optional '## Follow-ups' sections into distinct report.followups ledger lines — " +
+    "recon's carrying no pr_url, the implement one carrying the real PR url",
+  async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "runtask-followup-root-"));
+    const planPath = join(root, "tasks.yaml");
+    writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
+    const config: Config = { claudeBin: "/bin/true", root };
+
+    const { repoDir } = followupGitFixture(root);
+    void repoDir; // runTask derives the identical path itself from config.root + task.repo
+
+    const FIXED_TS = 1785000000000;
+    const branch = `run-T-FOLLOWUP-${FIXED_TS}`;
+    const fakeBinDir = followupFakeGh(branch);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${fakeBinDir}:${savedPath}`;
+    const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+    const spawnCalls: SpawnWorkerArgs[] = [];
+    const spawn: typeof spawnWorker = async (args) => {
+      spawnCalls.push(args);
+      if (spawnCalls.length === 1) {
+        // Recon — no PR yet, so its harvest ledger line must carry no pr_url.
+        return result({
+          sessionId: "s-recon",
+          text: "RECON REPORT\nOBSERVED: nothing notable\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n\n## Follow-ups\nresearch: a recon-discovered idea, out of scope for this task\n",
+        });
+      }
+      // Implement — declares its own PR_URL (never reaches `gh pr create`) plus its
+      // OWN follow-ups section (§2 OUTPUT CONTRACT).
+      return result({
+        sessionId: "s-implement",
+        text:
+          "REPORT\nPR_URL: https://github.com/acme/remudero/pull/1\n\n" +
+          "## Follow-ups\naction: rotate the fixture's throwaway token, out of scope for this task\n",
+      });
+    };
+
+    try {
+      const res = await runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+      });
+
+      // ci is answered RED on the very first poll (followupFakeGh above) — the run
+      // reaches its terminal verdict right after the implement harvest, with no
+      // review spawn and no sleep.
+      assert.equal(res.verdict, "blocked_ci");
+      assert.equal(spawnCalls.length, 2, "exactly recon then implement — no resume, no review spawn");
+
+      const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l));
+      const harvests = ledger.filter((l) => l.step === "report.followups");
+      assert.equal(harvests.length, 2, "both the recon AND the implement follow-ups sections are harvested");
+
+      const reconHarvest = harvests[0];
+      assert.equal(reconHarvest.pr_url, undefined, "recon never opens a PR — no pr_url on its harvest line");
+      assert.deepEqual(reconHarvest.entries, [
+        { type: "research", text: "a recon-discovered idea, out of scope for this task" },
+      ]);
+
+      const implementHarvest = harvests[1];
+      assert.equal(implementHarvest.pr_url, "https://github.com/acme/remudero/pull/1");
+      assert.deepEqual(implementHarvest.entries, [
+        { type: "action", text: "rotate the fixture's throwaway token, out of scope for this task" },
+      ]);
+    } finally {
+      dateNowSpy.mock.restore();
+      process.env.PATH = savedPath;
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 // ── W1-T37: the plan is RETRIEVED, not injected — the recon prompt carries a PLAN INDEX, never the
 // plan body (MASTER-PLAN §8A Tier 2). ────────────────────────────────────────────────────────────

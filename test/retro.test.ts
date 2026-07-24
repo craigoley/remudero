@@ -19,6 +19,7 @@ import {
   keyContradictionCandidates,
   mergedSince,
   mineDegradedSuccess,
+  mineFollowups,
   mineOverrunClasses,
   mineProceduralCandidates,
   ownBranchOf,
@@ -26,8 +27,10 @@ import {
   phraseProceduralCandidate,
   planHealthSweep,
   PROCEDURAL_SUCCESS_SIGNALS,
+  recordFollowupHarvest,
   renderContradictions,
   renderDegradedSuccess,
+  renderFollowupCandidates,
   renderGather,
   renderOrientation,
   renderOverrunProposals,
@@ -645,6 +648,141 @@ test("buildGather/renderGather surface procedural-success candidates (W1-T87/P13
   assert.equal(g.proceduralCandidates.length, 1);
   assert.deepEqual(g.proceduralCandidates[0]!.taskIds, ["W1-T300", "W1-T301"]);
   assert.match(renderGather(g), /Procedural-success mining/);
+});
+
+// ── Follow-up harvest (W1-T105) ─────────────────────────────────────────────
+// The operator's requirement, verbatim: "ensure that if any implementations
+// come back with follow-up research, actions, tasks, etc — they get added to
+// the plan." run-task.ts ledgers a worker's OPTIONAL '## Follow-ups' section as
+// ONE `report.followups` event (type, text, run/task/PR provenance); this
+// module mines the unharvested ones into PROPOSAL CANDIDATES (rule 15: never
+// an auto-filed task) and marks each processed so a later pass mints nothing
+// twice.
+
+test("mineFollowups: a report.followups event ledgers entries with provenance, and mints ONE candidate per entry citing run/task/PR", () => {
+  const records = parseLedger(
+    [
+      `{"ts":"2026-05-01T00:00:00.000Z","run_id":"W1-T400-1","task_id":"W1-T400","step":"report.followups","pr_url":"https://github.com/o/r/pull/400","entries":[{"type":"research","text":"confirm the mutation gate needs the same diff-scope trick"},{"type":"task","text":"extend ci-gate.yml REQUIRED array for the new check"}]}`,
+    ].join("\n"),
+  );
+  const harvest = mineFollowups(records);
+  assert.equal(harvest.candidates.length, 2);
+  assert.equal(harvest.deduped.length, 0);
+  const [research, task] = harvest.candidates;
+  assert.equal(research!.type, "research");
+  assert.equal(research!.text, "confirm the mutation gate needs the same diff-scope trick");
+  assert.equal(research!.runId, "W1-T400-1");
+  assert.equal(research!.taskId, "W1-T400");
+  assert.equal(research!.prUrl, "https://github.com/o/r/pull/400");
+  assert.equal(task!.type, "task");
+  // Each candidate's harvest line names ITS OWN entry — the mark that stops a
+  // second mining pass from minting the same entry twice.
+  assert.deepEqual(
+    harvest.harvestLines.map((l) => l.step),
+    ["followup.harvested", "followup.harvested"],
+  );
+});
+
+test("mineFollowups: an already-harvested entry mints NOTHING again — a second pass over the updated ledger is empty", () => {
+  const base = [
+    `{"ts":"2026-05-02T00:00:00.000Z","run_id":"R1","task_id":"W1-T401","step":"report.followups","pr_url":"https://github.com/o/r/pull/401","entries":[{"type":"action","text":"rotate the leaked fixture token"},{"type":"research","text":"unaffected second entry, still unharvested"}]}`,
+  ];
+  // Simulate: entry 0 was ALREADY harvested by a prior retro; entry 1 was not.
+  const alreadyHarvested = `{"ts":"2026-05-02T01:00:00.000Z","run_id":"R1","task_id":"W1-T401","step":"followup.harvested","entry_id":"R1:0"}`;
+  const records = parseLedger([...base, alreadyHarvested].join("\n"));
+  const first = mineFollowups(records);
+  assert.equal(first.candidates.length, 1, "only the NOT-yet-harvested entry mints");
+  assert.equal(first.candidates[0]!.text, "unaffected second entry, still unharvested");
+
+  // Now simulate a REAL retro run: append first.harvestLines (recordFollowupHarvest's
+  // job), then mine again over the updated ledger — mints ZERO.
+  const updated = parseLedger(
+    [...base, alreadyHarvested, ...first.harvestLines.map((l) => JSON.stringify({ ts: "2026-05-02T02:00:00.000Z", ...l }))].join(
+      "\n",
+    ),
+  );
+  const second = mineFollowups(updated);
+  assert.equal(second.candidates.length, 0);
+  assert.equal(second.deduped.length, 0);
+});
+
+test("mineFollowups: absent report.followups events change nothing — no candidates, no harvest lines", () => {
+  const records = parseLedger(LEDGER); // the module-level fixture, carries no report.followups step
+  const harvest = mineFollowups(records);
+  assert.deepEqual(harvest, { candidates: [], deduped: [], harvestLines: [] });
+});
+
+test("mineFollowups: an entry matching an open task/proposal title is DEDUPED, not minted, and ledgers followup.deduped", () => {
+  const records = parseLedger(
+    [
+      `{"ts":"2026-05-03T00:00:00.000Z","run_id":"R2","task_id":"W1-T402","step":"report.followups","pr_url":"https://github.com/o/r/pull/402","entries":[{"type":"task","text":"ci-gate REQUIRED array should be one entry per line"},{"type":"action","text":"a genuinely new, unrelated action"}]}`,
+    ].join("\n"),
+  );
+  const openTitles = ["ci-gate REQUIRED array — one entry per line, so concurrent gate additions merge"];
+  const harvest = mineFollowups(records, openTitles);
+  assert.equal(harvest.candidates.length, 1);
+  assert.equal(harvest.candidates[0]!.text, "a genuinely new, unrelated action");
+  assert.equal(harvest.deduped.length, 1);
+  assert.equal(harvest.deduped[0]!.text, "ci-gate REQUIRED array should be one entry per line");
+  assert.equal(harvest.harvestLines.find((l) => l.entry_id === harvest.deduped[0]!.entryId)?.step, "followup.deduped");
+  // A second pass over an updated ledger carrying that dedup mark mints neither candidate nor dup again.
+  const updated = parseLedger(
+    [
+      ...records.map((r) => JSON.stringify(r)),
+      ...harvest.harvestLines.map((l) => JSON.stringify({ ts: "2026-05-03T01:00:00.000Z", ...l })),
+    ].join("\n"),
+  );
+  assert.deepEqual(mineFollowups(updated, openTitles), { candidates: [], deduped: [], harvestLines: [] });
+});
+
+test("recordFollowupHarvest: writes every harvest line via the injectable writer, never touching disk in a test", () => {
+  const harvest = mineFollowups(
+    parseLedger(
+      `{"ts":"2026-05-04T00:00:00.000Z","run_id":"R3","task_id":"W1-T403","step":"report.followups","entries":[{"type":"research","text":"x"}]}`,
+    ),
+  );
+  const written: unknown[] = [];
+  recordFollowupHarvest(harvest, {
+    ledgerPath: "/dev/null/unused",
+    writeLedger: (_path, line) => {
+      written.push(line);
+    },
+  });
+  assert.equal(written.length, 1);
+  assert.equal((written[0] as { step: string }).step, "followup.harvested");
+});
+
+test("renderFollowupCandidates: names each candidate's origin verbatim as a CANDIDATE, and notes dedup matches without minting them", () => {
+  const harvest = mineFollowups(
+    parseLedger(
+      [
+        `{"ts":"2026-05-05T00:00:00.000Z","run_id":"R4","task_id":"W1-T404","step":"report.followups","pr_url":"https://github.com/o/r/pull/404","entries":[{"type":"research","text":"brand new research idea"},{"type":"task","text":"already-open dup"}]}`,
+      ].join("\n"),
+    ),
+    ["already-open dup task exists verbatim"],
+  );
+  const rendered = renderFollowupCandidates(harvest);
+  assert.match(rendered, /PROPOSAL CANDIDATES/);
+  assert.match(rendered, /brand new research idea/);
+  assert.match(rendered, /W1-T404/);
+  assert.match(rendered, /pull\/404/);
+  assert.doesNotMatch(rendered, /- \[task\] already-open dup/); // deduped, never minted as a bulleted candidate
+  assert.match(rendered, /already-open dup.*not re-minted|not re-minted.*already-open dup/s);
+});
+
+test("renderFollowupCandidates: no unharvested follow-up renders an explicit empty state, not a blank section", () => {
+  assert.match(renderFollowupCandidates({ candidates: [], deduped: [], harvestLines: [] }), /No unharvested follow-up/);
+});
+
+test("buildGather/renderGather surface the follow-up harvest, deduping via opts.openTitles", () => {
+  const ledgerNdjson = [
+    `{"ts":"2026-05-06T00:00:00.000Z","run_id":"R5","task_id":"W1-T405","step":"report.followups","pr_url":"https://github.com/o/r/pull/405","entries":[{"type":"action","text":"a fresh, unmatched action"}]}`,
+  ].join("\n");
+  const g = buildGather({ ledgerNdjson, learningsMd: "# L\n", openTitles: ["something entirely different"] });
+  assert.equal(g.followups.candidates.length, 1);
+  assert.equal(g.followups.candidates[0]!.text, "a fresh, unmatched action");
+  assert.match(renderGather(g), /Follow-up harvest/);
+  assert.match(renderGather(g), /a fresh, unmatched action/);
 });
 
 test("phraseProceduralCandidate: evidence is deterministic — the LLM stub receives ONLY the pre-detected candidate, never raw ledger records", async () => {

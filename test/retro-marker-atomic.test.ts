@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import fsDefault from "node:fs";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -320,6 +321,103 @@ test("retroCommand: --dry-run builds the gather and returns 0 without ever touch
       "--dry-run must print the deterministic gather report",
     );
   } finally {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+  }
+});
+
+// ── W1-T105: the follow-up harvest's dedup source (openTaskTitles/openProposalLines,
+// retroCommand, design (iv)) degrades BEST-EFFORT on a read hiccup — via
+// `tryReadFollowupTitles`'s own catch — rather than aborting the whole retro. Driven
+// through the REAL `retroCommand`'s `--dry-run` path (cheap: no worktree/gh/spawn, exits
+// right after building the gather) with `fsDefault.readFileSync` mocked ONLY for the two
+// exact repoRoot-relative paths this dedup read touches — every other read (ledger,
+// LEARNINGS.md, mast-mapping.yaml, ...) falls through to the real fs, unmocked.
+//
+// run-task.ts reads via a PLAIN named `import { readFileSync } from "node:fs"` (unlike
+// lib/retro.ts's own `fsMarker.*` indirection, adopted specifically so tests CAN mock
+// it) — Node bakes a core module's named ESM exports in at FIRST IMPORT TIME, so
+// reassigning `fsDefault.readFileSync` alone is invisible to that already-bound
+// binding (see test/setup/tmp-hygiene.ts's identical finding for `mkdtempSync`).
+// `syncBuiltinESMExports()` — Node's own documented fix — re-propagates the mock (and,
+// in the `finally`, the restored original) to every such binding.
+
+test("retroCommand: a follow-up dedup 'tasks' read that THROWS degrades to an empty dedup source and is NAMED in the console error — the retro itself still succeeds", async (t) => {
+  const fakeHome = mkdtempSync(join(tmpdir(), "rmd-retro-followup-tasks-home-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-retro-followup-tasks-root-"));
+  const savedHome = process.env.HOME;
+  process.env.HOME = fakeHome;
+  const cfgPath = configPath();
+  mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
+  writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
+
+  // repoRoot's real plan/tasks.yaml exists (existsSync is untouched, real) — only ITS
+  // OWN readFileSync (loadPlan's own read) is forced to throw; every other target path
+  // (ledger/LEARNINGS/mast-mapping/MASTER-PLAN.md) passes through to the real fs.
+  const tasksYamlPath = join(process.cwd(), "plan", "tasks.yaml");
+  const realReadFileSync = fsDefault.readFileSync.bind(fsDefault);
+  const forcedError = new Error("fixture: forced plan/tasks.yaml read failure");
+  const readSpy = t.mock.method(fsDefault, "readFileSync", (target: unknown, ...rest: unknown[]) => {
+    if (target === tasksYamlPath) throw forcedError;
+    return realReadFileSync(target as string, ...(rest as []));
+  });
+  syncBuiltinESMExports();
+  const errSpy = t.mock.method(console, "error", () => {});
+  const logSpy = t.mock.method(console, "log", () => {});
+
+  try {
+    const exitCode = await retroCommand(["--dry-run"]);
+    assert.equal(exitCode, 0, "a dedup-source read hiccup must never abort the retro (best-effort, W1-T105 design)");
+    assert.ok(
+      errSpy.mock.calls.some(
+        (c) => String(c.arguments[0]).includes("followups.open_titles.tasks") && String(c.arguments[0]).includes(forcedError.message),
+      ),
+      "the throw is NAMED (which source, and why) in the console error, never a silent swallow",
+    );
+    void logSpy;
+  } finally {
+    readSpy.mock.restore();
+    syncBuiltinESMExports(); // propagate the restored REAL readFileSync back to run-task.ts's baked-in binding
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+  }
+});
+
+test("retroCommand: a non-trivial MASTER-PLAN.md yielding ZERO proposal-bullet matches DEGRADES LOUDLY (format-drift signal) rather than silently reporting 'no open proposals'", async (t) => {
+  const fakeHome = mkdtempSync(join(tmpdir(), "rmd-retro-followup-proposals-home-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-retro-followup-proposals-root-"));
+  const savedHome = process.env.HOME;
+  process.env.HOME = fakeHome;
+  const cfgPath = configPath();
+  mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
+  writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
+
+  const masterPlanPath = join(process.cwd(), "MASTER-PLAN.md");
+  const realReadFileSync = fsDefault.readFileSync.bind(fsDefault);
+  // Non-trivial (> 500 chars, the guard's own threshold) but carries NO line matching
+  // the proposal-bullet regex (`^- P\d+...`) — the format-drift shape, not a genuinely
+  // proposal-free plan.
+  const noProposalBulletsMd = `# MASTER-PLAN\n\n${"prose with no bullet-list proposals whatsoever. ".repeat(20)}\n`;
+  const readSpy = t.mock.method(fsDefault, "readFileSync", (target: unknown, ...rest: unknown[]) => {
+    if (target === masterPlanPath) return noProposalBulletsMd;
+    return realReadFileSync(target as string, ...(rest as []));
+  });
+  syncBuiltinESMExports();
+  const errSpy = t.mock.method(console, "error", () => {});
+  const logSpy = t.mock.method(console, "log", () => {});
+
+  try {
+    assert.ok(noProposalBulletsMd.length > 500, "sanity: the fixture must clear the guard's own non-trivial threshold");
+    const exitCode = await retroCommand(["--dry-run"]);
+    assert.equal(exitCode, 0, "a format-drift dedup source must never abort the retro");
+    assert.ok(
+      errSpy.mock.calls.some((c) => String(c.arguments[0]).includes("followups.open_titles.proposals") && String(c.arguments[0]).includes("format drift")),
+      "zero proposal-bullet matches against a non-trivial MASTER-PLAN.md must be NAMED, never silently read as 'no open proposals'",
+    );
+    void logSpy;
+  } finally {
+    readSpy.mock.restore();
+    syncBuiltinESMExports(); // propagate the restored REAL readFileSync back to run-task.ts's baked-in binding
     if (savedHome === undefined) delete process.env.HOME;
     else process.env.HOME = savedHome;
   }

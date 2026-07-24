@@ -96,6 +96,16 @@ export function outputContractLines(taskId: string): string[] {
   return [
     "# OUTPUT CONTRACT",
     "- Make ONLY the change described in TASK; one concern.",
+    // W1-T105 — the operator's requirement, verbatim: "ensure that if any
+    // implementations come back with follow-up research, actions, tasks, etc —
+    // they get added to the plan." Anything discovered that is OUT OF SCOPE for
+    // this one concern goes HERE, never into the diff; the retro's follow-up
+    // harvest (lib/retro.ts) mines this section into cited proposal candidates.
+    "- FOLLOW-UPS (optional): anything you discover that is OUT OF SCOPE for this",
+    "  one concern — a research question, a follow-up task, or an action someone",
+    "  should take — goes in a '## Follow-ups' section of your REPORT, NEVER into",
+    "  the diff. One typed entry per line, its own one-line why included inline:",
+    "  `research: <what, and why>` | `task: <what, and why>` | `action: <what, and why>`.",
     "- If a filename/approach choice is needed, FIRST emit a DECISION_REQUEST",
     "  (exactly two options, one marked RECOMMENDED, a reversibility note) and STOP.",
     "- Otherwise: stage the changed file(s), commit, then run",
