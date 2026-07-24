@@ -1,0 +1,94 @@
+# plan/mast-mapping.yaml — the deterministic verdict -> MAST taxonomy mapping (W1-T89,
+# ratifies P18's mineable core). DATA, per Rule 2: this table is the classifier: a ledger
+# verdict class is NEVER LLM-judged into a MAST category, only looked up here.
+#
+# MAST (Cemri et al., NeurIPS 2025 [research: mast-neurips2025]; 1,600+ annotated traces
+# across 7 frameworks, kappa 0.88) names 14 failure modes across 3 categories:
+#   specification (~42%) — the task/system spec was violated or never terminated cleanly
+#   inter-agent    (~37%) — a coordination failure BETWEEN agents/workers
+#   verification   (~21%) — the check/review/gate step failed to catch (or misjudged) truth
+#
+# Applied READ-SIDE at retro-gather time (src/lib/retro.ts: mastRowFor / mastCategoryDistribution)
+# — it re-codes the WHOLE ledger retroactively, past and future, with zero ledger rewrites.
+#
+# Row shape: verdict (a src/lib/run-result.ts RunResult.verdict value) + an OPTIONAL `subtype`
+# qualifier (the worker-error subtype off the terminal `verdict` ledger line, e.g.
+# `error_max_turns`) -> mast_mode + category. A (verdict, subtype) row is matched before its
+# bare-verdict sibling; a verdict with NO row at all (or a subtype that matches no qualifier
+# row) reports as UNMAPPED at read time — visible in the retro report, never silently dropped
+# or guessed. Deliberately left OUT of this table for that reason (mixed/ambiguous causes that
+# would need finer qualifiers to code honestly, not yet mined): `blocked` (bare — too generic
+# on its own), `failed` (bare — see the `error_max_turns` qualifier row below for the one cause
+# mined so far), `blocked_transient`, `blocked_git_fetch`.
+#
+# `merged` carries no row: success is out of scope for a FAILURE distribution (P18's own
+# framing) — mastCategoryDistribution skips it before ever consulting this table.
+#
+# `provisional: true` marks a row P23's investigation (MASTER-PLAN, ratified via W1-T91) is
+# still refining — a mapping-as-data edit, not a code change, once it lands.
+
+rows:
+  - verdict: blocked_illformed
+    mast_mode: "FM-1.1 Disobey Task Specification"
+    category: specification
+    comment: >-
+      the task failed the pre-dispatch linter (task-linter.ts) before a worker ever ran —
+      MASTER-PLAN §5C's own worked example of blocked_illformed -> specification.
+
+  - verdict: blocked_budget
+    mast_mode: "FM-1.5 Unaware of Termination Conditions"
+    category: specification
+    comment: "the worker exhausted budget_usd without recognizing/honoring the termination bound"
+
+  - verdict: failed
+    subtype: error_max_turns
+    mast_mode: "FM-1.3 Step Repetition"
+    category: specification
+    comment: >-
+      the SDK's own max_turns backstop tripped — the worker looped/repeated steps without
+      reaching a terminal state (the "FOURTH max_turns event" class named in retro.ts's own
+      plan-health-sweep comments).
+
+  - verdict: blocked_review
+    mast_mode: "FM-3.2 No or Incomplete Verification"
+    category: verification
+    comment: "remudero-review found unmet acceptance criteria at gate time"
+
+  - verdict: blocked_ci
+    mast_mode: "FM-3.2 No or Incomplete Verification"
+    category: verification
+    comment: "required CI checks were red at merge time"
+
+  - verdict: no_pr
+    mast_mode: "FM-3.1 Premature Termination"
+    category: verification
+    comment: >-
+      the worker reached a success subtype but opened no PR -- a silent no-op (run
+      W1-T12a-1784117152056, cited at src/run-task.ts's own no_pr comment).
+
+  - verdict: pr_attribution_failed
+    mast_mode: "FM-3.3 Incorrect Verification"
+    category: verification
+    comment: >-
+      the false-attribution class (W1-T62/#80, W1-T51/P9-b): a run's ledger-claimed PR url did
+      not survive ownership verification -- the check itself had verified the wrong thing.
+
+  - verdict: blocked_inflight
+    mast_mode: "FM-2.5 Ignored Other Agent's Input"
+    category: inter-agent
+    comment: "the dedup guard found another run already claiming this task/branch"
+
+  - verdict: blocked_containment
+    mast_mode: "FM-3.2 No or Incomplete Verification"
+    category: verification
+    provisional: true
+    comment: >-
+      P23 (MASTER-PLAN, ratified via W1-T91): the investigated novel blocks were guards firing
+      CORRECTLY, not task defects -- category is a placeholder pending P23's own refined
+      guard-fired bucket; this row is the one line that changes when it lands.
+
+  - verdict: blocked_isolation
+    mast_mode: "FM-3.2 No or Incomplete Verification"
+    category: verification
+    provisional: true
+    comment: "P23's pair with blocked_containment above -- same provisional status, same investigation"

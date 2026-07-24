@@ -196,11 +196,13 @@ import {
   buildGather,
   calibrationTable,
   codeFilesInDiff,
+  loadMastMapping,
   parseLedger,
   probeGithubThrottle,
   renderGather,
   resolveMarkerForGather,
   saveMarker,
+  type MastMapping,
   type ShippedGithub,
 } from "./lib/retro.js";
 import { regenerateOrientation } from "./lib/orientation.js";
@@ -3789,6 +3791,13 @@ async function retroCommand(
   const learningsPath = join(repoRoot, "LEARNINGS.md");
   const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
   const learningsMd = existsSync(learningsPath) ? readFileSync(learningsPath, "utf8") : "";
+  // W1-T89/P18: plan/mast-mapping.yaml is DATA (Rule 2) — loaded here, never
+  // touched by buildGather itself. A missing file degrades to an empty table
+  // (every failure verdict reports unmapped, LOUDLY, in the render) rather than
+  // aborting the retro; a PRESENT-but-malformed file fails closed (loadMastMapping
+  // throws MastMappingError), same discipline as a corrupt marker below.
+  const mastMappingPath = join(repoRoot, "plan", "mast-mapping.yaml");
+  const mastMapping: MastMapping = existsSync(mastMappingPath) ? loadMastMapping(mastMappingPath) : { rows: [] };
   // W1-T242: a corrupt-but-present marker (e.g. a torn write from a crash, or a manual
   // edit) MUST NOT be silently treated as "no marker" — that would replay the whole
   // already-consumed run window and double-count SHIPPED/learnings. resolveMarkerForGather
@@ -3833,6 +3842,8 @@ async function retroCommand(
     sinceTs: marker?.ts,
     learningsAtMarker: marker?.learnings_count,
     github,
+    mastMapping,
+    priorMastCategoryCounts: marker?.mast_category_counts,
   });
   // W1-T111 (P25 iv): the approve/reframe rate is telemetry, not decoration — the field's
   // failure mode is the rubber-stamp queue, so it rides EVERY retro (cumulative, all-time,
@@ -4052,7 +4063,12 @@ async function retroCommand(
     say(`retro PR (plan-only): ${prUrl}`);
 
     // Advance the marker (the retro RAN — the gather is now consumed).
-    const nextMarker = { ts: new Date().toISOString(), learnings_count: gather.learningsNow, runs_seen: gather.totalRuns };
+    const nextMarker = {
+      ts: new Date().toISOString(),
+      learnings_count: gather.learningsNow,
+      runs_seen: gather.totalRuns,
+      mast_category_counts: gather.mast.byCategory,
+    };
     saveMarker(markerPath, nextMarker);
     log("retro.marker.advanced", nextMarker);
 
