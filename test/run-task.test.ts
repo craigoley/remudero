@@ -11,6 +11,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   buildSweepEffects,
   buildSweepLightHook,
   daemonCommand,
+  daemonPlistCommand,
   realArmDeps,
   type ArmDeps,
   DEFAULT_BUDGET_USD,
@@ -67,6 +68,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   runTask,
 } from "../src/run-task.js";
 import { requestStop } from "../src/lib/fleet-control.js";
+import { LaunchdPlistError } from "../src/lib/launchd.js";
 import type { AlertLaneAlert } from "../src/lib/alert-lane.js";
 import type { AlertGateway } from "../src/lib/ops.js";
 import { realOnboardFsDeps, type Inventory, type OnboardGhGateway } from "../src/lib/onboard/inventory.js";
@@ -4717,6 +4719,92 @@ test("daemonCommand: builds the real daemon deps (sweep + sweepLight wiring) the
     requestStop(root, "unit test");
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath]);
     assert.equal(code, 0, "a present STOP returns a clean exit 0, nothing dispatched or swept");
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T109: `rmd daemon-plist`'s CLI wiring bakes --allow-self-target consent into the unit ──
+// The refuse/bake DECISION itself is proven at the lib/launchd.ts level (test/launchd.test.ts,
+// over generateLaunchdPlist directly). These tests prove the CLI EDGE: daemonPlistCommand
+// actually computes isSelfTarget/allowSelfTarget from the real --repo arg + resolveOwnerRepo()
+// (this checkout's own origin is craigoley/remudero) and threads them through, so a self-target
+// invocation really does refuse without the flag and really does succeed with it — not just the
+// pure generator in isolation.
+function daemonPlistTestHome(): { home: string; root: string } {
+  const home = mkdtempSync(join(tmpdir(), "rmd-daemonplist-"));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  return { home, root };
+}
+
+test("daemonPlistCommand: --repo omitted (self-default) without --allow-self-target REFUSES — throws before any write", async () => {
+  const { home } = daemonPlistTestHome();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    await assert.rejects(
+      () => daemonPlistCommand([]),
+      (e: unknown) => e instanceof LaunchdPlistError && /--allow-self-target/.test((e as Error).message),
+    );
+    assert.equal(
+      existsSync(join(home, "Library", "LaunchAgents")),
+      false,
+      "a refused generation must write nothing — no LaunchAgents dir ever created",
+    );
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("daemonPlistCommand: --repo pointed at THIS checkout's own repo without --allow-self-target also REFUSES (not just the absent-repo default)", async () => {
+  const { home } = daemonPlistTestHome();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    await assert.rejects(
+      () => daemonPlistCommand(["--repo", "remudero"]),
+      (e: unknown) => e instanceof LaunchdPlistError && /--allow-self-target/.test((e as Error).message),
+    );
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("daemonPlistCommand: self-target + --allow-self-target succeeds and bakes the flag into the WRITTEN unit", async () => {
+  const { home } = daemonPlistTestHome();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const code = await daemonPlistCommand(["--repo", "remudero", "--allow-self-target", "--write"]);
+    assert.equal(code, 0);
+    const plistPath = join(home, "Library", "LaunchAgents", "com.remudero.daemon.plist");
+    const written = readFileSync(plistPath, "utf8");
+    assert.match(written, /--allow-self-target/, "consent must be baked into ProgramArguments, not just accepted");
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("daemonPlistCommand: a NON-self --repo needs no --allow-self-target and the flag is never baked in", async () => {
+  const { home } = daemonPlistTestHome();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const code = await daemonPlistCommand(["--repo", "remudero-sandbox", "--write"]);
+    assert.equal(code, 0);
+    const plistPath = join(home, "Library", "LaunchAgents", "com.remudero.daemon.plist");
+    const written = readFileSync(plistPath, "utf8");
+    assert.doesNotMatch(written, /--allow-self-target/, "a non-self target never carries the self-target flag");
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;

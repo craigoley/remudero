@@ -5029,7 +5029,7 @@ export async function daemonCommand(rest: string[]): Promise<number> {
  * the daemon would refuse to start it and launchd's KeepAlive would restart it forever. Passing
  * `--allow-self-target` bakes the same explicit consent into the unit's `ProgramArguments`.
  */
-async function daemonPlistCommand(rest: string[]): Promise<number> {
+export async function daemonPlistCommand(rest: string[]): Promise<number> {
   const badArg = unknownArgError("daemon-plist", rest, ["--poll-ms", "--repo"], ["--write", "--allow-self-target"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
