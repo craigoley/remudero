@@ -18,6 +18,7 @@ import { execFileSync } from "node:child_process";
 // property lookups at call time for exactly this reason (test/retro-marker-atomic.test.ts).
 import fsMarker from "node:fs";
 import { dirname } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { appendLedger } from "./ledger.js";
 import type { Lifecycle, LearningEntry } from "./learnings.js";
 import type { Task } from "./plan.js";
@@ -473,6 +474,171 @@ export function assertArchitectAboveWorker(architectModel: string, workerModel: 
 
 // ── The full gather + its rendering ───────────────────────────────────────
 
+// ── MAST-coded verdicts (W1-T89, ratifies P18's mineable core) ─────────────
+//
+// MAST (Cemri et al., NeurIPS 2025 [research: mast-neurips2025]; 1,600+ annotated
+// traces across 7 frameworks, kappa 0.88) names 14 failure modes across 3
+// categories -- specification (~42%), inter-agent misalignment (~37%),
+// verification (~21%). Remudero's ledger verdict classes are a private
+// vocabulary for the same underlying failures; plan/mast-mapping.yaml holds
+// the DETERMINISTIC verdict -> MAST mapping as DATA (Rule 2 -- never
+// LLM-classified). Applied READ-SIDE here, at retro-gather time, so the whole
+// ledger (past and future) codes against the published taxonomy with zero
+// ledger rewrites.
+
+/** One row of plan/mast-mapping.yaml: a ledger verdict class (+ optional
+ *  `subtype` qualifier -- the worker-error subtype off the terminal `verdict`
+ *  ledger line, e.g. `error_max_turns`) coded to one MAST failure mode + its
+ *  category. `provisional` marks a row an open investigation (P23) is still
+ *  refining -- visible in the render, not a distinct code path. */
+export interface MastMappingRow {
+  verdict: string;
+  subtype?: string;
+  mastMode: string;
+  category: string;
+  provisional?: boolean;
+  comment?: string;
+}
+
+/** The whole parsed mapping table -- an ordered list of rows, matched most-specific-first. */
+export interface MastMapping {
+  rows: MastMappingRow[];
+}
+
+/** plan/mast-mapping.yaml is structurally invalid (not a fixture bug, a file bug). */
+export class MastMappingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MastMappingError";
+  }
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Parse + validate raw YAML text into a {@link MastMapping}. Pure (no I/O) so a
+ * test can hand it a fixture string directly, same shape as {@link parseLedger}.
+ * Fails LOUDLY on a malformed row (Rule 2's own discipline: a mapping this
+ * central is trusted to be well-formed, never guessed at by a lenient parser).
+ */
+export function parseMastMapping(yamlText: string): MastMapping {
+  const raw = parseYaml(yamlText);
+  if (!isPlainObject(raw) || !Array.isArray(raw.rows)) {
+    throw new MastMappingError("mast-mapping.yaml must be a mapping with a 'rows' array.");
+  }
+  const rows: MastMappingRow[] = raw.rows.map((row: unknown, i: number) => {
+    if (!isPlainObject(row)) throw new MastMappingError(`mast-mapping.yaml rows[${i}] must be a mapping.`);
+    const { verdict, subtype, mast_mode, category, provisional, comment } = row;
+    if (typeof verdict !== "string" || !verdict) {
+      throw new MastMappingError(`mast-mapping.yaml rows[${i}].verdict must be a non-empty string.`);
+    }
+    if (typeof mast_mode !== "string" || !mast_mode) {
+      throw new MastMappingError(`mast-mapping.yaml rows[${i}].mast_mode must be a non-empty string.`);
+    }
+    if (typeof category !== "string" || !category) {
+      throw new MastMappingError(`mast-mapping.yaml rows[${i}].category must be a non-empty string.`);
+    }
+    if (subtype !== undefined && typeof subtype !== "string") {
+      throw new MastMappingError(`mast-mapping.yaml rows[${i}].subtype must be a string when present.`);
+    }
+    if (provisional !== undefined && typeof provisional !== "boolean") {
+      throw new MastMappingError(`mast-mapping.yaml rows[${i}].provisional must be a boolean when present.`);
+    }
+    return {
+      verdict,
+      ...(typeof subtype === "string" ? { subtype } : {}),
+      mastMode: mast_mode,
+      category,
+      ...(provisional === true ? { provisional: true } : {}),
+      ...(typeof comment === "string" ? { comment } : {}),
+    };
+  });
+  return { rows };
+}
+
+/** Load + parse plan/mast-mapping.yaml (or any path holding the same shape) from disk. */
+export function loadMastMapping(path: string): MastMapping {
+  return parseMastMapping(fsMarker.readFileSync(path, "utf8"));
+}
+
+/**
+ * Find the row coding one run, preferring an exact (verdict, subtype) row over
+ * its bare-verdict sibling -- the "optional qualifiers" plan/mast-mapping.yaml's
+ * design describes. Returns undefined when no row matches at all: the caller
+ * codes that as unmapped, never guesses.
+ */
+export function mastRowFor(mapping: MastMapping, run: Pick<RunSummary, "verdict" | "subtype">): MastMappingRow | undefined {
+  if (run.subtype) {
+    const exact = mapping.rows.find((r) => r.verdict === run.verdict && r.subtype === run.subtype);
+    if (exact) return exact;
+  }
+  return mapping.rows.find((r) => r.verdict === run.verdict && r.subtype === undefined);
+}
+
+/** The per-cycle MAST failure distribution `rmd retro` reports (W1-T89). */
+export interface MastCategoryDistribution {
+  /** category -> count, deterministic key order. `merged` runs are never
+   *  counted here -- success is out of scope for a FAILURE distribution
+   *  (P18's own framing); they never reach {@link mastRowFor} at all. */
+  byCategory: Record<string, number>;
+  /** Every failure verdict the mapping named no row for, as `verdict` (or
+   *  `verdict:subtype` when the run logged a subtype) -> count. Named,
+   *  visible, NEVER silently dropped or folded into a guessed category. */
+  unmapped: Record<string, number>;
+}
+
+function sortedCountRecord(m: Record<string, number>): Record<string, number> {
+  return Object.fromEntries(Object.entries(m).sort(([a], [b]) => (a < b ? -1 : 1)));
+}
+
+/**
+ * Reduce a cycle's runs into a {@link MastCategoryDistribution} against `mapping`.
+ * Pure and deterministic -- the mapping is DATA, so a row edit alone (zero code
+ * changes) flips a fixture's outcome; see mast-mapping.test.ts.
+ */
+export function mastCategoryDistribution(runs: RunSummary[], mapping: MastMapping): MastCategoryDistribution {
+  const byCategory: Record<string, number> = {};
+  const unmapped: Record<string, number> = {};
+  for (const r of runs) {
+    if (r.verdict === "merged") continue;
+    const row = mastRowFor(mapping, r);
+    if (row) {
+      byCategory[row.category] = (byCategory[row.category] ?? 0) + 1;
+    } else {
+      const key = r.subtype ? `${r.verdict}:${r.subtype}` : r.verdict;
+      unmapped[key] = (unmapped[key] ?? 0) + 1;
+    }
+  }
+  return { byCategory: sortedCountRecord(byCategory), unmapped: sortedCountRecord(unmapped) };
+}
+
+/** Render the MAST category table (markdown), with an optional trend column
+ *  against the PRIOR cycle's `byCategory` (the retro marker persists it, W1-T89). */
+export function mastDistributionTable(dist: MastCategoryDistribution, priorByCategory?: Record<string, number>): string {
+  const categories = [...new Set([...Object.keys(dist.byCategory), ...Object.keys(priorByCategory ?? {})])].sort();
+  const rows = categories.map((c) => {
+    const cur = dist.byCategory[c] ?? 0;
+    if (!priorByCategory) return `| ${c} | ${cur} |`;
+    const before = priorByCategory[c] ?? 0;
+    const delta = cur - before;
+    const trend = delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : "±0";
+    return `| ${c} | ${cur} | ${trend} |`;
+  });
+  const unmappedLines = Object.entries(dist.unmapped).map(([k, n]) => `- ${k}: ${n}`);
+  return [
+    priorByCategory ? "| category | count | trend vs prior cycle |" : "| category | count |",
+    priorByCategory ? "|---|---|---|" : "|---|---|",
+    ...(rows.length ? rows : ["| (no coded failures this cycle) | 0 |" + (priorByCategory ? " |" : "")]),
+    "",
+    unmappedLines.length
+      ? "Unmapped verdict classes (named, never guessed):"
+      : "Unmapped verdict classes: (none)",
+    ...unmappedLines,
+  ].join("\n");
+}
+
 export interface RetroGather {
   sinceTs?: string;
   totalRuns: number;
@@ -504,6 +670,15 @@ export interface RetroGather {
    * as a complete/confirmed count while this is set.
    */
   githubUnavailable?: string;
+  /** W1-T89/P18: this cycle's failure distribution BY MAST CATEGORY, mapped
+   *  read-side off `opts.mastMapping` (defaults to an empty table, which
+   *  reports every failure verdict unmapped — a valid, visible degrade, never
+   *  a build failure). */
+  mast: MastCategoryDistribution;
+  /** The PRIOR cycle's `mast.byCategory`, when the retro marker carried one —
+   *  present so `renderGather` can show a trend without re-reading the marker
+   *  itself. Absent on the very first MAST-coded retro. */
+  priorMastCategoryCounts?: Record<string, number>;
 }
 
 /**
@@ -519,6 +694,15 @@ export function buildGather(opts: {
   learningsAtMarker?: number;
   /** GitHub gateway for the SHIPPED union (W1-T51/P9). Omit to fall back ledger-only. */
   github?: ShippedGithub;
+  /** W1-T89/P18: the deterministic verdict -> MAST mapping (plan/mast-mapping.yaml,
+   *  already loaded — buildGather itself never touches disk). Omit ⇒ an empty
+   *  table, so every failure verdict reports unmapped rather than the gather
+   *  refusing to build. */
+  mastMapping?: MastMapping;
+  /** The prior cycle's `RetroGather.mast.byCategory` (the retro marker persists
+   *  it under `mast_category_counts`) — threaded through unchanged for the trend
+   *  column; buildGather never reads the marker itself. */
+  priorMastCategoryCounts?: Record<string, number>;
 }): RetroGather {
   const records = parseLedger(opts.ledgerNdjson);
   const runs = gatherRuns(records);
@@ -550,6 +734,11 @@ export function buildGather(opts: {
     learningsNow: learningsCount(opts.learningsMd),
     learningsAtMarker: opts.learningsAtMarker ?? 0,
     ...(githubUnavailable ? { githubUnavailable } : {}),
+    // W1-T89/P18: SAME `scoped` window as verdicts above (the whole cycle's
+    // runs, not just the merged subset) — a failure distribution over anything
+    // narrower would miss runs mergedSince already excludes by definition.
+    mast: mastCategoryDistribution(scoped, opts.mastMapping ?? { rows: [] }),
+    ...(opts.priorMastCategoryCounts ? { priorMastCategoryCounts: opts.priorMastCategoryCounts } : {}),
   };
 }
 
@@ -625,6 +814,9 @@ export function renderGather(g: RetroGather): string {
     ...(g.discrepancies.length
       ? ["", "## Discrepancies (ledger vs GitHub — every gate-side addition and rejected foreign trailer)", ...g.discrepancies.map((d) => `- ${d}`)]
       : []),
+    "",
+    "## Failure distribution BY MAST CATEGORY (W1-T89, ratifies P18 — plan/mast-mapping.yaml)",
+    mastDistributionTable(g.mast, g.priorMastCategoryCounts),
     "",
     renderDegradedSuccess(g.degradedSuccess),
     "",
@@ -1447,6 +1639,11 @@ export interface RetroMarker {
   ts: string;
   learnings_count: number;
   runs_seen: number;
+  /** W1-T89/P18: this cycle's `RetroGather.mast.byCategory`, carried forward so
+   *  the NEXT retro's render can show a trend column. Optional/backward-compatible
+   *  — a marker written before this field existed just yields no trend, never a
+   *  parse failure (loadMarker below does no schema validation on this key). */
+  mast_category_counts?: Record<string, number>;
 }
 
 /**
