@@ -57,7 +57,13 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   defaultSynthesizeDraft,
   lintPlanCommand,
   main,
+  alertFixCommand,
+  dispatchAlertFixRun,
+  type AlertFixCommandDeps,
+  type AlertFixDispatchDeps,
 } from "../src/run-task.js";
+import type { AlertLaneAlert } from "../src/lib/alert-lane.js";
+import type { AlertGateway } from "../src/lib/ops.js";
 import { realOnboardFsDeps, type Inventory, type OnboardGhGateway } from "../src/lib/onboard/inventory.js";
 import type { Candidate } from "../src/lib/onboard/recon.js";
 import { realReconFsDeps, type ReconGhGateway } from "../src/lib/onboard/recon.js";
@@ -4195,4 +4201,250 @@ test("readlineAsk: a numeric reply resolves to that candidate answer; free text 
 
   const outOfRange = await readlineAsk(question, { input: Readable.from(["9\n"]), output: sink() });
   assert.equal(outOfRange, "9", "a numeric out of range is not a candidate index — kept verbatim");
+});
+
+// ── W1-T90: dispatchAlertFixRun / alertFixCommand — the alert-fix lane's own CLI wiring, driven ──
+// over injected AlertFixDispatchDeps/AlertFixCommandDeps so every branch (success/no-PR/error,
+// dry-run/real, bad-arg) is a unit fixture, never a real `git worktree`/`gh`/Agent-SDK spawn —
+// the SAME fake-the-boundary shape withMaterializedWorktree's injected `remove` and
+// defaultReconRunLens's injected `spawn` already use in this file.
+
+const ALERT_FIX_MEDIUM_ALERT: AlertLaneAlert = {
+  source: "code-scanning",
+  id: "301",
+  severity: "medium",
+  state: "open",
+  createdAt: "2026-07-20T00:00:00Z",
+  summary: "unused variable",
+  url: "https://github.com/craigoley/remudero/security/code-scanning/301",
+  path: "src/lib/some-non-critical-file.ts",
+};
+
+const ALERT_FIX_CRITICAL_ALERT: AlertLaneAlert = {
+  source: "dependabot",
+  id: "302",
+  severity: "critical",
+  state: "open",
+  createdAt: "2026-07-20T00:00:00Z",
+  summary: "critical dependency vuln",
+  url: "https://github.com/craigoley/remudero/security/dependabot/302",
+};
+
+function fakeAlertFixWorkerResult(text: string): WorkerResult {
+  return {
+    sessionId: "s-alert-fix",
+    costUsd: 0.01,
+    numTurns: 1,
+    text,
+    blocks: [],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "default",
+    effort: "default",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+  } as unknown as WorkerResult;
+}
+
+const ALERT_FIX_MOUNT: Mount = { model: "fake-model", effort: "low", maxTurns: 5, contextBudget: 1000 };
+
+function fakeAlertFixDispatchDeps(overrides: Partial<AlertFixDispatchDeps> = {}): {
+  deps: AlertFixDispatchDeps;
+  calls: { worktreeAdd: unknown[][]; worktreeRemove: unknown[][]; ensureTaskTrailer: unknown[][] };
+} {
+  const calls = { worktreeAdd: [] as unknown[][], worktreeRemove: [] as unknown[][], ensureTaskTrailer: [] as unknown[][] };
+  const deps: AlertFixDispatchDeps = {
+    worktreeAdd: (...args) => {
+      calls.worktreeAdd.push(args);
+    },
+    worktreeRemove: (...args) => {
+      calls.worktreeRemove.push(args);
+    },
+    renderWorkerSettings: () => "/tmp/fake-settings.json",
+    loadMounts: () => ({}) as never,
+    resolveMount: () => ALERT_FIX_MOUNT,
+    spawn: async () => fakeAlertFixWorkerResult("REPORT\nPR_URL: https://github.com/craigoley/remudero/pull/999\n"),
+    ensureTaskTrailer: (...args) => {
+      calls.ensureTaskTrailer.push(args);
+    },
+    ...overrides,
+  };
+  return { deps, calls };
+}
+
+test("dispatchAlertFixRun: a successful worker with a PR_URL logs dispatching/dispatched_worker/pr_opened and ensures the task trailer", async () => {
+  const root = mkdtempSync(join(tmpdir(), "alert-fix-dispatch-ok-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  const { deps, calls } = fakeAlertFixDispatchDeps();
+  const config = { root } as Config;
+
+  await dispatchAlertFixRun("craigoley", "remudero", config, ALERT_FIX_MEDIUM_ALERT, ledgerPath, "ALERT-FIX-TEST-1", deps);
+
+  const lines = readFileSync(ledgerPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const steps = lines.map((l) => l.step);
+  assert.ok(steps.includes("alert-fix.dispatching"));
+  assert.ok(steps.includes("alert-fix.dispatched_worker"));
+  assert.ok(steps.includes("alert-fix.pr_opened"));
+  assert.equal(calls.worktreeAdd.length, 1, "exactly one worktree add");
+  assert.equal(calls.worktreeRemove.length, 1, "the worktree is torn down exactly once");
+  assert.equal(calls.ensureTaskTrailer.length, 1);
+  assert.equal(calls.ensureTaskTrailer[0][0], "https://github.com/craigoley/remudero/pull/999");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("dispatchAlertFixRun: a worker that opens no PR logs alert-fix.no_pr and never calls ensureTaskTrailer", async () => {
+  const root = mkdtempSync(join(tmpdir(), "alert-fix-dispatch-nopr-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  const { deps, calls } = fakeAlertFixDispatchDeps({
+    spawn: async () => fakeAlertFixWorkerResult("no report here, just prose"),
+  });
+  const config = { root } as Config;
+
+  await dispatchAlertFixRun("craigoley", "remudero", config, ALERT_FIX_MEDIUM_ALERT, ledgerPath, "ALERT-FIX-TEST-2", deps);
+
+  const lines = readFileSync(ledgerPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.ok(lines.some((l) => l.step === "alert-fix.no_pr"));
+  assert.equal(calls.ensureTaskTrailer.length, 0, "no PR_URL means the trailer helper is never called");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("dispatchAlertFixRun: a worktreeAdd failure is caught, logs alert-fix.error, and STILL tears down the worktree (best-effort finally)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "alert-fix-dispatch-err-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  const { deps, calls } = fakeAlertFixDispatchDeps({
+    worktreeAdd: () => {
+      throw new Error("worktree add boom");
+    },
+  });
+  const config = { root } as Config;
+
+  await dispatchAlertFixRun("craigoley", "remudero", config, ALERT_FIX_MEDIUM_ALERT, ledgerPath, "ALERT-FIX-TEST-3", deps);
+
+  const lines = readFileSync(ledgerPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const errLine = lines.find((l) => l.step === "alert-fix.error");
+  assert.ok(errLine, "the thrown worktreeAdd error is caught and logged");
+  assert.match(String(errLine?.error), /worktree add boom/);
+  assert.equal(calls.worktreeRemove.length, 1, "teardown still runs even though setup failed");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("alertFixCommand: an unknown flag fails loud before any config/gh work — exit 2", async (t) => {
+  const errSpy = t.mock.method(console, "error", () => {});
+  const code = await alertFixCommand(["--bogus"], {
+    resolveOwnerRepo: () => {
+      throw new Error("must not be called — arg parsing fails first");
+    },
+  });
+  assert.equal(code, 2);
+  assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /--bogus/);
+});
+
+function fakeAlertGateway(alerts: AlertLaneAlert[]): AlertGateway {
+  return {
+    codeScanning: (_o, _r) => alerts.filter((a) => a.source === "code-scanning"),
+    dependabot: (_o, _r) => alerts.filter((a) => a.source === "dependabot"),
+    secretScanning: (_o, _r) => alerts.filter((a) => a.source === "secret-scanning"),
+  };
+}
+
+test("alertFixCommand --dry-run: previews every open alert's disposition and dispatches/escalates nothing", async (t) => {
+  const logSpy = t.mock.method(console, "log", () => {});
+  const code = await alertFixCommand(["--dry-run"], {
+    config: { root: mkdtempSync(join(tmpdir(), "alert-fix-cmd-cfg-")) } as Config,
+    resolveOwnerRepo: () => ({ owner: "craigoley", repo: "remudero" }),
+    gateway: fakeAlertGateway([ALERT_FIX_MEDIUM_ALERT, ALERT_FIX_CRITICAL_ALERT]),
+    dispatch: async () => {
+      throw new Error("must not be called in --dry-run");
+    },
+    escalate: () => {
+      throw new Error("must not be called in --dry-run");
+    },
+  });
+  assert.equal(code, 0);
+  const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
+  assert.match(printed, /code-scanning#301 \[medium\] -> act/);
+  assert.match(printed, /dependabot#302 \[critical\] -> escalate/);
+});
+
+test("alertFixCommand --dry-run: zero open alerts prints 'no open alerts'", async (t) => {
+  const logSpy = t.mock.method(console, "log", () => {});
+  const code = await alertFixCommand(["--dry-run"], {
+    config: { root: mkdtempSync(join(tmpdir(), "alert-fix-cmd-cfg-")) } as Config,
+    resolveOwnerRepo: () => ({ owner: "craigoley", repo: "remudero" }),
+    gateway: fakeAlertGateway([]),
+  });
+  assert.equal(code, 0);
+  assert.match(logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /no open alerts/);
+});
+
+test("alertFixCommand: a real (non-dry-run) pass dispatches the 'act' alert, escalates the 'escalate' alert, and prints the tally", async (t) => {
+  const logSpy = t.mock.method(console, "log", () => {});
+  const dispatched: AlertLaneAlert[] = [];
+  const escalated: AlertLaneAlert[] = [];
+  const root = mkdtempSync(join(tmpdir(), "alert-fix-cmd-real-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+
+  const code = await alertFixCommand([], {
+    config: { root } as Config,
+    resolveOwnerRepo: () => ({ owner: "craigoley", repo: "remudero" }),
+    gateway: fakeAlertGateway([ALERT_FIX_MEDIUM_ALERT, ALERT_FIX_CRITICAL_ALERT]),
+    ledgerPath,
+    runId: "ALERT-FIX-CMD-TEST",
+    dispatch: async (alert) => {
+      dispatched.push(alert);
+    },
+    escalate: (alert) => {
+      escalated.push(alert);
+      return "https://github.com/craigoley/remudero/issues/1";
+    },
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(dispatched.map((a) => a.id), ["301"]);
+  assert.deepEqual(escalated.map((a) => a.id), ["302"]);
+  const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
+  assert.match(printed, /dispatched 1 · escalated 1/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+class AlertFixProcessExitCalled extends Error {
+  constructor(public code: number | undefined) {
+    super(`process.exit(${code})`);
+  }
+}
+
+test("main(): `rmd alert-fix` with an unknown flag dispatches to alertFixCommand and exits 2 (fail loud, no fs/gh work)", async (t) => {
+  const exitMock = ((code?: number): never => {
+    throw new AlertFixProcessExitCalled(code);
+  }) as typeof process.exit;
+  t.mock.method(process, "exit", exitMock);
+  const errSpy = t.mock.method(console, "error", () => {});
+  t.mock.method(console, "log", () => {});
+
+  const originalArgv = process.argv;
+  process.argv = ["node", "run-task.js", "alert-fix", "--bogus"];
+  const originalGuardEnv = process.env[SELF_SYNC_GUARD_ENV];
+  process.env[SELF_SYNC_GUARD_ENV] = "1";
+  try {
+    let caught: unknown;
+    await main().catch((e) => {
+      caught = e;
+    });
+    assert.ok(caught instanceof AlertFixProcessExitCalled, "main() must reach process.exit via alertFixCommand's return value");
+    assert.equal((caught as AlertFixProcessExitCalled).code, 2);
+    assert.match(errSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n"), /--bogus/);
+  } finally {
+    process.argv = originalArgv;
+    if (originalGuardEnv === undefined) {
+      delete process.env[SELF_SYNC_GUARD_ENV];
+    } else {
+      process.env[SELF_SYNC_GUARD_ENV] = originalGuardEnv;
+    }
+  }
 });

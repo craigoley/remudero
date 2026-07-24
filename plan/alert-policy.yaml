@@ -1,0 +1,37 @@
+# plan/alert-policy.yaml — the alert-fix lane's policy AS DATA (W1-T90, ratifies P20,
+# MASTER-PLAN.md:686). Read by src/lib/alert-lane.ts's loadAlertPolicy/validateAlertPolicy
+# (parsed with the SAME `yaml` package + load-and-validate shape .remudero/mounts.yaml uses),
+# consumed by decideAlertDisposition/runAlertLane — this file is DATA, never LLM-classified
+# (rule 2). Editing this file, alone, changes what the lane does; no code change required.
+#
+# act_severities: the severities eligible for "act" (an ephemeral, policy-matched lane fix
+# run). Every OTHER known severity ("critical", "high") and any UNKNOWN severity always
+# escalates — fail-closed, mirroring dep-review.ts's "unknown bump level -> escalate".
+act_severities:
+  - medium
+  - low
+
+# critical_paths: the gate/containment-critical path set P20's own text names explicitly —
+# "review, gate, containment, ledger, and status paths are IN it". A medium/low alert whose
+# path matches ANY glob below escalates regardless of severity; a path this repo's alert
+# APIs did not report (see alert-lane.ts's AlertLaneAlert doc) counts as OUTSIDE this set —
+# only severity can force escalate when no path is known. `*` is the only wildcard
+# (matches any run of characters), matched against the whole path.
+#
+# Every category below MUST stay non-empty (validated at load) — a category with zero globs
+# would silently stop gating that surface. `review` MUST include src/lib/review.ts verbatim:
+# the GOLDEN fixture path P20's own text names, and this repo's second deterministic judge
+# (the task-acceptance reviewer) — an alert-fix lane worker touching its OWN judge is exactly
+# the case this policy exists to keep out of the unattended act path.
+critical_paths:
+  review:
+    - "src/lib/review.ts"
+  gate:
+    - "src/lib/gate*.ts"
+  containment:
+    - "src/lib/containment*.ts"
+    - "src/lib/isolation*.ts"
+  ledger:
+    - "src/lib/ledger.ts"
+  status:
+    - "src/lib/status.ts"
