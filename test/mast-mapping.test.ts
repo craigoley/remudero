@@ -132,6 +132,10 @@ test("parseMastMapping: fails LOUDLY on a structurally invalid file, never silen
   assert.throws(() => parseMastMapping("rows:\n  - verdict: x\n    category: y\n"), /mast_mode/);
   assert.throws(() => parseMastMapping("rows:\n  - verdict: x\n    mast_mode: y\n"), /category/);
   assert.throws(() => parseMastMapping("rows:\n  - verdict: x\n    mast_mode: y\n    category: z\n    provisional: yes\n"), /provisional/);
+  assert.throws(
+    () => parseMastMapping("rows:\n  - verdict: x\n    subtype: 1\n    mast_mode: y\n    category: z\n"),
+    /subtype/,
+  );
 });
 
 test("plan/mast-mapping.yaml (the real committed file) parses cleanly and every row is well-formed", () => {
