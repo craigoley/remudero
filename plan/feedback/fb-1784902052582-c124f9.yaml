@@ -1,0 +1,25 @@
+id: fb-1784902052582-c124f9
+ts: 2026-07-24T14:07:32.583Z
+raw: "CONSOLE FRESHNESS IS INCOHERENT — one header renders three disagreeing
+  indicators (operator screenshot 2026-07-24 ~10:00 local): 'updated 10:00:42 AM
+  · 11s ago' + 'live · updated 5s ago' + 'STALE — showing last known data as of
+  12:03:09 PM · 5h ago', and the arithmetic is impossible (5h before 10:00 AM is
+  5:00 AM; if 12:03 is UTC it is ~2h; if yesterday-local, ~22h — the absolute
+  stamp, relative age, and staleness state cannot all be true). Also observed:
+  header tally '2 running' while NOW renders one run; the running card reads
+  spend $0.000 / 0 turns at elapsed 2m51s (progress source unwired or unflushed,
+  zeros rendered as fact); and a needs-me card links issue #113, a two-week-old
+  number, suggesting a link-construction defect. NEED, one freshness model:
+  every pane declares the source it renders and THAT source's age; a STALE
+  banner keys only on the pane's own source and never co-displays with live;
+  absolute and relative times computed from one clock with the timezone labeled;
+  run progress reads the live ledger for the run id and renders 'no data yet' as
+  such, never zeros; tallies and rendered rows derive from the same query.
+  Verify each chip's current source from serve.ts at implementation. Siblings:
+  cf7c24 (tabs/plain language) owns the body's structure, e025c1 the cards'
+  truth, the review-pending filing the checks' visibility — this one owns the
+  header's honesty."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
