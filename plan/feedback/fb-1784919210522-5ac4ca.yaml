@@ -1,0 +1,24 @@
+id: fb-1784919210522-5ac4ca
+ts: 2026-07-24T18:53:30.522Z
+raw: "RMD STATUS — the operator has no single verb answering: is it running,
+  what is it doing, why is it stalled. Three incidents on 07-24 alone where it
+  would have been question one: a DEPLOY_FAILED latch sat invisible ~17h while
+  the daemon ran stale code; a crash-loop (LastExitStatus=256) read as 'queue
+  not processing' until launchctl+ledger archaeology found it; four spurious
+  re-dispatches burned money invisibly. NEED: rmd status renders one
+  plain-language board — LIVENESS (daemon/serve/supervisor PIDs, boot time,
+  running HEAD vs origin/main with a STALE flag), LATCHES (every state flag with
+  age and stated consequence), LAST CYCLE (daemon.summary:
+  attempted/merged/stopDetail/cost), BLOCKERS BY CLASS (circuit-broken with
+  reset ETA, dispatch.indeterminate with the gh-window note, blocked PRs by
+  classified surface per the paramedic vocabulary), QUEUE HEAD (next
+  dispatchables; perpetual-attempt items flagged with per-cycle cost), INBOX
+  (READY/not-ready counts), HEADROOM (telemetry line + enforcement on/off per
+  fb-1784894405468-a4153e). Each section ends with the single next action if one
+  exists. --json for the console Now tab (fb-1784770111145-cf7c24). Siblings:
+  fb-1784842083584-6cc22a acts, this reads; the named-reason doctrine is the
+  vocabulary it renders."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
