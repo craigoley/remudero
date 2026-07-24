@@ -31,14 +31,19 @@ function invocationCount(stateFile: string): number {
   return Number(readFileSync(stateFile, "utf8").trim() || "0");
 }
 
-function runWrapper(mode: string, opts: { testName?: string; env?: Record<string, string> } = {}) {
+function runWrapper(
+  mode: string,
+  opts: { testName?: string; format?: string; env?: Record<string, string> } = {},
+) {
   const stateFile = newStateFile();
   const testName = opts.testName ?? "sample flaky test";
-  const result = spawnSync(
-    process.execPath,
-    [SCRIPT, process.execPath, FIXTURE, "--mode", mode, "--state-file", stateFile, "--test-name", testName],
-    { cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, ...opts.env } },
-  );
+  const args = [SCRIPT, process.execPath, FIXTURE, "--mode", mode, "--state-file", stateFile, "--test-name", testName];
+  if (opts.format) args.push("--format", opts.format);
+  const result = spawnSync(process.execPath, args, {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    env: { ...process.env, ...opts.env },
+  });
   return { ...result, invocations: invocationCount(stateFile) };
 }
 
@@ -73,6 +78,33 @@ test("test-with-retry: TEST_RETRY=0 disables the retry -- the same flake-once su
   const output = r.stdout + r.stderr;
   assert.notEqual(r.status, 0, output);
   assert.equal(r.invocations, 1, `TEST_RETRY=0 must stop after the first attempt, no retry spawn: ${output}`);
+});
+
+test("test-with-retry: recognizes the `spec` reporter's ✖-prefixed failing-test line (coverage job's dual-reporter shape), not just TAP", () => {
+  const r = runWrapper("flake-once", { testName: "spec-format widget test", format: "spec" });
+  const output = r.stdout + r.stderr;
+  assert.equal(r.status, 0, output);
+  assert.equal(r.invocations, 2, `a recovered flake must be spawned exactly twice: ${output}`);
+  assert.match(
+    r.stdout ?? "",
+    /FLAKE-RETRY: first attempt failed — .*spec-format widget test/,
+    "the spec-reporter's ✖ line must be parsed into the flake record just like TAP's not-ok line",
+  );
+});
+
+test("test-with-retry: forwards the child's stderr live (not just stdout) -- a failing attempt's stderr diagnostics reach the CI log", () => {
+  const r = runWrapper("deterministic-fail", { testName: "stderr-forwarding test" });
+  assert.match(
+    r.stderr ?? "",
+    /fake-suite: stderr-forwarding test failed on invocation \d+ \(stderr diagnostic\)/,
+    `the wrapper must forward the child's stderr chunks, not swallow them: ${r.stdout}${r.stderr}`,
+  );
+});
+
+test("test-with-retry: with no command given, prints a usage message and exits 2 -- no attempt is spawned at all", () => {
+  const result = spawnSync(process.execPath, [SCRIPT], { cwd: REPO_ROOT, encoding: "utf8" });
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stderr ?? "", /usage: test-with-retry\.mjs <command> \[args\.\.\.\]/);
 });
 
 test("test-with-retry: FLAKE-RETRY evidence is also appended to $GITHUB_STEP_SUMMARY when set, not just printed to stdout", () => {
