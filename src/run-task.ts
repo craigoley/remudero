@@ -111,7 +111,13 @@ import {
   type IssueGateway,
 } from "./lib/escalate.js";
 import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
-import { ghAlertGateway, pollAlerts, renderAlertsSummary } from "./lib/ops.js";
+import { alertOriginId, alertTaskId, buildAlertEscalation, ghAlertGateway, pollAlerts, renderAlertsSummary } from "./lib/ops.js";
+import {
+  decideAlertDisposition,
+  loadAlertPolicy,
+  runAlertLane,
+  type AlertLaneAlert,
+} from "./lib/alert-lane.js";
 import { ghIssueListGateway, pollIssues, renderIssuesSummary } from "./lib/issues-intake.js";
 import { loadManagedRepos, ManagedReposError } from "./lib/managed-repos.js";
 import {
@@ -7524,6 +7530,178 @@ async function opsCommand(rest: string[]): Promise<number> {
 }
 
 /**
+ * The ephemeral fix-run worker's prompt (W1-T90) — mirrors the retro/triage prompts' own
+ * "harness eats first" split: the WORKER only fixes the alert and opens its own PR through the
+ * normal contract (`Acceptance:`/`Remudero-Task:` trailer, `PR_URL:` REPORT line); this command
+ * owns the worktree/spawn/teardown mechanics deterministically, so an LLM can never skip the
+ * contract or scope-creep past the one named alert.
+ */
+function alertFixPrompt(alert: AlertLaneAlert, taskId: string): string {
+  return [
+    "You are a REMUDERO fix worker dispatched by the alert-fix lane (W1-T90, MASTER-PLAN P20, §5D lane 2).",
+    "Fix EXACTLY ONE thing: the alert named below. Do not scope-creep into unrelated changes.",
+    "",
+    `Alert: ${alert.source} #${alert.id} [${alert.severity}]`,
+    `Summary: ${alert.summary}`,
+    alert.url ? `Link: ${alert.url}` : undefined,
+    alert.path ? `Path: ${alert.path}` : undefined,
+    "",
+    "This alert was matched by policy (plan/alert-policy.yaml) as safe to auto-fix: severity is",
+    "medium or low, AND outside the gate/containment-critical path set. Make the minimal, correct fix.",
+    "",
+    "Then, from the working directory:",
+    "- git add the changed files && commit with a concise message;",
+    "- `git push origin HEAD` (NOT -u);",
+    "- open a PR: `gh pr create --fill --base main`. The PR body MUST include:",
+    "  - an `Acceptance:` block of `- <claim> | <proof>` bullets covering the fix;",
+    `  - \`origin: alert#${alertOriginId(alert)}\` naming this alert's provenance;`,
+    `  - as the LAST body line: \`Remudero-Task: ${taskId}\`.`,
+    "- End your REPORT with exactly: PR_URL: <the pull request url>",
+  ]
+    .filter((l): l is string => l !== undefined)
+    .join("\n");
+}
+
+/**
+ * The real `deps.dispatch` effect {@link runAlertLane} calls for an "act" disposition (W1-T90) —
+ * a MINIMAL analog of `buildSweepEffects`'s `dispatchFix` (~line 5546): a fresh branch off
+ * `origin/main`, a fresh worker settings file, ONE `spawnWorker` call, teardown. Deliberately
+ * NOT `dispatchFix`'s full machinery (no existing task/PR/branch to reuse, no fix-rung strikes —
+ * this is a BRAND NEW ephemeral run, never a fix on an existing task's branch): the worker owns
+ * its own commit/push/PR-open steps (mirrors the retro/triage workers' prompts) via
+ * {@link alertFixPrompt}; this function only spawns it and tears the worktree down after.
+ */
+async function dispatchAlertFixRun(
+  owner: string,
+  repo: string,
+  config: Config,
+  alert: AlertLaneAlert,
+  ledgerPath: string,
+  runId: string,
+): Promise<void> {
+  const originId = alertOriginId(alert);
+  const taskId = alertTaskId(alert);
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, ...extra });
+
+  const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
+  const branch = `alert-fix-${originId}-${Date.now()}`;
+  const worktreePath = join(worktreesDir(config), branch);
+  try {
+    worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+    const settingsFile = renderWorkerSettings({
+      templatePath: join(repoRoot, "settings", "worker.json"),
+      hooksDir: join(repoRoot, "hooks"),
+      outPath: join(config.root, "tmp", `alert-fix-settings-${taskId}-${Date.now()}.json`),
+    });
+    const mountsTable = loadMounts(mountsPath(repoRoot));
+    // W1-T90 rides the SAME "fix" task_type mounts.yaml already routes (§9) — this ephemeral run
+    // is scoped down to a single-alert fix, the same shape a fix-rung strike already is. Risk
+    // band is pinned at "medium": policy already confined this dispatch to a non-critical-path,
+    // medium/low-severity alert (decideAlertDisposition), so a "low"/"high" spend band would
+    // either under- or over-provision every dispatch identically — "medium" is the accurate
+    // single band for the whole act-eligible severity range this lane ever dispatches.
+    const fixMount: Mount = resolveMount(mountsTable, "fix", "medium");
+
+    log("alert-fix.dispatching", { branch, mount: fixMount.model });
+    const worker = await spawnWorker({
+      cwd: worktreePath,
+      permissionMode: "bypassPermissions",
+      settingsFile,
+      model: fixMount.model,
+      effort: fixMount.effort,
+      maxTurns: fixMount.maxTurns,
+      maxBudgetUsd: DEFAULT_BUDGET_USD,
+      config,
+      prompt: alertFixPrompt(alert, taskId),
+    });
+    log("alert-fix.dispatched_worker", {
+      session_id: worker.sessionId,
+      subtype: worker.subtype,
+      ...workerLedgerFields(worker),
+    });
+
+    const report = parseReport([worker.text, worker.blocks.join("\n")].join("\n"));
+    if (report?.prUrl) {
+      ensureTaskTrailer(report.prUrl, taskId);
+      log("alert-fix.pr_opened", { pr_url: report.prUrl, origin: `alert#${originId}` });
+    } else {
+      log("alert-fix.no_pr", { subtype: worker.subtype });
+    }
+  } catch (e) {
+    log("alert-fix.error", { error: String((e as Error)?.message ?? e) });
+  } finally {
+    try {
+      worktreeRemove(repoDir, worktreePath);
+    } catch {
+      /* best-effort cleanup */
+    }
+  }
+}
+
+/**
+ * `rmd alert-fix [--repo <name>] [--dry-run]` — the alert-fix lane's real CLI wiring (W1-T90,
+ * ratifies P20, MASTER-PLAN.md:686 — §5D lane 2's dep-review precedent, applied to scanners).
+ *
+ * Fetches every OPEN alert via the SAME `ghAlertGateway()` `rmd ops` already uses (ops.ts,
+ * W1-T55), loads `plan/alert-policy.yaml` (data, rule 2 — no LLM ever decides act-vs-escalate),
+ * and runs {@link runAlertLane} (src/lib/alert-lane.ts): a policy-matched "act" dispatches ONE
+ * ephemeral, lane-owned fix run through the full [ci, remudero-review] gate (never a per-item
+ * `plan/tasks.yaml` write — rule 15, the lane owns its run shape exactly like `rmd dep-review`);
+ * a critical/high or gate-critical-path alert escalates via the SAME `escalate()`/
+ * `buildAlertEscalation` machinery `rmd ops`'s own critical/high poll uses, sharing ONE
+ * escalation-ledger dedup namespace so an alert already escalated by `rmd ops` is never
+ * escalated again here (and vice versa) — see alert-lane.ts's own module doc.
+ *
+ * `--dry-run` previews every open alert's disposition; escalates/dispatches NOTHING.
+ */
+async function alertFixCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("alert-fix", rest, ["--repo"], ["--dry-run"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const dryRun = rest.includes("--dry-run");
+  const config = loadConfig();
+  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const self = resolveOwnerRepo();
+  const repo = flagValue(rest, "--repo") ?? self.repo;
+  const owner = self.owner;
+  const runId = `ALERT-FIX-${Date.now()}`;
+
+  const policy = loadAlertPolicy(join(repoRoot, "plan", "alert-policy.yaml"));
+  const gateway = ghAlertGateway();
+  const open: AlertLaneAlert[] = [
+    ...gateway.codeScanning(owner, repo),
+    ...gateway.dependabot(owner, repo),
+    ...gateway.secretScanning(owner, repo),
+  ].filter((a) => a.state === "open");
+
+  if (dryRun) {
+    const previews = open.map((a) => `  ${a.source}#${a.id} [${a.severity}] -> ${decideAlertDisposition(a, policy)}`);
+    console.log(
+      `### rmd alert-fix --dry-run — ${owner}/${repo}\n` + (previews.length ? previews.join("\n") : "no open alerts"),
+    );
+    return 0;
+  }
+
+  const result = await runAlertLane(open, policy, {
+    ledgerPath,
+    runId,
+    escalate: async (alert) =>
+      escalate(buildAlertEscalation(alert), { issues: ghIssueGateway(owner, repo), ledgerPath, runId }),
+    dispatch: async (alert) => dispatchAlertFixRun(owner, repo, config, alert, ledgerPath, runId),
+  });
+
+  console.log(
+    `### rmd alert-fix — ${owner}/${repo}\n` +
+      `dispatched ${result.dispatched.length} · escalated ${result.escalated.length} · ` +
+      `skipped(dup-dispatch) ${result.skippedDuplicateDispatch.length} · skipped(dup-escalate) ${result.skippedDuplicateEscalate.length}`,
+  );
+  return 0;
+}
+
+/**
  * `rmd issues [--dry-run]` — issues intake (W1-T57, MASTER-PLAN §5D lane 3): poll open issues
  * for every repo in `.remudero/managed-repos.json` via `gh api` (lib/issues-intake.ts), create a
  * `plan/feedback/<id>.yaml` entry (origin: `issue#<n>`) for each one not already captured, and
@@ -8490,6 +8668,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd ops [--dry-run]   # alert intake v0+v1 (W1-T55/W1-T56, §5D lane 2, §7B): poll code-scanning/Dependabot/secret-scanning alerts for this repo via gh api, fold open counts+ages into the next digest, escalate every NEW critical/high alert exactly once (needs-human, ledger-deduped so a re-poll never double-escalates), and capture a plan/feedback/<id>.yaml entry (origin: alert#<source>-<id>) for every open alert not already captured, any severity, for rmd triage to ground; id-deduped so a re-poll never double-creates; --dry-run previews, opens no issues, creates no feedback",
   },
   {
+    name: "alert-fix",
+    usage:
+      "rmd alert-fix [--repo <name>] [--dry-run]   # the alert-fix lane (W1-T90, ratifies P20, §5D lane 2's dep-review precedent): a deterministic policy (plan/alert-policy.yaml, data — no LLM ever) decides act-vs-escalate per open alert; act (severity medium/low, path outside the gate/containment-critical set) dispatches ONE ephemeral lane-owned fix run through the full [ci, remudero-review] gate, ledger-deduped so a re-poll never re-dispatches; escalate (critical/high/unknown severity, or a gate-critical path) opens a MANUAL needs-human issue via the SAME escalation-ledger namespace `rmd ops`'s own critical/high poll uses, so neither lane double-escalates the other's alert; never writes plan/tasks.yaml (rule 15); --dry-run previews every open alert's disposition, dispatches/escalates nothing",
+  },
+  {
     name: "issues",
     usage:
       "rmd issues [--dry-run]   # issues intake (W1-T57, §5D lane 3): poll open issues for every repo in .remudero/managed-repos.json via gh api, create a plan/feedback/<id>.yaml entry (origin: issue#<n>) for each one not already captured, fold an issues-reviewed count into the next digest; id-deduped so a re-poll never double-creates; --dry-run previews, creates nothing",
@@ -8709,6 +8892,9 @@ export async function main(
   }
   if (cmd === "ops") {
     process.exit(await opsCommand(rest));
+  }
+  if (cmd === "alert-fix") {
+    process.exit(await alertFixCommand(rest));
   }
   if (cmd === "issues") {
     process.exit(await issuesCommand(rest));

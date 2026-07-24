@@ -39,6 +39,7 @@ usage:
   rmd digest [--since <iso>] [--dry-run]   # roll up the ledger into one daily digest message
   rmd digest-plist [--hour <h>] [--write]   # generate the launchd unit for the daily `rmd digest` pulse (W1-T112, the W1-T12b generator pattern) — StartCalendarInterval at <h>:00 local time (default 8); commissioning (launchctl load) is an operator action
   rmd ops [--dry-run]   # alert intake v0+v1 (W1-T55/W1-T56, §5D lane 2, §7B): poll code-scanning/Dependabot/secret-scanning alerts for this repo via gh api, fold open counts+ages into the next digest, escalate every NEW critical/high alert exactly once (needs-human, ledger-deduped so a re-poll never double-escalates), and capture a plan/feedback/<id>.yaml entry (origin: alert#<source>-<id>) for every open alert not already captured, any severity, for rmd triage to ground; id-deduped so a re-poll never double-creates; --dry-run previews, opens no issues, creates no feedback
+  rmd alert-fix [--repo <name>] [--dry-run]   # the alert-fix lane (W1-T90, ratifies P20, §5D lane 2's dep-review precedent): a deterministic policy (plan/alert-policy.yaml, data — no LLM ever) decides act-vs-escalate per open alert; act (severity medium/low, path outside the gate/containment-critical set) dispatches ONE ephemeral lane-owned fix run through the full [ci, remudero-review] gate, ledger-deduped so a re-poll never re-dispatches; escalate (critical/high/unknown severity, or a gate-critical path) opens a MANUAL needs-human issue via the SAME escalation-ledger namespace `rmd ops`'s own critical/high poll uses, so neither lane double-escalates the other's alert; never writes plan/tasks.yaml (rule 15); --dry-run previews every open alert's disposition, dispatches/escalates nothing
   rmd issues [--dry-run]   # issues intake (W1-T57, §5D lane 3): poll open issues for every repo in .remudero/managed-repos.json via gh api, create a plan/feedback/<id>.yaml entry (origin: issue#<n>) for each one not already captured, fold an issues-reviewed count into the next digest; id-deduped so a re-poll never double-creates; --dry-run previews, creates nothing
   rmd init [--tier <pro|max5x|max20x>] [--yes]   # headless-safe first-run tier wizard
   rmd project init <repo> [--profile ts-node|ts-web|python|dotnet] --coverage-pct <n> --branches-pct <n> --mutation-pct <n> --dup-pct <n>   # fleet-inheritance onboarding primitive (W1-T27): generates the whole gate stack (workflows/configs/SECURITY.md/.remudero/principles.yaml) plus the branch-protection payload for a target repo; prints the file list + manual next steps, does not push/PR/arm protection itself
@@ -249,6 +250,14 @@ rmd ops [--dry-run]
 ```
 
 alert intake v0+v1 (W1-T55/W1-T56, §5D lane 2, §7B): poll code-scanning/Dependabot/secret-scanning alerts for this repo via gh api, fold open counts+ages into the next digest, escalate every NEW critical/high alert exactly once (needs-human, ledger-deduped so a re-poll never double-escalates), and capture a plan/feedback/<id>.yaml entry (origin: alert#<source>-<id>) for every open alert not already captured, any severity, for rmd triage to ground; id-deduped so a re-poll never double-creates; --dry-run previews, opens no issues, creates no feedback
+
+### `rmd alert-fix`
+
+```
+rmd alert-fix [--repo <name>] [--dry-run]
+```
+
+the alert-fix lane (W1-T90, ratifies P20, §5D lane 2's dep-review precedent): a deterministic policy (plan/alert-policy.yaml, data — no LLM ever) decides act-vs-escalate per open alert; act (severity medium/low, path outside the gate/containment-critical set) dispatches ONE ephemeral lane-owned fix run through the full [ci, remudero-review] gate, ledger-deduped so a re-poll never re-dispatches; escalate (critical/high/unknown severity, or a gate-critical path) opens a MANUAL needs-human issue via the SAME escalation-ledger namespace `rmd ops`'s own critical/high poll uses, so neither lane double-escalates the other's alert; never writes plan/tasks.yaml (rule 15); --dry-run previews every open alert's disposition, dispatches/escalates nothing
 
 ### `rmd issues`
 
