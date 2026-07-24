@@ -53,7 +53,7 @@ import { NEEDS_HUMAN_LABEL } from "./escalate.js";
  * be conflated with a genuinely absent result, the false `source: "none"` that
  * mis-filed W1-T116 as not-merged when GitHub simply hadn't been consulted.
  */
-export type StatusSource = "ledger" | "pr-field" | "trailer" | "correction" | "none" | "throttled";
+export type StatusSource = "ledger" | "pr-field" | "trailer" | "head-branch" | "correction" | "none" | "throttled";
 
 /**
  * The CLASSIFIED reason a `gh` read actually failed (W1-T119 design (i)) —
@@ -118,6 +118,14 @@ export interface PrRef {
    * optional field on this interface already follows.
    */
   title?: string;
+  /**
+   * The PR's head branch ref (W1-T256) — rides along on {@link GitHub.findMergedByHeadBranch}'s
+   * one `gh pr list` so rung (c2)'s corroboration can re-assert ownership (`run-<taskId>-\d+`)
+   * on the SAME fetch, never a second `gh` call. Optional (added after every pre-existing
+   * {@link PrRef} literal was written) so no existing implementer breaks — omitted ⇒ a caller
+   * that needs it treats the branch as unowned, the same fail-soft discipline as the rest.
+   */
+  headRefName?: string;
 }
 
 /**
@@ -274,6 +282,20 @@ export interface GitHub {
   prByRef(ref: string | number): PrRef | null;
   /** Find a MERGED PR whose body contains `Remudero-Task: <taskId>`. null if none. */
   findMergedByTrailer(taskId: string): PrRef | null;
+  /**
+   * CORROBORATION for an empty {@link findMergedByTrailer} (W1-T256): enumerate MERGED PRs
+   * whose HEAD BRANCH is `run-<taskId>-*` — the deterministic, ownership-encoding signal that
+   * is NOT the eventually-consistent BODY full-text index rung (c) relies on. An exit-0 EMPTY
+   * trailer search is INDETERMINATE, never authoritative "not merged": a single search miss on
+   * the body index demoted an already-merged task to dispatchable (four spurious 07-24
+   * re-dispatches). Returns the (fuzzily-matched) candidates newest-first — callers RE-ASSERT
+   * ownership on each `headRefName` before crediting, exactly like rung (c) re-verifies the
+   * trailer — or null if the read itself FAILED (→ readFailed()/W1-T119 indeterminate skip),
+   * as distinct from an empty array (genuinely no such branch). OPTIONAL (added after every
+   * pre-existing {@link GitHub} fixture was written) so no existing implementer breaks —
+   * omitted ⇒ the corroboration is skipped and derivation behaves exactly as before.
+   */
+  findMergedByHeadBranch?(taskId: string): PrRef[] | null;
   /**
    * The PR's head branch name, or undefined if it cannot be resolved. Backs
    * rung (c)'s ownership-assert (MASTER-PLAN P16 / W1-T69) — mirrors
@@ -951,6 +973,30 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   // happened to reference — the assert is strictly narrower than trusting the
   // trailer outright (a foreign PR still fails), strictly wider than "only
   // (a)/(b)'s own reference can credit" (a sibling's merge now credits).
+  // (c2) HEAD-BRANCH CORROBORATION (W1-T256). Rung (c)'s `findMergedByTrailer` is GitHub's
+  // eventually-consistent BODY full-text search: an exit-0 EMPTY result is INDETERMINATE, not
+  // authoritative "not merged". A single such miss demoted an already-merged task to
+  // dispatchable — four spurious re-dispatches on 2026-07-24 alone (W1-T1, W1-T12a ×2, W1-T99),
+  // each a no-op PR against an already-merged task. Before concluding source:"none", corroborate
+  // with a DETERMINISTIC read that does NOT touch the body index: enumerate merged PRs whose HEAD
+  // BRANCH is `run-<taskId>-*` (a structured `head:` ref match), then RE-ASSERT ownership on each
+  // candidate exactly as rung (c) re-verifies the trailer. `findMergedByHeadBranch` returns null
+  // on a `gh` FAILURE (→ readFailed()/W1-T119 indeterminate skip below), an empty array on a
+  // genuine no-such-branch — so EMPTY-on-BOTH is genuinely none, SEARCH-EMPTY-BUT-BRANCH-HIT
+  // resolves merged via the branch. Cost: one extra structured `gh pr list` per not-yet-credited
+  // task per projection — bounded, and only on the path that would otherwise conclude "none".
+  const corroborateByBranch = (): StatusProjection | undefined => {
+    const cands = deps.github.findMergedByHeadBranch?.(task.id);
+    if (!cands) return undefined; // null (read failed → W1-T119) or method absent (fixture) — skip
+    const debunked = debunkedTrailerUrls(ledgerLines, task.id);
+    const hit = cands.find(
+      (pr) => pr.state.toUpperCase() === "MERGED" && ownsBranch(pr.headRefName, task.id) && !debunked.has(pr.url),
+    );
+    return hit
+      ? { taskId: task.id, source: "head-branch", ...fromPrState(hit.state), prNumber: hit.number, prUrl: hit.url, prState: hit.state }
+      : undefined;
+  };
+
   const trailerPr = deps.github.findMergedByTrailer(task.id);
   if (trailerPr && !debunkedTrailerUrls(ledgerLines, task.id).has(trailerPr.url)) {
     const head = deps.github.headRefName(trailerPr.url);
@@ -959,10 +1005,13 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
       return { taskId: task.id, source: "trailer", ...fromPrState(trailerPr.state), prNumber: trailerPr.number, prUrl: trailerPr.url, prState: trailerPr.state };
     }
     // Rejected: foreign/unresolved head branch or an unanchored search hit — never
-    // credited. Surface WHY (legibility, W1-T69) ONLY when (a)/(b) found nothing to
-    // report either — an `ownResult` (this run's own OPEN/CLOSED PR) remains the
-    // more informative status to return than a bare rejection of an unrelated hit.
+    // credited. Corroborate by head branch first (a foreign trailer hit must not mask
+    // this task's OWN merged run), then surface WHY (legibility, W1-T69) ONLY when
+    // (a)/(b) found nothing to report either — an `ownResult` (this run's own
+    // OPEN/CLOSED PR) remains the more informative status than a bare rejection.
     if (!ownResult) {
+      const branchCredit = corroborateByBranch();
+      if (branchCredit) return branchCredit;
       const reason = !ownsBranch(head, task.id) ? "head-branch-not-owned" : "trailer-not-anchored";
       return {
         taskId: task.id,
@@ -973,6 +1022,13 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
       };
     }
   }
+
+  // (c2, continued) The trailer search credited nothing (EMPTY, debunked, or foreign-with-own-PR):
+  // corroborate by head branch before falling back. A merged, ownership-asserted branch hit is a
+  // sibling credit exactly like rung (c)'s — it WINS over (a)/(b)'s own non-merged `ownResult`,
+  // the same direction rung (c) already established.
+  const branchCredit = corroborateByBranch();
+  if (branchCredit) return branchCredit;
 
   // No merged sibling credit found: fall back to (a)/(b)'s own (non-merged)
   // resolution, unchanged from before this fix.
@@ -1415,6 +1471,21 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
         "--json", "number,url,state", "--limit", "1",
       ]);
       return list && list.length > 0 ? list[0] : null;
+    },
+    findMergedByHeadBranch(taskId) {
+      // Merged PRs whose HEAD BRANCH is `run-<taskId>-*` (W1-T256). `head:` is a
+      // STRUCTURED ref qualifier — it matches the branch name, NOT the body
+      // full-text index that rung (c)'s `in:body` search depends on and that a
+      // single eventually-consistent miss emptied (the false not-merged). Fuzzy
+      // like the trailer pass (a `head:` prefix can over-match), so `headRefName`
+      // rides along and the caller re-asserts `run-<taskId>-\d+` ownership before
+      // crediting. null on a `gh` FAILURE (→ readFailed()/W1-T119), [] on a
+      // genuine no-such-branch — the two must stay distinguishable.
+      return tryJson<PrRef[]>([
+        "pr", "list", "--repo", slug, "--state", "merged",
+        "--search", `head:run-${taskId}-`,
+        "--json", "number,url,state,headRefName", "--limit", "10",
+      ]);
     },
     headRefName(prUrl) {
       const view = tryJson<{ headRefName?: string }>(["pr", "view", prUrl, "--json", "headRefName"]);
