@@ -191,9 +191,15 @@ export function workerModel(config: Config): string {
   return config.workerModel ?? "sonnet";
 }
 
-/** Model the retro Architect rides (must outrank workerModel — G-17). Default `opus`. */
-export function architectModel(config: Config): string {
-  return config.architectModel ?? "opus";
+/**
+ * Model the Architect-tier roles ride — retro, triage, and the inbox-draft rung (must outrank
+ * workerModel — G-17). Sourced from the `.remudero/mounts.yaml` `architect:` row (the single
+ * declared source of truth for the top-tier mount), so a mount-table edit governs the spawn;
+ * falls back to `config.architectModel`, then the `opus` default when no mounts table is passed.
+ * `mounts` is typed structurally (just the field this reads) to avoid a config↔mounts import.
+ */
+export function architectModel(config: Config, mounts?: { architect: { model: string } }): string {
+  return mounts?.architect.model ?? config.architectModel ?? "opus";
 }
 
 /**

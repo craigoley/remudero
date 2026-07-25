@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { ConfigValidationError, configPath, loadConfig, resolveHeadroomEnabled, validateConfig, type Config } from "../src/lib/config.js";
+import { architectModel, ConfigValidationError, configPath, loadConfig, resolveHeadroomEnabled, validateConfig, type Config } from "../src/lib/config.js";
 
 // NOTE: calling loadConfig() on its CREATE path shells `which claude`, which is
 // absent in CI (LEARNINGS.md: lazy-config-in-ci). validateConfig is a pure function
@@ -90,4 +90,19 @@ test("resolveHeadroomEnabled: RMD_HEADROOM_ENABLED overrides config in BOTH dire
 test("resolveHeadroomEnabled: an empty/whitespace env value defers to config, not a spurious OFF", () => {
   assert.equal(resolveHeadroomEnabled(config({ headroom: { enabled: true } }), { RMD_HEADROOM_ENABLED: "" }), true);
   assert.equal(resolveHeadroomEnabled(config({ headroom: { enabled: true } }), { RMD_HEADROOM_ENABLED: "   " }), true);
+});
+
+// ── architectModel: the Architect-tier model is governed by mounts.yaml's `architect:` row ──
+// (fb-1784921980488-44b355 §4 — the MPG first-instance ruling: opus -> Opus 5). The retro,
+// triage, and inbox-draft spawns all resolve their model through this, so the mount-table row
+// governs the spawn (validated by the next inbox-draft ledger line's model).
+test("architectModel: the mounts.yaml architect row is the source of truth, then config.architectModel, then the opus default", () => {
+  // the mounts row wins when present
+  assert.equal(architectModel(config(), { architect: { model: "claude-opus-5" } }), "claude-opus-5");
+  // no mounts table -> falls back to config.architectModel
+  assert.equal(architectModel(config({ architectModel: "sonnet" })), "sonnet");
+  // neither present -> the bare "opus" default (back-compat)
+  assert.equal(architectModel(config()), "opus");
+  // the mounts row overrides even an explicit config.architectModel
+  assert.equal(architectModel(config({ architectModel: "opus" }), { architect: { model: "claude-opus-5" } }), "claude-opus-5");
 });

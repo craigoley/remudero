@@ -49,6 +49,7 @@ tiers:
   haiku: 1
   sonnet: 2
   opus: 3
+  claude-opus-5: 4
 
 # Effort ordering — same idea for the thinking-effort axis.
 efforts:
@@ -57,9 +58,13 @@ efforts:
   high: 3
 
 # ── The Architect mount (the bookend: plan authorship, orchestration) ──────────
-# opus/high — the sole top-tier mount; strictly above every worker below.
+# claude-opus-5/high — the sole top-tier mount; strictly above every worker below. This row
+# governs the model the Architect-tier roles (retro, triage, the inbox-draft rung) all ride
+# via architectModel(config, mounts) — a mount-table edit here, not a code change.
+# MPG first-instance ruling (fb-1784921980488-44b355 §4): opus -> Opus 5, launch-day SOTA on
+# knowledge-work evals at unchanged cost.
 architect:
-  model: opus
+  model: claude-opus-5
   effort: high
   max_turns: 400
   context_budget: 180000
