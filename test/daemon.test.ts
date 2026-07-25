@@ -556,6 +556,134 @@ test("headroom: a near-limit reading is an IN-PROCESS idle heartbeat, never a st
   assert.equal(heartbeats[0].extra.limit_pct, HEADROOM_LIMIT_PCT, "far from reset, the ceiling holds at the reserve");
 });
 
+// ── headroom GOVERNOR SWITCH (operator ruling fb-1784894405468-a4153e) ────────
+// With the governor DISABLED (the default host posture), no percent_used condition
+// pauses dispatch, but headroom is still READ and LEDGERED every cycle so the
+// console shows weekly burn. When ENABLED, the curve enforces exactly as today.
+
+test("headroom governor DISABLED (ruling a4153e): percent_used 99 does NOT pause dispatch — the task runs AND headroom is still ledgered (telemetry, enforced:false)", async () => {
+  const plan = fixturePlan();
+  const overLimit: UsageSnapshot = {
+    billingMode: "subscription",
+    session: { percentUsed: 42, resetsAt: "3pm" },
+    weekly: [{ label: "all models", percentUsed: 99, resetsAt: "Jul 25 at 12am" }], // 5 days out ⇒ ceiling 95, so 99 is over
+  };
+  let spawned = 0;
+  const root = mkdtempSync(join(tmpdir(), "daemon-headroom-off-"));
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => { spawned++; return okResult(id); },
+      readUsage: () => overLimit,
+      now: JUL_20_2026_2200,
+      checkStop: () => stopDetail(root),
+      sleep: async () => {},
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { headroomEnabled: false, max: 1 },
+  );
+  assert.equal(s.stopReason, "max_reached", "the loop dispatched and reached its bound — it never idled on headroom");
+  assert.ok(spawned >= 1, "dispatch PROCEEDS despite a 99% window when the governor is disabled");
+  const telem = lines.filter((l) => l.step === "daemon.headroom");
+  assert.ok(telem.length >= 1, "headroom is still READ and LEDGERED every cycle (telemetry without enforcement)");
+  assert.equal(telem[0].extra.percent_used, 99, "the burn reading is on the ledger line for the console to display");
+  assert.equal(telem[0].extra.enforced, false, "the telemetry line is explicitly marked non-enforcing");
+  assert.equal(telem[0].extra.over_ceiling, true, "it WAS over the ceiling — and dispatched anyway");
+});
+
+test("a4153e falsifier: with the governor disabled, NO headroom condition pauses dispatch — the daemon never enters the idle heartbeat", async () => {
+  const plan = fixturePlan();
+  const overLimit: UsageSnapshot = {
+    billingMode: "subscription",
+    session: { percentUsed: 99, resetsAt: "3pm" },
+    weekly: [{ label: "all models", percentUsed: 99, resetsAt: "Jul 25 at 12am" }],
+  };
+  let spawned = 0;
+  let sleeps = 0;
+  const root = mkdtempSync(join(tmpdir(), "daemon-headroom-falsifier-"));
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => { spawned++; return okResult(id); },
+      readUsage: () => overLimit,
+      now: JUL_20_2026_2200,
+      checkStop: () => stopDetail(root),
+      sleep: async () => { sleeps++; },
+      log: () => {},
+    },
+    { headroomEnabled: false, max: 1 },
+  );
+  assert.equal(s.stopReason, "max_reached");
+  assert.ok(spawned >= 1, "dispatch was not paused by any headroom condition");
+  assert.equal(s.ticks, 0, "no idle heartbeat tick ever fired — the governor is off");
+  assert.equal(sleeps, 0, "the loop never slept on headroom before dispatching");
+});
+
+test("headroom governor ENABLED explicitly: an at-ceiling reading idles EXACTLY as today — no spawn while over the limit", async () => {
+  const plan = fixturePlan();
+  const nearLimit: UsageSnapshot = {
+    billingMode: "subscription",
+    session: { percentUsed: 42, resetsAt: "3pm" },
+    weekly: [{ label: "all models", percentUsed: 98, resetsAt: "Jul 25 at 12am" }],
+  };
+  let spawned = 0;
+  const root = mkdtempSync(join(tmpdir(), "daemon-headroom-on-"));
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let calls = 0;
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => { spawned++; return okResult(id); },
+      readUsage: () => nearLimit,
+      now: JUL_20_2026_2200,
+      checkStop: () => stopDetail(root),
+      sleep: async () => { calls++; if (calls >= 3) requestStop(root, "test done polling"); },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { headroomEnabled: true },
+  );
+  assert.equal(s.stopReason, "stopped");
+  assert.equal(spawned, 0, "with the governor ENABLED, no task spawns while a window is over the limit");
+  assert.ok(s.ticks >= 3, "it idle-heartbeated exactly as before");
+  const heartbeats = lines.filter((l) => l.step === "daemon.headroom");
+  assert.equal(heartbeats[0].extra.percent_used, 98);
+  assert.equal(heartbeats[0].extra.limit_pct, HEADROOM_LIMIT_PCT);
+  assert.notEqual(heartbeats[0].extra.enforced, false, "the enforcement heartbeat is NOT tagged enforced:false");
+});
+
+test("headroom governor DISABLED + UNREADABLE usage: absent telemetry, never a hold — dispatch proceeds with no headroom line and no degraded idle", async () => {
+  const plan = fixturePlan();
+  let spawned = 0;
+  let sleeps = 0;
+  const root = mkdtempSync(join(tmpdir(), "daemon-headroom-off-unreadable-"));
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => { spawned++; return okResult(id); },
+      readUsage: () => undefined, // unreadable every tick
+      now: JUL_20_2026_2200,
+      checkStop: () => stopDetail(root),
+      sleep: async () => { sleeps++; },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { headroomEnabled: false, max: 1 },
+  );
+  assert.equal(s.stopReason, "max_reached");
+  assert.ok(spawned >= 1, "an unreadable read while disabled never holds dispatch");
+  assert.equal(sleeps, 0, "no degraded idle — the bounded-allowance escalation is enforcement-only");
+  assert.equal(
+    lines.filter((l) => l.step.startsWith("daemon.headroom")).length,
+    0,
+    "unreadable + disabled = ABSENT telemetry, not a headroom line",
+  );
+});
+
 test("headroom exhaustion resumes ON ITS OWN once the underlying window actually resets — no exit either side", async () => {
   // Proves acceptance criterion (a): "the daemon does not exit at all... it
   // RESUMES after the clock passes resets_at". readUsage is a fresh call
