@@ -1,0 +1,57 @@
+- id: W1-T258
+  title: "worker spawns honor an operator-provided ANTHROPIC_API_KEY so a fleet run can bill to API credits when the subscription window is exhausted — a TWO-FACTOR opt-in (config.overflow:api_key intent + the key in env), so the key merely being present in a shell can never silently flip billing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "FIELD NEED (2026-07-25): the subscription window exhausts mid-drain and the fleet stalls until reset,
+    even when the operator holds API credits that would carry the run. The billing boundary (src/lib/env.ts, FIELD
+    FINDING 1, §9) STRIPS every ANTHROPIC_* from a worker's env and billing_mode was a hardcoded 'subscription'
+    constant (worker.ts) — correct as a DEFAULT (an inherited key must never silently bill API), but it left no
+    sanctioned path to spend credits on purpose. The config half of that valve already existed and was VALIDATED
+    but never WIRED: config.overflow:'api_key' + a mandatory dailyCapUsd (validateConfig rejects the pairing's
+    absence — §9 conditional-cap guard: an uncapped api run cannot even be configured), yet nothing read
+    config.overflow at spawn time, so the key never crossed. This task wires that valve end to end WITHOUT
+    regressing the guard: the key flows env→env only (never a file, never a logged value), and billing_mode is
+    DERIVED per-run from the child's actual key set, never guessed."
+  design: |
+    TWO-FACTOR by construction (either factor absent ⇒ subscription, exactly as before):
+      1. INTENT — config.overflow === "api_key" (already schema-defined + validateConfig-guarded against an unset
+         dailyCapUsd). spawnWorker threads this to buildWorkerEnv as opts.allowApiKey.
+      2. KEY — a non-empty ANTHROPIC_API_KEY in the PARENT env.
+    buildWorkerEnv (src/lib/env.ts): when opts.allowApiKey AND the parent carries a non-empty ANTHROPIC_API_KEY,
+    copy that ONE key BY VALUE into the child. The survivor assertion is relaxed to permit ONLY ANTHROPIC_API_KEY
+    and ONLY while the flag is set — every other ANTHROPIC_* (BASE_URL/MODEL/AUTH_TOKEN/…) still throws, and an
+    ANTHROPIC_API_KEY reaching the child WITHOUT the flag (e.g. via extra) still throws. billingMode(envKeys) is
+    the single source of truth: 'api' iff ANTHROPIC_API_KEY is among the child's key NAMES, else 'subscription'.
+    workerLedgerFields derives billing_mode from r.childEnvKeys (names only — the value never appears), so a
+    ledger line reads the very env the worker spawned with, not a constant. assertCleanBoot/daemonBoot take the
+    same allowApiKey gate so the daemon.boot canary reports the mode its workers will actually bill.
+    NO SECRETS AT REST: generateLaunchdPlist is deliberately NOT relaxed — it keeps refusing to emit any
+    ANTHROPIC_* into the plist file (a world-readable secret at rest). The launchd path is documented, not coded:
+    run the daemon from an env-carrying session, or accept the key-at-rest tradeoff by hand (operator-guide.md).
+  acceptance:
+    - claim: "with config intent (allowApiKey) AND an exported key, the worker env carries ANTHROPIC_API_KEY by value and every OTHER ANTHROPIC_* is stripped"
+      proof: "unit test: test/env.test.ts::overflow valve (allowApiKey + exported key)"
+    - claim: "the KEY ALONE, without config intent, is ignored — an inherited key cannot silently flip the fleet to API billing"
+      proof: "unit test: test/env.test.ts::the KEY ALONE (no config intent"
+    - claim: "billing_mode on the ledger line is DERIVED 'api' from the child's key NAMES, and no secret value appears in the ledger fields"
+      proof: "unit test: test/worker.test.ts::billing_mode is DERIVED 'api' when the child spawned WITH"
+    - claim: "an ANTHROPIC_API_KEY injected via extra WITHOUT the flag still fails loud — a leak absent config intent"
+      proof: "unit test: test/env.test.ts::throws if ANTHROPIC_API_KEY is injected via extra WITHOUT allowApiKey"
+    - claim: "the daemon.boot canary reports api only under BOTH factors, matching what its workers bill"
+      proof: "unit test: test/daemon.test.ts::daemonBoot: BOTH factors (config intent allowApiKey=true + the key)"
+  risk: high
+  origin: architect
+  plan_refs: ["§9"]
+  files: [src/lib/env.ts, src/lib/worker.ts, src/lib/daemon.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high — it changes what the fleet BILLS. The fail-safe direction is asymmetric: the dangerous failure
+    is a SILENT flip to metered API, so the design makes engagement TWO-FACTOR (config intent that forces a
+    dailyCapUsd + the key) and keeps the default (either factor absent) byte-for-byte the old subscription path.
+    NO SECRETS IN CODE OR LOGS: the key travels env→env only; only its NAME is ever recorded (childEnvKeys), and
+    the launchd plist generator is intentionally left refusing to write the key to disk. Implemented directly by
+    an operator-directed session 2026-07-25; credited via the merging PR's Remudero-Task trailer."

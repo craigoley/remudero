@@ -335,6 +335,22 @@ test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_in
   assert.equal(BILLING_MODE, "subscription");
 });
 
+test("workerLedgerFields: billing_mode is DERIVED 'api' when the child spawned WITH the ANTHROPIC_API_KEY valve (childEnvKeys carries the NAME, never the value)", async () => {
+  // The proof surface is the key NAME in childEnvKeys — the secret VALUE is never
+  // recorded, so a ledger line proves api-billing without leaking the key.
+  const r = await collectWorkerResult(usageStream(), {
+    childEnvKeys: ["ANTHROPIC_API_KEY", "HOME", "PATH"],
+    model: "claude-opus-4",
+  });
+  const fields = workerLedgerFields(r);
+  assert.equal(fields.billing_mode, "api");
+  assert.equal(
+    JSON.stringify(fields).includes("sk-ant"),
+    false,
+    "no secret value may appear anywhere in the ledger fields",
+  );
+});
+
 // ── W1-T35: cache tokens ledgered as NAMED COLUMNS (flat, snake_case — matching
 // the SDK envelope's own field names) so the cache-reuse signal (MASTER-PLAN
 // §8A: "near-zero cache reads on the second worker of a run means the ordering

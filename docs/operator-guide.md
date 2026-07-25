@@ -277,23 +277,59 @@ boundary is enforced in code, not by convention (`src/lib/env.ts`, FIELD FINDING
 §9). `ANTHROPIC_API_KEY` exported from an operator's login shell **takes precedence** over the
 OAuth login — any process that inherits it silently bills metered API rates instead of the
 subscription. `buildWorkerEnv` constructs every worker's environment from an explicit allowlist
-(`PATH`/`HOME`/`TMPDIR`/`LANG`/`USER`) and **throws** if any `ANTHROPIC_*` key survives,
+(`PATH`/`HOME`/`TMPDIR`/`LANG`/`USER`) and **throws** if any `ANTHROPIC_*` key survives —
 including one passed in explicitly — a leak fails loud at construction, never silently on an
-invoice. The same check applies to the daemon's own boot environment in `src/lib/launchd.ts`.
+invoice. The sole exception is the sanctioned overflow valve below, and only when it is
+deliberately engaged. The same allowlist check applies to the daemon's own boot environment in
+`src/lib/launchd.ts`.
 
 **Where the boundary actually sits.** `launchd` never sources `~/.zshrc`, so a daemon loaded via
 `launchctl load` is clean by construction. The risk case is a daemon started from a **dev
 shell** for local testing: if that shell exports `ANTHROPIC_API_KEY` (common alongside other
-CLI/SDK work), the daemon *process itself* is contaminated even though every worker it spawns
-still gets a clean env via `buildWorkerEnv`. Check before running a dev-shell daemon:
+CLI/SDK work), the daemon *process itself* carries the key — but with the valve OFF (the default)
+every worker it spawns still gets a clean env via `buildWorkerEnv`, so the fleet stays on
+subscription. Check before running a dev-shell daemon you intend to keep on subscription:
 ```sh
-env | grep -i ^ANTHROPIC_    # must print nothing before you `rmd daemon`/`rmd drain` from a shell
+env | grep -i ^ANTHROPIC_    # nothing here ⇒ subscription guaranteed regardless of config
 ```
-**Why the dollar figures are tripwires, not charges.** Every budget number in this system
-(`budget_usd`, the $25 soft-budget warning, the $100 default hard cap) is **notional** under
-subscription billing, which strips `ANTHROPIC_*` — there is no metered invoice for these runs to
-accumulate against. They exist to catch a runaway loop, not to track spend. The one path where a
-dollar figure becomes real money is the deliberate overflow valve (`overflow: "api_key"` in
-`~/.config/remudero/config.json`), and `validateConfig` refuses to accept that setting without a
-paired `dailyCapUsd` — an uncapped API-billed run is a rejected config, never a silent
-possibility.
+
+### Engaging the overflow valve: draining on API credits (W1-T258)
+
+When the subscription window is exhausted and you want the fleet to keep draining on **metered
+API credits**, engage the valve. It is **two-factor by design** — the key merely being present in
+a shell can never bill the fleet on its own:
+
+1. **Intent** — set `overflow: "api_key"` in `~/.config/remudero/config.json`. `validateConfig`
+   refuses this unless it is paired with a `dailyCapUsd` (§9 conditional-cap guard: an uncapped
+   API run is a rejected config, never a silent possibility). This is what the harness reads to
+   decide whether the key may cross the boundary.
+2. **Key** — export `ANTHROPIC_API_KEY` into the environment of the process that launches the
+   fleet (`rmd drain`/`rmd daemon`). It travels **env → env only**: passed by value into each
+   worker's env, never written to a file, never logged (only its NAME appears in a ledger line's
+   `childEnvKeys`, as billing-boundary proof).
+
+With both in place, each worker's ledger line records `billing_mode:"api"` (derived from the
+worker's actual env, never guessed); the `daemon.boot` line reports `api` too. Absent *either*
+factor, the run bills subscription exactly as before. The dollar figures (`budget_usd`, the
+soft/hard caps) — notional under subscription — become **real money** in this mode, which is why
+the `dailyCapUsd` pairing is mandatory.
+
+**launchd plumbing note (the daemon's spawns need the key too).** A daemon supervised by
+`launchd` does **not** inherit your shell — its environment is exactly the plist's
+`EnvironmentVariables`, which `generateLaunchdPlist` builds as a closed `PATH`+`HOME` allowlist
+and **refuses to emit any `ANTHROPIC_*` key into** (no secret is ever written to the plist file —
+that would be a secret at rest in a world-readable `~/Library/LaunchAgents/*.plist`, contrary to
+"the key arrives via environment only"). So for **overnight draining on credits** you have two
+honest choices:
+
+- **(Recommended, env-only)** Run the daemon *not* under `launchd` but from a persistent session
+  (a `tmux`/`screen` window, or a wrapper) that has `ANTHROPIC_API_KEY` exported and
+  `overflow:"api_key"` configured. The key stays in process memory, never on disk.
+- **(Key-at-rest tradeoff)** Add `ANTHROPIC_API_KEY` to the launchd unit's `EnvironmentVariables`
+  by hand after generating the plist. This keeps `launchd` KeepAlive supervision but writes the
+  secret into the plist file — tighten its permissions (`chmod 600`) and know you have accepted a
+  secret at rest. The generator will never do this for you.
+
+A durable third path — a launchd wrapper that sources the key from a `600` file or the login
+keychain and execs `rmd daemon` with it exported (KeepAlive supervision *and* no plist secret) —
+is the intended follow-up; until it lands, prefer the env-only session above.

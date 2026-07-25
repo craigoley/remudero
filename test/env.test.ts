@@ -1,27 +1,84 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildWorkerEnv, isBillingClean } from "../src/lib/env.js";
+import { buildWorkerEnv, isBillingClean, billingMode, assertCleanBoot } from "../src/lib/env.js";
 
-test("strips ANTHROPIC_* from a polluted parent env (the billing boundary)", () => {
+test("default (no key exported) ⇒ subscription-clean, exactly as before the valve", () => {
   const parent: NodeJS.ProcessEnv = {
     PATH: "/usr/bin",
     HOME: "/home/x",
     TMPDIR: "/tmp",
     LANG: "en_US.UTF-8",
-    ANTHROPIC_API_KEY: "KEY-SHOULD-NEVER-SURVIVE",
-    ANTHROPIC_BASE_URL: "https://example.invalid",
-    ANTHROPIC_MODEL: "whatever",
   };
   const child = buildWorkerEnv({}, parent);
 
   const anthropicKeys = Object.keys(child).filter((k) => /^ANTHROPIC_/i.test(k));
-  assert.deepEqual(anthropicKeys, [], "no ANTHROPIC_* key may survive");
+  assert.deepEqual(anthropicKeys, [], "no ANTHROPIC_* key when none was exported");
   assert.ok(isBillingClean(child));
+  assert.equal(billingMode(Object.keys(child)), "subscription");
   // Allowlisted vars come through.
   assert.equal(child.PATH, "/usr/bin");
   assert.equal(child.HOME, "/home/x");
   assert.equal(child.TMPDIR, "/tmp");
   assert.equal(child.LANG, "en_US.UTF-8");
+});
+
+test("the KEY ALONE (no config intent ⇒ allowApiKey false) is IGNORED — the fleet still bills subscription", () => {
+  // The safety guard: an operator who happens to export ANTHROPIC_API_KEY for
+  // some OTHER CLI must never silently flip the fleet onto API billing.
+  const parent: NodeJS.ProcessEnv = { PATH: "/usr/bin", HOME: "/home/x", ANTHROPIC_API_KEY: "sk-ant-operator-key" };
+  const child = buildWorkerEnv({}, parent); // allowApiKey defaults false
+  assert.equal(child.ANTHROPIC_API_KEY, undefined, "the key is stripped without config intent");
+  assert.equal(billingMode(Object.keys(child)), "subscription");
+});
+
+test("overflow valve (allowApiKey + exported key): ANTHROPIC_API_KEY passes through by value; every OTHER ANTHROPIC_* is never copied", () => {
+  const parent: NodeJS.ProcessEnv = {
+    PATH: "/usr/bin",
+    HOME: "/home/x",
+    ANTHROPIC_API_KEY: "sk-ant-operator-key",
+    ANTHROPIC_BASE_URL: "https://example.invalid", // not allowlisted, not the valve
+    ANTHROPIC_MODEL: "whatever",                    // → never reaches the child
+  };
+  const child = buildWorkerEnv({}, parent, { allowApiKey: true });
+
+  assert.equal(child.ANTHROPIC_API_KEY, "sk-ant-operator-key", "the valve carries the key through");
+  assert.equal(child.ANTHROPIC_BASE_URL, undefined, "a non-sanctioned ANTHROPIC_* must not leak");
+  assert.equal(child.ANTHROPIC_MODEL, undefined);
+  assert.equal(billingMode(Object.keys(child)), "api", "billing_mode is DERIVED as api when the valve is engaged");
+});
+
+test("valve needs a NON-EMPTY key: allowApiKey with an empty ANTHROPIC_API_KEY stays subscription", () => {
+  const child = buildWorkerEnv({}, { PATH: "/usr/bin", ANTHROPIC_API_KEY: "" }, { allowApiKey: true });
+  assert.equal(child.ANTHROPIC_API_KEY, undefined, "empty ⇒ absent ⇒ subscription");
+  assert.equal(billingMode(Object.keys(child)), "subscription");
+});
+
+test("throws if a caller injects a NON-sanctioned ANTHROPIC_* var (billing/behaviour redirect), valve engaged or not", () => {
+  assert.throws(
+    () => buildWorkerEnv({ ANTHROPIC_BASE_URL: "https://sneaky.invalid" }, { PATH: "/usr/bin" }, { allowApiKey: true }),
+    /billing-boundary violation/,
+  );
+});
+
+test("throws if ANTHROPIC_API_KEY is injected via extra WITHOUT allowApiKey — a leak absent config intent", () => {
+  assert.throws(
+    () => buildWorkerEnv({ ANTHROPIC_API_KEY: "sk-ant-sneaky" }, { PATH: "/usr/bin" }),
+    /billing-boundary violation/,
+  );
+});
+
+test("assertCleanBoot: billing_mode is DERIVED, gated on BOTH the config intent and the key", () => {
+  // Key present but no config intent ⇒ subscription (matches what workers bill).
+  assert.deepEqual(
+    assertCleanBoot({ PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-ant-daemon" }),
+    { env_clean: false, billing_mode: "subscription" },
+  );
+  // Both factors ⇒ api. env_clean is the honest canary (key intentionally present).
+  const engaged = assertCleanBoot({ PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-ant-daemon" }, true);
+  assert.equal(engaged.billing_mode, "api", "a daemon booted with the valve records api");
+  assert.equal(engaged.env_clean, false);
+  // Config intent but no key ⇒ subscription (nothing to bill on).
+  assert.equal(assertCleanBoot({ PATH: "/usr/bin" }, true).billing_mode, "subscription");
 });
 
 test("does not inherit non-allowlisted parent vars wholesale", () => {
@@ -33,13 +90,6 @@ test("does not inherit non-allowlisted parent vars wholesale", () => {
   const child = buildWorkerEnv({}, parent);
   assert.equal(child.SECRET_TOKEN, undefined);
   assert.equal(child.AWS_SECRET_ACCESS_KEY, undefined);
-});
-
-test("throws if a caller tries to inject an ANTHROPIC_* var", () => {
-  assert.throws(
-    () => buildWorkerEnv({ ANTHROPIC_API_KEY: "sneaky" }, { PATH: "/usr/bin" }),
-    /billing-boundary violation/,
-  );
 });
 
 test("merges caller-supplied non-ANTHROPIC vars", () => {

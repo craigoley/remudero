@@ -109,13 +109,38 @@ test("daemonBoot: a clean env logs daemon.boot with env_clean=true, billing_mode
   assert.equal(lines[0].extra.billing_mode, "subscription");
 });
 
-test("daemonBoot: a contaminated env (ANTHROPIC_* present) still logs, but env_clean=false — a loud canary, not a throw", () => {
+test("daemonBoot: a NON-valve ANTHROPIC_* (e.g. BASE_URL) still logs env_clean=false but billing_mode=subscription — a loud canary, not a throw, and NOT api", () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const dirtyEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op", ANTHROPIC_API_KEY: "KEY-SHOULD-NEVER-SURVIVE" };
+  const dirtyEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op", ANTHROPIC_BASE_URL: "https://example.invalid" };
   const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }), dirtyEnv);
   assert.deepEqual(result, { env_clean: false, billing_mode: "subscription" });
   assert.equal(lines[0].extra.env_clean, false);
-  assert.equal(lines[0].extra.billing_mode, "subscription", "billing_mode is always subscription — this repo never runs a daemon in api mode");
+  assert.equal(lines[0].extra.billing_mode, "subscription", "only the sanctioned ANTHROPIC_API_KEY valve flips billing to api");
+});
+
+test("daemonBoot: the KEY ALONE (no config intent) stays subscription — an inherited key can't silently flip the daemon to api", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const keyEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op", ANTHROPIC_API_KEY: "sk-ant-daemon" };
+  const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }), keyEnv); // allowApiKey defaults false
+  assert.deepEqual(result, { env_clean: false, billing_mode: "subscription" });
+});
+
+test("daemonBoot: BOTH factors (config intent allowApiKey=true + the key) log env_clean=false AND billing_mode=api (overnight-on-credits, W1-T258)", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const valveEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op", ANTHROPIC_API_KEY: "sk-ant-daemon" };
+  // allowApiKey is daemonBoot's 8th param; the intervening optional hooks are unused here.
+  const result = daemonBoot(
+    (step, extra = {}) => lines.push({ step, extra }),
+    valveEnv,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    true,
+  );
+  assert.deepEqual(result, { env_clean: false, billing_mode: "api" });
+  assert.equal(lines[0].extra.billing_mode, "api", "the daemon deliberately drains on API credits");
 });
 
 test("daemonBoot: defaults to checking process.env when no env is injected", () => {
