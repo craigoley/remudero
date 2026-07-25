@@ -4960,6 +4960,12 @@ export async function daemonCommand(rest: string[]): Promise<number> {
             grantApps: [config.claudeBin, "/usr/bin/security"],
           })
       : undefined,
+    undefined, // crashLoopCheck — not wired at this call site
+    undefined, // resolveClaudeBin — default
+    // §9 overflow valve (W1-T258): make the daemon.boot billing_mode canary
+    // report `api` iff this daemon deliberately drains on API credits, matching
+    // what its workers will actually bill (the key must ALSO be in the env).
+    config.overflow === "api_key",
   );
 
   try {

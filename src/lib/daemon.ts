@@ -649,8 +649,12 @@ export function daemonBoot(
     onBreach: (verdict: CrashLoopVerdict) => void;
   },
   resolveClaudeBin?: () => string,
+  /** True iff config.overflow === "api_key" (§9): the daemon deliberately drains
+   * on API credits. Threaded so the daemon.boot canary reports the SAME billing
+   * mode its workers will actually bill, not just whether the key is in its env. */
+  allowApiKey = false,
 ): BootAssertion {
-  const assertion = assertCleanBoot(env);
+  const assertion = assertCleanBoot(env, allowApiKey);
   log("daemon.boot", { env_clean: assertion.env_clean, billing_mode: assertion.billing_mode });
   // BOOT-RATE INVARIANT (W1-T215): the SHAPE-not-cause check — see this
   // function's doc and detectDaemonCrashLoop's, above. Logged either way

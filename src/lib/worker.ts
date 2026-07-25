@@ -18,7 +18,7 @@ import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-a
 import { loadConfig, workerHomeDir, workerShell, workerZdotdir, type Config } from "./config.js";
 import { detectCompactionEvents, isQualitySuspect, type CompactionEvent } from "./compaction.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { buildWorkerEnv } from "./env.js";
+import { buildWorkerEnv, billingMode, type BillingMode } from "./env.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStaleWorkerScratch } from "./worker-scratch.js";
 import { ensureWorkerKeychain, materializeWorkerHome, workerKeychainPaths, type SecurityRunner } from "./worker-home.js";
@@ -114,11 +114,14 @@ export interface WorkerResult {
 export const DEFAULT_MODEL_LABEL = "default";
 export const DEFAULT_EFFORT_LABEL = "default";
 
-/** Billing mode is constant by construction: `buildWorkerEnv` strips every
- * `ANTHROPIC_*` var before a worker ever spawns (W1-T1), so no worker call can
- * ever be metered API-key-style. One literal, asserted everywhere (never
- * inferred per-call), so a ledger line can never drift from the true boundary. */
-export const BILLING_MODE = "subscription" as const;
+/** The DEFAULT billing mode: absent the opt-in overflow valve, `buildWorkerEnv`
+ * strips every `ANTHROPIC_*` var before a worker spawns (W1-T1), so the run is
+ * metered against the subscription. When the operator engages the valve (exports
+ * `ANTHROPIC_API_KEY`, W1-T258) the mode is instead DERIVED per-call from the
+ * child's actual key set via {@link billingMode}(`childEnvKeys`) — a ledger line
+ * still can never drift from the true boundary because it reads the very env
+ * names the worker spawned with, not a guess. */
+export const BILLING_MODE: BillingMode = "subscription";
 
 /**
  * Cache-token NAMED COLUMNS (MASTER-PLAN §8A / W1-T35): the aggregate
@@ -166,7 +169,7 @@ export function workerLedgerFields(r: WorkerResult): {
   cache_read_input_tokens: number;
   cache_creation_input_tokens: number;
   total_cost_usd: number;
-  billing_mode: typeof BILLING_MODE;
+  billing_mode: BillingMode;
   verdict: string;
   quality_suspect: boolean;
   compaction_events: CompactionEvent[];
@@ -177,7 +180,7 @@ export function workerLedgerFields(r: WorkerResult): {
     tokens: r.tokens,
     ...cacheTokenLedgerFields(r.tokens),
     total_cost_usd: r.costUsd,
-    billing_mode: BILLING_MODE,
+    billing_mode: billingMode(r.childEnvKeys),
     verdict: r.isError ? r.subtype : "success",
     quality_suspect: r.qualitySuspect,
     compaction_events: r.compactionEvents,
@@ -501,6 +504,11 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     zdotdir: workerZdotdir(config),
     shell: workerShell(config),
     home: workerHome,
+    // Overflow valve (§9, W1-T258): pass the operator's ANTHROPIC_API_KEY through
+    // to bill on API credits ONLY when config.overflow === "api_key" — which
+    // validateConfig refuses without a paired dailyCapUsd, so an uncapped api run
+    // can never even be configured. Absent that, ANTHROPIC_* is stripped as before.
+    allowApiKey: config.overflow === "api_key",
   });
 
   const stderrChunks: string[] = [];
