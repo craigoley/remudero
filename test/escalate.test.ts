@@ -306,3 +306,45 @@ test("ghIssueGateway.create: builds the gh issue-create args and returns the tri
     ],
   ]);
 });
+
+test("ghIssueGateway.listOpen: lists OPEN labeled issues with body via the deterministic list API (never a full-text search), parsed from JSON", () => {
+  const calls: string[][] = [];
+  const gateway = ghIssueGateway("craigoley", "remudero", {
+    exec: (args) => {
+      calls.push(args);
+      return JSON.stringify([
+        { number: 44, url: "https://github.com/craigoley/remudero/issues/44", title: "[BLOCKED] W1-T189", body: "**Task:** W1-T189\n" },
+      ]);
+    },
+  });
+  const open = gateway.listOpen?.(NEEDS_HUMAN_LABEL);
+  assert.equal(open?.length, 1);
+  assert.equal(open?.[0].number, 44);
+  assert.equal(open?.[0].body, "**Task:** W1-T189\n");
+  assert.deepEqual(calls, [
+    ["issue", "list", "--repo", "craigoley/remudero", "--label", NEEDS_HUMAN_LABEL, "--state", "open", "--json", "number,url,title,body", "--limit", "1000"],
+  ]);
+});
+
+test("ghIssueGateway.listOpen: a throwing `gh` (read failure) PROPAGATES — the reconciler caller degrades to no-action, never a false 'zero open'", () => {
+  const gateway = ghIssueGateway("craigoley", "remudero", {
+    exec: () => {
+      throw new Error("gh: HTTP 502");
+    },
+  });
+  assert.throws(() => gateway.listOpen?.(NEEDS_HUMAN_LABEL), /502/);
+});
+
+test("ghIssueGateway.closeWithComment: closes the issue with the citation comment", () => {
+  const calls: string[][] = [];
+  const gateway = ghIssueGateway("craigoley", "remudero", {
+    exec: (args) => {
+      calls.push(args);
+      return "";
+    },
+  });
+  gateway.closeWithComment?.("https://github.com/craigoley/remudero/issues/44", "resolved by #574");
+  assert.deepEqual(calls, [
+    ["issue", "close", "https://github.com/craigoley/remudero/issues/44", "--repo", "craigoley/remudero", "--comment", "resolved by #574"],
+  ]);
+});

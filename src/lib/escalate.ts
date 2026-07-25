@@ -41,10 +41,36 @@ export interface Escalation {
   recommendation: string;
 }
 
+/** One open issue as the reconciler reads it (fb-1784756088300-6a481e). */
+export interface OpenIssue {
+  number: number;
+  url: string;
+  title?: string;
+  /** Raw body — carries the `**Task:** <id>` line {@link renderIssueBody} writes, which the
+   *  escalation-lifecycle reconciler parses to derive the referenced task's current state. */
+  body?: string;
+}
+
 /** GitHub issue creation, behind an interface so tests never touch the network. */
 export interface IssueGateway {
   /** Create a labeled issue; returns its URL. */
   create(title: string, body: string, labels: string[]): string;
+  /**
+   * List OPEN issues carrying `label` (fb-1784756088300-6a481e — the escalation-lifecycle
+   * reconciler's read side): the queue of live needs-human issues whose referenced task the
+   * reconciler re-derives each sweep. THROWS on a `gh` read failure (never returns [] on an
+   * outage — the caller treats a failed read as "do nothing this cycle", never "zero open").
+   * Optional so create-only fakes keep working unchanged; a gateway omitting it yields no
+   * reconciler candidates at all.
+   */
+  listOpen?(label: string): OpenIssue[];
+  /**
+   * Close one issue, posting `comment` as the closing citation (fb-1784756088300-6a481e). Used
+   * ONLY by the reconciler when a referenced task has resolved — the comment names the resolver
+   * (the merged PR) so the closure is legible, never a silent disappearance. Optional, same
+   * fail-soft discipline as {@link ensureLabel}.
+   */
+  closeWithComment?(url: string, comment: string): void;
   /**
    * Ensure ONE label exists on the repo (create-if-missing, tolerate-already-exists).
    * Returns true when the label is now safe to attach, false when provisioning itself
@@ -222,6 +248,18 @@ export function ghIssueGateway(
       const args = ["issue", "create", "--repo", repoArg, "--title", title, "--body", body];
       for (const label of labels) args.push("--label", label);
       return run(args).trim();
+    },
+    listOpen(label) {
+      // OPEN issues only, with body (carries `**Task:** <id>`). Deterministic list API — never a
+      // full-text search. THROWS on a `gh` failure (the caller degrades to no action this cycle).
+      const raw = run([
+        "issue", "list", "--repo", repoArg, "--label", label, "--state", "open",
+        "--json", "number,url,title,body", "--limit", "1000",
+      ]);
+      return JSON.parse(raw) as OpenIssue[];
+    },
+    closeWithComment(url, comment) {
+      run(["issue", "close", url, "--repo", repoArg, "--comment", comment]);
     },
   };
 }

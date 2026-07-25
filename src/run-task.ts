@@ -105,10 +105,12 @@ import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js
 import {
   escalate,
   ghIssueGateway,
+  NEEDS_HUMAN_LABEL,
   tryEscalate,
   type EscalationClass,
   type EscalationOption,
   type IssueGateway,
+  type OpenIssue,
 } from "./lib/escalate.js";
 import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
 import {
@@ -303,6 +305,7 @@ import {
   renderClarificationQuestion,
   renderSweepSummary,
   runCreditBackfill,
+  runEscalationReconcile,
   runSweep,
   strikeCapForAnswer,
   terminalStateReason,
@@ -310,6 +313,8 @@ import {
   type CiFailure,
   type ClarificationQuestion,
   type CreditCandidate,
+  type EscalationReconcileCandidate,
+  type EscalationReconcileSummary,
   type FixDispatchEvidence,
   type LiveStateResult,
   type OpenPrView,
@@ -5668,6 +5673,59 @@ function buildCreditCandidates(
 }
 
 /**
+ * fb-1784756088300-6a481e: one {@link EscalationReconcileCandidate} per OPEN needs-human
+ * issue, pairing it with its referenced task's CURRENT state — the SAME #737/#741-corrected
+ * `deriveStatus` every other rung trusts. The task id is read from the issue body's
+ * `**Task:** <id>` line (W1-T186 — `renderIssueBody` writes it on every escalation). An issue
+ * with no named task, or one whose task is not in THIS plan, yields NO candidate — genuinely-
+ * human territory, left untouched. Uses the BATCHED gateway (one `gh pr list`) for derivation
+ * and one `gh issue list` for the open queue; a FAILED issue-list read yields [] (do nothing
+ * this cycle, never a false "zero open"), the same best-effort contract as buildCreditCandidates.
+ */
+export function buildEscalationReconcileCandidates(
+  owner: string,
+  repo: string,
+  plan: Plan,
+  ledgerPath: string,
+  log?: (step: string, extra?: Record<string, unknown>) => void,
+  // Injectable seams (mirrors buildCreditCandidates' buildBatchedGithub): real callers omit
+  // both and get the live `gh` gateways; tests supply fakes to drive the parse + derivation
+  // without shelling out.
+  injected: { issues?: IssueGateway; github?: GitHub } = {},
+): EscalationReconcileCandidate[] {
+  const issues = injected.issues ?? ghIssueGateway(owner, repo);
+  let open: OpenIssue[];
+  try {
+    open = issues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [];
+  } catch (e) {
+    log?.("sweep.escalation_reconcile.list_failed", { error: String((e as Error)?.message ?? e) });
+    return []; // a failed read is "do nothing this cycle", never a confident "zero open needs-human"
+  }
+  const deps: DeriveDeps = { ledgerPath, github: injected.github ?? buildBatchedGithub(owner, repo, { log }) };
+  const candidates: EscalationReconcileCandidate[] = [];
+  for (const issue of open) {
+    const taskId = /^\*\*Task:\*\*\s*(\S+)\s*$/m.exec(issue.body ?? "")?.[1];
+    if (!taskId) continue; // no named task — leave untouched (human territory)
+    const task = plan.byId.get(taskId);
+    if (!task) continue; // task not in this plan — leave untouched
+    const proj = deriveStatus(task, deps);
+    candidates.push({
+      issueUrl: issue.url,
+      issueNumber: issue.number,
+      taskId,
+      derived: {
+        merged: proj.merged,
+        indeterminate: proj.indeterminate,
+        prUrl: proj.prUrl,
+        prNumber: proj.prNumber,
+        source: proj.source,
+      },
+    });
+  }
+  return candidates;
+}
+
+/**
  * Wire the four gated effects to their real implementations. dispatchFix
  * reconstructs a W1-T76 `runFixRung` invocation for a PR discovered COLD (no live
  * run/session): it checks the PR head branch out into a scratch worktree, seeds a
@@ -5962,7 +6020,7 @@ export function buildSweepEffects(
  * BEFORE any `gh`/spawn (Standing rule). --dry-run previews dispositions and takes
  * NO effects. Non-zero exit only on a hard error.
  */
-async function sweepCommand(rest: string[]): Promise<number> {
+export async function sweepCommand(rest: string[]): Promise<number> {
   const badArg = unknownArgError("sweep", rest, ["--repo"], ["--dry-run"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -6011,12 +6069,62 @@ async function sweepCommand(rest: string[]): Promise<number> {
   const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
   const creditSummary = await runCreditBackfill(creditCandidates, { ledgerPath, runId, log, dryRun });
 
+  // fb-1784756088300-6a481e — the escalation-lifecycle reconciler rung: close stale
+  // needs-human issues whose referenced task has since resolved (the missing third leg
+  // of the escalation lifecycle). Same level-triggered doctrine + cadence as the two rungs
+  // above; bounded per cycle so a backlog drains gradually.
+  const reconcileSummary = await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { dryRun });
+
   console.log(
     `### rmd sweep${dryRun ? " --dry-run" : ""} — ${owner}/${repo}\n` +
       renderSweepSummary(summary) +
-      `\ncredit backfill: ${creditSummary.total} candidate(s) reconciled · ${creditSummary.corrected} corrected`,
+      `\ncredit backfill: ${creditSummary.total} candidate(s) reconciled · ${creditSummary.corrected} corrected` +
+      `\nescalation reconcile: ${reconcileSummary.total} open needs-human issue(s) checked · ${reconcileSummary.closed} closed`,
   );
   return 0;
+}
+
+/** The reconciler's live close side (fb-1784756088300-6a481e): `gh issue close --comment` via
+ *  {@link ghIssueGateway}, built once. Throws if the gateway cannot close, so a phantom close
+ *  is never ledgered — the reconciler's per-issue containment catches it as `close-failed`. */
+export function buildEscalationCloser(
+  owner: string,
+  repo: string,
+  issues: IssueGateway = ghIssueGateway(owner, repo),
+): (url: string, comment: string) => void {
+  return (url, comment) => {
+    if (!issues.closeWithComment) throw new Error("issue gateway cannot close issues");
+    issues.closeWithComment(url, comment);
+  };
+}
+
+/**
+ * The escalation-lifecycle reconciler rung (fb-1784756088300-6a481e), shared verbatim by
+ * `rmd sweep` and the daemon's sweep hook: list open needs-human issues, derive each referent's
+ * CURRENT state, and close the resolved ones with a citation naming the resolver. Injectable
+ * `issues`/`github` for tests. Returns the pass summary; never throws (buildEscalationReconcile-
+ * Candidates degrades a failed read to [], runEscalationReconcile contains per-issue throws).
+ */
+export async function sweepEscalationReconcile(
+  owner: string,
+  repo: string,
+  plan: Plan,
+  ledgerPath: string,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  opts: { dryRun?: boolean; issues?: IssueGateway; github?: GitHub } = {},
+): Promise<EscalationReconcileSummary> {
+  const candidates = buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
+    issues: opts.issues,
+    github: opts.github,
+  });
+  return runEscalationReconcile(candidates, {
+    closeIssue: buildEscalationCloser(owner, repo, opts.issues),
+    ledgerPath,
+    runId,
+    log,
+    dryRun: opts.dryRun,
+  });
 }
 
 /**
@@ -6024,7 +6132,7 @@ async function sweepCommand(rest: string[]): Promise<number> {
  * uses). Best-effort by the DaemonDeps.sweep contract — swallows its own errors so
  * a sweep hiccup never halts the scheduler loop.
  */
-function buildSweepHook(
+export function buildSweepHook(
   owner: string,
   repo: string,
   config: Config,
@@ -6042,6 +6150,12 @@ function buildSweepHook(
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath);
       const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
       await runSweep(openPrs, { ...effects, ledgerPath, runId, log }, DEFAULT_SWEEP_POLICY);
+      // fb-1784756088300-6a481e: the escalation-lifecycle reconciler rung — closes stale
+      // needs-human issues whose referenced task has since resolved, on the daemon's own
+      // cadence. The missing third leg of the escalation lifecycle (creation W1-T8, dedup
+      // W1-T195, closure here); same level-triggered doctrine as the credit rung below. Its
+      // own read failures degrade to [] internally, so it never strands the credit rung.
+      await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log);
       // W1-T150: the SAME credit-backfill rung `rmd sweep` runs, on the
       // daemon's own poll cadence — never a second, separately-scheduled loop.
       const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);

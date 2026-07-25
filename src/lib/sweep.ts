@@ -1463,3 +1463,161 @@ export async function runCreditBackfill(
   log("sweep.credit_backfill.summary", { total: summary.total, corrected: summary.corrected });
   return summary;
 }
+
+// ── ESCALATION-LIFECYCLE RECONCILER (fb-1784756088300-6a481e) ──────────────────
+// The sweep RAISES needs-human issues (W1-T8) but nothing ever CLOSED them when the
+// blocker resolved: 84% of open needs-human issues (26/31 on 2026-07-22) were stale —
+// each referenced a fix PR that later merged through its normal gate. This is the missing
+// third leg of the escalation lifecycle (creation W1-T8, dedup-at-creation W1-T195,
+// CLOSURE here), and it rides the SAME sweep seam + same level-triggered doctrine as
+// runCreditBackfill above: the CALLER re-derives each OPEN needs-human issue's referenced
+// task via the #737/#741-corrected deriveStatus and hands the derivation here. A RESOLVED
+// (merged) referent is closed with a citation naming the resolver; a still-LIVE referent is
+// left untouched; and an INDETERMINATE derivation (W1-T119 — GitHub could not be read) is
+// left untouched too, never closed on a read this pass could not trust. Bounded per cycle so
+// a large backlog drains gradually rather than in a burst of `gh issue close` calls, and
+// every close is ledgered.
+
+/** How many stale escalations one reconcile pass may close — bounds the write burst so a
+ *  large backlog (the observed 94-open shape) drains across several sweeps, never one. */
+export const MAX_ESCALATION_CLOSES_PER_CYCLE = 20;
+
+/** One open needs-human issue paired with its referenced task's CURRENT derived state. */
+export interface EscalationReconcileCandidate {
+  issueUrl: string;
+  issueNumber?: number;
+  taskId: string;
+  /** The referent's state, derived by the caller via the #737/#741-corrected deriveStatus. */
+  derived: {
+    merged: boolean;
+    /** W1-T119: the read that produced this derivation FAILED — treat as neither resolved nor live. */
+    indeterminate?: boolean;
+    prUrl?: string;
+    prNumber?: number;
+    source?: string;
+  };
+}
+
+/** One issue's reconcile outcome this pass. */
+export interface EscalationReconcileResult {
+  issueUrl: string;
+  taskId: string;
+  outcome: "closed" | "left-live" | "left-indeterminate" | "deferred-cap" | "close-failed";
+}
+
+/** The whole reconcile pass's outcome. */
+export interface EscalationReconcileSummary {
+  total: number;
+  closed: number;
+  results: EscalationReconcileResult[];
+}
+
+export interface EscalationReconcileDeps {
+  /** Close one issue, posting the citation comment. Wraps `gh issue close --comment` in prod. */
+  closeIssue: (url: string, comment: string) => void;
+  ledgerPath: string;
+  runId: string;
+  appendLine?: typeof appendLedger;
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** dryRun leaves no trace (no `gh`, no ledger line) — mirrors runSweep/runCreditBackfill. */
+  dryRun?: boolean;
+  /** Bound on closes this cycle; defaults to {@link MAX_ESCALATION_CLOSES_PER_CYCLE}. */
+  maxCloses?: number;
+}
+
+/**
+ * The closing citation posted on a reconciled issue — NAMES THE RESOLVER (the merged PR) so
+ * the closure is legible, never a silent disappearance. Pure + exported for a direct assertion.
+ */
+export function renderReconcileCloseComment(c: EscalationReconcileCandidate): string {
+  const pr = c.derived.prNumber !== undefined ? `#${c.derived.prNumber}` : (c.derived.prUrl ?? "its merged PR");
+  const link = c.derived.prUrl ? ` (${c.derived.prUrl})` : "";
+  const via = c.derived.source ? ` — derived via \`${c.derived.source}\`` : "";
+  return [
+    "Auto-closed by the escalation-lifecycle reconciler (fb-1784756088300-6a481e).",
+    "",
+    `The referenced task **${c.taskId}** is now **merged**, resolved by ${pr}${link}${via}. This escalation's blocker is gone.`,
+    "",
+    "_Level-triggered closure from GitHub-derived state (the #737/#741 derivation). If the decision this issue raised is still open, reopen it._",
+  ].join("\n");
+}
+
+/**
+ * Reconcile OPEN needs-human issues against their referent's CURRENT derived state. Separate
+ * entry point mirroring {@link runCreditBackfill}: its input domain is one OPEN issue per
+ * candidate (the caller lists them and derives each referent), disjoint from runSweep's OPEN
+ * PRs. Best-effort, per-issue throw-contained: one failed `gh issue close` never strands the
+ * rest (the W1-T99 lesson).
+ */
+export async function runEscalationReconcile(
+  candidates: EscalationReconcileCandidate[],
+  deps: EscalationReconcileDeps,
+): Promise<EscalationReconcileSummary> {
+  const appendLine = deps.appendLine ?? appendLedger;
+  const log = deps.log ?? (() => {});
+  const maxCloses = deps.maxCloses ?? MAX_ESCALATION_CLOSES_PER_CYCLE;
+
+  const results: EscalationReconcileResult[] = [];
+  let closed = 0;
+
+  for (const c of candidates) {
+    // INDETERMINATE first (W1-T119): a derivation this pass could not trust is neither a close
+    // NOR a confident "still live" — it simply waits for a readable pass.
+    if (c.derived.indeterminate) {
+      results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "left-indeterminate" });
+      continue;
+    }
+    // STILL LIVE: the referent has not resolved — leave the escalation untouched.
+    if (!c.derived.merged) {
+      results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "left-live" });
+      continue;
+    }
+    // RESOLVED. Bounded per cycle: once the cap is reached, the rest drain on the next sweep.
+    if (closed >= maxCloses) {
+      results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "deferred-cap" });
+      continue;
+    }
+    // dryRun leaves no trace but still previews (and counts toward the cap so the preview
+    // matches a live cycle's bound) — mirrors runCreditBackfill's `acted = ... && !dryRun`.
+    if (deps.dryRun) {
+      closed++;
+      results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "closed" });
+      continue;
+    }
+    const comment = renderReconcileCloseComment(c);
+    try {
+      deps.closeIssue(c.issueUrl, comment);
+    } catch (e) {
+      // PER-ISSUE THROW CONTAINMENT (W1-T99): one failed close never strands the rest, and an
+      // uncounted failure retries next cycle rather than consuming a cap slot forever.
+      log("sweep.escalation_close_failed", {
+        issue_url: c.issueUrl,
+        task_id: c.taskId,
+        error: String((e as Error)?.message ?? e),
+      });
+      results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "close-failed" });
+      continue;
+    }
+    appendLine(deps.ledgerPath, {
+      run_id: deps.runId,
+      task_id: c.taskId,
+      step: "sweep.escalation_closed",
+      issue_url: c.issueUrl,
+      pr_url: c.derived.prUrl,
+      pr_number: c.derived.prNumber,
+      source: c.derived.source,
+    });
+    log("sweep.escalation_closed", {
+      issue_url: c.issueUrl,
+      task_id: c.taskId,
+      pr_url: c.derived.prUrl,
+      pr_number: c.derived.prNumber,
+    });
+    closed++;
+    results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "closed" });
+  }
+
+  const summary: EscalationReconcileSummary = { total: candidates.length, closed, results };
+  log("sweep.escalation_reconcile.summary", { total: summary.total, closed: summary.closed });
+  return summary;
+}

@@ -8,6 +8,11 @@ import { fileURLToPath } from "node:url";
 import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, digestCommand, pushDrainRundown,
   armAutoMerge,
   armFailureAction,
+  buildEscalationCloser,
+  buildEscalationReconcileCandidates,
+  sweepEscalationReconcile,
+  sweepCommand,
+  buildSweepHook,
   buildSweepEffects,
   buildSweepLightHook,
   daemonCommand,
@@ -89,7 +94,8 @@ import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import { judgeReview } from "../src/lib/review.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { GitHub } from "../src/lib/status.js";
+import { buildBatchedGithub, type GitHub } from "../src/lib/status.js";
+import type { Plan, Task } from "../src/lib/plan.js";
 import {
   DEFAULT_SWEEP_POLICY,
   runSweep,
@@ -4970,5 +4976,150 @@ test("main(): a SERVICE command (daemon) runs the freshness GATE — never the i
     process.argv = originalArgv;
     if (originalGuardEnv === undefined) delete process.env[SELF_SYNC_GUARD_ENV];
     else process.env[SELF_SYNC_GUARD_ENV] = originalGuardEnv;
+  }
+});
+
+// ── fb-1784756088300-6a481e: the escalation-lifecycle reconciler's candidate builder + closer ──
+
+function reconLedger(): string {
+  const p = join(mkdtempSync(join(tmpdir(), "rmd-recon-")), "ledger.ndjson");
+  writeFileSync(p, "");
+  return p;
+}
+
+function reconPlan(taskId: string): Plan {
+  const t = {
+    id: taskId, title: taskId, repo: "remudero", depends_on: [], type: "implement",
+    verify: "auto", risk: "medium", status: "queued", attempts: 0, origin: "architect", acceptance: [],
+  } as unknown as Task;
+  return { tasks: [t], byId: new Map([[taskId, t]]) };
+}
+
+test("buildEscalationReconcileCandidates: an open needs-human issue whose referenced task is MERGED yields a candidate carrying the derived resolver", () => {
+  const issues: IssueGateway = {
+    create: () => "",
+    listOpen: () => [
+      { number: 44, url: "https://github.com/o/r/issues/44", title: "[BLOCKED] W1-T189", body: "**Class:** BLOCKED\n**Task:** W1-T189\n\ndetail" },
+    ],
+  };
+  const github = buildBatchedGithub("o", "r", {
+    fetchAll: () => [
+      { number: 574, url: "https://github.com/o/r/pull/574", state: "MERGED", headRefName: "run-W1-T189-1784000000000", body: "Remudero-Task: W1-T189\n" },
+    ],
+  });
+  const cands = buildEscalationReconcileCandidates("o", "r", reconPlan("W1-T189"), reconLedger(), undefined, { issues, github });
+  assert.equal(cands.length, 1);
+  assert.equal(cands[0].taskId, "W1-T189");
+  assert.equal(cands[0].issueUrl, "https://github.com/o/r/issues/44");
+  assert.equal(cands[0].derived.merged, true, "the referenced task's current state is derived MERGED");
+  assert.equal(cands[0].derived.prNumber, 574);
+});
+
+test("buildEscalationReconcileCandidates: an issue with no `**Task:**` line, or one whose task is not in the plan, yields NO candidate (left to a human)", () => {
+  const github = buildBatchedGithub("o", "r", { fetchAll: () => [] });
+  const issues: IssueGateway = {
+    create: () => "",
+    listOpen: () => [
+      { number: 1, url: "iss/1", body: "no task line here at all" },
+      { number: 2, url: "iss/2", body: "**Task:** W1-T999\n" }, // real task line, but not in THIS plan
+    ],
+  };
+  const cands = buildEscalationReconcileCandidates("o", "r", reconPlan("W1-T189"), reconLedger(), undefined, { issues, github });
+  assert.equal(cands.length, 0, "neither a task-less issue nor an out-of-plan task is auto-reconciled");
+});
+
+test("buildEscalationReconcileCandidates: a FAILED issue-list read yields [] (do nothing this cycle), never a false 'zero open'", () => {
+  const logs: string[] = [];
+  const github = buildBatchedGithub("o", "r", { fetchAll: () => [] });
+  const issues: IssueGateway = { create: () => "", listOpen: () => { throw new Error("gh: HTTP 502"); } };
+  const cands = buildEscalationReconcileCandidates("o", "r", reconPlan("W1-T189"), reconLedger(), (step) => logs.push(step), { issues, github });
+  assert.equal(cands.length, 0);
+  assert.ok(logs.includes("sweep.escalation_reconcile.list_failed"), "the failed read is logged, not silently treated as zero-open");
+});
+
+test("buildEscalationCloser: delegates to the gateway's closeWithComment; throws if the gateway cannot close (so no phantom close is ever ledgered)", () => {
+  const calls: Array<{ url: string; comment: string }> = [];
+  const closer = buildEscalationCloser("o", "r", { create: () => "", closeWithComment: (url, comment) => calls.push({ url, comment }) });
+  closer("iss/44", "cite");
+  assert.deepEqual(calls, [{ url: "iss/44", comment: "cite" }]);
+  const noClose = buildEscalationCloser("o", "r", { create: () => "" });
+  assert.throws(() => noClose("iss/44", "cite"), /cannot close/);
+});
+
+test("sweepEscalationReconcile: end-to-end over injected gateways — a resolved referent's issue is closed with a citation; the rung returns its summary", async () => {
+  const closed: Array<{ url: string; comment: string }> = [];
+  const issues: IssueGateway = {
+    create: () => "",
+    listOpen: () => [
+      { number: 44, url: "https://github.com/o/r/issues/44", body: "**Task:** W1-T189\n" },
+      { number: 45, url: "https://github.com/o/r/issues/45", body: "**Task:** W1-T500\n" }, // still live (not merged)
+    ],
+    closeWithComment: (url, comment) => closed.push({ url, comment }),
+  };
+  const github = buildBatchedGithub("o", "r", {
+    fetchAll: () => [
+      { number: 574, url: "https://github.com/o/r/pull/574", state: "MERGED", headRefName: "run-W1-T189-1784000000000", body: "Remudero-Task: W1-T189\n" },
+    ],
+  });
+  const plan: Plan = {
+    tasks: [reconPlan("W1-T189").tasks[0], reconPlan("W1-T500").tasks[0]],
+    byId: new Map([["W1-T189", reconPlan("W1-T189").tasks[0]], ["W1-T500", reconPlan("W1-T500").tasks[0]]]),
+  };
+  const summary = await sweepEscalationReconcile("o", "r", plan, reconLedger(), "SWEEP-1", () => {}, { issues, github });
+  assert.equal(summary.total, 2, "both open needs-human issues were checked");
+  assert.equal(summary.closed, 1, "only the RESOLVED one closed");
+  assert.equal(closed.length, 1);
+  assert.equal(closed[0].url, "https://github.com/o/r/issues/44");
+  assert.match(closed[0].comment, /W1-T189/);
+  assert.match(closed[0].comment, /#574/);
+});
+
+test("buildSweepHook: the daemon sweep closure runs EVERY rung — incl. the escalation reconciler — end-to-end over offline gh, and never lets a throw escape", async () => {
+  // PATH-stub gh to echo [] for every subcommand → every rung (runSweep, escalation reconcile,
+  // credit backfill, draft) runs cleanly; the reconciler's own read degrades to [] internally.
+  const bin = mkdtempSync(join(tmpdir(), "gh-sweephook-"));
+  writeFileSync(join(bin, "gh"), '#!/bin/sh\necho "[]"\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  const root = mkdtempSync(join(tmpdir(), "rmd-sweephook-"));
+  try {
+    const hook = buildSweepHook(
+      "o",
+      "r",
+      { root, claudeBin: "/bin/true" } as Config,
+      join(root, "ledger.ndjson"),
+      "SWEEP-1",
+      { tasks: [], byId: new Map() },
+      () => {},
+    );
+    await hook(); // must complete without throwing — the reconciler rung rides the seam alongside credit + draft
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("sweepCommand: `rmd sweep --repo <other>` runs the full pipeline incl. the escalation reconciler over offline gh and reports the reconcile count, exit 0", async () => {
+  const bin = mkdtempSync(join(tmpdir(), "gh-sweepcmd-"));
+  writeFileSync(join(bin, "gh"), '#!/bin/sh\necho "[]"\n', { mode: 0o755 });
+  const home = mkdtempSync(join(tmpdir(), "rmd-sweepcmd-home-"));
+  const oldPath = process.env.PATH;
+  const oldHome = process.env.HOME;
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root: join(home, "Remudero") }));
+  process.env.PATH = `${bin}:${oldPath}`;
+  process.env.HOME = home;
+  try {
+    // --repo <other> so the plan path points into a non-existent clone (best-effort empty plan),
+    // never a git op; gh is stubbed to [] so every rung runs cleanly through the reconciler.
+    const code = await sweepCommand(["--repo", "remudero-sandbox"]);
+    assert.equal(code, 0, "the sweep completes and the reconciler rung runs without stranding it");
+  } finally {
+    process.env.PATH = oldPath;
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 });
