@@ -12352,3 +12352,77 @@
   files: [src/run-task.ts]
   status: queued
   attempts: 0
+
+- id: W1-T261
+  title: "ci-gate RE-AGGREGATES on member-check completion — a member that re-runs green AFTER the aggregate concluded flips ci-gate on the SAME head sha, with no manual re-run and no throwaway commit"
+  repo: remudero
+  depends_on: [W1-T123]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    THE SIBLING HALF OF W1-T123, not a duplicate of it. W1-T123 fixes WHAT ci-gate reads (group
+    check-runs by name, evaluate only the latest attempt); this task fixes WHEN it reads. Today
+    .github/workflows/ci-gate.yml triggers on `pull_request:` ONLY (line 33-34) and its aggregation is a
+    single pass: step 1 waits until every REQUIRED name is terminal, step 2 fails on ANY entry whose
+    conclusion is a failure, and the job then exits forever. Nothing re-evaluates that sha again.
+    OBSERVED #729 (2026-07-24): coverage-ratchet was RED at ci-gate's 17:11 read and GREEN at 17:18,
+    after ci-gate had already concluded. The aggregate held a failure against a check that was, by then,
+    green — and only a manual ci-gate re-run or a fresh sha cleared it. Same class blocked #634.
+    WHY W1-T123 ALONE DOES NOT CLOSE THIS, and why the dependency runs the other way too: with the
+    latest-attempt dedupe but no re-read, the stale ci-gate check-run is still the newest ci-gate run on
+    that sha and nothing ever recomputes it; with a re-read but no dedupe, the recomputation re-reads a
+    list that STILL contains the superseded failure entry (step 2's filter selects any failing
+    conclusion, with no grouping by name) and fails identically. #729 needs BOTH: the re-read supplies a
+    fresh verdict, W1-T123 makes that verdict correct.
+    WHY A RE-RUN IS SUFFICIENT AND NO NEW SHA IS NEEDED: branch protection evaluates the LATEST check
+    run per required context on the head sha, which is exactly why a manual ci-gate re-run clears the
+    block today. Automating the re-drive therefore needs no synthetic commit — the #242 throwaway empty
+    commit (a61ddd7) was paying for a missing trigger, not a missing sha.
+    SCOPE BOUNDARY: the paramedic's re-aggregate verb (fb-1784842083584-6cc22a verb 6) stays the REPAIR
+    for historical instances already stuck; this task fixes the gate so new instances stop being created.
+  design: |
+    (i) TRIGGER. ci-gate gains a member-completion trigger alongside `pull_request:` — `check_run:
+    types: [completed]` (and/or `workflow_run: types: [completed]` for the member workflows that host the
+    REQUIRED jobs) — resolving the head sha and open PR from the event payload and re-running the SAME
+    aggregation against that sha. No open PR for the sha ⇒ clean no-op, never a failure.
+    (ii) RECURSION GUARD, mandatory. ci-gate's own check run completing must never re-trigger ci-gate.
+    Reuse the existing IGNORE list (`["ci-gate"]`, ci-gate.yml:128-129) as the single source of that
+    exclusion rather than hardcoding a second copy, and re-aggregate only for names in REQUIRED.
+    (iii) COLLAPSE, bounded. A burst of member completions on one sha must collapse to a bounded number
+    of aggregations (a `concurrency` group keyed on the sha), and the guard must never leave the NEWEST
+    ci-gate run on that sha cancelled or non-terminal — `cancelled` is in step 2's own failure list, so a
+    naive cancel-in-progress would manufacture the exact stale red this task removes.
+    (iv) PLATFORM FACTS TO VERIFY LIVE, NOT ASSUME. `check_run` only triggers a workflow whose file
+    exists on the DEFAULT branch, and GitHub deliberately suppresses some Actions-app/GITHUB_TOKEN-raised
+    events from starting new runs to prevent recursion. So the trigger MUST be proven against a real PR
+    before this is called done. If the platform suppresses it for Actions-authored member check runs, fall
+    back to the named alternative — ci-gate, before concluding FAILURE, re-reads once after a bounded
+    grace window (so a member that flips green within the window is seen) — and record which mechanism
+    was observed to work, with the probe evidence, in docs/review-gate.md (the W1-T24b probe pattern).
+    (v) NOT IN SCOPE: the REQUIRED/IGNORE contract, the fail-closed 15-minute wait and its timeout, and
+    absent-check semantics — all unchanged. This task changes WHEN the aggregation runs, never what a
+    required check means.
+  acceptance:
+    - claim: "a required member that completes SUCCESS after ci-gate already concluded FAILURE on the same head sha re-drives the aggregation, and the newest ci-gate run for that sha is SUCCESS — the #729 fixture (coverage-ratchet red at the 17:11 read, green at 17:18) locked so the aggregate flips with NO new sha and no manual re-run"
+      proof: "unit test: test/ci-gate-reaggregate.test.ts"
+    - claim: "re-aggregation never launders a real red: a member completing FAILURE, and a member whose latest attempt is still a failure, both re-aggregate to FAILURE, and an absent required check still blocks — the falsifier proving the trigger did not weaken the gate"
+      proof: "unit test: test/ci-gate-reaggregate.test.ts"
+    - claim: "ci-gate's own completion never re-triggers ci-gate (the IGNORE list is the single source of that exclusion), and a burst of member completions on one sha collapses to a bounded number of aggregations whose newest ci-gate run is always terminal, never cancelled"
+      proof: "unit test: test/ci-gate-reaggregate.test.ts"
+    - claim: "the workflow itself carries the member-completion trigger (or the recorded fallback), not just test doubles — the mechanism observed to work live is written down where the gate's contract is documented"
+      proof: "grep: re-aggregat in docs/review-gate.md"
+  risk: high
+  origin: feedback#fb-1784917146019-88250d
+  plan_refs: ["§5", "W1-T123"]
+  files: [.github/workflows/ci-gate.yml, docs/review-gate.md]
+  status: queued
+  attempts: 0
+  note: "SIBLING of W1-T123 (what ci-gate reads) — this is WHEN it reads. Hard dependency, both
+    directions of uselessness: dedupe without a re-read never recomputes the stale aggregate; a re-read
+    without dedupe recomputes the same red. Fixture #729 (2026-07-24), also observed as #634's blocker.
+    risk:high — it edits the single required context that gates every merge, and the failure direction is
+    asymmetric: a recursion or a cancel-in-progress bug either spins the gate or leaves a cancelled
+    ci-gate as the newest run, which reads as a hard red. The guards in design (ii)/(iii) are load-bearing
+    criteria, not defensive extras."
