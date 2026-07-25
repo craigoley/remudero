@@ -1,0 +1,52 @@
+- id: W1-T260
+  title: "operator write-actions on the console UP NEXT panel — a per-row Run button and a Drain-now control — using the marker-file pattern (never process management inside serve): the daemon consumes the marker and dispatches THAT task through its normal assertRunnable-gated path, refusals ledgered back to the console"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Operator ruling captured as fb-1784988460437-9daa9b (2026-07-25, the spec of record). The console
+    could read UP NEXT but had NO write-action to run a queued task or force a drain — the operator had to shell
+    in. Add both as MARKER-FILE writes (the DEPLOY_REQUESTED / STOP / PAUSE precedent), never process management
+    inside serve: the write-token API drops a marker; the running daemon consumes it at its next poll and
+    dispatches through its EXISTING gate, so no new dispatch path and no assertRunnable bypass are introduced."
+  design: |
+    Marker helpers (fleet-control.ts, alongside STOP/PAUSE): `state/KICK_REQUESTED-<taskId>` (one per queued task,
+    dispatched over successive cycles) and `state/DRAIN_REQUESTED` (run one cycle immediately). Each marker carries
+    the caller's `origin` (bearerTokenId) — the arm-identity captured AT BIRTH — so the daemon's consume-time
+    ledger line names the console as actor without ever seeing the raw token. Task ids are validated fail-closed
+    (`isSafeTaskId`) on BOTH write and read so a marker filename can never traverse out of state/.
+    Endpoints (panel-actions.ts, the write-scoped Route pattern): POST /v1/drain/kick {taskId} → requestKick +
+    ledger `console.kick_requested`; POST /v1/drain/run → requestDrainNow + ledger `console.drain_requested`.
+    Daemon (daemon.ts, injected deps — module stays fs-free): consume DRAIN_REQUESTED at the top of a cycle
+    (ledger `console.drain_consumed`); peek pending kicks, and for each gate through the merged projection +
+    `assertRunnable` — an unknown / already-merged (the stale-marker class) / verify:human / blocked / unmet-deps
+    kick is CLEARED and its named reason ledgered `console.kick_refused` (never silent), the first RUNNABLE kick
+    becomes this cycle's task via the normal runOne path (ledger `console.kick_dispatched`).
+    Console (serve.ts): a per-row Run button (delegated off #up-next-list) and a Drain-now control, both reusing
+    STOP/APPROVE's OWN arm-then-confirm discipline (a click ARMS + reads back, a second click within 8s acts). A
+    refusal surfaces as its `console.kick_refused` line in the RECENT ledger feed.
+  acceptance:
+    - claim: "the kick endpoint writes a KICK_REQUESTED marker carrying the bearer origin AND ledgers console.kick_requested; the daemon consumes it and dispatches THAT task, the dispatch line carrying the console-actor provenance"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "a verify:human kicked target is refused with its assertRunnable-named reason (rendered via the ledger, not silent), the marker cleared, and never dispatched"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "a stale kick for an already-merged task is refused via the projection (86793d class), the marker cleared, the reason ledgered — never re-dispatched"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "the kick + drain endpoints are write-scoped, validate/ fail-loud before any side effect, and stamp the console origin into both the marker and the ledger line"
+      proof: "unit test: test/panel-actions.test.ts"
+    - claim: "the marker helpers round-trip (write→peek→consume-once), reject unsafe task ids before any write, and skip a garbage marker instead of dispatching off it"
+      proof: "unit test: test/fleet-control.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§4", "§7"]
+  files: [src/lib/fleet-control.ts, src/lib/panel-actions.ts, src/lib/daemon.ts, src/lib/serve.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high — it lets the console DISPATCH work. The safety comes from reusing the EXISTING gate: the daemon
+    runs a kicked task through the SAME assertRunnable + merged-projection path a normal pick takes, so a console
+    Run can never bypass verify:human, a blocked task, unmerged deps, or dispatch a stale-merged id — every
+    refusal is cleared + ledgered, never silent. serve NEVER manages a process; it only drops a marker (the
+    DEPLOY_REQUESTED precedent). Implemented by an operator-directed session 2026-07-25 per fb-1784988460437-9daa9b
+    (filed first, the spec of record); credited via the merging PR's Remudero-Task trailer."

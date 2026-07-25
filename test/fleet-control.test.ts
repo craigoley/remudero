@@ -1,16 +1,24 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  clearKick,
+  consumeDrainNow,
   consumeStop,
+  drainNowFilePath,
   isPaused,
   isQuietHours,
+  isSafeTaskId,
   isStopped,
+  kickFilePath,
   pauseDetail,
   pauseFilePath,
+  pendingKicks,
   quietHoursFilePath,
+  requestDrainNow,
+  requestKick,
   requestPause,
   requestStop,
   resumeFleet,
@@ -175,4 +183,63 @@ test("resumeFleet does NOT touch quiet hours — it is a schedule preference, no
   assert.equal(isStopped(root), false);
   assert.equal(isPaused(root), false);
   assert.equal(isQuietHours(root), true, "resumeFleet must leave quiet hours untouched");
+});
+
+// ── CONSOLE WRITE-ACTION MARKERS (fb-1784988460437-9daa9b) ──────────────────────
+
+test("requestKick → pendingKicks round-trips the task id + console origin; clearKick consumes it once", () => {
+  const root = mkdtempSync(join(tmpdir(), "kick-"));
+  requestKick(root, "W1-T259", "console-hash-abc");
+  requestKick(root, "SBX-T1", "console-hash-def");
+  const pending = pendingKicks(root);
+  assert.equal(pending.length, 2);
+  const w = pending.find((k) => k.taskId === "W1-T259");
+  assert.ok(w);
+  assert.equal(w!.origin, "console-hash-abc");
+  // consumed-once
+  assert.equal(clearKick(root, "W1-T259"), true);
+  assert.equal(pendingKicks(root).length, 1);
+  assert.equal(clearKick(root, "W1-T259"), false, "clearing an absent marker is idempotent, not an error");
+});
+
+test("pendingKicks returns oldest-first and SKIPS a garbage marker (never dispatches off it)", () => {
+  const root = mkdtempSync(join(tmpdir(), "kick-order-"));
+  requestKick(root, "A-1", "o1");
+  requestKick(root, "A-2", "o2");
+  // a hand-corrupted marker in the same dir must be skipped, not crash the reader
+  writeFileSync(kickFilePath(root, "GARBAGE"), "{not json");
+  const pending = pendingKicks(root);
+  assert.deepEqual(pending.map((k) => k.taskId), ["A-1", "A-2"], "oldest-first, garbage excluded");
+});
+
+test("requestKick REFUSES an unsafe task id BEFORE any write (no path traversal, no side effect)", () => {
+  const root = mkdtempSync(join(tmpdir(), "kick-unsafe-"));
+  for (const bad of ["../evil", "a/b", "..", "", "with space"]) {
+    assert.throws(() => requestKick(root, bad, "o"), /unsafe task id/);
+  }
+  assert.equal(pendingKicks(root).length, 0, "no marker was ever written for an unsafe id");
+});
+
+test("isSafeTaskId accepts real task ids and rejects traversal/empties", () => {
+  for (const ok of ["W1-T259", "SBX-T1", "a.b_c-1"]) assert.equal(isSafeTaskId(ok), true, ok);
+  for (const bad of ["../x", "a/b", "..", "", " ", "a b", 5 as unknown]) assert.equal(isSafeTaskId(bad), false, String(bad));
+});
+
+test("requestDrainNow → consumeDrainNow round-trips the origin and is consumed-once", () => {
+  const root = mkdtempSync(join(tmpdir(), "drain-"));
+  assert.equal(consumeDrainNow(root), null, "no marker ⇒ null");
+  requestDrainNow(root, "console-drain-origin");
+  assert.ok(existsSync(drainNowFilePath(root)));
+  const first = consumeDrainNow(root);
+  assert.equal(first?.origin, "console-drain-origin");
+  assert.equal(existsSync(drainNowFilePath(root)), false, "marker deleted on consume");
+  assert.equal(consumeDrainNow(root), null, "consumed-once — a second consume sees nothing");
+});
+
+test("consumeDrainNow deletes even a GARBAGE marker (never lingers) and returns null", () => {
+  const root = mkdtempSync(join(tmpdir(), "drain-garbage-"));
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(drainNowFilePath(root), "{bad");
+  assert.equal(consumeDrainNow(root), null);
+  assert.equal(existsSync(drainNowFilePath(root)), false, "a garbage drain marker is still consumed-once");
 });

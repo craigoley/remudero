@@ -43,7 +43,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { execFileSync } from "node:child_process";
 import type { Route } from "./service.js";
 import { appendLedger } from "./ledger.js";
-import { isPaused, isQuietHours, isStopped, pauseDetail, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail } from "./fleet-control.js";
+import { isPaused, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail } from "./fleet-control.js";
 import { appendQuestionAnswer } from "./worker.js";
 import { hashToken } from "./last-seen.js";
 
@@ -455,6 +455,66 @@ export function buildDrainFeedbackRoute(deps: PanelActionDeps): Route {
   };
 }
 
+// ── POST /v1/drain/kick + /v1/drain/run (console UP NEXT write-actions) ──────
+// fb-1784988460437-9daa9b. Both write a marker the daemon consumes at its next
+// poll (never process management here) and ledger the console as actor (the
+// arm-identity, applied at BIRTH — the origin is stamped into the marker now and
+// carried to the daemon's consume-time outcome line). assertRunnable still gates
+// on the daemon side, so a verify:human/blocked/stale-merged target is refused
+// there with its named reason (rendered back via the ledger stream), not here —
+// this endpoint only records the operator's intent.
+
+interface TaskIdInput {
+  taskId: string;
+}
+
+function validateTaskId(body: unknown): { error: string } | TaskIdInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.taskId !== "string" || body.taskId.trim() === "") return { error: "taskId must be a non-empty string" };
+  // Fail loud on an id that could never be a safe marker filename — BEFORE any write.
+  if (!isSafeTaskId(body.taskId)) return { error: "taskId is not a valid task id" };
+  return { taskId: body.taskId };
+}
+
+/**
+ * POST /v1/drain/kick — the per-row "Run" button. Writes `KICK_REQUESTED-<taskId>`;
+ * the daemon dispatches THAT task by id through its normal `assertRunnable`-gated path
+ * at the next poll. Write-scoped; ledgers `console.kick_requested` (the birth line,
+ * console as actor). The dispatch/refusal OUTCOME is the daemon's own consume-time line.
+ */
+export function buildKickRoute(deps: Pick<PanelActionDeps, "root" | "ledgerPath">): Route {
+  return {
+    method: "POST",
+    path: "/v1/drain/kick",
+    scope: "write",
+    handler: jsonAction(validateTaskId, (input, req, res) => {
+      const origin = bearerTokenId(req);
+      requestKick(deps.root, input.taskId, origin);
+      appendPanelLedger(deps.ledgerPath, "console.kick_requested", input.taskId, origin, { armed: true });
+      sendJson(res, 200, { armed: true, taskId: input.taskId });
+    }),
+  };
+}
+
+/**
+ * POST /v1/drain/run — the "Drain now" button. Writes `DRAIN_REQUESTED`; the daemon
+ * runs one dispatch cycle immediately at its next poll. Write-scoped; ledgers
+ * `console.drain_requested` (console as actor). No body required.
+ */
+export function buildDrainNowRoute(deps: Pick<PanelActionDeps, "root" | "ledgerPath">): Route {
+  return {
+    method: "POST",
+    path: "/v1/drain/run",
+    scope: "write",
+    handler: async (req, res) => {
+      const origin = bearerTokenId(req);
+      requestDrainNow(deps.root, origin);
+      appendPanelLedger(deps.ledgerPath, "console.drain_requested", PANEL_TASK_ID, origin, { armed: true });
+      sendJson(res, 200, { armed: true });
+    },
+  };
+}
+
 /** Every panel write route, for a caller registering the full set at once (`rmd serve` wiring, later work). */
 export function buildPanelActionRoutes(deps: PanelActionDeps): Route[] {
   return [
@@ -467,6 +527,8 @@ export function buildPanelActionRoutes(deps: PanelActionDeps): Route[] {
     buildApproveManualRoute(deps),
     buildEscalationMarkHandledRoute(deps),
     buildDrainFeedbackRoute(deps),
+    buildKickRoute(deps),
+    buildDrainNowRoute(deps),
   ];
 }
 

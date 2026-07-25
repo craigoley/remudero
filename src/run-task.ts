@@ -354,8 +354,11 @@ import { acquireInflightLock, InflightLockError, sweepStaleInflightLocks } from 
 import { classifyFailure, MAX_TRANSIENT_RETRIES, type FailureSignal } from "./lib/classify.js";
 import { shouldRecordDecision } from "./lib/risk-score.js";
 import {
+  clearKick,
+  consumeDrainNow,
   consumeStop,
   pauseDetail,
+  pendingKicks,
   requestPause,
   requestStop,
   resumeFleet,
@@ -5003,6 +5006,12 @@ export async function daemonCommand(rest: string[]): Promise<number> {
         readUsage: () => readUsageSnapshot(config),
         checkStop: () => stopDetail(config.root),
         checkPause: () => pauseDetail(config.root),
+        // Console UP NEXT write-actions (fb-1784988460437-9daa9b): the daemon
+        // consumes markers the write-token API drops, dispatching a kicked task
+        // through its normal assertRunnable-gated path and honouring "drain now".
+        pendingKicks: () => pendingKicks(config.root),
+        clearKick: (taskId) => clearKick(config.root, taskId),
+        consumeDrainNow: () => consumeDrainNow(config.root),
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         // The real wall clock backing the TIME-AWARE headroom ceiling (see
         // lib/daemon.ts's HeadroomPolicy) — resolves each window's own

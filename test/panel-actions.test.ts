@@ -11,7 +11,10 @@ import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
   buildDrainFeedbackRoute,
+  buildDrainNowRoute,
   buildEscalationMarkHandledRoute,
+  buildKickRoute,
+  buildPanelActionRoutes,
   buildPauseRoute,
   buildQuietHoursRoute,
   buildResumeRoute,
@@ -20,7 +23,7 @@ import {
   type IssueCloser,
   type PanelActionDeps,
 } from "../src/lib/panel-actions.js";
-import { isPaused, isQuietHours, isStopped, pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
+import { consumeDrainNow, isPaused, isQuietHours, isStopped, kickFilePath, pauseDetail, pendingKicks, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
 import { runDrain, type DrainDeps } from "../src/lib/drain.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { RunResult } from "../src/lib/run-result.js";
@@ -86,6 +89,8 @@ async function withService<T>(deps: PanelActionDeps, fn: (baseUrl: string) => Pr
       buildApproveManualRoute(deps),
       buildEscalationMarkHandledRoute(deps),
       buildDrainFeedbackRoute(deps),
+      buildKickRoute(deps),
+      buildDrainNowRoute(deps),
     ],
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -642,4 +647,75 @@ test("INTEGRATION: a panel STOP mid-run halts the drain within one tick -- ledge
   // AFTER drain.stop as it returns), proving the halt happened on the FIRST tick after the
   // panel's STOP landed -- "no further spawns" is literal: no second drain.iteration exists.
   assert.deepEqual(steps, ["drain.iteration", "drain.stop", "drain.summary"]);
+});
+
+// ── UP NEXT write-actions: Run kick + Drain now (fb-1784988460437-9daa9b) ──────
+
+test("POST /v1/drain/kick writes a KICK_REQUESTED-<taskId> marker AND ledgers console.kick_requested with the bearer origin (console named as actor at birth)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "panel-kick-"));
+  const deps = depsFor(root);
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/drain/kick", WRITE_TOKEN, { taskId: "W1-T259" });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { armed: true, taskId: "W1-T259" });
+  });
+  // the marker the daemon will consume, carrying the console origin
+  const pending = pendingKicks(root);
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].taskId, "W1-T259");
+  assert.equal(pending[0].origin, bearerTokenId({ headers: { authorization: `Bearer ${WRITE_TOKEN}` } } as any));
+  // the ledger birth line
+  const lines = readLedgerLines(deps.ledgerPath);
+  const kick = lines.find((l) => l.step === "console.kick_requested");
+  assert.ok(kick, "console.kick_requested ledgered");
+  assert.equal(kick!.task_id, "W1-T259");
+  assert.equal(kick!.origin, pending[0].origin, "same console-actor origin on the ledger and in the marker");
+});
+
+test("POST /v1/drain/kick with a missing/unsafe taskId is a 400 with NO marker written (fail loud before any side effect)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "panel-kick-bad-"));
+  const deps = depsFor(root);
+  await withService(deps, async (base) => {
+    for (const bad of [{}, { taskId: "" }, { taskId: "../evil" }, { taskId: "a/b" }]) {
+      const res = await post(base, "/v1/drain/kick", WRITE_TOKEN, bad);
+      assert.equal(res.status, 400, JSON.stringify(bad));
+    }
+  });
+  assert.equal(pendingKicks(root).length, 0, "no marker for any rejected id");
+  assert.equal(existsSync(kickFilePath(root, "../evil")), false);
+});
+
+test("POST /v1/drain/run writes the DRAIN_REQUESTED marker AND ledgers console.drain_requested with the bearer origin", async () => {
+  const root = mkdtempSync(join(tmpdir(), "panel-drain-"));
+  const deps = depsFor(root);
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/drain/run", WRITE_TOKEN, {});
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { armed: true });
+  });
+  const drain = consumeDrainNow(root);
+  assert.ok(drain, "DRAIN_REQUESTED marker present");
+  assert.equal(drain!.origin, bearerTokenId({ headers: { authorization: `Bearer ${WRITE_TOKEN}` } } as any));
+  const lines = readLedgerLines(deps.ledgerPath);
+  const d = lines.find((l) => l.step === "console.drain_requested");
+  assert.ok(d, "console.drain_requested ledgered");
+  assert.equal(d!.origin, drain!.origin);
+});
+
+test("both /v1/drain/kick and /v1/drain/run are write-scoped: a read token gets 403 and writes nothing", async () => {
+  const root = mkdtempSync(join(tmpdir(), "panel-kick-scope-"));
+  const deps = depsFor(root);
+  await withService(deps, async (base) => {
+    assert.equal((await post(base, "/v1/drain/kick", READ_TOKEN, { taskId: "W1-T259" })).status, 403);
+    assert.equal((await post(base, "/v1/drain/run", READ_TOKEN, {})).status, 403);
+  });
+  assert.equal(pendingKicks(root).length, 0);
+  assert.equal(consumeDrainNow(root), null);
+});
+
+test("buildPanelActionRoutes registers the FULL write-action set, including the UP NEXT Run + Drain-now routes (fb-…9daa9b)", () => {
+  const deps = depsFor(mkdtempSync(join(tmpdir(), "panel-routes-")));
+  const paths = buildPanelActionRoutes(deps).map((r) => `${r.method} ${r.path}`);
+  assert.ok(paths.includes("POST /v1/drain/kick"), "the per-row Run kick route is in the complete set");
+  assert.ok(paths.includes("POST /v1/drain/run"), "the Drain-now route is in the complete set");
 });
