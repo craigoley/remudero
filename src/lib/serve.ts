@@ -755,14 +755,17 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     const d = Math.floor(h / 24);
     return \`\${d}d ago\`;
   }
-  /** \`iso\` -> "14:23:05 · 8s ago" -- local wall-clock time (the reader's own timezone) PLUS a
-   *  relative offset from now, together, never either alone. Falls back to the raw string only
-   *  when \`iso\` fails to parse (never silently swallowed). */
+  /** \`iso\` -> "14:23:05 EDT · 8s ago" -- local wall-clock time WITH THE TIMEZONE LABELED (the
+   *  reader's own zone) PLUS a relative offset, BOTH computed from the SAME \`t\` and the SAME
+   *  \`Date.now()\` so the absolute stamp and the age can never contradict (fb-…c124f9's "impossible
+   *  arithmetic"; the labeled zone removes the "is 12:03 UTC or local?" ambiguity). Mirrors the
+   *  unit-tested \`formatStamp\` in lib/console-freshness.ts. Falls back to the raw string only when
+   *  \`iso\` fails to parse (never silently swallowed). */
   function formatTimestamp(iso) {
     if (!iso) return "unknown";
     const t = Date.parse(iso);
     if (Number.isNaN(t)) return String(iso);
-    const local = new Date(t).toLocaleTimeString();
+    const local = new Date(t).toLocaleTimeString(undefined, { timeZoneName: "short" });
     return \`\${local} · \${formatRelative(Date.now() - t)}\`;
   }
 
@@ -917,6 +920,11 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     }
   }
   function markStale(asOf) {
+    // MUTUALLY EXCLUSIVE WITH LIVE/FRESH (fb-…c124f9): a STALE banner can never co-display with
+    // recent live data. If ANY transport (poll OR SSE) delivered inside STALE_DATA_AGE_MS, the
+    // pane is fresh — refuse to raise the banner (mirrors resolveFreshness: fresh ⇒ live). At a
+    // cold cache-restore lastLiveAt is null, so the cached data IS honestly stale and shows.
+    if (lastLiveAt && Date.now() - lastLiveAt < STALE_DATA_AGE_MS) return;
     const badge = document.getElementById("stale-badge");
     badge.hidden = false;
     badge.textContent = \`STALE — showing last known data as of \${asOf ? formatTimestamp(asOf) : "an earlier load"}\`;
@@ -929,10 +937,19 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
 
   function summaryText(tasks) {
     const total = tasks.length;
-    const merged = tasks.filter((t) => t.status === "merged" || t.status === "done").length;
-    const running = tasks.filter((t) => t.status === "running").length;
+    // fb-1784902052582-c124f9: the tally and the rendered rows derive from ONE query. "running"
+    // uses the SAME predicate renderNow filters on (an in-flight run \`phase\`), never \`status ===
+    // "running"\` — so the header count can never disagree with the NOW rows again.
+    const running = tasks.filter((t) => t.phase).length;
     const queued = tasks.filter((t) => t.status === "queued").length;
-    return \`\${total} tasks · \${running} running · \${merged} merged · \${queued} queued\`;
+    // 0-MERGED IS NOT A FACT DURING A GITHUB OUTAGE (fb-…c124f9): when merge-state is
+    // unreachable (the SAME per-task \`indeterminate\` signal the gh banner keys on), the merged
+    // tally is UNKNOWN, never rendered as \`0\`.
+    const unreachable = tasks.some((t) => t.indeterminate);
+    const mergedPart = unreachable
+      ? "merged: unknown (GitHub unreachable)"
+      : \`\${tasks.filter((t) => t.status === "merged" || t.status === "done").length} merged\`;
+    return \`\${total} tasks · \${running} running · \${mergedPart} · \${queued} queued\`;
   }
 
   // ── W1-T156: the live task-status truth this shell renders from. SSE deltas AND poll
@@ -1197,6 +1214,9 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   // drives the elapsed text, so a row that crosses its threshold mid-session is flagged without
   // waiting on the next status flip/re-render.
   function liveSpendHtml(t) {
+    // NO DATA YET, never zeros (fb-1784902052582-c124f9): an in-flight run that has logged no
+    // spend/turns line yet reads "no data yet", not "$0.000 / 0 turns" as fact.
+    if (t.liveSpendPending) return \` · spend: <span class="spend-pending">no data yet</span>\`;
     if (t.liveSpendUsd === undefined && t.liveTurns === undefined) return "";
     const turns = t.liveTurns !== undefined ? \` / \${t.liveTurns} turns\` : "";
     return \` · spend: \${costLabel(t.liveSpendUsd)}\${turns}\`;
@@ -2346,6 +2366,12 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
 
   function touchFreshness() {
     lastLiveAt = Date.now();
+    // Fresh data just landed from SOME transport (poll success or SSE delta) ⇒ the pane is no
+    // longer stale (fb-…c124f9): clear any lingering STALE banner, even a cache-seeded one that a
+    // poll never cleared because only the SSE was delivering — the exact "STALE beside live ·
+    // updated Ns ago" co-display the operator screenshotted. ONE clock (lastLiveAt) now both
+    // raises (markStale's guard) and lowers the banner, so the two can never contradict.
+    clearStale();
   }
   function tickFreshness() {
     const el = document.getElementById("freshness");

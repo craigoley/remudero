@@ -1,0 +1,50 @@
+- id: W1-T262
+  title: "the console header tells ONE coherent freshness story — every pane declares its source and that source's age from one clock (timezone labeled), a STALE banner keys on the pane's own source and never co-displays with live, run progress renders 'no data yet' not zeros, the merged tally reads 'unknown' during a GitHub outage rather than 0, and the running tally derives from the SAME query the NOW rows do"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "fb-1784902052582-c124f9 (the spec). The operator's 2026-07-24/25 screenshots showed the header
+    contradicting itself: three freshness chips off three different clocks ('updated 10:00:42 AM · 11s ago' +
+    'live · updated 5s ago' + 'STALE … as of 12:03:09 PM · 5h ago') whose absolute/relative/staleness could not
+    all be true; a header tally '2 running' beside a NOW pane rendering one run; a running card reading
+    $0.000/0 turns at 2m51s elapsed (zeros rendered as fact); and 0-merged rendered as fact while GitHub was
+    unreachable. This owns the HEADER's honesty (siblings: cf7c24 the body structure, e025c1 the cards' truth)."
+  design: |
+    ONE freshness model, pushed to the server snapshot (unit-testable) where it can be, with the client's own
+    time/chip logic mirrored from a pure, tested module so the browser renders the SAME logic the fixtures pin.
+    board.ts (the read model): `liveRunSpend` gains `hasData` so an in-flight run with no `implement.done`/`fix.done`
+    yet is `liveSpendPending` (UNKNOWN), never `liveSpendUsd:0`/`liveTurns:0`; the snapshot gains
+    `github_unreachable` (from `safeReadFailed`) and a `counts` summary whose `running` uses the SAME phase
+    predicate the NOW rows filter on (`isRunningRow`) and whose `merged_known` is false during an outage.
+    console-freshness.ts (new, pure): `formatStamp(iso, nowMs)` renders absolute time AND age from ONE instant +
+    ONE clock with the timezone LABELED (the "impossible arithmetic" can't recur); `resolveFreshness` returns
+    exactly one of live/reconnecting/stale so a STALE label can never co-display with live.
+    serve.ts (the client): the header tally + merged use the same predicate/outage signal as the rows; the NOW
+    card renders "no data yet"; the absolute stamp is timezone-labeled; and the STALE banner is raised/lowered off
+    the ONE `lastLiveAt` clock — a fresh delta from ANY transport (poll OR SSE) clears it, and it never raises
+    while fresh data is present (the cache-seeded "STALE beside live" the operator saw).
+  acceptance:
+    - claim: "the three-chip co-display is impossible: resolveFreshness returns exactly ONE mode, and a connected/fresh pane is never simultaneously stale"
+      proof: "unit test: test/console-freshness.test.ts"
+    - claim: "the impossible arithmetic can't recur: formatStamp derives absolute time and relative age from one instant + one clock, with the timezone labeled"
+      proof: "unit test: test/console-freshness.test.ts"
+    - claim: "an in-flight run with no spend line yet is 'no data yet' (liveSpendPending), never $0.000 / 0 turns rendered as fact"
+      proof: "unit test: test/board.test.ts"
+    - claim: "a GitHub-unreachable read flags github_unreachable + merged_known=false so the merged tally is UNKNOWN, never 0 as fact"
+      proof: "unit test: test/board.test.ts"
+    - claim: "the running tally derives from the SAME phase predicate the NOW rows use, so the header count can never disagree with the rendered rows"
+      proof: "unit test: test/board.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§7"]
+  files: [src/lib/board.ts, src/lib/console-freshness.ts, src/lib/serve.ts]
+  status: queued
+  attempts: 0
+  note: "The header's honesty is a TRUST surface — a console that contradicts itself teaches the operator to
+    distrust ALL of it. The fix pushes each honesty decision to a place it can be unit-pinned (board.ts snapshot,
+    the pure console-freshness.ts) so every observed incoherence is a reproduced-then-green fixture, and the
+    client mirrors that tested logic rather than re-deriving a fourth clock. Implemented by an operator-directed
+    session 2026-07-25 per fb-1784902052582-c124f9; credited via the merging PR's Remudero-Task trailer."
