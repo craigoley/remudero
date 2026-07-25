@@ -82,6 +82,40 @@ export interface Config {
    * console share one machine.
    */
   consoleUrl?: string;
+  /**
+   * Headroom governor switch (operator ruling fb-1784894405468-a4153e, 2026-07-24,
+   * amending P34(c)/W1-T249, extending W1-T252). When `enabled` is false — the
+   * default posture on this host — ALL headroom-based dispatch gating is OFF: the
+   * W1-T197 daemon idle curve and the ratified W1-T249 reserve gate never pause
+   * dispatch on `percent_used`. Headroom is still READ and LEDGERED every daemon
+   * cycle (telemetry without enforcement), so the console shows weekly burn and
+   * the operator flips the flag with data in front of him. The per-run turn limit
+   * and `budget_usd` tripwire remain the runaway guards (ruling clause 4). When
+   * `enabled` is true, the existing time-aware curve enforces unchanged.
+   *
+   * FUTURE HOME: `plan/policy.yaml`'s `headroom.enabled` row once W1-T252 ships;
+   * this config field (and the `RMD_HEADROOM_ENABLED` env override — see
+   * {@link resolveHeadroomEnabled}) is the interim carrier until then.
+   */
+  headroom?: { enabled?: boolean };
+}
+
+/**
+ * Resolve the headroom-governor switch (ruling fb-1784894405468-a4153e). Precedence:
+ * the `RMD_HEADROOM_ENABLED` env var (set/unset by the daemon plist) OVERRIDES the
+ * config field in BOTH directions; absent an env value, the config's
+ * `headroom.enabled`; absent that, **false** — governor OFF, the default host posture.
+ * `1/true/on/yes` (case-insensitive) ⇒ enabled; anything else present ⇒ disabled.
+ */
+export function resolveHeadroomEnabled(
+  config: Pick<Config, "headroom">,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw = env.RMD_HEADROOM_ENABLED;
+  if (typeof raw === "string" && raw.trim() !== "") {
+    return /^(1|true|on|yes)$/i.test(raw.trim());
+  }
+  return config.headroom?.enabled ?? false;
 }
 
 /**

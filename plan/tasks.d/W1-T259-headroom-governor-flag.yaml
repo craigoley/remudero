@@ -1,0 +1,51 @@
+- id: W1-T259
+  title: "ALL headroom-based dispatch gating sits behind one switch (headroom.enabled), default OFF on this host, per operator ruling fb-1784894405468-a4153e — when off, headroom is still read and ledgered every daemon cycle (telemetry without enforcement) but never pauses dispatch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR RULING fb-1784894405468-a4153e (2026-07-24), amending P34(c)/W1-T249 and extending W1-T252.
+    Runaway protection is already owned by the per-run turn limit and the budget_usd tripwire; the operator runs
+    with overflow credits beyond the weekly subscription window and is deliberately willing to exceed 100%, so
+    fleet-wide dispatch throttling on percent_used is NOT the wanted default posture. INTERIM-CHECK finding
+    (2026-07-25): the live W1-T197 curve site reads NO headroom limit from env/config — HEADROOM_LIMIT_PCT=95 is a
+    hardcoded constant and run-task's daemonCommand never wires an override into DaemonOpts — so there was no
+    stage-0 plist relief available and the durable flag had to be built."
+  design: |
+    ONE switch gates all headroom-based dispatch gating (the live W1-T197 daemon idle curve; the ratified-but-
+    unbuilt W1-T249 reserve gate rides the same switch when it lands). Interim carrier: config `headroom.enabled`
+    + env `RMD_HEADROOM_ENABLED` (resolveHeadroomEnabled, config.ts), default FALSE. FUTURE HOME: plan/policy.yaml's
+    `headroom.enabled` row once W1-T252 ships — noted in the config doc.
+    DISABLED (default host posture): headroom is still READ and LEDGERED every cycle — a `daemon.headroom` line
+    with `enforced:false` naming the most-burned window — so the console shows weekly burn, but NO percent_used
+    condition pauses dispatch. An UNREADABLE read while disabled is ABSENT TELEMETRY, never a hold (no degraded
+    idle, no escalation). ENABLED: the existing time-aware curve enforces UNCHANGED (idle while over; bounded
+    degraded-mode on unreadable). The daemon library defaults headroomEnabled TRUE so its long-standing behaviour
+    and tests are unchanged; the live `rmd daemon` entry resolves the host posture (OFF) and passes it explicitly.
+    UNCHANGED (ruling clause 4): imputed dollars gate nothing; the turn limit and budget_usd remain the runaway
+    guards.
+  acceptance:
+    - claim: "governor DISABLED + a 99% window: dispatch proceeds AND headroom is still ledgered (telemetry line, enforced:false)"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "the a4153e falsifier — with the governor disabled, NO headroom condition pauses dispatch (no idle tick, no sleep)"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "governor ENABLED: an at-ceiling reading idles exactly as today — no spawn while over the limit"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "governor DISABLED + unreadable usage: absent telemetry, never a hold — dispatch proceeds, no headroom line, no degraded idle"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "resolveHeadroomEnabled: default OFF; config turns it on; RMD_HEADROOM_ENABLED overrides config in both directions"
+      proof: "unit test: test/config.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§4", "§9"]
+  files: [src/lib/config.ts, src/lib/daemon.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high — it changes WHEN the fleet throttles itself. The failure direction is asymmetric, so the design
+    keeps the library default (enforcement ON) unchanged and moves ONLY the live host to OFF via config/env — an
+    inherited flag can never silently change the enforcement semantics the ratified curve encodes. Implemented
+    directly by an operator-directed session 2026-07-25 per the ruling; credited via the merging PR's
+    Remudero-Task trailer. W1-T249's own acceptance still needs the flag criterion added (ruling clause 5) and
+    W1-T252 remains the policy-file home — both tracked separately."

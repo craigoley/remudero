@@ -243,30 +243,32 @@ interface ResolvedWindow {
 }
 
 /**
- * The daemon's OWN headroom check — deliberately NOT `headroom.ts`'s exported
- * `headroomExhausted` (still used unchanged by `rmd drain`, which stays on
- * the flat `HEADROOM_LIMIT_PCT` ceiling; a human-invoked bounded drain is not
- * this task's concern and touching it is out of scope). This version applies
- * the TIME-AWARE ceiling (see {@link HeadroomPolicy}) PER WINDOW — each
- * window's own hours-to-reset resolves ITS OWN limit, since the 5-hour
- * session window and a weekly cap reset on entirely different clocks.
+ * The daemon's OWN per-window headroom resolution — deliberately NOT `headroom.ts`'s
+ * exported `headroomExhausted` (still used unchanged by `rmd drain`, which stays on
+ * the flat `HEADROOM_LIMIT_PCT` ceiling; a human-invoked bounded drain is not this
+ * task's concern and touching it is out of scope). Applies the TIME-AWARE ceiling
+ * (see {@link HeadroomPolicy}) PER WINDOW — each window's own hours-to-reset resolves
+ * ITS OWN limit, since the 5-hour session window and a weekly cap reset on entirely
+ * different clocks — and returns every window MOST-BURNED FIRST. The caller reads
+ * `[0]` for the burn telemetry line and `.find(w => w.percentUsed >= w.limitPct)` for
+ * the enforcement decision (the governor ON path), so both share ONE resolution.
  */
-function daemonHeadroomExhausted(snap: UsageSnapshot, now: Date, policy: HeadroomPolicy): ResolvedWindow | null {
+function resolveHeadroomWindows(snap: UsageSnapshot, now: Date, policy: HeadroomPolicy): ResolvedWindow[] {
   const windows: Array<{ window: string; percentUsed: number; resetsAt: string }> = [
     { window: "session (5h)", percentUsed: snap.session.percentUsed, resetsAt: snap.session.resetsAt },
     ...snap.weekly.map((w) => ({ window: `weekly (${w.label})`, percentUsed: w.percentUsed, resetsAt: w.resetsAt })),
   ];
-  const resolved: ResolvedWindow[] = windows.map((w) => {
-    const instant = parseResetInstant(w.resetsAt, now);
-    const hoursToReset = instant ? (instant.getTime() - now.getTime()) / 3_600_000 : null;
-    return {
-      ...w,
-      resetsAtDisplay: instant ? formatResetInstant(instant) : w.resetsAt,
-      limitPct: resolveHeadroomLimitPct(hoursToReset, policy),
-    };
-  });
-  const over = resolved.filter((w) => w.percentUsed >= w.limitPct).sort((a, b) => b.percentUsed - a.percentUsed);
-  return over[0] ?? null;
+  return windows
+    .map((w) => {
+      const instant = parseResetInstant(w.resetsAt, now);
+      const hoursToReset = instant ? (instant.getTime() - now.getTime()) / 3_600_000 : null;
+      return {
+        ...w,
+        resetsAtDisplay: instant ? formatResetInstant(instant) : w.resetsAt,
+        limitPct: resolveHeadroomLimitPct(hoursToReset, policy),
+      };
+    })
+    .sort((a, b) => b.percentUsed - a.percentUsed); // most-burned first
 }
 
 /** Default: escalate to the SAME in-process idle heartbeat as a confirmed
@@ -289,6 +291,18 @@ export interface DaemonOpts {
   max?: number;
   /** Idle-poll pace in ms when nothing is currently runnable (default {@link DEFAULT_POLL_INTERVAL_MS}). */
   pollIntervalMs?: number;
+  /**
+   * The headroom governor switch (operator ruling fb-1784894405468-a4153e). When
+   * false, headroom is still READ and LEDGERED every cycle (a `daemon.headroom`
+   * telemetry line, `enforced: false`) but NEVER gates dispatch — no `percent_used`
+   * condition idles the loop, and an unreadable read is absent telemetry, never a
+   * hold. When true, the existing time-aware curve enforces unchanged (idle while
+   * over, bounded degraded-mode on unreadable). Defaults to **true** here so the
+   * library's long-standing behaviour and its tests are unchanged; the live
+   * `rmd daemon` entry resolves the host posture (default OFF) from config/env via
+   * {@link resolveHeadroomEnabled} and passes it explicitly.
+   */
+  headroomEnabled?: boolean;
   /**
    * ≥ this % on any window, on a day the ceiling HOLDS ⇒ in-process idle
    * (default {@link HEADROOM_LIMIT_PCT}). Ignored when `headroomPolicy` is
@@ -786,6 +800,10 @@ export async function runDaemon(
   // `unreadableDegradedLimit` — see the headroom check below.
   let consecutiveUnreadable = 0;
   const headroomPolicy = opts.headroomPolicy ?? buildDefaultHeadroomPolicy(opts.headroomLimitPct);
+  // The headroom governor switch (ruling fb-1784894405468-a4153e). Library default
+  // TRUE (existing enforcement + tests unchanged); the live `rmd daemon` entry
+  // passes the host posture (default OFF) resolved from config/env.
+  const headroomEnabled = opts.headroomEnabled ?? true;
   const unreadableDegradedLimit = opts.unreadableDegradedLimit ?? DEFAULT_UNREADABLE_DEGRADED_LIMIT;
   const now = deps.now ?? (() => new Date());
 
@@ -867,21 +885,47 @@ export async function runDaemon(
         // A GOOD read clears the degraded-mode counter — only CONSECUTIVE
         // misses count toward escalation, not a lifetime total.
         consecutiveUnreadable = 0;
-        const over = daemonHeadroomExhausted(snap, now(), headroomPolicy);
-        if (over) {
-          ticks++;
-          log("daemon.headroom", {
-            tick: ticks,
-            window: over.window,
-            percent_used: over.percentUsed,
-            limit_pct: over.limitPct,
-            resets_at: over.resetsAtDisplay,
-            poll_interval_ms: pollIntervalMs,
-          });
-          await deps.sleep(pollIntervalMs);
-          continue;
+        const windows = resolveHeadroomWindows(snap, now(), headroomPolicy);
+        const over = windows.find((w) => w.percentUsed >= w.limitPct) ?? null;
+        if (headroomEnabled) {
+          // ENFORCEMENT (W1-T197 curve, UNCHANGED): an at/over-limit reading is an
+          // in-process idle heartbeat while over — never a stop (KeepAlive would
+          // relaunch into the same reading). Resumes on its own once the window resets.
+          if (over) {
+            ticks++;
+            log("daemon.headroom", {
+              tick: ticks,
+              window: over.window,
+              percent_used: over.percentUsed,
+              limit_pct: over.limitPct,
+              resets_at: over.resetsAtDisplay,
+              poll_interval_ms: pollIntervalMs,
+            });
+            await deps.sleep(pollIntervalMs);
+            continue;
+          }
+        } else {
+          // GOVERNOR DISABLED (operator ruling fb-1784894405468-a4153e): headroom is
+          // still READ and LEDGERED every cycle — telemetry without enforcement, so
+          // the console shows weekly burn — but NO percent_used condition ever pauses
+          // dispatch (the per-run turn limit + budget_usd are the runaway guards).
+          // Ledger the most-burned window; then fall through to dispatch.
+          const reading = windows[0];
+          if (reading) {
+            log("daemon.headroom", {
+              window: reading.window,
+              percent_used: reading.percentUsed,
+              limit_pct: reading.limitPct,
+              resets_at: reading.resetsAtDisplay,
+              enforced: false,
+              over_ceiling: over !== null,
+              poll_interval_ms: pollIntervalMs,
+              note: "headroom governor disabled (ruling a4153e) — telemetry only, dispatch not gated",
+            });
+          }
+          // no continue: dispatch proceeds regardless of burn.
         }
-      } else {
+      } else if (headroomEnabled) {
         // UNREADABLE: cannot-read-the-budget must never render as
         // proceed-as-if-unlimited (the fail-open polarity at the spending
         // layer — the #157/#143-adjacent cannot-observe-rendered-as-permissive
@@ -914,6 +958,12 @@ export async function runDaemon(
           degraded_limit: unreadableDegradedLimit,
           note: "usage unreadable — bounded degraded-mode allowance, still dispatching",
         });
+      } else {
+        // UNREADABLE while the governor is DISABLED (ruling a4153e clause 4): an
+        // unreadable read is ABSENT TELEMETRY, never a hold — no degraded idle, no
+        // escalation counter, no headroom line. Dispatch proceeds; reset the counter
+        // so a later enable starts from a clean slate.
+        consecutiveUnreadable = 0;
       }
     }
 

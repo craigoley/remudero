@@ -12,6 +12,7 @@ import {
   globalArtifactPath,
   loadConfig,
   notifyRecipient,
+  resolveHeadroomEnabled,
   softBudgetThreshold,
   userOverallLearningsHome,
   workerModel,
@@ -4791,6 +4792,10 @@ export async function daemonCommand(rest: string[]): Promise<number> {
     pollIntervalMs: pollIdx >= 0 ? Number(rest[pollIdx + 1]) : DEFAULT_POLL_INTERVAL_MS,
   };
   const config = loadConfig();
+  // Headroom governor switch (operator ruling fb-1784894405468-a4153e): resolve the
+  // host posture (default OFF) from config/env HERE and pass it explicitly, so the
+  // live daemon reads the flag while the library keeps its enforcement default.
+  opts.headroomEnabled = resolveHeadroomEnabled(config);
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const statusPath = join(config.root, "state", "status.json");
   const self = resolveOwnerRepo();
@@ -4924,6 +4929,8 @@ export async function daemonCommand(rest: string[]): Promise<number> {
     poll_interval_ms: opts.pollIntervalMs,
     lock_pid: drainLock.info.pid,
     repo: target.repo,
+    // Ruling fb-1784894405468-a4153e: the resolved governor posture, legible each boot.
+    headroom_enabled: opts.headroomEnabled,
   });
   // ANTHROPIC-clean-env boot assertion (W1-T12b): checked once, before the loop
   // starts, over the daemon process's OWN live env — belt-and-suspenders atop

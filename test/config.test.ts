@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { ConfigValidationError, configPath, loadConfig, validateConfig, type Config } from "../src/lib/config.js";
+import { ConfigValidationError, configPath, loadConfig, resolveHeadroomEnabled, validateConfig, type Config } from "../src/lib/config.js";
 
 // NOTE: calling loadConfig() on its CREATE path shells `which claude`, which is
 // absent in CI (LEARNINGS.md: lazy-config-in-ci). validateConfig is a pure function
@@ -65,4 +65,29 @@ test("validateConfig accepts overflow: none with no dailyCapUsd (subscription de
 
 test("validateConfig accepts a config with overflow entirely unset (default is none)", () => {
   assert.doesNotThrow(() => validateConfig(config()));
+});
+
+// ── resolveHeadroomEnabled (ruling fb-1784894405468-a4153e) ──────────────────
+
+test("resolveHeadroomEnabled: default is OFF — governor disabled when neither config nor env sets it", () => {
+  assert.equal(resolveHeadroomEnabled(config(), {}), false);
+});
+
+test("resolveHeadroomEnabled: config headroom.enabled=true turns it on", () => {
+  assert.equal(resolveHeadroomEnabled(config({ headroom: { enabled: true } }), {}), true);
+  assert.equal(resolveHeadroomEnabled(config({ headroom: { enabled: false } }), {}), false);
+});
+
+test("resolveHeadroomEnabled: RMD_HEADROOM_ENABLED overrides config in BOTH directions", () => {
+  // env ON beats config OFF
+  assert.equal(resolveHeadroomEnabled(config({ headroom: { enabled: false } }), { RMD_HEADROOM_ENABLED: "1" }), true);
+  assert.equal(resolveHeadroomEnabled(config(), { RMD_HEADROOM_ENABLED: "true" }), true);
+  // env OFF beats config ON
+  assert.equal(resolveHeadroomEnabled(config({ headroom: { enabled: true } }), { RMD_HEADROOM_ENABLED: "0" }), false);
+  assert.equal(resolveHeadroomEnabled(config({ headroom: { enabled: true } }), { RMD_HEADROOM_ENABLED: "false" }), false);
+});
+
+test("resolveHeadroomEnabled: an empty/whitespace env value defers to config, not a spurious OFF", () => {
+  assert.equal(resolveHeadroomEnabled(config({ headroom: { enabled: true } }), { RMD_HEADROOM_ENABLED: "" }), true);
+  assert.equal(resolveHeadroomEnabled(config({ headroom: { enabled: true } }), { RMD_HEADROOM_ENABLED: "   " }), true);
 });
