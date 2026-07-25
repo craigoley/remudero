@@ -298,3 +298,32 @@ circuit-breaker as the per-task guards. Both prerequisites pulled to the immedia
 - FIX (this PR): rung (c2) HEAD-BRANCH CORROBORATION. An exit-0-empty trailer search is now treated as INDETERMINATE, never authoritative. Before concluding `source:"none"`, `deriveStatus` corroborates with a DETERMINISTIC, non-body-index read — `findMergedByHeadBranch` enumerates merged PRs whose head branch is `run-<taskId>-*` (`gh pr list --state merged --search 'head:run-<id>-'`, a structured ref match), re-asserting `run-<taskId>-\d+` ownership on each candidate exactly as rung (c) re-verifies the trailer. Empty on BOTH the trailer search AND the head-branch read is genuinely none; search-empty-but-branch-hit resolves merged via the branch; a `gh` failure on the corroboration returns null and defers via the existing W1-T119 indeterminate skip.
 - COST OF THE BUG: four spurious re-dispatches on 2026-07-24 alone — W1-T1, W1-T12a (×2, PRs #61-era + the no-op #725), and W1-T99 (#729 already merged) — each a no-op PR against an already-merged task.
 - Rollback: revert this PR — restores the empty-search-as-authoritative behavior (src/lib/status.ts + test/status.test.ts only; no schema or CLI surface touched).
+
+## 2026-07-25T14:25:37.000Z — W1-T7 re-dispatch: already-satisfied, no-op close
+- Options: (A) close as already-satisfied, no functional code change, record the closure in
+  DECISIONS.md (RECOMMENDED) | (B) make no PR at all, report the finding only, since
+  `plan/tasks.yaml`'s own `note` field already documents the restructure in full
+- Chosen (RECOMMENDED, auto): Option A — no functional code change, DECISIONS.md entry as the
+  audit trail.
+- Rationale: W1-T7 (`plan/tasks.yaml` line 5836) carries exactly one acceptance criterion —
+  "network/5xx/CI-flake retries consume NO strike; deterministic failures do", proof "classifier
+  unit tests over recorded failure fixtures" — and it already reads `satisfied_by: "#48"`.
+  `gh pr view 48`: title "W1-T7: transient-vs-strike classifier + diagnose-then-retry", state
+  MERGED (2026-07-15T00:37:34Z), body ends with the trailer `Remudero-Task: W1-T7`, and its
+  checklist records `npm test` 182/182 passing including 8 new cases in
+  `test/classify.test.ts`. Both `src/lib/classify.ts` (12,358 B) and `test/classify.test.ts`
+  (11,186 B) are present on this worktree's `HEAD`, confirming the shipped code is live, not
+  just claimed. The task's own `note` field records a 2026-07-25 operator-ruled Architect
+  restructure (plan-only PR #764, commit `825b751`, already an ancestor of this branch's `HEAD`):
+  the former second criterion (two-strikes DIAGNOSE dispatch) was moved VERBATIM to W1-T7B
+  because `runDiagnoseThenRetry` (`classify.ts:204`) has ZERO production call site — confirmed
+  by `grep -rn runDiagnoseThenRetry src test`, which finds only its own definition, a comment
+  reference in `flight-judge.ts:367`, and its own test file; W1-T7B (`plan/tasks.yaml` line
+  7731, `depends_on: [W1-T7]`) carries that criterion forward. With criterion 1 satisfied by a
+  merged, trailer-carrying PR and criterion 2 relocated to a dependent task, W1-T7 has no open
+  acceptance criterion left to implement. `git status --short` is clean and this worktree's
+  `HEAD` matches `origin/main` — there is no diff to make against `classify.ts` or its tests for
+  this dispatch. Unlike the earlier W1-T12a/W1-T99 no-op closures (which blamed a since-fixed
+  `deriveStatus` defect, W1-T256 above), this closure rests on the task's own already-merged
+  restructure record, not on a GitHub-derivation gap.
+- Rollback: revert this PR — removes only this DECISIONS.md entry; no runtime code touched.
