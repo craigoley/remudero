@@ -13,6 +13,7 @@ import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { isPaused } from "../src/lib/fleet-control.js";
+import { shellBootReady } from "./setup/open-shell.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
@@ -155,7 +156,7 @@ async function openShell(base: string, token: string = READ_TOKEN): Promise<Page
   const context = await browser.newContext();
   const page = await context.newPage();
   await page.goto(`${base}/?token=${token}`);
-  await page.waitForFunction(() => !document.getElementById("top-status")?.textContent?.includes("loading"));
+  await page.waitForFunction(shellBootReady);
   return page;
 }
 
@@ -255,7 +256,7 @@ test("W1-T157 (2): a search + facet + sort round-trips through the URL — a rel
 
     // reload from that exact URL — the view must restore with NO interaction.
     await page.reload();
-    await page.waitForFunction(() => !document.getElementById("top-status")?.textContent?.includes("loading"));
+    await page.waitForFunction(shellBootReady);
     await page.waitForFunction(() => document.querySelectorAll("#rest-list > li[data-key]").length === 2);
 
     const after = await restListIds(page);

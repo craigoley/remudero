@@ -44,7 +44,15 @@ jobs:
         # runs as part of `npm test` below and is the falsifier proof this step is ACTIVE.
         run: npx tsc -p tsconfig.json --noEmit
       - name: Test
-        run: npm test
+        # W1-T255: routed through scripts/test-with-retry.mjs (npm run test:ci), NOT plain
+        # `npm test` -- see that script's header comment for the full rationale. On a green run
+        # this spawns `npm test`'s underlying command exactly once (zero behavior change); on a
+        # red run it retries the WHOLE command exactly once and names the first attempt's
+        # failing test on stdout (greppable: `FLAKE-RETRY: first attempt failed`) so a flake
+        # leaves a record instead of erasing it on a manual re-run. `npm test` itself stays
+        # retry-free -- Stryker's commandRunner re-runs it once per mutant (stryker.conf.json),
+        # where a retry would blur the kill signal.
+        run: npm run test:ci
 
   commitlint:
     # W1-T31 (MASTER-PLAN §6A) — Conventional Commits gate. Lints every commit ADDED by this PR
@@ -137,9 +145,16 @@ jobs:
         # passing, asserting test. `--enable-source-maps` makes Node translate V8 coverage positions
         # through tsx's inline source map back to the real .ts line before emitting DA: records, so the
         # two line-numbering schemes (git diff vs. lcov) finally agree.
+        # W1-T255: routed through scripts/test-with-retry.mjs, same as the ci job's Test step
+        # above -- on a red run, the WHOLE command (including the lcov write) retries exactly
+        # once and the SECOND run's coverage/lcov.info is what coverage-ratchet/diff-coverage
+        # below consume, so the artifact stays one coherent, single-run document rather than a
+        # per-test patchwork. On a green run the underlying node invocation still runs exactly
+        # once -- zero behavior change from before this task.
         run: |
           mkdir -p coverage
-          node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
+          node scripts/test-with-retry.mjs \
+            node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
             --test --import tsx "test/**/*.test.ts"
