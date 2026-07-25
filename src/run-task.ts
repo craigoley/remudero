@@ -4055,17 +4055,17 @@ async function retroCommand(
   recordFollowupHarvest(gather.followups, { ledgerPath });
 
   // G-17 Tier Invariant: the retro Architect MUST outrank implement workers.
-  const arch = architectModel(config);
+  // MOUNT-GOVERNED (§9, W1-T64 — sibling of W1-T63/P10): the retro/architect spawn's MODEL
+  // and turn budget BOTH come from mounts.yaml's `architect` row (the model is the source of
+  // truth; the flat-400 tripwire #90 is the turn cap), NEVER a hardcoded literal or a config
+  // default. Before this, a hardcoded 40-turn cap — the SAME class of cap that walled the
+  // reviewer (error_max_turns) — could wall the Architect mid-retro BEFORE it
+  // staged/committed/pushed/opened the PR, leaving an empty branch that then crashed
+  // `gh pr create --fill` (no diff to fill).
+  const mountsTable = loadMounts(mountsPath(repoRoot));
+  const arch = architectModel(config, mountsTable); // Architect model is the mounts.yaml `architect:` row
   const wrk = workerModel(config);
   assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
-
-  // MOUNT-GOVERNED (§9, W1-T64 — sibling of W1-T63/P10): the retro/architect spawn's
-  // turn budget comes from mounts.yaml's `architect` row (the flat-400 tripwire, #90),
-  // NEVER a hardcoded literal. Before this, a hardcoded 40-turn cap — the SAME class of
-  // cap that walled the reviewer (error_max_turns) — could wall the Architect mid-retro
-  // BEFORE it staged/committed/pushed/opened the PR, leaving an empty branch that then
-  // crashed `gh pr create --fill` (no diff to fill).
-  const mountsTable = loadMounts(mountsPath(repoRoot));
 
   const runId = `RETRO-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -6800,10 +6800,10 @@ export async function triageCommand(rest: string[]): Promise<number> {
   const { owner, repo } = resolveOwnerRepo();
 
   // G-17 Tier Invariant: the triage Architect MUST outrank implement workers.
-  const arch = architectModel(config);
+  const mountsTable = loadMounts(mountsPath(repoRoot));
+  const arch = architectModel(config, mountsTable); // Architect model is the mounts.yaml `architect:` row
   const wrk = workerModel(config);
   assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
-  const mountsTable = loadMounts(mountsPath(repoRoot));
 
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const taskId = `TRIAGE-${feedbackId}`;
@@ -7247,7 +7247,7 @@ function readFileIfExists(path: string): string | undefined {
  * happens with the resulting {@link DraftRungOutcome}s. `toDraft.length === 0` short-circuits
  * before any clone/worktree — no spend for the common "nothing to draft" case.
  */
-async function draftProposalBatch(
+export async function draftProposalBatch(
   toDraft: Proposal[],
   config: Config,
   owner: string,
@@ -7257,10 +7257,10 @@ async function draftProposalBatch(
 ): Promise<DraftRungOutcome[]> {
   if (toDraft.length === 0) return [];
 
-  const arch = architectModel(config);
+  const mountsTable = loadMounts(mountsPath(repoRoot));
+  const arch = architectModel(config, mountsTable); // Architect model is the mounts.yaml `architect:` row
   const wrk = workerModel(config);
   assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
-  const mountsTable = loadMounts(mountsPath(repoRoot));
 
   const settingsFile = renderWorkerSettings({
     templatePath: join(repoRoot, "settings", "worker.json"),
