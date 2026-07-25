@@ -110,6 +110,7 @@ spawn.
 | Merge gate + reviewer rubric | `src/lib/review.ts` |
 | Pre-dispatch plan linter | `src/lib/task-linter.ts` |
 | Worker spawn (Claude Agent SDK) | `src/lib/worker.ts` |
+| Mount routing (class-based dispatch) | [probe.md](probe.md) |
 | Sandbox containment probe | `src/lib/containment.ts` |
 | Shell isolation probe | `src/lib/isolation.ts` |
 | Append-only ledger | `src/lib/ledger.ts` |
