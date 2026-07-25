@@ -44,7 +44,9 @@ import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
   buildControlStatusRoute,
+  buildDrainNowRoute,
   buildEscalationMarkHandledRoute,
+  buildKickRoute,
   buildPauseRoute,
   buildQuietHoursRoute,
   buildResumeRoute,
@@ -382,6 +384,12 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
      as STOP's own .confirming (an unmissable state change), a distinct (non-danger) accent since
      approving is not a destructive action the way STOP is. */
   button.proposal-approve-btn.confirming { background: var(--accent); color: #04101f; border-color: var(--accent); }
+  /* fb-…9daa9b: the UP NEXT write-actions (per-row Run + Drain now) — same arm-then-confirm
+     visual language as APPROVE (a non-destructive accent), sized to sit inside a task row. */
+  .up-next-run-btn { padding: 0.15rem 0.5rem; font-size: 0.8rem; margin-left: 0.4rem; flex: 0 0 auto; }
+  .up-next-run-btn.confirming, #drain-now-btn.confirming { background: var(--accent); color: #04101f; border-color: var(--accent); }
+  .up-next-actions { margin-bottom: 0.5rem; }
+  #drain-now-btn { font-size: 0.85rem; padding: 0.25rem 0.6rem; }
   input[type="text"], input[type="url"] {
     font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 0.3rem 0.5rem; width: 100%; max-width: 24rem;
@@ -547,6 +555,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     <span>Up next</span><span class="section-summary" id="up-next-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
   </button></h2>
   <div id="up-next-body">
+    <div class="up-next-actions"><button type="button" id="drain-now-btn" data-confirming="false" aria-pressed="false">Drain now</button></div>
     <ul id="up-next-list" class="row-list">${skeletonRows(3)}</ul>
   </div>
 </section>
@@ -1357,7 +1366,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     const head = (cards ?? []).slice(0, 5);
     const rows = head.map((c) => ({
       key: c.id,
-      html: \`\${statusBadge("queued")}<span class="task-id">\${escapeHtml(c.id)}</span><span class="detail">\${escapeHtml(c.title)} · \${(c.dependsOn ?? []).length} dep(s)</span>\${rowChevronHtml()}\`,
+      html: \`\${statusBadge("queued")}<span class="task-id">\${escapeHtml(c.id)}</span><span class="detail">\${escapeHtml(c.title)} · \${(c.dependsOn ?? []).length} dep(s)</span><button type="button" class="up-next-run-btn" data-task-id="\${escapeHtml(c.id)}" data-confirming="false" aria-pressed="false">Run</button>\${rowChevronHtml()}\`,
       taskId: c.id,
     }));
     reconcileRows(document.getElementById("up-next-list"), rows, "drain queue is empty");
@@ -1916,6 +1925,63 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
       await postJson("/v1/inbox/approve", { proposalId });
       refreshAll();
     }
+  });
+
+  // ── UP NEXT write-actions (fb-1784988460437-9daa9b): Run a queued task, Drain now ──────
+  // Both reuse fleet control's OWN arm-then-confirm discipline (stop-btn, below): a single
+  // click ARMS + reads back what it will do; a second click within 8s acts. Run is delegated
+  // off #up-next-list (rows are reconciled), keyed by taskId so two armed rows never collide.
+  // The API only DROPS a marker; the daemon dispatches (assertRunnable-gated) and any refusal
+  // surfaces as a console.kick_refused line in the RECENT ledger feed, never silently.
+  const kickConfirmTimers = new Map();
+  function resetRunButton(btn) {
+    btn.dataset.confirming = "false";
+    btn.setAttribute("aria-pressed", "false");
+    btn.classList.remove("confirming");
+    btn.textContent = "Run";
+    clearTimeout(kickConfirmTimers.get(btn.dataset.taskId));
+    kickConfirmTimers.delete(btn.dataset.taskId);
+  }
+  document.getElementById("up-next-list").addEventListener("click", async (e) => {
+    const runBtn = e.target.closest(".up-next-run-btn");
+    if (!runBtn) return;
+    e.stopPropagation(); // never let a Run click also expand the row
+    if (runBtn.dataset.confirming !== "true") {
+      runBtn.dataset.confirming = "true";
+      runBtn.setAttribute("aria-pressed", "true");
+      runBtn.classList.add("confirming");
+      runBtn.textContent = \`Confirm run \${runBtn.dataset.taskId}?\`;
+      clearTimeout(kickConfirmTimers.get(runBtn.dataset.taskId));
+      kickConfirmTimers.set(runBtn.dataset.taskId, setTimeout(() => resetRunButton(runBtn), 8000));
+      return;
+    }
+    const taskId = runBtn.dataset.taskId;
+    resetRunButton(runBtn);
+    await postJson("/v1/drain/kick", { taskId });
+    refreshAll();
+  });
+  let drainConfirmTimer;
+  function resetDrainButton() {
+    const btn = document.getElementById("drain-now-btn");
+    btn.dataset.confirming = "false";
+    btn.setAttribute("aria-pressed", "false");
+    btn.classList.remove("confirming");
+    btn.textContent = "Drain now";
+    clearTimeout(drainConfirmTimer);
+  }
+  document.getElementById("drain-now-btn").addEventListener("click", () => {
+    const btn = document.getElementById("drain-now-btn");
+    if (btn.dataset.confirming !== "true") {
+      btn.dataset.confirming = "true";
+      btn.setAttribute("aria-pressed", "true");
+      btn.classList.add("confirming");
+      btn.textContent = "Confirm drain now?";
+      clearTimeout(drainConfirmTimer);
+      drainConfirmTimer = setTimeout(() => resetDrainButton(), 8000);
+      return;
+    }
+    resetDrainButton();
+    postJson("/v1/drain/run").then(refreshAll);
   });
 
   // ── fleet control READ-BACK (W1-T153): render the ACTIVE mode, never stateless buttons ──
@@ -2647,6 +2713,9 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     buildAnswerQuestionRoute(questionDeps),
     buildApproveManualRoute(fleetControlDeps),
     buildEscalationMarkHandledRoute(fleetControlDeps),
+    // Console UP NEXT write-actions (fb-1784988460437-9daa9b): Run a queued task, Drain now.
+    buildKickRoute(fleetControlDeps),
+    buildDrainNowRoute(fleetControlDeps),
     ...buildPanelGraphRoutes(panelGraphDeps),
     buildTaskCardRoute(deps.board),
     buildAuthScopeRoute(),

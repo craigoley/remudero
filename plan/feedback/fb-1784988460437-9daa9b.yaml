@@ -1,0 +1,23 @@
+id: fb-1784988460437-9daa9b
+ts: 2026-07-25T14:07:40.438Z
+raw: "CONSOLE WRITE-ACTIONS ON UP NEXT — operator ruling 2026-07-25. Add
+  operator write-actions to the console UP NEXT panel: a Run button per queued
+  task row, and a Drain-now control. MARKER-FILE PATTERN ONLY — never process
+  management inside serve. SCOPE: (1) Run on a queued row -> a write-token API
+  endpoint writes state/KICK_REQUESTED-<taskId> (the DEPLOY_REQUESTED
+  precedent); the daemon consumes the marker at its next poll and dispatches
+  THAT task by id THROUGH its normal path — assertRunnable still gates, so a
+  verify:human task refuses with its named reason rendered back to the console,
+  never silently. (2) Drain now -> state/DRAIN_REQUESTED; the daemon treats it
+  as run-one-cycle-immediately. (3) Both buttons use the #602 arm-then-confirm
+  discipline on the write-token API; both markers are consumed-once and ledgered
+  (console.kick_requested / console.drain_requested carrying the task id) so the
+  audit trail names the console as actor — the arm-identity lesson (9652bd)
+  applied at birth. (4) Stale marker for an already-merged task is refused via
+  the projection (the 86793d class), the marker cleared, and the reason
+  ledgered. NON-GOALS: no process spawning/killing in serve; no unqueued/blocked
+  task may be Run past assertRunnable."
+attachments: []
+origin: cli
+status: accepted
+proposal_pr: null

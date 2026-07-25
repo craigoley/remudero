@@ -684,6 +684,135 @@ test("headroom governor DISABLED + UNREADABLE usage: absent telemetry, never a h
   );
 });
 
+// ── CONSOLE WRITE-ACTIONS: Run kick + Drain now (fb-1784988460437-9daa9b) ─────
+// The daemon consumes markers the write-token API drops. A Run kick dispatches THAT
+// task by id through the SAME assertRunnable-gated path; a refused kick is cleared +
+// its reason ledgered (never silent); the ledger line names the console as actor.
+
+test("console kick: a Run on a runnable queued task dispatches THAT task by id (ahead of ordering) and ledgers console.kick_dispatched with the console-actor origin; marker consumed-once", async () => {
+  const plan = fixturePlan();
+  const spawned: string[] = [];
+  const cleared: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let kicks = [{ taskId: "D", origin: "console-abc123" }];
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => { spawned.push(id); return okResult(id); },
+      pendingKicks: () => kicks,
+      clearKick: (id) => { cleared.push(id); kicks = kicks.filter((k) => k.taskId !== id); },
+      sleep: async () => {},
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { headroomEnabled: false, max: 1 },
+  );
+  assert.equal(s.stopReason, "max_reached");
+  assert.deepEqual(spawned, ["D"], "the KICKED task D dispatched, ahead of A (nextRunnable's natural pick)");
+  const dispatched = lines.find((l) => l.step === "console.kick_dispatched");
+  assert.ok(dispatched, "console.kick_dispatched ledgered");
+  assert.equal(dispatched!.extra.task, "D");
+  assert.equal(dispatched!.extra.origin, "console-abc123", "the dispatch ledger line names the console as actor");
+  assert.deepEqual(cleared, ["D"], "the kick marker is consumed-once");
+});
+
+test("console kick: a verify:human target is REFUSED with its named reason (rendered via the ledger, never silent), the marker cleared, and never dispatched", async () => {
+  const plan = fixturePlan();
+  const spawned: string[] = [];
+  const cleared: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let kicks = [{ taskId: "H", origin: "console-xyz" }];
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => { spawned.push(id); return okResult(id); },
+      pendingKicks: () => kicks,
+      clearKick: (id) => { cleared.push(id); kicks = kicks.filter((k) => k.taskId !== id); },
+      sleep: async () => {},
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { headroomEnabled: false, max: 1 },
+  );
+  const refused = lines.find((l) => l.step === "console.kick_refused");
+  assert.ok(refused, "console.kick_refused ledgered");
+  assert.equal(refused!.extra.task, "H");
+  assert.match(String(refused!.extra.reason), /verify:human/, "the assertRunnable named reason surfaces");
+  assert.equal(refused!.extra.origin, "console-xyz");
+  assert.deepEqual(cleared, ["H"], "the refused marker is cleared, not left to retry forever");
+  assert.ok(!spawned.includes("H"), "a verify:human task is NEVER dispatched via a kick — assertRunnable still gates");
+});
+
+test("console kick: a STALE kick for an already-merged task is refused via the projection (86793d class), cleared, reason ledgered — never re-dispatched", async () => {
+  const plan = fixturePlan();
+  const spawned: string[] = [];
+  const cleared: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let kicks = [{ taskId: "D", origin: "console-stale" }];
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => mergedSetOf("D"), // D already merged/done per the projection
+      runOne: async (id) => { spawned.push(id); return okResult(id); },
+      pendingKicks: () => kicks,
+      clearKick: (id) => { cleared.push(id); kicks = kicks.filter((k) => k.taskId !== id); },
+      sleep: async () => {},
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { headroomEnabled: false, max: 1 },
+  );
+  const refused = lines.find((l) => l.step === "console.kick_refused");
+  assert.ok(refused, "console.kick_refused ledgered");
+  assert.equal(refused!.extra.task, "D");
+  assert.match(String(refused!.extra.reason), /already merged/, "the stale-merged reason surfaces");
+  assert.deepEqual(cleared, ["D"], "the stale marker is cleared");
+  assert.ok(!spawned.includes("D"), "a merged task is never re-dispatched off a stale kick");
+});
+
+test("console kick: an unknown task id is refused (unknown task id) and the marker cleared", async () => {
+  const plan = fixturePlan();
+  const cleared: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let kicks = [{ taskId: "NOPE", origin: "console-q" }];
+  await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => okResult(id),
+      pendingKicks: () => kicks,
+      clearKick: (id) => { cleared.push(id); kicks = kicks.filter((k) => k.taskId !== id); },
+      sleep: async () => {},
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { headroomEnabled: false, max: 1 },
+  );
+  const refused = lines.find((l) => l.step === "console.kick_refused");
+  assert.ok(refused);
+  assert.match(String(refused!.extra.reason), /unknown task id/);
+  assert.deepEqual(cleared, ["NOPE"]);
+});
+
+test("console drain-now: consuming DRAIN_REQUESTED ledgers console.drain_consumed with the console origin, dispatch proceeds", async () => {
+  const plan = fixturePlan();
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let drain: { origin: string } | null = { origin: "console-drain-1" };
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      runOne: async (id) => okResult(id),
+      consumeDrainNow: () => { const d = drain; drain = null; return d; },
+      sleep: async () => {},
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { headroomEnabled: false, max: 1 },
+  );
+  assert.equal(s.stopReason, "max_reached");
+  const consumed = lines.find((l) => l.step === "console.drain_consumed");
+  assert.ok(consumed, "console.drain_consumed ledgered");
+  assert.equal(consumed!.extra.origin, "console-drain-1", "the drain line names the console as actor");
+});
+
 test("headroom exhaustion resumes ON ITS OWN once the underlying window actually resets — no exit either side", async () => {
   // Proves acceptance criterion (a): "the daemon does not exit at all... it
   // RESUMES after the clock passes resets_at". readUsage is a fresh call

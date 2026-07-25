@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -158,4 +158,127 @@ export function resumeFleet(root: string): ResumeResult {
     clearedStop: clearFlag(stopFilePath(root)),
     clearedPause: clearFlag(pauseFilePath(root)),
   };
+}
+
+// ── CONSOLE WRITE-ACTION MARKERS (fb-1784988460437-9daa9b) ──────────────────────
+//
+// Operator write-actions on the console's UP NEXT panel use the SAME marker-file
+// pattern as STOP/PAUSE and DEPLOY_REQUESTED (deployer.ts) — the console NEVER
+// manages a process; it drops a marker the running daemon consumes at its next
+// poll. Two kinds:
+//   - `state/KICK_REQUESTED-<taskId>` — "Run this queued task now." One file per
+//     task id, so several kicks coexist and are dispatched over successive cycles.
+//   - `state/DRAIN_REQUESTED` — "run one dispatch cycle immediately."
+// Each marker carries the caller's `origin` (bearerTokenId, panel-actions.ts) —
+// the arm-identity captured AT BIRTH — so the daemon's consume-time ledger line
+// names the console as actor without the daemon ever seeing the raw token.
+
+/** A queued-task "Run now" request, parsed off a `KICK_REQUESTED-<taskId>` marker. */
+export interface KickRequest {
+  taskId: string;
+  /** The console actor id (a bearer-token hash), carried from write to consume. */
+  origin: string;
+  requestedAt: string;
+}
+
+/** A "Drain now" request, parsed off the `DRAIN_REQUESTED` marker. */
+export interface DrainNowRequest {
+  origin: string;
+  requestedAt: string;
+}
+
+/**
+ * Task ids that may become a marker FILENAME. Deliberately strict (the plan's own
+ * `W1-T###`/`SBX-T#` shape plus a safe superset) so a hostile or malformed id can
+ * never traverse out of `state/` (`/`, `..`, NUL, whitespace all rejected). Enforced
+ * fail-closed on BOTH write (`requestKick` throws) and read (`pendingKicks` skips).
+ */
+const SAFE_TASK_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126})$/;
+
+/** True iff `taskId` is safe to embed in a marker filename (see {@link SAFE_TASK_ID}). */
+export function isSafeTaskId(taskId: unknown): taskId is string {
+  return typeof taskId === "string" && SAFE_TASK_ID.test(taskId) && !taskId.includes("..");
+}
+
+const KICK_PREFIX = "KICK_REQUESTED-";
+
+export function kickFilePath(root: string, taskId: string): string {
+  return join(root, "state", `${KICK_PREFIX}${taskId}`);
+}
+
+export function drainNowFilePath(root: string): string {
+  return join(root, "state", "DRAIN_REQUESTED");
+}
+
+/**
+ * Write a `KICK_REQUESTED-<taskId>` marker (the console's "Run" button). Throws on an
+ * unsafe task id BEFORE any write — a malformed id performs no side effect, ever.
+ * Overwriting an existing marker for the same id is idempotent (still one pending kick).
+ */
+export function requestKick(root: string, taskId: string, origin: string): KickRequest {
+  if (!isSafeTaskId(taskId)) throw new Error(`requestKick: unsafe task id ${JSON.stringify(taskId)}`);
+  const req: KickRequest = { taskId, origin, requestedAt: new Date().toISOString() };
+  const path = kickFilePath(root, taskId);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(req, null, 2));
+  return req;
+}
+
+/**
+ * Every pending kick, oldest-first (by `requestedAt`). PEEK ONLY — does not delete; the
+ * daemon clears each with {@link clearKick} as it dispatches or refuses it, so a runnable
+ * kick it can't service this cycle survives to the next. A file whose JSON is garbage, or
+ * whose id no longer parses as safe, is skipped (fail-closed), never dispatched.
+ */
+export function pendingKicks(root: string): KickRequest[] {
+  const dir = join(root, "state");
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter((n) => n.startsWith(KICK_PREFIX));
+  } catch {
+    return []; // no state dir yet ⇒ no kicks
+  }
+  const out: KickRequest[] = [];
+  for (const name of names) {
+    try {
+      const o = JSON.parse(readFileSync(join(dir, name), "utf8"));
+      if (isSafeTaskId(o?.taskId) && typeof o?.origin === "string" && typeof o?.requestedAt === "string") {
+        out.push({ taskId: o.taskId, origin: o.origin, requestedAt: o.requestedAt });
+      }
+    } catch {
+      // garbage marker — leave it for an operator to notice; never dispatch off it.
+    }
+  }
+  return out.sort((a, b) => a.requestedAt.localeCompare(b.requestedAt));
+}
+
+/** Delete one kick marker (consumed-once). Idempotent; a concurrent clear is not an error. */
+export function clearKick(root: string, taskId: string): boolean {
+  return clearFlag(kickFilePath(root, taskId));
+}
+
+/** Write the `DRAIN_REQUESTED` marker (the console's "Drain now" button). */
+export function requestDrainNow(root: string, origin: string): DrainNowRequest {
+  const req: DrainNowRequest = { origin, requestedAt: new Date().toISOString() };
+  const path = drainNowFilePath(root);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(req, null, 2));
+  return req;
+}
+
+/** Read + DELETE the `DRAIN_REQUESTED` marker (consumed-once). `null` when none/garbage. */
+export function consumeDrainNow(root: string): DrainNowRequest | null {
+  const path = drainNowFilePath(root);
+  if (!existsSync(path)) return null;
+  let parsed: DrainNowRequest | null = null;
+  try {
+    const o = JSON.parse(readFileSync(path, "utf8"));
+    if (typeof o?.origin === "string" && typeof o?.requestedAt === "string") {
+      parsed = { origin: o.origin, requestedAt: o.requestedAt };
+    }
+  } catch {
+    parsed = null;
+  }
+  clearFlag(path); // consumed-once regardless of parse outcome — a garbage marker never lingers
+  return parsed;
 }

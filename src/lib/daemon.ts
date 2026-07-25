@@ -35,7 +35,7 @@ import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-
 import { nextRunnable, type MergedSet, type OpenPrCheck } from "./drain.js";
 import { HEADROOM_LIMIT_PCT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
-import type { Plan, Task } from "./plan.js";
+import { assertRunnable, PlanError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import type { StatusProjection } from "./status.js";
 
 /**
@@ -406,6 +406,22 @@ export interface DaemonDeps {
    * + merge) before a pause is honoured; no new spawn follows.
    */
   checkPause?: () => string | undefined;
+  /**
+   * CONSOLE WRITE-ACTIONS (fb-1784988460437-9daa9b). PEEK the pending "Run this
+   * queued task now" kick markers, oldest-first — PURE injection, no fs here (the
+   * real command wires `pendingKicks(root)` from fleet-control.ts). The daemon
+   * gates each through {@link assertRunnable} + the merged projection and clears it
+   * with {@link DaemonDeps.clearKick} as it dispatches or refuses it, so a runnable
+   * kick it can't service this cycle survives to the next.
+   */
+  pendingKicks?: () => Array<{ taskId: string; origin: string }>;
+  /** Delete one kick marker (consumed-once) after the daemon dispatches or refuses it. */
+  clearKick?: (taskId: string) => void;
+  /**
+   * READ + DELETE the "Drain now" marker (consumed-once); a defined return ⇒ the
+   * operator asked for one immediate dispatch cycle. Ledgered `console.drain_consumed`.
+   */
+  consumeDrainNow?: () => { origin: string } | null;
   /**
    * The INJECTED CLOCK: paces idle polling when nothing is runnable yet. The
    * real command wires a real `setTimeout`-backed sleep; tests inject a fake
@@ -843,6 +859,16 @@ export async function runDaemon(
       continue;
     }
 
+    // CONSOLE "DRAIN NOW" (fb-1784988460437-9daa9b): consumed-once at the top of a
+    // cycle — its whole effect IS "run one dispatch cycle immediately", which this
+    // loop body already is, so consuming + ledgering (naming the console as actor,
+    // origin carried from the marker) is the action. STOP/PAUSE above still win; a
+    // drain request never overrides a deliberate hold.
+    if (deps.consumeDrainNow) {
+      const drain = deps.consumeDrainNow();
+      if (drain) log("console.drain_consumed", { origin: drain.origin });
+    }
+
     const isMerged = deps.refreshMerged();
 
     // LEVEL-TRIGGERED PR-PIPELINE RECONCILER (W1-T77, ratifies P22 core): once
@@ -967,7 +993,38 @@ export async function runDaemon(
       }
     }
 
-    const next = nextRunnable(plan, isMerged, {
+    // CONSOLE "RUN" KICK (fb-1784988460437-9daa9b): a queued-row Run dispatches THAT
+    // task by id this cycle, ahead of nextRunnable's ordering — but still THROUGH the
+    // normal gate. A kicked id that is unknown, already merged (the stale-marker
+    // class), or refused by `assertRunnable` (verify:human / blocked / unmerged deps)
+    // is CLEARED and its named reason LEDGERED (`console.kick_refused`), never silently
+    // dropped, so the console surfaces it via the ledger stream. The first runnable
+    // kick becomes this cycle's task; other runnable kicks wait for the next cycle.
+    const mergedTask: MergedResolver = (t) => isMerged(t.id);
+    let forcedNext: Task | undefined;
+    if (deps.pendingKicks) {
+      for (const kick of deps.pendingKicks()) {
+        const refuse = (reason: string) => {
+          deps.clearKick?.(kick.taskId);
+          log("console.kick_refused", { task: kick.taskId, origin: kick.origin, reason });
+        };
+        const task = plan.byId.get(kick.taskId);
+        if (!task) { refuse("unknown task id"); continue; }
+        if (isMerged(kick.taskId)) { refuse("already merged — stale kick"); continue; }
+        try {
+          assertRunnable(plan, task, mergedTask);
+        } catch (e) {
+          refuse(e instanceof PlanError ? e.message : String((e as Error)?.message ?? e));
+          continue;
+        }
+        deps.clearKick?.(kick.taskId);
+        log("console.kick_dispatched", { task: kick.taskId, origin: kick.origin });
+        forcedNext = task;
+        break;
+      }
+    }
+
+    const next = forcedNext ?? nextRunnable(plan, isMerged, {
       isOpenPr: deps.isOpenPr,
       // IN-FLIGHT (W1-T80): a legible skip on console + ledger; the daemon
       // keeps polling rather than treating an open PR as a block.
