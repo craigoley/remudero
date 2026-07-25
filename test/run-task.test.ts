@@ -22,6 +22,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   commitsAhead,
   degradedReasonLedgerFields,
   deriveFixMode,
+  fetchPrBodyViaGh,
   deriveStrikeHistory,
   dispatchFixPreflightStandDown,
   drainCommand,
@@ -1709,6 +1710,82 @@ test("runFixRung: a seeded blocked_review with TWO unmet criteria dispatches ONE
   assert.equal(outcome.outcome, "fixed");
   assert.equal(outcome.strikes, 1);
   assert.equal(issueCalls.length, 0, "no escalation once the fix resolves the review");
+});
+
+test("runFixRung (W1-T256): in body-coverage mode the re-review judges the FRESH PR BODY (fetchPrBody), never the fix worker's chat text — a body the worker substantiated can actually heal the block", async () => {
+  const reviewReports: string[] = [];
+  // body-coverage block: the unmet reason is a keyword-coverage gap (not an executed_fail).
+  const failing = fakeReview("failure", [
+    criterion({ claim: "criterion A is documented", met: false, reason: "proof unmet: report does not substantiate it (matched 4/12 proof keywords)" }),
+  ]);
+  const passing = fakeReview("success", [criterion({ claim: "criterion A is documented", met: true })]);
+  const SUBSTANTIATED_BODY = "PR BODY: criterion A is documented — matched 12/12 proof keywords";
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: failing,
+    deps: {
+      // The fix worker edits the PR BODY (gh pr edit); its OWN chat text never echoes the proof.
+      spawn: async () => result({ sessionId: "fix-1", text: "edited the PR body; nothing here echoes the proof keywords" }),
+      waitForCiGreen: async () => "green",
+      fetchPrBody: async () => SUBSTANTIATED_BODY,
+      runReview: async (args) => {
+        reviewReports.push(args.report);
+        // The floor passes ONLY when the report actually is the substantiated body.
+        return args.report.includes("matched 12/12 proof keywords") ? passing : failing;
+      },
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(reviewReports.length, 1, "exactly one re-review after the single strike");
+  assert.equal(reviewReports[0], SUBSTANTIATED_BODY, "the re-review judged the fresh PR body, never the worker's chat text");
+  assert.equal(outcome.outcome, "fixed", "the worker's body substantiation healed the keyword-floor block");
+  assert.equal(outcome.strikes, 1);
+});
+
+test("fetchPrBodyViaGh (W1-T256): returns the PR body via the injected gh reader, and empty string when the body is absent", async () => {
+  assert.equal(await fetchPrBodyViaGh("https://github.com/acme/remudero/pull/1", () => ({ body: "the current PR body" })), "the current PR body");
+  assert.equal(await fetchPrBodyViaGh("https://github.com/acme/remudero/pull/1", () => ({})), "");
+});
+
+test("runFixRung (W1-T256): a THROWING fetchPrBody falls back to the worker text and never crashes the rung", async () => {
+  const reviewReports: string[] = [];
+  const failing = fakeReview("failure", [
+    criterion({ claim: "criterion A is documented", met: false, reason: "proof unmet: report does not substantiate it (matched 4/12 proof keywords)" }),
+  ]);
+  const passing = fakeReview("success", [criterion({ claim: "criterion A is documented", met: true })]);
+
+  await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 1,
+    initialReview: failing,
+    deps: {
+      spawn: async () => result({ sessionId: "fix-1", text: "WORKER-CHAT-FALLBACK" }),
+      waitForCiGreen: async () => "green",
+      fetchPrBody: async () => {
+        throw new Error("gh unavailable");
+      },
+      runReview: async (args) => {
+        reviewReports.push(args.report);
+        return passing;
+      },
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.match(reviewReports[0], /WORKER-CHAT-FALLBACK/, "a throwing fetchPrBody must fall back to the worker text, not crash the rung");
 });
 
 test("runFixRung: the fix worker amends the SAME run branch — its spawn's cwd is the blocked run's own worktree, never a fresh checkout", async () => {

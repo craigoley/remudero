@@ -721,6 +721,17 @@ export function armFailureAction(stderrText: string): "direct-merge" | "ignore" 
  * Idempotent and non-fatal: whoever opened the PR (worker or fallback), the
  * orchestrator guarantees the trailer here.
  */
+/**
+ * W1-T256: fetch a PR's CURRENT body via gh — the artifact the body-coverage fix
+ * rung must judge (the same `gh pr view --json body` read reviewCommand uses). The
+ * `gh` reader is injectable so the pure body/`?? ""` logic is unit-tested without a
+ * subprocess; the two fix-rung call sites pass it by reference.
+ */
+export async function fetchPrBodyViaGh(prUrl: string, gh: (args: string[]) => unknown = ghJson): Promise<string> {
+  const view = gh(["pr", "view", prUrl, "--json", "body"]) as { body?: string };
+  return view.body ?? "";
+}
+
 function ensureTaskTrailer(prUrl: string, taskId: string): void {
   const trailer = `Remudero-Task: ${taskId}`;
   try {
@@ -1684,6 +1695,19 @@ export async function runFixRung(opts: {
      * failing-check CONTENT stays stale.
      */
     fetchCiFailures?: (prUrl: string) => Promise<CiFailure[]>;
+    /**
+     * W1-T256: fetch THIS PR's current body. Consulted ONLY in `body-coverage`
+     * fix mode, where the fix worker was told (renderFixPrompt) that the review
+     * floor judges the PR BODY, and the authoritative `reviewCommand`/`post-review`
+     * path DOES judge the body (`report: body`). Without it, this re-review judges
+     * the fix worker's CHAT TEXT instead, so a correct body substantiation is
+     * invisible and the rung can never heal a keyword-floor block — it keeps
+     * posting a worker-text verdict that shadows the body. Injected only by tests;
+     * in production it DEFAULTS to {@link fetchPrBodyViaGh} (the real `gh pr view`
+     * read). Best-effort: a throwing fetcher falls back to the worker-text report,
+     * exactly the pre-W1-T256 behavior; only body-coverage strikes ever consult it.
+     */
+    fetchPrBody?: (prUrl: string) => Promise<string>;
     runReview: (args: Parameters<typeof runReview>[0]) => ReturnType<typeof runReview>;
     /** Push whatever the fix worker committed. Best-effort — a worker that
      * already pushed leaves nothing new, which is not an error. */
@@ -1777,6 +1801,7 @@ export async function runFixRung(opts: {
     const evidence: FixEvidence = noReviewYet
       ? { ciFailures: currentCiFailures, constraint: opts.constraint }
       : { review: { unmetCriteria: unmet, summary: review.summary }, constraint: opts.constraint };
+    const fixMode = deriveFixMode(evidence);
     const prompt = renderFixPrompt({
       task: opts.task,
       round: strikes,
@@ -1791,7 +1816,7 @@ export async function runFixRung(opts: {
     const verdictRegime: StrikeRegime = review.criteria.some((c) => c.proof_exec !== "not_executable")
       ? "executed"
       : "keyword_only";
-    deps.log("fix.dispatch", { strike: strikes, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: deriveFixMode(evidence), verdict_regime: verdictRegime });
+    deps.log("fix.dispatch", { strike: strikes, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: fixMode, verdict_regime: verdictRegime });
     deps.say(
       noReviewYet
         ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE ci-log fix worker for ` +
@@ -1863,12 +1888,26 @@ export async function runFixRung(opts: {
       continue; // still failing — loop to the next strike (or exhaust below)
     }
 
+    // W1-T256: in body-coverage mode judge the CURRENT PR BODY — the artifact the
+    // worker was told to substantiate and the one the authoritative reviewCommand/
+    // post-review path judges — not the fix worker's chat text. Best-effort: an
+    // absent/throwing fetchPrBody falls back to the worker-text report (pre-W1-T256
+    // behavior). Every other mode is unchanged.
+    let reviewReport = [fixResult.text, fixResult.blocks.join("\n")].join("\n");
+    if (fixMode === "body-coverage") {
+      const fetchBody = deps.fetchPrBody ?? fetchPrBodyViaGh;
+      try {
+        reviewReport = await fetchBody(opts.prUrl);
+      } catch (e) {
+        deps.log("fix.body_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
+      }
+    }
     review = await deps.runReview({
       owner: opts.reviewBase.owner,
       repo: opts.reviewBase.repo,
       prUrl: opts.prUrl,
       task: opts.task,
-      report: [fixResult.text, fixResult.blocks.join("\n")].join("\n"),
+      report: reviewReport,
       settingsFile: opts.settingsFile,
       config: opts.config,
       budgetUsd: opts.budgetUsd,
