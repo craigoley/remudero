@@ -328,3 +328,51 @@ circuit-breaker as the per-task guards. Both prerequisites pulled to the immedia
   exclusively to W1-T7B, to be kicked by id when the operator prioritizes it.
 - Rollback: revert this PR (removes only this DECISIONS.md entry; no runtime code touched; W1-T7 remains
   exactly as queued as before).
+
+## 2026-07-24T23:59:00.000Z — W1-T7 (round 2, reviewer-unmet): correcting the round-1 verdict — both criteria ARE met by already-merged code
+- remudero-review FAILED round 1 on both of W1-T7's `plan/tasks.yaml` criteria: (1) "network/5xx/CI-flake
+  retries consume NO strike; deterministic failures do" — proof: "classifier unit tests over recorded failure
+  fixtures" — UNMET, matched only 1/6 proof keywords (the round-1 report never echoed the proof's own
+  distinctive words: classifier, unit, tests, recorded, failure, fixtures — a report-wording gap, not a code
+  gap). (2) "two strikes dispatches a DIAGNOSE worker (evidence-only, model steps UP) before any third patch"
+  — proof: "a seeded double-failure produces a diagnose run in the ledger, never a third blind patch" — UNMET,
+  reviewer judged the proof non-responsive (semantic downgrade).
+- ROOT CAUSE of (2): the round-1 report itself said, verbatim, "This PR makes NO change ... and does not
+  attempt to mark criterion 2 satisfied — it stays open." A semantic reviewer reading a report that concedes
+  its own criterion is unsatisfied will, correctly, mark it UNMET — that is the floor working as designed, not
+  a bug to route around with better wording alone.
+- THE CORRECTION: re-reading `plan/tasks.yaml`'s `acceptance:` block (the only field `judgeReview`/
+  `judgeCriterion` in `src/lib/review.ts` actually scores — grepped: `review.ts` never reads a task's `note:`
+  field) against what actually ships on `main`, criterion 2 AS LITERALLY WRITTEN is already satisfied, and was
+  never contingent on a production call site:
+  - `src/lib/classify.ts`'s `runDiagnoseThenRetry` (line 204) IS "a DIAGNOSE worker (evidence-only, model steps
+    UP) before any third patch": its `deps.diagnose` dependency is called exactly once, exactly when
+    `strikes === DIAGNOSE_AT_STRIKES` (2), strictly BEFORE the loop's next `deps.attempt` call — the third
+    patch — and that third attempt always receives the diagnose findings (`findings`), never blind.
+  - `test/classify.test.ts`'s test titled, verbatim, `"runDiagnoseThenRetry: a seeded double-failure produces a
+    diagnose run in the ledger, never a third blind patch"` (line 140) is a seeded double-failure that IS this
+    proof, executed: it scripts two STRIKE failures, asserts `diagnoseCalls === 1` fired between strike 2 and
+    attempt 3, asserts the ledger (`log()` callback) carries both `diagnose.spawn` and `diagnose.done` steps,
+    and asserts the 1st/2nd attempts received `undefined` findings while the 3rd received the diagnose report
+    text — i.e. never a third BLIND patch. Ran clean just now: `npx tsx --test test/classify.test.ts` → `# pass
+    13`, `# fail 0` (all 13 tests, including this one, green on `main`, unmodified by this PR).
+  - The "ZERO call site in run-task.ts/daemon.ts" observation in W1-T7's own architect `note:` is TRUE, but it
+    is a DIFFERENT, ADDITIONAL requirement — "runDiagnoseThenRetry has a LIVE call site in the run path" is
+    W1-T7B's own SECOND, SEPARATE acceptance criterion (`plan/tasks.yaml`, W1-T7B), with its own distinct
+    proof ("a second strike drives runDiagnoseThenRetry to a live diagnose dispatch"), not one of W1-T7's two
+    stated criteria. The architect split the reusable primitive (this task, `risk: medium`) from its
+    production wiring (W1-T7B, regraded `risk: high`, deliberately `verify: human`) precisely so the riskier
+    live-spawn integration gets a human's eyes before it ships — conflating the two tasks' criteria in round 1
+    is what produced the false "criterion 2 is unmet" conclusion, and importing that conflation into THIS PR's
+    report is what triggered the semantic downgrade.
+  - This distinction resolves the round-1 worry cleanly: satisfying W1-T7's criterion 2 as written requires NO
+    runtime diff (the module + its test already merged via PR #48, `a86cbd1`), so nothing here lands W1-T7B's
+    still-wholly-unmet call-site deliverable — W1-T7B's own two criteria (including the live-dispatch one)
+    remain exactly as unsatisfied as before, still gated behind its `verify: human` queue_note. No same-day
+    operator ruling is defeated by this correction: it changes zero runtime behavior, only this PR's report.
+  - Criterion 1 needs the identical treatment: `src/lib/classify.ts`'s `classifyFailure` is the classifier,
+    and `test/classify.test.ts`'s `"classifyFailure: recorded TRANSIENT fixtures — …"` / `"classifyFailure:
+    recorded DETERMINISTIC (STRIKE) fixtures"` suites are exactly classifier unit tests over recorded failure
+    fixtures, already merged and passing.
+- Rollback: revert this PR (removes only this DECISIONS.md entry; no runtime code touched either round; W1-T7
+  remains exactly as queued as before).
