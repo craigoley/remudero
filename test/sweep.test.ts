@@ -11,14 +11,18 @@ import {
   deriveDisposition,
   isBlockedCi,
   renderClarificationQuestion,
+  renderReconcileCloseComment,
   renderSweepSummary,
   runCreditBackfill,
+  runEscalationReconcile,
   runSweep,
   strikeCapForAnswer,
   toQuestionEntry,
+  MAX_ESCALATION_CLOSES_PER_CYCLE,
   type CiFailure,
   type ClarificationQuestion,
   type CreditCandidate,
+  type EscalationReconcileCandidate,
   type FixDispatchEvidence,
   type OpenPrView,
   type RollupCheckEntry,
@@ -1097,6 +1101,162 @@ test("runCreditBackfill: a candidate it ACTUALLY corrects still logs its per-can
   assert.equal(acted.length, 1, "silence is scoped to NO-OPS — a real correction stays legible");
   assert.equal(acted[0].extra.task_id, "W1-TB");
   assert.equal(acted[0].extra.corrected, true);
+});
+
+// ── ESCALATION-LIFECYCLE RECONCILER (fb-1784756088300-6a481e) ──────────────────
+
+function reconcileCandidate(over: Partial<EscalationReconcileCandidate> = {}): EscalationReconcileCandidate {
+  return {
+    issueUrl: over.issueUrl ?? "https://github.com/o/r/issues/1",
+    issueNumber: over.issueNumber ?? 1,
+    taskId: over.taskId ?? "W1-T1",
+    derived: {
+      merged: true,
+      prUrl: "https://github.com/o/r/pull/255",
+      prNumber: 255,
+      source: "trailer",
+      ...(over.derived ?? {}),
+    },
+  };
+}
+
+test("renderReconcileCloseComment names the resolver — the merged PR + derivation source — and cites the feedback id", () => {
+  const comment = renderReconcileCloseComment(
+    reconcileCandidate({
+      taskId: "W1-T189",
+      derived: { merged: true, prUrl: "https://github.com/o/r/pull/574", prNumber: 574, source: "head-branch" },
+    }),
+  );
+  assert.match(comment, /W1-T189/);
+  assert.match(comment, /#574/);
+  assert.match(comment, /pull\/574/);
+  assert.match(comment, /head-branch/);
+  assert.match(comment, /fb-1784756088300-6a481e/);
+});
+
+test("escalation reconcile: a RESOLVED (merged) referent closes its needs-human issue with a citation naming the resolver, and ledgers the close", async () => {
+  const shared = ledgerPath();
+  const closes: Array<{ url: string; comment: string }> = [];
+  const summary = await runEscalationReconcile(
+    [
+      reconcileCandidate({
+        issueUrl: "https://github.com/o/r/issues/44",
+        issueNumber: 44,
+        taskId: "W1-T189",
+        derived: { merged: true, prUrl: "https://github.com/o/r/pull/574", prNumber: 574, source: "head-branch" },
+      }),
+    ],
+    { closeIssue: (url, comment) => closes.push({ url, comment }), ledgerPath: shared, runId: "SWEEP-1" },
+  );
+  assert.equal(summary.closed, 1);
+  assert.equal(summary.results[0].outcome, "closed");
+  assert.equal(closes.length, 1);
+  assert.equal(closes[0].url, "https://github.com/o/r/issues/44");
+  assert.match(closes[0].comment, /W1-T189/, "the citation names the task");
+  assert.match(closes[0].comment, /#574/, "the citation names the resolving PR");
+  assert.match(closes[0].comment, /head-branch/, "the citation names the derivation source");
+
+  const closedLines = readLedgerLines(shared).filter((l) => l.step === "sweep.escalation_closed");
+  assert.equal(closedLines.length, 1, "every close is ledgered");
+  assert.equal(closedLines[0].issue_url, "https://github.com/o/r/issues/44");
+  assert.equal(closedLines[0].task_id, "W1-T189");
+  assert.equal(closedLines[0].pr_number, 574);
+});
+
+test("escalation reconcile: a still-LIVE referent (not merged) is left untouched — no close, no ledger line", async () => {
+  const shared = ledgerPath();
+  const closes: string[] = [];
+  const summary = await runEscalationReconcile(
+    [reconcileCandidate({ derived: { merged: false, source: "none" } })],
+    { closeIssue: (url) => closes.push(url), ledgerPath: shared, runId: "SWEEP-1" },
+  );
+  assert.equal(summary.closed, 0);
+  assert.equal(summary.results[0].outcome, "left-live");
+  assert.equal(closes.length, 0, "a live escalation is never closed");
+  assert.equal(readLedgerLines(shared).filter((l) => l.step === "sweep.escalation_closed").length, 0);
+});
+
+test("escalation reconcile: an INDETERMINATE derivation (W1-T119 — GitHub unreadable) is left untouched, never closed on an untrusted read — even over a carried-forward merged", async () => {
+  const shared = ledgerPath();
+  const closes: string[] = [];
+  const summary = await runEscalationReconcile(
+    // merged:true carried from a prior observation, but THIS read failed (indeterminate) —
+    // the W1-T119 guard must win: defer, never close on a read we could not trust this pass.
+    [reconcileCandidate({ derived: { merged: true, indeterminate: true, source: "throttled" } })],
+    { closeIssue: (url) => closes.push(url), ledgerPath: shared, runId: "SWEEP-1" },
+  );
+  assert.equal(summary.closed, 0);
+  assert.equal(summary.results[0].outcome, "left-indeterminate");
+  assert.equal(closes.length, 0, "an indeterminate read defers, never closes");
+});
+
+test("escalation reconcile: a 94-open backlog of resolved issues drains across bounded cycles — never one burst", async () => {
+  const shared = ledgerPath();
+  let remaining: EscalationReconcileCandidate[] = Array.from({ length: 94 }, (_, i) =>
+    reconcileCandidate({ issueUrl: `https://github.com/o/r/issues/${i}`, issueNumber: i, taskId: `W1-T${i}` }),
+  );
+  let cycles = 0;
+  let totalClosed = 0;
+  while (remaining.length > 0) {
+    cycles++;
+    assert.ok(cycles <= 12, "the drain must terminate");
+    const closedUrls = new Set<string>();
+    const summary = await runEscalationReconcile(remaining, {
+      closeIssue: (url) => closedUrls.add(url), // a closed issue no longer appears in next cycle's OPEN list
+      ledgerPath: shared,
+      runId: `SWEEP-${cycles}`,
+    });
+    assert.ok(
+      summary.closed <= MAX_ESCALATION_CLOSES_PER_CYCLE,
+      `cycle ${cycles} closed ${summary.closed}, must be within the per-cycle bound`,
+    );
+    totalClosed += summary.closed;
+    remaining = remaining.filter((c) => !closedUrls.has(c.issueUrl)); // the caller lists only STILL-open issues
+  }
+  assert.equal(totalClosed, 94, "all 94 eventually close");
+  assert.equal(cycles, Math.ceil(94 / MAX_ESCALATION_CLOSES_PER_CYCLE), "drained across the expected bounded cycles");
+  assert.ok(cycles > 1, "a 94-open backlog must NOT drain in a single burst");
+});
+
+test("escalation reconcile: one failing `gh issue close` is contained — the rest still close, and the failed one is NOT ledgered (retries next cycle)", async () => {
+  const shared = ledgerPath();
+  const summary = await runEscalationReconcile(
+    [
+      reconcileCandidate({ issueUrl: "iss/1", taskId: "W1-T1" }),
+      reconcileCandidate({ issueUrl: "iss/BOOM", taskId: "W1-T2" }),
+      reconcileCandidate({ issueUrl: "iss/3", taskId: "W1-T3" }),
+    ],
+    {
+      closeIssue: (url) => {
+        if (url === "iss/BOOM") throw new Error("gh issue close failed");
+      },
+      ledgerPath: shared,
+      runId: "SWEEP-1",
+    },
+  );
+  assert.equal(summary.closed, 2, "the two good closes succeed despite the middle throw");
+  assert.equal(summary.results.find((r) => r.issueUrl === "iss/BOOM")?.outcome, "close-failed");
+  const closedLines = readLedgerLines(shared).filter((l) => l.step === "sweep.escalation_closed");
+  assert.equal(closedLines.length, 2, "the failed close leaves NO ledger line (retries next cycle)");
+  assert.ok(!closedLines.some((l) => l.task_id === "W1-T2"), "no phantom close line for the throwing issue");
+});
+
+test("escalation reconcile: --dry-run previews the closes but makes NO gh call and leaves NO ledger line", async () => {
+  const shared = ledgerPath();
+  const closes: string[] = [];
+  const summary = await runEscalationReconcile([reconcileCandidate()], {
+    closeIssue: (url) => closes.push(url),
+    ledgerPath: shared,
+    runId: "SWEEP-1",
+    dryRun: true,
+  });
+  assert.equal(summary.closed, 1, "the preview counts what a live pass WOULD close");
+  assert.equal(closes.length, 0, "dry-run makes no gh close call");
+  assert.equal(
+    readLedgerLines(shared).filter((l) => l.step === "sweep.escalation_closed").length,
+    0,
+    "and leaves no ledger line",
+  );
 });
 
 // ── post-review routing: a green-but-ungated PR gets the review lane, not an escalation ──
