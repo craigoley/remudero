@@ -5844,17 +5844,19 @@
   acceptance:
     - claim: "network/5xx/CI-flake retries consume NO strike; deterministic failures do"
       proof: "classifier unit tests over recorded failure fixtures"
-    - claim: "two strikes dispatches a DIAGNOSE worker (evidence-only, model steps UP) before any third patch"
-      proof: "a seeded double-failure produces a diagnose run in the ledger, never a third blind patch"
+      satisfied_by: "#48"
   risk: medium
   origin: architect
   status: queued
   attempts: 0
-  note: "Architect (rule-20 sweep): criterion 2 (diagnose dispatch) is NOT yet reachable — classify.ts
-    exports runDiagnoseThenRetry but it has ZERO call site in run-task.ts/daemon.ts (only classifyFailure is
-    imported at run-task.ts:94). The wiring is W1-T7B (Standing rule 14: the call site is the deliverable).
-    The gate passed #48 because the reviewer judges diff+report and the unit test satisfied the STATED proof
-    — reachability was nobody's deliverable. Criterion 2 stays OPEN (not satisfied) until W1-T7B lands."
+  note: "Architect restructure (plan-only PR, operator ruling 2026-07-25). Criterion 1 (the transient-vs-
+    strike classifier) SHIPPED via PR #48 (classify.ts + test/classify.test.ts, a86cbd1) — carried here as
+    satisfied_by:#48. The former criterion 2 (the two-strikes DIAGNOSE dispatch) is NOT reachable —
+    runDiagnoseThenRetry has ZERO call site in the run path — so it was MOVED to W1-T7B (Standing rule 14:
+    the call site is the deliverable), where it already lives VERBATIM as W1-T7B criterion 1 (nothing
+    dropped, only moved). W1-T7 is now legibly complete on its one shipped concern; the diagnose-dispatch
+    wiring tracks under W1-T7B. Supersedes the prior rule-20-sweep note and closes the #759 stall, whose
+    docs-only re-run could never satisfy a criterion the Architect had left OPEN."
 
 - id: W1-T8
   title: Escalations as GitHub issues + imessage-local notifier + daily digest
