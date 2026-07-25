@@ -12353,7 +12353,7 @@
   status: queued
   attempts: 0
 
-- id: W1-T260
+- id: W1-T261
   title: "ci-gate RE-AGGREGATES on member-check completion — a member that re-runs green AFTER the aggregate concluded flips ci-gate on the SAME head sha, with no manual re-run and no throwaway commit"
   repo: remudero
   depends_on: [W1-T123]
