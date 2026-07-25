@@ -12244,3 +12244,42 @@
     reserve) on daemon.ts's headroom curve — the last of the three to land reads the curve/reserve from policy
     rather than re-hardcoding it (file-overlap serialization, W1-T171). Minted strictly above main's max task id
     W1-T251."
+
+- id: W1-T256
+  title: "blocked_review fix rung heals body-coverage blocks — the re-review judges the FRESH PR BODY the worker was told to substantiate, not its own chat text (the #754 stall)"
+  repo: remudero
+  depends_on: [W1-T76]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "LIVE INCIDENT (#754, W1-T255): a PR with all CI green stalled on remudero-review failing the
+    keyword floor (`matched N/M proof keywords`). deriveFixMode CORRECTLY routed it to body-coverage mode,
+    and renderFixPrompt CORRECTLY told the fix worker the review floor judges the PR BODY (substantiate the
+    body; never patch code to satisfy keywords, the #157/#143 lesson). But the fix rung's own re-review
+    (runFixRung, the runReview call after CI goes green) passed `report: [fixResult.text, ...]` — the fix
+    worker's CHAT TEXT — regardless of mode. So a worker that correctly substantiated the body was judged on
+    its chat output instead; the floor never saw the fix, the rung posted a worker-text FAILURE verdict on
+    the new head that SHADOWED the body, and the only body-judging path (reviewCommand via the post-review
+    disposition, which needs reviewState=none) could never run. The block was unhealable by design: the mode
+    said `body`, the judge read `chat`."
+  design: |
+    In runFixRung's re-review, when the strike's fix mode is body-coverage, judge the CURRENT PR BODY — the
+    artifact the worker was told to edit and the one the authoritative reviewCommand/post-review path judges
+    (report: body) — instead of the fix worker's chat text. A new OPTIONAL injected dep fetchPrBody(prUrl)
+    supplies the fresh body (wired in both call sites to the same `gh pr view --json body` read reviewCommand
+    uses). Best-effort and mode-scoped: an absent or throwing fetchPrBody, and every non-body-coverage mode,
+    fall back to the existing worker-text report verbatim — zero behavior change outside the body-coverage
+    path. Consequence: a fix worker that substantiates the body can now actually heal a keyword-floor block
+    in one strike, instead of burning strikes to escalation.
+  acceptance:
+    - claim: "in body-coverage mode the fix-rung re-review judges the fresh PR body via fetchPrBody, not the fix worker's chat text"
+      proof: "unit test: test/run-task.test.ts::runFixRung (W1-T256): in body-coverage mode the re-review judges the FRESH PR BODY"
+    - claim: "a fetchPrBody that throws falls back to the worker text — a gh read failure never crashes the rung"
+      proof: "unit test: test/run-task.test.ts::runFixRung (W1-T256): a THROWING fetchPrBody falls back to the worker text"
+  risk: high
+  origin: feedback#pr-754-stall
+  plan_refs: ["§3", "W1-T76", "W1-T94"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
