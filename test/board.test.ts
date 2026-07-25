@@ -18,7 +18,9 @@ import {
   createBoardSnapshotCache,
   createRecentActivityCache,
   DEFAULT_POLL_MS,
+  isRunningRow,
   sortBoardRows,
+  summarizeCounts,
   type BoardDeps,
   type BoardRow,
 } from "../src/lib/board.js";
@@ -175,6 +177,63 @@ test("computeBoardSnapshot: one StatusProjection per plan task, reusing projectP
     assert.equal(t.status, "queued"); // no GitHub evidence for either fixture task
     assert.equal(t.merged, false);
   }
+});
+
+// ── fb-1784902052582-c124f9: the header's honesty. Each observed incoherence, reproduced. ─────
+
+test("fb-…c124f9 FIXTURE ($0.000 / 0 turns): an in-flight run with NO spend line yet is 'no data yet' (liveSpendPending), never liveSpendUsd:0 / liveTurns:0 rendered as fact", () => {
+  const ledgerPath = tmpLedgerPath();
+  appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "A", step: "run.start" }) + "\n");
+  const now = () => Date.parse("2026-07-20T10:02:51.000Z"); // 2m51s after run.start — still in flight
+  const snap = computeBoardSnapshot({ plan: planOf([task({ id: "A" })]), ledgerPath, github: fakeGitHub(), now });
+  const row = snap.tasks.find((t) => t.taskId === "A")!;
+  assert.equal(row.phase, "recon", "the run IS in flight (2m51s elapsed in the fixture)…");
+  assert.equal(row.liveSpendPending, true, "…but spend/turns are UNKNOWN, not zero");
+  assert.equal(row.liveSpendUsd, undefined, "no $0.000 rendered as fact");
+  assert.equal(row.liveTurns, undefined, "no '0 turns' rendered as fact");
+});
+
+test("fb-…c124f9: once a spend line lands, the in-flight run carries the REAL value, not pending", () => {
+  const ledgerPath = tmpLedgerPath();
+  appendFileSync(
+    ledgerPath,
+    JSON.stringify({ ts: "2026-07-20T10:00:00.000Z", run_id: "r1", task_id: "A", step: "run.start" }) + "\n" +
+      JSON.stringify({ ts: "2026-07-20T10:01:00.000Z", run_id: "r1", task_id: "A", step: "implement.done", cost_usd: 1.24, num_turns: 38 }) + "\n",
+  );
+  const now = () => Date.parse("2026-07-20T10:02:51.000Z");
+  const row = computeBoardSnapshot({ plan: planOf([task({ id: "A" })]), ledgerPath, github: fakeGitHub(), now }).tasks.find((t) => t.taskId === "A")!;
+  assert.equal(row.liveSpendUsd, 1.24);
+  assert.equal(row.liveTurns, 38);
+  assert.equal(row.liveSpendPending, undefined);
+});
+
+test("fb-…c124f9 FIXTURE (0-merged during GitHub-unreachable): a failed merge-state read flags github_unreachable + counts.merged_known=false — merged is UNKNOWN, never 0 as fact", () => {
+  const unreachable: GitHub = { ...fakeGitHub(), readFailed: () => true };
+  const snap = computeBoardSnapshot({ plan: planOf([task({ id: "A" }), task({ id: "B" })]), ledgerPath: tmpLedgerPath(), github: unreachable });
+  assert.equal(snap.github_unreachable, true);
+  assert.equal(snap.counts.merged_known, false, "the merged tally is UNKNOWN during an outage, not 0");
+});
+
+test("fb-…c124f9: a reachable GitHub reports github_unreachable=false + merged_known=true (the tally is trustworthy)", () => {
+  const snap = computeBoardSnapshot({ plan: planOf([task({ id: "A" })]), ledgerPath: tmpLedgerPath(), github: fakeGitHub() });
+  assert.equal(snap.github_unreachable, false);
+  assert.equal(snap.counts.merged_known, true);
+});
+
+test("fb-…c124f9 FIXTURE (tally ≠ rows: '2 running' while NOW shows 1): summarizeCounts derives 'running' from the SAME phase predicate the NOW rows use — the count can never disagree with the rows", () => {
+  const rows = [
+    { taskId: "A", status: "running", phase: "recon" }, // in-flight — a NOW row renders this
+    { taskId: "B", status: "running", phase: undefined }, // status says running but NO live phase — NOW would NOT render it
+    { taskId: "C", status: "queued", phase: undefined },
+    { taskId: "D", status: "merged", phase: undefined },
+  ] as unknown as BoardRow[];
+  const counts = summarizeCounts(rows, false);
+  const nowRows = rows.filter(isRunningRow); // exactly renderNow's own filter
+  assert.equal(counts.running, nowRows.length, "the header 'running' tally EQUALS the NOW rows");
+  assert.equal(counts.running, 1, "only A (live phase) counts as running — never B (a bare status)");
+  assert.equal(counts.merged, 1);
+  assert.equal(counts.queued, 1);
+  assert.equal(counts.total, 4);
 });
 
 test("W1-T155: computeBoardSnapshot carries the full status taxonomy through for free — an in-flight task's phase/startedAt/elapsedMs pass through projectPlan unchanged", () => {

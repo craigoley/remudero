@@ -77,11 +77,34 @@ export interface BoardRow extends StatusProjection {
   liveSpendUsd?: number;
   /** LIVE ACCUMULATED TURN COUNT (W1-T184) — the `num_turns` counterpart to {@link liveSpendUsd}. */
   liveTurns?: number;
+  /**
+   * NO DATA YET (fb-1784902052582-c124f9): the run is in flight (`phase` present) but has logged
+   * no `implement.done`/`fix.done` yet, so its spend/turns are genuinely UNKNOWN — not `0`.
+   * Mutually exclusive with {@link liveSpendUsd}/{@link liveTurns}: exactly one of "pending" or
+   * "has a value" is ever set for an in-flight run. The console renders this as "no data yet",
+   * never `$0.000 / 0 turns` as fact.
+   */
+  liveSpendPending?: boolean;
 }
 
 /** GET /v1/status's body — one {@link BoardRow} per plan task, as of `generated_at`. */
+export interface CountSummary {
+  total: number;
+  running: number;
+  merged: number;
+  queued: number;
+  /** False when the GitHub read backing merge-state was unreachable ⇒ the `merged` tally is
+   * UNKNOWN, not a fact — the console renders "merged: unknown" rather than "0 merged". */
+  merged_known: boolean;
+}
+
 export interface BoardSnapshot {
+  /** The ONE server clock this snapshot is "as of" — every header freshness chip keys on THIS. */
   generated_at: string;
+  /** True iff the GitHub read backing merge-state was unreachable this snapshot (fb-…c124f9). */
+  github_unreachable: boolean;
+  /** Header counts, derived from the SAME `tasks` below (tally and rows can never disagree). */
+  counts: CountSummary;
   tasks: BoardRow[];
 }
 
@@ -138,14 +161,45 @@ export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
     if (ts) row.lastActivityAt = ts;
     if (p.phase) {
       const spend = liveRunSpend(lines, p.taskId);
-      if (spend) {
+      if (spend?.hasData) {
         row.liveSpendUsd = spend.spendUsd;
         row.liveTurns = spend.turns;
+      } else if (spend) {
+        // In flight but nothing logged yet ⇒ "no data yet", NOT $0.000 / 0 turns.
+        row.liveSpendPending = true;
       }
     }
     return row;
   });
-  return { generated_at: new Date().toISOString(), tasks };
+  // ONE freshness/honesty payload for the header (fb-1784902052582-c124f9): the counts derive
+  // from the SAME `tasks` the rows render (never a second predicate that can disagree), and the
+  // merge tally is flagged UNKNOWN when the GitHub read that backs merge-state was unreachable —
+  // so "0 merged" is never rendered as fact during an outage.
+  const github_unreachable = safeReadFailed(deps.github);
+  return { generated_at: new Date().toISOString(), github_unreachable, counts: summarizeCounts(tasks, github_unreachable), tasks };
+}
+
+/** One in-flight predicate, shared by the header tally AND the NOW rows so they can never
+ * disagree (fb-1784902052582-c124f9): a task is "running" iff it carries a live run `phase` —
+ * exactly what {@link renderNow} filters on. */
+export function isRunningRow(row: Pick<BoardRow, "phase">): boolean {
+  return row.phase != null;
+}
+
+/** The header count summary, computed from the SAME task set the rows render. `merged_known` is
+ * false when the GitHub read backing merge-state was unreachable — the console then renders the
+ * merged tally as "unknown", never `0` as fact (fb-1784902052582-c124f9). */
+export function summarizeCounts(
+  tasks: Array<Pick<BoardRow, "phase" | "status">>,
+  githubUnreachable: boolean,
+): { total: number; running: number; merged: number; queued: number; merged_known: boolean } {
+  return {
+    total: tasks.length,
+    running: tasks.filter(isRunningRow).length,
+    merged: tasks.filter((t) => t.status === "merged" || t.status === "done").length,
+    queued: tasks.filter((t) => t.status === "queued").length,
+    merged_known: !githubUnreachable,
+  };
 }
 
 /**
@@ -169,16 +223,22 @@ export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
  * sites, not assumed). Returns undefined only when the task has no run currently in flight — the
  * phase/inFlight taxonomy above already guarantees one exists whenever this is called.
  */
-function liveRunSpend(lines: Array<Record<string, unknown>>, taskId: string): { spendUsd: number; turns: number } | undefined {
+function liveRunSpend(lines: Array<Record<string, unknown>>, taskId: string): { spendUsd: number; turns: number; hasData: boolean } | undefined {
   let inFlight = false;
   let spendUsd = 0;
   let turns = 0;
+  // NO DATA YET vs a real zero (fb-1784902052582-c124f9): a run that has logged `run.start`
+  // but no `implement.done`/`fix.done` yet has ACCUMULATED nothing — its spend/turns are
+  // UNKNOWN, not `0`. `hasData` records whether any spend/turns line landed since the latest
+  // `run.start`, so the console can render "no data yet" instead of `$0.000 / 0 turns` as fact.
+  let hasData = false;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
     if (line.step === "run.start") {
       inFlight = true;
       spendUsd = 0;
       turns = 0;
+      hasData = false;
       continue;
     }
     if (line.step === "verdict") {
@@ -189,8 +249,9 @@ function liveRunSpend(lines: Array<Record<string, unknown>>, taskId: string): { 
     if (line.step !== "implement.done" && line.step !== "fix.done") continue;
     if (typeof line.cost_usd === "number") spendUsd += line.cost_usd;
     if (typeof line.num_turns === "number") turns += line.num_turns;
+    hasData = true;
   }
-  return inFlight ? { spendUsd, turns } : undefined;
+  return inFlight ? { spendUsd, turns, hasData } : undefined;
 }
 
 /**
