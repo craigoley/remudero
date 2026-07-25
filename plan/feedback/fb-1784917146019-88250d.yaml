@@ -14,4 +14,4 @@ raw: "CI-GATE HOLDS STALE REDS — the aggregate has no per-name dedupe and no
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/775
