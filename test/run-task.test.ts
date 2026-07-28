@@ -14,6 +14,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   sweepCommand,
   buildSweepHook,
   buildSweepEffects,
+  buildFixRungDispatchArgs,
   buildSweepLightHook,
   daemonCommand,
   daemonPlistCommand,
@@ -103,6 +104,7 @@ import {
   terminalStateReason,
   type ClarificationQuestion,
   type FixDispatchEvidence,
+  type MergeConflictEvidence,
   type OpenPrView,
 } from "../src/lib/sweep.js";
 import type { Mount } from "../src/lib/mounts.js";
@@ -1584,6 +1586,21 @@ test("deriveFixMode: blocked_ci with no review verdict at all derives ci-log", (
   assert.equal(deriveFixMode(evidence), "ci-log");
 });
 
+// W1-T106 (the #170 DIRTY strand): fixture merge-conflict evidence — a
+// pure-concurrent-addition conflict, both sides' log since merge-base.
+function mergeConflictFixture(): MergeConflictEvidence {
+  return {
+    files: [{ path: "src/x.ts", oursDeleted: 0, theirsDeleted: 0 }],
+    oursLog: "abc1234 add entry A",
+    theirsLog: "def5678 add entry B",
+  };
+}
+
+test("deriveFixMode: a conflicted dispatch (evidence.mergeConflict set, no review verdict) derives merge-conflict — checked BEFORE ci-log even though `review` is undefined on both", () => {
+  const evidence: FixEvidence = { mergeConflict: mergeConflictFixture() };
+  assert.equal(deriveFixMode(evidence), "merge-conflict");
+});
+
 test("renderFixPrompt: the three mode fixtures each render a mode-named prompt carrying ONLY that mode's inputs", () => {
   const reviewerUnmet = renderFixPrompt({
     task: { id: "W1-TX", title: "T" },
@@ -1632,6 +1649,30 @@ test("renderFixPrompt: the three mode fixtures each render a mode-named prompt c
   assert.match(ciLog, /making CI GREEN/i, "ci-log states the target is making CI green on the same branch");
   assert.doesNotMatch(ciLog, /PR BODY's Acceptance block/, "ci-log must not carry body-coverage's instruction");
   assert.doesNotMatch(ciLog, /crit-reviewer|crit-coverage/, "ci-log must not carry any review-mode criteria");
+});
+
+// W1-T106 acceptance 2 — dedicated proof: "the rendered prompt names the mode,
+// the conflicting files, and the union-with-merge-base discipline."
+test("renderFixPrompt: merge-conflict mode names the mode, the conflicting file(s), and the union-with-merge-base discipline (never a review/ci-log mix)", () => {
+  const mergeConflict = mergeConflictFixture();
+  const prompt = renderFixPrompt({
+    task: { id: "W1-TX", title: "T" },
+    round: 1,
+    branch: "run-W1-TX-1",
+    evidence: { mergeConflict },
+  });
+  assert.match(prompt, /MODE: merge-conflict/, "the rendered prompt names its derived mode");
+  assert.match(prompt, /src\/x\.ts/, "names the conflicting file");
+  assert.match(prompt, /UNION/i, "states the union-toward-both-sides discipline");
+  assert.match(prompt, /merge-base/i, "states the merge-base analysis it must be gated on");
+  assert.match(prompt, /PURE CONCURRENT ADDITION/i, "names the safe-to-resolve condition");
+  assert.match(prompt, /REFUSE/i, "states the refuse-into-escalate discipline for a deletion/semantic conflict");
+  assert.match(prompt, /never rebase/i, "states merge, never rebase-force");
+  assert.match(prompt, /add entry A/, "carries OUR side's log since merge-base");
+  assert.match(prompt, /add entry B/, "carries THEIR side's log since merge-base");
+  assert.doesNotMatch(prompt, /making CI GREEN/, "merge-conflict must not carry ci-log's instruction");
+  assert.doesNotMatch(prompt, /PR BODY's Acceptance block/, "merge-conflict must not carry body-coverage's instruction");
+  assert.doesNotMatch(prompt, /crit-reviewer|crit-coverage/, "merge-conflict must not carry any review-mode criteria");
 });
 
 // Dedicated, narrowly-titled proof for the acceptance claim "body-coverage mode
@@ -2270,6 +2311,90 @@ test("runFixRung: a blocked_ci dispatch that exhausts its strikes without CI EVE
   assert.match(issueCalls[0].title, /blocked_ci/, "the escalation names blocked_ci, not blocked_review");
   assert.match(issueCalls[0].body, /Failing check\(s\)/);
   assert.match(issueCalls[0].body, /typecheck/, "the failing check name is carried");
+  assert.doesNotMatch(issueCalls[0].body, /Unmet criteria:/, "never the review-mode framing for a dispatch that never had a review");
+});
+
+// ── W1-T106 (the #170 DIRTY strand): `runFixRung` itself must derive
+// merge-conflict evidence, mirroring ci-log's own dedicated proofs above. ──
+
+test("runFixRung: a seeded conflicted dispatch (mergeConflict, no review posted yet) dispatches ONE fix worker in merge-conflict mode, carrying the conflicting file(s) — never reviewer criteria (W1-T106, the #170 DIRTY strand)", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const noReviewYet = fakeReview("failure", []); // conflicted's own placeholder — no reviewer verdict exists yet
+  const passing = fakeReview("success", []);
+  const mergeConflict: MergeConflictEvidence = {
+    files: [{ path: "src/x.ts", oursDeleted: 0, theirsDeleted: 0 }],
+    oursLog: "abc1234 add entry A",
+    theirsLog: "def5678 add entry B",
+  };
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: noReviewYet,
+    mergeConflict,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: "fix-session-1" });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => passing,
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(spawnCalls.length, 1, "exactly one fix worker spawn");
+  assert.match(spawnCalls[0].prompt, /MODE: merge-conflict/, "the rendered prompt names merge-conflict mode");
+  assert.match(spawnCalls[0].prompt, /src\/x\.ts/, "the conflicting file rides the prompt");
+  assert.doesNotMatch(spawnCalls[0].prompt, /UNMET acceptance criterion/i, "never reviewer-mode criteria — conflicted has none");
+  assert.equal(outcome.outcome, "fixed");
+  assert.equal(outcome.strikes, 1);
+});
+
+test("runFixRung: a conflicted dispatch that exhausts its strikes without the merge state EVER resolving escalates naming the conflicting file(s), never an empty/misleading 'Unmet criteria:' list", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const noReviewYet = fakeReview("failure", []);
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const mergeConflict: MergeConflictEvidence = {
+    files: [{ path: "src/y.ts", oursDeleted: 0, theirsDeleted: 0 }],
+    oursLog: "abc1234 add entry A",
+    theirsLog: "def5678 add entry B",
+  };
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: noReviewYet,
+    mergeConflict,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `fix-session-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "red", // merge state never resolves — no check ever runs, no review is ever reached
+      runReview: async () => {
+        throw new Error("runReview must never be called — the merge state never resolved");
+      },
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(spawnCalls.length, 2, "exactly strikeCap merge-conflict spawns");
+  assert.equal(outcome.outcome, "escalated");
+  assert.equal(issueCalls.length, 1);
+  assert.match(issueCalls[0].title, /conflicted fix rung exhausted/, "the escalation names conflicted, not blocked_ci/blocked_review");
+  assert.match(issueCalls[0].body, /Conflicting file/i);
+  assert.match(issueCalls[0].body, /src\/y\.ts/, "the conflicting file name is carried");
   assert.doesNotMatch(issueCalls[0].body, /Unmet criteria:/, "never the review-mode framing for a dispatch that never had a review");
 });
 
@@ -3047,6 +3172,228 @@ test("routeFix: a blocked_ci PR (checks red, review none) dispatches ci-log evid
   assert.equal(deps.escalated.length, 0, "fix FIRST — never straight to the question rung while strikes remain");
   assert.deepEqual(deps.fixed[0].evidence.unmetCriteria, [], "no reviewer criteria for a blocked_ci dispatch");
   assert.deepEqual(deps.fixed[0].evidence.ciFailures, ciFailures);
+});
+
+test("routeFix: a conflicted PR (mergeState dirty, pure concurrent addition) dispatches merge-conflict evidence — the SAME dispatch shape runSweep uses (W1-T106, the #170 DIRTY strand)", async () => {
+  const deps = fakeFixDeps();
+  const mergeConflict: MergeConflictEvidence = {
+    files: [{ path: "src/x.ts", oursDeleted: 0, theirsDeleted: 0 }],
+    oursLog: "abc1234 add entry A",
+    theirsLog: "def5678 add entry B",
+  };
+  const pr = fixPr({ reviewState: "success", checksState: "green", mergeState: "dirty", mergeConflict });
+
+  const result = await routeFix("OPEN", pr, deps);
+
+  assert.equal(result.outcome, "fixed");
+  assert.equal(deps.fixed.length, 1);
+  assert.equal(deps.escalated.length, 0, "the safely-fixable half never escalates");
+  assert.deepEqual(deps.fixed[0].evidence.mergeConflict, mergeConflict);
+  assert.deepEqual(deps.fixed[0].evidence.unmetCriteria, []);
+});
+
+// ── W1-T106: `buildFixRungDispatchArgs` is the pure arg-builder extracted out
+// of `buildSweepEffects.dispatchFix` (the git/gh/worker-spawn boundary around
+// it is untestable by design) — these are its dedicated proofs, covering the
+// evidence-classification + initial-verdict reconstruction directly. ────────
+
+function dispatchArgsBase() {
+  return {
+    task: { id: "W1-TX", title: "Some task" },
+    runId: "SWEEP-1730000000000",
+    prUrl: "https://github.com/acme/remudero/pull/9",
+    branch: "run-W1-TX-1730000000000",
+    worktreePath: "/tmp/rmd-dispatch-wt",
+    mount: FIX_RUNG_MOUNT,
+    settingsFile: "/tmp/rmd-dispatch-settings.json",
+    config: {} as Config,
+    budgetUsd: 10,
+    strikeCap: 2,
+    reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: "/tmp/rmd-dispatch-wt", reviewerMount: FIX_RUNG_MOUNT },
+  };
+}
+
+test("buildFixRungDispatchArgs: a merge-conflict dispatch (evidence.mergeConflict set) seeds a failing, criteria-less initialReview naming the conflict — checked BEFORE ciFailures even when both are present", () => {
+  const mergeConflict: MergeConflictEvidence = {
+    files: [{ path: "src/x.ts", oursDeleted: 0, theirsDeleted: 0 }],
+    oursLog: "abc1234 add entry A",
+    theirsLog: "def5678 add entry B",
+  };
+  const evidence: FixDispatchEvidence = {
+    unmetCriteria: [],
+    mergeConflict,
+    ciFailures: [{ name: "ci", logTail: "should be ignored" }],
+  };
+  const pr = { headSha: "deadbeef", reviewSummary: "should be ignored" };
+
+  const args = buildFixRungDispatchArgs({ ...dispatchArgsBase(), evidence, pr });
+
+  assert.equal(args.initialReview.state, "failure");
+  assert.deepEqual(args.initialReview.criteria, []);
+  assert.match(args.initialReview.summary, /merge state dirty/);
+  assert.equal(args.initialReview.reviewerOutcome, "sweep-reconstructed-merge-conflict");
+  assert.equal(args.initialReview.headSha, "deadbeef");
+  assert.deepEqual(args.mergeConflict, mergeConflict);
+  assert.deepEqual(args.ciFailures, evidence.ciFailures, "ciFailures still rides through unchanged for the rung's own reversion logic");
+  assert.equal(args.initialSessionId, "", "a cold PR: strike 1 degrades to fresh (adapter lives beside deps)");
+});
+
+test("buildFixRungDispatchArgs: a ci-log dispatch (evidence.ciFailures set, no mergeConflict) seeds a failing, criteria-less initialReview naming the failing checks (W1-T100)", () => {
+  const ciFailures = [{ name: "typecheck", logTail: "tsc: error TS2322" }];
+  const evidence: FixDispatchEvidence = { unmetCriteria: [], ciFailures };
+  const pr = { headSha: "cafe1234" };
+
+  const args = buildFixRungDispatchArgs({ ...dispatchArgsBase(), evidence, pr });
+
+  assert.equal(args.initialReview.state, "failure");
+  assert.deepEqual(args.initialReview.criteria, []);
+  assert.match(args.initialReview.summary, /required checks red/);
+  assert.equal(args.initialReview.reviewerOutcome, "sweep-reconstructed-ci-log");
+  assert.equal(args.mergeConflict, undefined);
+  assert.deepEqual(args.ciFailures, ciFailures);
+});
+
+test("buildFixRungDispatchArgs: an ordinary blocked_review dispatch (neither mergeConflict nor ciFailures) seeds the unmet criteria + reviewSummary verbatim", () => {
+  const unmet: CriterionVerdict[] = [{ claim: "criterion A", met: false, reason: "r", proof_exec: "not_executable" } as never];
+  const evidence: FixDispatchEvidence = { unmetCriteria: unmet };
+  const pr = { headSha: "f00d1234", reviewSummary: "the real failing review summary" };
+
+  const args = buildFixRungDispatchArgs({ ...dispatchArgsBase(), evidence, pr });
+
+  assert.deepEqual(args.initialReview.criteria, unmet);
+  assert.equal(args.initialReview.summary, "the real failing review summary");
+  assert.equal(args.initialReview.reviewerOutcome, "sweep-reconstructed");
+  assert.equal(args.mergeConflict, undefined);
+  assert.equal(args.ciFailures, undefined);
+});
+
+test("buildFixRungDispatchArgs: a pendingAnswer's constraint rides the constraint field verbatim; absent otherwise", () => {
+  const evidence: FixDispatchEvidence = { unmetCriteria: [] };
+  const withAnswer = buildFixRungDispatchArgs({
+    ...dispatchArgsBase(),
+    evidence,
+    pr: { headSha: "a", pendingAnswer: { constraint: "operator said: keep it" } },
+  });
+  assert.equal(withAnswer.constraint, "operator said: keep it");
+
+  const withoutAnswer = buildFixRungDispatchArgs({ ...dispatchArgsBase(), evidence, pr: { headSha: "a" } });
+  assert.equal(withoutAnswer.constraint, undefined);
+});
+
+// ── W1-T106: `buildSweepEffects.dispatchFix` end-to-end over REAL git + a
+// PATH-stubbed `gh` — the whole cold-PR reconstruction path (creditable-head
+// check, worktree materialization, buildFixRungDispatchArgs, the runFixRung
+// call itself) executes for real. `gh pr view --json state` reports OPEN on
+// its FIRST call (dispatchFix's own preflight) and MERGED from the SECOND
+// call on (runFixRung's site-(i) terminal check, at the top of its strike
+// loop) — so the rung stands down on its very first round, BEFORE ever
+// spending a strike, and no real worker is ever spawned (spawnWorker is the
+// codebase's own untested-by-design process boundary; this proof exercises
+// every line up to, but never including, that boundary). ───────────────────
+test("buildSweepEffects.dispatchFix: a conflicted cold PR runs the REAL git-worktree + arg-building path end to end, then stands down (merged mid-flight) before spawning any worker", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-dispatchfix-e2e-"));
+  const config = { claudeBin: "/bin/true", root } as Config;
+  const owner = "acme";
+  const repo = "scratch-dispatchfix-repo"; // must NOT be this checkout's own real repo name
+  const taskId = "W1-TX";
+  const branch = `run-${taskId}-${Date.now()}`;
+  const prUrl = "https://github.com/acme/scratch-dispatchfix-repo/pull/42";
+
+  const originDir = join(root, "gh-origin");
+  mkdirSync(originDir, { recursive: true });
+  const g = (dir: string, args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+  g(originDir, ["init", "--quiet", "-b", "main"]);
+  g(originDir, ["config", "user.email", "t@example.com"]);
+  g(originDir, ["config", "user.name", "Test"]);
+  writeFileSync(join(originDir, "README.md"), "x\n");
+  g(originDir, ["add", "."]);
+  g(originDir, ["commit", "--quiet", "-m", "init"]);
+  g(originDir, ["branch", branch]); // the creditable head, at the SAME commit as main
+
+  // repoDir MUST land exactly where buildSweepEffects computes it for a repo
+  // name that is NOT this checkout's own (join(config.root, "repos", repo)).
+  const repoDir = join(root, "repos", repo);
+  mkdirSync(join(root, "repos"), { recursive: true });
+  execFileSync("git", ["clone", "--quiet", originDir, repoDir]);
+  g(repoDir, ["config", "user.email", "t@example.com"]);
+  g(repoDir, ["config", "user.name", "Test"]);
+  mkdirSync(worktreesDir(config), { recursive: true });
+
+  // A stateful `gh` stub: `--json headRefName` always answers this PR's real
+  // creditable branch; `--json state` answers OPEN once (dispatchFix's own
+  // preflight, BEFORE any git side effect) then MERGED forever after (so
+  // runFixRung's site-(i) check stands the rung down on its first round).
+  const bin = mkdtempSync(join(tmpdir(), "gh-dispatchfix-"));
+  const counterFile = join(bin, "state-calls");
+  writeFileSync(counterFile, "0");
+  writeFileSync(
+    join(bin, "gh"),
+    `#!/usr/bin/env node
+const fs = require("fs");
+const args = process.argv.slice(2);
+const idx = args.indexOf("--json");
+const field = idx >= 0 ? args[idx + 1] : undefined;
+if (args[0] === "pr" && args[1] === "view" && field === "headRefName") {
+  process.stdout.write(JSON.stringify({ headRefName: ${JSON.stringify(branch)} }));
+} else if (args[0] === "pr" && args[1] === "view" && field === "state") {
+  const n = parseInt(fs.readFileSync(${JSON.stringify(counterFile)}, "utf8") || "0", 10);
+  fs.writeFileSync(${JSON.stringify(counterFile)}, String(n + 1));
+  process.stdout.write(JSON.stringify({ state: n === 0 ? "OPEN" : "MERGED" }));
+} else {
+  process.stdout.write("{}");
+}
+`,
+    { mode: 0o755 },
+  );
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const plan = {
+    tasks: [{ id: taskId, title: "t", repo, depends_on: [], type: "implement", risk: "medium", verify: "auto", status: "queued", attempts: 0 }],
+    byId: new Map(),
+  } as unknown as Plan;
+
+  try {
+    const effects = buildSweepEffects(
+      owner, repo, config, join(root, "ledger.ndjson"), "SWEEP-1",
+      plan,
+      (step, extra) => { logs.push({ step, extra }); },
+      DEFAULT_SWEEP_POLICY,
+    );
+    const mergeConflict: MergeConflictEvidence = {
+      files: [{ path: "src/x.ts", oursDeleted: 0, theirsDeleted: 0 }],
+      oursLog: "abc1234 add entry A",
+      theirsLog: "def5678 add entry B",
+    };
+    const pr: OpenPrView = {
+      prNumber: 42,
+      prUrl,
+      taskId,
+      reviewState: "none",
+      checksState: "pending",
+      unmetCriteria: [],
+      priorStrikes: 0,
+      lastActivityAt: new Date().toISOString(),
+      headSha: "deadbeef",
+      autoMergeArmed: false,
+      mergeConflict,
+    };
+
+    await effects.dispatchFix(pr, { unmetCriteria: [], mergeConflict });
+
+    // The rung reached its FIRST round, stood down (MERGED, second gh read) —
+    // never spent a strike, never dispatched a worker, never crashed dispatchFix.
+    assert.ok(!logs.some((l) => l.step === "sweep.fix.no_task"), "the task WAS found");
+    assert.ok(!logs.some((l) => l.step === "sweep.fix.uncreditable_head"), "the branch WAS creditable");
+    assert.ok(!logs.some((l) => l.step === "sweep.fix.error"), "the real git/arg-building path never threw");
+    assert.ok(logs.some((l) => l.step === "fix.stood_down"), "runFixRung's OWN terminal check fired — reached past dispatchFix's arg-building");
+    assert.equal(parseInt(readFileSync(counterFile, "utf8"), 10), 2, "exactly two `--json state` reads: dispatchFix's preflight, then runFixRung's site-(i) check");
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
 });
 
 test("routeFix: a strike-exhausted blocked_ci PR escalates to the question rung rather than dispatching a further fix — the SAME cap review-failure honors (W1-T100)", async () => {

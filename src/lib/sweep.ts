@@ -104,6 +104,7 @@ export type Disposition =
   | "blocked-ambiguous"
   | "dep-review"
   | "post-review"
+  | "conflicted"
   | "wait";
 
 /**
@@ -115,6 +116,64 @@ export type Disposition =
 export interface CiFailure {
   name: string;
   logTail: string;
+}
+
+/**
+ * GitHub's own `mergeStateStatus`, simplified to what the sweep needs (W1-T106,
+ * the #170 DIRTY strand): a stuck PR sat review-PASS, all-checks-SUCCESS, and
+ * unmergeable for hours at `mergeStateStatus` DIRTY — invisible to every
+ * disposition rule because conflict state was not an {@link OpenPrView} input at
+ * all. `"dirty"` is a real merge conflict; `"behind"` is deliberately OUT OF
+ * SCOPE (design note iv) — auto-merge already handles a behind-but-clean PR on
+ * its own. `"unknown"` is the fail-closed default for anything else (BLOCKED,
+ * DRAFT, HAS_HOOKS, UNSTABLE, an unrecognized value, or an unreadable read) —
+ * never manufactured into a false "clean".
+ */
+export type MergeState = "clean" | "dirty" | "behind" | "unknown";
+
+/**
+ * One conflicting file's line-delta on EACH side since the merge-base — the
+ * deterministic signal {@link isPureConcurrentAddition} classifies on. Counting
+ * only DELETIONS (never additions) is deliberate: two sides that both only
+ * ADD content can conflict textually (e.g. both appended an entry to the same
+ * list) yet resolve safely to their union; a side that DELETED something is
+ * the case the rung must never silently clobber (rationale: "union is
+ * resolution, not clobber").
+ */
+export interface ConflictFileDiff {
+  path: string;
+  /** Lines this PR's OWN branch removed in this file since the merge-base. */
+  oursDeleted: number;
+  /** Lines the target branch (origin/main) removed in this file since the merge-base. */
+  theirsDeleted: number;
+}
+
+/**
+ * The merge-conflict fix mode's ONLY input (W1-T94's mode table gains
+ * merge-conflict, design note iii): the conflicting file list plus BOTH
+ * sides' log since the merge-base, so the dispatched fix worker can perform
+ * the SAME hand-resolution procedure the #170 incident demonstrated — merge
+ * (never rebase-force), union ONLY where the diffs below show pure
+ * concurrent addition, refuse into escalate otherwise.
+ */
+export interface MergeConflictEvidence {
+  files: ConflictFileDiff[];
+  /** `git log <merge-base>..<branch>` on this PR's own head, one line per commit. */
+  oursLog: string;
+  /** `git log <merge-base>..origin/main`, the same shape for the target side. */
+  theirsLog: string;
+}
+
+/**
+ * PURE, DETERMINISTIC classification (rule 2 — never an LLM judgment call) of
+ * whether a merge conflict is safe to auto-resolve toward the union of both
+ * sides: every conflicting file must show ZERO deletions on BOTH sides since
+ * the merge-base. A single deleted line on either side — or no file evidence
+ * at all (an unreadable/uncaptured diff) — fails CLOSED to `false`: a wrong
+ * auto-resolution is worse than a strand (design note iii, verbatim).
+ */
+export function isPureConcurrentAddition(files: readonly ConflictFileDiff[]): boolean {
+  return files.length > 0 && files.every((f) => f.oursDeleted === 0 && f.theirsDeleted === 0);
 }
 
 /**
@@ -224,6 +283,19 @@ export interface OpenPrView {
    * `renderFixPrompt`, never a crash).
    */
   ciFailures?: CiFailure[];
+  /**
+   * GitHub's own merge-conflict state, simplified (W1-T106, the #170 DIRTY
+   * strand) — see {@link MergeState}'s own doc. `undefined`/`"unknown"` never
+   * disposition CONFLICTED (fail-closed): only an OBSERVED `"dirty"` does.
+   */
+  mergeState?: MergeState;
+  /**
+   * The merge-conflict fix mode's input — the conflicting file list + both
+   * sides' log since merge-base (W1-T94's new mode, design note iii).
+   * Populated when `mergeState === "dirty"`; `undefined` otherwise (mirrors
+   * how `ciFailures` is populated only when `checksState === "red"`).
+   */
+  mergeConflict?: MergeConflictEvidence;
   /**
    * What each recorded fix-rung strike TRIED for this PR's task, ledger
    * ground truth only (W1-T78) — the clarification-question rung's "what the
@@ -448,6 +520,13 @@ function pendingAgeMinutes(pr: OpenPrView, now: number): number | undefined {
  *   6. FAILING + actionable unmet criteria, strikes left -> blocked-fixable (fix rung).
  *      Only reached with checks NOT red (row 5 above already claimed that case).
  *   7. FAILING + no actionable criteria (contradictory)  -> blocked-ambiguous (escalate).
+ *   7.5. CONFLICTED (W1-T106, the #170 DIRTY strand): `mergeState === "dirty"`
+ *      — ABOVE mergeable, so a conflicting PR is NEVER armed no matter how
+ *      green. Two rows, in order: (a) a PURE-concurrent-addition conflict
+ *      (isPureConcurrentAddition) -> `conflicted`, dispatching the W1-T94
+ *      merge-conflict fix mode; (b) anything else dirty (a deletion-involved
+ *      or unclassifiable conflict) -> `blocked-ambiguous`, REFUSING
+ *      auto-resolution and escalating instead — never a wrong clobber.
  *   8. CI GREEN + REVIEW SUCCESS (POSITIVE match only)   -> mergeable (arm).
  *   9. WAIT (W1-T114, the 30-issue predicate-storm fix): checks pending AND a
  *      datable, in-window newest-check-start (policy.pendingCeilingMinutes) ->
@@ -563,6 +642,44 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     disposition: "blocked-ambiguous",
     when: (pr) => pr.reviewState === "failure",
     reason: () => "review failing with no actionable unmet criteria (contradictory) — escalating",
+  },
+  {
+    // W1-T106 (the #170 DIRTY strand): CONFLICTED is a POSITIVE disposition,
+    // ABOVE mergeable — a dirty PR is NEVER armed no matter how green its
+    // checks or how successful its review (the #170 live incident: review
+    // PASS, all checks SUCCESS, auto-merge armed, yet stuck DIRTY for hours).
+    // Ordered here (after the review-failure rows, before mergeable) — none
+    // of rows 3-7 above reference `mergeState`, so this placement changes
+    // nothing about their precedence; it only guarantees row 8 (mergeable)
+    // never sees a dirty PR. Deterministically fixable (rule 2, never an LLM
+    // judgment call) ONLY when {@link isPureConcurrentAddition} clears every
+    // conflicting file — both sides purely ADDED, neither deleted anything
+    // the other still relies on. The deletion-involved / no-evidence-captured
+    // case falls through to the very next row, never here.
+    disposition: "conflicted",
+    when: (pr) => pr.mergeState === "dirty" && isPureConcurrentAddition(pr.mergeConflict?.files ?? []),
+    reason: (pr) =>
+      `merge conflict (mergeState dirty) — pure concurrent addition on ` +
+      `${(pr.mergeConflict?.files ?? []).map((f) => f.path).join(", ")} — dispatching the merge-conflict fix mode`,
+  },
+  {
+    // W1-T106: the OTHER half of the same #170 strand — a dirty PR whose
+    // conflict involves a DELETION on either side (or whose file evidence
+    // could not be captured at all) is NEVER auto-resolved: "a wrong
+    // auto-resolution is worse than a strand" (design note iii, verbatim).
+    // REFUSE into escalate — the SAME blocked-ambiguous disposition/rung
+    // every other ambiguous block already routes through (never a
+    // reimplementation), naming the conflicting files so the operator does
+    // not have to go re-derive them by hand.
+    disposition: "blocked-ambiguous",
+    when: (pr) => pr.mergeState === "dirty",
+    reason: (pr) => {
+      const files = (pr.mergeConflict?.files ?? []).map((f) => f.path);
+      return (
+        `merge conflict (mergeState dirty) involves a deletion (or no file evidence was captured) — ` +
+        `never auto-resolved — files: ${files.length > 0 ? files.join(", ") : "none captured"} — escalating`
+      );
+    },
   },
   {
     // POSITIVE MATCH ONLY (the #161 fix, W1-T93): mergeable is NEVER inferred
@@ -841,6 +958,8 @@ export function strikeCapForAnswer(originalCap: number, policy: ClarifyPolicy = 
 export interface FixDispatchEvidence {
   unmetCriteria: CriterionVerdict[];
   ciFailures?: CiFailure[];
+  /** W1-T106: the merge-conflict fix mode's input — populated for a `conflicted` dispatch only. */
+  mergeConflict?: MergeConflictEvidence;
 }
 
 /**
@@ -1053,6 +1172,10 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
         armed.add(pr);
         break;
       case "blocked-fixable":
+      // W1-T106: a `conflicted` dispatch is the SAME "spend a fix-rung
+      // strike, re-earned by a new head sha" shape as blocked-fixable —
+      // dedup off the SAME set, never a second, independently-tracked one.
+      case "conflicted":
         fixed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         break;
       case "stale":
@@ -1082,6 +1205,7 @@ const ZERO_COUNTS = (): Record<Disposition, number> => ({
   "post-review": 0,
   stale: 0,
   "blocked-ambiguous": 0,
+  conflicted: 0,
   wait: 0,
 });
 
@@ -1131,6 +1255,7 @@ export async function runSweep(
         alreadyDone = pr.autoMergeArmed || prior.armed.has(pr.prNumber);
         break;
       case "blocked-fixable":
+      case "conflicted": // W1-T106: same dedup set as blocked-fixable — see priorActionsFromLedger.
         alreadyDone = prior.fixed.has(`${pr.prNumber}@${pr.headSha}`);
         break;
       case "stale":
@@ -1233,6 +1358,30 @@ export async function runSweep(
                   ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] }
                   : { unmetCriteria: pr.unmetCriteria },
               );
+              break;
+            }
+            case "conflicted": {
+              // W1-T106: the SAME terminal-state pre-flight (W1-T177) as
+              // blocked-fixable — never spend a merge-conflict fix strike on
+              // a PR that went terminal since this sweep pass's snapshot.
+              const live = await deps.readLiveState?.(pr);
+              let terminal: string | undefined;
+              if (live) {
+                if (live.ok) {
+                  terminal = terminalStateReason(live.state);
+                } else {
+                  log("sweep.dispose.indeterminate", { pr_number: pr.prNumber });
+                }
+              }
+              if (terminal) {
+                acted = false;
+                standDownReason = terminal;
+                break;
+              }
+              // The DISPOSITION_RULES "conflicted" row already gated this on
+              // isPureConcurrentAddition — dispatch carries the merge-conflict
+              // evidence, never a mix with ci-log/reviewer-unmet shapes.
+              await deps.dispatchFix(pr, { unmetCriteria: [], mergeConflict: pr.mergeConflict });
               break;
             }
             case "stale":
@@ -1362,7 +1511,7 @@ export function renderSweepSummary(s: SweepSummary): string {
   const b = s.byDisposition;
   return (
     `sweep: ${s.total} open PR(s) · ${s.actionsTaken} action(s) taken · ` +
-    `mergeable ${b.mergeable} · blocked-fixable ${b["blocked-fixable"]} · ` +
+    `mergeable ${b.mergeable} · blocked-fixable ${b["blocked-fixable"]} · conflicted ${b.conflicted} · ` +
     `stale ${b.stale} · blocked-ambiguous ${b["blocked-ambiguous"]}` +
     (s.actionsFailed > 0 ? ` · ⚠️ ${s.actionsFailed} action(s) FAILED (see sweep.action_failed)` : "") +
     (s.noneCount > 0 ? ` · ⚠️ ${s.noneCount} UNDISPOSED (invariant violated)` : "")

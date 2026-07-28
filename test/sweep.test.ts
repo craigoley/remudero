@@ -10,6 +10,7 @@ import {
   checksStateFromRollup,
   deriveDisposition,
   isBlockedCi,
+  isPureConcurrentAddition,
   renderClarificationQuestion,
   renderReconcileCloseComment,
   renderSweepSummary,
@@ -21,6 +22,7 @@ import {
   MAX_ESCALATION_CLOSES_PER_CYCLE,
   type CiFailure,
   type ClarificationQuestion,
+  type ConflictFileDiff,
   type CreditCandidate,
   type EscalationReconcileCandidate,
   type FixDispatchEvidence,
@@ -169,6 +171,45 @@ function blockedCiPr(): OpenPrView {
 }
 function blockedCiExhaustedPr(): OpenPrView {
   return { ...blockedCiPr(), prNumber: 171, prUrl: "url/171", priorStrikes: 2 };
+}
+
+// W1-T106 (the #170 DIRTY strand): the LIVE incident's own fixture — review
+// PASS, all checks SUCCESS, auto-merge would-be armed, yet mergeState DIRTY
+// (a ci-gate.yml REQUIRED-array conflict vs #177/#26) — invisible to every
+// disposition rule before this task because conflict state was not an
+// OpenPrView input at all.
+function conflictFile(over: Partial<ConflictFileDiff> = {}): ConflictFileDiff {
+  return { path: ".github/workflows/ci-gate.yml", oursDeleted: 0, theirsDeleted: 0, ...over };
+}
+function conflictedPurePr(): OpenPrView {
+  return pr({
+    prNumber: 1700,
+    prUrl: "url/1700",
+    taskId: "W1-CONFLICT",
+    reviewState: "success",
+    checksState: "green",
+    mergeState: "dirty",
+    mergeConflict: {
+      files: [conflictFile()],
+      oursLog: "abc1234 add REQUIRED entry for #177",
+      theirsLog: "def5678 add REQUIRED entry for #26",
+    },
+  });
+}
+function conflictedDeletionPr(): OpenPrView {
+  return pr({
+    prNumber: 1701,
+    prUrl: "url/1701",
+    taskId: "W1-CONFLICT-DEL",
+    reviewState: "success",
+    checksState: "green",
+    mergeState: "dirty",
+    mergeConflict: {
+      files: [conflictFile({ path: "src/config.ts", theirsDeleted: 3 })],
+      oursLog: "abc1234 edit config.ts",
+      theirsLog: "def5678 remove a stale entry from config.ts",
+    },
+  });
 }
 
 /** A recording fake for every injected effect. */
@@ -513,6 +554,69 @@ test("W1-T138 — a checks-red PR with strikes exhausted still escalates (the sh
   assert.equal(deps.escalated.length, 1);
 });
 
+// ── W1-T106 (the #170 DIRTY strand): CONFLICTED is a disposition — the sweep
+// sees mergeStateStatus, and the fix rung gains a merge-conflict mode ────────
+
+test("isPureConcurrentAddition: zero deletions on both sides across every file -> true; a single deletion on either side -> false; no file evidence -> false (fail closed)", () => {
+  assert.equal(isPureConcurrentAddition([conflictFile()]), true);
+  assert.equal(isPureConcurrentAddition([conflictFile(), conflictFile({ path: "b.txt" })]), true, "true across MULTIPLE files, all clean");
+  assert.equal(isPureConcurrentAddition([conflictFile({ oursDeleted: 1 })]), false, "OUR side deleted something");
+  assert.equal(isPureConcurrentAddition([conflictFile({ theirsDeleted: 1 })]), false, "THEIR side deleted something");
+  assert.equal(isPureConcurrentAddition([]), false, "no captured file evidence never defaults to safe");
+});
+
+test("deriveDisposition acceptance 1 — the #170 fixture (green checks, review PASS, mergeState dirty) dispositions CONFLICTED — the mergeable rule (row 8) cannot match a dirty PR, a regression lock ABOVE it", () => {
+  const seeded = conflictedPurePr();
+  const r = deriveDisposition(seeded, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "conflicted");
+  assert.notEqual(r.disposition, "mergeable", "a dirty PR is NEVER armed no matter how green");
+  assert.match(r.reason, /mergeState dirty/);
+  assert.match(r.reason, /ci-gate\.yml/, "names the conflicting file");
+
+  // The regression lock itself: feed the SAME fixture straight at the
+  // mergeable row's own predicate (never a second, independently-hardcoded
+  // check) — it must never positively match a dirty PR.
+  const mergeableRow = DISPOSITION_RULES.find((row) => row.disposition === "mergeable")!;
+  assert.equal(mergeableRow.when(seeded, DEFAULT_SWEEP_POLICY, 0, NOW), true, "sanity: checks green + review success alone WOULD match");
+  const conflictedRow = DISPOSITION_RULES.find((row) => row.disposition === "conflicted")!;
+  assert.equal(conflictedRow.when(seeded, DEFAULT_SWEEP_POLICY, 0, NOW), true, "the conflicted row matches FIRST, ordered above mergeable");
+});
+
+test("runSweep acceptance 2 — a pure-concurrent-addition conflict dispatches ONE merge-conflict-mode fix worker, carrying the conflicting files + both sides' log, never a reviewer-unmet/ci-log mix", async () => {
+  const deps = fakeDeps();
+  const seeded = conflictedPurePr();
+
+  const summary = await runSweep([seeded], deps);
+
+  assert.equal(summary.byDisposition.conflicted, 1);
+  assert.equal(deps.fixed.length, 1, "exactly ONE spawn");
+  assert.equal(deps.escalated.length, 0, "never straight to escalate — this is the safely-fixable half");
+  assert.deepEqual(deps.fixed[0].evidence.mergeConflict, seeded.mergeConflict, "both sides' context rides the dispatch verbatim");
+  assert.deepEqual(deps.fixed[0].evidence.unmetCriteria, [], "no reviewer criteria — a conflicted PR carries none");
+  assert.equal(deps.fixed[0].evidence.ciFailures, undefined, "never a mix with the ci-log shape");
+});
+
+test("deriveDisposition acceptance 3 — a deletion-involved conflict refuses into escalate (blocked-ambiguous), naming the files, never the conflicted/fixable row", () => {
+  const seeded = conflictedDeletionPr();
+  const r = deriveDisposition(seeded, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-ambiguous");
+  assert.notEqual(r.disposition, "conflicted", "a deletion is never auto-resolved");
+  assert.match(r.reason, /deletion/);
+  assert.match(r.reason, /src\/config\.ts/, "names the conflicting file(s)");
+});
+
+test("runSweep acceptance 3 — a deletion-involved conflict: NO resolution attempt (zero fix-worker spawns), escalate fires instead, naming the files", async () => {
+  const deps = fakeDeps();
+  const seeded = conflictedDeletionPr();
+
+  const summary = await runSweep([seeded], deps);
+
+  assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
+  assert.equal(deps.fixed.length, 0, "no resolution attempt — never dispatched");
+  assert.equal(deps.escalated.length, 1, "refuses into escalate instead");
+  assert.match(deps.escalated[0].reason, /src\/config\.ts/, "the escalation names the conflicting file(s)");
+});
+
 // ── ACCEPTANCE 1: the P22 golden, verbatim ────────────────────────────────────
 
 test("acceptance 1 — the P22 golden: {mergeable, blocked-fixable(2 criteria), superseded-orphan, strikes-exhausted} -> exactly {one arm, ONE fix carrying BOTH criteria, one close, one escalation}; none-count == 0", async () => {
@@ -544,7 +648,12 @@ test("acceptance 1 — the P22 golden: {mergeable, blocked-fixable(2 criteria), 
     mergeable: 1,
     "blocked-fixable": 1,
     stale: 1,
-    "blocked-ambiguous": 1, "dep-review": 0, "post-review": 0, wait: 0 });
+    "blocked-ambiguous": 1,
+    "dep-review": 0,
+    "post-review": 0,
+    conflicted: 0,
+    wait: 0,
+  });
   assert.equal(summary.total, 4);
   assert.equal(summary.actionsTaken, 4);
   assert.equal(summary.noneCount, 0, "no open PR ends the sweep with disposition=none");
@@ -739,7 +848,16 @@ test("an already-armed PR (observed autoMergeArmed=true) is not re-armed", async
 test("renderSweepSummary is a single legible line", () => {
   const s = {
     total: 4,
-    byDisposition: { mergeable: 1, "blocked-fixable": 1, stale: 1, "blocked-ambiguous": 1, "dep-review": 0, "post-review": 0, wait: 0 },
+    byDisposition: {
+      mergeable: 1,
+      "blocked-fixable": 1,
+      stale: 1,
+      "blocked-ambiguous": 1,
+      "dep-review": 0,
+      "post-review": 0,
+      conflicted: 0,
+      wait: 0,
+    },
     actionsTaken: 4,
     actionsFailed: 0,
     actions: [],
@@ -751,7 +869,16 @@ test("renderSweepSummary is a single legible line", () => {
 test("renderSweepSummary calls out failed actions distinctly (W1-T99)", () => {
   const s = {
     total: 3,
-    byDisposition: { mergeable: 1, "blocked-fixable": 0, stale: 0, "blocked-ambiguous": 1, "dep-review": 0, "post-review": 1, wait: 0 },
+    byDisposition: {
+      mergeable: 1,
+      "blocked-fixable": 0,
+      stale: 0,
+      "blocked-ambiguous": 1,
+      "dep-review": 0,
+      "post-review": 1,
+      conflicted: 0,
+      wait: 0,
+    },
     actionsTaken: 2,
     actionsFailed: 1,
     actions: [],
