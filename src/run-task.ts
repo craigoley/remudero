@@ -237,7 +237,7 @@ import {
   regeneratePlanIndexAndCommit,
   regeneratePlanIndexFile,
 } from "./lib/plan-pr-emitter.js";
-import { appendLedger } from "./lib/ledger.js";
+import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "./lib/ledger.js";
 import {
   assertRunnable,
   loadPlan,
@@ -2007,8 +2007,18 @@ export async function runFixRung(opts: {
       return { outcome: "escalated", review, strikes, issueUrl };
     }
 
-    strikes++;
-    const round: "resume" | "fresh" = strikes === 1 ? "resume" : "fresh";
+    // W1-T127 (the #212 fixture — PR #212/#213, a spawn-ENOENT/autoupdater-race
+    // binary crash that debited a fix-rung strike, and escalated, on a worker that
+    // never ran): `attempt` is only a CANDIDATE strike number until `deps.spawn`
+    // demonstrably returns, below. `strikes` itself — and every ledger line that
+    // counts toward it (`fix.dispatch`) — is committed strictly AFTER that point.
+    // Pre-W1-T127 this incremented `strikes` and logged `fix.dispatch` HERE, before
+    // dispatch even happened, so a spawn-infra throw left a strike on the books
+    // for a worker that never existed — see ledger.ts's `isRealStrike` for the
+    // conjunction (worker ran AND a judgment is posted for it) this restructuring
+    // enforces.
+    const attempt = strikes + 1;
+    const round: "resume" | "fresh" = attempt === 1 ? "resume" : "fresh";
     const unmet = review.criteria.filter((c) => !c.met);
     const evidence: FixEvidence =
       currentMergeConflict !== undefined
@@ -2019,7 +2029,7 @@ export async function runFixRung(opts: {
     const fixMode = deriveFixMode(evidence);
     const prompt = renderFixPrompt({
       task: opts.task,
-      round: strikes,
+      round: attempt,
       branch: opts.branch,
       evidence,
     });
@@ -2031,17 +2041,6 @@ export async function runFixRung(opts: {
     const verdictRegime: StrikeRegime = review.criteria.some((c) => c.proof_exec !== "not_executable")
       ? "executed"
       : "keyword_only";
-    deps.log("fix.dispatch", { strike: strikes, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: fixMode, verdict_regime: verdictRegime });
-    deps.say(
-      currentMergeConflict !== undefined
-        ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE merge-conflict fix worker for ` +
-          `${(currentMergeConflict.files ?? []).length} conflicting file(s)`
-        : noReviewYet
-        ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE ci-log fix worker for ` +
-          `${(currentCiFailures ?? []).length} failing check(s)`
-        : `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE fix worker for ` +
-          `${unmet.length} unmet criteri${unmet.length === 1 ? "on" : "a"}`,
-    );
 
     const fixArgs: SpawnWorkerArgs = {
       cwd: opts.worktreePath,
@@ -2062,7 +2061,47 @@ export async function runFixRung(opts: {
       tools: FIX_WORKER_TOOLS,
     };
 
-    const fixResult = deps.account(await deps.spawn(fixArgs));
+    let fixResult: WorkerResult;
+    try {
+      fixResult = deps.account(await deps.spawn(fixArgs));
+    } catch (e) {
+      if (!isSpawnInfraBlockedError(e)) throw e;
+      // No subprocess ever launched — nothing ran, nothing was billed. Log this as
+      // an INFRA-tagged $0 line — deliberately NEVER a `fix.dispatch` line, the
+      // ONLY step `priorStrikesFor` counts as a strike — so budget forensics can
+      // separate "the task was expensive" from "the host was broken" (W1-T127
+      // design note iii), then propagate the refusal unchanged: `strikes` and
+      // attempts-toward-escalation never move, and no escalate() ever fires for it
+      // here — the caller's existing spawn-infra degrade-don't-die handling
+      // (daemon.ts's `isSpawnInfraBlocked`) decides what happens next, exactly
+      // like the initial implement dispatch already does.
+      deps.log("fix.spawn_infra_blocked", {
+        attempt,
+        reason: e.message,
+        cost_usd: 0,
+        cost_tag: LEDGER_COST_TAG_INFRA,
+      });
+      deps.say(
+        `fix rung: strike ${attempt}/${opts.strikeCap} REFUSED — spawn infrastructure blocked, not counted as a ` +
+          `strike: ${e.message}`,
+      );
+      throw e;
+    }
+
+    // A worker DEMONSTRABLY ran (spawn returned rather than throwing) — only now
+    // is this round committed as a real strike.
+    strikes = attempt;
+    deps.log("fix.dispatch", { strike: strikes, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: fixMode, verdict_regime: verdictRegime });
+    deps.say(
+      currentMergeConflict !== undefined
+        ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE merge-conflict fix worker for ` +
+          `${(currentMergeConflict.files ?? []).length} conflicting file(s)`
+        : noReviewYet
+        ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE ci-log fix worker for ` +
+          `${(currentCiFailures ?? []).length} failing check(s)`
+        : `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE fix worker for ` +
+          `${unmet.length} unmet criteri${unmet.length === 1 ? "on" : "a"}`,
+    );
     sessionToResume = fixResult.sessionId;
     deps.log("fix.done", {
       strike: strikes,
