@@ -3734,6 +3734,7 @@ function armDeps(over: Partial<ArmDeps> = {}): ArmDeps & { said: string[] } {
     ],
     armAuto: () => {},
     mergeDirect: () => {},
+    disableAuto: () => {},
     say: (m) => { said.push(m); },
     ...over,
   };
@@ -3813,6 +3814,7 @@ test("realArmDeps: the real gh/config wiring executes against a PATH-stubbed gh 
     assert.equal(d.headSha("url/x"), "stub1234", "headSha parses gh pr view --json headRefOid");
     assert.doesNotThrow(() => d.armAuto("url/x"), "armAuto reaches gh pr merge --auto");
     assert.doesNotThrow(() => d.mergeDirect("url/x"), "mergeDirect reaches gh pr merge --squash");
+    assert.doesNotThrow(() => d.disableAuto("url/x"), "disableAuto (W1-T125) reaches gh pr merge --disable-auto");
     assert.doesNotThrow(() => d.say("realArmDeps coverage probe"));
     try {
       d.ledgerLines();

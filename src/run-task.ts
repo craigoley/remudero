@@ -687,6 +687,8 @@ export interface ArmDeps {
   armAuto: (prUrl: string) => void;
   /** `gh pr merge --squash --delete-branch` — the clean-status completion. */
   mergeDirect: (prUrl: string) => void;
+  /** `gh pr merge --disable-auto` — withdraws an early arm, W1-T125. */
+  disableAuto: (prUrl: string) => void;
   say: (msg: string) => void;
 }
 
@@ -701,6 +703,11 @@ export function realArmDeps(): ArmDeps {
       }) as unknown as void,
     mergeDirect: (prUrl) =>
       execFileSync("gh", ["pr", "merge", prUrl, "--squash", "--delete-branch"], {
+        encoding: "utf8",
+        stdio: "pipe",
+      }) as unknown as void,
+    disableAuto: (prUrl) =>
+      execFileSync("gh", ["pr", "merge", prUrl, "--disable-auto"], {
         encoding: "utf8",
         stdio: "pipe",
       }) as unknown as void,
@@ -742,6 +749,16 @@ export function armAutoMerge(
     deps.say(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
     return "ledger-refused";
   }
+  return attemptArm(prUrl, deps);
+}
+
+/**
+ * The shared `gh pr merge --auto` attempt + clean-status-direct-merge fallback —
+ * factored out (W1-T125) so both the ledger-gated {@link armAutoMerge} and the
+ * ungated {@link armAutoMergeAtOpen} share the EXACT same completion logic
+ * rather than duplicating it.
+ */
+function attemptArm(prUrl: string, deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "say">): ArmOutcome {
   try {
     deps.armAuto(prUrl);
     return "armed";
@@ -770,6 +787,50 @@ export function armAutoMerge(
     // Anything else stays informational (a transient gh/network error — the
     // next sweep pass re-derives and retries; the run flow's poll reads true state).
     return "arm-error-ignored";
+  }
+}
+
+/**
+ * W1-T125: arm auto-merge the INSTANT a run's own PR opens — deliberately
+ * UNGATED by any ledger verdict, because none can possibly exist yet (review
+ * hasn't run at PR-open time). This is safe ONLY because GitHub's own
+ * required-status contract (the `ci` check AND the REQUIRED `remudero-review`
+ * commit status) is what actually gates the merge, never this call — arming
+ * merely REGISTERS INTENT; GitHub will not merge until every required check
+ * reports success.
+ *
+ * The one shape this does NOT cover on its own: a CAPPED verdict (zero proofs
+ * executed) still posts `remudero-review: success` (see
+ * `postReviewStatusGuarded`/`judgeReview`'s `capped` field) — a local
+ * orchestrator policy with no GitHub-visible signal. `runTask`'s own capped-
+ * refusal branch closes that gap by calling {@link disarmAutoMerge} BEFORE
+ * escalating, withdrawing this early arm so the capped verdict's `success`
+ * status can no longer trigger a stray auto-merge.
+ */
+export function armAutoMergeAtOpen(
+  prUrl: string,
+  deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "say"> = realArmDeps(),
+): ArmOutcome {
+  return attemptArm(prUrl, deps);
+}
+
+/**
+ * W1-T125: best-effort withdrawal of an early {@link armAutoMergeAtOpen} —
+ * `gh pr merge --disable-auto`. Called from `runTask`'s capped-refusal branch,
+ * immediately before escalating, so a capped verdict that still posts
+ * `remudero-review: success` cannot merge a PR the orchestrator's own policy
+ * just refused. Never throws — matches this file's "never silent, never
+ * fatal" idiom (see {@link armAutoMerge}'s own arm-error-ignored branch): the
+ * withdraw itself can fail/race, and a full closure of that race would
+ * require changing `postReviewStatusGuarded` (out of this task's scope), so
+ * this is the minimal, best-effort, in-scope mitigation.
+ */
+export function disarmAutoMerge(prUrl: string, deps: Pick<ArmDeps, "disableAuto" | "say"> = realArmDeps()): void {
+  try {
+    deps.disableAuto(prUrl);
+    deps.say(`automerge.disarmed (W1-T125): early arm withdrawn — ${prUrl}`);
+  } catch (e) {
+    deps.say(`automerge.disarm_failed (W1-T125): ${String((e as Error)?.message ?? e)} — ${prUrl}`);
   }
 }
 
@@ -2540,10 +2601,19 @@ async function runTask(
      *  `containmentExec` above, driving the REAL blocked_isolation catch branch. Default: the
      *  real spawn-backed executor. */
     isolationExec?: IsolationProbeExecutor;
+    /** Injectable review judge for the PRIMARY (post-CI-green) review call — the same
+     *  shape `runFixRung`'s own `deps.runReview` already exposes. Default: the real
+     *  {@link runReview}. W1-T125: lets a behavioral test drive a REAL runTask() through
+     *  the capped-refusal branch (and its `disarmAutoMerge` call, right before escalating)
+     *  without a live reviewer spawn — `runReview` itself hard-codes `spawnWorker` (never
+     *  this file's injectable `spawn` param), so a genuine CAPPED verdict from a real
+     *  reviewer round-trip cannot be produced deterministically in a test. */
+    runReview?: (args: Parameters<typeof runReview>[0]) => ReturnType<typeof runReview>;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
   const spawn = opts.spawn ?? spawnWorker;
+  const runReviewFn = opts.runReview ?? runReview;
   const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const owner = resolveOwner();
@@ -3138,6 +3208,18 @@ async function runTask(
     log("pr.opened", { pr_url: prUrl });
     say(`PR: ${prUrl}`);
 
+    // ── ARM AT OPEN (W1-T125): register GitHub auto-merge the INSTANT this run's
+    // PR exists — not after CI wait + review, which measured 2-8 minutes of dead
+    // time (own-repo PRs #251/#245/#240/#249; #274 NEVER reached the old
+    // post-review arm call because its fix-rung loop was still running). Safe
+    // because GitHub's required-status contract (ci + the REQUIRED
+    // remudero-review status) is what actually gates the merge — see
+    // armAutoMergeAtOpen's doc. The one gap this leaves (a CAPPED verdict that
+    // still posts remudero-review=success) is closed below by disarmAutoMerge,
+    // right where the capped-refusal decision is made.
+    const armAtOpenOutcome = armAutoMergeAtOpen(prUrl);
+    log("automerge.armed", { at: "open", outcome: armAtOpenOutcome });
+
     // The implement worker's own optional '## Follow-ups' section (§2 OUTPUT CONTRACT,
     // outputContractLines in lib/compaction.ts).
     harvestFollowupsFromReport(fullText(impl), { label: "implement", prUrl, log, say });
@@ -3162,7 +3244,7 @@ async function runTask(
       say(`verdict: blocked_ci (ci ${ci}) — PR left OPEN: ${prUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
     }
-    let review = await runReview({
+    let review = await runReviewFn({
       owner,
       repo: task.repo,
       prUrl,
@@ -3298,6 +3380,13 @@ async function runTask(
       : undefined;
     const armDecision = resolveAutoMergeArm(review, tddStrict, cappedOverride, (s, extra) => log(s, extra));
     if (!armDecision.arm) {
+      // W1-T125: withdraw the early arm-at-open BEFORE escalating — GitHub already
+      // (or is about to) see ci=success + remudero-review=success (capped verdicts
+      // still post state:"success", see postReviewStatusGuarded) on an
+      // ALREADY-armed PR; without this it could auto-merge despite the capped
+      // refusal below.
+      disarmAutoMerge(prUrl);
+      log("automerge.disarmed", { reason: "capped verdict refused auto-merge" });
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
       const issueUrl = escalate(
         {
@@ -3338,14 +3427,14 @@ async function runTask(
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
     }
 
-    // ── ARM auto-merge, then POLL to the gate (W1-T1B).
-    // The runner NEVER force-merges: it arms GitHub auto-merge on the PR it just
-    // opened against main, then observes. GitHub merges only when the required
-    // check is green. If checks go red or the poll times out, the PR is LEFT
-    // OPEN and the verdict is blocked_ci — pending is treated as blocked, never
-    // as pass. No Action arms a PR; only this code, only on PRs it opened.
-    armAutoMerge(prUrl, taskId);
-    log("automerge.armed", {});
+    // ── POLL to the gate (W1-T1B).
+    // W1-T125: auto-merge was already armed at PR-OPEN (see armAutoMergeAtOpen,
+    // above, right after `pr.opened`) — this block no longer arms; it only
+    // observes. The runner NEVER force-merges: GitHub merges only when the
+    // required check is green. If checks go red or the poll times out, the PR
+    // is LEFT OPEN and the verdict is blocked_ci — pending is treated as
+    // blocked, never as pass. No Action arms a PR; only this code, only on PRs
+    // it opened.
     const outcome = await pollToGate(prUrl, (s, extra) => log(s, extra));
 
     if (outcome.merged) {
