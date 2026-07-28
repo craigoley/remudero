@@ -15,7 +15,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { dirname } from "node:path";
 import type { Plan, Task, TaskStatus } from "./plan.js";
-import { NEEDS_HUMAN_LABEL } from "./escalate.js";
+import { labelledIssuesRestArgs, NEEDS_HUMAN_LABEL, parseLabelledIssuesRest } from "./escalate.js";
 
 /**
  * Derived task status (MASTER-PLAN v2.1 decision, implemented here).
@@ -1743,12 +1743,14 @@ export function buildBatchedGithub(
   const fetchAllIssues =
     opts.fetchAllIssues ??
     (() => {
-      const raw = run([
-        "issue", "list", "--repo", slug, "--label", NEEDS_HUMAN_LABEL, "--state", "all",
-        "--json", "number,url,state,title", "--limit", "1000",
-      ]);
+      // REST, not `gh issue list --label`: `gh` routes label filtering through GitHub's GraphQL
+      // `search()` connection, throttled account-wide here, so this fetch failed 100% of the time
+      // (`board_gateway.issue_fetch_ok` NEVER appeared in the ledger, against 505 failures) and
+      // every escalation join silently fell back to its fail-closed branch. Same deterministic
+      // list API `issues-intake.ts` already reads. See labelledIssuesRestArgs for why `--slurp`.
+      const raw = run(labelledIssuesRestArgs(slug, NEEDS_HUMAN_LABEL, "all"));
       log("board_gateway.issue_fetch_bytes", { bytes: Buffer.byteLength(raw, "utf8") });
-      return JSON.parse(raw) as BatchedIssue[];
+      return parseLabelledIssuesRest(raw);
     });
 
   interface IssueIndex {

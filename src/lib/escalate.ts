@@ -52,6 +52,78 @@ export interface OpenIssue {
 }
 
 /** GitHub issue creation, behind an interface so tests never touch the network. */
+/**
+ * The `gh api repos/<slug>/issues?labels=…` argv every labelled-issue read in this repo uses.
+ *
+ * WHY REST, NOT `gh issue list --label`: `gh` implements `--label` filtering on issue lists over
+ * GitHub's GraphQL `search()` connection. That connection is throttled account-wide here, so the
+ * `--label` form failed 100% of the time — `board_gateway.issue_fetch_ok` never once appeared in
+ * the ledger against 505 failures, and the escalation reconciler read an empty list every tick
+ * while 79 needs-human issues sat open. REST's `/issues` endpoint answers the same question off
+ * the deterministic list API, with no search connection involved.
+ *
+ * `--slurp` (NOT bare `--paginate`) is load-bearing: `--paginate` alone concatenates one JSON
+ * array per page, which `JSON.parse` rejects outright — and the `state=all` read is genuinely
+ * multi-page (223 rows over 3 pages when this landed). `--slurp` wraps the pages in one outer
+ * array that parses cleanly; {@link parseLabelledIssuesRest} flattens it.
+ */
+export function labelledIssuesRestArgs(repoArg: string, label: string, state: "open" | "all"): string[] {
+  const q = `labels=${encodeURIComponent(label)}&state=${state}&per_page=100`;
+  return ["api", `repos/${repoArg}/issues?${q}`, "--paginate", "--slurp"];
+}
+
+/** An {@link OpenIssue} plus the `state` field the BATCHED board gateway's own consumer needs
+ *  (`state=all` there, so open-vs-closed is the whole question). Superset of both consumer
+ *  shapes, so one parse serves the reconciler AND the board gateway. */
+export interface LabelledIssue extends OpenIssue {
+  /** Lowercase "open"/"closed" as REST reports it — `resolveEscalation` upper-cases before
+   *  comparing, so this coexists with `gh --json state`'s "OPEN"/"CLOSED" unchanged. */
+  state: string;
+}
+
+/** One row exactly as GitHub's REST `/issues` endpoint returns it — the wire shape, never the
+ *  shape any consumer here reads (see {@link parseLabelledIssuesRest} for the translation). */
+interface RestIssueRow {
+  number: number;
+  /** The api.github.com URL. Deliberately DROPPED — see parseLabelledIssuesRest. */
+  url: string;
+  /** The github.com WEB url — what escalate.ts writes into the ledger and consumers match on. */
+  html_url: string;
+  /** Lowercase "open"/"closed" (REST), where `gh --json state` reports "OPEN"/"CLOSED". */
+  state: string;
+  title?: string;
+  body?: string;
+  /** Present ONLY on pull requests: REST's `/issues` returns PRs alongside issues. */
+  pull_request?: unknown;
+}
+
+/**
+ * Flatten `--slurp`'s pages, drop pull requests, and translate the wire shape to the one every
+ * consumer reads. THROWS on malformed input (the callers treat a failed read as "do nothing this
+ * cycle", never as a confirmed "zero open") — never returns [] to paper over a broken payload.
+ *
+ * TWO translations are load-bearing:
+ *  1. `url` is taken from REST's `html_url`, NOT its `url`. Consumers match against the web URLs
+ *     {@link renderIssueBody}/escalate write into the ledger; surfacing api.github.com would make
+ *     every lookup miss SILENTLY, a fail-open that reads as "escalation not found".
+ *  2. Rows carrying `pull_request` are dropped. REST's `/issues` returns PRs too, and an
+ *     escalation is always an issue.
+ */
+export function parseLabelledIssuesRest(raw: string): LabelledIssue[] {
+  const parsed = JSON.parse(raw) as unknown;
+  // `--slurp` yields pages-of-rows; tolerate a bare single page so a fixture (or a future gh
+  // that stops wrapping) is read correctly rather than silently as zero rows.
+  const pages: RestIssueRow[][] = Array.isArray(parsed)
+    ? (parsed as unknown[]).every((p) => Array.isArray(p))
+      ? (parsed as RestIssueRow[][])
+      : [parsed as RestIssueRow[]]
+    : [];
+  return pages
+    .flat()
+    .filter((i) => i?.pull_request === undefined)
+    .map((i) => ({ number: i.number, url: i.html_url, state: i.state, title: i.title, body: i.body }));
+}
+
 export interface IssueGateway {
   /** Create a labeled issue; returns its URL. */
   create(title: string, body: string, labels: string[]): string;
@@ -250,13 +322,14 @@ export function ghIssueGateway(
       return run(args).trim();
     },
     listOpen(label) {
-      // OPEN issues only, with body (carries `**Task:** <id>`). Deterministic list API — never a
-      // full-text search. THROWS on a `gh` failure (the caller degrades to no action this cycle).
-      const raw = run([
-        "issue", "list", "--repo", repoArg, "--label", label, "--state", "open",
-        "--json", "number,url,title,body", "--limit", "1000",
-      ]);
-      return JSON.parse(raw) as OpenIssue[];
+      // OPEN issues only, with body (carries `**Task:** <id>`). Read over REST's `/issues`
+      // endpoint, NOT `gh issue list --label`: the latter routes label filtering through
+      // GitHub's GraphQL `search()` connection, which is throttled account-wide here and made
+      // this read fail 100% of the time (the reconciler saw "zero open" every tick while 79
+      // needs-human issues were open). The pre-REST comment here claimed this was "never a
+      // full-text search" — it was, via `gh`'s own implementation; that is now literally true.
+      // THROWS on a `gh` failure (the caller degrades to no action this cycle, never "zero open").
+      return parseLabelledIssuesRest(run(labelledIssuesRestArgs(repoArg, label, "open")));
     },
     closeWithComment(url, comment) {
       run(["issue", "close", url, "--repo", repoArg, "--comment", comment]);
