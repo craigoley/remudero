@@ -216,6 +216,86 @@ test("P29(i) falsifier: a FOREIGN branch carrying the trailer is still NOT credi
   assert.equal(proj.source, "ledger", "falls back to rung (a)'s own (non-merged) resolution — the foreign hit is simply rejected, not substituted");
 });
 
+// ── W1-T116: a VERIFIED-MERGED credit outranks an open-PR ledger claim ─────
+// The live W1-T1 149x incident: `pr: 2` (GitHub-confirmed MERGED) alongside a
+// LATER dispatch's ledger `pr.opened` row for #258 (GitHub-confirmed OPEN).
+// Rung (a) resolved #258 first and, pre-fix, that non-merged `ownResult`
+// suppressed rung (b) outright — the merged `pr: 2` credit was never even
+// looked up, so the task stayed "running" forever and kept getting
+// re-dispatched. 153 run.start lines for W1-T1 on 2026-07-19, 97 of them
+// AFTER #258 was opened — ~$174, 41% of a day's task spend (MASTER-PLAN §3).
+
+test("W1-T116: a verified-merged pr-field credit outranks a ledger row claiming an open PR — the live W1-T1 fixture settles", () => {
+  const openedPr = "https://github.com/craigoley/remudero/pull/258"; // rung (a): the LATER dispatch's own PR, still open
+  const github = fakeGitHub({
+    byRef: {
+      [openedPr]: { number: 258, url: openedPr, state: "OPEN" },
+      "2": { number: 2, url: "https://github.com/craigoley/remudero/pull/2", state: "MERGED" },
+    },
+  });
+  const ledgerPath = ledgerFile([{ step: "pr.opened", task_id: "W1-T1", pr_url: openedPr }]);
+  const proj = deriveStatus(task({ id: "W1-T1", pr: 2 }), { ledgerPath, github });
+  assert.equal(proj.source, "pr-field", "the verified-merged pr: field credits the task, not rung (a)'s own open PR");
+  assert.equal(proj.merged, true);
+  assert.equal(proj.status, "merged");
+  assert.equal(proj.prNumber, 2, "credited via the MERGED pr: 2, never the open #258 the ledger's own row points at");
+
+  // Composed with the dispatcher (drain.ts's nextRunnable, same idiom as P29(i)'s
+  // sibling-credit composition above): a merged credit means `isMerged` reports
+  // true, so nextRunnable's very first check excludes the task — it is NEVER
+  // re-dispatched.
+  const plan: Plan = { tasks: [task({ id: "W1-T1", pr: 2 })], byId: new Map([["W1-T1", task({ id: "W1-T1", pr: 2 })]]) };
+  const isMerged: MergedSet = (id) => deriveStatus(plan.byId.get(id)!, { ledgerPath, github }).merged;
+  assert.equal(nextRunnable(plan, isMerged), undefined, "settled work is excluded — never re-dispatched");
+});
+
+test("W1-T116: dedup is intact — a genuinely-running task (no settled credit anywhere) is still reported running, not merged", () => {
+  const openedPr = "u/258";
+  const github = fakeGitHub({ byRef: { [openedPr]: { number: 258, url: openedPr, state: "OPEN" } } });
+  const ledgerPath = ledgerFile([{ step: "pr.opened", task_id: "W1-T1", pr_url: openedPr }]);
+  // No correction, no `pr:` field, no merged trailer/head-branch hit anywhere.
+  const proj = deriveStatus(task({ id: "W1-T1" }), { ledgerPath, github });
+  assert.equal(proj.status, "running");
+  assert.equal(proj.merged, false);
+  assert.equal(proj.source, "ledger", "falls back to rung (a)'s own open-PR resolution — the dedup signal drain.ts's isOpenPr guard (W1-T80) relies on to skip a duplicate dispatch");
+  assert.equal(proj.prNumber, 258);
+});
+
+test("W1-T116 regression lock: a correction wins over both a verified-merged pr-field and an open-PR ledger row present TOGETHER, in both the credit and the un-credit direction", () => {
+  // This is the exact acceptance-1 fixture (rung (a) open #258 + a verified-merged
+  // `pr: 2`) PLUS a correction retargeting the credit to #9 — the new composite
+  // shape this task's fix makes reachable for the first time (pre-fix, rung (b)
+  // was never even consulted once rung (a) had an `ownResult`, so a correction
+  // racing a would-be-merged pr-field couldn't previously be exercised together).
+  const rungAUrl = "u/258";
+  const prFieldUrl = "u/2";
+  const correctedUrl = "u/9";
+  const github = fakeGitHub({
+    byRef: {
+      [rungAUrl]: { number: 258, url: rungAUrl, state: "OPEN" },
+      "2": { number: 2, url: prFieldUrl, state: "MERGED" },
+      [correctedUrl]: { number: 9, url: correctedUrl, state: "MERGED" },
+    },
+  });
+  const ledgerPath = ledgerFile([
+    { step: "pr.opened", task_id: "W1-T1", pr_url: rungAUrl },
+    { step: "correction.provenance", task_id: "W1-T1", claimed_pr_url: prFieldUrl, actual_pr_url: correctedUrl },
+  ]);
+  const proj = deriveStatus(task({ id: "W1-T1", pr: 2 }), { ledgerPath, github });
+  // CREDIT direction: #9 — which NEITHER rung (a) nor (b) would ever have found —
+  // is credited, purely on the correction's say-so.
+  assert.equal(proj.source, "correction");
+  assert.equal(proj.merged, true);
+  assert.equal(proj.prNumber, 9, "credited via the correction's actual_pr_url, not either underlying rung");
+  // UN-CREDIT direction: #2 — which rung (b) WOULD have credited merged, per this
+  // very task's own fix — is superseded, never surfacing as the reported PR.
+  assert.notEqual(proj.prNumber, 2, "the pr: field's own (would-be-merged) PR is superseded by the correction, not reported");
+  // SUPREME, unconditionally: neither weaker rung is even queried once a
+  // correction exists — correction resolution short-circuits before any `gh` call.
+  assert.ok(!github.calls.includes("prByRef:2"), "rung (b) must never even be queried once a correction exists");
+  assert.ok(!github.calls.includes(`prByRef:${rungAUrl}`), "rung (a) must never even be queried once a correction exists");
+});
+
 test("source (b): explicit pr: field resolves when there is no ledger entry", () => {
   const github = fakeGitHub({ byRef: { "3": { number: 3, url: "u/3", state: "MERGED" } } });
   const ledgerPath = ledgerFile([{ step: "run.start", task_id: "OTHER" }]);
