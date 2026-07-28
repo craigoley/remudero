@@ -249,6 +249,184 @@ test("escalate: the canonical 2026-07-17 shape — a label whose provisioning HA
   assert.deepEqual(opened.degraded_labels, ["escalation-blocked"]);
 });
 
+// ── W1-T104: DEDUP LIVES IN THE TRANSPORT — the #178/#180 duplicate ────────────
+// LIVE INCIDENT: the sweep opened #180 for PR #177 while the drain-path exhaustion
+// escalation #178 for the SAME PR sat open, because each caller deduped only against
+// its OWN prior actions. escalate() itself now searches OPEN needs-human issues for
+// the same (task, PR) before creating a sibling.
+
+function fakeIssueStore(): IssueGateway & {
+  calls: Array<{ title: string; body: string; labels: string[] }>;
+  comments: Array<{ url: string; body: string }>;
+  closeIssue(url: string): void;
+} {
+  let seq = 100;
+  const issues: Array<{ number: number; url: string; title: string; body: string; state: string }> = [];
+  const calls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const comments: Array<{ url: string; body: string }> = [];
+  return {
+    calls,
+    comments,
+    create(title, body, labels) {
+      const number = seq++;
+      const url = `https://github.com/craigoley/remudero/issues/${number}`;
+      issues.push({ number, url, title, body, state: "open" });
+      calls.push({ title, body, labels });
+      return url;
+    },
+    listOpen() {
+      return issues.filter((i) => i.state === "open").map((i) => ({ number: i.number, url: i.url, title: i.title, body: i.body }));
+    },
+    comment(url, body) {
+      comments.push({ url, body });
+    },
+    closeIssue(url) {
+      const found = issues.find((i) => i.url === url);
+      if (found) found.state = "closed";
+    },
+  };
+}
+
+test("W1-T104: the #178/#180 fixture — two different caller templates, same (task, PR), creates ONE issue then comments", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+  const prUrl = "https://github.com/craigoley/remudero/pull/177";
+
+  // Caller 1: drain-path fix-rung exhaustion (#178's shape).
+  const first = escalate(
+    escalation({
+      taskId: "W1-T77",
+      summary: `blocked_review fix rung exhausted (2 strike(s)) — ${prUrl}`,
+      detail: "the fix rung dispatched 2 bounded fix workers and the review gate is still failing.",
+    }),
+    { issues, ledgerPath: path, runId: "RUN-1" },
+  );
+
+  // Caller 2: the sweep's clarification rung (#180's shape) — a DIFFERENT title
+  // template and its OWN distinct context (BLOCKED-AMBIGUOUS), same task + PR.
+  const second = escalate(
+    escalation({
+      taskId: "W1-T77",
+      summary: `PR ${prUrl} needs a clarification — ambiguous unmet criteria`,
+      detail: "the clarification rung reconciled open PR #177 to BLOCKED-AMBIGUOUS: no single nameable unmet criterion.",
+    }),
+    { issues, ledgerPath: path, runId: "RUN-2" },
+  );
+
+  assert.equal(second, first, "the second call returns the SAME issue url — no sibling issue");
+  assert.equal(issues.calls.length, 1, "exactly one create() across both callers");
+  assert.equal(issues.comments.length, 1, "the second observer appends a comment instead of opening one");
+  assert.equal(issues.comments[0].url, first);
+  // The second observation is PRESERVED, not merely a "duplicate" marker:
+  assert.match(issues.comments[0].body, /BLOCKED-AMBIGUOUS/, "the second caller's own view survives in the comment");
+
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(lines.filter((l) => l.step === "escalation.issue_opened").length, 1);
+  assert.equal(lines.filter((l) => l.step === "escalation.deduped").length, 1);
+  assert.equal(lines.find((l) => l.step === "escalation.deduped").issue_url, first);
+});
+
+test("W1-T104: a CLOSED prior issue does not suppress a new escalation for the same (task, PR)", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+  const prUrl = "https://github.com/craigoley/remudero/pull/200";
+
+  const first = escalate(escalation({ taskId: "W1-T80", summary: `blocked — ${prUrl}` }), {
+    issues,
+    ledgerPath: path,
+    runId: "RUN-1",
+  });
+  issues.closeIssue(first);
+
+  const second = escalate(escalation({ taskId: "W1-T80", summary: `blocked again, re-escalating — ${prUrl}` }), {
+    issues,
+    ledgerPath: path,
+    runId: "RUN-2",
+  });
+
+  assert.notEqual(second, first, "a genuine recurrence opens a FRESH issue once the prior one is closed");
+  assert.equal(issues.calls.length, 2, "two creates — dedup never matches a closed issue");
+});
+
+test("W1-T104: distinct PRs for one task escalate separately, never deduped against each other", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+
+  const first = escalate(
+    escalation({ taskId: "W1-T90", summary: "blocked — https://github.com/craigoley/remudero/pull/10" }),
+    { issues, ledgerPath: path, runId: "RUN-1" },
+  );
+  const second = escalate(
+    escalation({ taskId: "W1-T90", summary: "blocked — https://github.com/craigoley/remudero/pull/11" }),
+    { issues, ledgerPath: path, runId: "RUN-2" },
+  );
+
+  assert.notEqual(second, first, "different PR numbers on the same task each get their own issue");
+  assert.equal(issues.calls.length, 2);
+  assert.equal(issues.comments.length, 0, "no comment fires — these are genuinely separate escalations");
+});
+
+test("W1-T104: an escalation naming no PR (task-level, e.g. the dispatch circuit breaker) never dedup-searches at all", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+
+  const first = escalate(escalation({ taskId: "W1-T50", summary: "dispatch circuit breaker tripped" }), {
+    issues,
+    ledgerPath: path,
+    runId: "RUN-1",
+  });
+  const second = escalate(escalation({ taskId: "W1-T50", summary: "dispatch circuit breaker tripped again" }), {
+    issues,
+    ledgerPath: path,
+    runId: "RUN-2",
+  });
+
+  assert.notEqual(second, first, "with no PR reference in either escalation, each creates its own issue");
+  assert.equal(issues.calls.length, 2);
+});
+
+test("W1-T104: a gateway with no listOpen behaves exactly as before (back-compat) — no dedup, no throw", () => {
+  const issues = fakeIssues();
+  const path = ledgerPath();
+  const prUrl = "https://github.com/craigoley/remudero/pull/300";
+
+  const first = escalate(escalation({ taskId: "W1-T60", summary: `blocked — ${prUrl}` }), {
+    issues,
+    ledgerPath: path,
+    runId: "RUN-1",
+  });
+  const second = escalate(escalation({ taskId: "W1-T60", summary: `blocked — ${prUrl}` }), {
+    issues,
+    ledgerPath: path,
+    runId: "RUN-2",
+  });
+
+  assert.equal(first, second, "the fake gateway always returns the same fixed url regardless of dedup");
+  assert.equal(issues.calls.length, 2, "no listOpen -> the dedup search is skipped -> both calls create");
+});
+
+test("ghIssueGateway.comment: posts a plain comment without closing the issue", () => {
+  const calls: string[][] = [];
+  const gateway = ghIssueGateway("craigoley", "remudero", {
+    exec: (args) => {
+      calls.push(args);
+      return "";
+    },
+  });
+  gateway.comment?.("https://github.com/craigoley/remudero/issues/44", "another rung saw the same block");
+  assert.deepEqual(calls, [
+    [
+      "issue",
+      "comment",
+      "https://github.com/craigoley/remudero/issues/44",
+      "--repo",
+      "craigoley/remudero",
+      "--body",
+      "another rung saw the same block",
+    ],
+  ]);
+});
+
 // ── ghIssueGateway: the REAL `gh` gateway, exercised via the injectable `opts.exec`
 // stand-in (mirrors ghGateway in status.ts, W1-T119) so the ensureLabel/create wiring
 // below is proven WITHOUT shelling out to a real `gh` binary.
