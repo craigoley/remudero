@@ -44,6 +44,53 @@ export interface LedgerLine {
  * this or a crash mid-write, which no write-side mechanism can fully rule out — is
  * counted and surfaced, never silently absorbed into a fabricated empty record.
  */
+/**
+ * Duck-typed classifier for a spawn-INFRASTRUCTURE refusal (worker.ts's
+ * `ClaudeToolchainBlockedError`) — the SAME "plain string tag, never `instanceof`"
+ * idiom daemon.ts's own `isSpawnInfraBlocked` already uses (see that function's
+ * doc), duplicated here rather than imported so this module keeps its "fs + JSON
+ * only" contract and never gains a runtime dependency on the spawn layer.
+ *
+ * W1-T127 (the #212 fixture — PR #212/#213: a spawn-ENOENT/autoupdater-race binary
+ * crash debited a fix-rung strike, and nearly escalated, on a worker that never
+ * ran; the PR then sat 20h41m blocked on a strike that was pure accounting
+ * fiction). A `blocked_toolchain` refusal fires BEFORE the SDK subprocess ever
+ * launches (worker.ts's `resolveClaudeExecutable` preflight) — no worker ran,
+ * nothing was billed — so `run-task.ts`'s `runFixRung` calls this to gate whether
+ * a dispatch round is EVER eligible to become a strike: see `isRealStrike` below
+ * for the conjunction it enforces, and {@link LEDGER_COST_TAG_INFRA} for how the
+ * $0 line it still leaves behind is tagged.
+ */
+export function isSpawnInfraBlockedError(err: unknown): err is { reasonClass: "blocked_toolchain"; message: string } {
+  return typeof err === "object" && err !== null && (err as { reasonClass?: unknown }).reasonClass === "blocked_toolchain";
+}
+
+/**
+ * Cost-line tag (W1-T127 design note iii). `"task"` is the ordinary, implicit
+ * attribution for real billed work; `"infra"` marks a $0 line logged for a
+ * spawn-infrastructure refusal (see {@link isSpawnInfraBlockedError}) — so a
+ * per-task cost rollup can exclude it from "this task was expensive" while a
+ * fleet-health rollup can still find it under "the host was broken".
+ */
+export const LEDGER_COST_TAG_TASK = "task" as const;
+export const LEDGER_COST_TAG_INFRA = "infra" as const;
+export type LedgerCostTag = typeof LEDGER_COST_TAG_TASK | typeof LEDGER_COST_TAG_INFRA;
+
+/**
+ * THE #212 CONJUNCTION (W1-T127, design note i): "a strike is recorded only where
+ * a worker RAN and a judgment was POSTED. Assert both, never either." A worker
+ * having run with no judgment ever posted for it (e.g. the process died between
+ * dispatch and any further trace) is not a strike; a judgment with no worker
+ * having run for it is not constructible in the real system, but is asserted
+ * insufficient here too, so this predicate never silently degrades to just one
+ * half of the conjunction it claims to check. Pure and total — never reads a
+ * ledger itself; callers (`runFixRung`) supply the two halves from what they
+ * directly observed.
+ */
+export function isRealStrike(evidence: { workerRan: boolean; judgmentPosted: boolean }): boolean {
+  return evidence.workerRan && evidence.judgmentPosted;
+}
+
 export function appendLedger(path: string, line: LedgerLine, opts: { ceilingBytes?: number } = {}): void {
   mkdirSync(dirname(path), { recursive: true });
   const record = { ts: new Date().toISOString(), ...line };
