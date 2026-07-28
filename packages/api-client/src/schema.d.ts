@@ -121,6 +121,8 @@ export interface components {
       status: "new" | "grilling" | "proposed" | "accepted" | "rejected";
       /** Set once `rmd triage` opens a proposal PR for this entry; null until then. */
       proposal_pr: string | null;
+      /** GET /v1/feedback only (W1-T257): true when this `proposed` entry's proposal_pr merge state could not be read (GitHub outage) -- the row is kept, never dropped. Never written to plan/feedback/<id>.yaml; a read-time decoration only. */
+      unverified?: boolean;
     };
     /** GET /v1/feedback's body -- every captured feedback entry, oldest first. */
     FeedbackInboxResult: {

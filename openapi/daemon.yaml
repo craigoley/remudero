@@ -433,6 +433,12 @@ components:
             - string
             - "null"
           description: Set once `rmd triage` opens a proposal PR for this entry; null until then.
+        unverified:
+          type: boolean
+          description: >
+            GET /v1/feedback only (W1-T257): true when this `proposed` entry's proposal_pr merge
+            state could not be read (GitHub outage) -- the row is kept, never dropped. Never
+            written to plan/feedback/<id>.yaml; a read-time decoration only.
 
     FeedbackInboxResult:
       type: object
