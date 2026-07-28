@@ -4810,7 +4810,17 @@ function renderDaemonSummary(s: DaemonSummary): string {
  * Actually LOADING this as a launchd service (so it survives logout/reboot and
  * restarts on crash) is W1-T12b/d — this command is what that service execs.
  */
-export async function daemonCommand(rest: string[]): Promise<number> {
+export async function daemonCommand(
+  rest: string[],
+  deps: {
+    /** Injectable GitHub-gateway constructor for the merged-status projection. Defaults to the
+     *  BATCHED {@link buildBatchedGithub} — one NON-search `gh pr list` per projection, which is
+     *  what keeps merge state derivable while GitHub's GraphQL `search()` connection is
+     *  throttled. Mirrors {@link drainCommand}'s identical seam so a test can prove which
+     *  gateway the daemon derives from without a network round-trip. */
+    githubFactory?: (owner: string, repo: string) => GitHub;
+  } = {},
+): Promise<number> {
   // FAIL LOUD on junk args BEFORE any spawn/lock — `rmd daemon install --dry-run` silently
   // ran the daemon (draining W1-T15) because `install`/`--dry-run` were ignored. daemon
   // takes only these flags; anything else prints usage and exits non-zero, spawning nothing.
@@ -4901,10 +4911,11 @@ export async function daemonCommand(rest: string[]): Promise<number> {
   // guard) — the SAME projection `refreshMerged` just derived, never a second
   // GitHub read path.
   let lastProj: Map<string, StatusProjection> | undefined;
+  const githubFactory = deps.githubFactory ?? ((o: string, r: string) => buildBatchedGithub(o, r, { log }));
   const refreshMerged: () => MergedSet = () => {
     const proj = projectPlan(
       plan,
-      { ledgerPath, github: buildBatchedGithub(target.owner, target.repo, { log }) },
+      { ledgerPath, github: githubFactory(target.owner, target.repo) },
       statusPath,
     );
     lastProj = proj;
