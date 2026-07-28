@@ -103,6 +103,7 @@ import {
   terminalStateReason,
   type ClarificationQuestion,
   type FixDispatchEvidence,
+  type MergeConflictEvidence,
   type OpenPrView,
 } from "../src/lib/sweep.js";
 import type { Mount } from "../src/lib/mounts.js";
@@ -1584,6 +1585,21 @@ test("deriveFixMode: blocked_ci with no review verdict at all derives ci-log", (
   assert.equal(deriveFixMode(evidence), "ci-log");
 });
 
+// W1-T106 (the #170 DIRTY strand): fixture merge-conflict evidence — a
+// pure-concurrent-addition conflict, both sides' log since merge-base.
+function mergeConflictFixture(): MergeConflictEvidence {
+  return {
+    files: [{ path: "src/x.ts", oursDeleted: 0, theirsDeleted: 0 }],
+    oursLog: "abc1234 add entry A",
+    theirsLog: "def5678 add entry B",
+  };
+}
+
+test("deriveFixMode: a conflicted dispatch (evidence.mergeConflict set, no review verdict) derives merge-conflict — checked BEFORE ci-log even though `review` is undefined on both", () => {
+  const evidence: FixEvidence = { mergeConflict: mergeConflictFixture() };
+  assert.equal(deriveFixMode(evidence), "merge-conflict");
+});
+
 test("renderFixPrompt: the three mode fixtures each render a mode-named prompt carrying ONLY that mode's inputs", () => {
   const reviewerUnmet = renderFixPrompt({
     task: { id: "W1-TX", title: "T" },
@@ -1632,6 +1648,30 @@ test("renderFixPrompt: the three mode fixtures each render a mode-named prompt c
   assert.match(ciLog, /making CI GREEN/i, "ci-log states the target is making CI green on the same branch");
   assert.doesNotMatch(ciLog, /PR BODY's Acceptance block/, "ci-log must not carry body-coverage's instruction");
   assert.doesNotMatch(ciLog, /crit-reviewer|crit-coverage/, "ci-log must not carry any review-mode criteria");
+});
+
+// W1-T106 acceptance 2 — dedicated proof: "the rendered prompt names the mode,
+// the conflicting files, and the union-with-merge-base discipline."
+test("renderFixPrompt: merge-conflict mode names the mode, the conflicting file(s), and the union-with-merge-base discipline (never a review/ci-log mix)", () => {
+  const mergeConflict = mergeConflictFixture();
+  const prompt = renderFixPrompt({
+    task: { id: "W1-TX", title: "T" },
+    round: 1,
+    branch: "run-W1-TX-1",
+    evidence: { mergeConflict },
+  });
+  assert.match(prompt, /MODE: merge-conflict/, "the rendered prompt names its derived mode");
+  assert.match(prompt, /src\/x\.ts/, "names the conflicting file");
+  assert.match(prompt, /UNION/i, "states the union-toward-both-sides discipline");
+  assert.match(prompt, /merge-base/i, "states the merge-base analysis it must be gated on");
+  assert.match(prompt, /PURE CONCURRENT ADDITION/i, "names the safe-to-resolve condition");
+  assert.match(prompt, /REFUSE/i, "states the refuse-into-escalate discipline for a deletion/semantic conflict");
+  assert.match(prompt, /never rebase/i, "states merge, never rebase-force");
+  assert.match(prompt, /add entry A/, "carries OUR side's log since merge-base");
+  assert.match(prompt, /add entry B/, "carries THEIR side's log since merge-base");
+  assert.doesNotMatch(prompt, /making CI GREEN/, "merge-conflict must not carry ci-log's instruction");
+  assert.doesNotMatch(prompt, /PR BODY's Acceptance block/, "merge-conflict must not carry body-coverage's instruction");
+  assert.doesNotMatch(prompt, /crit-reviewer|crit-coverage/, "merge-conflict must not carry any review-mode criteria");
 });
 
 // Dedicated, narrowly-titled proof for the acceptance claim "body-coverage mode
@@ -3047,6 +3087,24 @@ test("routeFix: a blocked_ci PR (checks red, review none) dispatches ci-log evid
   assert.equal(deps.escalated.length, 0, "fix FIRST — never straight to the question rung while strikes remain");
   assert.deepEqual(deps.fixed[0].evidence.unmetCriteria, [], "no reviewer criteria for a blocked_ci dispatch");
   assert.deepEqual(deps.fixed[0].evidence.ciFailures, ciFailures);
+});
+
+test("routeFix: a conflicted PR (mergeState dirty, pure concurrent addition) dispatches merge-conflict evidence — the SAME dispatch shape runSweep uses (W1-T106, the #170 DIRTY strand)", async () => {
+  const deps = fakeFixDeps();
+  const mergeConflict: MergeConflictEvidence = {
+    files: [{ path: "src/x.ts", oursDeleted: 0, theirsDeleted: 0 }],
+    oursLog: "abc1234 add entry A",
+    theirsLog: "def5678 add entry B",
+  };
+  const pr = fixPr({ reviewState: "success", checksState: "green", mergeState: "dirty", mergeConflict });
+
+  const result = await routeFix("OPEN", pr, deps);
+
+  assert.equal(result.outcome, "fixed");
+  assert.equal(deps.fixed.length, 1);
+  assert.equal(deps.escalated.length, 0, "the safely-fixable half never escalates");
+  assert.deepEqual(deps.fixed[0].evidence.mergeConflict, mergeConflict);
+  assert.deepEqual(deps.fixed[0].evidence.unmetCriteria, []);
 });
 
 test("routeFix: a strike-exhausted blocked_ci PR escalates to the question rung rather than dispatching a further fix — the SAME cap review-failure honors (W1-T100)", async () => {

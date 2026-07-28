@@ -323,6 +323,7 @@ import {
   type EscalationReconcileSummary,
   type FixDispatchEvidence,
   type LiveStateResult,
+  type MergeConflictEvidence,
   type OpenPrView,
   type StrikeAttempt,
   type SweepDeps,
@@ -1277,20 +1278,24 @@ async function runReview(args: {
 // because `OpenPrView` carries it and this module already imports OpenPrView
 // from sweep.js; the reverse import would be circular (W1-T100).
 
-/** The three known fix-rung failure modes. See the taxonomy note above. */
-export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | (string & {});
+/** The four known fix-rung failure modes. See the taxonomy note above. */
+export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-conflict" | (string & {});
 
 /**
  * The block evidence a fix dispatch derives its MODE from. Exactly one shape
  * is populated by any real caller today: `review` for a `blocked_review`
  * verdict (reviewer-unmet / body-coverage — the rung's live callers), `review`
  * left `undefined` for a bare `blocked_ci` block with no review verdict at all
- * (ci-log — a future caller; the sweep's own module doc names this task as its
- * prerequisite). `ciFailures` carries the ci-log mode's input either way.
+ * (ci-log), or `mergeConflict` for a `conflicted` dispatch (W1-T106, the #170
+ * DIRTY strand) — no review can run at all until the conflict itself
+ * resolves. `ciFailures`/`mergeConflict` carry their own mode's input; never a
+ * mix of the two.
  */
 export interface FixEvidence {
   review?: { unmetCriteria: CriterionVerdict[]; summary: string };
   ciFailures?: CiFailure[];
+  /** W1-T106: the merge-conflict mode's ONLY input — conflicting files + both sides' log since merge-base. */
+  mergeConflict?: MergeConflictEvidence;
   /**
    * W1-T78: an operator's answer to a clarification question, carried VERBATIM
    * as an added constraint on the prompt — never paraphrased, never dropped.
@@ -1309,17 +1314,28 @@ interface FixModeRule {
  * match wins); the terminal row (`reviewer-unmet`) matches unconditionally, so
  * a mode is ALWAYS derived — no undispatched evidence shape.
  *
- *   1. ci-log         — no review verdict at all (`review` undefined): the
+ *   1. merge-conflict  — `evidence.mergeConflict` is set (W1-T106, the #170
+ *                        DIRTY strand): the PR's merge state itself is dirty,
+ *                        which precedes EVERYTHING else — no CI check even
+ *                        runs on an unmergeable ref, so neither a review nor a
+ *                        CI log can exist yet either. Checked FIRST so it is
+ *                        never misclassified as ci-log (both leave `review`
+ *                        undefined).
+ *   2. ci-log         — no review verdict at all (`review` undefined): the
  *                        failing signal IS the CI log, never a reviewer verdict.
- *   2. body-coverage   — every unmet criterion's reason is a keyword-coverage
+ *   3. body-coverage   — every unmet criterion's reason is a keyword-coverage
  *                        gap ("matched N/M proof keywords") and NONE was an
  *                        OBSERVED `executed_fail` (an actual failed run always
  *                        means real code broke — never treat that as body-only,
  *                        the #157/#143 lesson).
- *   3. reviewer-unmet  — the default: a real reviewer-computed unmet set
+ *   4. reviewer-unmet  — the default: a real reviewer-computed unmet set
  *                        (W1-T76, unchanged).
  */
 export const FIX_MODE_RULES: readonly FixModeRule[] = [
+  {
+    mode: "merge-conflict",
+    when: (e) => e.mergeConflict !== undefined,
+  },
   {
     mode: "ci-log",
     when: (e) => e.review === undefined,
@@ -1360,8 +1376,10 @@ export function deriveFixMode(evidence: FixEvidence, rules: readonly FixModeRule
  * ONCE — the anti-ping-pong invariant, P21's golden, absorbed verbatim; never a
  * narrowed, one-criterion prompt). `ci-log` comes from `evidence.ciFailures`
  * instead — the failing check names + log tails, with no review-shaped input
- * at all. Both `resume` (round 1) and `fresh` (round 2+) rounds get the
- * identical full-set framing for their mode.
+ * at all. `merge-conflict` (W1-T106) comes from `evidence.mergeConflict` — the
+ * conflicting file list + both sides' log since merge-base, with no
+ * review-shaped or ci-log-shaped input at all. Both `resume` (round 1) and
+ * `fresh` (round 2+) rounds get the identical full-set framing for their mode.
  *
  * A review can fail with an EMPTY `unmetCriteria` (judgeReview: `testTheater`
  * or `noCriteria` alone fails the state even when every named criterion is
@@ -1401,6 +1419,50 @@ export function renderFixPrompt(opts: {
     `typed entry per line, \`research:\` | \`task:\` | \`action:\`, its own one-line why inline.`,
     `End with a REPORT whose last line is exactly: PR_URL: <url>`,
   ];
+
+  if (mode === "merge-conflict") {
+    // W1-T106 (the #170 DIRTY strand): the conflicting file list + both
+    // sides' log since merge-base come from `git` on a PR branch/head an
+    // outside contributor could have authored — the SAME untrusted-content
+    // threat model W1-T210 fenced for ci-log's `gh run view` output, so this
+    // reuses the identical fence + neutralization rather than a parallel,
+    // differently-worded control.
+    const mc = opts.evidence.mergeConflict;
+    const files = mc?.files ?? [];
+    const fileList =
+      files.length > 0
+        ? files
+            .map((f) => `- ${neutralizeFenceMarkers(f.path)} (ours -${f.oursDeleted} line(s), theirs -${f.theirsDeleted} line(s) since merge-base)`)
+            .join("\n")
+        : "(no conflicting file detail was captured — re-check the PR's mergeability for the current state.)";
+    return [
+      header,
+      ...constraintBlock,
+      `This PR's merge state is DIRTY — GitHub cannot compute a clean merge ref, so NO check even`,
+      `runs until the conflict is resolved; there is no review to react to either. Your target: MERGE`,
+      `origin/main into this SAME branch (${opts.branch}) — never rebase, never force-push — resolve`,
+      `the conflicting file(s) below, then push. The changed head re-judges through the normal gate.`,
+      "",
+      `MERGE DISCIPLINE (the #170 hand-resolution's own procedure — never deviate): resolve toward the`,
+      `UNION of both sides ONLY where merge-base analysis shows a PURE CONCURRENT ADDITION — both`,
+      `sides only ADDED content, neither deleted anything the other still relies on. If EITHER side`,
+      `DELETED something in a conflicting file, or the conflict is SEMANTIC rather than a safe`,
+      `textual union, REFUSE to resolve it yourself and escalate instead — a wrong auto-resolution`,
+      `is worse than a strand.`,
+      "",
+      `Conflicting file(s):`,
+      fileList,
+      "",
+      `${CI_LOG_FENCE_OPEN}`,
+      `log since merge-base — OUR side (this branch):`,
+      neutralizeFenceMarkers(mc?.oursLog || "(not captured)"),
+      "",
+      `log since merge-base — THEIR side (origin/main):`,
+      neutralizeFenceMarkers(mc?.theirsLog || "(not captured)"),
+      `${CI_LOG_FENCE_CLOSE}`,
+      ...footer,
+    ].join("\n");
+  }
 
   if (mode === "ci-log") {
     const failures = opts.evidence.ciFailures ?? [];
@@ -1675,6 +1737,19 @@ export async function runFixRung(opts: {
    * review yet").
    */
   ciFailures?: CiFailure[];
+  /**
+   * W1-T106 (the #170 DIRTY strand): merge-conflict evidence for a
+   * `conflicted` dispatch — this PR's merge state is dirty, so no CI check
+   * even runs and no review can post until the conflict resolves. Present
+   * ONLY for a merge-conflict-mode dispatch; undefined for every other path
+   * (ci-log/reviewer-unmet/body-coverage, unchanged). Drives the
+   * merge-conflict MODE (deriveFixMode/renderFixPrompt, W1-T94) UNTIL a
+   * strike's push leaves CI able to run at all — from then on this PR is no
+   * longer dirty, so every subsequent strike reverts to whichever mode its
+   * (now-computable) review/checks state derives, exactly like ci-log's own
+   * `noReviewYet` reversion.
+   */
+  mergeConflict?: MergeConflictEvidence;
   deps: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     waitForCiGreen: (
@@ -1754,6 +1829,14 @@ export async function runFixRung(opts: {
   // of targeting the check that is actually still red.
   let noReviewYet = opts.ciFailures !== undefined;
   let currentCiFailures = opts.ciFailures;
+  // W1-T106 (the #170 DIRTY strand): mirrors `noReviewYet`/`currentCiFailures`
+  // for the merge-conflict mode — a SEPARATE variable (never folded into
+  // `noReviewYet`) because a dirty PR carries no ci-log evidence at all; the
+  // two shapes are mutually exclusive by construction (see FixDispatchEvidence).
+  // Cleared the moment CI can run at all (see below) — the conflict is
+  // resolved enough for GitHub to compute the merge ref, so every later
+  // strike reverts to whichever mode its now-computable state derives.
+  let currentMergeConflict = opts.mergeConflict;
 
   while (review.state !== "success" && strikes < opts.strikeCap) {
     // W1-T177 SITE (i) — TERMINAL-STATE CHECK before `strikes++`: the ONLY
@@ -1812,9 +1895,12 @@ export async function runFixRung(opts: {
     strikes++;
     const round: "resume" | "fresh" = strikes === 1 ? "resume" : "fresh";
     const unmet = review.criteria.filter((c) => !c.met);
-    const evidence: FixEvidence = noReviewYet
-      ? { ciFailures: currentCiFailures, constraint: opts.constraint }
-      : { review: { unmetCriteria: unmet, summary: review.summary }, constraint: opts.constraint };
+    const evidence: FixEvidence =
+      currentMergeConflict !== undefined
+        ? { mergeConflict: currentMergeConflict, constraint: opts.constraint }
+        : noReviewYet
+        ? { ciFailures: currentCiFailures, constraint: opts.constraint }
+        : { review: { unmetCriteria: unmet, summary: review.summary }, constraint: opts.constraint };
     const fixMode = deriveFixMode(evidence);
     const prompt = renderFixPrompt({
       task: opts.task,
@@ -1832,7 +1918,10 @@ export async function runFixRung(opts: {
       : "keyword_only";
     deps.log("fix.dispatch", { strike: strikes, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: fixMode, verdict_regime: verdictRegime });
     deps.say(
-      noReviewYet
+      currentMergeConflict !== undefined
+        ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE merge-conflict fix worker for ` +
+          `${(currentMergeConflict.files ?? []).length} conflicting file(s)`
+        : noReviewYet
         ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE ci-log fix worker for ` +
           `${(currentCiFailures ?? []).length} failing check(s)`
         : `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE fix worker for ` +
@@ -1901,6 +1990,13 @@ export async function runFixRung(opts: {
       }
       continue; // still failing — loop to the next strike (or exhaust below)
     }
+
+    // W1-T106: CI reaching green at all means GitHub could compute a merge
+    // ref — the conflict is resolved enough for a check to run — so the NEXT
+    // strike (if the review that follows still fails) is never re-dispatched
+    // as merge-conflict mode again; it reverts to whichever mode the now-real
+    // review verdict derives, exactly like `noReviewYet`'s own reversion.
+    currentMergeConflict = undefined;
 
     // W1-T256: in body-coverage mode judge the CURRENT PR BODY — the artifact the
     // worker was told to substantiate and the one the authoritative reviewCommand/
@@ -1971,22 +2067,40 @@ export async function runFixRung(opts: {
   // no review ran for the FINAL push either, so the escalation names the
   // failing checks it actually tried to fix (`currentCiFailures`, refreshed
   // each non-green strike) rather than an empty/stale "Unmet criteria:" list.
+  // W1-T106: `currentMergeConflict` reflects whether the FINAL strike was
+  // still spent trying to resolve a dirty merge state — mirrors `noReviewYet`
+  // for the ci-log shape, checked first (mutually exclusive by construction).
+  const stillConflicted = currentMergeConflict !== undefined;
   const issueUrl = escalate(
     {
       class: "BLOCKED",
       taskId: opts.taskId,
       runId: opts.runId,
-      summary: noReviewYet
+      summary: stillConflicted
+        ? `conflicted fix rung exhausted (${strikes} strike(s), merge state never resolved) — ${opts.prUrl}`
+        : noReviewYet
         ? `blocked_ci fix rung exhausted (${strikes} strike(s), checks never went green) — ${opts.prUrl}`
         : `blocked_review fix rung exhausted (${strikes} strike(s)) — ${opts.prUrl}`,
-      detail: noReviewYet
+      detail: stillConflicted
+        ? `The CONFLICTED FIX RUNG (merge-conflict mode, W1-T94/W1-T106) dispatched ${strikes} bounded fix worker(s) ` +
+          `on ${opts.branch} and the merge state is STILL dirty. Conflicting file(s):\n\n` +
+          (currentMergeConflict?.files ?? []).map((f) => `- ${f.path}`).join("\n")
+        : noReviewYet
         ? `The blocked_ci FIX RUNG (ci-log mode, W1-T94/W1-T100/W1-T138) dispatched ${strikes} bounded fix worker(s) ` +
           `on ${opts.branch} and required checks are STILL red — no review has run yet. Failing check(s):\n\n` +
           (currentCiFailures ?? []).map((f) => `- ${summarizeCiFailure(f)}`).join("\n")
         : `The blocked_review FIX RUNG (W1-T76) dispatched ${strikes} bounded fix worker(s) on ` +
           `${opts.branch} and the review gate is STILL failing. Unmet criteria:\n\n` +
           unmet.map((c) => `- ${c.claim}\n  reason: ${c.reason}`).join("\n"),
-      options: noReviewYet
+      options: stillConflicted
+        ? [
+            {
+              label: "hand-fix",
+              detail: "merge origin/main into the branch by hand, resolve the conflict, then push to re-trigger CI.",
+            },
+            { label: "close", detail: "close the PR and re-scope the task if the conflict cannot be safely resolved." },
+          ]
+        : noReviewYet
         ? [
             {
               label: "hand-fix",
@@ -6045,8 +6159,12 @@ export function buildSweepEffects(
     dispatchFix: async (pr, evidence) => {
       // W1-T100: `evidence.ciFailures` is defined ONLY for a blocked_ci
       // dispatch (runSweep/routeFix set it, undefined otherwise) — the SAME
-      // discriminator both callers use to pick this evidence shape.
-      const isCiLog = evidence.ciFailures !== undefined;
+      // discriminator both callers use to pick this evidence shape. W1-T106:
+      // `evidence.mergeConflict` is the analogous discriminator for a
+      // `conflicted` dispatch — checked FIRST (mirrors FIX_MODE_RULES'
+      // ordering) since a merge-conflict PR also carries no review verdict.
+      const isMergeConflict = evidence.mergeConflict !== undefined;
+      const isCiLog = !isMergeConflict && evidence.ciFailures !== undefined;
       const unmet = evidence.unmetCriteria;
       const task = plan.tasks.find((t) => t.id === pr.taskId);
       if (!task) {
@@ -6097,7 +6215,20 @@ export function buildSweepEffects(
         // be stale or simply irrelevant until the red check goes green (a FRESH
         // review only ever runs once CI is green). Either way, the fix rung
         // re-derives the AUTHORITATIVE verdict via runReview after each strike.
-        const initialReview: ReviewVerdict & { headSha: string; reviewerOutcome: string } = isCiLog
+        const initialReview: ReviewVerdict & { headSha: string; reviewerOutcome: string } = isMergeConflict
+          ? {
+              state: "failure",
+              criteria: [],
+              testTheater: false,
+              summary: `sweep-reconstructed: merge state dirty (${(evidence.mergeConflict?.files ?? []).length} conflicting file(s)) — merge-conflict dispatch, no review can run until the conflict resolves`,
+              floorDegraded: false,
+              capped: false,
+              keywordOnly: false,
+              planOnly: false,
+              headSha: pr.headSha,
+              reviewerOutcome: "sweep-reconstructed-merge-conflict",
+            }
+          : isCiLog
           ? {
               state: "failure",
               criteria: [],
@@ -6155,6 +6286,7 @@ export function buildSweepEffects(
           initialReview,
           constraint: pr.pendingAnswer?.constraint,
           ciFailures: evidence.ciFailures,
+          mergeConflict: evidence.mergeConflict,
           reviewBase: { owner, repo, headCheckoutDir: worktreePath, reviewerMount },
           deps: {
             // Fresh-spawn adapter: an empty resumeSessionId (cold PR) becomes a
@@ -6434,6 +6566,8 @@ export interface FixDeps {
  * never a reimplementation of the rung's dispatch:
  *   - not OPEN (merged/closed)                       -> refused, naming the state.
  *   - OPEN, disposition="blocked-fixable"             -> dispatchFix (fixed).
+ *   - OPEN, disposition="conflicted" (W1-T106)         -> dispatchFix with
+ *     merge-conflict evidence (fixed) — the SAME dispatch shape runSweep uses.
  *   - OPEN, failing review + strikes at/over the cap  -> escalate (escalated),
  *     naming the count — the cap is honored, never bypassed.
  *   - anything else (no block evidence: mergeable,
@@ -6462,6 +6596,14 @@ export async function routeFix(
       pr,
       isBlockedCi(pr) ? { unmetCriteria: [], ciFailures: pr.ciFailures ?? [] } : { unmetCriteria: pr.unmetCriteria },
     );
+    return { outcome: "fixed", reason };
+  }
+  if (disposition === "conflicted") {
+    // W1-T106: DISPOSITION_RULES already gated this on isPureConcurrentAddition
+    // — reaching "conflicted" here means it's safe to dispatch. The
+    // deletion-involved / unclassifiable case derives "blocked-ambiguous"
+    // instead (falls through below), never this branch.
+    await deps.dispatchFix(pr, { unmetCriteria: [], mergeConflict: pr.mergeConflict });
     return { outcome: "fixed", reason };
   }
   // Strike cap honored: the SAME rule the sweep policy uses to route to escalate
