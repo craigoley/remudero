@@ -48,4 +48,12 @@
     inherited flag can never silently change the enforcement semantics the ratified curve encodes. Implemented
     directly by an operator-directed session 2026-07-25 per the ruling; credited via the merging PR's
     Remudero-Task trailer. W1-T249's own acceptance still needs the flag criterion added (ruling clause 5) and
-    W1-T252 remains the policy-file home — both tracked separately."
+    W1-T252 remains the policy-file home — both tracked separately.
+    AMENDMENT — OPERATOR RULING 2026-07-25 (post-merge, supersedes a4153e's DEFAULT clause only): the shipped
+    default of resolveHeadroomEnabled flips FALSE -> TRUE. The flag architecture this task built is unchanged and
+    still governs (one switch, env over config in both directions, telemetry-without-enforcement when off); what
+    changes is what an unconfigured install inherits — the governor, because the product default should protect
+    the subscription rather than eat into extra spend, and opting into overflow is the deliberate act. THIS host
+    keeps the OFF posture, now carried explicitly as `headroom.enabled: false` in ~/.config/remudero/config.json,
+    so live behaviour here is unchanged; the title's 'default OFF on this host' therefore still holds, by explicit
+    config rather than by inheritance. W1-T252's policy row is documented with the same default, true."

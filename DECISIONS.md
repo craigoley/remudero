@@ -327,3 +327,40 @@ circuit-breaker as the per-task guards. Both prerequisites pulled to the immedia
   `deriveStatus` defect, W1-T256 above), this closure rests on the task's own already-merged
   restructure record, not on a GitHub-derivation gap.
 - Rollback: revert this PR — removes only this DECISIONS.md entry; no runtime code touched.
+
+## 2026-07-28 — OPERATOR RULING: the headroom governor ships ENABLED by default (SUPERSEDES fb-1784894405468-a4153e's DEFAULT clause; its flag architecture stands)
+
+*Operator-authored, not a machine auto-choose resolution — recorded by hand at the operator's
+instruction and marked so, exactly as the 2026-07-20 entry above.*
+
+- **THE RULING.** `resolveHeadroomEnabled` (src/lib/config.ts, built by W1-T259 / PR #768 under ruling
+  fb-1784894405468-a4153e) shipped with an inherited default of **false** — governor OFF unless a config
+  field or `RMD_HEADROOM_ENABLED` turned it on. That default is REVERSED to **true**, in the operator's
+  words: *"most people would prefer rmd to efficiently manage their tokens rather than eat into extra
+  spend."* The product default protects the subscription window; **opting into overflow is the deliberate
+  act**, expressed by setting `headroom.enabled: false` (or `RMD_HEADROOM_ENABLED=0`), never inherited
+  from a permissive default.
+- **SCOPE — the default clause ONLY.** a4153e's mechanism is kept verbatim and is NOT reopened: ONE switch
+  gates all headroom-based dispatch gating (the live W1-T197 idle curve; the ratified-but-unbuilt W1-T249
+  reserve gate when it lands); the env var overrides config in BOTH directions; DISABLED still means
+  headroom is READ and LEDGERED every cycle with `enforced:false` (telemetry without enforcement) and an
+  unreadable read is absent telemetry, never a hold; ENABLED still enforces the time-aware curve unchanged;
+  and clause 4 stands — imputed dollars gate nothing, the per-run turn limit and `budget_usd` tripwire
+  remain the runaway guards. The `runDaemon` library default was already TRUE and is untouched; what
+  changed is that an unconfigured install now agrees with it instead of contradicting it.
+- **THIS HOST IS UNCHANGED IN BEHAVIOUR.** The credits-burst posture a4153e ruled for is retained, but it
+  is now carried EXPLICITLY: `~/.config/remudero/config.json` gains `"headroom": {"enabled": false}`. The
+  live `rmd daemon` therefore still resolves the governor OFF here (validated at ruling time: the resolver
+  over this host's on-disk config returns `false`). The operator's willingness to exceed 100% of the weekly
+  window is now a recorded opt-out rather than an inherited silence.
+- **DOCUMENTED FUTURE HOME.** W1-T252's `plan/policy.yaml` row for `headroom.enabled` is documented with
+  the same default, **true** (plan/tasks.yaml, W1-T252 design), so the interim config carrier and the
+  eventual policy row cannot disagree when the substrate lands.
+- **FALSIFIER RETARGETED.** The a4153e falsifier (`test/daemon.test.ts`) no longer proves "the default
+  does not gate" — it proves **disabled-by-config does not gate**: it resolves the posture through the real
+  `resolveHeadroomEnabled` over an explicitly opted-out config and asserts no idle tick and no sleep. The
+  default itself is asserted directly in `test/config.test.ts` (default ON; explicit config false honored;
+  env wins both ways).
+- Rollback: revert this PR — restores the `?? false` default in `resolveHeadroomEnabled` and this entry.
+  This host's behaviour is unaffected either way while its config carries the explicit `false`; removing
+  that config line is the separate, deliberate act of re-inheriting the default.

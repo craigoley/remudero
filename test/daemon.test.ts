@@ -26,6 +26,7 @@ import {
   type HeadroomPolicy,
   type OrphanedRun,
 } from "../src/lib/daemon.js";
+import { resolveHeadroomEnabled } from "../src/lib/config.js";
 import { pauseDetail, requestPause, requestStop, resumeFleet, stopDetail } from "../src/lib/fleet-control.js";
 import type { MergedSet, OpenPrCheck } from "../src/lib/drain.js";
 import { deriveStatus, type GitHub, type PrRef } from "../src/lib/status.js";
@@ -557,9 +558,15 @@ test("headroom: a near-limit reading is an IN-PROCESS idle heartbeat, never a st
 });
 
 // ── headroom GOVERNOR SWITCH (operator ruling fb-1784894405468-a4153e) ────────
-// With the governor DISABLED (the default host posture), no percent_used condition
-// pauses dispatch, but headroom is still READ and LEDGERED every cycle so the
-// console shows weekly burn. When ENABLED, the curve enforces exactly as today.
+// With the governor DISABLED, no percent_used condition pauses dispatch, but headroom
+// is still READ and LEDGERED every cycle so the console shows weekly burn. When
+// ENABLED, the curve enforces exactly as today.
+// RETARGETED (operator ruling 2026-07-25): "disabled" is no longer the inherited
+// default — resolveHeadroomEnabled now defaults ON and disablement is an EXPLICIT
+// config/env opt-out (this host's `headroom.enabled: false`). These cases therefore
+// pass `headroomEnabled: false` as the resolved posture of a deliberately opted-out
+// host, which is what the a4153e mechanism must honor; the library's own default is
+// and always was TRUE.
 
 test("headroom governor DISABLED (ruling a4153e): percent_used 99 does NOT pause dispatch — the task runs AND headroom is still ledgered (telemetry, enforced:false)", async () => {
   const plan = fixturePlan();
@@ -593,7 +600,7 @@ test("headroom governor DISABLED (ruling a4153e): percent_used 99 does NOT pause
   assert.equal(telem[0].extra.over_ceiling, true, "it WAS over the ceiling — and dispatched anyway");
 });
 
-test("a4153e falsifier: with the governor disabled, NO headroom condition pauses dispatch — the daemon never enters the idle heartbeat", async () => {
+test("a4153e falsifier (retargeted to disabled-by-config): with the governor disabled, NO headroom condition pauses dispatch — the daemon never enters the idle heartbeat", async () => {
   const plan = fixturePlan();
   const overLimit: UsageSnapshot = {
     billingMode: "subscription",
@@ -603,6 +610,13 @@ test("a4153e falsifier: with the governor disabled, NO headroom condition pauses
   let spawned = 0;
   let sleeps = 0;
   const root = mkdtempSync(join(tmpdir(), "daemon-headroom-falsifier-"));
+  // The posture is RESOLVED, not asserted: an explicitly opted-out config (this host's
+  // `headroom.enabled: false`, the credits-burst posture) goes through the real
+  // resolveHeadroomEnabled — so the falsifier covers the whole chain config ⇒ no gate,
+  // not just the library flag. A default-ON regression that ignored the explicit false
+  // would fail here first.
+  const optedOut = resolveHeadroomEnabled({ headroom: { enabled: false } }, {});
+  assert.equal(optedOut, false, "an explicit config opt-out resolves the governor OFF");
   const s = await runDaemon(
     plan,
     {
@@ -614,7 +628,7 @@ test("a4153e falsifier: with the governor disabled, NO headroom condition pauses
       sleep: async () => { sleeps++; },
       log: () => {},
     },
-    { headroomEnabled: false, max: 1 },
+    { headroomEnabled: optedOut, max: 1 },
   );
   assert.equal(s.stopReason, "max_reached");
   assert.ok(spawned >= 1, "dispatch was not paused by any headroom condition");
