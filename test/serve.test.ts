@@ -395,14 +395,22 @@ test("GET /v1/status over a full 183-task plan: first-paint-to-data under budget
   });
 });
 
-// ── W1-T154: the batched gateway is PRE-WARMED at serve boot, not lazily on the first request ──
+// ── the batched gateway's pre-warm is GATED ON A CONNECTED CONSOLE ─────────────────────────
 //
-// Acceptance: "at serve boot the gateway fetch fires ONCE (pre-warm) before any request, and a
-// background timer refreshes it on the TTL; the FIRST GET /v1/status serves from the warm cache
-// with ZERO additional fetches on the request path — a first request that triggers the cold
-// fetch FAILS the test (the falsifier)".
+// SUPERSEDES W1-T154's boot-warm acceptance, deliberately. That acceptance read "at serve boot
+// the gateway fetch fires ONCE (pre-warm) before any request, and a background timer refreshes
+// it on the TTL". The cost of the unconditional half was never bounded: `warm()` is a GraphQL
+// `gh pr list`, so an unwatched serve process billed one every 15s forever — measured at 78.9%
+// of ALL GraphQL traffic on this account, ~62% of the hourly budget, for a board nobody had
+// open, which blinded the sweep for 22 consecutive minutes.
+//
+// The two tests below are the INVERTED form of W1-T154's originals: the boot-warm assertion
+// becomes "no fetch at all until a console connects", and the timer-lifecycle assertion now
+// opens a real SSE client first, because with zero clients there is correctly no timer to stop.
+// serve.ts's `gatePrewarmOnClients` owns the gate; test/serve-prewarm-clientgate.test.ts grades
+// its refcounting directly.
 
-test("buildServeServer pre-warms board.github at construction — BEFORE listen() and before any request", async () => {
+test("buildServeServer makes ZERO GitHub fetches at construction and while listening with no console connected", async () => {
   const root = tmpRoot();
   let fetchCalls = 0;
   const github = buildBatchedGithub("craigoley", "remudero", { fetchAll: () => { fetchCalls++; return []; } });
@@ -411,16 +419,18 @@ test("buildServeServer pre-warms board.github at construction — BEFORE listen(
   assert.equal(fetchCalls, 0, "sanity: nothing has fetched yet");
   const server = buildServeServer(deps);
   try {
-    // The pre-warm fetch already happened INSIDE buildServeServer, before .listen() was even
-    // called — no request, no .listen(), and yet the gateway is already warm.
-    assert.equal(fetchCalls, 1, "buildServeServer must pre-warm board.github synchronously at construction (boot), not lazily");
+    // W1-T154 asserted 1 here. An unwatched process must now cost nothing at all.
+    assert.equal(fetchCalls, 0, "constructing the server must not warm — no console is connected yet");
 
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    assert.equal(fetchCalls, 0, "listening with nobody watching must still cost zero GitHub fetches");
+
     const port = (server.address() as AddressInfo).port;
     const res = await get(`http://127.0.0.1:${port}`, "/v1/status", READ_TOKEN);
     assert.equal(res.status, 200);
-    // The FIRST real request must serve from the already-warm cache: zero ADDITIONAL fetches.
-    assert.equal(fetchCalls, 1, "the first GET /v1/status must add ZERO fetches — it must never be the cold-fetch request");
+    // The stated trade: with no console connected, this request pays its OWN lazy fetch — a
+    // first-request latency cost, never a correctness one, and vastly cheaper than 5,760/day.
+    assert.equal(fetchCalls, 1, "a request arriving before any console must lazily fetch exactly once, not stay cold");
   } finally {
     server.close();
   }
@@ -442,17 +452,32 @@ test("prewarmBoardGithub: a background timer re-warms on the TTL, with NO reques
   }
 });
 
-test("buildServeServer wires the prewarm timer's lifecycle to the server's own close() (no leaked interval)", async () => {
+test("buildServeServer starts the prewarm timer only once a console connects, and stops it when the server closes", async () => {
   const root = tmpRoot();
   let fetchCalls = 0;
   const github = buildBatchedGithub("o", "r", { ttlMs: 10, fetchAll: () => { fetchCalls++; return []; } });
   const deps = depsFor(root, planOf([task()]), { board: { plan: planOf([task()]), ledgerPath: ledgerPathFor(root), github }, boardGithubRefreshMs: 10 });
   const server = buildServeServer(deps);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+
+  // Nobody watching: the timer must not exist at all.
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(fetchCalls, 0, "no console connected -> no background timer -> zero fetches");
+
+  // A real SSE console connects, exactly as the browser shell's subscribeStatusStream does.
+  const ac = new AbortController();
+  const streamRes = await fetch(`http://127.0.0.1:${port}/v1/status/stream`, {
+    headers: { Authorization: `Bearer ${READ_TOKEN}` },
+    signal: ac.signal,
+  });
+  assert.equal(streamRes.status, 200);
   await new Promise((resolve) => setTimeout(resolve, 40));
   const callsBeforeClose = fetchCalls;
-  assert.ok(callsBeforeClose >= 2, "the background timer must have fired at least once before close()");
+  assert.ok(callsBeforeClose >= 2, `a connected console must start the background timer, got ${callsBeforeClose} fetches`);
+
   server.close();
+  ac.abort();
   await new Promise((resolve) => setTimeout(resolve, 60));
   assert.equal(fetchCalls, callsBeforeClose, "closing the server must stop the background prewarm timer — no further fetches after close()");
 });

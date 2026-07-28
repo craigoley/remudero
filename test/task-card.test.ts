@@ -269,11 +269,15 @@ test("GET /v1/task adds ZERO additional GitHub fetches beyond the already-warm b
   });
   const plan = planOf([task({ id: "W1-T1" }), task({ id: "W1-T2" }), task({ id: "W1-T3" })]);
   await withServeServer(depsFor(root, plan, github), async (base) => {
-    assert.equal(fetchCalls, 1, "buildServeServer must pre-warm board.github synchronously at construction");
+    // The pre-warm is now gated on a connected console (serve.ts's gatePrewarmOnClients), and no
+    // SSE client is attached here — so the snapshot is cold until the first request builds it.
+    // That shifts WHEN the single batched fetch happens; this test's actual invariant, "a card
+    // open adds ZERO fetches BEYOND that one snapshot", is unchanged and still asserted below.
+    assert.equal(fetchCalls, 0, "with no console connected, constructing the server must not warm");
 
     const status = await get(base, "/v1/status");
     assert.equal(status.status, 200);
-    assert.equal(fetchCalls, 1, "GET /v1/status must serve from the already-warm cache");
+    assert.equal(fetchCalls, 1, "GET /v1/status builds the batched snapshot exactly once");
 
     const card1 = await get(base, "/v1/task?id=W1-T2");
     assert.equal(card1.status, 200);
