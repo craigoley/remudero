@@ -1,0 +1,79 @@
+/**
+ * test/serve-service-boot.test.ts — W1-T152, the one criterion that CANNOT be proven against a
+ * pure function: does the console's startup banner reach a redirected log file WHILE the
+ * process is still running?
+ *
+ * WHY IT MATTERS. Under the launchd unit `rmd serve-plist` generates, stdout is not a terminal
+ * — it is `<root>/state/logs/serve.out.log`. Node switches stdout to a different write path
+ * for a non-TTY, and a fully-buffered stdout would mean the operator sees an EMPTY log until
+ * the process exits: exactly wrong for a service whose whole point is to never exit, and the
+ * shape of the original outage (a relaunch died into an unread log while the old process kept
+ * serving). The falsifier is a banner readable only after exit.
+ *
+ * ITS OWN FILE on purpose: this is the only test in the suite that spawns the real CLI and
+ * binds a real port. If it ever flakes it must not take a coverage-load-bearing file down with
+ * it (the run-task.test.ts file-level-crash lesson).
+ */
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+
+/** A port nobody holds right now — asked of the OS rather than guessed. */
+async function freePort(): Promise<number> {
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const { port } = probe.address() as { port: number };
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return port;
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+test("serve's startup banner is readable in a redirected log BEFORE the process exits", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-serveboot-"));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  const logPath = join(home, "serve.out.log");
+  const port = await freePort();
+
+  const out = openSync(logPath, "a", 0o600);
+  const child = spawn(join(repoRoot, "bin", "rmd"), ["serve", "--port", String(port), "--host", "127.0.0.1"], {
+    // NON-TTY stdout, redirected to a file — the launchd unit's exact shape.
+    stdio: ["ignore", out, out],
+    // `--host` above is also the end-to-end proof of its own arg-validator fix: before W1-T152
+    // it exited 2 as an "unexpected argument" despite being documented in USAGE.
+    env: { ...process.env, HOME: home },
+  });
+  t.after(() => {
+    child.kill("SIGKILL");
+  });
+
+  let banner = "";
+  const deadline = Date.now() + 45_000;
+  while (Date.now() < deadline) {
+    if (existsSync(logPath)) {
+      const text = readFileSync(logPath, "utf8");
+      if (text.includes("listening on")) {
+        banner = text;
+        break;
+      }
+    }
+    if (child.exitCode !== null) {
+      assert.fail(`serve exited (${child.exitCode}) before printing its banner. Log:\n${readFileSync(logPath, "utf8")}`);
+    }
+    await sleep(200);
+  }
+
+  assert.notEqual(banner, "", "the banner never appeared in the redirected log within 45s");
+  assert.equal(child.exitCode, null, "…and it appeared while serve was STILL RUNNING — the whole point");
+  assert.match(banner, new RegExp(`listening on http://127\\.0\\.0\\.1:${port}`));
+  assert.doesNotMatch(banner, /write token: [0-9a-f]{64}/, "the write token is never echoed to a log (R-5)");
+});

@@ -33,7 +33,8 @@
  * everywhere else in this codebase).
  */
 
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { Server } from "node:http";
@@ -2770,16 +2771,21 @@ export function buildServeServer(deps: ServeDeps): Server {
 // as pure/near-pure functions rather than only exercisable through the live CLI) ────────────
 
 /**
- * `--port <n>` if present (validated: an integer 1-65535), else {@link DEFAULT_SERVE_PORT}.
- * Throws (never returns an invalid port) so the CLI can fail loud before any bind attempt.
+ * `--port <n>` if present, else `configPort` (the `serve.port` field an install may pin —
+ * W1-T152, so the launchd unit and a hand-run `rmd serve` agree on ONE port without the
+ * operator retyping a flag), else {@link DEFAULT_SERVE_PORT}. BOTH sources are validated as an
+ * integer 1-65535 — a garbage config value must fail as loudly as a garbage flag, not silently
+ * fall through to the default and bind a port nobody's bookmark points at. Throws (never
+ * returns an invalid port) so the CLI can fail loud before any bind attempt.
  */
-export function resolveServePort(rest: string[]): number {
+export function resolveServePort(rest: string[], configPort?: number): number {
   const idx = rest.indexOf("--port");
-  if (idx < 0) return DEFAULT_SERVE_PORT;
-  const raw = rest[idx + 1];
+  const raw = idx >= 0 ? rest[idx + 1] : configPort;
+  if (raw === undefined) return DEFAULT_SERVE_PORT;
   const n = Number(raw);
   if (!Number.isInteger(n) || n <= 0 || n > 65535) {
-    throw new Error(`--port must be an integer 1-65535, got ${JSON.stringify(raw)}`);
+    const source = idx >= 0 ? "--port" : "config serve.port";
+    throw new Error(`${source} must be an integer 1-65535, got ${JSON.stringify(raw)}`);
   }
   return n;
 }
@@ -2794,21 +2800,22 @@ export const DEFAULT_SERVE_HOST = "127.0.0.1";
  * reach the console, and the only thing between them and fleet-control write actions was a
  * bearer token that the same command printed to a world-readable log.
  */
-const WILDCARD_HOSTS = new Set(["0.0.0.0", "::", "*", ""]);
+export const WILDCARD_HOSTS = new Set(["0.0.0.0", "::", "*", ""]);
 
 /**
  * Resolve the interface `rmd serve` binds to: `--host <addr>`, else `RMD_SERVE_HOST`, else
- * loopback. A wildcard is REFUSED rather than silently accepted — exposure must be a thing
- * someone typed, naming the interface they meant.
+ * `configHost` (config.json's `serve.host` — W1-T152, so a launchd unit and a hand-run serve
+ * agree without the operator retyping the address), else loopback. A wildcard is REFUSED rather
+ * than silently accepted — exposure must be a thing someone typed, naming the interface they meant.
  *
  * Remote access is expressed by naming the interface, not by opening all of them. This fleet is
  * reached from the operator's phone over Tailscale, so the tailnet address is the correct value
  * here (`RMD_SERVE_HOST=100.x.y.z`) — that keeps the console on an authenticated, encrypted
  * overlay instead of on every coffee-shop LAN the laptop joins.
  */
-export function resolveServeHosts(rest: string[], env: NodeJS.ProcessEnv = process.env): string[] {
+export function resolveServeHosts(rest: string[], env: NodeJS.ProcessEnv = process.env, configHost?: string): string[] {
   const idx = rest.indexOf("--host");
-  const raw = idx >= 0 ? rest[idx + 1] : env.RMD_SERVE_HOST;
+  const raw = idx >= 0 ? rest[idx + 1] : (env.RMD_SERVE_HOST ?? configHost);
   if (raw === undefined) return [DEFAULT_SERVE_HOST];
   const hosts = raw
     .split(",")
@@ -2840,6 +2847,145 @@ function assertBindableHost(host: string, raw: string): void {
   }
   if (host.startsWith("--")) {
     throw new Error(`--host expects an address, got the flag ${JSON.stringify(raw)}`);
+  }
+}
+
+// ── SERVICE LIFECYCLE (W1-T152) ───────────────────────────────────────────────────────────
+//
+// What changes when the console stops being a foreground process someone babysits and becomes
+// a launchd job that is expected to survive kills, reboots and the operator being 3000 miles
+// away. Each helper below is one incident, kept PURE-ish (injected clock / injected git / plain
+// paths) so it is provable without a live service:
+//
+//   listenWithReapWait  — the kill→relaunch EADDRINUSE race that produced a silent outage
+//   ensureLogFileMode   — R-5, a bearer token found in a world-readable serve.log
+//   offMainNotice       — a console serving branch code lies to the operator (W1-T255 posture:
+//                         it SAYS SO, LOUDLY, and keeps serving — a service never exit-1s on
+//                         tree state, which is what crash-looped the daemon after #707)
+
+/** How many times {@link listenWithReapWait} retries a bind that loses the port race, and how
+ *  long it waits between tries — 20 × 500ms = a 10s reap window, comfortably inside launchd's
+ *  60s ThrottleInterval, so a genuinely stuck port still surfaces as a real error rather than
+ *  being papered over forever. */
+export const DEFAULT_BIND_ATTEMPTS = 20;
+export const DEFAULT_BIND_RETRY_MS = 500;
+
+/**
+ * Bind, WAITING OUT a port the previous process has not released yet.
+ *
+ * THE INCIDENT: `kill $(lsof -ti :4317)` followed immediately by a relaunch raced — the new
+ * process hit EADDRINUSE, died into an unread log, the OLD process kept serving stale code,
+ * and when it finally exited the console was down with nothing listening. Every layer of that
+ * was silent. Under launchd the same race is REAL and more likely, not less: `kickstart -k`
+ * SIGKILLs and relaunches immediately, and a relaunch that dies on EADDRINUSE burns a
+ * ThrottleInterval before anyone finds out.
+ *
+ * So an in-use port is treated as a TRANSIENT condition to wait out (the old owner is being
+ * reaped), not a fatal one — but only for a bounded window, and only for EADDRINUSE: any other
+ * listen error (EACCES on a privileged port, EADDRNOTAVAIL for a tailnet address that isn't up
+ * yet) is rethrown immediately, because retrying those just delays a real diagnosis. `onRetry`
+ * is how the caller makes the wait AUDIBLE — the silence is what made the original outage
+ * expensive.
+ */
+export async function listenWithReapWait(
+  listen: () => Promise<void>,
+  opts: {
+    attempts?: number;
+    delayMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+    onRetry?: (attempt: number, err: NodeJS.ErrnoException) => void;
+  } = {},
+): Promise<void> {
+  const attempts = opts.attempts ?? DEFAULT_BIND_ATTEMPTS;
+  const delayMs = opts.delayMs ?? DEFAULT_BIND_RETRY_MS;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await listen();
+      return;
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException;
+      if (err.code !== "EADDRINUSE" || attempt >= attempts) throw err;
+      opts.onRetry?.(attempt, err);
+      await sleep(delayMs);
+    }
+  }
+}
+
+/**
+ * Force mode 0600 on the console's log files, creating them if absent (R-5, standing rule 24).
+ *
+ * launchd creates `StandardOutPath`/`StandardErrorPath` at its own umask — 0644 — and serve's
+ * startup banner prints the READ bearer token, so the default is a token in a world-readable
+ * file that outlives the process. That already happened once and cost a token rotation. Both
+ * the `--write` install path and serve's own boot call this: pre-creating at 0600 wins the
+ * common case (launchd appends to the existing file, keeping the mode), and the boot-time call
+ * repairs a file launchd got to first.
+ *
+ * BEST-EFFORT BY CONSTRUCTION: a chmod failure returns the path in `failed` and NEVER throws —
+ * a service that refuses to start because it could not tighten a log file has turned a hygiene
+ * problem into an outage (the W1-T255 posture, applied to file state instead of tree state).
+ */
+export function ensureLogFileMode(paths: string[], mode: number = 0o600): { secured: string[]; failed: string[] } {
+  const secured: string[] = [];
+  const failed: string[] = [];
+  for (const p of paths) {
+    try {
+      mkdirSync(dirname(p), { recursive: true });
+      closeSync(openSync(p, "a", mode));
+      chmodSync(p, mode); // FORCE — `openSync` only applies `mode` when it CREATES the file.
+      const actual = statSync(p).mode & 0o777;
+      if (actual === mode) secured.push(p);
+      else failed.push(p);
+    } catch {
+      failed.push(p);
+    }
+  }
+  return { secured, failed };
+}
+
+/** The branch a console is allowed to serve without comment. */
+export const SERVE_EXPECTED_BRANCH = "main";
+
+/**
+ * The LOUD non-fatal notice a console prints when its checkout is not on `main` — or `null`
+ * when it is (and when the branch can't be read at all, which is not evidence of anything).
+ *
+ * THE INCIDENT: `rmd serve` launched off a feature branch keeps serving that branch's code
+ * after the checkout returns to main, because tsx loads the module graph once. Three
+ * stale-code incidents in one day traced to it, and the operator had no way to tell from the
+ * board that he was looking at un-shipped code.
+ *
+ * WHY A NOTICE AND NOT A REFUSAL. W1-T152 originally specified "REFUSES to bind when not on
+ * main, exit non-zero". W1-T255 (#726) then established the opposite for services, the hard
+ * way: the daemon's dirty-tree refusal exit-1'd on every launchd restart and took the whole
+ * automation down for hours. A KeepAlive'd unit turns ANY startup refusal into a crash-loop,
+ * and a crash-looping console is strictly worse than a console that is honest about which
+ * branch it serves — the operator reattaching from a phone needs a surface that answers.
+ * So: assess, say so in the log every boot, and serve. (Amended in plan/tasks.yaml with this
+ * citation rather than implemented against the older wording.)
+ */
+export function offMainNotice(branch: string | null): string | null {
+  if (branch === null || branch === SERVE_EXPECTED_BRANCH) return null;
+  return (
+    `### rmd serve — WARNING: this checkout is on branch '${branch}', not '${SERVE_EXPECTED_BRANCH}'. ` +
+    `The console is serving code that is NOT what the fleet ships, and tsx loads the module graph ` +
+    `ONCE — returning the checkout to '${SERVE_EXPECTED_BRANCH}' will NOT change what this process ` +
+    `serves. Restart it (launchctl kickstart -k gui/$UID/com.remudero.serve) from ` +
+    `'${SERVE_EXPECTED_BRANCH}'. Serving anyway: a service never refuses to start over tree state (W1-T255).`
+  );
+}
+
+/** The checkout's current branch, or `null` when it can't be read (detached HEAD, no git, a
+ *  worktree mid-operation) — `null` is "don't know", never "off main", so {@link offMainNotice}
+ *  stays silent rather than crying wolf. `git` is injectable for tests. */
+export function currentBranch(repoDir: string, git?: (args: string[]) => string): string | null {
+  const run = git ?? ((args: string[]) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8" }));
+  try {
+    const branch = run(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+    return branch === "" || branch === "HEAD" ? null : branch;
+  } catch {
+    return null;
   }
 }
 

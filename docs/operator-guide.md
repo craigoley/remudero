@@ -40,6 +40,7 @@ All logic lives in TypeScript; `bin/rmd` is a thin `exec` wrapper into
 | `rmd deploy-run [--dry-run]` | One deploy-supervisor cycle (what the `launchd` unit runs on its interval): no-op unless a deploy is triggered AND the daemon is idle. |
 | `rmd deploy-plist [--interval <s>] [--write]` | Generate the deploy-supervisor `launchd` unit (default every 120s). Loading it is an operator action. |
 | `rmd serve [--port <n>] [--host <addr>]` | The operator console front door — see [The console](#the-console-what-it-binds-and-rotating-its-tokens) below. |
+| `rmd serve-plist [--port <n>] [--host <addr>] [--write]` | Generate the `launchd` unit that runs the console as a background **service** (KeepAlive + ThrottleInterval 60, logs 0600 under `state/logs/`). Loading it is an operator action. |
 | `rmd sweep [--repo <name>] [--dry-run]` | Level-triggered PR-pipeline reconciler: re-derives every open PR's disposition and takes the one gated action (arm merge, fix, close, or escalate). The daemon runs this every poll. |
 | `rmd fix <pr-number> [--repo <name>]` | Operator verb for the fix rung sweep uses — manual override to drive a stuck PR through the same fix path. |
 | `rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]` | The P12 learning-utility A/B harness: runs `<task-id>` twice — normal learnings injection vs masked — and ledgers the turn/cost/verdict/strike deltas. Sandbox-only by default; refuses any other `--repo` (including the primary repo) without `--allow-non-sandbox`. |
@@ -166,6 +167,29 @@ That keeps the console on an authenticated, encrypted overlay rather than on eve
 machine happens to join. Previously `serve` bound *every* interface while printing
 "listening on http://localhost:4317" — the log said the opposite of what was true.
 
+**Run it as a service, not in a terminal.** A foreground `rmd serve` dies with the shell that
+started it — every ctrl+C, closed tab or logout takes the board down, which matters most when
+the console is the only reattach surface for a fleet you are away from. `rmd serve-plist`
+generates the launchd unit that fixes that:
+
+```sh
+rmd serve-plist --write                                    # writes the unit + pre-creates 0600 logs
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.remudero.serve.plist
+launchctl kickstart -k gui/$(id -u)/com.remudero.serve     # restart it (e.g. after a deploy)
+```
+
+The unit carries `KeepAlive` unconditionally — `rmd serve` exits 0 on a clean SIGTERM and the
+console must come back from that too — rate-limited by `ThrottleInterval 60` so a
+misconfiguration cannot become a relaunch storm. It binds what `serve.host`/`RMD_SERVE_HOST`
+resolve to (put the pair in `~/.config/remudero/config.json` as `"serve": {"host":
+"127.0.0.1,100.x.y.z", "port": 4317}` so the unit and a hand-run `rmd serve` agree), it embeds
+**no token** (`service-tokens.json` is read at boot as always), and it references no daemon
+label or path — so it installs and keeps running with the daemon deliberately stopped.
+
+Its logs are `~/Remudero/state/logs/serve.out.log` / `serve.err.log`, forced to 0600 both at
+install and at every boot, because the startup banner carries the read token and launchd would
+otherwise create those files world-readable.
+
 **The banner prints the read token only.** There are two bearer tokens: the read token grants a
 view-only board, the write token additionally arms fleet-control and question/approve actions.
 The startup banner prints the console URL carrying the **read** token, and never prints the write
@@ -218,10 +242,17 @@ The daemon (`rmd daemon`, loaded via `~/Library/LaunchAgents/com.remudero.daemon
   tailing `state/logs/daemon.out`/`daemon.err` for a fresh `daemon.boot` line.
 
 **The reap-wait, if the same host also runs `rmd serve`.** Killing a process does not instantly
-free the port it held — the OS can hold it in `TIME_WAIT` briefly — so a kill-then-immediately-
-restart of `rmd serve` can still hit `EADDRINUSE` even though `kill` already returned. Poll for
-the port to actually clear before rebinding, rather than racing a fixed sleep against the OS's
-own cleanup:
+free the port it held, so a kill-then-immediately-restart of `rmd serve` can still hit
+`EADDRINUSE` even though `kill` already returned. Two things now absorb that race, and neither
+requires you to time it by hand:
+
+- Restart the console through launchd — `launchctl kickstart -k gui/$(id -u)/com.remudero.serve`
+  — rather than by killing a PID. launchd owns the process group and reaps it before relaunching.
+- `rmd serve` itself now WAITS OUT a held port (bounded: ~10s, `EADDRINUSE` only) instead of
+  dying on the first miss, and says so in the log and the ledger (`serve.bind_retry`) while it
+  waits. A port that never frees fails loudly with `serve.bind_failed` and a non-zero exit.
+
+If you are restarting a hand-run `rmd serve` anyway, the port check is still the honest signal:
 ```sh
 lsof -ti :4317        # empty output = the port is free, safe to `rmd serve` again
 ```
@@ -266,6 +297,8 @@ Then, in order:
    launchctl load ~/Library/LaunchAgents/com.remudero.supervisor.plist
    rmd digest-plist --write
    launchctl load ~/Library/LaunchAgents/com.remudero.digest.plist
+   rmd serve-plist --write
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.remudero.serve.plist
    ```
 5. Verify before trusting the loaded units: `rmd daemon --repo <target-repo> --dry-run` resolves
    the target and prints the planned sequence, spawning nothing — confirm it names the repo you
