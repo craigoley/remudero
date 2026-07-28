@@ -18,6 +18,7 @@ import {
   proofShapeViolations,
   provenanceViolation,
   sizingViolation,
+  SPAWN_OWNERSHIP_CUE,
   subsystemsOf,
   TaskLintError,
 } from "../src/lib/task-linter.js";
@@ -483,6 +484,93 @@ test("W1-T81 ACCEPTANCE 3: adding a new phrase row to the patterns table flags a
   const v = headlessFitnessViolations(seeded, extendedLexicon);
   assert.equal(v.length, 1);
   assert.match(v[0].message, /'confetti-cannon'/);
+});
+
+// ── W1-T118 — a lexicon hit needs an ACTOR (the #268 false positive) ─────────
+//
+// SAME WORD ('killed'), opposite fitness: W1-T117's child is spawned by the
+// test itself and reaped in-process (headless-performable); W1-T12d's daemon
+// is a real, operator-owned process on a live session (structurally NOT
+// headless-performable). The discriminator is SPAWN-OWNERSHIP, carried as an
+// optional `qualifier` on the lexicon row — never a rewording of the row.
+
+test("W1-T118 ACCEPTANCE 1a: W1-T117's criteria, verbatim from the plan (the as-filed, post-reword observable form), do not flag", () => {
+  const t = realTask("W1-T117");
+  assert.equal(t.acceptance!.length, 3);
+  assert.equal(headlessFitnessViolations(t).length, 0);
+});
+
+test("W1-T118 ACCEPTANCE 1b: the pre-#268-reword form of W1-T117's criteria — carrying the bare past-participle of the tag under test, same spawn-ownership context as the real proofs — also does not flag", () => {
+  const t = realTask("W1-T117");
+  // Derived from the REAL, as-filed criteria above by reverting the observable
+  // ("process.kill(childPid, 0) throws ESRCH" / "the stray's pid is ESRCH")
+  // back to the bare past-participle that #268 originally flagged, while
+  // leaving the SAME spawn/seed/fixture ownership language the real proofs
+  // already carry untouched — this is what the filer wrote BEFORE rewording
+  // around the checker.
+  const preReword: Task["acceptance"] = [
+    {
+      claim: t.acceptance![0]!.claim,
+      proof:
+        "in-process test: worker fixture spawns a detached long-sleep child; after teardown on BOTH the " +
+        "success and the error path, the child's process group is killed and the survivor scan returns an " +
+        "empty list — asserted in-process, no operator and no real signal to a system daemon",
+    },
+    {
+      claim: t.acceptance![1]!.claim,
+      proof:
+        "in-process test: seed one stray child carrying run markers plus one unrelated child without them; " +
+        "after the sweep, the stray child is killed and a ledger line carries its cmdline, while the " +
+        "unrelated child is still alive",
+    },
+  ];
+  assert.ok(/\bkilled\b/i.test(preReword[0]!.proof), "sanity: the pre-reword form carries the bare past-participle");
+  assert.equal(headlessFitnessViolations({ ...t, acceptance: preReword }).length, 0);
+});
+
+test("W1-T118 ACCEPTANCE 2: W1-T12d's third acceptance criterion, verbatim from the plan and evaluated AS IF verify:auto, still flags — the live-kill regression lock", () => {
+  const t12d = realTask("W1-T12d");
+  const criterion3 = t12d.acceptance![2]!;
+  assert.match(criterion3.claim, /\bkilled\b/i, "sanity: still carries the bare past-participle verbatim");
+  const asAuto: Task = { ...t12d, verify: "auto", acceptance: [criterion3] };
+  const v = headlessFitnessViolations(asAuto);
+  assert.equal(v.length, 1, "an operator-owned subject with no ownership signal must still flag");
+  assert.match(v[0].message, /'killed'/);
+  // Deletion would pass ACCEPTANCE 1 above and must NOT pass this one — the row stays.
+  const killedRow = HEADLESS_FORBIDDEN_LEXICON.find((e) => e.tag === "killed");
+  assert.ok(killedRow, "the 'killed' row must remain in the exported lexicon — scope as data, never delete");
+});
+
+test("W1-T118 ACCEPTANCE 3a: adding a qualifier row to the exported table flips a seeded criterion's verdict — ZERO changes to headlessFitnessViolations itself", () => {
+  const seeded = task({
+    id: "SEEDED-OWNERSHIP-OVERNIGHT",
+    acceptance: [
+      {
+        claim: "the scheduler fixture runs an overnight batch entirely in-process",
+        proof: "a test-spawned overnight-scheduler fixture fires every queued job synchronously; no real clock, no operator",
+      },
+    ],
+  });
+  assert.equal(
+    headlessFitnessViolations(seeded).length,
+    1,
+    "the DEFAULT lexicon's 'overnight' row carries no qualifier yet — it must still flag",
+  );
+  const qualifiedLexicon = HEADLESS_FORBIDDEN_LEXICON.map((e) =>
+    e.tag === "overnight" ? { ...e, qualifier: SPAWN_OWNERSHIP_CUE } : e,
+  );
+  const v = headlessFitnessViolations(seeded, qualifiedLexicon);
+  assert.equal(v.length, 0, "the qualifier, added as pure DATA, exempts the seeded criterion with zero code edits");
+});
+
+test("W1-T118 ACCEPTANCE 3b: a seeded criterion carrying a lexicon term with NO ownership signal in either direction still flags (fail-toward-flagging)", () => {
+  const seeded = task({
+    id: "SEEDED-AMBIGUOUS-KILLED",
+    acceptance: [{ claim: "the daemon process is killed and restarted", proof: "observe the restart" }],
+  });
+  const v = headlessFitnessViolations(seeded);
+  assert.equal(v.length, 1, "ambiguous ownership must default to flagging, not clearing");
+  assert.match(v[0].message, /'killed'/);
 });
 
 // ── PROOF-SHAPE — acceptance criterion 4 ──────────────────────────────────────

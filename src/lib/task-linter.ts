@@ -175,6 +175,23 @@ export function sizingViolation(task: Task): LintViolation | undefined {
 //     instruction; (b) a hit fully inside a quoted span ('...' or "...", the
 //     quote not itself a contraction/possessive apostrophe) is a quoted excerpt
 //     under discussion, not an instruction.
+//   - FALSE POSITIVE #3 — missing ACTOR (the #268 sweep, W1-T118): a lexicon
+//     word can name either a genuinely live action (W1-T12d's operator kill -9
+//     on a real daemon) or a headless one (a test spawning its own child and
+//     reaping it in-process, W1-T117) — SAME WORD, opposite fitness, because the
+//     check matched vocabulary, not who/what the action is done TO. The
+//     discriminator is SPAWN-OWNERSHIP: a lexicon row may carry an optional
+//     `qualifier` pattern (see {@link LexiconEntry}); when the criterion's own
+//     text (claim + proof together, unscoped by clause — ownership is usually
+//     established earlier in the SAME criterion, often in a different clause,
+//     e.g. 'fixture spawns...; ...killed') matches that pattern, the row does
+//     NOT fire — the process/resource acted upon is CREATED BY THE TEST OR
+//     FIXTURE, not pre-existing on the operator's machine, so the action is
+//     headlessly performable. No qualifier, or no match ⇒ the row fires exactly
+//     as before (DEFAULT ON FIRING: a false positive costs a reword, a false
+//     negative costs a dispatched task that can never pass, the W1-T9 death
+//     spiral) — W1-T12d's live-kill criterion names no ownership signal and
+//     must keep flagging.
 //   - FALSE NEGATIVE — the genuinely headless-unfit proofs the check was BUILT to
 //     catch ('paste the red check, then revert' — the W1-T25 no_pr incident,
 //     122 turns before verdict=no_pr) are PHRASES, not lexicon words, so the
@@ -184,14 +201,35 @@ export function sizingViolation(task: Task): LintViolation | undefined {
 export interface LexiconEntry {
   tag: string;
   pattern: RegExp;
+  /** SPAWN-OWNERSHIP qualifier (W1-T118, the #268 false positive) — OPTIONAL,
+   *  scope-as-data, never a reason to delete the row. When present, a hit for
+   *  THIS row is exempted (does not flag) if `qualifier` matches anywhere in the
+   *  criterion's combined claim+proof text: the criterion's own words establish
+   *  that the process/resource acted upon is CREATED BY THE TEST OR FIXTURE
+   *  (spawns/seeds/fixture/in-process/test-spawned), not pre-existing on the
+   *  operator's machine. Absent, or no match ⇒ the row fires unconditionally,
+   *  exactly as before — DEFAULT ON FIRING: an ambiguous criterion (the term
+   *  appears with no ownership signal either way) still flags, because a false
+   *  positive costs a reword while a false negative costs a dispatched task
+   *  that can never pass (the W1-T9 death spiral). See {@link
+   *  SPAWN_OWNERSHIP_CUE} for the shared cue pattern most rows will reuse. */
+  qualifier?: RegExp;
 }
+
+/** Shared SPAWN-OWNERSHIP cue (W1-T118): the criterion's own text names the
+ *  test/fixture as the thing that CREATED the process/resource being acted
+ *  upon — 'a worker fixture spawns a detached child... the child's process
+ *  group killed' (W1-T117) vs 'the LIVE daemon killed mid-task' (W1-T12d,
+ *  names no such actor). Any lexicon row may reuse this as its `qualifier`,
+ *  or supply its own — the field is per-row DATA, not tied to this constant. */
+export const SPAWN_OWNERSHIP_CUE = /\b(?:spawns?|spawned|spawning|seeds?|seeded|seeding|fixture|in-process|test-spawned)\b/i;
 
 export const HEADLESS_FORBIDDEN_LEXICON: ReadonlyArray<LexiconEntry> = [
   { tag: "overnight", pattern: /\bovernight\b/i },
   { tag: "reboot", pattern: /\breboot\b/i },
   { tag: "launchctl", pattern: /\blaunchctl\b/i },
   { tag: "loads-at-boot", pattern: /\bloads?\s+at\s+boot\b/i },
-  { tag: "killed", pattern: /\bkilled\b/i },
+  { tag: "killed", pattern: /\bkilled\b/i, qualifier: SPAWN_OWNERSHIP_CUE },
   { tag: "operator-confirms", pattern: /\boperator\s+confirms?\b/i },
   { tag: "user-selects", pattern: /\buser\s+selects?\b/i },
   { tag: "manual-eyeball", pattern: /\bmanual[- ]eyeball(?:ed|ing)?\b/i },
@@ -287,6 +325,21 @@ function isNegationScoped(text: string, start: number): boolean {
   return NEGATION_CUE.test(text.slice(clauseStart, start));
 }
 
+/** True iff `tag`'s row in `lexicon` carries a `qualifier` that matches
+ *  somewhere in `text` — the criterion's own words establish spawn-ownership
+ *  (W1-T118, the #268 false positive). Unscoped by clause (unlike {@link
+ *  isNegationScoped}): ownership is typically established earlier in the SAME
+ *  criterion, often in a different clause ('fixture spawns...; ...killed'), so
+ *  restricting to the local clause would miss it. No qualifier on the row, or
+ *  no match ⇒ false — DEFAULT ON FIRING (W1-T118(ii)): an ambiguous criterion
+ *  still flags. */
+function isSpawnOwnershipQualified(text: string, tag: string, lexicon: ReadonlyArray<LexiconEntry>): boolean {
+  const entry = lexicon.find((e) => e.tag === tag);
+  if (!entry?.qualifier) return false;
+  const re = new RegExp(entry.qualifier.source, entry.qualifier.flags.replace(/g/g, ""));
+  return re.test(text);
+}
+
 /** Every criterion of an auto-verify task that hits `lexicon` outside a negation
  *  scope, a quoted span, or a bare-'/' lexicon enumeration. Defaults to
  *  {@link HEADLESS_FORBIDDEN_LEXICON}; the `lexicon` param exists so the DATA
@@ -306,7 +359,11 @@ export function headlessFitnessViolations(
     if (hits.length === 0) return;
     const enumExempt = enumerationExemptIndices(hits, text);
     const hit = hits.find(
-      (h, idx) => !enumExempt.has(idx) && !isQuoted(text, h.start, h.end) && !isNegationScoped(text, h.start),
+      (h, idx) =>
+        !enumExempt.has(idx) &&
+        !isQuoted(text, h.start, h.end) &&
+        !isNegationScoped(text, h.start) &&
+        !isSpawnOwnershipQualified(text, h.tag, lexicon),
     );
     if (hit) {
       violations.push({
