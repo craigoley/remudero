@@ -83,6 +83,23 @@ test("triagePrompt: the AMBIGUOUS branch demands OPTION:/RECOMMENDATION: lines a
   assert.doesNotMatch(prompt, /AskUserQuestion/);
 });
 
+test("triagePrompt: the HARNESS-MINTED id is handed over verbatim — the worker is told to use it, not to compute one", () => {
+  const prompt = triagePrompt(ENTRY, "r1", "W1-T263");
+  assert.match(prompt, /USE EXACTLY `W1-T263`/, "the minted id is stated as the id to use");
+  assert.match(prompt, /number them upward from W1-T263/, "multi-task proposals are told where to continue");
+  // The worker has NO Bash tool (TRIAGE_WORKER_TOOLS) — a prompt that tells it to run a grep
+  // pipeline to find the highest id is an instruction it cannot execute, which is how id
+  // selection degraded to eyeballing whichever file it happened to read.
+  assert.doesNotMatch(prompt, /grep -h 'id: W1-T'/, "no shell pipeline survives in the minted-id branch");
+});
+
+test("triagePrompt: WITHOUT a minted id the fallback still names BOTH sources — monolith AND every shard", () => {
+  const prompt = triagePrompt(ENTRY, "r1");
+  assert.match(prompt, /plan\/tasks\.d\/\*\.yaml/);
+  assert.match(prompt, /monolith AND every shard/);
+  assert.doesNotMatch(prompt, /USE EXACTLY/, "no id was minted, so none is asserted");
+});
+
 test("triagePrompt: notes when there are no attachments and lists them when present", () => {
   assert.match(triagePrompt(ENTRY, "r1"), /attachments: \(none\)/);
   const withAttachment = { ...ENTRY, attachments: ["plan/feedback/attachments/fb-1/shot.png"] };
@@ -783,11 +800,15 @@ test("nonPlanFilesInDiff: MASTER-PLAN.md hunks are plan hunks, per this guard's 
 });
 
 // ── id selection sees the tasks.d shards (the W1-T236 re-mint stalemate) ────
+// AMENDED (the 2/2 collision evidence, W1-T256->257 #770 / W1-T260->261 #775): the prompt no
+// longer DESCRIBES a discovery command — the triage worker has no Bash tool, so the grep it
+// used to be handed was never runnable, and selection degraded to eyeballing. The harness
+// mints the id (lib/task-id.ts) and the prompt states it; the no-mint fallback keeps the
+// shard-inclusive RULE without prescribing a shell pipeline.
 
 test("the triage prompt instructs shard-inclusive id selection — max across plan/tasks.yaml AND plan/tasks.d, so a new id never collides with a shard-owned one", () => {
   const p = triagePrompt(ENTRY, "RUN-1");
   assert.match(p, /plan\/tasks\.d\/\*\.yaml/, "the id-selection rule must name the shards");
-  assert.match(p, /highest existing id across the monolith AND the shards/i);
-  assert.match(p, /grep -h 'id: W1-T' plan\/tasks\.yaml plan\/tasks\.d\/\*\.yaml/, "the exact discovery command is given, not left to the worker's guess");
-  assert.match(p, /mint the next\n?\s*integer above it/i);
+  assert.match(p, /highest id across the\s+monolith AND every shard/i);
+  assert.match(p, /never the monolith alone/i);
 });

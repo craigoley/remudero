@@ -101,8 +101,13 @@ export function missingFeedbackMessage(
  * GRILL-OR-PROPOSE, and required to end with exactly one of the three verdict markers this
  * module's {@link parseTriageVerdict} anchors on. The worker has NO Bash/git — it only edits
  * files; the caller (run-task.ts) owns commit/push/PR.
+ *
+ * `mintedId` (W1-T263): the id the HARNESS derived — the worker has no Bash tool, so the
+ * old "run this grep and pick the next integer" instruction was an instruction it could not
+ * execute, leaving id selection to eyeballing the files it happened to read. When present,
+ * the prompt HANDS the id over instead of describing how to compute one.
  */
-export function triagePrompt(entry: FeedbackEntry, runId: string): string {
+export function triagePrompt(entry: FeedbackEntry, runId: string, mintedId?: string): string {
   return [
     "You are the REMUDERO ARCHITECT running an INTAKE TRIAGE (MASTER-PLAN §7B) over one captured",
     "feedback entry. You ride a HIGHER tier than implement workers (G-17). You do NOT have a Bash",
@@ -153,12 +158,21 @@ export function triagePrompt(entry: FeedbackEntry, runId: string): string {
     "  (plan/tasks.yaml and/or MASTER-PLAN.md — NEVER src/ or test/) to add or rewire whatever the",
     "  feedback calls for. Every new or rewired plan/tasks.yaml task MUST carry",
     `  \`origin: feedback#${entry.id}\` so the provenance is traceable.`,
-    "  ID SELECTION for any NEW task: ids live in BOTH plan/tasks.yaml AND plan/tasks.d/*.yaml",
-    "  (the shards own ids the monolith does not — a colliding id is refused pre-push, so a wrong",
-    "  pick means NO proposal opens). Before minting a new task id, run",
-    "  `grep -h 'id: W1-T' plan/tasks.yaml plan/tasks.d/*.yaml | grep -oE 'W1-T[0-9]+' | sort -t T -k2 -n | tail -1`",
-    "  to find the highest existing id across the monolith AND the shards, and mint the next",
-    "  integer above it. End your output with a line",
+    ...(mintedId
+      ? [
+          `  ID SELECTION for any NEW task: USE EXACTLY \`${mintedId}\` — the harness already minted it`,
+          "  from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, and the ids open plan",
+          "  PRs have already minted. Do NOT pick your own id and do NOT 'correct' this one: a colliding",
+          "  id is refused pre-push, so a wrong pick means NO proposal opens. If the feedback needs MORE",
+          `  than one new task, number them upward from ${mintedId} (${mintedId}, then the next integers).`,
+        ]
+      : [
+          "  ID SELECTION for any NEW task: ids live in BOTH plan/tasks.yaml AND plan/tasks.d/*.yaml",
+          "  (the shards own ids the monolith does not — a colliding id is refused pre-push, so a wrong",
+          "  pick means NO proposal opens). Mint the next integer above the highest id across the",
+          "  monolith AND every shard — read both, never the monolith alone.",
+        ]),
+    "  End your output with a line",
     "  starting exactly `PROPOSED:` with a one-line summary of what changed and why, e.g.",
     "  `PROPOSED: add W1-T200 (origin: feedback#" + entry.id + ") to cover the requested CLI flag`.",
     "",
