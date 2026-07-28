@@ -66,8 +66,18 @@ import type { OrphanSweepReport } from "./worker-containment.js";
  * paused daemon now idles IN-PROCESS (a `daemon.pause` heartbeat per tick,
  * re-polling the flag via the injected clock), so `rmd resume` takes effect
  * on the next tick of the SAME process — no relaunch involved.
+ *
+ * `stale` (W1-T126, DAEMON SELF-FRESHNESS) is the OPPOSITE polarity from
+ * `headroom_exhausted`/`paused` above, deliberately: those two must never reach a
+ * process exit (an awaiting-state relaunched by KeepAlive just re-reads the identical
+ * condition and exits again — a storm). Staleness is not an awaiting-state; it is a
+ * REQUEST to exit, because launchd's `KeepAlive{SuccessfulExit:false}` is the only
+ * mechanism that can get a long-running daemon off code it loaded once at boot and
+ * onto a fix merged since (the five-manual-cycles-in-a-weekend problem this task
+ * fixes). So `stale` DOES reach {@link daemonExitCode} as a real stop reason, and maps
+ * to a nonzero exit — see that function's doc.
  */
-export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error";
+export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" | "stale";
 
 /** Default idle-poll pace: check back once a minute while nothing is runnable. */
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
@@ -82,15 +92,19 @@ export const DEFAULT_POLL_INTERVAL_MS = 60_000;
  * lives in one place, provable without launchd.
  *
  * `stopped`/`max_reached` are the only exits meaning "this was deliberate,
- * nothing to see" ⇒ 0. Every other reason — `blocked` and `error` — is
- * nonzero so a supervisor (or launchd's KeepAlive, W1-T12b) restarts. This
- * is exactly why neither headroom exhaustion NOR pause can be allowed to
- * reach this function as a `DaemonStopReason` at all (see that type's doc,
- * above): each would either wrongly map to 0 (silence — permanently dead
- * until a manual reload) or wrongly map to 1 (a relaunch storm — ~86s for
- * headroom, ~10s for the 2026-07-22 paused storm) — both wrong, because an
- * awaiting-state is neither a clean stop nor a crash. Both are handled
- * entirely inside the loop below instead, and never become return values.
+ * nothing to see" ⇒ 0. Every other reason — `blocked`, `error`, and `stale`
+ * (W1-T126) — is nonzero so a supervisor (or launchd's KeepAlive, W1-T12b)
+ * restarts. `stale` WANTS exactly that restart (it is how a long-running
+ * daemon gets off a stale boot sha and onto code merged since — see
+ * `DaemonStopReason`'s doc), unlike `blocked`/`error`, which merely tolerate
+ * it. This is exactly why neither headroom exhaustion NOR pause can be
+ * allowed to reach this function as a `DaemonStopReason` at all (see that
+ * type's doc, above): each would either wrongly map to 0 (silence —
+ * permanently dead until a manual reload) or wrongly map to 1 (a relaunch
+ * storm — ~86s for headroom, ~10s for the 2026-07-22 paused storm) — both
+ * wrong, because an awaiting-state is neither a clean stop nor a crash. Both
+ * are handled entirely inside the loop below instead, and never become
+ * return values.
  */
 export function daemonExitCode(stopReason: DaemonStopReason): number {
   return stopReason === "stopped" || stopReason === "max_reached" ? 0 : 1;
@@ -340,6 +354,15 @@ export interface DaemonOpts {
   maxSpawnInfraBackoffMs?: number;
 }
 
+/**
+ * W1-T126 (DAEMON SELF-FRESHNESS): the result of comparing THIS process's own boot sha
+ * against origin/main. `stale` carries the sha pair so the caller — and the ledger line
+ * this drives, `daemon_selfrestart_for_freshness` — names exactly what advanced, the same
+ * way `checkServiceFreshness`'s `behind` field does in self-sync.ts (the shared PREDICATE
+ * this sibling check reuses rather than duplicating; see `DaemonDeps.checkFreshness`).
+ */
+export type DaemonFreshness = { stale: false } | { stale: true; oldSha: string; newSha: string };
+
 export interface DaemonSummary {
   attempted: string[];
   merged: string[];
@@ -413,6 +436,37 @@ export interface DaemonDeps {
    * + merge) before a pause is honoured; no new spawn follows.
    */
   checkPause?: () => string | undefined;
+  /**
+   * W1-T126 (DAEMON SELF-FRESHNESS, filed from #271 holding-note item 7 — five manual
+   * pull-and-reload cycles in a single weekend, because every merged pipeline fix was
+   * invisible to the already-running daemon until a human noticed and cycled it by
+   * hand). An OPTIONAL check, consulted once per tick with the SAME "between iterations
+   * only" discipline as `checkStop`/`checkPause` immediately above — so it can NEVER
+   * interrupt a `runOne` already in flight; in-flight work always reaches its verdict +
+   * merge first (the identical drain-and-hold guarantee those two rely on).
+   *
+   * `{ stale: false }` ⇒ this process's own boot sha is caught up with origin/main, no
+   * action. `{ stale: true, oldSha, newSha }` ⇒ origin/main has advanced past it: the
+   * loop stops with {@link DaemonStopReason} `"stale"` — a deliberate NONZERO exit (see
+   * that type's doc for why this is the opposite polarity from headroom/pause) so
+   * launchd's `KeepAlive{SuccessfulExit:false}` relaunches into the fresh code — and
+   * ledgers `daemon_selfrestart_for_freshness` (never a bare generic stop line), so an
+   * intentional self-restart is provably distinguishable from a crash under the
+   * identical "any exit relaunches" semantics (see the BOOT-RATE INVARIANT doc above —
+   * a crash-loop reader keys off THIS marker, not the raw exit code, to tell the two
+   * apart).
+   *
+   * This module stays PURE (see the file header: never touches git or the filesystem)
+   * — the real command wires this to self-sync.ts's shared `checkServiceFreshness`
+   * PREDICATE (the W1-T79/W1-T255 sibling this design explicitly reuses rather than
+   * duplicating) evaluated against the sha recorded at THIS process's own boot, and
+   * performs the actual `git merge --ff-only origin/main` pull as part of producing a
+   * `stale` read — by the time this loop acts on it, the working tree is already at
+   * `newSha`, so the freshly-relaunched process boots straight into it. Optional:
+   * omitted ⇒ the loop never self-restarts for staleness, behavior unchanged from
+   * before this check existed.
+   */
+  checkFreshness?: () => DaemonFreshness;
   /**
    * CONSOLE WRITE-ACTIONS (fb-1784988460437-9daa9b). PEEK the pending "Run this
    * queued task now" kick markers, oldest-first — PURE injection, no fs here (the
@@ -886,6 +940,20 @@ export async function runDaemon(
     if (stopped) {
       log("daemon.stop", { detail: stopped });
       return summary("stopped", stopped);
+    }
+    // SELF-FRESHNESS (W1-T126): checked directly after STOP — a hard STOP still wins
+    // outright, a deliberately halted fleet never self-restarts for freshness — and
+    // before PAUSE/headroom/dispatch, so origin/main advancing past this process's own
+    // boot sha is noticed even while otherwise idle or paused. Never interrupts
+    // in-flight work: like `checkStop`/`checkPause`, this is only consulted between
+    // iterations. See `DaemonDeps.checkFreshness`'s doc for the full contract.
+    const freshness = deps.checkFreshness?.();
+    if (freshness?.stale) {
+      const detail =
+        `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
+        `past this process's boot sha`;
+      log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha });
+      return summary("stale", detail);
     }
     // PAUSE is an IN-PROCESS idle, never an exit (the 2026-07-22 relaunch
     // storm: returning here exited nonzero, and KeepAlive{SuccessfulExit:false}
