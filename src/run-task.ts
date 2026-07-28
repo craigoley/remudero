@@ -161,6 +161,7 @@ import { assertProposedPlanLoads,
   triageCommitMessage,
   triagePrompt,
 } from "./lib/triage.js";
+import { describeMint, mintNextTaskId } from "./lib/task-id.js";
 import {
   applyPlanProposalCommit,
   decidePlanArchitect,
@@ -3845,6 +3846,42 @@ async function depReviewCommand(prArg: string, rest: string[] = []): Promise<num
  * configuration error (exit 2), never a silent fall-back to full-plan or
  * no-op — the control surface never guesses on ambiguous input.
  */
+/**
+ * `rmd next-task-id [--plan <path>] [--offline]` — the OPERATOR-facing half of the mint
+ * (lib/task-id.ts). An id picked by eye collided twice in one session (W1-T256->257 in #770,
+ * W1-T260->261 in #775: one already owned by a merged PR, one by a `plan/tasks.d/` shard),
+ * each costing a mechanical renumber + re-push after `rmd lint-plan` refused the duplicate.
+ * This prints the derived id AND its provenance, so a mint is checkable rather than trusted.
+ *
+ * Exits 0 on a clean mint, 1 when a source DEGRADED (an unreadable shard, or an open-PR read
+ * that failed): the id is then a FLOOR that may still collide upward, and a non-zero exit is
+ * what stops a script from consuming it as authoritative. `--offline` skips the open-PR read
+ * deliberately — that is a stated scope reduction, still reported, still exit 0.
+ */
+export async function nextTaskIdCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("next-task-id", rest, ["--plan"], ["--offline"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const planPath = flagValue(rest, "--plan") ?? join(repoRoot, "plan", "tasks.yaml");
+  const offline = rest.includes("--offline");
+  const self = resolveOwnerRepo();
+  let mint;
+  try {
+    mint = mintNextTaskId({
+      planPath,
+      openPrTexts: offline ? undefined : () => openPrMintTexts(self.owner, self.repo),
+    });
+  } catch (e) {
+    console.error(`### rmd next-task-id: ${(e as Error).message}`);
+    return 2;
+  }
+  console.log(describeMint(mint));
+  if (offline) console.log("(--offline: open plan PRs were NOT read — this id is a floor, not a guarantee)");
+  return mint.degraded.length ? 1 : 0;
+}
+
 export async function lintPlanCommand(rest: string[]): Promise<number> {
   const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base"], []);
   if (badArg) {
@@ -5608,6 +5645,24 @@ export function deriveStrikeHistory(lines: Array<Record<string, unknown>>, taskI
 }
 
 /**
+ * The CHEAPLY-ENUMERABLE half of the mint's reserved set (lib/task-id.ts): every open PR's
+ * title, body, and head branch, as raw text to scan for already-minted `W1-T<n>` ids. ONE
+ * `gh pr list` — deliberately WITHOUT `statusCheckRollup` (the payload-heavy field
+ * `buildOpenPrViews` needs), so this stays an O(1)-ish read a mint can always afford.
+ *
+ * An id minted by an OPEN plan PR exists nowhere on main — that is exactly the gap that let
+ * `W1-T256` be minted twice (#770). Scanning free text over-counts by design: a skipped
+ * number costs nothing, a collision costs a renumber + re-push cycle.
+ */
+export function openPrMintTexts(owner: string, repo: string): string[] {
+  const rows = ghJson([
+    "pr", "list", "--repo", `${owner}/${repo}`, "--state", "open", "--limit", "100",
+    "--json", "title,body,headRefName",
+  ]) as Array<{ title?: string; body?: string; headRefName?: string }>;
+  return rows.map((r) => [r.title ?? "", r.body ?? "", r.headRefName ?? ""].join("\n"));
+}
+
+/**
  * Build the observed open-PR state the sweep reconciles — the real gateway
  * (`gh pr list --state open`), cross-referenced with the ledger. No `gh`/network
  * lives in lib/sweep.ts; this is the injected edge.
@@ -6865,6 +6920,25 @@ export async function triageCommand(rest: string[]): Promise<number> {
       return 1;
     }
 
+    // ID MINT (the 2/2 collision evidence: W1-T256->257 #770, W1-T260->261 #775; lineage
+    // feedback#fb-1784766965325-c7b673). Derived HERE, from the FRESH worktree's plan (monolith
+    // + every tasks.d shard) plus the ids open plan PRs have already minted, and handed to the
+    // worker — which has no Bash tool and so could never have run the grep the prompt used to
+    // describe. Ledgered with its provenance so a degraded source is visible, never silent.
+    const mint = mintNextTaskId({
+      planPath: join(worktreePath, "plan", "tasks.yaml"),
+      openPrTexts: () => openPrMintTexts(owner, repo),
+    });
+    log("triage.id_minted", {
+      minted_id: mint.id,
+      max_seen: mint.maxSeen,
+      source_monolith: mint.sources.monolith,
+      source_shards: mint.sources.shards,
+      source_open_prs: mint.sources.openPrs,
+      degraded: mint.degraded.map((d) => d.source),
+    });
+    say(`next task id: ${describeMint(mint)}`);
+
     const worker = await spawnWorker({
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
@@ -6873,7 +6947,7 @@ export async function triageCommand(rest: string[]): Promise<number> {
       maxTurns: mountsTable.architect.maxTurns, // MOUNT-GOVERNED (§9) — never a hardcoded literal.
       maxBudgetUsd: DEFAULT_BUDGET_USD,
       config,
-      prompt: triagePrompt(entry, runId),
+      prompt: triagePrompt(entry, runId, mint.id),
       tools: TRIAGE_WORKER_TOOLS,
     });
     log("triage.synthesized", {
@@ -9030,6 +9104,11 @@ const COMMANDS: readonly CommandSpec[] = [
     usage:
       "rmd lint-plan [--plan <path>] [--base <git-ref>]   # §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing",
   },
+  {
+    name: "next-task-id",
+    usage:
+      "rmd next-task-id [--plan <path>] [--offline]   # print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, and the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775); --offline skips the open-PR read (the mint is then a FLOOR, and says so); prints its provenance, spawns nothing",
+  },
   { name: "retro", usage: "rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)" },
   {
     name: "drain",
@@ -9324,6 +9403,9 @@ export async function main(
   }
   if (cmd === "lint-plan") {
     process.exit(await lintPlanCommand(rest));
+  }
+  if (cmd === "next-task-id") {
+    process.exit(await nextTaskIdCommand(rest));
   }
   if (cmd === "retro") {
     process.exit(await retroCommand(rest));
