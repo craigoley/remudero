@@ -133,10 +133,18 @@ jobs:
           set -euo pipefail
 
           runs_json() {
-            # All check runs on the PR head SHA, across every workflow + app, merged across pages.
+            # All check runs on the PR head SHA, across every workflow + app, merged across pages,
+            # THEN DEDUPED BY NAME (W1-T123): a SHA accumulates one check-run PER ATTEMPT, so a
+            # re-run of a required check leaves its earlier failed attempt in the list forever
+            # unless we narrow to one row per name. Group by `name` and keep only the attempt with
+            # the latest `started_at` -- a name whose failed attempt is followed by a later
+            # success now reads as that success; everything downstream evaluates ONLY this
+            # deduped, latest-per-name list.
             # (`--slurp` can't combine with `-q`, so flatten the page array with a separate jq.)
             gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" --paginate --slurp \
-              | jq -c '[ .[].check_runs[] | {name, status, conclusion} ]'
+              | jq -c '[ .[].check_runs[] | {name, status, conclusion, started_at} ]
+                        | group_by(.name)
+                        | map(max_by(.started_at))'
           }
 
           # 1) WAIT until every REQUIRED check is present + completed (terminal). A required check
