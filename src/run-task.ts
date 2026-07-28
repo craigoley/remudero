@@ -6044,6 +6044,111 @@ export function buildEscalationReconcileCandidates(
 }
 
 /**
+ * Pure arg-builder for a cold-PR `dispatchFix` reconstruction (W1-T100/W1-T106):
+ * derives the SAME `runFixRung` options (everything but `deps`, whose adapters
+ * close over dispatchFix's own git/gh/worker-spawn side effects) that
+ * `buildSweepEffects.dispatchFix` used to build inline. Extracted so the
+ * mode-classification and initial-verdict reconstruction — evidence.mergeConflict
+ * takes precedence over evidence.ciFailures over an ordinary reviewer-unmet seed,
+ * mirroring FIX_MODE_RULES' own ordering — is unit-testable directly, without the
+ * worktree/spawn boundary around dispatchFix itself (the codebase's established
+ * "the arg-builder carries the testable read-only contract; the spawn wrapper is
+ * untested by design" split — see spawnSpecialistWorker/spawnReconSpecialist).
+ */
+export function buildFixRungDispatchArgs(args: {
+  task: { id: string; title: string; acceptance?: AcceptanceCriterion[] };
+  runId: string;
+  prUrl: string;
+  branch: string;
+  worktreePath: string;
+  mount: Mount;
+  settingsFile: string;
+  config: Config;
+  budgetUsd: number;
+  strikeCap: number;
+  evidence: FixDispatchEvidence;
+  pr: { headSha: string; reviewSummary?: string; pendingAnswer?: { constraint: string; resetStrikeCounter?: boolean } };
+  reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount };
+}): Omit<Parameters<typeof runFixRung>[0], "deps"> {
+  const { evidence, pr } = args;
+  // W1-T100: `evidence.ciFailures` is defined ONLY for a blocked_ci dispatch
+  // (runSweep/routeFix set it, undefined otherwise) — the SAME discriminator
+  // both callers use to pick this evidence shape. W1-T106: `evidence.mergeConflict`
+  // is the analogous discriminator for a `conflicted` dispatch — checked FIRST
+  // (mirrors FIX_MODE_RULES' ordering) since a merge-conflict PR also carries no
+  // review verdict.
+  const isMergeConflict = evidence.mergeConflict !== undefined;
+  const isCiLog = !isMergeConflict && evidence.ciFailures !== undefined;
+  const unmet = evidence.unmetCriteria;
+
+  // A failing verdict seeded from the ledger's unmet criteria (review mode) —
+  // OR, for a blocked_ci/conflicted dispatch (W1-T100, broadened by W1-T106/
+  // W1-T138 to fire regardless of the review verdict beside it), a placeholder
+  // verdict: `criteria: []` so the rung never re-litigates a review verdict
+  // that may be stale or simply irrelevant until the block actually clears (a
+  // FRESH review only ever runs once CI is green). Either way, the fix rung
+  // re-derives the AUTHORITATIVE verdict via runReview after each strike.
+  const initialReview: ReviewVerdict & { headSha: string; reviewerOutcome: string } = isMergeConflict
+    ? {
+        state: "failure",
+        criteria: [],
+        testTheater: false,
+        summary: `sweep-reconstructed: merge state dirty (${(evidence.mergeConflict?.files ?? []).length} conflicting file(s)) — merge-conflict dispatch, no review can run until the conflict resolves`,
+        floorDegraded: false,
+        capped: false,
+        keywordOnly: false,
+        planOnly: false,
+        headSha: pr.headSha,
+        reviewerOutcome: "sweep-reconstructed-merge-conflict",
+      }
+    : isCiLog
+    ? {
+        state: "failure",
+        criteria: [],
+        testTheater: false,
+        summary: `sweep-reconstructed: required checks red (${(evidence.ciFailures ?? []).length} failing check(s)) — ci-log dispatch, any review verdict on this head is disregarded until checks are green`,
+        floorDegraded: false,
+        capped: false,
+        keywordOnly: false,
+        planOnly: false,
+        headSha: pr.headSha,
+        reviewerOutcome: "sweep-reconstructed-ci-log",
+      }
+    : {
+        state: "failure",
+        criteria: unmet,
+        testTheater: false,
+        summary: pr.reviewSummary ?? `sweep-reconstructed failing review (${unmet.length} unmet)`,
+        floorDegraded: false,
+        capped: false,
+        keywordOnly: false,
+        planOnly: false,
+        headSha: pr.headSha,
+        reviewerOutcome: "sweep-reconstructed",
+      };
+
+  return {
+    taskId: args.task.id,
+    runId: args.runId,
+    task: args.task,
+    prUrl: args.prUrl,
+    branch: args.branch,
+    worktreePath: args.worktreePath,
+    initialSessionId: "", // cold PR: no session — strike 1 degrades to fresh (adapter below)
+    mount: args.mount,
+    settingsFile: args.settingsFile,
+    config: args.config,
+    budgetUsd: args.budgetUsd,
+    strikeCap: args.strikeCap,
+    initialReview,
+    constraint: pr.pendingAnswer?.constraint,
+    ciFailures: evidence.ciFailures,
+    mergeConflict: evidence.mergeConflict,
+    reviewBase: args.reviewBase,
+  };
+}
+
+/**
  * Wire the four gated effects to their real implementations. dispatchFix
  * reconstructs a W1-T76 `runFixRung` invocation for a PR discovered COLD (no live
  * run/session): it checks the PR head branch out into a scratch worktree, seeds a
@@ -6157,15 +6262,6 @@ export function buildSweepEffects(
     },
 
     dispatchFix: async (pr, evidence) => {
-      // W1-T100: `evidence.ciFailures` is defined ONLY for a blocked_ci
-      // dispatch (runSweep/routeFix set it, undefined otherwise) — the SAME
-      // discriminator both callers use to pick this evidence shape. W1-T106:
-      // `evidence.mergeConflict` is the analogous discriminator for a
-      // `conflicted` dispatch — checked FIRST (mirrors FIX_MODE_RULES'
-      // ordering) since a merge-conflict PR also carries no review verdict.
-      const isMergeConflict = evidence.mergeConflict !== undefined;
-      const isCiLog = !isMergeConflict && evidence.ciFailures !== undefined;
-      const unmet = evidence.unmetCriteria;
       const task = plan.tasks.find((t) => t.id === pr.taskId);
       if (!task) {
         log("sweep.fix.no_task", { pr_number: pr.prNumber, task_id: pr.taskId });
@@ -6208,52 +6304,6 @@ export function buildSweepEffects(
         });
         const budgetUsd = task.budget_usd ?? DEFAULT_BUDGET_USD;
 
-        // A failing verdict seeded from the ledger's unmet criteria (review mode)
-        // — OR, for a blocked_ci dispatch (W1-T100, broadened by W1-T138 to fire
-        // regardless of the review verdict beside it), a placeholder verdict:
-        // `criteria: []` so the rung never re-litigates a review verdict that may
-        // be stale or simply irrelevant until the red check goes green (a FRESH
-        // review only ever runs once CI is green). Either way, the fix rung
-        // re-derives the AUTHORITATIVE verdict via runReview after each strike.
-        const initialReview: ReviewVerdict & { headSha: string; reviewerOutcome: string } = isMergeConflict
-          ? {
-              state: "failure",
-              criteria: [],
-              testTheater: false,
-              summary: `sweep-reconstructed: merge state dirty (${(evidence.mergeConflict?.files ?? []).length} conflicting file(s)) — merge-conflict dispatch, no review can run until the conflict resolves`,
-              floorDegraded: false,
-              capped: false,
-              keywordOnly: false,
-              planOnly: false,
-              headSha: pr.headSha,
-              reviewerOutcome: "sweep-reconstructed-merge-conflict",
-            }
-          : isCiLog
-          ? {
-              state: "failure",
-              criteria: [],
-              testTheater: false,
-              summary: `sweep-reconstructed: required checks red (${(evidence.ciFailures ?? []).length} failing check(s)) — ci-log dispatch, any review verdict on this head is disregarded until checks are green`,
-              floorDegraded: false,
-              capped: false,
-              keywordOnly: false,
-              planOnly: false,
-              headSha: pr.headSha,
-              reviewerOutcome: "sweep-reconstructed-ci-log",
-            }
-          : {
-              state: "failure",
-              criteria: unmet,
-              testTheater: false,
-              summary: pr.reviewSummary ?? `sweep-reconstructed failing review (${unmet.length} unmet)`,
-              floorDegraded: false,
-              capped: false,
-              keywordOnly: false,
-              planOnly: false,
-              headSha: pr.headSha,
-              reviewerOutcome: "sweep-reconstructed",
-            };
-
         // W1-T78: an operator's answer to a PRIOR clarification question
         // (routed here by the DISPOSITION_RULES "answered" row) re-arms this
         // SAME dispatch — never a new call site — carrying the answer as an
@@ -6271,23 +6321,21 @@ export function buildSweepEffects(
           : fixStrikeCap(config);
 
         await runFixRung({
-          taskId: task.id,
-          runId,
-          task,
-          prUrl: pr.prUrl,
-          branch: realBranch,
-          worktreePath,
-          initialSessionId: "", // cold PR: no session — strike 1 degrades to fresh (adapter below)
-          mount: fixMount,
-          settingsFile,
-          config,
-          budgetUsd,
-          strikeCap,
-          initialReview,
-          constraint: pr.pendingAnswer?.constraint,
-          ciFailures: evidence.ciFailures,
-          mergeConflict: evidence.mergeConflict,
-          reviewBase: { owner, repo, headCheckoutDir: worktreePath, reviewerMount },
+          ...buildFixRungDispatchArgs({
+            task,
+            runId,
+            prUrl: pr.prUrl,
+            branch: realBranch,
+            worktreePath,
+            mount: fixMount,
+            settingsFile,
+            config,
+            budgetUsd,
+            strikeCap,
+            evidence,
+            pr,
+            reviewBase: { owner, repo, headCheckoutDir: worktreePath, reviewerMount },
+          }),
           deps: {
             // Fresh-spawn adapter: an empty resumeSessionId (cold PR) becomes a
             // fresh spawn rather than an attempt to resume a session that doesn't exist.
