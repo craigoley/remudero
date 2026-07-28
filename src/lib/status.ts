@@ -30,9 +30,20 @@ import { labelledIssuesRestArgs, NEEDS_HUMAN_LABEL, parseLabelledIssuesRest } fr
  * Precedence for a task id — an operator correction is checked FIRST and is
  * SUPREME (MASTER-PLAN P9 / W1-T75): it is DECLARED ground truth, not inferred
  * evidence, so it outranks every rung below rather than being read only inside
- * rung (c). Then, absent a correction:
- *   (a) state/ledger.ndjson `pr.opened` line for this task -> query that PR's state;
- *   (b) an explicit `pr:` field in tasks.yaml (tasks executed by hand, pre-ledger);
+ * rung (c). Then, absent a correction, a VERIFIED-MERGED credit outranks an
+ * open-PR ledger claim (W1-T116, MASTER-PLAN §3): an open PR is only ever the
+ * WEAKEST evidence in the system — POSSIBLY RUNNING — so every rung below is
+ * checked for a GitHub-confirmed MERGED result BEFORE an open `pr.opened` row
+ * is allowed to stand as this task's status:
+ *   (a) state/ledger.ndjson `pr.opened` line for this task -> query that PR's state.
+ *       A MERGED resolution wins outright; a non-merged one is remembered as the
+ *       dedup fallback (below) but does NOT stop the remaining rungs from being
+ *       checked for a merged credit;
+ *   (b) an explicit `pr:` field in tasks.yaml (tasks executed by hand, pre-ledger)
+ *       — checked even when (a) already found a non-merged PR, so a settled `pr:`
+ *       credit is never masked by an in-flight ledger row (the W1-T1 149x root
+ *       cause: `pr.opened` pointed at an open, later-dispatched PR while `pr: 2`
+ *       had long since merged);
  *   (c) a merged PR whose body carries the trailer `Remudero-Task: <id>` —
  *       ownership-asserted (its head branch must be this task's own `run-<id>-*`),
  *       anchor-verified (the trailer must be an exact line, not a fuzzy search
@@ -40,7 +51,9 @@ import { labelledIssuesRestArgs, NEEDS_HUMAN_LABEL, parseLabelledIssuesRest } fr
  *       exact credit is honored) — MASTER-PLAN P16 / W1-T69, the "W1-T20c
  *       false-credit" class: deriveStatus GATES DISPATCH, so a bad credit here
  *       is worse than the same class W1-T51 fixed in the retro gather.
- * First source that resolves a PR wins. If none resolve, the task is not merged.
+ * The first rung to resolve a MERGED PR wins. If none merges, (a)'s own
+ * non-merged resolution (if any) stands as a "possibly running" dedup signal;
+ * otherwise the task is not merged.
  *
  * NOTHING in this module writes tasks.yaml. It reads the plan and the ledger and
  * queries GitHub; the only file it writes is the status.json cache.
@@ -970,16 +983,26 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     }
   }
 
-  // (b) explicit `pr:` field (hand-executed, pre-ledger) — precedence UNCHANGED:
-  // only consulted when (a) resolved NOTHING at all (no `openedUrl`, or GitHub
-  // could not resolve it) — an `ownResult` already captured from (a), merged or
-  // not, still means (b) is never tried, exactly as before this fix.
-  if (!ownResult && task.pr !== undefined) {
+  // (b) explicit `pr:` field (hand-executed, pre-ledger) — W1-T116: ALWAYS
+  // consulted, even when (a) already captured a non-merged `ownResult` (an
+  // open-PR ledger claim). THE INVARIANT: an open-PR ledger claim is only ever
+  // the WEAKEST evidence in the system — POSSIBLY RUNNING — and must never
+  // outrank a VERIFIED-MERGED credit found anywhere else, pr-field included.
+  // This is the live W1-T1 shape: `pr: 2` (GitHub-confirmed MERGED) alongside a
+  // ledger `pr.opened` row for #258 (GitHub-confirmed OPEN, from a later
+  // dispatch). Before this fix, (a)'s open #258 set `ownResult` and (b) was
+  // skipped outright, so the merged #2 credit was never even looked up, the
+  // task stayed "running" forever, and the daemon re-dispatched it — the same
+  // rung-(a)-masks-a-merged-sibling shape P29(i) fixed for rung (c)'s trailer
+  // search, now closed for rung (b) too. A NON-merged (b) result still never
+  // displaces an already-captured `ownResult` — that keeps the original
+  // "first (a)/(b) hit wins for dedup purposes" behavior when nothing merged.
+  if (task.pr !== undefined) {
     const pr = deps.github.prByRef(task.pr);
     if (pr) {
       const result: StatusProjection = { taskId: task.id, source: "pr-field", ...fromPrState(pr.state), prNumber: pr.number, prUrl: pr.url, prState: pr.state };
       if (result.merged) return result;
-      ownResult = result;
+      if (!ownResult) ownResult = result;
     }
   }
 
