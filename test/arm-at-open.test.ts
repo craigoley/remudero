@@ -400,6 +400,18 @@ test(
 //        neighbor test "runFixRung is REUSED..." already uses) that runTask's
 //        capped-refusal branch calls `disarmAutoMerge(prUrl)` BEFORE
 //        `escalate(...)`, not after and not on some other branch.
+//   (iv) an EXECUTION-level proof (added after the three above shipped, W1-T125
+//        round 1 fix-ci): `runTask`'s primary post-CI-green `runReview` call
+//        gained its own injectable seam (mirroring the `spawn`/`github`/
+//        `containmentExec` params already on `runTask`'s opts, and the
+//        `deps.runReview` seam `runFixRung` already had) so a test can hand it
+//        a CAPPED verdict DIRECTLY, without ever reaching the real `runReview`'s
+//        hard-coded `spawnWorker` call (the actual keychain/PATH hazard (i)-(iii)
+//        above worked around by staying at source level). This drives a REAL
+//        `runTask()` all the way through `disarmAutoMerge(prUrl)` and the
+//        `automerge.disarmed` ledger line it writes — the two lines a coverage
+//        tool could see were never actually EXECUTED by any prior test, only
+//        proven correct by construction via (i)-(iii).
 
 test(
   "MECHANISM (i): the real judgeReview + decideAutoMergeArm produce a CAPPED, state:success, " +
@@ -423,6 +435,151 @@ test(
 
     const decision = decideAutoMergeArm(verdict, false, undefined);
     assert.equal(decision.arm, false, "capped + non-planOnly + no override ⇒ decideAutoMergeArm refuses — exactly runTask's capped-refusal branch");
+  },
+);
+
+/** A fake `gh` for the EXECUTION-level capped-refusal proof: answers `pr view`
+ *  (headRefName/body/headRefOid/statusCheckRollup — CI GREEN on the very first
+ *  poll, unlike `armOpenFakeGh` above), `pr merge --auto`/`--disable-auto`
+ *  (ordered call log, same convention), AND the escalation surface `runTask`'s
+ *  own capped-refusal branch reaches next (`gh issue create`, `gh label
+ *  create`, `gh api .../issues?...` for the open-issue dedup read) — none of
+ *  which the CI-red fixture above ever needs, because a red PR returns before
+ *  reaching review at all. */
+function armOpenCappedFakeGh(branch: string, callLogPath: string, headSha: string): string {
+  const fakeBinDir = mkdtempSync(join(tmpdir(), "arm-open-capped-bin-"));
+  const fakeGhPath = join(fakeBinDir, "gh");
+  writeFileSync(
+    fakeGhPath,
+    [
+      "#!/bin/bash",
+      "set -e",
+      `CALLLOG="${callLogPath}"`,
+      "if [[ \"$1\" == 'pr' && \"$2\" == 'view' ]]; then",
+      `  if [[ "$5" == 'headRefName' ]]; then echo '{"headRefName":"${branch}"}'; exit 0; fi`,
+      "  if [[ \"$5\" == 'body' ]]; then echo '{\"body\":\"\"}'; exit 0; fi",
+      `  if [[ "$5" == 'headRefOid' ]]; then echo '{"headRefOid":"${headSha}"}'; exit 0; fi`,
+      "  if [[ \"$5\" == 'statusCheckRollup' ]]; then",
+      "    echo 'poll' >> \"$CALLLOG\"",
+      "    echo '{\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"SUCCESS\"}]}'",
+      "    exit 0",
+      "  fi",
+      "fi",
+      "if [[ \"$1\" == 'pr' && \"$2\" == 'edit' ]]; then exit 0; fi",
+      "if [[ \"$1\" == 'pr' && \"$2\" == 'merge' ]]; then",
+      "  if [[ \"$4\" == '--auto' ]]; then echo \"arm $3\" >> \"$CALLLOG\"; exit 0; fi",
+      "  if [[ \"$4\" == '--disable-auto' ]]; then echo \"disarm $3\" >> \"$CALLLOG\"; exit 0; fi",
+      "  exit 0",
+      "fi",
+      "if [[ \"$1\" == 'label' && \"$2\" == 'create' ]]; then exit 0; fi",
+      "if [[ \"$1\" == 'issue' && \"$2\" == 'create' ]]; then",
+      "  echo 'https://github.com/acme/remudero/issues/501'",
+      "  exit 0",
+      "fi",
+      "if [[ \"$1\" == 'api' ]]; then echo '[]'; exit 0; fi",
+      "exit 1",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(fakeGhPath, 0o755);
+  return fakeBinDir;
+}
+
+test(
+  "EXECUTION (W1-T125 mechanism iv): a real runTask() run whose review call (injected) returns a " +
+    "CAPPED, state:success, planOnly:false verdict actually EXECUTES disarmAutoMerge(prUrl) and logs " +
+    "automerge.disarmed — the fake-gh call log proves `pr merge --disable-auto` really reaches `gh`, " +
+    "withdrawing the arm-at-open BEFORE the run escalates and returns a blocked verdict",
+  async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "arm-open-capped-root-"));
+    const planPath = join(root, "tasks.yaml");
+    writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN);
+    const config: Config = { claudeBin: "/bin/true", root };
+
+    armOpenGitFixture(root);
+
+    const FIXED_TS = 1785100000001;
+    const branch = `run-T-ARM-OPEN-${FIXED_TS}`;
+    const headSha = "cafed00d1234";
+    const callLogPath = join(root, "gh-calls.log");
+    writeFileSync(callLogPath, "");
+    const fakeBinDir = armOpenCappedFakeGh(branch, callLogPath, headSha);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${fakeBinDir}:${savedPath}`;
+    const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+    const spawnCalls: SpawnWorkerArgs[] = [];
+    const spawn: typeof spawnWorker = async (args) => {
+      spawnCalls.push(args);
+      if (spawnCalls.length === 1) {
+        return result({ sessionId: "s-recon", text: "RECON REPORT\nOBSERVED: nothing notable\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n" });
+      }
+      return result({ sessionId: "s-implement", text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/501\n" });
+    };
+
+    // A genuinely CAPPED, state:success, planOnly:false verdict — the exact shape
+    // MECHANISM (i) above proves `judgeReview`+`decideAutoMergeArm` really produce,
+    // handed straight to runTask's injected review seam so the run reaches the
+    // capped-refusal branch without a live reviewer spawn.
+    const cappedVerdict = {
+      state: "success" as const,
+      criteria: [],
+      testTheater: false,
+      summary: "CAPPED — 0 of 1 proofs executed",
+      floorDegraded: false,
+      capped: true,
+      keywordOnly: false,
+      planOnly: false,
+      headSha,
+      reviewerOutcome: "success",
+    };
+    let seenRunReviewArgs: { prUrl: string } | undefined;
+
+    try {
+      const res = await runTask("T-ARM-OPEN", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: ARM_OPEN_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: armOpenHoldingContainmentExec,
+        isolationExec: armOpenCleanIsolationExec,
+        runReview: async (args) => {
+          seenRunReviewArgs = { prUrl: args.prUrl };
+          return cappedVerdict;
+        },
+      });
+
+      assert.equal(res.verdict, "blocked", "a CAPPED, non-planOnly verdict with no override is refused, unattended");
+      assert.equal(res.merged, false);
+      assert.equal(seenRunReviewArgs?.prUrl, "https://github.com/acme/remudero/pull/501", "the injected review seam observed the run's own PR");
+
+      const ledger = readLedger(root);
+      const armedIdx = ledger.findIndex((l) => l.step === "automerge.armed");
+      assert.ok(armedIdx >= 0, "the run must have armed at open first, same as the sibling ACCEPTANCE test");
+      const disarmedIdx = ledger.findIndex((l) => l.step === "automerge.disarmed");
+      assert.ok(disarmedIdx >= 0, "automerge.disarmed must be ledgered — the line disarmAutoMerge's own log() call writes");
+      assert.ok(disarmedIdx > armedIdx, "the disarm must be ledgered AFTER the earlier arm-at-open, never before");
+      assert.equal(ledger[disarmedIdx]?.reason, "capped verdict refused auto-merge");
+      const verdictIdx = ledger.findIndex((l) => l.step === "verdict");
+      assert.ok(verdictIdx > disarmedIdx, "the terminal verdict line must follow the disarm, matching the source order (disarm BEFORE escalate BEFORE the verdict log)");
+
+      // ── The execution-level proof itself: `gh pr merge <url> --disable-auto`
+      // really reached the fake `gh` binary — disarmAutoMerge's default deps
+      // (realArmDeps()) shell out for real, exercised end-to-end here.
+      const calls = readFileSync(callLogPath, "utf8").split("\n").filter(Boolean);
+      assert.ok(
+        calls.includes("disarm https://github.com/acme/remudero/pull/501"),
+        `expected a 'disarm <prUrl>' call in the gh call log; got: ${JSON.stringify(calls)}`,
+      );
+      const armIdx = calls.indexOf("arm https://github.com/acme/remudero/pull/501");
+      const disarmIdx = calls.indexOf("disarm https://github.com/acme/remudero/pull/501");
+      assert.ok(armIdx >= 0 && disarmIdx > armIdx, "the disarm call must follow the earlier arm-at-open call in gh's own call order");
+    } finally {
+      dateNowSpy.mock.restore();
+      process.env.PATH = savedPath;
+      rmSync(root, { recursive: true, force: true });
+    }
   },
 );
 

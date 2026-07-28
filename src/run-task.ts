@@ -2601,10 +2601,19 @@ async function runTask(
      *  `containmentExec` above, driving the REAL blocked_isolation catch branch. Default: the
      *  real spawn-backed executor. */
     isolationExec?: IsolationProbeExecutor;
+    /** Injectable review judge for the PRIMARY (post-CI-green) review call — the same
+     *  shape `runFixRung`'s own `deps.runReview` already exposes. Default: the real
+     *  {@link runReview}. W1-T125: lets a behavioral test drive a REAL runTask() through
+     *  the capped-refusal branch (and its `disarmAutoMerge` call, right before escalating)
+     *  without a live reviewer spawn — `runReview` itself hard-codes `spawnWorker` (never
+     *  this file's injectable `spawn` param), so a genuine CAPPED verdict from a real
+     *  reviewer round-trip cannot be produced deterministically in a test. */
+    runReview?: (args: Parameters<typeof runReview>[0]) => ReturnType<typeof runReview>;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
   const spawn = opts.spawn ?? spawnWorker;
+  const runReviewFn = opts.runReview ?? runReview;
   const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const owner = resolveOwner();
@@ -3235,7 +3244,7 @@ async function runTask(
       say(`verdict: blocked_ci (ci ${ci}) — PR left OPEN: ${prUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
     }
-    let review = await runReview({
+    let review = await runReviewFn({
       owner,
       repo: task.repo,
       prUrl,
