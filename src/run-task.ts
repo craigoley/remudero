@@ -113,6 +113,7 @@ import {
   type IssueGateway,
   type OpenIssue,
 } from "./lib/escalate.js";
+import { fetchOpenPrsRest, fetchSinglePrRest, type GhApiFetcher } from "./lib/open-prs-rest.js";
 import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
 import {
   alertOriginId,
@@ -5789,14 +5790,15 @@ export function openPrMintTexts(owner: string, repo: string): string[] {
 
 /**
  * Build the observed open-PR state the sweep reconciles — the real gateway
- * (`gh pr list --state open`), cross-referenced with the ledger. No `gh`/network
+ * (REST `/pulls?state=open`), cross-referenced with the ledger. No `gh`/network
  * lives in lib/sweep.ts; this is the injected edge.
+ *
+ * REST, NOT `gh pr list --json`: that flag is implemented over GraphQL, which put the sweep's
+ * whole critical path behind a budget that was exhausted on 2026-07-28 — 22 consecutive minutes
+ * of totally blind passes, zero PRs dispositioned, while core sat healthy. See lib/open-prs-rest.ts.
  */
 function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): OpenPrView[] {
-  const raw = ghJson([
-    "pr", "list", "--repo", `${owner}/${repo}`, "--state", "open", "--limit", "100",
-    "--json", "number,url,headRefName,headRefOid,updatedAt,body,autoMergeRequest,statusCheckRollup",
-  ]) as RawOpenPr[];
+  const raw = fetchOpenPrsRest(owner, repo, ghJson) as RawOpenPr[];
   const ledger = readLedgerLines(ledgerPath);
   // W1-T103: branch protection's OWN required-contexts list, read ONCE per
   // repo for this whole sweep pass (never per-PR, never hardcoded) — see
@@ -6494,7 +6496,12 @@ export async function routeFix(
  *
  * FAIL LOUD on junk args BEFORE any `gh` lookup/spawn (Standing rule).
  */
-async function fixCommand(rest: string[]): Promise<number> {
+export async function fixCommand(
+  rest: string[],
+  // Injectable exactly as approveCommand/inboxCommand already are — the seam that lets the
+  // REST lookup below be graded by a test instead of shipping unexercised.
+  deps: { config?: Config; fetch?: GhApiFetcher } = {},
+): Promise<number> {
   const prArg = rest[0];
   const badArg = unknownArgError("fix", rest.slice(1), ["--repo"], []);
   if (badArg) {
@@ -6507,7 +6514,7 @@ async function fixCommand(rest: string[]): Promise<number> {
     return 2;
   }
 
-  const config = loadConfig();
+  const config = deps.config ?? loadConfig();
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const self = resolveOwnerRepo();
   const repo = flagValue(rest, "--repo") ?? self.repo;
@@ -6518,15 +6525,10 @@ async function fixCommand(rest: string[]): Promise<number> {
 
   let raw: RawOpenPr & { state?: string };
   try {
-    raw = ghJson([
-      "pr",
-      "view",
-      String(prNumber),
-      "--repo",
-      `${owner}/${repo}`,
-      "--json",
-      "number,url,headRefName,headRefOid,updatedAt,body,autoMergeRequest,statusCheckRollup,state",
-    ]) as RawOpenPr & { state?: string };
+    // REST, for the same reason buildOpenPrViews uses it — `gh pr view --json` is GraphQL, and
+    // `rmd fix` is the operator's manual recovery verb, so it must keep working precisely when
+    // the GraphQL budget is the thing that is broken.
+    raw = fetchSinglePrRest(owner, repo, prNumber, deps.fetch ?? ghJson) as RawOpenPr & { state?: string };
   } catch (e) {
     console.error(`### rmd fix — could not look up PR #${prNumber} in ${owner}/${repo}: ${String((e as Error)?.message ?? e)}`);
     return 1;
