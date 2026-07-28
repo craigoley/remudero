@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -157,12 +157,22 @@ test("rotateLedger: every decision-relevant step survives into the live view, de
     }
     const expectedCount = DECISION_RELEVANT_LEDGER_STEPS.size;
 
+    // The ceiling must comfortably exceed the decision-relevant core's OWN byte size, or the
+    // shed-to-converge pass (rotateLedger's "THE CONVERGENCE INVARIANT" below) starts evicting
+    // the oldest decision-relevant lines to make room — exactly the bug this test exists to
+    // catch, just self-inflicted by the test instead of by a consumer. A hardcoded byte number
+    // here is the SAME "stale hardcoded list" trap this file's own doctrine warns against for
+    // the steps themselves (a future step added to DECISION_RELEVANT_LEDGER_STEPS grows this
+    // core and silently starts failing this test) — so it's derived from the core's measured
+    // size, with a generous multiple of headroom, rather than a fixed guess.
+    const coreBytes = statSync(ledgerPath).size;
+    const ceiling = coreBytes * 4;
+
     // Pad with enough noise to force a real rotation.
     for (let n = 0; n < 200; n++) {
       writeFileSync(ledgerPath, noiseLine(n) + "\n", { flag: "a" });
     }
 
-    const ceiling = 2000;
     assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "test setup sanity: padded past the ceiling");
     const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling });
     assert.equal(result.rotated, true);

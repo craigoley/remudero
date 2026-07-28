@@ -124,6 +124,10 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  *                                              operator-granted, head-pinned override that lets
  *                                              auto-merge arm despite a CAPPED verdict; losing
  *                                              this line silently revokes a human's decision.
+ *   - "sweep.post_fix_redriven"             → sweep.ts's per-pr-headSha-class dedup for the
+ *                                              W1-T124 post-fix re-verification reconciler —
+ *                                              losing this line re-earns and re-fires the same
+ *                                              redrive (and its strike-credit) on every rotation.
  *
  * Deliberately EXCLUDES pure telemetry/polling noise (`ci.polling`, `pr.polling`,
  * `ops.alerts_polled`, `issues.polled`, `inbox.polled`, ...) — exactly the high-frequency,
@@ -174,6 +178,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "review.post_refused",
   "automerge.capped_override_granted",
   "daemon.boot",
+  "sweep.post_fix_redriven",
 ]);
 
 /** Steps matched by PREFIX rather than enumerated — currently only `deploy.*` (`deploy.skip`,
