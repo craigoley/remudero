@@ -15,6 +15,7 @@ import {
   buildTraceRoute,
   draftedTaskSummaries,
   ratifyCliGateway,
+  reconcileFeedbackEntries,
   type PanelGraphDeps,
   type RatifyCliGateway,
 } from "../src/lib/panel-graph.js";
@@ -200,6 +201,120 @@ test("GET /v1/feedback: lists captured entries; ?status filters", async () => {
     };
     assert.deepEqual(proposedOnly.entries.map((e) => e.id), [b.id]);
   });
+});
+
+// ── W1-T257: a `proposed` entry whose proposal_pr MERGED reconciles to `accepted` on read ──
+// (rationale: "CONSUMED FEEDBACK RENDERS AS PENDING FOREVER" -- fb-1784732500436-728bc1/
+// fb-1784734427694-703ff7 both had a MERGED proposal_pr yet stayed `proposed` forever, because
+// the only transition off `proposed` was the manual POST /v1/feedback/decision. Reconciling on
+// GET /v1/feedback -- the SAME read serve.ts's NEEDS ME section fetches (getJson("/v1/feedback"))
+// -- fixes already-stuck entries too, not only future ones.)
+
+/** A `statusGithub` stub that counts real "gateway reads" (index() cache-fills), never per-row
+ *  fetches -- mirrors status.ts's `buildBatchedGithub`: one shared read backs every `prByRef`
+ *  lookup this test issues, proving "never a fetch per row" the way the real gateway does. */
+function fakeBatchedStatusGithub(prState: Record<string, string>, opts: { failRead?: boolean } = {}): GitHub & { reads: number } {
+  let reads = 0;
+  const stub = {
+    get reads() {
+      return reads;
+    },
+    prByRef(ref: string | number) {
+      reads += 1; // the real gateway's index() only actually re-fetches once per TTL window;
+      // this stub counts every call so the test can assert an UPPER bound, which is the
+      // property that matters here (a fix that fetched once per row would blow past it).
+      const state = prState[String(ref)];
+      return state ? { number: 1, url: String(ref), state } : null;
+    },
+    readFailed() {
+      return Boolean(opts.failRead);
+    },
+    readFailureReason() {
+      return opts.failRead ? ("unknown" as const) : undefined;
+    },
+  };
+  return stub as unknown as GitHub & { reads: number };
+}
+
+test("W1-T257: reconcileFeedbackEntries -- a proposed entry whose proposal_pr is MERGED reconciles to the existing terminal status 'accepted', persisted to disk", async () => {
+  const root = tmpRoot();
+  const entry = captureFeedback(root, { raw: "x", origin: "cli" });
+  setFeedbackStatus(root, entry.id, "proposed", { proposalPr: "https://github.com/o/r/pull/588" });
+  const github = fakeBatchedStatusGithub({ "https://github.com/o/r/pull/588": "MERGED" });
+
+  const reconciled = reconcileFeedbackEntries(root, [readFeedbackEntry(root, entry.id)], github);
+  assert.equal(reconciled[0].status, "accepted", "no new enum member -- reconciles to the EXISTING terminal 'accepted'");
+  assert.equal(readFeedbackEntry(root, entry.id).status, "accepted", "persisted via setFeedbackStatus, not just returned");
+});
+
+test("W1-T257: GET /v1/feedback -- a merged-proposal entry no longer carries status 'proposed', so it renders NO NEEDS ME decision card (serve.ts:1354's `else if (e.status === \"proposed\")` no longer matches; this test FAILS on today's un-reconciled predicate)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const stuck = captureFeedback(root, { raw: "already landed", origin: "cli" });
+  setFeedbackStatus(root, stuck.id, "proposed", { proposalPr: "https://github.com/o/r/pull/588" });
+  const github = fakeBatchedStatusGithub({ "https://github.com/o/r/pull/588": "MERGED" });
+
+  await withService({ ...depsFor(root, planPath), statusGithub: github }, async (base) => {
+    const body = (await (await get(base, "/v1/feedback", READ_TOKEN)).json()) as { entries: FeedbackEntry[] };
+    const e = body.entries.find((x) => x.id === stuck.id)!;
+    assert.equal(e.status, "accepted", "the ONLY field serve.ts's renderNeedsMe predicate keys on must no longer read 'proposed'");
+    // ?status=proposed must not surface it either -- the same list NEEDS ME's card-count derives from.
+    const proposedOnly = (await (await get(base, "/v1/feedback?status=proposed", READ_TOKEN)).json()) as { entries: FeedbackEntry[] };
+    assert.ok(!proposedOnly.entries.some((x) => x.id === stuck.id));
+  });
+});
+
+test("W1-T257: reconcileFeedbackEntries -- an OPEN proposal_pr, or a null/missing one, STAYS proposed (the falsifier: a live decision must never be swept off NEEDS ME)", async () => {
+  const root = tmpRoot();
+  const open = captureFeedback(root, { raw: "still under review", origin: "cli" });
+  setFeedbackStatus(root, open.id, "proposed", { proposalPr: "https://github.com/o/r/pull/1" });
+  const noPr = captureFeedback(root, { raw: "no proposal yet", origin: "cli" });
+  setFeedbackStatus(root, noPr.id, "proposed");
+  const github = fakeBatchedStatusGithub({ "https://github.com/o/r/pull/1": "OPEN" });
+
+  const reconciled = reconcileFeedbackEntries(
+    root,
+    [readFeedbackEntry(root, open.id), readFeedbackEntry(root, noPr.id)],
+    github,
+  );
+  assert.equal(reconciled[0].status, "proposed");
+  assert.equal(reconciled[1].status, "proposed");
+  assert.equal(github.reads, 1, "the null-proposal_pr entry must never even query the gateway");
+});
+
+test("W1-T257: reconcileFeedbackEntries -- an UNREADABLE merge state keeps the row (flagged unverified) instead of dropping it, resolved through the batched gateway, never one fetch per row", async () => {
+  const root = tmpRoot();
+  const a = captureFeedback(root, { raw: "a", origin: "cli" });
+  setFeedbackStatus(root, a.id, "proposed", { proposalPr: "https://github.com/o/r/pull/2" });
+  const b = captureFeedback(root, { raw: "b", origin: "cli" });
+  setFeedbackStatus(root, b.id, "proposed", { proposalPr: "https://github.com/o/r/pull/3" });
+  const github = fakeBatchedStatusGithub({}, { failRead: true });
+
+  const reconciled = reconcileFeedbackEntries(root, [readFeedbackEntry(root, a.id), readFeedbackEntry(root, b.id)], github);
+  assert.equal(reconciled[0].status, "proposed");
+  assert.equal(reconciled[1].status, "proposed");
+  assert.equal(reconciled[0].unverified, true, "an unreadable merge state must be flagged, not silently treated as resolved");
+  assert.equal(reconciled[1].unverified, true);
+  assert.equal(readFeedbackEntry(root, a.id).status, "proposed", "unverified is a read-time decoration only, never persisted");
+});
+
+test("W1-T257: reconciliation is idempotent and applies to ALREADY-STUCK entries, not only future ones -- running it twice over a live-stuck entry converges and stays converged", async () => {
+  const root = tmpRoot();
+  // Simulates the two real stuck entries named in the rationale: written straight to disk with
+  // status: proposed and a proposal_pr that is ALREADY merged, exactly as `rmd triage` left them
+  // long before this fix existed -- no special "new capture" path is needed to unstick them.
+  const stuck = captureFeedback(root, { raw: "fb-1784732500436-728bc1 lookalike", origin: "cli" });
+  setFeedbackStatus(root, stuck.id, "proposed", { proposalPr: "https://github.com/o/r/pull/588" });
+  const github = fakeBatchedStatusGithub({ "https://github.com/o/r/pull/588": "MERGED" });
+
+  const first = reconcileFeedbackEntries(root, [readFeedbackEntry(root, stuck.id)], github);
+  assert.equal(first[0].status, "accepted");
+
+  // Second pass: the entry is now `accepted`, so it is never even re-queried against GitHub.
+  const readsBeforeSecond = github.reads;
+  const second = reconcileFeedbackEntries(root, [readFeedbackEntry(root, stuck.id)], github);
+  assert.equal(second[0].status, "accepted", "stays converged -- no flapping back to proposed");
+  assert.equal(github.reads, readsBeforeSecond, "an already-terminal entry is never re-decided or re-queried");
 });
 
 test("GET /v1/feedback: invalid ?status -> 400", async () => {

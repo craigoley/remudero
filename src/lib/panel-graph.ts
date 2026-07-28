@@ -125,6 +125,47 @@ export interface PanelGraphDeps {
 
 // ── GET /v1/feedback — the inbox list ───────────────────────────────────────
 
+/**
+ * A reconciled {@link FeedbackEntry} as GET /v1/feedback returns it — `unverified` is a READ-TIME
+ * decoration only (never written to `plan/feedback/<id>.yaml`), so the on-disk schema stays exactly
+ * the §7B shape.
+ */
+export type ReconciledFeedbackEntry = FeedbackEntry & { unverified?: true };
+
+/**
+ * W1-T257: MERGING THE PROPOSAL PR IS THE DECISION. A `proposed` entry whose `proposal_pr` has
+ * MERGED already got its operator decision the moment the gate landed it — a second manual
+ * Accept adds nothing, so this reconciles it to the EXISTING terminal status `accepted` (never a
+ * new enum member) rather than leaving it to render forever in NEEDS ME's Accept/Reject queue
+ * (serve.ts's `renderNeedsMe`/`needsMeProposedHtml`, which key off `status === "proposed"` alone).
+ *
+ * Runs on every GET /v1/feedback read (the SAME read that feeds NEEDS ME), so it is idempotent
+ * and self-healing for entries ALREADY stuck on disk — no separate sweep/backfill needed. Every
+ * lookup goes through the injected, already-batched `statusGithub` (status.ts's `GitHub`, the SAME
+ * gateway GET /v1/drain/preview's merged-set derivation uses) — one shared `gh pr list` fetch
+ * backs every entry checked here, never a fetch per row.
+ *
+ * - No `proposal_pr` (null/unset) — never queried, entry passes through untouched (stays
+ *   `proposed`, the acceptance falsifier: a live decision must never be swept off the board).
+ * - `proposal_pr` resolves MERGED — persisted to `accepted` via `lib/feedback.ts`'s
+ *   `setFeedbackStatus` (the sole writer), reflected in the returned copy.
+ * - `proposal_pr` resolves OPEN or CLOSED (not merged) — stays `proposed` untouched; a
+ *   CLOSED-unmerged proposal is a separate rejected/abandoned call, not this task's concern.
+ * - `proposal_pr` resolves to nothing AND the read itself genuinely FAILED
+ *   (`statusGithub.readFailed?.()`) — stays `proposed`, decorated `unverified: true` (fail-safe,
+ *   inverse of W1-T182's merged-count direction: hiding a possibly-live decision is worse than
+ *   showing a resolved one).
+ */
+export function reconcileFeedbackEntries(root: string, entries: FeedbackEntry[], statusGithub: GitHub): ReconciledFeedbackEntry[] {
+  return entries.map((entry) => {
+    if (entry.status !== "proposed" || !entry.proposal_pr) return entry;
+    const pr = statusGithub.prByRef(entry.proposal_pr);
+    if (pr && pr.state === "MERGED") return setFeedbackStatus(root, entry.id, "accepted");
+    if (!pr && statusGithub.readFailed?.()) return { ...entry, unverified: true };
+    return entry;
+  });
+}
+
 /** GET /v1/feedback[?status=<status>] — the feedback inbox, read-scoped. */
 export function buildFeedbackInboxRoute(deps: PanelGraphDeps): Route {
   return {
@@ -138,7 +179,8 @@ export function buildFeedbackInboxRoute(deps: PanelGraphDeps): Route {
         sendJson(res, 400, { error: "invalid_request", detail: `status must be one of ${FEEDBACK_STATUSES.join(", ")}` });
         return;
       }
-      const entries = listFeedback(deps.root, statusParam ? { status: statusParam as FeedbackStatus } : {});
+      const reconciled = reconcileFeedbackEntries(deps.root, listFeedback(deps.root, {}), deps.statusGithub);
+      const entries = statusParam ? reconciled.filter((e) => e.status === statusParam) : reconciled;
       sendJson(res, 200, { entries });
     },
   };
