@@ -3280,6 +3280,122 @@ test("buildFixRungDispatchArgs: a pendingAnswer's constraint rides the constrain
   assert.equal(withoutAnswer.constraint, undefined);
 });
 
+// ── W1-T106: `buildSweepEffects.dispatchFix` end-to-end over REAL git + a
+// PATH-stubbed `gh` — the whole cold-PR reconstruction path (creditable-head
+// check, worktree materialization, buildFixRungDispatchArgs, the runFixRung
+// call itself) executes for real. `gh pr view --json state` reports OPEN on
+// its FIRST call (dispatchFix's own preflight) and MERGED from the SECOND
+// call on (runFixRung's site-(i) terminal check, at the top of its strike
+// loop) — so the rung stands down on its very first round, BEFORE ever
+// spending a strike, and no real worker is ever spawned (spawnWorker is the
+// codebase's own untested-by-design process boundary; this proof exercises
+// every line up to, but never including, that boundary). ───────────────────
+test("buildSweepEffects.dispatchFix: a conflicted cold PR runs the REAL git-worktree + arg-building path end to end, then stands down (merged mid-flight) before spawning any worker", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-dispatchfix-e2e-"));
+  const config = { claudeBin: "/bin/true", root } as Config;
+  const owner = "acme";
+  const repo = "scratch-dispatchfix-repo"; // must NOT be this checkout's own real repo name
+  const taskId = "W1-TX";
+  const branch = `run-${taskId}-${Date.now()}`;
+  const prUrl = "https://github.com/acme/scratch-dispatchfix-repo/pull/42";
+
+  const originDir = join(root, "gh-origin");
+  mkdirSync(originDir, { recursive: true });
+  const g = (dir: string, args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+  g(originDir, ["init", "--quiet", "-b", "main"]);
+  g(originDir, ["config", "user.email", "t@example.com"]);
+  g(originDir, ["config", "user.name", "Test"]);
+  writeFileSync(join(originDir, "README.md"), "x\n");
+  g(originDir, ["add", "."]);
+  g(originDir, ["commit", "--quiet", "-m", "init"]);
+  g(originDir, ["branch", branch]); // the creditable head, at the SAME commit as main
+
+  // repoDir MUST land exactly where buildSweepEffects computes it for a repo
+  // name that is NOT this checkout's own (join(config.root, "repos", repo)).
+  const repoDir = join(root, "repos", repo);
+  mkdirSync(join(root, "repos"), { recursive: true });
+  execFileSync("git", ["clone", "--quiet", originDir, repoDir]);
+  g(repoDir, ["config", "user.email", "t@example.com"]);
+  g(repoDir, ["config", "user.name", "Test"]);
+  mkdirSync(worktreesDir(config), { recursive: true });
+
+  // A stateful `gh` stub: `--json headRefName` always answers this PR's real
+  // creditable branch; `--json state` answers OPEN once (dispatchFix's own
+  // preflight, BEFORE any git side effect) then MERGED forever after (so
+  // runFixRung's site-(i) check stands the rung down on its first round).
+  const bin = mkdtempSync(join(tmpdir(), "gh-dispatchfix-"));
+  const counterFile = join(bin, "state-calls");
+  writeFileSync(counterFile, "0");
+  writeFileSync(
+    join(bin, "gh"),
+    `#!/usr/bin/env node
+const fs = require("fs");
+const args = process.argv.slice(2);
+const idx = args.indexOf("--json");
+const field = idx >= 0 ? args[idx + 1] : undefined;
+if (args[0] === "pr" && args[1] === "view" && field === "headRefName") {
+  process.stdout.write(JSON.stringify({ headRefName: ${JSON.stringify(branch)} }));
+} else if (args[0] === "pr" && args[1] === "view" && field === "state") {
+  const n = parseInt(fs.readFileSync(${JSON.stringify(counterFile)}, "utf8") || "0", 10);
+  fs.writeFileSync(${JSON.stringify(counterFile)}, String(n + 1));
+  process.stdout.write(JSON.stringify({ state: n === 0 ? "OPEN" : "MERGED" }));
+} else {
+  process.stdout.write("{}");
+}
+`,
+    { mode: 0o755 },
+  );
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const plan = {
+    tasks: [{ id: taskId, title: "t", repo, depends_on: [], type: "implement", risk: "medium", verify: "auto", status: "queued", attempts: 0 }],
+    byId: new Map(),
+  } as unknown as Plan;
+
+  try {
+    const effects = buildSweepEffects(
+      owner, repo, config, join(root, "ledger.ndjson"), "SWEEP-1",
+      plan,
+      (step, extra) => { logs.push({ step, extra }); },
+      DEFAULT_SWEEP_POLICY,
+    );
+    const mergeConflict: MergeConflictEvidence = {
+      files: [{ path: "src/x.ts", oursDeleted: 0, theirsDeleted: 0 }],
+      oursLog: "abc1234 add entry A",
+      theirsLog: "def5678 add entry B",
+    };
+    const pr: OpenPrView = {
+      prNumber: 42,
+      prUrl,
+      taskId,
+      reviewState: "none",
+      checksState: "pending",
+      unmetCriteria: [],
+      priorStrikes: 0,
+      lastActivityAt: new Date().toISOString(),
+      headSha: "deadbeef",
+      autoMergeArmed: false,
+      mergeConflict,
+    };
+
+    await effects.dispatchFix(pr, { unmetCriteria: [], mergeConflict });
+
+    // The rung reached its FIRST round, stood down (MERGED, second gh read) —
+    // never spent a strike, never dispatched a worker, never crashed dispatchFix.
+    assert.ok(!logs.some((l) => l.step === "sweep.fix.no_task"), "the task WAS found");
+    assert.ok(!logs.some((l) => l.step === "sweep.fix.uncreditable_head"), "the branch WAS creditable");
+    assert.ok(!logs.some((l) => l.step === "sweep.fix.error"), "the real git/arg-building path never threw");
+    assert.ok(logs.some((l) => l.step === "fix.stood_down"), "runFixRung's OWN terminal check fired — reached past dispatchFix's arg-building");
+    assert.equal(parseInt(readFileSync(counterFile, "utf8"), 10), 2, "exactly two `--json state` reads: dispatchFix's preflight, then runFixRung's site-(i) check");
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
 test("routeFix: a strike-exhausted blocked_ci PR escalates to the question rung rather than dispatching a further fix — the SAME cap review-failure honors (W1-T100)", async () => {
   const deps = fakeFixDeps();
   const pr = fixPr({
