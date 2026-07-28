@@ -37,6 +37,11 @@ import { HEADROOM_LIMIT_PCT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import { assertRunnable, PlanError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import type { StatusProjection } from "./status.js";
+// Type-only (erased at build) — this module stays a PURE module at RUNTIME
+// (see the file header: "never touches the filesystem"); `OrphanSweepReport`
+// only shapes the `sweepOrphanWorkers`/`sweepOrphans` injection points below,
+// the same discipline `RunResult`/`StatusProjection` above already follow.
+import type { OrphanSweepReport } from "./worker-containment.js";
 
 /**
  * Reason the scheduler loop returned — every terminal state is one of these.
@@ -454,6 +459,17 @@ export interface DaemonDeps {
    */
   sweep?: () => Promise<void> | void;
   /**
+   * W1-T117 orphan sweep (design part ii): the SAME `sweepOrphanWorkers`
+   * entry point (worker-containment.ts) `daemonBoot`'s own
+   * `sweepOrphanWorkers` param below runs once at boot, wired here so it
+   * ALSO runs once per poll iteration — a stray from a run that ended
+   * between polls (rather than only at the last boot) is still found within
+   * one cycle. Optional: omitted ⇒ the loop behaves exactly as before this
+   * sweep existed. Best-effort by the same contract as `sweep` above (own
+   * try/catch, logged, never halts the loop).
+   */
+  sweepOrphans?: () => Promise<OrphanSweepReport> | OrphanSweepReport;
+  /**
    * W1-T254 (the #707 fix) — the RESTRICTED LIGHT-SWEEP TICKER: `runOne` is
    * UNBOUNDED (a task can hold the daemon inside one call for a whole
    * session), and `deps.sweep` above only runs BETWEEN iterations — so a PR
@@ -685,6 +701,18 @@ export function daemonBoot(
    * on API credits. Threaded so the daemon.boot canary reports the SAME billing
    * mode its workers will actually bill, not just whether the key is in its env. */
   allowApiKey = false,
+  /**
+   * W1-T117 orphan sweep (design part ii): "the orphan sweep terminates
+   * strays from ended runs and ledgers them" — run once here, at boot,
+   * mirroring `sweepTmp`/`sweepLocks` above (injected, logged either way as
+   * `daemon.orphan_sweep` naming the killed/left-alone counts so the boot
+   * record carries this sweep's own pass/fail, not only its strays). The
+   * per-kill `worker_orphan_killed` ledger line is the injected function's
+   * OWN job (`sweepOrphanWorkers`'s `ledger` dep, worker-containment.ts) —
+   * this boot step only summarizes. Omitted ⇒ no sweep, behavior unchanged
+   * from before W1-T117.
+   */
+  sweepOrphanWorkers?: () => OrphanSweepReport,
 ): BootAssertion {
   const assertion = assertCleanBoot(env, allowApiKey);
   log("daemon.boot", { env_clean: assertion.env_clean, billing_mode: assertion.billing_mode });
@@ -756,6 +784,18 @@ export function daemonBoot(
         error_class: (err as { reasonClass?: string })?.reasonClass ?? "unknown",
         error: String((err as Error)?.message ?? err),
       });
+    }
+  }
+  // W1-T117 part (ii): the boot-time half of the orphan sweep — see this
+  // param's own doc, above. A sweep failure is logged, never thrown onward —
+  // boot continues (T197: the daemon sleeps through problems, never dies
+  // over a `ps`/kill hiccup).
+  if (sweepOrphanWorkers) {
+    try {
+      const report = sweepOrphanWorkers();
+      log("daemon.orphan_sweep", { killed: report.killed.length, left_alone: report.leftAlone.length });
+    } catch (err) {
+      log("daemon.orphan_sweep", { error: String((err as Error)?.message ?? err) });
     }
   }
   return assertion;
@@ -892,6 +932,22 @@ export async function runDaemon(
         await deps.sweep();
       } catch (e) {
         log("daemon.sweep.failed", { error: String((e as Error)?.message ?? e) });
+      }
+    }
+
+    // ORPHAN SWEEP (W1-T117 design part ii): runs alongside the PR-pipeline
+    // reconciler above, on the SAME "once per iteration" cadence — daemon
+    // BOOT already runs it once (see `daemonBoot`'s own `sweepOrphanWorkers`
+    // param, below); this is the "each poll" half. Best-effort by the same
+    // contract as `deps.sweep`: a `ps`/kill hiccup costs one logged tick,
+    // never the daemon's liveness. Optional — omitted, the loop behaves
+    // exactly as before this sweep existed.
+    if (deps.sweepOrphans) {
+      try {
+        const report = await deps.sweepOrphans();
+        log("daemon.orphan_sweep", { killed: report.killed.length, left_alone: report.leftAlone.length });
+      } catch (e) {
+        log("daemon.orphan_sweep.failed", { error: String((e as Error)?.message ?? e) });
       }
     }
 

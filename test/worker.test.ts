@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { WorkerSettingsError } from "../src/lib/settings.js";
 import { WorkerKeychainError } from "../src/lib/worker-home.js";
+import { isPidAlive, RUN_ID_ENV, spawnDetachedGroup, TASK_ID_ENV } from "../src/lib/worker-containment.js";
 import {
   BILLING_MODE,
   CLAUDE_BIN_ENV_OVERRIDE,
@@ -694,6 +695,136 @@ test("spawnWorker: W1-T113 — the darwin-only keychain gate provisions with the
   assert.ok(provisionCall, "the keychain-provisioning add-generic-password call actually ran");
   assert.ok(provisionCall!.includes(claudeBin), "the FRESHLY resolved claudeBin (not config.claudeBin's stale value) is granted");
   assert.ok(provisionCall!.includes("/usr/bin/security"), "the fixed /usr/bin/security helper is always granted alongside it");
+});
+
+// ── spawnWorker end-to-end containment (W1-T117) ────────────────────────────
+// Every earlier spawnWorker test above throws BEFORE reaching the SDK's real
+// `query()` call — that call needs a live `claude` subprocess, which a unit
+// test cannot provide. `args.queryFn` (W1-T117's own injectable seam) lets
+// these two tests drive spawnWorker all the way to its OWN process-group-
+// teardown wiring: the fake queryFn below plays the SDK's part just far
+// enough to invoke `options.spawnClaudeCodeProcess` itself (exactly as the
+// real SDK does — see worker-containment.ts's file header), which spawns a
+// REAL detached child via the real `spawnDetachedGroup`. No `claude` binary
+// is ever touched; the only thing faked is the SDK's own message stream.
+
+function fakeQueryFn(behavior: "success" | "error") {
+  return ((params: {
+    prompt: string;
+    options: { env: Record<string, string>; spawnClaudeCodeProcess?: (o: unknown) => { kill: (s: string) => void } };
+  }) => {
+    // Simulates the SDK's real behavior: it calls the custom spawn hook with
+    // the command it would have run (a real, harmless `sleep`) AND the SAME
+    // `options.env` spawnWorker itself built (markers included) — exactly
+    // what the real SDK passes through, never a re-hardcoded env.
+    params.options.spawnClaudeCodeProcess?.({
+      command: "/bin/sh",
+      args: ["-c", "sleep 300"],
+      env: params.options.env,
+      signal: new AbortController().signal,
+    });
+    if (behavior === "error") {
+      return (async function* () {
+        throw new Error("simulated transport failure — no result envelope ever seen");
+      })();
+    }
+    return (async function* () {
+      yield {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        session_id: "s-1",
+        total_cost_usd: 0.02,
+        num_turns: 1,
+      };
+    })();
+  }) as unknown as Parameters<typeof spawnWorker>[0]["queryFn"];
+}
+
+function e2eSpawnWorkerArgs(dir: string, extra: Record<string, unknown> = {}) {
+  const settingsFile = join(dir, "worker.json");
+  writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true } }));
+  return {
+    cwd: dir,
+    permissionMode: "bypassPermissions" as const,
+    settingsFile,
+    prompt: "end-to-end containment fixture",
+    config: { claudeBin: "/unused", root: dir },
+    claudeExecutable: {
+      cache: createClaudeExecutableCache(),
+      deps: { env: { [CLAUDE_BIN_ENV_OVERRIDE]: "/fake/claude" }, home: dir, exists: () => true, canExecute: () => true, locations: [] },
+    },
+    // Force past the darwin-only keychain gate without touching the real
+    // `security(1)` binary — same escape hatch the keychain test above uses.
+    keychain: { platform: "linux" as NodeJS.Platform },
+    ...extra,
+  };
+}
+
+test("spawnWorker (end-to-end, SUCCESS path): the process group spawned via options.spawnClaudeCodeProcess is torn down after a normal resolve", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-worker-e2e-success-"));
+  let capturedPid: number | undefined;
+  const result = await spawnWorker({
+    ...e2eSpawnWorkerArgs(dir),
+    runId: "run-e2e-1",
+    taskId: "W1-T117",
+    queryFn: fakeQueryFn("success"),
+    containment: {
+      spawn: (opts, onStderr) => {
+        const spawned = spawnDetachedGroup(opts, onStderr);
+        capturedPid = spawned.pid;
+        return spawned;
+      },
+    },
+  } as Parameters<typeof spawnWorker>[0]);
+
+  assert.equal(result.text, "done", "the fake success envelope reached the caller normally");
+  assert.ok(capturedPid, "spawnClaudeCodeProcess was invoked and a real pid captured");
+  await new Promise((r) => setTimeout(r, 50)); // let the SIGKILL land
+  assert.equal(isPidAlive(capturedPid!), false, "the group spawned by THIS spawnWorker call must be torn down on resolve");
+});
+
+test("spawnWorker (end-to-end, ERROR path): the process group is STILL torn down when the SDK stream throws (no result envelope)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-worker-e2e-error-"));
+  let capturedPid: number | undefined;
+  await assert.rejects(
+    () =>
+      spawnWorker({
+        ...e2eSpawnWorkerArgs(dir),
+        queryFn: fakeQueryFn("error"),
+        containment: {
+          spawn: (opts, onStderr) => {
+            const spawned = spawnDetachedGroup(opts, onStderr);
+            capturedPid = spawned.pid;
+            return spawned;
+          },
+        },
+      } as Parameters<typeof spawnWorker>[0]),
+    /simulated transport failure/,
+  );
+  assert.ok(capturedPid, "spawnClaudeCodeProcess was invoked and a real pid captured, even on the error path");
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(isPidAlive(capturedPid!), false, "the group must STILL be torn down — teardown is a finally, not a success-only step");
+});
+
+test("spawnWorker (end-to-end): REMUDERO_RUN_ID/REMUDERO_TASK_ID actually reach the child's env when runId/taskId are supplied", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-worker-e2e-markers-"));
+  let observedEnv: Record<string, string | undefined> | undefined;
+  await spawnWorker({
+    ...e2eSpawnWorkerArgs(dir),
+    runId: "run-marker-1",
+    taskId: "W1-T117",
+    queryFn: fakeQueryFn("success"),
+    containment: {
+      spawn: (opts) => {
+        observedEnv = opts.env;
+        return { process: { stdin: {}, stdout: {}, kill: () => true, killed: false, exitCode: null, on() {}, once() {}, off() {} } as never, pid: 999999 };
+      },
+    },
+  } as Parameters<typeof spawnWorker>[0]);
+  assert.equal(observedEnv?.[RUN_ID_ENV], "run-marker-1");
+  assert.equal(observedEnv?.[TASK_ID_ENV], "W1-T117");
 });
 
 // ── evaluateDenyFloor: the dontAsk fallback state machine (spike verdict 4) ──

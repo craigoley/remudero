@@ -22,6 +22,15 @@ import { buildWorkerEnv, billingMode, type BillingMode } from "./env.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStaleWorkerScratch } from "./worker-scratch.js";
 import { ensureWorkerKeychain, materializeWorkerHome, workerKeychainPaths, type SecurityRunner } from "./worker-home.js";
+import {
+  buildContainedSpawnFn,
+  spawnDetachedGroup,
+  teardownProcessGroup,
+  withWorkerGroupTeardown,
+  workerMarkerEnv,
+  type ContainedProcess,
+  type ContainedSpawnOptions,
+} from "./worker-containment.js";
 
 /**
  * Aggregate token usage off the SDK result envelope's `usage` field (verified
@@ -435,6 +444,41 @@ export interface SpawnWorkerArgs {
    * off a non-macOS CI runner, with no real keychain touched.
    */
   keychain?: { platform?: NodeJS.Platform; runner?: SecurityRunner; exists?: (path: string) => boolean };
+  /**
+   * W1-T117: attribution markers threaded into the child's env
+   * (`REMUDERO_RUN_ID`/`REMUDERO_TASK_ID`) — inherited by every descendant
+   * process the CLI spawns (env propagates downhill through `bash -c` by
+   * default, the same propagation that let the armed `gh pr create` bomb
+   * survive), consumed by the orphan sweep (worker-containment.ts's
+   * `sweepOrphanWorkers`) to attribute a stray survivor back to the run/task
+   * that spawned it. Optional: a caller that omits them still gets
+   * process-group containment (teardown kills everything regardless), it
+   * just cannot be RE-attributed by a later sweep if teardown itself never
+   * ran (e.g. the daemon process was killed mid-run).
+   */
+  runId?: string;
+  taskId?: string;
+  /**
+   * W1-T117 injectable seam: override the process-group spawn/teardown —
+   * same injection convention as `config`/`claudeExecutable`/`keychain`
+   * above. Omitted ⇒ the real `spawnDetachedGroup`/`teardownProcessGroup`
+   * (worker-containment.ts). Tests inject fakes so containment wiring is
+   * provable without a real `claude` binary.
+   */
+  containment?: {
+    spawn?: (opts: ContainedSpawnOptions, onStderr?: (chunk: string) => void) => ContainedProcess;
+    teardown?: (pgid: number) => void;
+  };
+  /**
+   * W1-T117 injectable seam: override the SDK's own `query()` entry point —
+   * same injection convention as every other seam above. Omitted ⇒ the real
+   * SDK `query` (a live `claude` subprocess). Tests inject a fake async
+   * iterable so spawnWorker's OWN process-group-teardown wiring (the code
+   * AFTER this call — see the `withWorkerGroupTeardown` call at the bottom
+   * of this function) is exercised end-to-end, on both the success and the
+   * thrown-error verdict path, with no real claude binary involved.
+   */
+  queryFn?: typeof query;
 }
 
 /**
@@ -510,9 +554,28 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // can never even be configured. Absent that, ANTHROPIC_* is stripped as before.
     allowApiKey: config.overflow === "api_key",
   });
+  // W1-T117: attribution markers merged in AFTER the allowlist/extras above —
+  // authoritative regardless of whatever `args.env` happens to contain (no
+  // caller has a legitimate reason to set REMUDERO_RUN_ID/TASK_ID itself).
+  Object.assign(childEnv, workerMarkerEnv(args.runId, args.taskId));
 
   const stderrChunks: string[] = [];
   const blocks: string[] = [];
+
+  // W1-T117: worker process-tree containment. `pidRef` is populated by the
+  // spawnClaudeCodeProcess closure below the first time the SDK actually
+  // spawns (lazily, on the returned async iterable's first pull);
+  // withWorkerGroupTeardown guarantees `teardownFn` runs against it on EITHER
+  // path once the message stream settles — normal return (any result
+  // subtype, including error_max_turns/error_max_budget_usd) or a thrown
+  // transport failure — never leaving a run's process group alive past its
+  // own teardown. See worker-containment.ts's file header for the verified
+  // SDK spawn-surface ground truth (`Options.spawnClaudeCodeProcess`) this
+  // relies on, including why it ALSO owns stderr piping here (a custom spawn
+  // gets no stderr wiring from the SDK itself).
+  const pidRef: { pid?: number } = {};
+  const spawnContained = args.containment?.spawn ?? spawnDetachedGroup;
+  const teardownContained = args.containment?.teardown ?? ((pgid: number) => void teardownProcessGroup(pgid));
 
   // NOTE (SDK 0.3.209 ground truth): passing BOTH a `settings` file path and the
   // `sandbox` option throws "Cannot use both …". The sandbox config therefore
@@ -525,9 +588,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     env: childEnv,
     settings: args.settingsFile,
     settingSources: [],
-    stderr: (data: string) => {
-      stderrChunks.push(data);
-    },
+    // W1-T117: run the CLI DETACHED into its own process group/session
+    // (setsid-equivalent) so teardown can reach every descendant — including
+    // one that outlives the CLI's own exit — with a single group signal.
+    // This REPLACES the SDK's default local spawn, so `stderrChunks` is fed
+    // from THIS closure (via buildContainedSpawnFn's onStderr sink), not
+    // from an `Options.stderr` callback here — the SDK never invokes one for
+    // a custom spawn (see the file-header note in worker-containment.ts).
+    spawnClaudeCodeProcess: buildContainedSpawnFn(spawnContained, (chunk) => stderrChunks.push(chunk), pidRef),
   };
   if (args.resumeSessionId) options.resume = args.resumeSessionId;
   if (args.model) options.model = args.model;
@@ -536,16 +604,22 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   if (typeof args.maxBudgetUsd === "number") options.maxBudgetUsd = args.maxBudgetUsd;
   if (args.tools) options.tools = args.tools;
 
-  return collectWorkerResult(query({ prompt: args.prompt, options }), {
-    childEnvKeys: Object.keys(childEnv).sort(),
-    stderrChunks,
-    // Logged verbatim as CONFIGURED inputs — never a read-back (effort is not
-    // in the SDK envelope at all; model here is the requested knob, which may
-    // differ from the envelope's `modelUsage` map keys for the model(s) actually
-    // billed). Unset ⇒ the honest "default" label, never a guessed value.
-    model: args.model ?? DEFAULT_MODEL_LABEL,
-    effort: args.effort ?? DEFAULT_EFFORT_LABEL,
-  });
+  const runQuery = args.queryFn ?? query;
+  return withWorkerGroupTeardown(
+    pidRef,
+    () =>
+      collectWorkerResult(runQuery({ prompt: args.prompt, options }), {
+        childEnvKeys: Object.keys(childEnv).sort(),
+        stderrChunks,
+        // Logged verbatim as CONFIGURED inputs — never a read-back (effort is not
+        // in the SDK envelope at all; model here is the requested knob, which may
+        // differ from the envelope's `modelUsage` map keys for the model(s) actually
+        // billed). Unset ⇒ the honest "default" label, never a guessed value.
+        model: args.model ?? DEFAULT_MODEL_LABEL,
+        effort: args.effort ?? DEFAULT_EFFORT_LABEL,
+      }),
+    teardownContained,
+  );
 }
 
 /**
