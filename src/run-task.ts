@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { homedir } from "node:os";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   architectModel,
@@ -247,7 +247,14 @@ import {
   type Plan,
   type Task,
 } from "./lib/plan.js";
-import { assertLintClean, changedTaskIds, lintTask, TaskLintError } from "./lib/task-linter.js";
+import {
+  assertLintClean,
+  changedTaskIds,
+  formatReadIdentity,
+  isPathOutsideRoot,
+  lintTask,
+  TaskLintError,
+} from "./lib/task-linter.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
 import { deriveTaskClass } from "./lib/task-class.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
@@ -376,7 +383,53 @@ import {
 // recon → provenance-linted prompt → implement → PR → merge → verdict, ledgering
 // every step. `rmd run-task <id>` is the single manual kick. No scheduler here.
 
-const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+/**
+ * Resolve the repo root a `rmd` invocation GATES, in priority order — replacing the
+ * old INSTALL-PATH derivation (`dirname(dirname(fileURLToPath(import.meta.url)))`,
+ * which named WHERE THE SCRIPT LIVES, never where the operator is standing). The
+ * #271 fixture: one checkout's `bin/rmd`, invoked with cwd inside a DIFFERENT work
+ * tree, used to silently gate the INSTALL tree's plan — a false green that never
+ * opened the file under test.
+ *   1. an explicit `--repo-root <path>` escape hatch, read directly off argv (a
+ *      GLOBAL flag scanned here rather than through any one command's own flag
+ *      allow-list — see `stripRepoRootFlag` below for why `main()` strips it before
+ *      per-command validation runs).
+ *   2. CWD-ASCENT: `git rev-parse --show-toplevel` from `cwd` — the tree the
+ *      INVOKING shell is standing in, not the tree the running code happens to live in.
+ *   3. Fall back to the INSTALL path ONLY when `cwd` is not inside a git work tree
+ *      at all (e.g. a bare/scripted context) — reported on stderr so the fallback
+ *      is never silent.
+ */
+export function resolveRepoRoot(
+  argv: string[],
+  cwd: string,
+  showToplevel: (dir: string) => string = (dir) =>
+    execFileSync("git", ["-C", dir, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim(),
+): string {
+  const flagIdx = argv.indexOf("--repo-root");
+  if (flagIdx >= 0 && argv[flagIdx + 1] !== undefined) return resolve(argv[flagIdx + 1]);
+  try {
+    return showToplevel(cwd);
+  } catch (e) {
+    const installRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+    console.error(
+      `### rmd: cwd (${cwd}) is not inside a git work tree (${(e as Error).message}) — ` +
+        `falling back to the install root (${installRoot})`,
+    );
+    return installRoot;
+  }
+}
+
+/** Strips a global `--repo-root <path>` pair off argv before per-command flag
+ *  validation — so a command whose own allow-list doesn't mention `--repo-root`
+ *  (nearly all of them) never rejects it as an unexpected argument. */
+export function stripRepoRootFlag(argv: string[]): string[] {
+  const i = argv.indexOf("--repo-root");
+  if (i < 0) return argv;
+  return [...argv.slice(0, i), ...argv.slice(i + 2)];
+}
+
+const repoRoot = resolveRepoRoot(process.argv.slice(2), process.cwd());
 
 /** Owner org, read from THIS repo's origin — no hardcoded account in the tree. */
 function resolveOwner(): string {
@@ -3684,11 +3737,19 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   const taskId = reviewTaskIdFromBody(body);
   if (taskId) {
     try {
-      const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+      const reviewPlanPath = join(repoRoot, "plan", "tasks.yaml");
+      // W1-T120: read the raw bytes ourselves (loadPlan re-reads the same path
+      // internally) so the READ-IDENTITY ASSERTION below hashes exactly what was
+      // opened — the abs path + content hash of the plan file this review actually
+      // read, legible in the printed summary instead of merely inferable from cwd.
+      const reviewPlanRaw = readFileSync(reviewPlanPath, "utf8");
+      const plan = loadPlan(reviewPlanPath);
       const t = plan.byId.get(taskId);
       if (t?.acceptance?.length) {
         criteria = t.acceptance;
-        source = `plan/tasks.yaml task ${taskId} (${criteria.length} criteria)`;
+        source =
+          `plan/tasks.yaml task ${taskId} (${criteria.length} criteria) — ` +
+          `read: ${formatReadIdentity(reviewPlanPath, reviewPlanRaw)}`;
       }
     } catch {
       // A bad/absent plan is not the reviewer's concern; fall through to the body.
@@ -4007,10 +4068,25 @@ export async function lintPlanCommand(rest: string[]): Promise<number> {
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
-  const planPath = flagValue(rest, "--plan") ?? join(repoRoot, "plan", "tasks.yaml");
+  const planPathArg = flagValue(rest, "--plan");
+  const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(repoRoot, "plan", "tasks.yaml");
+  // W1-T120: an explicit --plan resolving OUTSIDE the resolved root is REFUSED right
+  // here, BY NAME — before any --base/git-show plumbing gets a chance to mis-report it
+  // as a base-resolution failure (the #271 fixture's second false green: `relative(
+  // repoRoot, planPath)` used to yield a `../../..` path that `git show <base>:<that>`
+  // died on as though the BASE ref were the problem, never naming the real one).
+  if (planPathArg !== undefined && isPathOutsideRoot(repoRoot, planPath)) {
+    console.error(
+      `### rmd lint-plan: --plan ${planPath} resolves OUTSIDE the repo root ${repoRoot} — ` +
+        `refusing (a plan outside the gated tree is never in scope)`,
+    );
+    return 2;
+  }
   const baseRef = flagValue(rest, "--base");
   let plan: Plan;
+  let planRaw: string;
   try {
+    planRaw = readFileSync(planPath, "utf8");
     plan = loadPlan(planPath);
   } catch (e) {
     console.error(`### rmd lint-plan: ${(e as Error).message}`);
@@ -4067,7 +4143,13 @@ export async function lintPlanCommand(rest: string[]): Promise<number> {
     }
   }
   const scopeNote = scope ? ` (${scope.size} new/changed vs ${baseRef})` : "";
-  console.log(`\nrmd lint-plan: ${checked} task(s) checked${scopeNote} — ${failing} failing, ${warned} warning(s)`);
+  // W1-T120: the READ-IDENTITY ASSERTION — the abs path + content hash of the plan file
+  // ACTUALLY opened, so a wrong-file run (a false green pointed at the wrong tree) is
+  // legible in the gate's own output, not merely inferable from cwd.
+  console.log(
+    `\nrmd lint-plan: ${checked} task(s) checked${scopeNote} — ${failing} failing, ${warned} warning(s)\n` +
+      `  read: ${formatReadIdentity(planPath, planRaw)}`,
+  );
   return failing > 0 ? 1 : 0;
 }
 
@@ -9660,7 +9742,7 @@ export async function main(
     checkServiceFreshness?: typeof checkServiceFreshness;
   } = {},
 ): Promise<void> {
-  const [, , cmd, ...rest] = process.argv;
+  const [cmd, ...rest] = stripRepoRootFlag(process.argv.slice(2));
   const arg = rest[0];
   if (cmd === "--help" || cmd === "-h" || cmd === "help") {
     console.log(USAGE);
