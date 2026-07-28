@@ -1427,35 +1427,50 @@
     The service serve path runs the W1-T151 install-freshness check BEFORE binding (a lockfile-changing pull triggers
     npm install first). Port from config via resolveServePort. `--write` installs to ~/Library/LaunchAgents and
     prints the load line for the operator (loading the unit is the operator's one step, not an auto criterion).
-    BELT-AND-SUSPENDERS: the service serve path checks the checkout's current branch and REFUSES to bind when it
-    is not main (exit non-zero, name the branch) unless an explicit override flag is passed — a console serving
-    branch code lies to the operator (the ctrl+C-off-a-branch / serve-off-main incident). VERIFY generateLaunchdPlist's
-    current shape, resolveServePort, the W1-T151 freshness hook, W1-T143's line-buffer mechanism, and the git
-    current-branch read from source before wiring (distrust this note).
+    BELT-AND-SUSPENDERS: the service serve path checks the checkout's current branch and SAYS SO LOUDLY when it
+    is not main (naming the branch, every boot) — a console serving branch code lies to the operator (the
+    ctrl+C-off-a-branch / serve-off-main incident). AMENDED 2026-07-28 from "REFUSES to bind ... exit non-zero":
+    under the KeepAlive unit THIS task generates, any startup refusal is a crash-loop — precisely the W1-T255/#726
+    incident, where the daemon's dirty-tree refusal exit-1'd on every launchd restart and took the whole automation
+    down for hours. A crash-looping console is strictly worse than an honest degraded one for an operator whose only
+    reattach surface is that console. VERIFY generateLaunchdPlist's current shape, resolveServePort, the W1-T255
+    service-freshness gate, and the git current-branch read from source before wiring (distrust this note).
   acceptance:
-    - claim: "the generated plist runs `rmd serve` as a KeepAlive background service, port baked from config, logging to state/serve.log"
-      proof: "unit test over the PURE generator: the emitted plist string has ProgramArguments = [rmdBin, serve, --port, <resolved port>], KeepAlive present + RunAtLoad, StandardOutPath/StandardErrorPath pointing at state/serve.log, and the closed PATH+HOME env allowlist (no ANTHROPIC key) — asserted against the string alone, no OS service-manager runtime"
-    - claim: "the service serve path runs the W1-T151 install-freshness check before binding"
-      proof: "unit test: the service serve path, given a package-lock.json hash that differs from the persisted one, runs npm install BEFORE the server binds; a matching hash binds directly (the W1-T151 hook exercised on the service path, the falsifier being a service path that skips the check)"
-    - claim: "serve's logs are line-buffered (W1-T143) so state/serve.log is readable while running, not only at exit"
-      proof: "integration test: serve run with stdout directed to a non-TTY pipe/file emits a startup log LINE readable BEFORE the process exits (W1-T143's line-buffer/flush); a fully-buffered stdout that only flushes at exit FAILS the assertion (the falsifier)"
-    - claim: "belt-and-suspenders — the service serve path REFUSES to bind when the checkout is not on main, unless an explicit override flag is given (a console must never silently serve branch code)"
-      proof: "unit test over the service serve path: given a checkout whose current branch is NOT main, it exits non-zero WITHOUT binding, naming the off-main branch; with the override flag it binds; on main it binds normally — the falsifier being a serve that binds off-main and quietly serves un-shipped code (the exact way an operator gets lied to; the ctrl+C-off-a-branch incident)"
-    - claim: "the restart path cannot EADDRINUSE-race — it WAITS for port release (or binds SO_REUSEADDR-safely) so a kill->relaunch does not silently fail to bind"
-      proof: "unit/integration test: a kill->immediate-relaunch sequence where the OLD process has not yet released the port does NOT fail with EADDRINUSE — the restart path either WAITS for the port to be released before binding OR binds SO_REUSEADDR-safely and takes over; a relaunch that EADDRINUSE-races into a silent death FAILS (the falsifier — today's sequence: kill+immediate-relaunch raced with no reap wait -> the NEW process died EADDRINUSE into an unread log -> the OLD process kept serving stale code -> the old process eventually exited -> console down with nothing listening)"
+    - claim: "the generated plist runs `rmd serve` as a KeepAlive background service, port baked from config, logging to state/logs/serve.{out,err}.log"
+      proof: "unit test: test/serve-plist.test.ts"
+    - claim: "serve's boot runs the W1-T255 SERVICE-freshness assessment before binding — it assesses, ledgers and proceeds, and never exit-1s on tree state"
+      proof: "unit test: test/serve-command-boot.test.ts"
+    - claim: "serve's logs are line-buffered so state/logs/serve.out.log is readable while running, not only at exit"
+      proof: "unit test: test/serve-service-boot.test.ts"
+    - claim: "belt-and-suspenders — an off-main checkout is NAMED in a loud boot warning and SERVED ANYWAY (never a refusal, which KeepAlive would turn into a crash-loop)"
+      proof: "unit test: test/serve-command-boot.test.ts"
+    - claim: "the restart path cannot EADDRINUSE-race — it WAITS for port release so a kill->relaunch does not silently fail to bind, and a port that never frees fails loudly in the log AND the ledger"
+      proof: "unit test: test/serve-command-boot.test.ts"
     - claim: "the generated serve plist carries KeepAlive AND ThrottleInterval, so a crash-looping serve is rate-limited rather than relaunching without bound"
-      proof: "unit test on generated plist content"
+      proof: "unit test: test/serve-plist.test.ts"
     - claim: "plist generation succeeds and references no daemon label or daemon paths with the daemon uninstalled"
-      proof: "unit test"
-    - claim: "the log writer creates serve.log with mode 0600"
-      proof: "unit test on the writer"
+      proof: "unit test: test/serve-plist.test.ts"
+    - claim: "the console's log files are mode 0600 — both pre-created by the --write install and repaired at serve's boot if launchd created them at its 0644 umask"
+      proof: "unit test: test/serve-plist.test.ts"
   risk: high
   origin: architect
   plan_refs: ["§7", "§9"]
   files: [src/run-task.ts, src/lib/launchd.ts]
   status: queued
   attempts: 0
-  note: "AMENDED 2026-07-21 with three lessons from incidents that POSTDATE this filing. Task verified
+  note: "AMENDED 2026-07-28 (second amendment; task re-verified QUEUED, zero merged PRs carry its trailer).
+    (a) THE OFF-MAIN REFUSAL BECAME A NOTICE. See the design block: a startup refusal under this task's own
+    KeepAlive unit is the #726 crash-loop, re-created on the console. Refusal -> loud named warning + ledger
+    (serve.off_main) + serve.
+    (b) THE INSTALL-FRESHNESS CRITERION WAS RE-POINTED at what actually exists. W1-T151 (npm install after a
+    lock-changing pull) is still QUEUED and unshipped, so 'the service serve path runs the W1-T151 hook' could
+    only have been satisfied by building W1-T151 inside W1-T152. What serve DOES run before binding is the
+    W1-T255 SERVICE-freshness assessment (serviceFreshnessGate in main(), assess+ledger+proceed) - that is now
+    the criterion. The npm-install-on-lock-change hook stays W1-T151's remit and lands on serve's boot path
+    when it ships.
+    (c) LOG PATHS ARE state/logs/serve.{out,err}.log, not a single state/serve.log - the house layout every
+    other unit in this generator family (daemon/digest/supervisor) already uses.
+    ORIGINAL AMENDMENT (2026-07-21) FOLLOWS, with three lessons from incidents that POSTDATE this filing. Task verified
     QUEUED first - zero merged PRs carry its Remudero-Task trailer - so amendment is the correct instrument and
     standing rule 21 does not apply.
     (i) THROTTLEINTERVAL, not KeepAlive alone. This task predates the R-1 relaunch storm: 438 daemon boots
