@@ -1894,3 +1894,275 @@ export async function runEscalationReconcile(
   log("sweep.escalation_reconcile.summary", { total: summary.total, closed: summary.closed });
   return summary;
 }
+
+// ── POST-FIX RE-VERIFICATION RECONCILER (W1-T124) — the DRAINAGE-side
+// complement to the W1-T121 queue governor above: the governor stops the
+// queue GROWING, this rung stops it ROTTING. Filed from #271 holding-note
+// item 5.
+//
+// THE INCIDENT, twice. The 14-PR pile, then a sharper 2026-07-19 instance: FOUR
+// PRs (#265/#249/#245/#236) went red on `ci-gate: timed out waiting for
+// required check(s) to complete: mutation-ratchet` while mutation-ratchet
+// itself completed SUCCESS on those same heads moments later — the gate timed
+// out on the ~13-minute Stryker tax W1-T108 later removed, the work was fine.
+// Nothing re-examined the PRs the already-fixed cause had poisoned; all four
+// needed a hand-pushed fresh head to clear. A red caused by infrastructure,
+// whose cause is now merged, should not need a human to notice it.
+//
+// DESIGN (i): a failure-pattern -> fix-PR mapping held as DATA ({@link
+// FixClass} rows in {@link DEFAULT_FIX_CLASSES}) — covering a new systemic
+// fix is a ROW, never a branch in {@link runPostFixReverification} below,
+// exactly how {@link DISPOSITION_RULES} keeps disposition itself out of
+// deriveDisposition's control flow.
+//
+// DESIGN (iii): the re-drive must work against REAL ci-gate semantics. Until
+// W1-T123 (already merged, a hard dependency of this task) deduped check-runs
+// by NAME and evaluated only the latest attempt, a re-run in place could never
+// clear a stale red — ci-gate itself, once it posts a terminal FAILURE/
+// TIMED_OUT conclusion, would keep reading its OWN stale attempt forever. This
+// module never talks to GitHub directly (mirrors every other rung in this
+// file): HOW to re-drive — re-request the ci-gate check-run in place (the
+// W1-T123 world this rung ships into) vs. push a refresh commit (the
+// pre-W1-T123 fallback design note iii names) — is entirely the injected
+// {@link PostFixReverificationDeps.redrive} effect's own decision, never this
+// reconciler's.
+//
+// DESIGN (iv), STRIKE ACCOUNTING (load-bearing — see the task rationale: "self
+// -healing is capped by the very counter it exists to relieve" otherwise). A
+// re-verification pass itself never spends a strike (dedup below is keyed on
+// the redrive, not on `dispatchFix`/the fix-rung ladder at all). And because
+// this rung matches ONLY the PR's currently-recorded failure against a fixed
+// class (acceptance 2's falsifier proves an unmatched PR is never touched),
+// every strike a MATCHED PR carries into this pass was spent chasing that
+// SAME now-fixed infrastructure artifact — so a successful redrive credits
+// back the PR's full `priorStrikes` count when re-deriving its disposition,
+// both ledgered (for a future external strike-ledger consumer to reconcile)
+// and reflected LIVE in the disposition this pass returns (never deferred to
+// a second pass just to prove the credit took effect).
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One failure-pattern -> fix-PR class mapping ROW (design note i): DATA, not
+ * code. `matchesFailure` is a PURE predicate over the SAME {@link OpenPrView}
+ * shape every other rung in this file reads — never an LLM classification
+ * (rule 2) — mirroring how {@link DISPOSITION_RULES}' own rows carry a
+ * predicate function as their "data": the mapping lives in this table, not in
+ * `runPostFixReverification`'s control flow, so covering a new systemic fix
+ * never touches the reconciler itself.
+ */
+export interface FixClass {
+  /** Stable id for ledger lines, dedup keys, and test fixtures — never reused across rows. */
+  id: string;
+  /** The merged PR whose fix resolves this class — named in every reason/ledger line. */
+  fixPrNumber: number;
+  /** Human description, carried into ledger lines for an operator reading the trail. */
+  description: string;
+  /** Does this PR's OBSERVED, currently-recorded failure match this class? */
+  matchesFailure: (pr: OpenPrView) => boolean;
+}
+
+/**
+ * The 2026-07-19 regression fixture's own class (acceptance 4): `ci-gate`
+ * itself times out waiting for a required check that had, or would shortly
+ * have, actually succeeded on the SAME head — the W1-T123 dedupe-by-name fix
+ * is what makes a re-drive of this class able to clear at all (design note
+ * iii). Matches on the failing check's recorded name AND its log tail,
+ * never on checksState alone — a genuinely red mutation-ratchet (an actual
+ * mutation survivor, not a gate timeout) must never match this class.
+ */
+export const CI_GATE_TIMEOUT_FIX_CLASS: FixClass = {
+  id: "ci-gate-required-check-timeout",
+  fixPrNumber: 820, // W1-T123 — "fix(ci-gate): dedupe check-runs by name, evaluate only latest attempt"
+  description:
+    "ci-gate timed out waiting for a required check that had already (or was about to have) succeeded " +
+    "on the same head — a stale check-run attempt read instead of the latest one, not a real defect",
+  matchesFailure: (pr) =>
+    (pr.ciFailures ?? []).some(
+      (f) => f.name === "ci-gate" && /timed out waiting for required check\(s\)/i.test(f.logTail),
+    ),
+};
+
+/** The live class table this reconciler consults by default — a new systemic fix is a row appended
+ *  here (design note i), never a change to {@link runPostFixReverification}. */
+export const DEFAULT_FIX_CLASSES: readonly FixClass[] = [CI_GATE_TIMEOUT_FIX_CLASS];
+
+/**
+ * The injected redrive effect's outcome. `fresh`, when present, is a brand
+ * new {@link OpenPrView} read AFTER the redrive settled — this reconciler
+ * never invents one and never re-uses the STALE pre-redrive view to derive a
+ * disposition (that would just re-observe the same stale red it set out to
+ * clear). Absent `fresh` ⇒ the redrive was dispatched but no settled read is
+ * available yet (e.g. the re-run is still in flight): this pass records the
+ * redrive (so it is never repeated) and stops there — the PR's disposition is
+ * re-derived by the NEXT ordinary sweep once GitHub's own state has caught up.
+ */
+export interface RedriveResult {
+  fresh?: OpenPrView;
+}
+
+/** Injected effects for {@link runPostFixReverification} — mirrors {@link runCreditBackfill}/
+ *  {@link runEscalationReconcile}'s shape (same ledger reader/appender, same dry-run-leaves-no-
+ *  trace contract) so all three reconciler rungs in this file behave identically to their callers. */
+export interface PostFixReverificationDeps {
+  /**
+   * Re-drive the PR's matched required check for the given class (design
+   * note iii) — re-request the ci-gate check-run in place, or push a refresh
+   * commit, entirely the effect's own decision; this module never calls
+   * `gh`/git directly.
+   */
+  redrive: (pr: OpenPrView, fixClass: FixClass) => RedriveResult | Promise<RedriveResult>;
+  ledgerPath: string;
+  runId: string;
+  readLedger?: (path: string) => Array<Record<string, unknown>>;
+  appendLine?: typeof appendLedger;
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** Preview only: derive matches, take no effects, write no ledger lines. */
+  dryRun?: boolean;
+}
+
+/** One PR's outcome this pass. */
+export interface PostFixReverificationResult {
+  prNumber: number;
+  taskId?: string;
+  outcome: "redriven" | "unmatched" | "already-redriven" | "redrive-failed";
+  fixClassId?: string;
+  /** Present only when outcome === "redriven" AND the redrive returned a fresh, settled view
+   *  (design note ii — "re-dispose on the fresh result"). */
+  disposition?: Disposition;
+  /** Present only when outcome === "redriven" — the strikes credited back this pass (design iv). */
+  strikesCredited?: number;
+}
+
+/** The whole reconciliation pass's outcome. */
+export interface PostFixReverificationSummary {
+  total: number;
+  redriven: number;
+  results: PostFixReverificationResult[];
+}
+
+/**
+ * THE POST-FIX RE-VERIFICATION RUNG (W1-T124, acceptance 1/2/3/4). For every
+ * open PR whose CURRENTLY-recorded failure matches a {@link FixClass} row
+ * whose `fixPrNumber` is in `mergedFixPrNumbers` (the caller's own merged-PR
+ * read — this module never talks to GitHub, exactly like {@link
+ * CreditCandidate.merged} above): re-drive its matched check EXACTLY ONCE
+ * (deduped on the ledger, keyed by `pr@headSha@class` — a NEW push legitimately
+ * re-earns a redrive, mirroring how fix-dispatch dedup is head-keyed in {@link
+ * runSweep}), and — when the redrive returns a settled fresh view — re-derive
+ * its disposition with strikes credited back to zero (design note iv).
+ *
+ * A PR whose failure does NOT match any merged class is entirely untouched:
+ * no redrive call, no ledger line, `outcome: "unmatched"` (acceptance 2's
+ * falsifier — proves the mapping does real work rather than blanket-rerunning
+ * every open PR).
+ */
+export async function runPostFixReverification(
+  openPrs: OpenPrView[],
+  mergedFixPrNumbers: ReadonlySet<number>,
+  deps: PostFixReverificationDeps,
+  classes: readonly FixClass[] = DEFAULT_FIX_CLASSES,
+): Promise<PostFixReverificationSummary> {
+  const readLedger = deps.readLedger ?? readLedgerLines;
+  const appendLine = deps.appendLine ?? appendLedger;
+  const log = deps.log ?? (() => {});
+  const lines = readLedger(deps.ledgerPath);
+
+  const results: PostFixReverificationResult[] = [];
+  let redriven = 0;
+
+  for (const pr of openPrs) {
+    const cls = classes.find((c) => mergedFixPrNumbers.has(c.fixPrNumber) && c.matchesFailure(pr));
+    if (!cls) {
+      results.push({ prNumber: pr.prNumber, taskId: pr.taskId, outcome: "unmatched" });
+      continue;
+    }
+
+    // Head-keyed dedup (mirrors runSweep's fix-dispatch dedup): a NEW push
+    // legitimately re-earns a redrive even for the same class, but a repeat
+    // pass over the SAME unchanged head never re-drives twice (acceptance 1:
+    // "re-driven exactly once").
+    const redriveKey = `${pr.prNumber}@${pr.headSha}@${cls.id}`;
+    const already = lines.some((l) => l.step === "sweep.post_fix_redriven" && l.redrive_key === redriveKey);
+    if (already) {
+      results.push({ prNumber: pr.prNumber, taskId: pr.taskId, outcome: "already-redriven", fixClassId: cls.id });
+      continue;
+    }
+
+    if (deps.dryRun) {
+      results.push({ prNumber: pr.prNumber, taskId: pr.taskId, outcome: "redriven", fixClassId: cls.id });
+      redriven++;
+      continue;
+    }
+
+    let redrive: RedriveResult;
+    try {
+      redrive = await deps.redrive(pr, cls);
+    } catch (e) {
+      // PER-PR THROW CONTAINMENT (the W1-T99 lesson, mirrored from
+      // runEscalationReconcile above): one failed redrive never strands the
+      // rest of this pass, and — since nothing is ledgered on failure — it
+      // retries on the very next sweep rather than being silently dropped.
+      log("sweep.post_fix_redrive_failed", {
+        pr_number: pr.prNumber,
+        fix_class: cls.id,
+        error: String((e as Error)?.message ?? e),
+      });
+      results.push({ prNumber: pr.prNumber, taskId: pr.taskId, outcome: "redrive-failed", fixClassId: cls.id });
+      continue;
+    }
+
+    // Design note iv: captured from the PRE-redrive view, never from
+    // `redrive.fresh` (whose ledger read may already reflect THIS pass's own
+    // no-strike redrive) — the full count this PR carried in is what gets
+    // credited back.
+    const creditedStrikes = pr.priorStrikes;
+
+    appendLine(deps.ledgerPath, {
+      run_id: deps.runId,
+      task_id: pr.taskId ?? "SWEEP",
+      step: "sweep.post_fix_redriven",
+      pr_number: pr.prNumber,
+      pr_url: pr.prUrl,
+      redrive_key: redriveKey,
+      fix_class: cls.id,
+      fix_pr_number: cls.fixPrNumber,
+      credited_strikes: creditedStrikes,
+    });
+    // Reflected into THIS pass's own snapshot (mirrors runCreditBackfill) so a
+    // duplicate candidate for the same head within one pass redrives once.
+    lines.push({ step: "sweep.post_fix_redriven", redrive_key: redriveKey });
+    redriven++;
+
+    let disposition: Disposition | undefined;
+    if (redrive.fresh) {
+      // Re-dispose on the fresh, settled result (design note ii) — with
+      // strikes credited to zero (design note iv): the ONLY defect this rung
+      // ever matches against is the now-fixed class (acceptance 2 proves an
+      // unmatched PR is never touched at all), so every strike a MATCHED PR
+      // carried in was spent chasing that same infrastructure artifact.
+      const dispositionView: OpenPrView = { ...redrive.fresh, priorStrikes: 0 };
+      disposition = deriveDisposition(dispositionView).disposition;
+    }
+
+    log("sweep.post_fix_redriven", {
+      pr_number: pr.prNumber,
+      fix_class: cls.id,
+      fix_pr_number: cls.fixPrNumber,
+      credited_strikes: creditedStrikes,
+      disposition,
+    });
+
+    results.push({
+      prNumber: pr.prNumber,
+      taskId: pr.taskId,
+      outcome: "redriven",
+      fixClassId: cls.id,
+      disposition,
+      strikesCredited: creditedStrikes,
+    });
+  }
+
+  const summary: PostFixReverificationSummary = { total: openPrs.length, redriven, results };
+  log("sweep.post_fix_reverification.summary", { total: summary.total, redriven: summary.redriven });
+  return summary;
+}
