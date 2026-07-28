@@ -83,6 +83,22 @@ export interface Config {
    */
   consoleUrl?: string;
   /**
+   * Where the operator console BINDS (W1-T152) — the declared, per-install source for
+   * `rmd serve`'s listen address and port, so the launchd unit (`rmd serve-plist`) and a
+   * hand-run `rmd serve` resolve the SAME interfaces without the operator retyping flags.
+   *
+   * `host` is the comma-separated interface list `resolveServeHosts` accepts (e.g.
+   * `"127.0.0.1,100.90.47.107"` — loopback for local curls AND the tailnet address for the
+   * phone); a wildcard is refused there, as always. It lives HERE, outside the git tree,
+   * because a tailnet address is machine-specific and must never be a literal in committed
+   * source (the same rule `root`/`claudeBin` follow).
+   *
+   * PRECEDENCE, both in `rmd serve` and in the generated unit: `--host`/`--port` flag >
+   * `RMD_SERVE_HOST` env > this field > loopback/{@link DEFAULT_SERVE_PORT}. Absent, nothing
+   * changes: the console binds 127.0.0.1:4317 exactly as before.
+   */
+  serve?: { host?: string; port?: number };
+  /**
    * Headroom governor switch (operator ruling fb-1784894405468-a4153e, 2026-07-24,
    * amending P34(c)/W1-T249, extending W1-T252 — its DEFAULT clause reversed by the
    * operator ruling of 2026-07-25, below).

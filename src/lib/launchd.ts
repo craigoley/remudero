@@ -238,6 +238,184 @@ export function launchdPlistPath(label: string = DAEMON_LABEL, home: string = ho
   return join(home, "Library", "LaunchAgents", `${label}.plist`);
 }
 
+// ── The SERVE LaunchAgent (W1-T152 — the operator console as a background SERVICE) ────────
+//
+// SAME generator family as generateLaunchdPlist above (W1-T12b): the same absolute-path
+// assertions and the same closed-allowlist, ANTHROPIC-clean EnvironmentVariables. Three
+// deliberate differences, each earned by an incident:
+//
+//  1. `KeepAlive` is UNCONDITIONAL (`<true/>`), not the daemon's `SuccessfulExit: false`.
+//     `rmd serve` blocks until SIGINT/SIGTERM and returns 0 on a clean shutdown — under
+//     `SuccessfulExit: false` that clean exit is "successful", so launchd would leave the
+//     console DOWN exactly when someone ctrl+C'd or SIGTERM'd it, which is the fixture this
+//     task exists for (the operator reclaimed his shell twice in one morning and the board
+//     went dark). A console the operator reattaches to from a phone must come back from
+//     EVERY exit; deliberately stopping it is `launchctl bootout`, not an exit code.
+//  2. `ThrottleInterval` is EXPLICIT (default {@link DEFAULT_SERVE_THROTTLE_S}). R-1: 438
+//     daemon boots in two days, one per minute at its worst, because KeepAlive relaunches
+//     on exit and nothing rate-limited it. Unconditional KeepAlive inherits exactly that
+//     shape unless the throttle is stated, so it is stated.
+//  3. The bind interfaces ride in `RMD_SERVE_HOST` (the env slot `resolveServeHosts` in
+//     lib/serve.ts documents for remote access), resolved by the CALLER from config/env and
+//     passed in — never a literal address in committed source (public-repo hygiene, the same
+//     rule config.ts's `root` follows). This is the one key beyond PATH+HOME the allowlist
+//     carries, and it is still ANTHROPIC-clean (`assertNoAnthropicKeys` runs over the whole
+//     assembled dict, not a subset of it).
+//
+// DAEMON-INDEPENDENCE IS A REQUIREMENT (W1-T152 note ii), not a detail: on 2026-07-21 the
+// daemon was deliberately stopped for containment while the operator still needed the board.
+// Nothing below references {@link DAEMON_LABEL} or any daemon path — this unit installs,
+// loads and runs with the daemon absent, so stopping the fleet never blinds the operator.
+
+/** The launchd label the serve (operator console) unit is always generated under. */
+export const SERVE_LABEL = "com.remudero.serve";
+
+/** Default seconds launchd waits between serve relaunches — the R-1 relaunch-storm rate limit. */
+export const DEFAULT_SERVE_THROTTLE_S = 60;
+
+/**
+ * Bind values that mean "EVERY interface", refused by name at generation time. This is the
+ * defense-in-depth DUPLICATE of `lib/serve.ts`'s own `WILDCARD_HOSTS` (the primary gate — the
+ * CLI resolves hosts through `resolveServeHosts` before ever reaching this generator). Two
+ * copies exist because this module is a leaf (node:os + node:path only) and must not import the
+ * live HTTP console to validate a string; test/serve-plist.test.ts asserts the two sets are
+ * IDENTICAL, so they cannot drift apart. A unit that binds the wildcard would put fleet-control
+ * write actions on every coffee-shop LAN the laptop joins, permanently and across reboots —
+ * strictly worse than the foreground `rmd serve` it replaces.
+ */
+export const SERVE_WILDCARD_HOSTS = new Set(["0.0.0.0", "::", "*", ""]);
+
+/** Where the serve unit's stdout/stderr land — the SAME `<root>/state/logs/` home every other
+ *  unit in this family uses. Exported so the CLI can pre-create both files 0600 (R-5: a bearer
+ *  token in a world-readable log had to be rotated) instead of letting launchd create them at
+ *  its own umask, and so the path is computed ONCE for both the unit and the chmod. */
+export function serveLogPaths(root: string): { stdout: string; stderr: string } {
+  const logDir = join(root, "state", "logs");
+  return { stdout: join(logDir, "serve.out.log"), stderr: join(logDir, "serve.err.log") };
+}
+
+export interface ServeLaunchdPlistOpts {
+  /** Absolute path to the `bin/rmd` launcher. Never resolved from PATH — launchd doesn't search it. */
+  rmdBin: string;
+  /** Workspace root (config.root, §4A) — absolute. WorkingDirectory + log files derive from it. */
+  root: string;
+  /** TCP port baked into `ProgramArguments`. Resolved by the caller from `--port`/config. */
+  port: number;
+  /**
+   * The interfaces the console binds, ALREADY resolved by the caller from `--host`/config/env
+   * (lib/serve.ts `resolveServeHosts`) — e.g. `["127.0.0.1", "100.90.47.107"]` for "reachable
+   * locally AND from the phone over the tailnet". Emitted as `RMD_SERVE_HOST`. Never defaulted
+   * here: a unit that silently binds loopback-only would leave the operator's remote console
+   * dead with a green `launchctl print`.
+   */
+  hosts: string[];
+  /** launchd label. Default {@link SERVE_LABEL}. */
+  label?: string;
+  /** Explicit PATH the serve process boots with. Default {@link DEFAULT_LAUNCHD_PATH}. */
+  path?: string;
+  /** HOME the serve process boots with. Default `os.homedir()`. */
+  home?: string;
+  /** Seconds between relaunches. Default {@link DEFAULT_SERVE_THROTTLE_S}; min 10. */
+  throttleSeconds?: number;
+}
+
+/**
+ * Generate the launchd .plist TEXT for the operator console (`rmd serve`). Pure function of its
+ * args — no filesystem write, no `launchctl` call (see this module's header). Throws
+ * {@link LaunchdPlistError} if `rmdBin`/`root`/`home` aren't absolute, if `port` isn't an
+ * integer in [1, 65535], if `hosts` is empty or names a wildcard, if `throttleSeconds` is under
+ * 10, or if the assembled `EnvironmentVariables` block carries an `ANTHROPIC_*` key.
+ */
+export function generateServeLaunchdPlist(opts: ServeLaunchdPlistOpts): string {
+  assertAbsolute(opts.rmdBin, "rmdBin");
+  assertAbsolute(opts.root, "root");
+  if (opts.home !== undefined) assertAbsolute(opts.home, "home");
+
+  if (!Number.isInteger(opts.port) || opts.port < 1 || opts.port > 65535) {
+    throw new LaunchdPlistError(
+      `generateServeLaunchdPlist: port must be an integer in [1, 65535], got ${JSON.stringify(opts.port)}`,
+    );
+  }
+  if (opts.hosts.length === 0) {
+    throw new LaunchdPlistError(
+      `generateServeLaunchdPlist: hosts must name at least one interface — a unit that binds nothing ` +
+        `reads as a working console that answers no one.`,
+    );
+  }
+  for (const h of opts.hosts) {
+    if (SERVE_WILDCARD_HOSTS.has(h)) {
+      throw new LaunchdPlistError(
+        `generateServeLaunchdPlist: host ${JSON.stringify(h)} binds EVERY interface. Name the ` +
+          `interface(s) you mean (e.g. "127.0.0.1,<tailnet-ip>") — a launchd unit makes the ` +
+          `exposure permanent and reboot-surviving.`,
+      );
+    }
+  }
+
+  const label = opts.label ?? SERVE_LABEL;
+  const path = opts.path ?? DEFAULT_LAUNCHD_PATH;
+  const home = opts.home ?? homedir();
+  const throttle = opts.throttleSeconds ?? DEFAULT_SERVE_THROTTLE_S;
+  if (!Number.isInteger(throttle) || throttle < 10) {
+    throw new LaunchdPlistError(
+      `generateServeLaunchdPlist: throttleSeconds must be an integer >= 10, got ${JSON.stringify(opts.throttleSeconds)}`,
+    );
+  }
+  const logs = serveLogPaths(opts.root);
+  const hostList = opts.hosts.join(",");
+
+  const environment: Record<string, string> = { PATH: path, HOME: home, RMD_SERVE_HOST: hostList };
+  assertNoAnthropicKeys(environment, "generateServeLaunchdPlist");
+
+  const programArguments = [opts.rmdBin, "serve", "--port", String(opts.port)];
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${escapeXml(label)}</string>
+  <!-- ANTHROPIC-clean-env boot assertion (billing boundary, MASTER-PLAN §9 — the SAME
+       assertion generateLaunchdPlist() applies to the daemon unit, W1-T12b):
+       EnvironmentVariables below is a CLOSED allowlist (PATH + HOME + the resolved
+       RMD_SERVE_HOST bind list) — launchd never sources ~/.zshrc, so this dict is the
+       WHOLE env the console process receives at boot. It carries NO secret: the bearer
+       tokens are read at boot from <root>/state/service-tokens.json (0600, created on
+       first run) exactly as they are today, and are never embedded in this unit. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${escapeXml(path)}</string>
+    <key>HOME</key>
+    <string>${escapeXml(home)}</string>
+    <key>RMD_SERVE_HOST</key>
+    <string>${escapeXml(hostList)}</string>
+  </dict>
+  <key>ProgramArguments</key>
+  <array>
+${stringArray(programArguments)}
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${escapeXml(opts.root)}</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- UNCONDITIONAL KeepAlive (not the daemon's SuccessfulExit:false): rmd serve exits 0
+       on a clean SIGINT/SIGTERM, and the console must come back from THAT too — see this
+       section's header. ThrottleInterval is the R-1 relaunch-storm rate limit.
+       NOTE (no backticks anywhere inside this template literal — one would terminate it). -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>${throttle}</integer>
+  <key>StandardOutPath</key>
+  <string>${escapeXml(logs.stdout)}</string>
+  <key>StandardErrorPath</key>
+  <string>${escapeXml(logs.stderr)}</string>
+</dict>
+</plist>
+`;
+}
+
 // ── The digest LaunchAgent (W1-T112 — the morning pulse) ──────────────────────────────────
 //
 // SAME generator family as generateLaunchdPlist above (W1-T12b) — the SAME absolute-path

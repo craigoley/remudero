@@ -99,7 +99,7 @@ import {
 } from "./lib/daemon.js";
 import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
-import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateSupervisorLaunchdPlist, launchdPlistPath, SUPERVISOR_LABEL } from "./lib/launchd.js";
+import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchdPlistPath, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js";
 import { buildDigest, buildMarkerAwareDigest, consoleCardUrl, sendDigest, sendMarkerAwareDigest, sendRundown } from "./lib/digest.js";
 import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
@@ -145,6 +145,10 @@ import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./
 import { ghIssueCloser } from "./lib/panel-actions.js";
 import {
   buildServeServer,
+  currentBranch,
+  ensureLogFileMode,
+  listenWithReapWait,
+  offMainNotice,
   resolveServeHosts,
   resolveServePort,
   resolveServiceTokens,
@@ -5295,6 +5299,65 @@ async function digestPlistCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
+/**
+ * `rmd serve-plist [--port <n>] [--host <addr>] [--write]` — GENERATE the launchd unit that
+ * runs the operator console as a background SERVICE (W1-T152; lib/launchd.ts's
+ * `generateServeLaunchdPlist` owns the generation — the SAME W1-T12b generator family
+ * `daemonPlistCommand` uses, one closed env allowlist, not a second implementation).
+ *
+ * THE FIXTURE: the console only ever ran in a foreground terminal, so every shell reclaim
+ * (ctrl+C, a closed tab, a logout) took the board down — and the operator reads that board
+ * from a phone, days from the machine. Under launchd it comes back from any exit, survives
+ * reboot, and `kickstart -k` is a one-line restart that cannot lose the port to itself.
+ *
+ * The bind interfaces and port are RESOLVED HERE (flag > `RMD_SERVE_HOST` > config `serve.*`
+ * > loopback:4317) and baked in, so the unit and a hand-run `rmd serve` agree. `--write`
+ * installs the unit AND pre-creates both log files 0600 (R-5: launchd would otherwise create
+ * them at its 0644 umask, and serve's banner prints a bearer token). Loading it stays the
+ * operator's step, mirroring `daemon-plist`'s W1-T12d boundary.
+ */
+export async function servePlistCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("serve-plist", rest, ["--port", "--host"], ["--write"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const config = loadConfig();
+  let port: number;
+  let hosts: string[];
+  try {
+    port = resolveServePort(rest, config.serve?.port);
+    hosts = resolveServeHosts(rest, process.env, config.serve?.host);
+  } catch (e) {
+    console.error(`### rmd serve-plist — ${(e as Error).message}\n${USAGE}`);
+    return 2;
+  }
+  const rmdBin = join(repoRoot, "bin", "rmd");
+  const plist = generateServeLaunchdPlist({ rmdBin, root: config.root, port, hosts });
+  const plistPath = launchdPlistPath(SERVE_LABEL);
+  const logs = serveLogPaths(config.root);
+
+  if (rest.includes("--write")) {
+    mkdirSync(dirname(plistPath), { recursive: true });
+    writeFileSync(plistPath, plist);
+    // BEFORE launchd ever opens them: an existing 0600 file is appended to, keeping its mode.
+    const { failed } = ensureLogFileMode([logs.stdout, logs.stderr]);
+    console.log(`### rmd serve-plist — wrote ${plistPath}`);
+    console.log(`    logs (0600):  ${logs.stdout}, ${logs.stderr}`);
+    if (failed.length > 0) console.error(`    WARNING — could not force 0600 on: ${failed.join(", ")}`);
+  } else {
+    console.log(plist);
+  }
+  console.log(
+    `\n# to commission (operator-run — NOT done by this command):\n` +
+      `launchctl bootstrap gui/$UID ${plistPath}\n` +
+      `# to restart it after a deploy (reap-safe — launchd owns the port):\n` +
+      `launchctl kickstart -k gui/$UID/${SERVE_LABEL}\n` +
+      `# bindings baked in: ${hosts.map((h) => `http://${h}:${port}`).join(", ")}`,
+  );
+  return 0;
+}
+
 // ── rmd serve — the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B) ──
 //
 // Real business logic lives entirely in the four already-proven modules lib/serve.ts
@@ -5302,23 +5365,41 @@ async function digestPlistCommand(rest: string[]): Promise<number> {
 // glue only — resolve the port, load/generate the bearer tokens, build the real deps (the
 // real ghGateway/ghTraceGateway/ghIssueCloser, the real plan, the real ledger path), bind,
 // print the console URL, and block until SIGINT/SIGTERM.
-async function serveCommand(rest: string[]): Promise<number> {
-  const badArg = unknownArgError("serve", rest, ["--port"], []);
+// EXPORTED for test/serve-command-boot.test.ts (W1-T152): the service posture this function now
+// applies at boot — logs forced 0600, an off-main notice, a reap-waiting bind — is only real if
+// it is proven on the ACTUAL boot path, in-process, where a coverage record exists. A spawned
+// child proves the non-TTY log behaviour but reports no coverage for the lines that did it.
+export async function serveCommand(
+  rest: string[],
+  // `branch` is injectable for the SAME reason main()'s freshness check is: CI checks out a
+  // detached merge SHA, so the off-main branch of the notice below would never execute there
+  // — an untested warning is a warning that has never been seen to fire.
+  // `bindRetry` narrows the reap-wait window so a test can drive the LOSING side of the port
+  // race (retry, then give up) in milliseconds instead of the real 10s — production passes
+  // nothing and gets listenWithReapWait's own defaults.
+  deps: { branch?: (repoDir: string) => string | null; bindRetry?: { attempts?: number; delayMs?: number } } = {},
+): Promise<number> {
+  // `--host` was documented in USAGE and read by resolveServeHosts, but was NOT in this
+  // validator's value-flag list — so `rmd serve --host <addr>` exited 2 on its own documented
+  // flag and the tailnet bind was reachable only via RMD_SERVE_HOST (W1-T152).
+  const badArg = unknownArgError("serve", rest, ["--port", "--host"], []);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
+
+  const config = loadConfig();
   let port: number;
   let hosts: string[];
   try {
-    port = resolveServePort(rest);
-    hosts = resolveServeHosts(rest);
+    // Config is the LAST fallback (flag > RMD_SERVE_HOST > config.serve.* > loopback:4317), so
+    // the launchd unit's baked env and a hand-run `rmd serve` land on the same interfaces.
+    port = resolveServePort(rest, config.serve?.port);
+    hosts = resolveServeHosts(rest, process.env, config.serve?.host);
   } catch (e) {
     console.error(`### rmd serve — ${(e as Error).message}\n${USAGE}`);
     return 2;
   }
-
-  const config = loadConfig();
   const self = resolveOwnerRepo();
   const planPath = join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
@@ -5328,6 +5409,24 @@ async function serveCommand(rest: string[]): Promise<number> {
   const runId = `SERVE-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "SERVE", step, ...extra });
+
+  // ── SERVICE POSTURE (W1-T152). None of these three can refuse to start: under the launchd
+  // unit this command now generates, a startup refusal is a KeepAlive crash-loop, and a
+  // crash-looping console is worse than an honest degraded one (W1-T255, #726).
+  //
+  // 1. LOGS 0600 before anything is printed — the banner below carries the read token, and
+  //    launchd creates StandardOutPath at its own 0644 umask (R-5 cost a token rotation).
+  const logs = serveLogPaths(config.root);
+  const logMode = ensureLogFileMode([logs.stdout, logs.stderr]);
+  if (logMode.failed.length > 0) log("serve.log_mode_failed", { paths: logMode.failed });
+  // 2. OFF-MAIN is SAID, not refused: tsx loads the module graph once, so a console started off
+  //    a branch keeps serving that branch's code even after the checkout returns to main.
+  const branch = (deps.branch ?? currentBranch)(repoRoot);
+  const offMain = offMainNotice(branch);
+  if (offMain !== null) {
+    console.error(offMain);
+    log("serve.off_main", { branch });
+  }
 
   // BATCHED gateway (not per-task ghGateway): the board's GET /v1/status derives EVERY task via
   // projectPlan, and ghGateway shells `gh` per task (findMergedByTrailer is a search each) — O(N)
@@ -5393,13 +5492,28 @@ async function serveCommand(rest: string[]): Promise<number> {
               }
             });
       if (i > 0) mirrors.push(target);
-      await new Promise<void>((resolve, reject) => {
-        target.once("error", reject);
-        target.listen(port, h, resolve);
-      });
+      // 3. REAP-WAIT (W1-T152): a kill→relaunch that beats the old process's port release used
+      //    to die EADDRINUSE into an unread log while the OLD process kept serving stale code.
+      //    Under launchd `kickstart -k` that race is routine, so an in-use port is waited out
+      //    (bounded, EADDRINUSE only) and every wait is AUDIBLE in the log and the ledger.
+      await listenWithReapWait(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            target.once("error", reject);
+            target.listen(port, h, resolve);
+          }),
+        {
+          ...deps.bindRetry,
+          onRetry: (attempt, err) => {
+            console.error(`### rmd serve — ${h}:${port} still held (${err.code}), waiting for release (attempt ${attempt})`);
+            log("serve.bind_retry", { host: h, port, attempt, code: err.code });
+          },
+        },
+      );
     }
   } catch (e) {
     console.error(`### rmd serve — failed to listen on ${hosts.join(", ")}:${port}: ${(e as Error).message}`);
+    log("serve.bind_failed", { hosts, port, error: (e as Error).message });
     for (const m of mirrors) m.close();
     return 1;
   }
@@ -9157,6 +9271,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd serve [--port <n>] [--host <addr>]   # the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317 (matches apps/dashboard's own default); --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the console can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM",
   },
   {
+    name: "serve-plist",
+    usage:
+      "rmd serve-plist [--port <n>] [--host <addr>] [--write]   # generate the launchd unit that runs the operator console as a background SERVICE (W1-T152, the W1-T12b generator family): KeepAlive (unconditional — `rmd serve` exits 0 on a clean SIGTERM and the console must come back from that too) + ThrottleInterval 60 (the R-1 relaunch-storm rate limit) + RunAtLoad, logs to <config.root>/state/logs/serve.{out,err}.log at 0600, and the resolved bind list in RMD_SERVE_HOST (flag > env > config serve.host > 127.0.0.1) with the port baked into ProgramArguments. Carries NO token: service-tokens.json is read at boot as today. References no daemon label or path — it installs and runs with the daemon stopped. Prints by default; --write installs it + pre-creates the 0600 logs; `launchctl bootstrap` stays the operator's step.",
+  },
+  {
     name: "sweep",
     usage:
       "rmd sweep [--repo <name>] [--dry-run]   # level-triggered PR-pipeline reconciler (W1-T77, P22): re-derive EVERY open PR's disposition from observed state and take the ONE gated action — mergeable->arm auto-merge; blocked-fixable->W1-T76 fix rung; stale/superseded->close-with-reason; blocked-ambiguous->the W1-T78 clarification-question rung (a specific, decidable operator question to the §2 backlog + escalate() as transport, never a generic needs-human). Idempotent (a second sweep over unchanged state acts on nothing). The daemon runs this every poll; --dry-run previews dispositions and takes nothing.",
@@ -9441,6 +9560,9 @@ export async function main(
   }
   if (cmd === "serve") {
     process.exit(await serveCommand(rest));
+  }
+  if (cmd === "serve-plist") {
+    process.exit(await servePlistCommand(rest));
   }
   if (cmd === "sweep") {
     process.exit(await sweepCommand(rest));
