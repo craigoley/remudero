@@ -307,13 +307,23 @@ test("ghIssueGateway.create: builds the gh issue-create args and returns the tri
   ]);
 });
 
-test("ghIssueGateway.listOpen: lists OPEN labeled issues with body via the deterministic list API (never a full-text search), parsed from JSON", () => {
+test("ghIssueGateway.listOpen: lists OPEN labeled issues with body over REST's /issues endpoint (never gh's --label search path), parsed from JSON", () => {
   const calls: string[][] = [];
   const gateway = ghIssueGateway("craigoley", "remudero", {
     exec: (args) => {
       calls.push(args);
+      // `--slurp` shape: one outer array wrapping one array per page.
       return JSON.stringify([
-        { number: 44, url: "https://github.com/craigoley/remudero/issues/44", title: "[BLOCKED] W1-T189", body: "**Task:** W1-T189\n" },
+        [
+          {
+            number: 44,
+            url: "https://api.github.com/repos/craigoley/remudero/issues/44",
+            html_url: "https://github.com/craigoley/remudero/issues/44",
+            state: "open",
+            title: "[BLOCKED] W1-T189",
+            body: "**Task:** W1-T189\n",
+          },
+        ],
       ]);
     },
   });
@@ -321,8 +331,9 @@ test("ghIssueGateway.listOpen: lists OPEN labeled issues with body via the deter
   assert.equal(open?.length, 1);
   assert.equal(open?.[0].number, 44);
   assert.equal(open?.[0].body, "**Task:** W1-T189\n");
+  assert.equal(open?.[0].url, "https://github.com/craigoley/remudero/issues/44", "the WEB url, never api.github.com");
   assert.deepEqual(calls, [
-    ["issue", "list", "--repo", "craigoley/remudero", "--label", NEEDS_HUMAN_LABEL, "--state", "open", "--json", "number,url,title,body", "--limit", "1000"],
+    ["api", `repos/craigoley/remudero/issues?labels=${NEEDS_HUMAN_LABEL}&state=open&per_page=100`, "--paginate", "--slurp"],
   ]);
 });
 
