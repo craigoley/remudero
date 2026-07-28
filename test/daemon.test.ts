@@ -1691,6 +1691,83 @@ test("a THROWING sweep does not kill the loop — it logs daemon.sweep.failed an
   assert.notEqual(s.stopReason, "error", "a failing reconciler is not a daemon error");
 });
 
+// ── W1-T117 part (ii): the per-POLL half of the orphan sweep ───────────────
+// daemonBoot (above) runs the sweep once at boot; runDaemon's own tick loop
+// runs the SAME entry point once per iteration, alongside the existing
+// PR-pipeline `sweep` — a stray from a run that ends BETWEEN polls is still
+// found within one cycle, not only at the next boot.
+
+test("runDaemon: sweepOrphans runs once per tick and logs daemon.orphan_sweep with the killed/left-alone COUNT", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  let sweepCalls = 0;
+  const lines: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const root = mkdtempSync(join(tmpdir(), "daemon-orphan-sweep-"));
+  const s = await runDaemon(plan, {
+    refreshMerged: () => (id: string) => merged.has(id),
+    runOne: async (id) => {
+      merged.add(id);
+      return okResult(id);
+    },
+    sweepOrphans: () => {
+      sweepCalls += 1;
+      return {
+        killed: [{ pid: 111, run_id: "run-1", task_id: "W1-T1", cmdline: "sleep 300" }],
+        leftAlone: [],
+      };
+    },
+    checkStop: () => (sweepCalls >= 1 ? (requestStop(root, "one orphan sweep seen"), stopDetail(root)) : undefined),
+    sleep: async () => {},
+    log: (step, extra) => lines.push({ step, extra }),
+  });
+  assert.ok(sweepCalls >= 1, "the orphan sweep ran at least once per tick");
+  const line = lines.find((l) => l.step === "daemon.orphan_sweep");
+  assert.ok(line, "daemon.orphan_sweep is logged");
+  assert.equal(line?.extra?.killed, 1);
+  assert.equal(line?.extra?.left_alone, 0);
+  assert.notEqual(s.stopReason, "error");
+});
+
+test("runDaemon: a THROWING sweepOrphans does not kill the loop — it logs daemon.orphan_sweep.failed and keeps polling", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  let sweepCalls = 0;
+  const root = mkdtempSync(join(tmpdir(), "daemon-orphan-sweep-throw-"));
+  const s = await runDaemon(plan, {
+    refreshMerged: () => (id: string) => merged.has(id),
+    runOne: async (id) => {
+      merged.add(id);
+      return okResult(id);
+    },
+    sweepOrphans: () => {
+      sweepCalls += 1;
+      throw new Error("ps: command not found");
+    },
+    checkStop: () => (sweepCalls >= 2 ? (requestStop(root, "two failed orphan sweeps seen"), stopDetail(root)) : undefined),
+    sleep: async () => {},
+  });
+  assert.ok(sweepCalls >= 2, `the loop kept iterating THROUGH the failures (saw ${sweepCalls} sweeps)`);
+  assert.notEqual(s.stopReason, "error", "a failing orphan sweep is not a daemon error");
+});
+
+test("runDaemon: with no sweepOrphans injected, the loop behaves exactly as before W1-T117 (no daemon.orphan_sweep line)", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const lines: Array<{ step: string }> = [];
+  const root = mkdtempSync(join(tmpdir(), "daemon-no-orphan-sweep-"));
+  await runDaemon(plan, {
+    refreshMerged: () => (id: string) => merged.has(id),
+    runOne: async (id) => {
+      merged.add(id);
+      return okResult(id);
+    },
+    checkStop: () => (requestStop(root, "stop immediately"), stopDetail(root)),
+    sleep: async () => {},
+    log: (step) => lines.push({ step }),
+  });
+  assert.equal(lines.filter((l) => l.step.startsWith("daemon.orphan_sweep")).length, 0);
+});
+
 // ── W1-T254 (the #707 fix): the restricted LIGHT-SWEEP TICKER ──────────────
 // `runOne` is unbounded — a long task run holds the daemon inside a single
 // call, during which the outer per-iteration `deps.sweep` above never runs
@@ -1894,4 +1971,62 @@ test("daemonBoot: with no resolveClaudeBin injected, no daemon.claude_bin line i
   const lines: Array<{ step: string }> = [];
   daemonBoot((step) => lines.push({ step }), { PATH: "/usr/bin" });
   assert.equal(lines.filter((l) => l.step === "daemon.claude_bin").length, 0);
+});
+
+// ── daemonBoot: W1-T117 part (ii) — the boot-time orphan sweep ─────────────
+
+test("daemonBoot: calls the injected orphan sweep once and logs daemon.orphan_sweep with the killed/left-alone COUNT", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let calls = 0;
+  const sweepOrphanWorkers = () => {
+    calls += 1;
+    return {
+      killed: [{ pid: 111, run_id: "run-1", task_id: "W1-T1", cmdline: "sleep 300" }],
+      leftAlone: [{ pid: 222, reason: "unattributable" as const }],
+    };
+  };
+  daemonBoot(
+    (step, extra = {}) => lines.push({ step, extra }),
+    { PATH: "/usr/bin" },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    false,
+    sweepOrphanWorkers,
+  );
+  assert.equal(calls, 1, "swept exactly once at boot, not per poll");
+  const line = lines.find((l) => l.step === "daemon.orphan_sweep");
+  assert.ok(line, "daemon.orphan_sweep is logged");
+  assert.equal(line?.extra.killed, 1, "the killed COUNT is logged, not the raw list");
+  assert.equal(line?.extra.left_alone, 1);
+});
+
+test("daemonBoot: a THROWING orphan sweep still completes boot (never throws onward) — logged as a failure, not silently dropped", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const sweepOrphanWorkers = (): never => {
+    throw new Error("ps: command not found");
+  };
+  const result = daemonBoot(
+    (step, extra = {}) => lines.push({ step, extra }),
+    { PATH: "/usr/bin" },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    false,
+    sweepOrphanWorkers,
+  );
+  assert.ok(result, "daemonBoot returns normally — a sweep failure never aborts boot itself (T197 doctrine)");
+  const line = lines.find((l) => l.step === "daemon.orphan_sweep");
+  assert.ok(line, "the failure is logged on the SAME step name, not swallowed silently");
+  assert.match(String(line?.extra.error), /ps: command not found/);
+});
+
+test("daemonBoot: with no orphan sweep injected, no daemon.orphan_sweep line is written (behavior unchanged from before W1-T117)", () => {
+  const lines: Array<{ step: string }> = [];
+  daemonBoot((step) => lines.push({ step }), { PATH: "/usr/bin" });
+  assert.equal(lines.filter((l) => l.step === "daemon.orphan_sweep").length, 0);
 });
