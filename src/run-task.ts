@@ -4904,7 +4904,7 @@ export async function daemonCommand(rest: string[]): Promise<number> {
   const refreshMerged: () => MergedSet = () => {
     const proj = projectPlan(
       plan,
-      { ledgerPath, github: ghGateway(target.owner, target.repo) },
+      { ledgerPath, github: buildBatchedGithub(target.owner, target.repo, { log }) },
       statusPath,
     );
     lastProj = proj;
