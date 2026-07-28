@@ -20,7 +20,7 @@ import type { QuestionEntry } from "./worker.js";
  * LLM classification, never a magic number buried in an if-branch. Every threshold
  * a test might flip lives in the policy object so a fixture can override it.
  *
- * Every open PR gets EXACTLY ONE of four dispositions and its gated action:
+ * Every open PR gets EXACTLY ONE of seven dispositions and its gated action:
  *   - MERGEABLE        — POSITIVELY matched only: required checks green AND review
  *                        success -> arm auto-merge (per-repo merge SERIALIZATION
  *                        slots are a future WS-2 task and deliberately NOT built
@@ -62,6 +62,18 @@ import type { QuestionEntry } from "./worker.js";
  *                        backlog AND opens via W1-T8's `escalate()` as the
  *                        notification transport — so it is never silent and never
  *                        armed.
+ *   - WAIT             — (W1-T114, the 30-issue predicate-storm fix) required
+ *                        checks pending/queued AND the newest check's start is
+ *                        younger than a staleness ceiling (policy-as-data,
+ *                        {@link SweepPolicy.pendingCeilingMinutes}) -> no action
+ *                        this pass, a ledgered wait line, re-derived fresh next
+ *                        sweep. Pending is TIME, not ambiguity — escalating on it
+ *                        manufactured alert fatigue at machine speed (~24 of 30
+ *                        live needs-human issues, 2026-07-19, were exactly this
+ *                        shape). Ceiling EXCEEDED -> stale-pending, the SAME
+ *                        blocked-ambiguous escalate path below, its reason naming
+ *                        the elapsed minutes and the ceiling — a check stuck past
+ *                        the ceiling IS ambiguity.
  *
  * SCOPING (honest): HUNG workers are EXPLICITLY DEFERRED to a future WS-2 task.
  * Worker liveness is RUN-state, not PR-state, and this sweep's domain is PR state
@@ -92,7 +104,8 @@ export type Disposition =
   | "blocked-ambiguous"
   | "dep-review"
   | "post-review"
-  | "conflicted";
+  | "conflicted"
+  | "wait";
 
 /**
  * One failing required CI check's name + the tail of its log — the W1-T94
@@ -198,14 +211,27 @@ export interface SweepPolicy {
    * {@link checkQueueGovernor}, this policy's consumer.
    */
   wipLimit: number;
+  /**
+   * W1-T114 (the 30-issue predicate-storm fix) — the STALENESS CEILING for the
+   * WAIT disposition: required checks pending/queued with the newest check's
+   * start younger than this many minutes -> wait, no action; at or beyond it
+   * -> stale-pending, the escalate path. A ROW in this table (rule 2,
+   * policy-as-data), not a constant buried in the predicate — a fixture proves
+   * this by lowering the seeded ceiling and flipping a wait to an escalate with
+   * ZERO code changes. Default generous enough for the slowest required check
+   * to register and settle (an hour) — a check still pending PAST that IS
+   * ambiguity, not merely in-flight.
+   */
+  pendingCeilingMinutes: number;
 }
 
-/** The default policy — 14-day stale window, 2 fix strikes (mirrors fixStrikeCap), 10-PR WIP limit. */
+/** The default policy — 14-day stale window, 2 fix strikes (mirrors fixStrikeCap), 10-PR WIP limit, 60-minute pending ceiling. */
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   staleDays: 14,
   strikeCap: 2,
   clarify: DEFAULT_CLARIFY_POLICY,
   wipLimit: 10,
+  pendingCeilingMinutes: 60,
 };
 
 /**
@@ -222,6 +248,15 @@ export interface OpenPrView {
   reviewState: "success" | "failure" | "pending" | "none";
   /** Rolled-up required-checks state on the head. */
   checksState: "green" | "red" | "pending" | "none";
+  /**
+   * W1-T114: ISO-8601 timestamp of the NEWEST required check's start on this
+   * head — the WAIT disposition's only time input, populated when
+   * `checksState === "pending"` (undefined/unparseable otherwise, including
+   * when the real gateway has not been wired to surface it yet). Absent ⇒ the
+   * WAIT/stale-pending rows never match (fail toward the pre-existing
+   * catch-all escalate, never a silent indefinite wait on state we can't date).
+   */
+  checksPendingSince?: string;
   /** The unmet acceptance criteria from a failing review ([] otherwise). */
   unmetCriteria: CriterionVerdict[];
   /** Fix-rung strikes ALREADY attempted for this PR (from the ledger). */
@@ -420,9 +455,29 @@ export function isBlockedCi(pr: OpenPrView): boolean {
  */
 interface DispositionRule {
   readonly disposition: Disposition;
-  /** Observed-state predicate over the PR + the tunable {@link SweepPolicy} thresholds. */
-  readonly when: (pr: OpenPrView, policy: SweepPolicy, ageDays: number) => boolean;
-  readonly reason: (pr: OpenPrView, policy: SweepPolicy, ageDays: number) => string;
+  /**
+   * Observed-state predicate over the PR + the tunable {@link SweepPolicy}
+   * thresholds. `now` (W1-T114) is the same sweep-pass clock {@link ageDays}
+   * was derived from — threaded so the WAIT/stale-pending rows can derive the
+   * PENDING age from {@link OpenPrView.checksPendingSince} without a second,
+   * independently-sourced clock.
+   */
+  readonly when: (pr: OpenPrView, policy: SweepPolicy, ageDays: number, now: number) => boolean;
+  readonly reason: (pr: OpenPrView, policy: SweepPolicy, ageDays: number, now: number) => string;
+}
+
+/**
+ * W1-T114: how many minutes the newest required check has been pending on
+ * this head, or undefined when there is nothing to date — no
+ * `checksPendingSince` at all (the real gateway not yet wired, or checks
+ * aren't pending), or an unparseable timestamp. PURE, fail-toward-undefined:
+ * never guesses an age it cannot support from observed state.
+ */
+function pendingAgeMinutes(pr: OpenPrView, now: number): number | undefined {
+  if (!pr.checksPendingSince) return undefined;
+  const parsed = Date.parse(pr.checksPendingSince);
+  if (Number.isNaN(parsed)) return undefined;
+  return (now - parsed) / 60_000;
 }
 
 /**
@@ -461,7 +516,7 @@ interface DispositionRule {
  *      can be BOTH checks-red AND review-failing at once; ci-log wins, and once
  *      the check goes green a fresh review runs and rows 6/7 take over from
  *      there if IT still fails. FIX FIRST: this PR reaches the question rung
- *      (row 9) only by exhausting the ladder through row 4, never straight here.
+ *      (row 11) only by exhausting the ladder through row 4, never straight here.
  *   6. FAILING + actionable unmet criteria, strikes left -> blocked-fixable (fix rung).
  *      Only reached with checks NOT red (row 5 above already claimed that case).
  *   7. FAILING + no actionable criteria (contradictory)  -> blocked-ambiguous (escalate).
@@ -473,20 +528,36 @@ interface DispositionRule {
  *      or unclassifiable conflict) -> `blocked-ambiguous`, REFUSING
  *      auto-resolution and escalating instead — never a wrong clobber.
  *   8. CI GREEN + REVIEW SUCCESS (POSITIVE match only)   -> mergeable (arm).
- *   9. TERMINAL catch-all (the #161 fix, W1-T93): anything not positively
- *      mergeable, not already failure-shaped, and not the blocked_ci shape
- *      above (e.g. checks still pending, review still pending) ->
- *      blocked-ambiguous (the CLARIFICATION-QUESTION rung, W1-T78), naming the
- *      observed checks/review state. The catch-all is the LEAST permissive
- *      disposition, never the most permissive one; mergeable is ONLY ever
- *      positively matched (row 8), never a fallback.
+ *   9. WAIT (W1-T114, the 30-issue predicate-storm fix): checks pending AND a
+ *      datable, in-window newest-check-start (policy.pendingCeilingMinutes) ->
+ *      wait — no action, ledgered, re-derived next sweep. Never reached when
+ *      the review is FAILING (rows 4/6/7 above already claimed that) or checks
+ *      are red (row 5 above). Undated pending (no `checksPendingSince`, e.g.
+ *      the gateway not yet wired) never matches — falls through to row 11.
+ *  10. STALE-PENDING (W1-T114): same predicate as row 9 but the ceiling is MET
+ *      or EXCEEDED -> blocked-ambiguous, the SAME escalate path row 11 uses,
+ *      reason naming the elapsed minutes and the ceiling — a check stuck past
+ *      the ceiling IS ambiguity, unlike merely in-flight (row 9).
+ *  11. TERMINAL catch-all (the #161 fix, W1-T93): anything not positively
+ *      mergeable, not already failure-shaped, not the blocked_ci shape above,
+ *      and not a DATABLE pending state (rows 9/10) — e.g. checks pending with
+ *      no check-start to date, or review still pending with checks green/none
+ *      already routed elsewhere — lands here: blocked-ambiguous (the
+ *      CLARIFICATION-QUESTION rung, W1-T78), naming the observed checks/review
+ *      state. The catch-all is the LEAST permissive disposition, never the
+ *      most permissive one; mergeable is ONLY ever positively matched (row 8),
+ *      never a fallback.
  *
  * Stale/superseded rows precede the failing/mergeable rows so tightening the
  * stale threshold flips an otherwise-mergeable PR to a close. Row 3 (answered)
  * precedes row 4 (strikes exhausted) so an answer's extended allowance actually
  * overrides exhaustion; rows 4-7 (blocked_ci / review FAILING) precede row 8 so
  * a CI-green-but-review-failing (or checks-red) PR still routes to fix/escalate,
- * not mergeable.
+ * not mergeable. Rows 9/10 (wait / stale-pending) are ordered AFTER every
+ * failure/success row and BEFORE the row-11 catch-all so a genuinely-red or
+ * review-failing PR never gets stranded waiting, and a datable pending PR is
+ * never left to the catch-all's generic reason once W1-T114's ceiling can
+ * speak to it directly.
  */
 export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
@@ -631,19 +702,56 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // criteria (no trailer, no Acceptance block) posts FAIL fail-closed, which
     // is a LEGIBLE gate state rather than a clarification escalation.
     // Dependabot PRs never reach here (their own row above); checks-pending
-    // stays with the catch-all (review-before-green is not the lane's order).
+    // stays with rows 9/10 below (W1-T114) when datable, the catch-all
+    // otherwise (review-before-green is not the lane's order).
     disposition: "post-review",
     when: (pr) => pr.checksState === "green" && pr.reviewState === "none",
     reason: (pr) => `checks green, review never posted — running the review lane on #${pr.prNumber}`,
   },
   {
+    // WAIT (W1-T114, the 30-issue predicate-storm fix, LIVE INCIDENT
+    // 2026-07-19: ~24 of 30 open needs-human issues were exactly this shape —
+    // "checks pending, review success — escalating"). Never reached with a
+    // FAILING review or red checks (rows 4-7 above already claimed those) —
+    // only checks-pending survives to here. Requires a DATABLE age
+    // (`checksPendingSince` present and parseable); undated pending falls
+    // through to row 11's catch-all unchanged (the pre-W1-T114 behavior, for
+    // callers that haven't wired the timestamp yet).
+    disposition: "wait",
+    when: (pr, policy, _ageDays, now) => {
+      if (pr.checksState !== "pending") return false;
+      const mins = pendingAgeMinutes(pr, now);
+      return mins !== undefined && mins < policy.pendingCeilingMinutes;
+    },
+    reason: (pr, policy, _ageDays, now) =>
+      `checks pending ${Math.floor(pendingAgeMinutes(pr, now) ?? 0)}m (< ${policy.pendingCeilingMinutes}m ceiling) — waiting, re-deriving next sweep`,
+  },
+  {
+    // STALE-PENDING (W1-T114): the SAME datable-pending shape as row 9 above,
+    // but the ceiling is met or exceeded — a check stuck this long IS
+    // ambiguity, not merely in-flight. Disposition is blocked-ambiguous, the
+    // SAME escalate path row 11 uses (ledger dedup, clarification-question
+    // rendering, escalate() dispatch — nothing new to wire), with the elapsed
+    // minutes and the ceiling both named in the reason.
+    disposition: "blocked-ambiguous",
+    when: (pr, policy, _ageDays, now) => {
+      if (pr.checksState !== "pending") return false;
+      const mins = pendingAgeMinutes(pr, now);
+      return mins !== undefined && mins >= policy.pendingCeilingMinutes;
+    },
+    reason: (pr, policy, _ageDays, now) =>
+      `stale-pending — checks pending ${Math.floor(pendingAgeMinutes(pr, now) ?? 0)}m (>= ${policy.pendingCeilingMinutes}m ceiling) — escalating`,
+  },
+  {
     // TERMINAL rule (matches unconditionally) — the LEAST permissive disposition
     // (the #161 fix, W1-T93), not the most permissive one. A checks-red PR is
-    // the blocked_ci shape and is caught by row 5 above (W1-T100/W1-T138) —
-    // never lands here. Anything ELSE not positively mergeable and not
-    // failure-shaped (e.g. checks/review still pending) matches no earlier rule
-    // and no longer falls through to mergeable by default: it lands here and
-    // ESCALATES, naming the observed state, so it is never silent and never armed.
+    // the blocked_ci shape and is caught by row 5 above (W1-T100/W1-T138); a
+    // DATABLE checks-pending PR is caught by row 9/10 above (W1-T114) — neither
+    // ever lands here. Anything ELSE not positively mergeable and not
+    // failure-shaped (e.g. checks/review still pending with no datable
+    // check-start) matches no earlier rule and no longer falls through to
+    // mergeable by default: it lands here and ESCALATES, naming the observed
+    // state, so it is never silent and never armed.
     disposition: "blocked-ambiguous",
     when: () => true,
     reason: (pr) =>
@@ -666,14 +774,14 @@ export function deriveDisposition(
 ): DispositionResult {
   const parsed = Date.parse(pr.lastActivityAt);
   const ageDays = Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : (now - parsed) / MS_PER_DAY;
-  const rule = DISPOSITION_RULES.find((r) => r.when(pr, policy, ageDays));
+  const rule = DISPOSITION_RULES.find((r) => r.when(pr, policy, ageDays, now));
   if (!rule) {
     // UNREACHABLE — the terminal row matches unconditionally. This guards the
     // no-disposition=none invariant against a future table edit that drops it.
     // The safe fallback is the LEAST permissive disposition — escalate, never arm.
     return { disposition: "blocked-ambiguous", reason: "default (no rule matched) — escalating" };
   }
-  return { disposition: rule.disposition, reason: rule.reason(pr, policy, ageDays) };
+  return { disposition: rule.disposition, reason: rule.reason(pr, policy, ageDays, now) };
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1098,6 +1206,7 @@ const ZERO_COUNTS = (): Record<Disposition, number> => ({
   stale: 0,
   "blocked-ambiguous": 0,
   conflicted: 0,
+  wait: 0,
 });
 
 /**
@@ -1164,6 +1273,15 @@ export async function runSweep(
         // no PR number, only the taskId the review lane itself resolved,
         // matching `lastPostedReviewStatusFromLedger`'s established key).
         alreadyDone = prior.postReviewed.has(`${pr.taskId ?? ""}@${pr.headSha}`);
+        break;
+      case "wait":
+        // W1-T114: WAIT never gates an effect — there is nothing to dispatch,
+        // only time to let pass. Forcing `alreadyDone` true (rather than
+        // adding a no-op case to the action switch below) keeps `acted`
+        // false unconditionally, so the ledger line always reads
+        // `acted:false` — a wait is re-derived and re-ledgered every pass,
+        // never counted as an action taken.
+        alreadyDone = true;
         break;
       default:
         alreadyDone = false;

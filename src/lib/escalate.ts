@@ -144,6 +144,16 @@ export interface IssueGateway {
    */
   closeWithComment?(url: string, comment: string): void;
   /**
+   * Post `body` as a plain comment on an OPEN issue, without closing it (W1-T104 — the
+   * SECOND OBSERVER of an already-open escalation appends here rather than opening a
+   * sibling). Distinct from {@link closeWithComment}: that one is the reconciler's
+   * CLOSE-and-cite step; this one keeps the issue open and just adds the new caller's
+   * context. Optional, same fail-soft discipline as every other gateway extension here —
+   * a gateway omitting it still DEDUPES (no sibling is created) but silently drops the
+   * second observation instead of appending it.
+   */
+  comment?(url: string, body: string): void;
+  /**
    * Ensure ONE label exists on the repo (create-if-missing, tolerate-already-exists).
    * Returns true when the label is now safe to attach, false when provisioning itself
    * failed. Optional: a gateway that omits this is treated as "every label already
@@ -199,9 +209,49 @@ export interface EscalateDeps {
 }
 
 /**
+ * Pull a PR reference out of free text — a full `.../pull/<n>` URL, or a bare
+ * `PR #<n>` / `PR <n>` mention — and return just the number. Every current caller of
+ * `escalate()` embeds one of these forms directly in `summary` or `detail` (the fix
+ * rung's `${opts.prUrl}`, the clarification rung's `PR #${pr.prNumber}`, dep-review's
+ * PR url, …), so this needs no new field on {@link Escalation} to key dedup on — the
+ * CONTENT already carries it. Returns `undefined` when no PR is named (a task-level
+ * escalation like the dispatch circuit breaker, or the GRILL/CLI paths) — those never
+ * participate in dedup, exactly as before this task.
+ */
+function extractPrRef(text: string): string | undefined {
+  return (
+    /\/pull\/(\d+)\b/.exec(text)?.[1] ?? /\bPR\s*#(\d+)\b/i.exec(text)?.[1] ?? /\bPR\s+(\d+)\b/i.exec(text)?.[1]
+  );
+}
+
+/** The `**Task:** <id>` line {@link renderIssueBody} writes on every issue — the same
+ *  regex the escalation-lifecycle reconciler (run-task.ts) already reads task ids with. */
+const TASK_LINE_RE = /^\*\*Task:\*\*\s*(\S+)\s*$/m;
+
+/**
  * Open a labeled GitHub issue for one escalation + log the ledger line. Returns the
  * issue URL. An escalation with zero options is refused — bare alerts with no
  * actionable choice are exactly what this taxonomy exists to avoid (§4).
+ *
+ * DEDUP LIVES HERE, IN THE TRANSPORT (W1-T104 — the #178/#180 duplicate): a sweep
+ * escalation and a drain-path exhaustion escalation for the SAME (task, PR) used to
+ * each open their own issue, because each caller deduped only against ITS OWN prior
+ * actions (different title templates, different ledger keys) and never saw the
+ * other's issue. The fix is a single content-keyed check inside `escalate()` itself,
+ * so EVERY caller inherits it by construction rather than re-implementing it:
+ *   - key = (this escalation's taskId, the PR number found in its summary/detail).
+ *     No PR reference found -> skip the check entirely (create as always).
+ *   - search OPEN `needs-human` issues (never closed ones — a closed issue recorded a
+ *     human's resolution, and a fresh escalation on a recurrence must NOT be silenced
+ *     by it) for one whose `**Task:**` line matches and whose title+body names the
+ *     SAME PR number.
+ *   - found -> append THIS caller's own summary/detail as a comment (never dropped —
+ *     the second observer often knows something the first did not) and ledger
+ *     `escalation.deduped` instead of creating a sibling.
+ *   - not found -> create exactly as before.
+ * A `listOpen` read failure (or a gateway that omits `listOpen` altogether) falls
+ * through to the ordinary create path — dedup is a best-effort nicety, and must never
+ * be the reason a real escalation goes undelivered.
  *
  * ENSURE-LABELS, DEGRADE DON'T LOSE (W1-T99): every wanted label is passed through
  * `deps.issues.ensureLabel` first (a gateway lacking that method is treated as
@@ -215,6 +265,37 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
   if (e.options.length === 0) {
     throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
   }
+
+  const prRef = extractPrRef(`${e.summary}\n${e.detail}`);
+  if (prRef && deps.issues.listOpen) {
+    let open: OpenIssue[];
+    try {
+      open = deps.issues.listOpen(NEEDS_HUMAN_LABEL);
+    } catch {
+      open = []; // best-effort dedup: a failed read must never block the escalation itself
+    }
+    const dup = open.find(
+      (issue) =>
+        TASK_LINE_RE.exec(issue.body ?? "")?.[1] === e.taskId &&
+        extractPrRef(`${issue.title ?? ""}\n${issue.body ?? ""}`) === prRef,
+    );
+    if (dup) {
+      deps.issues.comment?.(
+        dup.url,
+        `Another escalation observed the same condition (task ${e.taskId}, PR #${prRef}) while this issue ` +
+          `was already open — appending rather than opening a sibling (W1-T104).\n\n${renderIssueBody(e)}`,
+      );
+      appendLedger(deps.ledgerPath, {
+        run_id: deps.runId,
+        task_id: e.taskId,
+        step: "escalation.deduped",
+        class: e.class,
+        issue_url: dup.url,
+      });
+      return dup.url;
+    }
+  }
+
   const title = `[${e.class}] ${e.taskId}: ${e.summary}`;
   const wanted = [NEEDS_HUMAN_LABEL, CLASS_LABEL[e.class]];
   const labels: string[] = [];
@@ -333,6 +414,9 @@ export function ghIssueGateway(
     },
     closeWithComment(url, comment) {
       run(["issue", "close", url, "--repo", repoArg, "--comment", comment]);
+    },
+    comment(url, body) {
+      run(["issue", "comment", url, "--repo", repoArg, "--body", body]);
     },
   };
 }

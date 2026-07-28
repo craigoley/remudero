@@ -1401,7 +1401,7 @@
     Reuses the board-fix regression harness for the <2s budget at 183-task scale — the real fetch client, not a stub."
 
 - id: W1-T152
-  title: "rmd serve-plist — a launchd-unit generator for the console (mirrors rmd daemon-plist): KeepAlive, logs to state/serve.log, port from config, so serve is a background service and never a foreground terminal"
+  title: "rmd serve-plist — a launchd-unit generator for the console (mirrors rmd daemon-plist): KeepAlive, logs to state/logs/serve.{out,err}.log at mode 0600, port from config, so serve is a background service and never a foreground terminal"
   repo: remudero
   depends_on: [W1-T139, W1-T12b, W1-T151, W1-T143]
   type: implement
@@ -1411,34 +1411,41 @@
   rationale: "FIXTURE (real): the operator ctrl+C'd `rmd serve` to get his shell back TWICE in one morning —
     the console only runs as a FOREGROUND process, so every terminal reclaim kills it and the board goes dark. A
     serve-plist generator, mirroring `rmd daemon-plist` (generateLaunchdPlist, W1-T12b), makes the console a
-    background SERVICE: KeepAlive so it comes back on exit, logs to state/serve.log (line-buffered per W1-T143 so it
-    is observable, not empty-until-exit), port baked from config. The operator never runs serve in a foreground
-    terminal again. EVIDENCE SET (one day, verbatim): (i) three STALE-CODE incidents — a serve launched off a branch
+    background SERVICE: KeepAlive so it comes back on exit, logs to state/logs/serve.{out,err}.log at mode 0600
+    (line-buffered per W1-T143 so it is observable, not empty-until-exit), port baked from config. The operator
+    never runs serve in a foreground terminal again. EVIDENCE SET (one day, verbatim): (i) three STALE-CODE
+    incidents — a serve launched off a branch
     keeps serving that branch's code after the checkout returns to main (tsx loads once); (ii) one OUTAGE with a
     silent-failed-relaunch: kill + immediate relaunch RACED (no reap wait) -> the new process died EADDRINUSE into an
     unread log -> the OLD process kept serving stale code -> the old process eventually exited -> console down with
-    nothing listening. A KeepAlive'd launchd service + the install-freshness hook + the reap-safe restart retires
-    EVERY class here: stale code, argv-kill misses, bind races, silent launch failures, zombie deaths."
+    nothing listening. A KeepAlive'd launchd service + the boot-time SERVICE-freshness assessment (which NAMES a
+    dirty or behind checkout in the ledger and proceeds) + the loud off-main boot warning + the reap-safe restart
+    retires or NAMES every class here: stale code, argv-kill misses, bind races, silent launch failures, zombie
+    deaths."
   design: |
     Add `rmd serve-plist [--port <n>] [--write]` mirroring daemonPlistCommand, and generalize generateLaunchdPlist
     (or add a serve variant) to emit: ProgramArguments = [rmdBin, "serve", "--port", <resolved port>]; a distinct
-    serve Label; KeepAlive (SuccessfulExit=false) + RunAtLoad; StandardOutPath/StandardErrorPath under state/ (a
-    single state/serve.log, line-buffered per W1-T143); the SAME closed PATH+HOME env allowlist (no ANTHROPIC keys).
-    The service serve path runs the W1-T151 install-freshness check BEFORE binding (a lockfile-changing pull triggers
-    npm install first). Port from config via resolveServePort. `--write` installs to ~/Library/LaunchAgents and
-    prints the load line for the operator (loading the unit is the operator's one step, not an auto criterion).
+    serve Label; KeepAlive (SuccessfulExit=false) + RunAtLoad; StandardOutPath/StandardErrorPath under state/logs/
+    (serve.out.log and serve.err.log, line-buffered per W1-T143, mode 0600); the SAME closed PATH+HOME env allowlist
+    (no ANTHROPIC keys). The service serve path runs the SERVICE-freshness assessment BEFORE binding —
+    `serviceFreshnessGate` (src/run-task.ts), which delegates to `checkServiceFreshness` (src/lib/self-sync.ts): it
+    assesses, ledgers daemon.tree_dirty / daemon.stale_code, and PROCEEDS, never exit-1ing on tree state. The
+    npm-install-after-a-lock-changing-pull hook is W1-T151's remit and is NOT built here. Port from config via
+    resolveServePort. `--write` installs to ~/Library/LaunchAgents and prints the load line for the operator
+    (loading the unit is the operator's one step, not an auto criterion).
     BELT-AND-SUSPENDERS: the service serve path checks the checkout's current branch and SAYS SO LOUDLY when it
     is not main (naming the branch, every boot) — a console serving branch code lies to the operator (the
     ctrl+C-off-a-branch / serve-off-main incident). AMENDED 2026-07-28 from "REFUSES to bind ... exit non-zero":
-    under the KeepAlive unit THIS task generates, any startup refusal is a crash-loop — precisely the W1-T255/#726
+    under the KeepAlive unit THIS task generates, any startup refusal is a crash-loop — precisely the PR #726
     incident, where the daemon's dirty-tree refusal exit-1'd on every launchd restart and took the whole automation
     down for hours. A crash-looping console is strictly worse than an honest degraded one for an operator whose only
-    reattach surface is that console. VERIFY generateLaunchdPlist's current shape, resolveServePort, the W1-T255
-    service-freshness gate, and the git current-branch read from source before wiring (distrust this note).
+    reattach surface is that console. VERIFY generateLaunchdPlist's current shape, resolveServePort,
+    `serviceFreshnessGate` (src/run-task.ts), and the git current-branch read from source before wiring (distrust
+    this note).
   acceptance:
     - claim: "the generated plist runs `rmd serve` as a KeepAlive background service, port baked from config, logging to state/logs/serve.{out,err}.log"
       proof: "unit test: test/serve-plist.test.ts"
-    - claim: "serve's boot runs the W1-T255 SERVICE-freshness assessment before binding — it assesses, ledgers and proceeds, and never exit-1s on tree state"
+    - claim: "serve's boot runs the SERVICE-freshness assessment serviceFreshnessGate (src/run-task.ts, delegating to checkServiceFreshness in src/lib/self-sync.ts) before binding — it assesses, ledgers and proceeds, and never exit-1s on tree state"
       proof: "unit test: test/serve-command-boot.test.ts"
     - claim: "serve's logs are line-buffered so state/logs/serve.out.log is readable while running, not only at exit"
       proof: "unit test: test/serve-service-boot.test.ts"
@@ -1458,16 +1465,29 @@
   files: [src/run-task.ts, src/lib/launchd.ts]
   status: queued
   attempts: 0
-  note: "AMENDED 2026-07-28 (second amendment; task re-verified QUEUED, zero merged PRs carry its trailer).
+  note: "AMENDED 2026-07-28 (third amendment — CITATION FIX + BODY RECONCILIATION ONLY; no criterion's
+    requirement changed). (i) The freshness criterion cited task id W1-T255, which is WRONG: W1-T255 is the
+    CI-flake whole-command test retry (this file, shipped by PR #754). The service-freshness behaviour was
+    shipped by PR #726 (branch fix-service-freshness, commit e94a736), which merged carrying NO Remudero-Task
+    trailer and therefore credits NO plan task — its TITLE says '(W1-T255)' and that title is the sole source of
+    the bad citation. Verified at source: `git log -1 --format=%B e94a736 | grep -c '^Remudero-Task:'` = 0. The
+    mechanism is therefore cited by FUNCTION NAME and FILE PATH, not by task id: serviceFreshnessGate
+    (src/run-task.ts), called from main() for cmd 'daemon' or 'serve' before dispatch, delegating to
+    checkServiceFreshness (src/lib/self-sync.ts). (ii) The title, rationale and design still specified the
+    SUPERSEDED single state/serve.log path and the SUPERSEDED W1-T151 install-freshness hook, contradicting the
+    criteria ratified by PR #798; they now describe what the criteria actually require. NOT TOUCHED: every
+    criterion's requirement, including the off-main serve-not-refuse criterion (under separate operator review),
+    and depends_on (still lists W1-T151 — flagged for the operator, deliberately not changed here).
+    SECOND AMENDMENT 2026-07-28 FOLLOWS (task re-verified QUEUED, zero merged PRs carry its trailer).
     (a) THE OFF-MAIN REFUSAL BECAME A NOTICE. See the design block: a startup refusal under this task's own
     KeepAlive unit is the #726 crash-loop, re-created on the console. Refusal -> loud named warning + ledger
     (serve.off_main) + serve.
     (b) THE INSTALL-FRESHNESS CRITERION WAS RE-POINTED at what actually exists. W1-T151 (npm install after a
     lock-changing pull) is still QUEUED and unshipped, so 'the service serve path runs the W1-T151 hook' could
     only have been satisfied by building W1-T151 inside W1-T152. What serve DOES run before binding is the
-    W1-T255 SERVICE-freshness assessment (serviceFreshnessGate in main(), assess+ledger+proceed) - that is now
-    the criterion. The npm-install-on-lock-change hook stays W1-T151's remit and lands on serve's boot path
-    when it ships.
+    SERVICE-freshness assessment serviceFreshnessGate (src/run-task.ts, called from main(); delegates to
+    checkServiceFreshness in src/lib/self-sync.ts; assess+ledger+proceed) - that is now the criterion. The
+    npm-install-on-lock-change hook stays W1-T151's remit and lands on serve's boot path when it ships.
     (c) LOG PATHS ARE state/logs/serve.{out,err}.log, not a single state/serve.log - the house layout every
     other unit in this generator family (daemon/digest/supervisor) already uses.
     ORIGINAL AMENDMENT (2026-07-21) FOLLOWS, with three lessons from incidents that POSTDATE this filing. Task verified

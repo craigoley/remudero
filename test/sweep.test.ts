@@ -383,6 +383,75 @@ test("deriveDisposition: a synthetic state matching no positive rule -> escalate
   assert.ok(r.reason.length > 0, "the catch-all states a reason");
 });
 
+// ── W1-T114: PENDING is a disposition — in-window checks WAIT, never escalate
+// (the 2026-07-19 30-issue predicate storm: ~24 of 30 open needs-human issues
+// were exactly "checks pending, review success — escalating"). ────────────────
+
+/** The live incident's own shape: checks pending, review ALREADY success. */
+function pendingStormPr(minutesPending: number, over: Partial<OpenPrView> = {}): OpenPrView {
+  return pr({
+    prNumber: 719,
+    prUrl: "url/719",
+    taskId: "W1-STORM",
+    reviewState: "success",
+    checksState: "pending",
+    checksPendingSince: new Date(NOW - minutesPending * 60_000).toISOString(),
+    ...over,
+  });
+}
+
+test("acceptance 1 — deriveDisposition: in-window pending (4min, the storm's own shape) -> wait, never arms, never escalates", () => {
+  const r = deriveDisposition(pendingStormPr(4), DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "wait");
+});
+
+test("acceptance 1 (runSweep) — a pending-4min PR takes NO gated action: no escalate call, no merge arm, ledgered acted:false", async () => {
+  const deps = fakeDeps();
+  const summary = await runSweep([pendingStormPr(4)], deps);
+  assert.equal(summary.byDisposition.wait, 1);
+  assert.equal(deps.escalated.length, 0, "no escalation call");
+  assert.equal(deps.armed.length, 0, "no merge arm");
+  assert.equal(summary.actionsTaken, 0, "wait never counts as an action taken");
+  const lines = readLedgerLines(deps.ledgerPath);
+  const disposed = lines.find((l) => l.step === "sweep.disposed");
+  assert.equal(disposed?.disposition, "wait");
+  assert.equal(disposed?.acted, false, "a wait ledger line, but no action fired");
+});
+
+test("acceptance 2 — deriveDisposition: stale-pending (90min, past the 60min default ceiling) -> escalate, reason names the age AND the ceiling", () => {
+  const r = deriveDisposition(pendingStormPr(90), DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-ambiguous");
+  assert.match(r.reason, /90m/, "the reason states the elapsed pending age");
+  assert.match(r.reason, /60m/, "the reason states the configured ceiling");
+});
+
+test("acceptance 2 (runSweep) — a pending-90min PR escalates through the EXISTING escalate path (same disposition/dedup as every other blocked-ambiguous PR)", async () => {
+  const deps = fakeDeps();
+  const summary = await runSweep([pendingStormPr(90)], deps);
+  assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
+  assert.equal(deps.escalated.length, 1, "the stale-pending PR reaches escalate()");
+  assert.match(deps.escalated[0].reason, /90m/);
+  assert.match(deps.escalated[0].reason, /60m/);
+});
+
+test("acceptance 3 — the pending ceiling is DATA: lowering the seeded ceiling flips the 4min fixture from wait to escalate with ZERO sweep-code changes", () => {
+  const p = pendingStormPr(4);
+  assert.equal(deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW).disposition, "wait", "baseline: 4min < the default 60min ceiling -> wait");
+  const tightened: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, pendingCeilingMinutes: 2 };
+  assert.equal(deriveDisposition(p, tightened, NOW).disposition, "blocked-ambiguous", "same fixture, only the policy changed -> escalate");
+});
+
+test("deriveDisposition: undated pending (no checksPendingSince — the gateway not yet wired) falls through to the pre-W1-T114 catch-all, never wait", () => {
+  const p = pr({ reviewState: "success", checksState: "pending" }); // no checksPendingSince
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-ambiguous", "no datable age -> the terminal catch-all, unchanged");
+});
+
+test("deriveDisposition regression lock (design iii): genuinely red checks still route blocked-fixable, never wait, even with a checksPendingSince set", () => {
+  const p = pr({ checksState: "red", checksPendingSince: new Date(NOW - 4 * 60_000).toISOString() });
+  assert.equal(deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-fixable");
+});
+
 test("deriveDisposition is TOTAL — superseded takes precedence over a failing review", () => {
   const p = pr({ reviewState: "failure", unmetCriteria: [criterion()], supersededBy: 42 });
   assert.equal(deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW).disposition, "stale");
@@ -508,9 +577,9 @@ test("deriveDisposition acceptance 1 — the #170 fixture (green checks, review 
   // mergeable row's own predicate (never a second, independently-hardcoded
   // check) — it must never positively match a dirty PR.
   const mergeableRow = DISPOSITION_RULES.find((row) => row.disposition === "mergeable")!;
-  assert.equal(mergeableRow.when(seeded, DEFAULT_SWEEP_POLICY, 0), true, "sanity: checks green + review success alone WOULD match");
+  assert.equal(mergeableRow.when(seeded, DEFAULT_SWEEP_POLICY, 0, NOW), true, "sanity: checks green + review success alone WOULD match");
   const conflictedRow = DISPOSITION_RULES.find((row) => row.disposition === "conflicted")!;
-  assert.equal(conflictedRow.when(seeded, DEFAULT_SWEEP_POLICY, 0), true, "the conflicted row matches FIRST, ordered above mergeable");
+  assert.equal(conflictedRow.when(seeded, DEFAULT_SWEEP_POLICY, 0, NOW), true, "the conflicted row matches FIRST, ordered above mergeable");
 });
 
 test("runSweep acceptance 2 — a pure-concurrent-addition conflict dispatches ONE merge-conflict-mode fix worker, carrying the conflicting files + both sides' log, never a reviewer-unmet/ci-log mix", async () => {
@@ -583,6 +652,7 @@ test("acceptance 1 — the P22 golden: {mergeable, blocked-fixable(2 criteria), 
     "dep-review": 0,
     "post-review": 0,
     conflicted: 0,
+    wait: 0,
   });
   assert.equal(summary.total, 4);
   assert.equal(summary.actionsTaken, 4);
@@ -786,6 +856,7 @@ test("renderSweepSummary is a single legible line", () => {
       "dep-review": 0,
       "post-review": 0,
       conflicted: 0,
+      wait: 0,
     },
     actionsTaken: 4,
     actionsFailed: 0,
@@ -806,6 +877,7 @@ test("renderSweepSummary calls out failed actions distinctly (W1-T99)", () => {
       "dep-review": 0,
       "post-review": 1,
       conflicted: 0,
+      wait: 0,
     },
     actionsTaken: 2,
     actionsFailed: 1,
