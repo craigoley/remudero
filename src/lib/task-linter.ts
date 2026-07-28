@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { relative, sep } from "node:path";
 import type { Plan, Task } from "./plan.js";
 import { isDialectPrefixed, parseWhitelistedProof } from "./review.js";
 
@@ -754,4 +756,33 @@ export class TaskLintError extends Error {
 export function assertLintClean(task: Task, opts: LintOpts = {}): void {
   const { ok, violations } = lintTask(task, opts);
   if (!ok) throw new TaskLintError(task.id, violations.filter((v) => v.severity === "block"));
+}
+
+// ── READ-IDENTITY & ROOT-CONTAINMENT (gate integrity, W1-T120) ──────────────
+//
+// A gate that reads a task/plan must be provably reading the RIGHT ONE — a silent
+// wrong-file read is still green and still wrong (the #271 false-green: one
+// checkout's `bin/rmd`, invoked with cwd inside a DIFFERENT work tree, linted the
+// INSTALL tree's plan and never opened the file under test at all). These two pure
+// helpers give `run-task.ts`'s `lint-plan`/`review` commands the vocabulary to (a)
+// refuse an out-of-root `--plan` BY NAME instead of letting it fail downstream as a
+// confusing base-resolution error, and (b) print the absolute path + content hash
+// of the file actually opened, so a wrong-file run is visible in its own output
+// instead of merely inferred from cwd. Both are pure string/hash logic over
+// ALREADY-READ input — no filesystem I/O, consistent with this module's contract.
+
+/** True iff `candidate` resolves to a path OUTSIDE `root` (`root` itself, and anything
+ *  under it, is IN). Both arguments must already be absolute — this does no resolving
+ *  or symlink-following of its own. */
+export function isPathOutsideRoot(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel === ".." || rel.startsWith(`..${sep}`);
+}
+
+/** `<abs path> (sha256:<first 12 hex chars>)` — the read-identity assertion a gate's
+ *  summary line carries so the file it actually opened is legible in its OWN output,
+ *  rather than merely inferable from cwd/argv. */
+export function formatReadIdentity(absPath: string, raw: string): string {
+  const hash = createHash("sha256").update(raw, "utf8").digest("hex").slice(0, 12);
+  return `${absPath} (sha256:${hash})`;
 }
