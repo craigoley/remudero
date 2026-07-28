@@ -12468,3 +12468,35 @@
     asymmetric: a recursion or a cancel-in-progress bug either spins the gate or leaves a cancelled
     ci-gate as the newest run, which reads as a hard red. The guards in design (ii)/(iii) are load-bearing
     criteria, not defensive extras."
+
+- id: T-MOUNTPROBE
+  title: "mount routing probe (docs class)"
+  repo: remudero
+  type: implement
+  verify: auto
+  risk: medium
+  origin: architect
+  status: queued
+  attempts: 0
+  files: [docs/probe.md]
+  rationale: |
+    The mount routing probe (W1-T167) documents and validates task-class-based routing — model/effort
+    selection based on what a task touches (docs, plan, or src). This task probes the docs-class path:
+    a task touching ONLY docs/probe.md must derive class=docs, route to the haiku/medium mount (not
+    the default sonnet/high), and ledger its routing decision for retro calibration. The probe validates
+    the complete class-routing pipeline from class derivation through mount resolution and ledgering.
+  design: |
+    The task touches only docs/probe.md, the routing probe documentation itself. This immutable fixture
+    allows validation that the class-routing logic (src/lib/task-class.ts derivation, src/lib/mounts.ts
+    resolution, src/run-task.ts ledgering) correctly identifies docs-only tasks and routes them through
+    the cheaper docs-class mount row. The test suite (test/mounts-wiring.test.ts) validates every step.
+  acceptance:
+    - claim: "the task derives class=docs and resolves to the docs row in mounts.yaml, routing to haiku/medium instead of the default sonnet/high"
+      proof: "unit test: test/mounts-wiring.test.ts::resolveRunMounts (W1-T167): a task with files=[docs/probe.md] derives task_class=docs and resolves mount_class=docs with model=haiku"
+    - claim: "run.start ledgers task_class=docs and mount_class=docs, visible for retro per-class cost/outcome calibration"
+      proof: "unit test: test/mounts-wiring.test.ts::runTask (W1-T167): the ledger carries task_class and mount_class fields for the docs-routed task"
+    - claim: "when the mounts table has the exact docs-class row, no fallback ledger is emitted (the happy path, class found)"
+      proof: "unit test: test/mounts-wiring.test.ts::resolveRunMounts (W1-T167): no mount.class_fallback line when the exact class row exists"
+  note: "Probe task for W1-T167 (mount routing by task class). Immutable fixture: touches only docs/probe.md
+    so class derivation and mount resolution are deterministic. The suite test/mounts-wiring.test.ts validates
+    the complete routing pipeline from class derivation through mount resolution and ledger emission."
