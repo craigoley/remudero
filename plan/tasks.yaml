@@ -12236,6 +12236,13 @@
     this note — review.ts:587 is the proof-timeout anchor, worker.ts DEFAULT_PRUNE_GRACE_MS the prune-grace anchor,
     daemon.ts the poll + headroom anchors, sweep.ts the staleDays/strikeCap/wipLimit anchors, drain the width);
     this task creates the file and its schema only — WIRING the consumer sites to read it is W1-T253.
+    HEADROOM GOVERNOR ROW (the future home of W1-T259's interim config carrier, per fb-1784894405468-a4153e):
+    when this file ships it carries a `headroom.enabled` boolean row whose DOCUMENTED DEFAULT IS **true** —
+    OPERATOR RULING 2026-07-25, superseding a4153e's default clause (which read false) while keeping its flag
+    architecture: the product default protects the subscription window, and opting into overflow spend is the
+    deliberate act. The env override `RMD_HEADROOM_ENABLED` wins over the policy row in both directions, exactly
+    as it wins over the config field today; a host opts out by setting the row (or config `headroom.enabled`)
+    false, as this operator host does.
   acceptance:
     - claim: "plan/policy.yaml lifts the CURRENT source values as initial data — proof timeout 60000, prune grace 120000, poll 60000, fix strike cap 2, sweep staleDays 14 / strikeCap 2 / wipLimit 10, drain max 10, and the headroom curve (≤24h→100% else 95% + reserve 95) — and a policy carrying the stale 30000 proof timeout is REFUSED as a regression below the live source value"
       proof: "unit test: test/policy.test.ts — the loaded policy proofTimeoutMs equals 60000 and the enumerated fields equal their lifted values; a policy fixture whose proof timeout is 30000 FAILS the not-below-current-source guard (the operator's 30000-rejected falsifier)"

@@ -67,10 +67,24 @@ test("validateConfig accepts a config with overflow entirely unset (default is n
   assert.doesNotThrow(() => validateConfig(config()));
 });
 
-// ── resolveHeadroomEnabled (ruling fb-1784894405468-a4153e) ──────────────────
+// ── resolveHeadroomEnabled (ruling fb-1784894405468-a4153e; DEFAULT clause reversed
+// by the operator ruling of 2026-07-25 — the flag architecture a4153e built is kept
+// verbatim, only the inherited default flips) ────────────────────────────────────
 
-test("resolveHeadroomEnabled: default is OFF — governor disabled when neither config nor env sets it", () => {
-  assert.equal(resolveHeadroomEnabled(config(), {}), false);
+test("resolveHeadroomEnabled: default is ON — an unconfigured install inherits the governor, protecting the subscription window", () => {
+  assert.equal(resolveHeadroomEnabled(config(), {}), true);
+  // ...and an empty headroom object is still "unset", not a spurious OFF.
+  assert.equal(resolveHeadroomEnabled(config({ headroom: {} }), {}), true);
+});
+
+test("resolveHeadroomEnabled: an explicit config headroom.enabled=false is honored — opting into overflow is the deliberate act (this host's posture)", () => {
+  assert.equal(resolveHeadroomEnabled(config({ headroom: { enabled: false } }), {}), false);
+  // The host config is exactly this shape: the credits-burst opt-out a4153e ruled for,
+  // now carried explicitly rather than inherited from a permissive default.
+  const hostConfig = JSON.parse(
+    '{"claudeBin":"/Users/x/.npm-global/bin/claude","root":"/Users/x/Remudero","headroom":{"enabled":false}}',
+  ) as Config;
+  assert.equal(resolveHeadroomEnabled(hostConfig, {}), false);
 });
 
 test("resolveHeadroomEnabled: config headroom.enabled=true turns it on", () => {
@@ -85,11 +99,15 @@ test("resolveHeadroomEnabled: RMD_HEADROOM_ENABLED overrides config in BOTH dire
   // env OFF beats config ON
   assert.equal(resolveHeadroomEnabled(config({ headroom: { enabled: true } }), { RMD_HEADROOM_ENABLED: "0" }), false);
   assert.equal(resolveHeadroomEnabled(config({ headroom: { enabled: true } }), { RMD_HEADROOM_ENABLED: "false" }), false);
+  // env OFF also beats the (now ON) inherited default, with no config field at all
+  assert.equal(resolveHeadroomEnabled(config(), { RMD_HEADROOM_ENABLED: "0" }), false);
 });
 
 test("resolveHeadroomEnabled: an empty/whitespace env value defers to config, not a spurious OFF", () => {
   assert.equal(resolveHeadroomEnabled(config({ headroom: { enabled: true } }), { RMD_HEADROOM_ENABLED: "" }), true);
   assert.equal(resolveHeadroomEnabled(config({ headroom: { enabled: true } }), { RMD_HEADROOM_ENABLED: "   " }), true);
+  // ...and it defers to an explicit config OFF too — a blank env never re-enables the governor
+  assert.equal(resolveHeadroomEnabled(config({ headroom: { enabled: false } }), { RMD_HEADROOM_ENABLED: "" }), false);
 });
 
 // ── architectModel: the Architect-tier model is governed by mounts.yaml's `architect:` row ──

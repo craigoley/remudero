@@ -84,27 +84,43 @@ export interface Config {
   consoleUrl?: string;
   /**
    * Headroom governor switch (operator ruling fb-1784894405468-a4153e, 2026-07-24,
-   * amending P34(c)/W1-T249, extending W1-T252). When `enabled` is false — the
-   * default posture on this host — ALL headroom-based dispatch gating is OFF: the
-   * W1-T197 daemon idle curve and the ratified W1-T249 reserve gate never pause
-   * dispatch on `percent_used`. Headroom is still READ and LEDGERED every daemon
-   * cycle (telemetry without enforcement), so the console shows weekly burn and
-   * the operator flips the flag with data in front of him. The per-run turn limit
-   * and `budget_usd` tripwire remain the runaway guards (ruling clause 4). When
+   * amending P34(c)/W1-T249, extending W1-T252 — its DEFAULT clause reversed by the
+   * operator ruling of 2026-07-25, below).
+   *
+   * When `enabled` is false, ALL headroom-based dispatch gating is OFF: the W1-T197
+   * daemon idle curve and the ratified W1-T249 reserve gate never pause dispatch on
+   * `percent_used`. Headroom is still READ and LEDGERED every daemon cycle
+   * (telemetry without enforcement), so the console shows weekly burn and the
+   * operator flips the flag with data in front of him. The per-run turn limit and
+   * `budget_usd` tripwire remain the runaway guards (ruling clause 4). When
    * `enabled` is true, the existing time-aware curve enforces unchanged.
    *
-   * FUTURE HOME: `plan/policy.yaml`'s `headroom.enabled` row once W1-T252 ships;
-   * this config field (and the `RMD_HEADROOM_ENABLED` env override — see
-   * {@link resolveHeadroomEnabled}) is the interim carrier until then.
+   * DEFAULT — **true** (OPERATOR RULING 2026-07-25, superseding a4153e's default
+   * clause while keeping its flag architecture intact): "most people would prefer
+   * rmd to efficiently manage their tokens rather than eat into extra spend." The
+   * shipped default protects the subscription window; SPENDING PAST IT IS THE
+   * DELIBERATE ACT — an operator opts into overflow by setting this field false (or
+   * `RMD_HEADROOM_ENABLED=0`), never by inheriting a permissive default. This host
+   * carries exactly that explicit opt-out in `~/.config/remudero/config.json`
+   * (`headroom.enabled: false`, the credits-burst posture a4153e ruled for), so live
+   * behaviour here is unchanged — only what an unconfigured install inherits flips.
+   *
+   * FUTURE HOME: `plan/policy.yaml`'s `headroom.enabled` row once W1-T252 ships —
+   * documented there with the same default, **true**; this config field (and the
+   * `RMD_HEADROOM_ENABLED` env override — see {@link resolveHeadroomEnabled}) is the
+   * interim carrier until then.
    */
   headroom?: { enabled?: boolean };
 }
 
 /**
- * Resolve the headroom-governor switch (ruling fb-1784894405468-a4153e). Precedence:
+ * Resolve the headroom-governor switch (ruling fb-1784894405468-a4153e; default clause
+ * reversed by the operator ruling of 2026-07-25). Precedence:
  * the `RMD_HEADROOM_ENABLED` env var (set/unset by the daemon plist) OVERRIDES the
  * config field in BOTH directions; absent an env value, the config's
- * `headroom.enabled`; absent that, **false** — governor OFF, the default host posture.
+ * `headroom.enabled`; absent that, **true** — governor ON, the product default that
+ * protects the subscription window. Opting into overflow is the deliberate act: a
+ * config `headroom.enabled: false` (this host) or `RMD_HEADROOM_ENABLED=0`.
  * `1/true/on/yes` (case-insensitive) ⇒ enabled; anything else present ⇒ disabled.
  */
 export function resolveHeadroomEnabled(
@@ -115,7 +131,7 @@ export function resolveHeadroomEnabled(
   if (typeof raw === "string" && raw.trim() !== "") {
     return /^(1|true|on|yes)$/i.test(raw.trim());
   }
-  return config.headroom?.enabled ?? false;
+  return config.headroom?.enabled ?? true;
 }
 
 /**

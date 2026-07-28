@@ -4795,9 +4795,11 @@ export async function daemonCommand(rest: string[]): Promise<number> {
     pollIntervalMs: pollIdx >= 0 ? Number(rest[pollIdx + 1]) : DEFAULT_POLL_INTERVAL_MS,
   };
   const config = loadConfig();
-  // Headroom governor switch (operator ruling fb-1784894405468-a4153e): resolve the
-  // host posture (default OFF) from config/env HERE and pass it explicitly, so the
-  // live daemon reads the flag while the library keeps its enforcement default.
+  // Headroom governor switch (operator ruling fb-1784894405468-a4153e; default clause
+  // reversed 2026-07-25 — the switch now defaults ON, and this host opts OUT explicitly
+  // via config `headroom.enabled: false`): resolve the host posture from config/env HERE
+  // and pass it explicitly, so the live daemon reads the flag while the library keeps
+  // its enforcement default.
   opts.headroomEnabled = resolveHeadroomEnabled(config);
   const ledgerPath = join(config.root, "state", "ledger.ndjson");
   const statusPath = join(config.root, "state", "status.json");

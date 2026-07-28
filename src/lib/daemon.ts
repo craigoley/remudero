@@ -299,8 +299,10 @@ export interface DaemonOpts {
    * hold. When true, the existing time-aware curve enforces unchanged (idle while
    * over, bounded degraded-mode on unreadable). Defaults to **true** here so the
    * library's long-standing behaviour and its tests are unchanged; the live
-   * `rmd daemon` entry resolves the host posture (default OFF) from config/env via
-   * {@link resolveHeadroomEnabled} and passes it explicitly.
+   * `rmd daemon` entry resolves the host posture from config/env via
+   * {@link resolveHeadroomEnabled} — which, since the 2026-07-25 ruling, also
+   * defaults **true**, so an unconfigured install and this library now agree — and
+   * passes it explicitly. This host opts OUT via config `headroom.enabled: false`.
    */
   headroomEnabled?: boolean;
   /**
@@ -818,7 +820,8 @@ export async function runDaemon(
   const headroomPolicy = opts.headroomPolicy ?? buildDefaultHeadroomPolicy(opts.headroomLimitPct);
   // The headroom governor switch (ruling fb-1784894405468-a4153e). Library default
   // TRUE (existing enforcement + tests unchanged); the live `rmd daemon` entry
-  // passes the host posture (default OFF) resolved from config/env.
+  // passes the host posture resolved from config/env — also default TRUE since the
+  // 2026-07-25 ruling, with this host opting out via `headroom.enabled: false`.
   const headroomEnabled = opts.headroomEnabled ?? true;
   const unreadableDegradedLimit = opts.unreadableDegradedLimit ?? DEFAULT_UNREADABLE_DEGRADED_LIMIT;
   const now = deps.now ?? (() => new Date());
