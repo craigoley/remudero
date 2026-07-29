@@ -160,3 +160,41 @@ test("runDaemon: a checkRetroTrigger that THROWS is caught, logged, and never ha
   assert.equal(summary.stopReason, "stopped", "a checkRetroTrigger throw must never crash the daemon loop");
   assert.ok(lines.some((l) => l.step === "daemon.retro_trigger.check_failed"), "the failure must be logged, not swallowed silently");
 });
+
+test("runDaemon: a fired retro whose runRetroTrigger THROWS is caught, logged (daemon.retro_trigger.run_failed), and never halts the loop", async () => {
+  const plan = fixturePlan();
+  const now = new Date("2026-07-29T00:00:00.000Z");
+  // A marker-absent evaluation with 0 merges fires on the days threshold (unbounded).
+  const policy = { mergesThreshold: 25, daysThreshold: 7 };
+  let stopChecks = 0;
+  let runCalls = 0;
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const summary = await runDaemon(plan, {
+    refreshMerged: () => () => true,
+    runOne: async (id): Promise<RunResult> => {
+      throw new Error(`runOne must never be called in this fixture (task ${id}) — the retro trigger owns every tick`);
+    },
+    checkStop: () => {
+      stopChecks++;
+      return stopChecks > 1 ? "test bound reached" : undefined;
+    },
+    sleep: async () => {},
+    now: () => now,
+    checkRetroTrigger: () => evaluateRetroTrigger(0, undefined, now, policy), // marker absent -> fires reason=days
+    runRetroTrigger: async () => {
+      runCalls++;
+      throw new Error("fixture: the automated retro run exploded");
+    },
+    log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
+  });
+  assert.equal(summary.stopReason, "stopped", "a runRetroTrigger throw must never crash the daemon loop");
+  assert.equal(runCalls, 1, "the fired retro was invoked exactly once before it threw");
+  assert.ok(
+    lines.some((l) => l.step === "retro_triggered"),
+    "the fire is still ledgered — the throw happens AFTER retro_triggered, inside runRetroTrigger",
+  );
+  assert.ok(
+    lines.some((l) => l.step === "daemon.retro_trigger.run_failed"),
+    "the runRetroTrigger failure must be logged (run_failed), not swallowed silently",
+  );
+});

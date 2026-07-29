@@ -4437,20 +4437,58 @@ function retroShippedGithubGateway(): ShippedGithub {
  * merges-since-marker of 0 off an unhealthy gateway — this just skips ONE tick's
  * evaluation; the daemon re-tries every tick after, and the days-threshold path still
  * advances off `marker.ts` regardless of GitHub's health).
+ *
+ * `deps` is a test seam (W1-T160 coverage): a test injects a tmp `config` (pointing
+ * at its own root's marker/ledger fixtures) and a fake `github` gateway to drive this
+ * real marker/ledger/shipped wiring without a live `gh` round-trip. Production passes
+ * neither, so `config` is the live `loadConfig()` and `github` the shared
+ * `retroShippedGithubGateway` — the same construction `retroCommand`'s own gather uses.
  */
-function retroTriggerCheck(now: Date = new Date()): RetroTriggerDecision | undefined {
-  const config = loadConfig();
+export function retroTriggerCheck(
+  now: Date = new Date(),
+  deps: { config?: Config; github?: ShippedGithub } = {},
+): RetroTriggerDecision | undefined {
+  const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   const markerPath = join(config.root, "state", "last-retro.json");
   const markerResolution = resolveMarkerForGather(markerPath);
   if (markerResolution.kind === "corrupt") return undefined;
   const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
-  const github = retroShippedGithubGateway();
+  const github = deps.github ?? retroShippedGithubGateway();
   if (github.unavailable?.()) return undefined;
   const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
   const runs = gatherRuns(parseLedger(ledgerNdjson));
   const mergesSinceMarker = shippedSince(runs, marker?.ts, github).shipped.length;
   return evaluateRetroTrigger(mergesSinceMarker, marker?.ts, now);
+}
+
+/**
+ * W1-T160: build the daemon's retro cadence hooks — SELF-TARGET ONLY (the retro
+ * reads/writes THIS repo's own MASTER-PLAN.md/LEARNINGS.md/plan/tasks.yaml/state, never
+ * a drained target's, so daemonCommand wires these only when draining itself). Extracted
+ * from daemonCommand's `DaemonDeps` literal so the hook BODIES — the `retroTriggerCheck`
+ * delegation and the automated-retro invocation — are unit-testable in isolation with
+ * injected `check`/`runRetro`, leaving the literal itself holding only covered property
+ * references rather than inline logic whose sole executor is the daemon boot path.
+ * `runRetroTrigger`'s return (an exit code) is discarded — retroCommand already ledgers
+ * everything the daemon loop needs (retro_triggered, retro_aborted_integrity, pr.opened,
+ * retro.marker.advanced).
+ */
+export function buildRetroDaemonHooks(deps: {
+  check?: () => RetroTriggerDecision | undefined;
+  runRetro?: (rest: string[], opts: { automated: Extract<RetroTriggerDecision, { fire: true }> }) => Promise<number>;
+} = {}): {
+  checkRetroTrigger: () => RetroTriggerDecision | undefined;
+  runRetroTrigger: (decision: Extract<RetroTriggerDecision, { fire: true }>) => Promise<void>;
+} {
+  const check = deps.check ?? (() => retroTriggerCheck());
+  const runRetro = deps.runRetro ?? retroCommand;
+  return {
+    checkRetroTrigger: () => check(),
+    runRetroTrigger: async (decision) => {
+      await runRetro([], { automated: decision });
+    },
+  };
 }
 
 async function retroCommand(
@@ -5329,6 +5367,12 @@ export async function daemonCommand(
      *  W1-T143) without a real `git fetch origin` against this repo's actual remote
      *  points it at a local git fixture instead. Production never passes this. */
     repoRoot?: string;
+    /** Injectable daemon loop (W1-T160 coverage seam). Defaults to the real {@link runDaemon}.
+     *  A test passes a stub that captures the wired `DaemonDeps` and returns immediately, so the
+     *  hook-wiring the daemon builds just before its loop (checkRetroTrigger/runRetroTrigger,
+     *  self-target only) is exercised without spawning a real, unbounded daemon. Production never
+     *  passes this. */
+    runDaemon?: typeof runDaemon;
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE any spawn/lock — `rmd daemon install --dry-run` silently
@@ -5556,8 +5600,11 @@ export async function daemonCommand(
     config.overflow === "api_key",
   );
 
+  const runDaemonFn = deps.runDaemon ?? runDaemon;
+  // W1-T160: the retro cadence hooks (self-target only) — see buildRetroDaemonHooks.
+  const retroHooks = target.isSelf ? buildRetroDaemonHooks() : undefined;
   try {
-    const summary = await runDaemon(
+    const summary = await runDaemonFn(
       plan,
       {
         refreshMerged,
@@ -5612,12 +5659,8 @@ export async function daemonCommand(
         // itself. `runRetroTrigger`'s return (an exit code) is discarded — retroCommand
         // already ledgers everything the daemon loop needs (retro_triggered above,
         // retro_aborted_integrity, pr.opened, retro.marker.advanced).
-        checkRetroTrigger: target.isSelf ? () => retroTriggerCheck() : undefined,
-        runRetroTrigger: target.isSelf
-          ? async (decision) => {
-              await retroCommand([], { automated: decision });
-            }
-          : undefined,
+        checkRetroTrigger: retroHooks?.checkRetroTrigger,
+        runRetroTrigger: retroHooks?.runRetroTrigger,
         // W1-T46 block-reasoning: a GENUINE BLOCKER (real downstream work
         // transitively needs the blocked task) opens a `needs-human` issue
         // naming the dependents it protects, via W1-T8's escalation taxonomy
