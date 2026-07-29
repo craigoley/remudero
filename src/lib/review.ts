@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
+import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { appendLedger } from "./ledger.js";
 import { isInPlanScope } from "./plan-architect.js";
@@ -2478,13 +2479,78 @@ export function reviewerOutcome(opts: {
  * env/HOME cannot read (`settings/worker.json` already denies
  * `~/.config/remudero/**`).
  */
-export function postReviewStatus(opts: {
-  owner: string;
-  repo: string;
-  sha: string;
-  state: ReviewState;
-  description?: string;
-}): void {
+/**
+ * W1-T135: total attempts (first try + retries) before a TRANSIENT gh-status-post
+ * error gives up — one initial attempt plus 3 retries, the same retry BOUND
+ * classify.ts's {@link "./classify.js".MAX_TRANSIENT_RETRIES} uses for the
+ * unrelated fix-rung attempt loop (independent counters, same "3 retries" policy
+ * so the two don't drift apart for no reason).
+ */
+export const POST_REVIEW_STATUS_MAX_ATTEMPTS = 4;
+
+/** Base delay (ms) for {@link postReviewStatus}'s exponential backoff between
+ * retries — attempt N's wait is `POST_REVIEW_STATUS_BASE_DELAY_MS * 2**(N-1)`. */
+export const POST_REVIEW_STATUS_BASE_DELAY_MS = 500;
+
+/**
+ * Injectable dependencies for {@link postReviewStatus}'s retry-with-backoff —
+ * mirrors classify.ts's `DiagnoseThenRetryDeps` DI shape (optional, real
+ * defaults; tests override to avoid a real `gh` spawn / real waiting).
+ */
+export interface PostReviewStatusRetryOpts {
+  /** Total attempts before giving up on a TRANSIENT error. Default {@link POST_REVIEW_STATUS_MAX_ATTEMPTS}. */
+  maxAttempts?: number;
+  /** Backoff before the NEXT attempt, given the just-failed attempt number (1-based). Default: exponential off {@link POST_REVIEW_STATUS_BASE_DELAY_MS}. */
+  backoffMs?: (failedAttempt: number) => number;
+  /** Injectable sleep (tests skip real waiting). Default: a real `setTimeout`. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Injectable `gh` invocation — the "gh gateway" a unit test simulates without shelling out. Defaults to the real `execFileSync("gh", ...)` POST below. */
+  exec?: (args: string[], env: NodeJS.ProcessEnv) => void;
+}
+
+function execGhStatusPost(args: string[], env: NodeJS.ProcessEnv): void {
+  execFileSync("gh", args, { stdio: "pipe", env, encoding: "utf8" });
+}
+
+/** The text a thrown `gh`/execFileSync error carries — stderr first (that's
+ * where `gh api`'s own "gh: <message> (HTTP <code>)" error lands), falling
+ * back to stdout, then the Error's own message. Mirrors the stderr/stdout
+ * extraction {@link execWhitelistedProof} already does for the same
+ * execFileSync error shape. */
+function ghErrorText(e: unknown): string {
+  const err = e as NodeJS.ErrnoException & { stderr?: string | Buffer | null; stdout?: string | Buffer | null };
+  const asString = (v: string | Buffer | null | undefined) => (typeof v === "string" ? v : (v?.toString("utf8") ?? ""));
+  const message = e instanceof Error ? e.message : String(e);
+  return [asString(err?.stderr), asString(err?.stdout), message].filter(Boolean).join("\n");
+}
+
+/**
+ * W1-T135 (LIVE INCIDENT 2026-07-20): this used to be a bare `execFileSync`
+ * with no error handling at all — a single transient 503 posting the status
+ * threw and crashed run W1-T132-1784508142857 mid-fix-rung, the root cause of
+ * escalation #283. Now: a TRANSIENT error ({@link classifyFailure} over the
+ * `gh` error text — GitHub 5xx, network blips, rate-limit backpressure; the
+ * SAME classifier the fix-rung retry loop uses, so "is this transient" never
+ * drifts between the two call sites) is retried with exponential backoff, up
+ * to {@link POST_REVIEW_STATUS_MAX_ATTEMPTS} attempts total. A PERMANENT error
+ * (a 404/422, or any text `classifyFailure` doesn't recognize as transient —
+ * fail-closed, same as classify.ts) is never retried; it throws on the first
+ * attempt. Either way, once attempts are exhausted this function THROWS the
+ * last error — it has no ledger access of its own, so "ledger-and-continue on
+ * exhaustion" is {@link postReviewStatusGuarded}'s job (the sole caller in
+ * production): it catches this throw, ledgers `review.post_failed`, and
+ * returns `{posted:false}` instead of letting the exception crash the run.
+ */
+export async function postReviewStatus(
+  opts: {
+    owner: string;
+    repo: string;
+    sha: string;
+    state: ReviewState;
+    description?: string;
+  },
+  retryOpts: PostReviewStatusRetryOpts = {},
+): Promise<void> {
   const args = [
     "api",
     "-X",
@@ -2498,7 +2564,22 @@ export function postReviewStatus(opts: {
   if (opts.description) args.push("-f", `description=${opts.description.slice(0, 140)}`);
   const reviewerToken = process.env[REVIEWER_TOKEN_ENV];
   const env = reviewerToken ? { ...process.env, GH_TOKEN: reviewerToken, GITHUB_TOKEN: reviewerToken } : process.env;
-  execFileSync("gh", args, { stdio: "pipe", env });
+
+  const maxAttempts = retryOpts.maxAttempts ?? POST_REVIEW_STATUS_MAX_ATTEMPTS;
+  const backoffMs = retryOpts.backoffMs ?? ((failedAttempt) => POST_REVIEW_STATUS_BASE_DELAY_MS * 2 ** (failedAttempt - 1));
+  const sleep = retryOpts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const exec = retryOpts.exec ?? execGhStatusPost;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      exec(args, env);
+      return;
+    } catch (e) {
+      const transient = classifyFailure({ text: ghErrorText(e) }) === "transient";
+      if (!transient || attempt >= maxAttempts) throw e; // permanent, or transient-but-exhausted: surface once
+      await sleep(backoffMs(attempt));
+    }
+  }
 }
 
 // ── W1-T228: the status CHANNEL is last-write-wins across uncoordinated
@@ -2515,7 +2596,7 @@ export function postReviewStatus(opts: {
 // the arm path, because the posted status is what branch protection reads,
 // what the board renders, and what an operator opens a PR to see.
 //
-// ONE POST SITE enforces THREE RULES — {@link postReviewStatusGuarded} is the
+// ONE POST SITE enforces FOUR RULES — {@link postReviewStatusGuarded} is the
 // only call path `run-task.ts` uses from here on (the raw {@link
 // postReviewStatus} above becomes an internal implementation detail + the
 // injectable "real poster" in tests):
@@ -2532,6 +2613,14 @@ export function postReviewStatus(opts: {
 //         (refuse a second concurrent holder) to a MUTEX (wait for the
 //         holder, then proceed): the drain/inflight locks guard a whole RUN;
 //         this guards one short read-decide-write critical section.
+//   (iv)  RESILIENCE (W1-T135) — {@link postReviewStatus} itself retries a
+//         TRANSIENT gh error (5xx, network) with backoff; if it still throws
+//         (retries exhausted, or a PERMANENT 4xx that was never retried),
+//         this guarded site catches it, ledgers `review.post_failed` with
+//         the would-be verdict, and returns `{posted:false}` — a status-post
+//         hiccup degrades, it never crashes the run (the W1-T113 class,
+//         applied here; LIVE INCIDENT: a bare 503 crashed run
+//         W1-T132-1784508142857 mid-fix-rung, escalation #283).
 // READ BEFORE WRITE, HONESTLY: precedence needs the CURRENT posted state, so
 // {@link postReviewStatusGuarded} reads the ledger and the live PR lifecycle
 // AFTER acquiring the lock, never before — a read taken before the lock is
@@ -2790,14 +2879,25 @@ export interface PostReviewStatusGuardedOpts {
    * lock, never before (see the module doc comment above).
    */
   fetchLifecycle: () => PrLifecycleState;
-  /** Injected raw poster (tests). Defaults to {@link postReviewStatus}. */
-  post?: (o: { owner: string; repo: string; sha: string; state: ReviewState; description?: string }) => void;
+  /** Injected raw poster (tests). Defaults to {@link postReviewStatus} (which
+   * already retries a TRANSIENT gh error internally — see the module doc
+   * comment's rule (iv)). May return a Promise (the default does) or `void`
+   * (existing sync test fakes keep working unchanged). */
+  post?: (o: {
+    owner: string;
+    repo: string;
+    sha: string;
+    state: ReviewState;
+    description?: string;
+  }) => void | Promise<void>;
   lockOpts?: AcquireReviewStatusLockOpts;
 }
 
 export interface PostReviewStatusGuardedResult {
   posted: boolean;
-  /** Present only when `posted` is false — see {@link decideReviewStatusPost}. */
+  /** Present only when `posted` is false — either {@link decideReviewStatusPost}
+   * refused the write (see `review.post_refused`), or the post itself failed
+   * after retries/as a permanent error (see `review.post_failed`, W1-T135). */
   reason?: string;
 }
 
@@ -2809,6 +2909,14 @@ export interface PostReviewStatusGuardedResult {
  * to the raw {@link postReviewStatus}) or refuses — EVERY attempt is
  * ledgered, including refusals (`review.post_refused`), so a refused write
  * leaves a trace instead of the same silent blindness this task fixes.
+ *
+ * W1-T135: a post that still THROWS (transient retries exhausted inside
+ * {@link postReviewStatus}, or a permanent error it never retried) is caught
+ * HERE, never left to propagate — it is ledgered as `review.post_failed`
+ * (carrying the verdict that could not be posted) and this function returns
+ * `{posted:false}` like an ordinary refusal, so every caller's existing
+ * `if (!posted.posted) { ... }` handling already degrades gracefully instead
+ * of the whole run crashing (the LIVE INCIDENT this task exists to fix).
  */
 export async function postReviewStatusGuarded(
   opts: PostReviewStatusGuardedOpts,
@@ -2839,7 +2947,26 @@ export async function postReviewStatusGuarded(
       });
       return { posted: false, reason: decision.reason };
     }
-    post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, state: opts.state, description: opts.description });
+    try {
+      await post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, state: opts.state, description: opts.description });
+    } catch (e) {
+      // W1-T135 exhaustion path: ledger-and-continue, never crash the run.
+      const message = e instanceof Error ? e.message : String(e);
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId,
+        task_id: opts.taskId,
+        step: "review.post_failed",
+        head_sha: opts.sha,
+        attempted_state: opts.state,
+        evidence: opts.evidence,
+        description: opts.description,
+        error: message,
+      });
+      return {
+        posted: false,
+        reason: `posting remudero-review failed and was not applied (see the review.post_failed ledger line): ${message}`,
+      };
+    }
     return { posted: true };
   } finally {
     handle.release();
