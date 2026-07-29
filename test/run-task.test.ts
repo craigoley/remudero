@@ -843,6 +843,90 @@ test(
   },
 );
 
+test(
+  "BEHAVIORAL (W1-T142): an UNREADABLE diff at the guarded push site (origin remote gone — the " +
+    "real shape of a corrupted worktree) FAILS CLOSED — refused, named, ledgered, never assumed clean",
+  async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "runtask-scopeguard-unreadable-root-"));
+    const planPath = join(root, "tasks.yaml");
+    writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN); // declares files: [src/lib/daemon.ts]
+    const config: Config = { claudeBin: "/bin/true", root };
+
+    followupGitFixture(root);
+
+    const FIXED_TS = 1785000000003;
+    const branch = `run-T-FOLLOWUP-${FIXED_TS}`;
+    const fakeBinDir = followupFakeGh(branch); // no `pr create` handler needed — refused first
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${fakeBinDir}:${savedPath}`;
+    const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+    let spawnCalls = 0;
+    const spawn: typeof spawnWorker = async (args) => {
+      spawnCalls++;
+      if (spawnCalls === 1) {
+        return result({ sessionId: "s-recon", text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n" });
+      }
+      // Implement: declares its own PR_URL (a fake one — never dereferenced, since the
+      // guard below returns BEFORE ownership/PR handling) so the SILENT NO-OP GUARD's
+      // `commitsAhead(worktreePath, "origin/main")` never runs and can't mask this
+      // test's real target. Then a real commit, then remove the `origin` remote
+      // entirely — the worktree shares its .git with the main clone, so this deletes
+      // BOTH the `origin` remote AND every `refs/remotes/origin/*` ref (origin/main
+      // included) out from under the guard. `ls-remote --exit-code origin <branch>`
+      // now fails (unknown remote) exactly like a genuinely offline/unreachable origin
+      // would, so the run falls into the SAME orchestrator push fallback as the other
+      // two tests above — except this time `git diff --name-only origin/main..HEAD`
+      // ALSO fails (no such revision), which is the one catch branch those two tests
+      // never reach.
+      const g = (a: string[]) => execFileSync("git", ["-C", args.cwd, ...a], { encoding: "utf8" });
+      mkdirSync(join(args.cwd, "src", "lib"), { recursive: true });
+      writeFileSync(join(args.cwd, "src", "lib", "daemon.ts"), "in-scope-edit\n");
+      g(["add", "."]);
+      g(["commit", "--quiet", "-m", "in-scope change"]);
+      g(["remote", "remove", "origin"]);
+      return result({
+        sessionId: "s-implement",
+        text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/999\n",
+      });
+    };
+
+    try {
+      const res = await runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+      });
+
+      assert.equal(res.verdict, "failed");
+      assert.equal(res.merged, false);
+      assert.equal(res.prUrl, undefined, "refused BEFORE gh pr create ever runs");
+
+      const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l));
+      const refusal = ledger.find((l) => l.step === "scope_guard.diff_unreadable");
+      assert.ok(refusal, "the fail-closed unreadable-diff branch is ledgered, named");
+      assert.equal(typeof refusal.error, "string");
+      assert.ok(refusal.error.length > 0, "the real git error is captured, not swallowed");
+      assert.equal(
+        ledger.find((l) => l.step === "scope_guard.refused"),
+        undefined,
+        "the diff never got far enough to evaluate in/out of scope — a different, earlier refusal",
+      );
+    } finally {
+      dateNowSpy.mock.restore();
+      process.env.PATH = savedPath;
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
 // ── `rmd review --repo` targets a repo OTHER than the checkout (remudero-sandbox for the
 // daemon's live commissioning). Without it the CLI was pinned to repoRoot's origin. ──
 test("resolveReviewTarget: no flag ⇒ the checkout default; --repo overrides (bare name keeps owner; owner/name overrides both)", () => {
