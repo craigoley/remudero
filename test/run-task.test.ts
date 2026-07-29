@@ -24,6 +24,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   GitFetchError,
   buildInboxDraftHook,
   checkPrOwnership,
+  scopeGuardOutOfScopeFiles,
   ciGateFromRollup,
   commitsAhead,
   degradedReasonLedgerFields,
@@ -557,6 +558,290 @@ test("checkPrOwnership: an UNRESOLVABLE head ref (gateway failure) is NOT owned 
   assert.equal(v.ledger.claimed_branch, null);
   assert.match(v.ledger.reason, /could not be resolved/i);
 });
+
+// ── scopeGuardOutOfScopeFiles: the SCOPE-GUARDED BRANCH REFRESH pure guard (W1-T142,
+// the `reset --soft` phantom-revert near-miss) — a refresh/collapse/squash whose diff
+// touches files outside the task's declared `files` must be flagged so the push site
+// can refuse it, named. ──────────────────────────────────────────────────────────────
+
+test("scopeGuardOutOfScopeFiles: the exact reset --soft near-miss shape — a diff touching one declared and one undeclared file names ONLY the undeclared one", () => {
+  const out = scopeGuardOutOfScopeFiles(["test/foo.ts", "src/lib/issues-intake.ts"], ["test/foo.ts"]);
+  assert.deepEqual(out, ["src/lib/issues-intake.ts"]);
+});
+
+test("scopeGuardOutOfScopeFiles: a diff that stays entirely within the declared files returns empty — no false positive on an in-scope squash", () => {
+  const out = scopeGuardOutOfScopeFiles(
+    ["src/run-task.ts", "test/run-task.test.ts"],
+    ["src/run-task.ts", "test/run-task.test.ts", "docs/unused.md"],
+  );
+  assert.deepEqual(out, []);
+});
+
+test("scopeGuardOutOfScopeFiles: is PURE — no injected git/network dependency, and identical input always yields an identical, freshly-allocated result", () => {
+  const diff = ["a.ts", "b.ts"];
+  const declared = ["a.ts"];
+  const first = scopeGuardOutOfScopeFiles(diff, declared);
+  const second = scopeGuardOutOfScopeFiles(diff, declared);
+  assert.deepEqual(first, ["b.ts"]);
+  assert.deepEqual(second, ["b.ts"]);
+  assert.notEqual(first, second, "each call returns its own array, never a shared/mutated reference");
+  // The inputs themselves are never mutated by the guard.
+  assert.deepEqual(diff, ["a.ts", "b.ts"]);
+  assert.deepEqual(declared, ["a.ts"]);
+});
+
+test("scopeGuardOutOfScopeFiles: FAIL-CLOSED — an undefined declared-files scope refuses a non-empty diff wholesale, never waved through", () => {
+  const out = scopeGuardOutOfScopeFiles(["src/lib/issues-intake.ts", "test/foo.ts"], undefined);
+  assert.deepEqual(out, ["src/lib/issues-intake.ts", "test/foo.ts"]);
+});
+
+test("scopeGuardOutOfScopeFiles: FAIL-CLOSED — an EMPTY declared-files array refuses a non-empty diff exactly like undefined", () => {
+  const out = scopeGuardOutOfScopeFiles(["src/lib/issues-intake.ts"], []);
+  assert.deepEqual(out, ["src/lib/issues-intake.ts"]);
+});
+
+test("scopeGuardOutOfScopeFiles: an EMPTY diff is always clean, even with an undefined/empty declared scope — nothing staged, nothing to refuse", () => {
+  assert.deepEqual(scopeGuardOutOfScopeFiles([], undefined), []);
+  assert.deepEqual(scopeGuardOutOfScopeFiles([], []), []);
+  assert.deepEqual(scopeGuardOutOfScopeFiles([], ["src/run-task.ts"]), []);
+});
+
+// ── FIXTURE: a REAL git repro of the `reset --soft` phantom-revert near-miss itself —
+// a stale worktree's `git reset --soft origin/main` forges a merge-base whose diff
+// silently reverts a file an unrelated, already-merged PR had touched. The guard is fed
+// the REAL `git diff --name-only origin/main..HEAD` this produces (never a hand-typed
+// fixture), proving it catches the actual failure shape, not just a synthetic one. ────
+test("scopeGuardOutOfScopeFiles: fed the REAL diff from a reconstructed reset --soft phantom-revert branch, refuses and names the reverted file", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-scope-guard-phantom-revert-"));
+  const g = (dir: string, args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+  const origin = join(root, "origin");
+  mkdirSync(origin, { recursive: true });
+  g(origin, ["init", "--quiet", "-b", "main"]);
+  g(origin, ["config", "user.email", "test@example.com"]);
+  g(origin, ["config", "user.name", "Test"]);
+  mkdirSync(join(origin, "src", "lib"), { recursive: true });
+  writeFileSync(join(origin, "src", "lib", "issues-intake.ts"), "original\n");
+  g(origin, ["add", "."]);
+  g(origin, ["commit", "--quiet", "-m", "c1: issues-intake.ts merged"]);
+
+  // The worker's stale worktree: forked at c1, made its OWN legitimate change to a
+  // declared file, and committed it — before main advanced any further.
+  const worker = join(root, "worker");
+  execFileSync("git", ["clone", "--quiet", origin, worker], { encoding: "utf8" });
+  g(worker, ["config", "user.email", "test@example.com"]);
+  g(worker, ["config", "user.name", "Test"]);
+  mkdirSync(join(worker, "test"), { recursive: true });
+  writeFileSync(join(worker, "test", "foo.ts"), "worker-change\n");
+  g(worker, ["add", "."]);
+  g(worker, ["commit", "--quiet", "-m", "worker: test/foo.ts"]);
+
+  // Meanwhile origin/main ADVANCES — a different, already-merged PR (#310/#314-shaped)
+  // touches the SAME file the stale worker checkout still has the OLD content for.
+  writeFileSync(join(origin, "src", "lib", "issues-intake.ts"), "newer-content-from-a-merged-pr\n");
+  g(origin, ["commit", "-a", "--quiet", "-m", "c2: issues-intake.ts advanced by another merged PR"]);
+
+  // The near-miss itself: an operator "refreshes" the stale worker branch onto the new
+  // origin/main tip via `git reset --soft` — this moves HEAD but leaves the INDEX/working
+  // tree exactly as they were (still the OLD issues-intake.ts + the worker's test/foo.ts),
+  // then collapses that into one commit. The new commit's diff vs origin/main now silently
+  // reverts issues-intake.ts alongside the legitimate test/foo.ts change.
+  g(worker, ["fetch", "--quiet", "origin"]);
+  g(worker, ["reset", "--soft", "origin/main"]);
+  g(worker, ["commit", "--quiet", "-m", "refresh: collapsed onto origin/main"]);
+
+  const diffFiles = g(worker, ["diff", "--name-only", "origin/main..HEAD"])
+    .split("\n")
+    .map((f) => f.trim())
+    .filter(Boolean);
+  assert.deepEqual(
+    diffFiles.sort(),
+    ["src/lib/issues-intake.ts", "test/foo.ts"].sort(),
+    "the forged refresh's real diff touches BOTH the legit change and the phantom revert",
+  );
+
+  const outOfScope = scopeGuardOutOfScopeFiles(diffFiles, ["test/foo.ts"]);
+  assert.deepEqual(outOfScope, ["src/lib/issues-intake.ts"], "the guard names ONLY the phantom-reverted file");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ── BEHAVIORAL: the guard WIRED at the real push site inside `runTask` (W1-T142) — reuses
+// the W1-T105 follow-up harness (real local git standing in for origin, zero network, zero
+// real Claude/gh spawn) so a scope-violating branch is driven through the REAL orchestrator
+// push fallback, not a hand-simulated call. ────────────────────────────────────────────────
+
+/** Extends {@link followupFakeGh}'s script with a `pr create` handler that echoes a fixed
+ *  PR URL — needed only by the in-scope (pass-through) case below, which reaches
+ *  `gh pr create --fill` because its worker report carries no PR_URL of its own. */
+function followupFakeGhWithCreate(branch: string, prUrl: string): string {
+  const fakeBinDir = mkdtempSync(join(tmpdir(), "runtask-scopeguard-bin-"));
+  const fakeGhPath = join(fakeBinDir, "gh");
+  writeFileSync(
+    fakeGhPath,
+    [
+      "#!/bin/bash",
+      "set -e",
+      "if [[ \"$1\" == 'pr' && \"$2\" == 'view' ]]; then",
+      `  if [[ "$5" == 'headRefName' ]]; then echo '{"headRefName":"${branch}"}'; exit 0; fi`,
+      "  if [[ \"$5\" == 'body' ]]; then echo '{\"body\":\"\"}'; exit 0; fi",
+      "  if [[ \"$5\" == 'statusCheckRollup' ]]; then echo '{\"statusCheckRollup\":[{\"name\":\"ci\",\"conclusion\":\"FAILURE\"}]}'; exit 0; fi",
+      "fi",
+      "if [[ \"$1\" == 'pr' && \"$2\" == 'edit' ]]; then exit 0; fi",
+      `if [[ "$1" == 'pr' && "$2" == 'create' ]]; then echo '${prUrl}'; exit 0; fi`,
+      "exit 1",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(fakeGhPath, 0o755);
+  return fakeBinDir;
+}
+
+test(
+  "BEHAVIORAL (W1-T142): a branch whose diff touches a file OUTSIDE the task's declared `files` is " +
+    "REFUSED at the real orchestrator push site — named, no push, no PR",
+  async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "runtask-scopeguard-refuse-root-"));
+    const planPath = join(root, "tasks.yaml");
+    writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN); // declares files: [src/lib/daemon.ts]
+    const config: Config = { claudeBin: "/bin/true", root };
+
+    followupGitFixture(root);
+
+    const FIXED_TS = 1785000000001;
+    const branch = `run-T-FOLLOWUP-${FIXED_TS}`;
+    const fakeBinDir = followupFakeGh(branch); // no `pr create` handler needed — refused first
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${fakeBinDir}:${savedPath}`;
+    const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+    let spawnCalls = 0;
+    const spawn: typeof spawnWorker = async (args) => {
+      spawnCalls++;
+      if (spawnCalls === 1) {
+        return result({ sessionId: "s-recon", text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n" });
+      }
+      // Implement: makes a REAL commit touching a file the task never declared — the
+      // reset --soft near-miss shape, minus the forged merge-base machinery (irrelevant
+      // to THIS guard, which only ever sees the resulting diff). No PR_URL in the report,
+      // so the run falls through to the orchestrator's own push fallback (the guarded site).
+      const g = (a: string[]) => execFileSync("git", ["-C", args.cwd, ...a], { encoding: "utf8" });
+      mkdirSync(join(args.cwd, "src", "lib"), { recursive: true });
+      writeFileSync(join(args.cwd, "src", "lib", "issues-intake.ts"), "out-of-scope-edit\n");
+      g(["add", "."]);
+      g(["commit", "--quiet", "-m", "out-of-scope change"]);
+      return result({ sessionId: "s-implement", text: "REPORT\nno PR opened yet\n" });
+    };
+
+    try {
+      const res = await runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+      });
+
+      assert.equal(res.verdict, "failed");
+      assert.equal(res.merged, false);
+      assert.equal(res.prUrl, undefined, "refused BEFORE gh pr create ever runs");
+
+      const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l));
+      const refusal = ledger.find((l) => l.step === "scope_guard.refused");
+      assert.ok(refusal, "the guard's refusal is ledgered, named");
+      assert.deepEqual(refusal.out_of_scope, ["src/lib/issues-intake.ts"]);
+      assert.deepEqual(refusal.declared_files, ["src/lib/daemon.ts"]);
+
+      // The proof that matters: the branch never reached origin — the push itself was
+      // refused, not just reported after the fact.
+      assert.throws(() =>
+        execFileSync("git", ["-C", join(root, "repos", "remudero"), "ls-remote", "--exit-code", "origin", branch], {
+          stdio: "pipe",
+        }),
+      );
+    } finally {
+      dateNowSpy.mock.restore();
+      process.env.PATH = savedPath;
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "BEHAVIORAL (W1-T142): a branch whose diff stays WITHIN the task's declared `files` is NOT blocked — " +
+    "the guard is not a false positive on a legitimate in-scope squash",
+  async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "runtask-scopeguard-pass-root-"));
+    const planPath = join(root, "tasks.yaml");
+    writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN); // declares files: [src/lib/daemon.ts]
+    const config: Config = { claudeBin: "/bin/true", root };
+
+    followupGitFixture(root);
+
+    const FIXED_TS = 1785000000002;
+    const branch = `run-T-FOLLOWUP-${FIXED_TS}`;
+    const fakeBinDir = followupFakeGhWithCreate(branch, "https://github.com/acme/remudero/pull/99");
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${fakeBinDir}:${savedPath}`;
+    const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+    let spawnCalls = 0;
+    const spawn: typeof spawnWorker = async (args) => {
+      spawnCalls++;
+      if (spawnCalls === 1) {
+        return result({ sessionId: "s-recon", text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n" });
+      }
+      // Implement: a REAL commit touching ONLY the declared file.
+      const g = (a: string[]) => execFileSync("git", ["-C", args.cwd, ...a], { encoding: "utf8" });
+      mkdirSync(join(args.cwd, "src", "lib"), { recursive: true });
+      writeFileSync(join(args.cwd, "src", "lib", "daemon.ts"), "in-scope-edit\n");
+      g(["add", "."]);
+      g(["commit", "--quiet", "-m", "in-scope change"]);
+      return result({ sessionId: "s-implement", text: "REPORT\nno PR opened yet\n" });
+    };
+
+    try {
+      const res = await runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+      });
+
+      // ci is answered RED on the very first poll (fakeGh) — the run reaches its
+      // terminal blocked_ci verdict, but only AFTER pushing and opening the PR: proof
+      // the guard let a clean, in-scope squash all the way through.
+      assert.equal(res.verdict, "blocked_ci");
+      assert.equal(res.prUrl, "https://github.com/acme/remudero/pull/99");
+
+      const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l));
+      assert.equal(
+        ledger.find((l) => l.step === "scope_guard.refused"),
+        undefined,
+        "an in-scope diff never trips the guard",
+      );
+
+      // The branch DID reach origin — the push was never refused.
+      execFileSync("git", ["-C", join(root, "repos", "remudero"), "ls-remote", "--exit-code", "origin", branch], {
+        stdio: "pipe",
+      });
+    } finally {
+      dateNowSpy.mock.restore();
+      process.env.PATH = savedPath;
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 // ── `rmd review --repo` targets a repo OTHER than the checkout (remudero-sandbox for the
 // daemon's live commissioning). Without it the CLI was pinned to repoRoot's origin. ──
