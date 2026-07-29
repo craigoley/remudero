@@ -206,3 +206,58 @@ test("a hard STOP still wins outright over a pending freshness restart", async (
 
   assert.equal(s.stopReason, "stopped", "a deliberately halted fleet never self-restarts for freshness");
 });
+
+// ── W1-T151: INSTALL FRESHNESS on the self-restart path ─────────────────────────
+// "the daemon self-restart (W1-T126) reinstalls on a lock change before re-exec,
+// not just re-pulls" — given a package-lock.json change between the boot sha and
+// the new sha, runs npm install BEFORE re-exec; with no lock change it re-execs
+// WITHOUT installing.
+
+test("stale + installNeeded: runInstall runs BEFORE the loop stops for restart", async () => {
+  const plan = fixturePlan();
+  const clock = fakeClock();
+  const calls: string[] = [];
+
+  const s = await runDaemon(plan, {
+    refreshMerged: () => () => false,
+    runOne: async (id) => okResult(id),
+    sleep: clock.sleep,
+    checkFreshness: (): DaemonFreshness => ({ stale: true, oldSha: OLD_SHA, newSha: NEW_SHA, installNeeded: true }),
+    runInstall: () => calls.push("install"),
+  });
+
+  assert.deepEqual(calls, ["install"], "runInstall was called exactly once");
+  assert.equal(s.stopReason, "stale");
+});
+
+test("stale WITHOUT installNeeded: re-execs (stops as stale) WITHOUT ever calling runInstall", async () => {
+  const plan = fixturePlan();
+  const clock = fakeClock();
+  const calls: string[] = [];
+
+  const s = await runDaemon(plan, {
+    refreshMerged: () => () => false,
+    runOne: async (id) => okResult(id),
+    sleep: clock.sleep,
+    checkFreshness: (): DaemonFreshness => ({ stale: true, oldSha: OLD_SHA, newSha: NEW_SHA }), // installNeeded omitted
+    runInstall: () => calls.push("install"),
+  });
+
+  assert.deepEqual(calls, [], "no lock change -> runInstall is never consulted");
+  assert.equal(s.stopReason, "stale");
+});
+
+test("stale + installNeeded but NO runInstall dep injected: still restarts (optional dep, behavior unchanged)", async () => {
+  const plan = fixturePlan();
+  const clock = fakeClock();
+
+  const s = await runDaemon(plan, {
+    refreshMerged: () => () => false,
+    runOne: async (id) => okResult(id),
+    sleep: clock.sleep,
+    checkFreshness: (): DaemonFreshness => ({ stale: true, oldSha: OLD_SHA, newSha: NEW_SHA, installNeeded: true }),
+    // runInstall omitted entirely
+  });
+
+  assert.equal(s.stopReason, "stale", "installNeeded with no runInstall wired never throws or hangs");
+});

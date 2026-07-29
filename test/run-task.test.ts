@@ -63,6 +63,9 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   reconCommand,
   defaultReconRunLens,
   serviceFreshnessGate,
+  ensureInstallFresh,
+  hashInstallInputs,
+  installHashMarkerPath,
   sessionCommand,
   synthesizeCommand,
   defaultSynthesizeDraft,
@@ -5277,7 +5280,14 @@ test("serviceFreshnessGate: a DIRTY+BEHIND assessment ledgers BOTH daemon.tree_d
   const dir = mkdtempSync(join(tmpdir(), "rmd-svc-gate-"));
   const ledgerPath = join(dir, "ledger.ndjson");
   const assessed: ServiceFreshness = { status: "assessed", dirty: true, behind: { oldSha: "aaaaaaa", newSha: "bbbbbbb" } };
-  serviceFreshnessGate("daemon", dir, {} as NodeJS.ProcessEnv, { checkServiceFreshness: () => assessed, ledgerPath });
+  // W1-T151: this test is about the dirty/behind ledger lines, not install-freshness —
+  // stub ensureInstallFresh so it never shells out to a real `npm ci` against this
+  // package.json-less tmp dir (the real default is exercised by its own dedicated tests).
+  serviceFreshnessGate("daemon", dir, {} as NodeJS.ProcessEnv, {
+    checkServiceFreshness: () => assessed,
+    ledgerPath,
+    ensureInstallFresh: () => false,
+  });
   const steps = readSteps(ledgerPath);
   assert.ok(steps.includes("daemon.tree_dirty"), "dirty tree ledgered daemon.tree_dirty");
   assert.ok(steps.includes("daemon.stale_code"), "behind origin ledgered daemon.stale_code");
@@ -5289,6 +5299,7 @@ test("serviceFreshnessGate: an up-to-date clean assessment ledgers NOTHING (a to
   serviceFreshnessGate("serve", dir, {} as NodeJS.ProcessEnv, {
     checkServiceFreshness: () => ({ status: "assessed", dirty: false, behind: null }),
     ledgerPath,
+    ensureInstallFresh: () => false,
   });
   assert.deepEqual(readSteps(ledgerPath), []);
 });
@@ -5326,6 +5337,123 @@ test("main(): a SERVICE command (daemon) runs the freshness GATE — never the i
     if (originalGuardEnv === undefined) delete process.env[SELF_SYNC_GUARD_ENV];
     else process.env[SELF_SYNC_GUARD_ENV] = originalGuardEnv;
   }
+});
+
+// ── W1-T151: INSTALL FRESHNESS — a pull that changes package.json/package-lock.json (or adds
+// a workspaces layout) triggers npm install BEFORE build/serve proceeds; a matching hash never
+// redundantly reinstalls ─────────────────────────────────────────────────────────────────────
+
+function installFixtureDir(pkg: string, lock: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-install-freshness-"));
+  writeFileSync(join(dir, "package.json"), pkg);
+  writeFileSync(join(dir, "package-lock.json"), lock);
+  return dir;
+}
+
+test("hashInstallInputs: changes when EITHER package.json or package-lock.json changes; missing files hash deterministically", () => {
+  const dir = installFixtureDir('{"name":"x","version":"1.0.0"}', '{"lockfileVersion":3}');
+  const h1 = hashInstallInputs(dir);
+  assert.equal(hashInstallInputs(dir), h1, "same content -> same hash, deterministic");
+
+  writeFileSync(join(dir, "package-lock.json"), '{"lockfileVersion":3,"packages":{}}');
+  const h2 = hashInstallInputs(dir);
+  assert.notEqual(h2, h1, "package-lock.json content change moves the hash");
+
+  writeFileSync(join(dir, "package.json"), '{"name":"x","version":"1.0.0","workspaces":["packages/*"]}');
+  const h3 = hashInstallInputs(dir);
+  assert.notEqual(h3, h2, "package.json content change (e.g. adding workspaces) ALSO moves the hash");
+
+  const emptyDir = mkdtempSync(join(tmpdir(), "rmd-install-freshness-empty-"));
+  assert.doesNotThrow(() => hashInstallInputs(emptyDir), "no package.json/lock yet -> hashes empty content, never throws");
+});
+
+test("ensureInstallFresh: no persisted marker (fresh clone) -> installs exactly once and persists the marker hash", () => {
+  const dir = installFixtureDir('{"name":"x"}', '{"lockfileVersion":3}');
+  let installs = 0;
+  const installed = ensureInstallFresh(dir, { install: () => { installs++; } });
+  assert.equal(installed, true);
+  assert.equal(installs, 1);
+  assert.equal(readFileSync(installHashMarkerPath(dir), "utf8"), hashInstallInputs(dir));
+});
+
+test("ensureInstallFresh: a MATCHING persisted hash is a total no-op — the no-redundant-install falsifier", () => {
+  const dir = installFixtureDir('{"name":"x"}', '{"lockfileVersion":3}');
+  let installs = 0;
+  ensureInstallFresh(dir, { install: () => { installs++; } }); // primes the marker
+  assert.equal(installs, 1);
+  const installed = ensureInstallFresh(dir, { install: () => { installs++; } });
+  assert.equal(installed, false, "matching hash -> no install triggered");
+  assert.equal(installs, 1, "install was NOT called a second time");
+});
+
+test("ensureInstallFresh: a package-lock.json change AFTER the marker was primed triggers exactly one more install", () => {
+  const dir = installFixtureDir('{"name":"x"}', '{"lockfileVersion":3}');
+  let installs = 0;
+  ensureInstallFresh(dir, { install: () => { installs++; } });
+  writeFileSync(join(dir, "package-lock.json"), '{"lockfileVersion":3,"packages":{"a":"1"}}');
+  const installed = ensureInstallFresh(dir, { install: () => { installs++; } });
+  assert.equal(installed, true);
+  assert.equal(installs, 2);
+});
+
+test("ensureInstallFresh: the workspace-conversion fixture (CI-green, operator-broke) is caught — a workspaces field added to package.json + a lock change makes the check detect + install", () => {
+  const dir = installFixtureDir('{"name":"x","version":"1.0.0"}', '{"lockfileVersion":3}');
+  let installs = 0;
+  ensureInstallFresh(dir, { install: () => { installs++; } }); // pre-conversion state, marker primed
+
+  // The conversion: package.json gains `workspaces`, package-lock.json regenerates.
+  writeFileSync(
+    join(dir, "package.json"),
+    '{"name":"x","version":"1.0.0","workspaces":["packages/*","apps/*"]}',
+  );
+  writeFileSync(join(dir, "package-lock.json"), '{"lockfileVersion":3,"packages":{"packages/api-client":{}}}');
+
+  const preFixHash = readFileSync(installHashMarkerPath(dir), "utf8");
+  assert.notEqual(
+    hashInstallInputs(dir),
+    preFixHash,
+    "the conversion DID change the hash — the pre-fix path (no install call at all) would silently run stale node_modules against the new workspaces layout",
+  );
+
+  const installed = ensureInstallFresh(dir, { install: () => { installs++; } });
+  assert.equal(installed, true, "the conversion is detected and install runs — the regression this fixture exists to catch");
+  assert.equal(installs, 2);
+});
+
+test("serviceFreshnessGate: an assessed tick that needs an install ledgers daemon.install_freshness; a matching hash ledgers nothing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-svc-gate-install-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const assessed: ServiceFreshness = { status: "assessed", dirty: false, behind: null };
+
+  serviceFreshnessGate("daemon", dir, {} as NodeJS.ProcessEnv, {
+    checkServiceFreshness: () => assessed,
+    ledgerPath,
+    ensureInstallFresh: () => true,
+  });
+  assert.ok(readSteps(ledgerPath).includes("daemon.install_freshness"), "an install that ran is ledgered");
+
+  const ledgerPath2 = join(dir, "ledger2.ndjson");
+  serviceFreshnessGate("serve", dir, {} as NodeJS.ProcessEnv, {
+    checkServiceFreshness: () => assessed,
+    ledgerPath: ledgerPath2,
+    ensureInstallFresh: () => false,
+  });
+  assert.deepEqual(readSteps(ledgerPath2), [], "a matching hash (no install) ledgers nothing — no redundant noise");
+});
+
+test("serviceFreshnessGate: guarded/degraded NEVER consults ensureInstallFresh at all — a service is never blocked checking its own deps", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-svc-gate-install-guard-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  let calls = 0;
+  serviceFreshnessGate("daemon", dir, {} as NodeJS.ProcessEnv, {
+    checkServiceFreshness: () => ({ status: "guarded" }),
+    ledgerPath,
+    ensureInstallFresh: () => {
+      calls++;
+      return true;
+    },
+  });
+  assert.equal(calls, 0, "guarded status short-circuits before install-freshness is ever consulted");
 });
 
 // ── fb-1784756088300-6a481e: the escalation-lifecycle reconciler's candidate builder + closer ──

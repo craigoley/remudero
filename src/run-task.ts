@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { homedir } from "node:os";
@@ -9891,17 +9892,120 @@ function commandSyntax(name: string): string {
 }
 
 /**
+ * W1-T151 INSTALL FRESHNESS: sha256 of `package.json` + `package-lock.json` content
+ * (order-stable, null-separated) — a workspaces field added to `package.json` with no
+ * `package-lock.json` change (or vice versa) still moves this hash, so the fixture task
+ * exists for ("the workspace conversion that broke operator builds while CI stayed
+ * green") is caught either way. A missing file hashes as empty content rather than
+ * throwing — deterministic either way, never a crash on a repo with no lockfile yet.
+ * This is a change-detector, not a security digest — collision resistance beyond
+ * "npm's own two source files changed" is not the property being relied on.
+ */
+export function hashInstallInputs(
+  repoDir: string,
+  deps: { readFile?: (p: string) => string } = {},
+): string {
+  const readFile = deps.readFile ?? ((p: string) => {
+    try {
+      return readFileSync(p, "utf8");
+    } catch {
+      return "";
+    }
+  });
+  const pkg = readFile(join(repoDir, "package.json"));
+  const lock = readFile(join(repoDir, "package-lock.json"));
+  return createHash("sha256").update(pkg).update("\0").update(lock).digest("hex");
+}
+
+/** Where the last-successful-install hash is persisted — inside `node_modules` itself
+ * (never committed, and naturally invalidated if `node_modules` is ever wiped wholesale). */
+export function installHashMarkerPath(repoDir: string): string {
+  return join(repoDir, "node_modules", ".rmd-install-hash");
+}
+
+export interface InstallFreshnessDeps {
+  hash?: (repoDir: string) => string;
+  readMarker?: (markerPath: string) => string | undefined;
+  writeMarker?: (markerPath: string, hash: string) => void;
+  /** Runs the real install (default `npm ci` in `repoDir`). Throws on failure — an
+   * install that fails to bring `node_modules` in sync with the lockfile must fail
+   * loudly here, never silently leave the caller running against the OLD, stale deps
+   * (the exact bug this task exists to close). */
+  install?: () => void;
+}
+
+/**
+ * W1-T151 INSTALL FRESHNESS — the fix for the real incident named in this task's
+ * rationale: a git pull that changes `package.json`/`package-lock.json` (or adds a
+ * `workspaces` layout) leaves a checkout's `node_modules` STALE relative to the code
+ * that now expects it. CI never saw this (CI installs fresh every run); a local
+ * checkout that just pulled the change did not.
+ *
+ * Cheap detection: hash `package.json` + `package-lock.json` ({@link hashInstallInputs})
+ * and compare against the hash PERSISTED at {@link installHashMarkerPath} from the last
+ * successful install. Different (or no persisted hash at all — a fresh clone) ⇒ `npm ci`
+ * runs BEFORE the caller proceeds, then the marker is rewritten to the new hash. A
+ * MATCHING hash is a total no-op — no redundant install, ever (the falsifier this task's
+ * acceptance criteria name explicitly). Returns whether an install actually ran, so a
+ * caller can ledger it.
+ *
+ * Deliberately reusable rather than git-plumbing-specific: it does not care HOW the
+ * checkout moved (this repo's own self-sync pull, an operator's plain `git pull`, the
+ * deploy supervisor's fast-forward, or a hand-run `npm install` that just changed the
+ * lock) — only whether the two files on disk now differ from what was last installed.
+ * Two call sites wire it: {@link serviceFreshnessGate} (the operator's `rmd daemon`/
+ * `rmd serve` entry, below) and `DaemonDeps.runInstall` (lib/daemon.ts) for W1-T126's
+ * in-process self-restart, consulted from the SAME predicate rather than duplicating it.
+ */
+export function ensureInstallFresh(repoDir: string, deps: InstallFreshnessDeps = {}): boolean {
+  const hash = deps.hash ?? ((dir: string) => hashInstallInputs(dir));
+  const markerPath = installHashMarkerPath(repoDir);
+  const readMarker =
+    deps.readMarker ??
+    ((p: string) => {
+      try {
+        return readFileSync(p, "utf8").trim();
+      } catch {
+        return undefined;
+      }
+    });
+  const writeMarker =
+    deps.writeMarker ??
+    ((p: string, h: string) => {
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, h);
+    });
+  const install = deps.install ?? (() => execFileSync("npm", ["ci"], { cwd: repoDir, stdio: "pipe" }));
+
+  const current = hash(repoDir);
+  if (readMarker(markerPath) === current) return false; // matching hash -> no-op
+
+  install();
+  writeMarker(markerPath, current);
+  return true;
+}
+
+/**
  * W1-T255: the LONG-RUNNING-SERVICE freshness gate (`rmd daemon`/`rmd serve`). Assesses the tree
  * via {@link checkServiceFreshness} and LEDGERS `daemon.tree_dirty` / `daemon.stale_code` — but
  * NEVER refuses, exits, or re-execs (a service crash-looping on its own dirt was the #707
  * aftermath). Genuine corruption still fails downstream in loadPlan. Extracted from main() so the
  * assess-and-ledger behavior is unit-testable (inject `checkServiceFreshness` + a tmp `ledgerPath`).
+ *
+ * W1-T151: also the operator's `build/serve` INSTALL-freshness choke point — see
+ * {@link ensureInstallFresh}, run here (guarded by the SAME `svc.status !== "assessed"`
+ * early-return above it, so CI/loop-guarded invocations never redundantly reinstall)
+ * BEFORE this function returns and the caller's daemon/serve dispatch proceeds.
  */
 export function serviceFreshnessGate(
   cmd: string,
   repoDir: string,
   env: NodeJS.ProcessEnv,
-  deps: { checkServiceFreshness?: typeof checkServiceFreshness; ledgerPath?: string } = {},
+  deps: {
+    checkServiceFreshness?: typeof checkServiceFreshness;
+    ledgerPath?: string;
+    ensureInstallFresh?: typeof ensureInstallFresh;
+  } = {},
 ): void {
   const svc = (deps.checkServiceFreshness ?? checkServiceFreshness)(repoDir, env);
   if (svc.status !== "assessed") return; // guarded/degraded: nothing to ledger — proceed
@@ -9920,6 +10024,9 @@ export function serviceFreshnessGate(
   };
   if (svc.dirty) emit("daemon.tree_dirty", {});
   if (svc.behind) emit("daemon.stale_code", { old_sha: svc.behind.oldSha, new_sha: svc.behind.newSha });
+  // Install BEFORE proceeding: package.json/package-lock.json changed since the last
+  // install this repoDir ran (see ensureInstallFresh's doc) — never after.
+  if ((deps.ensureInstallFresh ?? ensureInstallFresh)(repoDir)) emit("daemon.install_freshness", {});
 }
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
