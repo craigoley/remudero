@@ -268,6 +268,7 @@ import {
   TaskLintError,
 } from "./lib/task-linter.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
+import { loadPolicy, PolicyError } from "./lib/policy.js";
 import { deriveTaskClass } from "./lib/task-class.js";
 import { realRiskJudge, resolveRiskJudgeMount, runRiskJudge, type RiskJudgeInput } from "./lib/risk-judge.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
@@ -4608,6 +4609,24 @@ export async function lintPlanCommand(rest: string[]): Promise<number> {
       console.warn(`  ⚠ ${task.id}: [${v.check}] ${v.message}`);
     }
   }
+  // W1-T252 (P37 SUBSTRATE): plan/policy.yaml rides the SAME §5C lint gate as
+  // plan/tasks.yaml — a schema-bound value edit is reviewed data, never an
+  // unbounded edit slipping past CI. Sibling of the plan file actually opened
+  // (mirrors alert-policy.yaml's own plan/-relative placement), so a `--plan`
+  // pointed at a fixture tree with no policy.yaml of its own is a no-op here
+  // (nothing to check), never a spurious failure over a file that was never
+  // meant to exist at that path.
+  const policyFile = join(dirname(planPath), "policy.yaml");
+  if (existsSync(policyFile)) {
+    try {
+      loadPolicy(policyFile);
+    } catch (e) {
+      failing++;
+      const message = e instanceof PolicyError ? e.message : String((e as Error)?.message ?? e);
+      console.error(`✗ plan/policy.yaml: ${message}`);
+    }
+  }
+
   const scopeNote = scope ? ` (${scope.size} new/changed vs ${baseRef})` : "";
   // W1-T120: the READ-IDENTITY ASSERTION — the abs path + content hash of the plan file
   // ACTUALLY opened, so a wrong-file run (a false green pointed at the wrong tree) is

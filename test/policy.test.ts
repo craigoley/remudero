@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   loadPolicy,
   policyPath,
@@ -11,9 +11,48 @@ import {
   validatePolicy,
   type Policy,
 } from "../src/lib/policy.js";
+import { lintPlanCommand } from "../src/run-task.js";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const SHIPPED = policyPath(REPO_ROOT);
+
+/** A minimal, valid `plan/tasks.yaml` body — just enough for `loadPlan` to accept it;
+ *  these lint-plan integration tests are about `plan/policy.yaml`, not task shape. */
+const MINIMAL_VALID_TASKS_YAML =
+  "- id: FIXTURE-T1\n  title: policy lint fixture\n  repo: remudero\n  type: implement\n  origin: architect\n  risk: medium\n";
+
+/** Build a fixture `<dir>/plan/{tasks.yaml,policy.yaml}` pair — `tasks.yaml` always
+ *  minimal-valid, `policy.yaml` the caller's raw table — and return the tasks.yaml path
+ *  `lintPlanCommand(["--plan", ...])` should be pointed at (its sibling policy.yaml is
+ *  what `lintPlanCommand` itself resolves and checks, per W1-T252). Fixtures live UNDER
+ *  the repo root (test/.tmp-w1-t252-lint-*) so they are never refused as "outside root".
+ */
+function lintFixture(policyRaw: Record<string, unknown>): { tasksPath: string; dir: string } {
+  const dir = mkdtempSync(join(REPO_ROOT, "test", ".tmp-w1-t252-lint-"));
+  mkdirSync(join(dir, "plan"), { recursive: true });
+  const tasksPath = join(dir, "plan", "tasks.yaml");
+  writeFileSync(tasksPath, MINIMAL_VALID_TASKS_YAML, "utf8");
+  writeFileSync(join(dir, "plan", "policy.yaml"), stringifyYaml(policyRaw), "utf8");
+  return { tasksPath, dir };
+}
+
+async function runLintPlanCapturingStderr(tasksPath: string): Promise<{ exitCode: number; stderr: string }> {
+  const origError = console.error;
+  const origLog = console.log;
+  const origWarn = console.warn;
+  const errors: string[] = [];
+  console.error = (m: string) => errors.push(m);
+  console.log = () => {};
+  console.warn = () => {};
+  try {
+    const exitCode = await lintPlanCommand(["--plan", tasksPath]);
+    return { exitCode, stderr: errors.join("\n") };
+  } finally {
+    console.error = origError;
+    console.log = origLog;
+    console.warn = origWarn;
+  }
+}
 
 /** A minimal, VALID raw table mirroring the shipped plan/policy.yaml shape — the base every
  *  negative-case test below mutates one field of. */
@@ -142,6 +181,53 @@ test("REJECTS a headroom curve that does not end in a catch-all (maxHoursToReset
     origin: "lifted:src/lib/daemon.ts:145-148 (buildDefaultHeadroomPolicy)",
   };
   throwsPolicyError(() => validatePolicy(raw), /must end with a catch-all rung/);
+});
+
+test("rmd lint-plan FAILS over a bounds-violating plan/policy.yaml (fixStrikeCap out of its declared bound), naming the field", async () => {
+  const raw = goodRaw();
+  (raw.fixStrikeCap as Record<string, unknown>).value = 999;
+  const { tasksPath, dir } = lintFixture(raw);
+  try {
+    const { exitCode, stderr } = await runLintPlanCapturingStderr(tasksPath);
+    assert.notEqual(exitCode, 0, "lint-plan must exit non-zero over a bounds-violating plan/policy.yaml");
+    assert.match(stderr, /plan\/policy\.yaml/);
+    assert.match(stderr, /fixStrikeCap\.value.*out of its declared bound/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("rmd lint-plan FAILS over a plan/policy.yaml regressing proofTimeoutMs to the stale 30000", async () => {
+  const raw = goodRaw();
+  (raw.proofTimeoutMs as Record<string, unknown>).value = 30_000;
+  const { tasksPath, dir } = lintFixture(raw);
+  try {
+    const { exitCode, stderr } = await runLintPlanCapturingStderr(tasksPath);
+    assert.notEqual(exitCode, 0);
+    assert.match(stderr, /proofTimeoutMs\.value.*out of its declared bound/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("rmd lint-plan PASSES over a within-bounds plan/policy.yaml edit (a sweep.staleDays retune)", async () => {
+  const raw = goodRaw();
+  (raw.sweep as Record<string, Record<string, unknown>>).staleDays.value = 21;
+  const { tasksPath, dir } = lintFixture(raw);
+  try {
+    const { exitCode } = await runLintPlanCapturingStderr(tasksPath);
+    assert.equal(exitCode, 0, "an in-bounds plan/policy.yaml edit must lint clean");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("rmd lint-plan on the SHIPPED plan/tasks.yaml also validates the SHIPPED plan/policy.yaml (no --plan override) without adding a policy failure", async () => {
+  // Not a full-plan assertion (the real plan/tasks.yaml carries its own, unrelated
+  // pre-existing task-lint violations) — only that plan/policy.yaml itself never shows
+  // up as a `✗ plan/policy.yaml:` line, proving the shipped file is read and passes.
+  const { stderr } = await runLintPlanCapturingStderr(join(REPO_ROOT, "plan", "tasks.yaml"));
+  assert.ok(!/✗ plan\/policy\.yaml/.test(stderr), `the shipped plan/policy.yaml must not fail lint-plan; got:\n${stderr}`);
 });
 
 // ── acceptance 3: launchd ThrottleInterval is NET-NEW — never claimed lifted ───────────────
