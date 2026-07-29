@@ -1009,12 +1009,16 @@ test("W1-T182: needsMeTaskRowHtml's ACTUAL rendered output shows the issue's rea
     statusBadge: html.match(/function statusBadge\(key\) \{[\s\S]*?\n  \}/)?.[0],
     prLink: html.match(/function prLink\(t\) \{[\s\S]*?\n  \}/)?.[0],
     rowChevronHtml: html.match(/function rowChevronHtml\(\) \{[\s\S]*?\n  \}/)?.[0],
+    // W1-T202: needsMeTaskRowHtml's markHandledBtn now calls writeGateAttrs() (the disabled/
+    // reason attributes a read-only session's write affordances carry) -- pulled in here too so
+    // this isolated eval has the same closure the real served script does.
+    writeGateAttrs: html.match(/function writeGateAttrs\(\) \{[\s\S]*?\n  \}/)?.[0],
     needsMeTaskRowHtml: html.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0],
   };
   for (const [name, src] of Object.entries(parts)) assert.ok(src, `${name} must exist in the shell's inline script`);
 
   const renderRow = new Function(
-    `${parts.STATUS_LABELS}\n${parts.escapeHtml}\n${parts.statusBadge}\n${parts.prLink}\n${parts.rowChevronHtml}\n${parts.needsMeTaskRowHtml}\nreturn needsMeTaskRowHtml(arguments[0]);`,
+    `let hasWriteScope = false;\n${parts.STATUS_LABELS}\n${parts.escapeHtml}\n${parts.statusBadge}\n${parts.prLink}\n${parts.rowChevronHtml}\n${parts.writeGateAttrs}\n${parts.needsMeTaskRowHtml}\nreturn needsMeTaskRowHtml(arguments[0]);`,
   ) as (t: Record<string, unknown>) => string;
 
   // A CONFIRMED-open escalation, live issue title flowing through escalationTitle.

@@ -686,7 +686,9 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     <span>Up next</span><span class="section-summary" id="up-next-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
   </button></h2>
   <div id="up-next-body">
-    <div class="up-next-actions"><button type="button" id="drain-now-btn" data-confirming="false" aria-pressed="false">Drain now</button></div>
+    <!-- W1-T202: starts DISABLED (the safe default -- no write affordance renders armed until a
+         client-held write token actually proves out; see probeWriteScope/applyControlStatus). -->
+    <div class="up-next-actions"><button type="button" id="drain-now-btn" data-confirming="false" aria-pressed="false" disabled title="Read-only — enter a write token to enable this action">Drain now</button></div>
     <ul id="up-next-list" class="row-list">${skeletonRows(3)}</ul>
   </div>
 </section>
@@ -734,14 +736,28 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
 
 <section id="controls" class="panel-section" aria-label="Fleet control">
   <h2>Fleet control</h2>
+  <!-- W1-T202: the write token lives HERE, client-side only (sessionStorage), never in the URL --
+       the bookmark's own \`?token=\` carries only the read token (see this shell's bootstrap,
+       below). Every write affordance on this page starts DISABLED with a stated reason (standing
+       rule 22) and is re-enabled by probeWriteScope only once a client-held write token actually
+       proves out against GET /v1/auth/scope -- never merely because one was typed. -->
+  <div id="write-token-panel" class="write-token-panel">
+    <p id="write-token-status" role="status" aria-live="polite" class="counts">Read-only — write actions are unavailable. Enter a write token to enable them for this tab.</p>
+    <form id="write-token-form" class="inline-action">
+      <label for="write-token-input">Write token</label>
+      <input id="write-token-input" type="password" autocomplete="off" placeholder="paste write token" />
+      <button type="submit">Enable write access</button>
+    </form>
+    <button id="write-token-clear-btn" type="button" hidden>Clear write token</button>
+  </div>
   <label for="reason">Reason (optional, for Pause/STOP)</label>
   <input id="reason" type="text" />
   <div class="btn-row">
-    <button id="pause-btn" type="button" aria-pressed="false">Pause</button>
-    <button id="resume-btn" type="button" aria-pressed="false">Resume</button>
-    <button id="stop-btn" type="button" class="danger" aria-pressed="false">STOP</button>
+    <button id="pause-btn" type="button" aria-pressed="false" disabled title="Read-only — enter a write token to enable this action">Pause</button>
+    <button id="resume-btn" type="button" aria-pressed="false" disabled title="Read-only — enter a write token to enable this action">Resume</button>
+    <button id="stop-btn" type="button" class="danger" aria-pressed="false" disabled title="Read-only — enter a write token to enable this action">STOP</button>
     <label style="display:flex; align-items:center; gap:0.35rem; margin:0;">
-      <input id="quiet-hours" type="checkbox" /> Quiet hours
+      <input id="quiet-hours" type="checkbox" disabled title="Read-only — enter a write token to enable this action" /> Quiet hours
     </label>
   </div>
   <p id="controls-status" role="status" aria-live="polite" class="counts"></p>
@@ -791,12 +807,53 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   const token = params.get("token") ?? "";
   const authHeaders = { authorization: \`Bearer \${token}\` };
 
+  // W1-T202: the WRITE token never rides the URL -- the read token above is enough to boot the
+  // board (every GET on this page uses authHeaders), and a write action needs a SEPARATE token
+  // the operator has pasted into THIS TAB once, held only in sessionStorage (dies with the tab --
+  // W1-T202's own decision doc: the safest default, given this task's origin was a write bearer
+  // token leaked into a world-readable serve.log). Never written back into the URL, a ledger
+  // line, or a log line -- writeAuthHeaders/postJson below are the ONLY two places this value is
+  // read for an outbound request, and neither ever touches the browser history/location API or logs it.
+  const WRITE_TOKEN_STORAGE_KEY = "rmd-console-write-token";
+  function readStoredWriteToken() {
+    try {
+      return window.sessionStorage.getItem(WRITE_TOKEN_STORAGE_KEY) || "";
+    } catch {
+      return ""; // storage disabled/blocked -- fall back to no write token, never throw.
+    }
+  }
+  let writeToken = readStoredWriteToken();
+  function writeAuthHeaders() {
+    return { authorization: \`Bearer \${writeToken}\` };
+  }
+
   // W1-T222: "actions RENDER PER AUTH SCOPE" (cardActionsHtml, below) needs to know WHICH scope
-  // this page's own token actually carries. Resolved once, near boot (see the GET /v1/auth/scope
-  // probe further down) -- a plain GET, side-effect-free, so probing it costs nothing beyond one
-  // extra round trip and never risks a spurious write. Starts false (the safe default: no write
-  // affordance renders until proven otherwise), matching standing rule 22.
+  // this page's own WRITE token actually carries. Resolved at boot AND re-resolved every time the
+  // client-held write token changes (probeWriteScope, defined near the fleet-control wiring below)
+  // -- a plain GET, side-effect-free, so probing it costs nothing beyond one extra round trip and
+  // never risks a spurious write. Starts false (the safe default: no write affordance renders
+  // until proven otherwise), matching standing rule 22.
   let hasWriteScope = false;
+  // W1-T202: the last REAL fleet-control status this shell has fetched (GET /v1/control/status) --
+  // re-applied by probeWriteScope when the write token changes, so a write-scope flip alone never
+  // has to wait for the next poll tick to re-render the fleet-control buttons correctly. Never
+  // written to except by applyControlStatus itself, which always receives a real fetched status.
+  let lastControlStatus = { paused: false, stopped: false, quietHours: false };
+  // W1-T202: has the FIRST real GET /v1/status ever landed? probeWriteScope/the write-token
+  // clear handler both re-run paintFromTasksById off tasksById to re-gate NEEDS ME/UP NEXT rows
+  // -- but BEFORE any real data has landed, tasksById is legitimately empty, and reconcileRows
+  // would (correctly, off that empty state) render the "honest empty" markup, wiping out the
+  // W1-T200 first-paint skeleton the static HTML ships ahead of schedule. Gating on this flag
+  // keeps a write-scope flip that resolves before the first poll a no-op render-wise -- the
+  // skeleton stays exactly as authored until refreshAll's own first real paint takes over.
+  let firstStatusLoaded = false;
+  /** W1-T202: the inline "disabled + why" attributes every ROW-level write affordance (NEEDS ME,
+   *  UP NEXT) carries when hasWriteScope is false -- the richer disabled/explained treatment
+   *  cardActionsHtml's own doc reserves for this task (that function still hides its own button
+   *  entirely -- unchanged, W1-T222's own job; this is everywhere else, standing rule 22). */
+  function writeGateAttrs() {
+    return hasWriteScope ? "" : ' disabled title="Read-only — enter a write token to enable this action"';
+  }
 
   // W1-T156: read ONCE at load -- prefers-reduced-motion does not need live-tracking mid-
   // session for this shell's purposes, and a stable value keeps a row's rendered HTML (which
@@ -834,10 +891,14 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
       if (timer) clearTimeout(timer);
     }
   }
+  // W1-T202: every WRITE POST uses the client-held write token, never the URL's read token --
+  // the whole point of this task. A caller with no write token sends an empty bearer and gets the
+  // SAME 401 service.ts already returns for any unrecognized token; the UI never lets that fire
+  // from a live click (every write control starts/re-renders disabled until hasWriteScope is true).
   function postJson(path, body) {
     return fetch(path, {
       method: "POST",
-      headers: { ...authHeaders, "content-type": "application/json" },
+      headers: { ...writeAuthHeaders(), "content-type": "application/json" },
       body: JSON.stringify(body ?? {}),
     });
   }
@@ -1539,7 +1600,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
       ? \`<a href="\${escapeHtml(t.escalationIssueUrl)}" target="_blank" rel="noopener noreferrer">view issue</a>\`
       : "";
     const markHandledBtn = t.escalationIssueUrl
-      ? \`<button type="button" class="needs-me-mark-handled" data-task-id="\${escapeHtml(t.taskId)}" data-issue-url="\${escapeHtml(t.escalationIssueUrl)}">Mark handled</button>\`
+      ? \`<button type="button" class="needs-me-mark-handled"\${writeGateAttrs()} data-task-id="\${escapeHtml(t.taskId)}" data-issue-url="\${escapeHtml(t.escalationIssueUrl)}">Mark handled</button>\`
       : "";
     return (
       \`\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(t.taskId)}</span><span class="detail">\${ask}\${unverifiedNote}\${prLink(t)}</span>\` +
@@ -1553,14 +1614,14 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
       \`<form class="inline-action needs-me-answer" data-reply-to="\${escapeHtml(e.id)}">\` +
       \`<label for="answer-\${escapeHtml(e.id)}">Answer</label>\` +
       \`<input id="answer-\${escapeHtml(e.id)}" type="text" required />\` +
-      \`<button type="submit">Answer</button></form>\`
+      \`<button type="submit"\${writeGateAttrs()}>Answer</button></form>\`
     );
   }
   function needsMeProposedHtml(e) {
     return (
       \`\${statusBadge("needs-human")}<span class="task-id">feedback#\${escapeHtml(e.id)}</span><span class="detail">proposes: \${escapeHtml(e.raw)}</span>\` +
-      \`<span class="btn-row"><button type="button" class="needs-me-decide" data-id="\${escapeHtml(e.id)}" data-decision="accept">Accept</button>\` +
-      \`<button type="button" class="needs-me-decide" data-id="\${escapeHtml(e.id)}" data-decision="reject">Reject</button></span>\`
+      \`<span class="btn-row"><button type="button" class="needs-me-decide"\${writeGateAttrs()} data-id="\${escapeHtml(e.id)}" data-decision="accept">Accept</button>\` +
+      \`<button type="button" class="needs-me-decide"\${writeGateAttrs()} data-id="\${escapeHtml(e.id)}" data-decision="reject">Reject</button></span>\`
     );
   }
   // W1-T193: a READY card renders what would ACTUALLY be filed -- the drafted task ids AND
@@ -1584,11 +1645,11 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     return (
       \`\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(p.proposalId)}</span><span class="detail">READY to ratify — \${escapeHtml(p.summary)}</span>\` +
       draftedTasksHtml(draftedTasks) +
-      \`<span class="btn-row"><button type="button" class="proposal-approve-btn" data-proposal-id="\${escapeHtml(p.proposalId)}" data-read-back="\${escapeHtml(readBack)}" data-confirming="false" aria-pressed="false">Approve</button></span>\` +
+      \`<span class="btn-row"><button type="button" class="proposal-approve-btn"\${writeGateAttrs()} data-proposal-id="\${escapeHtml(p.proposalId)}" data-read-back="\${escapeHtml(readBack)}" data-confirming="false" aria-pressed="false">Approve</button></span>\` +
       \`<form class="inline-action needs-me-reframe" data-proposal-id="\${escapeHtml(p.proposalId)}">\` +
       \`<label for="reframe-\${escapeHtml(p.proposalId)}">Reframe (feedback)</label>\` +
       \`<textarea id="reframe-\${escapeHtml(p.proposalId)}" rows="2" required placeholder="what should change…"></textarea>\` +
-      \`<button type="submit">Reframe</button></form>\`
+      \`<button type="submit"\${writeGateAttrs()}>Reframe</button></form>\`
     );
   }
   // W1-T193: a proposal legitimately mid-draft for minutes (W1-T192's daemon-side rung) must
@@ -1656,7 +1717,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     const head = (cards ?? []).slice(0, 5);
     const rows = head.map((c) => ({
       key: c.id,
-      html: \`\${statusBadge("queued")}<span class="task-id">\${escapeHtml(c.id)}</span><span class="detail">\${escapeHtml(c.title)} · \${(c.dependsOn ?? []).length} dep(s)</span><button type="button" class="up-next-run-btn" data-task-id="\${escapeHtml(c.id)}" data-confirming="false" aria-pressed="false">Run</button>\${rowChevronHtml()}\`,
+      html: \`\${statusBadge("queued")}<span class="task-id">\${escapeHtml(c.id)}</span><span class="detail">\${escapeHtml(c.title)} · \${(c.dependsOn ?? []).length} dep(s)</span><button type="button" class="up-next-run-btn"\${writeGateAttrs()} data-task-id="\${escapeHtml(c.id)}" data-confirming="false" aria-pressed="false">Run</button>\${rowChevronHtml()}\`,
       taskId: c.id,
     }));
     reconcileRows(document.getElementById("up-next-list"), rows, "drain queue is empty");
@@ -2148,6 +2209,10 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   document.getElementById("needs-me-list").addEventListener("submit", async (e) => {
     const answerForm = e.target.closest(".needs-me-answer");
     const reframeForm = e.target.closest(".needs-me-reframe");
+    // W1-T202 defense-in-depth: the submit button itself carries 'disabled' while read-only
+    // (writeGateAttrs), but a disabled submit button does not stop Enter-key implicit submission
+    // in every engine -- never let a stale/read-only session's keystroke reach postJson.
+    if (!hasWriteScope) { e.preventDefault(); return; }
     if (answerForm) {
       e.preventDefault();
       const replyTo = answerForm.dataset.replyTo;
@@ -2185,6 +2250,9 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     const decideBtn = e.target.closest(".needs-me-decide");
     const markHandledBtn = e.target.closest(".needs-me-mark-handled");
     const approveBtn = e.target.closest(".proposal-approve-btn");
+    // W1-T202 defense-in-depth (see the submit handler above for why this exists alongside the
+    // 'disabled' attribute already on each of these three buttons).
+    if (!hasWriteScope && (decideBtn || markHandledBtn || approveBtn)) return;
     if (decideBtn) {
       await postJson("/v1/feedback/decision", { id: decideBtn.dataset.id, decision: decideBtn.dataset.decision });
       refreshAll();
@@ -2235,6 +2303,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   document.getElementById("up-next-list").addEventListener("click", async (e) => {
     const runBtn = e.target.closest(".up-next-run-btn");
     if (!runBtn) return;
+    if (!hasWriteScope) return; // W1-T202 defense-in-depth alongside runBtn's own 'disabled'
     e.stopPropagation(); // never let a Run click also expand the row
     if (runBtn.dataset.confirming !== "true") {
       runBtn.dataset.confirming = "true";
@@ -2260,6 +2329,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     clearTimeout(drainConfirmTimer);
   }
   document.getElementById("drain-now-btn").addEventListener("click", () => {
+    if (!hasWriteScope) return; // W1-T202 defense-in-depth alongside this button's own 'disabled'
     const btn = document.getElementById("drain-now-btn");
     if (btn.dataset.confirming !== "true") {
       btn.dataset.confirming = "true";
@@ -2275,19 +2345,34 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   });
 
   // ── fleet control READ-BACK (W1-T153): render the ACTIVE mode, never stateless buttons ──
+  // W1-T202: ALSO the write-lock read-back for these five controls -- 'locked' composes with the
+  // mode-derived disable so a write-scope flip (probeWriteScope, below) and a mode flip (a real
+  // GET /v1/control/status fetch) never fight over the same '.disabled' bit.
   function applyControlStatus(status) {
+    lastControlStatus = status;
     const pauseBtn = document.getElementById("pause-btn");
     const resumeBtn = document.getElementById("resume-btn");
     const stopBtn = document.getElementById("stop-btn");
     const quietHours = document.getElementById("quiet-hours");
+    const drainBtn = document.getElementById("drain-now-btn");
+    const locked = !hasWriteScope;
+    const lockTitle = "Read-only — enter a write token to enable this action";
     pauseBtn.setAttribute("aria-pressed", String(status.paused));
     pauseBtn.classList.toggle("active", status.paused);
-    pauseBtn.disabled = status.paused || status.stopped;
+    pauseBtn.disabled = locked || status.paused || status.stopped;
     stopBtn.setAttribute("aria-pressed", String(status.stopped));
     stopBtn.classList.toggle("active", status.stopped);
-    resumeBtn.disabled = !status.paused && !status.stopped;
+    stopBtn.disabled = locked;
+    resumeBtn.disabled = locked || (!status.paused && !status.stopped);
     resumeBtn.setAttribute("aria-pressed", String(!status.paused && !status.stopped && false));
+    quietHours.disabled = locked;
     quietHours.checked = status.quietHours;
+    if (drainBtn) drainBtn.disabled = locked;
+    pauseBtn.title = locked ? lockTitle : "";
+    resumeBtn.title = locked ? lockTitle : "";
+    stopBtn.title = locked ? lockTitle : "";
+    quietHours.title = locked ? lockTitle : "";
+    if (drainBtn) drainBtn.title = locked ? lockTitle : "";
     const detail = status.stopped ? status.stopDetail : status.paused ? status.pauseDetail : "fleet is running";
     document.getElementById("controls-status").textContent = detail ?? (status.stopped ? "stopped" : status.paused ? "paused" : "running");
   }
@@ -2295,6 +2380,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   // ── STOP requires an explicit second click ("Confirm STOP") — never a single click ──────
   let stopConfirmTimer;
   document.getElementById("stop-btn").addEventListener("click", () => {
+    if (!hasWriteScope) return; // W1-T202 defense-in-depth alongside this button's own 'disabled'
     const btn = document.getElementById("stop-btn");
     if (btn.dataset.confirming !== "true") {
       btn.dataset.confirming = "true";
@@ -2315,13 +2401,87 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     clearTimeout(stopConfirmTimer);
   }
   document.getElementById("pause-btn").addEventListener("click", () => {
+    if (!hasWriteScope) return; // W1-T202 defense-in-depth alongside this button's own 'disabled'
     postJson("/v1/control/pause", { reason: document.getElementById("reason").value || undefined }).then(refreshAll);
   });
   document.getElementById("resume-btn").addEventListener("click", () => {
+    if (!hasWriteScope) return; // W1-T202 defense-in-depth alongside this button's own 'disabled'
     postJson("/v1/control/resume").then(refreshAll);
   });
   document.getElementById("quiet-hours").addEventListener("change", (e) => {
+    if (!hasWriteScope) return; // W1-T202 defense-in-depth alongside this control's own 'disabled'
     postJson("/v1/quiet-hours", { enabled: e.target.checked }).then(refreshAll);
+  });
+
+  // ── W1-T202: the write-token entry/clear UI -- the ONLY place a write token is ever accepted
+  // from the operator. Submitting stores it in sessionStorage (never the URL/history, never a
+  // ledger line, never a log line) and re-probes scope immediately; clearing drops it and reverts
+  // every write affordance to its disabled/explained state WITHOUT a reload. ──────────────────
+  function updateWriteTokenUi() {
+    const statusEl = document.getElementById("write-token-status");
+    const form = document.getElementById("write-token-form");
+    const clearBtn = document.getElementById("write-token-clear-btn");
+    if (hasWriteScope) {
+      statusEl.textContent = "Write access enabled for this tab.";
+      form.hidden = true;
+      clearBtn.hidden = false;
+    } else {
+      statusEl.textContent = writeToken
+        ? "That write token was not accepted — write actions stay unavailable."
+        : "Read-only — write actions are unavailable. Enter a write token to enable them for this tab.";
+      form.hidden = false;
+      clearBtn.hidden = true;
+    }
+  }
+  // W1-T202: re-resolves hasWriteScope off the CURRENT client-held write token (never the URL) --
+  // called at boot and every time that token changes, since it can now change mid-session with no
+  // reload. Re-applies BOTH gating surfaces (the static fleet-control row via applyControlStatus,
+  // the dynamic NEEDS ME/UP NEXT rows via paintFromTasksById re-running writeGateAttrs) so a flip
+  // takes effect immediately rather than waiting for the next poll tick.
+  async function probeWriteScope() {
+    if (!writeToken) {
+      hasWriteScope = false;
+    } else {
+      try {
+        const res = await fetch("/v1/auth/scope", { headers: writeAuthHeaders() });
+        hasWriteScope = res.ok;
+      } catch {
+        hasWriteScope = false;
+      }
+    }
+    document.body.dataset.writeScopeResolved = "1";
+    updateWriteTokenUi();
+    applyControlStatus(lastControlStatus);
+    if (firstStatusLoaded) paintFromTasksById(); // else: the W1-T200 skeleton is already correct — see firstStatusLoaded's own doc
+  }
+  document.getElementById("write-token-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = document.getElementById("write-token-input");
+    const value = input.value.trim();
+    input.value = "";
+    if (!value) return;
+    writeToken = value;
+    try {
+      window.sessionStorage.setItem(WRITE_TOKEN_STORAGE_KEY, writeToken);
+    } catch {
+      // storage disabled/blocked -- the token still works for THIS page load via the in-memory
+      // 'writeToken' above; it just will not survive a reload. Never fall back to the URL/a cookie.
+    }
+    probeWriteScope();
+  });
+  document.getElementById("write-token-clear-btn").addEventListener("click", () => {
+    writeToken = "";
+    try {
+      window.sessionStorage.removeItem(WRITE_TOKEN_STORAGE_KEY);
+    } catch {
+      // storage disabled/blocked -- writeToken is already cleared in memory, which is what
+      // every outbound request and every render actually reads.
+    }
+    hasWriteScope = false;
+    document.body.dataset.writeScopeResolved = "1";
+    updateWriteTokenUi();
+    applyControlStatus(lastControlStatus);
+    if (firstStatusLoaded) paintFromTasksById(); // else: the W1-T200 skeleton is already correct — see firstStatusLoaded's own doc
   });
 
   // ── the auxiliary tool panels (unchanged mechanism from the v0 shell — in-shell, never a
@@ -2594,6 +2754,10 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     if (journeyToggle) { toggleCardJourney(journeyToggle); return; }
     const markHandledBtn = e.target.closest(".card-mark-handled");
     if (markHandledBtn) {
+      // W1-T202 defense-in-depth: cardActionsHtml already renders NO button at all when
+      // !hasWriteScope (W1-T222's own, unchanged, hide-entirely treatment), so this only ever
+      // guards a stale scope flip between render and click.
+      if (!hasWriteScope) return;
       postJson("/v1/escalation/mark-handled", { taskId: markHandledBtn.dataset.taskId, issueUrl: markHandledBtn.dataset.issueUrl }).then(refreshAll);
       return;
     }
@@ -2707,6 +2871,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     pollFailures = 0;
     lastSuccessAt = Date.now();
     touchFreshness();
+    firstStatusLoaded = true;
     const tasks = statusSnap.tasks ?? [];
     for (const t of tasks) ingestProjection(t);
     // W1-T159: "spend" rides on this SAME /v1/status response (board.ts's computeGlanceSpend) --
@@ -2858,15 +3023,11 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
           : '<span class="dot" aria-hidden="true"></span> disconnected — reconnecting…';
   }
 
-  // W1-T222: resolve write scope ONCE at boot, side-effect-free (a plain GET) -- see
-  // cardActionsHtml's own doc for why this exists and stays false until this actually succeeds.
-  getJson("/v1/auth/scope")
-    .then(() => { hasWriteScope = true; })
-    .catch(() => { hasWriteScope = false; })
-    // W1-T222: mark the boot scope probe resolved so a card expanded AFTER this renders its
-    // affordances against the settled scope (and a test can wait on it deterministically instead
-    // of racing a fixed timeout).
-    .finally(() => { document.body.dataset.writeScopeResolved = "1"; });
+  // W1-T222/W1-T202: resolve write scope at boot off whatever write token sessionStorage already
+  // held (probeWriteScope, defined with the write-token-form/clear-btn wiring above) -- and
+  // re-resolve it again every time that token changes, since it is no longer fixed for the life
+  // of the page load the way the URL's read token is.
+  probeWriteScope();
 
   // W1-T222 DEEP-LINK: \`?task=<id>\` opens with that row expanded and scrolled into view,
   // replacing the bottom-panel anchor W1-T158 used as this console's addressable-single-task

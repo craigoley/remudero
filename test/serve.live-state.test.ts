@@ -21,6 +21,7 @@ import { after, before, test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
+import { isPaused } from "../src/lib/fleet-control.js";
 import { shellBootReady } from "./setup/open-shell.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
@@ -157,12 +158,21 @@ after(async () => {
   await launched?.close();
 });
 
+// W1-T202: the write token NEVER rides the URL bootstrap anymore — the bookmark carries only the
+// read token. Requesting a non-read token here simulates an operator who already pasted it into
+// THIS tab earlier in the session: it is seeded into sessionStorage BEFORE the page's own script
+// runs (page.addInitScript), never appended to the navigated URL.
 async function openShell(base: string, opts: { reducedMotion?: boolean; token?: string } = {}): Promise<{ context: BrowserContext; page: Page }> {
   const context = await browser.newContext();
   if (opts.reducedMotion) await context.grantPermissions([]);
   const page = await context.newPage();
   if (opts.reducedMotion) await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.goto(`${base}/?token=${opts.token ?? READ_TOKEN}`);
+  if (opts.token && opts.token !== READ_TOKEN) {
+    await page.addInitScript((writeToken) => {
+      window.sessionStorage.setItem("rmd-console-write-token", writeToken);
+    }, opts.token);
+  }
+  await page.goto(`${base}/?token=${READ_TOKEN}`);
   await page.waitForFunction(shellBootReady);
   return { context, page };
 }
@@ -799,6 +809,40 @@ test("skeleton lifecycle: an EMPTY successful poll (no in-flight tasks, no escal
         assert.equal(s.skeletons, 0, `${s.list} must have zero skeleton nodes once its (empty) first successful render lands`);
         assert.ok(s.isHonestEmpty, `${s.list} must render its honest empty message, not fall back to skeletons`);
       }
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+// ── W1-T202: the console bookmark is READ-ONLY after the token-hygiene fix -- the shell must
+// accept the write token once and hold it client-side, or every NEEDS-ME write action 401s ──────
+
+test("W1-T202: a write action issued with a client-held write token succeeds while the URL still carries only the read token — the bookmark never gains write power", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })]);
+  await withShell(deps, async (base) => {
+    // boots off the bare read-token bookmark -- no write token anywhere yet.
+    const { context, page } = await openShell(base);
+    try {
+      assert.match(page.url(), new RegExp(`\\?token=${READ_TOKEN}$`), "the bookmark itself carries only the read token");
+      assert.equal(await page.evaluate(() => (document.getElementById("pause-btn") as HTMLButtonElement).disabled), true);
+      assert.equal(isPaused(root), false);
+
+      // the operator pastes the write token into the shell's OWN entry form -- never the URL.
+      await page.fill("#write-token-input", WRITE_TOKEN);
+      await page.click("#write-token-form button[type=submit]");
+      await page.waitForFunction(() => (document.getElementById("pause-btn") as HTMLButtonElement).disabled === false);
+
+      // the URL is untouched by entering the token -- still exactly the read-token bookmark.
+      assert.match(page.url(), new RegExp(`\\?token=${READ_TOKEN}$`));
+      assert.doesNotMatch(page.url(), new RegExp(WRITE_TOKEN));
+
+      // the write action now actually succeeds -- a REAL server-side effect, not merely a
+      // client-side toggle -- proven against fleet-control's own on-disk state (isPaused).
+      await page.click("#pause-btn");
+      await page.waitForFunction(() => document.getElementById("pause-btn")?.getAttribute("aria-pressed") === "true");
+      assert.equal(isPaused(root), true, "the client-held write token must actually authorize the write on the server");
     } finally {
       await context.close();
     }

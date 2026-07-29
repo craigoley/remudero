@@ -162,10 +162,19 @@ after(async () => {
   await launched?.close();
 });
 
+// W1-T202: the write token NEVER rides the URL bootstrap anymore — the bookmark carries only the
+// read token (see serve.ts's shell bootstrap). Passing WRITE_TOKEN here simulates an operator who
+// already pasted it into THIS tab earlier in the session: it is seeded into sessionStorage BEFORE
+// the page's own script runs (page.addInitScript), never appended to the navigated URL.
 async function openShell(base: string, token: string = READ_TOKEN): Promise<Page> {
   const context = await browser.newContext();
   const page = await context.newPage();
-  await page.goto(`${base}/?token=${token}`);
+  if (token !== READ_TOKEN) {
+    await page.addInitScript((writeToken) => {
+      window.sessionStorage.setItem("rmd-console-write-token", writeToken);
+    }, token);
+  }
+  await page.goto(`${base}/?token=${READ_TOKEN}`);
   await page.waitForFunction(shellBootReady);
   return page;
 }

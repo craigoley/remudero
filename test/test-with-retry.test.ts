@@ -148,22 +148,32 @@ test("test-with-retry: is wired into both required test surfaces (ci job + cover
 // These falsifiers stub `globalThis.document` with a minimal `getElementById` stand-in and call
 // the SAME function directly in this Node process -- no Playwright/browser dependency.
 
-function stubTopStatus(getElementById: (id: string) => { textContent: string | null } | null): void {
-  (globalThis as unknown as { document: { getElementById: typeof getElementById } }).document = { getElementById };
+// W1-T202: shellBootReady ALSO gates on document.body.dataset.writeScopeResolved -- these
+// falsifiers default that marker to "1" (already resolved) so the four pre-existing cases below
+// keep testing ONLY the #top-status dimension they were written for; the two NEW cases at the
+// end test the write-scope dimension on its own, with #top-status already satisfied.
+// NOTE: `writeScopeResolved` has NO default value on purpose -- a default triggers on an
+// explicitly-passed `undefined` too (JS default-parameter semantics), which would make the
+// "not resolved yet" falsifier below indistinguishable from "caller omitted the arg."
+function stubTopStatus(getElementById: (id: string) => { textContent: string | null } | null, writeScopeResolved: string | undefined): void {
+  (globalThis as unknown as { document: { getElementById: typeof getElementById; body: { dataset: Record<string, string | undefined> } } }).document = {
+    getElementById,
+    body: { dataset: { writeScopeResolved } },
+  };
 }
 
 test("shellBootReady: does NOT pass while #top-status is absent from the DOM (the vacuous-true bug this replaces)", () => {
-  stubTopStatus(() => null);
+  stubTopStatus(() => null, "1");
   assert.equal(shellBootReady(), false, "an absent element must never be read as 'booted'");
 });
 
 test("shellBootReady: does NOT pass while #top-status still shows the loading placeholder", () => {
-  stubTopStatus((id) => (id === "top-status" ? { textContent: "loading…" } : null));
+  stubTopStatus((id) => (id === "top-status" ? { textContent: "loading…" } : null), "1");
   assert.equal(shellBootReady(), false);
 });
 
 test("shellBootReady: passes once #top-status exists with real (non-loading) content", () => {
-  stubTopStatus((id) => (id === "top-status" ? { textContent: "8 tasks" } : null));
+  stubTopStatus((id) => (id === "top-status" ? { textContent: "8 tasks" } : null), "1");
   assert.equal(shellBootReady(), true);
 });
 
@@ -172,6 +182,16 @@ test("shellBootReady: does NOT pass when #top-status exists but has no text yet 
   // passed here too -- the real fix is requiring the element to EXIST, which this case already
   // satisfies; this falsifier documents that empty-but-present content is intentionally treated
   // as ready (matches the original predicate's intent for non-loading content).
-  stubTopStatus((id) => (id === "top-status" ? { textContent: "" } : null));
+  stubTopStatus((id) => (id === "top-status" ? { textContent: "" } : null), "1");
+  assert.equal(shellBootReady(), true);
+});
+
+test("shellBootReady (W1-T202): does NOT pass while #top-status is ready but the boot write-scope probe has not resolved yet", () => {
+  stubTopStatus((id) => (id === "top-status" ? { textContent: "8 tasks" } : null), undefined);
+  assert.equal(shellBootReady(), false, "a fully-painted board must still wait on probeWriteScope before write controls are trustworthy");
+});
+
+test("shellBootReady (W1-T202): passes once BOTH #top-status is ready and the write-scope probe has resolved", () => {
+  stubTopStatus((id) => (id === "top-status" ? { textContent: "8 tasks" } : null), "1");
   assert.equal(shellBootReady(), true);
 });
