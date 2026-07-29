@@ -1863,6 +1863,64 @@ function ghLiveStateByNumber(owner: string, repo: string, prNumber: number): str
 }
 
 /**
+ * W1-T168 (the #349/#360 stuck class): does THIS round's just-computed review
+ * verdict show a REVIEW FALSE-BLOCK the fix rung structurally cannot resolve
+ * by dispatching more code — so it must escalate for re-judgment instead of
+ * spending the round as an ordinary strike toward exhaustion? Two
+ * independent, OR'd signals (either alone is sufficient):
+ *
+ *  (a) NO-PROGRESS: this round's push landed no new commit — the review just
+ *      posted against the SAME head sha the round's fix worker was DISPATCHED
+ *      to resolve (`priorHeadSha`) — AND the SAME set of criteria (by claim
+ *      text) remains unmet. The worker could not add work, so striking again
+ *      against byte-identical code is guaranteed to reproduce the identical
+ *      verdict; no further strike can ever change the outcome.
+ *  (b) FLOOR-VS-REVIEWER DISAGREEMENT (the SHARPEST signal, #349/#360's own
+ *      shape): the deterministic floor ({@link ReviewVerdict.floorState}) —
+ *      every whitelisted proof this run could execute — observed PASS, yet
+ *      the advisory LLM reviewer's semantic layer downgraded the verdict to
+ *      failure anyway. Fires regardless of (a): a strike whose push DID
+ *      change the diff, whose floor now passes, but whose reviewer still
+ *      blocks is false-blocked exactly the same.
+ *
+ * A GENUINE deficiency trips NEITHER signal: a changed diff (headSha differs,
+ * so (a) never fires) whose floor ALSO still fails (so (b) never fires)
+ * always falls through to `undefined` here, so the caller strikes normally —
+ * the escape never weakens the rung for real work still owed (criterion 3).
+ *
+ * Pure and exported so the two signals are unit-testable falsifiers
+ * independent of the rung's spawn/push/CI plumbing.
+ */
+export function detectReviewFalseBlock(check: {
+  /** The head sha the review THIS ROUND'S fix worker was dispatched to resolve carried. */
+  priorHeadSha: string;
+  /** The unmet criteria (by `claim` text) that same prior review posted. */
+  priorUnmetClaims: ReadonlySet<string>;
+  /** The verdict `runReview` just computed for this round's (possibly unchanged) head. */
+  current: ReviewVerdict & { headSha: string };
+}): string | undefined {
+  const { priorHeadSha, priorUnmetClaims, current } = check;
+  if (current.state === "success") return undefined;
+
+  // (b) — checked first: it is the sharper signal and needs no diff-change
+  // evidence at all.
+  if (current.floorState === "success") {
+    return "review false-block: deterministic floor passes while the spawned reviewer blocks";
+  }
+
+  // (a)
+  const currentUnmetClaims = new Set(current.criteria.filter((c) => !c.met).map((c) => c.claim));
+  const sameCriteria =
+    currentUnmetClaims.size > 0 &&
+    currentUnmetClaims.size === priorUnmetClaims.size &&
+    [...currentUnmetClaims].every((c) => priorUnmetClaims.has(c));
+  if (current.headSha === priorHeadSha && sameCriteria) {
+    return "review false-block: same criterion re-blocked on unchanged code (no diff change this strike)";
+  }
+  return undefined;
+}
+
+/**
  * Dispatch ONE bounded fix worker per strike, up to `strikeCap` (config,
  * default 2), on a `blocked_review` verdict. Every dispatch receives the FULL
  * unmet_criteria set + the reviewer's reasons at once (never one criterion at
@@ -2088,6 +2146,13 @@ export async function runFixRung(opts: {
     const attempt = strikes + 1;
     const round: "resume" | "fresh" = attempt === 1 ? "resume" : "fresh";
     const unmet = review.criteria.filter((c) => !c.met);
+    // W1-T168: snapshot THIS round's dispatch target — the head sha + unmet
+    // claim set the fix worker below is being sent to resolve — BEFORE
+    // `review` is reassigned to this round's freshly computed verdict, so
+    // `detectReviewFalseBlock` (after the review call, below) can tell a
+    // byte-identical re-block apart from real progress.
+    const priorHeadSha = review.headSha;
+    const priorUnmetClaims = new Set(unmet.map((c) => c.claim));
     const evidence: FixEvidence =
       currentMergeConflict !== undefined
         ? { mergeConflict: currentMergeConflict, constraint: opts.constraint }
@@ -2260,6 +2325,73 @@ export async function runFixRung(opts: {
       state: review.state,
       unmet: review.criteria.filter((c) => !c.met).length,
     });
+
+    // W1-T168 (the #349/#360 stuck class): a review FALSE-BLOCK this rung
+    // cannot fix by dispatching more code escalates for RE-JUDGMENT right
+    // here — never as another silent strike toward exhaustion, and never
+    // deferred to the generic exhaustion escalate() below (which would file
+    // the wrong summary even on the strike this fired on).
+    const falseBlockReason = detectReviewFalseBlock({ priorHeadSha, priorUnmetClaims, current: review });
+    if (falseBlockReason) {
+      // W1-T177 discipline extended to this NEW spending site: a fresh
+      // terminal-state read before filing a needs-human issue, so a PR that
+      // went terminal (merged/closed) between this round's push and here
+      // never gets a false-block escalation opened against it either.
+      const preFalseBlockStandDown = await fixRungStandDownReason(
+        deps.readLiveState,
+        opts.prUrl,
+        "rung.false_block",
+        deps.log,
+      );
+      if (preFalseBlockStandDown) {
+        deps.log("fix.stood_down", { site: "rung.false_block", strikes, reason: preFalseBlockStandDown });
+        deps.say(`fix rung: standing down before false-block escalation — ${preFalseBlockStandDown}`);
+        return { outcome: "stood_down", review, strikes, standDownReason: preFalseBlockStandDown };
+      }
+      const stillUnmet = review.criteria.filter((c) => !c.met);
+      deps.log("fix.false_block", {
+        strike: strikes,
+        reason: falseBlockReason,
+        floor_state: review.floorState,
+        head_sha: review.headSha,
+        prior_head_sha: priorHeadSha,
+      });
+      deps.say(
+        `fix rung: ESCAPING after strike ${strikes}/${opts.strikeCap} — ${falseBlockReason} — escalating for ` +
+          `re-judgment rather than striking toward exhaustion: ${opts.prUrl}`,
+      );
+      const issueUrl = escalate(
+        {
+          class: "BLOCKED",
+          taskId: opts.taskId,
+          runId: opts.runId,
+          summary: `review false-block after ${strikes} strike(s) (${falseBlockReason}) — ${opts.prUrl}`,
+          detail:
+            `The blocked_review FIX RUNG (W1-T76, W1-T168) detected a REVIEW FALSE-BLOCK it cannot resolve by ` +
+            `dispatching more code: ${falseBlockReason}. Deterministic floor state: ` +
+            `${review.floorState ?? "unknown"}; spawned-reviewer-inclusive verdict: ${review.state}; head ` +
+            `${review.headSha.slice(0, 7)}. Unmet criteria:\n\n` +
+            stillUnmet.map((c) => `- ${c.claim}\n  reason: ${c.reason}`).join("\n") +
+            `\n\nThis is the #349/#360 stuck class: correct, test-passing code sat blocked while the fix rung ` +
+            `burned strikes re-attempting a fix that could never change the verdict. Escalating for a HUMAN ` +
+            `RE-JUDGMENT after ${strikes} strike(s) instead of exhausting the remaining strike(s) on unfixable work.`,
+          options: [
+            {
+              label: "re-judge",
+              detail:
+                "re-examine the reviewer's reasoning against the deterministic floor and re-post `remudero-review` " +
+                "by hand (e.g. `rmd review`) if the block is unwarranted.",
+            },
+            { label: "close", detail: "close the PR and re-scope the task if the criteria themselves are wrong." },
+          ],
+          recommendation: "re-judge",
+        },
+        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+      );
+      deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "false_block" });
+      deps.say(`fix rung: escalated (review false-block) — ${issueUrl}`);
+      return { outcome: "escalated", review, strikes, issueUrl };
+    }
   }
 
   if (review.state === "success") {

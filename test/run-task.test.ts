@@ -29,6 +29,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   commitsAhead,
   degradedReasonLedgerFields,
   deriveFixMode,
+  detectReviewFalseBlock,
   fetchPrBodyViaGh,
   deriveStrikeHistory,
   dispatchFixPreflightStandDown,
@@ -1814,10 +1815,18 @@ function criterion(over: Partial<CriterionVerdict> & Pick<CriterionVerdict, "cla
   return { proof: "proof", reason: "", proof_exec: "not_executable", ...over };
 }
 
-/** Build a `ReviewVerdict` (+ the runReview augmentation) from a criteria list. */
+/**
+ * Build a `ReviewVerdict` (+ the runReview augmentation) from a criteria list.
+ * `headSha` defaults to a fixed placeholder for tests that never dispatch more
+ * than one real strike; a test that models MULTIPLE genuine fix-worker
+ * attempts (a real commit landing each round, W1-T168) must pass a DISTINCT
+ * `headSha` per round — see {@link detectReviewFalseBlock}, which reads an
+ * UNCHANGED head sha across rounds as "no diff change".
+ */
 function fakeReview(
   state: "success" | "failure",
   criteria: CriterionVerdict[],
+  headSha = "deadbeef",
 ): ReviewVerdict & { headSha: string; reviewerOutcome: string } {
   return {
     state,
@@ -1828,7 +1837,7 @@ function fakeReview(
     capped: false,
     keywordOnly: false,
     planOnly: false,
-    headSha: "deadbeef",
+    headSha,
     reviewerOutcome: "success",
   };
 }
@@ -2240,8 +2249,17 @@ test("runFixRung: the fix worker amends the SAME run branch — its spawn's cwd 
 
 test("runFixRung: strike 1 RESUMES the failing implement session; strike 2 is a FRESH worker on the SAME branch — never resumed twice", async () => {
   const spawnCalls: SpawnWorkerArgs[] = [];
-  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })]);
-  const passing = fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })]);
+  const failing = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })], "sha-0");
+  // Strike 1's fix worker DOES push a genuine (if incomplete) commit — a
+  // different head sha than the review that triggered the rung — before
+  // strike 2 finally resolves it (W1-T168: an unchanged head sha would read
+  // as no-progress; this models a real, still-failing attempt instead).
+  const stillFailingAfterStrike1 = fakeReview(
+    "failure",
+    [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })],
+    "sha-1",
+  );
+  const passing = fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })], "sha-2");
   let reviewCalls = 0;
 
   const outcome = await runFixRung({
@@ -2256,7 +2274,7 @@ test("runFixRung: strike 1 RESUMES the failing implement session; strike 2 is a 
       waitForCiGreen: async () => "green",
       runReview: async () => {
         reviewCalls++;
-        return reviewCalls === 1 ? failing : passing; // still broken after strike 1, fixed after strike 2
+        return reviewCalls === 1 ? stillFailingAfterStrike1 : passing; // still broken after strike 1, fixed after strike 2
       },
       push: () => {},
       issues: fakeIssues([]),
@@ -2276,11 +2294,14 @@ test("runFixRung: strike 1 RESUMES the failing implement session; strike 2 is a 
 
 test("runFixRung: a second block after N strikes escalates rather than looping (P21's golden, verbatim) — no third spawn", async () => {
   const spawnCalls: SpawnWorkerArgs[] = [];
-  const stillFailing = fakeReview("failure", [
-    criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" }),
-  ]);
+  const stillFailing = fakeReview(
+    "failure",
+    [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })],
+    "sha-0",
+  );
   const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
   const ledgerPath = tmpLedgerPath();
+  let reviewCalls = 0;
 
   const outcome = await runFixRung({
     ...fixRungBaseOpts(),
@@ -2292,7 +2313,14 @@ test("runFixRung: a second block after N strikes escalates rather than looping (
         return result({ sessionId: `fix-session-${spawnCalls.length}` });
       },
       waitForCiGreen: async () => "green",
-      runReview: async () => stillFailing, // never resolves
+      // Never resolves — but a GENUINE deficiency: each strike's push lands a
+      // real (distinct) commit that still fails the identical criterion
+      // (W1-T168 criterion 3: a changed diff whose floor also fails strikes
+      // normally, never escaping as a false-block).
+      runReview: async () => {
+        reviewCalls++;
+        return { ...stillFailing, headSha: `sha-${reviewCalls}` };
+      },
       push: () => {},
       issues: fakeIssues(issueCalls),
       ledgerPath,
@@ -2368,6 +2396,7 @@ test("runFixRung (W1-T58 acceptance 1): an ORDINARY seeded blocked_review (no cr
   const escSpawnCalls: SpawnWorkerArgs[] = [];
   const escIssueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
   const escLedgerPath = tmpLedgerPath();
+  let escReviewCalls = 0;
   const escalated = await runFixRung({
     ...fixRungBaseOpts(),
     strikeCap: 2,
@@ -2378,7 +2407,13 @@ test("runFixRung (W1-T58 acceptance 1): an ORDINARY seeded blocked_review (no cr
         return result({ sessionId: `fix-session-${escSpawnCalls.length}` });
       },
       waitForCiGreen: async () => "green",
-      runReview: async () => stillFailing, // never resolves
+      // Never resolves — but a GENUINE deficiency: each strike lands a real,
+      // distinct commit that still fails the same criterion (W1-T168
+      // criterion 3 — never escaped as a false-block).
+      runReview: async () => {
+        escReviewCalls++;
+        return { ...stillFailing, headSha: `esc-sha-${escReviewCalls}` };
+      },
       push: () => {},
       issues: fakeIssues(escIssueCalls),
       ledgerPath: escLedgerPath,
@@ -2972,7 +3007,10 @@ test("runFixRung: a PR that goes MERGED mid-rung (after round 1's strike, before
     deps: {
       spawn: async () => result({ sessionId: "fix-session-1" }),
       waitForCiGreen: async () => "green",
-      runReview: async () => failing, // still failing — heads toward exhaustion
+      // Still failing — heads toward exhaustion — but a GENUINE deficiency:
+      // the strike lands a real, distinct commit (W1-T168: an identical head
+      // sha would instead read as no-progress and escalate as a false-block).
+      runReview: async () => ({ ...failing, headSha: "sha-1" }),
       push: () => {},
       issues: fakeIssues(issueCalls),
       ledgerPath: tmpLedgerPath(),
@@ -3006,7 +3044,11 @@ test("runFixRung: a FAILED/INDETERMINATE read at the EXHAUSTION check (site ii) 
     deps: {
       spawn: async () => result({ sessionId: "fix-session-1" }),
       waitForCiGreen: async () => "green",
-      runReview: async () => failing,
+      // A GENUINE deficiency: the strike lands a real, distinct commit that
+      // still fails (W1-T168: an identical head sha would instead read as
+      // no-progress and escalate as a false-block, never reaching this
+      // test's own exhaustion-check assertions).
+      runReview: async () => ({ ...failing, headSha: "sha-1" }),
       push: () => {},
       issues: fakeIssues(issueCalls),
       ledgerPath: tmpLedgerPath(),
@@ -3028,6 +3070,231 @@ test("runFixRung: a FAILED/INDETERMINATE read at the EXHAUSTION check (site ii) 
   assert.equal(issueCalls.length, 1, "the needs-human issue still files — a read failure is never treated as terminal");
   assert.equal(indeterminateLogs.length, 1, "site (ii)'s indeterminate read is ledgered exactly once");
   assert.deepEqual(indeterminateLogs[0], { site: "rung.exhaustion" });
+});
+
+// ── W1-T168 (the #349/#360 stuck class): the fix rung must ESCAPE a review
+// false-block it structurally cannot fix — no-progress across strikes
+// escalates for re-judgment, never silent strike-exhaustion. ────────────────
+
+test("detectReviewFalseBlock: an UNCHANGED head sha whose review re-fails the SAME criterion is a false-block (no diff change this strike)", () => {
+  const priorHeadSha = "sha-0";
+  const priorUnmetClaims = new Set(["criterion A merges cleanly"]);
+  const current = fakeReview(
+    "failure",
+    [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })],
+    "sha-0", // identical to priorHeadSha — no new commit landed this round
+  );
+  const reason = detectReviewFalseBlock({ priorHeadSha, priorUnmetClaims, current });
+  assert.ok(reason, "an unchanged head sha re-blocking the identical criterion is detected as a false-block");
+});
+
+test("detectReviewFalseBlock (the falsifier): a fix-rung round that STRIKES TO EXHAUSTION on unchanged code never happens — the SAME unresolved input is never treated as ordinary progress", () => {
+  // The falsifier named in the task's own acceptance criterion 1: a review
+  // whose head sha AND unmet criteria are byte-identical to the round before
+  // it must NEVER be classified as "no signal" (which would let the rung
+  // strike again toward exhaustion instead of escalating).
+  const priorHeadSha = "sha-0";
+  const priorUnmetClaims = new Set(["criterion A merges cleanly"]);
+  const current = fakeReview(
+    "failure",
+    [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })],
+    "sha-0",
+  );
+  assert.notEqual(
+    detectReviewFalseBlock({ priorHeadSha, priorUnmetClaims, current }),
+    undefined,
+    "unchanged head sha + identical unmet criterion must NOT read as ordinary (strikeable) progress",
+  );
+});
+
+test("detectReviewFalseBlock: the DETERMINISTIC floor passing while the spawned reviewer blocks is a false-block — the SHARPEST signal, independent of whether the head sha changed", () => {
+  const priorHeadSha = "sha-0";
+  const priorUnmetClaims = new Set(["criterion A merges cleanly"]);
+  // The head sha DID change (a real commit landed) — yet the floor observed
+  // every proof pass while the advisory reviewer still downgraded it. This is
+  // the #349/#360 shape and must escalate regardless of (a).
+  const current = {
+    ...fakeReview(
+      "failure",
+      [criterion({ claim: "criterion A merges cleanly", met: false, reason: "semantic downgrade", proof_exec: "executed_pass" })],
+      "sha-1",
+    ),
+    floorState: "success" as const,
+  };
+  const reason = detectReviewFalseBlock({ priorHeadSha, priorUnmetClaims, current });
+  assert.ok(reason, "floor-passes-but-reviewer-blocks is detected as a false-block even on a changed head sha");
+});
+
+test("detectReviewFalseBlock: a GENUINE deficiency (changed head sha, floor ALSO failing) trips NEITHER signal — the escape never weakens the rung for real work still owed", () => {
+  const priorHeadSha = "sha-0";
+  const priorUnmetClaims = new Set(["criterion A merges cleanly"]);
+  const current = {
+    ...fakeReview(
+      "failure",
+      [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken", proof_exec: "executed_fail" })],
+      "sha-1", // a real, changed commit
+    ),
+    floorState: "failure" as const, // the floor ALSO fails — a real deficiency
+  };
+  assert.equal(
+    detectReviewFalseBlock({ priorHeadSha, priorUnmetClaims, current }),
+    undefined,
+    "a genuine deficiency (changed diff, floor also failing) is never mis-escaped as a false-block",
+  );
+});
+
+test("detectReviewFalseBlock: a passing review is never a false-block, regardless of head sha or criteria", () => {
+  const current = fakeReview("success", [criterion({ claim: "criterion A merges cleanly", met: true })], "sha-0");
+  assert.equal(
+    detectReviewFalseBlock({ priorHeadSha: "sha-0", priorUnmetClaims: new Set(["criterion A merges cleanly"]), current }),
+    undefined,
+  );
+});
+
+test("runFixRung: a fix round with NO diff change that re-fails the SAME criterion ESCALATES as a false-block, not another silent strike toward exhaustion", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const initialReview = fakeReview(
+    "failure",
+    [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })],
+    "sha-0",
+  );
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2, // TWO strikes available — the escape must fire on strike 1 alone
+    initialReview,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: "fix-session-1" });
+      },
+      waitForCiGreen: async () => "green",
+      // The fix worker's push added NOTHING — the review re-runs against the
+      // IDENTICAL head sha and re-fails the IDENTICAL criterion.
+      runReview: async () => initialReview,
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(outcome.outcome, "escalated");
+  assert.equal(
+    spawnCalls.length,
+    1,
+    "the falsifier: a fix rung that strikes to EXHAUSTION (2 spawns) on unchanged code must never happen — it escalates after strike 1",
+  );
+  assert.equal(outcome.strikes, 1, "only ONE strike was spent — the escape fires before the cap is ever approached");
+  assert.equal(issueCalls.length, 1);
+  assert.match(issueCalls[0].body, /false-block/i);
+  assert.match(issueCalls[0].body, /criterion A merges cleanly/);
+});
+
+test("runFixRung: when the DETERMINISTIC floor passes but the spawned reviewer blocks, the disagreement ESCALATES naming the floor-vs-reviewer disagreement — the #349/#360 shape resolves without a human re-review loop", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  const initialReview = fakeReview(
+    "failure",
+    [criterion({ claim: "criterion A merges cleanly", met: false, reason: "reviewer disagreed with the floor" })],
+    "sha-0",
+  );
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: "fix-session-1" });
+      },
+      waitForCiGreen: async () => "green",
+      // A real commit landed (a DIFFERENT head sha) — the deterministic floor
+      // now observes every proof PASS, yet the advisory reviewer's semantic
+      // layer still downgrades the verdict.
+      runReview: async () => ({
+        ...fakeReview(
+          "failure",
+          [
+            criterion({
+              claim: "criterion A merges cleanly",
+              met: false,
+              reason: "reviewer disagreed with the floor",
+              proof_exec: "executed_pass",
+            }),
+          ],
+          "sha-1",
+        ),
+        floorState: "success" as const,
+      }),
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(outcome.outcome, "escalated");
+  assert.equal(spawnCalls.length, 1, "escalates on the FIRST strike whose floor passes but reviewer blocks — never exhausts");
+  assert.equal(issueCalls.length, 1);
+  assert.match(issueCalls[0].body, /floor/i);
+  assert.match(issueCalls[0].title, /false-block/i);
+});
+
+test("runFixRung: a GENUINE deficiency — a fix round that ADDS work (changed head sha) and still fails a criterion whose deterministic floor ALSO fails — strikes NORMALLY toward the cap (the escape never weakens the rung for real work still owed)", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
+  let reviewCalls = 0;
+  const initialReview = fakeReview(
+    "failure",
+    [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken", proof_exec: "executed_fail" })],
+    "sha-0",
+  );
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: `fix-session-${spawnCalls.length}` });
+      },
+      waitForCiGreen: async () => "green",
+      // Every strike lands a genuinely new commit (a distinct head sha) that
+      // still fails — and the deterministic floor ALSO fails, never passing —
+      // a real, unresolved deficiency, never a false-block.
+      runReview: async () => {
+        reviewCalls++;
+        return {
+          ...fakeReview(
+            "failure",
+            [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken", proof_exec: "executed_fail" })],
+            `sha-${reviewCalls}`,
+          ),
+          floorState: "failure" as const,
+        };
+      },
+      push: () => {},
+      issues: fakeIssues(issueCalls),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(outcome.outcome, "escalated");
+  assert.equal(spawnCalls.length, 2, "the escape never fires on a genuine deficiency — both strikes are spent, exactly as before this task");
+  assert.equal(outcome.strikes, 2);
+  assert.equal(issueCalls.length, 1);
+  assert.doesNotMatch(issueCalls[0].body, /false-block/i, "an ordinary exhaustion escalation is never mislabeled a false-block");
 });
 
 test("runFixRung: readLiveState omitted ⇒ behaves EXACTLY as before this check existed — the rung dispatches normally", async () => {
@@ -3420,9 +3687,12 @@ test("runFixRung: resetStrikeCounterOnAnswer=true (default) grants a FRESH full 
         return result({ sessionId: `fix-session-${spawnCalls.length}` });
       },
       waitForCiGreen: async () => "green",
+      // Strike 1 lands a real, distinct (still-failing) commit before strike
+      // 2 resolves it — W1-T168: an identical head sha across rounds would
+      // instead read as no-progress and escalate before strike 2 ever runs.
       runReview: async () => {
         reviewCalls++;
-        return reviewCalls === 1 ? failing : passing; // resolved on the SECOND strike
+        return reviewCalls === 1 ? { ...failing, headSha: "sha-1" } : passing; // resolved on the SECOND strike
       },
       push: () => {},
       issues: fakeIssues([]),

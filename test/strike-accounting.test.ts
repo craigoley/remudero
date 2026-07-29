@@ -35,7 +35,18 @@ function criterion(over: Partial<CriterionVerdict> & Pick<CriterionVerdict, "cla
   return { proof: "proof", reason: "", proof_exec: "not_executable", ...over };
 }
 
-function fakeReview(state: "success" | "failure", criteria: CriterionVerdict[]): ReviewVerdict & { headSha: string; reviewerOutcome: string } {
+/**
+ * `headSha` defaults to a fixed placeholder for a single-round fixture; a
+ * fixture modeling MULTIPLE genuine strikes must pass a DISTINCT `headSha` per
+ * round — {@link detectReviewFalseBlock} (W1-T168) reads an unchanged head sha
+ * across rounds as "no diff change" and escalates as a false-block rather
+ * than dispatching a further strike.
+ */
+function fakeReview(
+  state: "success" | "failure",
+  criteria: CriterionVerdict[],
+  headSha = "deadbeef",
+): ReviewVerdict & { headSha: string; reviewerOutcome: string } {
   return {
     state,
     criteria,
@@ -45,7 +56,7 @@ function fakeReview(state: "success" | "failure", criteria: CriterionVerdict[]):
     capped: false,
     keywordOnly: false,
     planOnly: false,
-    headSha: "deadbeef",
+    headSha,
     reviewerOutcome: "success",
   };
 }
@@ -231,7 +242,16 @@ test("W1-T127: isRealStrike is the conjunction — ONLY both halves together are
 test("W1-T127: the #212 replay — strike 1 is real and judged, strike 2 is a spawn-infra crash — leaves the counter at 1 (its pre-crash value) and never escalates", async () => {
   const { lines, log } = captureLog();
   const issueCalls: Array<{ title: string; body: string; labels: string[] }> = [];
-  const failingBoth = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })]);
+  const failingBoth = fakeReview("failure", [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })], "sha-0");
+  // Strike 1 lands a real, distinct commit that still fails the same
+  // criterion (a genuine deficiency, W1-T168 criterion 3) — never a
+  // false-block — so the rung proceeds to strike 2, exactly where #212's
+  // crash hit.
+  const failingAfterStrike1 = fakeReview(
+    "failure",
+    [criterion({ claim: "criterion A merges cleanly", met: false, reason: "still broken" })],
+    "sha-1",
+  );
   let spawnCalls = 0;
 
   await assert.rejects(
@@ -251,7 +271,7 @@ test("W1-T127: the #212 replay — strike 1 is real and judged, strike 2 is a sp
           waitForCiGreen: async () => "green",
           // Strike 1's judgment: still failing — the rung would normally loop
           // to strike 2 (strikeCap 2), which is exactly where #212's crash hit.
-          runReview: async () => failingBoth,
+          runReview: async () => failingAfterStrike1,
           push: () => {},
           issues: fakeIssues(issueCalls),
           ledgerPath: tmpLedgerPath(),
