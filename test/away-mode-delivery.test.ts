@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { escalateCommand } from "../src/run-task.js";
+import { awayCommand, escalateCommand } from "../src/run-task.js";
 import { awayFilePath, deliversRealtime, presenceMode, setPresenceMode } from "../src/lib/escalate.js";
 import { buildRecapEvents } from "../src/lib/recap.js";
 import type { Plan } from "../src/lib/plan.js";
@@ -184,4 +184,59 @@ test("claim 3c: escalateCommand is the ONLY real-time-ping site gated on presenc
   const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
   const occurrences = runTaskSrc.match(/deliversRealtime\(/g) ?? [];
   assert.equal(occurrences.length, 1, "deliversRealtime must gate exactly one call site — escalateCommand's real-time ping");
+});
+
+// ── rmd away [on|off]: the CLI verb that sets the presence flag the delivery path reads ──────
+
+test("rmd away on / off: sets the presence flag, ledgers fleet.presence, and prints the mode; toggling back clears it", async () => {
+  const { root, home } = setupRoot();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    // `on` → AWAY: presence flips, and the routing switch itself is ledgered.
+    const onCode = await awayCommand(["on"]);
+    assert.equal(onCode, 0);
+    assert.equal(presenceMode(root), "away", "rmd away on sets presence to away");
+    assert.equal(deliversRealtime(root), false, "away suppresses the real-time page");
+
+    // `off` → ATTENDED: presence flips back, clearing the flag.
+    const offCode = await awayCommand(["off"]);
+    assert.equal(offCode, 0);
+    assert.equal(presenceMode(root), "attended", "rmd away off returns to attended");
+    assert.equal(deliversRealtime(root), true, "attended restores real-time delivery");
+
+    const presenceLines = readLedger(root).filter((l) => l.step === "fleet.presence");
+    assert.deepEqual(
+      presenceLines.map((l) => l.mode),
+      ["away", "attended"],
+      "each toggle ledgers a fleet.presence line naming the new mode",
+    );
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("rmd away: no arg PRINTS the current mode (no flag write); a junk arg is a usage error (exit 2)", async () => {
+  const { root, home } = setupRoot();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    // Status read: no arg, default attended, and NO AWAY flag is created by a bare read.
+    const statusCode = await awayCommand([]);
+    assert.equal(statusCode, 0);
+    assert.equal(presenceMode(root), "attended", "a bare `rmd away` never writes the flag");
+
+    // Junk arg → usage error, non-zero, still no write.
+    const badCode = await awayCommand(["sometimes"]);
+    assert.equal(badCode, 2, "an unrecognized arg is a usage error");
+    assert.equal(presenceMode(root), "attended");
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
 });

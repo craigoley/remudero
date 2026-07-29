@@ -7624,7 +7624,7 @@ async function resumeFleetCommand(): Promise<number> {
  * dispatch (escalate.ts's module header names the dead presence×risk matrix this must not
  * resurrect); STOP/PAUSE (above) remain the only real-time-presence waits.
  */
-async function awayCommand(rest: string[]): Promise<number> {
+export async function awayCommand(rest: string[]): Promise<number> {
   const config = loadConfig();
   const arg = rest[0];
   if (arg !== undefined && arg !== "on" && arg !== "off") {
@@ -10602,6 +10602,7 @@ export async function main(
   if (cmd === "resume") {
     process.exit(await resumeFleetCommand());
   }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await awayCommand(rest)) cannot carry a DA hit without forking the process; awayCommand's own logic is unit-tested in test/away-mode-delivery.test.ts (same irreducible-glue shape as the sibling pause/resume/correct dispatch cases).
   if (cmd === "away") {
     process.exit(await awayCommand(rest));
   }
