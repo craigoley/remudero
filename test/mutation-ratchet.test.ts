@@ -265,6 +265,21 @@ test("resolve-scope: neither the PR scope nor the nightly scope ever matches a t
   assert.ok(candidates.some((p) => p.startsWith("test/")), "fixture must include at least one test/** path to prove exclusion, not mere absence");
 });
 
+test("resolve-scope: a `?` glob segment (globToRegExp's single-char wildcard branch) matches exactly one non-slash character, over the REAL candidate list", () => {
+  // `mutation-nightly-scope.json` never happens to use `?`, so this drives globToRegExp's `?`
+  // branch (re += '[^/]') directly through a scratch config: "src/lib/classify.t?" must match
+  // "src/lib/classify.ts" (the trailing `?` standing in for the single char "s") but must NOT
+  // match a path with a different number of trailing characters.
+  const questionMarkScope = join(FIXTURES, ".resolve-scope-question-mark-scratch.json");
+  writeFileSync(questionMarkScope, JSON.stringify({ mutate: ["src/lib/classify.t?"] }));
+  try {
+    const matched = resolveScope(questionMarkScope);
+    assert.deepEqual(matched, ["src/lib/classify.ts"], "`?` must match exactly one non-slash char, no more, no less");
+  } finally {
+    rmSync(questionMarkScope);
+  }
+});
+
 test("resolve-scope: a nightly scope config MISCONFIGURED to include test/** still yields zero test/** matches -- resolveMutateScope()'s hard exclusion cannot be bypassed by data", () => {
   const misconfiguredScope = join(FIXTURES, ".nightly-scope-config-misconfigured-scratch.json");
   writeFileSync(misconfiguredScope, JSON.stringify({ mutate: ["src/**/*.ts", "test/**"], fileCap: 50 }));
@@ -275,6 +290,22 @@ test("resolve-scope: a nightly scope config MISCONFIGURED to include test/** sti
   } finally {
     rmSync(misconfiguredScope);
   }
+});
+
+test("mutation-ratchet CLI --resolve-scope: missing --files and/or --config -> named loud failure (non-zero exit), never a silent no-op", () => {
+  const missingFiles = spawnSync(process.execPath, [SCRIPT, "--resolve-scope", "--config", STRYKER_CONFIG]);
+  assert.notEqual(missingFiles.status, 0, missingFiles.stdout?.toString() + missingFiles.stderr?.toString());
+  assert.match(missingFiles.stderr.toString(), /--resolve-scope requires --files <path> and --config <path>/);
+
+  const missingConfig = spawnSync(process.execPath, [SCRIPT, "--resolve-scope", "--files", NIGHTLY_CANDIDATES]);
+  assert.notEqual(missingConfig.status, 0, missingConfig.stdout?.toString() + missingConfig.stderr?.toString());
+  assert.match(missingConfig.stderr.toString(), /--resolve-scope requires --files <path> and --config <path>/);
+});
+
+test("mutation-ratchet CLI --nightly-scope: missing --files -> named loud failure (non-zero exit), never a silent no-op", () => {
+  const result = spawnSync(process.execPath, [SCRIPT, "--nightly-scope", "--night-index", "0"]);
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stderr.toString(), /--nightly-scope requires --files <candidate-file-list-path>/);
 });
 
 function runNightlyScope(nightIndex: number, scopeConfig: string = FIXTURE_NIGHTLY_SCOPE_CONFIG) {
@@ -314,6 +345,33 @@ test("mutation-ratchet CLI --nightly-scope: rotating night-index over a full cyc
   // Night-index 3 wraps back to night-index 0's group (3 % 3 === 0) -- the rotation is periodic.
   const wrapped = runNightlyScope(3);
   assert.deepEqual(wrapped, groups[0]);
+});
+
+test("mutation-ratchet CLI --nightly-scope: a scope config matching ZERO candidates -> sampleForNight's empty-input branch, empty sample, groupCount 0, still exit 0 (no crash, no false REQUIRED)", () => {
+  const emptyScope = join(FIXTURES, ".nightly-scope-config-empty-match-scratch.json");
+  writeFileSync(emptyScope, JSON.stringify({ mutate: ["nonexistent-dir/**"], fileCap: 2 }));
+  try {
+    const result = spawnSync(process.execPath, [
+      SCRIPT,
+      "--nightly-scope",
+      "--files",
+      NIGHTLY_CANDIDATES,
+      "--night-index",
+      "0",
+      "--scope-config",
+      emptyScope,
+    ]);
+    assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+    const stdout = result.stdout.toString();
+    assert.match(stdout, /group 1\/0/);
+    assert.match(stdout, /0 file\(s\) sampled from 0 matched/);
+    // Do NOT trim() before splitting: sample.join(',') on an empty sample prints an EMPTY line,
+    // and trim() would eat that trailing blank line, hiding exactly the thing under test.
+    const lines = stdout.split("\n");
+    assert.equal(lines[lines.length - 2], "", "the sample line itself must be empty when nothing matched");
+  } finally {
+    rmSync(emptyScope);
+  }
 });
 
 test("mutation-ratchet CLI --nightly-scope: writes the sample to $GITHUB_OUTPUT `mutate=...` for the workflow's `npx stryker run --mutate` step", () => {
