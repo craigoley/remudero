@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -384,6 +384,40 @@ import {
 // every step. `rmd run-task <id>` is the single manual kick. No scheduler here.
 
 /**
+ * W1-T143 (DAEMON OBSERVABILITY): emit one line to stdout(1)/stderr(2) via a raw,
+ * BLOCKING `write(2)` syscall (`fs.writeSync`), bypassing `process.stdout`/`stderr`'s
+ * own Writable-stream machinery entirely. Under launchd, `StandardOutPath`/
+ * `StandardErrorPath` are never a TTY (recon: a live overnight daemon run's
+ * `state/logs/daemon.out.log`/`daemon.err.log` sat EMPTY the whole run) — Node's
+ * stream writes to a non-TTY fd are queued ASYNCHRONOUSLY, and a `console.log`
+ * immediately followed by a process exit can drop that queued data outright (a
+ * well-documented Node pipe-write gotcha); short of an outright drop, the write is
+ * only guaranteed to land once the event loop gets around to it, never "within one
+ * poll" for certain. `fs.writeSync` makes neither failure mode possible: the syscall
+ * either completes before this function returns, or throws — there is no queue to
+ * lose data from and no dependency on the event loop ever getting a spare turn.
+ * Used for the daemon's own operator narration (`daemonCommand` + `runTask`'s `say`,
+ * which the daemon's `runOne` exercises on every dispatch) — every OTHER command's
+ * console output is unchanged (out of this task's scope, W1-T143).
+ */
+export function writeSyncLine(fd: 1 | 2, line: string): void {
+  writeSync(fd, line.endsWith("\n") ? line : line + "\n");
+}
+
+/**
+ * W1-T143 (DAEMON OBSERVABILITY): the ONE canonical ledger path, a PURE function of
+ * `config.root` — DOCUMENTED (docs/operator-guide.md) and named aloud at the daemon's
+ * own boot (`daemonCommand`'s `daemon.paths` ledger line) so it is provably
+ * deterministic, never folklore. Every call site in this file that used to inline
+ * `join(config.root, "state", "ledger.ndjson")` routes through this single function now
+ * — mechanical, behavior-preserving (the expression was already byte-identical at every
+ * site), so a future rename/relocation of the ledger changes exactly one line.
+ */
+export function ledgerPathFor(config: Config): string {
+  return join(config.root, "state", "ledger.ndjson");
+}
+
+/**
  * Resolve the repo root a `rmd` invocation GATES, in priority order — replacing the
  * old INSTALL-PATH derivation (`dirname(dirname(fileURLToPath(import.meta.url)))`,
  * which named WHERE THE SCRIPT LIVES, never where the operator is standing). The
@@ -695,7 +729,7 @@ export interface ArmDeps {
 export function realArmDeps(): ArmDeps {
   return {
     headSha: (prUrl) => (ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string }).headRefOid,
-    ledgerLines: () => readLedgerLines(join(loadConfig().root, "state", "ledger.ndjson")),
+    ledgerLines: () => readLedgerLines(ledgerPathFor(loadConfig())),
     armAuto: (prUrl) =>
       execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"], {
         encoding: "utf8",
@@ -2654,13 +2688,16 @@ async function runTask(
   const spawn = opts.spawn ?? spawnWorker;
   const runReviewFn = opts.runReview ?? runReview;
   const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const owner = resolveOwner();
 
   const runId = `${taskId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, ...extra });
-  const say = (msg: string) => console.log(`\n### [${taskId}] ${msg}`);
+  // W1-T143: a raw synchronous write, not console.log — this narration is exactly what the
+  // daemon's `runOne` exercises on every dispatch, and console.log's async, non-TTY-buffered
+  // writes are why daemon.out.log sat empty for a whole live run (see writeSyncLine's doc).
+  const say = (msg: string) => writeSyncLine(1, `\n### [${taskId}] ${msg}`);
 
   // ── GIT SELF-SYNC (W1-T60): read the plan from `origin/main`, never the working tree — a
   // dirty local WIP file or a stale local `main` must never change what this run dispatches,
@@ -2685,7 +2722,7 @@ async function runTask(
   const statusPath = join(config.root, "state", "status.json");
   const projection = projectPlan(
     plan,
-    { ledgerPath: join(config.root, "state", "ledger.ndjson"), github: opts.github ?? ghGateway(owner, task.repo) },
+    { ledgerPath: ledgerPathFor(config), github: opts.github ?? ghGateway(owner, task.repo) },
     statusPath,
   );
   const isMerged = (t: Task): boolean => projection.get(t.id)?.merged ?? false;
@@ -3892,7 +3929,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   }
 
   const config = loadConfigDep();
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const runId = `review-PR${view.number}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, ...extra });
@@ -4035,7 +4072,7 @@ async function depReviewCommand(prArg: string, rest: string[] = []): Promise<num
   const diff = execFileSync("gh", ["pr", "diff", view.url], { encoding: "utf8", maxBuffer: 1 << 26 });
 
   const config = loadConfig();
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const runId = `dep-review-PR${view.number}-${Date.now()}`;
   const taskId = `dep-review-PR${view.number}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -4319,7 +4356,7 @@ async function retroCommand(
   const dryRun = rest.includes("--dry-run");
   const spawn = opts.spawn ?? spawnWorker;
   const config = loadConfig();
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const markerPath = join(config.root, "state", "last-retro.json");
   const learningsPath = join(repoRoot, "LEARNINGS.md");
   const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
@@ -4919,7 +4956,7 @@ async function drainCommand(
   const opts: DrainOpts = curatedSelection ? applyCuratedSelection(baseOpts, curatedSelection) : baseOpts;
   const config = deps.config ?? loadConfig();
   const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const statusPath = join(config.root, "state", "status.json");
   const self = resolveOwnerRepo();
   const { owner } = self;
@@ -5160,7 +5197,7 @@ export async function daemonCommand(
     ["--dry-run", "--allow-self-target", "--allow-stale"],
   );
   if (badArg) {
-    console.error(badArg + "\n" + USAGE);
+    writeSyncLine(2, badArg + "\n" + USAGE);
     return 2;
   }
   const allowStale = rest.includes("--allow-stale");
@@ -5177,7 +5214,7 @@ export async function daemonCommand(
   // and pass it explicitly, so the live daemon reads the flag while the library keeps
   // its enforcement default.
   opts.headroomEnabled = resolveHeadroomEnabled(config);
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const statusPath = join(config.root, "state", "status.json");
   const self = resolveOwnerRepo();
   const reposDir = join(config.root, "repos");
@@ -5191,7 +5228,7 @@ export async function daemonCommand(
     rest,
   );
   if ("error" in resolved) {
-    console.error(resolved.error + "\n" + USAGE);
+    writeSyncLine(2, resolved.error + "\n" + USAGE);
     return 2;
   }
   const target = resolved.target;
@@ -5206,6 +5243,20 @@ export async function daemonCommand(
     self_host: target.isSelf,
     dry_run: target.dryRun,
   });
+  // W1-T143 (DAEMON OBSERVABILITY): name the daemon's canonical paths ALOUD, at boot,
+  // before ANYTHING else (including a --dry-run early return) — so the ledger location
+  // is provably deterministic (a pure function of config.root, ledgerPathFor) and never
+  // folklore (rationale: config.root defaults to os.homedir()/Remudero, the PARENT of the
+  // repo checkout, not where an operator instinctively looks). Ledgered (`daemon.paths`)
+  // AND printed (writeSyncLine — see its doc for why NOT console.log) so it lands on
+  // whichever channel the operator is actually watching.
+  const outLogPath = join(config.root, "state", "logs", "daemon.out.log");
+  const errLogPath = join(config.root, "state", "logs", "daemon.err.log");
+  log("daemon.paths", { ledger_path: ledgerPath, out_log: outLogPath, err_log: errLogPath });
+  writeSyncLine(
+    1,
+    `### rmd daemon — ledger: ${ledgerPath} | stdout: ${outLogPath} | stderr: ${errLogPath}`,
+  );
 
   // Read the plan to schedule. For a NON-self target without an explicit --plan, read it from a
   // clone of the target repo (the daemon clones it for execution anyway), SYNCED to the latest
@@ -5227,7 +5278,7 @@ export async function daemonCommand(
     const synced = syncPlanOrRefuse(target.planPath, {
       allowStale,
       log,
-      say: (msg) => console.error(`### rmd daemon — ${msg}`),
+      say: (msg) => writeSyncLine(2, `### rmd daemon — ${msg}`),
     });
     if ("error" in synced) return 1;
     plan = synced.plan;
@@ -5268,14 +5319,15 @@ export async function daemonCommand(
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     const seq = plannedSequence(plan, refreshMerged(), { max: opts.max ?? DRAIN_DEFAULT_MAX });
-    console.log(`### rmd daemon --dry-run — target ${target.owner}/${target.repo} · plan ${target.planPath}`);
-    console.log(seq.length ? seq.map((id, i) => `  ${i + 1}. ${id}`).join("\n") : "  (nothing runnable now)");
-    if (target.isSelf) console.warn("  ⚠️ SELF-HOSTING target — the daemon's own source repo.");
+    writeSyncLine(1, `### rmd daemon --dry-run — target ${target.owner}/${target.repo} · plan ${target.planPath}`);
+    writeSyncLine(1, seq.length ? seq.map((id, i) => `  ${i + 1}. ${id}`).join("\n") : "  (nothing runnable now)");
+    if (target.isSelf) writeSyncLine(2, "  ⚠️ SELF-HOSTING target — the daemon's own source repo.");
     return 0;
   }
 
   if (target.isSelf) {
-    console.warn(
+    writeSyncLine(
+      2,
       `### rmd daemon — SELF-HOSTING: draining the daemon's own source repo '${target.repo}' (--allow-self-target).`,
     );
   }
@@ -5289,7 +5341,8 @@ export async function daemonCommand(
     drainLock = acquireDrainLock(drainLockPath);
   } catch (e) {
     if (e instanceof DrainLockError) {
-      console.error(
+      writeSyncLine(
+        2,
         `### rmd daemon REFUSED — a drain/daemon is already running ` +
           `(pid ${e.holder.pid} on ${e.holder.host}, started ${e.holder.startedAt}).\n` +
           `If that process is dead, remove ${drainLockPath} and retry.`,
@@ -5441,7 +5494,7 @@ export async function daemonCommand(
       },
       opts,
     );
-    console.log("\n" + renderDaemonSummary(summary));
+    writeSyncLine(1, "\n" + renderDaemonSummary(summary));
     // The pure stop-reason -> exit-code mapping lives in lib/daemon.ts
     // (`daemonExitCode`), unit-tested there with no process spawn (Rule 18):
     // 0 only on a clean stop (STOP requested / max reached); a block, a
@@ -5546,7 +5599,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     stateRoot: config.root,
     daemonLabel: DAEMON_LABEL,
     uid,
-    ledgerPath: join(config.root, "state", "ledger.ndjson"),
+    ledgerPath: ledgerPathFor(config),
     log: (step, data) => console.log(`### [deploy] ${step}${data ? " " + JSON.stringify(data) : ""}`),
   });
   const result = runDeployCycle(deps, { dryRun: rest.includes("--dry-run") });
@@ -5727,7 +5780,7 @@ export async function serveCommand(
   }
   const self = resolveOwnerRepo();
   const planPath = join(repoRoot, "plan", "tasks.yaml");
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const plan = loadPlan(planPath);
   const tokens = resolveServiceTokens(config.root);
 
@@ -6624,7 +6677,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   }
   const dryRun = rest.includes("--dry-run");
   const config = loadConfig();
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const self = resolveOwnerRepo();
   const repo = flagValue(rest, "--repo") ?? self.repo;
   const owner = self.owner;
@@ -6915,7 +6968,7 @@ export async function fixCommand(
   }
 
   const config = deps.config ?? loadConfig();
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const self = resolveOwnerRepo();
   const repo = flagValue(rest, "--repo") ?? self.repo;
   const owner = self.owner;
@@ -7032,7 +7085,7 @@ export async function wipeTestCommand(
   const config = deps.config ?? loadConfig();
   const runTaskFn = deps.runTaskFn ?? runTask;
   const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const self = resolveOwnerRepo();
   const isSelf = repo === self.repo;
   const reposDir = join(config.root, "repos");
@@ -7078,7 +7131,7 @@ export async function wipeTestCommand(
 async function stopCommand(rest: string[]): Promise<number> {
   const config = loadConfig();
   const reason = flagValue(rest, "--reason");
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
 
   // STOP is ONE-SHOT: it exists only to halt a RUNNING drain/daemon, which auto-consumes it
   // on termination. With NOTHING running, writing STOP would be a persistent latch that
@@ -7125,7 +7178,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
   const config = loadConfig();
   const reason = flagValue(rest, "--reason");
   const info = requestPause(config.root, reason);
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   appendLedger(ledgerPath, {
     run_id: `FLEET-${Date.now()}`,
     task_id: "FLEET",
@@ -7144,7 +7197,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
 async function resumeFleetCommand(): Promise<number> {
   const config = loadConfig();
   const result = resumeFleet(config.root);
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   appendLedger(ledgerPath, {
     run_id: `FLEET-${Date.now()}`,
     task_id: "FLEET",
@@ -7270,7 +7323,7 @@ export async function escalateCommand(
   }
   const config = loadConfig();
   const { owner, repo } = resolveOwnerRepo();
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const runId = `ESCALATE-${Date.now()}`;
   const url = escalate(
     {
@@ -7306,7 +7359,7 @@ async function notifyCommand(rest: string[]): Promise<number> {
     return 2;
   }
   const config = loadConfig();
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   notify(message, {
     channel: imessageChannel(notifyRecipient(config)),
     ledgerPath,
@@ -7389,7 +7442,7 @@ export async function triageCommand(rest: string[]): Promise<number> {
   const wrk = workerModel(config);
   assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
 
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const taskId = `TRIAGE-${feedbackId}`;
   const runId = `${taskId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -7663,7 +7716,7 @@ async function planCommand(rest: string[]): Promise<number> {
   assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
   const mountsTable = loadMounts(mountsPath(repoRoot));
 
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const taskId = `PLAN-${mode}`;
   const runId = `${taskId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -8045,7 +8098,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
 
   const config = deps.config ?? loadConfig();
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const { owner, repo } = resolveOwnerRepo();
 
   const registryPath = join(config.root, "state", "inbox-proposals.json");
@@ -8190,7 +8243,7 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
 
   const config = deps.config ?? loadConfig();
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const { owner, repo } = resolveOwnerRepo();
 
@@ -8382,7 +8435,7 @@ export async function reframeCommand(rest: string[], deps: { config?: Config } =
 
   const config = deps.config ?? loadConfig();
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const { owner, repo } = resolveOwnerRepo();
 
   const registryPath = join(config.root, "state", "inbox-proposals.json");
@@ -8438,7 +8491,7 @@ export async function digestCommand(
 ): Promise<number> {
   const explicitSince = flagValue(rest, "--since");
   const config = loadConfig();
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
 
   if (explicitSince !== undefined) {
     if (rest.includes("--dry-run")) {
@@ -8504,7 +8557,7 @@ async function opsCommand(rest: string[]): Promise<number> {
   }
   const dryRun = rest.includes("--dry-run");
   const config = loadConfig();
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const { owner, repo } = resolveOwnerRepo();
   const runId = `OPS-${Date.now()}`;
   const result = await pollAlerts(owner, repo, {
@@ -8713,7 +8766,7 @@ export async function alertFixCommand(rest: string[], deps: AlertFixCommandDeps 
   }
   const dryRun = rest.includes("--dry-run");
   const config = deps.config ?? loadConfig();
-  const ledgerPath = deps.ledgerPath ?? join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = deps.ledgerPath ?? ledgerPathFor(config);
   const self = deps.resolveOwnerRepo ? deps.resolveOwnerRepo() : resolveOwnerRepo();
   const repo = flagValue(rest, "--repo") ?? self.repo;
   const owner = self.owner;
@@ -8779,7 +8832,7 @@ async function issuesCommand(rest: string[]): Promise<number> {
     throw err;
   }
   const config = loadConfig();
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const runId = `ISSUES-${Date.now()}`;
   const result = await pollIssues(managed, {
     issues: ghIssueListGateway(),
@@ -9517,7 +9570,7 @@ async function correctCommand(rest: string[]): Promise<number> {
   const config = loadConfig();
   const { owner } = resolveOwnerRepo();
   const github = ghGateway(owner, task.repo);
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const result = applyCorrection(task, prFlag, { ledgerPath, github }, { reason: flagValue(rest, "--reason") });
 
   console.log(describeProjection("before", result.before));
@@ -9559,7 +9612,7 @@ async function traceCommand(rest: string[]): Promise<number> {
   const plan = loadPlan(planPath);
   const config = loadConfig();
   const { owner, repo: defaultRepo } = resolveOwnerRepo();
-  const ledgerPath = join(config.root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor(config);
   const ledgerLines = readLedgerLines(ledgerPath);
 
   const task = plan.byId.get(id);
@@ -9843,7 +9896,7 @@ export function serviceFreshnessGate(
 ): void {
   const svc = (deps.checkServiceFreshness ?? checkServiceFreshness)(repoDir, env);
   if (svc.status !== "assessed") return; // guarded/degraded: nothing to ledger — proceed
-  const ledgerPath = deps.ledgerPath ?? join(loadConfig().root, "state", "ledger.ndjson");
+  const ledgerPath = deps.ledgerPath ?? ledgerPathFor(loadConfig());
   const emit = (step: string, extra: Record<string, unknown>): void => {
     try {
       appendLedger(ledgerPath, {
