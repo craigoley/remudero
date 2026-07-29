@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Remudero commit-msg gate (W1-T137) — a REAL git commit-msg hook, wired via
+# `core.hooksPath` at worktree-creation time (worktreeAdd, src/lib/worker.ts).
+#
+# PR #407 gave workers the instructional half (commitMessageContractLines(), embedded
+# in the worker OUTPUT CONTRACT and every fix-rung prompt) and a harness-side shaping
+# helper for the two sites where the HARNESS builds a commit header (plan-architect.ts,
+# triage.ts). Neither one STOPS a worker from authoring and `git commit`-ing a malformed
+# message itself, in its own worktree, on the implement path, the fix-rung path, or the
+# retro path alike — the only backstop left was `commitlint` in CI, and as of #830
+# (W1-T129) that job lints the PR TITLE only (this repo squash-merges everything), not
+# any branch commit. This hook is the missing STOP: it runs the real `commitlint` CLI
+# against the actual message being committed, in the worktree, before the commit is
+# ever created.
+#
+# git invokes a commit-msg hook as: commit-msg <msg-file> [<source>] [<sha>]
+#   $1 = path to the file holding the commit message about to be used (works for
+#        `-m`, `-F`, a heredoc piped into `-m`, or an editor-composed message alike —
+#        by the time this hook runs, git has already resolved the message to a file,
+#        so there is no shell-quoting/heredoc parsing to get wrong here).
+#   $2 = message source: "message" (-m/-F), "template", "merge", "squash", "commit"
+#        (amend/cherry-pick — $3 is then the SHA being amended), or empty (editor).
+#
+# A non-zero exit here ABORTS `git commit` outright: the malformed message never
+# becomes a commit. There is therefore no history to rewrite and nothing to amend —
+# this cannot conflict with hooks/deny-floor.sh's force-push-to-default-branch ban
+# (a different mechanism entirely: a Claude Code PreToolUse tripwire on Bash calls,
+# not a git hook), because there is nothing to push in the first place until the
+# worker fixes the message and retries `git commit`.
+set -euo pipefail
+
+msg_file="${1:-}"
+msg_source="${2:-}"
+
+# No message file: not a normal git-invoked call. Do nothing rather than guess.
+if [ -z "$msg_file" ]; then
+  exit 0
+fi
+
+# Skip auto-generated merge-commit messages. git authors these itself; they are not,
+# and are not expected to be, Conventional-Commits shaped.
+if [ "$msg_source" = "merge" ]; then
+  exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+commitlint_bin="$repo_root/node_modules/.bin/commitlint"
+config="$repo_root/commitlint.config.mjs"
+
+# FAIL LOUD, never silently skip the gate: a missing local install must block the
+# commit with an actionable next step, not let a malformed message through because
+# the tool to catch it wasn't there. (Standing rule: a control surface must fail
+# loud on bad input, never fall through to doing nothing — see hooks/deny-floor.sh's
+# own doc comment for the sibling case.) This also deliberately does NOT reach for
+# the network (no `npx` auto-install): the same fast, offline shape as deny-floor.sh.
+if [ ! -x "$commitlint_bin" ]; then
+  {
+    echo "commit-msg: commitlint is not installed in this worktree (node_modules/.bin/commitlint missing)."
+    echo "commit-msg: run \`npm ci\` first, then retry \`git commit\` -- this hook will not silently skip the gate."
+  } >&2
+  exit 1
+fi
+
+if ! "$commitlint_bin" --config "$config" --edit "$msg_file"; then
+  echo "commit-msg: commitlint rejected the message above -- fix it and retry \`git commit\` (W1-T137)." >&2
+  exit 1
+fi
+
+exit 0
