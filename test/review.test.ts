@@ -41,8 +41,10 @@ import {
   reviewerOutcome,
   reviewerVerdictContract,
   reviewLedgerLegibilityFields,
+  interpolatedTitleStaticChunks,
   type PriorReviewVerdict,
   type ProofExecutor,
+  type ProofSpawner,
   type WhitelistedProof,
 } from "../src/lib/review.js";
 
@@ -2122,8 +2124,9 @@ test('W1-T227 (acceptance 1): a proof matching tests in exactly one file execute
   );
   writeFileSync(join(dir, "test", "bar.test.ts"), 'test("something unrelated entirely", () => {});\n');
 
-  const candidates = resolveNameFilteredCandidates(dir, "a very distinctive test name for W1-T227");
-  assert.deepEqual(candidates, ["test/foo.test.ts"]);
+  const resolution = resolveNameFilteredCandidates(dir, "a very distinctive test name for W1-T227");
+  assert.deepEqual(resolution, { status: "resolved", files: ["test/foo.test.ts"] });
+  const candidates = resolution.status === "resolved" ? resolution.files : [];
 
   const baseArgs = [
     "--test",
@@ -2182,9 +2185,138 @@ test("W1-T227 (acceptance 3): zero-candidate patterns are NO-MATCH, not a pass �
   assert.notEqual(outcome, "pass", "an absent test is never a pass");
 });
 
-test("resolveNameFilteredCandidates: no file contains the raw name ⇒ empty candidate list (best-effort, never throws)", () => {
+test("resolveNameFilteredCandidates: grep LOOKED and no file contains the raw name ⇒ status absent (positive evidence, never a throw)", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-w227-"));
   mkdirSync(join(dir, "test"));
   writeFileSync(join(dir, "test", "foo.test.ts"), 'test("something else entirely", () => {});\n');
-  assert.deepEqual(resolveNameFilteredCandidates(dir, "a name that appears nowhere"), []);
+  assert.deepEqual(resolveNameFilteredCandidates(dir, "a name that appears nowhere"), { status: "absent" });
+});
+
+// ── Fast-fail on a proof that names no existing test ───────────────────────
+// A name-filtered proof resolving to ZERO candidate files used to fall back to
+// the FULL suite glob "just to be sure". That run cannot conclude anything: it
+// loads every test file including several that drive a real headless browser and
+// HANG when the name filter matches none of their tests, so it is killed at the
+// 60s proof timeout and reports exec_error — while leaking a chrome-headless-shell.
+// The conclusion it was groping for ("no-match" ⇒ not_executable ⇒ keyword floor,
+// annotated) is already derivable from the candidate resolution itself, without
+// spawning anything. 257 of the live plan's 932 proofs (27.6%) take this path.
+
+/** A {@link ProofSpawner} that COUNTS its invocations and records the argv it was
+ * handed, so a test can assert "the runner was never spawned" as a fact rather
+ * than infer it from a stopwatch. */
+function countingSpawner(stdout: string): { spawner: ProofSpawner; calls: { args: readonly string[] }[] } {
+  const calls: { args: readonly string[] }[] = [];
+  const spawner: ProofSpawner = (_command, args) => {
+    calls.push({ args });
+    return stdout;
+  };
+  return { spawner, calls };
+}
+
+test("fast-fail: a name-filtered proof whose test exists nowhere returns no-match and NEVER spawns the test runner", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-ff-absent-"));
+  mkdirSync(join(dir, "test"));
+  writeFileSync(join(dir, "test", "foo.test.ts"), 'test("something else entirely", () => {});\n');
+
+  const wp = parseWhitelistedProof("unit test: a title that appears in no test file at all");
+  assert.equal(wp?.nameFiltered, true, "precondition: this proof shape is name-filtered");
+
+  const { spawner, calls } = countingSpawner("");
+  const outcome = execWhitelistedProof(wp!, dir, 60_000, spawner);
+
+  assert.equal(outcome, "no-match", "an absent test resolves to no-match (⇒ not_executable), never exec_error");
+  assert.equal(calls.length, 0, "the fast path must not spawn the test runner at all — zero spawns, counted");
+});
+
+test("fast-fail: the no-match a fast-failed proof returns is the SAME outcome the judge degrades to not_executable, with the annotation naming the missing test", () => {
+  // The value of the fast path is that it reaches an outcome that ALREADY exists and is
+  // already handled — no new verdict, no new state. Judge the criterion through the real
+  // judgeCriterion with an executor pinned to the fast path's answer.
+  const verdict = judgeCriterion(
+    { claim: "the widget is wired", proof: "unit test: a title that appears in no test file at all" },
+    new Set(["the", "widget", "is", "wired", "title", "appears", "test", "file"]),
+    undefined,
+    { cwd: "/nonexistent", exec: () => "no-match" },
+  );
+  assert.equal(verdict.proof_exec, "not_executable");
+  assert.match(verdict.reason, /names no matching test/);
+  assert.match(verdict.reason, /keyword floor applied/);
+});
+
+test("fast-fail (TRAP 1): a DEGRADED candidate lookup is unresolvable, never absent — it still runs the unchanged full-glob invocation", () => {
+  // No `test/` directory at all: grep exits 2 ("could not look"), which is exactly the
+  // shape of a checkout that never materialised / a missing grep / an unreadable tree.
+  // Reporting "names no matching test" here would accuse a plan author of an error they
+  // did not make. It must degrade to the OLD behaviour instead, keeping open the chance
+  // of a real executed verdict.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-ff-degraded-"));
+  const resolution = resolveNameFilteredCandidates(dir, "any name at all");
+  assert.equal(resolution.status, "unresolvable", "a failed lookup is not evidence of absence");
+  assert.notEqual(resolution.status, "absent");
+
+  const wp = parseWhitelistedProof("unit test: any name at all");
+  const { spawner, calls } = countingSpawner(["ok 1 - any name at all", "# duration_ms 4"].join("\n"));
+  const outcome = execWhitelistedProof(wp!, dir, 60_000, spawner);
+
+  assert.equal(outcome, "pass", "a degraded lookup must still be able to reach a REAL executed verdict");
+  assert.equal(calls.length, 1, "the degraded path still spawns — that is the old behaviour, unchanged");
+  assert.ok(calls[0].args.includes("test/**/*.test.ts"), "and it still carries the full suite glob");
+});
+
+test("fast-fail (TRAP 2): a proof naming an INTERPOLATED test title is unresolvable, never absent — a fixed-string search cannot see it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-ff-interp-"));
+  mkdirSync(join(dir, "test"));
+  // A real declaration shape from this repo: the title is a template literal, so the
+  // rendered title in the TAP stream appears NOWHERE in the source `grep -F` searches.
+  writeFileSync(
+    join(dir, "test", "profiles.test.ts"),
+    'test(`profile coverage: \'${profile}\' is accepted and produces stable output`, () => {});\n',
+  );
+  const rendered = "profile coverage: 'alpha' is accepted and produces stable output";
+  const resolution = resolveNameFilteredCandidates(dir, rendered);
+  assert.equal(resolution.status, "unresolvable", "an interpolated title could render to this name — do not conclude absence");
+
+  const wp = parseWhitelistedProof(`unit test: ${rendered}`);
+  const { spawner, calls } = countingSpawner([`ok 1 - ${rendered}`, "# duration_ms 4"].join("\n"));
+  assert.equal(execWhitelistedProof(wp!, dir, 60_000, spawner), "pass");
+  assert.equal(calls.length, 1, "an interpolated title must still get its chance to run");
+});
+
+test("interpolatedTitleStaticChunks: splits a template title on its interpolations and keeps only chunks long enough to identify a file", () => {
+  assert.deepEqual(
+    interpolatedTitleStaticChunks("  test(`profile coverage: '${profile}' is accepted and produces stable output`, () => {"),
+    ["profile coverage: '", "' is accepted and produces stable output"],
+  );
+  // A leading interpolation leaves no prefix at all — the chunk AFTER it is what identifies the file.
+  assert.deepEqual(
+    interpolatedTitleStaticChunks("  test(`${label} reaches updateProposalRegistry, never a bare writeFileSync`, () => {"),
+    ["reaches updateProposalRegistry, never a bare writeFileSync"],
+  );
+  // Sub-threshold fragments (`' '`, `\"'s \"`) identify nothing and are dropped, or the guard
+  // would call every absent test "ambiguous" and the fast path would never fire.
+  assert.deepEqual(interpolatedTitleStaticChunks("  test(`${a} ${b}'s ${c}`, () => {"), []);
+  // A line with no template literal at all contributes nothing.
+  assert.deepEqual(interpolatedTitleStaticChunks('test("an ordinary quoted title", () => {'), []);
+});
+
+test("fast-fail: a proof naming a test that DOES exist still resolves, still narrows to that one file, and still reports its real result", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-ff-happy-"));
+  mkdirSync(join(dir, "test"));
+  writeFileSync(join(dir, "test", "foo.test.ts"), 'test("a genuinely present title for the happy path", () => {});\n');
+  writeFileSync(join(dir, "test", "bar.test.ts"), 'test("unrelated", () => {});\n');
+
+  const wp = parseWhitelistedProof("unit test: a genuinely present title for the happy path");
+
+  const passing = countingSpawner(["ok 1 - a genuinely present title for the happy path", "# duration_ms 4"].join("\n"));
+  assert.equal(execWhitelistedProof(wp!, dir, 60_000, passing.spawner), "pass");
+  assert.equal(passing.calls.length, 1, "the happy path still executes");
+  assert.ok(passing.calls[0].args.includes("test/foo.test.ts"), "narrowed to the one file that contains it");
+  assert.ok(!passing.calls[0].args.includes("test/**/*.test.ts"), "and never the full suite glob");
+
+  // The REAL result is reported, not assumed: the same proof over a failing run fails.
+  const failing = countingSpawner(
+    ["not ok 1 - a genuinely present title for the happy path", "# duration_ms 4"].join("\n"),
+  );
+  assert.equal(execWhitelistedProof(wp!, dir, 60_000, failing.spawner), "fail");
 });

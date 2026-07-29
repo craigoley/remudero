@@ -607,6 +607,20 @@ export type ProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => "pas
 const DEFAULT_PROOF_TIMEOUT_MS = 60_000;
 const npmCiPrimed = new Set<string>();
 
+/** The ONE process spawn a proof execution performs — the test/grep run itself.
+ * Injectable so a test can prove, by COUNTING, that a fast-failed proof never
+ * spawns the runner at all; timing that would only prove it was quick. */
+export type ProofSpawner = (command: string, args: readonly string[], cwd: string, timeoutMs: number) => string;
+
+/** Production {@link ProofSpawner}: no shell, stdout captured, hard timeout. */
+const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs) =>
+  execFileSync(command, args as string[], {
+    cwd,
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: timeoutMs,
+    encoding: "utf8",
+  });
+
 /** `npm ci` a fresh checkout ONCE before its first test proof (design: "fresh
  * worktrees have no node_modules"). Best-effort: a failed/skipped install is never
  * a silent hard-fail here — the test command below will itself fail to run, which
@@ -619,6 +633,110 @@ function ensureDeps(cwd: string): void {
     execFileSync("npm", ["ci"], { cwd, stdio: "pipe", timeout: 120_000 });
   } catch {
     /* best-effort priming; see doc comment above */
+  }
+}
+
+/**
+ * The three genuinely different answers to "which test file(s) could this
+ * name-filtered proof's raw name live in?" — kept distinct because two of them
+ * used to collapse into the same empty array, and acting on that ambiguity is
+ * how a reviewer ends up accusing a plan author of naming a test that does not
+ * exist when the truth is only that WE COULD NOT LOOK.
+ *   - `resolved`  — grep found ≥1 candidate file. Narrow the run to just those.
+ *   - `absent`    — a readable, non-empty test corpus was searched (proven by the
+ *                   control probe in {@link resolveNameFilteredCandidates}) and
+ *                   the name is in no test file, and no interpolated title could
+ *                   plausibly render to it either. Positive evidence of absence;
+ *                   safe to conclude `no-match` WITHOUT spawning the runner.
+ *   - `unresolvable` — the lookup itself could not be trusted (grep missing,
+ *                   `test/` absent or empty, the checkout never materialised, or
+ *                   a template-literal title makes a fixed-string search
+ *                   inconclusive). NOT evidence of anything: falls back to the
+ *                   unchanged full-glob invocation.
+ */
+export type NameFilterResolution =
+  | { status: "resolved"; files: string[] }
+  | { status: "absent" }
+  | { status: "unresolvable"; reason: string };
+
+/** ERE matching a test declaration whose title is a TEMPLATE LITERAL carrying at
+ * least one interpolation — the shape a fixed-string search structurally cannot
+ * find, because the title that ends up in the TAP stream never appears verbatim
+ * in the source. */
+const INTERPOLATED_TITLE_RE = "(test|it|describe)\\(`[^`]*\\$\\{";
+
+/** Shortest static run of a template title we will treat as identifying. Short
+ * fragments (`" "`, `"'s "`, `": "`) appear in almost any prose and would make
+ * every absent test look ambiguous, which would disable the fast path entirely. */
+const MIN_STATIC_CHUNK_LEN = 12;
+
+/** The literal (non-interpolated) runs of a template-literal test title, as seen
+ * on one line of source: everything between the line's first and last backtick,
+ * split on `${…}` holes. These are the ONLY substrings of the rendered title a
+ * `grep -F` could ever have matched, so they are what we compare a proof's raw
+ * name against when deciding whether an interpolated title might be its home. */
+export function interpolatedTitleStaticChunks(sourceLine: string): string[] {
+  const first = sourceLine.indexOf("`");
+  const last = sourceLine.lastIndexOf("`");
+  if (first < 0 || last <= first) return [];
+  return sourceLine
+    .slice(first + 1, last)
+    .split(/\$\{[^}]*\}/)
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length >= MIN_STATIC_CHUNK_LEN);
+}
+
+/**
+ * Could `rawName` be the RENDERED title of some test declared with an
+ * interpolated template literal? {@link resolveNameFilteredCandidates}'s
+ * `grep -F` cannot see such a title (the source holds `${…}`, the TAP stream
+ * holds the substituted value), so a zero-candidate result over a repo that
+ * declares them is not automatically evidence of absence.
+ *
+ * Answers "maybe" only on positive evidence: some interpolated declaration has a
+ * static chunk of real length that the proof's name actually contains. A repo
+ * with no interpolated titles at all answers a confident "no" — that is the
+ * common case and it keeps the fast path live. Only called once the corpus probe
+ * has already established that the search itself is trustworthy.
+ */
+function couldBeInterpolatedTitle(cwd: string, rawName: string): boolean {
+  let stdout: string;
+  try {
+    stdout = execFileSync("grep", ["-rhE", "--include=*.test.ts", "--", INTERPOLATED_TITLE_RE, "test"], {
+      cwd,
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8",
+    });
+  } catch {
+    // Only reached AFTER the corpus probe in resolveNameFilteredCandidates has already
+    // established that grep runs and the test tree is readable, so a throw here can only
+    // be grep's "no lines matched" — this repo declares no interpolated titles. A real
+    // answer ("no"), not a failed lookup.
+    return false;
+  }
+  return stdout.split("\n").some((line) => interpolatedTitleStaticChunks(line).some((c) => rawName.includes(c)));
+}
+
+/** `grep -rl -F` over the checkout's test files, as a plain list — or `null` when
+ * grep did not produce one (no match, no `test/` tree, grep missing, unreadable
+ * files). Deliberately does NOT interpret the exit code: MEASURED on macOS
+ * 2026-07-29, BSD grep exits 1 with EMPTY stderr both for "searched, found
+ * nothing" AND for "the directory does not exist", so the exit code cannot carry
+ * that distinction. {@link resolveNameFilteredCandidates} draws it with a control
+ * probe instead. */
+function grepFilesContaining(cwd: string, fixedPattern: string): string[] | null {
+  try {
+    const stdout = execFileSync("grep", ["-rl", "-F", "--include=*.test.ts", "--", fixedPattern, "test"], {
+      cwd,
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8",
+    });
+    return stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    return null;
   }
 }
 
@@ -641,38 +759,55 @@ function ensureDeps(cwd: string): void {
  * `--test-name-pattern` argument itself, applied here to the search that finds
  * candidate files.
  *
- * Best-effort: any grep failure (no match, `test/` absent, grep itself
- * missing, …) degrades to an EMPTY candidate list — {@link narrowNameFilteredArgs}
- * treats that identically to "genuinely zero candidates" and falls back to the
- * unchanged (full-glob) invocation, so a resolution hiccup can only cost the
- * optimisation, never turn into a false verdict.
+ * Returns a {@link NameFilterResolution}, not a bare list, because "found
+ * nothing" and "could not look" are different claims about the world and only
+ * the first of them licenses the caller's fast path. The line between them is
+ * drawn by a CONTROL PROBE, not by grep's exit code: an identical search for the
+ * empty pattern, which matches every line of every file it can read. If that
+ * probe comes back with at least one test file then grep runs, `test/` exists,
+ * it is readable, and it is non-empty — so a zero-hit search of the same corpus
+ * is a real observation. If the probe comes back empty or throws, we did not
+ * look at anything and say so. (The exit code cannot do this job: MEASURED on
+ * macOS 2026-07-29, BSD grep exits 1 with empty stderr for BOTH "searched, found
+ * nothing" and "that directory does not exist" — an earlier revision of this
+ * function trusted exit 2 for the latter and was falsified by its own test.)
  */
-export function resolveNameFilteredCandidates(cwd: string, rawName: string): string[] {
-  try {
-    const stdout = execFileSync("grep", ["-rl", "-F", "--include=*.test.ts", "--", rawName, "test"], {
-      cwd,
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8",
-    });
-    return stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
+export function resolveNameFilteredCandidates(cwd: string, rawName: string): NameFilterResolution {
+  const hits = grepFilesContaining(cwd, rawName);
+  if (hits && hits.length > 0) return { status: "resolved", files: hits };
+  // Zero hits. Everything below decides whether that is EVIDENCE or IGNORANCE.
+  const corpus = grepFilesContaining(cwd, "");
+  if (!corpus || corpus.length === 0)
+    return { status: "unresolvable", reason: "no readable test corpus to search (grep, test/, or the checkout)" };
+  // We could look, and did. Rule out the one thing a fixed-string search is
+  // structurally blind to (TRAP 2): a title built from a template literal, which
+  // never appears verbatim in the source that declares it.
+  if (couldBeInterpolatedTitle(cwd, rawName))
+    return { status: "unresolvable", reason: "an interpolated test title could render to this name" };
+  return { status: "absent" };
 }
 
 /**
  * W1-T227's command builder: given a name-filtered proof's already-compiled
  * `baseArgs` (from {@link parseTestTarget}, trailing with {@link TEST_GLOB})
  * and the candidate file(s) {@link resolveNameFilteredCandidates} found, swap
- * the full glob for just those candidates. ZERO candidates CHANGES NOTHING —
- * returns `baseArgs` verbatim, still globbed — because narrowing is an
- * optimisation of the executed path, never a new way for a genuinely-absent
- * test to pass: {@link nameFilteredOutcome}'s existing zero-match ⇒ "fail"
- * path fires identically either way (a wider search finding nothing is exactly
- * as conclusive as a narrower one).
+ * the full glob for just those candidates. ZERO candidates returns `baseArgs`
+ * verbatim, still globbed — reached ONLY for an `unresolvable` resolution,
+ * where falling back to the unchanged (slow, possibly timing-out) full-glob run
+ * is the honest thing to do because we have no evidence either way.
+ *
+ * Corrected 2026-07-29 (this file's own defect): the previous comment here
+ * claimed zero candidates "CHANGES NOTHING" because "nameFilteredOutcome's
+ * existing zero-match ⇒ 'fail' path fires identically either way (a wider
+ * search finding nothing is exactly as conclusive as a narrower one)". BOTH
+ * halves were false. Zero real matches on a COMPLETED run returns "no-match",
+ * not "fail" (see {@link nameFilteredOutcome}), which the judge degrades to
+ * `not_executable`. And the wider search does NOT finish: the full glob loads
+ * every file including several that drive a real headless browser and hang
+ * when the name filter matches none of their tests, so the run is killed at
+ * the proof timeout and yields `exec_error` — no conclusion at all. That is
+ * why {@link execWhitelistedProof} now decides `absent` BEFORE spawning
+ * anything, and why only `unresolvable` still reaches this fallback.
  */
 export function narrowNameFilteredArgs(baseArgs: readonly string[], candidateFiles: readonly string[]): string[] {
   if (candidateFiles.length === 0) return [...baseArgs];
@@ -703,39 +838,57 @@ export function narrowNameFilteredArgs(baseArgs: readonly string[], candidateFil
  * code reflects EVERY file in that glob, not just the one named test a
  * criterion cares about. FIXTURE, hit live implementing this very task:
  * `test/serve.find.test.ts` runs its file-scope `after` (`browser.close()`)
- * even on a pattern that matched none of ITS tests — `before` is skipped, so
- * `browser` is never assigned and `after` throws — which turns the ENTIRE
- * glob's exit code nonzero. On the old "any nonzero exit ⇒ fail" rule that
- * silently failed every OTHER criterion's name-filtered proof in the SAME
- * review, even though the test each of them actually named had passed —
- * observably, all four of this task's own falsifier tests. So for a
- * name-filtered proof, the verdict is read from {@link nameFilteredOutcome}
- * parsing the TAP stream for the matched test's OWN result line, never from
- * the process exit code — on both the success path and a thrown
- * nonzero-exit's attached stdout.
+ * even on a pattern that matched none of ITS tests, which turns the ENTIRE
+ * glob's exit code nonzero.
+ *
+ * MECHANISM CORRECTED 2026-07-29, from live observation of that fixture. The
+ * previous note here said "`before` is skipped, so `browser` is never
+ * assigned". It is not skipped: `before` IS entered, `chromium.launch()` runs,
+ * and a real `chrome-headless-shell` appears as a grandchild process. What
+ * actually happens is a RACE — `after` fires at ~0.2ms, long before `launch()`
+ * resolves, and throws on the still-undefined `browser`. Nothing ever closes
+ * the browser that did launch, and its `--remote-debugging-pipe` holds the
+ * event loop open, so the run does not merely exit nonzero: it HANGS until the
+ * proof timeout kills it, leaking the browser. That is the cost this function's
+ * fast path (below) exists to avoid, and it is why a zero-candidate name must
+ * never be answered by running the glob "just to be sure".
+ *
+ * So for a name-filtered proof, the verdict is read from
+ * {@link nameFilteredOutcome} parsing the TAP stream for the matched test's OWN
+ * result line, never from the process exit code — on both the success path and
+ * a thrown nonzero-exit's attached stdout.
  */
 export function execWhitelistedProof(
   whitelisted: WhitelistedProof,
   cwd: string,
   timeoutMs = DEFAULT_PROOF_TIMEOUT_MS,
+  spawn: ProofSpawner = defaultProofSpawner,
 ): "pass" | "fail" | "no-match" {
-  if (whitelisted.kind === "test") ensureDeps(cwd);
   // W1-T227: a name-filtered proof's `args` (from parseTestTarget) still carry
   // the FULL suite glob — resolve the actual candidate file(s) now, against
   // the real PR-head checkout, and narrow to just those before ever spawning
   // node. Not folded into parseWhitelistedProof itself: that function is a
   // pure parse with no `cwd`, and the candidate set can only be known against
   // a real checkout.
-  const args = whitelisted.nameFiltered
-    ? narrowNameFilteredArgs(whitelisted.args, resolveNameFilteredCandidates(cwd, whitelisted.label))
-    : whitelisted.args;
+  let args = whitelisted.args as readonly string[];
+  if (whitelisted.nameFiltered) {
+    const resolution = resolveNameFilteredCandidates(cwd, whitelisted.label);
+    // FAIL FAST on positive evidence of absence: no test file contains this name
+    // and no interpolated title could render to it, so the glob run's only possible
+    // finding is zero matches — the same "no-match" this returns, except reached by
+    // loading 168 files, hanging on the browser-driving ones until the timeout kills
+    // them, leaking a chrome-headless-shell, and then reporting `exec_error` (no
+    // conclusion at all) instead. `unresolvable` is NOT evidence and never lands
+    // here: it falls through to the unchanged full-glob invocation below.
+    if (resolution.status === "absent") return "no-match";
+    args = narrowNameFilteredArgs(whitelisted.args, resolution.status === "resolved" ? resolution.files : []);
+  }
+  // AFTER the fast path on purpose: priming a checkout's node_modules is only
+  // worth 120s of `npm ci` if we are actually going to run node. `ensureDeps` is
+  // memoised per cwd, so a later proof in the same checkout still primes it.
+  if (whitelisted.kind === "test") ensureDeps(cwd);
   try {
-    const stdout = execFileSync(whitelisted.command, args, {
-      cwd,
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: timeoutMs,
-      encoding: "utf8",
-    });
+    const stdout = spawn(whitelisted.command, args, cwd, timeoutMs);
     if (whitelisted.nameFiltered) return nameFilteredOutcome(stdout);
     return "pass";
   } catch (e) {
