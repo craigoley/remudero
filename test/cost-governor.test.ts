@@ -243,3 +243,42 @@ test("zero ledgered cost today never defers — a quiet/fresh day is always disp
   const result = checkCostGovernor(0, DEFAULT_SWEEP_POLICY);
   assert.equal(result.deferred, false);
 });
+
+test("checkCostGovernor's policy parameter defaults to DEFAULT_SWEEP_POLICY when the caller omits it entirely", () => {
+  // Every OTHER test in this file passes an explicit policy argument; this is
+  // the one call site that omits it, exercising the parameter's default-value
+  // branch rather than a caller-supplied override.
+  const result = checkCostGovernor(DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd - 1);
+  assert.equal(result.deferred, false, "one dollar under the default ceiling, using the default policy, does not defer");
+  assert.equal(result.ceilingUsd, DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd);
+});
+
+test("deriveDayCostUsd ignores a line with no ts field (or a non-string ts) — it can't be dated into today's window", () => {
+  const lines = [
+    { run_id: "NOTS", task_id: "W1-TZ", step: "verdict", cost_usd: 42 }, // no ts at all
+    { ts: 12345, run_id: "BADTS", task_id: "W1-TZ2", step: "verdict", cost_usd: 43 }, // non-string ts
+    { ts: "2026-07-29T09:00:00.000Z", run_id: "GOOD", task_id: "W1-TG", step: "verdict", cost_usd: 6 },
+  ];
+  const total = deriveDayCostUsd(lines, TODAY);
+  assert.equal(total, 6, "the two undatable lines contribute nothing; only the well-formed line counts");
+});
+
+test("deriveDayCostUsd ignores an in-window line with no run_id (or a non-string run_id) — it can't be bucketed by run", () => {
+  const lines = [
+    { ts: "2026-07-29T09:00:00.000Z", task_id: "W1-TZ", step: "verdict", cost_usd: 42 }, // no run_id
+    { ts: "2026-07-29T09:01:00.000Z", run_id: 7, task_id: "W1-TZ2", step: "verdict", cost_usd: 43 }, // non-string run_id
+    { ts: "2026-07-29T09:02:00.000Z", run_id: "GOOD2", task_id: "W1-TG", step: "verdict", cost_usd: 9 },
+  ];
+  const total = deriveDayCostUsd(lines, TODAY);
+  assert.equal(total, 9, "the two unbucketable lines contribute nothing; only the well-formed line counts");
+});
+
+test("deriveDayCostUsd contributes 0 for a run whose in-window lines carry no cost_usd at all (no verdict, no cost figure)", () => {
+  const lines = [
+    { ts: "2026-07-29T09:00:00.000Z", run_id: "NOCOST", task_id: "W1-TN", step: "run.start" },
+    { ts: "2026-07-29T09:01:00.000Z", run_id: "NOCOST", task_id: "W1-TN", step: "implement.start" },
+    { ts: "2026-07-29T09:02:00.000Z", run_id: "GOOD3", task_id: "W1-TG", step: "verdict", cost_usd: 11 },
+  ];
+  const total = deriveDayCostUsd(lines, TODAY);
+  assert.equal(total, 11, "a run with zero cost_usd-bearing lines contributes $0, not NaN or a thrown error");
+});
