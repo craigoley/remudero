@@ -709,6 +709,89 @@ test("retroCommand: a clean run with a PRE-EXISTING valid marker still resolves 
   });
 });
 
+// ── W1-T160: the INTEGRITY GATE — a HARD precondition INSIDE the automated
+// (daemon-triggered) path only. `opts.automated` claims the TRIGGER observed real
+// merge activity since the marker; this fixture's ledger/gh evidence is empty, so
+// buildGather's real `shippedSince` naturally credits ZERO -- exactly the R8-class
+// mismatch (trigger saw merges, the real gather found none) the gate exists to catch.
+
+test(
+  "retroCommand: the INTEGRITY GATE aborts an AUTOMATED run when the trigger saw real merges but the " +
+    "real gather credits ZERO -- no PR, no marker advance, no follow-up harvest, Architect never spawned",
+  async (t) => {
+    const fx = setupFakeRetroFixture(t, {
+      seedMarker: { ts: "2026-01-01T00:00:00.000Z", learnings_count: 0, runs_seen: 0 },
+    });
+    await fx.run(async () => {
+      let spawnCalls = 0;
+      const spawn = async () => {
+        spawnCalls++;
+        return fx.fakeSpawn();
+      };
+      const exitCode = await retroCommand([], {
+        spawn,
+        automated: { reason: "merges", mergesSinceMarker: 5, daysSinceMarker: 1 },
+      });
+      assert.equal(exitCode, 1);
+      assert.equal(spawnCalls, 0, "the integrity gate must abort BEFORE the Architect is ever spawned");
+
+      const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
+      assert.equal(marker.ts, "2026-01-01T00:00:00.000Z", "the marker must NOT advance past the seeded one");
+
+      const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8")
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l));
+      const abortLine = ledgerLines.find((l) => l.step === "retro_aborted_integrity");
+      assert.ok(abortLine, "a loud retro_aborted_integrity ledger line must be written");
+      assert.equal(abortLine.merges_since_marker, 5);
+      assert.equal(abortLine.gather_shipped, 0);
+      assert.equal(abortLine.trigger_reason, "merges");
+      assert.equal(ledgerLines.some((l) => l.step === "pr.opened"), false, "no PR may open on an integrity-gate abort");
+      assert.equal(
+        ledgerLines.some((l) => l.step === "retro.marker.advanced"),
+        false,
+        "the marker must never advance on an integrity-gate abort",
+      );
+    });
+  },
+);
+
+test("retroCommand: an OPERATOR-run retro (opts.automated absent) is NOT integrity-gated -- a zero-credit gather still proceeds exactly as before", async (t) => {
+  const fx = setupFakeRetroFixture(t, {
+    seedMarker: { ts: "2026-01-01T00:00:00.000Z", learnings_count: 0, runs_seen: 0 },
+  });
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], { spawn: fx.fakeSpawn }); // no `automated` -- same shape as every other test in this file
+    assert.equal(exitCode, 1, "same red-ci exit as the ordinary success path -- unaffected by the integrity gate");
+    const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
+    assert.ok(
+      new Date(marker.ts).getTime() > new Date("2026-01-01T00:00:00.000Z").getTime(),
+      "an operator-run retro still advances the marker even though the gather credited zero -- a human is watching",
+    );
+  });
+});
+
+test("retroCommand: an automated run whose gather DOES credit merges passes the integrity gate and proceeds", async (t) => {
+  const fx = setupFakeRetroFixture(t, {
+    seedMarker: { ts: "2026-01-01T00:00:00.000Z", learnings_count: 0, runs_seen: 0 },
+  });
+  await fx.run(async () => {
+    const exitCode = await retroCommand([], {
+      spawn: fx.fakeSpawn,
+      automated: { reason: "days", mergesSinceMarker: 0, daysSinceMarker: 8 },
+    });
+    // mergesSinceMarker: 0 -> checkRetroIntegrity's `priorMergesSinceMarker > 0` guard
+    // never trips, regardless of what the real gather credits -- same red-ci exit 1 as
+    // every other success-path variant, but reached THROUGH the gate, not around it.
+    assert.equal(exitCode, 1);
+    const marker = JSON.parse(readFileSync(join(fx.root, "state", "last-retro.json"), "utf8")) as RetroMarker;
+    assert.ok(new Date(marker.ts).getTime() > new Date("2026-01-01T00:00:00.000Z").getTime(), "the marker advanced -- the gate passed");
+    const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(ledgerLines.some((l) => l.step === "retro_aborted_integrity"), false);
+  });
+});
+
 test("retroCommand: an ownership mismatch (claimed PR head branch != this run's own branch) fails CLOSED before the marker ever advances", async (t) => {
   const fx = setupFakeRetroFixture(t, { headRefName: () => "some-other-branch-entirely" });
   await fx.run(async () => {
