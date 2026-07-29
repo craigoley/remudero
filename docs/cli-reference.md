@@ -35,6 +35,7 @@ usage:
   rmd stop [--reason <text>]    # fleet control: ONE-SHOT halt of the RUNNING drain; auto-clears when that run ends (no resume needed). No-op if nothing is running.
   rmd pause [--reason <text>]   # fleet control: PERSISTENT drain-and-hold — in-flight completes, no new spawns; survives across runs until `rmd resume`.
   rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume
+  rmd away [on|off]   # P34 clause (e): set/show operator presence (default attended). AWAY batches MANUAL/HARD_STOP escalations into the W1-T163 recap for async verdict instead of a real-time page; never gates dispatch.
   rmd correct <task-id> --pr <n> [--reason <text>]   # sanctioned operator-correction writer (P9/W1-T75): appends a correction.provenance ledger line naming the task's TRUE merged PR, SUPREME over every deriveStatus rung; prints derived status before/after
   rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option "label|detail"]...   # open a needs-human labeled GitHub issue; MANUAL/HARD_STOP also fire a real-time iMessage ping (BLOCKED collapses to digest)
   rmd notify <message>     # real-time iMessage ping (osascript)
@@ -220,6 +221,14 @@ rmd resume
 ```
 
 fleet control: clear PAUSE (and any STOP); spawns resume
+
+### `rmd away`
+
+```
+rmd away [on|off]
+```
+
+P34 clause (e): set/show operator presence (default attended). AWAY batches MANUAL/HARD_STOP escalations into the W1-T163 recap for async verdict instead of a real-time page; never gates dispatch.
 
 ### `rmd correct`
 

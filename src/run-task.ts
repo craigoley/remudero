@@ -106,14 +106,18 @@ import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js
 import { buildDigest, buildMarkerAwareDigest, consoleCardUrl, sendDigest, sendMarkerAwareDigest, sendRundown } from "./lib/digest.js";
 import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
 import {
+  deliversRealtime,
   escalate,
   ghIssueGateway,
   NEEDS_HUMAN_LABEL,
+  presenceMode,
+  setPresenceMode,
   tryEscalate,
   type EscalationClass,
   type EscalationOption,
   type IssueGateway,
   type OpenIssue,
+  type PresenceMode,
 } from "./lib/escalate.js";
 import { fetchOpenPrsRest, fetchSinglePrRest, type GhApiFetcher } from "./lib/open-prs-rest.js";
 import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
@@ -7612,6 +7616,42 @@ async function resumeFleetCommand(): Promise<number> {
   return 0;
 }
 
+/**
+ * `rmd away [on|off]` — set or show the operator presence mode (P34 clause (e), MASTER-PLAN
+ * §7B/§4). With no argument, prints the current mode. AWAY batches MANUAL/HARD_STOP escalations
+ * into the W1-T163 recap for an async verdict instead of paging in real time; ATTENDED (the
+ * default) delivers exactly as today. Presence keys ONLY escalation delivery — it never gates
+ * dispatch (escalate.ts's module header names the dead presence×risk matrix this must not
+ * resurrect); STOP/PAUSE (above) remain the only real-time-presence waits.
+ */
+async function awayCommand(rest: string[]): Promise<number> {
+  const config = loadConfig();
+  const arg = rest[0];
+  if (arg !== undefined && arg !== "on" && arg !== "off") {
+    console.error(`usage: ${commandSyntax("away")}`);
+    return 2;
+  }
+  if (arg === undefined) {
+    console.log(`### rmd away — presence mode: ${presenceMode(config.root)}`);
+    return 0;
+  }
+  const mode: PresenceMode = arg === "on" ? "away" : "attended";
+  setPresenceMode(config.root, mode);
+  const ledgerPath = ledgerPathFor(config);
+  appendLedger(ledgerPath, {
+    run_id: `FLEET-${Date.now()}`,
+    task_id: "FLEET",
+    step: "fleet.presence",
+    mode,
+  });
+  console.log(
+    mode === "away"
+      ? "### rmd away on — presence set to AWAY: MANUAL/HARD_STOP escalations now batch into the recap for async verdict instead of paging in real time."
+      : "### rmd away off — presence set to ATTENDED: escalations deliver exactly as today.",
+  );
+  return 0;
+}
+
 /** `--flag value` lookup over a raw argv tail; undefined if the flag is absent. */
 function flagValue(rest: string[], flag: string): string | undefined {
   const i = rest.indexOf(flag);
@@ -7707,8 +7747,12 @@ const ESCALATION_CLASSES: EscalationClass[] = ["BLOCKED", "MANUAL", "HARD_STOP"]
 /**
  * `rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s>
  *   [--detail <d>] [--recommendation <r>] [--option "label|detail"]...`
- * Opens the `needs-human` labeled issue (escalate.ts) and, for MANUAL/HARD_STOP
- * ONLY, also fires a real-time iMessage ping (§4: BLOCKED collapses to the digest).
+ * Opens the `needs-human` labeled issue (escalate.ts) UNCONDITIONALLY. For MANUAL/HARD_STOP
+ * ONLY, also fires a real-time iMessage ping (§4: BLOCKED collapses to the digest) — but ONLY
+ * when the operator is ATTENDED (escalate.ts's `deliversRealtime`, P34 clause (e)). AWAY mode
+ * skips that ping and instead ledgers `escalation.batched_away`: the issue already opened above
+ * is picked up by the W1-T163 recap/digest off the SAME marker for an ASYNC verdict, rather than
+ * expecting a sync answer right now. ATTENDED behaves EXACTLY as before this flag existed.
  */
 export async function escalateCommand(
   rest: string[],
@@ -7739,14 +7783,27 @@ export async function escalateCommand(
   );
   console.log(url);
   if (cls === "MANUAL" || cls === "HARD_STOP") {
-    // W1-T144: the real-time ping deep-links to the console card alongside the GitHub
-    // issue URL, same as the digest's own escalations line (digest.ts's renderDigest).
-    notify(`[${cls}] ${taskId}: ${summary}\n${url}\n${consoleCardUrl(consoleUrl(config), taskId)}`, {
-      channel: deps.notifyChannel ?? imessageChannel(notifyRecipient(config)),
-      ledgerPath,
-      runId,
-      taskId,
-    });
+    if (deliversRealtime(config.root)) {
+      // W1-T144: the real-time ping deep-links to the console card alongside the GitHub
+      // issue URL, same as the digest's own escalations line (digest.ts's renderDigest).
+      notify(`[${cls}] ${taskId}: ${summary}\n${url}\n${consoleCardUrl(consoleUrl(config), taskId)}`, {
+        channel: deps.notifyChannel ?? imessageChannel(notifyRecipient(config)),
+        ledgerPath,
+        runId,
+        taskId,
+      });
+    } else {
+      // P34 clause (e), AWAY mode: no real-time page. The `escalation.issue_opened` line above
+      // already carries this into the recap/digest; this line records that away mode is why no
+      // ping fired, so the routing decision itself is auditable.
+      appendLedger(ledgerPath, {
+        run_id: runId,
+        task_id: taskId,
+        step: "escalation.batched_away",
+        class: cls,
+        issue_url: url,
+      });
+    }
   }
   return 0;
 }
@@ -10157,6 +10214,11 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   { name: "resume", usage: "rmd resume                    # fleet control: clear PAUSE (and any STOP); spawns resume" },
   {
+    name: "away",
+    usage:
+      "rmd away [on|off]   # P34 clause (e): set/show operator presence (default attended). AWAY batches MANUAL/HARD_STOP escalations into the W1-T163 recap for async verdict instead of a real-time page; never gates dispatch.",
+  },
+  {
     name: "correct",
     usage:
       "rmd correct <task-id> --pr <n> [--reason <text>]   # sanctioned operator-correction writer (P9/W1-T75): appends a correction.provenance ledger line naming the task's TRUE merged PR, SUPREME over every deriveStatus rung; prints derived status before/after",
@@ -10539,6 +10601,9 @@ export async function main(
   }
   if (cmd === "resume") {
     process.exit(await resumeFleetCommand());
+  }
+  if (cmd === "away") {
+    process.exit(await awayCommand(rest));
   }
   if (cmd === "correct" && arg) {
     process.exit(await correctCommand(rest));
