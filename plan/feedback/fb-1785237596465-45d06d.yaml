@@ -1,0 +1,19 @@
+id: fb-1785237596465-45d06d
+ts: 2026-07-28T11:19:56.465Z
+raw: "GLOBAL LEARNINGS ARTIFACT MISSING — every worker spawn logs
+  learnings.injected with global_refused_reason 'global artifact not found:
+  /Users/craigoleyagent/Remudero/learnings-global/artifact.yaml' and drops 13 of
+  16 matched learnings against the 1800-char budget (observed on the console
+  RECENT feed, 2026-07-24 W1-T84 run). Workers are flying with a fraction of the
+  institutional knowledge the retro lane exists to accumulate — a direct quality
+  lever. NEED: (1) determine whether the global artifact was ever built or the
+  path is wrong (the retro/learnings lane owns it — W1-T87 lineage); build or
+  repoint; (2) the drop list is currently invisible outside the ledger — surface
+  dropped-count in rmd status; (3) revisit the 1800-char budget against measured
+  cache economics (cached input is ~10% rate — a larger, CACHED learnings block
+  may cost less than the bugs the dropped learnings would have prevented;
+  measure, don't assume)."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

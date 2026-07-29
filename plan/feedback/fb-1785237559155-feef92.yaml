@@ -1,0 +1,26 @@
+id: fb-1785237559155-feef92
+ts: 2026-07-28T11:19:19.155Z
+raw: "COST SENSORS AND LEVERS — the fleet spends without measuring its own
+  efficiency. Verified levers (Anthropic pricing, 2026-07): prompt caching ~90%
+  off cached input reads; Batch API flat 50% off input+output all models (~24h
+  async); output tokens 5x input everywhere. NEED four bounded additions riding
+  existing organs: (1) CACHE-HIT SENSOR — per-run and per-class
+  cache_read/(cache_read+input+cache_creation) ratio derived from the ledger
+  token fields already recorded, surfaced in the digest and rmd status; a
+  falling ratio is a prompt-architecture regression nobody currently sees. (2)
+  BATCH LANE for offline work — the proof-backlog healer (8c553a migration, ~15
+  tasks/cycle), retro mining, and learnings extraction are 24h-tolerant and
+  belong on the Batch API at half price; the lane is opt-in per task-class in
+  mounts.yaml, results consumed by the same rungs. (3) TURN-EFFICIENCY SENSOR —
+  output tokens and turns per MERGED PR, per class, trended in the retro; output
+  is 5x input so this is the dominant spend term, and a class whose
+  turns-per-merge climbs is the earliest quality regression signal. (4)
+  COST-ANOMALY SENTINEL — a run exceeding its class median by a policy-data
+  multiplier ledgers cost.anomaly and surfaces in NEEDS-ME; the W1-T7 arc ($9.32
+  across strikes to a blocked verdict) is the fixture. Coordinates: W1-T250
+  class-burn, 44b355 resolved-model ledgering, W1-T252 policy rows for the
+  thresholds."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

@@ -1,0 +1,25 @@
+id: fb-1785237627858-ffafd9
+ts: 2026-07-28T11:20:27.859Z
+raw: "LIVE WORKER OBSERVABILITY — workers are opaque between spawn and verdict:
+  the console's NOW card shows elapsed/spend but the operator cannot see what a
+  live worker is DOING, whether it is progressing or spinning, or read its
+  transcript until the run ends (and non-PR verdicts discard even that,
+  fb-321a4b). Insight source: herdr's agent-state model — per-agent
+  working/idle/blocked tracked automatically, with the session inspectable live.
+  NEED, three bounded pieces: (1) WORKER STATE SENSOR — derive a per-run state
+  (working / tool-executing / output-quiet-for-N-min) from the SDK stream the
+  harness already consumes, ledger state transitions (worker.state), render in
+  the NOW card next to spend — 'quiet 11m' is the signal the operator currently
+  cannot get. (2) STALL DETECTOR — output-quiet beyond a policy-data threshold
+  ledgers worker.stalled and surfaces in NEEDS-ME with the last transcript lines
+  attached (never auto-kill — the operator or a future paramedic verb decides;
+  the W1-T130 cannot-observe polarity applies). (3) PEEK — a read-only live
+  transcript tail: rmd peek <runId> and a console affordance on the NOW card,
+  streaming the worker's recent output; read-only by construction, no steering
+  surface in v1. Persist-on-exit for ALL verdicts folds in fb-321a4b as the same
+  organ. Sibling: rmd status (fb-1784919210522-5ac4ca) renders the states; this
+  filing produces them."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

@@ -1,0 +1,21 @@
+id: fb-1785237638458-0524f6
+ts: 2026-07-28T11:20:38.458Z
+raw: "TASK PRIORITY AS DATA — frontier order is tasks.yaml FILE ORDER (shards
+  last), so expressing urgency means moving lines: merge-conflict-prone,
+  invisible in review diffs as a semantic change, and impossible for machine
+  lanes to reason about (triage guidance says 'file near the front' — a physical
+  instruction for a logical need). Insight source: herdr's routing axis set —
+  context, cost, policy, URGENCY. NEED: an optional priority field per task
+  (bounded enum via the W1-T252 policy schema: urgent/normal/backlog, default
+  normal), consumed by nextRunnable as the primary sort with file order as the
+  stable tiebreak; shards keep sorting after tasks.yaml within the same band.
+  Plan-lint bounds the values; a priority CHANGE is a plan PR (reviewed,
+  visible, the P37 doctrine). Console UP NEXT renders the band; the Run button
+  (W1-T260) remains the ad-hoc override for one-off urgency. Regression: an
+  urgent task filed at the file's END dispatches before a normal task at its
+  head; the four verify:human parked tasks demonstrate the current failure
+  (early position ≠ priority)."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null

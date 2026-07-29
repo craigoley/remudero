@@ -1,0 +1,20 @@
+id: fb-1785237583569-3304ae
+ts: 2026-07-28T11:19:43.569Z
+raw: "RESILIENCE DRILL CADENCE — this week's incidents (binary husk, daemon
+  crash-loop, rotation storm, torn-review stalls) were all survived by guards,
+  but every drill was involuntary. Codify: a periodic fault-injection drill
+  riding the retro scheduler (P36 one-scheduler doctrine, so it waits on W1-T201
+  sequencing) that deliberately injects ONE fault per cycle from a rotating
+  library — claude binary replaced with the known husk signature, a torn ledger
+  tail line, gh returning 500s/empty via the injectable gateway, a deliberately
+  dirty daemon tree, SIGKILL mid-run — and asserts the named-reason +
+  bounded-recovery invariants that already exist (spawn_binary_unlaunchable
+  preflight per aa16b6/W1-T236, daemon.tree_dirty proceed per W1-T255, W1-T119
+  indeterminate, crash-loop detector). Each drill ledgers drill.executed with
+  outcome; a failed invariant escalates as its own incident. The drill library
+  grows one entry per real incident — the postmortem's last step becomes 'add it
+  to the drill'."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
