@@ -13,10 +13,21 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { buildGather, loadMarker, MarkerCorruptError, resolveMarkerForGather, saveMarker, type RetroMarker } from "../src/lib/retro.js";
+import {
+  buildGather,
+  evaluateRetroTrigger,
+  loadMarker,
+  MarkerCorruptError,
+  resolveMarkerForGather,
+  saveMarker,
+  type RetroMarker,
+  type RetroTriggerDecision,
+} from "../src/lib/retro.js";
 import { configPath } from "../src/lib/config.js";
 import { resolveRepoRoot, retroCommand } from "../src/run-task.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { runDaemon } from "../src/lib/daemon.js";
+import { loadPlan, type Plan } from "../src/lib/plan.js";
 
 // run-task.ts's own module-level `repoRoot` is `resolveRepoRoot(process.argv.slice(2),
 // process.cwd())` (W1-T120: CWD-ascent via a REAL `git rev-parse --show-toplevel`, not
@@ -791,6 +802,105 @@ test("retroCommand: an automated run whose gather DOES credit merges passes the 
     assert.equal(ledgerLines.some((l) => l.step === "retro_aborted_integrity"), false);
   });
 });
+
+/** A trivial empty plan for `runDaemon` — nothing is ever runnable, so the retro-trigger
+ *  branch (checked BEFORE task dispatch, W1-T160) owns every tick in the test below,
+ *  never racing a real task dispatch. */
+function minimalDaemonPlan(): Plan {
+  const dir = mkdtempSync(join(tmpdir(), "w1-t160-daemon-plan-"));
+  const f = join(dir, "tasks.yaml");
+  writeFileSync(f, "[]\n");
+  return loadPlan(f);
+}
+
+// ── W1-T160 FULL INTEGRATION: the daemon's own scheduling contract driving the REAL
+// retroCommand (W1-T136's mergeable-PR path), not a stand-in. The two halves of
+// criterion 3 — "runs end to end ... and advances the marker" AND "a second poll does
+// not re-fire" — are proven TOGETHER, in ONE pass, against the SAME on-disk marker:
+// `runDaemon`'s `checkRetroTrigger`/`runRetroTrigger` hooks are wired to the real
+// `evaluateRetroTrigger` (over the real marker file) and the real `retroCommand`
+// (over `setupFakeRetroFixture`'s real git/gh fixture) respectively — exactly the
+// wiring run-task.ts's `daemonCommand`/`retroTriggerCheck` use in production, not a
+// fake `runRetroTrigger` standing in for it.
+
+test(
+  "W1-T160 INTEGRATION: runDaemon fires the retro trigger, runs the REAL retroCommand (W1-T136's " +
+    "mergeable-PR path) through to a real pr.opened + marker advance, and does NOT re-fire on the very next poll",
+  async (t) => {
+    const fx = setupFakeRetroFixture(t); // fresh fixture, NO seeded marker -- absent marker fires via reason=days (Infinity)
+    await fx.run(async () => {
+      const markerPath = join(fx.root, "state", "last-retro.json");
+      const plan = minimalDaemonPlan();
+      // merges effectively disabled (this fixture's ledger/gh evidence is empty anyway);
+      // ANY elapsed time fires via "days" -- the absent-marker case is Infinity days.
+      const policy = { mergesThreshold: 999999, daysThreshold: 1 };
+
+      const checkRetroTrigger = (): RetroTriggerDecision => {
+        const resolution = resolveMarkerForGather(markerPath);
+        const marker = resolution.kind === "ok" ? resolution.marker : undefined;
+        return evaluateRetroTrigger(0, marker?.ts, new Date(), policy);
+      };
+
+      let retroRuns = 0;
+      const runRetroTrigger = async (decision: Extract<RetroTriggerDecision, { fire: true }>) => {
+        retroRuns++;
+        // THE REAL retroCommand -- W1-T136's mergeable-PR path (Architect spawn -> push
+        // -> gh pr create -> ownership assert -> pr.opened -> marker save), gated by
+        // opts.automated exactly as the real daemon wiring (run-task.ts's daemonCommand
+        // / retroTriggerCheck) invokes it in production. Never a stand-in.
+        await retroCommand([], { spawn: fx.fakeSpawn, automated: decision });
+      };
+
+      const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+      let stopChecks = 0;
+      const summary = await runDaemon(plan, {
+        refreshMerged: () => () => true, // nothing to dispatch -- the retro-trigger branch owns every tick
+        runOne: async (id) => {
+          throw new Error(`runOne must never be called in this fixture (task ${id})`);
+        },
+        checkStop: () => {
+          stopChecks++;
+          return stopChecks > 2 ? "test bound reached" : undefined;
+        },
+        sleep: async () => {},
+        checkRetroTrigger,
+        runRetroTrigger,
+        log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
+      });
+
+      assert.equal(summary.stopReason, "stopped");
+      assert.equal(retroRuns, 1, "the REAL retroCommand ran exactly once across the two evaluated ticks");
+
+      const fired = lines.filter((l) => l.step === "retro_triggered");
+      assert.equal(fired.length, 1, "retro_triggered ledgered exactly once, naming the fire");
+      assert.equal(fired[0].extra.reason, "days");
+
+      // W1-T136's mergeable-PR path: a REAL PR opened (never a stub), plan-only-asserted.
+      const ledgerLines = readFileSync(join(fx.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      assert.ok(
+        ledgerLines.some((l) => l.step === "pr.opened" && l.plan_only === true),
+        "the retro reached a real, plan-only, opened PR -- W1-T136's mergeable-PR path",
+      );
+      assert.ok(
+        ledgerLines.some((l) => l.step === "retro.marker.advanced"),
+        "the marker advance is the retro's own real saveMarker call, not asserted-away",
+      );
+      assert.equal(
+        ledgerLines.some((l) => l.step === "retro_aborted_integrity"),
+        false,
+        "the integrity gate passed -- an integrity-passing gather never aborts",
+      );
+
+      const markerAfter = JSON.parse(readFileSync(markerPath, "utf8")) as RetroMarker;
+      assert.ok(markerAfter.ts, "state/last-retro.json now holds a real, valid, advanced marker");
+
+      // The SECOND poll: re-derived FRESH off the marker THIS run just wrote to disk --
+      // not a mock returning a canned "don't fire" answer.
+      const secondDecision = checkRetroTrigger();
+      assert.equal(secondDecision.fire, false, "the advanced marker's own re-derived state does not cross either threshold again");
+    });
+  },
+);
 
 test("retroCommand: an ownership mismatch (claimed PR head branch != this run's own branch) fails CLOSED before the marker ever advances", async (t) => {
   const fx = setupFakeRetroFixture(t, { headRefName: () => "some-other-branch-entirely" });
