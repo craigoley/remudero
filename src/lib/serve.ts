@@ -38,7 +38,7 @@ import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { Server } from "node:http";
-import { createService, type Route, type ServiceOptions, type ServiceTokens } from "./service.js";
+import { createService, type Route, type ServiceOptions, type ServiceTokens, type SseRoute } from "./service.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import type { GitHub } from "./status.js";
 import {
@@ -157,6 +157,82 @@ export function prewarmBoardGithub(github: GitHub, refreshMs: number = DEFAULT_B
   const timer = setInterval(() => github.warm?.(), refreshMs);
   timer.unref?.();
   return () => clearInterval(timer);
+}
+
+/**
+ * GATE {@link prewarmBoardGithub} ON A CONNECTED CLIENT — the fix for the zero-viewer burn.
+ *
+ * WHAT WENT WRONG. W1-T154 wired the pre-warm timer UNCONDITIONALLY at `buildServeServer`, and
+ * its own doc argued that was the point: "the gateway never goes cold again waiting on a request
+ * to trigger its own refetch", client-independent by design. The cost of that design was never
+ * bounded. `warm()` resolves to a `gh pr list --state all --limit 1000` — a GraphQL call — so a
+ * `serve` process with NOBODY WATCHING still billed one every 15s, forever.
+ *
+ * MEASURED, 2026-07-28: a serve process left running unwatched for ~5.6 days issued 60 GraphQL
+ * pr-list calls in the 17:26:08Z–17:46Z window against the daemon's 16 — 78.9% of ALL GraphQL
+ * traffic on the account. At 4/min = 240/hr that projects to ~3,100 points/hour against a
+ * 5,000/hour budget, roughly 62% of the entire allowance, spent rendering a board no human had
+ * open. That exhaustion blinded the sweep for 22 consecutive minutes and delayed a PR review by
+ * ~13 minutes.
+ *
+ * WHY THIS SEAM. `rmd serve` ALREADY has an exact notion of "a client is connected", and it is
+ * not a heuristic: service.ts calls {@link SseRoute.subscribe} once per SSE connection and
+ * invokes the unsubscribe it returns from that request's own `close` event. Refcounting those
+ * two edges is therefore the connection count, not a proxy for it — no new tracking layer, no
+ * heartbeat, no socket bookkeeping of our own.
+ *
+ * THE CONTRACT, precisely:
+ *   - zero clients            -> no timer, and `warm()` is never called at all
+ *   - 0 -> 1 clients          -> warm ONCE immediately, then every `refreshMs`
+ *   - 1 -> 2 clients          -> nothing changes; ONE timer serves every viewer
+ *   - last client disconnects -> `clearInterval`, no dangling handle
+ *   - reconnect after idle    -> warms immediately again, exactly like the first connect
+ *
+ * DELIBERATE BEHAVIOUR CHANGE, stated rather than hidden: the BOOT-time warm is gone. A
+ * `GET /v1/status` that arrives before any SSE client has connected now pays its own fetch on
+ * the request path, which is what W1-T154 originally set out to avoid. That is a first-request
+ * latency cost, never a correctness one — `buildBatchedGithub` fetches lazily on demand and
+ * `warm()` only forces that same `index()` early. Paying it on the rare
+ * request-before-any-viewer is the entire point: the alternative is paying it 5,760 times a day
+ * for nobody.
+ */
+export function gatePrewarmOnClients(
+  route: SseRoute,
+  github: GitHub,
+  refreshMs: number = DEFAULT_BOARD_PREWARM_MS,
+): { route: SseRoute; stop: () => void } {
+  let clients = 0;
+  let stopPrewarm: (() => void) | undefined;
+
+  const stop = (): void => {
+    stopPrewarm?.();
+    stopPrewarm = undefined;
+  };
+
+  return {
+    stop,
+    route: {
+      ...route,
+      subscribe: (send) => {
+        const unsubscribe = route.subscribe(send);
+        clients += 1;
+        // 0 -> 1 ONLY. A second viewer must not start a second timer (which would double the
+        // very call rate this exists to bound) and must not re-warm off-cadence.
+        if (clients === 1) stopPrewarm = prewarmBoardGithub(github, refreshMs);
+        let released = false;
+        return () => {
+          // service.ts invokes this exactly once per connection, but a defensive latch keeps a
+          // double-release from underflowing the count — a negative count would never reach 0
+          // again and would strand the timer running with zero viewers, which is the bug.
+          if (released) return;
+          released = true;
+          unsubscribe();
+          clients -= 1;
+          if (clients === 0) stop();
+        };
+      },
+    },
+  };
 }
 
 /**
@@ -2752,18 +2828,24 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
 
 /**
  * Build (but do not `.listen()`) the full `rmd serve` HTTP server — one call, every route wired.
- * ALSO pre-warms `deps.board.github` (W1-T154) — synchronously, before this function returns —
- * and starts its background TTL refresh, stopped when the returned server `close`s.
+ * `deps.board.github`'s background TTL refresh (W1-T154) runs ONLY while at least one console is
+ * connected — see {@link gatePrewarmOnClients} for the zero-viewer burn that gate exists to stop.
+ * It is also stopped unconditionally when the returned server `close`s, so a server torn down
+ * with a viewer still attached leaves no timer behind.
  */
 export function buildServeServer(deps: ServeDeps): Server {
+  const prewarm = gatePrewarmOnClients(
+    buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS),
+    deps.board.github,
+    deps.boardGithubRefreshMs ?? DEFAULT_BOARD_PREWARM_MS,
+  );
   const server = createService({
     tokens: deps.tokens,
     routes: buildServeRoutes(deps),
-    sse: [buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS)],
+    sse: [prewarm.route],
     log: deps.log,
   });
-  const stopPrewarm = prewarmBoardGithub(deps.board.github, deps.boardGithubRefreshMs ?? DEFAULT_BOARD_PREWARM_MS);
-  server.on("close", stopPrewarm);
+  server.on("close", prewarm.stop);
   return server;
 }
 
