@@ -455,6 +455,45 @@ export function isDialectPrefixed(proof: string): boolean {
   return DIALECT_GREP_RE.test(trimmed) || DIALECT_TEST_RE.test(trimmed);
 }
 
+/** Sentence-level punctuation a bare test-name title would not carry: a
+ * comma, colon, semicolon, parenthetical aside, an em/en dash, or an
+ * ellipsis. Any one of these marks a body as PROSE, not a plain title. */
+const PROSE_PUNCTUATION_RE = /[,;:()]|--|—|–|\.\.\./;
+/** Above this length a body reads as a description, not a plausible bare
+ * test title, regardless of punctuation (a title this long is prose). */
+const BARE_TEST_NAME_MAX_LEN = 60;
+
+/**
+ * Deterministic predicate (W1-T161, #349/W1-T149): does a name-filtered
+ * `unit test:` proof BODY read as a long PROSE DESCRIPTION of behavior — the
+ * house convention — rather than a short, bare TEST-NAME-shaped string?
+ * {@link judgeCriterion} uses this ONLY to interpret a ZERO-MATCH outcome:
+ *   - prose shape     -> `not_executable` (keyword floor stands, floorDegraded)
+ *   - bare-name shape -> `executed_fail` (W1-T72's test-theater guard, PRESERVED)
+ *
+ * LIVE INCIDENT this fixes: #349/W1-T149's own proof read "a seeded task
+ * dispatched N times with no new owned PR trips the per-task circuit breaker
+ * at N+1 — exactly one needs-human escalation naming the loop, and zero
+ * further dispatches (the W1-T29 x10 spin shape)" — a prose paraphrase of a
+ * REAL, PASSING test titled "P29(ii) the W1-T29 x10 spin shape: …", worded
+ * completely differently. `--test-name-pattern` matched zero tests on that
+ * paraphrase, and the pre-fix rule minted an `executed_fail`, hard-blocking a
+ * green-code PR until a human re-reviewed it by hand.
+ *
+ * A pure length/punctuation shape check over the body text — no model call,
+ * so the same body always classifies the same way (acceptance #3). Threshold
+ * picked from this repo's own convention: a bare, fabricated test-theater
+ * title is written to LOOK like a real short title (one plain clause, no
+ * internal punctuation), while a genuine prose description — like the #349
+ * fixture above — routinely carries a comma/colon/dash/ellipsis/parenthetical
+ * and/or runs well past a plausible title's length.
+ */
+export function looksLikeProseDescription(body: string): boolean {
+  const trimmed = body.trim();
+  if (trimmed.length > BARE_TEST_NAME_MAX_LEN) return true;
+  return PROSE_PUNCTUATION_RE.test(trimmed);
+}
+
 /**
  * Split a `grep:` dialect body into its pattern + optional path. The path is
  * the trailing token after the LAST `\s+in\s+` boundary that itself looks like
@@ -1077,12 +1116,31 @@ export function judgeCriterion(
           reason = `proof executed and PASSED on the PR head (${whitelisted.kind}: ${whitelisted.label})`;
         } else if (outcome === "no-match") {
           // ZERO tests matched the proof's name pattern (the run completed — see
-          // nameFilteredOutcome). The named test does not exist: a proof-authoring mismatch,
-          // NOT a failing test. Degrade to `not_executable` (the keyword floor stands as
-          // computed above — `met`/`reason` from mechanical coverage), and ANNOTATE why, so an
-          // author sees "names no matching test" rather than a misleading "executed and FAILED".
-          proofExec = "not_executable";
-          reason = `${reason} — NOTE: proof names no matching test (0 tests matched '${whitelisted.label}'); not executed, keyword floor applied`;
+          // nameFilteredOutcome). W1-T161/#349: this is EITHER a proof-authoring
+          // mismatch (the house convention writes a `unit test:` proof as PROSE
+          // describing a test's behavior, not its literal name — see
+          // looksLikeProseDescription's doc comment for the #349 fixture) OR
+          // genuine test theater (a proof naming a specific, fabricated test).
+          // The two are told apart by a deterministic shape check over the body,
+          // never by re-running anything or calling a model.
+          if (looksLikeProseDescription(whitelisted.label)) {
+            // A prose paraphrase, not a bare name: NOT a failing test. Degrade to
+            // `not_executable` (the keyword floor stands as computed above —
+            // `met`/`reason` from mechanical coverage), and ANNOTATE why, so an
+            // author sees "names no matching test" rather than a misleading
+            // "executed and FAILED" — a false block on green, test-passing code.
+            proofExec = "not_executable";
+            reason = `${reason} — NOTE: proof names no matching test (0 tests matched '${whitelisted.label}'); not executed, keyword floor applied`;
+          } else {
+            // W1-T72's test-theater guard, PRESERVED: the body reads as a bare,
+            // concrete test NAME (short, no sentence punctuation) rather than a
+            // prose description, and it matches nothing on the PR head — a
+            // fabricated test name is theater and must FAIL, never silently
+            // degrade to the keyword floor.
+            proofExec = "executed_fail";
+            met = false;
+            reason = `proof names a specific test that does not exist on the PR head (0 tests matched '${whitelisted.label}') — test theater, not executed`;
+          }
         } else {
           proofExec = "executed_fail";
           met = false;
