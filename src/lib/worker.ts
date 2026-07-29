@@ -1082,6 +1082,20 @@ export function worktreeAdd(
     ["-C", repoDir, "worktree", "add", "-b", branch, worktreePath, base],
     { stdio: "inherit" },
   );
+  // W1-T137: point this worktree at the repo's tracked hooks/ dir so its real git
+  // commit-msg hook (hooks/commit-msg) fires on every commit the worker authors
+  // itself — the only backstop PR #407 explicitly left unbuilt (it shaped only the
+  // two HARNESS-built commit-header sites, never a worker's own `git commit`).
+  // A RELATIVE core.hooksPath resolves against each worktree's OWN top-level dir
+  // (verified against git 2.54: a linked worktree finds <worktree>/hooks, not the
+  // main checkout's), so "hooks" is correct here even though `git config` (no
+  // `extensions.worktreeConfig`) writes it to the repo's ONE shared config file —
+  // every worktree, this one and every future one off the same repoDir, resolves
+  // the same relative value against its own checked-out hooks/. Idempotent: safe
+  // to set on every worktreeAdd call, including ones after it is already set.
+  execFileSync("git", ["-C", worktreePath, "config", "core.hooksPath", "hooks"], {
+    stdio: "inherit",
+  });
 }
 
 export function worktreeRemove(repoDir: string, worktreePath: string): void {
