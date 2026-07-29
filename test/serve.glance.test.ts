@@ -118,11 +118,20 @@ async function withShell<T>(deps: ServeDeps, fn: (base: string) => Promise<T>): 
 }
 
 let browser: Browser;
+// Teardown closes the launch PROMISE, never the resolved handle. When `--test-name-pattern`
+// matches ZERO tests in this file, the runner still runs both hooks, but fires `after` ~0.2ms
+// in -- while `chromium.launch()` is still in flight and `browser` is therefore still
+// undefined. Awaiting the promise closes the browser that actually launched. `browserPromise`
+// is assigned synchronously, before `before`'s first await, so `after` can always see it (same
+// contract test/serve-browser-teardown.test.ts polices across every browser-launching suite).
+let browserPromise: Promise<Browser> | undefined;
 before(async () => {
-  browser = await chromium.launch({ args: ["--no-sandbox"] });
+  browserPromise = chromium.launch({ args: ["--no-sandbox"] });
+  browser = await browserPromise;
 });
 after(async () => {
-  await browser.close();
+  const launched = await browserPromise;
+  await launched?.close();
 });
 
 async function openShell(base: string, token = READ_TOKEN): Promise<{ context: BrowserContext; page: Page }> {
