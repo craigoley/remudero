@@ -42,6 +42,7 @@ import type { Route, SseRoute, SseSend } from "./service.js";
 import { bearerTokenId } from "./panel-actions.js";
 import type { LastSeenStore } from "./last-seen.js";
 import { buildRecapEvents, type RecapEvent } from "./recap.js";
+import { computeGlanceSpend, type GlanceSpend } from "./glance.js";
 
 /** Ledger poll pace for the SSE stream — comfortably under the 2s acceptance budget. */
 export const DEFAULT_POLL_MS = 250;
@@ -93,6 +94,9 @@ export interface CountSummary {
   running: number;
   merged: number;
   queued: number;
+  /** W1-T159 (GLANCE strip): tasks whose `status` is `"blocked"` — the SAME predicate the rest
+   *  section's status color/REST grouping already use, so the strip can never disagree with them. */
+  blocked: number;
   /** False when the GitHub read backing merge-state was unreachable ⇒ the `merged` tally is
    * UNKNOWN, not a fact — the console renders "merged: unknown" rather than "0 merged". */
   merged_known: boolean;
@@ -105,6 +109,10 @@ export interface BoardSnapshot {
   github_unreachable: boolean;
   /** Header counts, derived from the SAME `tasks` below (tally and rows can never disagree). */
   counts: CountSummary;
+  /** W1-T159 (GLANCE strip): merged-today/spend-today/spend-this-week, computed from the SAME
+   *  ledger lines this snapshot already read (lib/glance.ts's `computeGlanceSpend`) — never a
+   *  second ledger read/reduction. */
+  spend: GlanceSpend;
   tasks: BoardRow[];
 }
 
@@ -176,7 +184,14 @@ export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
   // merge tally is flagged UNKNOWN when the GitHub read that backs merge-state was unreachable —
   // so "0 merged" is never rendered as fact during an outage.
   const github_unreachable = safeReadFailed(deps.github);
-  return { generated_at: new Date().toISOString(), github_unreachable, counts: summarizeCounts(tasks, github_unreachable), tasks };
+  const now = deps.now ?? Date.now;
+  return {
+    generated_at: new Date().toISOString(),
+    github_unreachable,
+    counts: summarizeCounts(tasks, github_unreachable),
+    spend: computeGlanceSpend(lines, now()),
+    tasks,
+  };
 }
 
 /** One in-flight predicate, shared by the header tally AND the NOW rows so they can never
@@ -189,15 +204,13 @@ export function isRunningRow(row: Pick<BoardRow, "phase">): boolean {
 /** The header count summary, computed from the SAME task set the rows render. `merged_known` is
  * false when the GitHub read backing merge-state was unreachable — the console then renders the
  * merged tally as "unknown", never `0` as fact (fb-1784902052582-c124f9). */
-export function summarizeCounts(
-  tasks: Array<Pick<BoardRow, "phase" | "status">>,
-  githubUnreachable: boolean,
-): { total: number; running: number; merged: number; queued: number; merged_known: boolean } {
+export function summarizeCounts(tasks: Array<Pick<BoardRow, "phase" | "status">>, githubUnreachable: boolean): CountSummary {
   return {
     total: tasks.length,
     running: tasks.filter(isRunningRow).length,
     merged: tasks.filter((t) => t.status === "merged" || t.status === "done").length,
     queued: tasks.filter((t) => t.status === "queued").length,
+    blocked: tasks.filter((t) => t.status === "blocked").length,
     merged_known: !githubUnreachable,
   };
 }

@@ -58,6 +58,7 @@ import {
 import { buildPanelGraphRoutes, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
 import { buildTaskCardRoute } from "./task-card.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
+import { buildDaemonHealthRoute, type DaemonHealthDeps } from "./daemon-health.js";
 
 /** Default `rmd serve` port — matches apps/dashboard/src/main.ts's own `?daemon=` default (`http://localhost:4317`), so the shipped dashboard points at a served daemon out of the box. */
 export const DEFAULT_SERVE_PORT = 4317;
@@ -119,6 +120,15 @@ export interface ServeDeps {
    * has to construct it itself, and a test can still inject a fake by supplying it explicitly.
    */
   lastSeen?: LastSeenStore;
+  /**
+   * W1-T159: the GLANCE layer's daemon-health widget deps (disk-free path + injectable
+   * statfs/gh-exec/clock — see daemon-health.ts's own doc for each field's real source).
+   * OPTIONAL and defaults to `diskPath: fleetControlRoot` with the real `fs.statfsSync`/real
+   * `gh api rate_limit` when the caller doesn't supply one — the SAME "the assembler wires the
+   * real gateway, a test injects a fake" split every other optional ServeDeps field already
+   * follows (see `panelGraph.ratify`/`lastSeen`'s own docs, above).
+   */
+  daemonHealth?: Omit<DaemonHealthDeps, "ledgerPath" | "diskPath"> & { diskPath?: string };
 }
 
 /** Matches {@link buildBatchedGithub}'s own default `ttlMs` (status.ts) — kept as one named
@@ -407,6 +417,20 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     background-size: 400% 100%; animation: skeleton-pulse 1.4s ease infinite;
   }
   @keyframes skeleton-pulse { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+  /* W1-T159 GLANCE LAYER: the pinned summary strip + daemon-health widget -- dense, phone-first,
+     never a fixed-width table (the same v0 lesson W1-T153's own header already names). */
+  .glance-strip, .daemon-health {
+    display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; margin: 0.4rem 0; padding: 0.5rem 0.65rem;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  }
+  .glance-counts { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; }
+  .glance-item { display: inline-flex; align-items: baseline; gap: 0.3em; font-size: 0.85rem; }
+  .glance-label { color: var(--text-faint); }
+  .glance-value { font-family: var(--font-mono); color: var(--text); font-weight: 600; }
+  .glance-anomaly {
+    margin: 0.4rem 0 0; padding: 0.3rem 0.6rem; border-radius: 6px; font-size: 0.85rem; font-weight: 600;
+    background: rgba(255, 107, 107, 0.14); color: var(--status-blocked); border: 1px solid var(--status-blocked);
+  }
   #stale-badge {
     display: inline-block; margin: 0.25rem 0 0; padding: 0.15rem 0.5rem; border-radius: 999px;
     font-size: 0.75rem; font-weight: 600; background: var(--status-needs-human); color: #241a02;
@@ -589,6 +613,35 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
 <main>
 <header>
   <h1>Remudero — the operator console</h1>
+  <!-- W1-T159 GLANCE LAYER: a pinned summary strip -- running/needs-me/blocked/queued/
+       merged-today/spend-today/spend-this-week, EVERY number traceable to a named ledger/API
+       source (GET /v1/status's counts+spend, the same combined NEEDS ME set the section below
+       renders from) -- plus an anomaly banner (a NOW row past its phase threshold, or a NEEDS ME
+       item open over 24h) so the strip answers "is everything okay?", not only "how many". See
+       renderGlanceStrip/updateGlanceAnomaly, below. -->
+  <section id="glance" class="glance-strip" aria-label="At a glance">
+    <div id="glance-counts" class="glance-counts">
+      <span class="glance-item"><span class="glance-label">running</span><span class="glance-value" id="glance-running">…</span></span>
+      <span class="glance-item"><span class="glance-label">needs me</span><span class="glance-value" id="glance-needs-me">…</span></span>
+      <span class="glance-item"><span class="glance-label">blocked</span><span class="glance-value" id="glance-blocked">…</span></span>
+      <span class="glance-item"><span class="glance-label">queued</span><span class="glance-value" id="glance-queued">…</span></span>
+      <span class="glance-item"><span class="glance-label">merged today</span><span class="glance-value" id="glance-merged-today">…</span></span>
+      <span class="glance-item"><span class="glance-label">spend today</span><span class="glance-value" id="glance-spend-today">…</span></span>
+      <span class="glance-item"><span class="glance-label">spend this week</span><span class="glance-value" id="glance-spend-week">…</span></span>
+    </div>
+    <p id="glance-anomaly" class="glance-anomaly" role="status" aria-live="polite" hidden></p>
+  </section>
+  <!-- W1-T159: daemon-health widget -- last poll, a LIVE next-poll countdown, disk free, and
+       GitHub core rate-limit remaining, each from its own named source (GET /v1/daemon-health;
+       see daemon-health.ts's header). A placeholder value here would fail this task's own
+       acceptance bar, so every value starts "…" (unknown) until the first real response lands,
+       never a fabricated number. -->
+  <section id="daemon-health" class="daemon-health" aria-label="Daemon health">
+    <span class="glance-item"><span class="glance-label">last poll</span><span class="glance-value" id="dh-last-poll">…</span></span>
+    <span class="glance-item"><span class="glance-label">next poll</span><span class="glance-value" id="dh-next-poll">…</span></span>
+    <span class="glance-item"><span class="glance-label">disk free</span><span class="glance-value" id="dh-disk-free">…</span></span>
+    <span class="glance-item"><span class="glance-label">rate limit</span><span class="glance-value" id="dh-rate-limit">…</span></span>
+  </section>
   <p id="top-status" role="status" aria-live="polite">loading…</p>
   <p id="summary" class="counts" aria-live="polite"></p>
   <div class="btn-row" id="trust-row">
@@ -1038,6 +1091,13 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   let latestInboxDrafting = [];
   let latestUpNextCards = [];
   let latestRecentEntries = [];
+  // W1-T159 GLANCE LAYER state -- see renderGlanceStrip/updateTabTitle/updateGlanceAnomaly and
+  // renderDaemonHealth, below, for where each is read/written.
+  let latestSpend = null; // GET /v1/status's { mergedToday, spendTodayUsd, spendWeekUsd } (board.ts's computeGlanceSpend)
+  let latestNeedsMeRows = []; // set by renderNeedsMe -- the SAME combined NEEDS ME rows the section itself renders
+  let latestDaemonHealth = null; // GET /v1/daemon-health's body
+  const BASE_TITLE = document.title;
+  const NEEDS_ME_STALE_MS = 24 * 60 * 60 * 1000; // criterion 3's ">24h" anomaly-emphasis bound
 
   // ── W1-T223: SECTION COLLAPSE + SUMMARY -- every one of the five sections collapses, and its
   // header carries an ALWAYS-VISIBLE one-line summary derived from the SAME array its own
@@ -1258,10 +1318,124 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     document.getElementById("summary").textContent = summaryText(tasks);
   }
 
+  // ── W1-T159 GLANCE LAYER: the pinned summary strip, the browser-tab needs-me badge, and the
+  // daemon-health widget. EVERY number here is read off data ALREADY fetched for the sections
+  // above (GET /v1/status's tasks/counts/spend, the combined NEEDS ME row set) or the daemon-
+  // health route below -- never a second, independently-derived count. ──────────────────────
+
+  function setGlanceValue(id, text) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = String(text);
+  }
+
+  /** running/blocked/queued reuse the EXACT predicates summaryText/statusColorKey already use
+   *  for the SAME words elsewhere on this page (never a second, disagreeing derivation);
+   *  needs-me is latestNeedsMeRows.length -- the SAME combined set (tasks.needsHuman + feedback
+   *  grilling/proposed + inbox ready/drafting) the NEEDS ME section itself just rendered.
+   *  merged-today/spend-today/spend-this-week come from latestSpend (GET /v1/status's "spend"
+   *  field, board.ts's computeGlanceSpend) -- "…" (unknown, never a fabricated 0) until the
+   *  first real snapshot has landed. */
+  function renderGlanceStrip(tasks) {
+    setGlanceValue("glance-running", tasks.filter((t) => t.phase).length);
+    setGlanceValue("glance-needs-me", latestNeedsMeRows.length);
+    setGlanceValue("glance-blocked", tasks.filter((t) => t.status === "blocked").length);
+    setGlanceValue("glance-queued", tasks.filter((t) => t.status === "queued").length);
+    setGlanceValue("glance-merged-today", latestSpend ? latestSpend.mergedToday : "…");
+    setGlanceValue("glance-spend-today", latestSpend ? costLabel(latestSpend.spendTodayUsd) : "…");
+    setGlanceValue("glance-spend-week", latestSpend ? costLabel(latestSpend.spendWeekUsd) : "…");
+  }
+
+  /** The browser TAB TITLE carries the needs-me count (task design note) -- updated every time
+   *  latestNeedsMeRows changes (an SSE needs-human flip included: subscribeStatusStream's own
+   *  handler funnels through ingestProjection -> paintFromTasksById -> renderNeedsMe -> here). */
+  function updateTabTitle() {
+    const n = latestNeedsMeRows.length;
+    document.title = n > 0 ? \`(\${n}) \${BASE_TITLE}\` : BASE_TITLE;
+  }
+
+  /** ANOMALY EMPHASIS (criterion 3): the strip surfaces -- in the strip itself, not merely as an
+   *  ordinary count -- (a) any NOW row currently past its own phase threshold (the SAME
+   *  \`.row.anomaly\` class tickElapsed already toggles live, read back here rather than
+   *  re-deriving a second elapsed/threshold comparison), and (b) any NEEDS ME row older than
+   *  {@link NEEDS_ME_STALE_MS} (24h), using each row's own \`ts\` (task rows: escalationOpenedAt --
+   *  see renderNeedsMe's own note on why never startedAt). Never force-reopens a collapsed
+   *  section (same "emphasis, never a forced reopen" doctrine as updateNeedsMeArrivalEmphasis) --
+   *  this only ever touches the strip's own banner. */
+  function updateGlanceAnomaly() {
+    const anomalousNow = document.querySelectorAll("#now-list li.row.anomaly").length > 0;
+    const now = Date.now();
+    const staleNeedsMe = latestNeedsMeRows.some((r) => {
+      if (!r.ts) return false;
+      const t = Date.parse(r.ts);
+      return Number.isFinite(t) && now - t > NEEDS_ME_STALE_MS;
+    });
+    const el = document.getElementById("glance-anomaly");
+    if (!el) return;
+    if (!anomalousNow && !staleNeedsMe) {
+      el.hidden = true;
+      el.textContent = "";
+      return;
+    }
+    const parts = [];
+    if (anomalousNow) parts.push("a run is past its phase threshold");
+    if (staleNeedsMe) parts.push("a needs-me item has waited over 24h");
+    el.hidden = false;
+    el.textContent = \`⚠ \${parts.join(" · ")}\`;
+  }
+
+  /** \`n\` bytes -> "12.3 GB" -- the disk-free figure's own display formatter. */
+  function formatBytes(n) {
+    if (typeof n !== "number" || !Number.isFinite(n)) return "unknown";
+    const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+    let v = n;
+    let i = 0;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i += 1;
+    }
+    return \`\${v.toFixed(1)} \${units[i]}\`;
+  }
+
+  /** The daemon-health widget's LIVE next-poll countdown -- ticked off the SAME 1s interval
+   *  tickElapsed already runs on (never a second clock), reading the \`data-next-poll-at\`
+   *  attribute renderDaemonHealth stamps below. */
+  function tickDaemonCountdown() {
+    const el = document.getElementById("dh-next-poll");
+    if (!el) return;
+    const at = el.dataset.nextPollAt;
+    if (!at) return;
+    const ms = Date.parse(at) - Date.now();
+    el.textContent = ms <= 0 ? "due now" : \`in \${formatElapsed(ms)}\`;
+  }
+
+  /** Renders GET /v1/daemon-health's body -- last poll, disk free, and rate-limit remaining are
+   *  static per fetch; the next-poll countdown is stamped as a target instant (\`data-next-poll-
+   *  at\`) and ticked live by {@link tickDaemonCountdown}. Every field renders "unknown" (never a
+   *  placeholder number) when its own source could not be read this fetch (h.<field> absent). */
+  function renderDaemonHealth(h) {
+    setGlanceValue("dh-last-poll", h.lastPollTs ? formatRelative(h.lastPollAgeMs) : "unknown");
+    const nextPollEl = document.getElementById("dh-next-poll");
+    if (nextPollEl) {
+      if (h.nextPollAt) {
+        nextPollEl.dataset.nextPollAt = h.nextPollAt;
+        tickDaemonCountdown();
+      } else {
+        delete nextPollEl.dataset.nextPollAt;
+        nextPollEl.textContent = "unknown";
+      }
+    }
+    setGlanceValue("dh-disk-free", h.diskFreeBytes != null ? formatBytes(h.diskFreeBytes) : "unknown");
+    setGlanceValue("dh-rate-limit", h.rateLimitRemaining != null ? String(h.rateLimitRemaining) : "unknown");
+  }
+
   /** The cache-restore path (W1-T154): ingest the cached snapshot's tasks/side-data and paint
    *  through the SAME \`paintFromTasksById\` a live update uses. */
   function paintSnapshot(snapshot) {
     for (const t of snapshot.tasks ?? []) ingestProjection(t);
+    // W1-T159: restore the GLANCE strip's spend figures from the cache too -- otherwise a cold
+    // reload would flash "…" for merged-today/spend-today/spend-this-week even while every OTHER
+    // stale-but-real number (task counts) restores immediately from this SAME cached snapshot.
+    latestSpend = snapshot.spend ?? null;
     latestFeedbackEntries = snapshot.feedbackEntries ?? [];
     latestInboxReady = snapshot.inboxReady ?? [];
     latestInboxDrafting = snapshot.inboxDrafting ?? [];
@@ -1341,6 +1515,12 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
         if (marker) marker.hidden = !anomalous;
       }
     });
+    // W1-T159: the GLANCE strip's anomaly banner and the daemon-health countdown both tick off
+    // this SAME 1s clock -- never a second setInterval. The NOW-row anomaly flags above can flip
+    // between paints purely from wall-clock time passing (a run crossing its threshold with no
+    // new ledger line at all), so the banner is re-evaluated every tick too, not only on a paint.
+    updateGlanceAnomaly();
+    tickDaemonCountdown();
   }
 
   // ── NEEDS ME — escalations + inbox, one-line ask + action ───────────────────────────────
@@ -1424,7 +1604,12 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     for (const t of tasks) {
       if (!t.needsHuman) continue;
       shown.add(t.taskId);
-      rows.push({ key: \`task:\${t.taskId}\`, html: needsMeTaskRowHtml(t), taskId: t.taskId, ts: t.startedAt });
+      // W1-T159: the escalation's OWN open time (escalationOpenedAt), not the triggering run's
+      // startedAt -- those name DIFFERENT events (a run can start hours before the escalation
+      // that follows it fires), and the GLANCE strip's own >24h anomaly emphasis needs the real
+      // one. Falls back to startedAt only for a row with no escalationOpenedAt at all (should not
+      // happen for a real needsHuman row, but never let a missing field erase the row's age).
+      rows.push({ key: \`task:\${t.taskId}\`, html: needsMeTaskRowHtml(t), taskId: t.taskId, ts: t.escalationOpenedAt ?? t.startedAt });
     }
     for (const e of feedbackEntries ?? []) {
       if (e.status === "grilling") rows.push({ key: \`fbg:\${e.id}\`, html: needsMeGrillHtml(e), ts: e.ts });
@@ -1436,6 +1621,13 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     tickElapsed(); // paint the DRAFTING row's freshly-(re)rendered elapsed span immediately, same as renderNow does
     updateNeedsMeArrivalEmphasis(rows);
     finishSectionRender("needs-me", rows.length === 0, () => needsMeSummaryText(rows));
+    // W1-T159: the GLANCE strip's needs-me count AND the tab-title badge both read THIS exact
+    // set (task escalations + feedback grilling/proposed + inbox ready/drafting) -- never a
+    // second, independently-derived needs-me tally that could disagree with the section itself.
+    latestNeedsMeRows = rows;
+    renderGlanceStrip(tasks);
+    updateTabTitle();
+    updateGlanceAnomaly();
     return shown;
   }
   /** W1-T223: "a NEEDS ME item arriving while the section is collapsed must not be silently
@@ -2516,6 +2708,9 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     touchFreshness();
     const tasks = statusSnap.tasks ?? [];
     for (const t of tasks) ingestProjection(t);
+    // W1-T159: "spend" rides on this SAME /v1/status response (board.ts's computeGlanceSpend) --
+    // no extra round trip for merged-today/spend-today/spend-this-week.
+    latestSpend = statusSnap.spend ?? null;
     paintFromTasksById();
     // W1-T163: ONE-TIME, off this load's first snapshot only -- see renderRecapSection's doc for
     // why re-rendering off every later poll's own (by-then-mostly-consumed) recap would be wrong.
@@ -2525,18 +2720,26 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     }
 
     try {
-      const [recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus] = await Promise.all([
+      const [recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus, daemonHealth] = await Promise.all([
         getJson("/v1/recent").catch(() => ({ entries: [] })),
         getJson("/v1/drain/preview?max=5").catch(() => ({ cards: [] })),
         getJson("/v1/feedback").catch(() => ({ entries: [] })),
         getJson("/v1/inbox").catch(() => ({ ready: [], drafting: [] })),
         getJson("/v1/control/status").catch(() => ({ paused: false, stopped: false, quietHours: false })),
+        // W1-T159: the daemon-health widget's own fetch -- a fetch failure here must never break
+        // the rest of the refresh (same catch-and-degrade convention as every sibling above); the
+        // widget just keeps showing its last-known values (or "…" pre-first-success).
+        getJson("/v1/daemon-health").catch(() => null),
       ]);
       latestFeedbackEntries = feedbackSnap.entries ?? [];
       latestInboxReady = inboxSnap.ready ?? [];
       latestInboxDrafting = inboxSnap.drafting ?? [];
       latestUpNextCards = upNextSnap.cards ?? [];
       latestRecentEntries = recentSnap.entries ?? [];
+      if (daemonHealth) {
+        latestDaemonHealth = daemonHealth;
+        renderDaemonHealth(daemonHealth);
+      }
       // W1-T223: ONLY here (never off the status-only pass above) -- see finishSectionRender's
       // own doc for why defaulting/summarizing off still-empty feedback/inbox/up-next/recent
       // arrays would be exactly the "second, disagreeing derivation" this task forbids.
@@ -2555,6 +2758,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
       writeSnapshotCache({
         generated_at: statusSnap.generated_at,
         tasks,
+        spend: latestSpend,
         recentEntries: latestRecentEntries,
         upNextCards: latestUpNextCards,
         feedbackEntries: latestFeedbackEntries,
@@ -2804,10 +3008,19 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
   };
 
   const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
+  const daemonHealthDeps: DaemonHealthDeps = {
+    ledgerPath: deps.ledgerPath,
+    diskPath: deps.daemonHealth?.diskPath ?? deps.fleetControlRoot,
+    statfs: deps.daemonHealth?.statfs,
+    exec: deps.daemonHealth?.exec,
+    now: deps.daemonHealth?.now,
+    defaultPollIntervalMs: deps.daemonHealth?.defaultPollIntervalMs,
+  };
 
   return [
     buildStatusRoute(deps.board, lastSeen),
     buildRecentRoute(deps.board),
+    buildDaemonHealthRoute(daemonHealthDeps),
     buildControlStatusRoute(fleetControlDeps),
     buildPauseRoute(fleetControlDeps),
     buildResumeRoute(fleetControlDeps),
