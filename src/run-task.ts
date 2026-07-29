@@ -5185,6 +5185,13 @@ export async function daemonCommand(
      *  throttled. Mirrors {@link drainCommand}'s identical seam so a test can prove which
      *  gateway the daemon derives from without a network round-trip. */
     githubFactory?: (owner: string, repo: string) => GitHub;
+    /** Injectable self-target repo root. Defaults to this module's real `repoRoot`. A
+     *  self-target run with no explicit `--plan` derives its plan path from THIS value
+     *  (`resolveDaemonTarget`) and then git-syncs it (`syncPlanOrRefuse`) — a test that
+     *  needs to drive that sync's REFUSED/WARNING branches (its own `say` callback,
+     *  W1-T143) without a real `git fetch origin` against this repo's actual remote
+     *  points it at a local git fixture instead. Production never passes this. */
+    repoRoot?: string;
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE any spawn/lock — `rmd daemon install --dry-run` silently
@@ -5218,13 +5225,15 @@ export async function daemonCommand(
   const statusPath = join(config.root, "state", "status.json");
   const self = resolveOwnerRepo();
   const reposDir = join(config.root, "repos");
+  // deps.repoRoot's doc (above, W1-T143) explains why this is injectable at all.
+  const effectiveRepoRoot = deps.repoRoot ?? repoRoot;
 
   // ── REPO TARGETING + self-target GUARD (fix/daemon-repo-targeting). The daemon must know
   // WHICH repo to drain, EXPLICITLY — the old code read the plan from its own checkout and
   // hardcoded the "remudero" gateway, so an unattended run silently drained its own source.
   // --repo/--plan choose the gateway + plan source; W1-T12d targets the sandbox explicitly.
   const resolved = resolveDaemonTarget(
-    { selfOwner: self.owner, selfRepo: self.repo, repoRoot, reposDir },
+    { selfOwner: self.owner, selfRepo: self.repo, repoRoot: effectiveRepoRoot, reposDir },
     rest,
   );
   if ("error" in resolved) {
