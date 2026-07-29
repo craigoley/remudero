@@ -6,5 +6,15 @@
   "killed": 70,
   "timeout": 12,
   "survived": 26,
-  "noCoverage": 0
+  "noCoverage": 0,
+  "nightly": {
+    "_comment": "Nightly full-scope floor (W1-T133, .github/workflows/mutation-nightly.yml). A SIBLING of this file's root-level PR-gate fields above -- untouched by them, and they are untouched by it. BOOTSTRAP VALUE: unlike every other baseline number in this repo, this is NOT captured from a real run -- a real full-tree run costs ~4 hours (the reason this task exists), too expensive to execute just to seed this file. scorePct 0 means the first scheduled nightly run always passes; a human must replace this with that run's REAL measured score (scripts/mutation-nightly-scope.json's scope config decides which files it covers) as a deliberate, reviewed follow-up ratchet-up, same as any other floor bump. Never lower it to make a run pass -- raise it only when a real measured nightly score justifies it.",
+    "capturedAt": null,
+    "scopeConfig": "scripts/mutation-nightly-scope.json",
+    "scorePct": 0,
+    "killed": 0,
+    "timeout": 0,
+    "survived": 0,
+    "noCoverage": 0
+  }
 }

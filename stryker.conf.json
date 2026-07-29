@@ -3,7 +3,7 @@
   "packageManager": "npm",
   "testRunner": "command",
   "commandRunner": {
-    "command": "npm test"
+    "command": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/classify.test.ts test/block-reason.test.ts"
   },
   "mutate": ["src/lib/classify.ts"],
   "tsconfigFile": "tsconfig.stryker-unused.json",

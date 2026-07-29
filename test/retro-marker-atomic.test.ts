@@ -15,8 +15,19 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { buildGather, loadMarker, MarkerCorruptError, resolveMarkerForGather, saveMarker, type RetroMarker } from "../src/lib/retro.js";
 import { configPath } from "../src/lib/config.js";
-import { retroCommand } from "../src/run-task.js";
+import { resolveRepoRoot, retroCommand } from "../src/run-task.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+
+// run-task.ts's own module-level `repoRoot` is `resolveRepoRoot(process.argv.slice(2),
+// process.cwd())` (W1-T120: CWD-ascent via a REAL `git rev-parse --show-toplevel`, not
+// `process.cwd()` itself and not the install path -- see test/repo-root-identity.test.ts).
+// Under a plain `node --test` invocation from the repo root those two happen to be equal,
+// but they DIVERGE inside Stryker's mutation-testing sandbox (`.stryker-tmp/sandbox-*` has
+// no `.git` of its own, so git's ascent walks UP to the REAL checkout's toplevel, not the
+// sandbox copy) -- so any fixture below that assumed `process.cwd() === repoRoot` silently
+// mocked a path retroCommand never actually reads there, self-defeating the whole test.
+// Resolving it the SAME way production does keeps the fixture correct in both places.
+const REPO_ROOT_FOR_FIXTURES = resolveRepoRoot(process.argv.slice(2), process.cwd());
 
 // ── W1-T242: state/last-retro.json ATOMICITY + corrupt-vs-absent marker handling ──
 //
@@ -354,7 +365,7 @@ test("retroCommand: a follow-up dedup 'tasks' read that THROWS degrades to an em
   // repoRoot's real plan/tasks.yaml exists (existsSync is untouched, real) — only ITS
   // OWN readFileSync (loadPlan's own read) is forced to throw; every other target path
   // (ledger/LEARNINGS/mast-mapping/MASTER-PLAN.md) passes through to the real fs.
-  const tasksYamlPath = join(process.cwd(), "plan", "tasks.yaml");
+  const tasksYamlPath = join(REPO_ROOT_FOR_FIXTURES, "plan", "tasks.yaml");
   const realReadFileSync = fsDefault.readFileSync.bind(fsDefault);
   const forcedError = new Error("fixture: forced plan/tasks.yaml read failure");
   const readSpy = t.mock.method(fsDefault, "readFileSync", (target: unknown, ...rest: unknown[]) => {
@@ -392,7 +403,7 @@ test("retroCommand: a non-trivial MASTER-PLAN.md yielding ZERO proposal-bullet m
   mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
   writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
 
-  const masterPlanPath = join(process.cwd(), "MASTER-PLAN.md");
+  const masterPlanPath = join(REPO_ROOT_FOR_FIXTURES, "MASTER-PLAN.md");
   const realReadFileSync = fsDefault.readFileSync.bind(fsDefault);
   // Non-trivial (> 500 chars, the guard's own threshold) but carries NO line matching
   // the proposal-bullet regex (`^- P\d+...`) — the format-drift shape, not a genuinely

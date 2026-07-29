@@ -1,0 +1,4 @@
+{
+  "mutate": ["src/**/*.ts", "!src/**/*.test.ts"],
+  "fileCap": 2
+}
