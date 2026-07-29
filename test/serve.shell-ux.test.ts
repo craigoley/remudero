@@ -144,7 +144,21 @@ before(async () => {
   // crashed renderer surfaces as an inexplicable mid-file test failure that never reproduces on a
   // roomier local machine. Falls back to /tmp-backed shared memory instead, at a small perf cost.
   browserPromise = chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
-  browser = await browserPromise;
+  try {
+    browser = await browserPromise;
+  } catch {
+    // W1-T202 round 2: ONE bounded retry around the launch itself, after a short backoff -- round
+    // 1's --disable-dev-shm-usage did not clear a repeated, environment-only review-gate FAIL on
+    // this exact file (identical on a rerun, never reproduced locally, stressed or not -- see this
+    // task's own PR body), consistent with a transient launch crash under contention that a single
+    // retry absorbs without masking a CONSISTENTLY broken launch (a second failure still throws and
+    // fails `before`, same as today). `browserPromise` is REASSIGNED here, synchronously, before its
+    // own await -- so the teardown-safety invariant above (`after` always awaits the LATEST launch
+    // attempt, never a stale reference) holds for the retry exactly as it does for the first try.
+    await new Promise((r) => setTimeout(r, 250));
+    browserPromise = chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
+    browser = await browserPromise;
+  }
 });
 after(async () => {
   const launched = await browserPromise;

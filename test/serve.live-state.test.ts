@@ -156,7 +156,17 @@ before(async () => {
   // mid-file test failure that never reproduces on a roomier local machine. Falls back to
   // /tmp-backed shared memory instead, at a small perf cost.
   browserPromise = chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
-  browser = await browserPromise;
+  try {
+    browser = await browserPromise;
+  } catch {
+    // W1-T202 round 2: ONE bounded retry -- see the identical guard's doc comment in
+    // test/serve.shell-ux.test.ts for the full rationale. `browserPromise` is reassigned here,
+    // synchronously, before its own await, so the teardown-safety invariant above holds for the
+    // retry exactly as it does for the first attempt.
+    await new Promise((r) => setTimeout(r, 250));
+    browserPromise = chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
+    browser = await browserPromise;
+  }
 });
 after(async () => {
   const launched = await browserPromise;
