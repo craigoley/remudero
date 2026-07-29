@@ -138,7 +138,12 @@ let browser: Browser;
 // `before`'s first await, so `after` can always see it.
 let browserPromise: Promise<Browser> | undefined;
 before(async () => {
-  browserPromise = chromium.launch({ args: ["--no-sandbox"] });
+  // W1-T202 fix round: --disable-dev-shm-usage guards against a well-known headless-Chromium-in-
+  // CI crash class -- a constrained runner's small /dev/shm overflows under this file's now-
+  // heavier sequence of contexts/pages (13 tests, several opening a fresh context each), and a
+  // crashed renderer surfaces as an inexplicable mid-file test failure that never reproduces on a
+  // roomier local machine. Falls back to /tmp-backed shared memory instead, at a small perf cost.
+  browserPromise = chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
   browser = await browserPromise;
 });
 after(async () => {
@@ -515,7 +520,7 @@ test("W1-T223: the section header is the whole click/keyboard toggle target -- t
 // ── W1-T202: the console bookmark is READ-ONLY after the token-hygiene fix -- the shell must
 // accept the write token once and hold it client-side, or every NEEDS-ME write action 401s ──────
 
-test("W1-T202: a console loaded with the READ token alone renders the board fully and shows every write affordance as explicitly unavailable with a stated reason, rather than armed", async () => {
+test("a console loaded with the READ token alone renders the board fully and shows every write affordance as explicitly unavailable with a stated reason, rather than rendering it armed", async () => {
   const root = tmpRoot();
   await withShell(fixtureDeps(root), async (base) => {
     const page = await openShell(base); // READ_TOKEN only -- no write token seeded anywhere
@@ -552,7 +557,7 @@ test("W1-T202: a console loaded with the READ token alone renders the board full
   });
 });
 
-test("W1-T202: the write token is never written into the URL, a ledger line, or a log line at any point in the flow", async () => {
+test("the write token is never written into the URL, a ledger line, or a log line at any point in the flow — asserted against the rendered shell and the emitted ledger steps", async () => {
   const root = tmpRoot();
   const deps = fixtureDeps(root);
   await withShell(deps, async (base) => {
@@ -587,7 +592,7 @@ test("W1-T202: the write token is never written into the URL, a ledger line, or 
   });
 });
 
-test("W1-T202: clearing the stored write token returns the console to the read-only rendering without a reload", async () => {
+test("clearing the stored write token returns the console to the read-only rendering without a reload", async () => {
   const root = tmpRoot();
   await withShell(fixtureDeps(root), async (base) => {
     const page = await openShell(base, WRITE_TOKEN); // simulates a tab that already holds it

@@ -150,7 +150,12 @@ let browser: Browser;
 // `before`'s first await, so `after` can always see it.
 let browserPromise: Promise<Browser> | undefined;
 before(async () => {
-  browserPromise = chromium.launch({ args: ["--no-sandbox"] });
+  // W1-T202 fix round: --disable-dev-shm-usage guards against a well-known headless-Chromium-in-
+  // CI crash class -- a constrained runner's small /dev/shm overflows under this file's now-
+  // heavier sequence of contexts/pages, and a crashed renderer surfaces as an inexplicable
+  // mid-file test failure that never reproduces on a roomier local machine. Falls back to
+  // /tmp-backed shared memory instead, at a small perf cost.
+  browserPromise = chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
   browser = await browserPromise;
 });
 after(async () => {
@@ -818,7 +823,7 @@ test("skeleton lifecycle: an EMPTY successful poll (no in-flight tasks, no escal
 // ── W1-T202: the console bookmark is READ-ONLY after the token-hygiene fix -- the shell must
 // accept the write token once and hold it client-side, or every NEEDS-ME write action 401s ──────
 
-test("W1-T202: a write action issued with a client-held write token succeeds while the URL still carries only the read token — the bookmark never gains write power", async () => {
+test("a write action issued with a client-held write token succeeds while the URL still carries only the read token — the bookmark never gains write power", async () => {
   const root = tmpRoot();
   const deps = fixtureDeps(root, [task({ id: "W1-T1" })]);
   await withShell(deps, async (base) => {
