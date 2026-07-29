@@ -105,6 +105,33 @@ test("READ-SIDE also refuses an unstamped line, even if it reached the file some
   assert.equal(loaded[0].note, "stamped, fine");
 });
 
+test("READ-SIDE skips a CORRUPT (non-JSON) line without crashing the read", () => {
+  const root = tmpRoot();
+  mkdirSync(join(root, "plan"), { recursive: true });
+  appendFileSync(storePath(root), "this is not json at all — a torn/hand-mangled line\n");
+  appendFileSync(
+    storePath(root),
+    JSON.stringify({ ts: "2026-07-01T00:00:00.000Z", taskId: "W1-T1", author: "craig", note: "good line" }) + "\n",
+  );
+  const loaded = loadOperatorNotesForTask(root, "W1-T1");
+  assert.equal(loaded.length, 1, "the corrupt line is skipped; the surrounding good line still loads");
+  assert.equal(loaded[0].note, "good line");
+});
+
+test("appendOperatorNote WRITE-SIDE returns false (never throws) when the store path cannot be written", () => {
+  const root = tmpRoot();
+  // Make the store path itself a DIRECTORY so appendFileSync throws (EISDIR) — the catch must
+  // report the failure as `false`, matching worker.ts's appendQuestion non-blocking contract.
+  mkdirSync(storePath(root), { recursive: true });
+  const written = appendOperatorNote(root, {
+    ts: "2026-07-01T00:00:00.000Z",
+    taskId: "W1-T1",
+    author: "craig",
+    note: "x",
+  });
+  assert.equal(written, false, "a filesystem write failure is caught and reported as false, never thrown");
+});
+
 // ── render: verbatim injection with author+timestamp, provenance-cited ─────────────────────
 
 test("renderOperatorNotes: renders the note VERBATIM with its author and timestamp, provenance-cited", () => {
@@ -275,6 +302,20 @@ test("POST /v1/operator-notes/add: is write-scoped — a read-only token gets 40
     const res = await post(base, "/v1/operator-notes/add", READ_TOKEN, { taskId: "W1-T1", author: "craig", note: "x" });
     assert.equal(res.status, 403);
   });
+});
+
+test("POST /v1/operator-notes/add: a write failure surfaces as 500 write_failed and ledgers nothing", async () => {
+  const root = tmpRoot();
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  // Force appendOperatorNote to fail from inside the handler: make the store path a directory.
+  mkdirSync(storePath(root), { recursive: true });
+  await withRoutes(root, async (base) => {
+    const res = await post(base, "/v1/operator-notes/add", WRITE_TOKEN, { taskId: "W1-T1", author: "craig", note: "x" });
+    assert.equal(res.status, 500);
+    const body = (await res.json()) as { error: string };
+    assert.equal(body.error, "write_failed");
+  });
+  assert.equal(readLedgerLines(ledgerPath).length, 0, "a failed write must ledger nothing (the panel line is emitted only after a successful write)");
 });
 
 test("GET /v1/operator-notes?taskId=…: read-scoped, returns only that task's notes", async () => {
