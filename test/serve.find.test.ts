@@ -137,19 +137,29 @@ async function withShell<T>(deps: ServeDeps, fn: (base: string) => Promise<T>): 
 }
 
 let browser: Browser;
+// Teardown closes the launch PROMISE, never the resolved handle. When `--test-name-pattern`
+// (the review floor's own `unit test: <name>` dialect) matches ZERO tests in this file, the
+// runner still runs both hooks, but fires `after` ~0.2ms in -- while `chromium.launch()` is
+// still in flight and `browser` is therefore still undefined.
+//
+// W1-T178 (round 2) read that undefined as "`before` was skipped" and guarded with
+// `if (browser)`. OBSERVED 2026-07-29, that diagnosis was wrong and the guard was
+// insufficient: `before` IS entered and the browser DOES launch. The guard only suppressed
+// the `hookFailed` throw; it left the browser that finished launching a moment later with no
+// reference to close it. Its `--remote-debugging-pipe` holds the worker's event loop open, so
+// the run HANGS until the harness kills it, leaking a chrome-headless-shell process and a
+// playwright_chromiumdev_profile-* directory every single time.
+//
+// Awaiting the promise closes the browser that actually launched. `browserPromise` is
+// assigned synchronously, before `before`'s first await, so `after` can always see it.
+let browserPromise: Promise<Browser> | undefined;
 before(async () => {
-  browser = await chromium.launch({ args: ["--no-sandbox"] });
+  browserPromise = chromium.launch({ args: ["--no-sandbox"] });
+  browser = await browserPromise;
 });
 after(async () => {
-  // W1-T178 (round 2): `after` runs even when `--test-name-pattern` (the
-  // review floor's own `unit test: <name>` dialect, review.ts's
-  // parseTestTarget) matched none of THIS file's tests -- `before` above is
-  // then skipped, so `browser` was never assigned, and an unconditional
-  // `browser.close()` throws (hookFailed), turning the WHOLE glob's process
-  // exit code nonzero and (pre-fix, review.ts's nameFilteredOutcome) risking
-  // every OTHER criterion's name-filtered proof in the same review being
-  // misread as failed by collateral noise from a file it never touched.
-  if (browser) await browser.close();
+  const launched = await browserPromise;
+  await launched?.close();
 });
 
 async function openShell(base: string, token: string = READ_TOKEN): Promise<Page> {
