@@ -484,6 +484,92 @@ test("parseAcceptanceBlock: a bullet with no `|` keeps the whole line as the cla
   assert.equal(c[0].proof, "");
 });
 
+// ── W1-T134: the multi-line `- claim: "..."` / `  proof: "..."` house format ──
+// (#277/#280 — the pre-fix parser captured ONLY the first claim, with an empty
+// proof, and broke on the indented "proof:" continuation line.)
+
+test("parseAcceptanceBlock: a body with N multi-line claim/proof pairs yields N criteria, not 1", () => {
+  const body = [
+    "## Acceptance",
+    '- claim: "alpha does a thing"',
+    '  proof: "alpha proof pasted here"',
+    '- claim: "beta does another thing"',
+    '  proof: "beta proof pasted here"',
+    '- claim: "gamma does a third thing"',
+    '  proof: "gamma proof pasted here"',
+  ].join("\n");
+  const c = parseAcceptanceBlock(body);
+  assert.equal(c.length, 3);
+  assert.deepEqual(c, [
+    { claim: "alpha does a thing", proof: "alpha proof pasted here" },
+    { claim: "beta does another thing", proof: "beta proof pasted here" },
+    { claim: "gamma does a third thing", proof: "gamma proof pasted here" },
+  ]);
+});
+
+test("parseAcceptanceBlock: the single-line `claim | proof` pipe form is unchanged by the multi-line fix", () => {
+  const c = parseAcceptanceBlock("Acceptance:\n- alpha | proof a\n- beta | proof b");
+  assert.deepEqual(c, [
+    { claim: "alpha", proof: "proof a" },
+    { claim: "beta", proof: "proof b" },
+  ]);
+});
+
+test("parseAcceptanceBlock: a planted-false second claim in a multi-line body FAILS review — the pre-fix parser silently dropped it", () => {
+  const body = [
+    "## Acceptance",
+    '- claim: "rmd lint-plan reports clean"',
+    '  proof: "rmd lint-plan --base origin/main reports 0 failing"',
+    '- claim: "the moon is made of green cheese"',
+    '  proof: "gh api craters/composition returns cheese-content=100 percent"',
+  ].join("\n");
+  const criteria = parseAcceptanceBlock(body);
+  assert.equal(criteria.length, 2, "both claims must parse, not just the first");
+
+  const report = "rmd lint-plan --base origin/main reports 0 failing";
+  // Pre-fix, only criterion 1 was ever parsed — judging it alone wrongly passes,
+  // which is exactly the hole this task closes.
+  assert.equal(judgeReview([criteria[0]], { diff: "", report }).state, "success");
+  // Post-fix, both criteria are judged; the unsubstantiated second (false) claim
+  // fails the review.
+  assert.equal(judgeReview(criteria, { diff: "", report }).state, "failure");
+});
+
+test("parseAcceptanceBlock: genuine block termination is unchanged", () => {
+  // A new heading after the bullets ends the block; its prose is not a criterion.
+  const withHeading = [
+    "Acceptance:",
+    "- alpha | proof a",
+    "- beta | proof b",
+    "",
+    "## Verification",
+    "Some prose describing how this was checked, not a criterion.",
+  ].join("\n");
+  assert.equal(parseAcceptanceBlock(withHeading).length, 2);
+
+  // The Remudero-Task trailer ends the block.
+  const withTrailer = [
+    "Acceptance:",
+    '- claim: "alpha"',
+    '  proof: "proof a"',
+    "",
+    "Remudero-Task: none",
+  ].join("\n");
+  assert.equal(parseAcceptanceBlock(withTrailer).length, 1);
+
+  // An indented line that is NOT a "proof:" continuation still ends the block
+  // rather than being swallowed into the preceding criterion.
+  const withStrayProse = [
+    "Acceptance:",
+    '- claim: "alpha"',
+    '  proof: "proof a"',
+    "  a stray indented line that is not a proof continuation",
+  ].join("\n");
+  const c = parseAcceptanceBlock(withStrayProse);
+  assert.equal(c.length, 1);
+  assert.equal(c[0].proof, "proof a");
+});
+
 // ── GOLDEN FIXTURE: PR #12 — a CI-green single-doc PR that satisfies zero criteria.
 // PR #12 shipped ONLY docs/review-gate.md, passed CI, reported verdict=merged, and
 // did none of W1-T1D's actual work. It is the canonical reviewer test case: if the

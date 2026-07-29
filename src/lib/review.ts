@@ -1831,12 +1831,28 @@ export function parseReviewerVerdicts(text: string, count: number): (boolean | u
 
 // ── Acceptance criteria from a PR body (manual plan/doc PRs) ───────────────
 
+/** Strip a single layer of matching `"..."` or `'...'` quotes, if present. */
+function stripQuotes(s: string): string {
+  const m = s.match(/^(["'])([\s\S]*)\1$/);
+  return m ? m[2] : s;
+}
+
 /**
  * Parse an `Acceptance:` block out of a PR body, for manual plan/doc PRs that
  * carry no task id. The block is a header line — `Acceptance:` (optionally as
- * markdown `**Acceptance:**` or `## Acceptance`) — followed by bullet lines, each
- * `- <claim> | <proof>` (the `|` separates claim from proof). Parsing stops at the
- * first blank line or non-bullet line after the bullets begin.
+ * markdown `**Acceptance:**` or `## Acceptance`) — followed by bullet lines. Two
+ * bullet shapes are recognized, both index-aligned one-per-criterion:
+ *
+ *   1. Single-line: `- <claim> | <proof>` (the `|` separates claim from proof; no
+ *      `|` keeps the whole line as the claim with an empty proof).
+ *   2. Multi-line (the house format actually emitted by plan/doc PRs, #277/#280):
+ *      `- claim: "<claim>"` followed by an INDENTED, non-bullet `proof: "<proof>"`
+ *      continuation line, which attaches to that same criterion rather than ending
+ *      the block — so a body with N such pairs yields N criteria, not just the first.
+ *
+ * Parsing stops at the first line, after the bullets begin, that is neither a new
+ * bullet nor a recognized continuation of the current one — a blank line, a new
+ * heading, a trailer, or a resumed prose paragraph.
  *
  * Returns `[]` when there is no block — and an empty criteria list FAILS CLOSED in
  * {@link judgeReview} (nothing to judge is never a pass). A manual PR that wants to
@@ -1860,13 +1876,27 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
     if (bullet) {
       const item = bullet[1].trim();
       const pipe = item.indexOf("|");
-      const claim = (pipe >= 0 ? item.slice(0, pipe) : item).trim();
+      let claim = (pipe >= 0 ? item.slice(0, pipe) : item).trim();
       const proof = pipe >= 0 ? item.slice(pipe + 1).trim() : "";
+      // "- claim: <text>" form (no `|`): strip the label and any surrounding quotes.
+      const claimLabel = claim.match(/^claim\s*:\s*(.*)$/i);
+      if (claimLabel) claim = stripQuotes(claimLabel[1].trim());
       if (claim) criteria.push({ claim, proof });
       continue;
     }
+    // An indented, non-bullet "proof:" line right under a "- claim: ..." bullet is a
+    // CONTINUATION of that criterion, not a terminator — attach it and keep scanning
+    // for further bullets instead of dropping every criterion after the first.
+    if (criteria.length > 0 && /^\s+\S/.test(line)) {
+      const proofLabel = line.trim().match(/^proof\s*:\s*(.*)$/i);
+      const last = criteria[criteria.length - 1];
+      if (proofLabel && !last.proof) {
+        last.proof = stripQuotes(proofLabel[1].trim());
+        continue;
+      }
+    }
     // A blank line before any bullet is tolerated (header, then a gap, then bullets);
-    // once bullets have begun, any blank or non-bullet line ends the block.
+    // once bullets have begun, any blank or unrecognized line ends the block.
     if (line.trim() === "" && criteria.length === 0) continue;
     break;
   }
