@@ -1990,12 +1990,17 @@ export async function runCreditBackfill(
 // third leg of the escalation lifecycle (creation W1-T8, dedup-at-creation W1-T195,
 // CLOSURE here), and it rides the SAME sweep seam + same level-triggered doctrine as
 // runCreditBackfill above: the CALLER re-derives each OPEN needs-human issue's referenced
-// task via the #737/#741-corrected deriveStatus and hands the derivation here. A RESOLVED
-// (merged) referent is closed with a citation naming the resolver; a still-LIVE referent is
-// left untouched; and an INDETERMINATE derivation (W1-T119 — GitHub could not be read) is
-// left untouched too, never closed on a read this pass could not trust. Bounded per cycle so
-// a large backlog drains gradually rather than in a burst of `gh issue close` calls, and
-// every close is ledgered.
+// task via the #737/#741-corrected deriveStatus and hands the derivation here. A referent is
+// TERMINAL — and the escalation auto-closes, naming the resolution — either because it MERGED
+// (deriveStatus's `merged`, which also covers a task CREDITED via an operator correction, W1-T162)
+// or because its PR CLOSED WITHOUT MERGING (deriveStatus's `prState`, e.g. superseded/abandoned —
+// the sweep's own stale/superseded PR-close, W1-T77, is the common producer of this shape;
+// W1-T162 closed this gap, which previously left a closed-but-unmerged referent reading as
+// falsely "still live" forever). A still-LIVE referent (PR open/blocked-pending-fix, or a task
+// with no PR yet) is left untouched; an INDETERMINATE derivation (W1-T119 — GitHub could not be
+// read) is left untouched too, never closed on a read this pass could not trust. Bounded per
+// cycle so a large backlog drains gradually rather than in a burst of `gh issue close` calls,
+// and every close is ledgered.
 
 /** How many stale escalations one reconcile pass may close — bounds the write burst so a
  *  large backlog (the observed 94-open shape) drains across several sweeps, never one. */
@@ -2009,6 +2014,10 @@ export interface EscalationReconcileCandidate {
   /** The referent's state, derived by the caller via the #737/#741-corrected deriveStatus. */
   derived: {
     merged: boolean;
+    /** W1-T162: the referenced PR CLOSED WITHOUT MERGING (deriveStatus's `prState`, raw
+     *  "CLOSED") — a terminal, resolved-negative disposition (superseded/abandoned), distinct
+     *  from an open/blocked-pending-fix PR that is still live. Mutually exclusive with `merged`. */
+    closed?: boolean;
     /** W1-T119: the read that produced this derivation FAILED — treat as neither resolved nor live. */
     indeterminate?: boolean;
     prUrl?: string;
@@ -2045,17 +2054,21 @@ export interface EscalationReconcileDeps {
 }
 
 /**
- * The closing citation posted on a reconciled issue — NAMES THE RESOLVER (the merged PR) so
- * the closure is legible, never a silent disappearance. Pure + exported for a direct assertion.
+ * The closing citation posted on a reconciled issue — NAMES THE RESOLUTION (the merged PR, or
+ * the closed-without-merging PR that superseded/abandoned it) so the closure is legible, never
+ * a silent disappearance. Pure + exported for a direct assertion.
  */
 export function renderReconcileCloseComment(c: EscalationReconcileCandidate): string {
-  const pr = c.derived.prNumber !== undefined ? `#${c.derived.prNumber}` : (c.derived.prUrl ?? "its merged PR");
+  const pr = c.derived.prNumber !== undefined ? `#${c.derived.prNumber}` : (c.derived.prUrl ?? "its PR");
   const link = c.derived.prUrl ? ` (${c.derived.prUrl})` : "";
   const via = c.derived.source ? ` — derived via \`${c.derived.source}\`` : "";
+  const resolution = c.derived.merged
+    ? `is now **merged**, resolved by ${pr}${link}${via}`
+    : `is now **closed without merging** (${pr}${link}${via}) — superseded or abandoned, no longer a live blocker`;
   return [
     "Auto-closed by the escalation-lifecycle reconciler (fb-1784756088300-6a481e).",
     "",
-    `The referenced task **${c.taskId}** is now **merged**, resolved by ${pr}${link}${via}. This escalation's blocker is gone.`,
+    `The referenced task **${c.taskId}** ${resolution}. This escalation's blocker is gone.`,
     "",
     "_Level-triggered closure from GitHub-derived state (the #737/#741 derivation). If the decision this issue raised is still open, reopen it._",
   ].join("\n");
@@ -2086,12 +2099,14 @@ export async function runEscalationReconcile(
       results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "left-indeterminate" });
       continue;
     }
-    // STILL LIVE: the referent has not resolved — leave the escalation untouched.
-    if (!c.derived.merged) {
+    // STILL LIVE: the referent is neither merged nor closed-without-merging — leave the
+    // escalation untouched (an open PR, or a task with no PR yet, is a live decision).
+    if (!c.derived.merged && !c.derived.closed) {
       results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "left-live" });
       continue;
     }
-    // RESOLVED. Bounded per cycle: once the cap is reached, the rest drain on the next sweep.
+    // RESOLVED (merged OR closed-without-merging). Bounded per cycle: once the cap is
+    // reached, the rest drain on the next sweep.
     if (closed >= maxCloses) {
       results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "deferred-cap" });
       continue;
@@ -2117,11 +2132,15 @@ export async function runEscalationReconcile(
       results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "close-failed" });
       continue;
     }
+    // W1-T162: name the resolution kind in the ledger too, not just the GitHub comment —
+    // "merged" (or a task credited via correction) vs. "closed" (closed without merging).
+    const resolution = c.derived.merged ? "merged" : "closed";
     appendLine(deps.ledgerPath, {
       run_id: deps.runId,
       task_id: c.taskId,
       step: "sweep.escalation_closed",
       issue_url: c.issueUrl,
+      resolution,
       pr_url: c.derived.prUrl,
       pr_number: c.derived.prNumber,
       source: c.derived.source,
@@ -2129,6 +2148,7 @@ export async function runEscalationReconcile(
     log("sweep.escalation_closed", {
       issue_url: c.issueUrl,
       task_id: c.taskId,
+      resolution,
       pr_url: c.derived.prUrl,
       pr_number: c.derived.prNumber,
     });

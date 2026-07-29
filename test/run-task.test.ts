@@ -5861,6 +5861,54 @@ test("buildEscalationReconcileCandidates: an open needs-human issue whose refere
   assert.equal(cands[0].derived.prNumber, 574);
 });
 
+test("buildEscalationReconcileCandidates (W1-T162): an open needs-human issue whose referenced task's PR is CLOSED WITHOUT MERGING yields a candidate carrying derived.closed=true, derived.merged=false", () => {
+  const issues: IssueGateway = {
+    create: () => "",
+    listOpen: () => [
+      { number: 91, url: "https://github.com/o/r/issues/91", title: "[BLOCKED] W1-T190", body: "**Class:** BLOCKED\n**Task:** W1-T190\n\ndetail" },
+    ],
+  };
+  const github = buildBatchedGithub("o", "r", {
+    fetchAll: () => [
+      { number: 580, url: "https://github.com/o/r/pull/580", state: "CLOSED", headRefName: "run-W1-T190-1784000000000", body: "" },
+    ],
+  });
+  const t = {
+    id: "W1-T190", title: "W1-T190", repo: "remudero", depends_on: [], type: "implement",
+    verify: "auto", risk: "medium", status: "queued", attempts: 0, origin: "architect", acceptance: [], pr: 580,
+  } as unknown as Task;
+  const plan: Plan = { tasks: [t], byId: new Map([["W1-T190", t]]) };
+  const cands = buildEscalationReconcileCandidates("o", "r", plan, reconLedger(), undefined, { issues, github });
+  assert.equal(cands.length, 1);
+  assert.equal(cands[0].taskId, "W1-T190");
+  assert.equal(cands[0].derived.merged, false, "a closed-without-merge referent is not merged");
+  assert.equal(cands[0].derived.closed, true, "the referenced PR closed without merging — terminal, not live");
+  assert.equal(cands[0].derived.prNumber, 580);
+});
+
+test("buildEscalationReconcileCandidates (W1-T162, falsifier): an open needs-human issue whose referenced PR is still OPEN yields derived.merged=false AND derived.closed=false — a live decision stays live", () => {
+  const issues: IssueGateway = {
+    create: () => "",
+    listOpen: () => [
+      { number: 92, url: "https://github.com/o/r/issues/92", title: "[BLOCKED] W1-T191", body: "**Class:** BLOCKED\n**Task:** W1-T191\n\ndetail" },
+    ],
+  };
+  const github = buildBatchedGithub("o", "r", {
+    fetchAll: () => [
+      { number: 581, url: "https://github.com/o/r/pull/581", state: "OPEN", headRefName: "run-W1-T191-1784000000000", body: "" },
+    ],
+  });
+  const t = {
+    id: "W1-T191", title: "W1-T191", repo: "remudero", depends_on: [], type: "implement",
+    verify: "auto", risk: "medium", status: "queued", attempts: 0, origin: "architect", acceptance: [], pr: 581,
+  } as unknown as Task;
+  const plan: Plan = { tasks: [t], byId: new Map([["W1-T191", t]]) };
+  const cands = buildEscalationReconcileCandidates("o", "r", plan, reconLedger(), undefined, { issues, github });
+  assert.equal(cands.length, 1);
+  assert.equal(cands[0].derived.merged, false);
+  assert.equal(cands[0].derived.closed, false, "an OPEN PR must never be derived as closed-without-merge");
+});
+
 test("buildEscalationReconcileCandidates: an issue with no `**Task:**` line, or one whose task is not in the plan, yields NO candidate (left to a human)", () => {
   const github = buildBatchedGithub("o", "r", { fetchAll: () => [] });
   const issues: IssueGateway = {

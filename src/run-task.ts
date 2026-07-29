@@ -6493,12 +6493,20 @@ export function buildEscalationReconcileCandidates(
     const task = plan.byId.get(taskId);
     if (!task) continue; // task not in this plan — leave untouched
     const proj = deriveStatus(task, deps);
+    // W1-T162: a referent whose PR CLOSED WITHOUT MERGING is also terminal — superseded or
+    // abandoned, no longer a live blocker — distinct from an open/blocked-pending-fix PR.
+    // deriveStatus's `prState` carries the raw GitHub state through unchanged (status.ts's
+    // `fromPrState` only ever sets `status: "blocked"` for a raw "closed" state, so checking
+    // `prState` directly here is the same signal, made explicit rather than inferred from
+    // `status`). Mutually exclusive with `merged` by construction (fromPrState never sets both).
+    const closedWithoutMerge = !proj.merged && proj.prState?.toUpperCase() === "CLOSED";
     candidates.push({
       issueUrl: issue.url,
       issueNumber: issue.number,
       taskId,
       derived: {
         merged: proj.merged,
+        closed: closedWithoutMerge,
         indeterminate: proj.indeterminate,
         prUrl: proj.prUrl,
         prNumber: proj.prNumber,
