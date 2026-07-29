@@ -1,0 +1,27 @@
+id: fb-1785237573352-6c7b7e
+ts: 2026-07-28T11:19:33.353Z
+raw: "NON-FUNCTIONAL COMPLIANCE PROGRAM — the gate wall is already strong
+  (CodeQL, Semgrep, osv-scanner, depcruise, jscpd, mutation-ratchet, leak-grep,
+  containment-probe, claims, commitlint) and this filing names the GAPS, one
+  task each at triage: (1) LICENSE GATE — no dependency-license policy exists;
+  an allowed-list check (MIT/Apache-2.0/BSD family; flag copyleft) over the
+  lockfile, CI-blocking on new deps only. (2) OSV-SCANNER IS SKIPPING — observed
+  'skipping 3s' on recent PRs; investigate why and make it a real, required gate
+  or document the exemption; a security scanner that silently skips is worse
+  than absent. (3) PERF-BUDGET RATCHET — no performance gate exists; a
+  coverage-ratchet-style check timing pinned hot-path fixtures (deriveStatus
+  projection over the 274-task plan, serve board render) with a tolerance band,
+  so a 10x projection regression reds the PR that caused it instead of surfacing
+  as daemon slowness weeks later (the rotation-storm lesson generalized). (4)
+  CONSOLE A11Y — the Run/Drain buttons shipped with aria-pressed by instinct;
+  generalize: axe-core assertions in the existing serve Playwright suite,
+  blocking on new violations. (5) DOCS GATE — a new operator-facing rmd verb
+  without an operator-guide section fails lint (the docs-are-a-gated-artifact
+  learning, enforced); the console-url and status verbs are the first customers.
+  (6) SECRETS-AT-REST AUDIT — one recon task: enumerate every token/credential
+  currently in state/, plists, and the ledger; assert each against the serve.ts
+  rotation doctrine; file per-finding."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
