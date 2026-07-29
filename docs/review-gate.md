@@ -129,6 +129,58 @@ gh api --method PATCH \
   -f 'contexts[]=ci' -f 'contexts[]=remudero-review'
 ```
 
+## Re-aggregation on a same-sha rerun (W1-T261)
+
+`ci-gate`'s aggregation used to be a single pass: wait for every `REQUIRED` name
+to go terminal, fail on any real failure, then exit forever — nothing ever
+re-read that sha again. OBSERVED #729 (2026-07-24): `coverage-ratchet` was
+FAILURE at ci-gate's 17:11 read and SUCCESS at 17:18, seven minutes after
+ci-gate had already concluded and held a stale failure against a check that
+was, by then, green. Only a manual `ci-gate` re-run or a fresh sha cleared it.
+Same class blocked #634.
+
+**Investigated trigger, ruled out by a documented platform fact, not an
+assumption.** The obvious fix is a `check_run: types: [completed]` trigger that
+re-drives the aggregation whenever a member check finishes. GitHub's own docs
+rule this out: *"To prevent recursive workflows, this event does not trigger
+workflows if the check run's check suite was created by GitHub Actions"*
+([events-that-trigger-workflows#check_run](https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#check_run),
+corroborated by [community discussion #148873](https://github.com/orgs/community/discussions/148873)).
+Every name in `ci-gate`'s `REQUIRED` list — `ci`, `lint-plan`, `coverage-ratchet`,
+`mutation-ratchet`, and the rest — is itself a GitHub Actions check suite, so a
+`check_run` listener would never fire for the checks this gate actually
+aggregates. Merging a probe workflow to prove the negative live would have
+needed a direct push to `main`'s default-branch workflow set (`check_run`
+listeners only arm off the default branch) outside the normal PR-gated flow,
+so this finding rests on GitHub's own published contract for the event instead.
+
+**The fallback that shipped** — ci-gate re-aggregates the same head sha automatically,
+inside the *same* `pull_request`-triggered
+`ci-gate` run (`.github/workflows/ci-gate.yml`), no new trigger, no new sha, no
+manual action: when step 2 finds a real failure, ci-gate re-reads the deduped
+check-run list once more inside a bounded grace window
+(`GRACE_WINDOW_SECONDS` / `GRACE_POLL_INTERVAL_SECONDS`, default 600s / 20s —
+comfortably covering the #729 seven-minute gap) before concluding. A re-read
+only updates the failing-name set once every `REQUIRED` name is back to a
+terminal `completed` state (mirroring step 1's own wait discipline), so an
+in-flight rerun that hasn't finished yet can never be misread as a pass by
+landing on a still-`in_progress` snapshot. If the grace window elapses with a
+real failure still standing, ci-gate fails exactly as it always did — the
+re-read only ever *retracts* a stale red, never launders a fresh one. See
+`test/ci-gate-reaggregate.test.ts` for the fixture-driven proof, run the same
+way `test/ci-gate-dedupe.test.ts` (W1-T123) drives the real script as a
+subprocess.
+
+Because no new trigger surface was added, there is nothing for `ci-gate`'s own
+completion to re-trigger — the existing `IGNORE` list (`["ci-gate"]`) remains
+the single source excluding it from the required/failing set, unchanged and
+still doing that job across the new grace-window re-read path too — and no
+burst of member completions can fan out into multiple `ci-gate` runs: each
+`pull_request`-triggering push still produces exactly one `ci-gate` run, and
+the pre-existing `concurrency: group: ci-gate-<pr>, cancel-in-progress: true`
+(unchanged by this task) already keeps that run's completion terminal, never
+cancelled.
+
 ## Live-proof evidence (W1-T24b)
 
 Final protection state, confirmed live:
