@@ -213,6 +213,21 @@ export interface SweepPolicy {
    */
   wipLimit: number;
   /**
+   * W1-T148 COST GOVERNOR (the $206/60-run W1-T1 spin-loop incident) — a DAILY
+   * spend ceiling, in notional USD, on DISPATCH ONLY: at or over this many
+   * ledgered dollars spent so far TODAY, NEW dispatch is deferred; drainage
+   * (sweep/heal/arm/merge, at ANY depth) is never gated by it — a half-finished
+   * PR must still merge, a block must still escalate, and stranding in-flight
+   * work to save money is a worse failure than the spend itself. A ROW in this
+   * table (rule 2, policy-as-data), never a constant near a dispatch call site
+   * — see {@link checkCostGovernor}, this policy's consumer. Distinct from
+   * `budget_usd`/`DEFAULT_BUDGET_USD` (run-task.ts), the PER-RUN hard cap on a
+   * single worker spawn: this is the CROSS-RUN, daily total the per-run cap
+   * cannot see (60 runs each safely under their own per-run cap is exactly how
+   * the $206 incident accumulated).
+   */
+  dailyCostCeilingUsd: number;
+  /**
    * W1-T114 (the 30-issue predicate-storm fix) — the STALENESS CEILING for the
    * WAIT disposition: required checks pending/queued with the newest check's
    * start younger than this many minutes -> wait, no action; at or beyond it
@@ -226,12 +241,21 @@ export interface SweepPolicy {
   pendingCeilingMinutes: number;
 }
 
-/** The default policy — 14-day stale window, 2 fix strikes (mirrors fixStrikeCap), 10-PR WIP limit, 60-minute pending ceiling. */
+/**
+ * The default policy — 14-day stale window, 2 fix strikes (mirrors
+ * fixStrikeCap), 10-PR WIP limit, 60-minute pending ceiling, $150/day cost
+ * ceiling. The $150 default is a SAFE, fail-closed guess (rule 2: an absent
+ * policy value falls back to a bounded default, never unbounded spend) — well
+ * under the $206/60-run W1-T1 incident it exists to catch, while generous
+ * enough that ordinary single-day operation (well under DEFAULT_BUDGET_USD's
+ * $100 per-run cap, run once or twice) does not trip it by accident.
+ */
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   staleDays: 14,
   strikeCap: 2,
   clarify: DEFAULT_CLARIFY_POLICY,
   wipLimit: 10,
+  dailyCostCeilingUsd: 150,
   pendingCeilingMinutes: 60,
 };
 
@@ -1650,6 +1674,114 @@ export function logQueueGovernorDeferral(
     step: "dispatch_deferred_wip",
     observed_open_count: result.observedOpenCount,
     wip_limit: result.wipLimit,
+  });
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// W1-T148 — the COST GOVERNOR (the $206/60-run W1-T1 spin-loop incident). A
+// spin loop burned ~$206 over ~60 runs with no DAILY ceiling anywhere — every
+// individual run stayed safely under its own per-run `budget_usd` cap
+// (run-task.ts's `DEFAULT_BUDGET_USD`), so that per-run backstop never fired;
+// nothing was watching the CROSS-RUN total. Pairs with W1-T130's
+// CANNOT-OBSERVE-MEANS-WAIT polarity — the same "when in doubt, WAIT not
+// spend" doctrine, here applied to budget rather than observability, and the
+// architectural TWIN of the W1-T121 queue governor just above: a WIP limit
+// bounds intake by COUNT, this bounds intake by DOLLARS. Same asymmetry, same
+// reason: {@link checkCostGovernor} is a pure predicate its caller consults
+// ONLY on the NEW-task dispatch path — it is NEVER consulted by `runSweep`
+// above, which arms/fixes/closes/escalates already-open PRs at ANY day-cost,
+// ungated. A governor that also throttled drainage would strand in-flight
+// work to save money — a worse failure than the spend itself (a half-finished
+// PR must still merge, a block must still escalate).
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Sums ONE ledgered dollar figure per RUN (keyed by `run_id`), for every run
+ * with at least one ledger line whose `ts` falls on `now`'s UTC calendar day,
+ * then totals those per-run figures — the day's ledgered cost.
+ *
+ * PER-RUN, NOT PER-LINE (avoids double-counting): a run's `verdict` line (or,
+ * absent one — e.g. a run still in flight — its first `cost_usd`-bearing
+ * line) already carries that run's RUNNING TOTAL cost, the same "running
+ * total, not incremental" fact board.ts's `liveRunSpend` documents for
+ * `budget.warning`/`verdict` lines. Summing every `cost_usd`-bearing line
+ * for a run (verdict AND its own implement.done/fix.done contributors) would
+ * count that run's spend twice over; taking exactly one figure per run_id —
+ * mirroring retro.ts's `gatherRuns` costLine precedent (verdict line
+ * preferred, else the first cost_usd line seen) — does not.
+ *
+ * A line with no `ts` string, or a `ts` outside today, is excluded; a run
+ * whose only in-window lines carry no `cost_usd` contributes 0.
+ */
+export function deriveDayCostUsd(lines: ReadonlyArray<Record<string, unknown>>, now: number): number {
+  const day = new Date(now).toISOString().slice(0, 10); // "YYYY-MM-DD", UTC
+  const byRun = new Map<string, Record<string, unknown>[]>();
+  for (const line of lines) {
+    const ts = typeof line.ts === "string" ? line.ts : undefined;
+    if (!ts || !ts.startsWith(day)) continue;
+    const runId = typeof line.run_id === "string" ? line.run_id : undefined;
+    if (!runId) continue;
+    const bucket = byRun.get(runId);
+    if (bucket) bucket.push(line);
+    else byRun.set(runId, [line]);
+  }
+  let total = 0;
+  for (const runLines of byRun.values()) {
+    const verdictLine = runLines.find((l) => l.step === "verdict");
+    const costLine = verdictLine ?? runLines.find((l) => typeof l.cost_usd === "number");
+    if (costLine && typeof costLine.cost_usd === "number") total += costLine.cost_usd;
+  }
+  return total;
+}
+
+/** {@link checkCostGovernor}'s verdict for one dispatch-path consultation. */
+export interface CostGovernorResult {
+  /** true ⇒ the dispatch path MUST defer — do not open a new run this pass. */
+  deferred: boolean;
+  /** The day's ledgered cost (notional USD) the decision was made against. */
+  observedDayCostUsd: number;
+  /** The policy ceiling consulted (`policy.dailyCostCeilingUsd`, carried for the ledger line). */
+  ceilingUsd: number;
+}
+
+/**
+ * The cost governor's pure predicate: at or over `policy.dailyCostCeilingUsd`
+ * ledgered dollars spent today, NEW dispatch is deferred; below it, dispatch
+ * proceeds normally. THRESHOLDS ARE POLICY DATA (rule 2) —
+ * `policy.dailyCostCeilingUsd` is the ONLY thing that moves this decision.
+ * Never call this from `runSweep` or any of its deps (arm/dispatchFix/close/
+ * escalate) — see the asymmetry note above.
+ */
+export function checkCostGovernor(
+  dayCostUsd: number,
+  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+): CostGovernorResult {
+  return {
+    deferred: dayCostUsd >= policy.dailyCostCeilingUsd,
+    observedDayCostUsd: dayCostUsd,
+    ceilingUsd: policy.dailyCostCeilingUsd,
+  };
+}
+
+/**
+ * A throttled pass is NOT silent: the real dispatch path calls this exactly
+ * when {@link checkCostGovernor} returns `deferred: true`, writing one
+ * `dispatch_deferred_budget` ledger line naming the day-cost + ceiling — so a
+ * quiet daemon (nothing runnable) stays distinguishable from a
+ * BUDGET-THROTTLED one (runnable work exists, held back by the governor).
+ */
+export function logCostGovernorDeferral(
+  result: CostGovernorResult,
+  appendLine: (path: string, line: Record<string, unknown> & { run_id: string; task_id: string; step: string }) => void,
+  ledgerPath: string,
+  runId: string,
+): void {
+  appendLine(ledgerPath, {
+    run_id: runId,
+    task_id: "GOVERNOR",
+    step: "dispatch_deferred_budget",
+    observed_day_cost_usd: result.observedDayCostUsd,
+    daily_cost_ceiling_usd: result.ceilingUsd,
   });
 }
 
