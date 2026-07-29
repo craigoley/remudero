@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -7,8 +7,11 @@ import { appendLedger } from "../src/lib/ledger.js";
 import {
   acquireReviewStatusLock,
   decideReviewStatusPost,
+  execGhStatusPost,
   lastPostedReviewStatusFromLedger,
+  postReviewStatus,
   postReviewStatusGuarded,
+  POST_REVIEW_STATUS_MAX_ATTEMPTS,
   reviewEvidenceStrength,
   ReviewStatusLockTimeoutError,
   type PostedReviewStatusRecord,
@@ -416,6 +419,210 @@ test("postReviewStatusGuarded: ACCEPTANCE 3 — N concurrent posters on one PR s
     // verdict is still the executed failure the winner posted.
     const finalPrior = lastPostedReviewStatusFromLedger(lines, taskId);
     assert.deepEqual(finalPrior, { headSha: sha, state: "failure", evidence: "executed" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── postReviewStatus — W1-T135 retry-with-backoff on a transient gh 5xx ─────
+//
+// LIVE INCIDENT (plan/tasks.yaml W1-T135): a bare execFileSync("gh", ...) with
+// no error handling meant a single transient 503 posting the status threw and
+// CRASHED run W1-T132-1784508142857 mid-fix-rung (escalation #283). These
+// fixtures drive `exec`/`sleep` — postReviewStatus's own injection points —
+// never a real `gh` spawn, mirroring every other DI test in this file.
+
+/** Shapes a fake execFileSync failure the way `gh api` actually reports HTTP
+ * errors — the message lands on stderr, exactly what {@link ghErrorText}
+ * (review.ts) extracts from a real thrown error. */
+function ghHttpError(message: string): Error & { stderr: string; status: number } {
+  // Real execFileSync/execSync failures fold stderr into the thrown Error's
+  // own `.message` (Node's documented behavior) as well as exposing it via
+  // `.stderr` — mirrored here so assertions against either field hold.
+  const e = new Error(`Command failed: gh api ...\n${message}`) as Error & { stderr: string; status: number };
+  e.stderr = message;
+  e.status = 1;
+  return e;
+}
+
+test("postReviewStatus: ACCEPTANCE 1 — a transient 503 returned twice then a 200 posts on the third attempt", async () => {
+  let attempt = 0;
+  const sleeps: number[] = [];
+  await postReviewStatus(
+    { owner: "o", repo: "r", sha: "sha1", state: "success" },
+    {
+      exec: () => {
+        attempt++;
+        if (attempt < 3) throw ghHttpError("gh: Service Unavailable (HTTP 503)");
+      },
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    },
+  );
+  assert.equal(attempt, 3, "the gateway was retried until the third attempt's 200 succeeded");
+  assert.equal(sleeps.length, 2, "backoff waited before EACH retry, never after the eventual success");
+});
+
+test("postReviewStatus: ACCEPTANCE 2 — a 503 on every attempt exhausts retries and throws (never a silent hang or retry storm)", async () => {
+  let attempt = 0;
+  await assert.rejects(
+    () =>
+      postReviewStatus(
+        { owner: "o", repo: "r", sha: "sha1", state: "success" },
+        {
+          exec: () => {
+            attempt++;
+            throw ghHttpError("gh: Service Unavailable (HTTP 503)");
+          },
+          sleep: async () => {},
+        },
+      ),
+    /503/,
+  );
+  assert.equal(
+    attempt,
+    POST_REVIEW_STATUS_MAX_ATTEMPTS,
+    `gives up after exactly POST_REVIEW_STATUS_MAX_ATTEMPTS (${POST_REVIEW_STATUS_MAX_ATTEMPTS}) attempts`,
+  );
+});
+
+test("postReviewStatus: ACCEPTANCE 3 — a permanent 404 is classified non-transient and is NEVER retried (surfaced on the first attempt)", async () => {
+  let attempt = 0;
+  let slept = false;
+  await assert.rejects(
+    () =>
+      postReviewStatus(
+        { owner: "o", repo: "r", sha: "sha1", state: "success" },
+        {
+          exec: () => {
+            attempt++;
+            throw ghHttpError("gh: Not Found (HTTP 404)");
+          },
+          sleep: async () => {
+            slept = true;
+          },
+        },
+      ),
+    /404/,
+  );
+  assert.equal(attempt, 1, "a permanent 4xx must not trigger a retry storm");
+  assert.equal(slept, false, "no backoff wait ever happens for a non-transient error");
+});
+
+test("postReviewStatus: a permanent 422 is classified non-transient and is not retried either", async () => {
+  let attempt = 0;
+  await assert.rejects(() =>
+    postReviewStatus(
+      { owner: "o", repo: "r", sha: "sha1", state: "failure" },
+      {
+        exec: () => {
+          attempt++;
+          throw ghHttpError("gh: Unprocessable Entity (HTTP 422)");
+        },
+        sleep: async () => {},
+      },
+    ),
+  );
+  assert.equal(attempt, 1);
+});
+
+// ── execGhStatusPost — the real (uninjected) `gh` wrapper postReviewStatus's
+// `exec` defaults to. PATH-stubbed exactly like run-task.test.ts's
+// `realArmDeps` coverage probe, so this one-line real invocation earns its
+// own DA: hit instead of only ever running behind the injectable `exec`
+// every other test above supplies (W1-T135, diff-coverage ratchet).
+
+test("execGhStatusPost: the real execFileSync(\"gh\", ...) wrapper runs against a PATH-stubbed gh and returns normally on success", () => {
+  const bin = mkdtempSync(join(tmpdir(), "gh-status-stub-ok-"));
+  writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    assert.doesNotThrow(() => execGhStatusPost(["api", "-X", "POST", "repos/o/r/statuses/sha1"], process.env));
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test("execGhStatusPost: a failing gh stub throws with the stub's stderr surfaced", () => {
+  const bin = mkdtempSync(join(tmpdir(), "gh-status-stub-fail-"));
+  writeFileSync(join(bin, "gh"), '#!/bin/sh\necho "gh: Service Unavailable (HTTP 503)" >&2\nexit 1\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    assert.throws(
+      () => execGhStatusPost(["api", "-X", "POST", "repos/o/r/statuses/sha1"], process.env),
+      /HTTP 503/,
+    );
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+// ── postReviewStatusGuarded — W1-T135 ledger-and-continue on post failure ───
+
+test("postReviewStatusGuarded: ACCEPTANCE 2 — a post that throws after exhausting retries is ledgered as review.post_failed (carrying the verdict) and the call returns {posted:false} WITHOUT throwing", async () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const result = await postReviewStatusGuarded({
+      owner: "o",
+      repo: "r",
+      sha: "sha1",
+      state: "success",
+      description: "remudero-review: PASS — 3/3 criteria met",
+      taskId: "W1-T135X",
+      evidence: "executed",
+      ledgerPath,
+      runId: "run-9",
+      fetchLifecycle: () => NOT_MERGED,
+      post: () => {
+        throw ghHttpError("gh: Service Unavailable (HTTP 503)");
+      },
+    });
+
+    assert.equal(result.posted, false, "the run continues instead of crashing on the unhandled throw");
+    assert.match(result.reason ?? "", /review\.post_failed/);
+
+    const failed = readLedgerLines(ledgerPath).find((l) => l.step === "review.post_failed");
+    assert.ok(failed, "the unposted verdict must be ledgered — recoverable, never silently dropped");
+    assert.equal(failed?.head_sha, "sha1");
+    assert.equal(failed?.attempted_state, "success");
+    assert.equal(failed?.evidence, "executed");
+    assert.equal(failed?.description, "remudero-review: PASS — 3/3 criteria met");
+    assert.match(String(failed?.error ?? ""), /503/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("postReviewStatusGuarded: ACCEPTANCE 3 — a permanent-error post failure is ALSO ledgered as review.post_failed and does not throw", async () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const result = await postReviewStatusGuarded({
+      owner: "o",
+      repo: "r",
+      sha: "sha2",
+      state: "failure",
+      taskId: "W1-T135Y",
+      evidence: "no_evidence",
+      ledgerPath,
+      runId: "run-10",
+      fetchLifecycle: () => NOT_MERGED,
+      post: () => {
+        throw ghHttpError("gh: Not Found (HTTP 404)");
+      },
+    });
+
+    assert.equal(result.posted, false);
+    const failed = readLedgerLines(ledgerPath).find((l) => l.step === "review.post_failed");
+    assert.ok(failed);
+    assert.equal(failed?.head_sha, "sha2");
+    assert.match(String(failed?.error ?? ""), /404/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
