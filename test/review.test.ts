@@ -30,6 +30,7 @@ import {
   judgeRubric,
   judgeCriterion,
   keywordOnlyAnnotation,
+  looksLikeProseDescription,
   narrowNameFilteredArgs,
   nameFilteredOutcome,
   parseAcceptanceBlock,
@@ -1404,16 +1405,85 @@ test("nameFilteredOutcome: zero real matches on a COMPLETED run is NO-MATCH, not
   assert.equal(nameFilteredOutcome(stdout), "no-match");
 });
 
-test("judgeCriterion: a proof whose name-pattern matches NO test is not_executable (degrades to keyword floor), NOT executed_fail — and the reason names the mismatch", () => {
-  const criterion = { claim: "the widget renders densely", proof: "unit test: the widget renders densely above the fold" };
+test("judgeCriterion: a PROSE proof whose name-pattern matches NO test is not_executable (degrades to keyword floor), NOT executed_fail — and the reason names the mismatch (W1-T161/#349)", () => {
+  const criterion = {
+    claim: "the widget renders densely",
+    // The comma marks this as PROSE (looksLikeProseDescription), not a bare test
+    // name — see the fixture-table test below for the pure predicate itself.
+    proof: "unit test: the widget renders densely, that is, above the fold",
+  };
   // Report substantiates the claim's keywords, so the keyword floor is MET.
   const reportTokens = new Set(["the", "widget", "renders", "densely", "above", "fold"]);
   // Injected executor returns "no-match" — the named test does not exist in the suite.
   const v = judgeCriterion(criterion, reportTokens, undefined, { cwd: "/tmp/x", exec: () => "no-match" });
-  assert.equal(v.proof_exec, "not_executable", "a zero-match proof must NOT be executed_fail");
+  assert.equal(v.proof_exec, "not_executable", "a zero-match PROSE proof must NOT be executed_fail");
   assert.notEqual(v.proof_exec, "executed_fail");
   assert.match(v.reason, /no matching test/i, "the reason names the proof-test mismatch");
   assert.equal(v.met, true, "with keyword coverage met, the criterion is met via the floor, not hard-failed");
+});
+
+// ── W1-T161 (#349/W1-T149): the keyword fallback must not FALSE-BLOCK a
+// green-code PR — a `unit test:` proof matching zero test-names degrades to
+// not_executable ONLY when it reads as a PROSE description; a proof naming a
+// short, concrete, fabricated test name still fails (W1-T72's anti-theater
+// guard, PRESERVED). See looksLikeProseDescription's doc comment in
+// src/lib/review.ts for the full #349 incident writeup.
+
+test("looksLikeProseDescription: a fixture table of {prose->true, bare-name->false} — a pure, deterministic shape check, no model call", () => {
+  // PROSE — the real #349/W1-T149 fixture (plan/tasks.yaml:5540), a paraphrase
+  // of the passing "P29(ii) the W1-T29 x10 spin shape: …" test, worded
+  // completely differently: long, with an em dash and a parenthetical aside.
+  assert.equal(
+    looksLikeProseDescription(
+      "a seeded task dispatched N times with no new owned PR trips the per-task circuit breaker at " +
+        "N+1 — exactly one needs-human escalation naming the loop, and zero further dispatches " +
+        "(the W1-T29 x10 spin shape)",
+    ),
+    true,
+    "long + em dash + parenthetical ⇒ prose",
+  );
+  // PROSE — short but carries a comma, so it reads as a clause, not a title.
+  assert.equal(looksLikeProseDescription("renders the widget, densely, above the fold"), true, "a comma ⇒ prose");
+  // PROSE — no punctuation, but long enough that it reads as a description.
+  assert.equal(
+    looksLikeProseDescription("a completely uninterrupted run of plain words describing behavior at length"),
+    true,
+    "length alone (>60 chars, no punctuation) ⇒ prose",
+  );
+  // BARE TEST NAME — short, one plain clause, no sentence punctuation.
+  assert.equal(looksLikeProseDescription("renders the widget correctly"), false, "short + no punctuation ⇒ bare name");
+  assert.equal(looksLikeProseDescription("EEXIST falls through to read"), false, "short + no punctuation ⇒ bare name");
+});
+
+test("judgeCriterion: a proof naming a short, concrete, FABRICATED test name is still executed_fail — W1-T72's test-theater guard is not weakened by the prose carve-out", () => {
+  const criterion = { claim: "the widget renders correctly", proof: "unit test: renders the widget correctly" };
+  // Report keyword-claims it (would pass the old keyword-only floor).
+  const reportTokens = new Set(["renders", "the", "widget", "correctly"]);
+  const v = judgeCriterion(criterion, reportTokens, undefined, { cwd: "/tmp/x", exec: () => "no-match" });
+  assert.equal(v.proof_exec, "executed_fail", "a bare fabricated test name must still FAIL, never silently degrade");
+  assert.equal(v.met, false, "the anti-theater guard overrides keyword coverage, exactly like any other executed_fail");
+  assert.match(v.reason, /does not exist/i);
+});
+
+test("judgeCriterion (W1-T161 falsifier): the #349 fixture — a real PASSING test under a different name — yields NO block, reproducing the live incident and proving the fix", () => {
+  // The exact proof text recorded on plan/tasks.yaml:5540 (W1-T149's own third
+  // acceptance criterion), verbatim.
+  const criterion = {
+    claim: "a seeded task dispatched N times with no new owned PR trips the per-task circuit breaker",
+    proof:
+      "unit test: a seeded task dispatched N times with no new owned PR trips the per-task circuit " +
+      "breaker at N+1 — exactly one needs-human escalation naming the loop, and zero further dispatches " +
+      "(the W1-T29 x10 spin shape)",
+  };
+  const reportTokens = new Set(["seeded", "task", "dispatched", "circuit", "breaker", "escalation", "dispatches"]);
+  // The real test lives under a DIFFERENT title ("P29(ii) the W1-T29 x10 spin
+  // shape: …"), so --test-name-pattern against this paraphrase matches zero —
+  // the injected executor reproduces that observed shape.
+  const v = judgeCriterion(criterion, reportTokens, undefined, { cwd: "/tmp/x", exec: () => "no-match" });
+  // FALSIFIER: the pre-fix path returned executed_fail here, hard-blocking a
+  // green-code PR until a human re-reviewed it by hand (#349's own stuck state).
+  assert.notEqual(v.proof_exec, "executed_fail", "the #349 stuck class must not recur");
+  assert.equal(v.proof_exec, "not_executable");
 });
 
 // ── W1-T112 round-4: a name-filtered proof scopes the WHOLE suite glob (100+ files, several
@@ -2233,8 +2303,10 @@ test("fast-fail: the no-match a fast-failed proof returns is the SAME outcome th
   // The value of the fast path is that it reaches an outcome that ALREADY exists and is
   // already handled — no new verdict, no new state. Judge the criterion through the real
   // judgeCriterion with an executor pinned to the fast path's answer.
+  // (W1-T161: this proof body carries a comma, so it reads as PROSE, not a bare
+  // fabricated test name — the bare-name/executed_fail split is covered separately above.)
   const verdict = judgeCriterion(
-    { claim: "the widget is wired", proof: "unit test: a title that appears in no test file at all" },
+    { claim: "the widget is wired", proof: "unit test: a title that, worded exactly this way, appears in no test file at all" },
     new Set(["the", "widget", "is", "wired", "title", "appears", "test", "file"]),
     undefined,
     { cwd: "/nonexistent", exec: () => "no-match" },
