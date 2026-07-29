@@ -21,7 +21,10 @@ import { dirname } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { appendLedger, type LedgerLine } from "./ledger.js";
 import type { Lifecycle, LearningEntry } from "./learnings.js";
+import { resolveMountForClass, type Mounts } from "./mounts.js";
 import type { Task } from "./plan.js";
+import { utcWeekWindowMs } from "./sweep.js";
+import { DEFAULT_TASK_CLASS } from "./task-class.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
 import type { QuestionEntry } from "./worker.js";
 
@@ -250,6 +253,87 @@ export function aggregateByClass(runs: RunSummary[]): ClassCalibration[] {
     });
   }
   out.sort((a, b) => (a.taskClass < b.taskClass ? -1 : a.taskClass > b.taskClass ? 1 : 0));
+  return out;
+}
+
+/**
+ * One resolved MODEL TIER's share of THIS WEEK's burn (P34 clause (d), W1-T250) —
+ * the routing objective made measurable: "weekly-limit burn per model class",
+ * never imputed dollars (clause c, W1-T249's ratified rule). `turnsThisWeek` is
+ * the burn unit: a subscription's weekly caps meter real usage (messages/tokens
+ * of model time), not billed dollars, so turns — not `costUsd`, which stays an
+ * IMPUTED API-equivalent meter on a Max plan — is what this share is computed
+ * from. `costUsdThisWeek` rides along for context ONLY; it never drives
+ * `shareOfWeeklyBurn`.
+ */
+export interface ModelClassWeeklyBurn {
+  /** The model tier (a `.remudero/mounts.yaml` `tiers` key) this share burned on,
+   *  or `"unresolved"` for a run whose (task_type, risk) has no route in `mounts`
+   *  at all (a config gap the retro surfaces rather than crashing on — this is
+   *  read-only reporting over a possibly-legacy ledger, never a dispatch gate). */
+  model: string;
+  runs: number;
+  turnsThisWeek: number;
+  /** Imputed-dollar context only (clause c) — never the share driver. */
+  costUsdThisWeek: number;
+  /** `turnsThisWeek / (turns burned by every resolved model this week)`; `0`
+   *  when the week burned zero turns across every model (an empty week, not a
+   *  divide-by-zero) — the SHARE of the weekly subscription window this model
+   *  tier is burning, the cross-file invariant this task ratifies. */
+  shareOfWeeklyBurn: number;
+}
+
+/**
+ * Aggregate THIS WEEK's runs by the MODEL each one resolves to per
+ * `.remudero/mounts.yaml`'s (task_type × risk × class) routing rows (W1-T167,
+ * read via {@link resolveMountForClass}) — the genuinely atomic cross-file
+ * invariant P34 clause (d) asserts: the routing table's per-class rows, READ
+ * by this accounting, are the SOLE source of which model a run's burn is
+ * attributed to. Neither file alone can answer "what share of this model's
+ * weekly cap did this work burn": the mounts.yaml rows alone account nothing
+ * (they are policy, not ledgered fact), and the ledger's per-run turns alone
+ * have no model to bucket against (a run logs task_type/risk/class, never the
+ * model it resolves to) — this function is the join.
+ *
+ * `now` fixes THIS WEEK to the current UTC ISO week ({@link utcWeekWindowMs},
+ * the SAME week boundary `deriveWeekCostUsd` (sweep.ts, W1-T159) uses — one
+ * shared definition of "this week", never a second one computed here). A run
+ * whose (task_type, risk) has no route in `mounts` resolves to `"unresolved"`
+ * rather than throwing: unlike a live dispatch decision, a stale/legacy ledger
+ * line must never crash the retro's own reporting over it.
+ */
+export function aggregateWeeklyBurnByModelClass(runs: RunSummary[], mounts: Mounts, now: number): ModelClassWeeklyBurn[] {
+  const [weekStart, weekEnd] = utcWeekWindowMs(now);
+  const inWeek = runs.filter((r) => {
+    const ts = Date.parse(r.startTs);
+    return Number.isFinite(ts) && ts >= weekStart && ts < weekEnd;
+  });
+  const byModel = new Map<string, RunSummary[]>();
+  for (const r of inWeek) {
+    let model = "unresolved";
+    try {
+      model = resolveMountForClass(mounts, r.type, r.risk ?? "unknown", r.taskClass ?? DEFAULT_TASK_CLASS).mount.model;
+    } catch {
+      model = "unresolved"; // no route for this run's (task_type, risk) — a config gap, surfaced not thrown
+    }
+    const arr = byModel.get(model) ?? [];
+    arr.push(r);
+    byModel.set(model, arr);
+  }
+  const totalTurns = inWeek.reduce((s, r) => s + r.numTurns, 0);
+  const out: ModelClassWeeklyBurn[] = [];
+  for (const [model, rs] of byModel) {
+    const turns = rs.reduce((s, r) => s + r.numTurns, 0);
+    const cost = rs.reduce((s, r) => s + r.costUsd, 0);
+    out.push({
+      model,
+      runs: rs.length,
+      turnsThisWeek: turns,
+      costUsdThisWeek: round(cost),
+      shareOfWeeklyBurn: totalTurns === 0 ? 0 : round(turns / totalTurns),
+    });
+  }
+  out.sort((a, b) => (a.model < b.model ? -1 : a.model > b.model ? 1 : 0));
   return out;
 }
 
@@ -848,6 +932,11 @@ export interface RetroGather {
    *  measurement half of the routing hypothesis (the table itself is in
    *  .remudero/mounts.yaml; this is what tells the retro if it's working). */
   byClass: ClassCalibration[];
+  /** P34 clause (d), W1-T250: THIS WEEK's burn, bucketed by the model tier each
+   *  run resolves to per `.remudero/mounts.yaml`'s routing rows — present ONLY
+   *  when `buildGather` was given a `mounts` table (omitted degrades this
+   *  section out entirely, never a silent empty-array "confirmed zero"). */
+  weeklyBurnByModelClass?: ModelClassWeeklyBurn[];
   verdicts: Record<string, number>;
   mergedSince: RunSummary[];
   /** The SHIPPED union (W1-T51) — ledger ∪ GitHub-derived, ownership-asserted, correction-aware. */
@@ -924,6 +1013,16 @@ export function buildGather(opts: {
    *  follow-up harvest's dedup — buildGather never reads plan/tasks.yaml or
    *  MASTER-PLAN.md itself. Omit ⇒ every follow-up mints (no dedup source). */
   openTitles?: string[];
+  /** P34 clause (d), W1-T250: the ALREADY-LOADED `.remudero/mounts.yaml` table
+   *  (buildGather never reads it from disk — same discipline as `mastMapping`
+   *  above). Omit ⇒ `weeklyBurnByModelClass` is omitted entirely, never a
+   *  silently-empty array. */
+  mounts?: Mounts;
+  /** Epoch ms defining "this week" for {@link aggregateWeeklyBurnByModelClass}
+   *  ({@link utcWeekWindowMs}) — injected so buildGather stays a pure function
+   *  of its inputs (no internal wall-clock read). Ignored when `mounts` is
+   *  omitted. */
+  now?: number;
 }): RetroGather {
   const records = parseLedger(opts.ledgerNdjson);
   const runs = gatherRuns(records);
@@ -945,6 +1044,12 @@ export function buildGather(opts: {
     totalRuns: scoped.length,
     byType: aggregateByType(scoped),
     byClass: aggregateByClass(scoped),
+    // P34 clause (d), W1-T250: computed over the FULL `runs` (never `scoped`) —
+    // "this week" is an absolute calendar window, not marker-relative, so a
+    // fresh `sinceTs` must not truncate it out from under a week already in
+    // progress. Omitted entirely (never a silently-empty array) when the
+    // caller supplied no `mounts` table.
+    ...(opts.mounts ? { weeklyBurnByModelClass: aggregateWeeklyBurnByModelClass(runs, opts.mounts, opts.now ?? Date.now()) } : {}),
     verdicts: verdictDistribution(scoped),
     mergedSince: merged,
     shipped,
@@ -1003,6 +1108,19 @@ export function classCalibrationTable(byClass: ClassCalibration[]): string {
   ].join("\n");
 }
 
+/** Render the per-model-tier weekly-burn-share table (markdown, P34 clause (d), W1-T250) —
+ *  "is the routing table actually keeping cheap work off the capable model's weekly cap". */
+export function modelClassWeeklyBurnTable(byModel: ModelClassWeeklyBurn[]): string {
+  const rows = byModel.map(
+    (m) => `| ${m.model} | ${m.runs} | ${m.turnsThisWeek} | ${(m.shareOfWeeklyBurn * 100).toFixed(1)}% | $${m.costUsdThisWeek.toFixed(3)} |`,
+  );
+  return [
+    "| model | runs | turns this week | share of weekly burn | $ this week (context only) |",
+    "|---|---|---|---|---|",
+    ...rows,
+  ].join("\n");
+}
+
 /** Render the full gather as a human/Architect-readable report. */
 export function renderGather(g: RetroGather): string {
   // W1-T132 (design ii): a throttled/errored/absent gateway must SAY SO BY NAME
@@ -1039,6 +1157,13 @@ export function renderGather(g: RetroGather): string {
     "## Calibration (BY TASK CLASS, W1-T167) — is the docs/plan-lint routing discount paying off",
     classCalibrationTable(g.byClass),
     "",
+    ...(g.weeklyBurnByModelClass
+      ? [
+          "## Weekly burn BY MODEL CLASS (P34 clause (d), W1-T250) — objective: weekly-limit burn per model class, never imputed dollars",
+          modelClassWeeklyBurnTable(g.weeklyBurnByModelClass),
+          "",
+        ]
+      : []),
     "## Merged since marker (keyed by Remudero-Task)",
     ...(g.mergedSince.length
       ? g.mergedSince.map((r) => `- ${r.taskId} → ${r.prUrl ?? "(no pr)"} · $${r.costUsd.toFixed(3)} · ${r.numTurns} turns`)

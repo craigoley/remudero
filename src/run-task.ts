@@ -4755,6 +4755,13 @@ async function retroCommand(
     }
     return lines;
   });
+  // P34 clause (d), W1-T250: loaded HERE (hoisted above its pre-existing 4816
+  // use for the Architect mount resolution below) so buildGather's weekly
+  // burn-by-model-class section (the cross-file invariant this clause
+  // ratifies) is wired live rather than shipping as an inert, never-called
+  // organ. loadMounts throws on a bad/absent table — same fail-closed
+  // discipline every other mounts.yaml read in this file already has.
+  const mountsTable = loadMounts(mountsPath(repoRoot));
   const gather = buildGather({
     ledgerNdjson,
     learningsMd,
@@ -4764,6 +4771,8 @@ async function retroCommand(
     mastMapping,
     priorMastCategoryCounts: marker?.mast_category_counts,
     openTitles: [...openTaskTitles, ...openProposalLines],
+    mounts: mountsTable,
+    now: Date.now(),
   });
   // W1-T111 (P25 iv): the approve/reframe rate is telemetry, not decoration — the field's
   // failure mode is the rubber-stamp queue, so it rides EVERY retro (cumulative, all-time,
@@ -4811,8 +4820,9 @@ async function retroCommand(
   // default. Before this, a hardcoded 40-turn cap — the SAME class of cap that walled the
   // reviewer (error_max_turns) — could wall the Architect mid-retro BEFORE it
   // staged/committed/pushed/opened the PR, leaving an empty branch that then crashed
-  // `gh pr create --fill` (no diff to fill).
-  const mountsTable = loadMounts(mountsPath(repoRoot));
+  // `gh pr create --fill` (no diff to fill). `mountsTable` is the SAME table
+  // loaded above (pre-buildGather) for the weekly-burn-by-model-class gather —
+  // one load, two uses, never a second re-read of the same file.
   const arch = architectModel(config, mountsTable); // Architect model is the mounts.yaml `architect:` row
   const wrk = workerModel(config);
   assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
