@@ -220,3 +220,59 @@ test("diff-coverage: a `process-boundary` directive whose declaration never clos
   assert.match(result.stderr.toString(), /INVALID process-boundary directive/);
   assert.match(result.stderr.toString(), /could not find the end/);
 });
+
+// ── W1-T171 round 2: type-only declarations (interface bodies, `import type`) are erased to ZERO
+// runtime JS, so under --enable-source-maps every one of their lines still gets a `DA:<line>,0`
+// record (the same source-map-preamble artifact the leading-comment carve-out above already
+// documents) -- no test can ever turn that 0 positive, so the gate must recognise them, not wait
+// for coverage that can never arrive. Unlike `process-boundary`, no directive is required: an
+// interface/type-literal body can never hide business logic, so there is no misuse risk in
+// exempting it unconditionally.
+
+test("diff-coverage: a type-only import + a brand-new interface's member lines do NOT block, even though lcov marks every one DA:0 (the type-erasure source-map artifact) -- the real function alongside them still must (and does) carry a hit", () => {
+  const result = runDiffCoverageInFixtures("typeonly-ok.lcov", "typeonly-ok.diff");
+  assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  const out = result.stdout.toString();
+  // line 1 (`import type ...`) is non-executable per-line (isNonExecutableLine) -- it never even
+  // becomes a raw violation, so it is silently skipped, the same as a blank/comment line always
+  // has been; only the interface BODY needs the range-based type-only carve-out to be logged.
+  assert.doesNotMatch(result.stderr.toString(), /typeonly-ok\.fxt:1\b/);
+  assert.match(out, /exempt \(type-only\) typeonly-ok\.fxt:3/); // export interface Foo {
+  assert.match(out, /exempt \(type-only\) typeonly-ok\.fxt:4/); // id: string;
+  assert.match(out, /exempt \(type-only\) typeonly-ok\.fxt:5/); // count: number;
+});
+
+test("diff-coverage FALSIFIER: an interface exempts ONLY its own body -- a genuinely UNENTERED function declared alongside it still BLOCKS, proving the carve-out cannot hide real business logic", () => {
+  const result = runDiffCoverageInFixtures("typeonly-mixed.lcov", "typeonly-mixed.diff");
+  assert.notEqual(result.status, 0, result.stdout?.toString());
+  assert.match(result.stdout.toString(), /exempt \(type-only\) typeonly-mixed\.fxt:1/); // interface open
+  assert.match(result.stdout.toString(), /exempt \(type-only\) typeonly-mixed\.fxt:2/); // id: string;
+  assert.match(result.stderr.toString(), /BLOCKED/);
+  assert.match(result.stderr.toString(), /typeonly-mixed\.fxt:5/); // the real, unentered function
+  assert.match(result.stderr.toString(), /typeonly-mixed\.fxt:6/);
+});
+
+test("computeTypeOnlyRanges: an `interface`/object-`type` declaration with no matching closer at its own indent is left UNEXEMPTED (fails safe, never silently widens the carve-out)", async () => {
+  const { computeTypeOnlyRanges } = await import(pathToFileURL(SCRIPT).href);
+  const ranges = computeTypeOnlyRanges("export interface Unclosed {\n  id: string;\n");
+  assert.deepEqual(ranges, []);
+});
+
+test("computeTypeOnlyRanges: a `const` object LITERAL (real runtime value, not a type declaration) is never exempted -- only `interface`/`type X = {` openers qualify", async () => {
+  const { computeTypeOnlyRanges } = await import(pathToFileURL(SCRIPT).href);
+  const ranges = computeTypeOnlyRanges("const config = {\n  retries: 3,\n};\n");
+  assert.deepEqual(ranges, []);
+});
+
+test("computeTypeOnlyRanges: an object-`type` ALIAS (`type X = { ... }`), not just `interface`, is recognised the same way -- both TS type-declaration shapes erase to zero runtime code", async () => {
+  const { computeTypeOnlyRanges } = await import(pathToFileURL(SCRIPT).href);
+  const ranges = computeTypeOnlyRanges("export type Bar = {\n  id: string;\n};\n");
+  assert.deepEqual(ranges, [
+    {
+      start: 1,
+      end: 3,
+      reason: 'interface/type-literal member -- erases to zero runtime code, can never carry a hit',
+      kind: 'type-only',
+    },
+  ]);
+});

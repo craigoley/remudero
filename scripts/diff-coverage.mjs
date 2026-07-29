@@ -137,7 +137,62 @@ export function isNonExecutableLine(text) {
   if (t.startsWith('//')) return true;
   if (t.startsWith('/*') || t.startsWith('*')) return true; // /** ... * ... *\/ furniture
   if (/^[}\)\];,]+$/.test(t)) return true; // closer-only punctuation (`};`, `})`, ...) carries no logic
+  // A type-only import (`import type { X } from "...";`) is erased COMPLETELY at transpile --
+  // it is unambiguous (unlike a value import, which runs for its side effects) and carries no
+  // runtime code under any circumstance, so it is safe to recognise per-line with no surrounding
+  // context (see computeTypeOnlyRanges below for the analogous interface/type-literal BODY case,
+  // which needs brace-matching context to distinguish from a real object literal).
+  if (/^import\s+type\b/.test(t)) return true;
   return false;
+}
+
+/**
+ * The line ranges of a TypeScript `interface`/object-`type` declaration -- W1-T171's
+ * dispatch-overlap.ts (a brand-new file whose whole surface is `export interface`/`import type`)
+ * false-blocked here first: an interface body compiles to ZERO runtime JS, so under
+ * `--enable-source-maps` every one of its member lines still gets a `DA:<line>,0` record (lcov
+ * "instruments" a line that literally cannot execute, the same source-map artifact
+ * `isNonExecutableLine`'s comment/blank carve-out above already documents for a file's leading
+ * doc comment) -- no amount of additional test writing can ever turn that 0 into a positive hit,
+ * so treating it as a real coverage gap would block the PR forever. Unlike the comment/blank
+ * cases, a bare line like `task: string;` is NOT safely recognisable in isolation (an object
+ * literal property or a class field initializer can look identical) -- it is only safe once we
+ * know, from the surrounding brace structure, that it sits inside an `interface X { ... }` or
+ * `type X = { ... }` declaration, never inside a runtime value. This mirrors
+ * `computeBoundaryRanges`'s brace-matching shape exactly (same repo-wide uniform-indent brace
+ * style), just with no directive required: an interface/type-literal body can NEVER carry
+ * business logic, so -- unlike `// diff-cov: process-boundary` -- there is no misuse risk in
+ * exempting it unconditionally.
+ * @param {string} fileText
+ * @returns {Array<{start: number, end: number, reason: string, kind: 'type-only'}>}
+ */
+export function computeTypeOnlyRanges(fileText) {
+  const lines = fileText.split('\n');
+  const ranges = [];
+  const OPEN = /^(\s*)(?:export\s+)?(?:declare\s+)?interface\s+\S.*\{\s*$/;
+  const TYPE_OPEN = /^(\s*)(?:export\s+)?type\s+\S+[^={]*=\s*\{\s*$/;
+  const CLOSER = /^(\s*)\}/;
+  for (let i = 0; i < lines.length; i++) {
+    const m = OPEN.exec(lines[i]) ?? TYPE_OPEN.exec(lines[i]);
+    if (!m) continue;
+    const indent = m[1];
+    let end = -1;
+    for (let k = i + 1; k < lines.length; k++) {
+      const cm = CLOSER.exec(lines[k]);
+      if (cm && cm[1] === indent) {
+        end = k;
+        break;
+      }
+    }
+    if (end === -1) continue; // no matching closer found -- leave unexempted, the gate stays safe
+    ranges.push({
+      start: i + 1,
+      end: end + 1,
+      reason: 'interface/type-literal member -- erases to zero runtime code, can never carry a hit',
+      kind: 'type-only',
+    });
+  }
+  return ranges;
 }
 
 /**
@@ -223,7 +278,7 @@ export function computeBoundaryRanges(fileText) {
       });
       continue;
     }
-    ranges.push({ start, end: endLine, reason, directiveLine });
+    ranges.push({ start, end: endLine, reason, directiveLine, kind: 'process-boundary' });
   }
   return { ranges, errors };
 }
@@ -273,9 +328,12 @@ function main(argv) {
   const added = addedLinesByFile(diffText);
   const rawViolations = findUncoveredAddedLines(added, lcovHits);
 
-  // Resolve `// diff-cov: process-boundary` directives, but ONLY for files that actually have an
-  // uncovered added line -- an unused directive on an otherwise-clean file exempts nothing and is
-  // left unvalidated. A malformed/abused directive on a file WITH violations fails the gate CLOSED.
+  // Resolve `// diff-cov: process-boundary` directives PLUS automatic type-only-declaration
+  // ranges (interface/type-literal bodies -- see computeTypeOnlyRanges), but ONLY for files that
+  // actually have an uncovered added line -- an unused directive on an otherwise-clean file
+  // exempts nothing and is left unvalidated. A malformed/abused directive on a file WITH
+  // violations fails the gate CLOSED; type-only ranges need no directive (no misuse risk -- an
+  // interface/type-literal body can never carry business logic).
   const filesWithViolations = new Set(rawViolations.map((v) => v.slice(0, v.lastIndexOf(':'))));
   const rangesByFile = new Map();
   const directiveErrors = [];
@@ -287,7 +345,9 @@ function main(argv) {
       continue; // file not on disk (renamed/deleted) -- nothing to exempt, violation stands
     }
     const { ranges, errors } = computeBoundaryRanges(text);
-    if (ranges.length > 0) rangesByFile.set(file, ranges);
+    const typeOnlyRanges = computeTypeOnlyRanges(text);
+    const allRanges = [...ranges, ...typeOnlyRanges];
+    if (allRanges.length > 0) rangesByFile.set(file, allRanges);
     for (const e of errors) directiveErrors.push({ file, ...e });
   }
 
@@ -305,13 +365,14 @@ function main(argv) {
     const file = v.slice(0, idx);
     const ln = Number(v.slice(idx + 1));
     const hit = (rangesByFile.get(file) ?? []).find((r) => ln >= r.start && ln <= r.end);
-    if (hit) exempt.push({ v, reason: hit.reason });
+    if (hit) exempt.push({ v, reason: hit.reason, kind: hit.kind ?? 'process-boundary' });
     else blocking.push(v);
   }
 
   // No silent caps: every exempted line is printed with its declared reason, so each use of the
-  // directive is auditable in the CI log as well as diff-visible to the review gate and the human.
-  for (const e of exempt) console.log(`diff-coverage: exempt (process-boundary) ${e.v} -- ${e.reason}`);
+  // directive (or the automatic type-only carve-out) is auditable in the CI log as well as
+  // diff-visible to the review gate and the human.
+  for (const e of exempt) console.log(`diff-coverage: exempt (${e.kind}) ${e.v} -- ${e.reason}`);
 
   if (blocking.length > 0) {
     console.error(

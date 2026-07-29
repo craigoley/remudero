@@ -16,6 +16,7 @@ import {
   renderSummary,
   resumeCommand,
   runDrain,
+  runnableCandidates,
   type CuratedSelection,
   type DrainSummary,
   type MergedSet,
@@ -86,6 +87,42 @@ test("nextRunnable: first in file order whose deps are merged; skips verify:huma
   assert.equal(nextRunnable(plan, mergedSetOf("A"))?.id, "B");
   // A,B,C,D merged: only H left, and it is verify:human ⇒ nothing runnable.
   assert.equal(nextRunnable(plan, mergedSetOf("A", "B", "C", "D")), undefined);
+});
+
+// ── runnableCandidates: the multi-candidate generalization of nextRunnable
+// (W1-T171) — the candidate source dispatch-overlap.ts's partitionByFileOverlap
+// consumes. Must apply the EXACT SAME eligibility chain as nextRunnable (they
+// share isDispatchEligible), only returning MORE than one task and honoring
+// `limit`.
+
+test("runnableCandidates: every runnable task in file order, capped at limit — skips verify:human and merged exactly like nextRunnable", () => {
+  const plan = fixturePlan(); // A, B(dep A), C(dep B), D(no deps), H(verify:human)
+  // Nothing merged: only A and D are eligible (B/C blocked on unmet deps, H is human-only).
+  assert.deepEqual(
+    runnableCandidates(plan, NONE_MERGED, 10).map((t) => t.id),
+    ["A", "D"],
+  );
+  // limit=1 truncates to the first eligible candidate in file order.
+  assert.deepEqual(
+    runnableCandidates(plan, NONE_MERGED, 1).map((t) => t.id),
+    ["A"],
+  );
+  // limit<=0 yields an empty array.
+  assert.deepEqual(runnableCandidates(plan, NONE_MERGED, 0), []);
+  // A merged: B (deps now met) and D are eligible.
+  assert.deepEqual(
+    runnableCandidates(plan, mergedSetOf("A"), 10).map((t) => t.id),
+    ["B", "D"],
+  );
+});
+
+test("runnableCandidates: an in-flight (open-PR) task is excluded, same as nextRunnable — the eligibility chains never drift", () => {
+  const plan = fixturePlan();
+  const isOpenPr: OpenPrCheck = (id) => (id === "A" ? 42 : undefined);
+  assert.deepEqual(
+    runnableCandidates(plan, NONE_MERGED, 10, { isOpenPr, onSkip: () => {} }).map((t) => t.id),
+    ["D"],
+  );
 });
 
 // ── W1-T76 (absorbs P21): creditability is LOAD-BEARING for the whole DAG,
