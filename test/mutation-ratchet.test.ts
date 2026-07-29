@@ -199,3 +199,217 @@ test("mutation-ratchet CLI --changed-files (NO --relevant-paths, i.e. production
     rmSync(scratchChangedFiles);
   }
 });
+
+// ── W1-T133: nightly full-scope run owns the global score; the PR gate stays diff-only ─────
+//
+// Everything above this line is untouched (same SCRIPT constant, same fixtures, same 13
+// assertions) -- that IS the proof for this task's 1st acceptance criterion's "the PR job's
+// diff-scope trigger is unchanged" clause: this file still drives every prior assertion
+// byte-for-byte. The tests below cover the 3 NEW acceptance criteria:
+//  (1) the nightly and PR paths resolve DISTINCT scopes, both excluding test/**
+//  (2) the nightly scope's sample is deterministic given a seed, and rotates to cover the whole
+//      matched set over N nights; a below-baseline sampled score / absent / corrupt report / an
+//      unbootstrapped nightly baseline section all BLOCK loudly, never a silent pass
+//  (3) test files are never a mutation target in either scope
+
+const REPO_ROOT = join(__dirname, "..");
+const STRYKER_CONFIG = join(REPO_ROOT, "stryker.conf.json");
+const PROD_NIGHTLY_SCOPE_CONFIG = join(REPO_ROOT, "scripts", "mutation-nightly-scope.json");
+const PROD_BASELINE = join(REPO_ROOT, "scripts", "mutation-baseline.json");
+const NIGHTLY_CANDIDATES = join(FIXTURES, "nightly-candidates.txt");
+const FIXTURE_NIGHTLY_SCOPE_CONFIG = join(FIXTURES, "nightly-scope-config.json");
+const NIGHTLY_BASELINE = join(FIXTURES, "nightly-baseline.json");
+
+function resolveScope(configPath: string, filesPath: string = NIGHTLY_CANDIDATES) {
+  const result = spawnSync(process.execPath, [
+    SCRIPT,
+    "--resolve-scope",
+    "--files",
+    filesPath,
+    "--config",
+    configPath,
+  ]);
+  assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  const lines = result.stdout.toString().trim().split("\n");
+  const matched = lines[lines.length - 1].split(",").filter(Boolean);
+  return matched;
+}
+
+test("resolve-scope: the REAL PR gate config (stryker.conf.json) resolves to exactly its declared mutate scope, unchanged by this task", () => {
+  const strykerConfig: { mutate: string[] } = JSON.parse(readFileSync(STRYKER_CONFIG, "utf8"));
+  assert.deepEqual(strykerConfig.mutate, ["src/lib/classify.ts"], "stryker.conf.json's PR-gate mutate scope must stay exactly W1-T108's shape");
+
+  const matched = resolveScope(STRYKER_CONFIG);
+  assert.deepEqual(matched, ["src/lib/classify.ts"]);
+});
+
+test("resolve-scope: the REAL nightly config (scripts/mutation-nightly-scope.json) resolves to a DISTINCT, wider scope than the PR gate, over the SAME candidate list", () => {
+  const prMatched = resolveScope(STRYKER_CONFIG);
+  const nightlyMatched = resolveScope(PROD_NIGHTLY_SCOPE_CONFIG);
+
+  assert.notDeepEqual(nightlyMatched, prMatched, "nightly and PR scopes must resolve DISTINCT file sets");
+  assert.ok(nightlyMatched.length > prMatched.length, "nightly's src/** scope must cover more files than the PR gate's single classify.ts target");
+  assert.ok(nightlyMatched.includes("src/lib/classify.ts"), "the nightly scope must still cover classify.ts (it is part of src/**)");
+});
+
+test("resolve-scope: neither the PR scope nor the nightly scope ever matches a test/** fixture path, over a fixture tree mixing src + test files", () => {
+  const prMatched = resolveScope(STRYKER_CONFIG);
+  const nightlyMatched = resolveScope(PROD_NIGHTLY_SCOPE_CONFIG);
+
+  for (const path of [...prMatched, ...nightlyMatched]) {
+    assert.equal(path.startsWith("test/"), false, `${path} must not be a mutation target in either scope`);
+  }
+  // The fixture candidate list itself DOES include test/** entries -- prove they were actually
+  // filtered, not merely absent from the input.
+  const candidates = readFileSync(NIGHTLY_CANDIDATES, "utf8").split("\n").filter(Boolean);
+  assert.ok(candidates.some((p) => p.startsWith("test/")), "fixture must include at least one test/** path to prove exclusion, not mere absence");
+});
+
+test("resolve-scope: a nightly scope config MISCONFIGURED to include test/** still yields zero test/** matches -- resolveMutateScope()'s hard exclusion cannot be bypassed by data", () => {
+  const misconfiguredScope = join(FIXTURES, ".nightly-scope-config-misconfigured-scratch.json");
+  writeFileSync(misconfiguredScope, JSON.stringify({ mutate: ["src/**/*.ts", "test/**"], fileCap: 50 }));
+  try {
+    const matched = resolveScope(misconfiguredScope);
+    assert.ok(matched.length > 0, "sanity: src files still matched");
+    assert.ok(matched.every((p) => !p.startsWith("test/")), "test/** must be excluded even when the config's own glob asks for it");
+  } finally {
+    rmSync(misconfiguredScope);
+  }
+});
+
+function runNightlyScope(nightIndex: number, scopeConfig: string = FIXTURE_NIGHTLY_SCOPE_CONFIG) {
+  const result = spawnSync(process.execPath, [
+    SCRIPT,
+    "--nightly-scope",
+    "--files",
+    NIGHTLY_CANDIDATES,
+    "--night-index",
+    String(nightIndex),
+    "--scope-config",
+    scopeConfig,
+  ]);
+  assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  const lines = result.stdout.toString().trim().split("\n");
+  return lines[lines.length - 1].split(",").filter(Boolean);
+}
+
+test("mutation-ratchet CLI --nightly-scope: the same night-index always yields the SAME deterministic sample", () => {
+  const first = runNightlyScope(0);
+  const second = runNightlyScope(0);
+  assert.deepEqual(first, second);
+  assert.ok(first.length > 0 && first.length <= 2, "fixture scope-config's fileCap is 2");
+});
+
+test("mutation-ratchet CLI --nightly-scope: rotating night-index over a full cycle covers the WHOLE matched set exactly once, zero overlap between nights", () => {
+  // The fixture candidate list matches 5 src files against a fileCap of 2 -> groupCount = ceil(5/2) = 3.
+  const groups = [runNightlyScope(0), runNightlyScope(1), runNightlyScope(2)];
+  for (const group of groups) {
+    assert.ok(group.length <= 2, "every night's sample must respect the fileCap");
+  }
+  const union = groups.flat();
+  const expected = resolveScope(FIXTURE_NIGHTLY_SCOPE_CONFIG).sort();
+  assert.deepEqual(union.slice().sort(), expected, "3 nights must union back to exactly the matched set");
+  assert.equal(new Set(union).size, union.length, "no file may appear in more than one night's sample");
+
+  // Night-index 3 wraps back to night-index 0's group (3 % 3 === 0) -- the rotation is periodic.
+  const wrapped = runNightlyScope(3);
+  assert.deepEqual(wrapped, groups[0]);
+});
+
+test("mutation-ratchet CLI --nightly-scope: writes the sample to $GITHUB_OUTPUT `mutate=...` for the workflow's `npx stryker run --mutate` step", () => {
+  const outFile = join(FIXTURES, ".github-output-nightly-scope-scratch.txt");
+  spawnSync(process.execPath, [
+    SCRIPT,
+    "--nightly-scope",
+    "--files",
+    NIGHTLY_CANDIDATES,
+    "--night-index",
+    "0",
+    "--scope-config",
+    FIXTURE_NIGHTLY_SCOPE_CONFIG,
+  ], { env: { ...process.env, GITHUB_OUTPUT: outFile } });
+  const written = readFileSync(outFile, "utf8");
+  rmSync(outFile);
+  assert.match(written, /^mutate=.+$/m);
+  const mutateLine = written.trim().split("\n").find((l) => l.startsWith("mutate="))!;
+  const files = mutateLine.slice("mutate=".length).split(",").filter(Boolean);
+  assert.ok(files.every((p) => !p.startsWith("test/")), "the $GITHUB_OUTPUT sample must never include a test/** path");
+});
+
+test("mutation-ratchet CLI --nightly-scope: the production scripts/mutation-nightly-scope.json is valid data (a `mutate` array and a numeric `fileCap`)", () => {
+  const prodConfig: { mutate: string[]; fileCap: number } = JSON.parse(readFileSync(PROD_NIGHTLY_SCOPE_CONFIG, "utf8"));
+  assert.ok(Array.isArray(prodConfig.mutate) && prodConfig.mutate.length > 0);
+  assert.equal(typeof prodConfig.fileCap, "number");
+  assert.ok(prodConfig.fileCap > 0);
+});
+
+function runNightlyRatchet(reportFixture: string, baseline: string = NIGHTLY_BASELINE) {
+  return spawnSync(process.execPath, [
+    SCRIPT,
+    "--nightly-ratchet",
+    "--report",
+    reportFixture.startsWith("/") ? reportFixture : join(FIXTURES, reportFixture),
+    "--baseline",
+    baseline,
+  ]);
+}
+
+test("mutation-ratchet CLI --nightly-ratchet: a BELOW-baseline sampled report -> non-zero exit (BLOCKS loudly, never a silent pass)", () => {
+  const result = runNightlyRatchet("below-baseline.json");
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stderr.toString(), /NIGHTLY BLOCKED/);
+  assert.match(result.stderr.toString(), /mutation score 20\.00% < baseline 80\.00%/);
+});
+
+test("mutation-ratchet CLI --nightly-ratchet: an AT/ABOVE-baseline sampled report -> zero exit", () => {
+  const result = runNightlyRatchet("above-baseline.json");
+  assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stdout.toString(), /NIGHTLY score 90\.00%/);
+  assert.match(result.stdout.toString(), /NIGHTLY OK -- at or above baseline/);
+});
+
+test("mutation-ratchet CLI --nightly-ratchet: an ABSENT Stryker report -> named loud failure (non-zero exit), never a silent pass", () => {
+  const result = runNightlyRatchet(join(FIXTURES, "does-not-exist-report.json"));
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stderr.toString(), /NIGHTLY BLOCKED -- Stryker report absent or unreadable/);
+});
+
+test("mutation-ratchet CLI --nightly-ratchet: a CORRUPT (invalid JSON) Stryker report -> named loud failure (non-zero exit), never a silent pass", () => {
+  const result = runNightlyRatchet("corrupt-report.json");
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stderr.toString(), /NIGHTLY BLOCKED -- Stryker report absent or unreadable/);
+});
+
+test("mutation-ratchet CLI --nightly-ratchet: a baseline file with NO \"nightly\" section -> named loud failure, never silently defaults to an always-pass floor", () => {
+  const result = runNightlyRatchet("above-baseline.json", join(FIXTURES, "nightly-baseline-missing-section.json"));
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stderr.toString(), /NIGHTLY BLOCKED.*no "nightly" section/);
+});
+
+test("mutation-ratchet CLI --nightly-ratchet: a \"nightly\" section with a non-numeric scorePct -> named loud failure, same as a missing section", () => {
+  const result = runNightlyRatchet("above-baseline.json", join(FIXTURES, "nightly-baseline-non-numeric.json"));
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stderr.toString(), /NIGHTLY BLOCKED.*no "nightly" section/);
+});
+
+test("mutation-ratchet CLI --nightly-ratchet: a corrupt/unreadable BASELINE file -> named loud failure, never a silent pass", () => {
+  const result = runNightlyRatchet("above-baseline.json", join(FIXTURES, "corrupt-report.json"));
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stderr.toString(), /NIGHTLY BLOCKED -- baseline file unreadable\/invalid/);
+});
+
+test("the production scripts/mutation-baseline.json carries a bootstrap \"nightly\" section (numeric scorePct) WITHOUT altering the existing PR-gate root-level fields", () => {
+  const prodBaseline: {
+    scorePct: number;
+    mutateScope: string[];
+    nightly?: { scorePct: number };
+  } = JSON.parse(readFileSync(PROD_BASELINE, "utf8"));
+
+  // PR-gate fields untouched (still W1-T96's originally captured numbers).
+  assert.equal(prodBaseline.scorePct, 75.92);
+  assert.deepEqual(prodBaseline.mutateScope, ["src/lib/classify.ts"]);
+
+  // Nightly section present and well-formed.
+  assert.ok(prodBaseline.nightly, "scripts/mutation-baseline.json must carry a nightly section");
+  assert.equal(typeof prodBaseline.nightly!.scorePct, "number");
+});

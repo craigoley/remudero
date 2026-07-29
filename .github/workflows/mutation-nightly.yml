@@ -1,0 +1,91 @@
+name: Mutation Nightly
+
+# W1-T133 (MASTER-PLAN §5, D-10): the PR-time mutation-ratchet job (ci.yml) is deliberately
+# scoped to src/lib/classify.ts only (W1-T108's diff-scope + incremental fixes keep it near-
+# instant) -- that leaves the other ~15k lines of src/** with ZERO mutation coverage forever,
+# since mutating the FULL tree with Stryker's command test runner (which reruns the whole suite
+# per mutant -- no per-mutant test filtering exists yet for Node's built-in test runner) was
+# measured at ~4 hours, far past ci-gate.yml's 15-minute required-check wait ceiling. This
+# workflow moves that cost OFF the PR critical path entirely: scheduled nightly, full src/**
+# scope, OWNS the global mutation score.
+#
+# NOT a required check, ever -- that is the entire point (D-10: the PR gate's narrow scope is
+# only defensible because this workflow is the falsifier of record for everything else). It has
+# no `pull_request` trigger, is not listed in ci-gate.yml, and stryker.conf.json (the PR gate's
+# config) is untouched by this task -- the PR gate keeps W1-T108's exact shape.
+#
+# TEST FILES ARE NEVER A MUTATION TARGET, enforced twice: scripts/mutation-nightly-scope.json's
+# own `mutate` glob never targets test/** (it lives outside src/** entirely), AND
+# scripts/mutation-ratchet.mjs's resolveMutateScope() hard-excludes `test/**` unconditionally
+# regardless of what that config says.
+#
+# BOUNDED, not exhaustive, per run: mutating every one of src/**'s ~84 files with the command
+# runner would reproduce the same ~4-hour cost this workflow exists to avoid off the PR path (a
+# nightly run still shouldn't run forever). scripts/mutation-ratchet.mjs's `--nightly-scope` mode
+# deterministically samples a `fileCap`-sized subset (scripts/mutation-nightly-scope.json) keyed
+# on the day-of-year, so a bounded, reproducible sample runs each night and the sample ROTATES --
+# the whole matched tree is covered once every N nights (N = ceil(matched-file-count / fileCap)).
+# Same night-index always yields the same sample: deterministic, auditable, never flaky.
+#
+# LOUD FAILURE, never a silent pass: `--nightly-ratchet` (run after Stryker) blocks this workflow
+# on a below-baseline sampled score, an unreadable/corrupt report, or a missing "nightly" baseline
+# section -- there is no code path that reaches a green run without a real, valid, at-or-above-
+# baseline comparison (the W1-T130 degrade-loudly polarity).
+#
+# This workflow intentionally does NOT auto-commit an updated scripts/mutation-baseline.json --
+# ratcheting the nightly floor up is a deliberate, reviewed change, the same convention every
+# other baseline in this repo already follows, not something a cron job should do unattended. The
+# uploaded report artifact is what a human uses to make that call.
+on:
+  schedule:
+    # Nightly, off-peak (03:31 UTC -- staggered from CodeQL 04:43/Scorecard 02:23's own slots).
+    - cron: "31 3 * * *"
+  workflow_dispatch:
+
+# Least privilege at the top level (Scorecard TokenPermissions -- W1-T66).
+permissions:
+  contents: read
+
+jobs:
+  mutation-nightly:
+    name: mutation-nightly (full src/** scope, sampled + rotated)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: List this run's mutate candidates (all of src/**; test/** is never produced by this glob)
+        run: find src -type f \( -name '*.ts' -o -name '*.tsx' \) | sort > nightly-candidates.txt
+      - name: Resolve tonight's deterministic sample (day-of-year seed, fileCap-bounded, rotates over N nights)
+        id: scope
+        run: |
+          set -euo pipefail
+          node scripts/mutation-ratchet.mjs --nightly-scope \
+            --files nightly-candidates.txt \
+            --night-index "$(date -u +%j)"
+      - name: Restore Stryker incremental cache (nightly's OWN cache namespace -- never shared with the PR gate's)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: reports/stryker-incremental.json
+          key: mutation-nightly-incremental-${{ github.run_id }}
+          restore-keys: |
+            mutation-nightly-incremental-
+      - name: Stryker mutation run (tonight's sampled scope -- see the `scope` step above)
+        run: npx stryker run --mutate "${{ steps.scope.outputs.mutate }}"
+      - name: Nightly mutation ratchet (blocks LOUDLY on a below-baseline sample or a missing/broken report)
+        run: |
+          node scripts/mutation-ratchet.mjs --nightly-ratchet \
+            --report reports/mutation/mutation.json \
+            --baseline scripts/mutation-baseline.json
+      - name: Upload the full Stryker JSON report (for a human ratchet-up decision)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-nightly-report
+          path: reports/mutation/mutation.json
+          retention-days: 14
