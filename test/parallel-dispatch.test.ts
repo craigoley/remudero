@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import type { RunResult } from "../src/run-task.js";
+import type { UsageSnapshot } from "../src/lib/headroom.js";
 import { laneDispatchBudget, runDrain } from "../src/lib/drain.js";
 
 /**
@@ -323,4 +324,109 @@ test("W1-T172 + W1-T171: an overlapping candidate within the SAME pass is deferr
   assert.equal(serializedLine?.extra.blocked_by, "A");
   assert.deepEqual(ran, ["A", "D"], "D dispatches on the pass AFTER A — self-resolving, no second bookkeeping needed");
   assert.equal(s.stopReason, "no_runnable");
+});
+
+// ── lane-loop control branches: STOP / PAUSE / headroom / live-state / indeterminate ──
+// The multi-lane loop (runDrainLanes) shares the single-lane path's own STOP/PAUSE/headroom
+// gates and per-task skip callbacks; these drive each through the laneCount>=2 path so the
+// concurrent loop's copies are exercised, not only runDrain's serial ones.
+
+test("W1-T172: a checkStop signal halts the lane loop BEFORE any dispatch — stopReason=stopped", async () => {
+  const plan = fixturePlan();
+  let ran = 0;
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => () => false,
+      runOne: async (id) => { ran++; return okResult(id); },
+      checkStop: () => "operator STOP",
+    },
+    { laneCount: 2, max: 4 },
+  );
+  assert.equal(s.stopReason, "stopped");
+  assert.equal(s.stopDetail, "operator STOP");
+  assert.equal(ran, 0, "STOP is checked at the top of the pass, before any lane dispatches");
+});
+
+test("W1-T172: a checkPause signal parks the lane loop BEFORE any dispatch — stopReason=paused", async () => {
+  const plan = fixturePlan();
+  let ran = 0;
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => () => false,
+      runOne: async (id) => { ran++; return okResult(id); },
+      checkPause: () => "quiet hours",
+    },
+    { laneCount: 2, max: 4 },
+  );
+  assert.equal(s.stopReason, "paused");
+  assert.equal(s.stopDetail, "quiet hours");
+  assert.equal(ran, 0);
+});
+
+test("W1-T172: a near-limit usage reading stops the lane loop with headroom_exhausted before dispatch", async () => {
+  const plan = fixturePlan();
+  const nearLimit: UsageSnapshot = {
+    billingMode: "subscription",
+    session: { percentUsed: 42, resetsAt: "3pm" },
+    weekly: [{ label: "all models", percentUsed: 98, resetsAt: "Monday" }],
+  };
+  let ran = 0;
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => () => false,
+      runOne: async (id) => { ran++; return okResult(id); },
+      readUsage: () => nearLimit,
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { laneCount: 2, max: 4 },
+  );
+  assert.equal(s.stopReason, "headroom_exhausted");
+  assert.equal(ran, 0, "no lane spawns when a window is at/near its limit");
+  assert.ok(lines.some((l) => l.step === "drain.headroom"), "the exhaustion is ledgered (drain.headroom)");
+});
+
+test("W1-T172: readLiveState returning undefined for an in-flight task ledgers dispatch.live_state_indeterminate", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  await runDrain(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      // A reads as in-flight, so the live re-read is consulted for it; undefined ⇒ indeterminate.
+      isOpenPr: (id) => (id === "A" ? 388 : undefined),
+      readLiveState: () => undefined,
+      runOne: async (id) => { merged.add(id); return okResult(id); },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { laneCount: 3, max: 4 },
+  );
+  assert.ok(
+    lines.some((l) => l.step === "dispatch.live_state_indeterminate" && l.extra.task === "A"),
+    "A's undefined live-state re-read is ledgered on the lane path, not silently trusted",
+  );
+});
+
+test("W1-T172: an indeterminate task is skipped with dispatch.indeterminate and the caller's onIndeterminate fires", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const indeterminate: string[] = [];
+  await runDrain(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      isIndeterminate: (id) => id === "A",
+      onIndeterminate: (t) => indeterminate.push(t.id),
+      runOne: async (id) => { merged.add(id); return okResult(id); },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { laneCount: 3, max: 4 },
+  );
+  assert.ok(lines.some((l) => l.step === "dispatch.indeterminate" && l.extra.task === "A"), "A's indeterminate skip is ledgered");
+  assert.ok(indeterminate.includes("A"), "the caller's onIndeterminate hook fired for A");
 });
