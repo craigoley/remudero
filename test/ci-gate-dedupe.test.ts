@@ -70,6 +70,11 @@ async function runAggregateScript(
         SHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         REQUIRED: JSON.stringify(required),
         IGNORE: JSON.stringify(ignore),
+        // W1-T261 added a bounded grace-window re-read before ci-gate concludes FAILURE
+        // (test/ci-gate-reaggregate.test.ts exercises it directly). Zero it here so this
+        // suite's dedupe-only fixtures keep their original immediate-conclusion timing.
+        GRACE_WINDOW_SECONDS: "0",
+        GRACE_POLL_INTERVAL_SECONDS: "1",
       },
       encoding: "utf8",
       timeout: timeoutMs,

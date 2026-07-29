@@ -127,10 +127,19 @@ jobs:
       # a separate required context posted directly by the orchestrator, not a check-run).
       IGNORE: >-
         ["ci-gate"]
+      # W1-T261 RE-AGGREGATE grace window — see the step below for the mechanism. Kept as env
+      # (not a literal) so tests can shrink both to seconds instead of minutes.
+      GRACE_WINDOW_SECONDS: "600"
+      GRACE_POLL_INTERVAL_SECONDS: "20"
     steps:
       - name: Aggregate sibling check results (fail only on a REAL failure; skipped/absent are OK)
         run: |
           set -euo pipefail
+
+          # Defensive defaults (job env already sets both -- see above) so the script never dies
+          # on `set -u` if either is ever left unset.
+          GRACE_WINDOW_SECONDS="${GRACE_WINDOW_SECONDS:-600}"
+          GRACE_POLL_INTERVAL_SECONDS="${GRACE_POLL_INTERVAL_SECONDS:-20}"
 
           runs_json() {
             # All check runs on the PR head SHA, across every workflow + app, merged across pages,
@@ -169,14 +178,54 @@ jobs:
 
           # 2) FAIL if ANY check (excluding IGNORE) concluded as a real failure. Skipped / neutral
           #    / success all pass — so a path-filter-skipped (or absent) check never blocks.
+          evaluate_fails() {
+            jq -r --argjson ig "${IGNORE}" '
+              .[] | .name as $n | .conclusion as $c
+                  | select(($ig | index($n)) == null)
+                  | select(["failure","timed_out","cancelled","action_required","startup_failure"] | index($c))
+                  | $n' <<< "$1"
+          }
+
           echo "--- gated check runs ---"
           printf '%s' "${runs}" | jq -r '.[] | "  \(.conclusion // .status)\t\(.name)"' | sort
 
-          fails="$(jq -r --argjson ig "${IGNORE}" '
-            .[] | .name as $n | .conclusion as $c
-                | select(($ig | index($n)) == null)
-                | select(["failure","timed_out","cancelled","action_required","startup_failure"] | index($c))
-                | $n' <<< "${runs}")"
+          fails="$(evaluate_fails "${runs}")"
+
+          # 3) RE-AGGREGATE (W1-T261). A required check's LATEST attempt can flip from failure to
+          #    success on a rerun that lands moments AFTER this read -- #729 (2026-07-24):
+          #    coverage-ratchet was FAILURE at ci-gate's 17:11 read, SUCCESS at 17:18, and only a
+          #    manual ci-gate re-run or a fresh sha cleared the stale hold. `check_run:
+          #    types: [completed]` was investigated as the trigger for this (design (i)) but
+          #    GitHub's documented recursion guard suppresses check_run events for any check run
+          #    whose check suite was created by GitHub Actions (docs.github.com/en/actions/using-
+          #    workflows/events-that-trigger-workflows#check_run and community discussion #148873)
+          #    -- every REQUIRED name here IS a GitHub Actions check suite, so that trigger would
+          #    never fire for the checks this gate actually aggregates. Per design (iv), falling
+          #    back to the named alternative: before concluding FAILURE, RE-READ (never a fresh
+          #    workflow run, no new sha, no manual action) inside a BOUNDED grace window, long
+          #    enough to see an in-flight rerun land (600s comfortably covers the #729 seven-
+          #    minute gap), short enough to fail closed instead of hanging. `fails` only updates
+          #    once a read is FULLY terminal (mirrors step 1's own wait discipline) so an in-flight
+          #    rerun can never be misread as a pass by landing on a still-`in_progress` snapshot.
+          if [ -n "${fails}" ]; then
+            grace_deadline=$(( $(date +%s) + GRACE_WINDOW_SECONDS ))
+            echo "::warning::ci-gate: required check(s) failing — entering a ${GRACE_WINDOW_SECONDS}s grace window for a same-sha rerun to land before concluding:"
+            printf '%s\n' "${fails}" | sed 's/^/  - /'
+            while [ -n "${fails}" ] && [ "$(date +%s)" -lt "${grace_deadline}" ]; do
+              sleep "${GRACE_POLL_INTERVAL_SECONDS}"
+              runs="$(runs_json)"
+              not_ready="$(jq -r --argjson req "${REQUIRED}" '
+                ([ .[] | select(.status=="completed") | .name ]) as $done
+                | ($req - $done)
+                | .[]' <<< "${runs}")"
+              # Not every required name is terminal yet (a rerun is mid-flight) -- keep polling
+              # without touching `fails`, so a not-yet-concluded rerun is never read as a pass.
+              [ -n "${not_ready}" ] && continue
+              fails="$(evaluate_fails "${runs}")"
+            done
+            echo "--- gated check runs (post-grace-window) ---"
+            printf '%s' "${runs}" | jq -r '.[] | "  \(.conclusion // .status)\t\(.name)"' | sort
+          fi
 
           if [ -n "${fails}" ]; then
             echo "::error::ci-gate: required check(s) FAILED — holding merge:"
