@@ -1,0 +1,10 @@
+import type { Task } from "./plan.js";
+
+export interface Foo {
+  id: string;
+  count: number;
+}
+
+export function realFn(x: number): number {
+  return x + 1;
+}

@@ -1,0 +1,12 @@
+diff --git a/typeonly-mixed.fxt b/typeonly-mixed.fxt
+new file mode 100644
+--- /dev/null
++++ b/typeonly-mixed.fxt
+@@ -0,0 +1,6 @@
++export interface Foo {
++  id: string;
++}
++
++export function uncoveredFn(x: number): number {
++  return x * 2;
++}

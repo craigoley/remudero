@@ -1,0 +1,15 @@
+diff --git a/typeonly-ok.fxt b/typeonly-ok.fxt
+new file mode 100644
+--- /dev/null
++++ b/typeonly-ok.fxt
+@@ -0,0 +1,9 @@
++import type { Task } from "./plan.js";
++
++export interface Foo {
++  id: string;
++  count: number;
++}
++
++export function realFn(x: number): number {
++  return x + 1;
++}

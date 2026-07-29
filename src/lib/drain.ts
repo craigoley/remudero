@@ -106,46 +106,78 @@ export interface NextRunnableOpts {
  * `undefined` when nothing is runnable.
  */
 export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts = {}): Task | undefined {
-  const merged: import("./plan.js").MergedResolver = (t) => isMerged(t.id);
   for (const t of plan.tasks) {
-    if (isMerged(t.id)) continue;
-    if (t.verify !== "auto") continue;
-    if (t.status === "blocked") continue;
-    if (unmetDependencies(plan, t, merged).length > 0) continue;
-    // INDETERMINATE (W1-T119) — checked BEFORE the circuit breaker and the
-    // in-flight guard: an indeterminate read says nothing about either of
-    // those, and dispatching now risks re-running work that may already be
-    // merged (the throttle-reads-as-not-merged spend event this task exists
-    // to prevent). NEVER treated as an ordinary queued task.
-    if (opts.isIndeterminate?.(t.id)) {
-      opts.onIndeterminate?.(t);
-      continue;
-    }
-    // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)) — checked BEFORE the in-flight
-    // guard below: a tripped task halts regardless of whatever its latest PR's
-    // state happens to be; it is the backstop that bounds (i)'s sibling-credit
-    // fix even if that fix is somehow wrong.
-    if (opts.isCircuitTripped?.(t.id)) {
-      opts.onCircuitBreak?.(t);
-      continue;
-    }
-    const openPrNumber = opts.isOpenPr?.(t.id);
-    if (openPrNumber !== undefined) {
-      // W1-T177: CONFIRM the cached in-flight snapshot with a fresh read
-      // before skipping — a stale OPEN wrongly blocks a task that is
-      // actually runnable (the #388 fixture: `dispatch.skipped reason=
-      // 'open-pr'` more than six minutes after that PR had merged).
-      const liveState = opts.readLiveState?.(t.id, openPrNumber);
-      if (liveState !== undefined && liveState !== "OPEN") {
-        opts.onStoodDown?.(t, openPrNumber, liveState);
-      } else {
-        opts.onSkip?.(t, openPrNumber);
-        continue; // IN-FLIGHT (or unreadable — fail OPEN) — never a duplicate fresh build.
-      }
-    }
-    return t;
+    if (isDispatchEligible(plan, t, isMerged, opts)) return t;
   }
   return undefined;
+}
+
+/**
+ * The exact per-task eligibility chain {@link nextRunnable} and {@link
+ * runnableCandidates} both apply, factored out so the two can never drift: a task
+ * ineligible for SOLO dispatch must never be offered as a concurrent candidate
+ * either. Order matters (see the inline comments on each guard) and is preserved
+ * verbatim from nextRunnable's original single-task walk.
+ */
+function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: NextRunnableOpts): boolean {
+  const merged: import("./plan.js").MergedResolver = (task) => isMerged(task.id);
+  if (isMerged(t.id)) return false;
+  if (t.verify !== "auto") return false;
+  if (t.status === "blocked") return false;
+  if (unmetDependencies(plan, t, merged).length > 0) return false;
+  // INDETERMINATE (W1-T119) — checked BEFORE the circuit breaker and the
+  // in-flight guard: an indeterminate read says nothing about either of
+  // those, and dispatching now risks re-running work that may already be
+  // merged (the throttle-reads-as-not-merged spend event this task exists
+  // to prevent). NEVER treated as an ordinary queued task.
+  if (opts.isIndeterminate?.(t.id)) {
+    opts.onIndeterminate?.(t);
+    return false;
+  }
+  // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)) — checked BEFORE the in-flight
+  // guard below: a tripped task halts regardless of whatever its latest PR's
+  // state happens to be; it is the backstop that bounds (i)'s sibling-credit
+  // fix even if that fix is somehow wrong.
+  if (opts.isCircuitTripped?.(t.id)) {
+    opts.onCircuitBreak?.(t);
+    return false;
+  }
+  const openPrNumber = opts.isOpenPr?.(t.id);
+  if (openPrNumber !== undefined) {
+    // W1-T177: CONFIRM the cached in-flight snapshot with a fresh read
+    // before skipping — a stale OPEN wrongly blocks a task that is
+    // actually runnable (the #388 fixture: `dispatch.skipped reason=
+    // 'open-pr'` more than six minutes after that PR had merged).
+    const liveState = opts.readLiveState?.(t.id, openPrNumber);
+    if (liveState !== undefined && liveState !== "OPEN") {
+      opts.onStoodDown?.(t, openPrNumber, liveState);
+    } else {
+      opts.onSkip?.(t, openPrNumber);
+      return false; // IN-FLIGHT (or unreadable — fail OPEN) — never a duplicate fresh build.
+    }
+  }
+  return true;
+}
+
+/**
+ * Up to `limit` runnable tasks, in FILE ORDER — the multi-candidate generalization
+ * of {@link nextRunnable} for a concurrent dispatcher (P19 rung 1, W1-T171; wired
+ * by the lane scheduler in W1-T172) to hand to `dispatch-overlap.ts`'s
+ * `partitionByFileOverlap`. Applies the EXACT SAME eligibility chain as
+ * `nextRunnable` (see {@link isDispatchEligible}) — a task ineligible for solo
+ * dispatch is never offered as a concurrent candidate either. `limit <= 0` yields
+ * an empty array. This function does NOT itself check `files:` overlap between the
+ * candidates it returns — that partition is `dispatch-overlap.ts`'s job, kept
+ * separate so the DAG/status eligibility logic here never duplicates the pure glob
+ * predicate there (and vice versa).
+ */
+export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: number, opts: NextRunnableOpts = {}): Task[] {
+  const out: Task[] = [];
+  for (const t of plan.tasks) {
+    if (out.length >= limit) break;
+    if (isDispatchEligible(plan, t, isMerged, opts)) out.push(t);
+  }
+  return out;
 }
 
 /** Reason a drain stopped — every terminal state is one of these. */
