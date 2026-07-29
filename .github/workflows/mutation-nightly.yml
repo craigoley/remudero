@@ -11,8 +11,14 @@ name: Mutation Nightly
 #
 # NOT a required check, ever -- that is the entire point (D-10: the PR gate's narrow scope is
 # only defensible because this workflow is the falsifier of record for everything else). It has
-# no `pull_request` trigger, is not listed in ci-gate.yml, and stryker.conf.json (the PR gate's
-# config) is untouched by this task -- the PR gate keeps W1-T108's exact shape.
+# no `pull_request` trigger and is not listed in ci-gate.yml. stryker.conf.json's `mutate` scope
+# (still exactly `["src/lib/classify.ts"]`, W1-T108's shape) is untouched by this task -- the ONLY
+# stryker.conf.json edit this task makes is scoping the PR gate's `commandRunner.command` to the
+# two test files that actually exercise classify.ts (test/classify.test.ts,
+# test/block-reason.test.ts) instead of the full suite -- see ci.yml's mutation-ratchet job
+# comment for the measured latency incident that made that necessary. The PR gate's WHAT (mutate
+# target, diff-scope trigger, ratchet comparison) keeps W1-T108's exact shape; only the per-mutant
+# HOW got faster.
 #
 # TEST FILES ARE NEVER A MUTATION TARGET, enforced twice: scripts/mutation-nightly-scope.json's
 # own `mutate` glob never targets test/** (it lives outside src/** entirely), AND

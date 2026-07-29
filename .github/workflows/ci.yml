@@ -176,16 +176,39 @@ jobs:
     #
     # SCOPE: Stryker has no first-party test-runner plugin with per-mutant coverage-based test
     # filtering for Node's built-in `node --test` runner (only the generic command runner, which
-    # reruns the WHOLE suite per mutant). Mutating this project's full ~15k-line src/** tree was
-    # measured at ~4 hours in that mode — that blows through ci-gate.yml's 15-minute
-    # required-check wait ceiling and would deadlock every PR. `stryker.conf.json`'s `mutate`
-    # glob is therefore deliberately scoped to one pure-logic module (src/lib/classify.ts) today.
-    # Widening scope later is a one-line glob change plus a baseline recapture in
+    # reruns whatever command it is given per mutant). Mutating this project's full ~15k-line
+    # src/** tree was measured at ~4 hours in that mode — that blows through ci-gate.yml's
+    # 15-minute required-check wait ceiling and would deadlock every PR. `stryker.conf.json`'s
+    # `mutate` glob is therefore deliberately scoped to one pure-logic module (src/lib/classify.ts)
+    # today. Widening scope later is a one-line glob change plus a baseline recapture in
     # scripts/mutation-baseline.json — no script or CI-wiring change.
     #
     # LATENCY (W1-T108): even scoped to one module, a real `npx stryker run` was still costing
     # ~13 minutes on every PR, including PRs that never touched src/lib/classify.ts and so could
-    # not possibly move its mutation score. Two independent fixes, same job:
+    # not possibly move its mutation score.
+    #
+    # LATENCY, ROUND 2 (W1-T133): W1-T108's diff-scope trigger (below) means the expensive path
+    # now only runs on a PR that touches classify.ts's own relevant files — but this task's OWN
+    # PR is exactly such a PR (it edits scripts/mutation-ratchet.mjs + scripts/mutation-
+    # baseline.json), and it is also the FIRST PR since W1-T108 landed to actually exercise a real
+    # `npx stryker run` all the way through (every prior "matched" run in the wild had failed
+    # earlier, at the dry-run stage, on an unrelated broken fixture — see the run-task.ts fixture
+    # fix earlier in this same task). That first real run MEASURED `stryker.conf.json`'s
+    # `commandRunner.command` (`npm test`, the FULL test/**/*.test.ts glob — ~3,000 tests,
+    # Playwright-backed) rerunning per mutant and BLEW WAY PAST ci-gate's 15-minute ceiling (it was
+    # still running past the 55-minute mark). The full suite is not needed: only
+    # test/classify.test.ts and test/block-reason.test.ts (the sole two files that import from
+    # src/lib/classify.ts — verified by grep, and empirically by running Stryker scoped to exactly
+    # these two files: SAME 108 valid mutants, SAME 70 killed / 12 timeout / 26 survived / 0
+    # no-coverage split as the recorded baseline, in 54 seconds instead of 55+ minutes). Scoping
+    # `commandRunner.command` to those two files (below) is the fix — it changes nothing about
+    # WHAT is mutated (`mutate` stays exactly `["src/lib/classify.ts"]`, W1-T108's shape,
+    # unchanged — proven in test/mutation-ratchet.test.ts) or what the ratchet compares, only HOW
+    # FAST the PR gate can verify it, which is the entire point of "the PR gate stays the fast
+    # diff-only classify.ts check" (this task's own title). Neither file needs a browser, so the
+    # Playwright/Chromium install this job used to pay for a `npm test` dry run is gone too.
+    #
+    # Two independent latency fixes together, same job:
     #  1. DIFF-SCOPED, the containment-probe shape (see that job's comment below): this job's
     #     check run still registers UNCONDITIONALLY (no path filter, no job `if:`) so it can
     #     never go silently absent and deadlock merge — but the `trigger` step below runs
@@ -228,9 +251,6 @@ jobs:
           git diff --name-only "${BASE_SHA}"...HEAD > changed-files.txt
           cat changed-files.txt
           node scripts/mutation-ratchet.mjs --changed-files changed-files.txt
-      - name: Install Playwright's Chromium (stryker.conf.json's commandRunner is plain `npm test` -- the FULL test/**/*.test.ts glob, same Playwright-backed shell tests as the `ci`/`coverage-ratchet` jobs above -- Stryker's own "initial test run" needs a real headless browser too, or it fails closed on a missing-executable hook error before ever reaching a mutation verdict. Gated on `trigger` like the cache/stryker steps below -- a skipped PR never pays this download.)
-        if: steps.trigger.outputs.matched == 'true'
-        run: npx playwright install --with-deps chromium
       - name: Restore Stryker incremental cache
         if: steps.trigger.outputs.matched == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -241,6 +241,39 @@ test("resolve-scope: the REAL PR gate config (stryker.conf.json) resolves to exa
 
   const matched = resolveScope(STRYKER_CONFIG);
   assert.deepEqual(matched, ["src/lib/classify.ts"]);
+});
+
+// W1-T133 LATENCY, ROUND 2: this task's own PR is a `matched: true` PR (it edits scripts/
+// mutation-ratchet.mjs + scripts/mutation-baseline.json, both in the trigger's relevant-paths
+// list) and was the FIRST PR since W1-T108 to actually drive a real `npx stryker run` through to
+// completion -- every prior "matched" run in the wild had died earlier, at the dry-run stage, on
+// an unrelated broken fixture. That first real run MEASURED stryker.conf.json's
+// `commandRunner.command` (`npm test`, the FULL ~3,000-test Playwright-backed suite, rerun once
+// per mutant) blowing past ci-gate's 15-minute required-check ceiling (it was still running past
+// the 55-minute mark). test/classify.test.ts and test/block-reason.test.ts are the ONLY two test
+// files that import anything from src/lib/classify.ts (verified by grep across test/**), and a
+// real Stryker run scoped to exactly those two files reproduced the SAME 108 valid mutants / 70
+// killed / 12 timeout / 26 survived / 0 no-coverage split as the recorded baseline in 54 seconds
+// -- so scoping the command to them changes nothing about WHAT gets mutated or ratcheted, only
+// how fast the PR gate can verify it. This is the assertion that keeps that scope from silently
+// drifting back to the full suite (and the latency incident with it).
+test("the REAL PR gate config's commandRunner is scoped to exactly the test files that import src/lib/classify.ts -- not the full suite (W1-T133 latency fix)", () => {
+  const strykerConfig: { commandRunner: { command: string } } = JSON.parse(readFileSync(STRYKER_CONFIG, "utf8"));
+  const command = strykerConfig.commandRunner.command;
+
+  assert.match(command, /\bnode --test\b/, "must invoke node's test runner directly, not `npm test` (the full test/**/*.test.ts glob)");
+  assert.match(command, /\btest\/classify\.test\.ts\b/, "must run classify.ts's own dedicated unit test");
+  assert.match(command, /\btest\/block-reason\.test\.ts\b/, "must run block-reason.test.ts -- the only OTHER file importing from src/lib/classify.ts");
+  assert.equal(command.includes("test/**"), false, "must never fall back to the full test/**/*.test.ts glob -- that is the latency incident this task fixed");
+
+  // The claim that these are the ONLY two consumers is itself falsifiable against the real
+  // source tree, not just asserted here -- grep every test file for an import naming classify.
+  const testFiles = readdirSync(join(REPO_ROOT, "test")).filter((f) => f.endsWith(".test.ts"));
+  const classifyImporters = testFiles.filter((f) => {
+    const contents = readFileSync(join(REPO_ROOT, "test", f), "utf8");
+    return /from ["'].*classify(\.js)?["']/.test(contents);
+  });
+  assert.deepEqual(classifyImporters.sort(), ["block-reason.test.ts", "classify.test.ts"], "the command-runner scope must track every test file that actually imports classify.ts -- add it here if a new one starts importing classify.ts");
 });
 
 test("resolve-scope: the REAL nightly config (scripts/mutation-nightly-scope.json) resolves to a DISTINCT, wider scope than the PR gate, over the SAME candidate list", () => {
