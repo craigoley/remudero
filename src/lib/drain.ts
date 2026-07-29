@@ -19,6 +19,7 @@ import type { RunResult } from "./run-result.js";
 import { headroomExhausted } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import { unmetDependencies, type Plan, type Task } from "./plan.js";
+import { partitionByFileOverlap, serializedLedgerPayload } from "./dispatch-overlap.js";
 
 /** A merged predicate — DERIVED FROM GITHUB in the real runner (status.ts). */
 export type MergedSet = (taskId: string) => boolean;
@@ -189,7 +190,16 @@ export type StopReason =
   | "headroom_exhausted"
   | "stopped"
   | "paused"
-  | "error";
+  | "error"
+  /**
+   * W1-T172: the queue governor's WIP ceiling leaves ZERO lane headroom this
+   * tick (`laneDispatchBudget` returned 0) — runnable work may well exist,
+   * held back by the governor rather than absent (distinct from
+   * `no_runnable`, which means nothing is eligible at all). Only reachable
+   * via the multi-lane path ({@link runDrainLanes}); the single-lane path
+   * never consults the governor and can never produce it.
+   */
+  | "wip_deferred";
 
 export interface DrainOpts {
   until?: string;
@@ -211,6 +221,24 @@ export interface DrainOpts {
    * consistent with the selection's `depth`.
    */
   curated?: string[];
+  /**
+   * W1-T172 PARALLEL DISPATCH — the number of concurrent dispatch lanes this
+   * drain fills per pass (`SweepPolicy.dispatchLanes` — ONE threshold home,
+   * never a second; see sweep.ts). Omitted or <= 1 ⇒ {@link runDrain}'s
+   * original single-task loop, UNCHANGED byte-for-byte — both the
+   * regression lock and the off switch. >= 2 hands off to the concurrent
+   * pass loop ({@link runDrainLanes}).
+   */
+  laneCount?: number;
+  /**
+   * W1-T172: the queue governor's WIP ceiling (`SweepPolicy.wipLimit`,
+   * W1-T121) consulted ALONGSIDE `laneCount` on the multi-lane path — THE
+   * GOVERNOR IS THE CEILING, NOT A SUGGESTION: a pass never dispatches past
+   * `min(laneCount, wipLimit - observed open count)`. Omitted ⇒ unbounded by
+   * the governor (bounded by `laneCount` alone). Never consulted on the
+   * single-lane path (unchanged from before this task).
+   */
+  wipLimit?: number;
 }
 
 /**
@@ -521,14 +549,31 @@ export interface DrainDeps {
   checkPause?: () => string | undefined;
   /** One ledger line per task + terminal reason (reuses run-task's ledger). */
   log?: (step: string, extra?: Record<string, unknown>) => void;
+  /**
+   * W1-T172: the CURRENT observed open-PR count — the queue governor's other
+   * input alongside `DrainOpts.wipLimit` (re-derive fresh each call, the same
+   * freshness contract as `isOpenPr`/`isCircuitTripped` above; the real
+   * wiring counts OPEN entries in the SAME projection `refreshMerged` just
+   * built, never a second GitHub read path). Only consulted on the multi-lane
+   * path; omitted there, lane count is bounded by `laneCount` alone.
+   */
+  openPrCount?: () => number;
 }
 
 /**
  * The drain loop. Deterministic; no LLM decisions. Each iteration: re-derive
  * status → check headroom → pick the next runnable → run it → STOP on any
  * non-merged verdict. Returns a {@link DrainSummary}.
+ *
+ * W1-T172 PARALLEL DISPATCH: `opts.laneCount >= 2` hands off to {@link
+ * runDrainLanes}, the concurrent multi-task pass loop, entirely separate code
+ * so THIS loop can never drift under lane changes. Omitted or `<= 1` runs the
+ * single-task loop below UNCHANGED, byte-for-byte, from before this task —
+ * both the regression lock and the off switch.
  */
 export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}): Promise<DrainSummary> {
+  if ((opts.laneCount ?? 1) >= 2) return runDrainLanes(plan, deps, opts);
+
   const max = opts.max ?? DEFAULT_MAX;
   const log = deps.log ?? (() => {});
   const attempted: string[] = [];
@@ -659,6 +704,209 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     }
     merged.push(next.id);
     if (opts.until && next.id === opts.until) return summary("until_reached", opts.until);
+  }
+  return summary("max_reached", `${max} task(s)`);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// W1-T172 — PARALLEL DISPATCH. Ratifies P19's dispatch half (DECISIONS.md
+// 2026-07-21): "N parallel dispatch lanes bounded by the governor's WIP limit
+// (start N=2), with W1-T80 dedup + W1-T149's circuit breaker as the per-task
+// guards." Both are reused UNCHANGED via `runnableCandidates` (they are the
+// exact same `isDispatchEligible` chain the single-lane loop above applies —
+// see that function's own doc). W1-T171's `partitionByFileOverlap` adds the
+// ACROSS-candidate check the single-task loop never needed. Little's law is
+// still the argument, one layer up: lanes raise the RATE at which the
+// governor's bounded WIP fills; they never raise the bound itself.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** {@link laneDispatchBudget}'s input — one pass's governor consultation. */
+export interface LaneBudgetInput {
+  /** `SweepPolicy.dispatchLanes` (W1-T172) — the row this drain was configured with. */
+  laneCount: number;
+  /** `SweepPolicy.wipLimit` (W1-T121), when the governor is wired at this call site. */
+  wipLimit?: number;
+  /** The current observed open-PR count — the governor's other input. */
+  openPrCount?: number;
+}
+
+/**
+ * THE GOVERNOR IS THE CEILING, NOT A SUGGESTION: how many tasks a pass may
+ * dispatch this tick — `min(laneCount, headroom)`, where headroom is
+ * `wipLimit - openPrCount`, floored at 0. `wipLimit`/`openPrCount` omitted ⇒
+ * unbounded by the governor (bounded by `laneCount` alone) — the same
+ * "an un-wired site behaves exactly as before this guard existed" contract
+ * every other optional dispatch guard in this module already carries. Pure;
+ * no I/O; never negative.
+ */
+export function laneDispatchBudget(input: LaneBudgetInput): number {
+  const lanes = Math.max(0, input.laneCount);
+  if (input.wipLimit === undefined || input.openPrCount === undefined) return lanes;
+  const headroom = Math.max(0, input.wipLimit - input.openPrCount);
+  return Math.min(lanes, headroom);
+}
+
+/**
+ * The concurrent-lane pass loop (W1-T172), entered only via {@link runDrain}
+ * when `opts.laneCount >= 2`. Each pass: the SAME per-tick checks as the
+ * single-lane loop (fleet control, `--until`, headroom) → this pass's lane
+ * BUDGET ({@link laneDispatchBudget}, the governor ceiling) → up to `budget`
+ * runnable candidates ({@link runnableCandidates} — the EXACT SAME per-task
+ * guards the single-lane path applies, W1-T80's open-PR dedup and W1-T149's
+ * circuit breaker, reused, never reimplemented) → partitioned for `files:`
+ * overlap ACROSS the co-dispatched set (W1-T171's `partitionByFileOverlap`)
+ * → the surviving dispatch set run CONCURRENTLY via `Promise.allSettled` —
+ * never `Promise.all`, whose first rejection would abort every sibling
+ * promise still in flight; every lane's result is awaited and recorded
+ * before this pass decides anything (LANE-LOCAL BLOCK SEMANTICS: one lane's
+ * block or throw never halts, cancels, or races ahead of its siblings) →
+ * `dispatch.concurrent_set` ledgers the co-dispatched ids (the evidence
+ * trail P19's banked rung 2 needs) → on any block or lane failure THIS pass,
+ * the WHOLE drain stops afterward — same STOP-ON-BLOCK doctrine as the
+ * single-lane loop's header, just evaluated at pass granularity instead of
+ * per task; W1-T46's smarter successor block reasoner is what would change
+ * WHAT happens to a blocked lane, not whether its siblings survive the pass.
+ */
+async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Promise<DrainSummary> {
+  const laneCount = Math.max(1, opts.laneCount ?? 1);
+  const max = opts.max ?? DEFAULT_MAX;
+  const log = deps.log ?? (() => {});
+  const attempted: string[] = [];
+  const merged: string[] = [];
+  let costUsd = 0;
+  // Same escalation-dedup contract as the single-lane loop (see its own
+  // comment): bounds the CALLBACK to this drain's first observation of each
+  // tripped task id, across every pass — `isCircuitTripped` itself is still
+  // consulted (and still excludes the task) every pass.
+  const circuitEscalated = new Set<string>();
+
+  const summary = (stopReason: StopReason, stopDetail?: string): DrainSummary => {
+    const s: DrainSummary = { attempted, merged, stopReason, stopDetail, costUsd, resumeCommand: resumeCommand(opts) };
+    log("drain.summary", { ...s });
+    return s;
+  };
+
+  while (attempted.length < max) {
+    const stopped = deps.checkStop?.();
+    if (stopped) {
+      log("drain.stop", { detail: stopped });
+      return summary("stopped", stopped);
+    }
+    const paused = deps.checkPause?.();
+    if (paused) {
+      log("drain.pause", { detail: paused });
+      return summary("paused", paused);
+    }
+
+    const isMerged = deps.refreshMerged();
+    if (opts.until && isMerged(opts.until)) return summary("until_reached", opts.until);
+
+    if (deps.readUsage) {
+      const snap = deps.readUsage();
+      const over = snap ? headroomExhausted(snap, opts.headroomLimitPct) : null;
+      if (over) {
+        log("drain.headroom", { window: over.window, percent_used: over.percentUsed, resets_at: over.resetsAt });
+        return summary("headroom_exhausted", `${over.window} at ${over.percentUsed}% — resets ${over.resetsAt}`);
+      }
+      if (!snap) log("drain.headroom.unavailable", { note: "usage unreadable — continuing (best-effort)" });
+    }
+
+    const openCount = deps.openPrCount?.();
+    const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: openCount });
+    const passSize = Math.min(budget, max - attempted.length);
+    if (passSize <= 0) {
+      log("dispatch.wip_deferred", {
+        lane_count: laneCount,
+        wip_limit: opts.wipLimit ?? null,
+        observed_open_count: openCount ?? null,
+      });
+      return summary(
+        "wip_deferred",
+        `governor at ${openCount ?? "?"}/${opts.wipLimit ?? "?"} open PRs — no lane headroom this pass`,
+      );
+    }
+
+    const skipOpts: NextRunnableOpts = {
+      isOpenPr: deps.isOpenPr,
+      onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
+      readLiveState: deps.readLiveState
+        ? (taskId, prNumber) => {
+            const state = deps.readLiveState!(taskId, prNumber);
+            if (state === undefined) log("dispatch.live_state_indeterminate", { task: taskId, pr_number: prNumber });
+            return state;
+          }
+        : undefined,
+      onStoodDown: (t, prNumber, state) =>
+        log("dispatch.stood_down", { task: t.id, pr_number: prNumber, state, reason: "cached in-flight read was stale" }),
+      isIndeterminate: deps.isIndeterminate,
+      onIndeterminate: (t) => {
+        log("dispatch.indeterminate", { task: t.id });
+        deps.onIndeterminate?.(t);
+      },
+      isCircuitTripped: deps.isCircuitTripped,
+      onCircuitBreak: (t) => {
+        log("dispatch.circuit_broken", { task: t.id });
+        if (!circuitEscalated.has(t.id)) {
+          circuitEscalated.add(t.id);
+          deps.onCircuitBreak?.(t);
+        }
+      },
+    };
+
+    const candidates = runnableCandidates(plan, isMerged, passSize, skipOpts);
+    if (candidates.length === 0) return summary("no_runnable");
+
+    // PRE-DISPATCH OVERLAP CHECK (W1-T171), ACROSS the co-dispatched set: a
+    // deferred task is simply absent from THIS pass — it is re-considered
+    // next tick, by which point the task it collided with is either merged
+    // or (far more commonly) has an OPEN PR of its own, so the in-flight
+    // guard above excludes it from candidates entirely and the collision
+    // never recurs. Self-resolving; no bookkeeping needed here.
+    const partition = partitionByFileOverlap(candidates);
+    for (const d of partition.serialized) log("dispatch.serialized", serializedLedgerPayload(d));
+    const dispatchSet = partition.dispatch;
+    if (dispatchSet.length === 0) return summary("no_runnable");
+
+    log("dispatch.concurrent_set", { tasks: dispatchSet.map((t) => t.id), lane_count: laneCount });
+    for (const t of dispatchSet) {
+      attempted.push(t.id);
+      log("drain.iteration", { task: t.id, attempted: attempted.length, max, lane: true });
+    }
+
+    // CONCURRENT LANES: `allSettled`, never `all` — see this function's own
+    // doc. Every sibling's outcome is recorded below BEFORE the pass decides
+    // whether to stop.
+    const settled = await Promise.allSettled(dispatchSet.map((t) => deps.runOne(t.id)));
+
+    let blocked: { taskId: string; result: RunResult } | undefined;
+    let failure: { taskId: string; message: string } | undefined;
+    for (let i = 0; i < dispatchSet.length; i++) {
+      const t = dispatchSet[i];
+      const outcome = settled[i];
+      if (outcome.status === "rejected") {
+        const message = String((outcome.reason as Error)?.message ?? outcome.reason);
+        log("drain.lane_error", { task: t.id, message });
+        if (!failure) failure = { taskId: t.id, message }; // first-observed wins the summary detail
+        continue;
+      }
+      const result = outcome.value;
+      costUsd += result.costUsd;
+      if (!result.merged) {
+        // STOP-ON-BLOCK, at pass granularity — LANE-LOCAL: this task took its
+        // normal blocked path; it never touched a sibling still in flight.
+        log("drain.blocked", { task: t.id, verdict: result.verdict, pr_url: result.prUrl });
+        if (!blocked) blocked = { taskId: t.id, result };
+        continue;
+      }
+      merged.push(t.id);
+    }
+
+    if (failure) return summary("error", `${failure.taskId}: ${failure.message}`);
+    if (blocked) {
+      const r = blocked.result;
+      return summary("blocked", `${blocked.taskId} → ${r.verdict}${r.prUrl ? ` (${r.prUrl})` : ""}`);
+    }
+    if (opts.until && merged.includes(opts.until)) return summary("until_reached", opts.until);
   }
   return summary("max_reached", `${max} task(s)`);
 }

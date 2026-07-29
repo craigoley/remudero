@@ -213,6 +213,18 @@ export interface SweepPolicy {
    */
   wipLimit: number;
   /**
+   * W1-T172 PARALLEL DISPATCH (P19, DECISIONS.md 2026-07-21) — the number of
+   * concurrent dispatch LANES a drain pass may fill, bounded by `wipLimit`
+   * above (the governor is the CEILING; lanes only raise the RATE it fills,
+   * never the bound). A ROW in THIS SAME table — one threshold home, never a
+   * second — see `laneDispatchBudget` (drain.ts), this row's consumer.
+   * Started at 2 deliberately: the WS-2 concurrent-keychain question is
+   * unvalidated and per-repo merge serialization is server-side auto-merge
+   * rather than a queue of our own. Raising N is a policy-data row edit, not
+   * a code change — the point of holding it here rather than as a constant.
+   */
+  dispatchLanes: number;
+  /**
    * W1-T148 COST GOVERNOR (the $206/60-run W1-T1 spin-loop incident) — a DAILY
    * spend ceiling, in notional USD, on DISPATCH ONLY: at or over this many
    * ledgered dollars spent so far TODAY, NEW dispatch is deferred; drainage
@@ -243,18 +255,20 @@ export interface SweepPolicy {
 
 /**
  * The default policy — 14-day stale window, 2 fix strikes (mirrors
- * fixStrikeCap), 10-PR WIP limit, 60-minute pending ceiling, $150/day cost
- * ceiling. The $150 default is a SAFE, fail-closed guess (rule 2: an absent
- * policy value falls back to a bounded default, never unbounded spend) — well
- * under the $206/60-run W1-T1 incident it exists to catch, while generous
- * enough that ordinary single-day operation (well under DEFAULT_BUDGET_USD's
- * $100 per-run cap, run once or twice) does not trip it by accident.
+ * fixStrikeCap), 10-PR WIP limit, 2 dispatch lanes (W1-T172, start N=2),
+ * 60-minute pending ceiling, $150/day cost ceiling. The $150 default is a
+ * SAFE, fail-closed guess (rule 2: an absent policy value falls back to a
+ * bounded default, never unbounded spend) — well under the $206/60-run W1-T1
+ * incident it exists to catch, while generous enough that ordinary
+ * single-day operation (well under DEFAULT_BUDGET_USD's $100 per-run cap,
+ * run once or twice) does not trip it by accident.
  */
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   staleDays: 14,
   strikeCap: 2,
   clarify: DEFAULT_CLARIFY_POLICY,
   wipLimit: 10,
+  dispatchLanes: 2,
   dailyCostCeilingUsd: 150,
   pendingCeilingMinutes: 60,
 };

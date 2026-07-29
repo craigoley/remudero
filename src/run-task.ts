@@ -5309,6 +5309,11 @@ async function drainCommand(
   const baseOpts: DrainOpts = {
     until: untilIdx >= 0 ? rest[untilIdx + 1] : undefined,
     max: maxIdx >= 0 ? Number(rest[maxIdx + 1]) : DRAIN_DEFAULT_MAX,
+    // W1-T172 PARALLEL DISPATCH — both read from the SAME SweepPolicy row
+    // W1-T121 gave the WIP limit (one threshold home, never a second); raising
+    // either is a policy-data edit, never a CLI flag or a second constant here.
+    laneCount: DEFAULT_SWEEP_POLICY.dispatchLanes,
+    wipLimit: DEFAULT_SWEEP_POLICY.wipLimit,
   };
   const opts: DrainOpts = curatedSelection ? applyCuratedSelection(baseOpts, curatedSelection) : baseOpts;
   const config = deps.config ?? loadConfig();
@@ -5368,6 +5373,14 @@ async function drainCommand(
   const isOpenPr: OpenPrCheck = (id) => {
     const p = lastProj?.get(id);
     return p?.prState === "OPEN" ? p.prNumber : undefined;
+  };
+  // W1-T172: the queue governor's other input (alongside DrainOpts.wipLimit) —
+  // OPEN entries in the SAME projection `isOpenPr` just read, never a second
+  // GitHub read path. Only consulted by the multi-lane path.
+  const openPrCount = () => {
+    let n = 0;
+    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") n++;
+    return n;
   };
   // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd drain` invocation.
   const breakerGate = breakerGateFor(ledgerPath);
@@ -5459,6 +5472,7 @@ async function drainCommand(
         readUsage: () => readUsageSnapshot(config),
         checkStop: () => stopDetail(config.root),
         checkPause: () => pauseDetail(config.root),
+        openPrCount, // W1-T172: the governor's WIP-ceiling input on the multi-lane path.
         log,
       },
       opts,
