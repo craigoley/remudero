@@ -360,8 +360,18 @@ export interface DaemonOpts {
  * this drives, `daemon_selfrestart_for_freshness` — names exactly what advanced, the same
  * way `checkServiceFreshness`'s `behind` field does in self-sync.ts (the shared PREDICATE
  * this sibling check reuses rather than duplicating; see `DaemonDeps.checkFreshness`).
+ *
+ * `installNeeded` (W1-T151, INSTALL FRESHNESS) is OPTIONAL — omitted/false behaves exactly
+ * as before this field existed. `true` means the pull that produced `newSha` also changed
+ * `package.json`/`package-lock.json` (or added a `workspaces` layout) relative to `oldSha`,
+ * so `DaemonDeps.runInstall` runs BEFORE this loop stops for restart — never after — the
+ * same install-then-restart ordering `serviceFreshnessGate`/`ensureInstallFresh` (run-task.ts)
+ * apply at the operator's `rmd daemon`/`rmd serve` entry, so a stale `node_modules` never
+ * survives into the freshly-restarted process either.
  */
-export type DaemonFreshness = { stale: false } | { stale: true; oldSha: string; newSha: string };
+export type DaemonFreshness =
+  | { stale: false }
+  | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean };
 
 export interface DaemonSummary {
   attempted: string[];
@@ -467,6 +477,18 @@ export interface DaemonDeps {
    * before this check existed.
    */
   checkFreshness?: () => DaemonFreshness;
+  /**
+   * W1-T151 (INSTALL FRESHNESS). Consulted ONLY when `checkFreshness()` reports
+   * `{ stale: true, installNeeded: true }` — runs BEFORE the loop stops for restart
+   * (never after), so the process launchd relaunches into `newSha` also inherits a
+   * `node_modules` that actually matches it, closing the same staleness class
+   * {@link ensureInstallFresh} (run-task.ts) closes at the operator's `rmd daemon`/
+   * `rmd serve` entry. This module stays PURE — the real command wires this to
+   * `ensureInstallFresh(repoRoot)`'s real `npm ci`. Optional: omitted (or
+   * `installNeeded` false/absent) ⇒ never called, behavior unchanged from before
+   * this hook existed.
+   */
+  runInstall?: () => void;
   /**
    * CONSOLE WRITE-ACTIONS (fb-1784988460437-9daa9b). PEEK the pending "Run this
    * queued task now" kick markers, oldest-first — PURE injection, no fs here (the
@@ -949,6 +971,12 @@ export async function runDaemon(
     // iterations. See `DaemonDeps.checkFreshness`'s doc for the full contract.
     const freshness = deps.checkFreshness?.();
     if (freshness?.stale) {
+      // W1-T151: install BEFORE the loop stops for restart — never after — so the
+      // freshly-relaunched process (booting at newSha) inherits deps that already
+      // match it, not the stale node_modules this tick's own process is still running.
+      if (freshness.installNeeded) {
+        deps.runInstall?.();
+      }
       const detail =
         `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
         `past this process's boot sha`;
