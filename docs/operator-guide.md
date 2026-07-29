@@ -81,7 +81,21 @@ repo changes.
    digests, you don't kick off individual tasks by hand.
 3. **Read the ledger, not the terminal.** Every step of every run appends one
    NDJSON line (`src/lib/ledger.ts`) keyed by `run_id`/`task_id`. This is the
-   provenance record — prefer it over reconstructing history from logs.
+   provenance record — prefer it over reconstructing history from logs. The
+   ledger's location is deterministic, a pure function of `config.root`
+   (`ledgerPathFor` in `src/run-task.ts`): **`<config.root>/state/ledger.ndjson`**
+   — by default `~/Remudero/state/ledger.ndjson`, since `config.root` defaults
+   to `os.homedir()/Remudero`, the *parent* of a repo checkout, not the
+   checkout itself (W1-T143). `rmd daemon` ledgers this path (plus its
+   launchd `StandardOutPath`/`StandardErrorPath` — `<config.root>/state/logs/
+   daemon.out.log`/`daemon.err.log`) aloud in its own `daemon.paths` line at
+   every boot, and prints the same line to stdout, so the path is never
+   folklore. The daemon's console narration (stdout/stderr) is written via a
+   synchronous `write(2)` (`writeSyncLine`), not `console.log` — under
+   launchd, stdout/stderr are never a TTY, and a plain `console.log`'s queued,
+   asynchronous write is why those out/err log files used to sit empty for
+   the life of a live run; the ledger stays the authoritative, structured
+   record either way.
 4. **Watch for escalations.** A `BLOCKED` verdict lands in the digest; `MANUAL`
    or `HARD_STOP` page you in real time via iMessage. Escalations are opened as
    labeled GitHub issues (`rmd escalate`) with a summary, detail, and — where
