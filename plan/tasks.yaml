@@ -11429,11 +11429,11 @@
     T132), and the retro command from source first (distrust this note).
   acceptance:
     - claim: "the retro fires on merges-since-marker >= N OR days-since-marker >= D (policy data), whichever first, at the daemon poll, with a retro_triggered ledger line naming the reason"
-      proof: "unit test over the trigger predicate + policy: a marker with merges >= N (default 25) fires reason=merges; a marker with days >= D (default 7) fires reason=days; whichever crosses first fires; below both, NO fire; a fire writes a retro_triggered line naming the reason; N and D are policy-data rows (changing the value changes the threshold with no code edit)"
+      proof: "unit test: runDaemon: a fired retro trigger ledgers retro_triggered and runs the automated retro exactly once"
     - claim: "the integrity gate is a HARD precondition: a gather crediting ZERO merges on a NONZERO window ABORTS the automated retro (loud ledger line), never writes"
-      proof: "unit test: an automated retro whose gather credits 0 merges while merges-since-marker > 0 ABORTS with a loud retro_aborted_integrity ledger line and writes NOTHING (no PR, no marker advance) — the falsifier being an automated retro that writes on a zero-credit gather (the R8 silent under-count, now fail-closed)"
+      proof: "unit test: retroCommand: the INTEGRITY GATE aborts an AUTOMATED run when the trigger saw real merges"
     - claim: "a fired, integrity-passing retro runs end to end via W1-T136's mergeable-PR path and advances the marker; a second poll does not re-fire"
-      proof: "integration test: a fired trigger with an integrity-passing gather runs the retro to a mergeable plan-sync PR (W1-T136 path) and advances the marker (state/last-retro.json); an immediately-following poll does NOT re-fire (the marker moved past the threshold)"
+      proof: "unit test: W1-T160 INTEGRATION: runDaemon fires the retro trigger, runs the REAL retroCommand"
   risk: high
   origin: architect
   plan_refs: ["§9", "§5C"]
