@@ -1,7 +1,19 @@
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { randomBytes, randomUUID } from "node:crypto";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 
 /**
  * GENERAL SHELL-ISOLATION MECHANISM (W1-T18 / OSS blocker).
@@ -181,6 +193,161 @@ export function materializeWorkerHome(opts: {
   }
 
   return plan;
+}
+
+// ── W1-T170: per-run/per-spawn worker HOMES (the singleton does not survive concurrency) ──
+//
+// WS-2 names the failure mode by hand: "the singleton <root>/worker-home (W1-T18/
+// #100/#102) does NOT survive concurrency; every concurrent worker needs its own
+// worker-home-<runId> with its own empty rc + its own login.keychain-db/.claude/
+// .config/gh symlinks. A shared home races on rc materialization and the keychain
+// grant." Two overlapping spawns truncating/symlinking the SAME rc files and
+// keychain slot is exactly the kind of interleaving that turns a deterministic,
+// already-fixed bug (#100's HOME-relative keychain miss) into an intermittent one.
+// NOT IN SCOPE, and unchanged by this section: WHAT is symlinked — the allowlist
+// above, verbatim — only how many homes exist and who owns each.
+
+const workerHomeFsOps = { existsSync, rmSync, readdirSync, statSync };
+type WorkerHomeFsOps = typeof workerHomeFsOps;
+
+/**
+ * The per-spawn worker HOME: `<workerHomeRoot>-<id>`, a SIBLING of the
+ * singleton root (never the root itself, never nested under it — see
+ * {@link isReapableWorkerHome}, which enforces exactly that shape on reap).
+ * `id` prefers the caller's `runId` when supplied (durable and legible in
+ * `ps`/logs — the literal `worker-home-<runId>` WS-2 names), but generation
+ * never DEPENDS on one being threaded through: the concurrency invariant —
+ * no two overlapping spawns ever share a home — must hold even for a caller
+ * that has not (yet) wired a runId through, so an absent/empty one falls
+ * back to a fresh `randomUUID()` per call.
+ */
+export function perRunWorkerHomeDir(workerHomeRoot: string, runId?: string): string {
+  const id = runId && runId.length > 0 ? runId : randomUUID();
+  return `${workerHomeRoot}-${id}`;
+}
+
+/**
+ * `true` IFF `target` is exactly `<root>-<nonempty-suffix>` — a per-spawn
+ * SIBLING of the singleton root, one segment, no traversal. Guards
+ * {@link reapWorkerHome} so a malformed target can never remove the
+ * singleton root itself or anything outside its own sibling — the same
+ * one-segment-below/beside-root discipline worker-scratch.ts's
+ * `isReapableScratchTarget` already applies to the identical class of
+ * mistake (a reap that escapes its own resource).
+ */
+export function isReapableWorkerHome(root: string, target: string): boolean {
+  const rootResolved = resolve(root);
+  const t = resolve(target);
+  if (t === rootResolved) return false; // never the singleton root itself
+  const prefix = `${rootResolved}-`;
+  if (!t.startsWith(prefix)) return false;
+  const suffix = t.slice(prefix.length);
+  return suffix.length > 0 && !suffix.includes("/");
+}
+
+export interface WorkerHomeReapResult {
+  reaped: boolean;
+  target?: string;
+  reason?: string;
+}
+
+/**
+ * Best-effort reap of ONE per-spawn worker home. Called at spawn teardown on
+ * EVERY exit path, including a thrown error — the same `withTempDir`
+ * discipline (W1-T115/W1-T131) rmd already applies to its other throwaway
+ * resources, now covering a resource that must not accumulate across
+ * concurrent or serial spawns. Guarded by {@link isReapableWorkerHome};
+ * existence-checked; never throws.
+ */
+export function reapWorkerHome(
+  root: string,
+  target: string,
+  opts: { fsImpl?: Partial<WorkerHomeFsOps> } = {},
+): WorkerHomeReapResult {
+  try {
+    const f = { ...workerHomeFsOps, ...opts.fsImpl };
+    if (!isReapableWorkerHome(root, target)) return { reaped: false, target, reason: "guard-rejected" };
+    if (!f.existsSync(target)) return { reaped: false, target, reason: "absent" };
+    f.rmSync(target, { recursive: true, force: true });
+    return { reaped: true, target };
+  } catch (e) {
+    return { reaped: false, target, reason: String((e as Error)?.message ?? e) };
+  }
+}
+
+/** Default age ceiling for {@link sweepStaleWorkerHomes}: 24h — matches the
+ * other boot sweeps (lib/tmp.ts's `sweepStaleTempDirs`, lib/worker-scratch.ts's
+ * `sweepStaleWorkerScratch`). */
+export const DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+export interface WorkerHomeSweepOpts {
+  /** Reap a worker-home dir older than this. Default 24h. */
+  maxAgeMs?: number;
+  /** Injectable clock (tests). Defaults to Date.now. */
+  now?: () => number;
+  fsImpl?: Partial<WorkerHomeFsOps>;
+}
+
+export interface WorkerHomeSweepSummary {
+  removed: string[];
+  kept: string[];
+}
+
+/**
+ * Boot-time backstop (mirrors worker-scratch.ts's `sweepStaleWorkerScratch`
+ * and tmp.ts's `sweepStaleTempDirs`): reap `<root>-<id>` worker-home dirs a
+ * crashed/killed process could not reach its own {@link reapWorkerHome} call
+ * for — the daemon boot sweep this task's design calls for, so a home
+ * orphaned by an ended run does not accumulate across boots. Scans `root`'s
+ * PARENT directory for siblings matching `<basename(root)>-`, reaping only
+ * ones older than `maxAgeMs`: `materializeWorkerHome` touches a home's mtime
+ * on every use, so a home belonging to a still-running spawn is always
+ * recent and never collateral. Best-effort throughout; never throws.
+ */
+export function sweepStaleWorkerHomes(root: string, opts: WorkerHomeSweepOpts = {}): WorkerHomeSweepSummary {
+  const f = { ...workerHomeFsOps, ...opts.fsImpl };
+  const now = opts.now ?? (() => Date.now());
+  const maxAgeMs = opts.maxAgeMs ?? DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS;
+  const removed: string[] = [];
+  const kept: string[] = [];
+  const parent = dirname(root);
+  const prefix = `${basename(root)}-`;
+
+  let entries: string[];
+  try {
+    entries = f.readdirSync(parent);
+  } catch {
+    return { removed, kept }; // parent unreadable/absent — best-effort
+  }
+
+  for (const name of entries) {
+    if (!name.startsWith(prefix)) continue;
+    const full = join(parent, name);
+    let mtimeMs: number;
+    let isDir: boolean;
+    try {
+      const st = f.statSync(full);
+      isDir = st.isDirectory();
+      mtimeMs = st.mtimeMs;
+    } catch {
+      continue; // vanished between readdir and stat — someone else's cleanup won
+    }
+    if (!isDir) {
+      kept.push(name);
+      continue;
+    }
+    if (now() - mtimeMs <= maxAgeMs) {
+      kept.push(name); // recent mtime ⇒ a live spawn may still own it
+      continue;
+    }
+    try {
+      f.rmSync(full, { recursive: true, force: true });
+      removed.push(name);
+    } catch {
+      kept.push(name); // a permissions hiccup on one entry never blocks the rest
+    }
+  }
+  return { removed, kept };
 }
 
 // ── W1-T235: the dedicated worker keychain (WS-7 keychain-unlock gate) ──────

@@ -21,7 +21,14 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { buildWorkerEnv, billingMode, type BillingMode } from "./env.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStaleWorkerScratch } from "./worker-scratch.js";
-import { ensureWorkerKeychain, materializeWorkerHome, workerKeychainPaths, type SecurityRunner } from "./worker-home.js";
+import {
+  ensureWorkerKeychain,
+  materializeWorkerHome,
+  perRunWorkerHomeDir,
+  reapWorkerHome,
+  workerKeychainPaths,
+  type SecurityRunner,
+} from "./worker-home.js";
 import {
   buildContainedSpawnFn,
   spawnDetachedGroup,
@@ -496,6 +503,10 @@ export interface SpawnWorkerArgs {
  *  - `sandbox` → parsed from the settings file and passed as the validated SDK
  *    option, so a malformed sandbox block fails loud instead of the CLI silently
  *    dropping an invalid settings file and running unsandboxed.
+ *  - `env.home` → a worker-home dir UNIQUE to this call (W1-T170: `perRunWorkerHomeDir`,
+ *    preferring `args.runId` when supplied), materialized fresh and reaped in a
+ *    `finally` regardless of outcome — the pre-W1-T170 singleton `<root>/worker-home`
+ *    does not survive two overlapping spawns (WS-2).
  */
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // Validate-before-spawn guard (WS-0 FF10a) enforced at the spawn boundary, not
@@ -517,109 +528,126 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // scratch dir holding ONLY empty rc files (never the operator's real HOME),
   // with the few paths a worker legitimately needs symlinked back in. Best-
   // effort/idempotent — safe to call before every spawn. See worker-home.ts.
-  const workerHome = workerHomeDir(config);
+  //
+  // W1-T170: the singleton root does NOT survive concurrency (WS-2) — two
+  // overlapping spawns truncating/symlinking the SAME rc files and keychain
+  // slot race each other. So EVERY spawn gets its OWN home, a sibling of the
+  // root (`perRunWorkerHomeDir`), never the shared root itself; reaped below
+  // on every exit path (including error) once this spawn is done with it.
+  const workerHomeRoot = workerHomeDir(config);
+  const workerHome = perRunWorkerHomeDir(workerHomeRoot, args.runId);
   const realHome = process.env.HOME ?? homedir();
-  // W1-T235 (WS-7 keychain-unlock gate, macOS only): guarantee the DEDICATED
-  // always-unlocked worker keychain before any spawn, and point the redirected
-  // HOME's keychain slot at it — a LOCKED login keychain can no longer kill the
-  // spawn "Not logged in" at $0. A credential problem throws WorkerKeychainError
-  // HERE, pre-spawn, with a named reason class — never a $0 worker whose
-  // zero-write death reads as "containment UNPROVEN" (the 2026-07-21 incident).
-  let workerKeychainPath: string | undefined;
-  const platform = args.keychain?.platform ?? process.platform;
-  if (platform === "darwin") {
-    workerKeychainPath = ensureWorkerKeychain({
-      ...workerKeychainPaths(join(config.root, "state")),
-      loginKeychainPath: join(realHome, "Library", "Keychains", "login.keychain-db"),
-      grantApps: workerKeychainGrantApps(claudeBin),
-      runner: args.keychain?.runner,
-      exists: args.keychain?.exists,
-    }).keychainPath;
+  try {
+    // W1-T235 (WS-7 keychain-unlock gate, macOS only): guarantee the DEDICATED
+    // always-unlocked worker keychain before any spawn, and point the redirected
+    // HOME's keychain slot at it — a LOCKED login keychain can no longer kill the
+    // spawn "Not logged in" at $0. A credential problem throws WorkerKeychainError
+    // HERE, pre-spawn, with a named reason class — never a $0 worker whose
+    // zero-write death reads as "containment UNPROVEN" (the 2026-07-21 incident).
+    let workerKeychainPath: string | undefined;
+    const platform = args.keychain?.platform ?? process.platform;
+    if (platform === "darwin") {
+      workerKeychainPath = ensureWorkerKeychain({
+        ...workerKeychainPaths(join(config.root, "state")),
+        loginKeychainPath: join(realHome, "Library", "Keychains", "login.keychain-db"),
+        grantApps: workerKeychainGrantApps(claudeBin),
+        runner: args.keychain?.runner,
+        exists: args.keychain?.exists,
+      }).keychainPath;
+    }
+    materializeWorkerHome({ workerHome, realHome, workerKeychainPath });
+
+    // Shell isolation (resolved from config, never hardcoded) so a worker sources
+    // no operator rc: HOME is redirected (above) so CLAUDE_CODE_SHELL's Bash-tool
+    // snapshot (which sources `$HOME/.bashrc`) resolves to the redirected scratch
+    // HOME's empty rc, never the operator's — isolation independent of whatever
+    // the operator's real dotfiles contain. ZDOTDIR covers any direct zsh (W1-T1C
+    // compinit contamination).
+    const childEnv = buildWorkerEnv(args.env ?? {}, process.env, {
+      zdotdir: workerZdotdir(config),
+      shell: workerShell(config),
+      home: workerHome,
+      // Overflow valve (§9, W1-T258): pass the operator's ANTHROPIC_API_KEY through
+      // to bill on API credits ONLY when config.overflow === "api_key" — which
+      // validateConfig refuses without a paired dailyCapUsd, so an uncapped api run
+      // can never even be configured. Absent that, ANTHROPIC_* is stripped as before.
+      allowApiKey: config.overflow === "api_key",
+    });
+    // W1-T117: attribution markers merged in AFTER the allowlist/extras above —
+    // authoritative regardless of whatever `args.env` happens to contain (no
+    // caller has a legitimate reason to set REMUDERO_RUN_ID/TASK_ID itself).
+    Object.assign(childEnv, workerMarkerEnv(args.runId, args.taskId));
+
+    const stderrChunks: string[] = [];
+    const blocks: string[] = [];
+
+    // W1-T117: worker process-tree containment. `pidRef` is populated by the
+    // spawnClaudeCodeProcess closure below the first time the SDK actually
+    // spawns (lazily, on the returned async iterable's first pull);
+    // withWorkerGroupTeardown guarantees `teardownFn` runs against it on EITHER
+    // path once the message stream settles — normal return (any result
+    // subtype, including error_max_turns/error_max_budget_usd) or a thrown
+    // transport failure — never leaving a run's process group alive past its
+    // own teardown. See worker-containment.ts's file header for the verified
+    // SDK spawn-surface ground truth (`Options.spawnClaudeCodeProcess`) this
+    // relies on, including why it ALSO owns stderr piping here (a custom spawn
+    // gets no stderr wiring from the SDK itself).
+    const pidRef: { pid?: number } = {};
+    const spawnContained = args.containment?.spawn ?? spawnDetachedGroup;
+    const teardownContained = args.containment?.teardown ?? ((pgid: number) => void teardownProcessGroup(pgid));
+
+    // NOTE (SDK 0.3.209 ground truth): passing BOTH a `settings` file path and the
+    // `sandbox` option throws "Cannot use both …". The sandbox config therefore
+    // lives inside the settings file; the probe (verdict 7) empirically confirms
+    // it actually engaged rather than being silently dropped.
+    const options: Options = {
+      cwd: args.cwd,
+      permissionMode: args.permissionMode,
+      pathToClaudeCodeExecutable: claudeBin,
+      env: childEnv,
+      settings: args.settingsFile,
+      settingSources: [],
+      // W1-T117: run the CLI DETACHED into its own process group/session
+      // (setsid-equivalent) so teardown can reach every descendant — including
+      // one that outlives the CLI's own exit — with a single group signal.
+      // This REPLACES the SDK's default local spawn, so `stderrChunks` is fed
+      // from THIS closure (via buildContainedSpawnFn's onStderr sink), not
+      // from an `Options.stderr` callback here — the SDK never invokes one for
+      // a custom spawn (see the file-header note in worker-containment.ts).
+      spawnClaudeCodeProcess: buildContainedSpawnFn(spawnContained, (chunk) => stderrChunks.push(chunk), pidRef),
+    };
+    if (args.resumeSessionId) options.resume = args.resumeSessionId;
+    if (args.model) options.model = args.model;
+    if (args.effort) options.effort = args.effort as Options["effort"];
+    if (typeof args.maxTurns === "number") options.maxTurns = args.maxTurns;
+    if (typeof args.maxBudgetUsd === "number") options.maxBudgetUsd = args.maxBudgetUsd;
+    if (args.tools) options.tools = args.tools;
+
+    const runQuery = args.queryFn ?? query;
+    return await withWorkerGroupTeardown(
+      pidRef,
+      () =>
+        collectWorkerResult(runQuery({ prompt: args.prompt, options }), {
+          childEnvKeys: Object.keys(childEnv).sort(),
+          stderrChunks,
+          // Logged verbatim as CONFIGURED inputs — never a read-back (effort is not
+          // in the SDK envelope at all; model here is the requested knob, which may
+          // differ from the envelope's `modelUsage` map keys for the model(s) actually
+          // billed). Unset ⇒ the honest "default" label, never a guessed value.
+          model: args.model ?? DEFAULT_MODEL_LABEL,
+          effort: args.effort ?? DEFAULT_EFFORT_LABEL,
+        }),
+      teardownContained,
+    );
+  } finally {
+    // W1-T170: reap THIS spawn's per-spawn home on every exit path, including a
+    // thrown error (validate/toolchain/keychain failures above, or a transport
+    // failure out of withWorkerGroupTeardown) — the same withTempDir discipline
+    // (W1-T115/W1-T131) applied to a resource that must not accumulate across
+    // concurrent or serial spawns. Guarded (never touches the singleton root or
+    // anything outside its own sibling) and best-effort — see worker-home.ts.
+    reapWorkerHome(workerHomeRoot, workerHome);
   }
-  materializeWorkerHome({ workerHome, realHome, workerKeychainPath });
-
-  // Shell isolation (resolved from config, never hardcoded) so a worker sources
-  // no operator rc: HOME is redirected (above) so CLAUDE_CODE_SHELL's Bash-tool
-  // snapshot (which sources `$HOME/.bashrc`) resolves to the redirected scratch
-  // HOME's empty rc, never the operator's — isolation independent of whatever
-  // the operator's real dotfiles contain. ZDOTDIR covers any direct zsh (W1-T1C
-  // compinit contamination).
-  const childEnv = buildWorkerEnv(args.env ?? {}, process.env, {
-    zdotdir: workerZdotdir(config),
-    shell: workerShell(config),
-    home: workerHome,
-    // Overflow valve (§9, W1-T258): pass the operator's ANTHROPIC_API_KEY through
-    // to bill on API credits ONLY when config.overflow === "api_key" — which
-    // validateConfig refuses without a paired dailyCapUsd, so an uncapped api run
-    // can never even be configured. Absent that, ANTHROPIC_* is stripped as before.
-    allowApiKey: config.overflow === "api_key",
-  });
-  // W1-T117: attribution markers merged in AFTER the allowlist/extras above —
-  // authoritative regardless of whatever `args.env` happens to contain (no
-  // caller has a legitimate reason to set REMUDERO_RUN_ID/TASK_ID itself).
-  Object.assign(childEnv, workerMarkerEnv(args.runId, args.taskId));
-
-  const stderrChunks: string[] = [];
-  const blocks: string[] = [];
-
-  // W1-T117: worker process-tree containment. `pidRef` is populated by the
-  // spawnClaudeCodeProcess closure below the first time the SDK actually
-  // spawns (lazily, on the returned async iterable's first pull);
-  // withWorkerGroupTeardown guarantees `teardownFn` runs against it on EITHER
-  // path once the message stream settles — normal return (any result
-  // subtype, including error_max_turns/error_max_budget_usd) or a thrown
-  // transport failure — never leaving a run's process group alive past its
-  // own teardown. See worker-containment.ts's file header for the verified
-  // SDK spawn-surface ground truth (`Options.spawnClaudeCodeProcess`) this
-  // relies on, including why it ALSO owns stderr piping here (a custom spawn
-  // gets no stderr wiring from the SDK itself).
-  const pidRef: { pid?: number } = {};
-  const spawnContained = args.containment?.spawn ?? spawnDetachedGroup;
-  const teardownContained = args.containment?.teardown ?? ((pgid: number) => void teardownProcessGroup(pgid));
-
-  // NOTE (SDK 0.3.209 ground truth): passing BOTH a `settings` file path and the
-  // `sandbox` option throws "Cannot use both …". The sandbox config therefore
-  // lives inside the settings file; the probe (verdict 7) empirically confirms
-  // it actually engaged rather than being silently dropped.
-  const options: Options = {
-    cwd: args.cwd,
-    permissionMode: args.permissionMode,
-    pathToClaudeCodeExecutable: claudeBin,
-    env: childEnv,
-    settings: args.settingsFile,
-    settingSources: [],
-    // W1-T117: run the CLI DETACHED into its own process group/session
-    // (setsid-equivalent) so teardown can reach every descendant — including
-    // one that outlives the CLI's own exit — with a single group signal.
-    // This REPLACES the SDK's default local spawn, so `stderrChunks` is fed
-    // from THIS closure (via buildContainedSpawnFn's onStderr sink), not
-    // from an `Options.stderr` callback here — the SDK never invokes one for
-    // a custom spawn (see the file-header note in worker-containment.ts).
-    spawnClaudeCodeProcess: buildContainedSpawnFn(spawnContained, (chunk) => stderrChunks.push(chunk), pidRef),
-  };
-  if (args.resumeSessionId) options.resume = args.resumeSessionId;
-  if (args.model) options.model = args.model;
-  if (args.effort) options.effort = args.effort as Options["effort"];
-  if (typeof args.maxTurns === "number") options.maxTurns = args.maxTurns;
-  if (typeof args.maxBudgetUsd === "number") options.maxBudgetUsd = args.maxBudgetUsd;
-  if (args.tools) options.tools = args.tools;
-
-  const runQuery = args.queryFn ?? query;
-  return withWorkerGroupTeardown(
-    pidRef,
-    () =>
-      collectWorkerResult(runQuery({ prompt: args.prompt, options }), {
-        childEnvKeys: Object.keys(childEnv).sort(),
-        stderrChunks,
-        // Logged verbatim as CONFIGURED inputs — never a read-back (effort is not
-        // in the SDK envelope at all; model here is the requested knob, which may
-        // differ from the envelope's `modelUsage` map keys for the model(s) actually
-        // billed). Unset ⇒ the honest "default" label, never a guessed value.
-        model: args.model ?? DEFAULT_MODEL_LABEL,
-        effort: args.effort ?? DEFAULT_EFFORT_LABEL,
-      }),
-    teardownContained,
-  );
 }
 
 /**
