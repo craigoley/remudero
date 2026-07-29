@@ -1,6 +1,7 @@
 import { appendLedger } from "./ledger.js";
 import { readLedgerLines } from "./status.js";
-import type { CriterionVerdict } from "./review.js";
+import { cappedOverrideFromLedger, decideAutoMergeArm, postedArmFactsFromLedger } from "./review.js";
+import type { ArmDecision, CriterionVerdict } from "./review.js";
 import type { QuestionEntry } from "./worker.js";
 
 /**
@@ -784,6 +785,50 @@ export function deriveDisposition(
   return { disposition: rule.disposition, reason: rule.reason(pr, policy, ageDays, now) };
 }
 
+/**
+ * ARMING PARITY WITH THE RUN FLOW — the fix for the gap run-task.ts named in its
+ * own capped-refusal comment ("`sweep.ts`'s independent 'checks green + review
+ * success -> mergeable' reconciliation does not yet consult `capped`/an
+ * override — a PR this refuses stays OPEN and UNARMED, but a later sweep poll
+ * could still arm it via that separate path").
+ *
+ * LIVE INSTANCE (2026-07-28): PR #800's verdict carried `capped: true` at
+ * `proof_exec 0/5` — five `exec_error` proofs, nothing executed. The run flow
+ * refused it. This reconciler armed it at 17:48:57Z and GitHub merged it 35
+ * seconds later, unattended, with zero acceptance proofs ever executed.
+ *
+ * NOT A SECOND IMPLEMENTATION — that duplication is exactly how the two paths
+ * drifted apart. This delegates to {@link decideAutoMergeArm}, the SAME pure
+ * predicate `runTask`'s arming path calls, so the W1-T205 carve-out it already
+ * encodes travels with it: a `planOnly` CAPPED verdict is STRUCTURALLY capped
+ * (a plan PR files or amends a task; it has no code to run a proof against) and
+ * STILL ARMS, with no operator override, or every retro/triage/plan/approve PR
+ * in the system would stall. The one shape this takes away is the one the run
+ * flow already refuses: capped, not plan-only, no ledgered operator override.
+ *
+ * `tddStrict` is passed `false` because W1-T229 removed it from the GATE — it
+ * survives on {@link decideAutoMergeArm}'s signature purely for
+ * `resolveAutoMergeArm`'s override-provenance bookkeeping, and never changes
+ * which verdicts arm. The override is recovered head-bound from the SAME
+ * `automerge.capped_override_granted` ledger line `runTask` reads
+ * ({@link cappedOverrideFromLedger}), so an operator who unblocks a PR by hand
+ * unblocks it for BOTH paths, not just the one they happened to be looking at.
+ *
+ * FAIL-OPEN ON ABSENT EVIDENCE (see {@link postedArmFactsFromLedger}): a head
+ * with no recoverable ledgered verdict arms exactly as it did before this
+ * function existed. Refusal requires positively observing `capped: true,
+ * plan_only: false` for THIS head.
+ */
+export function decideSweepArm(pr: OpenPrView, ledgerLines: ReadonlyArray<Record<string, unknown>>): ArmDecision {
+  const facts = postedArmFactsFromLedger(ledgerLines, pr.taskId, pr.headSha);
+  if (!facts) {
+    return { arm: true, reason: "no ledgered verdict recoverable for this head — arming as before (no evidence to refuse on)" };
+  }
+  const override =
+    facts.capped && pr.taskId ? cappedOverrideFromLedger(ledgerLines, pr.taskId, pr.headSha) : undefined;
+  return decideAutoMergeArm({ state: "success", capped: facts.capped, planOnly: facts.planOnly }, false, override);
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // W1-T78 — the CLARIFICATION-QUESTION rung (ratifies P22's new rung): an
 // ambiguous (BLOCKED-AMBIGUOUS) block yields a SPECIFIC, decidable operator
@@ -1227,8 +1272,11 @@ export async function runSweep(
   const log = deps.log ?? (() => {});
 
   // Dedup is keyed on the ledger (it persists across sweeps even when the input
-  // is byte-identical) — the level-triggered idempotence mechanism.
-  const prior = priorActionsFromLedger(readLedger(deps.ledgerPath));
+  // is byte-identical) — the level-triggered idempotence mechanism. The SAME
+  // read also feeds {@link decideSweepArm}'s head-bound verdict/override
+  // recovery, so arming parity costs this pass no extra ledger read.
+  const ledgerLines = readLedger(deps.ledgerPath);
+  const prior = priorActionsFromLedger(ledgerLines);
 
   const byDisposition = ZERO_COUNTS();
   const actions: SweepAction[] = [];
@@ -1318,9 +1366,23 @@ export async function runSweep(
       } else {
         try {
           switch (disposition) {
-            case "mergeable":
+            case "mergeable": {
+              // ARMING PARITY (see decideSweepArm): the run flow's own capped
+              // refusal is worthless while this independent path arms the same
+              // verdict seconds later (PR #800). Stand down instead of arming —
+              // `acted:false` keeps this PR out of `prior.armed`, so the next
+              // pass re-derives it fresh and arms the moment executed proof (or
+              // a ledgered operator override) lands. No escalation, no strike,
+              // no retry: the refusal is a NON-action, named on the ledger line.
+              const armDecision = decideSweepArm(pr, ledgerLines);
+              if (!armDecision.arm) {
+                acted = false;
+                standDownReason = armDecision.reason;
+                break;
+              }
               await deps.arm(pr);
               break;
+            }
             case "blocked-fixable": {
               // W1-T177 — TERMINAL-STATE CHECK AT THE SPENDING SITE: re-read this
               // PR's state FRESH, right before a fix-rung strike is actually

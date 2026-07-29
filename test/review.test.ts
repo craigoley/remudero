@@ -2100,7 +2100,10 @@ test("a seeded materialization failure posts a verdict whose description names i
   assert.match(v.summary, /CAPPED/);
   assert.doesNotMatch(v.summary, /substantiated/);
   // whose ledger line records the same:
-  assert.deepEqual(reviewLedgerLegibilityFields(v), { capped: true, keyword_only: true });
+  // `plan_only` joined this projection so the ledger carries every input
+  // decideAutoMergeArm needs (lib/sweep.ts's reconciliation reads the ledger, never
+  // the verdict object). REAL_TEST_DIFF touches src/test files, so it is false here.
+  assert.deepEqual(reviewLedgerLegibilityFields(v), { capped: true, keyword_only: true, plan_only: false });
 });
 
 // ── W1-T227: a name-filtered proof must scope its node --test invocation to
