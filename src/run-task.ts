@@ -993,6 +993,34 @@ export function checkPrOwnership(
   };
 }
 
+/**
+ * SCOPE-GUARDED BRANCH REFRESH (W1-T142, the `reset --soft` phantom-revert
+ * near-miss): collapsing a stale worker branch with `git reset --soft
+ * origin/main` forged a merge-base — the flattened commit's diff vs main
+ * REVERTED files an unrelated merged PR had touched, and because main had not
+ * re-touched them GitHub showed the PR as cleanly mergeable; the phantom
+ * revert would have merged silently. Given the set of paths a refreshed
+ * branch's diff touches and the task's declared `files` scope, returns the
+ * OUT-OF-SCOPE paths (empty = clean, safe to push) — anything outside the
+ * declared scope is either a phantom revert or scope creep.
+ *
+ * PURE: no git/network calls — `diffFiles` is the caller's already-computed
+ * diff-file list, never read here. FAIL-CLOSED: an empty/undefined
+ * `declaredFiles` scope refuses every non-empty diff (returns it verbatim)
+ * rather than waving it through — a task with no declared scope can never
+ * legitimize an out-of-scope push. An empty `diffFiles` is always clean
+ * (nothing staged, nothing to refuse) regardless of the declared scope.
+ */
+export function scopeGuardOutOfScopeFiles(
+  diffFiles: readonly string[],
+  declaredFiles: readonly string[] | undefined,
+): string[] {
+  if (diffFiles.length === 0) return [];
+  if (!declaredFiles || declaredFiles.length === 0) return [...diffFiles];
+  const declared = new Set(declaredFiles);
+  return diffFiles.filter((f) => !declared.has(f));
+}
+
 interface GateOutcome {
   merged: boolean;
   reason: string;
@@ -3256,6 +3284,39 @@ async function runTask(
       branchOnOrigin = false;
     }
     if (!branchOnOrigin) {
+      // W1-T142 SCOPE GUARD — the ONE orchestrator-initiated push in this file
+      // (the worker itself normally pushes from inside its own sandbox; this
+      // fallback runs on whatever the worktree holds, which is exactly the
+      // shape a refreshed/collapsed/squashed branch would have). Computed
+      // FRESH from this worktree, never a cached list, and BEFORE the push —
+      // a forged merge-base (the `reset --soft` near-miss) must never reach
+      // origin. Fail closed: an unreadable diff refuses rather than assumes clean.
+      let diffFiles: string[];
+      try {
+        diffFiles = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", "origin/main..HEAD"], {
+          encoding: "utf8",
+        })
+          .split("\n")
+          .map((f) => f.trim())
+          .filter(Boolean);
+      } catch (e) {
+        log("scope_guard.diff_unreadable", { error: String((e as Error)?.message ?? e) });
+        say(
+          `REFUSED: branch ${branch}'s diff against origin/main could not be read — refusing to push rather ` +
+            `than assuming it is in scope`,
+        );
+        return { taskId, runId, merged: false, costUsd, verdict: "failed" };
+      }
+      const outOfScope = scopeGuardOutOfScopeFiles(diffFiles, task.files);
+      if (outOfScope.length > 0) {
+        log("scope_guard.refused", { out_of_scope: outOfScope, declared_files: task.files ?? [] });
+        say(
+          `REFUSED: branch ${branch}'s diff touches file(s) outside task ${taskId}'s declared scope — ` +
+            `likely a forged merge-base / phantom revert (the reset --soft near-miss); NOT pushing: ` +
+            `${outOfScope.join(", ")}`,
+        );
+        return { taskId, runId, merged: false, costUsd, verdict: "failed" };
+      }
       say("fallback: pushing branch from orchestrator (outside sandbox)");
       execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
     }
