@@ -55,30 +55,34 @@ jobs:
         run: npm run test:ci
 
   commitlint:
-    # W1-T31 (MASTER-PLAN §6A) — Conventional Commits gate. Lints every commit ADDED by this PR
-    # (the base..head range, never the whole historical log, so pre-existing non-conventional
-    # commits on main can't retroactively block an unrelated PR) against commitlint.config.mjs.
+    # W1-T31 (MASTER-PLAN §6A), relocated by W1-T129 — Conventional Commits gate. This repo
+    # SQUASH-MERGES every PR (`squash_merge_commit_title: COMMIT_OR_PR_TITLE`, and neither
+    # `gh pr merge --squash` call site in src/run-task.ts / src/lib/worker.ts passes an explicit
+    # `--subject`), so branch commits never reach main — only the PR TITLE (GitHub's squash
+    # default for a multi-commit PR) becomes the commit that lands. Linting the base..head commit
+    # range therefore failed PRs over commits that would never exist post-merge, while the
+    # artifact that DOES persist went unchecked. This job now lints ONLY the PR title against
+    # commitlint.config.mjs — the standard is RELOCATED, not dropped: a non-conventional title
+    # still fails (test/commitlint-mode.test.ts is the falsifier proof), and a PR predating this
+    # gate no longer needs its branch history rewritten just to satisfy it (the #234/#238 class).
     # Runs UNCONDITIONALLY on every PR (no path filter, no job `if:`) — same fail-closed shape as
     # `lint-plan`/`depcruise`/`claims` above: a path-filtered REQUIRED check that can go silently
-    # absent is the synthwatch #102 deadlock class ci-gate.yml exists to avoid. A commit whose
-    # message doesn't parse as `type(scope): subject` (or uses an unrecognized type) fails this
-    # job — see test/commitlint-config.test.ts for the falsifier proof the config itself rejects/
-    # accepts the right messages.
+    # absent is the synthwatch #102 deadlock class ci-gate.yml exists to avoid. See
+    # test/commitlint-config.test.ts for the falsifier proof the config itself rejects/accepts the
+    # right messages.
     name: commitlint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
       - name: Install (clean, from lockfile)
         run: npm ci
-      - name: commitlint (this PR's commits, base..head)
+      - name: commitlint (the PR title — the artifact that survives the squash merge)
         env:
-          FROM_SHA: ${{ github.event.pull_request.base.sha }}
-        run: npx commitlint --from "$FROM_SHA" --to HEAD --verbose
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$PR_TITLE" | npx commitlint --config commitlint.config.mjs --verbose
 
   leak-grep:
     # Plaintext-secret tripwire (MASTER-PLAN §5 TIER 1) — runs on every PR,
