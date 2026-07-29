@@ -40,6 +40,7 @@ import { dirname, join } from "node:path";
 import type { Server } from "node:http";
 import { createService, type Route, type ServiceOptions, type ServiceTokens, type SseRoute } from "./service.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
+import { buildGlanceRoute } from "./glance.js";
 import type { GitHub } from "./status.js";
 import {
   buildAnswerQuestionRoute,
@@ -487,6 +488,24 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   .drafted-tasks { flex-basis: 100%; margin: 0.15rem 0 0.15rem 1.1rem; padding: 0; font-size: 0.875rem; color: var(--text-dim); }
   .drafted-tasks li { list-style: disc; }
   .counts { color: var(--text-dim); font-size: 0.9rem; }
+  /* W1-T159 GLANCE strip -- pinned above every section, so a phone glance answers "what needs
+     me / is the fleet healthy / what has it cost" without opening a single row. */
+  .glance-strip { display: flex; flex-direction: column; gap: 0.4rem; }
+  .glance-counts, .glance-daemon-health { display: flex; flex-wrap: wrap; gap: 0.4rem 0.75rem; }
+  .glance-chip { display: flex; flex-direction: column; min-width: 4.5rem; }
+  .glance-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-faint); }
+  .glance-value { font-size: 1.05rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .glance-chip[data-key="needs-me"] .glance-value { color: var(--status-needs-human); }
+  .glance-chip[data-key="blocked"] .glance-value { color: var(--status-blocked); }
+  .glance-daemon-health { border-top: 1px solid var(--border); padding-top: 0.4rem; }
+  .glance-daemon-health .glance-value { font-size: 0.9rem; font-weight: 500; }
+  /* ANOMALY EMPHASIS (criterion 3): not merely a count -- an explicit banner, the SAME
+     needs-human accent colour the row-level anomaly flag already uses (W1-T183). */
+  .glance-anomaly {
+    background: rgba(255, 184, 77, 0.12); border: 1px solid var(--status-needs-human);
+    color: var(--status-needs-human); padding: 0.4rem 0.6rem; border-radius: 8px; font-size: 0.85rem; font-weight: 600;
+  }
+  .glance-strip[data-anomaly="true"] { border-color: var(--status-needs-human); }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   /* W1-T157 FIND layer: faceted filters, sort headers, live counts ─────────────────────────── */
   .find-facets { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; margin: 0.3rem 0; }
@@ -603,6 +622,30 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
        reader users get "task flipped" news without a sighted user's visual flash/highlight. -->
   <div id="aria-announcer" class="sr-only" role="status" aria-live="polite"></div>
 </header>
+
+<!-- W1-T159 GLANCE: a PINNED strip -- running/needs-me/blocked/queued/merged-today/spend-today
+     +spend-this-week, an anomaly-emphasis line, and a daemon-health widget (last poll/next-poll
+     countdown/disk-free/rate-limit). Every number here is fetched from GET /v1/glance (a real
+     ledger/API reduction, glance.ts) -- never a value computed twice against the sections below,
+     so the strip and the rows it summarizes can never disagree (standing rule 22). -->
+<section id="glance-strip" class="panel-section glance-strip" aria-label="At a glance" data-anomaly="false">
+  <div id="glance-counts" class="glance-counts" aria-live="polite">
+    <span class="glance-chip" data-key="running"><span class="glance-label">Running</span><span class="glance-value" id="glance-running">…</span></span>
+    <span class="glance-chip" data-key="needs-me"><span class="glance-label">Needs me</span><span class="glance-value" id="glance-needs-me">…</span></span>
+    <span class="glance-chip" data-key="blocked"><span class="glance-label">Blocked</span><span class="glance-value" id="glance-blocked">…</span></span>
+    <span class="glance-chip" data-key="queued"><span class="glance-label">Queued</span><span class="glance-value" id="glance-queued">…</span></span>
+    <span class="glance-chip" data-key="merged-today"><span class="glance-label">Merged today</span><span class="glance-value" id="glance-merged-today">…</span></span>
+    <span class="glance-chip" data-key="spend-today"><span class="glance-label">Spend today</span><span class="glance-value" id="glance-spend-today">…</span></span>
+    <span class="glance-chip" data-key="spend-week"><span class="glance-label">Spend this week</span><span class="glance-value" id="glance-spend-week">…</span></span>
+  </div>
+  <div id="glance-anomaly" class="glance-anomaly" role="alert" hidden></div>
+  <div id="glance-daemon-health" class="glance-daemon-health" aria-label="Daemon health">
+    <span class="glance-chip" data-key="last-poll"><span class="glance-label">Last poll</span><span class="glance-value" id="glance-last-poll">…</span></span>
+    <span class="glance-chip" data-key="next-poll"><span class="glance-label">Next poll</span><span class="glance-value" id="glance-next-poll">…</span></span>
+    <span class="glance-chip" data-key="disk-free"><span class="glance-label">Disk free</span><span class="glance-value" id="glance-disk-free">…</span></span>
+    <span class="glance-chip" data-key="rate-limit"><span class="glance-label">GitHub rate limit</span><span class="glance-value" id="glance-rate-limit">…</span></span>
+  </div>
+</section>
 
 <section id="recap" class="panel-section" aria-label="Since you last checked" hidden>
   <h2><span>Since you last checked</span></h2>
@@ -844,6 +887,22 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     if (Number.isNaN(t)) return String(iso);
     const local = new Date(t).toLocaleTimeString(undefined, { timeZoneName: "short" });
     return \`\${local} · \${formatRelative(Date.now() - t)}\`;
+  }
+
+  // ── W1-T159 GLANCE formatting helpers ───────────────────────────────────────────────────────
+  function formatUsd(n) {
+    return typeof n === "number" && Number.isFinite(n) ? \`$\${n.toFixed(2)}\` : "unknown";
+  }
+  function formatBytes(n) {
+    if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return "unknown";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let v = n;
+    let i = 0;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i++;
+    }
+    return \`\${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} \${units[i]}\`;
   }
 
   // ── W1-T156 UI+TRUST: an animated per-row "in flight" indicator, replaced by a STATIC badge
@@ -2488,6 +2547,86 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     }
   }
 
+  // ── W1-T159 GLANCE: the pinned strip + daemon-health widget, fed by GET /v1/glance
+  // (glance.ts) -- a SEPARATE endpoint from /v1/status because it carries its own reduction
+  // (ledger-scanned spend/mergedToday, a real disk-free/rate-limit probe), never re-derived
+  // client-side off tasksById (that would be a SECOND, disagreeing count -- standing rule 22).
+  // The browser TAB TITLE badge (criterion 4) is driven by the SSE "needs-human" event below
+  // (updateTabTitleForNeedsMe), but also set here on every glance load/poll so the very first
+  // paint (before any SSE event has fired) already carries the real count, not a placeholder. ──
+  const BASE_TITLE = "Remudero — the operator console";
+  function updateTabTitleForNeedsMe(count) {
+    document.title = typeof count === "number" && count > 0 ? \`(\${count}) \${BASE_TITLE}\` : BASE_TITLE;
+  }
+  function setGlanceValue(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  }
+  function renderGlanceAnomaly(anomalies) {
+    const strip = document.getElementById("glance-strip");
+    const el = document.getElementById("glance-anomaly");
+    const has = !!(anomalies && anomalies.hasAnomaly);
+    if (strip) strip.dataset.anomaly = String(has);
+    if (!el) return;
+    if (!has) {
+      el.hidden = true;
+      el.textContent = "";
+      return;
+    }
+    const phaseIds = anomalies.phaseBreachTaskIds ?? [];
+    const staleIds = anomalies.staleNeedsMeTaskIds ?? [];
+    const parts = [];
+    if (phaseIds.length) parts.push(\`\${phaseIds.length} run past its phase threshold (\${phaseIds.join(", ")})\`);
+    if (staleIds.length) parts.push(\`\${staleIds.length} needs-me item(s) open over 24h (\${staleIds.join(", ")})\`);
+    el.hidden = false;
+    el.textContent = \`⚠ \${parts.join(" · ")}\`;
+  }
+  // The live "next poll" countdown ticks off this ONE stashed ETA (an ISO string from the
+  // server, glance.ts's DaemonHealth.nextPollEta) — recomputed every second client-side rather
+  // than re-fetched, so it counts down smoothly between glance polls.
+  let glanceNextPollAtMs;
+  function tickDaemonCountdown() {
+    const el = document.getElementById("glance-next-poll");
+    if (!el) return;
+    if (typeof glanceNextPollAtMs !== "number" || Number.isNaN(glanceNextPollAtMs)) {
+      el.textContent = "unknown";
+      return;
+    }
+    const remainingMs = glanceNextPollAtMs - Date.now();
+    el.textContent = remainingMs > 0 ? \`in \${formatElapsed(remainingMs)}\` : "any moment";
+  }
+  function renderGlance(g) {
+    if (!g) return;
+    const counts = g.counts ?? {};
+    setGlanceValue("glance-running", typeof counts.running === "number" ? String(counts.running) : "unknown");
+    setGlanceValue("glance-needs-me", typeof counts.needsMe === "number" ? String(counts.needsMe) : "unknown");
+    setGlanceValue("glance-blocked", typeof counts.blocked === "number" ? String(counts.blocked) : "unknown");
+    setGlanceValue("glance-queued", typeof counts.queued === "number" ? String(counts.queued) : "unknown");
+    setGlanceValue("glance-merged-today", typeof counts.mergedToday === "number" ? String(counts.mergedToday) : "unknown");
+    const spend = g.spend ?? {};
+    setGlanceValue("glance-spend-today", formatUsd(spend.todayUsd));
+    setGlanceValue("glance-spend-week", formatUsd(spend.weekUsd));
+    renderGlanceAnomaly(g.anomalies);
+    const dh = g.daemonHealth ?? {};
+    setGlanceValue("glance-last-poll", dh.lastPollAt ? formatTimestamp(dh.lastPollAt) : "unknown");
+    glanceNextPollAtMs = dh.nextPollEta ? Date.parse(dh.nextPollEta) : undefined;
+    tickDaemonCountdown();
+    setGlanceValue("glance-disk-free", formatBytes(dh.diskFreeBytes));
+    setGlanceValue("glance-rate-limit", typeof dh.rateLimitRemaining === "number" ? String(dh.rateLimitRemaining) : "unknown");
+    // Baseline tab-title state -- the SSE needs-human handler (below) is the fast, event-driven
+    // path; this keeps the title correct even before the first SSE event has fired.
+    updateTabTitleForNeedsMe(counts.needsMe);
+  }
+  async function refreshGlance() {
+    try {
+      renderGlance(await getJson("/v1/glance", { timeoutMs: STATUS_FETCH_TIMEOUT_MS }));
+    } catch (e) {
+      // Leave the last-known glance values on screen -- a transient failure here must not blank
+      // a widget that was showing real numbers a moment ago (the same "degrade, don't blank"
+      // rule the rest of this shell already follows for a poll failure).
+    }
+  }
+
   // ── the poll loop: the fallback/resync transport, driving UP NEXT/RECENT/feedback/inbox/
   // fleet-control read-back (none of which the SSE stream below carries) plus a periodic
   // full-snapshot resync of the task-status truth. W1-T156 DELTA-DRIVEN: task-status ROW
@@ -2587,7 +2726,11 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     return { event, data: dataLines.join("\\n") };
   }
 
-  function subscribeStatusStream(onEvent, onState) {
+  // W1-T159 GLANCE criterion 4: \`onNeedsHuman\` is OPTIONAL (a caller that omits it keeps
+  // today's exact behavior -- e.g. any test that only cares about \`status\`/\`onState\`), fired on
+  // the SAME wire's distinct \`needs-human\` event (board.ts's buildStatusStream) — the browser
+  // tab-title badge's fast, event-driven path (see updateTabTitleForNeedsMe, above).
+  function subscribeStatusStream(onEvent, onState, onNeedsHuman) {
     let stopped = false;
     let controller;
 
@@ -2620,6 +2763,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
             buffer = buffer.slice(sep + 2);
             const parsed = parseSseFrame(frame);
             if (parsed && parsed.event === "status") onEvent(JSON.parse(parsed.data));
+            else if (parsed && parsed.event === "needs-human") onNeedsHuman?.(JSON.parse(parsed.data));
           }
         }
       } catch {
@@ -2726,9 +2870,12 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     markStale(cachedSnapshot.generated_at);
   }
   refreshAll();
+  refreshGlance();
   setInterval(refreshAll, POLL_INTERVAL_MS);
+  setInterval(refreshGlance, POLL_INTERVAL_MS);
   setInterval(tickElapsed, 1000);
   setInterval(tickFreshness, 1000);
+  setInterval(tickDaemonCountdown, 1000);
   subscribeStatusStream(
     (projection) => {
       ingestProjection(projection);
@@ -2737,6 +2884,10 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
       applyDeepLinkIfNeeded(); // W1-T222: a no-op once already applied (see applyDeepLinkIfNeeded's own doc).
     },
     (state) => setConnectionState(state),
+    // W1-T159 criterion 4: the tab-title badge's fast path -- an SSE \`needs-human\` event updates
+    // \`document.title\` directly off the event's own count, the SAME field the strip's
+    // \`glance-needs-me\` chip renders (both trace to StatusProjection.needsHuman -- one source).
+    (payload) => updateTabTitleForNeedsMe(payload?.count),
   );
 </script>
 </body>
@@ -2808,6 +2959,11 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
   return [
     buildStatusRoute(deps.board, lastSeen),
     buildRecentRoute(deps.board),
+    // W1-T159 GLANCE: the pinned summary strip + daemon-health widget's data source, read-scoped
+    // like every other board-derived route. Shares deps.board's own ledgerPath/plan/github (never
+    // a third independently-resolved root) and the SAME phase thresholds the shell's client-side
+    // per-row anomaly check already embeds (buildShellRoute, below) — one named policy, not two.
+    buildGlanceRoute({ ...deps.board, phaseElapsedThresholdsMs: deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS }),
     buildControlStatusRoute(fleetControlDeps),
     buildPauseRoute(fleetControlDeps),
     buildResumeRoute(fleetControlDeps),

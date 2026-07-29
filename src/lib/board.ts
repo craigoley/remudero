@@ -651,6 +651,25 @@ export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): Ss
       let lastLineCount = primingLines.length;
       const lastSent = new Map<string, string>(deps.plan.tasks.map((t) => [t.id, JSON.stringify(deriveForStream(t, primingLines))]));
 
+      // W1-T159 GLANCE: a SECOND, distinct SSE event — `needs-human` — carrying the CURRENT
+      // needs-me task-id set, sent whenever that set actually changes (an addition OR a
+      // removal), never on every `status` flip that leaves it untouched. Distinct from `status`
+      // (one event per task) because the browser TAB BADGE needs one authoritative COUNT for the
+      // whole fleet, not fifty per-task deltas it would otherwise have to reduce itself. Primed
+      // from the SAME `lastSent` baseline just built above (deriveForStream's needsHuman field),
+      // so a subscribe against an already-needs-human fleet does not immediately "flip" and fire
+      // — only a set that changes AFTER this connection opened does, matching every other event
+      // this stream sends (a state FLIP, not a replay of current state).
+      const needsHumanIds = (taskId: string): boolean => JSON.parse(lastSent.get(taskId) ?? "{}").needsHuman === true;
+      const needsHumanState = new Map<string, boolean>(deps.plan.tasks.map((t) => [t.id, needsHumanIds(t.id)]));
+      const needsMeKey = () =>
+        [...needsHumanState.entries()]
+          .filter(([, v]) => v)
+          .map(([id]) => id)
+          .sort()
+          .join(",");
+      let lastNeedsMeKey = needsMeKey();
+
       const tick = () => {
         const lines = readLedger(deps.ledgerPath);
         if (lines.length <= lastLineCount) return;
@@ -666,7 +685,15 @@ export function buildStatusStream(deps: BoardDeps, pollMs = DEFAULT_POLL_MS): Ss
           const serialized = JSON.stringify(projection);
           if (lastSent.get(taskId) === serialized) continue; // no actual flip (incl. spend) — don't spam.
           lastSent.set(taskId, serialized);
+          needsHumanState.set(taskId, projection.needsHuman === true);
           send("status", projection);
+        }
+
+        const currentKey = needsMeKey();
+        if (currentKey !== lastNeedsMeKey) {
+          lastNeedsMeKey = currentKey;
+          const taskIds = currentKey ? currentKey.split(",") : [];
+          send("needs-human", { count: taskIds.length, taskIds });
         }
       };
 

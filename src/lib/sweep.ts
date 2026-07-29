@@ -1697,8 +1697,12 @@ export function logQueueGovernorDeferral(
 
 /**
  * Sums ONE ledgered dollar figure per RUN (keyed by `run_id`), for every run
- * with at least one ledger line whose `ts` falls on `now`'s UTC calendar day,
- * then totals those per-run figures — the day's ledgered cost.
+ * with at least one ledger line whose `ts` passes `inWindow`, then totals
+ * those per-run figures — a WINDOWED ledgered cost. Factored out of {@link
+ * deriveDayCostUsd} (W1-T159, the GLANCE strip's spend-this-week figure) so
+ * the day and week reductions share exactly one dedup rule rather than two
+ * copies that could silently drift apart (plan/tasks.yaml W1-T159's own
+ * boundary note: "if both need the same ledger reduction, factor it once").
  *
  * PER-RUN, NOT PER-LINE (avoids double-counting): a run's `verdict` line (or,
  * absent one — e.g. a run still in flight — its first `cost_usd`-bearing
@@ -1710,15 +1714,14 @@ export function logQueueGovernorDeferral(
  * mirroring retro.ts's `gatherRuns` costLine precedent (verdict line
  * preferred, else the first cost_usd line seen) — does not.
  *
- * A line with no `ts` string, or a `ts` outside today, is excluded; a run
- * whose only in-window lines carry no `cost_usd` contributes 0.
+ * A line with no `ts` string, or a `ts` `inWindow` rejects, is excluded; a
+ * run whose only in-window lines carry no `cost_usd` contributes 0.
  */
-export function deriveDayCostUsd(lines: ReadonlyArray<Record<string, unknown>>, now: number): number {
-  const day = new Date(now).toISOString().slice(0, 10); // "YYYY-MM-DD", UTC
+function deriveWindowCostUsd(lines: ReadonlyArray<Record<string, unknown>>, inWindow: (ts: string) => boolean): number {
   const byRun = new Map<string, Record<string, unknown>[]>();
   for (const line of lines) {
     const ts = typeof line.ts === "string" ? line.ts : undefined;
-    if (!ts || !ts.startsWith(day)) continue;
+    if (!ts || !inWindow(ts)) continue;
     const runId = typeof line.run_id === "string" ? line.run_id : undefined;
     if (!runId) continue;
     const bucket = byRun.get(runId);
@@ -1732,6 +1735,50 @@ export function deriveDayCostUsd(lines: ReadonlyArray<Record<string, unknown>>, 
     if (costLine && typeof costLine.cost_usd === "number") total += costLine.cost_usd;
   }
   return total;
+}
+
+/**
+ * Sums ONE ledgered dollar figure per RUN, for every run with at least one
+ * ledger line whose `ts` falls on `now`'s UTC calendar day — the day's
+ * ledgered cost. See {@link deriveWindowCostUsd} for the shared per-run dedup
+ * rule this and {@link deriveWeekCostUsd} both apply.
+ */
+export function deriveDayCostUsd(lines: ReadonlyArray<Record<string, unknown>>, now: number): number {
+  const day = new Date(now).toISOString().slice(0, 10); // "YYYY-MM-DD", UTC
+  return deriveWindowCostUsd(lines, (ts) => ts.startsWith(day));
+}
+
+/**
+ * The UTC-Monday-00:00 start of the calendar week containing `now`, as an
+ * ISO-8601 instant — the same "UTC calendar boundary" convention {@link
+ * deriveDayCostUsd}'s UTC-calendar-day already uses, extended to a week so
+ * the two figures are directly comparable (a week-to-date total that used a
+ * different clock/boundary than the day total beside it would make "is
+ * today normal against this week" unanswerable — exactly the W1-T159
+ * falsifier).
+ */
+export function startOfUtcWeekIso(now: number): string {
+  const d = new Date(now);
+  const dow = d.getUTCDay(); // 0=Sun..6=Sat
+  const daysSinceMonday = (dow + 6) % 7; // Mon=0, Tue=1, ..., Sun=6
+  const mondayMidnightUtc = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - daysSinceMonday, 0, 0, 0, 0);
+  return new Date(mondayMidnightUtc).toISOString();
+}
+
+/**
+ * Sums ONE ledgered dollar figure per RUN, for every run with at least one
+ * ledger line `ts` between this UTC week's Monday-00:00 start ({@link
+ * startOfUtcWeekIso}) and `now` (inclusive) — week-TO-DATE, not a rolling
+ * 7-day window, so it reads the same way "today so far" does: a baseline the
+ * operator can compare today's figure against (W1-T159's own falsifier: a
+ * ~2.54 USD post-merge burn looked unremarkable in isolation and only reads
+ * as an anomaly against a weekly figure). Shares {@link deriveWindowCostUsd}'s
+ * per-run dedup with {@link deriveDayCostUsd} — never a second, drifting copy.
+ */
+export function deriveWeekCostUsd(lines: ReadonlyArray<Record<string, unknown>>, now: number): number {
+  const start = startOfUtcWeekIso(now);
+  const nowIso = new Date(now).toISOString();
+  return deriveWindowCostUsd(lines, (ts) => ts >= start && ts <= nowIso);
 }
 
 /** {@link checkCostGovernor}'s verdict for one dispatch-path consultation. */

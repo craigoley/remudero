@@ -564,6 +564,63 @@ test("W1-T184: GET /v1/status/stream carries LIVE accumulated spend/turns too, n
   });
 });
 
+// ── W1-T159 GLANCE criterion 4: the browser tab badge's SSE SOURCE. The task's own design note
+// says "VERIFY... the SSE needs-human event from source first (distrust this note)" — before this
+// change, GET /v1/status/stream emitted only ONE event type (`status`), never `needs-human`; a
+// client-side tab badge listening for it would have found nothing to listen to. These tests prove
+// the event now genuinely exists on the wire, is driven by the SAME `needsHuman` field the NEEDS
+// ME taxonomy already derives (never a second, disagreeing signal), and fires ONLY on an actual
+// set change (an addition or a removal), not on every unrelated `status` flip. ─────────────────
+
+test("GET /v1/status/stream: a fresh escalation flips the needs-me set and the stream sends a distinct `needs-human` event carrying the count + task ids", async () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1" }), task({ id: "W1-T2" })]);
+  const issueUrl = "https://github.com/o/r/issues/900";
+  const github: GitHub = { ...fakeGitHub(), issueByUrl: (url) => (url === issueUrl ? { state: "OPEN", title: "needs a call" } : null) };
+  const deps: BoardDeps = { plan, ledgerPath, github };
+
+  await withBoardService(deps, 30, async (base) => {
+    const client = openSseClient(base, "/v1/status/stream", READ_TOKEN);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 40)); // let the priming baseline settle
+      assert.equal(client.events.filter((e) => e.event === "needs-human").length, 0, "no spurious event before anything actually changes");
+
+      appendFileSync(
+        ledgerPath,
+        JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "escalation.issue_opened", issue_url: issueUrl, class: "BLOCKED" }) + "\n",
+      );
+      await waitFor(() => client.events.some((e) => e.event === "needs-human"));
+      const evt = client.events.find((e) => e.event === "needs-human")!.data as { count: number; taskIds: string[] };
+      assert.equal(evt.count, 1, "carries the CURRENT needs-me count, matching the NEEDS ME taxonomy set");
+      assert.deepEqual(evt.taskIds, ["W1-T1"]);
+    } finally {
+      client.stop();
+      await client.done;
+    }
+  });
+});
+
+test("GET /v1/status/stream: a `status` flip that leaves the needs-me SET unchanged sends no `needs-human` event", async () => {
+  const ledgerPath = tmpLedgerPath();
+  const plan = planOf([task({ id: "W1-T1" })]);
+  const prUrl = "https://github.com/craigoley/remudero/pull/77";
+  const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub({ [prUrl]: { number: 77, url: prUrl, state: "MERGED" } }) };
+
+  await withBoardService(deps, 30, async (base) => {
+    const client = openSseClient(base, "/v1/status/stream", READ_TOKEN);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "r1", task_id: "W1-T1", step: "pr.opened", pr_url: prUrl }) + "\n");
+      await waitFor(() => client.events.some((e) => e.event === "status"));
+      await new Promise((resolve) => setTimeout(resolve, 100)); // a few more poll ticks
+      assert.equal(client.events.filter((e) => e.event === "needs-human").length, 0, "the merge flip never touched needsHuman — no needs-human event should fire");
+    } finally {
+      client.stop();
+      await client.done;
+    }
+  });
+});
+
 // ── W1-T184: LEDGER-FIRST RENDERING ─────────────────────────────────────────────────────────
 //
 // RECENT becomes an activity feed sourced from the LOCAL ledger; NOW rows carry live per-run
