@@ -101,7 +101,7 @@ import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/iso
 import { judgeReview } from "../src/lib/review.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import { buildBatchedGithub, type GitHub } from "../src/lib/status.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import type { AcceptanceCriterion, Plan, Task } from "../src/lib/plan.js";
 import {
   DEFAULT_SWEEP_POLICY,
   runSweep,
@@ -2138,6 +2138,107 @@ test("runFixRung: a seeded blocked_review with TWO unmet criteria dispatches ONE
   assert.equal(outcome.outcome, "fixed");
   assert.equal(outcome.strikes, 1);
   assert.equal(issueCalls.length, 0, "no escalation once the fix resolves the review");
+});
+
+// ── W1-T166: holdout acceptance criteria — reviewer-visible, WORKER-hidden.
+// The fix rung dispatches an actual coding worker, so its unmet-criteria block
+// is a worker-facing prompt exactly like the initial implement prompt — a
+// holdout criterion's claim/proof text must never reach it, even though the
+// SAME holdout criterion being unmet still counts toward the block (judgeReview
+// already folds it into `state`; these are the run-task.ts dispatch-site proofs).
+
+test("runFixRung (W1-T166 criterion 1): a mix of visible + holdout unmet criteria dispatches a fix prompt carrying the VISIBLE one only — the holdout claim/proof/reason never appear", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const failing = fakeReview("failure", [
+    criterion({ claim: "visible criterion merges cleanly", met: false, reason: "reason-visible-missing" }),
+    criterion({
+      claim: "HOLDOUT-SECRET-CRITERION-never-shown",
+      proof: "HOLDOUT-SECRET-PROOF-never-shown",
+      met: false,
+      reason: "HOLDOUT-SECRET-REASON-never-shown",
+      holdout: true,
+    }),
+  ]);
+  const passing = fakeReview("success", [
+    criterion({ claim: "visible criterion merges cleanly", met: true }),
+    criterion({ claim: "HOLDOUT-SECRET-CRITERION-never-shown", met: true, holdout: true }),
+  ]);
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 2,
+    initialReview: failing,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: "fix-session-holdout" });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => passing,
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(spawnCalls.length, 1, "exactly one fix worker spawn");
+  const prompt = spawnCalls[0].prompt;
+  assert.match(prompt, /visible criterion merges cleanly/);
+  assert.match(prompt, /reason-visible-missing/);
+  assert.doesNotMatch(prompt, /HOLDOUT-SECRET-CRITERION/, "the holdout claim must never reach the fix worker's prompt");
+  assert.doesNotMatch(prompt, /HOLDOUT-SECRET-PROOF/, "the holdout proof must never reach the fix worker's prompt");
+  assert.doesNotMatch(prompt, /HOLDOUT-SECRET-REASON/, "the holdout reviewer reason must never reach the fix worker's prompt");
+  assert.equal(outcome.outcome, "fixed");
+});
+
+test("runFixRung (W1-T166): when EVERY unmet criterion is holdout, the fix prompt still names the block (via the review's redacted summary) but never the holdout claim/proof text — never a silently-empty, unexplained prompt", async () => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  // A REAL judgeReview verdict (not the fakeReview() shortcut) so `summary` is
+  // computed by the actual failSummary redaction path this task adds.
+  const criteria: AcceptanceCriterion[] = [
+    { claim: "visible criterion merges cleanly", proof: "alpha-widget-check" },
+    { claim: "HOLDOUT-SECRET-CRITERION-never-shown", proof: "HOLDOUT-ZQXJK-MARKER-SECRET", holdout: true },
+  ];
+  const computed = judgeReview(criteria, { diff: "", report: "REPORT: alpha widget check done." });
+  assert.equal(computed.state, "failure", "sanity: the holdout-only gap still fails the verdict");
+  const failing: ReviewVerdict & { headSha: string; reviewerOutcome: string } = {
+    ...computed,
+    headSha: "deadbeef",
+    reviewerOutcome: "success",
+  };
+  const passing = fakeReview("success", [
+    criterion({ claim: "visible criterion merges cleanly", met: true }),
+    criterion({ claim: "HOLDOUT-SECRET-CRITERION-never-shown", met: true, holdout: true }),
+  ]);
+
+  await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 1,
+    initialReview: failing,
+    deps: {
+      spawn: async (args) => {
+        spawnCalls.push(args);
+        return result({ sessionId: "fix-session-holdout-only" });
+      },
+      waitForCiGreen: async () => "green",
+      runReview: async () => passing,
+      push: () => {},
+      issues: fakeIssues([]),
+      ledgerPath: tmpLedgerPath(),
+      log: () => {},
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.equal(spawnCalls.length, 1);
+  const prompt = spawnCalls[0].prompt;
+  assert.doesNotMatch(prompt, /HOLDOUT-SECRET-CRITERION|HOLDOUT-ZQXJK-MARKER-SECRET/, "the holdout claim/proof must never reach the fix worker");
+  assert.match(prompt, /1 holdout criterion unmet/i, "the redacted summary still names the honest, non-leaking reason the gate is red");
+  assert.match(prompt, /not disclosed to the worker/i);
 });
 
 test("runFixRung (W1-T256): in body-coverage mode the re-review judges the FRESH PR BODY (fetchPrBody), never the fix worker's chat text — a body the worker substantiated can actually heal the block", async () => {

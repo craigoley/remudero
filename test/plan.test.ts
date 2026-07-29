@@ -10,6 +10,7 @@ import {
   selectTask,
   transitiveDependents,
   unmetDependencies,
+  visibleCriteria,
 } from "../src/lib/plan.js";
 
 function planFile(yaml: string): string {
@@ -118,4 +119,56 @@ test("the real plan/tasks.yaml loads; W1-T1 has no deps; W1-T1B gates the rest",
   assert.deepEqual(selectTask(plan, "W1-T1B").depends_on, ["W1-T1"]);
   // Every later task depends on the CI gate (self-hosting safety).
   assert.ok(selectTask(plan, "W1-T2").depends_on.includes("W1-T1B"));
+});
+
+// ── W1-T166: holdout acceptance criteria ────────────────────────────────────
+
+const YAML_WITH_HOLDOUT = `
+- id: H
+  title: has a holdout criterion
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "the ordinary criterion is visible"
+      proof: "grep: ORDINARY_MARKER in src/x.ts"
+    - claim: "HOLDOUT-SECRET-CLAIM-never-shown"
+      proof: "HOLDOUT-SECRET-PROOF-never-shown"
+      holdout: true
+`;
+
+test("a task's acceptance criteria carry `holdout: true` through YAML parsing unchanged", () => {
+  const plan = loadPlan(planFile(YAML_WITH_HOLDOUT));
+  const criteria = selectTask(plan, "H").acceptance ?? [];
+  assert.equal(criteria.length, 2);
+  assert.equal(criteria[0].holdout, undefined, "an ordinary criterion has no holdout flag");
+  assert.equal(criteria[1].holdout, true);
+});
+
+test("visibleCriteria: filters out every holdout:true entry, keeping ordinary ones — the single choke point every worker-facing prompt assembler routes through", () => {
+  const plan = loadPlan(planFile(YAML_WITH_HOLDOUT));
+  const criteria = selectTask(plan, "H").acceptance ?? [];
+  const visible = visibleCriteria(criteria);
+  assert.deepEqual(
+    visible.map((c) => c.claim),
+    ["the ordinary criterion is visible"],
+  );
+});
+
+test("visibleCriteria: a task with no declared criteria at all yields [] (never throws)", () => {
+  assert.deepEqual(visibleCriteria([]), []);
+});
+
+test("visibleCriteria: generic over anything carrying an optional `holdout` flag (e.g. lib/review.ts's CriterionVerdict, not just AcceptanceCriterion)", () => {
+  const verdictLike = [
+    { claim: "a", met: true, holdout: false },
+    { claim: "b", met: false, holdout: true },
+  ];
+  assert.deepEqual(
+    visibleCriteria(verdictLike).map((c) => c.claim),
+    ["a"],
+  );
 });

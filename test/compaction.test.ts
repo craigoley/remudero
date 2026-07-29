@@ -7,7 +7,7 @@ import {
   outputContractLines,
   renderAnchorBlock,
 } from "../src/lib/compaction.js";
-import { renderImplementPrompt } from "../src/run-task.js";
+import { renderImplementPrompt, renderReconPrompt } from "../src/run-task.js";
 import type { Task } from "../src/lib/plan.js";
 
 function task(over: Partial<Task> = {}): Task {
@@ -156,6 +156,40 @@ test("renderAnchorBlock: deterministic — the SAME inputs always produce the SA
 test("renderAnchorBlock: a task with no declared acceptance criteria still renders (never throws), with an explicit 'none declared' marker", () => {
   const anchor = renderAnchorBlock(task({ acceptance: undefined }), "RUN-1");
   assert.ok(anchor.includes("(none declared)"));
+});
+
+// ── W1-T166 (acceptance criterion 1, the FALSIFIER): a holdout:true criterion
+// is EXCLUDED from every worker prompt — grep the assembled prompts. Every
+// site a worker actually sees task.acceptance flow into: the initial recon
+// prompt, the initial implement prompt, and the post-compaction ANCHOR (the
+// re-injected copy the SAME worker sees again after a compaction, W1-T36/§8B)
+// — none may ever contain a holdout criterion's claim/proof text, while the
+// SAME assembled text still carries the ordinary (non-holdout) criterion.
+
+test("FALSIFIER (W1-T166 acceptance 1): a holdout:true criterion's claim/proof text is ABSENT from the recon prompt, the implement prompt, and the post-compaction anchor — the ordinary criterion is still present in the anchor", () => {
+  const t = task({
+    acceptance: [
+      { claim: "the ordinary criterion is visible", proof: "grep: ORDINARY_MARKER in src/x.ts" },
+      { claim: "HOLDOUT-SECRET-CLAIM-never-shown", proof: "HOLDOUT-SECRET-PROOF-never-shown", holdout: true },
+    ],
+  });
+  const runId = "RUN-166";
+  const recon = renderReconPrompt("");
+  const implement = renderImplementPrompt(t, "", runId, "");
+  const anchor = renderAnchorBlock(t, runId);
+
+  for (const [name, prompt] of [
+    ["recon", recon],
+    ["implement", implement],
+    ["post-compaction anchor", anchor],
+  ] as const) {
+    assert.doesNotMatch(prompt, /HOLDOUT-SECRET-CLAIM/, `${name} prompt must never contain the holdout claim`);
+    assert.doesNotMatch(prompt, /HOLDOUT-SECRET-PROOF/, `${name} prompt must never contain the holdout proof`);
+  }
+  // Provably a REAL filter, not a wholesale omission: the ordinary criterion
+  // still reaches the anchor (the one site that renders criteria text at all).
+  assert.match(anchor, /the ordinary criterion is visible/);
+  assert.match(anchor, /ORDINARY_MARKER/);
 });
 
 // ── anchorReinjections: the acceptance-criterion #2 proof surface ──────────
