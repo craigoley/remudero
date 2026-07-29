@@ -219,7 +219,10 @@ import {
   assertArchitectAboveWorker,
   buildGather,
   calibrationTable,
+  checkRetroIntegrity,
   codeFilesInDiff,
+  evaluateRetroTrigger,
+  gatherRuns,
   loadMastMapping,
   parseLedger,
   probeGithubThrottle,
@@ -227,7 +230,9 @@ import {
   renderGather,
   resolveMarkerForGather,
   saveMarker,
+  shippedSince,
   type MastMapping,
+  type RetroTriggerDecision,
   type ShippedGithub,
 } from "./lib/retro.js";
 import { regenerateOrientation } from "./lib/orientation.js";
@@ -4406,6 +4411,86 @@ function tryReadFollowupTitles(label: string, read: () => string[]): string[] {
  * then state/last-retro.json advances. Generation (this) is separated from
  * publication (the gate + the human) [research].
  */
+/**
+ * The GitHub gateway `shippedSince` needs, wired to this repo's real `gh` (W1-T132
+ * design ii): `unavailable()` backed by ONE cheap `gh api rate_limit` probe. Shared by
+ * `retroCommand`'s own gather AND the daemon's cadence-trigger check (W1-T160,
+ * `retroTriggerCheck` below) so both read the SAME credited-merge signal off the SAME
+ * gateway construction, never two independently-behaving GitHub reads.
+ */
+function retroShippedGithubGateway(): ShippedGithub {
+  const { owner, repo } = resolveOwnerRepo();
+  const baseGithub = ghGateway(owner, repo);
+  return {
+    findMergedByTrailer: (taskId) => baseGithub.findMergedByTrailer(taskId),
+    headRefName: (prUrl) => baseGithub.headRefName(prUrl),
+    unavailable: () => probeGithubThrottle(),
+  };
+}
+
+/**
+ * W1-T160: evaluate the retro cadence trigger against the REAL marker + ledger +
+ * GitHub read — the impure wiring behind `evaluateRetroTrigger` (retro.ts, pure).
+ * Returns `undefined` when there is nothing safe to evaluate this tick: a corrupt
+ * marker (fail closed exactly like `retroCommand`'s own guard — never replay a torn
+ * marker as "no marker") or a degraded GitHub read (never claim a false
+ * merges-since-marker of 0 off an unhealthy gateway — this just skips ONE tick's
+ * evaluation; the daemon re-tries every tick after, and the days-threshold path still
+ * advances off `marker.ts` regardless of GitHub's health).
+ *
+ * `deps` is a test seam (W1-T160 coverage): a test injects a tmp `config` (pointing
+ * at its own root's marker/ledger fixtures) and a fake `github` gateway to drive this
+ * real marker/ledger/shipped wiring without a live `gh` round-trip. Production passes
+ * neither, so `config` is the live `loadConfig()` and `github` the shared
+ * `retroShippedGithubGateway` — the same construction `retroCommand`'s own gather uses.
+ */
+export function retroTriggerCheck(
+  now: Date = new Date(),
+  deps: { config?: Config; github?: ShippedGithub } = {},
+): RetroTriggerDecision | undefined {
+  const config = deps.config ?? loadConfig();
+  const ledgerPath = ledgerPathFor(config);
+  const markerPath = join(config.root, "state", "last-retro.json");
+  const markerResolution = resolveMarkerForGather(markerPath);
+  if (markerResolution.kind === "corrupt") return undefined;
+  const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
+  const github = deps.github ?? retroShippedGithubGateway();
+  if (github.unavailable?.()) return undefined;
+  const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
+  const runs = gatherRuns(parseLedger(ledgerNdjson));
+  const mergesSinceMarker = shippedSince(runs, marker?.ts, github).shipped.length;
+  return evaluateRetroTrigger(mergesSinceMarker, marker?.ts, now);
+}
+
+/**
+ * W1-T160: build the daemon's retro cadence hooks — SELF-TARGET ONLY (the retro
+ * reads/writes THIS repo's own MASTER-PLAN.md/LEARNINGS.md/plan/tasks.yaml/state, never
+ * a drained target's, so daemonCommand wires these only when draining itself). Extracted
+ * from daemonCommand's `DaemonDeps` literal so the hook BODIES — the `retroTriggerCheck`
+ * delegation and the automated-retro invocation — are unit-testable in isolation with
+ * injected `check`/`runRetro`, leaving the literal itself holding only covered property
+ * references rather than inline logic whose sole executor is the daemon boot path.
+ * `runRetroTrigger`'s return (an exit code) is discarded — retroCommand already ledgers
+ * everything the daemon loop needs (retro_triggered, retro_aborted_integrity, pr.opened,
+ * retro.marker.advanced).
+ */
+export function buildRetroDaemonHooks(deps: {
+  check?: () => RetroTriggerDecision | undefined;
+  runRetro?: (rest: string[], opts: { automated: Extract<RetroTriggerDecision, { fire: true }> }) => Promise<number>;
+} = {}): {
+  checkRetroTrigger: () => RetroTriggerDecision | undefined;
+  runRetroTrigger: (decision: Extract<RetroTriggerDecision, { fire: true }>) => Promise<void>;
+} {
+  const check = deps.check ?? (() => retroTriggerCheck());
+  const runRetro = deps.runRetro ?? retroCommand;
+  return {
+    checkRetroTrigger: () => check(),
+    runRetroTrigger: async (decision) => {
+      await runRetro([], { automated: decision });
+    },
+  };
+}
+
 async function retroCommand(
   rest: string[],
   opts: {
@@ -4413,6 +4498,17 @@ async function retroCommand(
      *  the retro success path (through the atomic marker-advance, W1-T242) without a real
      *  Architect spawn. Default: the real {@link spawnWorker}. */
     spawn?: typeof spawnWorker;
+    /**
+     * W1-T160: present when this retro run was fired by the daemon's cadence trigger
+     * (never set for an operator-run `rmd retro`) — carries the count
+     * `evaluateRetroTrigger` observed when it decided to fire. Its presence turns on the
+     * INTEGRITY GATE (`checkRetroIntegrity`): once the real gather below is computed, a
+     * mismatch (this run's `mergesSinceMarker` was > 0 but the gather credits 0) aborts
+     * loudly (`retro_aborted_integrity`) and writes NOTHING — no PR, no marker advance,
+     * no follow-up harvest. An operator-run retro (`opts.automated` absent) is watched
+     * by a human and keeps its existing behavior unchanged.
+     */
+    automated?: { reason: "merges" | "days"; mergesSinceMarker: number; daysSinceMarker: number };
   } = {},
 ): Promise<number> {
   const dryRun = rest.includes("--dry-run");
@@ -4449,25 +4545,20 @@ async function retroCommand(
     return 1;
   }
   const marker = markerResolution.kind === "ok" ? markerResolution.marker : undefined;
+  // owner/repo: still needed below (repo clone, orientation's own gateway, PR create) —
+  // retroShippedGithubGateway() resolves its OWN copy internally for the SHIPPED union.
+  const { owner, repo } = resolveOwnerRepo();
   // W1-T132: resolved EARLY (a pure git-config read, no spawn) so the SHIPPED
   // union (W1-T51's shippedSince) can be wired into the gather from the start —
   // omitting `github` here degrades `shipped` to the ledger-only list, which is
   // structurally EMPTY in the gate-side-merge era (every merge now lands via the
   // gate, never a ledger verdict=merged write).
-  const { owner, repo } = resolveOwnerRepo();
-  const baseGithub = ghGateway(owner, repo);
   // DEGRADE LOUDLY (design ii): `unavailable` is checked ONCE per gather via a
   // real `gh api rate_limit` probe — an exhausted quota or a `gh` CLI failure is
   // NAMED in the rendered report rather than silently read as "nothing shipped"
   // (every findMergedByTrailer/headRefName call would otherwise fail the same
-  // way a genuine absence does). This exact object literal (not a spread) keeps
-  // it structurally matched to ShippedGithub — no excess properties leaking in
-  // from GitHub's wider surface (prByRef/prBody).
-  const github: ShippedGithub = {
-    findMergedByTrailer: (taskId) => baseGithub.findMergedByTrailer(taskId),
-    headRefName: (prUrl) => baseGithub.headRefName(prUrl),
-    unavailable: () => probeGithubThrottle(),
-  };
+  // way a genuine absence does). Shared construction — see retroShippedGithubGateway's doc.
+  const github: ShippedGithub = retroShippedGithubGateway();
   // W1-T105 design (iv): the follow-up harvest's dedup source — every existing task
   // title (any status; a followup matching an already-shipped task is still a dup)
   // plus every open PROPOSAL's summary line off MASTER-PLAN.md (each written as one
@@ -4511,6 +4602,28 @@ async function retroCommand(
   if (dryRun) {
     console.log(report);
     return 0;
+  }
+
+  // INTEGRITY GATE (W1-T160): a HARD precondition INSIDE the automated path only — an
+  // operator watching `rmd retro` run keeps today's behavior unchanged. Checked here,
+  // BEFORE any write (recordFollowupHarvest is itself a write) — see checkRetroIntegrity's
+  // doc for why a mismatch means ABORT, never write: no PR, no marker advance, no
+  // follow-up harvest.
+  if (opts.automated) {
+    const integrity = checkRetroIntegrity(opts.automated.mergesSinceMarker, gather.shipped.length);
+    if (!integrity.ok) {
+      console.error(`\n### [retro] ${integrity.reason}`);
+      appendLedger(ledgerPath, {
+        run_id: `RETRO-${Date.now()}`,
+        task_id: "RETRO",
+        step: "retro_aborted_integrity",
+        reason: integrity.reason,
+        trigger_reason: opts.automated.reason,
+        merges_since_marker: opts.automated.mergesSinceMarker,
+        gather_shipped: gather.shipped.length,
+      });
+      return 1;
+    }
   }
 
   // W1-T105: harvest marks are a REAL-RUN-ONLY side effect — mineFollowups (inside
@@ -5254,6 +5367,12 @@ export async function daemonCommand(
      *  W1-T143) without a real `git fetch origin` against this repo's actual remote
      *  points it at a local git fixture instead. Production never passes this. */
     repoRoot?: string;
+    /** Injectable daemon loop (W1-T160 coverage seam). Defaults to the real {@link runDaemon}.
+     *  A test passes a stub that captures the wired `DaemonDeps` and returns immediately, so the
+     *  hook-wiring the daemon builds just before its loop (checkRetroTrigger/runRetroTrigger,
+     *  self-target only) is exercised without spawning a real, unbounded daemon. Production never
+     *  passes this. */
+    runDaemon?: typeof runDaemon;
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE any spawn/lock — `rmd daemon install --dry-run` silently
@@ -5481,8 +5600,11 @@ export async function daemonCommand(
     config.overflow === "api_key",
   );
 
+  const runDaemonFn = deps.runDaemon ?? runDaemon;
+  // W1-T160: the retro cadence hooks (self-target only) — see buildRetroDaemonHooks.
+  const retroHooks = target.isSelf ? buildRetroDaemonHooks() : undefined;
   try {
-    const summary = await runDaemon(
+    const summary = await runDaemonFn(
       plan,
       {
         refreshMerged,
@@ -5531,6 +5653,14 @@ export async function daemonCommand(
         // flight, so a green PR whose review went absent re-posts within one poll
         // interval. Dangerous lanes (fix/close/arm/escalate) stay non-concurrent.
         sweepLight: buildSweepLightHook(target.owner, target.repo, config, ledgerPath, runId, plan, log),
+        // RETRO CADENCE TRIGGER (W1-T160) — SELF-TARGET ONLY: the retro reads/writes
+        // THIS repo's own MASTER-PLAN.md/LEARNINGS.md/plan/tasks.yaml/state, never a
+        // drained target's, so the trigger is wired only when the daemon is draining
+        // itself. `runRetroTrigger`'s return (an exit code) is discarded — retroCommand
+        // already ledgers everything the daemon loop needs (retro_triggered above,
+        // retro_aborted_integrity, pr.opened, retro.marker.advanced).
+        checkRetroTrigger: retroHooks?.checkRetroTrigger,
+        runRetroTrigger: retroHooks?.runRetroTrigger,
         // W1-T46 block-reasoning: a GENUINE BLOCKER (real downstream work
         // transitively needs the blocked task) opens a `needs-human` issue
         // naming the dependents it protects, via W1-T8's escalation taxonomy

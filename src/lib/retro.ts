@@ -2157,6 +2157,110 @@ export function saveMarker(path: string, marker: RetroMarker): void {
   fsMarker.renameSync(tmpPath, path);
 }
 
+// ── W1-T160: retro cadence trigger + integrity gate ────────────────────────
+//
+// The retro runs on an OPERATOR today (someone types `rmd retro`). This section
+// makes it a LOOP: a pure TRIGGER predicate the daemon's poll evaluates against
+// the marker (state/last-retro.json) — fire on merges-since-marker >= N OR
+// days-since-marker >= D, whichever crosses first — plus an INTEGRITY GATE the
+// AUTOMATED (unattended) path enforces before it ever writes: the gather must
+// credit the window's merges, or the retro refuses to write (no PR, no marker
+// advance). N/D are POLICY DATA (rule 2) — a caller changes the threshold by
+// passing a different RetroTriggerPolicy, never a source edit.
+
+/** Policy-data default: fire once at least this many merges have landed since
+ *  the marker. Overridable via {@link RetroTriggerPolicy} — never hardcode a
+ *  literal 25 at a call site. */
+export const DEFAULT_RETRO_MERGES_THRESHOLD = 25;
+
+/** Policy-data default: fire once at least this many days have elapsed since
+ *  the marker, even with zero (or few) merges — a staleness floor so the retro
+ *  still runs on a quiet week. Overridable via {@link RetroTriggerPolicy}. */
+export const DEFAULT_RETRO_DAYS_THRESHOLD = 7;
+
+/** Policy-as-data (rule 2) for the retro cadence trigger — same `?? DEFAULT`
+ *  override shape daemon.ts's own headroom/backoff policy already uses
+ *  (see e.g. `DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS`), not a bespoke pattern
+ *  invented for this task. */
+export interface RetroTriggerPolicy {
+  mergesThreshold: number;
+  daysThreshold: number;
+}
+
+export function defaultRetroTriggerPolicy(): RetroTriggerPolicy {
+  return { mergesThreshold: DEFAULT_RETRO_MERGES_THRESHOLD, daysThreshold: DEFAULT_RETRO_DAYS_THRESHOLD };
+}
+
+export type RetroTriggerDecision =
+  | { fire: false; mergesSinceMarker: number; daysSinceMarker: number }
+  | { fire: true; reason: "merges" | "days"; mergesSinceMarker: number; daysSinceMarker: number };
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * PURE trigger predicate (W1-T160): fires on `mergesSinceMarker >=
+ * policy.mergesThreshold` OR `daysSinceMarker >= policy.daysThreshold`,
+ * whichever crosses first. `markerTs` undefined (no marker has ever been
+ * written — the same "absent" state {@link resolveMarkerForGather} names)
+ * makes `daysSinceMarker` `Infinity`, so a repo with no retro history is
+ * always eligible via `reason: "days"` unless the merge count alone already
+ * clears the threshold.
+ *
+ * TIE-BREAK: when both thresholds are already crossed at the SAME evaluation
+ * (a daemon that was paused/down a while, or the marker-absent case above
+ * with a high merge count), `reason` prefers "merges" — the more informative
+ * signal ("real work shipped"), never silently masked by the staleness floor.
+ * Each threshold is independently sufficient to fire; this only decides which
+ * name a simultaneous crossing gets in the ledger line.
+ */
+export function evaluateRetroTrigger(
+  mergesSinceMarker: number,
+  markerTs: string | undefined,
+  now: Date,
+  policy: RetroTriggerPolicy = defaultRetroTriggerPolicy(),
+): RetroTriggerDecision {
+  const daysSinceMarker = markerTs === undefined ? Infinity : (now.getTime() - Date.parse(markerTs)) / MS_PER_DAY;
+  if (mergesSinceMarker >= policy.mergesThreshold) {
+    return { fire: true, reason: "merges", mergesSinceMarker, daysSinceMarker };
+  }
+  if (daysSinceMarker >= policy.daysThreshold) {
+    return { fire: true, reason: "days", mergesSinceMarker, daysSinceMarker };
+  }
+  return { fire: false, mergesSinceMarker, daysSinceMarker };
+}
+
+export interface RetroIntegrityResult {
+  ok: boolean;
+  /** Present iff `!ok` — the loud, human-readable reason the automated retro refused to write. */
+  reason?: string;
+}
+
+/**
+ * The INTEGRITY GATE (W1-T160): a HARD precondition inside the AUTOMATED
+ * (daemon-triggered) retro path only — an operator-run `rmd retro` is watched
+ * by a human and keeps its existing behavior unchanged. `priorMergesSinceMarker`
+ * is the count the TRIGGER observed when it decided to fire (see
+ * {@link evaluateRetroTrigger}); `gatherShippedCount` is the REAL gather's
+ * `RetroGather.shipped.length` the retro run itself computes moments later. A
+ * mismatch — the trigger saw real merge activity but the actual gather credits
+ * NONE — means the credit union degraded between trigger and run (a GitHub
+ * throttle, an ownership-assert rejecting everything, a gateway outage) and the
+ * retro must ABORT rather than silently write on a zero-credit gather (the
+ * R8-class silent under-count, now fail-closed because no human is watching an
+ * unattended run to catch it).
+ */
+export function checkRetroIntegrity(priorMergesSinceMarker: number, gatherShippedCount: number): RetroIntegrityResult {
+  if (priorMergesSinceMarker > 0 && gatherShippedCount === 0) {
+    return {
+      ok: false,
+      reason:
+        `retro integrity gate: the trigger observed ${priorMergesSinceMarker} merge(s) since the marker, ` +
+        `but the gather credited 0 -- refusing to write (R8-class silent under-count, no human watching to catch it)`,
+    };
+  }
+  return { ok: true };
+}
+
 function round(n: number): number {
   return Math.round(n * 1000) / 1000;
 }

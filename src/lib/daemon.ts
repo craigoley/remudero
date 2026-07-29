@@ -37,6 +37,10 @@ import { HEADROOM_LIMIT_PCT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import { assertRunnable, PlanError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import type { StatusProjection } from "./status.js";
+// Type-only (erased at build, same discipline as StatusProjection above) — W1-T160's
+// retro cadence trigger decision shape, defined once in retro.ts (evaluateRetroTrigger)
+// and reused here so DaemonDeps.checkRetroTrigger/runRetroTrigger never re-declare it.
+import type { RetroTriggerDecision } from "./retro.js";
 // Type-only (erased at build) — this module stays a PURE module at RUNTIME
 // (see the file header: "never touches the filesystem"); `OrphanSweepReport`
 // only shapes the `sweepOrphanWorkers`/`sweepOrphans` injection points below,
@@ -545,6 +549,29 @@ export interface DaemonDeps {
    * try/catch, logged, never halts the loop).
    */
   sweepOrphans?: () => Promise<OrphanSweepReport> | OrphanSweepReport;
+  /**
+   * W1-T160: evaluate the retro cadence trigger this tick — fires on
+   * merges-since-marker >= N OR days-since-marker >= D (policy data),
+   * whichever crosses first (retro.ts's `evaluateRetroTrigger`, the pure
+   * predicate this wraps against the real marker/ledger/GitHub read). Returns
+   * `undefined` when there is nothing safe to evaluate this tick (a corrupt
+   * marker, a degraded GitHub read) or a decision with `fire: false` — both
+   * mean "do not fire this tick"; the loop only acts on `fire: true`.
+   * Optional: omitted ⇒ the loop behaves exactly as before this feature
+   * existed (the retro stays operator-run only).
+   */
+  checkRetroTrigger?: () => RetroTriggerDecision | undefined;
+  /**
+   * W1-T160: run the automated retro once `checkRetroTrigger` fires. The real
+   * wiring (run-task.ts's `daemonCommand`) threads the fired decision's
+   * `mergesSinceMarker` into `retroCommand`'s `opts.automated` so the
+   * INTEGRITY GATE (retro.ts's `checkRetroIntegrity`) can compare it against
+   * the real gather's credited count and abort loudly (never write) on a
+   * mismatch. Best-effort like `sweep`/`sweepOrphans` above — a throw here
+   * costs one logged tick, never the daemon's life. Never called unless
+   * `checkRetroTrigger` fires.
+   */
+  runRetroTrigger?: (decision: Extract<RetroTriggerDecision, { fire: true }>) => Promise<void>;
   /**
    * W1-T254 (the #707 fix) — the RESTRICTED LIGHT-SWEEP TICKER: `runOne` is
    * UNBOUNDED (a task can hold the daemon inside one call for a whole
@@ -1145,6 +1172,41 @@ export async function runDaemon(
         // escalation counter, no headroom line. Dispatch proceeds; reset the counter
         // so a later enable starts from a clean slate.
         consecutiveUnreadable = 0;
+      }
+    }
+
+    // RETRO CADENCE TRIGGER (W1-T160): evaluated once per tick, AFTER headroom (an
+    // automated retro spawns a real, budget-costing Architect run — the same class of
+    // spend headroom exists to gate, so a fired retro under a near-exhausted pool waits
+    // like any other dispatch would) and BEFORE the normal task-dispatch pick, so a
+    // fired retro this tick displaces dispatch for the tick rather than racing it.
+    // Best-effort: a caught error costs one logged tick, never the daemon's life (same
+    // discipline as deps.sweep/deps.sweepOrphans above).
+    if (deps.checkRetroTrigger) {
+      let decision: RetroTriggerDecision | undefined;
+      try {
+        decision = deps.checkRetroTrigger();
+      } catch (e) {
+        log("daemon.retro_trigger.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (decision?.fire) {
+        log("retro_triggered", {
+          reason: decision.reason,
+          merges_since_marker: decision.mergesSinceMarker,
+          // Infinity (the marker-absent case) is not JSON-representable — name it
+          // explicitly rather than let JSON.stringify silently collapse it to null.
+          days_since_marker: Number.isFinite(decision.daysSinceMarker) ? decision.daysSinceMarker : "unbounded",
+        });
+        if (deps.runRetroTrigger) {
+          try {
+            await deps.runRetroTrigger(decision);
+          } catch (e) {
+            log("daemon.retro_trigger.run_failed", { error: String((e as Error)?.message ?? e) });
+          }
+        }
+        ticks++;
+        await deps.sleep(pollIntervalMs);
+        continue;
       }
     }
 

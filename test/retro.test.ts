@@ -33,6 +33,11 @@ import {
   renderFollowupCandidates,
   renderGather,
   renderOrientation,
+  checkRetroIntegrity,
+  DEFAULT_RETRO_DAYS_THRESHOLD,
+  DEFAULT_RETRO_MERGES_THRESHOLD,
+  defaultRetroTriggerPolicy,
+  evaluateRetroTrigger,
   renderOverrunProposals,
   renderPlanHealth,
   renderProceduralCandidates,
@@ -42,6 +47,7 @@ import {
   type ContradictionCandidatePair,
   type DegradedSuccessSignal,
   type ProceduralCandidate,
+  type RetroTriggerPolicy,
   type RunSummary,
   type ShippedGithub,
 } from "../src/lib/retro.js";
@@ -1082,6 +1088,94 @@ test("renderOrientation: no runnable task renders an explicit '(none runnable)' 
   const md = renderOrientation({ generatedAt: "2026-07-18T00:00:00.000Z", gather, standingRules: [] });
   assert.match(md, /none runnable right now/);
   assert.doesNotMatch(md, /undefined/);
+});
+
+// ── W1-T160: the retro cadence trigger predicate + integrity gate ─────────────
+//
+// evaluateRetroTrigger/checkRetroIntegrity are PURE (no fs, no gh, no marker file) —
+// the daemon-poll wiring that feeds them a real marker/ledger/GitHub read is covered
+// by test/daemon-retro-trigger.test.ts (the injected-dependency integration seam) and
+// test/retro-marker-atomic.test.ts (the automated retroCommand abort path).
+
+test("evaluateRetroTrigger: policy-data defaults are 25 merges / 7 days (rule 2 — changing the value changes the threshold with no code edit)", () => {
+  assert.equal(DEFAULT_RETRO_MERGES_THRESHOLD, 25);
+  assert.equal(DEFAULT_RETRO_DAYS_THRESHOLD, 7);
+  assert.deepEqual(defaultRetroTriggerPolicy(), { mergesThreshold: 25, daysThreshold: 7 });
+});
+
+test("evaluateRetroTrigger: merges-since-marker >= N fires reason=merges (below the days threshold)", () => {
+  const markerTs = "2026-07-25T00:00:00.000Z"; // 1 day before `now` — well under D=7
+  const now = new Date("2026-07-26T00:00:00.000Z");
+  const decision = evaluateRetroTrigger(25, markerTs, now);
+  assert.deepEqual(decision, { fire: true, reason: "merges", mergesSinceMarker: 25, daysSinceMarker: 1 });
+});
+
+test("evaluateRetroTrigger: days-since-marker >= D fires reason=days (below the merges threshold)", () => {
+  const markerTs = "2026-07-01T00:00:00.000Z"; // 7 days before `now`
+  const now = new Date("2026-07-08T00:00:00.000Z");
+  const decision = evaluateRetroTrigger(3, markerTs, now); // 3 << 25
+  assert.deepEqual(decision, { fire: true, reason: "days", mergesSinceMarker: 3, daysSinceMarker: 7 });
+});
+
+test("evaluateRetroTrigger: below BOTH thresholds — no fire", () => {
+  const markerTs = "2026-07-27T00:00:00.000Z"; // 2 days before `now`
+  const now = new Date("2026-07-29T00:00:00.000Z");
+  const decision = evaluateRetroTrigger(10, markerTs, now); // 10 < 25, 2 < 7
+  assert.deepEqual(decision, { fire: false, mergesSinceMarker: 10, daysSinceMarker: 2 });
+});
+
+test("evaluateRetroTrigger: whichever crosses first fires — a days-only crossing still fires even at merges=0", () => {
+  const markerTs = "2026-07-01T00:00:00.000Z"; // 28 days before `now`, way past D=7
+  const now = new Date("2026-07-29T00:00:00.000Z");
+  const decision = evaluateRetroTrigger(0, markerTs, now);
+  assert.equal(decision.fire, true);
+  assert.equal((decision as { reason: string }).reason, "days");
+});
+
+test("evaluateRetroTrigger: an absent marker (no retro has ever run) makes days-since-marker Infinity — always eligible via reason=days unless merges alone already crossed", () => {
+  const now = new Date("2026-07-29T00:00:00.000Z");
+  const decision = evaluateRetroTrigger(0, undefined, now);
+  assert.equal(decision.fire, true);
+  assert.equal((decision as { reason: string }).reason, "days");
+  assert.equal((decision as { daysSinceMarker: number }).daysSinceMarker, Infinity);
+});
+
+test("evaluateRetroTrigger: a simultaneous crossing of both thresholds ties toward reason=merges (documented, deterministic tie-break)", () => {
+  const markerTs = "2026-07-01T00:00:00.000Z"; // way past D=7
+  const now = new Date("2026-07-29T00:00:00.000Z");
+  const decision = evaluateRetroTrigger(30, markerTs, now); // also >= N=25
+  assert.equal(decision.fire, true);
+  assert.equal((decision as { reason: string }).reason, "merges");
+});
+
+test("evaluateRetroTrigger: N/D are POLICY DATA — a caller-supplied policy changes the threshold with ZERO code change", () => {
+  const markerTs = "2026-07-28T00:00:00.000Z"; // 1 day before `now`
+  const now = new Date("2026-07-29T00:00:00.000Z");
+  const tightPolicy: RetroTriggerPolicy = { mergesThreshold: 2, daysThreshold: 100 };
+  // Under the DEFAULT policy, 3 merges / 1 day fires neither.
+  assert.equal(evaluateRetroTrigger(3, markerTs, now).fire, false);
+  // The SAME inputs, under a custom policy object built entirely in this test (no
+  // retro.ts edit), now cross the merges threshold.
+  const decision = evaluateRetroTrigger(3, markerTs, now, tightPolicy);
+  assert.equal(decision.fire, true);
+  assert.equal((decision as { reason: string }).reason, "merges");
+});
+
+test("checkRetroIntegrity: a zero-credit gather on a genuinely zero-merge window is FINE (e.g. a days-only fire with nothing merged) — ok=true", () => {
+  assert.deepEqual(checkRetroIntegrity(0, 0), { ok: true });
+});
+
+test("checkRetroIntegrity: a nonzero credit matching real merge activity is FINE — ok=true", () => {
+  assert.deepEqual(checkRetroIntegrity(5, 5), { ok: true });
+  assert.deepEqual(checkRetroIntegrity(5, 2), { ok: true }); // fewer credited than the trigger saw is not itself a violation
+});
+
+test("checkRetroIntegrity: the HARD precondition — the trigger observed real merges (>0) but the gather credits ZERO — ok=false, a loud reason naming both counts", () => {
+  const result = checkRetroIntegrity(7, 0);
+  assert.equal(result.ok, false);
+  assert.match(result.reason ?? "", /trigger observed 7 merge\(s\)/);
+  assert.match(result.reason ?? "", /gather credited 0/);
+  assert.match(result.reason ?? "", /refusing to write/);
 });
 
 // The saveMarker/loadMarker atomicity + corrupt-vs-absent-marker coverage for W1-T242
