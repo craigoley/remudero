@@ -145,11 +145,24 @@ function runStart(taskId: string, runId = "r1"): string {
 }
 
 let browser: Browser;
+// Teardown closes the launch PROMISE, never the resolved handle. When `--test-name-pattern`
+// matches ZERO tests in this file the runner still runs both hooks, but fires `after` ~0.2ms
+// in -- while `chromium.launch()` is still in flight and `browser` is therefore still
+// undefined. Closing `browser` there throws (or, if guarded, does nothing), and the browser
+// that finishes launching a moment later is left with no reference to close it: its
+// `--remote-debugging-pipe` holds the worker's event loop open, so the run HANGS until the
+// harness kills it, leaking a chrome-headless-shell process and a
+// playwright_chromiumdev_profile-* directory every single time. Awaiting the promise closes
+// the browser that actually launched. `browserPromise` is assigned synchronously, before
+// `before`'s first await, so `after` can always see it.
+let browserPromise: Promise<Browser> | undefined;
 before(async () => {
-  browser = await chromium.launch({ args: ["--no-sandbox"] });
+  browserPromise = chromium.launch({ args: ["--no-sandbox"] });
+  browser = await browserPromise;
 });
 after(async () => {
-  await browser.close();
+  const launched = await browserPromise;
+  await launched?.close();
 });
 
 async function openShell(base: string, opts: { viewport?: { width: number; height: number } } = {}): Promise<{ context: BrowserContext; page: Page }> {
