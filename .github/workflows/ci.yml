@@ -228,6 +228,9 @@ jobs:
           git diff --name-only "${BASE_SHA}"...HEAD > changed-files.txt
           cat changed-files.txt
           node scripts/mutation-ratchet.mjs --changed-files changed-files.txt
+      - name: Install Playwright's Chromium (stryker.conf.json's commandRunner is plain `npm test` -- the FULL test/**/*.test.ts glob, same Playwright-backed shell tests as the `ci`/`coverage-ratchet` jobs above -- Stryker's own "initial test run" needs a real headless browser too, or it fails closed on a missing-executable hook error before ever reaching a mutation verdict. Gated on `trigger` like the cache/stryker steps below -- a skipped PR never pays this download.)
+        if: steps.trigger.outputs.matched == 'true'
+        run: npx playwright install --with-deps chromium
       - name: Restore Stryker incremental cache
         if: steps.trigger.outputs.matched == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
