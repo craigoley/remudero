@@ -248,6 +248,7 @@ import {
   assertRunnable,
   loadPlan,
   selectTask,
+  visibleCriteria,
   type AcceptanceCriterion,
   type MergedResolver,
   type Plan,
@@ -1339,8 +1340,15 @@ async function runReview(args: {
     return { ...verdict, headSha, reviewerOutcome: outcome };
   }
   const unmet = verdict.criteria.filter((c) => !c.met);
-  const unmetClaims = unmet.map((c) => c.claim);
-  const reasons = unmet.map((c) => c.reason);
+  // W1-T166: holdout criteria are reviewer-visible but WORKER-hidden. `verdict.state`
+  // above already folded them into the pass/fail decision; the DISPLAYED claim/reason
+  // text below must not — this feeds the `review.posted` ledger's `unmet_criteria`/
+  // `reasons` (which a cold-dispatch fix rung reconstructs verbatim, unmetFromLedger)
+  // AND the PR comment further down, both `gh`-readable by the very worker a holdout
+  // criterion must never reach.
+  const visibleUnmet = visibleCriteria(unmet);
+  const unmetClaims = visibleUnmet.map((c) => c.claim);
+  const reasons = visibleUnmet.map((c) => c.reason);
   if (verdict.testTheater) reasons.push("test theater: added tests assert nothing");
   // OBSERVABILITY (W1-T65 design): per-criterion proof_exec outcome, so an
   // OBSERVED verdict (executed_pass/executed_fail) is legible on the ledger vs a
@@ -1387,6 +1395,10 @@ async function runReview(args: {
     // review that genuinely passed — always present, never inferred.
     floor_state: computed.floorState,
     downgrade_suppressed: suppressed,
+    // W1-T166: the reward-hacking measurement — visible-pass-rate minus
+    // holdout-pass-rate for this run, `null` when not measurable (no holdout
+    // criteria declared). See ReviewVerdict.rewardHackingGap's doc.
+    reward_hacking_gap: verdict.rewardHackingGap,
   });
   if (verdict.capped) {
     say(cappedAnnotation(proofExec.length));
@@ -1401,7 +1413,7 @@ async function runReview(args: {
     // place a human (or the next run) reads. Best-effort — never blocks the verdict.
     const body =
       `**remudero-review=failure** — the following acceptance ${unmetClaims.length === 1 ? "criterion is" : "criteria are"} unmet:\n\n` +
-      unmetClaims.map((c, i) => `${i + 1}. ${c}\n   - ${unmet[i].reason}`).join("\n") +
+      unmetClaims.map((c, i) => `${i + 1}. ${c}\n   - ${reasons[i]}`).join("\n") +
       (verdict.testTheater ? `\n\n_Also: test theater — added tests assert nothing._` : "") +
       `\n\nAdd the missing work (or escalate). Do NOT edit the acceptance criteria to match the diff.`;
     try {
@@ -2146,12 +2158,17 @@ export async function runFixRung(opts: {
     // enforces.
     const attempt = strikes + 1;
     const round: "resume" | "fresh" = attempt === 1 ? "resume" : "fresh";
-    const unmet = review.criteria.filter((c) => !c.met);
+    // W1-T166: holdout criteria are reviewer-visible but WORKER-hidden — the fix
+    // rung dispatches an actual coding worker, so its unmet-criteria block must
+    // never carry a holdout criterion's claim/proof text (visibleCriteria is the
+    // same filter renderAnchorBlock and runReview's ledger/PR-comment text use).
+    const unmet = visibleCriteria(review.criteria.filter((c) => !c.met));
     // W1-T168: snapshot THIS round's dispatch target — the head sha + unmet
     // claim set the fix worker below is being sent to resolve — BEFORE
     // `review` is reassigned to this round's freshly computed verdict, so
     // `detectReviewFalseBlock` (after the review call, below) can tell a
-    // byte-identical re-block apart from real progress.
+    // byte-identical re-block apart from real progress. Keyed on the SAME
+    // worker-visible unmet set the fix rung actually dispatches (W1-T166).
     const priorHeadSha = review.headSha;
     const priorUnmetClaims = new Set(unmet.map((c) => c.claim));
     const evidence: FixEvidence =

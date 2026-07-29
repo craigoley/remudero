@@ -1,4 +1,4 @@
-import type { AcceptanceCriterion, Task } from "./plan.js";
+import { visibleCriteria, type AcceptanceCriterion, type Task } from "./plan.js";
 
 /**
  * One compaction event observed in an SDK message stream (MASTER-PLAN §8B:
@@ -135,13 +135,19 @@ export function outputContractLines(taskId: string): string[] {
  * `anchorReinjections`) — deliberately excludes the volatile CONTEXT block
  * (recon/matched-learnings, §8A Tier 1/3), which a compaction is free to
  * lose; only the three §8B-named anchor components survive it.
+ *
+ * W1-T166: the "acceptance criteria" component is filtered through
+ * {@link visibleCriteria} — this re-injects into the SAME worker's own
+ * context, so a `holdout: true` criterion belongs here exactly as little as
+ * it belongs in the turn-0 prompt: never re-injected, never re-derived, never
+ * shown, across a compaction any more than before one.
  */
 export function renderAnchorBlock(
   task: Pick<Task, "id" | "title" | "prompt" | "acceptance">,
   runId: string,
 ): string {
   const goal = (task.prompt ?? task.title).split("${RUN_ID}").join(runId).split("${TASK_ID}").join(task.id);
-  const criteria = (task.acceptance ?? [])
+  const criteria = visibleCriteria(task.acceptance ?? [])
     .map((c: AcceptanceCriterion) => `- claim: ${c.claim}\n  proof: ${c.proof}`)
     .join("\n");
   return [

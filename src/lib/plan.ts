@@ -48,6 +48,35 @@ export interface AcceptanceCriterion {
    * OBSERVE repo state, which is the real fix; `satisfied_by` is the manual patch.)
    */
   satisfied_by?: string;
+  /**
+   * W1-T166 (the SpecBench reward-hacking finding): a criterion a worker that can
+   * optimize TO the visible test suite would otherwise game. `holdout: true` marks
+   * it REVIEWER-VISIBLE but WORKER-HIDDEN — every prompt assembled for a worker
+   * (recon, implement, the fix rung's unmet-criteria block, the post-compaction
+   * ANCHOR) filters it out via {@link visibleCriteria}; `buildReviewPrompt`
+   * (lib/review.ts) deliberately does NOT filter through it, since the reviewer
+   * must judge visible AND holdout criteria both — a diff that passes visible-only
+   * still yields an overall FAIL (`judgeReview`). The visible-pass vs holdout-pass
+   * gap is the reward-hacking measurement, ledgered per run as `reward_hacking_gap`
+   * (see `ReviewVerdict.rewardHackingGap`). Absent/false is the default: an
+   * ordinary criterion, shown to the worker like any other.
+   */
+  holdout?: boolean;
+}
+
+/**
+ * Criteria a WORKER may be shown (W1-T166): every criterion EXCEPT `holdout:
+ * true` ones. The single filter every worker-facing prompt assembler routes
+ * through — `renderAnchorBlock` (lib/compaction.ts) and the fix rung's
+ * unmet-criteria block (run-task.ts) both call this rather than each
+ * hand-rolling its own `!c.holdout` predicate, so "never shown to a worker"
+ * has exactly ONE implementation to audit. Generic over anything carrying an
+ * optional `holdout` flag — both {@link AcceptanceCriterion} (the task's
+ * authored list) and `CriterionVerdict` (lib/review.ts's judged list, which
+ * copies `holdout` from the criterion it judged) satisfy it.
+ */
+export function visibleCriteria<T extends { holdout?: boolean }>(criteria: T[]): T[] {
+  return criteria.filter((c) => !c.holdout);
 }
 
 /** A pre-authored, pre-cited CONTEXT claim (provenance is mandatory — §2). */
