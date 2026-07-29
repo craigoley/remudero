@@ -1330,6 +1330,76 @@ test("renderReconcileCloseComment names the resolver — the merged PR + derivat
   assert.match(comment, /fb-1784756088300-6a481e/);
 });
 
+test("renderReconcileCloseComment (W1-T162): a CLOSED-WITHOUT-MERGING referent names the PR as closed, never claims 'merged'", () => {
+  const comment = renderReconcileCloseComment(
+    reconcileCandidate({
+      taskId: "W1-T189",
+      derived: { merged: false, closed: true, prUrl: "https://github.com/o/r/pull/580", prNumber: 580, source: "pr-field" },
+    }),
+  );
+  assert.match(comment, /W1-T189/);
+  assert.match(comment, /#580/);
+  assert.match(comment, /closed without merging/);
+  assert.doesNotMatch(comment, /is now \*\*merged\*\*/, "a closed-without-merge referent must never be cited as merged");
+  assert.match(comment, /fb-1784756088300-6a481e/);
+});
+
+test("escalation reconcile (W1-T162): a RESOLVED-but-CLOSED-WITHOUT-MERGING referent (superseded/abandoned PR) closes its needs-human issue too — this is the falsifier's positive complement", async () => {
+  const shared = ledgerPath();
+  const closes: Array<{ url: string; comment: string }> = [];
+  const summary = await runEscalationReconcile(
+    [
+      reconcileCandidate({
+        issueUrl: "https://github.com/o/r/issues/91",
+        issueNumber: 91,
+        taskId: "W1-T190",
+        derived: { merged: false, closed: true, prUrl: "https://github.com/o/r/pull/580", prNumber: 580, source: "pr-field" },
+      }),
+    ],
+    { closeIssue: (url, comment) => closes.push({ url, comment }), ledgerPath: shared, runId: "SWEEP-1" },
+  );
+  assert.equal(summary.closed, 1);
+  assert.equal(summary.results[0].outcome, "closed");
+  assert.equal(closes.length, 1);
+  assert.match(closes[0].comment, /closed without merging/);
+  const closedLines = readLedgerLines(shared).filter((l) => l.step === "sweep.escalation_closed");
+  assert.equal(closedLines.length, 1);
+  assert.equal(closedLines[0].task_id, "W1-T190");
+  assert.equal(closedLines[0].resolution, "closed", "the ledger names the resolution kind, not just the PR");
+});
+
+test("escalation reconcile (W1-T162): a mixed batch (merged referents + closed-without-merge referents) is driven to zero by ONE sweep pass, and a second pass over the closed state closes NOTHING", async () => {
+  const shared = ledgerPath();
+  const closes: string[] = [];
+  const batch: EscalationReconcileCandidate[] = [
+    reconcileCandidate({ issueUrl: "iss/1", taskId: "W1-T1", derived: { merged: true, prNumber: 101, source: "trailer" } }),
+    reconcileCandidate({ issueUrl: "iss/2", taskId: "W1-T2", derived: { merged: false, closed: true, prNumber: 102, source: "pr-field" } }),
+    reconcileCandidate({ issueUrl: "iss/3", taskId: "W1-T3", derived: { merged: true, prNumber: 103, source: "head-branch" } }),
+    reconcileCandidate({ issueUrl: "iss/4", taskId: "W1-T4", derived: { merged: false, closed: true, prNumber: 104, source: "pr-field" } }),
+  ];
+  const summary = await runEscalationReconcile(batch, {
+    closeIssue: (url) => closes.push(url),
+    ledgerPath: shared,
+    runId: "SWEEP-1",
+  });
+  assert.equal(summary.closed, 4, "one sweep drives the whole resolved-referent batch to zero");
+  assert.deepEqual(closes.sort(), ["iss/1", "iss/2", "iss/3", "iss/4"]);
+
+  // Idempotence: a second sweep over the NOW-CLOSED state (every closed issue no longer
+  // appears in the caller's OPEN needs-human list — the real `gh issue list` contract
+  // `buildEscalationReconcileCandidates` relies on) closes NOTHING.
+  const closes2: string[] = [];
+  const summary2 = await runEscalationReconcile([], {
+    closeIssue: (url) => closes2.push(url),
+    ledgerPath: shared,
+    runId: "SWEEP-2",
+  });
+  assert.equal(summary2.closed, 0, "a second sweep over the now-closed state closes nothing");
+  assert.equal(closes2.length, 0);
+  const closedLines = readLedgerLines(shared).filter((l) => l.step === "sweep.escalation_closed");
+  assert.equal(closedLines.length, 4, "the second, idempotent pass adds no new ledger lines");
+});
+
 test("escalation reconcile: a RESOLVED (merged) referent closes its needs-human issue with a citation naming the resolver, and ledgers the close", async () => {
   const shared = ledgerPath();
   const closes: Array<{ url: string; comment: string }> = [];
