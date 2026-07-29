@@ -41,6 +41,16 @@ test("rejects an unrecognized source kind", () => {
   assert.equal(lintPrompt(bad).ok, false);
 });
 
+test("W1-T164: accepts an operator# citation (a console-authored, provenance-stamped operator_note)", () => {
+  const ok = [
+    "# CONTEXT",
+    `- prefer the smaller diff here ${citation("operator#craig@2026-07-29T12:00:00.000Z")}`,
+    "# TASK",
+    "x",
+  ].join("\n");
+  assert.equal(lintPrompt(ok).ok, true);
+});
+
 test("accepts a bare commit hash and a URL as sources", () => {
   const ok = [
     "# CONTEXT",

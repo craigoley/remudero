@@ -369,9 +369,9 @@ test("renderReconPrompt: the REAL committed plan/plan-index.json renders a promp
   assert.doesNotMatch(prompt, /Hooks <1s\. Craig overlay/);
 });
 
-test("wiring: the recon worker's spawn prompt is built via renderReconPrompt(planIndexBlock), not a hardcoded literal", () => {
+test("wiring: the recon worker's spawn prompt is built via renderReconPrompt(planIndexBlock, ...), not a hardcoded literal", () => {
   const reconIdx = runTaskSrc.indexOf('"recon worker"');
-  const promptCallIdx = runTaskSrc.indexOf("prompt: renderReconPrompt(planIndexBlock)");
+  const promptCallIdx = runTaskSrc.indexOf("prompt: renderReconPrompt(planIndexBlock,");
   assert.ok(reconIdx >= 0, "the recon worker section must exist");
   assert.ok(promptCallIdx > reconIdx, "the recon spawn must build its prompt via renderReconPrompt, after the recon worker say()");
 });

@@ -57,6 +57,7 @@ import {
 } from "./panel-actions.js";
 import { buildPanelGraphRoutes, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
 import { buildTaskCardRoute } from "./task-card.js";
+import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operator-notes.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import { buildDaemonHealthRoute, type DaemonHealthDeps } from "./daemon-health.js";
 
@@ -3029,6 +3030,11 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     buildAnswerQuestionRoute(questionDeps),
     buildApproveManualRoute(fleetControlDeps),
     buildEscalationMarkHandledRoute(fleetControlDeps),
+    // W1-T164: operator guidance notes — console-editable, provenance-stamped, task-scoped.
+    // Rooted at `questionsRoot` (repoRoot) — the SAME durable, gitignored `plan/` store
+    // worker.ts's question channel already reads/writes (see operator-notes.ts's module doc).
+    buildAddOperatorNoteRoute({ root: deps.questionsRoot, ledgerPath: deps.ledgerPath }),
+    buildListOperatorNotesRoute({ root: deps.questionsRoot }),
     // Console UP NEXT write-actions (fb-1784988460437-9daa9b): Run a queued task, Drain now.
     buildKickRoute(fleetControlDeps),
     buildDrainNowRoute(fleetControlDeps),
