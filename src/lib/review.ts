@@ -2508,7 +2508,13 @@ export interface PostReviewStatusRetryOpts {
   exec?: (args: string[], env: NodeJS.ProcessEnv) => void;
 }
 
-function execGhStatusPost(args: string[], env: NodeJS.ProcessEnv): void {
+/** Exported (not just internal) so a unit test can PATH-stub `gh` and drive
+ * this exact real invocation directly — the same "temp-dir fake gh on PATH"
+ * pattern `realArmDeps` tests already use in run-task.test.ts — rather than
+ * only ever exercising it indirectly through {@link postReviewStatus}'s
+ * injectable `exec`, which would leave this one-line real wrapper itself
+ * permanently uncovered by the diff-coverage ratchet. */
+export function execGhStatusPost(args: string[], env: NodeJS.ProcessEnv): void {
   execFileSync("gh", args, { stdio: "pipe", env, encoding: "utf8" });
 }
 

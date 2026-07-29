@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -7,6 +7,7 @@ import { appendLedger } from "../src/lib/ledger.js";
 import {
   acquireReviewStatusLock,
   decideReviewStatusPost,
+  execGhStatusPost,
   lastPostedReviewStatusFromLedger,
   postReviewStatus,
   postReviewStatusGuarded,
@@ -524,6 +525,41 @@ test("postReviewStatus: a permanent 422 is classified non-transient and is not r
     ),
   );
   assert.equal(attempt, 1);
+});
+
+// ── execGhStatusPost — the real (uninjected) `gh` wrapper postReviewStatus's
+// `exec` defaults to. PATH-stubbed exactly like run-task.test.ts's
+// `realArmDeps` coverage probe, so this one-line real invocation earns its
+// own DA: hit instead of only ever running behind the injectable `exec`
+// every other test above supplies (W1-T135, diff-coverage ratchet).
+
+test("execGhStatusPost: the real execFileSync(\"gh\", ...) wrapper runs against a PATH-stubbed gh and returns normally on success", () => {
+  const bin = mkdtempSync(join(tmpdir(), "gh-status-stub-ok-"));
+  writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    assert.doesNotThrow(() => execGhStatusPost(["api", "-X", "POST", "repos/o/r/statuses/sha1"], process.env));
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test("execGhStatusPost: a failing gh stub throws with the stub's stderr surfaced", () => {
+  const bin = mkdtempSync(join(tmpdir(), "gh-status-stub-fail-"));
+  writeFileSync(join(bin, "gh"), '#!/bin/sh\necho "gh: Service Unavailable (HTTP 503)" >&2\nexit 1\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    assert.throws(
+      () => execGhStatusPost(["api", "-X", "POST", "repos/o/r/statuses/sha1"], process.env),
+      /HTTP 503/,
+    );
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+  }
 });
 
 // ── postReviewStatusGuarded — W1-T135 ledger-and-continue on post failure ───
