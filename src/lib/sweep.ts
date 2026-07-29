@@ -1697,8 +1697,12 @@ export function logQueueGovernorDeferral(
 
 /**
  * Sums ONE ledgered dollar figure per RUN (keyed by `run_id`), for every run
- * with at least one ledger line whose `ts` falls on `now`'s UTC calendar day,
- * then totals those per-run figures — the day's ledgered cost.
+ * with at least one ledger line whose `ts` falls within `[windowStartMs,
+ * windowEndMs)`, then totals those per-run figures — a window's ledgered
+ * cost. {@link deriveDayCostUsd}/{@link deriveWeekCostUsd} (W1-T159) are both
+ * this ONE reduction over a different window, never a separately reimplemented
+ * scan — "if both need the same ledger reduction, factor it once" (W1-T184's
+ * queue_note, filed against exactly this pairing).
  *
  * PER-RUN, NOT PER-LINE (avoids double-counting): a run's `verdict` line (or,
  * absent one — e.g. a run still in flight — its first `cost_usd`-bearing
@@ -1710,15 +1714,20 @@ export function logQueueGovernorDeferral(
  * mirroring retro.ts's `gatherRuns` costLine precedent (verdict line
  * preferred, else the first cost_usd line seen) — does not.
  *
- * A line with no `ts` string, or a `ts` outside today, is excluded; a run
- * whose only in-window lines carry no `cost_usd` contributes 0.
+ * A line with no `ts` string, an unparseable `ts`, or a `ts` outside the
+ * window, is excluded; a run whose only in-window lines carry no `cost_usd`
+ * contributes 0.
  */
-export function deriveDayCostUsd(lines: ReadonlyArray<Record<string, unknown>>, now: number): number {
-  const day = new Date(now).toISOString().slice(0, 10); // "YYYY-MM-DD", UTC
+export function deriveWindowCostUsd(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  windowStartMs: number,
+  windowEndMs: number,
+): number {
   const byRun = new Map<string, Record<string, unknown>[]>();
   for (const line of lines) {
     const ts = typeof line.ts === "string" ? line.ts : undefined;
-    if (!ts || !ts.startsWith(day)) continue;
+    const parsed = ts ? Date.parse(ts) : NaN;
+    if (!Number.isFinite(parsed) || parsed < windowStartMs || parsed >= windowEndMs) continue;
     const runId = typeof line.run_id === "string" ? line.run_id : undefined;
     if (!runId) continue;
     const bucket = byRun.get(runId);
@@ -1732,6 +1741,49 @@ export function deriveDayCostUsd(lines: ReadonlyArray<Record<string, unknown>>, 
     if (costLine && typeof costLine.cost_usd === "number") total += costLine.cost_usd;
   }
   return total;
+}
+
+/** `[start, end)` of `now`'s UTC calendar day, in epoch ms — the day-cost window boundary,
+ *  factored out so {@link deriveDayCostUsd} and a "merged today" tally (lib/glance.ts, W1-T159)
+ *  agree on exactly what "today" means, rather than each computing its own midnight. */
+export function utcDayWindowMs(now: number): [start: number, end: number] {
+  const day = new Date(now).toISOString().slice(0, 10); // "YYYY-MM-DD", UTC
+  const start = Date.parse(`${day}T00:00:00.000Z`);
+  return [start, start + 24 * 60 * 60 * 1000];
+}
+
+/** `[start, end)` of the CURRENT UTC ISO week (Monday 00:00 UTC through the following Monday
+ *  00:00 UTC) containing `now`, in epoch ms — the week-to-date spend window (W1-T159). */
+export function utcWeekWindowMs(now: number): [start: number, end: number] {
+  const [dayStart] = utcDayWindowMs(now);
+  const dayOfWeek = new Date(dayStart).getUTCDay(); // 0=Sun..6=Sat
+  const daysSinceMonday = (dayOfWeek + 6) % 7; // Mon=0, Tue=1, ..., Sun=6
+  const weekStart = dayStart - daysSinceMonday * 24 * 60 * 60 * 1000;
+  return [weekStart, weekStart + 7 * 24 * 60 * 60 * 1000];
+}
+
+/**
+ * The day's ledgered cost — `now`'s UTC calendar day, per-run (see
+ * {@link deriveWindowCostUsd} for the shared reduction). BEHAVIOR UNCHANGED from
+ * this function's pre-W1-T159 form: same window (today's UTC calendar day), same
+ * per-run/verdict-preferred reduction — {@link checkCostGovernor}'s existing call
+ * site sees byte-identical results.
+ */
+export function deriveDayCostUsd(lines: ReadonlyArray<Record<string, unknown>>, now: number): number {
+  const [start, end] = utcDayWindowMs(now);
+  return deriveWindowCostUsd(lines, start, end);
+}
+
+/**
+ * The WEEK-TO-DATE ledgered cost (W1-T159): the current UTC ISO week (Monday 00:00 UTC through
+ * `now`'s week), same per-run reduction as {@link deriveDayCostUsd}. The GLANCE strip's own
+ * falsifier is exactly why this exists beside the day figure: "a daily-only figure cannot answer
+ * whether today is normal — ~2.54 USD burned post-merge looked unremarkable in isolation and is
+ * only legible against a weekly baseline" (plan/tasks.yaml, this task's amended criterion).
+ */
+export function deriveWeekCostUsd(lines: ReadonlyArray<Record<string, unknown>>, now: number): number {
+  const [start, end] = utcWeekWindowMs(now);
+  return deriveWindowCostUsd(lines, start, end);
 }
 
 /** {@link checkCostGovernor}'s verdict for one dispatch-path consultation. */

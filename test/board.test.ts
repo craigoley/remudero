@@ -388,6 +388,39 @@ test("W1-T157: computeBoardSnapshot sets lastActivityAt to the ts of the LAST le
   assert.equal(byId.get("B")!.lastActivityAt, undefined); // no ledger line at all
 });
 
+// ── W1-T159 (GLANCE layer): the strip's "blocked" count and "merged-today"/"spend-today"/
+// "spend-this-week" figures both derive from computeBoardSnapshot's SAME already-read tasks/
+// ledger lines — never a second, independently-derived tally the strip could disagree with. ────
+
+test("W1-T159: summarizeCounts adds a blocked tally from the SAME task set — the strip's blocked count can never disagree with the rows", () => {
+  const rows = [
+    { taskId: "A", status: "blocked", phase: undefined },
+    { taskId: "B", status: "blocked", phase: undefined },
+    { taskId: "C", status: "queued", phase: undefined },
+    { taskId: "D", status: "merged", phase: undefined },
+  ] as unknown as BoardRow[];
+  const counts = summarizeCounts(rows, false);
+  assert.equal(counts.blocked, 2);
+  assert.equal(counts.queued, 1);
+  assert.equal(counts.total, 4);
+});
+
+test("W1-T159: computeBoardSnapshot carries glance spend (mergedToday/spendTodayUsd/spendWeekUsd) computed from the SAME ledger lines already read, via lib/glance.ts's computeGlanceSpend", () => {
+  const ledgerPath = tmpLedgerPath();
+  appendFileSync(
+    ledgerPath,
+    JSON.stringify({ ts: "2026-07-29T09:00:00.000Z", run_id: "r1", task_id: "A", step: "verdict", verdict: "merged", cost_usd: 2 }) + "\n",
+  );
+  const plan = planOf([task({ id: "A" })]);
+  const deps: BoardDeps = { plan, ledgerPath, github: fakeGitHub(), now: () => Date.parse("2026-07-29T18:00:00.000Z") };
+
+  const snapshot = computeBoardSnapshot(deps);
+
+  assert.equal(snapshot.spend.mergedToday, 1);
+  assert.equal(snapshot.spend.spendTodayUsd, 2);
+  assert.equal(snapshot.spend.spendWeekUsd, 2);
+});
+
 function row(over: Partial<BoardRow>): BoardRow {
   return { taskId: "X", status: "queued", merged: false, source: "none", title: "t", risk: "medium", ...over };
 }

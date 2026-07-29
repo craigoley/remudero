@@ -227,6 +227,17 @@ export interface StatusProjection {
    */
   escalationUnverified?: true;
   /**
+   * ISO-8601 `ts` of the OPEN escalation's own `escalation.issue_opened` ledger line (W1-T159) —
+   * when this became a needs-human item, NOT when its (possibly much earlier, possibly much
+   * later — a redispatch can precede an escalation by hours) triggering run started. A caller
+   * measuring "how long has this needed a human" (e.g. the GLANCE strip's >24h anomaly emphasis)
+   * MUST use this field, never `startedAt`: they name two different events, and NEEDS ME rows
+   * had been keying their own age off `startedAt` (the run's start) — a proxy that is wrong
+   * whenever the escalation fires well after the run that preceded it began, or long after a
+   * later run's own startedAt was overwritten. Present iff `needsHuman` is.
+   */
+  escalationOpenedAt?: string;
+  /**
    * True when the projection's current OPEN PR already has GitHub auto-merge armed,
    * observed via the SAME batched gateway fetch {@link buildBatchedGithub} already
    * makes for every other {@link GitHub} method — W1-T155 preserves the board-fix O(1)
@@ -1210,10 +1221,11 @@ function deriveRunState(lines: ReadonlyArray<Record<string, unknown>>, taskId: s
 export function latestEscalationLine(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
-): { issueUrl?: string; escalationClass?: string } | undefined {
+): { issueUrl?: string; escalationClass?: string; openedAt?: string } | undefined {
   let last: "run" | "escalation" | undefined;
   let issueUrl: string | undefined;
   let escalationClass: string | undefined;
+  let openedAt: string | undefined;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
     if (line.step === "run.start") {
@@ -1222,9 +1234,14 @@ export function latestEscalationLine(
       last = "escalation";
       issueUrl = typeof line.issue_url === "string" ? line.issue_url : undefined;
       escalationClass = typeof line.class === "string" ? line.class : undefined;
+      // W1-T159: the escalation's OWN ledger-line ts — carried forward so a caller can measure
+      // "how long has this actually needed a human" against the escalation's real open time,
+      // never a run's `startedAt` (a DIFFERENT event — the run that PRECEDED the escalation,
+      // not the escalation itself; see StatusProjection.escalationOpenedAt's own doc).
+      openedAt = typeof line.ts === "string" ? line.ts : undefined;
     }
   }
-  return last === "escalation" ? { issueUrl, escalationClass } : undefined;
+  return last === "escalation" ? { issueUrl, escalationClass, openedAt } : undefined;
 }
 
 /** {@link deriveStatus}'s escalation-derived fields, once an escalation resolves as still-relevant. */
@@ -1233,6 +1250,7 @@ export interface EscalationState {
   escalationClass?: string;
   title?: string;
   unverified?: true;
+  openedAt?: string;
 }
 
 /**
@@ -1285,6 +1303,7 @@ export function resolveEscalation(
     escalationClass: latest.escalationClass,
     title: issue?.title,
     unverified: state === "OPEN" ? undefined : true,
+    openedAt: latest.openedAt,
   };
 }
 
@@ -1343,6 +1362,7 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
     if (escalation.issueUrl) projection.escalationIssueUrl = escalation.issueUrl;
     if (escalation.title) projection.escalationTitle = escalation.title;
     if (escalation.unverified) projection.escalationUnverified = true;
+    if (escalation.openedAt) projection.escalationOpenedAt = escalation.openedAt;
   }
 
   // ARMED-AWAITING-MERGE: only meaningful for a currently OPEN PR — reuses the exact
