@@ -23,6 +23,7 @@ All logic lives in TypeScript; `bin/rmd` is a thin `exec` wrapper into
 | `rmd stop [--reason <text>]` | **One-shot** hard kill: the currently running drain/daemon halts within one tick; auto-clears once that run ends. A no-op-that-warns when nothing is running. |
 | `rmd pause [--reason <text>]` | **Persistent** hold: no new spawns, but an in-flight task always finishes (verdict + merge). Cleared only by `resume`. |
 | `rmd resume` | Clears both `stop` and `pause`. |
+| `rmd away [on\|off]` | Set/show operator presence (default `attended`). `away` batches `MANUAL`/`HARD_STOP` escalations into the since-you-last-checked recap for an async verdict instead of a real-time page; `attended` (or no argument to show current mode) delivers exactly as before. Never gates dispatch — presence keys delivery only. |
 | `rmd review <pr-number> [--repo <name>]` | The escape hatch for a **hand-opened** PR (plan/doc edits, anything outside the runner): posts `remudero-review` via the same deterministic judge. `--repo` overrides the checkout's default owner/repo. |
 | `rmd dep-review <pr-number> [--repo <name>]` | Deterministic Dependabot-PR review lane: minor/patch → arm auto-merge; major (or unparseable) → escalate; source outside manifests → refuse. |
 | `rmd lint-plan [--plan <path>]` | Deterministic (no-LLM) linter over the whole plan — sizing, headless-fitness, proof-shape, provenance. Exits non-zero on any blocking violation. |

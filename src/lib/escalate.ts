@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { appendLedger } from "./ledger.js";
 
 /**
@@ -180,6 +182,68 @@ const CLASS_LABEL: Record<EscalationClass, string> = {
 
 /** The label every escalation issue carries — the queue the control panel reads (§4). */
 export const NEEDS_HUMAN_LABEL = "needs-human";
+
+// ── OPERATOR PRESENCE (P34 clause (e), MASTER-PLAN §7B/§4; ratified round iii) ──────────────
+//
+// An operator presence signal keys ONLY escalation DELIVERY — never dispatch. Round iii killed
+// the rounds-1-2 presence×risk DISPATCH matrix (MASTER-PLAN's original P34 proposal, superseded
+// by the round-3 ratification note directly above it): no dispatch decision (drain.ts's
+// `nextRunnable`/`runnableCandidates`, dispatch-overlap.ts) reads this flag, and none should —
+// that would resurrect the dead matrix. The control surface on the dispatch path stays gates +
+// the risk judge (W1-T248) + escalations + console, exactly as before this task. The ONLY
+// real-time-presence waits remain STOP and PAUSE (fleet-control.ts, W1-T11) — untouched here.
+//
+// This flag answers exactly one question: does a MANUAL/HARD_STOP escalation page the operator
+// in real time RIGHT NOW (ATTENDED — today's behavior, unchanged), or does it batch into the
+// W1-T163 recap/digest for an ASYNC verdict instead of expecting a sync answer (AWAY)? Either
+// way `escalate()` below opens the `needs-human` issue and ledgers `escalation.issue_opened`
+// UNCONDITIONALLY — recap.ts/digest.ts already surface every such line off the SAME per-token
+// marker regardless of presence (see their module headers). AWAY mode changes only whether a
+// CALLER (run-task.ts's `escalateCommand`, the sole real-time-ping site — grep-provable: it is
+// the only call to `notify()` gated on `cls === "MANUAL" || cls === "HARD_STOP"`) also fires an
+// immediate ping alongside that unconditional issue.
+
+export type PresenceMode = "attended" | "away";
+
+/** `<root>/state/AWAY` — the same existence-gated flag idiom as fleet-control.ts's
+ *  STOP/PAUSE/QUIET_HOURS: a corrupt/unreadable state dir still fails to the SAFE default
+ *  (`"attended"`, i.e. deliver exactly as today), never silently goes quiet. */
+export function awayFilePath(root: string): string {
+  return join(root, "state", "AWAY");
+}
+
+/** The operator's CURRENT presence mode. Default (no flag file, or a fresh root) is
+ *  `"attended"` — away-mode routing is opt-in, never assumed. */
+export function presenceMode(root: string): PresenceMode {
+  return existsSync(awayFilePath(root)) ? "away" : "attended";
+}
+
+/**
+ * `rmd away on|off` — the operator sets the mode explicitly (MASTER-PLAN §7B/§4: "an operator
+ * presence signal ... OR an explicit `away` mode"). `"away"` writes the flag; `"attended"`
+ * clears it (idempotent either way).
+ */
+export function setPresenceMode(root: string, mode: PresenceMode): void {
+  const path = awayFilePath(root);
+  if (mode === "away") {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ setAt: new Date().toISOString() }, null, 2));
+    return;
+  }
+  if (existsSync(path)) unlinkSync(path);
+}
+
+/**
+ * Should an escalation for this class deliver as a real-time, sync-answer-expecting ping RIGHT
+ * NOW? `false` means: batch into the recap instead — the caller must skip its own real-time
+ * `notify()` and rely on `escalation.issue_opened` (already ledgered unconditionally by
+ * {@link escalate}/{@link tryEscalate}) surfacing via the marker-aware recap/digest read.
+ * ATTENDED (the default) returns `true` for every class exactly as before this flag existed —
+ * away-mode routing changes NOTHING attended.
+ */
+export function deliversRealtime(root: string): boolean {
+  return presenceMode(root) === "attended";
+}
 
 /** Render the issue body: context, the options, and the recommendation called out. */
 export function renderIssueBody(e: Escalation): string {
