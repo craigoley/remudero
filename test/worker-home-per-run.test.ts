@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 import {
   WORKER_HOME_RC_FILES,
@@ -204,6 +204,97 @@ test("sweepStaleWorkerHomes: reaps an OLD orphaned per-run home but keeps a fres
     rmSync(stale, { recursive: true, force: true });
     rmSync(fresh, { recursive: true, force: true });
     rmSync(unrelated, { recursive: true, force: true });
+  }
+});
+
+test("reapWorkerHome: an rmSync failure is caught and reported as { reaped: false, reason: <message> }, never thrown", () => {
+  const root = join(tmp(), "worker-home");
+  const home = perRunWorkerHomeDir(root, "run-rm-fails");
+  mkdirSync(home, { recursive: true });
+  try {
+    const result = reapWorkerHome(root, home, {
+      fsImpl: {
+        existsSync: () => true,
+        rmSync: () => {
+          throw new Error("simulated EBUSY");
+        },
+      },
+    });
+    assert.equal(result.reaped, false);
+    assert.match(result.reason ?? "", /simulated EBUSY/, "the thrown error's message surfaces in `reason`");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("sweepStaleWorkerHomes: an unreadable parent directory (readdirSync throws) is a benign no-op — returns empty removed/kept, never throws", () => {
+  const root = join(tmp(), "worker-home");
+  assert.doesNotThrow(() => {
+    const summary = sweepStaleWorkerHomes(root, {
+      fsImpl: {
+        readdirSync: () => {
+          throw new Error("simulated ENOENT: parent vanished");
+        },
+      },
+    });
+    assert.deepEqual(summary, { removed: [], kept: [] });
+  });
+});
+
+test("sweepStaleWorkerHomes: an entry that vanishes between readdir and stat is silently skipped — neither removed nor kept", () => {
+  const root = join(tmp(), "worker-home");
+  const stale = perRunWorkerHomeDir(root, "vanished");
+  try {
+    mkdirSync(stale, { recursive: true });
+    const summary = sweepStaleWorkerHomes(root, {
+      fsImpl: {
+        statSync: () => {
+          throw new Error("simulated ENOENT: vanished between readdir and stat");
+        },
+      },
+    });
+    assert.equal(summary.removed.length, 0);
+    assert.equal(summary.kept.length, 0, "a stat failure is neither removed NOR kept — someone else's cleanup won");
+  } finally {
+    rmSync(stale, { recursive: true, force: true });
+  }
+});
+
+test("sweepStaleWorkerHomes: a non-directory sibling matching the naming prefix is kept, never reaped", () => {
+  const root = join(tmp(), "worker-home");
+  const homeAsFile = perRunWorkerHomeDir(root, "not-a-dir");
+  try {
+    mkdirSync(dirname(homeAsFile), { recursive: true });
+    writeFileSync(homeAsFile, "unexpectedly a file, not a directory\n");
+    const summary = sweepStaleWorkerHomes(root, { now: () => Date.now() });
+    assert.equal(summary.removed.length, 0);
+    assert.ok(summary.kept.includes(basename(homeAsFile)), "a non-directory sibling is always kept, never reaped");
+    assert.ok(existsSync(homeAsFile), "the file itself must survive the sweep");
+  } finally {
+    rmSync(homeAsFile, { force: true });
+  }
+});
+
+test("sweepStaleWorkerHomes: an rmSync failure on ONE stale entry is caught and that entry is kept — a permissions hiccup never blocks the rest", () => {
+  const root = join(tmp(), "worker-home");
+  const stale = perRunWorkerHomeDir(root, "rm-fails");
+  try {
+    mkdirSync(stale, { recursive: true });
+    const oldMtime = new Date(Date.now() - DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS * 2);
+    utimesSync(stale, oldMtime, oldMtime);
+    const summary = sweepStaleWorkerHomes(root, {
+      now: () => Date.now(),
+      fsImpl: {
+        rmSync: () => {
+          throw new Error("simulated EACCES");
+        },
+      },
+    });
+    assert.equal(summary.removed.length, 0);
+    assert.ok(summary.kept.includes("worker-home-rm-fails"), "an rmSync failure keeps the entry rather than dropping it silently");
+    assert.ok(existsSync(stale), "the stale dir is untouched since the injected rmSync never actually removed it");
+  } finally {
+    rmSync(stale, { recursive: true, force: true });
   }
 });
 
