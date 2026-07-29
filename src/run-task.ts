@@ -268,6 +268,7 @@ import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/co
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, renderDoctrinePreamble } from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
+import { loadOperatorNotesForTask, renderOperatorNotes } from "./lib/operator-notes.js";
 import {
   computeMatchedLearningsForArm,
   deriveWipeTestRunResult,
@@ -2550,8 +2551,12 @@ function reconObservedToContext(recon: WorkerResult, taskId: string): string {
  * run paying to carry the whole ~1900-line document. `planIndexBlock` is `""` when no index is
  * committed yet (a fresh checkout before the first `npm run plan-index`) — recon still runs, just
  * without the pointer; correctness never depends on the index being present.
+ *
+ * `operatorNotesBlock` (W1-T164, `lib/operator-notes.ts`'s `renderOperatorNotes`) carries THIS
+ * task's console-authored, provenance-stamped guidance — feedback INTO the task before it runs,
+ * scoped strictly to this task's own id. `""` (the default) when the task carries no notes.
  */
-export function renderReconPrompt(planIndexBlock: string): string {
+export function renderReconPrompt(planIndexBlock: string, operatorNotesBlock = ""): string {
   return [
     "You are a RECON worker. Do NOT modify anything. Inspect the current git " +
       "repository read-only (git remote -v, git log --oneline -5, ls). Output one report:\n" +
@@ -2564,6 +2569,7 @@ export function renderReconPrompt(planIndexBlock: string): string {
       "per line, its own one-line why inline: `research: <what, why>` | `task: <what, why>` |\n" +
       "`action: <what, why>` — for anything discovered that is out of THIS recon's scope.",
     planIndexBlock,
+    operatorNotesBlock,
   ]
     .filter((s) => s.length > 0)
     .join("\n\n");
@@ -2587,12 +2593,20 @@ export function renderReconPrompt(planIndexBlock: string): string {
  *      the doctrine/task/recon bytes that precede it.
  * Every line is already provenance-tagged, so the whole CONTEXT block still
  * lints clean regardless of ordering.
+ *
+ * `operatorNotesBlock` (W1-T164, `lib/operator-notes.ts`'s `renderOperatorNotes`) carries THIS
+ * task's console-authored, provenance-stamped guidance, scoped strictly to `task.id` — placed
+ * after the task/recon context and before the volatile learnings corpus: it is per-task and
+ * per-run stable (never grows mid-run), so it need not trail behind everything the way the
+ * ever-growing learnings corpus must (cache-aware ordering, W1-T35). `""` (the default) when the
+ * task carries no notes.
  */
 export function renderImplementPrompt(
   task: Task,
   reconContext: string,
   runId: string,
   matchedLearnings = "",
+  operatorNotesBlock = "",
 ): string {
   const contextClaims = (task.context ?? [])
     .map((c) => `- ${c.claim} ${citation(c.src)}`)
@@ -2606,6 +2620,7 @@ export function renderImplementPrompt(
     renderDoctrinePreamble(),
     contextClaims,
     reconContext,
+    operatorNotesBlock,
     matchedLearnings,
     "",
     "# TASK",
@@ -3025,6 +3040,13 @@ async function runTask(
     // plan-index` just omits the block); `npm run plan-index:check` fails CI on a stale index.
     const planIndex = loadPlanIndex(join(dirname(planPath), "plan-index.json"));
     const planIndexBlock = planIndex ? renderPlanIndex(planIndex) : "";
+    // W1-T164: task-scoped operator guidance notes — read from the durable console-editable
+    // store (`repoRoot`, the SAME root worker.ts's question store reads/writes), scoped strictly
+    // to THIS task's id (never another task's), and rendered ONCE so the identical block injects
+    // into both the recon prompt below and the implement prompt further down.
+    const operatorNotes = loadOperatorNotesForTask(repoRoot, task.id);
+    const operatorNotesBlock = renderOperatorNotes(operatorNotes);
+    log("operator_notes.injected", { count: operatorNotes.length });
     const recon = account(
       await spawn({
         cwd: worktreePath,
@@ -3033,7 +3055,7 @@ async function runTask(
         maxTurns: 8, // recon is read-only + bounded; turns stay tight here.
         maxBudgetUsd: budgetUsd, // dollars are the real backstop (WS-0 knob a).
         config,
-        prompt: renderReconPrompt(planIndexBlock),
+        prompt: renderReconPrompt(planIndexBlock, operatorNotesBlock),
       }),
     );
     log("recon.done", {
@@ -3099,7 +3121,7 @@ async function runTask(
 
     // ── Render + provenance-lint the prompt.
     const reconContext = reconObservedToContext(recon, taskId);
-    const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings);
+    const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     log("prompt.linted", { provenance: "clean" });
     say("prompt provenance-linted: clean");

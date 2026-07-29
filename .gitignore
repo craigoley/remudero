@@ -38,4 +38,5 @@ reports/audit/
 # exhaust never counts against a clean tree.
 state/
 plan/questions.ndjson
+plan/operator-notes.ndjson
 *.log

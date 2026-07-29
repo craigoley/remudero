@@ -4,7 +4,7 @@
  *   PROVENANCE OR IT DOESN'T GO IN A PROMPT.
  *
  * Every claim in a rendered prompt's CONTEXT block must carry a citation
- * `[src: recon#… | plan#… | PR#… | <commit> | learnings#… | <url>]`. An uncited
+ * `[src: recon#… | plan#… | PR#… | <commit> | learnings#… | operator#… | <url>]`. An uncited
  * claim BLOCKS dispatch — deterministically, before any worker spawns. This is
  * the mechanized version of the provenance gate: not discipline, a predicate.
  */
@@ -24,7 +24,9 @@ export class ProvenanceError extends Error {
 /** A `[src: …]` whose payload is one of the accepted provenance kinds. */
 const CITATION = /\[src:\s*([^\]]+?)\s*\]/i;
 const ACCEPTED_KIND =
-  /^(recon#|plan#|PR#|learnings#|commit#|https?:\/\/|[0-9a-f]{7,40}$)/i;
+  // W1-T164: `operator#<author>@<ts>` — a console-authored, provenance-stamped operator_note,
+  // injected under the SAME discipline as `learnings#` (see lib/operator-notes.ts).
+  /^(recon#|plan#|PR#|learnings#|operator#|commit#|https?:\/\/|[0-9a-f]{7,40}$)/i;
 
 /** Build a citation token for a source id (e.g. `citation("recon#SB-HELLO")`). */
 export function citation(src: string): string {
