@@ -16,6 +16,7 @@ import {
   resolveHeadroomEnabled,
   softBudgetThreshold,
   userOverallLearningsHome,
+  workerHomeDir,
   workerModel,
   workerShell,
   workerZdotdir,
@@ -368,7 +369,7 @@ import {
   type SpawnWorkerArgs,
   type WorkerResult,
 } from "./lib/worker.js";
-import { ensureWorkerKeychain, workerKeychainPaths } from "./lib/worker-home.js";
+import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from "./lib/worker-home.js";
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, FIX_WORKER_TOOLS, neutralizeFenceMarkers } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "./lib/drain-lock.js";
 import { checkCliFreshness, checkServiceFreshness } from "./lib/self-sync.js";
@@ -5744,6 +5745,15 @@ export async function daemonCommand(
       const scratch = sweepStaleWorkerScratch();
       if (scratch.removed.length) {
         log("daemon.scratch_sweep", { removed: scratch.removed.length, sample: scratch.removed.slice(0, 5) });
+      }
+      // W1-T170 boot sweep: reap per-spawn worker-home dirs (`<root>/worker-home-<id>`)
+      // orphaned by a run/spawn that ended without reaching its own reapWorkerHome
+      // call (a kill -9, a crashed daemon). Same 24h age ceiling as the scratch/tmp
+      // sweeps above — a still-running spawn's home is always recent (materialize
+      // touches it on every use) and never collateral.
+      const homes = sweepStaleWorkerHomes(workerHomeDir(config));
+      if (homes.removed.length) {
+        log("daemon.worker_home_sweep", { removed: homes.removed.length, sample: homes.removed.slice(0, 5) });
       }
       return sweepStaleTempDirs();
     },
