@@ -82,19 +82,19 @@ export function checkCiGateDocNotAProbe(ciGateDocExists: boolean): { ok: boolean
 test("docs-claims: README.md does not claim the repo currently contains the WS-0 spike", async () => {
   const readme = await readFile(join(REPO_ROOT, "README.md"), "utf8");
   const result = checkWsStageClaim(readme);
-  assert.ok(result.ok, result.reason);
+  if (!result.ok) assert.fail(result.reason);
 });
 
 test("docs-claims: CONTRIBUTING.md names ci-gate (not bare ci) as the required aggregator check", async () => {
   const contributing = await readFile(join(REPO_ROOT, "CONTRIBUTING.md"), "utf8");
   const result = checkRequiredCheckClaim(contributing);
-  assert.ok(result.ok, result.reason);
+  if (!result.ok) assert.fail(result.reason);
 });
 
 test("docs-claims: docs/operator-guide.md documents the --repo flag", async () => {
   const guide = await readFile(join(REPO_ROOT, "docs", "operator-guide.md"), "utf8");
   const result = checkRepoCoverage(guide);
-  assert.ok(result.ok, result.reason);
+  if (!result.ok) assert.fail(result.reason);
 });
 
 test("docs-claims: docs/operator-guide.md's command table covers every COMMANDS registry verb", async () => {
@@ -105,7 +105,7 @@ test("docs-claims: docs/operator-guide.md's command table covers every COMMANDS 
 
 test("docs-claims: docs/ci-gate.md is removed, not a one-line probe artifact", () => {
   const result = checkCiGateDocNotAProbe(existsSync(join(REPO_ROOT, "docs", "ci-gate.md")));
-  assert.ok(result.ok, result.reason);
+  if (!result.ok) assert.fail(result.reason);
 });
 
 // ── Falsifiers: each check must actually go RED, not just parse ─────────────────────────────
