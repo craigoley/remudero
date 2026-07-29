@@ -925,23 +925,6 @@ export function narrowNameFilteredArgs(baseArgs: readonly string[], candidateFil
  * {@link nameFilteredOutcome} parsing the TAP stream for the matched test's OWN
  * result line, never from the process exit code — on both the success path and
  * a thrown nonzero-exit's attached stdout.
- *
- * ONE BOUNDED RETRY (W1-T202 round 2) for a WHOLE-FILE (never name-filtered)
- * `test` proof's genuine clean-nonzero-exit `fail` verdict — mirroring
- * `scripts/test-with-retry.mjs`'s already-reviewed rationale (W1-T255) for the
- * SAME class of flake this repo already documents and tolerates in its `ci`
- * required check (`npm run test:ci` retries the WHOLE suite once on a red run;
- * a deterministic failure still fails both attempts, so a genuine break is
- * never masked). Before this, `remudero-review`'s own proof executor ran the
- * raw, retry-free command — STRICTER than the `ci` check it is supposed to sit
- * alongside, so a Playwright-driving proof that flakes under load could fail
- * the required merge-gate review while the identical commit's `ci` run (which
- * DOES retry) went green, an inconsistency observed live on this exact task's
- * own two `unit test:` proofs (both whole-file, both Chromium-driving) failing
- * `remudero-review` twice in a row while passing `ci` and every local rerun,
- * stressed or not. Deliberately NOT applied to a name-filtered proof (a retry
- * there would re-run the SAME leak-prone full-glob fallback twice) or a `grep`
- * proof (deterministic; a retry could only ever repeat the same answer).
  */
 export function execWhitelistedProof(
   whitelisted: WhitelistedProof,
@@ -992,20 +975,6 @@ export function execWhitelistedProof(
     // absence; the former degrades to exec_error (the keyword floor) rather
     // than false-blocking on an environment/authoring problem.
     if (whitelisted.kind === "grep" && err.status === 2) throw err;
-    // W1-T202 round 2: ONE bounded retry for a whole-file `test` proof's clean-nonzero-exit
-    // `fail` — see this function's own doc comment for the full rationale (mirrors
-    // scripts/test-with-retry.mjs, W1-T255). Scoped to exactly this shape: never name-filtered
-    // (already handled above, before this line is ever reached) and never `grep` (deterministic).
-    if (whitelisted.kind === "test") {
-      try {
-        spawn(whitelisted.command, args, cwd, timeoutMs);
-        return "pass"; // the retry ran clean — the first attempt's failure did not reproduce
-      } catch (e2) {
-        const err2 = e2 as NodeJS.ErrnoException & { status?: number | null };
-        if (typeof err2.status !== "number") throw err2; // a timeout/spawn error on the retry ⇒ exec_error, same rule as the first attempt
-        return "fail"; // reproduced on the retry — a genuine, non-flaky fail
-      }
-    }
     return "fail"; // a single-file/grep proof's own nonzero exit is a genuine fail
   }
 }
