@@ -1664,19 +1664,89 @@ export function keywordOnlyAnnotation(): string {
 }
 
 /**
- * The `capped`/`keywordOnly` facts the `review.posted` ledger line records
- * (W1-T185, criterion 5: "when materialization is impossible the verdict is
- * EXPLICITLY marked keyword-only, in both the posted status and the ledger —
+ * The `capped`/`keywordOnly`/`planOnly` facts the `review.posted` ledger line
+ * records (W1-T185, criterion 5: "when materialization is impossible the verdict
+ * is EXPLICITLY marked keyword-only, in both the posted status and the ledger —
  * silent keyword-only posting is unreachable"). Pure + exported so run-task.ts's
- * `log("review.posted", …)` call and a unit test both read the SAME two fields
+ * `log("review.posted", …)` call and a unit test both read the SAME fields
  * off the SAME verdict, rather than the ledger line risking a hand-copied
  * projection that could silently drift from what {@link cappedSummary}/
- * {@link passSummary} actually rendered on the posted status.
+ * {@link planOnlySummary}/{@link passSummary} actually rendered on the posted
+ * status.
+ *
+ * `plan_only` joined the line so the LEDGER carries every input
+ * {@link decideAutoMergeArm} needs — `capped` alone cannot distinguish the
+ * structural, permanently-capped plan-only shape (which ARMS, W1-T205) from a
+ * proof-failure capped verdict (which does not, W1-T229). {@link
+ * postedArmFactsFromLedger} is the reader; `sweep.ts`'s reconciliation is why it
+ * has to be on the ledger at all — that path never holds the verdict object,
+ * only what was written down about it.
  */
 export function reviewLedgerLegibilityFields(
-  verdict: Pick<ReviewVerdict, "capped" | "keywordOnly">,
-): { capped: boolean; keyword_only: boolean } {
-  return { capped: verdict.capped, keyword_only: verdict.keywordOnly };
+  verdict: Pick<ReviewVerdict, "capped" | "keywordOnly" | "planOnly">,
+): { capped: boolean; keyword_only: boolean; plan_only: boolean } {
+  return { capped: verdict.capped, keyword_only: verdict.keywordOnly, plan_only: verdict.planOnly };
+}
+
+/**
+ * The arming-relevant facts of the review verdict posted for ONE EXACT head —
+ * {@link decideAutoMergeArm}'s `verdict` argument, recovered from the ledger by
+ * a caller that never held the verdict object itself (`lib/sweep.ts`'s
+ * independent "checks green + review success ⇒ arm" reconciliation). Same "last
+ * one wins" scan idiom as {@link lastPostedReviewStatusFromLedger} and
+ * {@link cappedOverrideFromLedger}; HEAD-BOUND for the same W1-T219/W1-T230
+ * reason — a verdict judged against an older push says nothing about the head
+ * about to be armed.
+ *
+ * TWO DIFFERENT ABSENCES, TWO DIFFERENT ANSWERS — this is the whole safety
+ * argument, and the two cases are NOT symmetric:
+ *
+ *   (a) NO RECOVERABLE VERDICT AT ALL — no matching line, or one whose `capped`
+ *       is not a boolean. Returns `undefined`: "no evidence". The caller arms
+ *       exactly as it did before this function existed. A rotated ledger, a PR
+ *       reviewed on another machine, or a verdict this ledger simply never saw
+ *       must never strand a PR whose `remudero-review` status GitHub reports as
+ *       success — that would be a fleet-wide stall triggered by log rotation.
+ *
+ *   (b) A VERDICT IS RECOVERABLE BUT `plan_only` IS ABSENT (a line written by a
+ *       binary older than the field). `planOnly` reads FALSE — so a `capped`
+ *       verdict from that era REFUSES. It is tempting to call this "unknown, so
+ *       arm", but that reopens the exact hole for every pre-existing capped
+ *       line, and the two outcomes are not equally bad: an unattended merge of
+ *       a diff with zero executed proof is irreversible, while the cost of
+ *       refusing is that the PR sits open and unarmed until someone runs
+ *       `rmd review <n>` (which re-posts the verdict WITH `plan_only`, after
+ *       which the W1-T205 carve-out applies normally). This mirrors sweep.ts's
+ *       own standing ruling on the conflict rung: "a wrong auto-resolution is
+ *       worse than a strand".
+ *
+ * The transitional exposure of (b) is bounded and was MEASURED before shipping:
+ * a plan PR is armed at open by its own emitter (`armAutoMerge` directly,
+ * bypassing this gate entirely — see review.test.ts's W1-T229 criterion-2
+ * structural fixture), so it only reaches this decision at all when that at-open
+ * arm failed; at the time this landed, zero open PRs carried a legacy capped
+ * line for their current head.
+ */
+export interface PostedArmFacts {
+  capped: boolean;
+  planOnly: boolean;
+}
+
+export function postedArmFactsFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string | undefined,
+  headSha: string | undefined,
+): PostedArmFacts | undefined {
+  if (!taskId || !headSha) return undefined;
+  let facts: PostedArmFacts | undefined;
+  for (const line of lines) {
+    if (line.step !== "review.posted" || line.task_id !== taskId) continue;
+    if (typeof line.head_sha !== "string" || line.head_sha !== headSha) continue;
+    if (typeof line.capped !== "boolean") continue;
+    // `plan_only` absent ⇒ false ⇒ a capped legacy verdict refuses. See (b) above.
+    facts = { capped: line.capped, planOnly: line.plan_only === true };
+  }
+  return facts;
 }
 
 /** Max length of a GitHub commit-status description (postReviewStatus also truncates). */
