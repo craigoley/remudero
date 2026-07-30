@@ -437,6 +437,32 @@ export interface DaemonDeps {
   /** Read current /usage; `undefined` ⇒ unavailable (headroom check is skipped). */
   readUsage?: () => UsageSnapshot | undefined;
   /**
+   * P34 clause (c), W1-T249: called when a window first crosses the operator
+   * reserve (a CONFIRMED, readable breach — never on the unreadable/degraded
+   * path, which has its own bounded-allowance handling above). Fires AT MOST
+   * ONCE per breach episode — the SAME "dedup while the condition holds, reset
+   * once it clears" discipline `onCircuitBreak`'s caller applies, so a
+   * sustained breach does not open a fresh notification every poll — and
+   * dispatch is ALREADY paused (the in-process idle heartbeat this same check
+   * drives) by the time this fires, so the hook is a pure notification, never
+   * a dispatch decision itself. The real command wires escalate.ts's
+   * `escalate()` (HARD_STOP class — "spend beyond cap" is exactly this
+   * clause's shape on a subscription) naming the offending window/percent/
+   * reset, with its OWN cross-boot ledger dedup keyed on `resetsAt` (mirroring
+   * `escalateCircuitBreak`'s durable dedup, since this in-process flag alone
+   * resets to empty on every daemon restart). Wrapped in the caller's own
+   * try/catch (same discipline as `onCircuitBreak`/`onSpawnInfraBlocked`) so a
+   * failed notification costs one logged line, never the daemon's liveness.
+   * Optional — omitted, the breach still pauses dispatch exactly as before
+   * this hook existed, it just opens no issue.
+   */
+  onHeadroomBreach?: (info: {
+    window: string;
+    percentUsed: number;
+    limitPct: number;
+    resetsAt: string;
+  }) => void | Promise<void>;
+  /**
    * Fleet control (W1-T11, MASTER-PLAN §4A/§4B): a defined return ⇒ a hard STOP
    * is in effect, and the string is the ledger/summary detail. Checked FIRST,
    * every tick — before PAUSE, headroom, or picking the next task — so it takes
@@ -952,6 +978,15 @@ export async function runDaemon(
   // CONSECUTIVE spawn-infra failures — backs the backoff below; reset by any
   // runOne call that does NOT throw this class (success or an unrelated verdict).
   let consecutiveSpawnInfraFailures = 0;
+  // HEADROOM RESERVE ESCALATION DEDUP (P34 clause (c), W1-T249): the SAME
+  // per-episode bound `circuitEscalated` applies above — a sustained breach is
+  // read fresh every tick (never a stop, see the HEADROOM comment below), so
+  // without this the notification hook would fire on every idle poll for as
+  // long as the window stays over the reserve. Cleared the moment a read
+  // reports the window back under the reserve, so a LATER breach (a new
+  // episode) escalates again rather than staying silenced for the rest of
+  // this process's life.
+  let headroomReserveEscalated = false;
   const maxSpawnInfraBackoffMs = opts.maxSpawnInfraBackoffMs ?? DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS;
   // BOUNDED DEGRADED MODE (recon R-7: the live ledger shows /usage unreadable
   // ~78% of the time — an unconditional fail-closed-on-first-miss would halt
@@ -1095,6 +1130,11 @@ export async function runDaemon(
         consecutiveUnreadable = 0;
         const windows = resolveHeadroomWindows(snap, now(), headroomPolicy);
         const over = windows.find((w) => w.percentUsed >= w.limitPct) ?? null;
+        // P34 clause (c), W1-T249: a breach episode escalates AT MOST ONCE (see
+        // `headroomReserveEscalated`'s doc above) — clearing here, unconditionally
+        // (whether or not the governor is enforcing), so a LATER breach after this
+        // one recovers is treated as a fresh episode rather than staying silenced.
+        if (!over) headroomReserveEscalated = false;
         if (headroomEnabled) {
           // ENFORCEMENT (W1-T197 curve, UNCHANGED): an at/over-limit reading is an
           // in-process idle heartbeat while over — never a stop (KeepAlive would
@@ -1109,6 +1149,24 @@ export async function runDaemon(
               resets_at: over.resetsAtDisplay,
               poll_interval_ms: pollIntervalMs,
             });
+            // P34 clause (c), W1-T249: notify ONCE per episode — dispatch is
+            // ALREADY paused above (this same `continue`), so the hook is a pure
+            // notification, never a dispatch decision. Failure here costs one
+            // logged line, never the daemon's liveness (same discipline as
+            // `onCircuitBreak`/`onSpawnInfraBlocked`).
+            if (!headroomReserveEscalated) {
+              headroomReserveEscalated = true;
+              try {
+                await deps.onHeadroomBreach?.({
+                  window: over.window,
+                  percentUsed: over.percentUsed,
+                  limitPct: over.limitPct,
+                  resetsAt: over.resetsAtDisplay,
+                });
+              } catch (e) {
+                log("daemon.escalation.failed", { error: String((e as Error)?.message ?? e) });
+              }
+            }
             await deps.sleep(pollIntervalMs);
             continue;
           }
