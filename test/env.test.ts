@@ -171,3 +171,26 @@ test("ZDOTDIR defaults nest under the REDIRECTED HOME, not the operator's real o
   );
   assert.equal(child.ZDOTDIR, "/opt/rmd/worker-home/.config/remudero/zdotdir");
 });
+
+// ── W1-T236: DISABLE_AUTOUPDATER grant (autoupdater-race hazard) ──
+
+test("grants DISABLE_AUTOUPDATER=1 to every worker child, added through the allowlist rather than dropped by it", () => {
+  // ALLOWLIST is exactly PATH/HOME/TMPDIR/LANG/USER — DISABLE_AUTOUPDATER is
+  // not a parent var at all here, so its presence proves it is an explicit
+  // grant (like CLAUDE_CODE_SHELL/ZDOTDIR above), not a copy the allowlist let through.
+  const child = buildWorkerEnv({}, { PATH: "/usr/bin", HOME: "/home/x" });
+  assert.equal(child.DISABLE_AUTOUPDATER, "1", "every worker child must carry the autoupdater kill switch");
+});
+
+test("NEVER copies the operator's DISABLE_AUTOUPDATER from the parent — only the granted value", () => {
+  const child = buildWorkerEnv(
+    {},
+    { PATH: "/usr/bin", HOME: "/home/x", DISABLE_AUTOUPDATER: "0" },
+  );
+  assert.equal(child.DISABLE_AUTOUPDATER, "1", "an operator value must not leak in — the grant always wins");
+});
+
+test("an explicit DISABLE_AUTOUPDATER in extra overrides the default (test/override escape hatch)", () => {
+  const child = buildWorkerEnv({ DISABLE_AUTOUPDATER: "0" }, { PATH: "/usr/bin", HOME: "/home/x" });
+  assert.equal(child.DISABLE_AUTOUPDATER, "0");
+});
