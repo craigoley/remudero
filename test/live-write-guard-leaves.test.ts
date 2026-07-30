@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { ghPrMergeSquash } from "../src/lib/worker.js";
 import { ghPrCreateFillCommand } from "../src/run-task.js";
 import { ghIssueGateway } from "../src/lib/escalate.js";
-import { gitPushRunBranch } from "../src/lib/git-push.js";
+import { defaultPushExec, gitPushRunBranch } from "../src/lib/git-push.js";
 import { LiveWriteBlockedError, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
 // ── LEAF-LEVEL GUARD PROOFS ──────────────────────────────────────────────────────────
@@ -196,4 +196,15 @@ test("LEAF GUARD git-push: the setUpstream variant refuses too, and builds push 
   assert.equal(seen.length, 0, "no push was made");
   withLiveWritesAllowed(() => gitPushRunBranch("/tmp/wt", { setUpstream: true, exec: rec }));
   assert.deepEqual(seen[0], ["-C", "/tmp/wt", "push", "-u", "origin", "HEAD"], "the -u divergence is preserved exactly");
+});
+
+// The default exec is the real `execFileSync` indirection the leaf falls back to when no
+// exec is injected. Driven with harmless binaries — never git, never a push — so the
+// indirection is proven to actually shell out rather than being an untested passthrough.
+test("git-push leaf: defaultPushExec really shells out — a clean command succeeds and a failing one throws", () => {
+  assert.doesNotThrow(() => defaultPushExec("true", [], { stdio: "ignore" }), "a clean command runs");
+  assert.throws(
+    () => defaultPushExec("false", [], { stdio: "ignore" }),
+    "a failing command propagates — proving the call really reached execFileSync",
+  );
 });
