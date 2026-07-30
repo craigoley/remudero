@@ -4545,7 +4545,22 @@ export async function nextTaskIdCommand(rest: string[]): Promise<number> {
   return mint.degraded.length ? 1 : 0;
 }
 
-export async function lintPlanCommand(rest: string[]): Promise<number> {
+/** W1-T180: the post-merge-amendment status resolution's only I/O — loadConfig (reads $HOME),
+ *  resolveOwnerRepo (shells `git remote`), ghGateway (real `gh` exec), projectPlan (the
+ *  ledger read + GitHub round-trip) — injectable so a test can prove BOTH the success path
+ *  (statusResolvable stays true, per-task opts get populated) and the fail-open catch path
+ *  (any of the four throws => statusResolvable false, never a thrown error out of lint-plan)
+ *  without shelling a real `gh` or touching this machine's actual $HOME. Real callers (the
+ *  CLI dispatch below) omit `deps` entirely and get the real functions, same DI shape as
+ *  `runTask`'s `opts.config ?? loadConfig()` / `opts.github ?? ghGateway(...)`. */
+export type LintPlanStatusDeps = {
+  loadConfig?: typeof loadConfig;
+  resolveOwnerRepo?: () => { owner: string; repo: string };
+  ghGateway?: typeof ghGateway;
+  projectPlan?: typeof projectPlan;
+};
+
+export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps = {}): Promise<number> {
   const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base"], []);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -4622,11 +4637,11 @@ export async function lintPlanCommand(rest: string[]): Promise<number> {
   let statusResolvable = false;
   if (scope && scope.size > 0) {
     try {
-      const config = loadConfig();
-      const { owner, repo } = resolveOwnerRepo();
-      const github = ghGateway(owner, repo);
+      const config = (deps.loadConfig ?? loadConfig)();
+      const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
+      const github = (deps.ghGateway ?? ghGateway)(owner, repo);
       const scopedPlan: Plan = { tasks: plan.tasks.filter((t) => scope!.has(t.id)), byId: new Map() };
-      statusByTaskId = projectPlan(scopedPlan, { ledgerPath: ledgerPathFor(config), github });
+      statusByTaskId = (deps.projectPlan ?? projectPlan)(scopedPlan, { ledgerPath: ledgerPathFor(config), github });
       statusResolvable = true;
     } catch {
       statusByTaskId = undefined;
