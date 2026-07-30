@@ -55,9 +55,6 @@
  * silently, so it is deliberately not attempted here.
  */
 
-/** The four outward effects recon-AQ identified as reaching the live repo. */
-export type LiveWriteBoundary = "git-push" | "gh-pr-create" | "gh-pr-merge" | "gh-issue-create";
-
 /**
  * Deliberate opt-out for a whole PROCESS (e.g. a future integration run pointed at a
  * throwaway sandbox repo). This is the blunt instrument; per-test exemption is
@@ -73,6 +70,15 @@ export function isTestRunner(env: NodeJS.ProcessEnv = process.env): boolean {
   const ctx = env.NODE_TEST_CONTEXT;
   return typeof ctx === "string" && ctx.length > 0;
 }
+
+/** The four outward effects recon-AQ identified as reaching the live repo.
+ *  DELIBERATELY SANDWICHED between two executed declarations (`isTestRunner` above,
+ *  `LiveWriteBlockedError` below) rather than sitting at the file head: under
+ *  `--experimental-test-coverage` a type-only line in a new file's leading or trailing
+ *  source-line records is stamped `DA:<line>,0`, and diff-coverage then flags it as an
+ *  uncovered added line. Measured: DA=0 at the head, DA=1 here. See CLAUDE.md,
+ *  "Lessons from 2026-07-25". */
+export type LiveWriteBoundary = "git-push" | "gh-pr-create" | "gh-pr-merge" | "gh-issue-create";
 
 /** Thrown at a boundary rather than returning silently: a swallowed refusal would
  * read as "the effect did not happen for some other reason", which is the same
