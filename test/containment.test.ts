@@ -7,9 +7,12 @@ import {
   ContainmentError,
   assessContainment,
   containmentProbePrompt,
+  defaultExecutor,
   probeContainment,
   type ProbeExecResult,
 } from "../src/lib/containment.js";
+import type { Config } from "../src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 
 function settingsFile(contents: unknown): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-containment-test-"));
@@ -177,6 +180,123 @@ test("ContainmentError: the sandbox-dropped state (outside write LANDED) is a PR
       return true;
     },
   );
+});
+
+// ── W1-T237: credential-dead worker gets a DISTINCT named reason, never the
+// generic "unproven" — the misdiagnosis that cost the 2026-07-21 incident two
+// days (a dead-auth worker and a compliant sandbox were byte-identical in the
+// verdict). Planted-probe pattern: seed the exact verified CLI text ("Not
+// logged in · Please run /login", isError true) and assert the verdict names it.
+
+test("assessContainment: credentialFailure ⇒ FAILS CLOSED with the spawn_credential_failure reason, not generic unproven", () => {
+  const v = assessContainment({
+    outsideWriteCreated: false,
+    osDenialSeen: false,
+    insideWriteCreated: false,
+    credentialFailure: true,
+  });
+  assert.equal(v.contained, false);
+  assert.match(v.reason, /spawn_credential_failure/);
+  assert.doesNotMatch(v.reason, /UNPROVEN/);
+});
+
+test("probeContainment: a seeded error-result carrying 'Not logged in · Please run /login' yields the credential-named reason, FAILS CLOSED", async () => {
+  await assert.rejects(
+    () =>
+      probeContainment({
+        settingsFile: settingsFile(ENABLED),
+        token: "credtok",
+        exec: async () => ({
+          transcript: "Not logged in · Please run /login",
+          outsideWriteCreated: false,
+          insideWriteCreated: false,
+          isError: true,
+        }),
+      }),
+    (e: unknown) => {
+      assert.ok(e instanceof ContainmentError);
+      const err = e as ContainmentError;
+      assert.equal(err.guard, "containment");
+      assert.equal(err.check, "spawn-credential-failure");
+      assert.equal(err.observed, "spawn_credential_failure");
+      assert.match(err.message, /spawn_credential_failure/);
+      return true;
+    },
+  );
+});
+
+test("probeContainment: a genuine no-write, no-denial, non-error run still yields the generic unproven reason (credential path does not swallow it)", async () => {
+  await assert.rejects(
+    () =>
+      probeContainment({
+        settingsFile: settingsFile(ENABLED),
+        token: "mytoken",
+        exec: async () => ({
+          transcript: "some unrelated line: Operation not permitted on /elsewhere",
+          outsideWriteCreated: false,
+          insideWriteCreated: true,
+          isError: false,
+        }),
+      }),
+    (e: unknown) => {
+      assert.ok(e instanceof ContainmentError);
+      const err = e as ContainmentError;
+      assert.equal(err.check, "outside-cwd-denial");
+      assert.equal(err.observed, "unproven");
+      return true;
+    },
+  );
+});
+
+test("probeContainment: isError alone (no credential-shaped text) does NOT trip the credential verdict — falls through to genuine unproven", async () => {
+  await assert.rejects(
+    () =>
+      probeContainment({
+        settingsFile: settingsFile(ENABLED),
+        token: "othererr",
+        exec: async () => ({
+          transcript: "some unrelated transport failure",
+          outsideWriteCreated: false,
+          insideWriteCreated: false,
+          isError: true,
+        }),
+      }),
+    (e: unknown) => {
+      assert.ok(e instanceof ContainmentError);
+      const err = e as ContainmentError;
+      assert.equal(err.check, "outside-cwd-denial");
+      assert.equal(err.observed, "unproven");
+      return true;
+    },
+  );
+});
+
+// ── defaultExecutor: the real-spawn path plumbs isError through (W1-T237) ──
+
+test("defaultExecutor: passes the real spawn's isError through to ProbeExecResult", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-containment-executor-test-"));
+  const config = { root: dir } as Config;
+  const fakeSpawn = async (_args: SpawnWorkerArgs): Promise<WorkerResult> =>
+    ({
+      sessionId: "s",
+      costUsd: 0,
+      numTurns: 0,
+      text: "Not logged in · Please run /login",
+      blocks: [],
+      stderr: "",
+      subtype: "error_during_execution",
+      isError: true,
+      apiError: false,
+      permissionDenials: [],
+    }) as unknown as WorkerResult;
+
+  const exec = defaultExecutor("settings.json", config, undefined, fakeSpawn);
+  const result: ProbeExecResult = await exec("execTok");
+
+  assert.equal(result.isError, true);
+  assert.match(result.transcript, /not logged in/i);
+  assert.equal(result.outsideWriteCreated, false);
+  assert.equal(result.insideWriteCreated, false);
 });
 
 test("ContainmentError: the static config gate (sandbox disabled) names its own guard-cause", async () => {
