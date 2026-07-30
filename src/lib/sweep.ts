@@ -79,6 +79,24 @@ import type { QuestionEntry } from "./worker.js";
  *                        remedy. FAIL-CLOSED: at most one deterministic attempt per
  *                        head sha — a refused attempt routes the NEXT pass to
  *                        BLOCKED-AMBIGUOUS above instead of re-posting forever.
+ *                        ORPHANED-BY-PUSH (W1-T225; the 2026-07-21 PRs #477/#484
+ *                        jam): the SAME zero-observed-runs shape also arises when a
+ *                        PR WAS reviewed on an earlier head and a later push left the
+ *                        new head with no remudero-review status at all — the old
+ *                        verdict is correctly bound to the sha it was posted against
+ *                        (push-invalidates-review is never weakened here), but
+ *                        nothing had ever re-dispatched the lane on the new head, so
+ *                        the PR sat ABSENT — indistinguishable from a check that
+ *                        simply hasn't run yet — and auto-merge waited forever.
+ *                        `OpenPrView.reviewOrphanedByPush` distinguishes this from a
+ *                        PR awaiting its FIRST review (the reason string differs;
+ *                        the dispatch is identical: run the review lane, posting a
+ *                        FRESH verdict, never the prior one carried forward). BOUNDED
+ *                        (design note, "same discipline as CI re-runs"): once
+ *                        `priorReviewOrphans` reaches `policy.reviewOrphanCap`, the
+ *                        row above escalates instead of re-dispatching — a PR that
+ *                        pushes repeatedly (or whose re-review itself keeps failing
+ *                        to stick) cannot loop the review lane unboundedly.
  *   - WAIT             — (W1-T114, the 30-issue predicate-storm fix) required
  *                        checks pending/queued AND the newest check's start is
  *                        younger than a staleness ceiling (policy-as-data,
@@ -267,6 +285,19 @@ export interface SweepPolicy {
    * ambiguity, not merely in-flight.
    */
   pendingCeilingMinutes: number;
+  /**
+   * W1-T225 (the 2026-07-21 PRs #477/#484 jam) — the LOOP FALSIFIER for the
+   * review-orphaned-by-push remedy: once a PR's `priorReviewOrphans` count
+   * (prior heads that already spent one orphan re-review) reaches this cap,
+   * the sweep stops re-dispatching the review lane and escalates instead —
+   * "same discipline W1-T224 owes for CI re-runs" (design note, verbatim). A
+   * ROW in this table (rule 2, policy-as-data), never a constant buried in
+   * the predicate. Set at the SAME default as `strikeCap` — bounded enough
+   * to catch a genuinely looping push/re-review cycle, generous enough that
+   * ordinary iteration (a handful of legitimate follow-up pushes) never trips
+   * it by accident.
+   */
+  reviewOrphanCap: number;
 }
 
 /**
@@ -287,6 +318,7 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   dispatchLanes: 2,
   dailyCostCeilingUsd: 150,
   pendingCeilingMinutes: 60,
+  reviewOrphanCap: 2,
 };
 
 /**
@@ -421,6 +453,55 @@ export interface OpenPrView {
    * never a new one.
    */
   requiredContextsUnreadable?: boolean;
+  /**
+   * W1-T225 (the 2026-07-21 PRs #477/#484 jam): true when the ledger already
+   * carries a `review.posted` (or `review.post_refused`) outcome for THIS
+   * task at an EARLIER head sha than {@link headSha} — i.e. this PR HAS been
+   * reviewed before, just not on the head the sweep is looking at right now.
+   * Distinguishes a PR whose review was ORPHANED BY A PUSH (reviewed once,
+   * then silenced by a later commit) from one AWAITING ITS FIRST REVIEW ever
+   * (`undefined`/`false` — every existing caller/fixture that hasn't wired
+   * this reads exactly as before: the post-review row still dispatches, just
+   * with the original "review never posted" reason). Only changes the REASON
+   * string the post-review row states and gates the {@link priorReviewOrphans}
+   * cap row above it — never the dispatch itself: either way the remedy is
+   * "run the review lane and post a fresh verdict for this head," and a
+   * verdict from an earlier, now-superseded head is NEVER copied forward
+   * (push-invalidates-review is not weakened by this field).
+   *
+   * SCOPE (honest, mirrors how `pendingAnswer` shipped its mechanism ahead of
+   * its producer): this field, its {@link DISPOSITION_RULES} rows, and the
+   * reason-string branch are the full MECHANISM, wired end-to-end and
+   * unit-tested here — but nothing in `run-task.ts` populates it yet
+   * (`buildOpenPrViews` would derive it the SAME way it already derives
+   * `reviewPostRefused`: scan the ledger for a prior `review.posted`/
+   * `review.post_refused` line for this `taskId` at a head sha OTHER than
+   * the current one). Until that wiring lands, this is always `undefined` in
+   * the real gateway, so every orphaned-by-push PR still reaches post-review
+   * (correctly — the dispatch never depended on this field) with the
+   * "review never posted" reason rather than the more specific one; it never
+   * silently misclassifies as ambiguous or mergeable.
+   */
+  reviewOrphanedByPush?: boolean;
+  /**
+   * W1-T225 — THE LOOP FALSIFIER: how many PRIOR heads for this task already
+   * spent one review-orphaned-by-push re-dispatch (i.e. reached `post-review`
+   * with {@link reviewOrphanedByPush} true on an earlier push). Mirrors
+   * `priorStrikes`'s shape exactly — a running ledger-derived count, never a
+   * per-pass toggle — so a PR that keeps getting pushed, or whose re-review
+   * keeps failing to stick, cannot re-dispatch the review lane unboundedly:
+   * once this reaches `policy.reviewOrphanCap` the sweep escalates instead of
+   * retrying (see the cap row in {@link DISPOSITION_RULES}, ordered before
+   * post-review). `undefined` reads as `0` — a caller that hasn't wired this
+   * yet (e.g. `rmd fix`'s single-PR build, or `run-task.ts` before its own
+   * follow-up wiring lands — see {@link reviewOrphanedByPush}'s SCOPE note)
+   * behaves exactly as before this field existed: the cap never trips on
+   * missing information, fail-open toward "keep re-reviewing," never
+   * fail-closed toward "escalate a PR that was never actually looping." The
+   * real gateway would derive this from the SAME ledger scan that derives
+   * `reviewOrphanedByPush`, counting the distinct prior heads it found.
+   */
+  priorReviewOrphans?: number;
 }
 
 /** The disposition derived for one PR, plus a stated human reason. */
@@ -640,6 +721,20 @@ function pendingAgeMinutes(pr: OpenPrView, now: number): number | undefined {
  *      in the table) so a refused head never re-reaches the dispatch and
  *      loops; the FAIL-CLOSED boundary is "at most one attempt per head sha,"
  *      never zero and never unbounded.
+ *   8.6. REVIEW ORPHANED BY A PUSH, BOUNDED (W1-T225; the 2026-07-21
+ *      #477/#484 jam): the SAME zero-observed-runs shape, but this PR WAS
+ *      reviewed on an earlier head (`OpenPrView.reviewOrphanedByPush`) — a
+ *      later push left the new head silent rather than re-dispatching the
+ *      lane, and ABSENT reads as "not yet run," never as a block, so
+ *      auto-merge waited forever. Ordered BEFORE the post-review row (same
+ *      dispatch, `post-review`, just a reason that names the orphaning
+ *      rather than "review never posted," so an operator can tell the two
+ *      shapes apart) and, when `priorReviewOrphans` has already reached
+ *      `policy.reviewOrphanCap`, checked as its OWN row here (ordered before
+ *      post-review) so a PR that keeps getting pushed — or whose re-review
+ *      keeps failing to stick — escalates instead of re-dispatching forever;
+ *      the fresh verdict this posts NEVER re-uses the prior one (invalidation
+ *      is not weakened).
  *   9. WAIT (W1-T114, the 30-issue predicate-storm fix): checks pending AND a
  *      datable, in-window newest-check-start (policy.pendingCeilingMinutes) ->
  *      wait — no action, ledgered, re-derived next sweep. Never reached when
@@ -824,26 +919,60 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       "attempt for this head was refused — escalating rather than retrying indefinitely",
   },
   {
+    // W1-T225 (the 2026-07-21 PRs #477/#484 jam) — THE LOOP FALSIFIER: a PR
+    // whose review was orphaned by a push re-earns the review lane (the row
+    // below), but not unboundedly. Ordered STRICTLY BEFORE that row so a PR
+    // that has already spent `policy.reviewOrphanCap` orphan re-reviews never
+    // re-reaches its dispatch — repeated pushes (or a re-review that itself
+    // keeps failing to stick) must eventually ask an operator, the SAME
+    // discipline the fix-rung strike ladder (row 4) and the CI re-run cap
+    // (W1-T224) already hold elsewhere. `reviewOrphanedByPush !== true` (a PR
+    // awaiting its FIRST review) never matches this row — only a PR that has
+    // demonstrably been reviewed before can exhaust this cap.
+    disposition: "blocked-ambiguous",
+    when: (pr, policy) =>
+      pr.checksState === "green" &&
+      pr.reviewState === "none" &&
+      pr.reviewOrphanedByPush === true &&
+      (pr.priorReviewOrphans ?? 0) >= policy.reviewOrphanCap &&
+      pr.requiredContextsUnreadable !== true,
+    reason: (pr, policy) =>
+      `review orphaned by a push, again — the sweep has already re-reviewed this PR ${pr.priorReviewOrphans} ` +
+      `time(s) (>= ${policy.reviewOrphanCap} cap) — escalating instead of retrying indefinitely`,
+  },
+  {
     // POST-REVIEW ROUTING (the 2026-07-22 #584 stall; NARROWED by W1-T176 —
-    // see the row immediately above): a checks-GREEN PR whose remudero-review
-    // was never posted at all previously fell to the terminal catch-all below
-    // and ESCALATED ("checks green, review none") — a hand-opened PR could
-    // sit fully green forever with a needs-human issue as its only
-    // disposition, because nothing ever invoked the review lane on it, AND
-    // (W1-T176's own fixture, #393/#391) an operator round-trip was spent on
-    // a decision the machine could already make: an ABSENT required check is
-    // mechanically decidable ("post it"), never ambiguous, on its FIRST
-    // sighting. Route it to the SAME reviewCommand the operator verb runs
-    // (dedup per head, like dep-review): the posted verdict then drives the
-    // NEXT pass — success -> mergeable/arm, failure -> the fix/escalate rows.
-    // A PR with no criteria (no trailer, no Acceptance block) posts FAIL
-    // fail-closed, which is a LEGIBLE gate state rather than a clarification
-    // escalation. Dependabot PRs never reach here (their own row above);
-    // checks-pending stays with rows 9/10 below (W1-T114) when datable, the
-    // catch-all otherwise (review-before-green is not the lane's order).
+    // see two rows above): a checks-GREEN PR whose remudero-review was never
+    // posted at all previously fell to the terminal catch-all below and
+    // ESCALATED ("checks green, review none") — a hand-opened PR could sit
+    // fully green forever with a needs-human issue as its only disposition,
+    // because nothing ever invoked the review lane on it, AND (W1-T176's own
+    // fixture, #393/#391) an operator round-trip was spent on a decision the
+    // machine could already make: an ABSENT required check is mechanically
+    // decidable ("post it"), never ambiguous, on its FIRST sighting. Route it
+    // to the SAME reviewCommand the operator verb runs (dedup per head, like
+    // dep-review): the posted verdict then drives the NEXT pass — success ->
+    // mergeable/arm, failure -> the fix/escalate rows. A PR with no criteria
+    // (no trailer, no Acceptance block) posts FAIL fail-closed, which is a
+    // LEGIBLE gate state rather than a clarification escalation. Dependabot
+    // PRs never reach here (their own row above); checks-pending stays with
+    // rows 9/10 below (W1-T114) when datable, the catch-all otherwise
+    // (review-before-green is not the lane's order).
+    //
+    // W1-T225 (the 2026-07-21 PRs #477/#484 jam): the SAME row also carries a
+    // PR whose review was ORPHANED BY A PUSH (reviewed on an earlier head,
+    // silent on this one — the cap row immediately above already claimed the
+    // bounded-out case) — the dispatch is identical (run the review lane,
+    // posting a FRESH verdict; the prior verdict is NEVER carried forward),
+    // only the stated reason differs, so an operator reading the ledger can
+    // tell "never reviewed" from "orphaned by a push" apart at a glance.
     disposition: "post-review",
     when: (pr) => pr.checksState === "green" && pr.reviewState === "none" && pr.requiredContextsUnreadable !== true,
-    reason: (pr) => `checks green, review never posted — running the review lane on #${pr.prNumber}`,
+    reason: (pr) =>
+      pr.reviewOrphanedByPush === true
+        ? `checks green, review orphaned by a push (reviewed on an earlier head, silent on this one) — ` +
+          `re-running the review lane on #${pr.prNumber}`
+        : `checks green, review never posted — running the review lane on #${pr.prNumber}`,
   },
   {
     // WAIT (W1-T114, the 30-issue predicate-storm fix, LIVE INCIDENT
