@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { relative, sep } from "node:path";
-import type { Plan, Task } from "./plan.js";
+import type { AcceptanceCriterion, Plan, Task } from "./plan.js";
 import { isDialectPrefixed, parseWhitelistedProof } from "./review.js";
 
 /**
@@ -11,17 +11,26 @@ import { isDialectPrefixed, parseWhitelistedProof } from "./review.js";
  * (Rule 19), headless-unfitness (Rule 18), vibe proofs, a proof that CANNOT
  * EXECUTE at all (the dead proof floor, moratorium finding 9, W1-T246), a
  * dialect-prefixed proof that promises executability but names no resolvable
- * artifact (the W1-T100 0/3, W1-T101), and missing provenance (Rules 16/17).
+ * artifact (the W1-T100 0/3, W1-T101), an ALREADY-MERGED task's criteria being
+ * amended with no follow-up filed in the same PR (W1-T180 — MERGED is terminal,
+ * so the drain and the retro sweep both skip it and the amendment would
+ * otherwise orphan silently), and missing provenance (Rules 16/17).
  *
- * Wired at TWO points, both FAIL-CLOSED:
+ * Wired at TWO points, both FAIL-CLOSED — EXCEPT post-merge-amendment, which is
+ * CI-only (see below):
  *   (i)  a CI check on any PR that edits plan/tasks.yaml (`rmd lint-plan`, see
  *        run-task.ts's `lintPlanCommand` + .github/workflows/ci.yml's `lint-plan`
- *        job, aggregated into the required `ci-gate` context).
+ *        job, aggregated into the required `ci-gate` context). Only THIS call
+ *        site supplies `opts.postMergeAmendment` (it alone has a `--base` diff
+ *        and derived merge state to inject) — the check is a no-op wherever
+ *        that context is absent.
  *   (ii) a PRE-DISPATCH guard in `rmd run-task` (and therefore `rmd drain`, which
  *        dispatches every task through the same `runTask` path) — a task that
  *        fails a BLOCKING check is NEVER dispatched: `verdict=blocked_illformed`,
  *        no worker spawned, no inflight lock even taken (see run-task.ts,
- *        `assertLintClean` called immediately after `assertRunnable`).
+ *        `assertLintClean` called immediately after `assertRunnable`). Post-
+ *        merge-amendment needs no wiring here: a MERGED task is never dispatched
+ *        in the first place (the drain's own `if (isMerged(t.id)) continue`).
  *
  * A BLOCKING violation refuses dispatch. A WARN violation is visibility-only and
  * never blocks — budget-sanity always warns; proof-dialect and proof-resolvability
@@ -38,6 +47,7 @@ export type LintCheck =
   | "proof-shape"
   | "proof-dialect"
   | "proof-resolvability"
+  | "post-merge-amendment"
   | "provenance"
   | "budget-sanity";
 export type LintSeverity = "block" | "warn";
@@ -626,6 +636,122 @@ export function proofResolvabilityViolations(
   return violations;
 }
 
+// ── POST-MERGE-AMENDMENT (§5C, W1-T180) ──────────────────────────────────────
+//
+// An amendment to an ALREADY-MERGED task's acceptance criteria is unreachable by
+// every rung today: MERGED is terminal in the status layer (status.ts:696), the
+// drain skips a merged id outright (drain.ts:88's `if (isMerged(t.id)) continue`),
+// and the retro's plan-health sweep explicitly scopes itself away from a closed
+// task (retro.ts:578). So a claim added to a merged task's criteria after the
+// fact sits in the plan looking authoritative and is never dispatched, reviewed,
+// or proven — the LIVE FIXTURE: PR #374 added two criteria to W1-T155 an hour
+// forty-five minutes after PR #365 credited it merged, and every existing gate
+// passed it clean. Standing rule 21 (MASTER-PLAN §12) names the house answer in
+// prose — amending a merged task does not re-queue it; the amender owns filing
+// the follow-up in the SAME PR — this check is what makes that answer CHECKED
+// rather than merely conventional.
+//
+// THE INJECTION PROBLEM: merge state and the base-ref criteria set are I/O, and
+// this module is documented as a PURE function over an already-loaded Task/Plan
+// (module comment above) — so neither is fetched here. Both arrive through
+// {@link LintOpts.postMergeAmendment}, populated by the CALLER (run-task.ts's
+// `lintPlanCommand`, which already does the `--base` git-show read) from
+// deriveStatus + the base plan snapshot. This check performs no I/O and imports
+// neither status.ts nor any gh/exec surface.
+
+/** Trim + collapse-whitespace normalized key for a criterion's (claim, proof)
+ *  pair — SET membership, not raw-list/positional equality, so reordering the
+ *  `acceptance:` list or a pure formatting reflow never trips this check; only
+ *  a criterion whose claim+proof text actually differs from every base-ref
+ *  entry counts as added-or-changed. */
+function criterionKey(c: AcceptanceCriterion): string {
+  const norm = (s: string) => s.trim().replace(/\s+/g, " ");
+  return `${norm(c.claim ?? "")} ${norm(c.proof ?? "")}`;
+}
+
+/**
+ * Criteria in `currentCriteria` whose (claim+proof) pair does not appear
+ * anywhere in `baseCriteria` — covers BOTH an outright ADDITION and a semantic
+ * CHANGE to an existing criterion (a changed pair is, by set membership, a new
+ * one). `baseCriteria` undefined (the task did not exist at the base ref, or
+ * the caller could not resolve a base version) yields no additions — nothing
+ * to diff against, so the check is a no-op for that task.
+ */
+export function criteriaAdded(
+  baseCriteria: AcceptanceCriterion[] | undefined,
+  currentCriteria: AcceptanceCriterion[],
+): AcceptanceCriterion[] {
+  if (!baseCriteria) return [];
+  const baseKeys = new Set(baseCriteria.map(criterionKey));
+  return currentCriteria.filter((c) => !baseKeys.has(criterionKey(c)));
+}
+
+/**
+ * True iff every criterion in `added` is carried by at least one task in
+ * `candidateTasks` — the follow-up escape hatch (W1-T180's design): the same PR
+ * that amends a merged task's criteria also introduces a NEW task whose own
+ * acceptance criteria include the amended ones, so the criteria have a home
+ * that will actually be dispatched. Vacuously true when `added` is empty (there
+ * is nothing to carry). The caller supplies `candidateTasks` as the OTHER tasks
+ * newly introduced by the same changed set — this function does no scoping of
+ * its own.
+ */
+export function followUpCarriesCriteria(added: AcceptanceCriterion[], candidateTasks: Task[]): boolean {
+  if (added.length === 0) return true;
+  const addedKeys = new Set(added.map(criterionKey));
+  return candidateTasks.some((t) => (t.acceptance ?? []).some((c) => addedKeys.has(criterionKey(c))));
+}
+
+/**
+ * Context the CALLER resolves via I/O and injects through {@link LintOpts} —
+ * see the module comment above this section for why it cannot be fetched here.
+ */
+export interface PostMergeAmendmentContext {
+  /** False iff the derived merge status could not be resolved at all (`gh`
+   *  unavailable, no token, `loadConfig`'s CI trap — see run-task.ts's
+   *  `lintPlanCommand`). FAIL OPEN: an unreadable status never produces a
+   *  violation, deliberately, so a GitHub outage never reds the one lane
+   *  (plan-only PRs) that still works during one. */
+  statusResolvable: boolean;
+  /** This task's derived status is MERGED. Only a merged task can be "amended
+   *  post-merge" — an open/queued task's criteria changing is ordinary authoring. */
+  merged: boolean;
+  /** This task's acceptance criteria as they existed at the PR's base ref.
+   *  Undefined when the task is new in this PR or the caller could not resolve
+   *  a base version — either way {@link criteriaAdded} is a no-op. */
+  baseAcceptance?: AcceptanceCriterion[];
+  /** Whether some OTHER task in the SAME changed set already carries the added
+   *  criteria (the follow-up escape hatch) — necessarily computed across the
+   *  whole changed set by the caller, since a single task's lint has no
+   *  visibility into its siblings. */
+  followUpFiled: boolean;
+}
+
+/** Every acceptance criterion this PR adds or changes on an ALREADY-MERGED
+ *  task, absent a follow-up task in the same PR to carry it. No {@link
+ *  LintOpts.postMergeAmendment} at all ⇒ this check is skipped entirely (the
+ *  pre-dispatch call site never dispatches a merged task in the first place,
+ *  so it never supplies this context). */
+export function postMergeAmendmentViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const ctx = opts.postMergeAmendment;
+  if (!ctx) return [];
+  if (!ctx.statusResolvable) return []; // fail OPEN on an unreadable derived status
+  if (!ctx.merged) return []; // only a merged task's criteria can orphan this way
+  const added = criteriaAdded(ctx.baseAcceptance, task.acceptance ?? []);
+  if (added.length === 0) return []; // no delta vs the base ref — reword/reorder-only, or unchanged
+  if (ctx.followUpFiled) return []; // the escape hatch: the same PR files the follow-up
+  return added.map((c) => ({
+    check: "post-merge-amendment",
+    severity: "block",
+    message:
+      `task ${task.id} is already MERGED, but this PR adds/changes acceptance criterion ` +
+      `("${(c.claim ?? "").slice(0, 80)}") with no follow-up task carrying it filed in the same PR — ` +
+      "Standing rule 21: MERGED is terminal (an amendment does not re-queue the task), the drain " +
+      "skips a merged id outright, and the retro sweep skips a closed one, so this criterion would " +
+      "orphan silently; file a follow-up task carrying it in this SAME PR",
+  }));
+}
+
 // ── PROVENANCE (Rules 16/17) ─────────────────────────────────────────────────
 //
 // `risk:` is already guaranteed present by plan.ts's loader (it validates
@@ -692,11 +818,18 @@ export interface LintOpts {
    *  CI's `lint-plan`, the inbox draft rung, and the retro's plan-health sweep — the birth
    *  gates, where the artifact really ought to exist — all want the default and BLOCK. */
   proofResolvability?: LintSeverity;
+  /** Injected merge-state context for {@link postMergeAmendmentViolations} —
+   *  see {@link PostMergeAmendmentContext} for why this arrives by injection
+   *  rather than a fetch. Absent ⇒ the check is skipped (no merge state to
+   *  judge against, e.g. the pre-dispatch call site, which never dispatches an
+   *  already-merged task in the first place). */
+  postMergeAmendment?: PostMergeAmendmentContext;
 }
 
 /** Lint one task. Hard checks (sizing/headless-fitness/proof-shape/proof-dialect/
- *  proof-resolvability/provenance) always run; budget-sanity runs only when
- *  `opts.mountMaxTurns` is supplied. */
+ *  proof-resolvability/post-merge-amendment/provenance) always run — post-merge-
+ *  amendment is a no-op absent `opts.postMergeAmendment` — budget-sanity runs
+ *  only when `opts.mountMaxTurns` is supplied. */
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task);
@@ -705,6 +838,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofShapeViolations(task));
   violations.push(...proofDialectViolations(task, opts));
   violations.push(...proofResolvabilityViolations(task, opts));
+  violations.push(...postMergeAmendmentViolations(task, opts));
   const prov = provenanceViolation(task);
   if (prov) violations.push(prov);
   if (opts.mountMaxTurns !== undefined) {

@@ -1,0 +1,16 @@
+# W1-T180 coverage fixture: a single task used ONLY by the
+# "lintPlanCommand status-resolution DI" tests in test/run-task.test.ts. The
+# test temporarily rewrites this file's on-disk copy (adding an acceptance
+# criterion absent from THIS committed version) then restores it byte-for-byte
+# in a `finally` — this committed blob is what `git show <base>:<path>` reads
+# back as the "old" (pre-amendment) task, giving the test a real `--base` diff
+# to exercise the derived-merge-status wiring against, with zero risk to any
+# production plan file.
+- id: LINTDI-1
+  title: fixture task for lintPlanCommand status-DI coverage
+  repo: remudero
+  type: implement
+  origin: "test fixture (W1-T180 coverage, not a real plan entry)"
+  acceptance:
+    - claim: "the fixture's original criterion"
+      proof: "unit test: test/run-task.test.ts::LINTDI-1 original criterion proof"

@@ -6,12 +6,15 @@ import {
   assertLintClean,
   budgetSanityWarning,
   changedTaskIds,
+  criteriaAdded,
   DATA_ARTIFACT_CLASSES,
+  followUpCarriesCriteria,
   HEADLESS_FORBIDDEN_LEXICON,
   headlessFitnessViolations,
   lintPlan,
   lintTask,
   moduleIdFromPath,
+  postMergeAmendmentViolations,
   PROOF_PAYLOAD_SHAPES,
   proofDialectViolations,
   proofResolvabilityViolations,
@@ -1128,4 +1131,136 @@ test("lintPlan runs the same checks across every task in a loaded plan", () => {
   // "works" is BOTH a vibe (proof-shape) AND unparseable as any executable dialect shape
   // (proof-dialect, moratorium finding 9) — the SAME defect, seen by two different checks.
   assert.deepEqual(badChecks, ["headless-fitness", "proof-dialect", "proof-shape"]);
+});
+
+// ── POST-MERGE-AMENDMENT (W1-T180) ────────────────────────────────────────────
+
+const W1_T155_BASE_CRITERIA = [
+  { claim: "status regresses to queued on a read failure is fixed", proof: "unit test: test/status.test.ts" },
+];
+
+test("W1-T180 ACCEPTANCE 1: a plan PR that ADDS a criterion to an already-merged task FAILS the linter, naming the task and the criterion (PR #374/W1-T155 falsifier)", () => {
+  const amended = task({
+    id: "W1-T155",
+    acceptance: [
+      ...W1_T155_BASE_CRITERIA,
+      { claim: "monotonic under darkness: status never regresses across an unobservable gap", proof: "unit test: test/status.test.ts::monotonic under darkness" },
+    ],
+  });
+  const res = lintTask(amended, {
+    postMergeAmendment: {
+      statusResolvable: true,
+      merged: true,
+      baseAcceptance: W1_T155_BASE_CRITERIA,
+      followUpFiled: false,
+    },
+  });
+  assert.equal(res.ok, false);
+  const v = res.violations.find((x) => x.check === "post-merge-amendment");
+  assert.ok(v, "expected a post-merge-amendment violation");
+  assert.equal(v?.severity, "block");
+  assert.match(v!.message, /W1-T155/);
+  assert.match(v!.message, /monotonic under darkness/);
+});
+
+test("W1-T180 ACCEPTANCE 1 (helper): criteriaAdded reports the gained entry vs the base ref, and NOTHING when the set is unchanged", () => {
+  const current = [
+    ...W1_T155_BASE_CRITERIA,
+    { claim: "liveness bound: a stale in-flight trace is never reported running forever", proof: "unit test: test/status.test.ts::liveness bound" },
+  ];
+  const added = criteriaAdded(W1_T155_BASE_CRITERIA, current);
+  assert.equal(added.length, 1);
+  assert.equal(added[0].claim, "liveness bound: a stale in-flight trace is never reported running forever");
+  assert.deepEqual(criteriaAdded(W1_T155_BASE_CRITERIA, W1_T155_BASE_CRITERIA), []);
+});
+
+test("W1-T180 ACCEPTANCE 1: reword/reorder-only changes (SAME set, different order/whitespace) do NOT trip it", () => {
+  const reworded = [{ claim: "  status   regresses to queued on a read failure is fixed ", proof: "unit test: test/status.test.ts" }];
+  assert.deepEqual(criteriaAdded(W1_T155_BASE_CRITERIA, reworded), []);
+  const amended = task({ id: "W1-T155", acceptance: reworded });
+  const res = lintTask(amended, {
+    postMergeAmendment: { statusResolvable: true, merged: true, baseAcceptance: W1_T155_BASE_CRITERIA, followUpFiled: false },
+  });
+  assert.equal(res.ok, true);
+});
+
+test("W1-T180 ACCEPTANCE 2: the SAME PR filing a follow-up task carrying the amended criteria PASSES — the check gates the orphaning, not the amending", () => {
+  const addedCriterion = { claim: "monotonic under darkness", proof: "unit test: test/status.test.ts::monotonic under darkness" };
+  const amended = task({ id: "W1-T155", acceptance: [...W1_T155_BASE_CRITERIA, addedCriterion] });
+  const followUp = task({ id: "W1-T179", acceptance: [addedCriterion] });
+  const changedSet = [amended, followUp];
+  for (const t of changedSet) {
+    const added = criteriaAdded(W1_T155_BASE_CRITERIA, t.acceptance ?? []);
+    const followUpFiled = followUpCarriesCriteria(
+      added,
+      changedSet.filter((c) => c.id !== t.id),
+    );
+    const res = lintTask(t, {
+      postMergeAmendment: {
+        statusResolvable: true,
+        merged: t.id === "W1-T155",
+        baseAcceptance: t.id === "W1-T155" ? W1_T155_BASE_CRITERIA : undefined,
+        followUpFiled,
+      },
+    });
+    assert.equal(res.ok, true, `${t.id} must pass — the follow-up carries the amended criteria`);
+  }
+});
+
+test("W1-T180 ACCEPTANCE 2 (helper): followUpCarriesCriteria is FALSE with no escape hatch, TRUE once a candidate task carries the added criterion, and vacuously TRUE for an empty added set", () => {
+  const addedCriterion = { claim: "monotonic under darkness", proof: "unit test: test/status.test.ts::monotonic under darkness" };
+  assert.equal(followUpCarriesCriteria([addedCriterion], []), false);
+  assert.equal(followUpCarriesCriteria([addedCriterion], [task({ id: "OTHER", acceptance: [{ claim: "unrelated", proof: "unit test: test/other.test.ts" }] })]), false);
+  assert.equal(followUpCarriesCriteria([addedCriterion], [task({ id: "W1-T179", acceptance: [addedCriterion] })]), true);
+  assert.equal(followUpCarriesCriteria([], []), true);
+});
+
+test("W1-T180 ACCEPTANCE 4: an UNREADABLE derived status fails OPEN — a status-read failure never reds an otherwise-valid plan PR", () => {
+  const amended = task({
+    id: "W1-T155",
+    acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a brand new criterion", proof: "unit test: test/status.test.ts::brand new" }],
+  });
+  const res = lintTask(amended, {
+    postMergeAmendment: {
+      statusResolvable: false, // the seeded status-resolution failure
+      merged: true,
+      baseAcceptance: W1_T155_BASE_CRITERIA,
+      followUpFiled: false,
+    },
+  });
+  assert.equal(res.ok, true, "an unreadable status must never produce a violation");
+  assert.ok(!res.violations.some((v) => v.check === "post-merge-amendment"));
+});
+
+test("W1-T180: absent LintOpts.postMergeAmendment entirely is a no-op (the pre-dispatch call site, which never dispatches an already-merged task)", () => {
+  const amended = task({
+    id: "W1-T155",
+    acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a brand new criterion", proof: "unit test: test/status.test.ts::brand new" }],
+  });
+  assert.deepEqual(postMergeAmendmentViolations(amended), []);
+  assert.equal(lintTask(amended).ok, true);
+});
+
+test("W1-T180: an amended task whose derived status is NOT merged (still open/queued) is untouched — ordinary authoring, not a post-merge amendment", () => {
+  const amended = task({
+    id: "W1-T155",
+    acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a brand new criterion", proof: "unit test: test/status.test.ts::brand new" }],
+  });
+  const res = lintTask(amended, {
+    postMergeAmendment: { statusResolvable: true, merged: false, baseAcceptance: W1_T155_BASE_CRITERIA, followUpFiled: false },
+  });
+  assert.equal(res.ok, true);
+});
+
+test("W1-T180 ACCEPTANCE 5: the check stays PURE — task-linter.ts imports neither status.ts nor any gh/exec surface", () => {
+  const src = readFileSync(fileURLToPath(new URL("../src/lib/task-linter.ts", import.meta.url)), "utf8");
+  assert.ok(!/from ["']\.\/status\.js["']/.test(src), "must not import lib/status.ts");
+  assert.ok(!/node:child_process/.test(src), "must not import an exec surface");
+  // and it is reachable purely through injection: merge state supplied via LintOpts,
+  // never fetched by the check itself.
+  const t = task({ id: "W1-T155", acceptance: [...W1_T155_BASE_CRITERIA, { claim: "x", proof: "unit test: test/x.test.ts" }] });
+  const v = postMergeAmendmentViolations(t, {
+    postMergeAmendment: { statusResolvable: true, merged: true, baseAcceptance: W1_T155_BASE_CRITERIA, followUpFiled: false },
+  });
+  assert.equal(v.length, 1);
 });

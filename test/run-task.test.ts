@@ -72,6 +72,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   synthesizeCommand,
   defaultSynthesizeDraft,
   lintPlanCommand,
+  type LintPlanStatusDeps,
   main,
   alertFixCommand,
   dispatchAlertFixRun,
@@ -101,7 +102,7 @@ import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import { judgeReview } from "../src/lib/review.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import { buildBatchedGithub, type GitHub } from "../src/lib/status.js";
+import { buildBatchedGithub, type GitHub, type StatusProjection } from "../src/lib/status.js";
 import type { AcceptanceCriterion, Plan, Task } from "../src/lib/plan.js";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -4883,6 +4884,91 @@ test("rmd lint-plan --base HEAD: the reconstruct-base-plan branch (tmpDir, git s
     console.warn = origWarn;
   }
   assert.equal(exitCode, 0, "HEAD vs working-copy plan/tasks.yaml has no diff — scope is empty, nothing fails");
+});
+
+// ── W1-T180 round 2 (coverage-ratchet): `lintPlanCommand`'s derived-merge-status wiring ─────
+// (the try/catch around `loadConfig`/`resolveOwnerRepo`/`ghGateway`/`projectPlan`, and the
+// per-task `opts.postMergeAmendment` build in the lint loop) had zero covering tests — every
+// existing `--base` test above drives `scope.size === 0` (HEAD vs itself), which short-circuits
+// BOTH blocks before a single line of either runs. `LintPlanStatusDeps` (this same commit) is
+// the injection seam: real callers (the CLI dispatch) omit it and get the real `gh`-shelling
+// functions unchanged; these tests supply fixtures so the whole wiring runs with zero network
+// I/O, against a REAL `--base` diff on a dedicated fixture plan file
+// (test/fixtures/lint-plan-status-di/tasks.yaml, committed with ONE criterion) whose on-disk
+// copy each test temporarily rewrites with an ADDED criterion (restored in `finally`, no matter
+// how the test exits) — exactly the "PR amends a merged task's acceptance criteria" shape the
+// whole feature exists to catch.
+
+const LINT_DI_FIXTURE = fileURLToPath(new URL("./fixtures/lint-plan-status-di/tasks.yaml", import.meta.url));
+const LINT_DI_BASE_YAML = readFileSync(LINT_DI_FIXTURE, "utf8");
+const LINT_DI_AMENDED_YAML =
+  LINT_DI_BASE_YAML +
+  '    - claim: "the fixture\'s amended criterion"\n' +
+  '      proof: "unit test: test/run-task.test.ts::LINTDI-1 amended criterion proof"\n';
+
+/** Runs `lintPlanCommand(["--plan", LINT_DI_FIXTURE, "--base", "HEAD"], deps)` with the fixture's
+ *  on-disk copy temporarily amended (an added criterion vs the committed HEAD blob), console
+ *  output captured, and the fixture restored byte-for-byte in `finally` regardless of outcome. */
+async function runLintDiCase(deps: LintPlanStatusDeps): Promise<{ exitCode: number; errText: string }> {
+  const origLog = console.log;
+  const origError = console.error;
+  const origWarn = console.warn;
+  const errLines: string[] = [];
+  console.log = () => {};
+  console.error = (...args: unknown[]) => {
+    errLines.push(args.map(String).join(" "));
+  };
+  console.warn = () => {};
+  writeFileSync(LINT_DI_FIXTURE, LINT_DI_AMENDED_YAML, "utf8");
+  try {
+    const exitCode = await lintPlanCommand(["--plan", LINT_DI_FIXTURE, "--base", "HEAD"], deps);
+    return { exitCode, errText: errLines.join("\n") };
+  } finally {
+    writeFileSync(LINT_DI_FIXTURE, LINT_DI_BASE_YAML, "utf8");
+    console.log = origLog;
+    console.error = origError;
+    console.warn = origWarn;
+  }
+}
+
+function lintDiStatusMap(merged: boolean): Map<string, StatusProjection> {
+  return new Map([["LINTDI-1", { taskId: "LINTDI-1", status: merged ? "merged" : "queued", merged, source: "none" }]]);
+}
+
+test("rmd lint-plan --base HEAD: status resolution SUCCEEDS via injected deps — a MERGED task's amended criterion with no follow-up BLOCKS", async () => {
+  const { exitCode, errText } = await runLintDiCase({
+    loadConfig: () => ({ root: "/tmp/rmd-lint-di-unused" }) as Config,
+    resolveOwnerRepo: () => ({ owner: "acme-corp", repo: "widget-fixture" }),
+    ghGateway: () => ({}) as GitHub,
+    projectPlan: () => lintDiStatusMap(true),
+  });
+  assert.equal(exitCode, 1, "LINTDI-1 is MERGED, its criterion was amended, and no follow-up task was filed — BLOCK");
+  assert.match(errText, /\[post-merge-amendment\]/);
+  assert.match(errText, /LINTDI-1/);
+});
+
+test("rmd lint-plan --base HEAD: status resolution SUCCEEDS via injected deps — a NOT-merged task's amended criterion never blocks", async () => {
+  const { exitCode, errText } = await runLintDiCase({
+    loadConfig: () => ({ root: "/tmp/rmd-lint-di-unused" }) as Config,
+    resolveOwnerRepo: () => ({ owner: "acme-corp", repo: "widget-fixture" }),
+    ghGateway: () => ({}) as GitHub,
+    projectPlan: () => lintDiStatusMap(false),
+  });
+  assert.equal(exitCode, 0, "LINTDI-1 has not merged yet — the post-merge-amendment check is a no-op for it");
+  assert.doesNotMatch(errText, /\[post-merge-amendment\]/);
+});
+
+test("rmd lint-plan --base HEAD: status resolution FAILS (loadConfig throws) — the catch path fails OPEN, never blocking on an unresolvable status", async () => {
+  const { exitCode, errText } = await runLintDiCase({
+    loadConfig: () => {
+      throw new Error("simulated: $HOME unreadable, exactly the CI `loadConfig` trap this catch exists for");
+    },
+    resolveOwnerRepo: () => ({ owner: "acme-corp", repo: "widget-fixture" }),
+    ghGateway: () => ({}) as GitHub,
+    projectPlan: () => lintDiStatusMap(true), // would BLOCK if reached — proves it never is
+  });
+  assert.equal(exitCode, 0, "statusResolvable never became true — fail OPEN, not a spurious block");
+  assert.doesNotMatch(errText, /\[post-merge-amendment\]/);
 });
 
 // ── W1-T245 remaining criteria: deep-compare vs real checkout, dup-id through synced, temp cleanup ──
