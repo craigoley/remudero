@@ -386,6 +386,32 @@ export interface OpenPrView {
    * (its own deterministic judge), NEVER the fix rung (which would push commits
    * onto a Dependabot branch) and never the clarification rung. */
   isDependabot?: boolean;
+  /**
+   * W1-T196: true when this PR is a plan-FILING PR — one that introduces new
+   * task(s) into `plan/tasks.yaml` and, per W1-T136 criterion 5, deliberately
+   * carries NO `Remudero-Task:` trailer (lib/plan-pr-emitter.ts's correctness
+   * rule: crediting a filing PR's own trailer would mark the task it just
+   * filed DONE on merge, before it is ever built). A `taskId`-unresolved PR
+   * with this true is a KNOWN, non-emergency attribution gap — the sweep
+   * stands down instead of escalating a `[BLOCKED] UNKNOWN: PR #...` issue
+   * with no operator-decidable question (the #440 fixture). MUST be a
+   * POSITIVE signal read from the emitter's own output (e.g. the
+   * `filingAcceptanceCriteria` claim text uniquely present in a filing PR's
+   * body) — never inferred from the absent trailer alone (that would also
+   * swallow a genuinely broken/missing trailer on an IMPLEMENTING PR, a real
+   * defect worth surfacing) and never inferred from the diff touching only
+   * `plan/**` (a hand-authored plan PR would misclassify).
+   *
+   * SCOPE (honest, mirrors how `pendingAnswer`/`reviewOrphanedByPush` shipped
+   * their mechanism ahead of their producer): this field and the stand-down
+   * it drives in `runSweep` are the full MECHANISM, wired end-to-end and
+   * unit-tested here — but `run-task.ts`'s `buildOpenPrViews` does not
+   * populate it yet. Until that producer wiring lands, this is always
+   * `undefined` in the real gateway, so every unattributable PR keeps
+   * escalating exactly as before this field existed (fail-open toward
+   * surfacing, never silently swallowing a real defect by omission).
+   */
+  isPlanFiling?: boolean;
   /** The failing review's one-line summary (context for fix/escalate). */
   reviewSummary?: string;
   /**
@@ -1788,11 +1814,26 @@ export async function runSweep(
     const { disposition, reason } = deriveDisposition(pr, policy, now);
     byDisposition[disposition]++;
 
+    // W1-T196: a blocked-ambiguous PR that never resolved a task id is a
+    // KNOWN, non-emergency state ONLY when it is POSITIVELY a plan-filing PR
+    // (`isPlanFiling` — see its own doc comment) — a filing PR carries no
+    // trailer BY DESIGN, so there is no task to ask about and no
+    // operator-decidable question (the #440 fixture: "[BLOCKED] UNKNOWN: PR
+    // #439 needs a clarification" — there is no clarification to give). An
+    // unattributed PR that is NOT flagged plan-filing still escalates below,
+    // unchanged: that is a genuine attribution defect (a missing/malformed
+    // trailer on an IMPLEMENTING PR), not a designed gap, and stays surfaced.
+    const unattributableFiling = disposition === "blocked-ambiguous" && !pr.taskId && pr.isPlanFiling === true;
+
     // W1-T78: render the clarification question up front for blocked-ambiguous
     // PRs — it is ledgered EVERY sweep (so an unanswered question stays
     // visible), even on a deduped sweep where `escalate` itself does not fire.
+    // Skipped for an unattributable filing PR (above): there is no task-bound
+    // question to render, only a stand-down.
     const question =
-      disposition === "blocked-ambiguous" ? renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []) : undefined;
+      disposition === "blocked-ambiguous" && !unattributableFiling
+        ? renderClarificationQuestion(pr, reason, pr.strikeHistory ?? [])
+        : undefined;
 
     // Is this action already true (deduped)? Keyed per disposition.
     let alreadyDone: boolean;
@@ -1960,7 +2001,21 @@ export async function runSweep(
               await deps.close(pr, reason);
               break;
             case "blocked-ambiguous":
-              await deps.escalate(pr, reason, question!);
+              // W1-T196: stand down instead of escalating `task: UNKNOWN` — see
+              // `unattributableFiling`'s doc comment above. No `deps.escalate`
+              // call, no issue, but NEVER silent: the stand-down reason names
+              // both the PR and the unresolved attribution on this pass's
+              // `sweep.disposed` ledger line below (the SAME trace discipline
+              // `standDownReason` gives every other non-actionable disposition).
+              if (unattributableFiling) {
+                acted = false;
+                standDownReason =
+                  `task id unresolved for PR #${pr.prNumber} (${pr.prUrl}) — a plan-filing PR carries no ` +
+                  `Remudero-Task trailer by design (W1-T136 criterion 5); attribution failure on this class ` +
+                  `is a known state, not an escalation`;
+              } else {
+                await deps.escalate(pr, reason, question!);
+              }
               break;
             case "dep-review":
               if (deps.depReview) {

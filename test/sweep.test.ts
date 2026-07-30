@@ -155,6 +155,25 @@ function strikesExhaustedPr(): OpenPrView {
   });
 }
 
+// W1-T196: the #440 fixture — a plan-FILING PR (introduces new task(s), so it
+// carries NO Remudero-Task trailer by design, W1-T136 criterion 5) reaching
+// the SAME strikes-exhausted blocked-ambiguous shape as strikesExhaustedPr,
+// but with taskId unresolved and the emitter's positive isPlanFiling signal set.
+function unattributableFilingPr(over: Partial<OpenPrView> = {}): OpenPrView {
+  return pr({
+    prNumber: 439,
+    prUrl: "url/439",
+    taskId: undefined,
+    isPlanFiling: true,
+    reviewState: "failure",
+    checksState: "red",
+    priorStrikes: 2, // == default cap
+    unmetCriteria: [criterion({ claim: "still unmet" })],
+    reviewSummary: "still failing after 2 strikes",
+    ...over,
+  });
+}
+
 // W1-T100 (the #170 fix): blocked_ci — checks red, NO review posted yet.
 function ciFailure(over: Partial<CiFailure> = {}): CiFailure {
   return { name: "ci", logTail: "tsc: error TS2322: ...", ...over };
@@ -460,6 +479,94 @@ test("acceptance 2 (runSweep) — a pending-90min PR escalates through the EXIST
   assert.equal(deps.escalated.length, 1, "the stale-pending PR reaches escalate()");
   assert.match(deps.escalated[0].reason, /90m/);
   assert.match(deps.escalated[0].reason, /60m/);
+});
+
+// ── W1-T196: UNATTRIBUTABLE-PR STAND-DOWN — a rung that cannot resolve a task ──
+//    id must stand down with a ledger line, not escalate `task: UNKNOWN`: a
+//    plan-filing PR carries no trailer BY DESIGN (W1-T136 criterion 5), so
+//    attribution failure on that class is a known state, not an emergency.
+//    FIXTURE (real): issue #440, opened 2026-07-21T01:46:53Z — "[BLOCKED]
+//    UNKNOWN: PR #439 needs a clarification — not positively mergeable —
+//    checks pending, review none — escalating" — against a plan-filing PR
+//    whose missing trailer is required, not accidental.
+
+test("W1-T196 acceptance 1 — a plan-filing PR with no resolvable task id STANDS DOWN with a ledger line and calls escalate() ZERO times (the #440 falsifier)", async () => {
+  const filingPr = unattributableFilingPr();
+  // Sanity: still the same blocked-ambiguous shape strikesExhaustedPr hits — only the
+  // taskId/isPlanFiling signal differs from that baseline fixture.
+  assert.equal(deriveDisposition(filingPr, DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
+
+  const deps = fakeDeps();
+  const summary = await runSweep([filingPr], deps);
+
+  assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
+  assert.equal(
+    deps.escalated.length,
+    0,
+    "no escalate() call — the #440 defect ('[BLOCKED] UNKNOWN: PR #439') must never fire again for this class",
+  );
+
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed.length, 1);
+  assert.equal(disposed[0].disposition, "blocked-ambiguous");
+  assert.equal(disposed[0].acted, false, "standing down is never counted as an action taken");
+  assert.equal(disposed[0].pr_number, 439, "the ledger line names the PR");
+  assert.equal(disposed[0].pr_url, "url/439", "the ledger line names the PR");
+  assert.match(String(disposed[0].stand_down_reason), /439/, "the stand-down reason itself also names the PR");
+  assert.match(
+    String(disposed[0].stand_down_reason),
+    /task id unresolved/,
+    "the stand-down reason names the unresolved attribution",
+  );
+  assert.equal(
+    disposed[0].question,
+    undefined,
+    "no clarification question is rendered — there is no task-bound question to ask",
+  );
+});
+
+test("W1-T196 acceptance 2 — the stand-down is TRACED, never silent: it re-ledgers every pass, citing the W1-T136 no-trailer rule by name", async () => {
+  const deps = fakeDeps();
+  await runSweep([unattributableFilingPr()], deps);
+  await runSweep([unattributableFilingPr()], deps); // a second, identical pass — never deduped into silence
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed.length, 2, "re-derived and re-ledgered every pass, never dropped after the first");
+  for (const line of disposed) {
+    assert.equal(line.acted, false);
+    assert.match(
+      String(line.stand_down_reason),
+      /plan-filing PR carries no Remudero-Task trailer by design \(W1-T136 criterion 5\)/,
+    );
+  }
+  assert.equal(deps.escalated.length, 0);
+});
+
+test("W1-T196 acceptance 3 — a DELIBERATELY-unattributed filing PR is distinguished from BROKEN attribution: without the POSITIVE isPlanFiling signal, an unresolved task id still escalates unchanged (a real defect stays surfaced)", async () => {
+  // Same shape as unattributableFilingPr, minus the emitter's positive filing
+  // signal — the shape of an IMPLEMENTING PR whose trailer went missing/malformed.
+  const brokenAttributionPr = unattributableFilingPr({ isPlanFiling: undefined });
+  const deps = fakeDeps();
+  const summary = await runSweep([brokenAttributionPr], deps);
+  assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
+  assert.equal(
+    deps.escalated.length,
+    1,
+    "a genuinely unattributable PR (never flagged plan-filing) still surfaces — treating every " +
+      "attribution failure as benign would silence a worker's PR that lost its trailer",
+  );
+  assert.equal(
+    deps.escalated[0].question.taskId,
+    "UNKNOWN",
+    "unchanged fallback for this class — only a POSITIVELY-flagged plan-filing PR stands down",
+  );
+});
+
+test("W1-T196 acceptance 4 — an attributable PR with a genuine block still escalates exactly as before this task", async () => {
+  const deps = fakeDeps();
+  const summary = await runSweep([strikesExhaustedPr()], deps);
+  assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
+  assert.equal(deps.escalated.length, 1, "an attributed PR's genuine block is unaffected by the stand-down carve-out");
+  assert.equal(deps.escalated[0].question.taskId, "W1-D");
 });
 
 test("acceptance 3 — the pending ceiling is DATA: lowering the seeded ceiling flips the 4min fixture from wait to escalate with ZERO sweep-code changes", () => {
