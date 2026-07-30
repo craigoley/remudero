@@ -7,6 +7,7 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import {
   NEEDS_HUMAN_LABEL,
   escalate,
+  escalationCause,
   tryEscalate,
   renderIssueBody,
   ghIssueGateway,
@@ -404,6 +405,210 @@ test("W1-T104: a gateway with no listOpen behaves exactly as before (back-compat
 
   assert.equal(first, second, "the fake gateway always returns the same fixed url regardless of dedup");
   assert.equal(issues.calls.length, 2, "no listOpen -> the dedup search is skipped -> both calls create");
+});
+
+// ── W1-T195: composite dedup key (PR, head sha, cause class) ───────────────────────
+//
+// Extends W1-T104's (taskId, PR) dedup with two OPTIONAL dimensions — headSha and
+// cause — so the fix rung's strike-exhaustion escalate and the clarification rung's
+// blocked-ambiguous escalate collapse into ONE issue when they observe the identical
+// (PR, head, cause), but a genuinely NEW push or a DIFFERENT cause on the same sha
+// still opens its own (the six same-PR pairs, e.g. #412/#413, #433/#434, this task's
+// rationale names). Callers that never set headSha/cause (every caller except these
+// two rungs) keep W1-T104's exact (taskId, PR)-only behavior — covered below.
+
+test("W1-T195: renderIssueBody writes Head/Cause lines only when the caller sets them", () => {
+  const withBoth = renderIssueBody(escalation({ headSha: "abc1234def5678", cause: "review" }));
+  assert.match(withBoth, /^\*\*Head:\*\* abc1234def5678$/m);
+  assert.match(withBoth, /^\*\*Cause:\*\* review$/m);
+
+  const withNeither = renderIssueBody(escalation());
+  assert.doesNotMatch(withNeither, /\*\*Head:\*\*/);
+  assert.doesNotMatch(withNeither, /\*\*Cause:\*\*/);
+});
+
+test("W1-T195: escalationCause classifies conflicted > ci-failing > review, matching the fix rung's own signals", () => {
+  assert.equal(escalationCause(true, true), "conflict", "a dirty merge state wins — GitHub never ran checks at all");
+  assert.equal(escalationCause(true, false), "conflict");
+  assert.equal(escalationCause(false, true), "ci");
+  assert.equal(escalationCause(false, false), "review");
+});
+
+test("W1-T195: two rungs observing the SAME (PR, head sha, cause) produce ONE escalation, the second appending", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+  const prUrl = "https://github.com/craigoley/remudero/pull/433";
+  const headSha = "deadbeef00112233445566778899aabbccddeef";
+
+  // Caller 1: the fix rung's strike-exhaustion escalate (#433's shape) — 2 strikes
+  // spent, review still failing.
+  const first = escalate(
+    escalation({
+      taskId: "W1-T179",
+      headSha,
+      cause: escalationCause(false, false),
+      summary: `blocked_review fix rung exhausted (2 strike(s)) — ${prUrl}`,
+      detail: "the fix rung dispatched 2 bounded fix workers and the review gate is still failing — 2 strikes spent.",
+    }),
+    { issues, ledgerPath: path, runId: "RUN-1" },
+  );
+
+  // Caller 2: the clarification rung's blocked-ambiguous escalate (#434's shape) —
+  // SAME PR, SAME head sha, SAME underlying cause (review failing), but its own
+  // distinct finding: no single nameable unmet criterion.
+  const second = escalate(
+    escalation({
+      taskId: "W1-T179",
+      headSha,
+      cause: escalationCause(false, false),
+      summary: `PR ${prUrl} needs a clarification — review failing with no actionable unmet criteria`,
+      detail:
+        `the clarification rung reconciled open PR #433 to BLOCKED-AMBIGUOUS: no single nameable unmet criterion.`,
+    }),
+    { issues, ledgerPath: path, runId: "RUN-2" },
+  );
+
+  assert.equal(second, first, "the second call returns the SAME issue url — no sibling issue");
+  assert.equal(issues.calls.length, 1, "exactly one create() across both rungs");
+  assert.equal(issues.comments.length, 1, "the second observer appends a comment instead of opening one");
+  // The second observer's information is PRESERVED, never dropped — its own finding
+  // (no single nameable unmet criterion) survives verbatim in the appended comment,
+  // not merely a bare "duplicate" marker.
+  assert.match(
+    issues.comments[0].body,
+    /no single nameable unmet criterion/,
+    "the second rung's own view survives in the comment",
+  );
+  assert.match(issues.comments[0].body, /BLOCKED-AMBIGUOUS/);
+
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(lines.filter((l) => l.step === "escalation.issue_opened").length, 1);
+  assert.equal(lines.filter((l) => l.step === "escalation.deduped").length, 1);
+});
+
+test("W1-T195: a NEW head sha on the same PR opens its OWN escalation — a fresh push is never suppressed", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+  const prUrl = "https://github.com/craigoley/remudero/pull/500";
+
+  const first = escalate(
+    escalation({
+      taskId: "W1-T80",
+      headSha: "1111111111111111111111111111111111111",
+      cause: "review",
+      summary: `blocked_review fix rung exhausted (2 strike(s)) — ${prUrl}`,
+    }),
+    { issues, ledgerPath: path, runId: "RUN-1" },
+  );
+
+  // Same PR, same cause, but a NEW push landed a NEW head sha — this must NOT be
+  // silenced by the still-open prior issue (the dangerous over-suppression
+  // direction this task's design explicitly names as worse than a duplicate).
+  const second = escalate(
+    escalation({
+      taskId: "W1-T80",
+      headSha: "2222222222222222222222222222222222222",
+      cause: "review",
+      summary: `blocked_review fix rung exhausted (1 strike(s)) — ${prUrl}`,
+    }),
+    { issues, ledgerPath: path, runId: "RUN-2" },
+  );
+
+  assert.notEqual(second, first, "a new head sha on the same PR gets its own escalation");
+  assert.equal(issues.calls.length, 2);
+  assert.equal(issues.comments.length, 0, "no comment fires — this is a genuinely new block, not a duplicate");
+});
+
+test("W1-T195: a DIFFERENT cause class on the SAME head sha opens its OWN escalation", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+  const prUrl = "https://github.com/craigoley/remudero/pull/501";
+  const headSha = "3333333333333333333333333333333333333";
+
+  const first = escalate(
+    escalation({
+      taskId: "W1-T81",
+      headSha,
+      cause: "review",
+      summary: `blocked_review fix rung exhausted (2 strike(s)) — ${prUrl}`,
+    }),
+    { issues, ledgerPath: path, runId: "RUN-1" },
+  );
+
+  // Same PR, same head sha, but a DIFFERENT operator ask — the checks went red on
+  // this exact sha too, which is a distinct question from the review-failing one.
+  const second = escalate(
+    escalation({
+      taskId: "W1-T81",
+      headSha,
+      cause: "ci",
+      summary: `blocked_ci fix rung exhausted (1 strike(s)) — ${prUrl}`,
+    }),
+    { issues, ledgerPath: path, runId: "RUN-2" },
+  );
+
+  assert.notEqual(second, first, "a different cause class on the same sha gets its own escalation");
+  assert.equal(issues.calls.length, 2);
+  assert.equal(issues.comments.length, 0);
+});
+
+test("W1-T195: a CLOSED escalation with a matching (PR, head sha, cause) does not suppress a genuine recurrence", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+  const prUrl = "https://github.com/craigoley/remudero/pull/502";
+  const headSha = "4444444444444444444444444444444444444";
+
+  const first = escalate(
+    escalation({ taskId: "W1-T82", headSha, cause: "conflict", summary: `conflicted fix rung exhausted — ${prUrl}` }),
+    { issues, ledgerPath: path, runId: "RUN-1" },
+  );
+  issues.closeIssue(first);
+
+  // The exact SAME (PR, head sha, cause) recurs after the operator closed the prior
+  // issue — this is a genuine re-escalation, never silenced by the closed record.
+  const second = escalate(
+    escalation({
+      taskId: "W1-T82",
+      headSha,
+      cause: "conflict",
+      summary: `conflicted fix rung exhausted, again — ${prUrl}`,
+    }),
+    { issues, ledgerPath: path, runId: "RUN-2" },
+  );
+
+  assert.notEqual(second, first, "a closed prior issue never suppresses a recurrence, even on an identical key");
+  assert.equal(issues.calls.length, 2);
+});
+
+test("W1-T195: an un-migrated caller (no headSha/cause set) keeps W1-T104's (taskId, PR)-only dedup unchanged", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+  const prUrl = "https://github.com/craigoley/remudero/pull/503";
+
+  // Caller 1 DOES set headSha/cause (e.g. the fix rung, already migrated).
+  const first = escalate(
+    escalation({
+      taskId: "W1-T83",
+      headSha: "5555555555555555555555555555555555555",
+      cause: "review",
+      summary: `blocked_review fix rung exhausted — ${prUrl}`,
+    }),
+    { issues, ledgerPath: path, runId: "RUN-1" },
+  );
+
+  // Caller 2 is an ordinary, un-migrated caller (e.g. `rmd escalate`, dep-review,
+  // the risk judge) that never sets headSha/cause at all — matchesOptionalDimension
+  // treats the missing dimensions as permissive, so this still dedupes against the
+  // migrated caller's issue exactly as W1-T104 always has.
+  const second = escalate(escalation({ taskId: "W1-T83", summary: `blocked, unrelated caller — ${prUrl}` }), {
+    issues,
+    ledgerPath: path,
+    runId: "RUN-2",
+  });
+
+  assert.equal(second, first, "a caller that never sets headSha/cause still dedupes on (taskId, PR) alone");
+  assert.equal(issues.calls.length, 1);
+  assert.equal(issues.comments.length, 1);
 });
 
 test("ghIssueGateway.comment: posts a plain comment without closing the issue", () => {
