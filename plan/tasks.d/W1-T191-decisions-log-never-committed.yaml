@@ -1,11 +1,11 @@
 - id: W1-T191
-  title: "THE DECISION AUDIT LOG NEVER REACHES THE REPO — decision.autochoose appends to the OPERATOR CHECKOUT's DECISIONS.md, which no worker PR ever includes, so every auto-choose resolution accumulates uncommitted on one machine's disk"
+  title: "TWO WRITE PATHS DIRTY THE DAEMON'S OWN CHECKOUT AND SO DISABLE ITS AUTO-SYNC — decision.autochoose appends to that checkout's DECISIONS.md and the console's feedback-decision route flips `status:` in its plan/feedback/*.yaml, neither commits, and checkCliFreshness then refuses every non-exempt rmd verb while the checkout is both dirty and behind origin/main"
   repo: remudero
   depends_on: []
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 100.00
+  budget_usd: 130.00
   rationale: "OBSERVED 2026-07-20/21 while recording an operator decision: the operator checkout
     (~/Remudero/remudero) showed `M DECISIONS.md` with THREE machine-written entries present in the working tree
     and absent from origin/main:
@@ -54,6 +54,54 @@
     RESCUE THE EXISTING THREE either way. Whatever mechanism ships, the three entries observed above must end up
     in the repo — they are already preserved in the PR that files this task, so the fix must not assume an empty
     starting state.
+
+    ── FOLDED IN 2026-07-30 (was W1-T263, PR #958 closed as a duplicate) ───────────────────────
+    THERE IS A SECOND WRITE PATH, and it is the same defect with a different artifact. The console's
+    POST /v1/feedback/decision route (src/lib/panel-graph.ts:353, handler at :371) calls
+    setFeedbackStatus(deps.root, id, status), whose sole write is
+    writeFileSync(feedbackEntryPath(root, id), ...) at src/lib/feedback.ts:301. deps.root is the same
+    repoRoot the daemon uses, so an operator clicking Accept in the console leaves a TRACKED
+    modification in the checkout the daemon and the console both run from. Verified at origin/main
+    e9fa9ac; these coordinates drift, re-read them before building.
+
+    THE CONSEQUENCE THAT MAKES BOTH URGENT — and it is not durability. checkCliFreshness refuses when
+    the checkout is BOTH behind origin/main AND dirty (src/lib/self-sync.ts:175 returns
+    {status: "refused", reason: "dirty"}), and src/run-task.ts:10843 turns that into process.exit(1)
+    for every non-exempt verb. Main moves several times an hour, so `behind` is the steady state and a
+    lingering modification makes the refusal effectively permanent. The auto-sync that would clear
+    `behind` runs through the same gate, so THE DIRT SWITCHES OFF ITS OWN REMEDY.
+    Observed 2026-07-29/30: the daemon's plan went stale so the reviewer read superseded acceptance
+    criteria; `rmd deploy-run` failed 35 consecutive times over five days without completing a cycle;
+    a $100-budget run (W1-T253) was nearly judged against the wrong criteria and needed a hand pull.
+    RECURRENCE IS LIVE: after a `git reset --hard origin/main` produced a clean tree, the same seven
+    plan/feedback status flips reappeared within the hour, unprompted; a further unprompted flip
+    (fb-1784770185732-e025c1.yaml) was observed on 2026-07-30 after those seven had landed via #956.
+
+    THE ASYMMETRY THE CODE ALREADY STATES: src/lib/self-sync.ts:243 says "DIRT NEVER BLOCKS A SERVICE"
+    — daemon and serve are exempt precisely because the daemon dirties its own tree. So the SERVICE is
+    protected from this dirt and the PLAN is not. Do NOT "fix" this by exempting more verbs or widening
+    that carve-out: the gate is correct, the writers are the defect. The last acceptance criterion
+    exists to pin that.
+
+    THE MECHANISM EXISTS AND IS NOT WIRED. src/lib/feedback-landing.ts implements a commit bridge whose
+    doc at :24-27 states it "NEVER touches the caller's own working tree, index, or local branches" —
+    exactly the missing property. It force-pushes a branch rebuilt from origin/main's current tip to
+    LANDING_BRANCH ("feedback-landing", :46). Its ONLY call site is feedback.ts:252, inside
+    captureFeedback; setFeedbackStatus (feedback.ts:286-303) does not call it at all, which is why the
+    status flips sit uncommitted.
+
+    THE TWO SITES NEED DIFFERENT-SIZED FIXES — size the work accordingly, do not assume symmetry:
+      - WRITE SITE 2 IS THE CHEAP HALF. plan/feedback/<id>.yaml is one file per entry, so entries never
+        collide and the bridge's force-push-from-current-tip is already safe for them. This is close to
+        wiring landFeedback into setFeedbackStatus.
+      - WRITE SITE 1 IS THE EXPENSIVE HALF, and the existing "concurrent resolutions cannot conflict"
+        criterion above is why. DECISIONS.md is ONE shared append target: two concurrent appenders each
+        rebuild from the same tip, each add their own record, and the second force-push silently
+        discards the first — trading a visible dirty tree for INVISIBLE RECORD LOSS, which is strictly
+        worse than the defect. The bridge does NOT generalise to it. Resolve that explicitly (shard per
+        decision, derive from the ledger's decision.autochoose lines, or a read-modify-write retry
+        against origin/main's current tip) before wiring anything.
+
   acceptance:
     - claim: "a decision.autochoose resolution reaches the repository without an operator noticing a dirty tree"
       proof: "integration test over a seeded auto-choose resolution: the decision record is present in a committed/committable artifact of the run rather than only in the operator checkout's working tree. FALSIFIER, observed 2026-07-20/21: three resolutions (W1-T156 20:36:14, W1-T128 22:31:09, W1-T136 01:18:25) sat uncommitted in ~/Remudero/remudero/DECISIONS.md — committed HEAD 29 entries, working tree 32 — with matching decision.autochoose ledger lines proving each decision was made and acted on"
@@ -63,13 +111,34 @@
       proof: "unit/structural test: no decision record exists solely as an uncommitted modification in a long-lived checkout. FALSIFIER: today `git checkout -- DECISIONS.md` in the operator checkout silently destroys every unrescued entry, and that is a routine command for cleaning a dirty tree"
     - claim: "the three already-observed entries are preserved, not assumed away"
       proof: "the three 2026-07-20/21 resolutions are present in the repository after this task ships. FALSIFIER: a fix that only handles future decisions leaves these three dependent on the PR that happened to rescue them, and provides no evidence that earlier resolutions were not already lost to a checkout or clean-up"
-  risk: medium
+    - claim: "a console feedback decision no longer leaves a tracked modification in the checkout it wrote through — the status flip reaches a branch, not the working tree"
+      proof: "unit test: a feedback decision leaves the caller's working tree clean"
+    - claim: "the freshness gate stops firing for this cause — a checkout behind origin/main whose only prior dirt came from these two writers is no longer refused, so the auto-sync that clears `behind` is no longer switched off by the dirt it is meant to clear"
+      proof: "unit test: a checkout dirtied only by these two writers is not refused"
+    - claim: "the fix does not widen the service carve-out or exempt further verbs from the freshness gate — the gate is correct, the writers are the defect"
+      proof: "grep: DIRT NEVER BLOCKS A SERVICE in src/lib/self-sync.ts"
+  risk: high
   origin: architect
   plan_refs: ["§4"]
-  files: [src/run-task.ts, test/run-task.test.ts]
+  files: [src/run-task.ts, src/lib/feedback.ts, src/lib/panel-graph.ts, src/lib/feedback-landing.ts, test/run-task.test.ts, test/feedback-landing.test.ts]
   status: queued
   attempts: 0
-  note: "FOUND 2026-07-21 by a dirty-tree check while recording an operator decision — not by any gate. Three
+  note: "FOLDED 2026-07-30: W1-T263 (PR #958) filed the same defect from the other write site and was
+    closed as a duplicate; its three genuinely-new criteria are appended above (the console feedback
+    decision, the freshness-refusal consequence, and the do-not-widen-the-carve-out guard rail). Its
+    other three restated criteria this task already had — including the concurrent-append constraint,
+    which is preserved verbatim as criterion 2. budget_usd raised 100 -> 130 for the second write site
+    and its tests; risk RAISED medium -> HIGH, matching W1-T263's original grading: with the second
+    write site the task's `files` span four subsystems (feedback, feedback-landing, panel-graph,
+    run-task) and Rule 19's sizing check requires high or a decomposition. It also reflects the real
+    hazard — an autonomous commit/push path added to capture-time and console-time code, whose
+    realistic failure (silent record loss on concurrent appends) is worse than the defect. verify stays AUTO: every criterion is test-pinnable.
+    CAVEAT FOR WHOEVER PICKS THIS UP: criteria 1, 3 and 4 are PROSE and are refused by
+    parseWhitelistedProof, so this task is UNDISPATCHABLE until they are rewritten in executable
+    dialect (`unit test: <title substring>` or `grep: <pattern> in <path>`). The fold did not touch
+    them — rewording existing criteria was out of scope for that change. Same routine fix as #920
+    (W1-T253) and #942 (W1-T180/W1-T186).
+    FOUND 2026-07-21 by a dirty-tree check while recording an operator decision — not by any gate. Three
     machine-written entries were sitting uncommitted in the operator checkout with matching decision.autochoose
     ledger lines. They are preserved in the PR that files this task, so the fix starts from a non-empty state.
     Applies standing rule 22: the ledger holds the RECEIPT of each decision and DECISIONS.md holds the readable
