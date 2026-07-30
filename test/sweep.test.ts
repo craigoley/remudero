@@ -925,7 +925,7 @@ function strike(over: Partial<StrikeAttempt> = {}): StrikeAttempt {
 
 test("renderClarificationQuestion: a strikes-exhausted fixture yields ONE question naming the decision, both candidate resolutions, and the PR/run context", () => {
   const pr = strikesExhaustedPr();
-  const { reason } = deriveDisposition(pr);
+  const { reason } = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
   const history = [strike({ strike: 1, round: "resume" }), strike({ strike: 2, round: "fresh" })];
 
   const q = renderClarificationQuestion(pr, reason, history);
@@ -962,7 +962,7 @@ test("renderClarificationQuestion: no single unmet criterion (the contradictory/
 
 test("toQuestionEntry: conforms to the §2 QUESTION contract's shape (worker.ts's QuestionEntry)", () => {
   const pr = strikesExhaustedPr();
-  const { reason } = deriveDisposition(pr);
+  const { reason } = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
   const q = renderClarificationQuestion(pr, reason, []);
   const entry = toQuestionEntry(q, "2026-07-17T00:00:00.000Z");
   assert.equal(entry.ts, "2026-07-17T00:00:00.000Z");
@@ -1114,6 +1114,39 @@ test("renderClarificationQuestion: an ordinary review-failure/contradictory bloc
   assert.doesNotMatch(q.question, /^\[/, "no bracketed state tag when none applies");
 });
 
+// ── REGRESSION LOCK: the wall-clock time bomb (2026-07-30T12:00:00Z) ──────────────────────
+//
+// Every age-sensitive assertion in this file MUST pass the pinned `NOW`. `deriveDisposition`'s
+// third parameter defaults to `Date.now()`, so an assertion that omits it is judged against the
+// REAL clock while its fixture carries a fixed `RECENT` date — which works until `RECENT` ages
+// past `staleDays`, and then flips the disposition to "stale" for reasons that have nothing to
+// do with the code under test. That is not hypothetical: RECENT is 2026-07-16T12:00:00Z and
+// staleDays is 14, so at exactly 2026-07-30T12:00:00Z eight assertions across this file and
+// test/run-task.test.ts went red simultaneously, on a tree nobody had touched. Every PR whose
+// CI ran before that instant was green; the first one after it was not.
+//
+// These two assertions lock both halves: the fixture/clock pair stays self-consistent, and the
+// stale rule really is what fires once the pair drifts apart.
+
+test("REGRESSION LOCK: the fixture clock and RECENT stay within staleDays, so no assertion here depends on the wall clock", () => {
+  const ageDays = (NOW - Date.parse(RECENT)) / 86_400_000;
+  assert.ok(
+    ageDays < DEFAULT_SWEEP_POLICY.staleDays,
+    `RECENT must sit inside the stale window relative to the pinned NOW (age ${ageDays}d vs staleDays ${DEFAULT_SWEEP_POLICY.staleDays}) — ` +
+      "otherwise every fixture built on it is stale before a test even runs",
+  );
+});
+
+test("REGRESSION LOCK: the SAME fixture judged against a clock past staleDays becomes stale — the exact mechanism that reddened main", () => {
+  const aged = NOW + (DEFAULT_SWEEP_POLICY.staleDays + 1) * 86_400_000;
+  assert.equal(deriveDisposition(strikesExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
+  assert.equal(
+    deriveDisposition(strikesExhaustedPr(), DEFAULT_SWEEP_POLICY, aged).disposition,
+    "stale",
+    "an un-pinned clock is why this fixture silently reclassified — pin NOW at every call site",
+  );
+});
+
 test("strikeCapForAnswer: resetStrikeCounterOnAnswer=true (default) grants a FRESH full strikeCap; false grants exactly one bounded strike — policy-as-data, per config", () => {
   assert.equal(strikeCapForAnswer(2), 2);
   assert.equal(strikeCapForAnswer(2, DEFAULT_CLARIFY_POLICY), 2);
@@ -1124,9 +1157,9 @@ test("strikeCapForAnswer: resetStrikeCounterOnAnswer=true (default) grants a FRE
 test("deriveDisposition: an operator's answer RE-ARMS a strikes-exhausted PR to blocked-fixable — the answer's own strike allowance overrides exhaustion", () => {
   const answered: OpenPrView = { ...strikesExhaustedPr(), pendingAnswer: { constraint: "use approach X" } };
   // Un-answered, this fixture is strikes-exhausted -> blocked-ambiguous (baseline).
-  assert.equal(deriveDisposition(strikesExhaustedPr()).disposition, "blocked-ambiguous");
+  assert.equal(deriveDisposition(strikesExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
   // Answered, with the default reset policy (a FRESH strikeCap), it re-arms.
-  const result = deriveDisposition(answered);
+  const result = deriveDisposition(answered, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(result.disposition, "blocked-fixable");
   assert.match(result.reason, /operator answered/);
 });
@@ -1134,10 +1167,10 @@ test("deriveDisposition: an operator's answer RE-ARMS a strikes-exhausted PR to 
 test("deriveDisposition: an operator's answer ALSO re-arms a strikes-exhausted blocked_ci PR (W1-T100) — the ANSWERED row was generalized alongside the exhaustion/fixable rows, one ladder for both shapes", () => {
   const answered: OpenPrView = { ...blockedCiExhaustedPr(), pendingAnswer: { constraint: "pin the dependency version" } };
   // Un-answered, this fixture is strikes-exhausted -> blocked-ambiguous (baseline).
-  assert.equal(deriveDisposition(blockedCiExhaustedPr()).disposition, "blocked-ambiguous");
+  assert.equal(deriveDisposition(blockedCiExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
   // Answered, with the default reset policy (a FRESH strikeCap), it re-arms — the
   // SAME row that re-arms a review-failure PR, never a second, un-generalized path.
-  const result = deriveDisposition(answered);
+  const result = deriveDisposition(answered, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(result.disposition, "blocked-fixable");
   assert.match(result.reason, /operator answered/);
 });
@@ -1148,14 +1181,14 @@ test("deriveDisposition: resetStrikeCounterOnAnswer=false grants exactly ONE ext
   // (policy.strikeCap + strikeCapForAnswer(2, {reset:false}) === 2 + 1).
   const justAnswered: OpenPrView = { ...strikesExhaustedPr(), priorStrikes: 2, pendingAnswer: { constraint: "use approach X" } };
   // priorStrikes (2) IS below the ceiling (3) -> the one bounded extra strike is granted.
-  assert.equal(deriveDisposition(justAnswered, policy).disposition, "blocked-fixable");
+  assert.equal(deriveDisposition(justAnswered, policy, NOW).disposition, "blocked-fixable");
 
   // The extra strike was ALSO spent (ledger now shows 3 dispatches) and the PR
   // is STILL failing with a (new, unconsumed) pendingAnswer -> the ceiling (3)
   // is no longer above priorStrikes (3) -> escalates again rather than granting
   // a THIRD attempt off the same answer.
   const stillFailing: OpenPrView = { ...justAnswered, priorStrikes: 3 };
-  assert.equal(deriveDisposition(stillFailing, policy).disposition, "blocked-ambiguous");
+  assert.equal(deriveDisposition(stillFailing, policy, NOW).disposition, "blocked-ambiguous");
 });
 
 test("runSweep: a BLOCKED-AMBIGUOUS PR ledgers its clarification question EVERY sweep, even once escalate() is deduped — an unanswered question stays visible, nothing else is ever dispatched", async () => {
@@ -1267,7 +1300,7 @@ test("W1-T103 acceptance 1 — the #170 fixture (all required success, one non-r
   assert.equal(checksState, "green");
 
   const healedPr = pr({ prNumber: 170, prUrl: "url/170", taskId: "W1-T170", reviewState: "success", checksState });
-  assert.equal(deriveDisposition(healedPr, DEFAULT_SWEEP_POLICY).disposition, "mergeable");
+  assert.equal(deriveDisposition(healedPr, DEFAULT_SWEEP_POLICY, NOW).disposition, "mergeable");
 
   const deps = fakeDeps();
   await runSweep([healedPr], deps);

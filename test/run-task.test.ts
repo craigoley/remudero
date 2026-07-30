@@ -3864,7 +3864,11 @@ function fixPr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "pending",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-07-16T12:00:00Z",
+    // A RECENT-activity fixture, not a date-specific one: routeFix has no injectable clock,
+    // so deriveDisposition sees the real Date.now(). A fixed 2026-07-16 literal here silently
+    // aged past DEFAULT_SWEEP_POLICY.staleDays (14) and flipped every routeFix disposition to
+    // "stale" on 2026-07-30T12:00:00Z. Relative, like this file's other OpenPrView helpers.
+    lastActivityAt: new Date().toISOString(),
     headSha: "aaaa111",
     autoMergeArmed: false,
     ...over,
