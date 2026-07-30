@@ -1157,9 +1157,6 @@ test("strikeCapForAnswer: resetStrikeCounterOnAnswer=true (default) grants a FRE
 test("deriveDisposition: an operator's answer RE-ARMS a strikes-exhausted PR to blocked-fixable — the answer's own strike allowance overrides exhaustion", () => {
   const answered: OpenPrView = { ...strikesExhaustedPr(), pendingAnswer: { constraint: "use approach X" } };
   // Un-answered, this fixture is strikes-exhausted -> blocked-ambiguous (baseline).
-  // W1-T262 ci-log fix: pass the fixed NOW (every other call site in this file
-  // does) — omitting it defaults to the real Date.now(), which ages RECENT past
-  // policy.staleDays and flips the disposition to "stale" instead.
   assert.equal(deriveDisposition(strikesExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
   // Answered, with the default reset policy (a FRESH strikeCap), it re-arms.
   const result = deriveDisposition(answered, DEFAULT_SWEEP_POLICY, NOW);
@@ -1170,7 +1167,6 @@ test("deriveDisposition: an operator's answer RE-ARMS a strikes-exhausted PR to 
 test("deriveDisposition: an operator's answer ALSO re-arms a strikes-exhausted blocked_ci PR (W1-T100) — the ANSWERED row was generalized alongside the exhaustion/fixable rows, one ladder for both shapes", () => {
   const answered: OpenPrView = { ...blockedCiExhaustedPr(), pendingAnswer: { constraint: "pin the dependency version" } };
   // Un-answered, this fixture is strikes-exhausted -> blocked-ambiguous (baseline).
-  // W1-T262 ci-log fix: pass the fixed NOW, same reasoning as the sibling test above.
   assert.equal(deriveDisposition(blockedCiExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
   // Answered, with the default reset policy (a FRESH strikeCap), it re-arms — the
   // SAME row that re-arms a review-failure PR, never a second, un-generalized path.
@@ -1185,7 +1181,6 @@ test("deriveDisposition: resetStrikeCounterOnAnswer=false grants exactly ONE ext
   // (policy.strikeCap + strikeCapForAnswer(2, {reset:false}) === 2 + 1).
   const justAnswered: OpenPrView = { ...strikesExhaustedPr(), priorStrikes: 2, pendingAnswer: { constraint: "use approach X" } };
   // priorStrikes (2) IS below the ceiling (3) -> the one bounded extra strike is granted.
-  // W1-T262 ci-log fix: pass the fixed NOW, same reasoning as the two tests above.
   assert.equal(deriveDisposition(justAnswered, policy, NOW).disposition, "blocked-fixable");
 
   // The extra strike was ALSO spent (ledger now shows 3 dispatches) and the PR
@@ -1305,9 +1300,6 @@ test("W1-T103 acceptance 1 — the #170 fixture (all required success, one non-r
   assert.equal(checksState, "green");
 
   const healedPr = pr({ prNumber: 170, prUrl: "url/170", taskId: "W1-T170", reviewState: "success", checksState });
-  // W1-T262 ci-log fix: pass the fixed NOW (the `runSweep` call below already gets
-  // it via fakeDeps().now — this standalone deriveDisposition call was the one
-  // spot in the file defaulting to real Date.now(), aging RECENT past staleDays).
   assert.equal(deriveDisposition(healedPr, DEFAULT_SWEEP_POLICY, NOW).disposition, "mergeable");
 
   const deps = fakeDeps();
