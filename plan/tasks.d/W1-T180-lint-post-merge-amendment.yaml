@@ -63,15 +63,15 @@
     lint cannot see, revisit it then.
   acceptance:
     - claim: "a plan PR that ADDS an acceptance criterion to an already-merged task FAILS the linter, naming the task and the criterion"
-      proof: "unit test over the new check with injected merge state: a task whose derived status is merged and whose criteria set gained an entry vs the base ref produces a blocking violation naming the task id and the added claim. FALSIFIER: PR #374, which added two criteria to W1-T155 at 17:35:20Z — one hour forty-five minutes after PR #365 credited it merged at 15:50:08Z — and passed every gate clean, leaving both criteria unreachable by the drain (drain.ts:88 skips merged) and by the retro sweep (retro.ts:578 skips merged/done)"
+      proof: "unit test: test/task-linter.test.ts"
     - claim: "the same PR filing a FOLLOW-UP task carrying the amended criteria PASSES — the check gates the orphaning, not the amending"
-      proof: "unit test: a changed-set containing BOTH the amended merged task AND a new task carrying those criteria produces no violation. FALSIFIER: a check with no escape hatch, which would make the correct action (amend for the record, file the follow-up) impossible and push authors to skip the record entirely"
+      proof: "unit test: test/task-linter.test.ts"
     - claim: "the linter WARNS on an acceptance proof the executor cannot parse — a proof that can never run is caught at authoring time, not discovered as a 0/N verdict"
-      proof: "unit test: a criterion whose proof lacks the `unit test:`/`grep:` dialect prefix, or whose prefixed body is prose where a file-or-test NAME belongs, yields a WARNING (not a blocking violation — an unrunnable proof is a quality problem, not a merge-stopper). FALSIFIER: W1-T181 shipped with criteria 3 and 5 carrying no dialect prefix at all and the prefixed ones carrying prose, so all five read not_executable/executed_fail via an empty name-filter and nothing warned before dispatch — an operator authoring error the linter was positioned to catch and did not"
+      proof: "unit test: test/task-linter.test.ts"
     - claim: "an UNREADABLE derived status fails OPEN — a status-read failure never reds an otherwise-valid plan PR"
-      proof: "unit test: a seeded status-resolution failure yields no violation. FALSIFIER: a fail-closed implementation, which during a GitHub outage would red every plan PR — blocking the plan-only lane that remains usable precisely when the fleet cannot observe GitHub"
+      proof: "unit test: test/task-linter.test.ts"
     - claim: "the linter stays PURE — merge state arrives by injection, the check performs no I/O"
-      proof: "unit/structural test: the new check is reachable with merge state supplied through LintOpts and task-linter.ts imports neither status.ts nor any gh/exec surface, preserving the documented 'PURE function over a loaded Task/Plan, no I/O' contract at task-linter.ts:3-4. FALSIFIER: a check that fetches merge state itself, which makes every linter unit test require network or heavy mocking and breaks the CI-safe purity the linter depends on"
+      proof: "unit test: test/task-linter.test.ts"
   risk: high
   origin: architect
   plan_refs: ["§5C", "§12"]
@@ -94,3 +94,15 @@
     workaround: adding a BLOCKING check to the plan lane can red every plan PR if it misfires, which is why the
     fail-open-on-unreadable boundary and the follow-up escape hatch are load-bearing criteria rather than
     defensive extras."
+  amendment_note: "PROOFS AMENDED 2026-07-30 (operator, post-#928). The five proofs were rationale prose with
+    embedded FALSIFIER clauses; two did not parse at all (near-miss `unit test over ...` / `unit/structural test:`)
+    and three parsed as name-filtered and resolved 'absent'. Measured against the real executor: 0/5 executable, so
+    #928 returned CAPPED with all five criteria unmet and the fix rung could not repair it (Standing rule 15 forbids a
+    worker amending its own criteria). Rewritten to the pure-path form, which lint-passes AND executes the whole file;
+    every `claim` is preserved VERBATIM and the falsifier reasoning stays in the claim text and rationale.
+    OPEN QUESTION FOR THE ARCHITECT — criterion 3 ('the linter WARNS on an acceptance proof the executor cannot
+    parse') is NOT implemented by #928 and does not need to be: `proofDialectViolations` (W1-T246) already refuses an
+    unparseable proof at authoring time, and #906 extended that to dispatch, so the behaviour ships STRONGER than the
+    claim states (it blocks, it does not merely warn). The claim's own parenthetical 'not a blocking violation' is now
+    stale. Left as-authored rather than rewritten, because narrowing or restating a claim is an Architect decision;
+    the amended proof points at test/task-linter.test.ts, which carries W1-T246's own dialect tests."
