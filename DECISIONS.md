@@ -364,3 +364,48 @@ instruction and marked so, exactly as the 2026-07-20 entry above.*
 - Rollback: revert this PR — restores the `?? false` default in `resolveHeadroomEnabled` and this entry.
   This host's behaviour is unaffected either way while its config carries the explicit `false`; removing
   that config line is the separate, deliberate act of re-inheriting the default.
+
+## 2026-07-30 — W1-T262 re-dispatch: already-satisfied, no-op close
+
+- Options: (A) close as already-satisfied, no functional code change, record the closure in
+  DECISIONS.md (RECOMMENDED) | (B) make no PR at all, report the finding only, leaving no audit
+  trail explaining why `plan/tasks.d/W1-T262-console-header-freshness-honesty.yaml` sits at
+  `status: queued` / `attempts: 0` despite its work already shipping.
+- Chosen (RECOMMENDED): Option A — no functional code change, DECISIONS.md entry as the audit
+  trail, following the precedent set for W1-T7/#772, W1-T12a/#725, and W1-T99/#731.
+- Rationale: this worktree's dispatch was cut for a five-criterion `implement` task
+  (`src/lib/board.ts`, `src/lib/console-freshness.ts`, `src/lib/serve.ts`), but every criterion is
+  already merged and passing at `HEAD`. `git merge-base --is-ancestor 6d6c5c7 HEAD` confirms
+  `6d6c5c7` — "fix(serve): one coherent freshness model for the console header (W1-T262) (#777)" —
+  is on `main` and an ancestor of this branch's `HEAD` (`fa766be`); its subject and body name
+  W1-T262 and enumerate the same five fixtures this task's acceptance list does (three-chip
+  co-display, impossible arithmetic, `$0.000`/0-turns-as-fact, 0-merged-during-outage,
+  header-vs-NOW-row disagreement). It carries no separate `Remudero-Task:` trailer line — the
+  task id is embedded in the commit subject and PR number instead — so provenance here is by
+  subject-line match plus the code/test correspondence below, not a trailer grep.
+  `src/lib/console-freshness.ts` (the pure `formatStamp`/`resolveFreshness` module) and
+  `test/console-freshness.test.ts` are both live on `HEAD`; `npx tsx --test
+  test/console-freshness.test.ts` runs all 7 cases green, covering criteria 1 (the three modes are
+  mutually exclusive — a fresh/connected pane can never also read stale) and 2 (`formatStamp`
+  derives absolute time and relative age from one instant + one clock, timezone labeled).
+  `src/lib/board.ts` carries `liveSpendPending` (:88), `counts.merged_known` (:102, :214),
+  `github_unreachable` (:109), `isRunningRow` (:200), and `counts.running: tasks.filter
+  (isRunningRow).length` (:210) — the same predicate `renderNow` filters NOW's rows on.
+  `npx tsx --test test/board.test.ts` runs all 48 cases green, including the named
+  fb-…c124f9 fixtures: line 184 (`liveSpendPending` true when no spend line has landed, never a
+  defined `liveSpendUsd:0`/`liveTurns:0`), line 210 (`github_unreachable`/`counts.merged_known`
+  false during an unreachable read, so merged reads UNKNOWN, never 0), and lines 226-236
+  (`counts.running` equals `rows.filter(isRunningRow).length` exactly, never a header count the
+  rendered rows disagree with). `src/lib/serve.ts` mirrors the same tested logic: :1115-1122
+  refuses to raise the STALE banner while data delivered inside `STALE_DATA_AGE_MS` on ANY
+  transport (mirrors `resolveFreshness`'s fresh-implies-live invariant), :1531-1532 renders
+  "no data yet" on `t.liveSpendPending` rather than a zeroed spend/turns line, and :1142 renders
+  "merged: unknown (GitHub unreachable)" rather than 0. `git status --porcelain` is empty and this
+  worktree's `HEAD` matches `origin/main` — there is no diff to make against `board.ts`,
+  `console-freshness.ts`, or `serve.ts` for this dispatch. Per `src/lib/plan.ts:101-105` and
+  `src/lib/status.ts:20-59`, a task's `status:` field is decorative/initial-state only (real
+  merge-state is GitHub-derived and never written back), and per `src/lib/review.ts:2906-2932`
+  (Standing rule 15) `satisfied_by` is Architect-only — a worker-added one fails review — so
+  neither `plan/tasks.d/W1-T262-console-header-freshness-honesty.yaml`'s `status` field nor its
+  acceptance criteria are touched by this PR.
+- Rollback: revert this PR — removes only this DECISIONS.md entry; no runtime code touched.
