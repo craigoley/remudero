@@ -672,7 +672,12 @@ export type ProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => "pas
 // run before it ever reached the named test's file (see nameFilteredOutcome's doc
 // comment) — widened for headroom. The truncation-detection fix above is the actual
 // correctness guarantee; this just reduces how often it needs to engage.
-const DEFAULT_PROOF_TIMEOUT_MS = 60_000;
+// Exported (W1-T252 follow-up) so `test/policy.test.ts` can assert plan/policy.yaml's LIFTED
+// `proofTimeoutMs` against this constant itself rather than against a second copy of the
+// literal — a duplicated expectation cannot detect the drift it exists to detect. Every other
+// constant that file lifts is already exported for the same reason (DEFAULT_PRUNE_GRACE_MS,
+// DEFAULT_POLL_INTERVAL_MS, DEFAULT_SWEEP_POLICY, DEFAULT_MAX, HEADROOM_LIMIT_PCT).
+export const DEFAULT_PROOF_TIMEOUT_MS = 60_000;
 const npmCiPrimed = new Set<string>();
 /** Process-wide latch for {@link ensureBrowsersOnce} — see its doc comment for why
  * this is NOT keyed by cwd the way {@link npmCiPrimed} is. */
