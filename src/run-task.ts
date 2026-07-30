@@ -365,6 +365,7 @@ import {
   pruneStaleRuns,
   removeRunLock,
   renderWorkerSettings,
+  runWorktreeReapRung,
   spawnWorker,
   cacheTokenLedgerFields,
   workerLedgerFields,
@@ -374,6 +375,7 @@ import {
   writeRunLock,
   type SpawnWorkerArgs,
   type WorkerResult,
+  type WorktreeReapSummary,
 } from "./lib/worker.js";
 import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from "./lib/worker-home.js";
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, FIX_WORKER_TOOLS, neutralizeFenceMarkers } from "./lib/fix-fence.js";
@@ -7299,11 +7301,21 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // above; bounded per cycle so a backlog drains gradually.
   const reconcileSummary = await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { dryRun });
 
+  // W1-T175 — the worktree reaper rung: same level-triggered doctrine + cadence as the
+  // rungs above, closing pruneStaleRuns' coverage holes (git-invisible dirs, detached-HEAD
+  // sweep-* orphans, widowed .lock files) on THIS cadence, not only at a run's own start.
+  // --dry-run takes no effects, matching every other rung in this command.
+  let reapSummary: WorktreeReapSummary = { reaped: [], reapedLocks: [], kept: [] };
+  if (!dryRun) {
+    reapSummary = runWorktreeReapRung(config, log);
+  }
+
   console.log(
     `### rmd sweep${dryRun ? " --dry-run" : ""} — ${owner}/${repo}\n` +
       renderSweepSummary(summary) +
       `\ncredit backfill: ${creditSummary.total} candidate(s) reconciled · ${creditSummary.corrected} corrected` +
-      `\nescalation reconcile: ${reconcileSummary.total} open needs-human issue(s) checked · ${reconcileSummary.closed} closed`,
+      `\nescalation reconcile: ${reconcileSummary.total} open needs-human issue(s) checked · ${reconcileSummary.closed} closed` +
+      `\nworktree reap: ${reapSummary.reaped.length} worktree(s) reaped · ${reapSummary.reapedLocks.length} widowed lock(s) reaped`,
   );
   return 0;
 }
@@ -7384,6 +7396,12 @@ export function buildSweepHook(
       // daemon's own poll cadence — never a second, separately-scheduled loop.
       const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
       await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
+      // W1-T175 — the worktree reaper rung, on the daemon's own poll cadence: the hole
+      // this closes is specifically an IDLE fleet (no run dispatched, so pruneStaleRuns'
+      // run-start trigger never fires) leaving crashed-run debris to grow unbounded. Own
+      // try/catch, folded into runWorktreeReapRung (distinct from the shared "sweep.error"
+      // below) so a reap hiccup never masks — or is masked by — the rungs above it.
+      runWorktreeReapRung(config, log);
     } catch (e) {
       log("sweep.error", { error: String((e as Error)?.message ?? e) });
     }
