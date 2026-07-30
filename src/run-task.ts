@@ -6531,6 +6531,22 @@ function reviewStateFromRollup(rollup: RollupCheck[] | undefined): OpenPrView["r
 }
 
 /**
+ * W1-T176: has the deterministic `rmd review` post already been ATTEMPTED
+ * and REFUSED for this exact `taskId@headSha`? Scans for a `review.post_refused`
+ * ledger line matching both fields — deliberately NOT `review.post_failed`
+ * (a transient `gh` error, which must keep retrying, never escalate on a
+ * mere network hiccup) and NOT `review.posted` (a real post always flips
+ * GitHub's live rollup away from "zero runs," so `reviewStateFromRollup`
+ * itself carries that outcome on the next read — no ledger check needed).
+ * `taskId` undefined (no `Remudero-Task:` trailer) can never have a
+ * matching ledger line — returns `false`, never a crash.
+ */
+function reviewPostRefusedFor(ledger: Array<Record<string, unknown>>, taskId: string | undefined, headSha: string): boolean {
+  if (!taskId) return false;
+  return ledger.some((l) => l.step === "review.post_refused" && l.task_id === taskId && l.head_sha === headSha);
+}
+
+/**
  * W1-T100 (the #170 fix): failing required-check names + a tail of each one's
  * log — the ci-log fix mode's ONLY input (deriveFixMode/renderFixPrompt,
  * W1-T94). Best-effort: a log-fetch failure degrades to an EMPTY tail
@@ -6787,6 +6803,15 @@ function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): Open
       // W1-T100: the ci-log fix mode's input — only worth fetching when checks
       // are actually red (a PR gate that already needs blocked_ci's rung).
       ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, pr.statusCheckRollup) : undefined,
+      // W1-T176: only meaningful in the zero-runs shape post-review routes on;
+      // cheap to compute unconditionally rather than re-deriving checksState
+      // green/reviewState none here just to gate the ledger scan.
+      reviewPostRefused: reviewPostRefusedFor(ledger, taskId, pr.headRefOid),
+      // W1-T176 (design boundary (ii)): `ghRequiredStatusCheckContexts` fails
+      // SOFT to undefined/empty on an unreadable protection rule — that same
+      // signal must gate the zero-runs discriminator OFF (never assume
+      // permissive on missing information).
+      requiredContextsUnreadable: !requiredContexts || requiredContexts.length === 0,
     };
   });
 }

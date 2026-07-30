@@ -1609,6 +1609,99 @@ test("runSweep: no postReview dep wired -> ledgered stand-down, no crash, no esc
   assert.equal(disposed[0].acted, false);
 });
 
+// ── W1-T176: a required check with ZERO check runs is DETERMINISTIC-ACTION, ──
+//    not blocked-ambiguous — the clarification rung must not spend an operator
+//    round-trip on "post the missing check", a decision the machine can
+//    already make. FIXTURE (real): 2026-07-20 20:11:58Z, run
+//    DAEMON-1784578236497 escalated issue #393 against PR #391 — every other
+//    check SUCCESS, `remudero-review` (a required context) with NO CHECK RUN
+//    AT ALL — with two mis-framed options, while `rmd review 391` was the
+//    actual one-command remedy and the PR merged at 20:16:09Z once it ran.
+
+test("W1-T176 acceptance 1 (the #393/#391 falsifier) — every other check SUCCESS, remudero-review has ZERO check runs -> post-review (DETERMINISTIC-ACTION), escalating NOTHING", async () => {
+  const zeroRunsPr = ungatedGreenPr(); // checksState "green" (every OTHER required check SUCCESS), reviewState "none"
+  const derived = deriveDisposition(zeroRunsPr, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(derived.disposition, "post-review", "a zero-runs required check is decidable, not ambiguous");
+
+  const posted: number[] = [];
+  const deps = fakeDeps({ postReview: (p) => { posted.push(p.prNumber); } });
+  await runSweep([zeroRunsPr], deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(posted, [584], "routes to the SAME deterministic reviewer path `rmd review` drives");
+  assert.equal(deps.escalated.length, 0, "the #393/#391 defect: NOTHING escalates on first sighting");
+});
+
+test("W1-T176 acceptance 2 — a required check that RAN and FAILED still classifies blocked-ambiguous and still escalates (the rung is NARROWED, never removed)", async () => {
+  // A review that RAN and came back failure with no single nameable unmet
+  // criterion — genuinely contradictory, the shape row 7 already escalates.
+  // reviewPostRefused must be irrelevant here: this PR's review context DID
+  // run (reviewState "failure", not "none"), so the zero-runs discriminator
+  // never applies regardless of that field's value.
+  const ranAndFailed = pr({
+    prNumber: 391,
+    prUrl: "url/391",
+    taskId: "W1-T391",
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [],
+    reviewPostRefused: true,
+  });
+  const derived = deriveDisposition(ranAndFailed, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(derived.disposition, "blocked-ambiguous");
+  assert.match(derived.reason, /no actionable unmet criteria/);
+
+  const deps = fakeDeps();
+  await runSweep([ranAndFailed], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(deps.escalated.length, 1, "a genuinely-ran, genuinely-failed check still escalates — never swallowed");
+});
+
+test("W1-T176 acceptance 3a — checksStateFromRollup derives EVERY required context from branch protection, not a hardcoded pair (a third context added later still vetoes)", () => {
+  const threeRequired = [...REQUIRED, "new-required-check"];
+  const rollup: RollupCheckEntry[] = [
+    rollupCheck({ name: "ci-gate", conclusion: "SUCCESS" }),
+    rollupCheck({ name: "remudero-review", conclusion: "SUCCESS" }),
+    rollupCheck({ name: "new-required-check", conclusion: "FAILURE" }),
+  ];
+  assert.equal(
+    checksStateFromRollup(rollup, threeRequired),
+    "red",
+    "a hardcoded two-context check would miss this and silently report green",
+  );
+});
+
+test("W1-T176 acceptance 3b — an unreadable branch-protection read fails CLOSED: the zero-runs discriminator (post-review AND the escalate-on-refusal row) stands down, and the PR still escalates rather than being assumed permissive", () => {
+  const unreadable = ungatedGreenPr({ requiredContextsUnreadable: true });
+  const derived = deriveDisposition(unreadable, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(
+    derived.disposition,
+    "blocked-ambiguous",
+    "an unreadable protection read must never be assumed permissive — it escalates, never silently posts or arms",
+  );
+  assert.notEqual(derived.disposition, "post-review");
+  assert.notEqual(derived.disposition, "mergeable");
+});
+
+test("W1-T176 acceptance 4 — posting the missing check cannot loop: a SECOND absence at the SAME head sha (one deterministic attempt already refused) escalates instead of re-posting", async () => {
+  const alreadyAttempted = ungatedGreenPr({ reviewPostRefused: true });
+  const derived = deriveDisposition(alreadyAttempted, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(derived.disposition, "blocked-ambiguous");
+  assert.match(derived.reason, /refused/);
+
+  const posted: number[] = [];
+  const deps = fakeDeps({ postReview: (p) => { posted.push(p.prNumber); } });
+  await runSweep([alreadyAttempted], deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(posted, [], "FALSIFIER guard: an unbounded post-retry would re-invoke postReview here — it must not");
+  assert.equal(deps.escalated.length, 1, "the second absence escalates instead of silently re-standing-down forever");
+});
+
+test("W1-T176 — a FRESH push (new head sha) after a refusal re-earns exactly one fresh deterministic attempt", () => {
+  // reviewPostRefused is per-headSha ground truth (buildOpenPrViews scans the
+  // ledger for THIS exact taskId@headSha) — a new push mints a new head, so a
+  // caller building the NEXT OpenPrView for the new sha naturally omits the
+  // flag rather than carrying a stale refusal forward.
+  const freshPush = ungatedGreenPr({ headSha: "bbbb222", reviewPostRefused: undefined });
+  assert.equal(deriveDisposition(freshPush, DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review");
+});
+
 // ── W1-T254: per-PR throw containment — one PR's thrown action never aborts the pass ──
 
 test("runSweep: a throwing action does not abort the pass — later PRs still reconcile and the throwing PR is attributed (W1-T254)", async () => {
