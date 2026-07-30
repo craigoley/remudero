@@ -434,7 +434,7 @@ test("W1-T195: escalationCause classifies conflicted > ci-failing > review, matc
   assert.equal(escalationCause(false, false), "review");
 });
 
-test("W1-T195: two rungs observing the SAME (PR, head sha, cause) produce ONE escalation, the second appending", () => {
+test("W1-T195 claim 1: the fix-rung-exhausted path and the clarification path, both fired against one PR at one head sha for one cause, yield exactly ONE open issue and the second observer's state appears as a comment on it (the #412/#413, #420/#421, #427/#428, #433/#434, #415/#416, #390/#395 six-same-PR-pair falsifier, four pairs 64-74 seconds apart)", () => {
   const issues = fakeIssueStore();
   const path = ledgerPath();
   const prUrl = "https://github.com/craigoley/remudero/pull/433";
@@ -486,7 +486,59 @@ test("W1-T195: two rungs observing the SAME (PR, head sha, cause) produce ONE es
   assert.equal(lines.filter((l) => l.step === "escalation.deduped").length, 1);
 });
 
-test("W1-T195: a NEW head sha on the same PR opens its OWN escalation — a fresh push is never suppressed", () => {
+test("W1-T195 claim 2: the appended comment carries the second rung's own view (strike count, or the no-single-unmet-criterion finding), not merely a 'duplicate' marker — #433 knew two strikes had been spent, #434 knew there was no single nameable unmet criterion, and an operator needs both to decide", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+  const prUrl = "https://github.com/craigoley/remudero/pull/433";
+  const headSha = "deadbeef00112233445566778899aabbccddeef";
+
+  // #433's shape: the fix rung knows TWO STRIKES had been spent.
+  const first = escalate(
+    escalation({
+      taskId: "W1-T179",
+      headSha,
+      cause: escalationCause(false, false),
+      summary: `blocked_review fix rung exhausted (2 strike(s)) — ${prUrl}`,
+      detail: "the fix rung dispatched two strikes had been spent and the review gate is still failing.",
+    }),
+    { issues, ledgerPath: path, runId: "RUN-1" },
+  );
+
+  // #434's shape: the clarification rung knows there is NO SINGLE NAMEABLE UNMET
+  // CRITERION — a DIFFERENT fact than the strike count, which an operator needs
+  // alongside the first rung's finding to decide, not instead of it.
+  const second = escalate(
+    escalation({
+      taskId: "W1-T179",
+      headSha,
+      cause: escalationCause(false, false),
+      summary: `PR ${prUrl} needs a clarification — review failing with no actionable unmet criteria`,
+      detail: "the clarification rung found there was no single nameable unmet criterion to name.",
+    }),
+    { issues, ledgerPath: path, runId: "RUN-2" },
+  );
+
+  assert.equal(second, first, "still one issue — the assertions below are about what survives on it");
+  assert.equal(issues.comments.length, 1, "the second rung's observation is never silently dropped");
+  // Dropping the second observation would lose what #434 uniquely knew — assert its
+  // EXACT finding (never merely a bare "duplicate" marker) survives on the comment.
+  assert.match(
+    issues.comments[0].body,
+    /no single nameable unmet criterion/,
+    "#434's own finding — no single nameable unmet criterion — is preserved verbatim in the comment",
+  );
+  assert.doesNotMatch(
+    issues.comments[0].body,
+    /^duplicate$/m,
+    "never collapsed to a bare 'duplicate' marker — the second rung's actual view is what's posted",
+  );
+  // #433's own finding (two strikes had been spent) is what OPENED the issue in the
+  // first place — still readable on it via renderIssueBody's own detail passthrough,
+  // so an operator reading the thread has BOTH rungs' findings, not just the second's.
+  assert.equal(issues.calls[0].body.includes("two strikes had been spent"), true);
+});
+
+test("W1-T195 claim 3a: the same PR escalating after a new push opens a fresh issue — keying on PR number alone would suppress a genuinely new block on a new push", () => {
   const issues = fakeIssueStore();
   const path = ledgerPath();
   const prUrl = "https://github.com/craigoley/remudero/pull/500";
@@ -519,7 +571,7 @@ test("W1-T195: a NEW head sha on the same PR opens its OWN escalation — a fres
   assert.equal(issues.comments.length, 0, "no comment fires — this is a genuinely new block, not a duplicate");
 });
 
-test("W1-T195: a DIFFERENT cause class on the SAME head sha opens its OWN escalation", () => {
+test("W1-T195 claim 3b: the same PR escalating for a different cause class on the same sha opens a fresh issue — dedup that hides live work is worse than the duplication it removes", () => {
   const issues = fakeIssueStore();
   const path = ledgerPath();
   const prUrl = "https://github.com/craigoley/remudero/pull/501";
@@ -552,7 +604,7 @@ test("W1-T195: a DIFFERENT cause class on the SAME head sha opens its OWN escala
   assert.equal(issues.comments.length, 0);
 });
 
-test("W1-T195: a CLOSED escalation with a matching (PR, head sha, cause) does not suppress a genuine recurrence", () => {
+test("W1-T195 claim 4: with the prior issue CLOSED and the condition recurring on the same sha, a new escalation opens — treating a closed issue as a dedup hit would silence a condition the operator has already tried to resolve, the inverse and more dangerous failure", () => {
   const issues = fakeIssueStore();
   const path = ledgerPath();
   const prUrl = "https://github.com/craigoley/remudero/pull/502";
