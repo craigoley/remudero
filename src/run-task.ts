@@ -5251,6 +5251,72 @@ export function escalateCircuitBreak(
 }
 
 /**
+ * P34 clause (c), W1-T249: the daemon's `onHeadroomBreach` hook, called when a
+ * weekly (or session) window first crosses the operator reserve. Dispatch is
+ * ALREADY paused by the time this fires (`runDaemon`'s own in-process idle,
+ * driven by the SAME reading) — this is a pure notification, mirroring
+ * `escalateCircuitBreak` immediately above rather than a second mechanism.
+ *
+ * CROSS-BOOT DEDUP keyed on `resetsAt` — NOT task id (there is no task; the
+ * breach is a property of the account, not one candidate change) and NOT a
+ * per-process flag alone (`runDaemon`'s own `headroomReserveEscalated` already
+ * bounds ONE daemon run, but a restart forgets it and would re-open the SAME
+ * issue for the SAME still-unresolved window). The window's own `resets_at` is
+ * the natural episode key: unchanged for as long as the breach persists, and a
+ * NEW value the moment the window actually resets, so a later breach escalates
+ * again rather than staying silenced by a stale marker (the same "write the
+ * dedup key whether or not delivery succeeded" discipline
+ * `escalateCircuitBreak` documents, so a throwing `gh` is never retried into an
+ * unbounded relaunch loop).
+ */
+export function escalateHeadroomReserve(
+  info: { window: string; percentUsed: number; limitPct: number; resetsAt: string },
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+): void {
+  const already = readLedgerLines(ctx.ledgerPath).some(
+    (l) => l.step === "daemon.headroom_reserve.escalated" && l.resets_at === info.resetsAt,
+  );
+  if (already) return;
+  const issueUrl = tryEscalate(
+    {
+      class: "HARD_STOP",
+      taskId: "daemon",
+      runId: ctx.runId,
+      summary: `weekly headroom reserve reached — dispatch paused until ${info.resetsAt}`,
+      detail:
+        `P34 clause (c): ${info.window} is at ${info.percentUsed}% used (>= the ${info.limitPct}% operator ` +
+        `reserve ceiling). Dispatch is paused — drain-and-hold, in-flight work finishes, no new spawn — until ` +
+        `the window resets at ${info.resetsAt}; imputed ledger dollar figures never gate this decision, only ` +
+        `the subscription window itself does.`,
+      options: [
+        {
+          label: "wait for reset",
+          detail: `Dispatch resumes on its own once the window resets at ${info.resetsAt} — no action needed.`,
+        },
+        {
+          label: "raise the reserve",
+          detail: "If 5% is too conservative for this account, retune the HEADROOM_LIMIT_PCT policy curve.",
+        },
+      ],
+      recommendation: "wait for reset",
+    },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "daemon",
+    step: "daemon.headroom_reserve.escalated",
+    resets_at: info.resetsAt,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
  * W1-T206: shared dispatch-breaker gate for drainCommand/daemonCommand — ONE
  * {@link DispatchBreakerCache} per invocation (never rebuilt per tick/per task, so a
  * same-process rotation gets caught as it happens — see the cache's own doc), memoized
@@ -5896,6 +5962,9 @@ export async function daemonCommand(
             skipGitSync: !!flagValue(rest, "--plan"),
           }),
         readUsage: () => readUsageSnapshot(config),
+        // P34 clause (c), W1-T249: the reserve gate's notification — dispatch is
+        // already paused (runDaemon's own in-process idle) by the time this fires.
+        onHeadroomBreach: (info) => escalateHeadroomReserve(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         checkStop: () => stopDetail(config.root),
         checkPause: () => pauseDetail(config.root),
         // Console UP NEXT write-actions (fb-1784988460437-9daa9b): the daemon

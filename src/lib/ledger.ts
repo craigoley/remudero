@@ -211,6 +211,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
   "pr.opened",
   "dispatch.circuit_broken.escalated",
+  "daemon.headroom_reserve.escalated",
   "verdict",
   "verdict.merged",
   "correction.provenance",
