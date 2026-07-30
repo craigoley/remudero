@@ -12,7 +12,7 @@
 // Protocol audit plumbing beyond a Playwright page, which this suite already needs for the
 // responsive/interaction bars.
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
@@ -138,18 +138,46 @@ let browser: Browser;
 // `before`'s first await, so `after` can always see it.
 let browserPromise: Promise<Browser> | undefined;
 before(async () => {
-  browserPromise = chromium.launch({ args: ["--no-sandbox"] });
-  browser = await browserPromise;
+  // W1-T202 fix round: --disable-dev-shm-usage guards against a well-known headless-Chromium-in-
+  // CI crash class -- a constrained runner's small /dev/shm overflows under this file's now-
+  // heavier sequence of contexts/pages (13 tests, several opening a fresh context each), and a
+  // crashed renderer surfaces as an inexplicable mid-file test failure that never reproduces on a
+  // roomier local machine. Falls back to /tmp-backed shared memory instead, at a small perf cost.
+  browserPromise = chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
+  try {
+    browser = await browserPromise;
+  } catch {
+    // W1-T202 round 2: ONE bounded retry around the launch itself, after a short backoff -- round
+    // 1's --disable-dev-shm-usage did not clear a repeated, environment-only review-gate FAIL on
+    // this exact file (identical on a rerun, never reproduced locally, stressed or not -- see this
+    // task's own PR body), consistent with a transient launch crash under contention that a single
+    // retry absorbs without masking a CONSISTENTLY broken launch (a second failure still throws and
+    // fails `before`, same as today). `browserPromise` is REASSIGNED here, synchronously, before its
+    // own await -- so the teardown-safety invariant above (`after` always awaits the LATEST launch
+    // attempt, never a stale reference) holds for the retry exactly as it does for the first try.
+    await new Promise((r) => setTimeout(r, 250));
+    browserPromise = chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
+    browser = await browserPromise;
+  }
 });
 after(async () => {
   const launched = await browserPromise;
   await launched?.close();
 });
 
+// W1-T202: the write token NEVER rides the URL bootstrap anymore — the bookmark carries only the
+// read token (see serve.ts's shell bootstrap). Passing WRITE_TOKEN here simulates an operator who
+// already pasted it into THIS tab earlier in the session: it is seeded into sessionStorage BEFORE
+// the page's own script runs (page.addInitScript), never appended to the navigated URL.
 async function openShell(base: string, token: string = READ_TOKEN): Promise<Page> {
   const context = await browser.newContext();
   const page = await context.newPage();
-  await page.goto(`${base}/?token=${token}`);
+  if (token !== READ_TOKEN) {
+    await page.addInitScript((writeToken) => {
+      window.sessionStorage.setItem("rmd-console-write-token", writeToken);
+    }, token);
+  }
+  await page.goto(`${base}/?token=${READ_TOKEN}`);
   // wait for the first poll's real data to land (not the static "loading…" placeholder) —
   // the same "exercise the real consuming client" discipline as the fetch, not a fixed sleep.
   await page.waitForFunction(shellBootReady);
@@ -203,7 +231,10 @@ test("fleet-control read-back: RUNNING vs PAUSED vs STOPPED render visibly disti
   const deps = fixtureDeps(root);
   await withShell(deps, async (base) => {
     async function modeState() {
-      const page = await openShell(base);
+      // W1-T202: this test proves MODE read-back (running/paused/stopped), not write-scope
+      // gating — it needs a write-capable session so pause/resume/stop are ever enableable at
+      // all, exactly as the pre-W1-T202 URL-bootstrap model always granted them here.
+      const page = await openShell(base, WRITE_TOKEN);
       const state = await page.evaluate(() => ({
         pausePressed: document.getElementById("pause-btn")!.getAttribute("aria-pressed"),
         pauseDisabled: (document.getElementById("pause-btn") as HTMLButtonElement).disabled,
@@ -494,6 +525,115 @@ test("W1-T223: the section header is the whole click/keyboard toggle target -- t
 
       await page.keyboard.press(" ");
       await page.waitForFunction(() => document.getElementById("recent-toggle")?.getAttribute("aria-expanded") === "false");
+    } finally {
+      await page.context().close();
+    }
+  });
+});
+
+// ── W1-T202: the console bookmark is READ-ONLY after the token-hygiene fix -- the shell must
+// accept the write token once and hold it client-side, or every NEEDS-ME write action 401s ──────
+
+test("a console loaded with the READ token alone renders the board fully and shows every write affordance as explicitly unavailable with a stated reason, rather than rendering it armed", async () => {
+  const root = tmpRoot();
+  await withShell(fixtureDeps(root), async (base) => {
+    const page = await openShell(base); // READ_TOKEN only -- no write token seeded anywhere
+    try {
+      // the board itself still renders FULLY off the read token alone (this is a view, not a
+      // failure) -- the summary line is real data, never the "…"/skeleton placeholder.
+      await page.waitForFunction(() => (document.getElementById("summary")?.textContent ?? "") !== "" && !(document.getElementById("summary")?.textContent ?? "").includes("…"));
+
+      const state = await page.evaluate(() => ({
+        pauseDisabled: (document.getElementById("pause-btn") as HTMLButtonElement)?.disabled,
+        pauseTitle: (document.getElementById("pause-btn") as HTMLButtonElement)?.title ?? "",
+        resumeDisabled: (document.getElementById("resume-btn") as HTMLButtonElement)?.disabled,
+        stopDisabled: (document.getElementById("stop-btn") as HTMLButtonElement)?.disabled,
+        stopTitle: (document.getElementById("stop-btn") as HTMLButtonElement)?.title ?? "",
+        quietHoursDisabled: (document.getElementById("quiet-hours") as HTMLInputElement)?.disabled,
+        drainDisabled: (document.getElementById("drain-now-btn") as HTMLButtonElement)?.disabled,
+        writeTokenStatus: document.getElementById("write-token-status")?.textContent ?? "",
+        writeTokenFormHidden: (document.getElementById("write-token-form") as HTMLElement)?.hidden,
+        clearBtnHidden: (document.getElementById("write-token-clear-btn") as HTMLElement)?.hidden,
+      }));
+      assert.equal(state.pauseDisabled, true, "Pause must render disabled, never armed, with only a read token");
+      assert.match(state.pauseTitle, /read-only/i, "the disabled control must state WHY, not just that it is disabled");
+      assert.equal(state.resumeDisabled, true);
+      assert.equal(state.stopDisabled, true);
+      assert.match(state.stopTitle, /read-only/i);
+      assert.equal(state.quietHoursDisabled, true);
+      assert.equal(state.drainDisabled, true);
+      assert.match(state.writeTokenStatus, /read-only/i);
+      assert.equal(state.writeTokenFormHidden, false, "the read-only state offers the write-token entry form");
+      assert.equal(state.clearBtnHidden, true, "there is nothing to clear -- no write token is held");
+    } finally {
+      await page.context().close();
+    }
+  });
+});
+
+test("the write token is never written into the URL, a ledger line, or a log line at any point in the flow — asserted against the rendered shell and the emitted ledger steps", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root);
+  await withShell(deps, async (base) => {
+    const page = await openShell(base); // boots on the READ token alone, exactly like a real bookmark
+    try {
+      assert.doesNotMatch(page.url(), new RegExp(WRITE_TOKEN), "the write token must never appear in the navigated URL");
+
+      // paste the write token into the shell's own entry form -- the ONLY sanctioned channel.
+      await page.fill("#write-token-input", WRITE_TOKEN);
+      await page.click("#write-token-form button[type=submit]");
+      await page.waitForFunction(() => (document.getElementById("write-token-clear-btn") as HTMLElement)?.hidden === false);
+
+      // the URL must STILL carry only the read token -- entering a write token never round-trips
+      // it back into history/location (the bookmark never gains write power).
+      assert.doesNotMatch(page.url(), new RegExp(WRITE_TOKEN));
+      assert.match(page.url(), new RegExp(`token=${READ_TOKEN}`));
+
+      // fire a real write action so a ledger line actually gets emitted, then inspect it.
+      await page.click("#pause-btn");
+      await page.waitForFunction(() => document.getElementById("pause-btn")?.getAttribute("aria-pressed") === "true");
+
+      const ledgerContents = readFileSync(deps.ledgerPath, "utf8");
+      assert.doesNotMatch(ledgerContents, new RegExp(WRITE_TOKEN), "the write token must never reach a ledger line");
+
+      // the console's own localStorage snapshot cache is the other persisted-client-state surface
+      // this shell writes (W1-T154) -- it must not carry the credential either.
+      const cachedSnapshot = await page.evaluate(() => window.localStorage.getItem("rmd-console-snapshot-v1"));
+      if (cachedSnapshot) assert.doesNotMatch(cachedSnapshot, new RegExp(WRITE_TOKEN));
+    } finally {
+      await page.context().close();
+    }
+  });
+});
+
+test("clearing the stored write token returns the console to the read-only rendering without a reload", async () => {
+  const root = tmpRoot();
+  await withShell(fixtureDeps(root), async (base) => {
+    const page = await openShell(base, WRITE_TOKEN); // simulates a tab that already holds it
+    try {
+      await page.waitForFunction(() => (document.getElementById("pause-btn") as HTMLButtonElement)?.disabled === false);
+
+      // a marker that ONLY survives in-page -- a real reload/navigation would wipe it, proving
+      // the revert below happens live, client-side, with no round trip to GET /.
+      await page.evaluate(() => { (window as unknown as { __t202Marker: string }).__t202Marker = "still-here"; });
+
+      await page.click("#write-token-clear-btn");
+      await page.waitForFunction(() => (document.getElementById("pause-btn") as HTMLButtonElement)?.disabled === true);
+
+      const state = await page.evaluate(() => ({
+        marker: (window as unknown as { __t202Marker?: string }).__t202Marker,
+        stopDisabled: (document.getElementById("stop-btn") as HTMLButtonElement).disabled,
+        quietHoursDisabled: (document.getElementById("quiet-hours") as HTMLButtonElement).disabled,
+        storedToken: window.sessionStorage.getItem("rmd-console-write-token"),
+        clearBtnHidden: (document.getElementById("write-token-clear-btn") as HTMLElement).hidden,
+        formHidden: (document.getElementById("write-token-form") as HTMLElement).hidden,
+      }));
+      assert.equal(state.marker, "still-here", "clearing the token must never reload/navigate the page");
+      assert.equal(state.stopDisabled, true);
+      assert.equal(state.quietHoursDisabled, true);
+      assert.equal(state.storedToken, null, "the token must actually be removed from sessionStorage, not just hidden");
+      assert.equal(state.clearBtnHidden, true);
+      assert.equal(state.formHidden, false);
     } finally {
       await page.context().close();
     }

@@ -20,7 +20,15 @@
 // self-contained read of the page's global `document`. test/test-with-retry.test.ts unit-tests
 // this same function (no Playwright/browser dependency) by stubbing `globalThis.document` with a
 // minimal `getElementById` stub before calling it directly in this Node process.
+//
+// W1-T202: ALSO waits for the boot write-scope probe to resolve (document.body.dataset.
+// writeScopeResolved === "1"), not just the first real paint. Before this, every suite that
+// interacted with a write control raced the SAME probe individually (see the flake-fix comment on
+// test/serve.shell-ux.test.ts's markHandledPresence) -- folding it into the one shared boot
+// barrier means every caller inherits a fully-settled write-gating state (fleet-control buttons'
+// `disabled`, NEEDS ME/UP NEXT row affordances) instead of re-deriving its own wait.
 export function shellBootReady(): boolean {
   const el = document.getElementById("top-status");
-  return el !== null && el.textContent !== null && !el.textContent.includes("loading");
+  if (el === null || el.textContent === null || el.textContent.includes("loading")) return false;
+  return document.body.dataset.writeScopeResolved === "1";
 }
