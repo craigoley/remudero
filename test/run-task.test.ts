@@ -97,6 +97,7 @@ import {
   type SynthesizeGitGateway,
 } from "../src/lib/onboard/synthesize.js";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
+import type { recordDecision } from "../src/lib/feedback-landing.js";
 import type { Config } from "../src/lib/config.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
@@ -333,6 +334,176 @@ test(
     }
   },
 );
+
+// ── W1-T191: DECISION_REQUEST auto-choose no longer appends to THIS checkout's own
+// DECISIONS.md (a real working-tree write that made checkCliFreshness refuse every
+// non-exempt `rmd` verb once the checkout also fell behind origin/main) — it calls the
+// injectable `recordDecision` (feedback-landing.js), which lands a per-resolution shard via
+// the SAME commit-bridge mechanism W1-T243 proved for `plan/feedback/**`, WITHOUT ever
+// writing to repoRoot's real working tree. These drive the REAL runTask() through the REAL
+// DECISION_REQUEST branch (never a unit test of the branch's code in isolation) — only
+// `recordDecision` itself is faked, so this proves the WIRING (right fields, right gating),
+// while feedback-landing.test.ts proves the real git/gh mechanics recordDecision performs. ──
+
+test("W1-T191: runTask's DECISION_REQUEST branch calls the injectable recordDecision with the right fields for a medium-risk decision, and its landed status reaches the decision.autochoose ledger line", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "runtask-decision-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+  followupGitFixture(root);
+
+  const FIXED_TS = 1785000000001;
+  const branch = `run-T-FOLLOWUP-${FIXED_TS}`;
+  const fakeBinDir = followupFakeGh(branch);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${fakeBinDir}:${savedPath}`;
+  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) {
+      return result({ sessionId: "s-recon", text: "RECON REPORT\nOBSERVED: nothing notable\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n" });
+    }
+    if (spawnCalls.length === 2) {
+      // Implement's FIRST reply is a DECISION_REQUEST — a schema/migration choice trips
+      // shouldRecordDecision's medium-risk signal, so the record gate fires.
+      return result({
+        sessionId: "s-implement",
+        text: "DECISION_REQUEST\n- Add a schema migration column (RECOMMENDED)\n- Do nothing\n",
+      });
+    }
+    // The resumed implement call, after the decision is auto-chosen and (fake-)recorded.
+    return result({ sessionId: "s-implement", text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/2\n" });
+  };
+
+  const recordDecisionCalls: Array<{ root: string; params: Parameters<typeof recordDecision>[1] }> = [];
+  const fakeRecordDecision: typeof recordDecision = (calledRoot, params) => {
+    recordDecisionCalls.push({ root: calledRoot, params });
+    return { landed: true, files: [`plan/decisions.d/${params.taskId}-${params.runId}.md`], prUrl: "https://github.com/acme/remudero/pull/900" };
+  };
+
+  try {
+    const res = await runTask("T-FOLLOWUP", {
+      skipGitSync: true,
+      planPath,
+      config,
+      github: FOLLOWUP_OFFLINE_GITHUB,
+      spawn,
+      containmentExec: followupHoldingContainmentExec,
+      isolationExec: followupCleanIsolationExec,
+      recordDecision: fakeRecordDecision,
+    });
+
+    assert.equal(res.verdict, "blocked_ci");
+    assert.equal(spawnCalls.length, 3, "recon, implement (DECISION_REQUEST), resumed implement (REPORT+PR)");
+    assert.equal(recordDecisionCalls.length, 1, "recordDecision must be called exactly once for a medium-risk decision");
+
+    const call = recordDecisionCalls[0];
+    assert.equal(call.params.taskId, "T-FOLLOWUP");
+    assert.equal(call.params.runId, `T-FOLLOWUP-${FIXED_TS}`);
+    assert.deepEqual(call.params.options, ["Add a schema migration column", "Do nothing"]);
+    assert.equal(call.params.chosen, "Add a schema migration column");
+    assert.equal(call.params.band, "medium");
+    assert.ok(call.root.length > 0, "recordDecision is called with repoRoot, never the worker's own worktree");
+
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const autochoose = ledger.find((l) => l.step === "decision.autochoose");
+    assert.ok(autochoose, "decision.autochoose must still fire — the receipt half never changes");
+    assert.equal(autochoose.recorded, true);
+    assert.equal(autochoose.risk_band, "medium");
+    assert.equal(autochoose.landed, true, "the fake recordDecision's landed:true must reach the ledger line");
+  } finally {
+    dateNowSpy.mock.restore();
+    process.env.PATH = savedPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T191: runTask's DECISION_REQUEST branch never calls recordDecision for a trivial, low-risk decision — ledger-only stays ledger-only, no wasted git/gh work", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "runtask-decision-lowrisk-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+  followupGitFixture(root);
+
+  const FIXED_TS = 1785000000002;
+  const branch = `run-T-FOLLOWUP-${FIXED_TS}`;
+  const fakeBinDir = followupFakeGh(branch);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${fakeBinDir}:${savedPath}`;
+  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) {
+      return result({ sessionId: "s-recon", text: "RECON REPORT\nOBSERVED: nothing notable\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n" });
+    }
+    if (spawnCalls.length === 2) {
+      // A trivial filename pick — no risk keyword, no reversibility caveat anywhere in it.
+      return result({ sessionId: "s-implement", text: "DECISION_REQUEST\n- Name the file utils.ts (RECOMMENDED)\n- Name the file helpers.ts\n" });
+    }
+    return result({ sessionId: "s-implement", text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/3\n" });
+  };
+
+  const recordDecisionCalls: unknown[] = [];
+  const fakeRecordDecision: typeof recordDecision = (calledRoot, params) => {
+    recordDecisionCalls.push({ calledRoot, params });
+    return { landed: true, files: [] };
+  };
+
+  try {
+    const res = await runTask("T-FOLLOWUP", {
+      skipGitSync: true,
+      planPath,
+      config,
+      github: FOLLOWUP_OFFLINE_GITHUB,
+      spawn,
+      containmentExec: followupHoldingContainmentExec,
+      isolationExec: followupCleanIsolationExec,
+      recordDecision: fakeRecordDecision,
+    });
+
+    assert.equal(res.verdict, "blocked_ci");
+    assert.equal(recordDecisionCalls.length, 0, "a trivial low-risk decision must stay ledger-only — recordDecision must never be invoked");
+
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const autochoose = ledger.find((l) => l.step === "decision.autochoose");
+    assert.ok(autochoose, "decision.autochoose must still fire even when ledger-only");
+    assert.equal(autochoose.recorded, false);
+    assert.equal(autochoose.risk_band, "low");
+    assert.equal(autochoose.landed, false);
+  } finally {
+    dateNowSpy.mock.restore();
+    process.env.PATH = savedPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T191 acceptance 4: the three already-observed decision records (found 2026-07-21 in a
+// dirty operator checkout, uncommitted) are preserved in the repository, not assumed away. ──
+
+test("W1-T191 acceptance 4: the three already-observed 2026-07-20/21 decision resolutions are present in the committed DECISIONS.md", () => {
+  const decisionsMd = readFileSync(join(new URL("..", import.meta.url).pathname, "DECISIONS.md"), "utf8");
+  assert.match(decisionsMd, /## 2026-07-20T20:36:14\.454Z — W1-T156 \(W1-T156-1784579460422\)/);
+  assert.match(decisionsMd, /## 2026-07-20T22:31:09\.231Z — W1-T128 \(W1-T128-1784586484416\)/);
+  assert.match(decisionsMd, /## 2026-07-21T01:18:25\.612Z — W1-T136 \(W1-T136-1784596357757\)/);
+});
+
+// ── W1-T191 acceptance 7: the fix does not widen the service carve-out or exempt further
+// verbs from the freshness gate — the gate is correct, the writers were the defect. ────────
+
+test("W1-T191 acceptance 7: self-sync.ts's service carve-out is untouched — DIRT NEVER BLOCKS A SERVICE still stands, verbatim", () => {
+  const selfSyncSrc = readFileSync(fileURLToPath(new URL("../src/lib/self-sync.ts", import.meta.url)), "utf8");
+  assert.match(selfSyncSrc, /DIRT NEVER BLOCKS A SERVICE/);
+});
 
 // ── W1-T37: the plan is RETRIEVED, not injected — the recon prompt carries a PLAN INDEX, never the
 // plan body (MASTER-PLAN §8A Tier 2). ────────────────────────────────────────────────────────────

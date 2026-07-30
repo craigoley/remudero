@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -146,7 +146,7 @@ import {
   FeedbackError,
   type FeedbackEntry,
 } from "./lib/feedback.js";
-import { findPendingLandingPr } from "./lib/feedback-landing.js";
+import { findPendingLandingPr, recordDecision } from "./lib/feedback-landing.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
 import {
@@ -2900,11 +2900,19 @@ async function runTask(
      *  this file's injectable `spawn` param), so a genuine CAPPED verdict from a real
      *  reviewer round-trip cannot be produced deterministically in a test. */
     runReview?: (args: Parameters<typeof runReview>[0]) => ReturnType<typeof runReview>;
+    /** Injectable decision-record writer+lander (W1-T191, write site 1) — lets a behavioral
+     *  test drive a REAL runTask() through the DECISION_REQUEST auto-choose branch and assert
+     *  exactly what it writes/lands, without ever shelling out to a real git/gh. Default: the
+     *  real {@link recordDecision} (feedback-landing.js), which writes
+     *  `plan/decisions.d/<taskId>-<runId>.md` and lands it via the shared decisions-landing
+     *  bridge — the same mechanism W1-T243 proved for `plan/feedback/**`. */
+    recordDecision?: typeof recordDecision;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
   const spawn = opts.spawn ?? spawnWorker;
   const runReviewFn = opts.runReview ?? runReview;
+  const recordDecisionFn = opts.recordDecision ?? recordDecision;
   const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = ledgerPathFor(config);
   const owner = resolveOwner();
@@ -3395,28 +3403,45 @@ async function runTask(
     const decision = parseDecisionRequest(fullText(impl));
     if (decision && !parseReport(fullText(impl))?.prUrl) {
       const chosen = decision.recommended ?? decision.options[0] ?? "(first option)";
-      // W1-T32: DECISIONS.md hygiene. Every DECISION_REQUEST is auto-chosen and
+      // W1-T32: decision-record hygiene. Every DECISION_REQUEST is auto-chosen and
       // ledgered — that never changes — but only decisions worth a human's
       // future attention (risk >= medium, or an explicit reversibility
-      // caveat) get PROMOTED to the durable, human-read record. A trivial
+      // caveat) get PROMOTED to a durable, human-read record. A trivial
       // filename pick stays ledger-only instead of burying real decisions.
       const recordVerdict = shouldRecordDecision(decision);
+      let landed = false;
       if (recordVerdict.record) {
-        appendFileSync(
-          join(repoRoot, "DECISIONS.md"),
-          `\n## ${new Date().toISOString()} — ${taskId} (${runId})\n` +
-            `- Options: ${decision.options.join(" | ")}\n` +
-            `- Chosen (RECOMMENDED, auto): ${chosen}\n` +
-            `- Risk: ${recordVerdict.band} (${recordVerdict.reason})\n` +
-            `- Rollback: revert the PR.\n`,
-        );
+        // W1-T191: one shard per resolution (`plan/decisions.d/<taskId>-<runId>.md`), never
+        // the shared `DECISIONS.md` append this replaces — concurrent runs across different
+        // tasks/run ids can never collide on the same path. Harness-owned and deterministic
+        // (never delegated to the worker's own commit — the resume prompt below never even
+        // mentions this file), and best-effort landed via the SAME commit-bridge mechanism
+        // W1-T243 proved for `plan/feedback/**`, so `repoRoot` never sits dirty waiting for
+        // an operator to notice (the defect this task fixes).
+        landed = recordDecisionFn(repoRoot, {
+          taskId,
+          runId,
+          options: decision.options,
+          chosen,
+          band: recordVerdict.band,
+          reason: recordVerdict.reason,
+        }).landed;
       }
-      log("decision.autochoose", { chosen, recorded: recordVerdict.record, risk_band: recordVerdict.band });
+      log("decision.autochoose", { chosen, recorded: recordVerdict.record, risk_band: recordVerdict.band, landed });
       say(
-        `DECISION_REQUEST auto-chose: ${chosen} (${recordVerdict.record ? "recorded in DECISIONS.md" : "ledger-only, " + recordVerdict.band + " risk"})`,
+        `DECISION_REQUEST auto-chose: ${chosen} (${
+          recordVerdict.record
+            ? `recorded in plan/decisions.d/ — ${landed ? "landed" : "landing pending"}`
+            : "ledger-only, " + recordVerdict.band + " risk"
+        })`,
       );
       impl = account(
-        await spawnWorker({
+        // W1-T191: this resumed spawn used to call the real `spawnWorker` directly, bypassing
+        // the injectable `spawn` (`opts.spawn ?? spawnWorker`) every OTHER spawn call site in
+        // this function uses — the DECISION_REQUEST resume branch was consequently untestable
+        // in isolation (no behavioral test could drive it without a real Claude subprocess).
+        // Production behavior is unchanged: `spawn` defaults to the exact same `spawnWorker`.
+        await spawn({
           cwd: worktreePath,
           permissionMode: "bypassPermissions",
           settingsFile,
@@ -6511,6 +6536,10 @@ export async function serveCommand(
       ledgerPath,
       github: ghTraceGateway(self.owner, self.repo),
       statusGithub: boardGithub,
+      // W1-T191: arm the real feedback-landing bridge for POST /v1/feedback/decision — an
+      // operator's accept/reject click writes against `repoRoot` (the daemon's own checkout)
+      // and, without this, leaves it dirty until the next `git checkout --`/reset wipes it.
+      feedbackLand: {},
     },
     ledgerPath,
     issues: ghIssueCloser(),

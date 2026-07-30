@@ -5,8 +5,19 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { captureFeedback, feedbackEntryPath, readFeedbackEntry } from "../src/lib/feedback.js";
-import { LANDING_BRANCH, LANDING_PR_TITLE, findPendingLandingPr, landFeedback } from "../src/lib/feedback-landing.js";
+import { captureFeedback, feedbackEntryPath, readFeedbackEntry, setFeedbackStatus } from "../src/lib/feedback.js";
+import {
+  DECISIONS_LANDING_BRANCH,
+  DECISIONS_LANDING_PR_TITLE,
+  LANDING_BRANCH,
+  LANDING_PR_TITLE,
+  decisionRecordContent,
+  decisionRecordRelPath,
+  findPendingLandingPr,
+  landFeedback,
+  recordDecision,
+} from "../src/lib/feedback-landing.js";
+import { checkCliFreshness } from "../src/lib/self-sync.js";
 import { missingFeedbackMessage } from "../src/lib/triage.js";
 import { triageCommand } from "../src/run-task.js";
 
@@ -572,4 +583,211 @@ test("landFeedback's full commit message (header + body) passes the REAL commitl
   const message = execFileSync("git", ["--git-dir", bareOrigin, "log", "-1", "--format=%B", LANDING_BRANCH], { encoding: "utf8" });
   const result = lint(message);
   assert.equal(result.status, 0, `landing commit message must pass commitlint:\n${message}\n${result.stdout}${result.stderr}`);
+});
+
+// ── W1-T191: TWO WRITE PATHS DIRTY THE DAEMON'S OWN CHECKOUT ───────────────────────────────
+//
+// decision.autochoose used to `appendFileSync(join(repoRoot, "DECISIONS.md"), ...)` — a real
+// working-tree write in the checkout `run-task`/`drain` themselves run from, which
+// `checkCliFreshness` (self-sync.ts) then reads as "dirty" on every subsequent non-exempt
+// `rmd` invocation. `recordDecision` replaces that append with a per-resolution shard
+// (`plan/decisions.d/<taskId>-<runId>.md`) landed via the SAME commit-bridge mechanism
+// W1-T243 already proved for `plan/feedback/**` — DELIBERATELY never written to `root`'s real
+// working tree at all (not just "cleaned up after" — never put there), so `root` never picks
+// up so much as an untracked file from this call.
+
+test("W1-T191 acceptance 1: recordDecision reaches a COMMITTED artifact on origin — never root's working tree", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  const { gh } = fakeGh("https://github.com/o/r/pull/100");
+
+  const result = recordDecision(
+    root,
+    { taskId: "T1", runId: "T1-111", options: ["a", "b"], chosen: "a", band: "medium", reason: "medium-risk signal" },
+    { gh },
+  );
+
+  assert.equal(result.landed, true);
+  const rel = decisionRecordRelPath("T1", "T1-111");
+  assert.deepEqual(result.files, [rel]);
+
+  // Never touched root's real working tree — no local file, no directory, at all.
+  assert.equal(existsSync(join(root, rel)), false, "recordDecision must never write plan/decisions.d/ to root's real working tree");
+  assert.equal(existsSync(join(root, "plan", "decisions.d")), false);
+  assert.equal(
+    execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" }).trim(),
+    "",
+    "root's own working tree must stay CLEAN — this is the checkCliFreshness dirt this task removes",
+  );
+
+  // But the record IS on the shared decisions-landing branch, as a real git-durable commit.
+  const onBranch = execFileSync("git", ["--git-dir", bareOrigin, "show", `${DECISIONS_LANDING_BRANCH}:${rel}`], {
+    encoding: "utf8",
+  });
+  assert.match(onBranch, /Chosen \(RECOMMENDED, auto\): a/);
+  assert.match(onBranch, /Risk: medium \(medium-risk signal\)/);
+});
+
+test("W1-T191 acceptance 3: a decision record survives even if root's checkout is destroyed by an ordinary git hygiene command", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  const { gh } = fakeGh("https://github.com/o/r/pull/101");
+  const result = recordDecision(
+    root,
+    { taskId: "T2", runId: "T2-222", options: ["x"], chosen: "x", band: "high", reason: "irreversible" },
+    { gh },
+  );
+  assert.equal(result.landed, true);
+
+  // The FALSIFIER this replaces: `git checkout -- .` / `git reset --hard` in the operator
+  // checkout used to silently destroy every unrescued DECISIONS.md entry. Since recordDecision
+  // never put anything in root's working tree to begin with, there is nothing there for a
+  // hygiene command to destroy — the record already lives only on the landing branch.
+  execFileSync("git", ["-C", root, "reset", "--hard", "HEAD"], { encoding: "utf8" });
+  execFileSync("git", ["-C", root, "clean", "-fdx"], { encoding: "utf8" });
+
+  const rel = decisionRecordRelPath("T2", "T2-222");
+  const stillThere = execFileSync("git", ["--git-dir", bareOrigin, "show", `${DECISIONS_LANDING_BRANCH}:${rel}`], {
+    encoding: "utf8",
+  });
+  assert.match(stillThere, /Chosen \(RECOMMENDED, auto\): x/);
+});
+
+test("W1-T191 acceptance 2: two decisions resolved before either lands merges BOTH survive on the shared branch — no conflict, no silent loss", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  const { gh } = fakeGh("https://github.com/o/r/pull/102");
+
+  // Neither PR has merged yet when the second decision resolves — the exact "concurrent"
+  // shape criterion 2 falsifies a naive shared-file append against.
+  const first = recordDecision(root, { taskId: "T3", runId: "T3-1", options: ["a"], chosen: "a", band: "medium", reason: "r1" }, { gh });
+  const second = recordDecision(root, { taskId: "T4", runId: "T4-1", options: ["b"], chosen: "b", band: "medium", reason: "r2" }, { gh });
+  assert.equal(first.landed, true);
+  assert.equal(second.landed, true);
+
+  const tree = execFileSync("git", ["--git-dir", bareOrigin, "ls-tree", "-r", "--name-only", DECISIONS_LANDING_BRANCH], {
+    encoding: "utf8",
+  });
+  assert.match(tree, /T3-T3-1\.md/, "the FIRST decision's record must still be present after the SECOND lands");
+  assert.match(tree, /T4-T4-1\.md/, "the SECOND decision's record must be present too");
+});
+
+test("W1-T191: recordDecision is idempotent — a decision whose content already matches what's on origin/main lands nothing", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  const params = { taskId: "T5", runId: "T5-1", options: ["a"], chosen: "a", band: "low" as const, reason: "r", ts: "2026-01-01T00:00:00.000Z" };
+  const rel = decisionRecordRelPath("T5", "T5-1");
+
+  // Seed origin/main with the EXACT bytes recordDecision would itself produce.
+  const seed = mkdtempSync(join(tmpdir(), "rmd-decisions-landing-seed-"));
+  execFileSync("git", ["clone", "--quiet", bareOrigin, seed], { encoding: "utf8", env: GIT_ENV });
+  mkdirSync(join(seed, "plan", "decisions.d"), { recursive: true });
+  writeFileSync(join(seed, rel), decisionRecordContent(params));
+  git(seed, "add", "-A");
+  git(seed, "commit", "--quiet", "-m", "chore: seed decision T5");
+  git(seed, "push", "--quiet", "origin", "main");
+
+  const { gh } = fakeGh("https://github.com/o/r/pull/103");
+  const result = recordDecision(root, params, { gh });
+  assert.equal(result.landed, false, "already-landed content must be a no-op, never an empty force-push");
+  assert.deepEqual(result.files, []);
+});
+
+test("W1-T191 acceptance 5: a console feedback decision (setFeedbackStatus with `land`) lands via the bridge and leaves root's working tree CLEAN", () => {
+  const bareOrigin = makeBareOrigin();
+  const id = "fb-preexisting-1";
+
+  // Seed origin/main with an ALREADY-TRACKED, ALREADY-MERGED feedback entry — exactly the
+  // state a `proposed` entry is in by the time a console accept/reject decision acts on it
+  // (captured, landed, and merged in an earlier, unrelated PR/session). Seeding this way
+  // (rather than via captureFeedback into `root` itself) avoids conflating THIS task's fix
+  // with captureFeedback's own separate, pre-existing, out-of-scope local-write behavior.
+  const seed = mkdtempSync(join(tmpdir(), "rmd-feedback-landing-seed-fb-"));
+  execFileSync("git", ["clone", "--quiet", bareOrigin, seed], { encoding: "utf8", env: GIT_ENV });
+  mkdirSync(join(seed, "plan", "feedback"), { recursive: true });
+  writeFileSync(
+    join(seed, "plan", "feedback", `${id}.yaml`),
+    "id: fb-preexisting-1\n" +
+      "ts: '2026-01-01T00:00:00.000Z'\n" +
+      "raw: needs a decision\n" +
+      "attachments: []\n" +
+      "origin: cli\n" +
+      "status: proposed\n" +
+      "proposal_pr: null\n",
+  );
+  git(seed, "add", "-A");
+  git(seed, "commit", "--quiet", "-m", "chore: seed pre-existing feedback entry");
+  git(seed, "push", "--quiet", "origin", "main");
+
+  const root = cloneRoot(bareOrigin); // root's clone TRACKS the entry from the start.
+  assert.equal(
+    execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" }).trim(),
+    "",
+    "sanity: root is clean and the entry is tracked before the decision flip",
+  );
+
+  const { gh } = fakeGh("https://github.com/o/r/pull/200");
+  const updated = setFeedbackStatus(root, id, "accepted", { land: { gh } });
+  assert.equal(updated.status, "accepted");
+
+  // The flip never touched root's real working tree — the file on disk is byte-identical to
+  // what's in root's own git index (still `status: new`), and `git status --porcelain` proves
+  // it: no `M`, no dirt, exactly the property checkCliFreshness's dirty check inspects.
+  assert.equal(
+    execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" }).trim(),
+    "",
+    "a console feedback decision must leave root's working tree clean (W1-T191 acceptance 5)",
+  );
+
+  // But the flip DID reach a branch — a real, git-durable commit, not only root's own tree.
+  const onBranch = execFileSync(
+    "git",
+    ["--git-dir", bareOrigin, "show", `${LANDING_BRANCH}:plan/feedback/${id}.yaml`],
+    { encoding: "utf8" },
+  );
+  assert.match(onBranch, /status: accepted/);
+});
+
+test("W1-T191 acceptance 6: a checkout dirtied ONLY by these two writers is not refused by checkCliFreshness once it falls behind origin/main", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  const { gh } = fakeGh("https://github.com/o/r/pull/201");
+
+  recordDecision(root, { taskId: "T6", runId: "T6-1", options: ["a"], chosen: "a", band: "medium", reason: "r" }, { gh });
+
+  // origin/main moves on (root falls behind) — the steady state self-sync exists to clear.
+  const advance = mkdtempSync(join(tmpdir(), "rmd-decisions-landing-advance-"));
+  execFileSync("git", ["clone", "--quiet", bareOrigin, advance], { encoding: "utf8", env: GIT_ENV });
+  writeFileSync(join(advance, "README.md"), "seed\nmore\n");
+  git(advance, "add", "-A");
+  git(advance, "commit", "--quiet", "-m", "chore: advance main");
+  git(advance, "push", "--quiet", "origin", "main");
+
+  const realGit = (args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" });
+  const result = checkCliFreshness(root, {}, { git: realGit, say: () => {}, warn: () => {}, reexec: () => {} });
+  assert.notEqual(result.status, "refused", `expected NOT refused, got: ${JSON.stringify(result)}`);
+});
+
+test("W1-T191: DECISIONS_LANDING_PR_TITLE passes the REAL commitlint CLI", () => {
+  const result = lint(DECISIONS_LANDING_PR_TITLE);
+  assert.equal(
+    result.status,
+    0,
+    `decisions-landing commit header must pass commitlint:\n${DECISIONS_LANDING_PR_TITLE}\n${result.stdout}${result.stderr}`,
+  );
+});
+
+test("W1-T191: recordDecision's full commit message (header + body) passes the REAL commitlint CLI", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  const { gh } = fakeGh("https://github.com/o/r/pull/202");
+  recordDecision(root, { taskId: "T7", runId: "T7-1", options: ["a"], chosen: "a", band: "medium", reason: "r" }, { gh });
+
+  const message = execFileSync(
+    "git",
+    ["--git-dir", bareOrigin, "log", "-1", "--format=%B", DECISIONS_LANDING_BRANCH],
+    { encoding: "utf8" },
+  );
+  const result = lint(message);
+  assert.equal(result.status, 0, `decisions-landing commit message must pass commitlint:\n${message}\n${result.stdout}${result.stderr}`);
 });
