@@ -151,6 +151,23 @@ export type Disposition =
 export interface CiFailure {
   name: string;
   logTail: string;
+  /**
+   * The commit sha this check's failure is attributable to, when the read can identify one
+   * (W1-T186, the #420 fixture: commitlint lints the whole base..head RANGE, so a required
+   * check reported against the PR can be tripped by a commit that is NOT one of the PR's own —
+   * #417's own three commits measured 92/90/76 chars while the 101-char header that actually
+   * failed commitlint was `0e63429` on MAIN). `undefined` when the failure could not be
+   * attributed to a specific sha — the ordinary case, where the check simply failed against the
+   * PR's own head (`OpenPrView.headSha`), and the escalation names that instead.
+   */
+  sha?: string;
+  /**
+   * `true` when `sha` is OBSERVED to be outside this PR's own commit range — the #420 shape.
+   * `undefined`/`false` otherwise, including when it is simply unknown: NEVER asserted without
+   * positive evidence (fail toward "assume it's the PR's own", never invent an exoneration the
+   * read cannot support).
+   */
+  outsidePrRange?: boolean;
 }
 
 /**
@@ -376,6 +393,24 @@ export interface OpenPrView {
    * disposition CONFLICTED (fail-closed): only an OBSERVED `"dirty"` does.
    */
   mergeState?: MergeState;
+  /**
+   * GitHub's OWN raw `mergeable` boolean, observed verbatim (W1-T186 — the #412/#413 fixture: a
+   * PR reading `mergeable: false, mergeable_state: "dirty"` registers ZERO check runs BY
+   * CONSTRUCTION, so an escalation that only ever had `checksState`/`reviewState` to read from
+   * could not help but describe that as a checks/review problem). Carried ALONGSIDE the
+   * already-simplified {@link mergeState} rather than replacing it — every existing
+   * `mergeState === "dirty"` disposition row is unchanged — so the escalation renderer can name
+   * the exact fact GitHub reported, not just the bucket it was sorted into. `undefined` when
+   * unread, same fail-closed default as `mergeState`.
+   */
+  mergeable?: boolean;
+  /**
+   * GitHub's OWN raw `mergeable_state` string ("clean" | "dirty" | "blocked" | "behind" |
+   * "unstable" | "unknown" | ...), observed verbatim (W1-T186, alongside {@link mergeable}
+   * above) — the escalation names THIS exact reported value, never just the simplified
+   * {@link MergeState} bucket it was derived into.
+   */
+  mergeableState?: string;
   /**
    * The merge-conflict fix mode's input — the conflicting file list + both
    * sides' log since merge-base (W1-T94's new mode, design note iii).
@@ -625,6 +660,118 @@ export function isBlockedCi(pr: OpenPrView): boolean {
 }
 
 /**
+ * The four named "why is this actually blocked" states an escalation must distinguish
+ * (W1-T186) — never a single overloaded `checksState`/`reviewState` pair. Exactly one applies
+ * (or none, for an ordinary review-failure/contradictory block, where these four facts say
+ * nothing extra beyond the criterion itself):
+ *
+ *   - CONFLICTED: `mergeState`/`mergeable` observed dirty/false. The PR cannot merge regardless
+ *     of any check's state — zero check runs here is EXPECTED (GitHub does not start checks on
+ *     an unmergeable ref), never a checks/review signal. Action: merge main into the branch.
+ *   - FAILING: a required check ran and CONCLUDED failure (`checksState === "red"`). Action:
+ *     names the check — see {@link describeCiFailures}.
+ *   - ABSENT: a required context has ZERO observed check runs on an otherwise-mergeable PR —
+ *     either the whole rollup is empty (`checksState === "none"`) or, the W1-T176 shape,
+ *     `remudero-review` specifically never posted while every OTHER required check is green
+ *     (`checksState === "green" && reviewState === "none"`). Action: post/kick off the check.
+ *   - PENDING: checks exist and are still running (`checksState === "pending"`). Action: wait
+ *     (or, once a staleness ceiling is exceeded, escalate naming the elapsed time — the
+ *     stale-pending row already does this via `reason`; this state still names the fact).
+ *
+ * CHECKED IN THIS ORDER, CONFLICTED FIRST: the #412/#413 live incident was PRECISELY a PR that
+ * was both `checksState: "none"` (zero check runs) AND `mergeState: "dirty"` — reading "none"
+ * before "dirty" would have mis-sorted it as ABSENT (post the check) when the check will NEVER
+ * run until the conflict resolves. This is the split acceptance 3 requires: `checksState: "none"`
+ * is no longer read as one fact meaning two different things.
+ */
+export type ObservedBlockerState = "CONFLICTED" | "FAILING" | "ABSENT" | "PENDING";
+
+export function observedBlockerState(pr: OpenPrView): ObservedBlockerState | undefined {
+  if (pr.mergeState === "dirty" || pr.mergeable === false) return "CONFLICTED";
+  // CHECKED BEFORE reviewState, mirroring DISPOSITION_RULES row 4/5's own "ci-log wins"
+  // precedence (a review verdict beside a red required check may be STALE — computed before the
+  // push that broke it): FAILING fires regardless of what the review says.
+  if (pr.checksState === "red") return "FAILING";
+  // A failing REVIEW (checks not red) already names its own block via the criterion/contradictory
+  // text — PENDING/ABSENT below would misframe that as "wait" or "post the check" when the
+  // review verdict is the actual thing blocking merge.
+  if (pr.reviewState === "failure") return undefined;
+  if (pr.checksState === "pending") return "PENDING";
+  if (pr.checksState === "none") return "ABSENT";
+  // The W1-T176 shape: every OTHER required context is green, but remudero-review specifically
+  // has zero observed runs — invisible to the branch above because overall checksState reads
+  // "green", not "none" (only the one required context is absent).
+  if (pr.checksState === "green" && pr.reviewState === "none") return "ABSENT";
+  return undefined;
+}
+
+/**
+ * Name the FAILING check(s) + the sha each ran against (W1-T186) — "checks red" is not
+ * actionable, "commitlint failed on 0e63429" is. Falls back to a generic sentence when no
+ * per-check detail was captured (never silent, never a crash), and — the #420 fixture — says so
+ * explicitly when a check's own sha is OBSERVED to sit outside this PR's own commit range.
+ */
+function describeCiFailures(pr: OpenPrView): string {
+  const failures = pr.ciFailures ?? [];
+  if (failures.length === 0) {
+    return `a required check failed on head ${pr.headSha.slice(0, 7)} (no failing-check detail captured)`;
+  }
+  return failures
+    .map((f) => {
+      const sha = (f.sha ?? pr.headSha).slice(0, 7);
+      const rangeNote = f.outsidePrRange
+        ? " — NOT one of this PR's own commits; only present on the base branch"
+        : "";
+      return `${f.name} failed on ${sha}${rangeNote}`;
+    })
+    .join("; ");
+}
+
+/** The `mergeable`/`mergeableState` facts line every escalation carries when observed (W1-T186,
+ *  acceptance 2) — "" when neither was read, so callers can omit it cleanly. */
+function mergeableFactLine(pr: OpenPrView): string {
+  if (pr.mergeable === undefined && pr.mergeableState === undefined) return "";
+  return `observed mergeable=${pr.mergeable ?? "unknown"}, mergeableState=${pr.mergeableState ?? "unknown"}`;
+}
+
+/**
+ * Render the named observed-blocker facts (W1-T186) that {@link renderClarificationQuestion}
+ * prepends to every question — the operator sees WHICH of the four named states fired and the
+ * facts that support it, not just a re-derived "checks X, review Y" summary. "" when
+ * {@link observedBlockerState} found none of the four to name (an ordinary review-failure block),
+ * so the caller falls back to the criterion/reason text alone, exactly as before this task.
+ *
+ * FALSIFIER-SHAPED CONSTRAINT: the CONFLICTED branch below must never contain the word "CI" or
+ * the token "blocked_ci" — both are FALSE for a conflicted PR (GitHub never even started a check,
+ * let alone failed one), and this codebase's own #412/#413 incident is exactly an escalation that
+ * said "blocked_ci"/"checks pending" for a PR that was neither.
+ */
+function renderObservedFacts(pr: OpenPrView, state: ObservedBlockerState | undefined): string {
+  const mergeableFact = mergeableFactLine(pr);
+  const suffix = mergeableFact ? ` (${mergeableFact})` : "";
+  switch (state) {
+    case "CONFLICTED":
+      return (
+        `[CONFLICTED]${suffix} this PR cannot merge as observed; zero check runs here is EXPECTED ` +
+        `(GitHub does not start checks on an unmergeable ref), not a signal that anything is blocked or ` +
+        `pending review. Remedy: merge origin/main into the branch to resolve the conflict, then push to ` +
+        `re-trigger checks.`
+      );
+    case "FAILING":
+      return `[FAILING]${suffix} ${describeCiFailures(pr)}.`;
+    case "ABSENT":
+      return (
+        `[ABSENT]${suffix} the required check has ZERO observed check runs on head ` +
+        `${pr.headSha.slice(0, 7)} — it has not started at all, not merely running slowly.`
+      );
+    case "PENDING":
+      return `[PENDING]${suffix} required checks are still running on head ${pr.headSha.slice(0, 7)}.`;
+    default:
+      return mergeableFact ? `(${mergeableFact})` : "";
+  }
+}
+
+/**
  * One row of the POLICY-AS-DATA table (rule 2): a mapping from an observed
  * PR-state predicate to the disposition it produces, plus the stated reason.
  * The disposition SELECTION lives in {@link DISPOSITION_RULES} — a data
@@ -822,7 +969,13 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // (design note iv: one ladder, one exhaustion route).
     disposition: "blocked-ambiguous",
     when: (pr, policy) => (pr.reviewState === "failure" || isBlockedCi(pr)) && pr.priorStrikes >= policy.strikeCap,
-    reason: (pr, policy) => `fix strikes exhausted (${pr.priorStrikes}/${policy.strikeCap}) — escalating`,
+    // W1-T186 (the #420 fixture): once checks are the reason strikes exhausted, NAME the check
+    // + sha here too — not just in the rendered ClarificationQuestion — so the ledgered/summary
+    // reason itself never reads as the generic, uninvestigable "fix strikes exhausted".
+    reason: (pr, policy) =>
+      isBlockedCi(pr)
+        ? `fix strikes exhausted (${pr.priorStrikes}/${policy.strikeCap}) — ${describeCiFailures(pr)} — escalating`
+        : `fix strikes exhausted (${pr.priorStrikes}/${policy.strikeCap}) — escalating`,
   },
   {
     // W1-T100 (the #170 fix); BROADENED + PROMOTED ahead of the review-failing
@@ -1152,6 +1305,12 @@ export interface ClarificationQuestion {
   strikeHistory: StrikeAttempt[];
   /** Exactly two candidate resolutions — never a silent guess, never more than two. */
   resolutions: readonly [ClarificationResolution, ClarificationResolution];
+  /**
+   * W1-T186: which of {@link ObservedBlockerState}'s four named states this escalation
+   * observed, or `undefined` when none applies (an ordinary review-failure/contradictory
+   * block, where the criterion fields above already say everything there is to say).
+   */
+  observedState?: ObservedBlockerState;
 }
 
 /**
@@ -1178,7 +1337,10 @@ export function renderClarificationQuestion(
         .map(
           (s) =>
             `strike ${s.strike} (${s.round}): ${s.unmetCount} unmet criteri${s.unmetCount === 1 ? "on" : "a"} going in, ` +
-            `CI ${s.ciGreen ? "went green" : "did not go green"}` +
+            // W1-T186: "checks", never "CI" — this same sentence renders inside a CONFLICTED
+            // escalation too (strike history predates a later-discovered conflict), and that
+            // escalation must never contain the literal word "CI" (it never ran one).
+            `checks ${s.ciGreen ? "went green" : "did not go green"}` +
             (s.reviewState ? `, review came back ${s.reviewState}` : ""),
         )
         .join("; ")
@@ -1203,12 +1365,21 @@ export function renderClarificationQuestion(
   // suffix — editing the resolutions never requires editing this text twice).
   const decisionSuffix = `Which is right — (1) ${resolutions[0].label}: ${resolutions[0].detail}, or (2) ${resolutions[1].label}: ${resolutions[1].detail}`;
 
-  const question = criterion
+  const baseQuestion = criterion
     ? `Task ${pr.taskId}, PR #${pr.prNumber} (${pr.prUrl}): after ${strikeHistory.length} fix strike(s) — ${tried} — ` +
       `"${criterion}" is still unmet. The reviewer requires: "${reviewerRequirement}". The spec's own proof text says: ` +
       `"${specText}". ${decisionSuffix}`
     : `Task ${pr.taskId}, PR #${pr.prNumber} (${pr.prUrl}): ${reason} — ${tried}. There is no single actionable unmet ` +
       `criterion to point at. ${decisionSuffix}`;
+
+  // W1-T186: prepend the named observed-blocker facts (CONFLICTED/FAILING/ABSENT/PENDING, plus
+  // the raw mergeable/mergeableState GitHub reported) EVERY escalation carries them when
+  // observed — never only the criterion-shaped ones. "" when observedBlockerState found none of
+  // the four to name AND no mergeable/mergeableState was read, so an ordinary review-failure
+  // question renders byte-identical to before this task.
+  const observedState = observedBlockerState(pr);
+  const observedFacts = renderObservedFacts(pr, observedState);
+  const question = observedFacts ? `${observedFacts} ${baseQuestion}` : baseQuestion;
 
   return {
     taskId: pr.taskId ?? "UNKNOWN",
@@ -1220,6 +1391,7 @@ export function renderClarificationQuestion(
     specText,
     strikeHistory,
     resolutions,
+    observedState,
   };
 }
 

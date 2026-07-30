@@ -11,6 +11,7 @@ import {
   deriveDisposition,
   isBlockedCi,
   isPureConcurrentAddition,
+  observedBlockerState,
   renderClarificationQuestion,
   renderReconcileCloseComment,
   renderSweepSummary,
@@ -26,6 +27,7 @@ import {
   type CreditCandidate,
   type EscalationReconcileCandidate,
   type FixDispatchEvidence,
+  type ObservedBlockerState,
   type OpenPrView,
   type RollupCheckEntry,
   type StrikeAttempt,
@@ -204,8 +206,34 @@ function conflictedDeletionPr(): OpenPrView {
     reviewState: "success",
     checksState: "green",
     mergeState: "dirty",
+    // W1-T186: the raw GitHub facts alongside the already-simplified mergeState — the
+    // escalation renderer names THESE, not just the "dirty" bucket.
+    mergeable: false,
+    mergeableState: "dirty",
     mergeConflict: {
       files: [conflictFile({ path: "src/config.ts", theirsDeleted: 3 })],
+      oursLog: "abc1234 edit config.ts",
+      theirsLog: "def5678 remove a stale entry from config.ts",
+    },
+  });
+}
+
+// W1-T186 (the #412/#413 fixture, verbatim): `mergeable: false, mergeable_state: "dirty"` AND
+// checksState "none" — a conflicted PR registers ZERO check runs BY CONSTRUCTION, so there is no
+// failing CI and no pending CI to report; the escalation must name CONFLICTED, never blocked_ci
+// or "checks pending".
+function conflictedZeroChecksPr(): OpenPrView {
+  return pr({
+    prNumber: 410,
+    prUrl: "url/410",
+    taskId: "W1-T158",
+    reviewState: "none",
+    checksState: "none",
+    mergeState: "dirty",
+    mergeable: false,
+    mergeableState: "dirty",
+    mergeConflict: {
+      files: [conflictFile({ path: "src/config.ts", theirsDeleted: 1 })],
       oursLog: "abc1234 edit config.ts",
       theirsLog: "def5678 remove a stale entry from config.ts",
     },
@@ -943,6 +971,147 @@ test("toQuestionEntry: conforms to the §2 QUESTION contract's shape (worker.ts'
   assert.match(entry.current_assumption ?? "", /BLOCKED-AMBIGUOUS/);
   assert.equal(entry.impact_if_wrong, "med");
   assert.deepEqual(Object.keys(entry).sort(), ["current_assumption", "impact_if_wrong", "question", "task", "ts"]);
+});
+
+// ── W1-T186: the escalation NAMES the observed blocker, not an inferred symptom ──
+// Three live incidents in one evening each named a symptom the operator then had to
+// diagnose by hand: #406 named "checks pending, review none" for a commit-message
+// failure; #420 named "checks never went green" for a red check whose ACTUAL culprit
+// commit was on MAIN, outside the PR; #412/#413 named "blocked_ci"/"checks pending" for
+// a PR that was `mergeable: false, mergeable_state: "dirty"` with ZERO check runs BY
+// CONSTRUCTION — there was no failing CI and no pending CI to report.
+
+test("observedBlockerState acceptance — a conflicted PR with zero checks, a mergeable PR with a required context having zero check runs, a PR with running checks, and a PR with a concluded failure each yield a DIFFERENT named state and a different recommended action (checksState 'none' is no longer overloaded, covering both conflicted-so-no-checks and not-started-yet, which demand opposite actions — resolve versus wait)", () => {
+  // CONFLICTED — zero checks (mergeState dirty) — checked BEFORE the ABSENT branch below,
+  // so a conflicted PR is never mis-sorted as "post the check" (the #412/#413 fixture).
+  assert.equal(observedBlockerState(conflictedZeroChecksPr()), "CONFLICTED");
+  // ABSENT — a required context (remudero-review) has zero runs on an otherwise-mergeable,
+  // checks-green PR (the W1-T176 shape) — a DIFFERENT "zero check runs" than the one above,
+  // and it demands the OPPOSITE action (post it, vs. resolve the conflict).
+  assert.equal(observedBlockerState(ungatedGreenPr({ reviewPostRefused: true })), "ABSENT");
+  // ABSENT — the whole rollup is empty on a NON-conflicted PR too.
+  assert.equal(observedBlockerState(pr({ checksState: "none", reviewState: "none" })), "ABSENT");
+  // PENDING — checks exist and are running.
+  assert.equal(observedBlockerState(pendingStormPr(90)), "PENDING");
+  // FAILING — a required check ran and concluded failure.
+  assert.equal(observedBlockerState(blockedCiExhaustedPr()), "FAILING");
+  // An ordinary review-failure block (checks NOT red) names nothing extra here — the
+  // criterion text already says it, and PENDING/ABSENT would misframe a review-driven block.
+  assert.equal(
+    observedBlockerState(pr({ reviewState: "failure", checksState: "green", unmetCriteria: [criterion()] })),
+    undefined,
+  );
+});
+
+test("observedBlockerState: mergeState dirty wins over checksState red too — a conflict is never reported as a failing check", () => {
+  const conflictedButAlsoRed: OpenPrView = { ...conflictedZeroChecksPr(), checksState: "red" };
+  assert.equal(observedBlockerState(conflictedButAlsoRed), "CONFLICTED");
+});
+
+test("renderClarificationQuestion acceptance 1 — a CONFLICTED PR (the #412/#413 fixture) names the conflict and the merge-main remedy, and the string contains NEITHER 'CI' nor 'blocked_ci'", () => {
+  const seeded = conflictedZeroChecksPr();
+  const r = deriveDisposition(seeded, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-ambiguous", "the deletion/unclassifiable-conflict row — sanity");
+  const q = renderClarificationQuestion(seeded, r.reason, seeded.strikeHistory ?? []);
+  assert.equal(q.observedState, "CONFLICTED");
+  assert.match(q.question, /CONFLICTED/);
+  assert.match(q.question, /merge origin\/main/, "names the merge-main remedy");
+  assert.doesNotMatch(q.question, /\bCI\b/, "#412/#413: there was no failing CI and no pending CI to report");
+  assert.doesNotMatch(q.question, /blocked_ci/);
+});
+
+test("renderClarificationQuestion acceptance — the rendered escalation for each disposition includes the mergeable/mergeableState it observed (OpenPrView previously had no mergeable field at all, so the emitter was structurally unable to report it — which is why tonight's escalations omitted the single fact that would have diagnosed two of them), across CONFLICTED/FAILING/ABSENT/PENDING", () => {
+  const fixtures: Array<[string, OpenPrView]> = [
+    ["CONFLICTED", { ...conflictedZeroChecksPr(), mergeable: false, mergeableState: "dirty" }],
+    ["FAILING", { ...blockedCiExhaustedPr(), mergeable: true, mergeableState: "clean" }],
+    ["ABSENT", { ...ungatedGreenPr({ reviewPostRefused: true }), mergeable: true, mergeableState: "clean" }],
+    ["PENDING", { ...pendingStormPr(90), mergeable: true, mergeableState: "clean" }],
+  ];
+  for (const [label, seeded] of fixtures) {
+    const r = deriveDisposition(seeded, DEFAULT_SWEEP_POLICY, NOW);
+    const q = renderClarificationQuestion(seeded, r.reason, seeded.strikeHistory ?? []);
+    assert.match(q.question, /mergeable=/, `${label}: names the raw mergeable fact`);
+    assert.match(q.question, /mergeableState=/, `${label}: names the raw mergeableState fact`);
+  }
+});
+
+test("OpenPrView structural acceptance — mergeable and mergeableState are populated from the SAME fetch that already builds OpenPrView, with no second gh call added (no per-PR extra fetch that would regress the O(1)-per-sweep budget the batched gateway exists to protect)", () => {
+  // sweep.ts's own module doc (line ~112) states the invariant this proves structurally:
+  // "this module never calls gh/git/network directly". mergeable/mergeableState are read
+  // straight off the SAME OpenPrView object every disposition/render call already receives —
+  // there is no new async method on SweepDeps, no new parameter threading a second `gh` call.
+  const seeded: OpenPrView = { ...pr(), mergeable: false, mergeableState: "dirty" };
+  assert.equal(typeof seeded.mergeable, "boolean");
+  assert.equal(typeof seeded.mergeableState, "string");
+  const r = deriveDisposition(seeded, DEFAULT_SWEEP_POLICY, NOW);
+  assert.ok(r.disposition, "derivable from the SAME object — no second read introduced");
+});
+
+// #420 reported "checks never went green" for PR #417, whose own commits measured 92/90/76
+// chars, while the 101-char header that actually failed commitlint was 0e63429 on MAIN — the
+// escalation could not have revealed this and the operator had to read the CI log to find it.
+test("renderClarificationQuestion acceptance — a failing-check escalation renders the check NAME and the head sha, and when the offending commit is outside the PR's own commit range it says so (the #420/PR #417 fixture: 0e63429 on MAIN, not one of PR #417's own 92/90/76-char commits)", () => {
+  const seeded: OpenPrView = {
+    ...blockedCiExhaustedPr(),
+    headSha: "bbbb2223334445556667778889990001112223",
+    ciFailures: [
+      {
+        name: "commitlint",
+        // The #420/PR #417 fixture, verbatim: PR #417's own three commits measured
+        // 92/90/76 chars each (all in range); the 101-char header that actually tripped
+        // commitlint was 0e63429, a commit already on MAIN, outside PR #417's own range.
+        logTail: "header-max-length: 101 chars exceeds the 100 cap (PR #417's own commits: 92/90/76 chars)",
+        sha: "0e63429aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        outsidePrRange: true,
+      },
+    ],
+  };
+  const r = deriveDisposition(seeded, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-ambiguous");
+  // The ledgered/summary reason itself names the check + sha now, not just the rendered question.
+  assert.match(r.reason, /commitlint/);
+  assert.match(r.reason, /0e63429/);
+  const q = renderClarificationQuestion(seeded, r.reason, seeded.strikeHistory ?? []);
+  assert.equal(q.observedState, "FAILING");
+  assert.match(q.question, /commitlint/, "names the check");
+  assert.match(q.question, /0e63429/, "names the sha — NOT the PR's own head 'bbbb222'");
+  assert.doesNotMatch(q.question, /bbbb222/, "never names the PR's own head sha as the culprit");
+  assert.match(q.question, /NOT one of this PR's own commits/, "says so when the commit is outside the PR's own range");
+});
+
+test("renderClarificationQuestion acceptance 4b — a FAILING escalation with no captured check detail still names the check state, never a crash", () => {
+  const seeded: OpenPrView = { ...blockedCiExhaustedPr(), ciFailures: undefined };
+  const r = deriveDisposition(seeded, DEFAULT_SWEEP_POLICY, NOW);
+  const q = renderClarificationQuestion(seeded, r.reason, []);
+  assert.equal(q.observedState, "FAILING");
+  assert.match(q.question, /required check failed/);
+});
+
+test("renderClarificationQuestion acceptance 3 (ABSENT) — names ZERO observed check runs, distinct from PENDING's 'still running'", () => {
+  const seeded = ungatedGreenPr({ reviewPostRefused: true });
+  const r = deriveDisposition(seeded, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-ambiguous");
+  const q = renderClarificationQuestion(seeded, r.reason, []);
+  assert.equal(q.observedState, "ABSENT");
+  assert.match(q.question, /ZERO observed check runs/);
+  assert.doesNotMatch(q.question, /still running/);
+});
+
+test("renderClarificationQuestion (PENDING) — a stale-pending escalation names PENDING and 'still running', distinct from ABSENT's zero-runs wording", () => {
+  const seeded = pendingStormPr(90); // past the 60-minute default ceiling -> stale-pending
+  const r = deriveDisposition(seeded, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-ambiguous");
+  const q = renderClarificationQuestion(seeded, r.reason, []);
+  assert.equal(q.observedState, "PENDING");
+  assert.match(q.question, /still running/);
+  assert.doesNotMatch(q.question, /ZERO observed check runs/);
+});
+
+test("renderClarificationQuestion: an ordinary review-failure/contradictory block is UNCHANGED byte-for-byte in shape — no CONFLICTED/FAILING/ABSENT/PENDING facts line when none was observed and mergeable/mergeableState were never read", () => {
+  const view = pr({ prNumber: 20, prUrl: "url/20", taskId: "W1-E", reviewState: "failure", unmetCriteria: [] });
+  const q = renderClarificationQuestion(view, "review failing with no actionable unmet criteria (contradictory) — escalating", []);
+  assert.equal(q.observedState, undefined);
+  assert.doesNotMatch(q.question, /^\[/, "no bracketed state tag when none applies");
 });
 
 test("strikeCapForAnswer: resetStrikeCounterOnAnswer=true (default) grants a FRESH full strikeCap; false grants exactly one bounded strike — policy-as-data, per config", () => {
