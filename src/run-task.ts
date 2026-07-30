@@ -160,6 +160,7 @@ import {
   resolveServiceTokens,
   serviceTokensPath,
 } from "./lib/serve.js";
+import { consoleUrlCommand } from "./lib/console-url.js";
 import { assertProposedPlanLoads,
   buildGrillEscalation,
   decideTriage,
@@ -10501,6 +10502,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd serve [--port <n>] [--host <addr>]   # the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317 (matches apps/dashboard's own default); --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the console can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM",
   },
   {
+    name: "console-url",
+    usage:
+      "rmd console-url [--port <n>] [--host <addr>] [--write]   # print the console URL carrying the READ token — the bookmark that gets you in, one command instead of hand-extracting <config.root>/state/service-tokens.json (fb-1784772988510-da3712); prints one URL per bound interface, resolving port/host EXACTLY as `rmd serve` does (flag > RMD_SERVE_HOST > config.serve.* > 127.0.0.1:4317); --write additionally prints the WRITE token as a bare value to paste into the console (never in a URL), and REFUSES unless stdout is a TTY, because a redirected stdout becomes a file that outlives the process (R-5); reads the 0600 tokens file but never creates one — if the console has never run it says so and names the remedy; spawns nothing",
+  },
+  {
     name: "serve-plist",
     usage:
       "rmd serve-plist [--port <n>] [--host <addr>] [--write]   # generate the launchd unit that runs the operator console as a background SERVICE (W1-T152, the W1-T12b generator family): KeepAlive (unconditional — `rmd serve` exits 0 on a clean SIGTERM and the console must come back from that too) + ThrottleInterval 60 (the R-1 relaunch-storm rate limit) + RunAtLoad, logs to <config.root>/state/logs/serve.{out,err}.log at 0600, and the resolved bind list in RMD_SERVE_HOST (flag > env > config serve.host > 127.0.0.1) with the port baked into ProgramArguments. Carries NO token: service-tokens.json is read at boot as today. References no daemon label or path — it installs and runs with the daemon stopped. Prints by default; --write installs it + pre-creates the 0600 logs; `launchctl bootstrap` stays the operator's step.",
@@ -10901,6 +10907,10 @@ export async function main(
   }
   if (cmd === "serve") {
     process.exit(await serveCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await consoleUrlCommand(rest, loadConfig())) cannot carry a DA hit without forking the process; consoleUrlCommand's own logic — the URL assembly, the --write TTY refusal, and all three failure modes — is unit-tested in test/console-url.test.ts (same irreducible-glue shape as the sibling away/pause/resume dispatch cases).
+  if (cmd === "console-url") {
+    process.exit(await consoleUrlCommand(rest, loadConfig()));
   }
   if (cmd === "serve-plist") {
     process.exit(await servePlistCommand(rest));
