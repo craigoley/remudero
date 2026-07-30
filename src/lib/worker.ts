@@ -19,6 +19,7 @@ import { loadConfig, workerHomeDir, workerShell, workerZdotdir, type Config } fr
 import { detectCompactionEvents, isQualitySuspect, type CompactionEvent } from "./compaction.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { buildWorkerEnv, billingMode, type BillingMode } from "./env.js";
+import { loadDefaultPolicy } from "./policy.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStaleWorkerScratch } from "./worker-scratch.js";
 import {
@@ -1239,8 +1240,13 @@ export function removeRunLock(worktreePath: string): void {
  * just `git worktree add`-ed but not yet written its {@link runLockPath} — the tiny
  * create-before-lock race. Callers pass this to protect that window; genuinely old
  * lockless debris (past the window) is still reaped.
+ *
+ * W1-T253 (P37 CONSUMERS): read from `plan/policy.yaml`'s `pruneGraceMs` (a POLICY value now,
+ * never a source literal) via {@link loadDefaultPolicy} — a retune is a reviewed plan PR, not
+ * a code edit. `loadDefaultPolicy` self-locates the policy file from its own install location
+ * (never cwd), so this resolves identically regardless of which directory a caller runs from.
  */
-export const DEFAULT_PRUNE_GRACE_MS = 120_000;
+export const DEFAULT_PRUNE_GRACE_MS = loadDefaultPolicy().values.pruneGraceMs;
 
 export interface PruneOpts {
   /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */

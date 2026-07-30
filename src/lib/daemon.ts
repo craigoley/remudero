@@ -83,7 +83,21 @@ import type { OrphanSweepReport } from "./worker-containment.js";
  */
 export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" | "stale";
 
-/** Default idle-poll pace: check back once a minute while nothing is runnable. */
+/**
+ * Default idle-poll pace: check back once a minute while nothing is runnable.
+ *
+ * W1-T253 (P37 CONSUMERS): every OTHER collected constant this task rewires reads its
+ * default via `policy.ts`'s `loadDefaultPolicy` (a self-locating, memoized `readFileSync`).
+ * THIS module cannot do that — see the file header: "this pure module never touches the
+ * filesystem" (Rule 16's headless/live split; `runDaemon` must stay callable thousands of
+ * times against an injected clock in a unit test with zero real I/O). So this literal
+ * STAYS — it is the fs-free safety net for a direct/test caller that supplies no
+ * `pollIntervalMs` at all — and the actual `rmd daemon` CLI entry (`daemonCommand`,
+ * run-task.ts) is the one that loads `plan/policy.yaml`'s `pollIntervalMs` and threads it
+ * into `DaemonOpts.pollIntervalMs` EXPLICITLY on every real invocation, so this constant is
+ * provably dead for the operating path (test/policy-consumers.test.ts). Mirrors the
+ * `buildDefaultHeadroomPolicy` curve just below, same reasoning.
+ */
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
 
 /**
@@ -141,6 +155,15 @@ export type HeadroomPolicy = HeadroomPolicyRule[];
  * {@link HEADROOM_LIMIT_PCT}). A caller supplies a wholly different curve via
  * `DaemonOpts.headroomPolicy` without touching this source (see
  * `resolveHeadroomLimitPct`).
+ *
+ * W1-T253 (P37 CONSUMERS): this curve mirrors `plan/policy.yaml`'s `headroom.curve` (which
+ * this task's substrate, W1-T252, lifted FROM here) but stays a literal IN THIS FUNCTION —
+ * see {@link DEFAULT_POLL_INTERVAL_MS}'s doc, immediately above, for why: this module never
+ * touches the filesystem, and `loadDefaultPolicy` does. `daemonCommand` (run-task.ts) is the
+ * real `rmd daemon` entry point; it loads the policy's curve and threads it in as
+ * `DaemonOpts.headroomPolicy` on every real invocation, so a policy edit to the curve moves
+ * the LIVE daemon with zero code change even though this literal stays put as the fs-free
+ * fallback for a direct/test caller.
  */
 export function buildDefaultHeadroomPolicy(holdLimitPct: number = HEADROOM_LIMIT_PCT): HeadroomPolicy {
   return [

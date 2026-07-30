@@ -15,7 +15,12 @@ import {
 import { lintPlanCommand } from "../src/run-task.js";
 // The SOURCE constants plan/policy.yaml claims to lift — imported so the drift lock below
 // compares against the real thing, never a second copy of the literal.
-import { DEFAULT_PROOF_TIMEOUT_MS } from "../src/lib/review.js";
+//
+// `proofTimeoutMs` is deliberately ABSENT from this list: W1-T253 replaced review.ts's
+// `DEFAULT_PROOF_TIMEOUT_MS` literal with a read of the policy itself, so there is no source
+// constant left to compare against and drift is structurally unreachable for that field. See
+// the drift lock's own note below and test/policy-consumers.test.ts, which asserts the
+// stronger property (the executor's effective timeout IS the policy value).
 import { DEFAULT_PRUNE_GRACE_MS } from "../src/lib/worker.js";
 import { buildDefaultHeadroomPolicy, DEFAULT_POLL_INTERVAL_MS } from "../src/lib/daemon.js";
 import { fixStrikeCap } from "../src/lib/config.js";
@@ -139,7 +144,9 @@ test("the SHIPPED plan/policy.yaml loads and lifts the current source values", (
 
 test("every LIFTED policy value equals the SOURCE constant it cites — the drift lock", () => {
   const p = loadPolicy(SHIPPED).values;
-  assert.equal(p.proofTimeoutMs, DEFAULT_PROOF_TIMEOUT_MS, "proofTimeoutMs drifted from review.ts's DEFAULT_PROOF_TIMEOUT_MS");
+  // proofTimeoutMs is NOT asserted here — W1-T253 removed review.ts's literal in favour of a
+  // read of this very file, so a comparison would be against nothing (and drift is impossible
+  // once the code reads the policy). Consumed-from-policy is proved in policy-consumers.test.ts.
   assert.equal(p.pruneGraceMs, DEFAULT_PRUNE_GRACE_MS, "pruneGraceMs drifted from worker.ts's DEFAULT_PRUNE_GRACE_MS");
   assert.equal(p.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS, "pollIntervalMs drifted from daemon.ts's DEFAULT_POLL_INTERVAL_MS");
   assert.equal(p.fixStrikeCap, fixStrikeCap({ claudeBin: "/bin/true", root: "/nonexistent" }), "fixStrikeCap drifted from config.ts's fixStrikeCap default");

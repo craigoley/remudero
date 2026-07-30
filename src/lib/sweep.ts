@@ -1,5 +1,6 @@
 import { appendLedger } from "./ledger.js";
 import { readLedgerLines } from "./status.js";
+import { loadDefaultPolicy } from "./policy.js";
 import { cappedOverrideFromLedger, decideAutoMergeArm, postedArmFactsFromLedger } from "./review.js";
 import type { ArmDecision, CriterionVerdict } from "./review.js";
 import type { QuestionEntry } from "./worker.js";
@@ -326,12 +327,20 @@ export interface SweepPolicy {
  * incident it exists to catch, while generous enough that ordinary
  * single-day operation (well under DEFAULT_BUDGET_USD's $100 per-run cap,
  * run once or twice) does not trip it by accident.
+ *
+ * W1-T253 (P37 CONSUMERS): `staleDays`/`strikeCap`/`wipLimit` are the three fields this task's
+ * substrate (W1-T252) collected into `plan/policy.yaml` — read here via {@link
+ * loadDefaultPolicy} (self-locates the policy file from its own install location, never cwd)
+ * rather than a source literal, so a plan-reviewed policy edit retunes them with zero code
+ * change. The other rows (`dispatchLanes`/`dailyCostCeilingUsd`/`pendingCeilingMinutes`) are
+ * NOT collected constants for this task and stay exactly as they were.
  */
+const POLICY_SWEEP = loadDefaultPolicy().values.sweep;
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
-  staleDays: 14,
-  strikeCap: 2,
+  staleDays: POLICY_SWEEP.staleDays,
+  strikeCap: POLICY_SWEEP.strikeCap,
   clarify: DEFAULT_CLARIFY_POLICY,
-  wipLimit: 10,
+  wipLimit: POLICY_SWEEP.wipLimit,
   dispatchLanes: 2,
   dailyCostCeilingUsd: 150,
   pendingCeilingMinutes: 60,

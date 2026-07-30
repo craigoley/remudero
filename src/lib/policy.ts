@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 /**
@@ -312,4 +313,33 @@ export function loadPolicy(path: string): Policy {
     throw new PolicyError(`policy.yaml is not valid YAML (${path}): ${String(err)}`);
   }
   return validatePolicy(raw);
+}
+
+/**
+ * Absolute path to THIS INSTALLATION's `plan/policy.yaml`, resolved from this module's own
+ * file location — never from `process.cwd()` or an ambient repoRoot. `src/lib/policy.ts` sits
+ * two directories under the repo root, so a leaf consumer with no `repoRoot` parameter of its
+ * own (review.ts, worker.ts, daemon.ts, sweep.ts, drain.ts, launchd.ts — W1-T253's CONSUMER
+ * sites) can still resolve the SAME `plan/policy.yaml` `rmd`'s own CLI entry point resolves
+ * (`run-task.ts`'s `resolveRepoRoot`), regardless of the invoking shell's cwd. Mirrors that
+ * same function's own `import.meta.url`-based install-root fallback — same technique, same
+ * module-boundary reasoning, not a new pattern introduced by this file.
+ */
+export function installPolicyPath(): string {
+  return policyPath(join(fileURLToPath(new URL(".", import.meta.url)), "..", ".."));
+}
+
+let cachedDefaultPolicy: Policy | undefined;
+
+/**
+ * The policy at {@link installPolicyPath}, loaded once and memoized for the process's
+ * lifetime (the same "load once, hold it" shape `src/lib/config.ts`'s `Config` already uses).
+ * Every W1-T253 consumer site's DEFAULT resolves through this rather than a source literal —
+ * every site's default parameter/constant remains explicit and independently overridable by a
+ * caller or test that wants a value other than the loaded policy's, so this never forecloses
+ * direct injection for testing.
+ */
+export function loadDefaultPolicy(): Policy {
+  if (!cachedDefaultPolicy) cachedDefaultPolicy = loadPolicy(installPolicyPath());
+  return cachedDefaultPolicy;
 }

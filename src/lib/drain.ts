@@ -267,7 +267,23 @@ export function applyCuratedSelection(opts: DrainOpts, selection: CuratedSelecti
   return { ...opts, curated, max };
 }
 
-/** Default iteration cap — a sane bound, never infinite (an unattended loop). */
+/**
+ * Default iteration cap — a sane bound, never infinite (an unattended loop).
+ *
+ * W1-T253 (P37 CONSUMERS): mirrors `plan/policy.yaml`'s `drain.max` (lifted FROM this
+ * literal by the W1-T252 substrate) but stays a literal HERE rather than self-loading via
+ * `policy.ts`'s `loadDefaultPolicy` (a `readFileSync`, see review.ts/worker.ts/sweep.ts's
+ * siblings in this same task) — `daemon.ts` imports THIS module at the VALUE level
+ * (`nextRunnable`), and daemon.ts's own file header is explicit: "this pure module never
+ * touches the filesystem" (Rule 16 — `runDaemon` must stay callable thousands of times
+ * against an injected clock in a unit test with zero real I/O). An eager fs read here would
+ * leak into every daemon.ts import transitively. So this stays the fs-free fallback for a
+ * direct/test caller, and `drainCommand`/`daemonCommand` (run-task.ts) — the real `rmd
+ * drain`/`rmd daemon` CLI entries — load `plan/policy.yaml`'s `drain.max` and thread it in
+ * explicitly on every real invocation, so a policy edit moves the LIVE bound with zero code
+ * change even though this constant is provably dead on that path
+ * (test/policy-consumers.test.ts).
+ */
 export const DEFAULT_MAX = 10;
 
 export interface DrainSummary {
