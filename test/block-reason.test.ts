@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { INITIAL_RETRY_STATE, MAX_TRANSIENT_RETRIES, type RetryState } from "../src/lib/classify.js";
+import { INITIAL_RETRY_STATE, MAX_STRIKES, MAX_TRANSIENT_RETRIES, type RetryState } from "../src/lib/classify.js";
 import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
-import { reasonAboutBlock, verdictFailureClass } from "../src/lib/block-reason.js";
+import { reasonAboutBlock, verdictFailureClass, verdictIsFixable } from "../src/lib/block-reason.js";
 
 // A -> B -> C (chain); D independent (no dependents at all, no dependencies).
 const YAML = `
@@ -100,12 +100,67 @@ test("reasonAboutBlock: a strike on C (a leaf of the chain, nothing depends on I
 // ── acceptance #2: GENUINE BLOCKER — one or more transitive dependents ─────
 // never silently skipped.
 
-test("reasonAboutBlock: a strike on B (C transitively needs it) is GENUINE BLOCKER, naming C", () => {
-  const d = reasonAboutBlock(plan(), "B", "blocked_review", INITIAL_RETRY_STATE);
+test("reasonAboutBlock: an UNFIXABLE strike on B (C transitively needs it) is GENUINE BLOCKER, naming C", () => {
+  const d = reasonAboutBlock(plan(), "B", "blocked_budget", INITIAL_RETRY_STATE);
   assert.deepEqual(d, { kind: "genuine_blocker", dependents: ["C"] });
 });
 
 test("reasonAboutBlock: a strike on A (both B and C transitively need it) names BOTH dependents, sorted", () => {
   const d = reasonAboutBlock(plan(), "A", "failed", INITIAL_RETRY_STATE);
   assert.deepEqual(d, { kind: "genuine_blocker", dependents: ["B", "C"] });
+});
+
+// ── W1-T174: drain/sweep PARITY — a FIXABLE genuine blocker routes to the
+// fix rung (a bounded, strike-capped attempt), NOT straight to halt+escalate.
+// Halt+escalate NARROWS to the truly-stuck; it is never removed. ───────────
+
+test("verdictIsFixable: blocked_ci and blocked_review are fixable — the SAME signal classes the W1-T77 sweep routes to its fix rung", () => {
+  assert.equal(verdictIsFixable("blocked_ci"), true);
+  assert.equal(verdictIsFixable("blocked_review"), true);
+});
+
+test("verdictIsFixable: every other non-transient verdict is NOT fixable — no nameable criterion the rung could act on", () => {
+  const verdicts = [
+    "blocked",
+    "blocked_budget",
+    "blocked_containment",
+    "blocked_isolation",
+    "blocked_inflight",
+    "blocked_git_fetch",
+    "blocked_illformed",
+    "no_pr",
+    "pr_attribution_failed",
+    "failed",
+  ] as const;
+  for (const v of verdicts) assert.equal(verdictIsFixable(v), false, v);
+});
+
+test("reasonAboutBlock: a FIXABLE genuine blocker (blocked_ci — the #382 fixture's own verdict) routes to fixable_blocker, NOT straight to halt+escalate", () => {
+  const d = reasonAboutBlock(plan(), "B", "blocked_ci", INITIAL_RETRY_STATE);
+  assert.equal(d.kind, "fixable_blocker");
+  if (d.kind === "fixable_blocker") {
+    assert.deepEqual(d.dependents, ["C"]);
+    assert.equal(d.state.strikes, 1, "the fix attempt consumes ONE strike of the bound");
+    assert.equal(d.state.transientRetries, 0, "strikes and transient retries are independent counters");
+  }
+});
+
+test("reasonAboutBlock: a FIXABLE genuine blocker (blocked_review — a nameable unmet criterion) ALSO routes to fixable_blocker", () => {
+  const d = reasonAboutBlock(plan(), "B", "blocked_review", INITIAL_RETRY_STATE);
+  assert.equal(d.kind, "fixable_blocker");
+  if (d.kind === "fixable_blocker") assert.deepEqual(d.dependents, ["C"]);
+});
+
+test("reasonAboutBlock: fixable-blocker fix attempts are BOUNDED — exhausting the strike cap falls through to GENUINE BLOCKER (the W1-T168 anti-regression guard: it does not fix-loop forever)", () => {
+  let state: RetryState = INITIAL_RETRY_STATE;
+  for (let i = 0; i < MAX_STRIKES; i++) {
+    const d = reasonAboutBlock(plan(), "B", "blocked_ci", state);
+    assert.equal(d.kind, "fixable_blocker", `attempt ${i + 1}/${MAX_STRIKES}`);
+    if (d.kind === "fixable_blocker") state = d.state;
+  }
+  // One more blocked_ci exhausts the strike bound — no longer safe to keep
+  // attempting a fix; falls through to the SAME halt+escalate an unfixable
+  // block always got, still naming the real dependents.
+  const exhausted = reasonAboutBlock(plan(), "B", "blocked_ci", state);
+  assert.deepEqual(exhausted, { kind: "genuine_blocker", dependents: ["C"] });
 });

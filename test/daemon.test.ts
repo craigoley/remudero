@@ -1288,6 +1288,110 @@ test("W1-T46 INDEPENDENT-FAILURE: a block on a task with NO transitive dependent
   assert.ok(!lines.some((l) => l.step === "daemon.blocked"), "an independent failure never triggers a genuine-blocker halt");
 });
 
+// ── W1-T174: drain/sweep PARITY — a FIXABLE genuine blocker dispatches to
+// the fix rung instead of halting; halt narrows to the truly-stuck. ────────
+
+test("W1-T174: a FIXABLE genuine blocker (blocked_ci, the #382 fixture's own verdict) dispatches to deps.dispatchFix — NOT halt+escalate — and the retry succeeds", async () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const dispatches: Array<{ task: Task; result: RunResult; dependents: string[] }> = [];
+  const escalations: unknown[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const clock = fakeClock();
+  let bAttempts = 0;
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id): Promise<RunResult> => {
+        ran.push(id);
+        if (id === "B") {
+          bAttempts++;
+          if (bAttempts === 1) {
+            return {
+              taskId: id,
+              runId: id + "-run",
+              merged: false,
+              costUsd: 0.2,
+              verdict: "blocked_ci",
+              prUrl: "https://github.com/o/r/pull/382",
+            };
+          }
+        }
+        merged.add(id);
+        return okResult(id);
+      },
+      dispatchFix: async (info) => { dispatches.push(info); },
+      escalateBlock: async (info) => { escalations.push(info); },
+      sleep: clock.sleep,
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 5 },
+  );
+  assert.deepEqual(ran, ["A", "B", "B", "C", "D"], "B retries once (fixable) before merging and C proceeds");
+  assert.deepEqual(s.merged, ["A", "B", "C", "D"]);
+  assert.equal(s.stopReason, "max_reached", "a fixable block with the fix rung wired never halts the daemon");
+  assert.equal(dispatches.length, 1, "dispatchFix is called exactly once, for the ONE fixable block");
+  assert.equal(dispatches[0].task.id, "B");
+  assert.deepEqual(dispatches[0].dependents, ["C"]);
+  assert.equal(dispatches[0].result.verdict, "blocked_ci");
+  assert.equal(escalations.length, 0, "a fixable block the rung is wired to handle never escalates");
+  assert.ok(!lines.some((l) => l.step === "daemon.blocked"), "a fixable block dispatched to the rung is never a halt-and-escalate");
+  const dispatchLine = lines.find((l) => l.step === "daemon.block.fixable_dispatch");
+  assert.ok(dispatchLine, "a daemon.block.fixable_dispatch ledger line was emitted");
+  assert.deepEqual(dispatchLine?.extra, { task: "B", verdict: "blocked_ci", dependents: ["C"], strikes: 1 });
+});
+
+test("W1-T174: an UNFIXABLE genuine blocker still halts + escalates immediately, even with dispatchFix wired — halt narrows to the truly-stuck, it is not removed", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const dispatches: unknown[] = [];
+  const escalations: Array<{ task: Task; result: RunResult; dependents: string[] }> = [];
+  const clock = fakeClock();
+  const s = await runDaemon(plan, {
+    refreshMerged: () => (id) => merged.has(id),
+    runOne: async (id): Promise<RunResult> => {
+      if (id === "B") {
+        return { taskId: id, runId: id + "-run", merged: false, costUsd: 0.2, verdict: "blocked_budget" };
+      }
+      merged.add(id);
+      return okResult(id);
+    },
+    dispatchFix: async (info) => { dispatches.push(info); },
+    escalateBlock: async (info) => { escalations.push(info); },
+    sleep: clock.sleep,
+  });
+  assert.equal(s.stopReason, "blocked");
+  assert.match(s.stopDetail ?? "", /B → blocked_budget/);
+  assert.equal(dispatches.length, 0, "an unfixable block never reaches the fix rung — no nameable criterion to act on");
+  assert.equal(escalations.length, 1, "an unfixable genuine blocker still escalates exactly as before");
+  assert.equal(escalations[0].task.id, "B");
+});
+
+test("W1-T174: a FIXABLE genuine blocker with NO dispatchFix wired still halts + escalates — never a silent stall on a block it has no rung to act on", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const escalations: Array<{ task: Task; result: RunResult; dependents: string[] }> = [];
+  const clock = fakeClock();
+  const s = await runDaemon(plan, {
+    refreshMerged: () => (id) => merged.has(id),
+    runOne: async (id): Promise<RunResult> => {
+      if (id === "B") {
+        return { taskId: id, runId: id + "-run", merged: false, costUsd: 0.2, verdict: "blocked_ci" };
+      }
+      merged.add(id);
+      return okResult(id);
+    },
+    escalateBlock: async (info) => { escalations.push(info); },
+    sleep: clock.sleep,
+  });
+  assert.equal(s.stopReason, "blocked");
+  assert.match(s.stopDetail ?? "", /B → blocked_ci/);
+  assert.equal(escalations.length, 1, "no dispatchFix wired ⇒ the SAME halt+escalate a genuine blocker always got");
+  assert.equal(escalations[0].task.id, "B");
+});
+
 // ── the PERSISTENT difference from `rmd drain`: it polls instead of stopping ─
 
 test("no runnable task right now: the daemon PACES itself (injected clock) and keeps polling instead of stopping", async () => {

@@ -632,6 +632,19 @@ export interface DaemonDeps {
    */
   escalateBlock?: (info: { task: Task; result: RunResult; dependents: string[] }) => void | Promise<void>;
   /**
+   * W1-T174 (drain/sweep PARITY): called for a FIXABLE genuine blocker
+   * (`reasonAboutBlock`'s `fixable_blocker` disposition — one or more
+   * dependents, but the verdict names actionable evidence, see block-
+   * reason.ts's `verdictIsFixable`) BEFORE any halt+escalate. The real
+   * command wires this to the SAME W1-T76 fix rung the W1-T77 sweep already
+   * dispatches (`routeFix`/`dispatchFix` in run-task.ts), driven against
+   * the task's own open PR. Optional — omitted (or once `reasonAboutBlock`'s
+   * own strike bound is exhausted), a fixable block falls through to the
+   * SAME `escalateBlock` halt a genuine blocker always got: the daemon
+   * never silently stalls on a fixable block it has no rung wired to act on.
+   */
+  dispatchFix?: (info: { task: Task; result: RunResult; dependents: string[] }) => void | Promise<void>;
+  /**
    * W1-T113 part (iii), DEGRADE DON'T DIE (the vanished-binary incident): called
    * AT MOST ONCE per distinct `reason` for the life of this daemon run — never
    * once per poll tick, never once per task — when `runOne` throws a spawn-
@@ -936,8 +949,11 @@ export function daemonBoot(
  * order, reusing drain.ts's `nextRunnable` — never reimplemented) → run it →
  * REASON about any non-merged verdict (W1-T46, superseding v1's blunt
  * stop-on-block): transient retries (no strike), an independent failure is
- * flagged + skipped while the rest of the drain continues, a genuine blocker
- * halts + escalates. When nothing is runnable OR headroom is exhausted, sleep
+ * flagged + skipped while the rest of the drain continues, a FIXABLE genuine
+ * blocker gets a bounded fix-rung attempt before halting (W1-T174, drain/
+ * sweep parity), and a genuine blocker with no fixable signal (or an
+ * exhausted fix attempt) halts + escalates. When nothing is runnable OR
+ * headroom is exhausted, sleep
  * via the injected clock and poll again — the loop is PERSISTENT by default
  * (no `max`), unlike a bounded drain, and idling (for either reason) is an
  * in-process state, never a process exit.
@@ -1452,6 +1468,28 @@ export async function runDaemon(
         });
         continue;
       }
+      if (disposition.kind === "fixable_blocker" && deps.dispatchFix) {
+        // W1-T174 (drain/sweep PARITY): the SAME blocked_ci/blocked_review
+        // evidence the W1-T77 sweep routes to the W1-T76 fix rung gets a
+        // bounded fix attempt here too, BEFORE halting — strike-capped by
+        // `reasonAboutBlock` via the SAME classify.ts primitive every
+        // strike in this module already uses (never a separate, unbounded
+        // loop — the W1-T168 anti-regression guard: exhausting the bound
+        // falls through to `genuine_blocker` on a LATER tick and escalates
+        // for re-judgment, it does not fix-loop forever). Keep the retry
+        // state threaded across ticks — dropped only once resolved
+        // (merged, flagged, or escalated) below.
+        blockRetryStates.set(next.id, disposition.state);
+        log("daemon.block.fixable_dispatch", {
+          task: next.id,
+          verdict: result.verdict,
+          dependents: disposition.dependents,
+          strikes: disposition.state.strikes,
+        });
+        await deps.dispatchFix({ task: next, result, dependents: disposition.dependents });
+        continue;
+      }
+
       blockRetryStates.delete(next.id); // resolved one way or another below
 
       if (disposition.kind === "independent_failure") {
@@ -1471,7 +1509,12 @@ export async function runDaemon(
       // GENUINE BLOCKER: real downstream work transitively needs this task
       // merged — "never continue into the gap" is absolute here. Halt and
       // escalate, exactly as v1's stop-on-block halted, but now the
-      // dependents it protects are named.
+      // dependents it protects are named. Reached by a `genuine_blocker`
+      // disposition (no fixable signal at all, or a `fixable_blocker` whose
+      // strike bound `reasonAboutBlock` already exhausted) AND by a
+      // `fixable_blocker` with no `dispatchFix` wired (W1-T174: never a
+      // silent stall on a fixable block this daemon has no rung to act on —
+      // the SAME halt+escalate a genuine blocker always got).
       log("daemon.blocked", {
         task: next.id,
         verdict: result.verdict,
