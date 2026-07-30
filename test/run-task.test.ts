@@ -490,7 +490,7 @@ test("W1-T191: runTask's DECISION_REQUEST branch never calls recordDecision for 
 // ── W1-T191 acceptance 4: the three already-observed decision records (found 2026-07-21 in a
 // dirty operator checkout, uncommitted) are preserved in the repository, not assumed away. ──
 
-test("W1-T191 acceptance 4: the three already-observed 2026-07-20/21 decision resolutions are present in the committed DECISIONS.md", () => {
+test("W1-T191 acceptance 4: the three rescued decision records are present after the fix — the 2026-07-20/21 resolutions in the committed DECISIONS.md", () => {
   const decisionsMd = readFileSync(join(new URL("..", import.meta.url).pathname, "DECISIONS.md"), "utf8");
   assert.match(decisionsMd, /## 2026-07-20T20:36:14\.454Z — W1-T156 \(W1-T156-1784579460422\)/);
   assert.match(decisionsMd, /## 2026-07-20T22:31:09\.231Z — W1-T128 \(W1-T128-1784586484416\)/);

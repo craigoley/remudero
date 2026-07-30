@@ -596,7 +596,7 @@ test("landFeedback's full commit message (header + body) passes the REAL commitl
 // working tree at all (not just "cleaned up after" — never put there), so `root` never picks
 // up so much as an untracked file from this call.
 
-test("W1-T191 acceptance 1: recordDecision reaches a COMMITTED artifact on origin — never root's working tree", () => {
+test("W1-T191 acceptance 1: a decision record reaches a committed artifact, not only the working tree — recordDecision on origin, never root's working tree", () => {
   const bareOrigin = makeBareOrigin();
   const root = cloneRoot(bareOrigin);
   const { gh } = fakeGh("https://github.com/o/r/pull/100");
@@ -628,7 +628,7 @@ test("W1-T191 acceptance 1: recordDecision reaches a COMMITTED artifact on origi
   assert.match(onBranch, /Risk: medium \(medium-risk signal\)/);
 });
 
-test("W1-T191 acceptance 3: a decision record survives even if root's checkout is destroyed by an ordinary git hygiene command", () => {
+test("W1-T191 acceptance 3: no decision record exists solely as an uncommitted modification — it survives root's checkout being destroyed by an ordinary git hygiene command", () => {
   const bareOrigin = makeBareOrigin();
   const root = cloneRoot(bareOrigin);
   const { gh } = fakeGh("https://github.com/o/r/pull/101");
@@ -653,7 +653,7 @@ test("W1-T191 acceptance 3: a decision record survives even if root's checkout i
   assert.match(stillThere, /Chosen \(RECOMMENDED, auto\): x/);
 });
 
-test("W1-T191 acceptance 2: two decisions resolved before either lands merges BOTH survive on the shared branch — no conflict, no silent loss", () => {
+test("W1-T191 acceptance 2: two concurrent decision records both land without a conflict — neither's PR has merged yet when the second resolves", () => {
   const bareOrigin = makeBareOrigin();
   const root = cloneRoot(bareOrigin);
   const { gh } = fakeGh("https://github.com/o/r/pull/102");
@@ -693,7 +693,7 @@ test("W1-T191: recordDecision is idempotent — a decision whose content already
   assert.deepEqual(result.files, []);
 });
 
-test("W1-T191 acceptance 5: a console feedback decision (setFeedbackStatus with `land`) lands via the bridge and leaves root's working tree CLEAN", () => {
+test("W1-T191 acceptance 5: a feedback decision leaves the caller's working tree clean — a console setFeedbackStatus with `land` lands via the bridge", () => {
   const bareOrigin = makeBareOrigin();
   const id = "fb-preexisting-1";
 
@@ -748,7 +748,7 @@ test("W1-T191 acceptance 5: a console feedback decision (setFeedbackStatus with 
   assert.match(onBranch, /status: accepted/);
 });
 
-test("W1-T191 acceptance 6: a checkout dirtied ONLY by these two writers is not refused by checkCliFreshness once it falls behind origin/main", () => {
+test("W1-T191 acceptance 6: a checkout dirtied only by these two writers is not refused — once it falls behind origin/main, checkCliFreshness lets it through", () => {
   const bareOrigin = makeBareOrigin();
   const root = cloneRoot(bareOrigin);
   const { gh } = fakeGh("https://github.com/o/r/pull/201");
