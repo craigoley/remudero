@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { appendLedger } from "./ledger.js";
+import { assertLiveWriteAllowed } from "./live-write-guard.js";
 
 /**
  * Escalations as GitHub issues (W1-T8, MASTER-PLAN §4 "Escalation taxonomy").
@@ -462,6 +463,7 @@ export function ghIssueGateway(
       }
     },
     create(title, body, labels) {
+      assertLiveWriteAllowed("gh-issue-create", `filing an issue on ${repoArg}`);
       const args = ["issue", "create", "--repo", repoArg, "--title", title, "--body", body];
       for (const label of labels) args.push("--label", label);
       return run(args).trim();

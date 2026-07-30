@@ -39,6 +39,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { assertLiveWriteAllowed } from "./live-write-guard.js";
 
 const FEEDBACK_REL_DIR = "plan/feedback";
 
@@ -241,6 +242,10 @@ function finishLanding(
   // ONE shared branch per kind, always rebuilt from origin/main's CURRENT tip — force-push
   // is safe (and required) because this branch is bot-owned and never diverges by history,
   // only by content, so it can never actually conflict.
+  // #954 GUARD, CARRIED ACROSS THE finishLanding REFACTOR: main added this inline to the body
+  // this function replaced, so the merge had to move it WITH the code — resolving to either
+  // side alone would have silently dropped it and reopened the hole #954 closed.
+  assertLiveWriteAllowed("git-push", `force-pushing the ${kind.branch} branch`);
   git(["push", "--force", "origin", `${commitSha}:refs/heads/${kind.branch}`]);
 
   let prUrl = findPendingLandingPr({ gh, branch: kind.branch });
@@ -261,6 +266,7 @@ function finishLanding(
   }
   if (prUrl) {
     try {
+      assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
       gh(["pr", "merge", prUrl, "--auto", "--squash"]);
     } catch {
       // Best-effort — the ci + remudero-review gate decides; GitHub does the merging

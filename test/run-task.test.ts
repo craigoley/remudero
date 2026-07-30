@@ -98,6 +98,7 @@ import {
 } from "../src/lib/onboard/synthesize.js";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import type { recordDecision } from "../src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { Config } from "../src/lib/config.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
@@ -293,15 +294,21 @@ test(
     };
 
     try {
-      const res = await runTask("T-FOLLOWUP", {
-        skipGitSync: true,
-        planPath,
-        config,
-        github: FOLLOWUP_OFFLINE_GITHUB,
-        spawn,
-        containmentExec: followupHoldingContainmentExec,
-        isolationExec: followupCleanIsolationExec,
-      });
+      // A REAL runTask() on followupGitFixture's throwaway bare TMPDIR origin: recon,
+      // implement, the squash and `git push origin HEAD` all run for real, entirely offline,
+      // with a fake gh on PATH and an offline `github` gateway. Exempted because the guard
+      // checks the CALL, not the destination — this run never touches the live repo.
+      const res = await withLiveWritesAllowed(() =>
+        runTask("T-FOLLOWUP", {
+          skipGitSync: true,
+          planPath,
+          config,
+          github: FOLLOWUP_OFFLINE_GITHUB,
+          spawn,
+          containmentExec: followupHoldingContainmentExec,
+          isolationExec: followupCleanIsolationExec,
+        }),
+      );
 
       // ci is answered RED on the very first poll (followupFakeGh above) — the run
       // reaches its terminal verdict right after the implement harvest, with no
@@ -982,15 +989,21 @@ test(
     };
 
     try {
-      const res = await runTask("T-FOLLOWUP", {
-        skipGitSync: true,
-        planPath,
-        config,
-        github: FOLLOWUP_OFFLINE_GITHUB,
-        spawn,
-        containmentExec: followupHoldingContainmentExec,
-        isolationExec: followupCleanIsolationExec,
-      });
+      // A REAL runTask() on followupGitFixture's throwaway bare TMPDIR origin: recon,
+      // implement, the squash and `git push origin HEAD` all run for real, entirely offline,
+      // with a fake gh on PATH and an offline `github` gateway. Exempted because the guard
+      // checks the CALL, not the destination — this run never touches the live repo.
+      const res = await withLiveWritesAllowed(() =>
+        runTask("T-FOLLOWUP", {
+          skipGitSync: true,
+          planPath,
+          config,
+          github: FOLLOWUP_OFFLINE_GITHUB,
+          spawn,
+          containmentExec: followupHoldingContainmentExec,
+          isolationExec: followupCleanIsolationExec,
+        }),
+      );
 
       // ci is answered RED on the very first poll (fakeGh) — the run reaches its
       // terminal blocked_ci verdict, but only AFTER pushing and opening the PR: proof
@@ -4631,7 +4644,11 @@ test("ghPrCreateFillCommand: plan/triage PR-create runs gh with cwd pinned to th
   // other cwd (the rmd process's own dir) --fill throws `ambiguous argument` and no PR
   // opens, leaving an orphan branch. This asserts the cwd is the fix, not process.cwd().
   const worktree = "/Users/x/Remudero/repos/remudero/worktrees/run-TRIAGE-fb-abc-123";
-  const built = ghPrCreateFillCommand(worktree, "craigoley", "remudero", "run-TRIAGE-fb-abc-123");
+  // Builds the argv only — nothing is executed here — but the guard fires on the PR-create
+  // boundary itself, so the builder needs the exemption to be reachable at all.
+  const built = withLiveWritesAllowed(() =>
+    ghPrCreateFillCommand(worktree, "craigoley", "remudero", "run-TRIAGE-fb-abc-123"),
+  );
   assert.equal(built.options.cwd, worktree, "cwd MUST be the run worktree — this is the whole fix");
   assert.notEqual(built.options.cwd, process.cwd(), "cwd must NOT default to the process cwd, where the branch is unresolvable");
   assert.equal(built.command, "gh");
@@ -4732,9 +4749,12 @@ test("realArmDeps: the real gh/config wiring executes against a PATH-stubbed gh 
   try {
     const d = realArmDeps();
     assert.equal(d.headSha("url/x"), "stub1234", "headSha parses gh pr view --json headRefOid");
-    assert.doesNotThrow(() => d.armAuto("url/x"), "armAuto reaches gh pr merge --auto");
-    assert.doesNotThrow(() => d.mergeDirect("url/x"), "mergeDirect reaches gh pr merge --squash");
-    assert.doesNotThrow(() => d.disableAuto("url/x"), "disableAuto (W1-T125) reaches gh pr merge --disable-auto");
+    // These three reach `gh pr merge` for real, against the PATH-stubbed `gh` written above —
+    // never the live repo. Each is exempted individually because the guard checks the CALL,
+    // not the destination, and running the real dep body IS the assertion.
+    assert.doesNotThrow(() => withLiveWritesAllowed(() => d.armAuto("url/x")), "armAuto reaches gh pr merge --auto");
+    assert.doesNotThrow(() => withLiveWritesAllowed(() => d.mergeDirect("url/x")), "mergeDirect reaches gh pr merge --squash");
+    assert.doesNotThrow(() => withLiveWritesAllowed(() => d.disableAuto("url/x")), "disableAuto (W1-T125) reaches gh pr merge --disable-auto");
     assert.doesNotThrow(() => d.say("realArmDeps coverage probe"));
     try {
       d.ledgerLines();

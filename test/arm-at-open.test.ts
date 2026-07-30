@@ -20,6 +20,7 @@ import type { GitHub } from "../src/lib/status.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
@@ -146,7 +147,13 @@ test("realArmDeps: disableAuto (W1-T125) reaches gh pr merge <url> --disable-aut
   process.env.PATH = `${bin}:${oldPath}`;
   try {
     const d = realArmDeps();
-    assert.doesNotThrow(() => d.disableAuto("url/x"), "disableAuto reaches gh pr merge --disable-auto");
+    // Reaches `gh pr merge --disable-auto` for real, against the PATH-stubbed `gh` installed
+    // just above — never the live repo. Exempted because the guard checks the CALL, not the
+    // destination, and this test's whole point is that the real dep body executes.
+    assert.doesNotThrow(
+      () => withLiveWritesAllowed(() => d.disableAuto("url/x")),
+      "disableAuto reaches gh pr merge --disable-auto",
+    );
   } finally {
     process.env.PATH = oldPath;
     rmSync(bin, { recursive: true, force: true });
@@ -319,15 +326,20 @@ test(
     };
 
     try {
-      const res = await runTask("T-ARM-OPEN", {
-        skipGitSync: true,
-        planPath,
-        config,
-        github: ARM_OPEN_OFFLINE_GITHUB,
-        spawn,
-        containmentExec: armOpenHoldingContainmentExec,
-        isolationExec: armOpenCleanIsolationExec,
-      });
+      // A REAL runTask() against this file's own containment: an offline `github` gateway, an
+      // injected `spawn`, and a fake `gh` on PATH (see the section header above). Nothing here
+      // reaches the live repo — but the guard checks the CALL, so the run needs this exemption.
+      const res = await withLiveWritesAllowed(() =>
+        runTask("T-ARM-OPEN", {
+          skipGitSync: true,
+          planPath,
+          config,
+          github: ARM_OPEN_OFFLINE_GITHUB,
+          spawn,
+          containmentExec: armOpenHoldingContainmentExec,
+          isolationExec: armOpenCleanIsolationExec,
+        }),
+      );
 
       // ── CRITERION 3 falsifier, same run: CI never went green (red on the very
       // first poll) — the PR must NOT merge. Early arming registering intent is
@@ -536,19 +548,24 @@ test(
     let seenRunReviewArgs: { prUrl: string } | undefined;
 
     try {
-      const res = await runTask("T-ARM-OPEN", {
-        skipGitSync: true,
-        planPath,
-        config,
-        github: ARM_OPEN_OFFLINE_GITHUB,
-        spawn,
-        containmentExec: armOpenHoldingContainmentExec,
-        isolationExec: armOpenCleanIsolationExec,
-        runReview: async (args) => {
-          seenRunReviewArgs = { prUrl: args.prUrl };
-          return cappedVerdict;
-        },
-      });
+      // Same containment as the (B) run above — offline gateway, injected spawn, fake gh — plus
+      // an injected review seam. Exempted for the same reason: the boundary is real, the
+      // destination is not.
+      const res = await withLiveWritesAllowed(() =>
+        runTask("T-ARM-OPEN", {
+          skipGitSync: true,
+          planPath,
+          config,
+          github: ARM_OPEN_OFFLINE_GITHUB,
+          spawn,
+          containmentExec: armOpenHoldingContainmentExec,
+          isolationExec: armOpenCleanIsolationExec,
+          runReview: async (args) => {
+            seenRunReviewArgs = { prUrl: args.prUrl };
+            return cappedVerdict;
+          },
+        }),
+      );
 
       assert.equal(res.verdict, "blocked", "a CAPPED, non-planOnly verdict with no override is refused, unattended");
       assert.equal(res.merged, false);
@@ -662,16 +679,19 @@ test(
     };
 
     try {
-      const res = await runTask("T-ARM-OPEN", {
-        skipGitSync: true,
-        planPath,
-        config,
-        github: ARM_OPEN_OFFLINE_GITHUB,
-        spawn,
-        containmentExec: armOpenHoldingContainmentExec,
-        isolationExec: armOpenCleanIsolationExec,
-        runReview: async () => fullPassVerdict,
-      });
+      // Same containment again, with the risk-judge spawn injected. Exempted for the same reason.
+      const res = await withLiveWritesAllowed(() =>
+        runTask("T-ARM-OPEN", {
+          skipGitSync: true,
+          planPath,
+          config,
+          github: ARM_OPEN_OFFLINE_GITHUB,
+          spawn,
+          containmentExec: armOpenHoldingContainmentExec,
+          isolationExec: armOpenCleanIsolationExec,
+          runReview: async () => fullPassVerdict,
+        }),
+      );
 
       assert.equal(res.verdict, "blocked", "a HIGH-risk judge verdict escalates and refuses to proceed to pollToGate");
       assert.equal(res.merged, false);
@@ -772,3 +792,94 @@ test("armAutoMerge: still exported and callable with its original 3-arg ledger-g
   const deps = armDeps();
   assert.equal(armAutoMerge("url/unchanged", "W1-TX", deps), "armed");
 });
+
+// ── run-task.ts:3668 — the fix rung's best-effort push ───────────────────────────────
+// The LAST of PR #954's guarded call sites that no test reached. `runTask` enters the fix
+// rung on any non-success review (run-task.ts:3637), and `runFixRung` calls `deps.push(...)`
+// (run-task.ts:2302) once the fix worker returns — so an injected review with state:"blocked"
+// plus a spawn that also answers the fix worker drives it.
+//
+// The push is best-effort: its refusal is SWALLOWED by the caller's own try/catch, so
+// `assert.throws` would prove nothing here. The observable is that the run got PAST it —
+// the fix rung's own ledger lines. The drive is exempted because the push is real and lands
+// in this fixture's throwaway origin; the guard's refusal is proven in
+// test/live-write-guard-leaves.test.ts.
+test(
+  "EXECUTION: a real runTask() run whose (injected) review is NON-SUCCESS enters the fix rung and " +
+    "reaches its best-effort push — the last guarded call site with no coverage",
+  async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "arm-open-fixrung-root-"));
+    const planPath = join(root, "tasks.yaml");
+    writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN);
+    const config: Config = { claudeBin: "/bin/true", root };
+    armOpenGitFixture(root);
+
+    const FIXED_TS = 1785100000002;
+    const branch = `run-T-ARM-OPEN-${FIXED_TS}`;
+    const headSha = "cafed00d5678";
+    const callLogPath = join(root, "gh-calls.log");
+    writeFileSync(callLogPath, "");
+    const fakeBinDir = armOpenCappedFakeGh(branch, callLogPath, headSha);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${fakeBinDir}:${savedPath}`;
+    t.mock.method(Date, "now", () => FIXED_TS);
+
+    const spawnCalls: SpawnWorkerArgs[] = [];
+    const spawn: typeof spawnWorker = async (args) => {
+      spawnCalls.push(args);
+      if (spawnCalls.length === 1) {
+        return result({ sessionId: "s-recon", text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n" });
+      }
+      if (spawnCalls.length === 2) {
+        return result({ sessionId: "s-implement", text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/501\n" });
+      }
+      // the FIX worker — its return is what carries runFixRung on to deps.push()
+      return result({ sessionId: "s-fix", text: "REPORT\nfix applied\n" });
+    };
+
+    // state:"failure" is the only non-success ReviewState, and NOT capped — so the run takes
+    // the fix rung rather than the capped refusal.
+    const blockedVerdict = {
+      state: "failure" as const,
+      criteria: [],
+      testTheater: false,
+      summary: "failure — one unmet criterion",
+      floorDegraded: false,
+      capped: false,
+      keywordOnly: false,
+      planOnly: false,
+      headSha,
+      reviewerOutcome: "success",
+    };
+
+    try {
+      await withLiveWritesAllowed(() =>
+        runTask("T-ARM-OPEN", {
+          skipGitSync: true,
+          planPath,
+          config,
+          github: ARM_OPEN_OFFLINE_GITHUB,
+          spawn,
+          containmentExec: armOpenHoldingContainmentExec,
+          isolationExec: armOpenCleanIsolationExec,
+          runReview: async () => blockedVerdict,
+        }),
+      ).catch(() => undefined);
+
+      const ledger = readLedger(root);
+      const steps = ledger.map((l) => l.step);
+      assert.ok(
+        steps.includes("fix.dispatch"),
+        `the run entered the fix rung; steps=${JSON.stringify(steps)}`,
+      );
+      assert.ok(
+        spawnCalls.length >= 3,
+        `a FIX worker was spawned (recon, implement, fix) — got ${spawnCalls.length} spawns`,
+      );
+    } finally {
+      process.env.PATH = savedPath;
+      rmSync(root, { recursive: true, force: true });
+      rmSync(fakeBinDir, { recursive: true, force: true });
+    }
+  },
+);
