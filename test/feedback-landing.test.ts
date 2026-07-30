@@ -596,6 +596,54 @@ test("landFeedback's full commit message (header + body) passes the REAL commitl
 // working tree at all (not just "cleaned up after" — never put there), so `root` never picks
 // up so much as an untracked file from this call.
 
+test("landContent carry-forward: a pending file whose blob will not resolve is SKIPPED, never fatal", () => {
+  // Covers the `continue` in landContent's carry-forward rev-parse catch. `ls-tree` lists a path on
+  // the landing branch, then the per-file `rev-parse origin/<branch>:<path>` fails — the ref moved
+  // between the two reads, or the entry is not a resolvable blob. That file must simply be dropped
+  // from the carry-forward set: the batch still lands. A throw here would take the whole bridge down
+  // on a benign race, and the bridge's contract is NEVER-THROWS.
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  const { gh } = fakeGh("https://github.com/o/r/pull/101");
+
+  const first = recordDecision(
+    root,
+    { taskId: "T1", runId: "T1-111", options: ["a", "b"], chosen: "a", band: "medium", reason: "first" },
+    { gh },
+  );
+  assert.equal(first.landed, true, "the first record is on the decisions-landing branch");
+
+  // Second record. Real git for everything EXCEPT the carry-forward blob lookup, which throws the
+  // way git does when the path is not resolvable in that ref.
+  let skipped = 0;
+  const racingGit = (args: string[], opts?: { env?: NodeJS.ProcessEnv }) => {
+    if (args[0] === "rev-parse" && String(args[1]).startsWith(`origin/${DECISIONS_LANDING_BRANCH}:`)) {
+      skipped++;
+      throw new Error(`fatal: path does not exist in 'origin/${DECISIONS_LANDING_BRANCH}'`);
+    }
+    return execFileSync("git", ["-C", root, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: opts?.env ?? process.env,
+    });
+  };
+
+  const second = recordDecision(
+    root,
+    { taskId: "T2", runId: "T2-222", options: ["a", "b"], chosen: "b", band: "medium", reason: "second" },
+    { gh, git: racingGit },
+  );
+
+  assert.ok(skipped > 0, "the unresolvable-blob branch was actually taken");
+  assert.equal(second.landed, true, "the batch still lands — a skipped carry-forward file is not fatal");
+  assert.equal(second.error, undefined, "and it is not reported as an error");
+  assert.deepEqual(
+    second.files,
+    [decisionRecordRelPath("T2", "T2-222")],
+    "only the new record is landed; the pending one whose blob would not resolve was skipped",
+  );
+});
+
 test("W1-T191 acceptance 1: a decision record reaches a committed artifact, not only the working tree — recordDecision on origin, never root's working tree", () => {
   const bareOrigin = makeBareOrigin();
   const root = cloneRoot(bareOrigin);
