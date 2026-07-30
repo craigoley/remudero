@@ -20,6 +20,7 @@ import {
   runSweep,
   strikeCapForAnswer,
   toQuestionEntry,
+  unattributedFilingReason,
   MAX_ESCALATION_CLOSES_PER_CYCLE,
   type CiFailure,
   type ClarificationQuestion,
@@ -685,6 +686,104 @@ test("acceptance 1 — the P22 golden: {mergeable, blocked-fixable(2 criteria), 
   assert.equal(summary.total, 4);
   assert.equal(summary.actionsTaken, 4);
   assert.equal(summary.noneCount, 0, "no open PR ends the sweep with disposition=none");
+});
+
+// ── W1-T196: UNATTRIBUTABLE-PR STAND-DOWN — the #440 fixture. PR #439 was a
+// plan-FILING PR (W1-T136 criterion 5: a filing PR carries NO Remudero-Task
+// trailer BY DESIGN) whose unresolved task id rendered `task: UNKNOWN` in an
+// operator-facing escalation. A rung that cannot resolve a task id for a
+// PR it can POSITIVELY confirm is a filing PR must stand down with a ledger
+// line instead — the question has no answer, since there is no task to ask
+// about. Any OTHER unattributed PR (broken/missing trailer on what may be an
+// implementing PR, or a genuinely blocked, attributable PR) escalates
+// exactly as before. ───────────────────────────────────────────────────────
+
+/** The #440 fixture: a plan-filing PR, unresolved task id, in-flight (never merged pre-heal). */
+function filingPrNoTrailer(over: Partial<OpenPrView> = {}): OpenPrView {
+  return pr({
+    prNumber: 439,
+    prUrl: "url/439",
+    taskId: undefined,
+    filingPr: true,
+    reviewState: "none",
+    checksState: "pending",
+    ...over,
+  });
+}
+
+test("unattributedFilingReason: an unresolved task id on a POSITIVELY-confirmed filing PR names the PR and cites W1-T136 criterion 5", () => {
+  const r = unattributedFilingReason(filingPrNoTrailer());
+  assert.match(r ?? "", /#439/);
+  assert.match(r ?? "", /filing/i);
+  assert.match(r ?? "", /W1-T136/);
+});
+
+test("unattributedFilingReason: a RESOLVED task id never stands down, even when filingPr is (incorrectly) set true", () => {
+  assert.equal(unattributedFilingReason(filingPrNoTrailer({ taskId: "W1-Z" })), undefined);
+});
+
+test("unattributedFilingReason: an unresolved task id with filingPr undefined/false does NOT stand down — the pre-existing broken-attribution case", () => {
+  assert.equal(unattributedFilingReason(pr({ taskId: undefined })), undefined);
+  assert.equal(unattributedFilingReason(pr({ taskId: undefined, filingPr: false })), undefined);
+});
+
+test("acceptance 1 — runSweep: a filing PR with no resolvable task id STANDS DOWN — escalate() is called ZERO times, and the disposed line ledgers the stand-down naming the PR (the #440 falsifier)", async () => {
+  const notOpenLogs: unknown[] = [];
+  const deps = fakeDeps({
+    log: (step, extra) => {
+      if (step === "sweep.dispose.not_open") notOpenLogs.push(extra);
+    },
+  });
+
+  const summary = await runSweep([filingPrNoTrailer()], deps);
+
+  assert.equal(deps.escalated.length, 0, "escalate() must never fire for a confirmed filing PR");
+  assert.equal(summary.actions[0].acted, false);
+  assert.equal(notOpenLogs.length, 1, "the stand-down is ledgered, never silent");
+  assert.match((notOpenLogs[0] as { reason: string }).reason, /#439/);
+
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed.length, 1);
+  assert.equal(disposed[0].acted, false);
+  assert.match(String(disposed[0].stand_down_reason), /filing/i);
+  assert.equal(disposed[0].question, undefined, "no 'Task UNKNOWN' clarification question is rendered for a filing PR");
+});
+
+test("acceptance 2 — runSweep: a DELIBERATELY-unattributed filing PR stands down quietly, while an IMPLEMENTING PR whose trailer is missing/malformed (taskId unresolved, filingPr NOT confirmed) still escalates — a task that should be credited and would otherwise never be", async () => {
+  const deps = fakeDeps();
+  const brokenTrailerPr = strikesExhaustedPr(); // exhausted, actionable criteria -> blocked-ambiguous
+  brokenTrailerPr.taskId = undefined; // trailer missing/malformed on what is otherwise a real implementing PR
+
+  const summary = await runSweep([filingPrNoTrailer(), brokenTrailerPr], deps);
+
+  assert.equal(summary.byDisposition["blocked-ambiguous"], 2);
+  assert.equal(deps.escalated.length, 1, "exactly the broken-attribution PR escalates");
+  assert.equal(deps.escalated[0].pr.prNumber, brokenTrailerPr.prNumber);
+});
+
+test("acceptance 3 — runSweep: the filing-PR stand-down is TRACED every pass, never silent — a second sweep over the SAME unchanged filing PR ledgers a fresh stand-down line again (never deduped into silence, since escalate() never ran to record it as done)", async () => {
+  const shared = ledgerPath();
+  const deps1 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-1" });
+  await runSweep([filingPrNoTrailer()], deps1);
+
+  const deps2 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-2" });
+  const second = await runSweep([filingPrNoTrailer()], deps2);
+
+  assert.equal(deps2.escalated.length, 0);
+  const disposed = readLedgerLines(shared).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed.length, 2, "each pass ledgers its own stand-down line — never silent, never a one-time record");
+  assert.equal(second.actions[0].acted, false);
+});
+
+test("acceptance 4 — runSweep: an ATTRIBUTABLE PR with a genuine block still escalates unchanged — filingPr never widens into general escalation suppression", async () => {
+  const deps = fakeDeps();
+  const seeded = strikesExhaustedPr(); // taskId resolved ("W1-D"), strikes exhausted -> blocked-ambiguous
+
+  const summary = await runSweep([seeded], deps);
+
+  assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
+  assert.equal(deps.escalated.length, 1, "a resolved task id with a genuine block escalates exactly as today");
+  assert.equal(deps.escalated[0].pr.prNumber, seeded.prNumber);
 });
 
 // ── ACCEPTANCE 2: idempotence — the level-triggered core ──────────────────────

@@ -546,6 +546,39 @@ export interface OpenPrView {
    * `reviewOrphanedByPush`, counting the distinct prior heads it found.
    */
   priorReviewOrphans?: number;
+  /**
+   * W1-T196 (the #440 fixture): true when this sweep pass can POSITIVELY
+   * confirm the PR is a plan-FILING PR — one that introduces a NEW task into
+   * `plan/tasks.yaml` and, per W1-T136 criterion 5, deliberately carries NO
+   * `Remudero-Task:` trailer (enforced by the shared emitter's
+   * `buildPlanPrCommitMessage`/`buildPlanPrBody` in plan-pr-emitter.ts, PR
+   * #437 — omitting `taskId` there is the correctness rule, not an
+   * oversight: crediting a filing PR's own task would mark unbuilt work
+   * DONE). An unresolved {@link taskId} on a PR where this is `true` is a
+   * KNOWN, benign state — attribution failure by design, not a defect — and
+   * {@link unattributedFilingReason} stands the blocked-ambiguous rung down
+   * instead of escalating `task: UNKNOWN` to an operator who cannot answer
+   * it (there is no task to ask about).
+   *
+   * `undefined`/`false` — the default every existing caller/fixture
+   * implicitly uses — behaves exactly as before this field existed: an
+   * unresolved task id still escalates, which is also the correct outcome
+   * for an IMPLEMENTING PR whose trailer is missing or malformed (a genuine
+   * defect — a task that should be credited on merge otherwise never will
+   * be). Fails toward escalating, never toward silence, on any PR this
+   * field hasn't positively confirmed.
+   *
+   * SCOPE (honest, mirrors how `pendingAnswer`/`reviewOrphanedByPush`
+   * shipped their mechanism ahead of their producer): this field and its
+   * consumer ({@link unattributedFilingReason}) are the full MECHANISM,
+   * wired end-to-end and unit-tested here — but nothing in `run-task.ts`
+   * populates it yet (`buildOpenPrViews` would derive it from the SAME
+   * positive signal plan-pr-emitter.ts's tests already assert per PR
+   * class). Until that wiring lands, this is always `undefined` in the real
+   * gateway, so a filing PR still escalates exactly as it does today; only
+   * a caller that explicitly sets this field gets the stand-down.
+   */
+  filingPr?: boolean;
 }
 
 /** The disposition derived for one PR, plus a stated human reason. */
@@ -1477,6 +1510,36 @@ export function terminalStateReason(state: string | undefined): string | undefin
 }
 
 /**
+ * STAND-DOWN PREDICATE (W1-T196, the #440 fixture) — the ONE place that
+ * distinguishes a DELIBERATELY-unattributed plan-filing PR from BROKEN
+ * attribution on an implementing PR, for the blocked-ambiguous rung only.
+ *
+ * Returns a human-legible stand-down reason ONLY when BOTH hold: the task
+ * id is unresolved ({@link OpenPrView.taskId} absent) AND this pass can
+ * POSITIVELY confirm the PR is a plan-filing PR ({@link OpenPrView.filingPr}
+ * true) — the W1-T136 criterion 5 case, where the missing trailer is a
+ * designed property of the PR class, not an oversight. That combination
+ * carries no operator-decidable question: there is no task to ask about.
+ *
+ * Returns `undefined` (never stands down) in every other case, INCLUDING a
+ * resolved task id regardless of `filingPr` (an attributable PR with a
+ * genuine block still escalates unchanged) and an unresolved task id where
+ * `filingPr` is `undefined`/`false` (the pre-existing behavior — a broken
+ * or missing trailer on what may be an implementing PR is a genuine defect
+ * and must still surface). The dangerous direction here is
+ * over-suppression, so this fails toward escalating on anything this
+ * function cannot positively confirm as a filing PR.
+ */
+export function unattributedFilingReason(pr: OpenPrView): string | undefined {
+  if (pr.taskId) return undefined;
+  if (!pr.filingPr) return undefined;
+  return (
+    `PR #${pr.prNumber} (${pr.prUrl}) is a plan-filing PR carrying no Remudero-Task trailer BY DESIGN ` +
+    `(W1-T136 criterion 5) — task id unattributable, not a genuine block; standing down instead of escalating`
+  );
+}
+
+/**
  * One fresh, live read of a PR's GitHub state (W1-T177). `ok:false` marks a
  * genuinely FAILED or INDETERMINATE read (network/auth/rate-limit) — the
  * caller must treat that exactly as if no check ran at all, never as
@@ -1736,11 +1799,19 @@ export async function runSweep(
     const { disposition, reason } = deriveDisposition(pr, policy, now);
     byDisposition[disposition]++;
 
+    // W1-T196: computed BEFORE the question render below, so a positively-
+    // confirmed filing PR never gets a "Task UNKNOWN" clarification question
+    // rendered for it at all — the stand-down reason below is the record,
+    // not a question with no one to ask.
+    const filingStandDownReason = disposition === "blocked-ambiguous" ? unattributedFilingReason(pr) : undefined;
+
     // W1-T78: render the clarification question up front for blocked-ambiguous
     // PRs — it is ledgered EVERY sweep (so an unanswered question stays
     // visible), even on a deduped sweep where `escalate` itself does not fire.
     const question =
-      disposition === "blocked-ambiguous" ? renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []) : undefined;
+      disposition === "blocked-ambiguous" && !filingStandDownReason
+        ? renderClarificationQuestion(pr, reason, pr.strikeHistory ?? [])
+        : undefined;
 
     // Is this action already true (deduped)? Keyed per disposition.
     let alreadyDone: boolean;
@@ -1896,6 +1967,18 @@ export async function runSweep(
               await deps.close(pr, reason);
               break;
             case "blocked-ambiguous":
+              // W1-T196: a rung that cannot resolve a task id for a
+              // POSITIVELY-confirmed plan-filing PR stands down with a
+              // ledger line instead of escalating `task: UNKNOWN` — see
+              // `unattributedFilingReason`'s own doc. Every other
+              // blocked-ambiguous PR (including an unresolved task id NOT
+              // confirmed as a filing PR — the broken-attribution case)
+              // escalates exactly as before.
+              if (filingStandDownReason) {
+                acted = false;
+                standDownReason = filingStandDownReason;
+                break;
+              }
               await deps.escalate(pr, reason, question!);
               break;
             case "dep-review":
