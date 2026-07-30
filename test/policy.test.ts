@@ -445,7 +445,41 @@ test("REJECTS a headroom.curve rung whose maxHoursToReset is neither null nor a 
     value: [{ maxHoursToReset: -5, limitPct: 100 }],
     origin: "lifted:src/lib/daemon.ts:145-148",
   };
-  throwsPolicyError(() => validatePolicy(raw), /headroom\.curve\.value\[0\]\.maxHoursToReset.*must be null or a positive number/);
+  throwsPolicyError(() => validatePolicy(raw), /headroom\.curve\.value\[0\]\.maxHoursToReset.*must be null or a finite positive number/);
+});
+
+// The same non-finite hole existed TWICE MORE in this file, on the curve rungs — NaN passes every
+// range test by failing every comparison. Unfixed, a `.nan` maxHoursToReset loads clean and then
+// never matches in resolveHeadroomLimitPct (a silently dead rung), and a `.nan` limitPct loads
+// clean and yields a NaN CEILING that every headroom comparison silently fails. Infinity is
+// refused on maxHoursToReset because `null` is this schema's only spelling of the catch-all, so a
+// non-final Infinity rung would swallow every rung after it.
+
+test("REJECTS a curve rung whose maxHoursToReset is NaN rather than accepting a rung that can never match", () => {
+  const raw = goodRaw();
+  (raw.headroom as Record<string, unknown>).curve = {
+    value: [{ maxHoursToReset: NaN, limitPct: 100 }, { maxHoursToReset: null, limitPct: 95 }],
+    origin: "lifted:src/lib/daemon.ts:145-148",
+  };
+  throwsPolicyError(() => validatePolicy(raw), /maxHoursToReset.*must be null or a finite positive number/);
+});
+
+test("REJECTS a non-final Infinity curve rung, which would swallow every rung after it", () => {
+  const raw = goodRaw();
+  (raw.headroom as Record<string, unknown>).curve = {
+    value: [{ maxHoursToReset: Infinity, limitPct: 100 }, { maxHoursToReset: null, limitPct: 95 }],
+    origin: "lifted:src/lib/daemon.ts:145-148",
+  };
+  throwsPolicyError(() => validatePolicy(raw), /maxHoursToReset.*must be null or a finite positive number/);
+});
+
+test("REJECTS a NaN limitPct rather than accepting a ceiling no comparison can satisfy", () => {
+  const raw = goodRaw();
+  (raw.headroom as Record<string, unknown>).curve = {
+    value: [{ maxHoursToReset: 24, limitPct: NaN }, { maxHoursToReset: null, limitPct: 95 }],
+    origin: "lifted:src/lib/daemon.ts:145-148",
+  };
+  throwsPolicyError(() => validatePolicy(raw), /limitPct.*must be a finite number/);
 });
 
 test("loadPolicy REJECTS a file that is not valid YAML, naming the path", () => {

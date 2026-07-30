@@ -220,14 +220,21 @@ function validateHeadroomCurve(
       throw new PolicyError(`policy.yaml: '${path}.value[${i}]' must be a mapping of maxHoursToReset/limitPct.`);
     }
     const { maxHoursToReset, limitPct } = rung as Record<string, unknown>;
-    if (maxHoursToReset !== null && (typeof maxHoursToReset !== "number" || maxHoursToReset <= 0)) {
+    // Number.isFinite, not `typeof === "number"`, for the SAME reason numberField above needs it:
+    // NaN passes every range test by failing every comparison. A `maxHoursToReset: .nan` rung would
+    // load clean and then never match in resolveHeadroomLimitPct's `hoursToReset <= r.maxHours`
+    // (a silently dead rung); a `limitPct: .nan` would load clean and yield a NaN CEILING, which
+    // every headroom comparison then silently fails. Infinity is refused here too: `null` is the
+    // only spelling of the catch-all rung this schema accepts (see the final-rung check below), so
+    // an `Infinity` rung in a non-final position would swallow every rung after it.
+    if (maxHoursToReset !== null && (typeof maxHoursToReset !== "number" || !Number.isFinite(maxHoursToReset) || maxHoursToReset <= 0)) {
       throw new PolicyError(
-        `policy.yaml: '${path}.value[${i}].maxHoursToReset' must be null or a positive number, got ${JSON.stringify(maxHoursToReset)}.`,
+        `policy.yaml: '${path}.value[${i}].maxHoursToReset' must be null or a finite positive number, got ${JSON.stringify(maxHoursToReset)}.`,
       );
     }
-    if (typeof limitPct !== "number" || limitPct < 0 || limitPct > 100) {
+    if (typeof limitPct !== "number" || !Number.isFinite(limitPct) || limitPct < 0 || limitPct > 100) {
       throw new PolicyError(
-        `policy.yaml: '${path}.value[${i}].limitPct' must be a number in [0, 100], got ${JSON.stringify(limitPct)}.`,
+        `policy.yaml: '${path}.value[${i}].limitPct' must be a finite number in [0, 100], got ${JSON.stringify(limitPct)}.`,
       );
     }
     return { maxHoursToReset: maxHoursToReset as number | null, limitPct };
