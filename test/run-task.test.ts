@@ -4953,7 +4953,7 @@ test("rmd lint-plan --base HEAD: status resolution SUCCEEDS via injected deps �
     ghGateway: () => ({}) as GitHub,
     projectPlan: () => lintDiStatusMap(false),
   });
-  assert.equal(exitCode, 0, "LINTDI-1 has not merged yet — the post-merge-amendment check is a no-op for it");
+  assert.equal(exitCode, 0, "LINTDI-1 has not merged yet — the post-merge-amendment check is a no-op for it: " + errText);
   assert.doesNotMatch(errText, /\[post-merge-amendment\]/);
 });
 

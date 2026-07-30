@@ -10,6 +10,7 @@
   title: fixture task for lintPlanCommand status-DI coverage
   repo: remudero
   type: implement
+  origin: "test fixture (W1-T180 coverage, not a real plan entry)"
   acceptance:
     - claim: "the fixture's original criterion"
-      proof: "unit test: fixture original criterion proof"
+      proof: "unit test: test/run-task.test.ts::LINTDI-1 original criterion proof"
