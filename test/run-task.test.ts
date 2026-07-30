@@ -78,6 +78,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   type AlertFixCommandDeps,
   type AlertFixDispatchDeps,
   runTask,
+  buildOpenPrViews,
 } from "../src/run-task.js";
 import { requestStop } from "../src/lib/fleet-control.js";
 import { LaunchdPlistError } from "../src/lib/launchd.js";
@@ -6386,5 +6387,107 @@ test("sweepCommand: `rmd sweep --repo <other>` runs the full pipeline incl. the 
     else process.env.HOME = oldHome;
     rmSync(bin, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T176: buildOpenPrViews' REAL wiring (not lib/sweep.ts's already-pure-tested ────────
+//    predicate) — reviewPostRefusedFor + the two new OpenPrView fields it feeds.
+//    Exercised over a REST-shaped PATH-stub `gh`, never touching effects/config/repoRoot.
+
+/** A PATH-stub `gh` answering the exact REST calls `buildOpenPrViews` issues for ONE open
+ *  PR (`api repos/.../pulls?state=open...`, its check-runs + combined-status, and the
+ *  branch-protection required-contexts read) — no `gh pr view`/`gh issue`/`gh api` beyond
+ *  those four, so this never risks a buildSweepEffects side effect (no arm/escalate ridden). */
+function ghStubForOpenPrViews(opts: { sha: string; taskId: string; protectionFails?: boolean }): string {
+  const protectionBody = opts.protectionFails
+    ? `if (a.includes("required_status_checks")) { process.stderr.write("boom"); process.exit(1); }`
+    : `if (a.includes("required_status_checks")) { process.stdout.write(JSON.stringify({ contexts: ["ci-gate", "remudero-review"] })); process.exit(0); }`;
+  return `#!/usr/bin/env node
+const a = process.argv.slice(2).join(" ");
+${protectionBody}
+if (a.includes("pulls?state=open")) {
+  process.stdout.write(JSON.stringify([{
+    number: 900,
+    html_url: "https://github.com/o/r/pull/900",
+    state: "open",
+    body: "Remudero-Task: ${opts.taskId}\\n",
+    updated_at: "2026-07-30T00:00:00Z",
+    head: { ref: "run-${opts.taskId}-1", sha: "${opts.sha}" },
+    auto_merge: null,
+  }]));
+  process.exit(0);
+}
+if (a.includes("check-runs")) {
+  process.stdout.write(JSON.stringify({ check_runs: [{ name: "ci-gate", status: "completed", conclusion: "success" }] }));
+  process.exit(0);
+}
+if (a.includes("/status")) {
+  process.stdout.write(JSON.stringify({ statuses: [] }));
+  process.exit(0);
+}
+process.stdout.write("{}");
+`;
+}
+
+function withGhStub<T>(script: string, fn: () => T): T {
+  const bin = mkdtempSync(join(tmpdir(), "gh-openprviews-"));
+  writeFileSync(join(bin, "gh"), script, { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    return fn();
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+  }
+}
+
+test("buildOpenPrViews: a zero-runs required check (ci-gate green, remudero-review absent) with a PRIOR review.post_refused ledger line for this exact taskId@headSha sets reviewPostRefused true — the second-absence discriminator's real gateway input (W1-T176)", () => {
+  const sha = "deadbeef0000000000000000000000000000000";
+  const taskId = "W1-T900";
+  const root = mkdtempSync(join(tmpdir(), "rmd-openprviews-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  writeFileSync(
+    ledgerPath,
+    JSON.stringify({ ts: "2026-07-30T00:00:00Z", run_id: "SWEEP-0", task_id: taskId, step: "review.post_refused", head_sha: sha }) + "\n",
+  );
+  try {
+    const views = withGhStub(ghStubForOpenPrViews({ sha, taskId }), () => buildOpenPrViews("o", "r", ledgerPath));
+    assert.equal(views.length, 1);
+    assert.equal(views[0].taskId, taskId);
+    assert.equal(views[0].checksState, "green", "ci-gate success, remudero-review absent — every REQUIRED context present reports SUCCESS");
+    assert.equal(views[0].reviewState, "none", "no remudero-review entry in either check-runs or the combined status");
+    assert.equal(views[0].reviewPostRefused, true, "the ledger already carries a refusal for this exact taskId@headSha");
+    assert.equal(views[0].requiredContextsUnreadable, false, "the branch-protection read succeeded");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("buildOpenPrViews: the SAME zero-runs shape with NO ledger line for this head reports reviewPostRefused false — a fresh sighting, not a re-refusal (W1-T176)", () => {
+  const sha = "cafefeed0000000000000000000000000000000";
+  const taskId = "W1-T901";
+  const root = mkdtempSync(join(tmpdir(), "rmd-openprviews-"));
+  const ledgerPath = join(root, "ledger.ndjson"); // never written — no matching (or any) line exists
+  try {
+    const views = withGhStub(ghStubForOpenPrViews({ sha, taskId }), () => buildOpenPrViews("o", "r", ledgerPath));
+    assert.equal(views.length, 1);
+    assert.equal(views[0].reviewPostRefused, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("buildOpenPrViews: an UNREADABLE branch-protection read (gh api fails) sets requiredContextsUnreadable true — never assumed permissive (W1-T176 design boundary ii)", () => {
+  const sha = "1234567800000000000000000000000000000000";
+  const taskId = "W1-T902";
+  const root = mkdtempSync(join(tmpdir(), "rmd-openprviews-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  try {
+    const views = withGhStub(ghStubForOpenPrViews({ sha, taskId, protectionFails: true }), () => buildOpenPrViews("o", "r", ledgerPath));
+    assert.equal(views.length, 1);
+    assert.equal(views[0].requiredContextsUnreadable, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

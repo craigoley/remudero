@@ -6759,7 +6759,7 @@ export function openPrMintTexts(owner: string, repo: string): string[] {
  * whole critical path behind a budget that was exhausted on 2026-07-28 — 22 consecutive minutes
  * of totally blind passes, zero PRs dispositioned, while core sat healthy. See lib/open-prs-rest.ts.
  */
-function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): OpenPrView[] {
+export function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): OpenPrView[] {
   const raw = fetchOpenPrsRest(owner, repo, ghJson) as RawOpenPr[];
   const ledger = readLedgerLines(ledgerPath);
   // W1-T103: branch protection's OWN required-contexts list, read ONCE per
