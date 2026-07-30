@@ -7,7 +7,7 @@
 // test kills every leader pgid it spawned as a cleanup backstop, independent
 // of whatever the test body itself already tore down.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { test } from "node:test";
 import {
   buildContainedSpawnFn,
@@ -170,7 +170,12 @@ test("spawnDetachedGroup: stderr is piped to the caller's own sink (the SDK does
   // still-empty buffer. `close` fires only after every stdio stream feeding
   // this child has itself emitted `end`/`close`, so by the time it fires the
   // `onStderr` sink is guaranteed to have already received every byte.
-  await new Promise<void>((resolve) => proc.on("close", () => resolve()));
+  // `SdkSpawnedProcess.on` (worker-containment.ts's return type) only types
+  // 'exit'/'error' per the SDK's own SpawnedProcess interface — `close` is a
+  // real ChildProcess event underneath (per that module's own doc comment,
+  // "ChildProcess already satisfies this interface"), so this test reaches
+  // it via the same underlying object, cast back to its real runtime type.
+  await new Promise<void>((resolve) => (proc as unknown as ChildProcess).on("close", () => resolve()));
   assert.ok(chunks.join("").includes("boom"), "the child's stderr must reach the injected onStderr sink");
   assert.equal(typeof pid, "number");
 });
