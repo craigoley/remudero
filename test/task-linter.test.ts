@@ -22,7 +22,8 @@ import {
   subsystemsOf,
   TaskLintError,
 } from "../src/lib/task-linter.js";
-import { loadPlan, loadPlanFromYaml, type Task } from "../src/lib/plan.js";
+import { loadPlan, loadPlanFromYaml, type Plan, type Task } from "../src/lib/plan.js";
+import { nextRunnable, type MergedSet } from "../src/lib/drain.js";
 
 /** A minimal, otherwise-clean Task fixture — every test overrides only what it needs. */
 function task(over: Partial<Task> & { id: string }): Task {
@@ -954,6 +955,123 @@ test("ACCEPTANCE 6 (CANONICAL REGRESSION): W1-T12's original definition is flagg
     "must flag headless-fitness (overnight/launchctl/killed)",
   );
   assert.throws(() => assertLintClean(W1_T12_ORIGINAL), TaskLintError);
+});
+
+// ── W1-T198: the self-reference false positive + the over-gating blast radius ──
+//
+// W1-T20c's own criterion 3 NAMES the live-context lexicon ('overnight/launchctl/
+// killed') to SPECIFY that headless-fitness detects those words — the detector
+// then matched its own specification (observed 2026-07-21, escalated as issue
+// #448 naming 27 transitively-blocked dependents). Two defects compound:
+//   (1) the self-reference false positive itself — CLOSED by W1-T81's
+//       enumeration/quote-span exemptions (commit 9fb30bd; see "W1-T81
+//       ACCEPTANCE 1c", above, which already locks this exact fixture) — and
+//   (2) the BLAST RADIUS: that one violation, on a task GitHub had already
+//       merged (PR #134), must never gate a task that merely DEPENDS on it —
+//       a settled dispatch decision has nothing left to gate.
+// These four tests lock all four of W1-T198's acceptance claims under its own
+// name, so a future regression on either half is caught here even if the
+// upstream W1-T81/nextRunnable fixtures it currently piggybacks on ever move.
+
+test("W1-T198 ACCEPTANCE 1: a criterion NAMING the trigger words to SPECIFY detection is not flagged; the SAME words used as a genuine live REQUIREMENT still are — FALSIFIER: W1-T20c criterion 3, verbatim from the plan", () => {
+  // The FALSIFIER, verbatim from the real plan: 'a criterion containing
+  // overnight/launchctl/killed on an auto-verify task is FLAGGED' — its claim IS
+  // the lexicon, enumerating the three trigger words to say the rule detects them.
+  const t = realTask("W1-T20c");
+  const selfDescribing = t.acceptance!.find((c) => c.claim.includes("overnight/launchctl/killed"));
+  assert.ok(selfDescribing, "expected W1-T20c to still carry its self-describing criterion verbatim");
+  assert.equal(
+    headlessFitnessViolations({ ...t, acceptance: [selfDescribing!] }).length,
+    0,
+    "naming the trigger words to SPECIFY the rule must not trip the rule it specifies",
+  );
+  // The SAME word, used to REQUIRE a live action rather than enumerate the
+  // lexicon, must still flag — an exemption wide enough to pass the
+  // self-reference case must not also blunt a genuine requirement.
+  const genuinelyLive = task({
+    id: "W1-T198-GENUINE-LIVE",
+    acceptance: [
+      {
+        claim: "the daemon runs overnight on the operator's machine and is manually confirmed alive at dawn",
+        proof: "operator confirms via ssh the following morning",
+      },
+    ],
+  });
+  assert.equal(headlessFitnessViolations(genuinelyLive).length, 1);
+});
+
+test("W1-T198 ACCEPTANCE 2: a genuinely live-context criterion is STILL flagged, standalone — FALSIFIER: an exemption broad enough to pass W1-T20c's self-reference would also pass W1-T12's live criteria, the fixtures Rule 18 was written from", () => {
+  // W1-T12's original overnight-drain (criterion 1) and live-kill (criterion 3)
+  // criteria are the FIXTURES Rule 18 was written from (ACCEPTANCE 6, above) —
+  // checked STANDALONE (one criterion at a time) so the self-reference fix can't
+  // be hiding behind an aggregate OR across the other criteria in the task.
+  assert.equal(
+    headlessFitnessViolations({ ...W1_T12_ORIGINAL, acceptance: [W1_T12_ORIGINAL.acceptance![0]] }).length,
+    1,
+    "criterion 1 ('...unattended, overnight') must still flag alone",
+  );
+  assert.equal(
+    headlessFitnessViolations({ ...W1_T12_ORIGINAL, acceptance: [W1_T12_ORIGINAL.acceptance![2]] }).length,
+    1,
+    "criterion 3 ('daemon killed mid-task...') must still flag alone",
+  );
+  assert.throws(() => assertLintClean(W1_T12_ORIGINAL), TaskLintError);
+});
+
+test("W1-T198 ACCEPTANCE 3: a lint violation on an ALREADY-MERGED task refuses only THAT task's own dispatch; a task that merely DEPENDS on it dispatches normally — FALSIFIER: issue #448, one W1-T20c violation naming 27 transitively-blocked dependents on a task deriveStatus resolves as MERGED via PR #134", () => {
+  const illformed = task({
+    id: "W1-T198-ILLFORMED-MERGED",
+    acceptance: [{ claim: "daemon killed mid-task recovers state", proof: "chaos-drill transcript" }],
+  });
+  const dependent = task({ id: "W1-T198-DEPENDENT", depends_on: ["W1-T198-ILLFORMED-MERGED"] });
+  const plan: Plan = {
+    tasks: [illformed, dependent],
+    byId: new Map([
+      [illformed.id, illformed],
+      [dependent.id, dependent],
+    ]),
+  };
+
+  // THAT task's own (re-)dispatch is still refused — the fail-closed guard is
+  // unweakened by this fix.
+  assert.equal(lintTask(illformed).ok, false);
+  assert.throws(() => assertLintClean(illformed), TaskLintError);
+
+  // But it is ALREADY MERGED (GitHub-derived, per the fixture's `isMerged`) —
+  // `nextRunnable`'s dispatch-eligibility chain excludes an already-merged task
+  // BEFORE any lint check ever runs (isDispatchEligible tests `isMerged` FIRST,
+  // task-linter.ts is never even consulted for a merged candidate), and
+  // `unmetDependencies` is purely merge-gated — a dependency's LINT status never
+  // enters a dependent's eligibility at all. So the dependent, whose only
+  // dependency is (already) merged, is offered next: the queue never freezes on
+  // a violation the failing task's own dispatch decision has already settled.
+  const isMerged: MergedSet = (id) => id === illformed.id;
+  const next = nextRunnable(plan, isMerged);
+  assert.equal(
+    next?.id,
+    dependent.id,
+    "the dependent must dispatch — a merged dependency's OWN lint failure must not gate it",
+  );
+
+  // Contrast: while genuinely UNMERGED, the SAME task is still the one offered
+  // first (dependency ordering is unweakened) — its own dispatch attempt is what
+  // the pre-dispatch guard above refuses, never the dependent's.
+  const isMergedNone: MergedSet = () => false;
+  const next2 = nextRunnable(plan, isMergedNone);
+  assert.equal(
+    next2?.id,
+    illformed.id,
+    "while genuinely unmerged, the upstream task is still offered first — dependency ordering is unweakened",
+  );
+});
+
+test("W1-T198 ACCEPTANCE 4: the fail-closed pre-dispatch guard still refuses a genuinely ill-formed task that IS due for dispatch — FALSIFIER: weakening the guard would reopen the W1-T12 max_turns hole it was built to close", () => {
+  assert.equal(lintTask(W1_T12_ORIGINAL).ok, false);
+  assert.throws(() => assertLintClean(W1_T12_ORIGINAL), TaskLintError);
+  // The behavioral (verdict=blocked_illformed, zero spawn) integration of this
+  // SAME guard is locked at the dispatch call site by
+  // test/task-linter-wiring.test.ts's "CRITERION 5 (behavioral)" tests — this
+  // test only re-asserts the pure guard this task's files: scope owns.
 });
 
 // ── changedTaskIds — the CI diff-scope helper ─────────────────────────────────
