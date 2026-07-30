@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { appendLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
-import { probeContainment } from "../src/lib/containment.js";
-import { probeIsolation } from "../src/lib/isolation.js";
+import { defaultExecutor as containmentDefaultExecutor, probeContainment } from "../src/lib/containment.js";
+import { defaultExecutor as isolationDefaultExecutor, probeIsolation } from "../src/lib/isolation.js";
+import type { Config } from "../src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import {
   capStderrExcerpt,
   collectWorkerResult,
@@ -14,6 +16,29 @@ import {
   workerFailureExcerpt,
   workerLedgerFields,
 } from "../src/lib/worker.js";
+
+/** Minimal fake WorkerResult — only the fields the defaultExecutor call sites read. */
+function fakeWorkerResult(overrides: Partial<WorkerResult>): WorkerResult {
+  return {
+    sessionId: "sess-fake",
+    costUsd: 0.01,
+    numTurns: 1,
+    text: "",
+    blocks: [],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    ...overrides,
+  } as WorkerResult;
+}
+
+function fakeConfigWithRoot(): Config {
+  const root = mkdtempSync(join(tmpdir(), "rmd-stderr-persist-root-"));
+  return { root } as Config;
+}
 
 // ── W1-T238: "the decisive stderr existed in memory on all four failing spawns
 // and was discarded" — collectWorkerResult already captures the child's stderr
@@ -195,4 +220,61 @@ test("acceptance: the isolation probe persists a capped stderr excerpt on log('i
   });
   const [, extra] = events.find(([step]) => step === "isolation.probe")!;
   assert.match(String(extra?.stderr_excerpt), /Not logged in - Please run \/login/);
+});
+
+// ── The REAL (non-injected-exec) code paths: `probeContainment`/`probeIsolation`
+// resolve to `defaultExecutor` whenever the caller doesn't supply `exec`, and it is
+// THAT function's own `isError: probe.isError` line — never reached by the `exec`
+// fakes above — that this task's fix touches. Exercised directly here with an
+// injected `spawn` (defaulting to the real spawnWorker in production) so the real
+// propagation is under coverage without paying for an actual SDK spawn.
+
+test("acceptance: containment.ts's real defaultExecutor propagates a failed probe spawn's isError (not only the exec-fake path)", async () => {
+  const settingsFile = enabledSandboxSettingsFile();
+  const config = fakeConfigWithRoot();
+  const fakeSpawn = async (_args: SpawnWorkerArgs) =>
+    fakeWorkerResult({
+      isError: true,
+      stderr: "Not logged in - Please run /login\n",
+      text: "outside: touch: Operation not permitted\ninside: ok",
+    });
+  const exec = containmentDefaultExecutor(settingsFile, config, undefined, fakeSpawn);
+  const result = await exec("tok-real-238");
+  assert.equal(result.isError, true);
+  assert.match(result.transcript, /Not logged in - Please run \/login/);
+});
+
+test("acceptance: containment.ts's real defaultExecutor reports isError=false on a clean probe spawn", async () => {
+  const settingsFile = enabledSandboxSettingsFile();
+  const config = fakeConfigWithRoot();
+  const fakeSpawn = async (_args: SpawnWorkerArgs) =>
+    fakeWorkerResult({ isError: false, text: "outside: touch: Operation not permitted\ninside: ok" });
+  const exec = containmentDefaultExecutor(settingsFile, config, undefined, fakeSpawn);
+  const result = await exec("tok-real-238-clean");
+  assert.equal(result.isError, false);
+});
+
+test("acceptance: isolation.ts's real defaultExecutor propagates a failed probe spawn's isError (not only the exec-fake path)", async () => {
+  const settingsFile = enabledSandboxSettingsFile();
+  const config = fakeConfigWithRoot();
+  const fakeSpawn = async (_args: SpawnWorkerArgs) =>
+    fakeWorkerResult({
+      isError: true,
+      stderr: "Not logged in - Please run /login\n",
+      text: "alias_count: 0\nfunction_count: 0",
+    });
+  const exec = isolationDefaultExecutor(settingsFile, config, undefined, fakeSpawn);
+  const result = await exec();
+  assert.equal(result.isError, true);
+  assert.match(result.transcript, /Not logged in - Please run \/login/);
+});
+
+test("acceptance: isolation.ts's real defaultExecutor reports isError=false on a clean probe spawn", async () => {
+  const settingsFile = enabledSandboxSettingsFile();
+  const config = fakeConfigWithRoot();
+  const fakeSpawn = async (_args: SpawnWorkerArgs) =>
+    fakeWorkerResult({ isError: false, text: "alias_count: 0\nfunction_count: 0" });
+  const exec = isolationDefaultExecutor(settingsFile, config, undefined, fakeSpawn);
+  const result = await exec();
+  assert.equal(result.isError, false);
 });

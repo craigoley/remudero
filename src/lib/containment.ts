@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type Config } from "./config.js";
 import { validateWorkerSettingsFile } from "./settings.js";
-import { capStderrExcerpt, spawnWorker } from "./worker.js";
+import { capStderrExcerpt, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { reapWorkerScratch } from "./worker-scratch.js";
 
 /**
@@ -127,8 +127,19 @@ export function containmentProbePrompt(token: string): string {
  */
 const OS_DENIAL_RE = /operation not permitted|not permitted|permission denied|read-only file system|sandbox|denied/i;
 
-/** Default executor: spawn a real sandboxed worker in a scratch cwd under the workspace. */
-function defaultExecutor(settingsFile: string, config: Config, budgetUsd?: number): ProbeExecutor {
+/**
+ * Default executor: spawn a real sandboxed worker in a scratch cwd under the workspace.
+ * `spawn` is injectable (defaults to the real {@link spawnWorker}) SOLELY so a unit
+ * test can drive the `isError` propagation on line below without paying for a real
+ * SDK spawn (W1-T238: this is the exact branch that discarded stderr on a failed
+ * probe — it must stay under direct coverage, not only via the `exec` fake).
+ */
+export function defaultExecutor(
+  settingsFile: string,
+  config: Config,
+  budgetUsd?: number,
+  spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult> = spawnWorker,
+): ProbeExecutor {
   return async (token: string) => {
     // The scratch dir lives under the WORKSPACE root, never under $TMPDIR — the
     // sandbox write scope is cwd + session $TMPDIR, so a sibling of cwd here is
@@ -140,7 +151,7 @@ function defaultExecutor(settingsFile: string, config: Config, budgetUsd?: numbe
     const outsidePath = join(base, `${token}.txt`);
     const insidePath = join(cwd, "probe-ok.txt");
     try {
-      const probe = await spawnWorker({
+      const probe = await spawn({
         cwd,
         permissionMode: "bypassPermissions",
         settingsFile,
