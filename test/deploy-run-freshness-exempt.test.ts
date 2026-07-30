@@ -31,7 +31,7 @@ class ProcessExitCalled extends Error {
 const REFUSED_BEHIND_AND_DIRTY = () =>
   ({
     status: "refused" as const,
-    reason: "dirty",
+    reason: "dirty" as const,
     message:
       "rmd is behind origin/main (e9fa9ac..97e6857) and the working tree has uncommitted " +
       "changes -- refusing to auto-sync (never mutating uncommitted local state).",
