@@ -742,7 +742,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
        rule 22) and is re-enabled by probeWriteScope only once a client-held write token actually
        proves out against GET /v1/auth/scope -- never merely because one was typed. -->
   <div id="write-token-panel" class="write-token-panel">
-    <p id="write-token-status" role="status" aria-live="polite" class="counts">Read-only — write actions are unavailable. Enter a write token to enable them for this tab.</p>
+    <p id="write-token-status" role="status" aria-live="polite" class="counts">Read-only — write actions are unavailable. Enter a write token to enable them for this tab. Get one by running: rmd console-url --write</p>
     <form id="write-token-form" class="inline-action">
       <label for="write-token-input">Write token</label>
       <input id="write-token-input" type="password" autocomplete="off" placeholder="paste write token" />
@@ -2428,7 +2428,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     } else {
       statusEl.textContent = writeToken
         ? "That write token was not accepted — write actions stay unavailable."
-        : "Read-only — write actions are unavailable. Enter a write token to enable them for this tab.";
+        : "Read-only — write actions are unavailable. Enter a write token to enable them for this tab. Get one by running: rmd console-url --write";
       form.hidden = false;
       clearBtn.hidden = true;
     }
