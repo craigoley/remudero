@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type Config } from "./config.js";
 import { validateWorkerSettingsFile } from "./settings.js";
-import { capStderrExcerpt, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { capStderrExcerpt, spawnWorker } from "./worker.js";
 import { reapWorkerScratch } from "./worker-scratch.js";
 
 /**
@@ -59,6 +59,19 @@ export interface ContainmentEvidence {
   osDenialSeen: boolean;
   /** Did the write INSIDE cwd land? Sanity signal that the sandbox isn't over-blocking. */
   insideWriteCreated: boolean;
+  /**
+   * W1-T237: did the probe worker die on a credential/auth failure (isError PLUS
+   * the conservative `CREDENTIAL_RE` signature) rather than ever attempting a
+   * write? A credential-dead worker makes NO writes and trips no OS-denial text,
+   * so it is byte-identical to the genuine no-write/no-denial "unproven" case
+   * unless named separately — that collapse is exactly the misdiagnosis that
+   * cost the 2026-07-21 incident two days (a dead-auth worker and a compliant
+   * sandbox read the same). Distinguish it FIRST, before the write/denial checks
+   * below, since a credential-dead worker proves nothing about isolation either
+   * way. Optional — defaults falsy so pre-existing evidence literals that never
+   * saw a credential failure need not spell it out.
+   */
+  credentialFailure?: boolean;
 }
 
 /**
@@ -68,6 +81,14 @@ export interface ContainmentEvidence {
  * which must also fail closed). Every other combination is `contained: false`.
  */
 export function assessContainment(e: ContainmentEvidence): { contained: boolean; reason: string } {
+  if (e.credentialFailure) {
+    return {
+      contained: false,
+      reason:
+        "spawn_credential_failure — the probe worker died on a credential/auth failure before it could " +
+        "attempt any write; this is NOT a containment finding (unlock the keychain, don't investigate the sandbox)",
+    };
+  }
   if (e.outsideWriteCreated) {
     return {
       contained: false,
@@ -95,11 +116,17 @@ export interface ProbeExecResult {
   /** Notional cost of the probe spawn (subscription) — surfaced so the run meters it. */
   costUsd?: number;
   /**
-   * W1-T238: the underlying probe spawn's own `WorkerResult.isError` — carried
-   * through so a failed probe spawn's stderr/error-result text (already folded
-   * into `transcript`) can be persisted to the ledger, capped, instead of dying
-   * with the process the way it did the incident this task fixes. Omitted by
-   * fakes that never populate it ⇒ treated as a clean spawn (no excerpt).
+   * W1-T237: `WorkerResult.isError` from the probe spawn's own result envelope —
+   * the information was already in hand (worker.ts carries it) but the preflight
+   * never looked at it, testing only the transcript for denial text. Optional so
+   * a pre-existing test double that omits it defaults to `false` (no credential
+   * verdict fires without an explicit error signal).
+   *
+   * W1-T238: also carried through so a failed probe spawn's stderr/error-result
+   * text (already folded into `transcript`) can be persisted to the ledger,
+   * capped, instead of dying with the process the way it did the incident this
+   * task fixes. Omitted by fakes that never populate it ⇒ treated as a clean
+   * spawn (no excerpt).
    */
   isError?: boolean;
 }
@@ -128,17 +155,29 @@ export function containmentProbePrompt(token: string): string {
 const OS_DENIAL_RE = /operation not permitted|not permitted|permission denied|read-only file system|sandbox|denied/i;
 
 /**
- * Default executor: spawn a real sandboxed worker in a scratch cwd under the workspace.
- * `spawn` is injectable (defaults to the real {@link spawnWorker}) SOLELY so a unit
- * test can drive the `isError` propagation on line below without paying for a real
- * SDK spawn (W1-T238: this is the exact branch that discarded stderr on a failed
- * probe — it must stay under direct coverage, not only via the `exec` fake).
+ * Regex marking the CLI's credential/auth-dead result text, verified verbatim
+ * (SDK 0.3.209 / CLI 2.1.209, see env.ts / worker-home.ts / FINDINGS.md): a
+ * headless spawn with no usable OAuth token exits "Not logged in · Please run
+ * /login" at $0 before any turn. MATCHED CONSERVATIVELY — both fragments must
+ * appear (not "any error"), so an unrelated error-result is never mislabelled a
+ * credential failure. Applied only in combination with `isError`, never alone.
+ */
+const CREDENTIAL_FAILURE_RE = /not logged in/i;
+const CREDENTIAL_LOGIN_HINT_RE = /run \/login/i;
+
+/**
+ * Default executor: spawn a real sandboxed worker in a scratch cwd under the
+ * workspace. `spawn` is injectable (defaults to the real {@link spawnWorker})
+ * so both W1-T237's `isError` plumbing and W1-T238's stderr-persistence branch
+ * (the exact branch that discarded stderr on a failed probe) are directly
+ * unit-testable without spawning an actual sandboxed subprocess — every other
+ * call site relies on the default.
  */
 export function defaultExecutor(
   settingsFile: string,
   config: Config,
   budgetUsd?: number,
-  spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult> = spawnWorker,
+  spawn: typeof spawnWorker = spawnWorker,
 ): ProbeExecutor {
   return async (token: string) => {
     // The scratch dir lives under the WORKSPACE root, never under $TMPDIR — the
@@ -166,6 +205,7 @@ export function defaultExecutor(
         outsideWriteCreated: existsSync(outsidePath),
         insideWriteCreated: existsSync(insidePath),
         costUsd: probe.costUsd,
+        // W1-T237: the signal was already on WorkerResult; the preflight just never read it.
         isError: probe.isError,
       };
     } finally {
@@ -231,12 +271,20 @@ export async function probeContainment(opts: {
     // stray "permission" mention elsewhere in the transcript can't fake it.
     osDenialSeen: r.transcript.includes(token) && OS_DENIAL_RE.test(r.transcript),
     insideWriteCreated: r.insideWriteCreated,
+    // W1-T237: isError PLUS BOTH conservative credential fragments — not "any
+    // error" — so an unrelated error-result is never mislabelled a credential
+    // failure (the design's own conservatism requirement).
+    credentialFailure:
+      r.isError === true &&
+      CREDENTIAL_FAILURE_RE.test(r.transcript) &&
+      CREDENTIAL_LOGIN_HINT_RE.test(r.transcript),
   };
   const verdict = assessContainment(evidence);
   const costUsd = r.costUsd ?? 0;
   log("containment.probe", {
     contained: verdict.contained,
     reason: verdict.reason,
+    credential_failure: evidence.credentialFailure,
     outside_write_created: evidence.outsideWriteCreated,
     os_denial_seen: evidence.osDenialSeen,
     inside_write_created: evidence.insideWriteCreated,
@@ -247,11 +295,25 @@ export async function probeContainment(opts: {
     ...(r.isError ? { stderr_excerpt: capStderrExcerpt(r.transcript) } : {}),
   });
   if (!verdict.contained) {
-    // OBSERVED (W1-T91/P23 part i): the write's OWN outcome names which of the two
-    // failure states this was — proven-broken (the outside write LANDED, the
-    // sandbox did not engage) is data-bearing; the no-denial-observed path is
-    // genuinely UNPROVEN (the write may never have been attempted) and reports the
-    // literal "unproven" rather than a fabricated data string.
+    // OBSERVED (W1-T91/P23 part i, extended by W1-T237): the write's OWN outcome
+    // names which of THREE states this was, checked in this order so a
+    // credential-dead worker can never be reported as the genuine unproven case:
+    //  1. credentialFailure — the probe worker died on auth, before it could
+    //     attempt any write. Named `spawn_credential_failure` distinctly: this
+    //     proves NOTHING about isolation either way (unlock the keychain, don't
+    //     investigate the sandbox) — the opposite operator response from #2.
+    //  2. outsideWriteCreated — proven-broken (the outside write LANDED, the
+    //     sandbox did not engage) is data-bearing.
+    //  3. neither — genuinely UNPROVEN (the write may never have been
+    //     attempted) and reports the literal "unproven" rather than a
+    //     fabricated data string.
+    if (evidence.credentialFailure) {
+      throw new ContainmentError(
+        `containment preflight: spawn_credential_failure — ${verdict.reason} — FAIL CLOSED, the run does not proceed`,
+        "spawn-credential-failure",
+        "spawn_credential_failure",
+      );
+    }
     const observed = evidence.outsideWriteCreated
       ? "outside-cwd write succeeded (sandbox did not engage)"
       : "unproven";
