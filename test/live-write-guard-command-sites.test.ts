@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { planCommand, triageCommand } from "../src/run-task.js";
+import { approveCommand, planCommand, triageCommand } from "../src/run-task.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
@@ -240,4 +240,75 @@ test("GUARDED SITE plan push: the run reaches planCommand's gitPushRunBranch", a
   assert.equal(ledger.filter((l) => l.step === "plan.synthesized").length, 1, "reached post-spawn code");
   const reached = ledger.some((l) => typeof l.step === "string" && l.step.startsWith("plan."));
   assert.ok(reached, `run reached plan's terminal block; steps=${JSON.stringify(ledger.map((l) => l.step))}`);
+});
+
+// ── run-task.ts:9116 and :9136 — approveCommand's REAL (un-injected) gateway ─────────
+// Every other test of `rmd approve` injects `gateway:`, which replaces the whole object and
+// so never runs its two guarded lines. Omitting it runs the real one: it clones/worktrees,
+// commits, pushes (:9116) and opens a plan PR (:9136). Offline throughout — config.root is a
+// tmpdir, the repo is pre-seeded from a bare TMPDIR origin, and gh is shimmed.
+test("GUARDED SITE approve push and pr-create: the REAL un-injected gateway reaches both guarded lines", async () => {
+  const bare = makeOrigin(undefined);
+  const home = mkdtempSync(join(tmpdir(), "cmdsite-apphome-"));
+  const root = mkdtempSync(join(tmpdir(), "cmdsite-approot-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "cmdsite-appshim-"));
+  const savedHome = process.env.HOME;
+  const savedPath = process.env.PATH;
+  try {
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    writeFileSync(
+      join(home, ".config", "remudero", "config.json"),
+      JSON.stringify({ claudeBin: "/usr/bin/true", root }, null, 2),
+      "utf8",
+    );
+    process.env.HOME = home;
+    writeGhShim(shimDir);
+    process.env.PATH = `${shimDir}:${savedPath}`;
+
+    // The repo the real gateway worktrees from, at the path resolveOwnerRepo() derives.
+    const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], {
+      encoding: "utf8",
+    }).trim();
+    const repoName = originUrl.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/)![2];
+    const repoDir = join(root, "repos", repoName);
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: GIT_ENV });
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
+
+    // A READY proposal: no evidence anchors, and a lint-clean single-task fragment, so the
+    // REAL classifyProposal resolves "ready" with no git/gh call of its own.
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(
+      join(root, "state", "inbox-proposals.json"),
+      JSON.stringify({ proposals: [{ id: "P-GUARD", summary: "guarded-site fixture", evidenceAnchors: [] }] }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(root, "state", "inbox-drafts.json"),
+      JSON.stringify({
+        "P-GUARD": {
+          proposalId: "P-GUARD",
+          fragmentYaml:
+            "- id: W1-TGUARD\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n",
+          stampLine: "- P-GUARD (plan) — RATIFIED -> W1-TGUARD.",
+          anchorFingerprint: "",
+        },
+      }),
+      "utf8",
+    );
+
+    // Real gateway (no `gateway:`), and the push/PR-create land in the TMPDIR origin.
+    await withLiveWritesAllowed(() => approveCommand(["P-GUARD"], { config: { claudeBin: "/usr/bin/true", root } as never })).catch(
+      () => undefined,
+    );
+
+    // The gateway's branch really landed on the throwaway origin — the push executed.
+    const refs = execFileSync("git", ["-C", bare, "for-each-ref", "--format=%(refname:short)"], { encoding: "utf8" });
+    assert.match(refs, /run-/, `the ratification branch reached the origin; refs=${JSON.stringify(refs)}`);
+  } finally {
+    process.env.HOME = savedHome;
+    process.env.PATH = savedPath;
+    for (const d of [bare, home, root, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
 });
