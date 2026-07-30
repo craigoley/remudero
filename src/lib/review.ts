@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -674,6 +674,9 @@ export type ProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => "pas
 // correctness guarantee; this just reduces how often it needs to engage.
 const DEFAULT_PROOF_TIMEOUT_MS = 60_000;
 const npmCiPrimed = new Set<string>();
+/** Process-wide latch for {@link ensureBrowsersOnce} — see its doc comment for why
+ * this is NOT keyed by cwd the way {@link npmCiPrimed} is. */
+let browserPreflightDone = false;
 
 /** The ONE process spawn a proof execution performs — the test/grep run itself.
  * Injectable so a test can prove, by COUNTING, that a fast-failed proof never
@@ -702,6 +705,154 @@ function ensureDeps(cwd: string): void {
   } catch {
     /* best-effort priming; see doc comment above */
   }
+}
+
+/**
+ * The Chromium builds a `test` proof needs on THIS host, derived from the pinned
+ * Playwright's own `browsers.json` — the same source `npx playwright install`
+ * reads, so the two can never disagree about which revision is wanted.
+ *
+ * WHY THIS EXISTS (live incident, 2026-07-29, PR #892). `ci` runs
+ * `npx playwright install --with-deps chromium` before EVERY test job
+ * (.github/workflows/ci.yml). The review host runs it NEVER — its browser cache
+ * is only ever populated by hand. So when #863 bumped `playwright` 1.61.1 →
+ * 1.62.0, the wanted Chromium revision moved 1228 → 1234, the review host still
+ * had only 1228, and every `chromium.launch()` in `test/serve.*.test.ts` died
+ * with `Executable doesn't exist at …/chromium_headless_shell-1234/…`. Because a
+ * whole-file `test` proof's verdict IS its exit code (see
+ * {@link execWhitelistedProof}), that host-environment breakage was posted as
+ * `executed_fail` — "proof executed and FAILED on the PR head" — on code that
+ * `ci` was passing. W1-T202 burned FIVE identical FAIL rounds on it and its
+ * author shipped two mitigations for a race that did not exist. This preflight
+ * removes the asymmetry at its source: the review host installs what `ci`
+ * installs, before it judges.
+ *
+ * Scoped to the Chromium family on purpose — `chromium` is the only browser this
+ * repo's suites ever launch, and the only one `ci` installs. `ffmpeg` (also
+ * pulled in by an `install chromium`) is deliberately NOT required here: it backs
+ * video capture, which no proof uses, so demanding it would trigger a pointless
+ * 180MB re-install on a cache that can already launch every test we have.
+ *
+ * The `-` → `_` rewrite is Playwright's own on-disk convention:
+ * `chromium-headless-shell` rev 1234 lives in `chromium_headless_shell-1234`,
+ * while `chromium` rev 1234 lives in `chromium-1234`.
+ */
+export function requiredChromiumDirs(browsersJsonText: string): string[] {
+  const parsed = JSON.parse(browsersJsonText) as { browsers?: { name?: string; revision?: string | number; installByDefault?: boolean }[] };
+  const wanted = [];
+  for (const b of parsed.browsers ?? []) {
+    if (b.installByDefault !== true) continue; // tip-of-tree channels are opt-in; never auto-fetch one
+    if (b.name !== "chromium" && b.name !== "chromium-headless-shell") continue;
+    if (b.revision === undefined) continue;
+    wanted.push(`${b.name.replace(/-/g, "_")}-${b.revision}`);
+  }
+  return wanted;
+}
+
+/** Everything {@link ensureBrowsers} touches outside itself, injected so the
+ * decision logic is provable without a filesystem, a network fetch, or a 180MB
+ * download. */
+export interface BrowserPreflightDeps {
+  /** The pinned Playwright's `browsers.json`, or null when it could not be read
+   * (no `node_modules` yet, a truncated install) — NOT evidence of anything. */
+  browsersJsonText: string | null;
+  /** True when `<cacheRoot>/<dir>` holds a COMPLETE install. Playwright writes an
+   * `INSTALLATION_COMPLETE` marker last, so a half-extracted directory that would
+   * fail to launch reads as absent here rather than as present. */
+  isInstalled: (dir: string) => boolean;
+  /** Fetch the missing builds (production: `npx playwright install chromium`). */
+  install: () => void;
+  log?: (msg: string) => void;
+}
+
+/**
+ * Mirror `ci`'s browser-install step on the review host, ONCE per process, before
+ * the first `test` proof runs. See {@link requiredChromiumDirs} for the incident
+ * this closes.
+ *
+ * Best-effort by the same doctrine as {@link ensureDeps}: this never throws and
+ * never decides a verdict. If the install fails or the manifest is unreadable,
+ * the proof still runs and still reports whatever it reports — a preflight that
+ * could itself fail a criterion would just relocate the false-FAIL problem it
+ * exists to remove. What it returns is a FACT about what happened, so callers and
+ * tests can assert on it:
+ *   - `"ok"`          — every wanted build was already present; nothing spawned.
+ *   - `"installed"`   — builds were missing and the install ran to completion.
+ *   - `"failed"`      — builds were missing and the install threw.
+ *   - `"unreadable"`  — the manifest could not be read, so "wanted" is unknown.
+ */
+export function ensureBrowsers(deps: BrowserPreflightDeps): "ok" | "installed" | "failed" | "unreadable" {
+  if (deps.browsersJsonText === null) return "unreadable";
+  let required: string[];
+  try {
+    required = requiredChromiumDirs(deps.browsersJsonText);
+  } catch {
+    return "unreadable"; // malformed manifest — same "we cannot know" class as an unreadable one
+  }
+  const missing = required.filter((dir) => !deps.isInstalled(dir));
+  if (missing.length === 0) return "ok";
+  deps.log?.(`(browser preflight: installing Chromium for the pinned Playwright — missing ${missing.join(", ")})`);
+  try {
+    deps.install();
+  } catch (e) {
+    deps.log?.(`(browser preflight: install FAILED — ${String((e as Error)?.message ?? e)}; browser proofs may report exec_error)`);
+    return "failed";
+  }
+  return "installed";
+}
+
+/** Production {@link ensureBrowsers} wiring, memoised per process — the browser
+ * cache is HOST-global (not per-checkout like `node_modules`), so one check per
+ * review process covers every proof it goes on to run. */
+function ensureBrowsersOnce(cwd: string): void {
+  if (browserPreflightDone) return;
+  browserPreflightDone = true; // attempted regardless of outcome — never retry-storm a download
+  const manifest = join(cwd, "node_modules", "playwright-core", "browsers.json");
+  ensureBrowsers({
+    browsersJsonText: existsSync(manifest) ? readFileSync(manifest, "utf8") : null,
+    isInstalled: (dir) => existsSync(join(playwrightCacheRoot(), dir, "INSTALLATION_COMPLETE")),
+    install: () => installPinnedChromium(cwd),
+    log: (m) => console.log(m),
+  });
+}
+
+/** The checkout's OWN Playwright CLI entry. Deliberately not `npx playwright`:
+ * `npx` resolves a name, and on a cache miss will happily FETCH a different
+ * Playwright than the one pinned in this checkout — which would install a browser
+ * revision the tests do not want, i.e. the exact drift this preflight exists to
+ * end. Running the pinned CLI with the already-running `node` binary pins both
+ * halves. */
+export function pinnedPlaywrightCli(cwd: string): string {
+  return join(cwd, "node_modules", "playwright", "cli.js");
+}
+
+// diff-cov: process-boundary — the irreducible browser download. A unit test cannot execute a
+// 180MB fetch; the argv it builds is asserted by pinnedPlaywrightCli's own tests, and every
+// decision about WHETHER to call this lives in ensureBrowsers, which is fully covered.
+function installPinnedChromium(cwd: string): void {
+  execFileSync(process.execPath, [pinnedPlaywrightCli(cwd), "install", "chromium"], {
+    cwd,
+    stdio: "pipe",
+    timeout: 600_000,
+  });
+}
+
+/**
+ * Where Playwright keeps its browser builds. `PLAYWRIGHT_BROWSERS_PATH` wins when
+ * set to a real path (it is how CI images relocate the cache); the literal `"0"`
+ * means "inside node_modules" and is NOT a directory, so it falls through to the
+ * platform default exactly as Playwright's own resolution does.
+ */
+export function playwrightCacheRoot(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: string = process.platform,
+  home: string = homedir(),
+): string {
+  const override = env.PLAYWRIGHT_BROWSERS_PATH;
+  if (override !== undefined && override !== "" && override !== "0") return override;
+  if (platform === "darwin") return join(home, "Library", "Caches", "ms-playwright");
+  if (platform === "win32") return join(env.LOCALAPPDATA ?? join(home, "AppData", "Local"), "ms-playwright");
+  return join(home, ".cache", "ms-playwright");
 }
 
 /**
@@ -954,7 +1105,13 @@ export function execWhitelistedProof(
   // AFTER the fast path on purpose: priming a checkout's node_modules is only
   // worth 120s of `npm ci` if we are actually going to run node. `ensureDeps` is
   // memoised per cwd, so a later proof in the same checkout still primes it.
-  if (whitelisted.kind === "test") ensureDeps(cwd);
+  if (whitelisted.kind === "test") {
+    ensureDeps(cwd);
+    // Same "only when we are actually going to run node" placement as ensureDeps,
+    // and for the same reason: a `grep` proof never launches a browser. See
+    // requiredChromiumDirs for the false-FAIL incident this closes (PR #892).
+    ensureBrowsersOnce(cwd);
+  }
   try {
     const stdout = spawn(whitelisted.command, args, cwd, timeoutMs);
     if (whitelisted.nameFiltered) return nameFilteredOutcome(stdout);
