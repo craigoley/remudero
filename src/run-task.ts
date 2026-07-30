@@ -296,6 +296,7 @@ import {
   buildReviewPrompt,
   cappedAnnotation,
   cappedOverrideFromLedger,
+  decideAutoMergeArm,
   decideArmFromLedgerVerdict,
   fetchPrLifecycle,
   floorDegradedAnnotation,
@@ -1204,6 +1205,12 @@ async function runReview(args: {
    */
   materializationFailure?: MaterializationFailure;
   /**
+   * Injectable auto-merge withdrawal (impl-BF). Default: the real
+   * {@link disarmAutoMerge}. Exists so a unit test can assert the withdrawal is
+   * ISSUED rather than mocking `gh`.
+   */
+  disarm?: (prUrl: string) => void;
+  /**
    * W1-T178 (verdict stability): the run's ledger path, so a semantic-lane
    * downgrade on an UNCHANGED head sha whose deterministic floor still passes
    * can be suppressed against the most recent `review.posted` verdict for this
@@ -1338,6 +1345,36 @@ async function runReview(args: {
   // named reason on the posted description itself — the operator reading the
   // commit status (not just the ledger) sees WHY, never only "unavailable".
   const description = reviewPostedDescription(verdict, args.materializationFailure);
+
+  // impl-BF — WITHDRAW AN EXISTING ARM BEFORE THE STATUS GOES UP.
+  //
+  // A worker PR is armed AT OPEN (armAutoMergeAtOpen, ~16s after the PR exists) before any
+  // verdict is computed. PR #831 taught the SWEEP to refuse to ARM a proof-failure cap, but
+  // nothing withdrew an arm already on GitHub: `disarmAutoMerge` had exactly two call sites,
+  // both inside `runTask`, so a cap posted from `reviewCommand` (the operator's `rmd review`
+  // AND the sweep's post-review lane, which reaches this same function via `runReviewDep`)
+  // left the arm standing. Live: PR #969 posted "CAPPED — 0/4 proofs executed; not certified"
+  // at 23:34:42Z and GitHub merged it at 23:34:44Z. Two seconds.
+  //
+  // ORDER IS THE FIX: this runs BEFORE `postReviewStatusGuarded` below, so the arm is gone
+  // before the required status can be satisfied. Disarming after the post would race GitHub —
+  // and #969 shows that race is lost in about two seconds.
+  //
+  // THE DECISION IS NOT RE-DERIVED: `decideAutoMergeArm` is the SAME predicate the arming
+  // path uses, so the W1-T205 carve-out (a plan-only PR is structurally, permanently capped
+  // and MUST stay armed) is preserved by construction rather than by a second copy of the
+  // rule — two copies of exactly this rule are how the sweep and the run flow diverged.
+  // `disarmAutoMerge` never throws and is a no-op-ish on an unarmed PR, so this needs no
+  // extra API call to learn whether the PR was armed.
+  const disarmDecision = decideAutoMergeArm(
+    verdict,
+    false,
+    verdict.capped ? cappedOverrideFromLedger(readLedgerLines(args.ledgerPath), task.id, headSha) : undefined,
+  );
+  if (!disarmDecision.arm) {
+    (args.disarm ?? disarmAutoMerge)(prUrl);
+    log("automerge.disarmed", { reason: `verdict refuses auto-merge: ${disarmDecision.reason}`, head_sha: headSha });
+  }
 
   // W1-T228: the ONLY call path that posts `remudero-review` from here on —
   // acquires the per-task serialization lock, re-reads the ledger + live PR
