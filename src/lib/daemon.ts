@@ -437,6 +437,32 @@ export interface DaemonDeps {
   /** Read current /usage; `undefined` ⇒ unavailable (headroom check is skipped). */
   readUsage?: () => UsageSnapshot | undefined;
   /**
+   * P34 clause (c), W1-T249: called when a window first crosses the operator
+   * reserve (a CONFIRMED, readable breach — never on the unreadable/degraded
+   * path, which has its own bounded-allowance handling above). Fires AT MOST
+   * ONCE per breach episode — the SAME "dedup while the condition holds, reset
+   * once it clears" discipline `onCircuitBreak`'s caller applies, so a
+   * sustained breach does not open a fresh notification every poll — and
+   * dispatch is ALREADY paused (the in-process idle heartbeat this same check
+   * drives) by the time this fires, so the hook is a pure notification, never
+   * a dispatch decision itself. The real command wires escalate.ts's
+   * `escalate()` (HARD_STOP class — "spend beyond cap" is exactly this
+   * clause's shape on a subscription) naming the offending window/percent/
+   * reset, with its OWN cross-boot ledger dedup keyed on `resetsAt` (mirroring
+   * `escalateCircuitBreak`'s durable dedup, since this in-process flag alone
+   * resets to empty on every daemon restart). Wrapped in the caller's own
+   * try/catch (same discipline as `onCircuitBreak`/`onSpawnInfraBlocked`) so a
+   * failed notification costs one logged line, never the daemon's liveness.
+   * Optional — omitted, the breach still pauses dispatch exactly as before
+   * this hook existed, it just opens no issue.
+   */
+  onHeadroomBreach?: (info: {
+    window: string;
+    percentUsed: number;
+    limitPct: number;
+    resetsAt: string;
+  }) => void | Promise<void>;
+  /**
    * Fleet control (W1-T11, MASTER-PLAN §4A/§4B): a defined return ⇒ a hard STOP
    * is in effect, and the string is the ledger/summary detail. Checked FIRST,
    * every tick — before PAUSE, headroom, or picking the next task — so it takes
@@ -605,6 +631,19 @@ export interface DaemonDeps {
    * silently continues), it just has no issue opened.
    */
   escalateBlock?: (info: { task: Task; result: RunResult; dependents: string[] }) => void | Promise<void>;
+  /**
+   * W1-T174 (drain/sweep PARITY): called for a FIXABLE genuine blocker
+   * (`reasonAboutBlock`'s `fixable_blocker` disposition — one or more
+   * dependents, but the verdict names actionable evidence, see block-
+   * reason.ts's `verdictIsFixable`) BEFORE any halt+escalate. The real
+   * command wires this to the SAME W1-T76 fix rung the W1-T77 sweep already
+   * dispatches (`routeFix`/`dispatchFix` in run-task.ts), driven against
+   * the task's own open PR. Optional — omitted (or once `reasonAboutBlock`'s
+   * own strike bound is exhausted), a fixable block falls through to the
+   * SAME `escalateBlock` halt a genuine blocker always got: the daemon
+   * never silently stalls on a fixable block it has no rung wired to act on.
+   */
+  dispatchFix?: (info: { task: Task; result: RunResult; dependents: string[] }) => void | Promise<void>;
   /**
    * W1-T113 part (iii), DEGRADE DON'T DIE (the vanished-binary incident): called
    * AT MOST ONCE per distinct `reason` for the life of this daemon run — never
@@ -910,8 +949,11 @@ export function daemonBoot(
  * order, reusing drain.ts's `nextRunnable` — never reimplemented) → run it →
  * REASON about any non-merged verdict (W1-T46, superseding v1's blunt
  * stop-on-block): transient retries (no strike), an independent failure is
- * flagged + skipped while the rest of the drain continues, a genuine blocker
- * halts + escalates. When nothing is runnable OR headroom is exhausted, sleep
+ * flagged + skipped while the rest of the drain continues, a FIXABLE genuine
+ * blocker gets a bounded fix-rung attempt before halting (W1-T174, drain/
+ * sweep parity), and a genuine blocker with no fixable signal (or an
+ * exhausted fix attempt) halts + escalates. When nothing is runnable OR
+ * headroom is exhausted, sleep
  * via the injected clock and poll again — the loop is PERSISTENT by default
  * (no `max`), unlike a bounded drain, and idling (for either reason) is an
  * in-process state, never a process exit.
@@ -952,6 +994,15 @@ export async function runDaemon(
   // CONSECUTIVE spawn-infra failures — backs the backoff below; reset by any
   // runOne call that does NOT throw this class (success or an unrelated verdict).
   let consecutiveSpawnInfraFailures = 0;
+  // HEADROOM RESERVE ESCALATION DEDUP (P34 clause (c), W1-T249): the SAME
+  // per-episode bound `circuitEscalated` applies above — a sustained breach is
+  // read fresh every tick (never a stop, see the HEADROOM comment below), so
+  // without this the notification hook would fire on every idle poll for as
+  // long as the window stays over the reserve. Cleared the moment a read
+  // reports the window back under the reserve, so a LATER breach (a new
+  // episode) escalates again rather than staying silenced for the rest of
+  // this process's life.
+  let headroomReserveEscalated = false;
   const maxSpawnInfraBackoffMs = opts.maxSpawnInfraBackoffMs ?? DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS;
   // BOUNDED DEGRADED MODE (recon R-7: the live ledger shows /usage unreadable
   // ~78% of the time — an unconditional fail-closed-on-first-miss would halt
@@ -1095,6 +1146,11 @@ export async function runDaemon(
         consecutiveUnreadable = 0;
         const windows = resolveHeadroomWindows(snap, now(), headroomPolicy);
         const over = windows.find((w) => w.percentUsed >= w.limitPct) ?? null;
+        // P34 clause (c), W1-T249: a breach episode escalates AT MOST ONCE (see
+        // `headroomReserveEscalated`'s doc above) — clearing here, unconditionally
+        // (whether or not the governor is enforcing), so a LATER breach after this
+        // one recovers is treated as a fresh episode rather than staying silenced.
+        if (!over) headroomReserveEscalated = false;
         if (headroomEnabled) {
           // ENFORCEMENT (W1-T197 curve, UNCHANGED): an at/over-limit reading is an
           // in-process idle heartbeat while over — never a stop (KeepAlive would
@@ -1109,6 +1165,24 @@ export async function runDaemon(
               resets_at: over.resetsAtDisplay,
               poll_interval_ms: pollIntervalMs,
             });
+            // P34 clause (c), W1-T249: notify ONCE per episode — dispatch is
+            // ALREADY paused above (this same `continue`), so the hook is a pure
+            // notification, never a dispatch decision. Failure here costs one
+            // logged line, never the daemon's liveness (same discipline as
+            // `onCircuitBreak`/`onSpawnInfraBlocked`).
+            if (!headroomReserveEscalated) {
+              headroomReserveEscalated = true;
+              try {
+                await deps.onHeadroomBreach?.({
+                  window: over.window,
+                  percentUsed: over.percentUsed,
+                  limitPct: over.limitPct,
+                  resetsAt: over.resetsAtDisplay,
+                });
+              } catch (e) {
+                log("daemon.escalation.failed", { error: String((e as Error)?.message ?? e) });
+              }
+            }
             await deps.sleep(pollIntervalMs);
             continue;
           }
@@ -1394,6 +1468,28 @@ export async function runDaemon(
         });
         continue;
       }
+      if (disposition.kind === "fixable_blocker" && deps.dispatchFix) {
+        // W1-T174 (drain/sweep PARITY): the SAME blocked_ci/blocked_review
+        // evidence the W1-T77 sweep routes to the W1-T76 fix rung gets a
+        // bounded fix attempt here too, BEFORE halting — strike-capped by
+        // `reasonAboutBlock` via the SAME classify.ts primitive every
+        // strike in this module already uses (never a separate, unbounded
+        // loop — the W1-T168 anti-regression guard: exhausting the bound
+        // falls through to `genuine_blocker` on a LATER tick and escalates
+        // for re-judgment, it does not fix-loop forever). Keep the retry
+        // state threaded across ticks — dropped only once resolved
+        // (merged, flagged, or escalated) below.
+        blockRetryStates.set(next.id, disposition.state);
+        log("daemon.block.fixable_dispatch", {
+          task: next.id,
+          verdict: result.verdict,
+          dependents: disposition.dependents,
+          strikes: disposition.state.strikes,
+        });
+        await deps.dispatchFix({ task: next, result, dependents: disposition.dependents });
+        continue;
+      }
+
       blockRetryStates.delete(next.id); // resolved one way or another below
 
       if (disposition.kind === "independent_failure") {
@@ -1413,7 +1509,12 @@ export async function runDaemon(
       // GENUINE BLOCKER: real downstream work transitively needs this task
       // merged — "never continue into the gap" is absolute here. Halt and
       // escalate, exactly as v1's stop-on-block halted, but now the
-      // dependents it protects are named.
+      // dependents it protects are named. Reached by a `genuine_blocker`
+      // disposition (no fixable signal at all, or a `fixable_blocker` whose
+      // strike bound `reasonAboutBlock` already exhausted) AND by a
+      // `fixable_blocker` with no `dispatchFix` wired (W1-T174: never a
+      // silent stall on a fixable block this daemon has no rung to act on —
+      // the SAME halt+escalate a genuine blocker always got).
       log("daemon.blocked", {
         task: next.id,
         verdict: result.verdict,

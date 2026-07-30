@@ -268,6 +268,7 @@ import {
   TaskLintError,
 } from "./lib/task-linter.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
+import { loadPolicy, PolicyError } from "./lib/policy.js";
 import { deriveTaskClass } from "./lib/task-class.js";
 import { realRiskJudge, resolveRiskJudgeMount, runRiskJudge, type RiskJudgeInput } from "./lib/risk-judge.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
@@ -4619,6 +4620,24 @@ export async function lintPlanCommand(rest: string[]): Promise<number> {
       console.warn(`  ⚠ ${task.id}: [${v.check}] ${v.message}`);
     }
   }
+  // W1-T252 (P37 SUBSTRATE): plan/policy.yaml rides the SAME §5C lint gate as
+  // plan/tasks.yaml — a schema-bound value edit is reviewed data, never an
+  // unbounded edit slipping past CI. Sibling of the plan file actually opened
+  // (mirrors alert-policy.yaml's own plan/-relative placement), so a `--plan`
+  // pointed at a fixture tree with no policy.yaml of its own is a no-op here
+  // (nothing to check), never a spurious failure over a file that was never
+  // meant to exist at that path.
+  const policyFile = join(dirname(planPath), "policy.yaml");
+  if (existsSync(policyFile)) {
+    try {
+      loadPolicy(policyFile);
+    } catch (e) {
+      failing++;
+      const message = e instanceof PolicyError ? e.message : String((e as Error)?.message ?? e);
+      console.error(`✗ plan/policy.yaml: ${message}`);
+    }
+  }
+
   const scopeNote = scope ? ` (${scope.size} new/changed vs ${baseRef})` : "";
   // W1-T120: the READ-IDENTITY ASSERTION — the abs path + content hash of the plan file
   // ACTUALLY opened, so a wrong-file run (a false green pointed at the wrong tree) is
@@ -5256,6 +5275,72 @@ export function escalateCircuitBreak(
     run_id: ctx.runId,
     task_id: task.id,
     step: "dispatch.circuit_broken.escalated",
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
+ * P34 clause (c), W1-T249: the daemon's `onHeadroomBreach` hook, called when a
+ * weekly (or session) window first crosses the operator reserve. Dispatch is
+ * ALREADY paused by the time this fires (`runDaemon`'s own in-process idle,
+ * driven by the SAME reading) — this is a pure notification, mirroring
+ * `escalateCircuitBreak` immediately above rather than a second mechanism.
+ *
+ * CROSS-BOOT DEDUP keyed on `resetsAt` — NOT task id (there is no task; the
+ * breach is a property of the account, not one candidate change) and NOT a
+ * per-process flag alone (`runDaemon`'s own `headroomReserveEscalated` already
+ * bounds ONE daemon run, but a restart forgets it and would re-open the SAME
+ * issue for the SAME still-unresolved window). The window's own `resets_at` is
+ * the natural episode key: unchanged for as long as the breach persists, and a
+ * NEW value the moment the window actually resets, so a later breach escalates
+ * again rather than staying silenced by a stale marker (the same "write the
+ * dedup key whether or not delivery succeeded" discipline
+ * `escalateCircuitBreak` documents, so a throwing `gh` is never retried into an
+ * unbounded relaunch loop).
+ */
+export function escalateHeadroomReserve(
+  info: { window: string; percentUsed: number; limitPct: number; resetsAt: string },
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+): void {
+  const already = readLedgerLines(ctx.ledgerPath).some(
+    (l) => l.step === "daemon.headroom_reserve.escalated" && l.resets_at === info.resetsAt,
+  );
+  if (already) return;
+  const issueUrl = tryEscalate(
+    {
+      class: "HARD_STOP",
+      taskId: "daemon",
+      runId: ctx.runId,
+      summary: `weekly headroom reserve reached — dispatch paused until ${info.resetsAt}`,
+      detail:
+        `P34 clause (c): ${info.window} is at ${info.percentUsed}% used (>= the ${info.limitPct}% operator ` +
+        `reserve ceiling). Dispatch is paused — drain-and-hold, in-flight work finishes, no new spawn — until ` +
+        `the window resets at ${info.resetsAt}; imputed ledger dollar figures never gate this decision, only ` +
+        `the subscription window itself does.`,
+      options: [
+        {
+          label: "wait for reset",
+          detail: `Dispatch resumes on its own once the window resets at ${info.resetsAt} — no action needed.`,
+        },
+        {
+          label: "raise the reserve",
+          detail: "If 5% is too conservative for this account, retune the HEADROOM_LIMIT_PCT policy curve.",
+        },
+      ],
+      recommendation: "wait for reset",
+    },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "daemon",
+    step: "daemon.headroom_reserve.escalated",
+    resets_at: info.resetsAt,
     issue_url: issueUrl,
     delivered: issueUrl !== null,
   });
@@ -5907,6 +5992,9 @@ export async function daemonCommand(
             skipGitSync: !!flagValue(rest, "--plan"),
           }),
         readUsage: () => readUsageSnapshot(config),
+        // P34 clause (c), W1-T249: the reserve gate's notification — dispatch is
+        // already paused (runDaemon's own in-process idle) by the time this fires.
+        onHeadroomBreach: (info) => escalateHeadroomReserve(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         checkStop: () => stopDetail(config.root),
         checkPause: () => pauseDetail(config.root),
         // Console UP NEXT write-actions (fb-1784988460437-9daa9b): the daemon

@@ -23,9 +23,22 @@
  *   `blocked` so `nextRunnable` never reconsiders it this run).
  *
  *   GENUINE BLOCKER (one or more transitive dependents — real downstream work
- *   needs this task merged) -> halt and escalate for a human. This is the ONE
- *   invariant that never bends: a task with a real dependent NEVER gets
- *   silently skipped ("never continue into the gap", MASTER-PLAN §4).
+ *   needs this task merged) with NO fixable signal (see `verdictIsFixable`,
+ *   below) -> halt and escalate for a human. This is the ONE invariant that
+ *   never bends: a task with a real dependent NEVER gets silently skipped
+ *   ("never continue into the gap", MASTER-PLAN §4).
+ *
+ *   FIXABLE BLOCKER (W1-T174, drain/sweep PARITY: one or more transitive
+ *   dependents, but the verdict names actionable evidence — the SAME
+ *   `blocked_ci`/`blocked_review` classes the W1-T77 sweep's `isBlockedCi` /
+ *   unmet-criteria rows already route to its W1-T76 fix rung, see sweep.ts's
+ *   `DISPOSITION_RULES`) -> a bounded fix attempt BEFORE halting, strike-
+ *   capped via the SAME classify.ts `planRetry` primitive every strike here
+ *   already uses (never a separate, unbounded loop — the W1-T168 anti-
+ *   regression guard: a strike-exhausted false-block falls through to
+ *   GENUINE BLOCKER and escalates for re-judgment, it does not fix-loop
+ *   forever). Halt+escalate NARROWS to the truly-stuck here; it is never
+ *   removed.
  *
  * DECISION RECORD (W1-T46 PR): the independent/genuine split is a strict
  * "does anything transitively depend on it at all" binary — deliberately NOT
@@ -52,9 +65,30 @@ export function verdictFailureClass(verdict: RunResult["verdict"]): FailureClass
   return verdict === "blocked_transient" ? "transient" : "strike";
 }
 
+/**
+ * W1-T174 (drain/sweep parity): does this verdict name evidence the W1-T76
+ * fix rung can act on? Structurally mirrors the W1-T77 sweep's own
+ * blocked-fixable signal (sweep.ts's `isBlockedCi` — a required check red —
+ * and its `reviewState === "failure" && unmetCriteria.length > 0` row) at
+ * the coarser grain `RunResult["verdict"]` carries: `blocked_ci` IS a
+ * required check red (run-task.ts's review gate sets it from exactly that
+ * evidence, before review even runs); `blocked_review` IS a failing review
+ * naming unmet criteria (the SAME gate's review-failure branch). Every
+ * OTHER non-transient verdict (`blocked_budget`/`blocked_containment`/
+ * `blocked_isolation`/`blocked_inflight`/`blocked_git_fetch`/
+ * `blocked_illformed`/`no_pr`/`pr_attribution_failed`/`failed`/bare
+ * `blocked`) names an environmental or ambiguous failure with no nameable
+ * criterion the rung could act on — never fixable, matching the sweep's own
+ * `blocked-ambiguous` default-escalate row for the identical reason.
+ */
+export function verdictIsFixable(verdict: RunResult["verdict"]): boolean {
+  return verdict === "blocked_ci" || verdict === "blocked_review";
+}
+
 export type BlockDisposition =
   | { kind: "retry_transient"; state: RetryState }
   | { kind: "independent_failure"; dependents: string[] }
+  | { kind: "fixable_blocker"; dependents: string[]; state: RetryState }
   | { kind: "genuine_blocker"; dependents: string[] };
 
 /**
@@ -80,7 +114,23 @@ export function reasonAboutBlock(
     // any other real failure.
   }
   const dependents = [...transitiveDependents(plan, taskId)].sort();
-  return dependents.length === 0
-    ? { kind: "independent_failure", dependents }
-    : { kind: "genuine_blocker", dependents };
+  if (dependents.length === 0) return { kind: "independent_failure", dependents };
+
+  // W1-T174: the GENUINE-BLOCKER branch gets the sweep's disposition
+  // vocabulary — a block whose verdict names fixable evidence gets a
+  // bounded fix attempt (the SAME strike/give_up bound `planRetry` already
+  // enforces above for transience) BEFORE halting. Reuses `state`'s
+  // `strikes` counter, independent of `transientRetries` above, so a
+  // verdict that was transient before exhausting ITS OWN bound still starts
+  // this count at zero.
+  if (verdictIsFixable(verdict)) {
+    const action = planRetry(state, "strike");
+    if (action.kind !== "give_up") {
+      return { kind: "fixable_blocker", dependents, state: action.state };
+    }
+    // Strikes exhausted — the SAME class as the W1-T76 rung's OWN
+    // exhaustion (W1-T168): stop attempting fixes, escalate for
+    // re-judgment rather than fix-looping forever.
+  }
+  return { kind: "genuine_blocker", dependents };
 }
