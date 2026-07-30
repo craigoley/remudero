@@ -460,10 +460,11 @@ function looksLikeNonTitleBody(body: string): boolean {
 
 /** Every non-`satisfied_by` criterion whose proof does not parse as a
  *  {@link parseWhitelistedProof} shape — a proof that CANNOT execute never
- *  lands (the dead proof floor, moratorium finding 9). BLOCK by default;
- *  `opts.proofDialect: "warn"` (the pre-dispatch call site, run-task.ts —
- *  the ~90-task legacy backlog must not brick overnight) demotes every
- *  violation here to visibility-only. A criterion whose proof DOES parse but
+ *  lands (the dead proof floor, moratorium finding 9). BLOCK by default, and
+ *  since impl-AK every call site including run-task.ts's pre-dispatch gate
+ *  takes that default: `opts.proofDialect: "warn"` remains available (it
+ *  demotes every violation here to visibility-only) but no caller passes it.
+ *  A criterion whose proof DOES parse but
  *  reads as a non-title `unit test:` body (see {@link looksLikeNonTitleBody})
  *  gets a separate WARN, always, independent of `opts.proofDialect`. */
 export function proofDialectViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
@@ -678,16 +679,18 @@ export interface LintOpts {
   mountMaxTurns?: number;
   /** The observed class mean, from a real Calibration row — never hardcoded. */
   calibration?: ClassCalibration;
-  /** Severity for {@link proofDialectViolations}. Default "block" (CI's `lint-plan`, the
-   *  inbox draft rung, and the retro's plan-health sweep all want the default). The
-   *  pre-dispatch call site (run-task.ts's `assertLintClean`) passes "warn" — the legacy
-   *  backlog must not brick overnight; CI still reds a hand-filed offender. */
+  /** Severity for {@link proofDialectViolations}. Default "block", and since impl-AK EVERY
+   *  call site takes it — CI's `lint-plan`, the inbox draft rung, the retro's plan-health
+   *  sweep, AND run-task.ts's pre-dispatch `assertLintClean`. The "warn" demotion the
+   *  pre-dispatch site used to pass is still honoured here, but nothing passes it: a proof
+   *  that cannot execute is refused before a worker spawns. */
   proofDialect?: LintSeverity;
-  /** Severity for {@link proofResolvabilityViolations}. Default "block" — same rollout
-   *  convention as `proofDialect` above, for the same reason: `rmd run-task`'s pre-dispatch
-   *  call site passes "warn" so the legacy backlog (authored before this check existed)
-   *  does not brick overnight; CI's `lint-plan`, the inbox draft rung, and the retro's
-   *  plan-health sweep all want the default and BLOCK. */
+  /** Severity for {@link proofResolvabilityViolations}. Default "block" — but `rmd
+   *  run-task`'s pre-dispatch call site DELIBERATELY still passes "warn", and that is not an
+   *  oversight: a queued task's proof legitimately FORWARD-REFERENCES the test its own PR
+   *  will create, and this check cannot tell that apart from a dead reference pre-dispatch.
+   *  CI's `lint-plan`, the inbox draft rung, and the retro's plan-health sweep — the birth
+   *  gates, where the artifact really ought to exist — all want the default and BLOCK. */
   proofResolvability?: LintSeverity;
 }
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -69,7 +69,7 @@ const FIXTURE_PLAN = `- id: TST-BAD
   status: queued
   attempts: 0
 - id: TST-WARN
-  title: "clean sizing, but a grep: proof names no resolvable artifact (W1-T101 warn rollout)"
+  title: "clean sizing; the proof PARSES but names no resolvable artifact (W1-T101 warn rollout)"
   repo: remudero
   depends_on: []
   type: implement
@@ -79,7 +79,37 @@ const FIXTURE_PLAN = `- id: TST-BAD
   files: [src/lib/daemon.ts]
   acceptance:
     - claim: "does the thing"
-      proof: "grep: TODO"
+      proof: "unit test: a seeded fixture, an injected clock, and a recorded verdict all agree"
+  status: queued
+  attempts: 0
+- id: TST-PROSE
+  title: "clean sizing, but the proof is free prose that can never execute (impl-AK: dialect BLOCKS)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  origin: architect
+  files: [src/lib/daemon.ts]
+  acceptance:
+    - claim: "the daemon keeps polling after a failed tick"
+      proof: "unit test: test/daemon.test.ts asserts the poll loop survives a failed tick"
+    - claim: "the operator can see why a tick failed"
+      proof: "the board visibly shows the failed tick when you look at it"
+  status: queued
+  attempts: 0
+- id: TST-FWD
+  title: "clean sizing; the proof FORWARD-REFERENCES a test file its own PR will create"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  origin: architect
+  files: [src/lib/daemon.ts]
+  acceptance:
+    - claim: "does the thing"
+      proof: "unit test: test/impl-ak-not-yet-created.test.ts"
   status: queued
   attempts: 0
 `;
@@ -181,6 +211,133 @@ test("CRITERION 5 (behavioral): a proof-resolvability-only violation WARNS (neve
 
 test("blocked_illformed is a recognized terminal verdict on RunResult", () => {
   assert.match(runTaskSrc, /"blocked_illformed"/);
+});
+
+// ── impl-AK: proofDialect BLOCKS pre-dispatch; proofResolvability STAYS demoted ──────────
+//
+// The two halves of this section are deliberately asymmetric and must stay that way:
+//   • a proof that cannot PARSE (free prose / a near-miss prefix) is REFUSED before the
+//     in-flight lock — no lock, no worktree, no worker, cost 0;
+//   • a proof that DOES parse but names no artifact resolvable TODAY still DISPATCHES,
+//     because a queued task's proof legitimately forward-references the test its own PR
+//     will create. The dispatch case is the regression lock on that carve-out.
+//
+// Both halves drive the REAL runTask path through injected seams. "Still dispatches" is
+// proved by PRE-SEEDING a live (this process' own pid) in-flight lock for the task, so
+// runTask refuses with `blocked_inflight` at the guard IMMEDIATELY AFTER the lint gate:
+// reaching that verdict is positive proof the lint gate ran and PASSED, and the injected
+// spawn counter proves no worker was reached either way. Never a timing assertion.
+
+/** Drive runTask for `taskId` with a pre-seeded LIVE in-flight lock and a counting spawn
+ *  stub. `blocked_inflight` ⇒ the pre-dispatch lint gate PASSED; `blocked_illformed` ⇒ it
+ *  REFUSED. Returns the verdict, the spawn count, and the run's own ledger lines. */
+async function dispatchProbe(taskId: string, opts: { seedInflight: boolean }) {
+  const planPath = fixturePlanPath();
+  const configRoot = mkdtempSync(join(tmpdir(), "rmd-implak-root-"));
+  const config: Config = { claudeBin: "/bin/true", root: configRoot };
+
+  if (opts.seedInflight) {
+    const inflightDir = join(configRoot, "state", "inflight");
+    mkdirSync(inflightDir, { recursive: true });
+    writeFileSync(
+      join(inflightDir, `${taskId}.lock`),
+      JSON.stringify({ pid: process.pid, run_id: "pre-existing-run", host: "test-host", startedAt: new Date().toISOString() }),
+    );
+  }
+
+  let spawnCalls = 0;
+  const spawn = (async () => {
+    spawnCalls++;
+    throw new Error(`spawn must never be reached for ${taskId} on this path`);
+  }) as typeof spawnWorker;
+
+  const res = await runTask(taskId, { skipGitSync: true, planPath, config, github: OFFLINE_GITHUB, spawn });
+  let ledger: Record<string, unknown>[] = [];
+  try {
+    ledger = readFileSync(join(configRoot, "state", "ledger.ndjson"), "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+  } catch {
+    ledger = [];
+  }
+  return { res, spawnCalls, ledger };
+}
+
+test("impl-AK: a free-prose proof is REFUSED at dispatch and no worker spawns", async () => {
+  const { res, spawnCalls } = await dispatchProbe("TST-PROSE", { seedInflight: false });
+  assert.equal(res.verdict, "blocked_illformed", "a proof that cannot execute must REFUSE dispatch, not merely warn");
+  assert.equal(res.costUsd, 0, "the refusal costs nothing — it precedes the in-flight lock");
+  assert.equal(spawnCalls, 0, "the injected worker-spawn counter proves NO worker was spawned");
+});
+
+test("impl-AK: the dialect refusal names the task, the criterion, and the offending proof string", async () => {
+  const { res, ledger } = await dispatchProbe("TST-PROSE", { seedInflight: false });
+  assert.equal(res.verdict, "blocked_illformed");
+  const blocked = ledger.find((l) => l.step === "lint.blocked");
+  assert.ok(blocked, "the refusal must be ledgered on the EXISTING lint.blocked channel, never a new one");
+  assert.equal(blocked!.task_id, "TST-PROSE", "the ledgered refusal names WHICH task");
+  const violations = blocked!.violations as { check: string; message: string }[];
+  const dialect = violations.filter((v) => v.check === "proof-dialect");
+  assert.equal(dialect.length, 1, "exactly the one non-parsing criterion is cited");
+  assert.match(dialect[0]!.message, /criterion 2/, "the refusal names WHICH criterion");
+  assert.match(
+    dialect[0]!.message,
+    /the board visibly shows the failed tick when you look at it/,
+    "the refusal quotes WHICH proof string",
+  );
+  assert.match(dialect[0]!.message, /rewrite as `unit test: <path-or-test-title>` or `grep: <pattern> in <path>`/, "the refusal carries the remedy");
+});
+
+test("impl-AK: a parsing-but-unresolvable proof still DISPATCHES (the forward-reference carve-out)", async () => {
+  const { res, spawnCalls, ledger } = await dispatchProbe("TST-WARN", { seedInflight: true });
+  assert.equal(
+    res.verdict,
+    "blocked_inflight",
+    "proofResolvability must STAY demoted to warn: reaching the in-flight guard proves the lint gate PASSED",
+  );
+  assert.equal(spawnCalls, 0, "the pre-seeded in-flight lock refuses before any worker is spawned");
+  const warned = ledger.find((l) => l.step === "lint.warned" && l.check === "proof-resolvability");
+  assert.ok(warned, "the still-demoted violation is ledgered as a WARNING, so the authoring gap stays visible");
+  assert.match(String(warned!.message), /names no resolvable/, "the warning carries the linter's own remedy");
+  assert.equal(
+    ledger.find((l) => l.step === "lint.blocked"),
+    undefined,
+    "nothing blocked: a resolvability-only violation must never refuse dispatch",
+  );
+});
+
+test("impl-AK: a forward-referenced test path still DISPATCHES", async () => {
+  const plan = loadPlan(fixturePlanPath());
+  const fwd = plan.byId.get("TST-FWD")!;
+  assert.equal(
+    existsSync(fileURLToPath(new URL("../test/impl-ak-not-yet-created.test.ts", import.meta.url))),
+    false,
+    "the proof's target must NOT exist — that is what makes this a forward reference",
+  );
+  assert.doesNotThrow(() => assertLintClean(fwd), "a path proof naming a file the PR will create passes the gate");
+  const { res, spawnCalls } = await dispatchProbe("TST-FWD", { seedInflight: true });
+  assert.equal(res.verdict, "blocked_inflight", "reaching the in-flight guard proves the lint gate PASSED");
+  assert.equal(spawnCalls, 0);
+});
+
+test("impl-AK: a fully valid resolvable proof dispatches exactly as before", async () => {
+  const { res, spawnCalls, ledger } = await dispatchProbe("TST-OK", { seedInflight: true });
+  assert.equal(res.verdict, "blocked_inflight", "an unchanged clean task still passes the lint gate");
+  assert.equal(spawnCalls, 0);
+  assert.equal(ledger.find((l) => l.step === "lint.blocked"), undefined, "nothing blocked");
+  assert.equal(ledger.find((l) => l.step === "lint.warned"), undefined, "nothing warned either");
+});
+
+test("impl-AK: the pre-dispatch gate passes ONE options object to both lint calls so they cannot drift", () => {
+  assert.match(
+    runTaskSrc,
+    /const preDispatchLint = \{ proofResolvability: "warn" \} as const;/,
+    "the pre-dispatch lint options are declared once, with proofDialect left at its blocking default",
+  );
+  assert.match(runTaskSrc, /assertLintClean\(task, preDispatchLint\);/, "the gate uses that one object");
+  assert.doesNotMatch(runTaskSrc, /proofDialect: "warn"/, 'no call site may demote proofDialect to "warn"');
 });
 
 // ── the CI half is wired too ───────────────────────────────────────────────────
