@@ -837,12 +837,13 @@ test(
       return result({ sessionId: "s-fix", text: "REPORT\nfix applied\n" });
     };
 
-    // Non-success and NOT capped, so the run takes the fix rung rather than the capped refusal.
+    // state:"failure" is the only non-success ReviewState, and NOT capped — so the run takes
+    // the fix rung rather than the capped refusal.
     const blockedVerdict = {
-      state: "blocked" as const,
+      state: "failure" as const,
       criteria: [],
       testTheater: false,
-      summary: "blocked — one unmet criterion",
+      summary: "failure — one unmet criterion",
       floorDegraded: false,
       capped: false,
       keywordOnly: false,
