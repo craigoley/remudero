@@ -262,10 +262,13 @@ import {
 import {
   assertLintClean,
   changedTaskIds,
+  criteriaAdded,
+  followUpCarriesCriteria,
   formatReadIdentity,
   isPathOutsideRoot,
   lintTask,
   TaskLintError,
+  type LintOpts,
 } from "./lib/task-linter.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
 import { loadPolicy, PolicyError } from "./lib/policy.js";
@@ -4574,6 +4577,8 @@ export async function lintPlanCommand(rest: string[]): Promise<number> {
   }
 
   let scope: Set<string> | undefined;
+  let oldById: Map<string, Task> | undefined;
+  let newTaskIds: Set<string> | undefined;
   if (baseRef) {
     const relPath = relative(repoRoot, planPath);
     // W1-T246 (recon): a plain `git show <base>:<relPath>` only ever materializes the MONOLITH
@@ -4595,11 +4600,37 @@ export async function lintPlanCommand(rest: string[]): Promise<number> {
       materializeOriginShards(repoRoot, dirname(relPath), tmpDir, undefined, baseRef);
       const oldPlan = loadPlan(tmpFile);
       scope = changedTaskIds(oldPlan.tasks, plan.tasks);
+      oldById = new Map(oldPlan.tasks.map((t) => [t.id, t]));
+      // Tasks this PR introduces outright (absent at the base ref) — the only tasks that
+      // can possibly BE a post-merge-amendment follow-up (W1-T180).
+      newTaskIds = new Set(plan.tasks.filter((t) => !oldById!.has(t.id)).map((t) => t.id));
     } catch (e) {
       console.error(`### rmd lint-plan: cannot resolve --base ${baseRef}: ${(e as Error).message}`);
       return 2;
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+  // W1-T180 (§5C post-merge-amendment): derived merge status for every task in `scope`,
+  // resolved ONCE here (never per-task) and injected via LintOpts — task-linter.ts stays
+  // a pure function over already-loaded data, per its own documented contract. FAIL OPEN,
+  // deliberately, on ANY resolution failure (no `--base`, `loadConfig`'s CI `which claude`
+  // trap, `gh` unauthenticated/unavailable): `statusResolvable` stays false and the check
+  // is skipped rather than redding a plan-only PR during a GitHub outage.
+  let statusByTaskId: Map<string, StatusProjection> | undefined;
+  let statusResolvable = false;
+  if (scope && scope.size > 0) {
+    try {
+      const config = loadConfig();
+      const { owner, repo } = resolveOwnerRepo();
+      const github = ghGateway(owner, repo);
+      const scopedPlan: Plan = { tasks: plan.tasks.filter((t) => scope!.has(t.id)), byId: new Map() };
+      statusByTaskId = projectPlan(scopedPlan, { ledgerPath: ledgerPathFor(config), github });
+      statusResolvable = true;
+    } catch {
+      statusByTaskId = undefined;
+      statusResolvable = false;
     }
   }
 
@@ -4609,7 +4640,28 @@ export async function lintPlanCommand(rest: string[]): Promise<number> {
   for (const task of plan.tasks) {
     if (scope && !scope.has(task.id)) continue;
     checked++;
-    const { violations } = lintTask(task);
+    let opts: LintOpts = {};
+    if (scope) {
+      const oldTask = oldById?.get(task.id);
+      const proj = statusByTaskId?.get(task.id);
+      // Per-task fail-open: even when the batched read above succeeded overall, THIS
+      // task's own projection can still be indeterminate (a mid-batch rate-limit/auth
+      // failure) — that must fail open exactly like a total resolution failure does.
+      const taskStatusResolvable = statusResolvable && proj !== undefined && !proj.indeterminate;
+      const added = criteriaAdded(oldTask?.acceptance, task.acceptance ?? []);
+      const followUpTasks = newTaskIds
+        ? plan.tasks.filter((t) => t.id !== task.id && newTaskIds!.has(t.id))
+        : [];
+      opts = {
+        postMergeAmendment: {
+          statusResolvable: taskStatusResolvable,
+          merged: proj?.merged ?? false,
+          baseAcceptance: oldTask?.acceptance,
+          followUpFiled: followUpCarriesCriteria(added, followUpTasks),
+        },
+      };
+    }
+    const { violations } = lintTask(task, opts);
     const blocking = violations.filter((v) => v.severity === "block");
     const soft = violations.filter((v) => v.severity === "warn");
     if (blocking.length) {
