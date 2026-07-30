@@ -163,6 +163,35 @@ export function cacheTokenLedgerFields(tokens: TokenUsage): {
 }
 
 /**
+ * Persisted-stderr length ceiling (W1-T238, the "Not logged in" incident): the
+ * child's stderr and any swallowed error-result text lived only in
+ * `stderrChunks`/`text` in memory and were discarded once the spawn returned —
+ * two production spawns failed and the one artifact that named the cause had
+ * to be reconstructed by a repro instead of read off disk. This bounds the
+ * PERSISTED copy so a runaway transcript cannot bloat the ledger; it never
+ * bounds what stays in-memory on {@link WorkerResult} itself.
+ */
+export const STDERR_EXCERPT_CAP = 4000;
+
+/** Truncate `s` to {@link STDERR_EXCERPT_CAP} chars, noting how much was cut —
+ * never a silent drop. */
+export function capStderrExcerpt(s: string, cap: number = STDERR_EXCERPT_CAP): string {
+  return s.length > cap ? `${s.slice(0, cap)}…[truncated, ${s.length - cap} more chars]` : s;
+}
+
+/**
+ * The capped, ledger-safe excerpt of a FAILED spawn's stderr + error-result
+ * text (W1-T238). Returns `undefined` for a clean spawn (`isError=false`) or
+ * one with nothing to say, so a success line never carries this field — a
+ * clean spawn must not spam the ledger with an empty/absent excerpt.
+ */
+export function workerFailureExcerpt(r: Pick<WorkerResult, "isError" | "stderr" | "text">): string | undefined {
+  if (!r.isError) return undefined;
+  const combined = [r.stderr, r.text].filter((s) => s && s.trim().length > 0).join("\n");
+  return combined ? capStderrExcerpt(combined) : undefined;
+}
+
+/**
  * The standard per-call ledger telemetry (W1-T6 acceptance): every worker AND
  * brain-plane (architect/reviewer) call logs `{model, effort, tokens,
  * cache_read_input_tokens, cache_creation_input_tokens, total_cost_usd,
@@ -178,6 +207,12 @@ export function cacheTokenLedgerFields(tokens: TokenUsage): {
  * SAME line as `verdict` — a compacted call's ledger line is directly
  * queryable/grep-able for both its outcome and whether that outcome should
  * be trusted, with no join against a separate compaction event stream.
+ *
+ * `stderr_excerpt` (W1-T238) rides the same line, capped via
+ * {@link workerFailureExcerpt} — present ONLY when `r.isError`, so the run's
+ * own ledger (keyed by `run_id`/`task_id` at every existing call site) is the
+ * recoverable-after-the-fact home for the stderr that used to die with the
+ * process, never a second, uncapped surface.
  */
 export function workerLedgerFields(r: WorkerResult): {
   model: string;
@@ -190,8 +225,11 @@ export function workerLedgerFields(r: WorkerResult): {
   verdict: string;
   quality_suspect: boolean;
   compaction_events: CompactionEvent[];
+  stderr_excerpt?: string;
 } {
+  const stderrExcerpt = workerFailureExcerpt(r);
   return {
+    ...(stderrExcerpt !== undefined ? { stderr_excerpt: stderrExcerpt } : {}),
     model: r.model,
     effort: r.effort,
     tokens: r.tokens,

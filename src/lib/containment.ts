@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type Config } from "./config.js";
 import { validateWorkerSettingsFile } from "./settings.js";
-import { spawnWorker } from "./worker.js";
+import { capStderrExcerpt, spawnWorker } from "./worker.js";
 import { reapWorkerScratch } from "./worker-scratch.js";
 
 /**
@@ -121,6 +121,12 @@ export interface ProbeExecResult {
    * never looked at it, testing only the transcript for denial text. Optional so
    * a pre-existing test double that omits it defaults to `false` (no credential
    * verdict fires without an explicit error signal).
+   *
+   * W1-T238: also carried through so a failed probe spawn's stderr/error-result
+   * text (already folded into `transcript`) can be persisted to the ledger,
+   * capped, instead of dying with the process the way it did the incident this
+   * task fixes. Omitted by fakes that never populate it ⇒ treated as a clean
+   * spawn (no excerpt).
    */
   isError?: boolean;
 }
@@ -162,9 +168,10 @@ const CREDENTIAL_LOGIN_HINT_RE = /run \/login/i;
 /**
  * Default executor: spawn a real sandboxed worker in a scratch cwd under the
  * workspace. `spawn` is injectable (defaults to the real {@link spawnWorker})
- * PURELY so W1-T237's `isError` plumbing (the line the real spawn path adds)
- * is directly unit-testable without spawning an actual sandboxed subprocess —
- * every other call site relies on the default.
+ * so both W1-T237's `isError` plumbing and W1-T238's stderr-persistence branch
+ * (the exact branch that discarded stderr on a failed probe) are directly
+ * unit-testable without spawning an actual sandboxed subprocess — every other
+ * call site relies on the default.
  */
 export function defaultExecutor(
   settingsFile: string,
@@ -282,6 +289,10 @@ export async function probeContainment(opts: {
     os_denial_seen: evidence.osDenialSeen,
     inside_write_created: evidence.insideWriteCreated,
     cost_usd: costUsd,
+    // W1-T238: the probe spawn's own stderr/error-result text, capped, ONLY when
+    // the underlying worker call itself errored — a clean probe spawn never
+    // gets this field, so a passing run's ledger line stays exactly as it was.
+    ...(r.isError ? { stderr_excerpt: capStderrExcerpt(r.transcript) } : {}),
   });
   if (!verdict.contained) {
     // OBSERVED (W1-T91/P23 part i, extended by W1-T237): the write's OWN outcome
