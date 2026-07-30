@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type Config } from "./config.js";
 import { validateWorkerSettingsFile } from "./settings.js";
-import { spawnWorker } from "./worker.js";
+import { capStderrExcerpt, spawnWorker } from "./worker.js";
 import { reapWorkerScratch } from "./worker-scratch.js";
 
 /**
@@ -94,6 +94,14 @@ export interface ProbeExecResult {
   insideWriteCreated: boolean;
   /** Notional cost of the probe spawn (subscription) — surfaced so the run meters it. */
   costUsd?: number;
+  /**
+   * W1-T238: the underlying probe spawn's own `WorkerResult.isError` — carried
+   * through so a failed probe spawn's stderr/error-result text (already folded
+   * into `transcript`) can be persisted to the ledger, capped, instead of dying
+   * with the process the way it did the incident this task fixes. Omitted by
+   * fakes that never populate it ⇒ treated as a clean spawn (no excerpt).
+   */
+  isError?: boolean;
 }
 
 /** Injectable probe runner (default spawns a real worker); tests provide a fake. */
@@ -147,6 +155,7 @@ function defaultExecutor(settingsFile: string, config: Config, budgetUsd?: numbe
         outsideWriteCreated: existsSync(outsidePath),
         insideWriteCreated: existsSync(insidePath),
         costUsd: probe.costUsd,
+        isError: probe.isError,
       };
     } finally {
       // Reap the probe worker's SDK scratchpad (keyed by its cwd) before the cwd
@@ -221,6 +230,10 @@ export async function probeContainment(opts: {
     os_denial_seen: evidence.osDenialSeen,
     inside_write_created: evidence.insideWriteCreated,
     cost_usd: costUsd,
+    // W1-T238: the probe spawn's own stderr/error-result text, capped, ONLY when
+    // the underlying worker call itself errored — a clean probe spawn never
+    // gets this field, so a passing run's ledger line stays exactly as it was.
+    ...(r.isError ? { stderr_excerpt: capStderrExcerpt(r.transcript) } : {}),
   });
   if (!verdict.contained) {
     // OBSERVED (W1-T91/P23 part i): the write's OWN outcome names which of the two
