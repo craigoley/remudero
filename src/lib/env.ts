@@ -117,6 +117,22 @@ export function buildWorkerEnv(
     if (zdotdir) child.ZDOTDIR = zdotdir;
   }
 
+  // Grant DISABLE_AUTOUPDATER=1 (unless the caller set one via `extra`) — W1-T236:
+  // the shared `claude` binary a worker execs is a symlink into an
+  // auto-updating install (npm-global or the native installer), and its
+  // content can be rewritten mid-run out from under the resolved path — a
+  // same-day 2.1.216→2.1.217 bump was observed rewriting it 2026-07-21
+  // mid-incident. Unlike every OTHER grant above, this is not copied from the
+  // parent (autoupdates are not something a worker's env legitimately carries
+  // in) — it is an explicit ADD, the same discipline the ALLOWLIST enforces
+  // for copies: nothing reaches `child` that is not named. This makes it
+  // impossible for a running worker to trigger or race an update of the
+  // binary it and every sibling worker are executing; the operator can still
+  // update the CLI deliberately outside a run.
+  if (!("DISABLE_AUTOUPDATER" in child)) {
+    child.DISABLE_AUTOUPDATER = "1";
+  }
+
   // Overflow valve — engaged ONLY when the caller passes `opts.allowApiKey`
   // (config.overflow === "api_key", §9 conditional-cap guard). When engaged and
   // the operator has exported ANTHROPIC_API_KEY into the PARENT env, pass that
@@ -195,4 +211,55 @@ export function assertCleanBoot(
   // reports subscription, matching what its workers will actually bill.
   const engaged = allowApiKey && typeof env[SANCTIONED_KEY] === "string" && env[SANCTIONED_KEY] !== "";
   return { env_clean: isBillingClean(env), billing_mode: engaged ? "api" : "subscription" };
+}
+
+// ── Binary content pin (W1-T236) ────────────────────────────────────────
+//
+// DISABLE_AUTOUPDATER above stops a WORKER from triggering or racing an
+// update while it runs. It does not, by itself, make a swap the OPERATOR
+// caused between runs visible: `config.claudeBin` (config.ts's
+// `resolveClaudeBin`) records a path once, and a path is not content — the
+// same path can resolve to a rewritten binary after a deliberate `npm i -g`
+// or an autoupdate that landed between runs. `checkBinaryPin` is the smaller
+// of the two content-pin designs (MASTER-PLAN's harness-owned-copy is the
+// stronger, deferred guarantee): compare the version recorded at config time
+// against the version observed at THIS preflight (`claude --version`, e.g.
+// via `resolveClaudeExecutable`'s caller). A caller wires this at the actual
+// preflight call site; this module only supplies the pure comparison so it is
+// unit-testable without a real binary.
+
+/** One version-pin reading — returned, never thrown (see {@link checkBinaryPin}). */
+export interface BinaryPinCheck {
+  /** True iff `actualVersion` differs from `recordedVersion`. */
+  drift: boolean;
+  /** The version recorded at config time. */
+  recordedVersion: string;
+  /** The version observed at this preflight. */
+  actualVersion: string;
+  /** Machine-greppable drift reason — present only when `drift` is true. */
+  reason?: string;
+}
+
+/**
+ * Compare the `claude` binary version recorded at config time against the
+ * version observed at preflight (W1-T236). A MATCH returns `{drift: false}`
+ * with no `reason` — the common case passes silently, exactly as before this
+ * pin existed (acceptance: "a matching binary passes preflight silently").
+ * A MISMATCH — the shared binary's content changed underneath the recorded
+ * path (a deliberate operator update, or an autoupdate race) — returns
+ * `{drift: true, reason}` naming both versions, so a caller can LEDGER the
+ * drift and CONTINUE rather than hard-fail: the operator still updates the
+ * CLI deliberately, so this makes a swap VISIBLE and INTENTIONAL, never
+ * impossible (acceptance: "ledgered with a named drift reason").
+ */
+export function checkBinaryPin(recordedVersion: string, actualVersion: string): BinaryPinCheck {
+  if (recordedVersion === actualVersion) {
+    return { drift: false, recordedVersion, actualVersion };
+  }
+  return {
+    drift: true,
+    recordedVersion,
+    actualVersion,
+    reason: `claude binary content changed since it was pinned: recorded ${recordedVersion}, observed ${actualVersion} at preflight`,
+  };
 }

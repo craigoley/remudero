@@ -673,6 +673,12 @@ export type ProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => "pas
 // run before it ever reached the named test's file (see nameFilteredOutcome's doc
 // comment) — widened for headroom. The truncation-detection fix above is the actual
 // correctness guarantee; this just reduces how often it needs to engage.
+// W1-T253 (P37 CONSUMERS) SUPERSEDES the exported literal this used to be: #916 exported
+// `DEFAULT_PROOF_TIMEOUT_MS` so test/policy.test.ts's drift lock could compare the policy row
+// against the literal. With the literal gone that comparison is impossible AND unnecessary —
+// drift is structurally unreachable once the code reads the policy. policy.test.ts drops that
+// one assertion (the other eight literals still exist and keep theirs); the stronger property
+// is asserted in test/policy-consumers.test.ts.
 //
 // W1-T253 (P37 CONSUMERS): this is now a POLICY READ (plan/policy.yaml's `proofTimeoutMs`),
 // never a source literal — the 60s above is DATA now, floored at load (policy.ts's

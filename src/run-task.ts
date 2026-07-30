@@ -364,6 +364,7 @@ import {
   pruneStaleRuns,
   removeRunLock,
   renderWorkerSettings,
+  runWorktreeReapRung,
   spawnWorker,
   cacheTokenLedgerFields,
   workerLedgerFields,
@@ -373,6 +374,7 @@ import {
   writeRunLock,
   type SpawnWorkerArgs,
   type WorkerResult,
+  type WorktreeReapSummary,
 } from "./lib/worker.js";
 import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from "./lib/worker-home.js";
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, FIX_WORKER_TOOLS, neutralizeFenceMarkers } from "./lib/fix-fence.js";
@@ -2939,26 +2941,37 @@ async function runTask(
   // worktree, no worker ever spawns. `rmd drain` dispatches every task through
   // this same `runTask` path, so this ONE call site gates both entry points.
   try {
-    // proofDialect:"warn" — W1-T246: the check that a proof cannot execute (the dead
-    // proof floor) BLOCKS at filing (`rmd lint-plan`, the inbox draft rung, the retro's
-    // plan-health sweep — all default to "block") but only WARNS pre-dispatch, so the
-    // ~90-task legacy backlog authored before this check existed does not brick into
-    // blocked_illformed overnight. Log every such warning (visibility, never a refusal)
-    // BEFORE the shared assertLintClean gate below runs the SAME check again to decide
-    // whether to dispatch — a block-severity violation (any OTHER check) still refuses.
+    // proofDialect — W1-T246's pre-dispatch "warn" demotion is REVERSED here: a proof that
+    // cannot execute now BLOCKS pre-dispatch, exactly as it already blocks at filing (`rmd
+    // lint-plan`, the inbox draft rung, the retro's plan-health sweep). The demotion's stated
+    // reason was that a "~90-task legacy backlog" would brick into blocked_illformed
+    // overnight; measured over the 7 days to 2026-07-30 that premise no longer holds — only
+    // 24 tasks are dispatchable at all, 15 of which still dispatch under this gate, while the
+    // demotion let 45 runs / $400.83 (49.4% of run spend, 34 distinct tasks) reach a worker
+    // with a proof that could never execute. NONE of those 45 merged, and none could have:
+    // review.ts's `capped` (`executableCriteria.length > 0 && executedCount === 0`) is
+    // unavoidable for such a task, and decideAutoMergeArm has refused to arm auto-merge on
+    // ANY capped verdict since W1-T229/#528 (2026-07-22). So this refusal declines to pay for
+    // a run a downstream gate would refuse anyway. The escape hatch is `git revert` of the
+    // one commit that made this change — deliberately no config key, env var, or policy row.
     //
-    // proofResolvability:"warn" — W1-T101, the SAME rollout convention for the SAME
-    // reason: measured against the live queue, the check that a dialect-prefixed proof
-    // names no resolvable artifact trips ~200 already-queued tasks (the `unit test:`
-    // narrative authoring convention long predates this check) — an unconditional block
-    // here would brick most of the open backlog overnight. BLOCKS at filing/plan-health
-    // (the birth gate this check exists for); WARNS pre-dispatch.
-    for (const v of lintTask(task, { proofDialect: "warn", proofResolvability: "warn" }).violations) {
+    // proofResolvability:"warn" — DELIBERATELY LEFT DEMOTED, and this is not an oversight.
+    // W1-T101's rollout reason still binds: a queued task's proof legitimately FORWARD-
+    // REFERENCES the test its own PR will create (recon-AB measured 27 of 39 path proofs
+    // doing exactly that), and resolvability cannot tell that apart from a dead reference
+    // pre-dispatch. Blocking it would refuse correct authoring at scale. BLOCKS at
+    // filing/plan-health (the birth gate this check exists for); WARNS pre-dispatch.
+    //
+    // ONE options object for both calls: the loop below is visibility-only (it ledgers a
+    // `lint.warned` line per still-demoted violation) and `assertLintClean` is the actual
+    // gate, so the two MUST agree — two separate literals had already drifted once.
+    const preDispatchLint = { proofResolvability: "warn" } as const;
+    for (const v of lintTask(task, preDispatchLint).violations) {
       if ((v.check === "proof-dialect" || v.check === "proof-resolvability") && v.severity === "warn") {
         log("lint.warned", { check: v.check, message: v.message });
       }
     }
-    assertLintClean(task, { proofDialect: "warn", proofResolvability: "warn" });
+    assertLintClean(task, preDispatchLint);
   } catch (e) {
     if (e instanceof TaskLintError) {
       log("lint.blocked", { violations: e.violations });
@@ -6547,6 +6560,22 @@ function reviewStateFromRollup(rollup: RollupCheck[] | undefined): OpenPrView["r
 }
 
 /**
+ * W1-T176: has the deterministic `rmd review` post already been ATTEMPTED
+ * and REFUSED for this exact `taskId@headSha`? Scans for a `review.post_refused`
+ * ledger line matching both fields — deliberately NOT `review.post_failed`
+ * (a transient `gh` error, which must keep retrying, never escalate on a
+ * mere network hiccup) and NOT `review.posted` (a real post always flips
+ * GitHub's live rollup away from "zero runs," so `reviewStateFromRollup`
+ * itself carries that outcome on the next read — no ledger check needed).
+ * `taskId` undefined (no `Remudero-Task:` trailer) can never have a
+ * matching ledger line — returns `false`, never a crash.
+ */
+function reviewPostRefusedFor(ledger: Array<Record<string, unknown>>, taskId: string | undefined, headSha: string): boolean {
+  if (!taskId) return false;
+  return ledger.some((l) => l.step === "review.post_refused" && l.task_id === taskId && l.head_sha === headSha);
+}
+
+/**
  * W1-T100 (the #170 fix): failing required-check names + a tail of each one's
  * log — the ci-log fix mode's ONLY input (deriveFixMode/renderFixPrompt,
  * W1-T94). Best-effort: a log-fetch failure degrades to an EMPTY tail
@@ -6759,7 +6788,7 @@ export function openPrMintTexts(owner: string, repo: string): string[] {
  * whole critical path behind a budget that was exhausted on 2026-07-28 — 22 consecutive minutes
  * of totally blind passes, zero PRs dispositioned, while core sat healthy. See lib/open-prs-rest.ts.
  */
-function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): OpenPrView[] {
+export function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): OpenPrView[] {
   const raw = fetchOpenPrsRest(owner, repo, ghJson) as RawOpenPr[];
   const ledger = readLedgerLines(ledgerPath);
   // W1-T103: branch protection's OWN required-contexts list, read ONCE per
@@ -6803,6 +6832,15 @@ function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): Open
       // W1-T100: the ci-log fix mode's input — only worth fetching when checks
       // are actually red (a PR gate that already needs blocked_ci's rung).
       ciFailures: checksState === "red" ? fetchCiFailures(owner, repo, pr.statusCheckRollup) : undefined,
+      // W1-T176: only meaningful in the zero-runs shape post-review routes on;
+      // cheap to compute unconditionally rather than re-deriving checksState
+      // green/reviewState none here just to gate the ledger scan.
+      reviewPostRefused: reviewPostRefusedFor(ledger, taskId, pr.headRefOid),
+      // W1-T176 (design boundary (ii)): `ghRequiredStatusCheckContexts` fails
+      // SOFT to undefined/empty on an unreadable protection rule — that same
+      // signal must gate the zero-runs discriminator OFF (never assume
+      // permissive on missing information).
+      requiredContextsUnreadable: !requiredContexts || requiredContexts.length === 0,
     };
   });
 }
@@ -7317,11 +7355,21 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // above; bounded per cycle so a backlog drains gradually.
   const reconcileSummary = await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { dryRun });
 
+  // W1-T175 — the worktree reaper rung: same level-triggered doctrine + cadence as the
+  // rungs above, closing pruneStaleRuns' coverage holes (git-invisible dirs, detached-HEAD
+  // sweep-* orphans, widowed .lock files) on THIS cadence, not only at a run's own start.
+  // --dry-run takes no effects, matching every other rung in this command.
+  let reapSummary: WorktreeReapSummary = { reaped: [], reapedLocks: [], kept: [] };
+  if (!dryRun) {
+    reapSummary = runWorktreeReapRung(config, log);
+  }
+
   console.log(
     `### rmd sweep${dryRun ? " --dry-run" : ""} — ${owner}/${repo}\n` +
       renderSweepSummary(summary) +
       `\ncredit backfill: ${creditSummary.total} candidate(s) reconciled · ${creditSummary.corrected} corrected` +
-      `\nescalation reconcile: ${reconcileSummary.total} open needs-human issue(s) checked · ${reconcileSummary.closed} closed`,
+      `\nescalation reconcile: ${reconcileSummary.total} open needs-human issue(s) checked · ${reconcileSummary.closed} closed` +
+      `\nworktree reap: ${reapSummary.reaped.length} worktree(s) reaped · ${reapSummary.reapedLocks.length} widowed lock(s) reaped`,
   );
   return 0;
 }
@@ -7402,6 +7450,12 @@ export function buildSweepHook(
       // daemon's own poll cadence — never a second, separately-scheduled loop.
       const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
       await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
+      // W1-T175 — the worktree reaper rung, on the daemon's own poll cadence: the hole
+      // this closes is specifically an IDLE fleet (no run dispatched, so pruneStaleRuns'
+      // run-start trigger never fires) leaving crashed-run debris to grow unbounded. Own
+      // try/catch, folded into runWorktreeReapRung (distinct from the shared "sweep.error"
+      // below) so a reap hiccup never masks — or is masked by — the rungs above it.
+      runWorktreeReapRung(config, log);
     } catch (e) {
       log("sweep.error", { error: String((e as Error)?.message ?? e) });
     }

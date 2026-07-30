@@ -13,7 +13,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSy
 // rest of this file's fs usage is untouched and keeps its existing named imports.
 import fs from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { loadConfig, workerHomeDir, workerShell, workerZdotdir, type Config } from "./config.js";
 import { detectCompactionEvents, isQualitySuspect, type CompactionEvent } from "./compaction.js";
@@ -1379,6 +1379,255 @@ export function pruneStaleRuns(
   }
 
   return { worktrees: removedWorktrees, branches: removedBranches, skipped };
+}
+
+// ── Worktree reaper (W1-T175) — closes pruneStaleRuns' coverage holes ─────
+//
+// pruneStaleRuns (above) is a real, working owner, but it only sees what it is
+// TOLD to look at, and only at moments a run happens to start:
+//   (1) it enumerates ONLY `git worktree list --porcelain` for ONE assumed
+//       repoDir, so a directory git no longer registers is invisible to it;
+//   (2) it fires exclusively at the START of a run — an idle fleet reaps
+//       nothing, however long a crashed run's debris sits;
+//   (3) its predicate requires a `run-*` BRANCH, so a `sweep-*` worktree
+//       interrupted before `checkout -B` (still on a detached HEAD) is
+//       permanently orphaned, and a widowed `.lock` whose worktree dir is
+//       already gone is never swept (removeRunLock only runs INSIDE a
+//       successful removal).
+// reapStaleWorktrees closes all three: it enumerates the DIRECTORY itself
+// (never git's registry) and resolves each entry's parent repo from its OWN
+// `.git` gitdir pointer — never a fixed/assumed repoDir, which matters on a
+// host with more than one checkout of the same project. It is intentionally
+// MORE conservative than pruneStaleRuns: every path that is not a definitely-
+// alive pid still goes through the age gate (pruneStaleRuns lets a
+// definitively-dead pid skip that grace; this reaper does not need that
+// nuance — it runs on a cadence, not to urgently reclaim a name collision at
+// run start), so a wrong reap here would take strictly longer to happen.
+
+/** What a cadence reap pass did, by dir/lock name (not full path). */
+export interface WorktreeReapSummary {
+  /** Worktree directories force-removed (git-invisible, detached-HEAD orphan, or a
+   *  registered branch confirmed merged/deleted upstream — always past the age gate). */
+  reaped: string[];
+  /** Widowed `<name>.lock` files removed because `<name>/` no longer exists. */
+  reapedLocks: string[];
+  /** Entries deliberately left: a live pid, a branch still live upstream, or too young. */
+  kept: string[];
+}
+
+export interface WorktreeReapOpts {
+  /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */
+  isPidAlive?: (pid: number) => boolean;
+  /** Age ceiling (ms) below which a terminal-looking entry is still protected — the
+   * same create-before-lock / branch-not-yet-pushed race {@link DEFAULT_PRUNE_GRACE_MS}
+   * protects against in pruneStaleRuns. Default {@link DEFAULT_PRUNE_GRACE_MS}. */
+  maxAgeMs?: number;
+  /** Injectable clock (tests). Defaults to Date.now. */
+  now?: () => number;
+  /** Whether `branch` (in `repoDir`) is still live upstream — true means KEEP, fail
+   * closed. Defaults to {@link defaultBranchIsLiveUpstream} (an `origin` ls-remote). */
+  branchIsLiveUpstream?: (branch: string, repoDir: string) => boolean;
+}
+
+/**
+ * Resolve a linked worktree's parent repoDir from its OWN `.git` gitdir pointer file
+ * — `gitdir: <repoDir>/.git/worktrees/<name>` — rather than assuming a fixed repoDir.
+ * Returns null when `entryPath` is not a linked git worktree at all (no `.git` file,
+ * or it does not parse): exactly the shape hole (1) exists to cover — debris that
+ * never was, or no longer is, a registered worktree.
+ */
+function resolveWorktreeRepoDir(entryPath: string): string | null {
+  let raw: string;
+  try {
+    raw = readFileSync(join(entryPath, ".git"), "utf8");
+  } catch {
+    return null;
+  }
+  const m = raw.match(/^gitdir:\s*(.+?)\s*$/m);
+  if (!m) return null;
+  const gitdir = m[1];
+  const marker = `${sep}.git${sep}worktrees${sep}`;
+  const idx = gitdir.indexOf(marker);
+  return idx === -1 ? null : gitdir.slice(0, idx);
+}
+
+/** A linked worktree's registration state, read from ITS OWN resolved repo. */
+interface WorktreeRegistration {
+  repoDir: string;
+  /** undefined when registered but on a DETACHED HEAD — hole (3): a `sweep-*` dir
+   *  interrupted before `checkout -B` never gets a branch to check upstream. */
+  branch?: string;
+}
+
+/**
+ * Cross-reference `entryPath` against `git worktree list --porcelain` for its OWN
+ * resolved repoDir (never a fixed/assumed one — the multi-checkout lesson from this
+ * task's fixture forensics). Returns null when git does not register this path at
+ * all under that repo, which this function treats identically to "not a worktree" —
+ * both are hole (1) debris with no branch to consult.
+ */
+function resolveWorktreeRegistration(entryPath: string): WorktreeRegistration | null {
+  const repoDir = resolveWorktreeRepoDir(entryPath);
+  if (!repoDir) return null;
+  let list = "";
+  try {
+    list = execFileSync("git", ["-C", repoDir, "worktree", "list", "--porcelain"], {
+      encoding: "utf8",
+    });
+  } catch {
+    return null;
+  }
+  let curPath = "";
+  let curBranch: string | undefined;
+  let found = false;
+  for (const line of list.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      curPath = line.slice("worktree ".length).trim();
+      curBranch = undefined;
+      if (curPath === entryPath) found = true;
+    } else if (line.startsWith("branch ") && curPath === entryPath) {
+      curBranch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
+    }
+  }
+  return found ? { repoDir, branch: curBranch } : null;
+}
+
+/**
+ * Default {@link WorktreeReapOpts.branchIsLiveUpstream}: does `branch` still exist on
+ * `origin`? Mirrors the fixture forensics' own check (`gh api .../branches/<b>` => 404
+ * ⇒ deleted upstream) with plain git plumbing. FAIL CLOSED on anything ambiguous — a
+ * network hiccup or an unexpected exit code is reported as "still live", never as
+ * grounds to reap; only git's own not-found signal (exit 2) says the branch is gone.
+ */
+function defaultBranchIsLiveUpstream(branch: string, repoDir: string): boolean {
+  try {
+    execFileSync("git", ["-C", repoDir, "ls-remote", "--exit-code", "--heads", "origin", branch], {
+      stdio: "pipe",
+    });
+    return true; // still on origin — merged-with-branch-kept, or simply not deleted yet
+  } catch (e) {
+    return (e as { status?: number }).status !== 2; // 2 == git's own "no matching refs"
+  }
+}
+
+/**
+ * Cadence reaper for `root` (pass {@link worktreesDir}(config)) — the backstop for
+ * pruneStaleRuns' three coverage holes (see the block comment above). Fail-closed
+ * throughout: a live pid is NEVER reaped; a branch still live upstream is NEVER
+ * reaped, however old; everything else is reaped only once past `maxAgeMs`. A
+ * per-entry failure (a removal hiccup, an unreadable entry) is best-effort and
+ * never blocks the rest of the pass — mirrors pruneStaleRuns' own per-item guards.
+ */
+export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): WorktreeReapSummary {
+  const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  const maxAgeMs = opts.maxAgeMs ?? DEFAULT_PRUNE_GRACE_MS;
+  const now = opts.now ?? (() => Date.now());
+  const branchIsLiveUpstream = opts.branchIsLiveUpstream ?? defaultBranchIsLiveUpstream;
+  const reaped: string[] = [];
+  const reapedLocks: string[] = [];
+  const kept: string[] = [];
+
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(root);
+  } catch {
+    return { reaped, reapedLocks, kept }; // unreadable root — best-effort, never throws
+  }
+
+  for (const name of entries) {
+    if (name.endsWith(".lock")) continue; // widowed-lock pass below, after dirs settle
+    const entryPath = join(root, name);
+    let isDir: boolean;
+    try {
+      isDir = statSync(entryPath).isDirectory();
+    } catch {
+      continue; // vanished between readdir and stat — someone else's cleanup won the race
+    }
+    if (!isDir) continue;
+
+    const lockRead = readRunLock(entryPath);
+    if (lockRead.kind === "live" && isPidAlive(lockRead.info.pid)) {
+      kept.push(name); // LIVE pid — never reaped, the same guard pruneStaleRuns applies
+      continue;
+    }
+
+    // Not a live-pid worktree. A registered branch still live upstream (an open,
+    // unmerged PR) is fail-closed KEPT regardless of age — the sweep-W1-T154
+    // falsifier: a sweep-* dir writes no lock at all, so lock state alone cannot
+    // tell it apart from genuine debris; only the branch/PR signal can.
+    const registration = resolveWorktreeRegistration(entryPath);
+    if (registration?.branch && branchIsLiveUpstream(registration.branch, registration.repoDir)) {
+      kept.push(name);
+      continue;
+    }
+
+    // Terminal by every available signal: no live pid, and either git no longer
+    // registers this directory at all (hole 1), it is registered but on a detached
+    // HEAD with no branch to check (hole 3), or its branch is confirmed
+    // merged-or-deleted upstream. Age-gate before acting on any of them.
+    let mtimeMs = 0;
+    try {
+      mtimeMs = statSync(entryPath).mtimeMs;
+    } catch {
+      mtimeMs = 0;
+    }
+    if (now() - mtimeMs < maxAgeMs) {
+      kept.push(name);
+      continue;
+    }
+    try {
+      fs.rmSync(entryPath, { recursive: true, force: true });
+      removeRunLock(entryPath); // clear the sibling lock so it can't linger widowed
+      reaped.push(name);
+    } catch {
+      kept.push(name); // best-effort: a removal hiccup never blocks the rest of the pass
+    }
+  }
+
+  // Widowed `.lock` siblings whose worktree dir is already gone (hole 3):
+  // removeRunLock only ever fires INSIDE a successful removal (worktreeRemove,
+  // pruneStaleRuns, or the reap above), so a lock orphaned by any OTHER path —
+  // e.g. a manual `rm -rf` of the worktree dir — lingers forever and makes a dead
+  // run read as live to anything that trusts the lock. No age gate is owed here:
+  // the owning directory is already gone, so nothing in flight can be harmed.
+  for (const name of entries) {
+    if (!name.endsWith(".lock")) continue;
+    const dirPath = join(root, name.slice(0, -".lock".length));
+    if (existsSync(dirPath)) continue; // owning worktree still present — not widowed
+    try {
+      unlinkSync(join(root, name));
+      reapedLocks.push(name);
+    } catch {
+      // best-effort
+    }
+  }
+
+  return { reaped, reapedLocks, kept };
+}
+
+/**
+ * The W1-T175 worktree-reap RUNG: resolve `config`'s worktreesDir, run
+ * {@link reapStaleWorktrees} against it, and best-effort-ledger the outcome via `log`. Shared by
+ * `rmd sweep` (sweepCommand) and the daemon's own per-poll hook (buildSweepHook) so both run the
+ * EXACT same rung on the EXACT same cadence-doctrine — pulled out to one place after the first
+ * draft duplicated this try/catch verbatim at both call sites (a duplicate-drift risk the two
+ * rungs' own doc comments already warned about). The try/catch here guards ONLY
+ * `worktreesDir(config)` itself (a malformed `config.root` throws from `path.join`) —
+ * {@link reapStaleWorktrees} is fail-closed internally and never throws under default opts — so
+ * a reap-rung failure never masks, or is masked by, the caller's OWN error handling.
+ */
+export function runWorktreeReapRung(
+  config: Config,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): WorktreeReapSummary {
+  let reapSummary: WorktreeReapSummary = { reaped: [], reapedLocks: [], kept: [] };
+  try {
+    reapSummary = reapStaleWorktrees(worktreesDir(config));
+    if (reapSummary.reaped.length || reapSummary.reapedLocks.length) log("worktree.reaped", { ...reapSummary });
+  } catch (e) {
+    log("worktree.reap.error", { error: String((e as Error)?.message ?? e) });
+  }
+  return reapSummary;
 }
 
 // ── gh helpers (run outside the sandbox; TLS fails under Seatbelt) ─────────
