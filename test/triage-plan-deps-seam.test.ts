@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -80,7 +80,20 @@ function makeOrigin(feedbackId: string): string {
   execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: GIT_ENV });
   mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
   mkdirSync(join(seed, "plan", "feedback"), { recursive: true });
-  writeFileSync(join(seed, "plan", "tasks.yaml"), '- id: W1-T4\n  title: "a"\n');
+  writeFileSync(
+    join(seed, "plan", "tasks.yaml"),
+    [
+      "- id: W1-T4",
+      '  title: "a seed task the plan loader accepts"',
+      "  repo: remudero",
+      "  depends_on: []",
+      "  type: implement",
+      "  verify: auto",
+      "  status: queued",
+      "  attempts: 0",
+      "",
+    ].join("\n"),
+  );
   writeFileSync(
     join(seed, "plan", "feedback", `${feedbackId}.yaml`),
     [
@@ -192,4 +205,56 @@ test("SEAM REACHABILITY: an injected spawn carries planCommand PAST the worker t
   const synthesized = ledger.filter((l) => l.step === "plan.synthesized");
   assert.equal(synthesized.length, 1, "the post-spawn ledger line was written — execution got past the spawn");
   assert.equal(synthesized[0].session_id, "SEAM-SESSION-1", "and it carries the INJECTED worker's session id");
+});
+
+// ── REACHABILITY PROOF 3: PAST the spawn AND all the way to the push ─────────────────
+// Proofs 1 and 2 show execution reaches the first post-spawn statement. This one goes the
+// whole distance to the `git push` — the specific line PR #954 could not cover — by making
+// the fake spawn behave like a REAL triage worker: it writes a plan/ file into the worktree
+// it was handed (`args.cwd`) and returns a `PROPOSED:` verdict, which is what `decideTriage`
+// needs to take the propose branch instead of bailing "inconsistent".
+//
+// The push is REAL and lands in the throwaway bare origin this fixture created — offline,
+// no network, no live repo. `gh pr create` fails on the shim immediately afterwards, which
+// is fine: the push has already happened by then, and that is what is being proven.
+test("SEAM REACHABILITY: a worker-shaped fake spawn drives triageCommand all the way to its git push", async () => {
+  const feedbackId = `fb-seam-push-${Date.now()}`;
+
+  const ledger = await withOfflineHarness(feedbackId, async () => {
+    await triageCommand([feedbackId], {
+      spawn: async (args: { cwd: string }) => {
+        // Behave like the real triage worker: edit a plan file in the run worktree.
+        appendFileSync(
+          join(args.cwd, "plan", "tasks.yaml"),
+          [
+            "- id: W1-T99",
+            '  title: "seam fixture task filed by the fake worker"',
+            "  repo: remudero",
+            "  depends_on: []",
+            "  type: implement",
+            "  verify: auto",
+            "  status: queued",
+            "  attempts: 0",
+            "",
+          ].join("\n"),
+        );
+        return fakeWorkerResult("PROPOSED: file W1-T99 for the deps-seam reachability proof");
+      },
+    }).catch(() => undefined);
+  });
+
+  // Got past the spawn…
+  assert.equal(ledger.filter((l) => l.step === "triage.synthesized").length, 1, "reached the post-spawn ledger line");
+  // …and did NOT bail at the inconsistent branch, which is what stopped every earlier attempt.
+  // …and did NOT bail at the "inconsistent" branch, which is where every earlier attempt
+  // stopped. The run now reaches the git push (run-task.ts:8381, measured DA=1) and only
+  // then fails at `gh pr create`, which the shim refuses — so the failure NAMES the step
+  // AFTER the push, which is the observable proof the push line executed.
+  const errs = ledger.filter((l) => l.step === "triage.error");
+  assert.equal(errs.length, 1, "exactly one terminal error");
+  assert.match(
+    String(errs[0].error),
+    /gh pr create/,
+    "the run got past the git push and died at gh pr create — NOT at the inconsistent branch",
+  );
 });
