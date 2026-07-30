@@ -21,7 +21,12 @@
  * Blocks are no longer blunt stop-on-block (W1-T46, superseding v1): each
  * non-merged verdict is REASONED about via `block-reason.ts`'s
  * `reasonAboutBlock` — transient (retry, no strike), independent-failure (skip
- * only that task, flag it, keep draining everything else), or genuine blocker
+ * only that task, flag it, keep draining everything else), a FIXABLE genuine
+ * blocker (W1-T174 — route to the W1-T76 fix rung, the SAME one the W1-T77
+ * sweep already dispatches to, before halting: flag the task so `runOne`
+ * never re-runs it this boot, and keep draining everything else while the
+ * dispatched fix rides the task's existing open PR forward via `deps.sweep`'s
+ * own per-tick reconciliation), or a genuine blocker with no fixable signal
  * (halt + escalate — never continue into the gap). See `runDaemon`, below.
  *
  * Single-instance + per-task locking (drain-lock.ts / inflight-lock.ts) are
@@ -631,6 +636,30 @@ export interface DaemonDeps {
    * silently continues), it just has no issue opened.
    */
   escalateBlock?: (info: { task: Task; result: RunResult; dependents: string[] }) => void | Promise<void>;
+  /**
+   * W1-T174 (drain/sweep parity — the #383/DAEMON-1784570007163 fixture):
+   * called once when `reasonAboutBlock` (block-reason.ts) classifies a block
+   * `fixable_blocker` — a genuine blocker whose evidence is the SAME "red
+   * required check" / "nameable unmet criterion" signal sweep.ts's
+   * `blocked-fixable` disposition reads (W1-T77) — tried BEFORE the daemon
+   * halts. Return `"fixed"` once the SAME bounded, strike-capped W1-T76 fix
+   * rung the sweep dispatches to has been dispatched onto the task's EXISTING
+   * open PR: the caller flags the task (never re-run via `runOne` again this
+   * boot — the fix rides the existing PR forward via `deps.sweep`'s own
+   * per-tick reconciliation, never a second parallel run) and keeps draining
+   * everything else. Return `"escalate"` when the rung itself is
+   * strike-exhausted or otherwise refuses — the W1-T168 anti-regression: a
+   * fix attempt that cannot win escalates for re-judgment, it never fix-loops
+   * forever — and the daemon falls through to the SAME halt+escalate path a
+   * non-fixable genuine blocker takes. Optional — omitted, a fixable blocker
+   * still halts+escalates exactly as before this hook existed (never a
+   * silent assumption that a fix is in flight).
+   */
+  dispatchFixRung?: (info: {
+    task: Task;
+    result: RunResult;
+    dependents: string[];
+  }) => "fixed" | "escalate" | Promise<"fixed" | "escalate">;
   /**
    * W1-T113 part (iii), DEGRADE DON'T DIE (the vanished-binary incident): called
    * AT MOST ONCE per distinct `reason` for the life of this daemon run — never
@@ -1468,10 +1497,45 @@ export async function runDaemon(
         continue;
       }
 
+      if (disposition.kind === "fixable_blocker" && deps.dispatchFixRung) {
+        // FIXABLE GENUINE BLOCKER (W1-T174, drain/sweep parity): the SAME
+        // red-check / nameable-unmet-criterion signal the W1-T77 sweep
+        // already routes to the W1-T76 fix rung — attempt it here too BEFORE
+        // halting, so the drain and the sweep dispose the same block the
+        // same way (the #383 fixture: a stale generated api-client,
+        // blocked_ci, that one fix worker cleared — progress was available
+        // and the pre-fix daemon never attempted it).
+        const outcome = await deps.dispatchFixRung({ task: next, result, dependents: disposition.dependents });
+        if (outcome === "fixed") {
+          // Never re-run via `runOne` again this boot — the dispatched fix
+          // rides the task's EXISTING open PR forward via `deps.sweep`'s own
+          // per-tick reconciliation, not a second parallel run.
+          next.status = "blocked";
+          log("daemon.block.fix_rung_dispatched", {
+            task: next.id,
+            verdict: result.verdict,
+            pr_url: result.prUrl,
+            dependents: disposition.dependents,
+          });
+          continue;
+        }
+        // Strike-exhausted or otherwise refused (W1-T168 anti-regression:
+        // never fix-loop forever) — falls through to the SAME halt+escalate
+        // path a non-fixable genuine blocker takes, below.
+        log("daemon.block.fix_rung_escalated", {
+          task: next.id,
+          verdict: result.verdict,
+          pr_url: result.prUrl,
+          dependents: disposition.dependents,
+        });
+      }
+
       // GENUINE BLOCKER: real downstream work transitively needs this task
-      // merged — "never continue into the gap" is absolute here. Halt and
-      // escalate, exactly as v1's stop-on-block halted, but now the
-      // dependents it protects are named.
+      // merged, and no fixable signal (or a fix attempt that itself
+      // escalated) leaves it truly stuck — "never continue into the gap" is
+      // absolute here. Halt and escalate, exactly as v1's stop-on-block
+      // halted, but now the dependents it protects are named. Halt narrows to
+      // this truly-stuck case (W1-T174) — it is never removed.
       log("daemon.blocked", {
         task: next.id,
         verdict: result.verdict,

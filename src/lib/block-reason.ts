@@ -23,9 +23,24 @@
  *   `blocked` so `nextRunnable` never reconsiders it this run).
  *
  *   GENUINE BLOCKER (one or more transitive dependents — real downstream work
- *   needs this task merged) -> halt and escalate for a human. This is the ONE
- *   invariant that never bends: a task with a real dependent NEVER gets
- *   silently skipped ("never continue into the gap", MASTER-PLAN §4).
+ *   needs this task merged) -> the ONE invariant that never bends: a task with
+ *   a real dependent NEVER gets silently skipped ("never continue into the
+ *   gap", MASTER-PLAN §4). W1-T174 (drain/sweep parity) splits this bucket in
+ *   two rather than halting unconditionally:
+ *
+ *     FIXABLE (the evidence is a red required check, or a failing review with
+ *     a nameable unmet criterion — the EXACT signals the W1-T77 sweep reads
+ *     for its `blocked-fixable` disposition, sweep.ts's `isBlockedCi` +
+ *     `unmetCriteria`) -> route to the W1-T76 fix rung, the SAME bounded,
+ *     strike-capped rung the sweep already dispatches to, BEFORE halting —
+ *     the #383 fixture (DAEMON-1784570007163, 2026-07-20) is exactly this: a
+ *     stale generated api-client (`blocked_ci`) that one fix worker cleared,
+ *     yet the pre-fix daemon halted+escalated without ever attempting it.
+ *
+ *     TRULY STUCK (no fixable signal — ambiguous, no red check, no nameable
+ *     criterion) -> halt and escalate for a human, exactly as EVERY genuine
+ *     blocker did before this split. Halt narrows to this case; it is never
+ *     removed.
  *
  * DECISION RECORD (W1-T46 PR): the independent/genuine split is a strict
  * "does anything transitively depend on it at all" binary — deliberately NOT
@@ -52,24 +67,59 @@ export function verdictFailureClass(verdict: RunResult["verdict"]): FailureClass
   return verdict === "blocked_transient" ? "transient" : "strike";
 }
 
+/**
+ * The FIXABLE-signal evidence `reasonAboutBlock` accepts alongside a verdict
+ * (W1-T174). `reasonAboutBlock` only ever sees a `RunResult`'s bare verdict —
+ * never a live `OpenPrView` (sweep.ts) — so `blocked_ci` alone already IS the
+ * "required check is red" signal (sweep.ts's `isBlockedCi`'s exact condition,
+ * `checksState === "red"`); `unmetCriteria` lets a caller that DOES have a
+ * nameable unmet-criterion list (mirroring `OpenPrView.unmetCriteria`) supply
+ * it for the `blocked_review` side of the same sweep disposition. Omitted /
+ * empty ⇒ no review-side fixable signal (fail-closed, same discipline as the
+ * rest of this module).
+ */
+export interface BlockEvidence {
+  unmetCriteria?: string[];
+}
+
+const NO_EVIDENCE: BlockEvidence = {};
+
+/**
+ * FIXABLE-signal check (W1-T174) — mirrors, rather than re-derives, the W1-T77
+ * sweep's `blocked-fixable` disposition rows (sweep.ts's `isBlockedCi` +
+ * its `unmetCriteria.length > 0` row, in the SAME ci-red-first order): a red
+ * required check wins outright; a failing review needs a NAMEABLE unmet
+ * criterion, never a bare `blocked_review` with no evidence (that stays
+ * ambiguous — fail-closed, exactly like every other classification here).
+ */
+function isFixableBlock(verdict: RunResult["verdict"], evidence: BlockEvidence): boolean {
+  if (verdict === "blocked_ci") return true;
+  return verdict === "blocked_review" && (evidence.unmetCriteria?.length ?? 0) > 0;
+}
+
 export type BlockDisposition =
   | { kind: "retry_transient"; state: RetryState }
   | { kind: "independent_failure"; dependents: string[] }
+  | { kind: "fixable_blocker"; dependents: string[] }
   | { kind: "genuine_blocker"; dependents: string[] };
 
 /**
  * Reason about one block. `state` is the CALLER's per-task {@link RetryState},
  * threaded across daemon ticks for the SAME task id (a fresh
  * {@link INITIAL_RETRY_STATE} the first time a task blocks; the caller drops
- * it once the disposition is no longer `retry_transient`). Pure — no I/O, no
+ * it once the disposition is no longer `retry_transient`). `evidence` (W1-T174)
+ * is the OPTIONAL fixable-signal input — see {@link BlockEvidence}; omitted ⇒
+ * only `blocked_ci` can classify fixable, exactly matching every real caller
+ * today (a bare `RunResult` carries no unmet-criteria list). Pure — no I/O, no
  * mutation of `plan` — the caller applies the disposition (retry / flag+skip
- * / halt+escalate).
+ * / fix-rung / halt+escalate).
  */
 export function reasonAboutBlock(
   plan: Plan,
   taskId: string,
   verdict: RunResult["verdict"],
   state: RetryState = INITIAL_RETRY_STATE,
+  evidence: BlockEvidence = NO_EVIDENCE,
 ): BlockDisposition {
   const cls = verdictFailureClass(verdict);
   if (cls === "transient") {
@@ -80,7 +130,8 @@ export function reasonAboutBlock(
     // any other real failure.
   }
   const dependents = [...transitiveDependents(plan, taskId)].sort();
-  return dependents.length === 0
-    ? { kind: "independent_failure", dependents }
+  if (dependents.length === 0) return { kind: "independent_failure", dependents };
+  return isFixableBlock(verdict, evidence)
+    ? { kind: "fixable_blocker", dependents }
     : { kind: "genuine_blocker", dependents };
 }
