@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { planCommand, triageCommand } from "../src/run-task.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 
 // ── WHAT THIS FILE PROVES ────────────────────────────────────────────────────────────
@@ -228,7 +229,11 @@ test("SEAM REACHABILITY: a worker-shaped fake spawn drives triageCommand all the
   const feedbackId = `fb-seam-push-${Date.now()}`;
 
   const ledger = await withOfflineHarness(feedbackId, async () => {
-    await triageCommand([feedbackId], {
+    // PR #954 adds a live-write guard that refuses the push this test exists to reach, so the
+    // drive is exempted — the push is real but lands in this fixture's throwaway bare origin,
+    // never the live repo. The guard's own refusal is proven in
+    // test/live-write-guard-leaves.test.ts; exempting here proves REACHABILITY, not absence.
+    await withLiveWritesAllowed(() => triageCommand([feedbackId], {
       spawn: async (args: { cwd: string }) => {
         // Behave like the real triage worker: edit a plan file in the run worktree.
         appendFileSync(
@@ -247,7 +252,7 @@ test("SEAM REACHABILITY: a worker-shaped fake spawn drives triageCommand all the
         );
         return fakeWorkerResult("PROPOSED: file W1-T99 for the deps-seam reachability proof");
       },
-    }).catch(() => undefined);
+    })).catch(() => undefined);
   });
 
   // Got past the spawn…
