@@ -66,6 +66,7 @@ import {
   type FeedbackEntry,
   type FeedbackStatus,
 } from "./feedback.js";
+import type { LandFeedbackOpts } from "./feedback-landing.js";
 import { renderTraceChain, traceForward, traceReverse, type TraceChain, type TraceGithub } from "./trace.js";
 import type { Route } from "./service.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
@@ -121,6 +122,17 @@ export interface PanelGraphDeps {
    * synchronous re-implementation of `rmd approve`'s git/gh side effects.
    */
   ratify: RatifyCliGateway;
+  /**
+   * Best-effort git-land the status flip POST /v1/feedback/decision just wrote, right after
+   * `setFeedbackStatus` writes it (W1-T191, write site 2) — WITHOUT this, an operator's
+   * accept/reject click leaves a tracked modification in `root`, the SAME checkout the daemon
+   * runs from, which is exactly what makes `checkCliFreshness` refuse every non-exempt `rmd`
+   * verb once that checkout also falls behind origin/main. Omitted (undefined, the default) in
+   * a test that isn't exercising this — no git ever runs, so existing coverage of this route
+   * is unaffected. Real callers (`rmd serve`) always pass `{}` so the real `landFeedback`
+   * bridge fires with real git/gh.
+   */
+  feedbackLand?: LandFeedbackOpts;
 }
 
 // ── GET /v1/feedback — the inbox list ───────────────────────────────────────
@@ -368,7 +380,12 @@ export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
         return;
       }
       const status = input.decision === "accept" ? "accepted" : "rejected";
-      const updated = setFeedbackStatus(deps.root, input.id, status);
+      const updated = setFeedbackStatus(
+        deps.root,
+        input.id,
+        status,
+        deps.feedbackLand ? { land: deps.feedbackLand } : {},
+      );
       const origin = bearerTokenId(req);
       appendPanelLedger(deps.ledgerPath, input.decision === "accept" ? "panel.proposal_accepted" : "panel.proposal_rejected", input.id, origin, {
         proposal_pr: updated.proposal_pr,

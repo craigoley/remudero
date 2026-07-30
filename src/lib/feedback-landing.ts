@@ -36,7 +36,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
@@ -47,6 +47,24 @@ const FEEDBACK_REL_DIR = "plan/feedback";
 export const LANDING_BRANCH = "feedback-landing";
 /** The one shared PR title/head every landing call opens or reuses. */
 export const LANDING_PR_TITLE = "chore(feedback): land pending filings";
+
+/**
+ * `plan/decisions.d` — the decision-record sibling of `plan/feedback` (W1-T191). One file PER
+ * RESOLUTION (`<taskId>-<runId>.md`), never a shared growing log: `decision.autochoose`
+ * (run-task.ts) used to append every resolution straight into THIS checkout's own
+ * `DECISIONS.md`, which no PR was ever cut from — the exact "capture lands locally, nothing
+ * commits it" defect W1-T243 already fixed for feedback. Sharding (rather than moving the
+ * shared-file append into a worker's worktree) is the deliberate choice: two concurrent
+ * `run-task` orchestrators each appending a line to the SAME file's end, merged one after the
+ * other, is a textbook git append-conflict (the exact class W1-T122 solved for
+ * `plan/tasks.yaml` by sharding) — a per-decision file makes that structurally impossible
+ * instead of retrying around it.
+ */
+const DECISIONS_REL_DIR = "plan/decisions.d";
+/** The one shared branch every decision-record landing call force-pushes to. */
+export const DECISIONS_LANDING_BRANCH = "decisions-landing";
+/** The one shared PR title/head every decision-record landing call opens or reuses. */
+export const DECISIONS_LANDING_PR_TITLE = "chore(decisions): land pending decision records";
 
 const LANDING_AUTHOR_NAME = "rmd-feedback-bridge";
 const LANDING_AUTHOR_EMAIL = "rmd-feedback-bridge@users.noreply.github.com";
@@ -90,9 +108,9 @@ function defaultGh(): GhExec {
   return (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
-/** Every file under `<root>/plan/feedback/` (recursively — entries AND their attachments), repo-relative. */
-function listFeedbackFiles(root: string): string[] {
-  const dir = join(root, FEEDBACK_REL_DIR);
+/** Every file under `<root>/<relDir>/` (recursively — entries AND any nested attachments), repo-relative. */
+function listRelFiles(root: string, relDir: string): string[] {
+  const dir = join(root, relDir);
   if (!existsSync(dir)) return [];
   const out: string[] = [];
   const walk = (abs: string, rel: string) => {
@@ -103,17 +121,170 @@ function listFeedbackFiles(root: string): string[] {
       else out.push(childRel);
     }
   };
-  walk(dir, FEEDBACK_REL_DIR);
+  walk(dir, relDir);
   return out;
 }
 
+/** One landing target's shape — every kind shares the same commit/push/PR tail (see
+ *  {@link finishLanding}); only the branch name, the human-facing commit/PR text, and (for a
+ *  disk-scanning kind) which directory it walks differ. */
+interface LandingKind {
+  branch: string;
+  prTitle: string;
+  commitMessage: (unlanded: string[]) => string;
+  prBody: (unlanded: string[]) => string;
+}
+
+function feedbackCommitMessage(unlanded: string[]): string {
+  return [
+    LANDING_PR_TITLE,
+    "",
+    "Data-only: no code, no plan/tasks.yaml edits, no triage. Each entry keeps its",
+    "existing status. Automated by the durable-inbox commit bridge (W1-T243) — this",
+    "step used to be a hand-run `git add`+commit+PR before every `rmd triage`.",
+    "",
+    ...unlanded.map((f) => `- ${f}`),
+  ].join("\n");
+}
+
+function feedbackPrBody(unlanded: string[]): string {
+  const ids = unlanded
+    .filter((f) => f.startsWith(`${FEEDBACK_REL_DIR}/`) && f.endsWith(".yaml"))
+    .map((f) => f.slice(FEEDBACK_REL_DIR.length + 1, -".yaml".length));
+  return [
+    `Lands ${unlanded.length} pending \`plan/feedback/**\` file(s) so they become`,
+    "git-durable — the automated durable-inbox commit bridge (W1-T243).",
+    "",
+    "Data-only: no code, no `plan/tasks.yaml` edits, no triage. Each entry keeps",
+    "whatever status it already had.",
+    "",
+    "## Acceptance",
+    ...(ids.length > 0
+      ? ids.map((id) => `- ${id} lands as a durable inbox entry | grep: ${id} in plan/feedback/${id}.yaml`)
+      : unlanded.map((f) => `- ${f} lands durably on origin/main | grep: . in ${f}`)),
+  ].join("\n");
+}
+
+function decisionsCommitMessage(unlanded: string[]): string {
+  return [
+    DECISIONS_LANDING_PR_TITLE,
+    "",
+    "Data-only: no code, no plan/tasks.yaml edits. Each record keeps the risk band and",
+    "rationale the auto-choose gate assigned it. Automated by the decision-record",
+    "commit bridge (W1-T191) — decision.autochoose used to append straight into this",
+    "checkout's own DECISIONS.md, which no PR was ever cut from.",
+    "",
+    ...unlanded.map((f) => `- ${f}`),
+  ].join("\n");
+}
+
+function decisionsPrBody(unlanded: string[]): string {
+  return [
+    `Lands ${unlanded.length} pending \`plan/decisions.d/**\` record(s) so they become`,
+    "git-durable — the automated decision-record commit bridge (W1-T191).",
+    "",
+    "Data-only: no code, no `plan/tasks.yaml` edits. Each record is exactly what",
+    "decision.autochoose wrote at auto-choose time.",
+    "",
+    "## Acceptance",
+    ...unlanded.map((f) => `- ${f} lands as a durable decision record | grep: . in ${f}`),
+  ].join("\n");
+}
+
+const FEEDBACK_LANDING_KIND: LandingKind = {
+  branch: LANDING_BRANCH,
+  prTitle: LANDING_PR_TITLE,
+  commitMessage: feedbackCommitMessage,
+  prBody: feedbackPrBody,
+};
+
+const DECISIONS_LANDING_KIND: LandingKind = {
+  branch: DECISIONS_LANDING_BRANCH,
+  prTitle: DECISIONS_LANDING_PR_TITLE,
+  commitMessage: decisionsCommitMessage,
+  prBody: decisionsPrBody,
+};
+
 /**
- * Best-effort land any `plan/feedback/**` file present in `root` but absent or changed on
- * `origin/main`, onto the one shared gated landing PR. NEVER throws: every failure — not a
- * git checkout, no `origin` remote, offline, `gh` unavailable/unauthenticated — resolves to
- * `{ landed: false, files: [], error }` instead.
+ * The commit/push/open-or-reuse-PR/arm-auto-merge tail every landing call shares, regardless
+ * of how its tree was built (a real working-tree scan for {@link landPending}, or purely
+ * in-memory content for {@link landContent}). NEVER throws on its own — callers already run
+ * inside a try/catch that folds any error into `{ landed: false, error }`, except the
+ * `gh pr create` failure below, which still counts as `landed: true` (the push already
+ * succeeded).
  */
-export function landFeedback(root: string, opts: LandFeedbackOpts = {}): LandFeedbackResult {
+function finishLanding(
+  kind: LandingKind,
+  git: GitExec,
+  gh: GhExec,
+  mainSha: string,
+  treeSha: string,
+  unlanded: string[],
+  env: NodeJS.ProcessEnv,
+): LandFeedbackResult {
+  const message = kind.commitMessage(unlanded);
+  const commitSha = git(
+    [
+      "-c",
+      `user.name=${LANDING_AUTHOR_NAME}`,
+      "-c",
+      `user.email=${LANDING_AUTHOR_EMAIL}`,
+      "commit-tree",
+      treeSha,
+      "-p",
+      mainSha,
+      "-m",
+      message,
+    ],
+    { env },
+  ).trim();
+
+  // ONE shared branch per kind, always rebuilt from origin/main's CURRENT tip — force-push
+  // is safe (and required) because this branch is bot-owned and never diverges by history,
+  // only by content, so it can never actually conflict.
+  // #954 GUARD, CARRIED ACROSS THE finishLanding REFACTOR: main added this inline to the body
+  // this function replaced, so the merge had to move it WITH the code — resolving to either
+  // side alone would have silently dropped it and reopened the hole #954 closed.
+  assertLiveWriteAllowed("git-push", `force-pushing the ${kind.branch} branch`);
+  git(["push", "--force", "origin", `${commitSha}:refs/heads/${kind.branch}`]);
+
+  let prUrl = findPendingLandingPr({ gh, branch: kind.branch });
+  if (!prUrl) {
+    const body = kind.prBody(unlanded);
+    try {
+      const out = gh(["pr", "create", "--base", "main", "--head", kind.branch, "--title", kind.prTitle, "--body", body]);
+      prUrl = out.match(/https:\/\/\S+\/pull\/\d+/)?.[0];
+    } catch (e) {
+      // Pushed fine, opening the PR failed (no `gh`, no auth) — still landed on the
+      // branch; a future call (or a human `gh pr create`) can pick the PR up from there.
+      return {
+        landed: true,
+        files: unlanded,
+        error: `pushed to ${kind.branch} but \`gh pr create\` failed: ${String((e as Error)?.message ?? e)}`,
+      };
+    }
+  }
+  if (prUrl) {
+    try {
+      assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
+      gh(["pr", "merge", prUrl, "--auto", "--squash"]);
+    } catch {
+      // Best-effort — the ci + remudero-review gate decides; GitHub does the merging
+      // either way (Standing rule 3B), this call only arms auto-merge when it can.
+    }
+  }
+  return { landed: true, files: unlanded, prUrl };
+}
+
+/**
+ * Best-effort land any `plan/feedback/**` file present in `root`'s REAL working tree but
+ * absent or changed on `origin/main`, onto the shared `feedback-landing` PR. NEVER throws:
+ * every failure — not a git checkout, no `origin` remote, offline, `gh`
+ * unavailable/unauthenticated — resolves to `{ landed: false, files: [], error }` instead.
+ * Scans disk because `captureFeedback`'s local copy is the durable buffer §7B promises even
+ * offline — unlike {@link landContent}, this one legitimately needs a real file to read.
+ */
+function landPending(root: string, kind: LandingKind, opts: LandFeedbackOpts): LandFeedbackResult {
   const git = opts.git ?? defaultGit(root);
   const gh = opts.gh ?? defaultGh();
   let scratchDir: string | undefined;
@@ -122,7 +293,7 @@ export function landFeedback(root: string, opts: LandFeedbackOpts = {}): LandFee
     git(["fetch", "origin", "--quiet"]);
     const mainSha = git(["rev-parse", "origin/main"]).trim();
 
-    const unlanded = listFeedbackFiles(root).filter((rel) => {
+    const unlanded = listRelFiles(root, FEEDBACK_REL_DIR).filter((rel) => {
       const localSha = git(["hash-object", join(root, rel)]).trim();
       let remoteSha: string | null;
       try {
@@ -136,7 +307,7 @@ export function landFeedback(root: string, opts: LandFeedbackOpts = {}): LandFee
 
     // Build the new commit against a SCRATCH index — never the caller's real index/working
     // tree (W1-T60: this module must never mutate the operator's own checkout).
-    scratchDir = mkdtempSync(join(tmpdir(), "rmd-feedback-landing-"));
+    scratchDir = mkdtempSync(join(tmpdir(), `rmd-${kind.branch}-`));
     const env = { ...process.env, GIT_INDEX_FILE: join(scratchDir, "index") };
     git(["read-tree", "origin/main"], { env });
     for (const rel of unlanded) {
@@ -144,85 +315,121 @@ export function landFeedback(root: string, opts: LandFeedbackOpts = {}): LandFee
       git(["update-index", "--add", "--cacheinfo", `100644,${blobSha},${rel}`], { env });
     }
     const treeSha = git(["write-tree"], { env }).trim();
-    const message = [
-      LANDING_PR_TITLE,
-      "",
-      "Data-only: no code, no plan/tasks.yaml edits, no triage. Each entry keeps its",
-      "existing status. Automated by the durable-inbox commit bridge (W1-T243) — this",
-      "step used to be a hand-run `git add`+commit+PR before every `rmd triage`.",
-      "",
-      ...unlanded.map((f) => `- ${f}`),
-    ].join("\n");
-    const commitSha = git([
-      "-c",
-      `user.name=${LANDING_AUTHOR_NAME}`,
-      "-c",
-      `user.email=${LANDING_AUTHOR_EMAIL}`,
-      "commit-tree",
-      treeSha,
-      "-p",
-      mainSha,
-      "-m",
-      message,
-    ]).trim();
-
-    // ONE shared branch, always rebuilt from origin/main's CURRENT tip — force-push is
-    // safe (and required) because this branch is bot-owned and never diverges by history,
-    // only by content, so it can never actually conflict.
-    assertLiveWriteAllowed("git-push", "force-pushing the feedback-landing branch");
-    git(["push", "--force", "origin", `${commitSha}:refs/heads/${LANDING_BRANCH}`]);
-
-    let prUrl = findPendingLandingPr({ gh });
-    if (!prUrl) {
-      const ids = unlanded
-        .filter((f) => f.startsWith(`${FEEDBACK_REL_DIR}/`) && f.endsWith(".yaml"))
-        .map((f) => f.slice(FEEDBACK_REL_DIR.length + 1, -".yaml".length));
-      const body = [
-        `Lands ${unlanded.length} pending \`plan/feedback/**\` file(s) so they become`,
-        "git-durable — the automated durable-inbox commit bridge (W1-T243).",
-        "",
-        "Data-only: no code, no `plan/tasks.yaml` edits, no triage. Each entry keeps",
-        "whatever status it already had.",
-        "",
-        "## Acceptance",
-        ...(ids.length > 0
-          ? ids.map((id) => `- ${id} lands as a durable inbox entry | grep: ${id} in plan/feedback/${id}.yaml`)
-          : unlanded.map((f) => `- ${f} lands durably on origin/main | grep: . in ${f}`)),
-      ].join("\n");
+    return finishLanding(kind, git, gh, mainSha, treeSha, unlanded, env);
+  } catch (e) {
+    return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
+  } finally {
+    if (scratchDir) {
       try {
-        const out = gh([
-          "pr",
-          "create",
-          "--base",
-          "main",
-          "--head",
-          LANDING_BRANCH,
-          "--title",
-          LANDING_PR_TITLE,
-          "--body",
-          body,
-        ]);
-        prUrl = out.match(/https:\/\/\S+\/pull\/\d+/)?.[0];
-      } catch (e) {
-        // Pushed fine, opening the PR failed (no `gh`, no auth) — still landed on the
-        // branch; a future call (or a human `gh pr create`) can pick the PR up from there.
-        return {
-          landed: true,
-          files: unlanded,
-          error: `pushed to ${LANDING_BRANCH} but \`gh pr create\` failed: ${String((e as Error)?.message ?? e)}`,
-        };
-      }
-    }
-    if (prUrl) {
-      try {
-        assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-        gh(["pr", "merge", prUrl, "--auto", "--squash"]);
+        rmSync(scratchDir, { recursive: true, force: true });
       } catch {
-        // Best-effort — the ci + remudero-review gate decides; GitHub does the merging
-        // either way (Standing rule 3B), this call only arms auto-merge when it can.
+        // best-effort cleanup of a temp dir; never let this mask the real result above
       }
     }
-    return { landed: true, files: unlanded, prUrl };
+  }
+}
+
+export function landFeedback(root: string, opts: LandFeedbackOpts = {}): LandFeedbackResult {
+  return landPending(root, FEEDBACK_LANDING_KIND, opts);
+}
+
+export interface LandContentInput {
+  /** Repo-relative, forward-slash path this content belongs at. */
+  relPath: string;
+  content: string;
+}
+
+/**
+ * The IN-MEMORY sibling of {@link landPending}: lands explicit `(path, content)` pairs that
+ * are NEVER written to `root`'s real working tree — not merely "untouched after writing"
+ * (landPending's guarantee for feedback's own local durable copy) but literally never written
+ * there at all. This is the piece that makes W1-T191 actually work: a real local write of an
+ * ALREADY-TRACKED file (a status flip) or a brand-new one (a decision record) would itself
+ * count as dirt in `checkCliFreshness`'s `git status --porcelain` the instant it lands on
+ * disk — landing it via a bridge afterward doesn't undo that, since the bridge (by design,
+ * the W1-T60 rule) never touches the working tree either. So the fix is to never put it there
+ * to begin with: content is staged into a scratch tmp file OUTSIDE `root` (under `os.tmpdir()`)
+ * purely so `git hash-object -w` has a path to read bytes from — the blob it writes goes to
+ * the repo's OBJECT DATABASE (`root/.git/objects`), never to `root`'s working tree. Same
+ * skip-if-already-identical-upstream idempotence and NEVER-THROWS contract as
+ * {@link landPending}.
+ */
+function landContent(
+  root: string,
+  kind: LandingKind,
+  inputs: LandContentInput[],
+  opts: LandFeedbackOpts,
+): LandFeedbackResult {
+  const git = opts.git ?? defaultGit(root);
+  const gh = opts.gh ?? defaultGh();
+  let scratchDir: string | undefined;
+
+  try {
+    git(["fetch", "origin", "--quiet"]);
+    const mainSha = git(["rev-parse", "origin/main"]).trim();
+
+    scratchDir = mkdtempSync(join(tmpdir(), `rmd-${kind.branch}-`));
+    const env = { ...process.env, GIT_INDEX_FILE: join(scratchDir, "index") };
+    // Always start from FRESH origin/main (never a possibly-stale pending branch — unrelated
+    // content that landed on main since an earlier still-open landing PR must not be
+    // silently reverted by this force-push).
+    git(["read-tree", "origin/main"], { env });
+
+    // CARRY FORWARD whatever an EARLIER, still-unmerged call already pushed to this shared
+    // branch (W1-T191 acceptance criterion 2): unlike {@link landPending} (which naturally
+    // re-includes an earlier call's still-pending files on every re-scan of `root`'s real
+    // disk), this content-only path has no disk to re-scan — without this, a second call
+    // landing before the first call's PR merges would force-push a tree missing the first
+    // call's content entirely, silently discarding it. Anything already merged into
+    // origin/main is skipped (no need to carry forward what's already landed for real).
+    let pendingFiles: string[] = [];
+    try {
+      pendingFiles = git(["ls-tree", "-r", "--name-only", `origin/${kind.branch}`])
+        .trim()
+        .split("\n")
+        .filter(Boolean);
+    } catch {
+      pendingFiles = []; // no pending branch yet — nothing to carry forward
+    }
+    for (const f of pendingFiles) {
+      let pendingBlob: string;
+      try {
+        pendingBlob = git(["rev-parse", `origin/${kind.branch}:${f}`]).trim();
+      } catch {
+        continue;
+      }
+      let mainBlob: string | null;
+      try {
+        mainBlob = git(["rev-parse", `origin/main:${f}`]).trim();
+      } catch {
+        mainBlob = null;
+      }
+      if (pendingBlob === mainBlob) continue; // already merged into main for real
+      git(["update-index", "--add", "--cacheinfo", `100644,${pendingBlob},${f}`], { env });
+    }
+
+    const unlanded: string[] = [];
+    let i = 0;
+    for (const { relPath, content } of inputs) {
+      // A scratch tmp file, never inside `root` — `git hash-object` just needs a path to
+      // read; where it lives is irrelevant to the blob it writes.
+      const tmpFile = join(scratchDir, `content-${i++}`);
+      writeFileSync(tmpFile, content);
+      const blobSha = git(["hash-object", "-w", tmpFile], { env }).trim();
+      let remoteSha: string | null;
+      try {
+        remoteSha = git(["rev-parse", `origin/main:${relPath}`]).trim();
+      } catch {
+        remoteSha = null; // not on origin/main at all yet
+      }
+      if (remoteSha === blobSha) continue; // already identical upstream — nothing to land
+      git(["update-index", "--add", "--cacheinfo", `100644,${blobSha},${relPath}`], { env });
+      unlanded.push(relPath);
+    }
+    if (unlanded.length === 0) return { landed: false, files: [] };
+
+    const treeSha = git(["write-tree"], { env }).trim();
+    return finishLanding(kind, git, gh, mainSha, treeSha, unlanded, env);
   } catch (e) {
     return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
   } finally {
@@ -237,17 +444,97 @@ export function landFeedback(root: string, opts: LandFeedbackOpts = {}): LandFee
 }
 
 /**
- * The URL of the currently-open shared landing PR, if any — best-effort, never throws
- * (a missing/unauthenticated `gh` resolves to `undefined`, same as "no PR yet"). Used both
- * by {@link landFeedback} (to reuse rather than duplicate an open PR) and by `rmd
- * triage`'s exit-2 branch (to name the pending PR instead of the misleading "no such
+ * `<root>/plan/decisions.d/<taskId>-<runId>.md` — one file per decision.autochoose resolution
+ * (never a shared growing log), so concurrent `run-task` runs across different tasks/runs can
+ * never collide on the same path. Never actually written to disk (see {@link recordDecision})
+ * — this is the path it lands at on `origin/main`, via the `decisions-landing` bridge.
+ */
+export function decisionRecordRelPath(taskId: string, runId: string): string {
+  return `${DECISIONS_REL_DIR}/${taskId}-${runId}.md`;
+}
+
+export interface DecisionRecordParams {
+  taskId: string;
+  runId: string;
+  options: string[];
+  chosen: string;
+  band: string;
+  reason: string;
+  /** Defaults to `new Date().toISOString()` — injectable so a test can pin the timestamp. */
+  ts?: string;
+}
+
+/** Pure — the exact human-readable body `DECISIONS.md`'s append used to carry, unchanged in
+ *  substance, just now the sole content of its own shard rather than one more line on a
+ *  shared growing file. */
+export function decisionRecordContent(params: DecisionRecordParams): string {
+  const ts = params.ts ?? new Date().toISOString();
+  return (
+    `## ${ts} — ${params.taskId} (${params.runId})\n` +
+    `- Options: ${params.options.join(" | ")}\n` +
+    `- Chosen (RECOMMENDED, auto): ${params.chosen}\n` +
+    `- Risk: ${params.band} (${params.reason})\n` +
+    `- Rollback: revert the PR.\n`
+  );
+}
+
+/**
+ * Land one decision-record shard (harness-owned, deterministic — never delegated to the
+ * worker's own commit, which the resume prompt never even mentions) via {@link landContent}.
+ * DELIBERATELY never writes `plan/decisions.d/**` to `root`'s real working tree at all — see
+ * {@link landContent}'s own doc for why a real local write would itself be the dirt this task
+ * removes. Best-effort like every other write in this module: a landing failure (offline, no
+ * `gh`) means the record exists ONLY as the `decision.autochoose` ledger line (already
+ * ledgered regardless — the RECEIPT half of standing rule 22's receipt/claim split) until a
+ * later resolution's call retries; there is no local file for a human to grep in the meantime,
+ * which is the one durability property this trades away in exchange for never dirtying the
+ * checkout (out of scope here — see the accompanying follow-up).
+ */
+export function recordDecision(
+  root: string,
+  params: DecisionRecordParams,
+  opts: LandFeedbackOpts = {},
+): LandFeedbackResult {
+  const relPath = decisionRecordRelPath(params.taskId, params.runId);
+  return landContent(root, DECISIONS_LANDING_KIND, [{ relPath, content: decisionRecordContent(params) }], opts);
+}
+
+/**
+ * Land one feedback entry's already-serialized YAML content via {@link landContent} — the
+ * write-site-2 (console `POST /v1/feedback/decision`) sibling of {@link recordDecision}.
+ * DELIBERATELY never writes to `root`'s real working tree: `setFeedbackStatus` calls this
+ * INSTEAD OF its normal `writeFileSync` when `opts.land` is set, because writing the flip to
+ * an ALREADY-TRACKED file locally would leave it `M`-modified in `checkCliFreshness`'s `git
+ * status --porcelain` — the exact dirt W1-T191 removes — even though `landFeedback`'s bridge
+ * would separately get it onto `origin/main`. The trade: a caller that reads `root`'s own
+ * `plan/feedback/<id>.yaml` again right after (e.g. the console's own feedback list) won't see
+ * the flip until this checkout's next self-sync past the landing PR's merge — out of scope for
+ * this task's acceptance bar (a clean working tree, not read-your-own-write), noted as a
+ * follow-up.
+ */
+export function landFeedbackStatusContent(
+  root: string,
+  relPath: string,
+  content: string,
+  opts: LandFeedbackOpts = {},
+): LandFeedbackResult {
+  return landContent(root, FEEDBACK_LANDING_KIND, [{ relPath, content }], opts);
+}
+
+/**
+ * The URL of the currently-open shared landing PR for `opts.branch` (default
+ * {@link LANDING_BRANCH}), if any — best-effort, never throws (a missing/unauthenticated `gh`
+ * resolves to `undefined`, same as "no PR yet"). Used by {@link landFeedback}/
+ * {@link landDecisions} (to reuse rather than duplicate an open PR) and by `rmd triage`'s
+ * exit-2 branch (to name the pending feedback-landing PR instead of the misleading "no such
  * feedback entry" — W1-T243 acceptance claim 4).
  */
-export function findPendingLandingPr(opts: { gh?: GhExec } = {}): string | undefined {
+export function findPendingLandingPr(opts: { gh?: GhExec; branch?: string } = {}): string | undefined {
   const gh = opts.gh ?? defaultGh();
+  const branch = opts.branch ?? LANDING_BRANCH;
   try {
     const existing = JSON.parse(
-      gh(["pr", "list", "--head", LANDING_BRANCH, "--state", "open", "--json", "url"]),
+      gh(["pr", "list", "--head", branch, "--state", "open", "--json", "url"]),
     ) as Array<{ url: string }>;
     return existing[0]?.url;
   } catch {

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { landFeedback, type LandFeedbackOpts } from "./feedback-landing.js";
+import { landFeedback, landFeedbackStatusContent, type LandFeedbackOpts } from "./feedback-landing.js";
 
 /**
  * `plan/feedback/` — the durable, diffable feedback inbox (MASTER-PLAN §7B, W1-T40).
@@ -107,6 +107,12 @@ export function feedbackAttachmentsDir(root: string, id: string): string {
 
 export function feedbackEntryPath(root: string, id: string): string {
   return join(feedbackDir(root), `${id}.yaml`);
+}
+
+/** Repo-relative, forward-slash form of {@link feedbackEntryPath} — what a git plumbing call
+ *  (landFeedbackStatusContent) addresses the entry by, since it never touches the real path. */
+function feedbackEntryRelPath(root: string, id: string): string {
+  return relative(root, feedbackEntryPath(root, id)).split(sep).join("/");
 }
 
 /** `fb-<epoch-ms>-<6 hex>` — sortable by capture order, collision-safe under concurrent capture. */
@@ -282,12 +288,33 @@ export function listFeedback(root: string, opts: { status?: FeedbackStatus } = {
  * an unknown status; does not otherwise constrain which transition is legal — the state machine
  * that decides WHEN each transition is appropriate belongs to the intake loop that calls this,
  * not to the inbox's storage layer.
+ *
+ * `opts.land`, when passed, routes the write itself through {@link landFeedbackStatusContent}
+ * INSTEAD OF the normal local `writeFileSync` (W1-T191, write site 2) — deliberately, not an
+ * add-on: `id`'s entry is already TRACKED in git (it was captured+landed+merged earlier), so a
+ * normal local write here would leave it `M`-modified in `checkCliFreshness`'s `git status
+ * --porcelain` — the exact "checkout dirties, auto-sync switches itself off" defect this task
+ * removes — even though `landFeedback`'s bridge would separately get the SAME content onto
+ * `origin/main`. See {@link "./feedback-landing.js".landContent}'s doc for why landing
+ * afterward doesn't undo a local write's dirt (the bridge never touches the working tree
+ * either way, by design).
+ *
+ * This is OPT-IN, not automatic for every caller, unlike `captureFeedback`'s unconditional
+ * `landFeedback` call: `rmd triage` (run-task.ts) calls this against a worker's OWN worktree
+ * and immediately `git add`+commit+push+`gh pr create`s it for real, so it needs the REAL
+ * local write (that commit reads the working tree) and must never take this branch. The ONE
+ * caller this exists for is the console's `POST /v1/feedback/decision` route
+ * (panel-graph.ts), which writes straight against the daemon's own checkout and has no commit
+ * path of its own — that route passes `{ land: {} }` explicitly. Trade-off: a caller that
+ * reads `root`'s own `plan/feedback/<id>.yaml` again right after (e.g. the console's own list)
+ * won't see the flip until this checkout's next self-sync past the landing PR's merge — out of
+ * scope for this task's acceptance bar (a clean tree, not read-your-own-write).
  */
 export function setFeedbackStatus(
   root: string,
   id: string,
   status: FeedbackStatus,
-  opts: { proposalPr?: string } = {},
+  opts: { proposalPr?: string; land?: LandFeedbackOpts } = {},
 ): FeedbackEntry {
   if (!(FEEDBACK_STATUSES as readonly string[]).includes(status)) {
     throw new FeedbackError(`invalid status "${status}" — must be one of ${FEEDBACK_STATUSES.join(", ")}`);
@@ -298,6 +325,17 @@ export function setFeedbackStatus(
     status,
     proposal_pr: opts.proposalPr ?? entry.proposal_pr ?? null,
   };
-  writeFileSync(feedbackEntryPath(root, id), stringifyYaml(updated));
+  const content = stringifyYaml(updated);
+  if (opts.land) {
+    try {
+      landFeedbackStatusContent(root, feedbackEntryRelPath(root, id), content, opts.land);
+    } catch {
+      // landFeedbackStatusContent already swallows its own failures — this is a defensive
+      // second layer, mirroring captureFeedback's own, so nothing landing-related can ever
+      // turn a successful status flip into a thrown error.
+    }
+  } else {
+    writeFileSync(feedbackEntryPath(root, id), content);
+  }
   return updated;
 }
