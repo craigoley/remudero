@@ -12476,4 +12476,43 @@
     risk:high — it edits the single required context that gates every merge, and the failure direction is
     asymmetric: a recursion or a cancel-in-progress bug either spins the gate or leaves a cancelled
     ci-gate as the newest run, which reads as a hard red. The guards in design (ii)/(iii) are load-bearing
-    criteria, not defensive extras."
+
+- id: W1-T263
+  title: "mount routing probe (docs class)"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: |
+    PROBE TASK validating that task-class routing for docs-only changes works correctly. Tests W1-T167's
+    addition of the docs-class axis to the mount routing table. The task derivation must correctly identify
+    docs-only tasks using file patterns, the mount resolution must find the exact (implement, medium, docs)
+    row in .remudero/mounts.yaml without fallback, the resolved mount must route to haiku model (the
+    cost-optimized tier), and the run telemetry must carry task_class and mount_class for the retro's
+    per-class calibration.
+  design: |
+    The test fixture (test/mounts-wiring.test.ts::runTask resolves the class-routed mount) creates this
+    exact task definition with files:[docs/probe.md] and validates the routing through the actual spawn
+    path. Acceptance proofs run that test and verify the ledger output carries the required W1-T167
+    telemetry (task_class and mount_class fields in run.start). The mount routing subsystem is verified
+    to make the cost-optimized docs-class selection without falling back to the default src mount.
+  acceptance:
+    - claim: "task class derivation correctly identifies docs-only tasks: files: [docs/probe.md] derives task_class: docs"
+      proof: "unit test: test/mounts-wiring.test.ts :: runTask resolves the class-routed mount and ledgers run.start with task_class/mount_class"
+    - claim: "mount resolution finds the exact (implement, medium, docs) row in .remudero/mounts.yaml without fallback"
+      proof: "unit test: test/mounts-wiring.test.ts :: runTask resolves the class-routed mount and ledgers run.start with task_class/mount_class"
+    - claim: "the docs-class mount for implement×medium routes to haiku model (the cost-optimized tier)"
+      proof: "unit test: test/mounts-wiring.test.ts :: runTask resolves the class-routed mount and ledgers run.start with task_class/mount_class"
+    - claim: "run.start ledgers task_class and mount_class for the retro's per-class calibration (W1-T167)"
+      proof: "unit test: test/mounts-wiring.test.ts :: runTask resolves the class-routed mount and ledgers run.start with task_class/mount_class"
+  risk: medium
+  origin: architect
+  plan_refs: ["§9", "W1-T167"]
+  files: [docs/probe.md]
+  status: queued
+  attempts: 0
+  note: "Probe task validating that task-class routing for docs-only changes works correctly. The test
+    fixture in test/mounts-wiring.test.ts was designed specifically to exercise the mount routing
+    subsystem with a docs-class task, and this plan entry formalizes that as a real task. Acceptance
+    proofs are literal test names from mounts-wiring.test.ts, executing the full routing path."
