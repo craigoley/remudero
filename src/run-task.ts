@@ -8200,7 +8200,18 @@ export const TRIAGE_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "We
  * harness eats first" split `regenerateOrientation` established for the retro's docs write), so
  * the LLM can never skip the Acceptance:/Remudero-Task: contract or open a PR touching code.
  */
-export async function triageCommand(rest: string[]): Promise<number> {
+/** Injectable seam (impl-BB) mirroring {@link runTask}'s own `opts` shape exactly — the
+ *  same `spawn?: typeof spawnWorker` field, the same `config?: Config`, the same
+ *  `?? real` defaulting inside, so this repo has ONE dependency-injection convention and
+ *  not two. It exists because every line after the worker spawn in this function was
+ *  unreachable from any offline test: with no seam, a test could not get past
+ *  `spawnWorker` without paying for a real worker, so diff-coverage reported every added
+ *  line here as uncovered whatever it contained. Passing nothing is the production
+ *  contract and behaves exactly as before. */
+export async function triageCommand(
+  rest: string[],
+  opts: { spawn?: typeof spawnWorker; config?: Config } = {},
+): Promise<number> {
   const parsed = parseTriageArgs(rest);
   if ("error" in parsed) {
     console.error(parsed.error + "\n" + USAGE);
@@ -8208,7 +8219,8 @@ export async function triageCommand(rest: string[]): Promise<number> {
   }
   const { feedbackId } = parsed;
 
-  const config = loadConfig();
+  const config = opts.config ?? loadConfig();
+  const spawn = opts.spawn ?? spawnWorker;
   const { owner, repo } = resolveOwnerRepo();
 
   // G-17 Tier Invariant: the triage Architect MUST outrank implement workers.
@@ -8294,7 +8306,7 @@ export async function triageCommand(rest: string[]): Promise<number> {
     });
     say(`next task id: ${describeMint(mint)}`);
 
-    const worker = await spawnWorker({
+    const worker = await spawn({
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
       settingsFile,
@@ -8474,7 +8486,18 @@ const PLAN_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "WebSearch",
  * per-item status file to update here (unlike triage's feedback entry), so only a PROPOSED
  * verdict reaches the commit/push/PR/gate machinery below.
  */
-async function planCommand(rest: string[]): Promise<number> {
+/** Injectable seam (impl-BB) mirroring {@link runTask}'s own `opts` shape exactly — the
+ *  same `spawn?: typeof spawnWorker` field, the same `config?: Config`, the same
+ *  `?? real` defaulting inside, so this repo has ONE dependency-injection convention and
+ *  not two. It exists because every line after the worker spawn in this function was
+ *  unreachable from any offline test: with no seam, a test could not get past
+ *  `spawnWorker` without paying for a real worker, so diff-coverage reported every added
+ *  line here as uncovered whatever it contained. Passing nothing is the production
+ *  contract and behaves exactly as before. */
+export async function planCommand(
+  rest: string[],
+  opts: { spawn?: typeof spawnWorker; config?: Config } = {},
+): Promise<number> {
   const parsed = parsePlanArgs(rest);
   if ("error" in parsed) {
     console.error(parsed.error + "\n" + USAGE);
@@ -8482,7 +8505,8 @@ async function planCommand(rest: string[]): Promise<number> {
   }
   const { mode, brief } = parsed;
 
-  const config = loadConfig();
+  const config = opts.config ?? loadConfig();
+  const spawn = opts.spawn ?? spawnWorker;
   const { owner, repo } = resolveOwnerRepo();
 
   // G-17 Tier Invariant: the plan Architect MUST outrank implement workers.
@@ -8521,7 +8545,7 @@ async function planCommand(rest: string[]): Promise<number> {
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
   try {
-    const worker = await spawnWorker({
+    const worker = await spawn({
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
       settingsFile,
