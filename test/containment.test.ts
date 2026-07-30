@@ -7,9 +7,12 @@ import {
   ContainmentError,
   assessContainment,
   containmentProbePrompt,
+  defaultExecutor,
   probeContainment,
   type ProbeExecResult,
 } from "../src/lib/containment.js";
+import type { Config } from "../src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 
 function settingsFile(contents: unknown): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-containment-test-"));
@@ -266,6 +269,34 @@ test("probeContainment: isError alone (no credential-shaped text) does NOT trip 
       return true;
     },
   );
+});
+
+// ── defaultExecutor: the real-spawn path plumbs isError through (W1-T237) ──
+
+test("defaultExecutor: passes the real spawn's isError through to ProbeExecResult", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-containment-executor-test-"));
+  const config = { root: dir } as Config;
+  const fakeSpawn = async (_args: SpawnWorkerArgs): Promise<WorkerResult> =>
+    ({
+      sessionId: "s",
+      costUsd: 0,
+      numTurns: 0,
+      text: "Not logged in · Please run /login",
+      blocks: [],
+      stderr: "",
+      subtype: "error_during_execution",
+      isError: true,
+      apiError: false,
+      permissionDenials: [],
+    }) as unknown as WorkerResult;
+
+  const exec = defaultExecutor("settings.json", config, undefined, fakeSpawn);
+  const result: ProbeExecResult = await exec("execTok");
+
+  assert.equal(result.isError, true);
+  assert.match(result.transcript, /not logged in/i);
+  assert.equal(result.outsideWriteCreated, false);
+  assert.equal(result.insideWriteCreated, false);
 });
 
 test("ContainmentError: the static config gate (sandbox disabled) names its own guard-cause", async () => {

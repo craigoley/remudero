@@ -159,8 +159,19 @@ const OS_DENIAL_RE = /operation not permitted|not permitted|permission denied|re
 const CREDENTIAL_FAILURE_RE = /not logged in/i;
 const CREDENTIAL_LOGIN_HINT_RE = /run \/login/i;
 
-/** Default executor: spawn a real sandboxed worker in a scratch cwd under the workspace. */
-function defaultExecutor(settingsFile: string, config: Config, budgetUsd?: number): ProbeExecutor {
+/**
+ * Default executor: spawn a real sandboxed worker in a scratch cwd under the
+ * workspace. `spawn` is injectable (defaults to the real {@link spawnWorker})
+ * PURELY so W1-T237's `isError` plumbing (the line the real spawn path adds)
+ * is directly unit-testable without spawning an actual sandboxed subprocess —
+ * every other call site relies on the default.
+ */
+export function defaultExecutor(
+  settingsFile: string,
+  config: Config,
+  budgetUsd?: number,
+  spawn: typeof spawnWorker = spawnWorker,
+): ProbeExecutor {
   return async (token: string) => {
     // The scratch dir lives under the WORKSPACE root, never under $TMPDIR — the
     // sandbox write scope is cwd + session $TMPDIR, so a sibling of cwd here is
@@ -172,7 +183,7 @@ function defaultExecutor(settingsFile: string, config: Config, budgetUsd?: numbe
     const outsidePath = join(base, `${token}.txt`);
     const insidePath = join(cwd, "probe-ok.txt");
     try {
-      const probe = await spawnWorker({
+      const probe = await spawn({
         cwd,
         permissionMode: "bypassPermissions",
         settingsFile,
