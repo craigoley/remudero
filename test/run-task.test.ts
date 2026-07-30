@@ -5961,6 +5961,85 @@ test("buildSweepEffects.postReview: a THROWING review runner ledgers post_review
   rmSync(root, { recursive: true, force: true });
 });
 
+// W1-T195: the clarification rung's REAL `escalate` closure (never the mocked
+// `deps.escalate` every other sweep.test.ts fixture substitutes) carries the composite
+// dedup key's headSha/cause onto the issue it opens — a `gh` shim on PATH captures the
+// exact `gh issue create --body ...` args so this proves the values actually reach the
+// rendered issue, not merely that the closure was constructed.
+test("buildSweepEffects.escalate: the real clarification-rung closure carries pr.headSha and escalationCause(...) onto the created issue's body", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-sweep-escalate-"));
+  const bin = mkdtempSync(join(tmpdir(), "gh-sweep-escalate-"));
+  const callsFile = join(bin, "calls.ndjson");
+  writeFileSync(callsFile, "");
+  writeFileSync(
+    join(bin, "gh"),
+    `#!/usr/bin/env node
+const fs = require("fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify(args) + "\\n");
+if (args[0] === "label" && args[1] === "create") {
+  process.exit(0);
+} else if (args[0] === "api") {
+  process.stdout.write("[]");
+} else if (args[0] === "issue" && args[1] === "create") {
+  process.stdout.write("https://github.com/acme/remudero/issues/999\\n");
+} else {
+  process.stdout.write("{}");
+}
+`,
+    { mode: 0o755 },
+  );
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    const effects = buildSweepEffects(
+      "acme", "remudero", { root } as never, join(root, "ledger.ndjson"), "SWEEP-ESC-1",
+      { tasks: [] } as never,
+      () => {},
+      DEFAULT_SWEEP_POLICY,
+    );
+    const pr = {
+      prNumber: 999,
+      prUrl: "https://github.com/acme/remudero/pull/999",
+      taskId: "W1-TESC",
+      headSha: "feedface00112233445566778899aabbccddeef",
+      checksState: "red", // isBlockedCi(pr) -> true -> cause "ci"
+      mergeState: "clean", // not "dirty" -> conflict is ruled out
+    } as never;
+    const question = {
+      taskId: "W1-TESC",
+      prNumber: 999,
+      prUrl: "https://github.com/acme/remudero/pull/999",
+      question: "which fix should land?",
+      criterion: "",
+      reviewerRequirement: "",
+      specText: "",
+      strikeHistory: [],
+      resolutions: [
+        { label: "hand-fix", detail: "d1" },
+        { label: "close", detail: "d2" },
+      ],
+    } as never;
+
+    withLiveWritesAllowed(() => effects.escalate(pr, "checks are red with no single nameable unmet criterion", question));
+
+    const calls: string[][] = readFileSync(callsFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const createCall = calls.find((c) => c[0] === "issue" && c[1] === "create");
+    assert.ok(createCall, `expected an 'issue create' gh call; calls=${JSON.stringify(calls)}`);
+    const body = createCall![createCall!.indexOf("--body") + 1];
+    assert.match(
+      body,
+      /\*\*Head:\*\* feedface00112233445566778899aabbccddeef/,
+      "pr.headSha rides the composite dedup key onto the issue body",
+    );
+    assert.match(body, /\*\*Cause:\*\* ci/, "isBlockedCi(pr) (checksState: red) classifies as the 'ci' cause");
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
 test("buildSweepLightHook: runs the restricted light sweep over an empty PR set (offline gh) without touching a dangerous lane, best-effort on error", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-lighthook-"));
   const bin = mkdtempSync(join(tmpdir(), "gh-empty-"));
