@@ -22,6 +22,7 @@ import { buildWorkerEnv, billingMode, type BillingMode } from "./env.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStaleWorkerScratch } from "./worker-scratch.js";
+import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import {
   ensureWorkerKeychain,
   materializeWorkerHome,
@@ -1695,6 +1696,7 @@ export function ghPrView(prUrl: string): { state: string; mergeable: string; url
 }
 
 export function ghPrMergeSquash(prUrl: string): string {
+  assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl}`);
   return execFileSync("gh", ["pr", "merge", prUrl, "--squash", "--delete-branch"], {
     encoding: "utf8",
   });

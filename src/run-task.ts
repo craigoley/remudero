@@ -380,6 +380,7 @@ import {
   type WorkerResult,
   type WorktreeReapSummary,
 } from "./lib/worker.js";
+import { gitPushRunBranch } from "./lib/git-push.js";
 import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from "./lib/worker-home.js";
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, FIX_WORKER_TOOLS, neutralizeFenceMarkers } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "./lib/drain-lock.js";
@@ -387,6 +388,7 @@ import { checkCliFreshness, checkServiceFreshness } from "./lib/self-sync.js";
 import { acquireInflightLock, InflightLockError, sweepStaleInflightLocks } from "./lib/inflight-lock.js";
 import { classifyFailure, MAX_TRANSIENT_RETRIES, type FailureSignal } from "./lib/classify.js";
 import { shouldRecordDecision } from "./lib/risk-score.js";
+import { assertLiveWriteAllowed } from "./lib/live-write-guard.js";
 import {
   clearKick,
   consumeDrainNow,
@@ -701,6 +703,10 @@ export function ghPrCreateFillCommand(
   repo: string,
   branch: string,
 ): { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } } {
+  // LIVE-WRITE GUARD at the BUILDER, not at each of its four executors: this function
+  // exists only to produce a `gh pr create` argv, so refusing here covers every call
+  // site at once and cannot be bypassed by a new one.
+  assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
   return {
     command: "gh",
     args: ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch, "--fill"],
@@ -750,21 +756,30 @@ export function realArmDeps(): ArmDeps {
   return {
     headSha: (prUrl) => (ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string }).headRefOid,
     ledgerLines: () => readLedgerLines(ledgerPathFor(loadConfig())),
-    armAuto: (prUrl) =>
+    armAuto: (prUrl) => {
+      assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
       execFileSync("gh", ["pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"], {
         encoding: "utf8",
         stdio: "pipe",
-      }) as unknown as void,
-    mergeDirect: (prUrl) =>
+      });
+    },
+    mergeDirect: (prUrl) => {
+      assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl} directly`);
       execFileSync("gh", ["pr", "merge", prUrl, "--squash", "--delete-branch"], {
         encoding: "utf8",
         stdio: "pipe",
-      }) as unknown as void,
-    disableAuto: (prUrl) =>
+      });
+    },
+    // `--disable-auto` WITHDRAWS an arm rather than creating one, but it is still a live
+    // mutation of a real PR, and under the guard there is never an arm to withdraw — the
+    // arm itself was refused above. Guarded for symmetry, not because it is dangerous.
+    disableAuto: (prUrl) => {
+      assertLiveWriteAllowed("gh-pr-merge", `disabling auto-merge on ${prUrl}`);
       execFileSync("gh", ["pr", "merge", prUrl, "--disable-auto"], {
         encoding: "utf8",
         stdio: "pipe",
-      }) as unknown as void,
+      });
+    },
     say: (msg) => console.log(msg),
   };
 }
@@ -3525,7 +3540,7 @@ async function runTask(
         return { taskId, runId, merged: false, costUsd, verdict: "failed" };
       }
       say("fallback: pushing branch from orchestrator (outside sandbox)");
-      execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+      gitPushRunBranch(worktreePath);
     }
     if (!prUrl) {
       const prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch);
@@ -3650,7 +3665,7 @@ async function runTask(
           runReview,
           push: (wt) => {
             try {
-              execFileSync("git", ["-C", wt, "push", "origin", "HEAD"], { stdio: "ignore" });
+              gitPushRunBranch(wt, { stdio: "ignore" });
             } catch {
               // best-effort — the fix worker may already have pushed itself;
               // nothing new to push is not an error.
@@ -5111,7 +5126,7 @@ async function retroCommand(
       onOrigin = false;
     }
     if (!onOrigin || orientationCommitted || planIndexCommitted) {
-      execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+      gitPushRunBranch(worktreePath);
     }
 
     let prUrl = parseReport([worker.text, worker.blocks.join("\n")].join("\n"))?.prUrl;
@@ -7141,6 +7156,11 @@ export function buildSweepEffects(
   // W1-T254: injectable review runner so the post-review effect's attempt/
   // done/failed logging path is unit-covered without spawning a real review.
   reviewRunner: (prNumber: number) => Promise<number> = (prNumber) => reviewCommand(String(prNumber), ["--repo", repo]),
+  // Injectable worker spawn, same shape and rationale as `reviewRunner` directly above: the
+  // fix rung's own effects (including its best-effort push) were unreachable from any offline
+  // test because the adapter below hardcoded `spawnWorker`. Optional with no default body, so
+  // this adds no new executable line — the adapter itself resolves it.
+  spawnImpl?: (args: SpawnWorkerArgs) => Promise<WorkerResult>,
 ): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = ghIssueGateway(owner, repo);
@@ -7311,7 +7331,7 @@ export function buildSweepEffects(
           deps: {
             // Fresh-spawn adapter: an empty resumeSessionId (cold PR) becomes a
             // fresh spawn rather than an attempt to resume a session that doesn't exist.
-            spawn: (args) => spawnWorker({ ...args, resumeSessionId: args.resumeSessionId || undefined }),
+            spawn: (args) => (spawnImpl ?? spawnWorker)({ ...args, resumeSessionId: args.resumeSessionId || undefined }),
             waitForCiGreen,
             // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
             // non-green — see runFixRung's own doc for why this must happen on
@@ -7325,7 +7345,7 @@ export function buildSweepEffects(
             runReview,
             push: (wt) => {
               try {
-                execFileSync("git", ["-C", wt, "push", "origin", "HEAD"], { stdio: "ignore" });
+                gitPushRunBranch(wt, { stdio: "ignore" });
               } catch {
                 /* best-effort — the worker may already have pushed */
               }
@@ -8379,7 +8399,7 @@ export async function triageCommand(
     execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/"], { stdio: "inherit" });
     const commitMessage = triageCommitMessage({ decision, feedbackId, taskId, grillIssueUrl });
     execFileSync("git", ["-C", worktreePath, "commit", "-m", commitMessage], { stdio: "inherit" });
-    execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+    gitPushRunBranch(worktreePath);
 
     const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch);
     const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
@@ -8412,7 +8432,7 @@ export async function triageCommand(
         ["-C", worktreePath, "commit", "-m", `chore(triage): record proposal_pr for feedback#${feedbackId}`],
         { stdio: "inherit" },
       );
-      execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+      gitPushRunBranch(worktreePath);
     }
 
     // DETERMINISTIC GUARD: a triage PR is PLAN-ONLY. Fail closed if the diff touches anything
@@ -8600,7 +8620,7 @@ export async function planCommand(
     say(formatPlanVerdictLine(mode, decision));
     const commitMessage = planCommitMessage({ decision, mode, brief, taskId });
     applyPlanProposalCommit(worktreePath, commitMessage);
-    execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+    gitPushRunBranch(worktreePath);
 
     const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch);
     const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
@@ -9098,7 +9118,7 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
 
       execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
       execFileSync("git", ["-C", worktreePath, "commit", "-m", approveCommitMessage(payload)], { stdio: "inherit" });
-      execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+      gitPushRunBranch(worktreePath);
       return branch;
     },
     openPlanPr(branch, id) {
@@ -9118,6 +9138,7 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
         intro,
         criteria: filingAcceptanceCriteria(ids, ["plan/tasks.yaml", "MASTER-PLAN.md"]),
       });
+      assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
       const out = execFileSync(
         "gh",
         ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch, "--title", `chore(plan): ratify ${id} via rmd approve`, "--body", body],

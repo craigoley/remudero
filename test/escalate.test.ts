@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import {
   NEEDS_HUMAN_LABEL,
   escalate,
@@ -462,10 +463,15 @@ test("ghIssueGateway.create: builds the gh issue-create args and returns the tri
       return "https://github.com/craigoley/remudero/issues/123\n";
     },
   });
-  const url = gateway.create("[BLOCKED] W1-TX: two strikes exhausted", "body text", [
-    NEEDS_HUMAN_LABEL,
-    "escalation-blocked",
-  ]);
+  // Drives the gh issue boundary deliberately, against this test's own injected `exec` above —
+  // nothing reaches a real `gh`. The guard checks the CALL, not the destination, so it needs
+  // this explicit exemption.
+  const url = withLiveWritesAllowed(() =>
+    gateway.create("[BLOCKED] W1-TX: two strikes exhausted", "body text", [
+      NEEDS_HUMAN_LABEL,
+      "escalation-blocked",
+    ]),
+  );
   assert.equal(url, "https://github.com/craigoley/remudero/issues/123");
   assert.deepEqual(calls, [
     [

@@ -39,6 +39,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { assertLiveWriteAllowed } from "./live-write-guard.js";
 
 const FEEDBACK_REL_DIR = "plan/feedback";
 
@@ -168,6 +169,7 @@ export function landFeedback(root: string, opts: LandFeedbackOpts = {}): LandFee
     // ONE shared branch, always rebuilt from origin/main's CURRENT tip — force-push is
     // safe (and required) because this branch is bot-owned and never diverges by history,
     // only by content, so it can never actually conflict.
+    assertLiveWriteAllowed("git-push", "force-pushing the feedback-landing branch");
     git(["push", "--force", "origin", `${commitSha}:refs/heads/${LANDING_BRANCH}`]);
 
     let prUrl = findPendingLandingPr({ gh });
@@ -213,6 +215,7 @@ export function landFeedback(root: string, opts: LandFeedbackOpts = {}): LandFee
     }
     if (prUrl) {
       try {
+        assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
         gh(["pr", "merge", prUrl, "--auto", "--squash"]);
       } catch {
         // Best-effort — the ci + remudero-review gate decides; GitHub does the merging
