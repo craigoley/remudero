@@ -120,7 +120,7 @@ test("LEAF GUARD gh-issue-create: ghIssueGateway create REFUSES and its injected
   }
   assert.ok(caught instanceof LiveWriteBlockedError, "the leaf refused with LiveWriteBlockedError");
   assert.match(String((caught as Error).message), /gh-issue-create/, "the error names its own boundary");
-  assert.deepEqual(seen, [], "the injected exec was never reached — no issue was filed");
+  assert.equal(seen.length, 0, "the injected exec was never reached — no issue was filed");
 
   // WOULD-HAVE-FIRED control: exempted, the identical call reaches the exec exactly once.
   withLiveWritesAllowed(() => gateway.create("[BLOCKED] leaf guard probe", "body", []));
