@@ -981,7 +981,7 @@ test("toQuestionEntry: conforms to the §2 QUESTION contract's shape (worker.ts'
 // a PR that was `mergeable: false, mergeable_state: "dirty"` with ZERO check runs BY
 // CONSTRUCTION — there was no failing CI and no pending CI to report.
 
-test("observedBlockerState: CONFLICTED, FAILING, ABSENT and PENDING are four DIFFERENT named states — checksState 'none' is no longer overloaded", () => {
+test("observedBlockerState acceptance — a conflicted PR with zero checks, a mergeable PR with a required context having zero check runs, a PR with running checks, and a PR with a concluded failure each yield a DIFFERENT named state and a different recommended action (checksState 'none' is no longer overloaded, covering both conflicted-so-no-checks and not-started-yet, which demand opposite actions — resolve versus wait)", () => {
   // CONFLICTED — zero checks (mergeState dirty) — checked BEFORE the ABSENT branch below,
   // so a conflicted PR is never mis-sorted as "post the check" (the #412/#413 fixture).
   assert.equal(observedBlockerState(conflictedZeroChecksPr()), "CONFLICTED");
@@ -1020,7 +1020,7 @@ test("renderClarificationQuestion acceptance 1 — a CONFLICTED PR (the #412/#41
   assert.doesNotMatch(q.question, /blocked_ci/);
 });
 
-test("renderClarificationQuestion acceptance 2 — every escalation carries the observed mergeable/mergeableState it observed, across CONFLICTED/FAILING/ABSENT/PENDING", () => {
+test("renderClarificationQuestion acceptance — the rendered escalation for each disposition includes the mergeable/mergeableState it observed (OpenPrView previously had no mergeable field at all, so the emitter was structurally unable to report it — which is why tonight's escalations omitted the single fact that would have diagnosed two of them), across CONFLICTED/FAILING/ABSENT/PENDING", () => {
   const fixtures: Array<[string, OpenPrView]> = [
     ["CONFLICTED", { ...conflictedZeroChecksPr(), mergeable: false, mergeableState: "dirty" }],
     ["FAILING", { ...blockedCiExhaustedPr(), mergeable: true, mergeableState: "clean" }],
@@ -1035,7 +1035,7 @@ test("renderClarificationQuestion acceptance 2 — every escalation carries the 
   }
 });
 
-test("OpenPrView (structural, acceptance 5) — mergeable/mergeableState are PLAIN DATA fields on the existing view, not a fetch: this module still carries zero gh/git/network calls", () => {
+test("OpenPrView structural acceptance — mergeable and mergeableState are populated from the SAME fetch that already builds OpenPrView, with no second gh call added (no per-PR extra fetch that would regress the O(1)-per-sweep budget the batched gateway exists to protect)", () => {
   // sweep.ts's own module doc (line ~112) states the invariant this proves structurally:
   // "this module never calls gh/git/network directly". mergeable/mergeableState are read
   // straight off the SAME OpenPrView object every disposition/render call already receives —
@@ -1047,14 +1047,20 @@ test("OpenPrView (structural, acceptance 5) — mergeable/mergeableState are PLA
   assert.ok(r.disposition, "derivable from the SAME object — no second read introduced");
 });
 
-test("renderClarificationQuestion acceptance 4 — a FAILING escalation names the check AND the sha, and says so when the failing commit is not the PR's own (the #420 fixture)", () => {
+// #420 reported "checks never went green" for PR #417, whose own commits measured 92/90/76
+// chars, while the 101-char header that actually failed commitlint was 0e63429 on MAIN — the
+// escalation could not have revealed this and the operator had to read the CI log to find it.
+test("renderClarificationQuestion acceptance — a failing-check escalation renders the check NAME and the head sha, and when the offending commit is outside the PR's own commit range it says so (the #420/PR #417 fixture: 0e63429 on MAIN, not one of PR #417's own 92/90/76-char commits)", () => {
   const seeded: OpenPrView = {
     ...blockedCiExhaustedPr(),
     headSha: "bbbb2223334445556667778889990001112223",
     ciFailures: [
       {
         name: "commitlint",
-        logTail: "header-max-length: 101 chars exceeds the 100 cap",
+        // The #420/PR #417 fixture, verbatim: PR #417's own three commits measured
+        // 92/90/76 chars each (all in range); the 101-char header that actually tripped
+        // commitlint was 0e63429, a commit already on MAIN, outside PR #417's own range.
+        logTail: "header-max-length: 101 chars exceeds the 100 cap (PR #417's own commits: 92/90/76 chars)",
         sha: "0e63429aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         outsidePrRange: true,
       },
