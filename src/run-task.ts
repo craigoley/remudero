@@ -78,7 +78,6 @@ import {
 import {
   applyCuratedSelection,
   buildRundown,
-  DEFAULT_MAX as DRAIN_DEFAULT_MAX,
   nextRunnable,
   plannedSequence,
   renderRundown,
@@ -92,12 +91,12 @@ import {
   type OpenPrCheck,
 } from "./lib/drain.js";
 import {
-  DEFAULT_POLL_INTERVAL_MS,
   daemonBoot,
   daemonExitCode,
   runDaemon,
   type DaemonOpts,
   type DaemonSummary,
+  type HeadroomPolicy,
 } from "./lib/daemon.js";
 import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
@@ -268,7 +267,7 @@ import {
   TaskLintError,
 } from "./lib/task-linter.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
-import { loadPolicy, PolicyError } from "./lib/policy.js";
+import { loadPolicy, policyPath, PolicyError, type PolicyHeadroomRung } from "./lib/policy.js";
 import { deriveTaskClass } from "./lib/task-class.js";
 import { realRiskJudge, resolveRiskJudgeMount, runRiskJudge, type RiskJudgeInput } from "./lib/risk-judge.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
@@ -5453,9 +5452,15 @@ async function drainCommand(
     curatedSelection = { taskIds: rec!.taskIds as string[], depth: rec!.depth as number };
   }
 
+  // W1-T253 (P37 CONSUMERS): `drain.max` read from `plan/policy.yaml` — never `drain.ts`'s
+  // own fs-free literal default (`DEFAULT_MAX`'s doc, lib/drain.ts, explains why that module
+  // can't load it itself: `daemon.ts` imports `drain.ts` at the value level and must stay
+  // filesystem-free) — so a plan-reviewed policy edit retunes the LIVE bound with zero code
+  // change.
+  const drainMax = loadPolicy(policyPath(repoRoot)).values.drain.max;
   const baseOpts: DrainOpts = {
     until: untilIdx >= 0 ? rest[untilIdx + 1] : undefined,
-    max: maxIdx >= 0 ? Number(rest[maxIdx + 1]) : DRAIN_DEFAULT_MAX,
+    max: maxIdx >= 0 ? Number(rest[maxIdx + 1]) : drainMax,
     // W1-T172 PARALLEL DISPATCH — both read from the SAME SweepPolicy row
     // W1-T121 gave the WIP limit (one threshold home, never a second); raising
     // either is a policy-data edit, never a CLI flag or a second constant here.
@@ -5694,6 +5699,22 @@ function renderDaemonSummary(s: DaemonSummary): string {
  * Actually LOADING this as a launchd service (so it survives logout/reboot and
  * restarts on crash) is W1-T12b/d — this command is what that service execs.
  */
+
+/**
+ * `plan/policy.yaml`'s `headroom.curve` (its `maxHoursToReset: number | null` catch-all)
+ * converted into `daemon.ts`'s {@link HeadroomPolicy} shape (`Infinity` catch-all,
+ * `buildDefaultHeadroomPolicy`'s own convention) — W1-T253 (P37 CONSUMERS). `daemon.ts`
+ * itself cannot load the policy (its file header: "this pure module never touches the
+ * filesystem", Rule 16), so THIS is the one place that does, threaded into
+ * `DaemonOpts.headroomPolicy` explicitly on every real `rmd daemon` invocation below.
+ */
+export function headroomPolicyFromCurve(curve: PolicyHeadroomRung[]): HeadroomPolicy {
+  return curve.map((rung) => ({
+    maxHoursToReset: rung.maxHoursToReset === null ? Infinity : rung.maxHoursToReset,
+    limitPct: rung.limitPct,
+  }));
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -5734,9 +5755,15 @@ export async function daemonCommand(
   const allowStale = rest.includes("--allow-stale");
   const maxIdx = rest.indexOf("--max");
   const pollIdx = rest.indexOf("--poll-ms");
+  // W1-T253 (P37 CONSUMERS): pollIntervalMs + the headroom curve read from `plan/policy.yaml`
+  // (never `daemon.ts`'s own fs-free literal defaults — see headroomPolicyFromCurve's doc)
+  // on every real invocation, so a plan-reviewed policy edit retunes the LIVE daemon with
+  // zero code change.
+  const policy = loadPolicy(policyPath(repoRoot));
   const opts: DaemonOpts = {
     max: maxIdx >= 0 ? Number(rest[maxIdx + 1]) : undefined,
-    pollIntervalMs: pollIdx >= 0 ? Number(rest[pollIdx + 1]) : DEFAULT_POLL_INTERVAL_MS,
+    pollIntervalMs: pollIdx >= 0 ? Number(rest[pollIdx + 1]) : policy.values.pollIntervalMs,
+    headroomPolicy: headroomPolicyFromCurve(policy.values.headroom.curve),
   };
   const config = loadConfig();
   // Headroom governor switch (operator ruling fb-1784894405468-a4153e; default clause
@@ -5851,7 +5878,9 @@ export async function daemonCommand(
 
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
-    const seq = plannedSequence(plan, refreshMerged(), { max: opts.max ?? DRAIN_DEFAULT_MAX });
+    // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
+    // drain.ts's own fs-free literal default.
+    const seq = plannedSequence(plan, refreshMerged(), { max: opts.max ?? policy.values.drain.max });
     writeSyncLine(1, `### rmd daemon --dry-run — target ${target.owner}/${target.repo} · plan ${target.planPath}`);
     writeSyncLine(1, seq.length ? seq.map((id, i) => `  ${i + 1}. ${id}`).join("\n") : "  (nothing runnable now)");
     if (target.isSelf) writeSyncLine(2, "  ⚠️ SELF-HOSTING target — the daemon's own source repo.");

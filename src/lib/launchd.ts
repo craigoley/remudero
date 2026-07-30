@@ -39,6 +39,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { loadDefaultPolicy } from "./policy.js";
 
 /** The launchd label this daemon unit is always generated under. */
 export const DAEMON_LABEL = "com.remudero.daemon";
@@ -88,6 +89,14 @@ export interface LaunchdPlistOpts {
    * Ignored (never required, never baked) for a non-self target.
    */
   allowSelfTarget?: boolean;
+  /**
+   * Seconds launchd waits between daemon relaunches (R-1: the relaunch-storm rate limit
+   * already applied to the SEPARATE serve unit, {@link DEFAULT_SERVE_THROTTLE_S}). NET-NEW
+   * for the daemon unit (W1-T253, P37 CONSUMERS) — no prior literal existed to lift, so
+   * absent here this reads `plan/policy.yaml`'s `launchd.throttleIntervalS` (net-new,
+   * bounded [10, 3600] at load) rather than a source literal.
+   */
+  throttleIntervalS?: number;
 }
 
 /** Thrown by {@link generateLaunchdPlist} when an input violates one of its invariants. */
@@ -166,6 +175,10 @@ export function generateLaunchdPlist(opts: LaunchdPlistOpts): string {
   const label = opts.label ?? DAEMON_LABEL;
   const path = opts.path ?? DEFAULT_LAUNCHD_PATH;
   const home = opts.home ?? homedir();
+  // W1-T253: net-new — reads plan/policy.yaml's launchd.throttleIntervalS (no prior literal
+  // existed to lift, see LaunchdPlistOpts.throttleIntervalS's doc) when the caller doesn't
+  // override it.
+  const throttleIntervalS = opts.throttleIntervalS ?? loadDefaultPolicy().values.launchd.throttleIntervalS;
   const logDir = join(opts.root, "state", "logs");
   const stdoutPath = join(logDir, "daemon.out.log");
   const stderrPath = join(logDir, "daemon.err.log");
@@ -220,6 +233,10 @@ ${stringArray(programArguments)}
     <key>SuccessfulExit</key>
     <false/>
   </dict>
+  <!-- ThrottleInterval (W1-T253, P37 CONSUMERS): the R-1 relaunch-storm rate limit,
+       net-new here — plan/policy.yaml's launchd.throttleIntervalS, unless overridden. -->
+  <key>ThrottleInterval</key>
+  <integer>${throttleIntervalS}</integer>
   <key>StandardOutPath</key>
   <string>${escapeXml(stdoutPath)}</string>
   <key>StandardErrorPath</key>

@@ -7,6 +7,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { appendLedger } from "./ledger.js";
 import { isInPlanScope } from "./plan-architect.js";
 import { visibleCriteria, type AcceptanceCriterion } from "./plan.js";
+import { loadDefaultPolicy } from "./policy.js";
 import { readLedgerLines } from "./status.js";
 
 /**
@@ -672,7 +673,16 @@ export type ProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => "pas
 // run before it ever reached the named test's file (see nameFilteredOutcome's doc
 // comment) — widened for headroom. The truncation-detection fix above is the actual
 // correctness guarantee; this just reduces how often it needs to engage.
-const DEFAULT_PROOF_TIMEOUT_MS = 60_000;
+//
+// W1-T253 (P37 CONSUMERS): this is now a POLICY READ (plan/policy.yaml's `proofTimeoutMs`),
+// never a source literal — the 60s above is DATA now, floored at load (policy.ts's
+// `numberField`, min 60000 — the "30000 regression" the substrate refuses to accept), so a
+// retune is a reviewed plan PR, not a code edit. `loadDefaultPolicy` self-locates
+// plan/policy.yaml from this module's own install location (never cwd), so this default
+// resolves identically no matter what directory `execWhitelistedProof` is called from.
+function defaultProofTimeoutMs(): number {
+  return loadDefaultPolicy().values.proofTimeoutMs;
+}
 const npmCiPrimed = new Set<string>();
 /** Process-wide latch for {@link ensureBrowsersOnce} — see its doc comment for why
  * this is NOT keyed by cwd the way {@link npmCiPrimed} is. */
@@ -1080,7 +1090,7 @@ export function narrowNameFilteredArgs(baseArgs: readonly string[], candidateFil
 export function execWhitelistedProof(
   whitelisted: WhitelistedProof,
   cwd: string,
-  timeoutMs = DEFAULT_PROOF_TIMEOUT_MS,
+  timeoutMs = defaultProofTimeoutMs(),
   spawn: ProofSpawner = defaultProofSpawner,
 ): "pass" | "fail" | "no-match" {
   // W1-T227: a name-filtered proof's `args` (from parseTestTarget) still carry

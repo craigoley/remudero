@@ -185,8 +185,10 @@ test("generateLaunchdPlist: --allow-self-target is neither required nor baked fo
 });
 
 // ── Regression lock: a NON-self --repo target's output is byte-identical to the plist this
-// generator produced before W1-T109 — captured verbatim from the pre-change generator output. ──
-test("generateLaunchdPlist: a non-self --repo target's output is BYTE-IDENTICAL to before W1-T109 (regression lock)", () => {
+// generator produced before W1-T109 — captured verbatim from the pre-change generator output,
+// EXCEPT for the ThrottleInterval key W1-T253 (P37 CONSUMERS) added (net-new, read from
+// plan/policy.yaml's launchd.throttleIntervalS — see LaunchdPlistOpts.throttleIntervalS). ──
+test("generateLaunchdPlist: a non-self --repo target's output is BYTE-IDENTICAL to before W1-T109, plus W1-T253's ThrottleInterval (regression lock)", () => {
   const plist = generateLaunchdPlist({
     rmdBin: "/Users/op/Remudero/bin/rmd",
     root: "/Users/op/Remudero",
@@ -194,8 +196,15 @@ test("generateLaunchdPlist: a non-self --repo target's output is BYTE-IDENTICAL 
     repo: "remudero-sandbox",
   });
   const expected =
-    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key>\n  <string>com.remudero.daemon</string>\n  <!-- ANTHROPIC-clean-env boot assertion (W1-T12b, billing boundary, MASTER-PLAN §9):\n       EnvironmentVariables below is a CLOSED allowlist (PATH + HOME only) — launchd\n       never sources ~/.zshrc, so this dict is the WHOLE env the daemon process\n       receives at boot. generateLaunchdPlist() throws if any ANTHROPIC_* key ever\n       lands in it. The daemon process itself re-asserts this at runtime over its\n       OWN live env (lib/daemon.ts daemonBoot, lib/env.ts assertCleanBoot) and logs\n       env_clean=true / billing_mode=subscription — belt-and-suspenders against a\n       future edit to this generator. -->\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n    <key>HOME</key>\n    <string>/Users/op</string>\n  </dict>\n  <key>ProgramArguments</key>\n  <array>\n    <string>/Users/op/Remudero/bin/rmd</string>\n    <string>daemon</string>\n    <string>--repo</string>\n    <string>remudero-sandbox</string>\n  </array>\n  <key>WorkingDirectory</key>\n  <string>/Users/op/Remudero</string>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>\n  <key>StandardOutPath</key>\n  <string>/Users/op/Remudero/state/logs/daemon.out.log</string>\n  <key>StandardErrorPath</key>\n  <string>/Users/op/Remudero/state/logs/daemon.err.log</string>\n</dict>\n</plist>\n";
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key>\n  <string>com.remudero.daemon</string>\n  <!-- ANTHROPIC-clean-env boot assertion (W1-T12b, billing boundary, MASTER-PLAN §9):\n       EnvironmentVariables below is a CLOSED allowlist (PATH + HOME only) — launchd\n       never sources ~/.zshrc, so this dict is the WHOLE env the daemon process\n       receives at boot. generateLaunchdPlist() throws if any ANTHROPIC_* key ever\n       lands in it. The daemon process itself re-asserts this at runtime over its\n       OWN live env (lib/daemon.ts daemonBoot, lib/env.ts assertCleanBoot) and logs\n       env_clean=true / billing_mode=subscription — belt-and-suspenders against a\n       future edit to this generator. -->\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n    <key>HOME</key>\n    <string>/Users/op</string>\n  </dict>\n  <key>ProgramArguments</key>\n  <array>\n    <string>/Users/op/Remudero/bin/rmd</string>\n    <string>daemon</string>\n    <string>--repo</string>\n    <string>remudero-sandbox</string>\n  </array>\n  <key>WorkingDirectory</key>\n  <string>/Users/op/Remudero</string>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>\n  <!-- ThrottleInterval (W1-T253, P37 CONSUMERS): the R-1 relaunch-storm rate limit,\n       net-new here — plan/policy.yaml's launchd.throttleIntervalS, unless overridden. -->\n  <key>ThrottleInterval</key>\n  <integer>60</integer>\n  <key>StandardOutPath</key>\n  <string>/Users/op/Remudero/state/logs/daemon.out.log</string>\n  <key>StandardErrorPath</key>\n  <string>/Users/op/Remudero/state/logs/daemon.err.log</string>\n</dict>\n</plist>\n";
   assert.equal(plist, expected);
+});
+
+test("generateLaunchdPlist: ThrottleInterval reads plan/policy.yaml's launchd.throttleIntervalS (60) by default, and a caller-supplied value overrides it", () => {
+  const defaulted = generateLaunchdPlist(VALID);
+  assert.match(defaulted, /<key>ThrottleInterval<\/key>\s*<integer>60<\/integer>/);
+  const overridden = generateLaunchdPlist({ ...VALID, throttleIntervalS: 120 });
+  assert.match(overridden, /<key>ThrottleInterval<\/key>\s*<integer>120<\/integer>/);
 });
 
 // ── generateDigestLaunchdPlist: the daily `rmd digest` pulse (W1-T112, the W1-T12b generator
