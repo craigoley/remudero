@@ -20,6 +20,7 @@ import type { GitHub } from "../src/lib/status.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
@@ -146,7 +147,13 @@ test("realArmDeps: disableAuto (W1-T125) reaches gh pr merge <url> --disable-aut
   process.env.PATH = `${bin}:${oldPath}`;
   try {
     const d = realArmDeps();
-    assert.doesNotThrow(() => d.disableAuto("url/x"), "disableAuto reaches gh pr merge --disable-auto");
+    // Reaches `gh pr merge --disable-auto` for real, against the PATH-stubbed `gh` installed
+    // just above — never the live repo. Exempted because the guard checks the CALL, not the
+    // destination, and this test's whole point is that the real dep body executes.
+    assert.doesNotThrow(
+      () => withLiveWritesAllowed(() => d.disableAuto("url/x")),
+      "disableAuto reaches gh pr merge --disable-auto",
+    );
   } finally {
     process.env.PATH = oldPath;
     rmSync(bin, { recursive: true, force: true });
@@ -319,15 +326,20 @@ test(
     };
 
     try {
-      const res = await runTask("T-ARM-OPEN", {
-        skipGitSync: true,
-        planPath,
-        config,
-        github: ARM_OPEN_OFFLINE_GITHUB,
-        spawn,
-        containmentExec: armOpenHoldingContainmentExec,
-        isolationExec: armOpenCleanIsolationExec,
-      });
+      // A REAL runTask() against this file's own containment: an offline `github` gateway, an
+      // injected `spawn`, and a fake `gh` on PATH (see the section header above). Nothing here
+      // reaches the live repo — but the guard checks the CALL, so the run needs this exemption.
+      const res = await withLiveWritesAllowed(() =>
+        runTask("T-ARM-OPEN", {
+          skipGitSync: true,
+          planPath,
+          config,
+          github: ARM_OPEN_OFFLINE_GITHUB,
+          spawn,
+          containmentExec: armOpenHoldingContainmentExec,
+          isolationExec: armOpenCleanIsolationExec,
+        }),
+      );
 
       // ── CRITERION 3 falsifier, same run: CI never went green (red on the very
       // first poll) — the PR must NOT merge. Early arming registering intent is
@@ -536,19 +548,24 @@ test(
     let seenRunReviewArgs: { prUrl: string } | undefined;
 
     try {
-      const res = await runTask("T-ARM-OPEN", {
-        skipGitSync: true,
-        planPath,
-        config,
-        github: ARM_OPEN_OFFLINE_GITHUB,
-        spawn,
-        containmentExec: armOpenHoldingContainmentExec,
-        isolationExec: armOpenCleanIsolationExec,
-        runReview: async (args) => {
-          seenRunReviewArgs = { prUrl: args.prUrl };
-          return cappedVerdict;
-        },
-      });
+      // Same containment as the (B) run above — offline gateway, injected spawn, fake gh — plus
+      // an injected review seam. Exempted for the same reason: the boundary is real, the
+      // destination is not.
+      const res = await withLiveWritesAllowed(() =>
+        runTask("T-ARM-OPEN", {
+          skipGitSync: true,
+          planPath,
+          config,
+          github: ARM_OPEN_OFFLINE_GITHUB,
+          spawn,
+          containmentExec: armOpenHoldingContainmentExec,
+          isolationExec: armOpenCleanIsolationExec,
+          runReview: async (args) => {
+            seenRunReviewArgs = { prUrl: args.prUrl };
+            return cappedVerdict;
+          },
+        }),
+      );
 
       assert.equal(res.verdict, "blocked", "a CAPPED, non-planOnly verdict with no override is refused, unattended");
       assert.equal(res.merged, false);
@@ -662,16 +679,19 @@ test(
     };
 
     try {
-      const res = await runTask("T-ARM-OPEN", {
-        skipGitSync: true,
-        planPath,
-        config,
-        github: ARM_OPEN_OFFLINE_GITHUB,
-        spawn,
-        containmentExec: armOpenHoldingContainmentExec,
-        isolationExec: armOpenCleanIsolationExec,
-        runReview: async () => fullPassVerdict,
-      });
+      // Same containment again, with the risk-judge spawn injected. Exempted for the same reason.
+      const res = await withLiveWritesAllowed(() =>
+        runTask("T-ARM-OPEN", {
+          skipGitSync: true,
+          planPath,
+          config,
+          github: ARM_OPEN_OFFLINE_GITHUB,
+          spawn,
+          containmentExec: armOpenHoldingContainmentExec,
+          isolationExec: armOpenCleanIsolationExec,
+          runReview: async () => fullPassVerdict,
+        }),
+      );
 
       assert.equal(res.verdict, "blocked", "a HIGH-risk judge verdict escalates and refuses to proceed to pollToGate");
       assert.equal(res.merged, false);

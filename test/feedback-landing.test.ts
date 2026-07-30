@@ -9,6 +9,22 @@ import { captureFeedback, feedbackEntryPath, readFeedbackEntry } from "../src/li
 import { LANDING_BRANCH, LANDING_PR_TITLE, findPendingLandingPr, landFeedback } from "../src/lib/feedback-landing.js";
 import { missingFeedbackMessage } from "../src/lib/triage.js";
 import { triageCommand } from "../src/run-task.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+
+// ── Why every landFeedback()/captureFeedback({land}) call below is wrapped ──────────────
+// This whole suite exercises the durable-inbox commit bridge, which commits and PUSHES for
+// real. It does so entirely offline, against a `git init --quiet --bare` origin created in
+// TMPDIR by this file's own fixture, with an injected fake `gh`; nothing reaches the live
+// repo. The live-write guard cannot see that, because it checks the CALL, not the
+// DESTINATION — so each such call is exempted individually, at the call site, rather than
+// by any file- or env-level switch. The two `captureFeedback()` calls that deliberately have
+// NO repo / NO origin are left unwrapped: they never reach the boundary, and leaving them
+// bare keeps the guard live on them.
+//
+// NOTE for anyone re-measuring this: `landFeedback` is best-effort and SWALLOWS the guard's
+// throw, so before this change the failures here surfaced downstream as
+// `fatal: invalid object name 'feedback-landing'` and reported ZERO `LiveWriteBlockedError`.
+// Counting this defect by grepping for the error name undercounts it.
 
 // commitlint (W1-T136 class) — same subprocess pattern as test/orientation.test.ts.
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -95,7 +111,7 @@ test("W1-T243 END-TO-END: a captured entry is invisible on origin/main until lan
   const root = cloneRoot(bareOrigin);
   const { gh, calls, createCount } = fakeGh("https://github.com/o/r/pull/1");
 
-  const entry = captureFeedback(root, { raw: "the drain loop hangs on a stale lock", origin: "cli", land: { gh } });
+  const entry = withLiveWritesAllowed(() => captureFeedback(root, { raw: "the drain loop hangs on a stale lock", origin: "cli", land: { gh } }));
 
   // The local write is durable the instant captureFeedback returns (§7B's promise, unchanged).
   assert.ok(existsSync(feedbackEntryPath(root, entry.id)));
@@ -151,7 +167,7 @@ test("W1-T243 CHOKE POINT: captureFeedback lands ANY caller's entry — this tes
   // A fixture "sixth caller" — an origin shape none of the five named call sites use verbatim
   // for THIS test, proving the bridge is keyed to captureFeedback()/the inbox directory, not to
   // per-caller wiring that a new caller would have to remember to add.
-  const entry = captureFeedback(root, { raw: "fixture caller feedback", origin: "alert#code-scanning-999", land: { gh } });
+  const entry = withLiveWritesAllowed(() => captureFeedback(root, { raw: "fixture caller feedback", origin: "alert#code-scanning-999", land: { gh } }));
 
   const onBranch = execFileSync(
     "git",
@@ -189,10 +205,12 @@ test("W1-T243 STRANDED-ENTRY SWEEP: captureFeedback with the landing path STUBBE
   const failingGit = (): string => {
     throw new Error("simulated network failure — git fetch origin unreachable");
   };
-  const entry = captureFeedback(root, {
-    raw: "stranded while offline, must not be lost",
-    land: { git: failingGit },
-  });
+  const entry = withLiveWritesAllowed(() =>
+    captureFeedback(root, {
+      raw: "stranded while offline, must not be lost",
+      land: { git: failingGit },
+    }),
+  );
   assert.equal(entry.raw, "stranded while offline, must not be lost", "captureFeedback still returns success");
   assert.ok(
     existsSync(feedbackEntryPath(root, entry.id)),
@@ -209,7 +227,7 @@ test("W1-T243 STRANDED-ENTRY SWEEP: captureFeedback with the landing path STUBBE
   // this time with a real, un-stubbed git, picks the stranded entry up and lands it. Nothing
   // about this entry was dropped; it was only ever DEFERRED.
   const { gh } = fakeGh("https://github.com/o/r/pull/99");
-  const laterPass = landFeedback(root, { gh });
+  const laterPass = withLiveWritesAllowed(() => landFeedback(root, { gh }));
   assert.equal(laterPass.landed, true, "the later bridge pass lands the previously-stranded entry");
   assert.deepEqual(laterPass.files, [`plan/feedback/${entry.id}.yaml`]);
 
@@ -232,7 +250,7 @@ test("W1-T243 OFFLINE: landFeedback pushes fine even when `gh pr create` fails (
     throw Object.assign(new Error("gh: not authenticated"), { status: 4 });
   };
 
-  const result = landFeedback(root, { gh });
+  const result = withLiveWritesAllowed(() => landFeedback(root, { gh }));
   assert.equal(result.landed, true, "the push itself already succeeded — only PR-open failed");
   assert.deepEqual(result.files, ["plan/feedback/fb-1.yaml"]);
   assert.match(result.error ?? "", /gh pr create.*failed/i);
@@ -258,13 +276,13 @@ test("landFeedback: once its PR has merged, a later call with nothing NEW lands 
   writeFileSync(join(root, "plan", "feedback", "fb-1.yaml"), "id: fb-1\nraw: x\n");
 
   const { gh, createCount } = fakeGh("https://github.com/o/r/pull/3");
-  const first = landFeedback(root, { gh });
+  const first = withLiveWritesAllowed(() => landFeedback(root, { gh }));
   assert.equal(first.landed, true);
   assert.equal(createCount(), 1);
 
   simulateMerge(bareOrigin); // the gate merges — fb-1.yaml is now really on origin/main
 
-  const second = landFeedback(root, { gh });
+  const second = withLiveWritesAllowed(() => landFeedback(root, { gh }));
   assert.deepEqual(second, { landed: false, files: [] });
   assert.equal(createCount(), 1, "no spurious re-push/re-PR once the content is already on origin/main");
 });
@@ -276,14 +294,14 @@ test("landFeedback: while a landing PR is still OPEN, a second batch of new file
   writeFileSync(join(root, "plan", "feedback", "fb-1.yaml"), "id: fb-1\nraw: x\n");
 
   const { gh, createCount } = fakeGh("https://github.com/o/r/pull/4");
-  const first = landFeedback(root, { gh });
+  const first = withLiveWritesAllowed(() => landFeedback(root, { gh }));
   assert.equal(first.landed, true);
   assert.equal(createCount(), 1);
 
   // No merge yet — the PR from `first` is still open. A second, unrelated new file shows up
   // (e.g. another capture on this same machine before the gate has gotten to the first PR).
   writeFileSync(join(root, "plan", "feedback", "fb-2.yaml"), "id: fb-2\nraw: y\n");
-  const second = landFeedback(root, { gh });
+  const second = withLiveWritesAllowed(() => landFeedback(root, { gh }));
   assert.equal(second.landed, true);
   // fb-1.yaml is STILL unlanded too (nothing merged it), so this batch rebuilds the branch with
   // both files — never a second PR for fb-2 alone.
@@ -463,7 +481,7 @@ test("landFeedback: a root that never captured anything (plan/feedback/ doesn't 
   assert.ok(!existsSync(join(root, "plan", "feedback")), "sanity: nothing captured here yet");
 
   const { gh, createCount } = fakeGh("https://github.com/o/r/pull/10");
-  const result = landFeedback(root, { gh });
+  const result = withLiveWritesAllowed(() => landFeedback(root, { gh }));
   assert.deepEqual(result, { landed: false, files: [] });
   assert.equal(createCount(), 0, "an absent plan/feedback/ dir must never open a PR");
 });
@@ -478,7 +496,7 @@ test("landFeedback: an unlanded file that isn't a plan/feedback/*.yaml entry (e.
   writeFileSync(join(root, "plan", "feedback", "NOTES.md"), "not a feedback entry, just a stray file\n");
 
   const { gh, calls } = fakeGh("https://github.com/o/r/pull/11");
-  const result = landFeedback(root, { gh });
+  const result = withLiveWritesAllowed(() => landFeedback(root, { gh }));
   assert.equal(result.landed, true);
   assert.deepEqual(result.files, ["plan/feedback/NOTES.md"]);
   const createCall = calls.find((c) => c[0] === "pr" && c[1] === "create");
@@ -494,7 +512,7 @@ test("landFeedback: captured entries nested under plan/feedback/attachments/<id>
   writeFileSync(attachmentSrc, "not really a png, just fixture bytes");
 
   const { gh } = fakeGh("https://github.com/o/r/pull/12");
-  const entry = captureFeedback(root, { raw: "see the attached screenshot", attachments: [attachmentSrc], land: { gh } });
+  const entry = withLiveWritesAllowed(() => captureFeedback(root, { raw: "see the attached screenshot", attachments: [attachmentSrc], land: { gh } }));
   assert.equal(entry.attachments.length, 1);
   assert.match(entry.attachments[0], /^plan\/feedback\/attachments\//);
 
@@ -519,7 +537,7 @@ test("landFeedback: `gh pr create` throwing a NON-Error value (no `.message`) st
     throw "gh: command not found, no message property at all";
   };
 
-  const result = landFeedback(root, { gh });
+  const result = withLiveWritesAllowed(() => landFeedback(root, { gh }));
   assert.equal(result.landed, true, "the push already succeeded — only PR-open failed");
   assert.match(result.error ?? "", /gh: command not found, no message property at all/);
 });
@@ -537,7 +555,7 @@ test("landFeedback: `gh pr merge` throwing is swallowed (best-effort auto-merge 
     throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
   };
 
-  const result = landFeedback(root, { gh });
+  const result = withLiveWritesAllowed(() => landFeedback(root, { gh }));
   assert.equal(result.landed, true, "a failed best-effort auto-merge arm must never turn a successful push+PR into a failure");
   assert.equal(result.prUrl, "https://github.com/o/r/pull/13");
 });
@@ -548,7 +566,7 @@ test("landFeedback: a git failure that throws a NON-Error value still resolves t
     // eslint-disable-next-line no-throw-literal
     throw "totally not a git repo, and this is a bare string, not an Error";
   };
-  const result = landFeedback(root, { git: failingGit });
+  const result = withLiveWritesAllowed(() => landFeedback(root, { git: failingGit }));
   assert.deepEqual(result.files, []);
   assert.equal(result.landed, false);
   assert.match(result.error ?? "", /totally not a git repo, and this is a bare string/);
@@ -567,7 +585,7 @@ test("landFeedback's full commit message (header + body) passes the REAL commitl
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });
   writeFileSync(join(root, "plan", "feedback", "fb-1.yaml"), "id: fb-1\nraw: x\n");
   const { gh } = fakeGh("https://github.com/o/r/pull/5");
-  landFeedback(root, { gh });
+  withLiveWritesAllowed(() => landFeedback(root, { gh }));
 
   const message = execFileSync("git", ["--git-dir", bareOrigin, "log", "-1", "--format=%B", LANDING_BRANCH], { encoding: "utf8" });
   const result = lint(message);

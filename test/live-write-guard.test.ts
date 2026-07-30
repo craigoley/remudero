@@ -13,6 +13,8 @@ import {
   isTestRunner,
   LiveWriteBlockedError,
   LIVE_WRITE_OVERRIDE_ENV,
+  liveWritesExempt,
+  withLiveWritesAllowed,
   type LiveWriteBoundary,
 } from "../src/lib/live-write-guard.js";
 
@@ -100,4 +102,84 @@ test("STRUCTURAL: every outward-effect call site in src/ is guarded — this is 
     });
   }
   assert.deepEqual(unguarded, [], `these outward call sites are NOT guarded:\n${unguarded.join("\n")}`);
+});
+
+// ── The per-test opt-out (operator ruling 2026-07-30, option 2) ─────────────────────
+// Five suites legitimately drive these boundaries against their OWN containment, so the
+// guard has to be suspendable at TEST granularity. These lock the two ways such a
+// mechanism leaks, plus the regression that matters most: not wrapping is still refused.
+
+test("REGRESSION LOCK: a boundary that does NOT wrap is still refused, so the opt-out did not make the guard inert", () => {
+  assert.equal(liveWritesExempt(), false, "no exemption may be in effect before this test");
+  assert.throws(
+    () => assertLiveWriteAllowed("git-push", "unwrapped push", TEST_RUN),
+    (e: unknown) => e instanceof LiveWriteBlockedError,
+    "an unwrapped boundary must still throw",
+  );
+});
+
+test("the opt-out suspends the guard only INSIDE the wrapped section", () => {
+  assert.equal(liveWritesExempt(), false);
+  const seen = withLiveWritesAllowed(() => {
+    assert.equal(liveWritesExempt(), true, "exempt inside");
+    assertLiveWriteAllowed("git-push", "wrapped push", TEST_RUN); // must NOT throw
+    return "ran";
+  });
+  assert.equal(seen, "ran", "the wrapped section's return value passes through");
+  assert.equal(liveWritesExempt(), false, "re-armed immediately after");
+  assert.throws(() => assertLiveWriteAllowed("git-push", "after", TEST_RUN), LiveWriteBlockedError);
+});
+
+test("TRAP 1 throw: a wrapped section that THROWS leaves the guard armed again afterwards", () => {
+  assert.throws(
+    () =>
+      withLiveWritesAllowed(() => {
+        assert.equal(liveWritesExempt(), true, "exempt while inside");
+        throw new Error("boom");
+      }),
+    /boom/,
+    "the original error must propagate unchanged",
+  );
+  // Assert the RE-ARMED STATE directly, not merely the absence of an effect.
+  assert.equal(liveWritesExempt(), false, "the exemption must not survive a throw");
+  assert.throws(() => assertLiveWriteAllowed("gh-pr-create", "after throw", TEST_RUN), LiveWriteBlockedError);
+});
+
+test("TRAP 1 async: a wrapped ASYNC section stays exempt for the whole await and re-arms only after it settles", async () => {
+  let exemptDuringAwait: boolean | undefined;
+  const p = withLiveWritesAllowed(async () => {
+    await new Promise((r) => setTimeout(r, 25));
+    // If the restore ran synchronously, the guard would already be re-armed HERE and the
+    // boundary would be refused mid-section — the exact early-restore bug.
+    exemptDuringAwait = liveWritesExempt();
+    assertLiveWriteAllowed("gh-pr-merge", "inside awaited work", TEST_RUN); // must NOT throw
+    return "async-done";
+  });
+  assert.equal(liveWritesExempt(), true, "still exempt while the promise is pending");
+  assert.equal(await p, "async-done");
+  assert.equal(exemptDuringAwait, true, "exempt for the DURATION of the awaited work");
+  assert.equal(liveWritesExempt(), false, "re-armed once the promise settles");
+});
+
+test("TRAP 1 async reject: a wrapped ASYNC section that REJECTS still re-arms the guard", async () => {
+  await assert.rejects(
+    withLiveWritesAllowed(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+      throw new Error("async-boom");
+    }),
+    /async-boom/,
+  );
+  assert.equal(liveWritesExempt(), false, "the exemption must not survive an async rejection");
+});
+
+test("the opt-out NESTS without an inner section re-arming the guard for the outer one", () => {
+  withLiveWritesAllowed(() => {
+    withLiveWritesAllowed(() => {
+      assert.equal(liveWritesExempt(), true);
+    });
+    // A boolean flag would have re-armed here; a depth counter must not.
+    assert.equal(liveWritesExempt(), true, "the OUTER exemption survives the inner one ending");
+    assertLiveWriteAllowed("git-push", "outer still exempt", TEST_RUN);
+  });
+  assert.equal(liveWritesExempt(), false);
 });
