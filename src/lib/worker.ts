@@ -1599,6 +1599,31 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
   return { reaped, reapedLocks, kept };
 }
 
+/**
+ * The W1-T175 worktree-reap RUNG: resolve `config`'s worktreesDir, run
+ * {@link reapStaleWorktrees} against it, and best-effort-ledger the outcome via `log`. Shared by
+ * `rmd sweep` (sweepCommand) and the daemon's own per-poll hook (buildSweepHook) so both run the
+ * EXACT same rung on the EXACT same cadence-doctrine — pulled out to one place after the first
+ * draft duplicated this try/catch verbatim at both call sites (a duplicate-drift risk the two
+ * rungs' own doc comments already warned about). The try/catch here guards ONLY
+ * `worktreesDir(config)` itself (a malformed `config.root` throws from `path.join`) —
+ * {@link reapStaleWorktrees} is fail-closed internally and never throws under default opts — so
+ * a reap-rung failure never masks, or is masked by, the caller's OWN error handling.
+ */
+export function runWorktreeReapRung(
+  config: Config,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): WorktreeReapSummary {
+  let reapSummary: WorktreeReapSummary = { reaped: [], reapedLocks: [], kept: [] };
+  try {
+    reapSummary = reapStaleWorktrees(worktreesDir(config));
+    if (reapSummary.reaped.length || reapSummary.reapedLocks.length) log("worktree.reaped", { ...reapSummary });
+  } catch (e) {
+    log("worktree.reap.error", { error: String((e as Error)?.message ?? e) });
+  }
+  return reapSummary;
+}
+
 // ── gh helpers (run outside the sandbox; TLS fails under Seatbelt) ─────────
 
 /**

@@ -363,9 +363,9 @@ import {
   parseReconReport,
   parseReport,
   pruneStaleRuns,
-  reapStaleWorktrees,
   removeRunLock,
   renderWorkerSettings,
+  runWorktreeReapRung,
   spawnWorker,
   cacheTokenLedgerFields,
   workerLedgerFields,
@@ -7307,12 +7307,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // --dry-run takes no effects, matching every other rung in this command.
   let reapSummary: WorktreeReapSummary = { reaped: [], reapedLocks: [], kept: [] };
   if (!dryRun) {
-    try {
-      reapSummary = reapStaleWorktrees(worktreesDir(config));
-      if (reapSummary.reaped.length || reapSummary.reapedLocks.length) log("worktree.reaped", { ...reapSummary });
-    } catch (e) {
-      log("worktree.reap.error", { error: String((e as Error)?.message ?? e) });
-    }
+    reapSummary = runWorktreeReapRung(config, log);
   }
 
   console.log(
@@ -7404,14 +7399,9 @@ export function buildSweepHook(
       // W1-T175 — the worktree reaper rung, on the daemon's own poll cadence: the hole
       // this closes is specifically an IDLE fleet (no run dispatched, so pruneStaleRuns'
       // run-start trigger never fires) leaving crashed-run debris to grow unbounded. Own
-      // try/catch (distinct from the shared "sweep.error" below) so a reap hiccup never
-      // masks — or is masked by — the rungs above it.
-      try {
-        const reapSummary = reapStaleWorktrees(worktreesDir(config));
-        if (reapSummary.reaped.length || reapSummary.reapedLocks.length) log("worktree.reaped", { ...reapSummary });
-      } catch (e) {
-        log("worktree.reap.error", { error: String((e as Error)?.message ?? e) });
-      }
+      // try/catch, folded into runWorktreeReapRung (distinct from the shared "sweep.error"
+      // below) so a reap hiccup never masks — or is masked by — the rungs above it.
+      runWorktreeReapRung(config, log);
     } catch (e) {
       log("sweep.error", { error: String((e as Error)?.message ?? e) });
     }

@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -15,7 +17,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { type Config } from "../src/lib/config.js";
 import { appendLedger } from "../src/lib/ledger.js";
-import { pruneStaleRuns, reapStaleWorktrees, runLockPath, writeRunLock } from "../src/lib/worker.js";
+import {
+  pruneStaleRuns,
+  reapStaleWorktrees,
+  runLockPath,
+  runWorktreeReapRung,
+  writeRunLock,
+} from "../src/lib/worker.js";
 import { buildSweepHook, sweepCommand } from "../src/run-task.js";
 
 // pruneStaleRuns needs a real git repo + worktree to exercise `git worktree list`.
@@ -52,6 +60,28 @@ function makeRepoWithNamedWorktree(
   const wtPath = join(worktreesRoot, dirName);
   git("worktree", "add", "-b", branch, wtPath);
   return { dir, repoDir, worktreesRoot, wtPath, dirName, branch };
+}
+
+// defaultBranchIsLiveUpstream (worker.ts) shells REAL `git ls-remote --heads origin <branch>` —
+// exercising it (rather than the injected `branchIsLiveUpstream` every other reap test uses)
+// needs a REAL `origin` remote, not a fixture flag. `pushBranch: true` mirrors an OPEN,
+// unmerged PR (branch present on origin); `pushBranch: false` mirrors a merged/deleted branch
+// (`git push` never ran, or `origin` already dropped it) — `ls-remote --exit-code` reports the
+// SAME "no matching refs" (exit 2) either way, which is exactly the signal the default reads.
+function makeRepoWithNamedWorktreeAndOrigin(
+  dirName: string,
+  branch: string,
+  opts: { pushBranch: boolean },
+): { dir: string; repoDir: string; worktreesRoot: string; wtPath: string; dirName: string; branch: string } {
+  const base = makeRepoWithNamedWorktree(dirName, branch);
+  const originDir = join(base.dir, "origin.git");
+  const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+  execFileSync("git", ["init", "--bare", "-b", "main", originDir], { encoding: "utf8" });
+  const git = (...args: string[]) => execFileSync("git", ["-C", base.repoDir, ...args], { encoding: "utf8", env: gitEnv });
+  git("remote", "add", "origin", originDir);
+  git("push", "origin", "main");
+  if (opts.pushBranch) git("push", "origin", `${branch}:${branch}`);
+  return base;
 }
 
 function makeRepoWithRunWorktree(): {
@@ -248,6 +278,138 @@ test("reapStaleWorktrees: does NOT touch a `.lock` whose owning worktree directo
   } finally {
     rmSync(t.dir, { recursive: true, force: true });
   }
+});
+
+test("reapStaleWorktrees: REAPS an entry whose `.git` gitdir names a repoDir git itself cannot even QUERY — the throw variant of hole (1), distinct from the not-registered-at-all variant above", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-reap-badgitdir-")));
+  try {
+    const entryPath = join(root, "run-W1-T999-badgitdir");
+    mkdirSync(entryPath, { recursive: true });
+    // A well-formed gitdir POINTER whose target repoDir does not exist at all: `git -C
+    // <repoDir> worktree list --porcelain` doesn't merely omit this entry (found: false) —
+    // it THROWS (`fatal: cannot change to '<repoDir>'`), the other fail path
+    // resolveWorktreeRegistration's own try/catch exists to cover.
+    writeFileSync(join(entryPath, ".git"), `gitdir: ${root}/nonexistent-rmd-repo/.git/worktrees/x\n`);
+    const summary = reapStaleWorktrees(root, { now: () => 4_000_000_000_000 });
+    assert.ok(!existsSync(entryPath), "an entry whose repoDir git cannot even query is reaped once aged");
+    assert.ok(summary.reaped.includes("run-W1-T999-badgitdir"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── defaultBranchIsLiveUpstream: the NO-OVERRIDE default path (real `git ls-remote`), not the
+// ── injected `branchIsLiveUpstream` every test above uses to stand in for it. ──────────────
+
+test("reapStaleWorktrees (default branchIsLiveUpstream, no override): KEEPS a worktree whose branch is genuinely present on a REAL `origin` remote", () => {
+  const t = makeRepoWithNamedWorktreeAndOrigin("sweep-W1-T910-live", "run-W1-T910-1784000000000", { pushBranch: true });
+  try {
+    const summary = reapStaleWorktrees(t.worktreesRoot, { now: () => 4_000_000_000_000 }); // no branchIsLiveUpstream override
+    assert.ok(existsSync(t.wtPath), "a worktree whose branch is actually still on origin must NOT be reaped");
+    assert.ok(summary.kept.includes(t.dirName));
+  } finally {
+    rmSync(t.dir, { recursive: true, force: true });
+  }
+});
+
+test("reapStaleWorktrees (default branchIsLiveUpstream, no override): REAPS a worktree once `git ls-remote` genuinely reports its branch absent from origin", () => {
+  const t = makeRepoWithNamedWorktreeAndOrigin("sweep-W1-T911-gone", "run-W1-T911-1784000000000", { pushBranch: false });
+  try {
+    const summary = reapStaleWorktrees(t.worktreesRoot, { now: () => 4_000_000_000_000 }); // no branchIsLiveUpstream override
+    assert.ok(!existsSync(t.wtPath), "a worktree whose branch never reached (or is gone from) origin is reaped once aged");
+    assert.ok(summary.reaped.includes(t.dirName));
+  } finally {
+    rmSync(t.dir, { recursive: true, force: true });
+  }
+});
+
+test("reapStaleWorktrees: a broken symlink entry (vanished, stat fails) is skipped WITHOUT blocking the rest of the pass — the same 'someone else's cleanup won the race' guard as the mid-loop stat", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-reap-brokenlink-")));
+  try {
+    // Not a `.lock` name, not a directory — `statSync` throws ENOENT for a dangling
+    // symlink exactly the way it would for a directory that vanished between `readdirSync`
+    // and the loop's own `statSync` call; this is the portable, non-racy way to hit that path.
+    symlinkSync(join(root, "does-not-exist"), join(root, "run-W1-T912-dangling"));
+    // A genuine reap candidate alongside it, proving the broken-link entry never halts the pass.
+    const entryPath = join(root, "run-W1-T913-debris");
+    mkdirSync(entryPath, { recursive: true });
+    writeRunLock(entryPath, { pid: 999999, run_id: "W1-T913", startedAt: "2026-07-01T00:00:00Z" });
+
+    const summary = reapStaleWorktrees(root, { isPidAlive: () => false, now: () => 4_000_000_000_000 });
+    assert.ok(existsSync(join(root, "run-W1-T913-debris")) === false, "the genuine debris past it is still reaped");
+    assert.ok(summary.reaped.includes("run-W1-T913-debris"));
+    assert.ok(
+      !summary.reaped.includes("run-W1-T912-dangling") && !summary.kept.includes("run-W1-T912-dangling"),
+      "the dangling symlink is neither reaped nor kept — it is simply skipped",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reapStaleWorktrees: a worktree dir removed as a side effect of its OWN `git worktree list` call (mid-pass vanish, the SECOND stat) still reaps cleanly via mtimeMs=0", () => {
+  const t = makeRepoWithNamedWorktree("sweep-W1-T914-vanish", "run-W1-T914-1784000000000");
+  const bin = mkdtempSync(join(tmpdir(), "rmd-reap-vanish-git-"));
+  const oldPath = process.env.PATH;
+  try {
+    // A fake `git` ahead of the real one on PATH: whatever `resolveWorktreeRegistration`
+    // asks it (only ever `worktree list --porcelain` inside reapStaleWorktrees), it first
+    // removes this test's OWN worktree dir as a side effect, then reports nothing found —
+    // simulating the directory vanishing BETWEEN the loop's first stat (isDir check, which
+    // already passed) and its second (the mtimeMs read for the age gate).
+    writeFileSync(
+      join(bin, "git"),
+      `#!/bin/sh\nrm -rf "${t.wtPath}"\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${bin}:${oldPath}`;
+
+    const summary = reapStaleWorktrees(t.worktreesRoot, { now: () => 4_000_000_000_000 });
+    assert.ok(!existsSync(t.wtPath), "the entry (removed mid-pass by its own registration lookup) stays gone");
+    assert.ok(summary.reaped.includes(t.dirName), "the mid-pass vanish is still recorded as reaped, not silently dropped");
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(t.dir, { recursive: true, force: true });
+  }
+});
+
+test("reapStaleWorktrees: a removal failure on one aged, terminal entry is best-effort KEPT — never thrown — and does not block the rest of the pass", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-reap-permfail-")));
+  const entryPath = join(root, "run-W1-T915-permfail");
+  const lockedDir = join(entryPath, "sub");
+  try {
+    mkdirSync(lockedDir, { recursive: true });
+    writeFileSync(join(lockedDir, "f.txt"), "x\n");
+    // No write permission on `sub` — deleting `sub/f.txt` (and hence the recursive
+    // `rmSync(entryPath, ...)`) fails with EACCES; Node's `force` option only swallows
+    // ENOENT, so this genuinely throws inside the reaper's own removal try/catch.
+    chmodSync(lockedDir, 0o500);
+
+    // A genuine second reap candidate, proving the permission failure doesn't halt the pass.
+    const okPath = join(root, "run-W1-T916-ok");
+    mkdirSync(okPath, { recursive: true });
+    writeRunLock(okPath, { pid: 999999, run_id: "W1-T916", startedAt: "2026-07-01T00:00:00Z" });
+
+    const summary = reapStaleWorktrees(root, { isPidAlive: () => false, now: () => 4_000_000_000_000 });
+    assert.ok(summary.kept.includes("run-W1-T915-permfail"), "a removal hiccup is best-effort KEPT, never thrown");
+    assert.ok(!summary.reaped.includes("run-W1-T915-permfail"));
+    assert.ok(summary.reaped.includes("run-W1-T916-ok"), "the pass continues past the failed entry");
+  } finally {
+    chmodSync(lockedDir, 0o700);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runWorktreeReapRung: a malformed config (worktreesDir throws) is caught and ledgered as worktree.reap.error, never thrown to the caller", () => {
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const log = (step: string, extra?: Record<string, unknown>) => logs.push({ step, extra });
+  const summary = runWorktreeReapRung({} as Config, log); // no `root` — `join(undefined, ...)` throws
+  assert.deepEqual(summary, { reaped: [], reapedLocks: [], kept: [] }, "the pre-declared empty summary survives the throw");
+  assert.ok(
+    logs.some((l) => l.step === "worktree.reap.error" && typeof l.extra?.error === "string"),
+    "the rung's own failure is ledgered by name, never thrown to sweepCommand/buildSweepHook",
+  );
 });
 
 // ── CADENCE (hole 2): the reaper runs from `rmd sweep` AND from the daemon's own per-poll ──
