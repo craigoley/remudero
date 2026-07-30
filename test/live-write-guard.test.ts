@@ -111,6 +111,17 @@ test("STRUCTURAL: every outward-effect call site in src/ is guarded — this is 
     });
   }
   assert.deepEqual(unguarded, [], `these outward call sites are NOT guarded:\n${unguarded.join("\n")}`);
+
+  // THE LEAF ITSELF. After impl-BA the push goes out through an indirection
+  // (`(opts.exec ?? defaultPushExec)(...)`), so the argv-substring scan above can no longer
+  // see it — which means the scan alone would NOT notice the leaf losing its guard. Assert
+  // it directly: this is the single line that guards all nine former call sites.
+  const leaf = readFileSync("src/lib/git-push.ts", "utf8");
+  assert.ok(
+    leaf.includes('assertLiveWriteAllowed("git-push"'),
+    "src/lib/git-push.ts is THE git-push leaf and has lost its guard — every push in the " +
+      "codebase routes through it, so nothing is guarded",
+  );
 });
 
 // ── The per-test opt-out (operator ruling 2026-07-30, option 2) ─────────────────────
