@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { approveCommand, planCommand, triageCommand } from "../src/run-task.js";
+import { approveCommand, buildSweepEffects, planCommand, triageCommand } from "../src/run-task.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
@@ -310,5 +310,94 @@ test("GUARDED SITE approve push and pr-create: the REAL un-injected gateway reac
     process.env.HOME = savedHome;
     process.env.PATH = savedPath;
     for (const d of [bare, home, root, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// ── run-task.ts:7348 — the SWEEP fix rung's best-effort push ─────────────────────────
+// The last of PR #954's guarded call sites with no coverage. `buildSweepEffects().dispatchFix`
+// drives `runFixRung`, which calls `deps.push(...)` once the fix worker returns. That spawn
+// was hardcoded until now; it is injectable here for exactly the reason `reviewRunner` beside
+// it already is. Offline: a bare TMPDIR origin carrying the run branch, a gh shim, and a fake
+// spawn. The push is real and lands in that origin, so the drive is exempted.
+test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its best-effort push", async () => {
+  const TASK = "W1-TSWEEP";
+  const branch = `run-${TASK}-1785100000003`;
+  const bare = mkdtempSync(join(tmpdir(), "sweepfix-origin-"));
+  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: GIT_ENV });
+  const seed = mkdtempSync(join(tmpdir(), "sweepfix-seed-"));
+  execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: GIT_ENV });
+  writeFileSync(join(seed, "README.md"), "seed\n");
+  git(seed, "add", "-A");
+  git(seed, "commit", "--quiet", "-m", "seed");
+  git(seed, "remote", "add", "origin", bare);
+  git(seed, "push", "--quiet", "origin", "main");
+  git(seed, "checkout", "--quiet", "-b", branch);
+  writeFileSync(join(seed, "work.txt"), "work\n");
+  git(seed, "add", "-A");
+  git(seed, "commit", "--quiet", "-m", "work");
+  git(seed, "push", "--quiet", "origin", branch);
+  rmSync(seed, { recursive: true, force: true });
+
+  const root = mkdtempSync(join(tmpdir(), "sweepfix-root-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "sweepfix-shim-"));
+  const savedPath = process.env.PATH;
+  try {
+    const repoDir = join(root, "repos", "sandboxrepo");
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: GIT_ENV });
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
+
+    writeFileSync(
+      join(shimDir, "gh"),
+      [
+        "#!/bin/sh",
+        'case "$*" in',
+        `  *"headRefName"*) printf '{"headRefName":"%s"}\\n' "${branch}" ;;`,
+        '  *"statusCheckRollup"*) echo \'{"statusCheckRollup":[{"name":"ci","conclusion":"SUCCESS"}]}\' ;;',
+        '  *"--json state"*) echo \'{"state":"OPEN"}\' ;;',
+        '  *"--json body"*) echo \'{"body":""}\' ;;',
+        '  *"pr diff"*) echo "" ;;',
+        "  *) exit 0 ;;",
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${shimDir}:${savedPath}`;
+
+    let fixSpawns = 0;
+    const steps: string[] = [];
+    const effects = buildSweepEffects(
+      "acme",
+      "sandboxrepo",
+      { claudeBin: "/usr/bin/true", root } as never,
+      join(root, "ledger.ndjson"),
+      "SWEEP-FIX-1",
+      { tasks: [{ id: TASK, title: "sweep fixture", repo: "sandboxrepo", type: "implement", risk: "low", verify: "auto", status: "queued", attempts: 0, depends_on: [] }] } as never,
+      (step, extra) => { steps.push(`${step} ${JSON.stringify(extra ?? {})}`); },
+      undefined,
+      undefined,
+      async () => {
+        fixSpawns += 1;
+        return fakeWorker("REPORT\nfix applied\n");
+      },
+    );
+
+    try {
+      await withLiveWritesAllowed(() =>
+        effects.dispatchFix(
+          { prNumber: 7, prUrl: "https://github.com/acme/sandboxrepo/pull/7", taskId: TASK, reviewState: "failure" } as never,
+          { unmetCriteria: [{ claim: "c1", proof: "unit test: p", met: false, why: "unmet" }], ciFailures: [] } as never,
+        ),
+      );
+    } catch {
+      /* the rung may end non-zero once the fix worker returns — reaching it is the assertion */
+    }
+
+    assert.ok(fixSpawns >= 1, `fixSpawns=${fixSpawns} steps=${JSON.stringify(steps)}`);
+  } finally {
+    process.env.PATH = savedPath;
+    for (const d of [bare, root, shimDir]) rmSync(d, { recursive: true, force: true });
   }
 });

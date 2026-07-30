@@ -7156,6 +7156,11 @@ export function buildSweepEffects(
   // W1-T254: injectable review runner so the post-review effect's attempt/
   // done/failed logging path is unit-covered without spawning a real review.
   reviewRunner: (prNumber: number) => Promise<number> = (prNumber) => reviewCommand(String(prNumber), ["--repo", repo]),
+  // Injectable worker spawn, same shape and rationale as `reviewRunner` directly above: the
+  // fix rung's own effects (including its best-effort push) were unreachable from any offline
+  // test because the adapter below hardcoded `spawnWorker`. Optional with no default body, so
+  // this adds no new executable line — the adapter itself resolves it.
+  spawnImpl?: (args: SpawnWorkerArgs) => Promise<WorkerResult>,
 ): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = ghIssueGateway(owner, repo);
@@ -7326,7 +7331,7 @@ export function buildSweepEffects(
           deps: {
             // Fresh-spawn adapter: an empty resumeSessionId (cold PR) becomes a
             // fresh spawn rather than an attempt to resume a session that doesn't exist.
-            spawn: (args) => spawnWorker({ ...args, resumeSessionId: args.resumeSessionId || undefined }),
+            spawn: (args) => (spawnImpl ?? spawnWorker)({ ...args, resumeSessionId: args.resumeSessionId || undefined }),
             waitForCiGreen,
             // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
             // non-green — see runFixRung's own doc for why this must happen on
