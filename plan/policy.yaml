@@ -1,0 +1,125 @@
+# plan/policy.yaml — the fleet's operating constants AS DATA (W1-T252, P37 substrate,
+# ratifies P34's 2026-07-23 operator ruling). SAME load-and-validate house pattern
+# .remudero/mounts.yaml and plan/alert-policy.yaml already use (parsed with the `yaml`
+# package, validated by src/lib/policy.ts's `validatePolicy`/`loadPolicy`).
+#
+# WHY: before this file, the fleet's operating constants (proof timeout, prune grace,
+# poll interval, fix-strike cap, sweep thresholds, drain width, headroom curve) were
+# literals scattered across src/lib/*.ts — a value change was an edit to a constant,
+# invisible to plan review. Every field below is SCHEMA-BOUNDED (min/max travel with
+# the value, enforced by src/lib/policy.ts at load, and by `rmd lint-plan` at review
+# time) — a value change is now a reviewed plan PR, and an out-of-bounds edit is
+# refused mechanically rather than caught in code review after the fact.
+#
+# PROVENANCE (`origin`, on every field): `lifted:<src-site>` names the exact source
+# constant this field's INITIAL value was copied from (verified against source at
+# authoring time, OPERATOR RULING 2026-07-23) — never trust this comment over the
+# cited site; re-derive it yourself if the site moves. `net-new` marks a field with
+# NO prior source literal — `launchd.throttleIntervalS` is the one net-new field this
+# file carries (the daemon's generated plist has no ThrottleInterval key today; see
+# src/lib/launchd.ts's `generateLaunchdPlist`). A `net-new` field must NEVER be
+# relabeled `lifted:` without a real source site to cite, and a `lifted:` field must
+# NEVER be relabeled `net-new` — src/lib/policy.ts's loader enforces both directions
+# per named field (test/policy.test.ts).
+#
+# THE 30000 REGRESSION (OPERATOR RULING, binding, rounds 1-4): `proofTimeoutMs.min` is
+# set to 60000 — the value ALREADY live at src/lib/review.ts:675 — not merely as this
+# field's initial value but as its FLOOR. A P37 fixture draft carried a stale 30000
+# proof-timeout figure that predates a merged change; loading (or lint-plan-checking)
+# a policy fixture with `proofTimeoutMs.value: 30000` FAILS the normal min-bound check
+# for exactly this reason — 30000 is a regression below the live source value, not a
+# looser tuning choice, and must be refused, never silently accepted as "a smaller
+# number is fine".
+#
+# WIRING NOTE: this file and its loader (src/lib/policy.ts) are the SUBSTRATE only —
+# no consumer site reads from it yet. W1-T253 (P37 CONSUMERS, depends_on this task)
+# rewires review.ts/worker.ts/daemon.ts/sweep.ts/drain.ts/launchd.ts to read every
+# field below instead of their current source literals.
+
+proofTimeoutMs:
+  value: 60000
+  origin: "lifted:src/lib/review.ts:675 (DEFAULT_PROOF_TIMEOUT_MS)"
+  # Floor = the CURRENT live source value. Never regress below it (the 30000 rejection).
+  min: 60000
+  max: 300000
+
+pruneGraceMs:
+  value: 120000
+  origin: "lifted:src/lib/worker.ts:1243 (DEFAULT_PRUNE_GRACE_MS)"
+  min: 30000
+  max: 900000
+
+pollIntervalMs:
+  value: 60000
+  origin: "lifted:src/lib/daemon.ts:87 (DEFAULT_POLL_INTERVAL_MS)"
+  min: 5000
+  max: 600000
+
+fixStrikeCap:
+  value: 2
+  origin: "lifted:src/lib/config.ts:218 (fixStrikeCap default)"
+  min: 1
+  max: 10
+
+sweep:
+  staleDays:
+    value: 14
+    origin: "lifted:src/lib/sweep.ts:254 (DEFAULT_SWEEP_POLICY.staleDays)"
+    min: 1
+    max: 90
+  strikeCap:
+    value: 2
+    origin: "lifted:src/lib/sweep.ts:255 (DEFAULT_SWEEP_POLICY.strikeCap)"
+    min: 1
+    max: 10
+  wipLimit:
+    value: 10
+    origin: "lifted:src/lib/sweep.ts:257 (DEFAULT_SWEEP_POLICY.wipLimit)"
+    min: 1
+    max: 50
+
+drain:
+  max:
+    value: 10
+    origin: "lifted:src/lib/drain.ts:243 (DEFAULT_MAX)"
+    min: 1
+    max: 100
+
+# The daemon's headroom ceiling curve (src/lib/daemon.ts's `buildDefaultHeadroomPolicy`):
+# at/under 24h-to-window-reset the ceiling is 100% (no reason to hold back headroom that
+# expires unused at reset); otherwise it holds at `reservePct`, the operator reserve
+# (src/lib/headroom.ts's `HEADROOM_LIMIT_PCT`, currently 95). `maxHoursToReset: null`
+# means "no ceiling on hours" (the last, catch-all rung — mirrors `Infinity` in source).
+headroom:
+  curve:
+    value:
+      - { maxHoursToReset: 24, limitPct: 100 }
+      - { maxHoursToReset: null, limitPct: 95 }
+    origin: "lifted:src/lib/daemon.ts:145-148 (buildDefaultHeadroomPolicy)"
+  reservePct:
+    value: 95
+    origin: "lifted:src/lib/headroom.ts:119 (HEADROOM_LIMIT_PCT)"
+    min: 50
+    max: 100
+  # OPERATOR RULING 2026-07-25 (fb-1784894405468-a4153e, superseded default clause):
+  # documented default TRUE — matches the live runtime default (daemon.ts:968's
+  # `opts.headroomEnabled ?? true`) — the governor protects the subscription window
+  # by default; opting into overflow spend is the deliberate act, set here or via
+  # config `headroom.enabled: false` / `RMD_HEADROOM_ENABLED=0` (both still win over
+  # this row once W1-T253 wires the read).
+  enabled:
+    value: true
+    origin: "lifted:src/lib/daemon.ts:968 (headroomEnabled default)"
+
+# NET-NEW: no daemon-plist ThrottleInterval literal exists in src today (see
+# src/lib/launchd.ts's `generateLaunchdPlist` — it emits no ThrottleInterval key).
+# The R-1 relaunch-storm rate limit already applied to the SEPARATE serve unit
+# (`DEFAULT_SERVE_THROTTLE_S`, also 60) is the precedent this value follows, but this
+# row governs the daemon unit specifically and is NEVER to be presented as lifted from
+# that (or any) source constant.
+launchd:
+  throttleIntervalS:
+    value: 60
+    origin: "net-new"
+    min: 10
+    max: 3600
