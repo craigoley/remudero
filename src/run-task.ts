@@ -2940,26 +2940,37 @@ async function runTask(
   // worktree, no worker ever spawns. `rmd drain` dispatches every task through
   // this same `runTask` path, so this ONE call site gates both entry points.
   try {
-    // proofDialect:"warn" — W1-T246: the check that a proof cannot execute (the dead
-    // proof floor) BLOCKS at filing (`rmd lint-plan`, the inbox draft rung, the retro's
-    // plan-health sweep — all default to "block") but only WARNS pre-dispatch, so the
-    // ~90-task legacy backlog authored before this check existed does not brick into
-    // blocked_illformed overnight. Log every such warning (visibility, never a refusal)
-    // BEFORE the shared assertLintClean gate below runs the SAME check again to decide
-    // whether to dispatch — a block-severity violation (any OTHER check) still refuses.
+    // proofDialect — W1-T246's pre-dispatch "warn" demotion is REVERSED here: a proof that
+    // cannot execute now BLOCKS pre-dispatch, exactly as it already blocks at filing (`rmd
+    // lint-plan`, the inbox draft rung, the retro's plan-health sweep). The demotion's stated
+    // reason was that a "~90-task legacy backlog" would brick into blocked_illformed
+    // overnight; measured over the 7 days to 2026-07-30 that premise no longer holds — only
+    // 24 tasks are dispatchable at all, 15 of which still dispatch under this gate, while the
+    // demotion let 45 runs / $400.83 (49.4% of run spend, 34 distinct tasks) reach a worker
+    // with a proof that could never execute. NONE of those 45 merged, and none could have:
+    // review.ts's `capped` (`executableCriteria.length > 0 && executedCount === 0`) is
+    // unavoidable for such a task, and decideAutoMergeArm has refused to arm auto-merge on
+    // ANY capped verdict since W1-T229/#528 (2026-07-22). So this refusal declines to pay for
+    // a run a downstream gate would refuse anyway. The escape hatch is `git revert` of the
+    // one commit that made this change — deliberately no config key, env var, or policy row.
     //
-    // proofResolvability:"warn" — W1-T101, the SAME rollout convention for the SAME
-    // reason: measured against the live queue, the check that a dialect-prefixed proof
-    // names no resolvable artifact trips ~200 already-queued tasks (the `unit test:`
-    // narrative authoring convention long predates this check) — an unconditional block
-    // here would brick most of the open backlog overnight. BLOCKS at filing/plan-health
-    // (the birth gate this check exists for); WARNS pre-dispatch.
-    for (const v of lintTask(task, { proofDialect: "warn", proofResolvability: "warn" }).violations) {
+    // proofResolvability:"warn" — DELIBERATELY LEFT DEMOTED, and this is not an oversight.
+    // W1-T101's rollout reason still binds: a queued task's proof legitimately FORWARD-
+    // REFERENCES the test its own PR will create (recon-AB measured 27 of 39 path proofs
+    // doing exactly that), and resolvability cannot tell that apart from a dead reference
+    // pre-dispatch. Blocking it would refuse correct authoring at scale. BLOCKS at
+    // filing/plan-health (the birth gate this check exists for); WARNS pre-dispatch.
+    //
+    // ONE options object for both calls: the loop below is visibility-only (it ledgers a
+    // `lint.warned` line per still-demoted violation) and `assertLintClean` is the actual
+    // gate, so the two MUST agree — two separate literals had already drifted once.
+    const preDispatchLint = { proofResolvability: "warn" } as const;
+    for (const v of lintTask(task, preDispatchLint).violations) {
       if ((v.check === "proof-dialect" || v.check === "proof-resolvability") && v.severity === "warn") {
         log("lint.warned", { check: v.check, message: v.message });
       }
     }
-    assertLintClean(task, { proofDialect: "warn", proofResolvability: "warn" });
+    assertLintClean(task, preDispatchLint);
   } catch (e) {
     if (e instanceof TaskLintError) {
       log("lint.blocked", { violations: e.violations });
