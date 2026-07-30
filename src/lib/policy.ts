@@ -114,8 +114,10 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-/** Parse+validate one `origin:` string into its {@link PolicyOriginKind}, by field path. */
-function parseOrigin(path: string, raw: unknown): PolicyFieldOrigin {
+/** Parse+validate one `origin:` string into its {@link PolicyOriginKind}, by field path.
+ *  Exported for the direct unrecognized-field guard test (validatePolicy only ever passes
+ *  registered paths, so that defensive branch is unreachable through the public loader). */
+export function parseOrigin(path: string, raw: unknown): PolicyFieldOrigin {
   if (typeof raw !== "string" || raw.length === 0) {
     throw new PolicyError(`policy.yaml: '${path}.origin' must be a non-empty string, got ${JSON.stringify(raw)}.`);
   }

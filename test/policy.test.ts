@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   loadPolicy,
+  parseOrigin,
   policyPath,
   PolicyError,
   validatePolicy,
@@ -308,4 +309,73 @@ test("REJECTS min > max as an unsatisfiable bound", () => {
   (raw.fixStrikeCap as Record<string, unknown>).min = 10;
   (raw.fixStrikeCap as Record<string, unknown>).max = 1;
   throwsPolicyError(() => validatePolicy(raw), /unsatisfiable bound/);
+});
+
+// ── structural-guard coverage: every defensive PolicyError branch has a falsifier ──────────
+// These pin the validator's malformed-input rejections (each a distinct throw the shipped,
+// well-formed policy.yaml never reaches) so a future refactor that drops a guard fails RED.
+
+test("parseOrigin REJECTS an unregistered field path (the defensive unknown-field guard)", () => {
+  throwsPolicyError(() => parseOrigin("bogus.not-a-policy-field", "net-new"), /is not a recognized policy field/);
+});
+
+test("parseOrigin REJECTS a non-string / empty origin", () => {
+  throwsPolicyError(() => parseOrigin("proofTimeoutMs", ""), /origin.*must be a non-empty string/);
+  throwsPolicyError(() => parseOrigin("proofTimeoutMs", 42), /origin.*must be a non-empty string/);
+});
+
+test("REJECTS a numeric field that is not a {value,origin,min,max} mapping", () => {
+  const raw = goodRaw();
+  raw.proofTimeoutMs = 60_000; // a bare number, not the bounded-field mapping
+  throwsPolicyError(() => validatePolicy(raw), /proofTimeoutMs.*must be a mapping/);
+});
+
+test("REJECTS a numeric field missing its numeric min/max bounds", () => {
+  const raw = goodRaw();
+  raw.proofTimeoutMs = { value: 60_000, origin: "lifted:src/lib/review.ts:675" }; // no min/max
+  throwsPolicyError(() => validatePolicy(raw), /proofTimeoutMs.*must carry numeric 'min' and 'max'/);
+});
+
+test("REJECTS a boolean field that is not a {value,origin} mapping", () => {
+  const raw = goodRaw();
+  (raw.headroom as Record<string, unknown>).enabled = true; // a bare boolean, not the mapping
+  throwsPolicyError(() => validatePolicy(raw), /headroom\.enabled.*must be a mapping/);
+});
+
+test("REJECTS a headroom.curve that is not a {value,origin} mapping", () => {
+  const raw = goodRaw();
+  (raw.headroom as Record<string, unknown>).curve = [{ maxHoursToReset: null, limitPct: 95 }]; // array, not mapping
+  throwsPolicyError(() => validatePolicy(raw), /headroom\.curve.*must be a mapping/);
+});
+
+test("REJECTS a headroom.curve whose value is an empty (or non-array) rung list", () => {
+  const raw = goodRaw();
+  (raw.headroom as Record<string, unknown>).curve = { value: [], origin: "lifted:src/lib/daemon.ts:145-148" };
+  throwsPolicyError(() => validatePolicy(raw), /headroom\.curve\.value.*must be a non-empty array/);
+});
+
+test("REJECTS a headroom.curve rung that is not a mapping", () => {
+  const raw = goodRaw();
+  (raw.headroom as Record<string, unknown>).curve = { value: [5], origin: "lifted:src/lib/daemon.ts:145-148" };
+  throwsPolicyError(() => validatePolicy(raw), /headroom\.curve\.value\[0\].*must be a mapping/);
+});
+
+test("REJECTS a headroom.curve rung whose maxHoursToReset is neither null nor a positive number", () => {
+  const raw = goodRaw();
+  (raw.headroom as Record<string, unknown>).curve = {
+    value: [{ maxHoursToReset: -5, limitPct: 100 }],
+    origin: "lifted:src/lib/daemon.ts:145-148",
+  };
+  throwsPolicyError(() => validatePolicy(raw), /headroom\.curve\.value\[0\]\.maxHoursToReset.*must be null or a positive number/);
+});
+
+test("loadPolicy REJECTS a file that is not valid YAML, naming the path", () => {
+  const dir = mkdtempSync(join(REPO_ROOT, "test", ".tmp-w1-t252-badyaml-"));
+  const bad = join(dir, "policy.yaml");
+  writeFileSync(bad, "proofTimeoutMs: {value: 60000,\n  bad: [unterminated\n", "utf8"); // malformed YAML
+  try {
+    throwsPolicyError(() => loadPolicy(bad), /is not valid YAML/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
