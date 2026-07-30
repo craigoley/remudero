@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { ghPrMergeSquash } from "../src/lib/worker.js";
 import { ghPrCreateFillCommand } from "../src/run-task.js";
 import { ghIssueGateway } from "../src/lib/escalate.js";
+import { gitPushRunBranch } from "../src/lib/git-push.js";
 import { LiveWriteBlockedError, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
 // ── LEAF-LEVEL GUARD PROOFS ──────────────────────────────────────────────────────────
@@ -128,18 +129,71 @@ test("LEAF GUARD gh-issue-create: ghIssueGateway create REFUSES and its injected
   assert.deepEqual(seen[0].slice(0, 4), ["issue", "create", "--repo", "acme/remudero"]);
 });
 
-// ── THE OPERATION WITH NO LEAF: git-push ─────────────────────────────────────────────
-// Documented as an executable assertion rather than a comment, so it FAILS THE BUILD if
-// someone later extracts a push helper without moving the guard into it — at which point
-// this test should be replaced by a real leaf-refusal test like the three above.
-test("git-push has NO shared leaf — every push is inlined, which is why its guard cannot be relocated", () => {
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  const inlinedPushes = src
-    .split("\n")
-    .filter((l) => l.includes('"push"') && l.includes('execFileSync("git"'));
-  assert.ok(
-    inlinedPushes.length >= 8,
-    `expected the inlined git-push call sites to still be inlined, found ${inlinedPushes.length} — ` +
-      "if a shared push leaf has been extracted, move the guard into it and replace this test",
-  );
+// ── LEAF: lib/git-push.ts gitPushRunBranch — boundary "git-push" ─────────────────────
+// Extracted by impl-BA. Nine inlined execFileSync calls across seven top-level functions in
+// two files now route through this one helper, so the guard is at the leaf like the other
+// three operations. The `exec` seam is what makes it testable at all: six of those nine
+// sites sat after a spawnWorker call inside commands with no injectable deps.
+test("LEAF GUARD git-push: gitPushRunBranch REFUSES and the injected exec is never reached", () => {
+  const seen: Array<{ file: string; args: string[] }> = [];
+  const rec = (file: string, args: string[]) => {
+    seen.push({ file, args });
+  };
+
+  let caught: unknown;
+  try {
+    gitPushRunBranch("/tmp/wt", { exec: rec });
+  } catch (e) {
+    caught = e;
+  }
+  assert.ok(caught instanceof LiveWriteBlockedError, "the leaf refused with LiveWriteBlockedError");
+  assert.match(String((caught as Error).message), /git-push/, "the error names its own boundary");
+  assert.equal(seen.length, 0, "the injected exec was never reached — nothing was pushed");
+
+  // WOULD-HAVE-FIRED control: exempted, the identical call reaches the exec exactly once
+  // with the argv every former call site used. Without this, an empty log could equally
+  // mean the test never arrived at the boundary.
+  withLiveWritesAllowed(() => gitPushRunBranch("/tmp/wt", { exec: rec }));
+  assert.equal(seen.length, 1, "exempted, the same call reaches the exec exactly once");
+  assert.equal(seen[0].file, "git");
+  assert.deepEqual(seen[0].args, ["-C", "/tmp/wt", "push", "origin", "HEAD"]);
+});
+
+// The two best-effort sites (run-task.ts fix rungs) SWALLOW a thrown refusal in their own
+// `try/catch`, so for them `assert.throws` would pass vacuously. The observable there is the
+// UN-MADE CALL, which this pins directly: the refusal propagates out of the helper, and the
+// caller's catch is what discards it — so the push still never happens.
+test("LEAF GUARD git-push: a swallowed best-effort caller still makes no push — the refusal is what it swallows", () => {
+  const seen: string[][] = [];
+  const rec = (_file: string, args: string[]) => {
+    seen.push(args);
+  };
+  // Exactly the shape of run-task.ts's fix-rung push closure.
+  const bestEffortPush = (wt: string) => {
+    try {
+      gitPushRunBranch(wt, { stdio: "ignore", exec: rec });
+    } catch {
+      /* best-effort — mirrors the real caller */
+    }
+  };
+
+  assert.doesNotThrow(() => bestEffortPush("/tmp/wt"), "the caller swallows it, so nothing propagates");
+  assert.equal(seen.length, 0, "and NO push was made — the un-made call is the only observable here");
+
+  withLiveWritesAllowed(() => bestEffortPush("/tmp/wt"));
+  assert.equal(seen.length, 1, "exempted, the same best-effort caller does push");
+  assert.deepEqual(seen[0], ["-C", "/tmp/wt", "push", "origin", "HEAD"]);
+});
+
+// spike.ts's push-fallback used `push -u`. It was the ONE argv divergence, and it is a
+// parameter rather than a second implementation. It was also UNGUARDED before this change.
+test("LEAF GUARD git-push: the setUpstream variant refuses too, and builds push -u when exempted", () => {
+  const seen: string[][] = [];
+  const rec = (_f: string, args: string[]) => {
+    seen.push(args);
+  };
+  assert.throws(() => gitPushRunBranch("/tmp/wt", { setUpstream: true, exec: rec }), LiveWriteBlockedError);
+  assert.equal(seen.length, 0, "no push was made");
+  withLiveWritesAllowed(() => gitPushRunBranch("/tmp/wt", { setUpstream: true, exec: rec }));
+  assert.deepEqual(seen[0], ["-C", "/tmp/wt", "push", "-u", "origin", "HEAD"], "the -u divergence is preserved exactly");
 });

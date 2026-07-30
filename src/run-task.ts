@@ -379,6 +379,7 @@ import {
   type WorkerResult,
   type WorktreeReapSummary,
 } from "./lib/worker.js";
+import { gitPushRunBranch } from "./lib/git-push.js";
 import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from "./lib/worker-home.js";
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, FIX_WORKER_TOOLS, neutralizeFenceMarkers } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "./lib/drain-lock.js";
@@ -3538,8 +3539,7 @@ async function runTask(
         return { taskId, runId, merged: false, costUsd, verdict: "failed" };
       }
       say("fallback: pushing branch from orchestrator (outside sandbox)");
-      assertLiveWriteAllowed("git-push", "pushing the run branch to origin");
-      execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+      gitPushRunBranch(worktreePath);
     }
     if (!prUrl) {
       const prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch);
@@ -3664,8 +3664,7 @@ async function runTask(
           runReview,
           push: (wt) => {
             try {
-              assertLiveWriteAllowed("git-push", "pushing the run branch to origin");
-              execFileSync("git", ["-C", wt, "push", "origin", "HEAD"], { stdio: "ignore" });
+              gitPushRunBranch(wt, { stdio: "ignore" });
             } catch {
               // best-effort — the fix worker may already have pushed itself;
               // nothing new to push is not an error.
@@ -5126,8 +5125,7 @@ async function retroCommand(
       onOrigin = false;
     }
     if (!onOrigin || orientationCommitted || planIndexCommitted) {
-      assertLiveWriteAllowed("git-push", "pushing the run branch to origin");
-      execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+      gitPushRunBranch(worktreePath);
     }
 
     let prUrl = parseReport([worker.text, worker.blocks.join("\n")].join("\n"))?.prUrl;
@@ -7341,8 +7339,7 @@ export function buildSweepEffects(
             runReview,
             push: (wt) => {
               try {
-                assertLiveWriteAllowed("git-push", "pushing the run branch to origin");
-                execFileSync("git", ["-C", wt, "push", "origin", "HEAD"], { stdio: "ignore" });
+                gitPushRunBranch(wt, { stdio: "ignore" });
               } catch {
                 /* best-effort — the worker may already have pushed */
               }
@@ -8384,8 +8381,7 @@ export async function triageCommand(rest: string[]): Promise<number> {
     execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/"], { stdio: "inherit" });
     const commitMessage = triageCommitMessage({ decision, feedbackId, taskId, grillIssueUrl });
     execFileSync("git", ["-C", worktreePath, "commit", "-m", commitMessage], { stdio: "inherit" });
-    assertLiveWriteAllowed("git-push", "pushing the run branch to origin");
-    execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+    gitPushRunBranch(worktreePath);
 
     const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch);
     const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
@@ -8418,8 +8414,7 @@ export async function triageCommand(rest: string[]): Promise<number> {
         ["-C", worktreePath, "commit", "-m", `chore(triage): record proposal_pr for feedback#${feedbackId}`],
         { stdio: "inherit" },
       );
-      assertLiveWriteAllowed("git-push", "pushing the run branch to origin");
-      execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+      gitPushRunBranch(worktreePath);
     }
 
     // DETERMINISTIC GUARD: a triage PR is PLAN-ONLY. Fail closed if the diff touches anything
@@ -8595,8 +8590,7 @@ async function planCommand(rest: string[]): Promise<number> {
     say(formatPlanVerdictLine(mode, decision));
     const commitMessage = planCommitMessage({ decision, mode, brief, taskId });
     applyPlanProposalCommit(worktreePath, commitMessage);
-    assertLiveWriteAllowed("git-push", "pushing the run branch to origin");
-    execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+    gitPushRunBranch(worktreePath);
 
     const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch);
     const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
@@ -9094,8 +9088,7 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
 
       execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
       execFileSync("git", ["-C", worktreePath, "commit", "-m", approveCommitMessage(payload)], { stdio: "inherit" });
-      assertLiveWriteAllowed("git-push", "pushing the run branch to origin");
-      execFileSync("git", ["-C", worktreePath, "push", "origin", "HEAD"], { stdio: "inherit" });
+      gitPushRunBranch(worktreePath);
       return branch;
     },
     openPlanPr(branch, id) {

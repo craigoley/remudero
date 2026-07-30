@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./lib/config.js";
 import { assertLiveWriteAllowed } from "./lib/live-write-guard.js";
+import { gitPushRunBranch } from "./lib/git-push.js";
 import {
   DENY_FLOOR_FALLBACK_MODE,
   evaluateDenyFloor,
@@ -258,7 +259,7 @@ async function main(): Promise<void> {
   }
   if (!branchOnOrigin) {
     log("PUSH FALLBACK", "worker in-sandbox push did not land branch → orchestrator pushes outside sandbox");
-    execFileSync("git", ["-C", worktreePath, "push", "-u", "origin", "HEAD"], { stdio: "inherit" });
+    gitPushRunBranch(worktreePath, { setUpstream: true });
     pushPath = "orchestrator git push OUTSIDE sandbox (in-sandbox push did not land the branch)";
     branchOnOrigin = true;
   }

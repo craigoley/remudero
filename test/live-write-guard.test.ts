@@ -77,7 +77,11 @@ test("STRUCTURAL: every outward-effect call site in src/ is guarded — this is 
   // containment — which is worse than none because it invites false confidence. This test
   // is the replacement for a choke point: a NEW unguarded outward call fails the build.
   const SHAPES = [
-    '"push", "origin", "HEAD"',
+    // impl-BA: git-push now has a LEAF (src/lib/git-push.ts). The old marker was the exact
+    // substring '"push", "origin", "HEAD"', which MISSED spike.ts's `push -u` variant — that
+    // call site sat UNGUARDED and this test still reported clean. `PUSH_SHAPE` below is
+    // checked structurally instead, so both variants are caught and the only surviving
+    // inlined push (the leaf's own) must carry the guard.
     '"pr", "create"',
     '"pr", "merge"',
     '"issue", "create"',
@@ -89,11 +93,16 @@ test("STRUCTURAL: every outward-effect call site in src/ is guarded — this is 
       return statSync(p).isDirectory() ? walk(p) : p.endsWith(".ts") ? [p] : [];
     });
 
+  // Any inlined `execFileSync("git", [... "push" ...])` anywhere in src/, regardless of the
+  // exact argv — this is what the old exact-substring marker could not see.
+  const isInlinedPush = (line: string): boolean =>
+    line.includes('execFileSync("git"') && line.includes('"push"');
+
   const unguarded: string[] = [];
   for (const file of walk("src")) {
     const lines = readFileSync(file, "utf8").split("\n");
     lines.forEach((line, i) => {
-      if (!SHAPES.some((s) => line.includes(s))) return;
+      if (!SHAPES.some((s) => line.includes(s)) && !isInlinedPush(line)) return;
       if (line.includes("assertLiveWriteAllowed")) return;
       // guarded when the assert appears on the preceding line, or anywhere in the
       // enclosing few lines above (a builder guard at the top of its function).
