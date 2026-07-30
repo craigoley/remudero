@@ -1,0 +1,128 @@
+- id: W1-T263
+  title: "TWO WRITE PATHS DIRTY THE DAEMON'S OWN CHECKOUT AND SO DISABLE ITS AUTO-SYNC — the DECISIONS.md append (run-task.ts:3404) and the console's feedback status flip (panel-graph.ts:371 -> feedback.ts:301) leave TRACKED modifications in the checkout the daemon runs from, and checkCliFreshness refuses every non-exempt rmd verb while that checkout is both dirty and behind origin/main, so the mechanism that would clear the staleness is the mechanism the dirt switches off"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 120.00
+  rationale: "OBSERVED 2026-07-29/30. Two code paths write into the daemon's OWN canonical checkout as a
+    side effect of normal operation, and neither commits:
+      (1) DECISIONS.md. run-task.ts:3404-3411 does `appendFileSync(join(repoRoot, \"DECISIONS.md\"), ...)`
+          in the decision.autochoose path. repoRoot is resolveRepoRoot(argv, cwd) (run-task.ts:456-474) =
+          the git toplevel of the daemon's cwd, i.e. the checkout the daemon is running from.
+      (2) plan/feedback/*.yaml status. The console's POST /v1/feedback/decision route
+          (panel-graph.ts:350-377, registered at serve.ts:3202 with root = repoRoot per run-task.ts:6508)
+          calls setFeedbackStatus(deps.root, id, status) at panel-graph.ts:371, whose sole write is
+          writeFileSync(feedbackEntryPath(root, id), ...) at feedback.ts:301.
+    Both leave TRACKED modifications, which is what makes this a defect rather than untidiness.
+    THE CONSEQUENCE. checkCliFreshness (self-sync.ts:122-176) refuses when the checkout is BOTH behind
+    origin/main AND dirty — self-sync.ts:168-175 returns {status: \"refused\", reason: \"dirty\"}, and
+    run-task.ts:10843-10847 turns that into process.exit(1) for every non-exempt verb. Main moves several
+    times an hour, so `behind` is the steady state and a lingering modification makes the refusal
+    effectively permanent. The auto-sync that would clear `behind` runs through the same gate, so the dirt
+    switches off its own remedy.
+    OBSERVED DAMAGE: the daemon's plan went stale, so the reviewer read superseded acceptance criteria;
+    `rmd deploy-run` failed 35 consecutive times over five days without once completing a cycle; and a
+    $100-budget run (W1-T253) was nearly judged against the wrong criteria and had to be rescued by a hand
+    pull.
+    THE RECURRENCE IS LIVE, not historical: after a `git reset --hard origin/main` produced a clean tree,
+    the same seven plan/feedback status flips reappeared within the hour, unprompted. At the time of
+    filing the checkout again shows seven `M plan/feedback/*.yaml`, each a one-line
+    `status: proposed` -> `status: accepted`.
+    THE ASYMMETRY THE CODE ALREADY STATES. self-sync.ts:243 says 'DIRT NEVER BLOCKS A SERVICE' — daemon
+    and serve are exempt (run-task.ts:10839-10841) precisely because the daemon dirties its own tree. So
+    the SERVICE is protected from this dirt and the PLAN is not: the exemption keeps the daemon alive
+    while leaving the artifact it reads stale."
+  design: |
+    VERIFY FROM SOURCE FIRST — every coordinate in the rationale was read on 2026-07-30 at origin/main
+    e9fa9ac and line numbers drift.
+
+    THE MECHANISM ALREADY EXISTS AND IS NOT WIRED. src/lib/feedback-landing.ts implements a commit bridge
+    with exactly the missing property, stated in its own doc at feedback-landing.ts:24-27: it "NEVER
+    touches the caller's own working tree, index, or local branches". It fetches origin/main, diffs the
+    local tree against it, builds a commit against a SCRATCH index (GIT_INDEX_FILE, never the repo's real
+    index) via hash-object/write-tree/commit-tree, and force-pushes to ONE shared bot branch
+    (LANDING_BRANCH = "feedback-landing", feedback-landing.ts:46), opening or reusing ONE gated PR.
+    Rebuilding from origin/main's current tip every call is why it never conflicts.
+
+    THREE OBSTACLES, named so the implementer does not rediscover them:
+      (a) IT IS ONLY CALLED FROM captureFeedback. feedback.ts:252 is the sole call site of landFeedback,
+          inside captureFeedback. setFeedbackStatus (feedback.ts:286-303) does NOT call it — which is
+          exactly why the seven status flips sit uncommitted. Wiring the bridge to the status writer is
+          the smaller half of this task.
+      (b) DECISIONS.md IS ONE SHARED APPEND TARGET, and this is the design constraint that makes this not
+          a five-minute change. The bridge's safety rests on force-pushing a branch rebuilt from
+          origin/main's current tip: that is sound for per-entry files that never collide (one
+          plan/feedback/<id>.yaml per entry), and LOSSY for a single append-only file. Two concurrent
+          appenders each rebuild from the same tip, each add their own record, and the second force-push
+          silently discards the first — trading today's visible dirty tree for invisible record loss,
+          which is strictly worse. THE IMPLEMENTER MUST RESOLVE THIS EXPLICITLY, not assume the bridge
+          generalises. Options to weigh, not a prescription: shard the log per decision (the W1-T122
+          pattern, and W1-T191's design option (b)); derive DECISIONS.md from the ledger's
+          decision.autochoose lines rather than appending (W1-T191 design option (c), listed first there
+          for the same deriving-beats-storing reason); or give the append its own read-modify-write
+          retry against origin/main's current tip so a losing racer re-appends rather than clobbering.
+          Whichever is chosen, the acceptance criterion below pins that concurrent appends do not lose a
+          record.
+      (c) IT IS WIRED TO NEITHER WRITE SITE TODAY.
+
+    RELATIONSHIP TO EXISTING TASKS — read both before starting; this task deliberately overlaps them and
+    the operator may prefer to fold rather than run all three:
+      W1-T191 (plan/tasks.d/W1-T191-decisions-log-never-committed.yaml, queued) owns write site (1) framed
+        as DURABILITY — the audit record never reaching the repo. Its criterion 2 already pins the
+        concurrent-append constraint. It does NOT name write site (2), the bridge, or the freshness
+        refusal.
+      W1-T243 (plan/tasks.yaml, queued) owns the capture-time bridge for triage's read path. The bridge it
+        asked for now EXISTS (feedback-landing.ts); this task is about the two writers it was never wired
+        to.
+    WHAT IS NEW HERE and in neither: write site (2) at all, and the OPERATIONAL defect — that the dirt
+    disables the auto-sync through checkCliFreshness, which is what turned a durability problem into five
+    days of failed deploys.
+
+    SCOPE BOUNDARY. Do not "fix" this by exempting more verbs from the freshness gate, and do not widen
+    the daemon/serve carve-out. The gate is correct: it refuses to mutate uncommitted local state. The
+    defect is that these two writers create uncommitted state in a checkout that must stay clean. Fix the
+    writers.
+  acceptance:
+    - claim: "a console feedback decision no longer leaves a tracked modification in the checkout it wrote through — the status flip reaches a branch, not the working tree"
+      proof: "unit test: a feedback decision leaves the caller's working tree clean"
+    - claim: "an auto-chosen DECISION_REQUEST no longer leaves a tracked modification in the daemon's checkout"
+      proof: "unit test: an auto-chosen decision record leaves the daemon checkout clean"
+    - claim: "concurrent decision records do not lose each other — the shared-append-target constraint is resolved rather than inherited from the bridge's force-push"
+      proof: "unit test: two concurrent decision records both survive"
+    - claim: "the freshness gate stops firing for this cause: a checkout behind origin/main whose only prior dirt came from these two writers is no longer refused"
+      proof: "unit test: a checkout dirtied only by these two writers is not refused"
+    - claim: "the guard is real and not a no-op — the pre-fix behaviour is pinned as a falsifier so a regression is caught rather than silently reintroduced"
+      proof: "unit test: FALSIFIER: writing DECISIONS.md through the old path dirties the tree"
+    - claim: "the fix does not widen the service carve-out or exempt further verbs from the freshness gate"
+      proof: "grep: DIRT NEVER BLOCKS A SERVICE in src/lib/self-sync.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§4", "§7B"]
+  files: [src/run-task.ts, src/lib/feedback.ts, src/lib/panel-graph.ts, src/lib/feedback-landing.ts, test/run-task.test.ts, test/feedback-landing.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-07-30 by the Architect against origin/main e9fa9ac. Every file:line in the rationale was
+    read from source at that sha, and three of the four coordinates in the originating recon had already
+    drifted (DECISIONS.md append reported at ~3382, actually 3404; the freshness gate reported at
+    ~10662/~10666, actually 10843/10846; self-sync.ts:243 was correct). Both premises were also confirmed
+    empirically, not only by reading: the running console on :4317 loads
+    /Users/craigoleyagent/Remudero/remudero/src/run-task.ts, and that checkout's seven dirty files are each
+    a `status: proposed` -> `status: accepted` flip — write site (2) landing exactly where the rationale
+    says it lands.
+    verify:human — the acceptance criteria can all be pinned by tests, but the defect that MOTIVATES this
+    task is an operational one (deploy-run failing 35 times over five days) whose absence cannot be
+    asserted by the suite; a human must confirm the checkout stays clean across a real daemon cycle before
+    this is called done.
+    risk:high — it edits a write path the daemon depends on and adds an autonomous commit/push path to
+    capture-time and console-time code. The realistic failure is worse than the defect: a bridge applied
+    naively to DECISIONS.md trades a visible dirty tree for SILENT record loss on concurrent appends,
+    which is what acceptance criterion 3 exists to prevent.
+    budget_usd:120 — above the 100 the recent shards use, because the implementer must resolve the
+    shared-append-target design question (option-weighing plus a concurrency test) on top of wiring two
+    call sites, and must read W1-T191/W1-T243 first to decide what to fold. Bounded, not open-ended.
+    OVERLAP IS DELIBERATE AND THE OPERATOR SHOULD RULE ON IT: W1-T191 already owns write site (1). This
+    task was filed rather than folded into it because W1-T191 names neither write site (2) nor the
+    freshness-refusal consequence, and the two write sites share one mechanism and one fix. Folding all
+    three into one is a legitimate alternative disposition."
