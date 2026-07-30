@@ -12340,7 +12340,7 @@
     - claim: "launchd ThrottleInterval is EMITTED into the generated plist from the policy's net-new bounded value (there is no prior literal to remove) — changing the policy value changes the emitted plist"
       proof: "unit test: test/policy-consumers.test.ts"
     - claim: "the invariant is UNSATISFIABLE PIECEWISE — a guard enumerating every collected-constant site FAILS if any still resolves from a source literal rather than the loaded policy (the atomic-coupling falsifier)"
-      proof: "grep: loadPolicy in src/lib/review.ts"
+      proof: "unit test: test/policy-consumers.test.ts"
   risk: high
   origin: architect
   plan_refs: ["P37", "P34", "§9", "§5C"]
