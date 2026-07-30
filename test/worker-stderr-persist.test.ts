@@ -173,10 +173,15 @@ test("acceptance: a clean spawn does not spam the surface - persistence fires on
 
 test("acceptance: the containment probe persists a capped stderr excerpt on log('containment.probe', …) only when the probe spawn itself errored", async () => {
   const events: Array<[string, Record<string, unknown> | undefined]> = [];
+  // NOTE: the transcript deliberately avoids the "not logged in" / "run /login"
+  // credential-failure phrasing (W1-T237's CREDENTIAL_FAILURE_RE /
+  // CREDENTIAL_LOGIN_HINT_RE) — this test is exercising the generic
+  // isError-persists-stderr path, not the credential-failure branch, which has
+  // its own dedicated coverage in containment.test.ts.
   await probeContainment({
     settingsFile: enabledSandboxSettingsFile(),
     exec: async (token) => ({
-      transcript: `outside: touch: cannot touch '../${token}.txt': Operation not permitted\nNot logged in - Please run /login\ninside: ok`,
+      transcript: `outside: touch: cannot touch '../${token}.txt': Operation not permitted\nsome transient tool error\ninside: ok`,
       outsideWriteCreated: false,
       insideWriteCreated: true,
       costUsd: 0.05,
@@ -185,7 +190,7 @@ test("acceptance: the containment probe persists a capped stderr excerpt on log(
     log: (step, extra) => events.push([step, extra]),
   });
   const [, extra] = events.find(([step]) => step === "containment.probe")!;
-  assert.match(String(extra?.stderr_excerpt), /Not logged in - Please run \/login/);
+  assert.match(String(extra?.stderr_excerpt), /some transient tool error/);
 });
 
 test("acceptance: the containment probe does not persist an excerpt for a clean (non-erroring) probe spawn", async () => {
