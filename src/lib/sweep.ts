@@ -1487,10 +1487,57 @@ export interface LiveStateResult {
   state?: string;
 }
 
+/**
+ * The outcome names `armAutoMerge` returns (run-task.ts's `ArmOutcome`). Mirrored here rather
+ * than imported to keep lib/sweep.ts free of a run-task.ts dependency; `armOutcomeArmed` below
+ * is the single place that decides which of them count as having actually armed.
+ */
+export type ArmOutcomeName =
+  | "no-task-id"
+  | "head-unavailable"
+  | "ledger-refused"
+  | "armed"
+  | "direct-merged"
+  | "direct-merge-failed"
+  | "arm-error-ignored";
+
+/**
+ * TRUE only for outcomes that genuinely armed or merged.
+ *
+ *   armed          — `gh pr merge --auto` succeeded; auto-merge is registered.
+ *   direct-merged  — GitHub refused `--auto` on an already-clean PR and the fallback merged it
+ *                    outright. A success, though not an arm: the PR leaves `openPrs` next pass,
+ *                    so nothing is left to retry.
+ *
+ * Every other outcome armed NOTHING and must be retried on a later pass:
+ *   no-task-id / head-unavailable / ledger-refused  — returned before any arm was attempted.
+ *   direct-merge-failed / arm-error-ignored         — the attempt was made and did not stick.
+ */
+export function armOutcomeArmed(outcome: ArmOutcomeName | void): boolean {
+  // An `undefined` return is a fake/effect that predates this signature — treat it as armed,
+  // which is exactly what the code assumed before, so no existing lane regresses.
+  if (outcome === undefined) return true;
+  return outcome === "armed" || outcome === "direct-merged";
+}
+
 /** Injected effects — the real command wires arm/close/fix/escalate; tests fake them. */
 export interface SweepDeps {
-  /** Arm GitHub auto-merge (armAutoMerge). Idempotent at the GitHub level. */
-  arm: (pr: OpenPrView) => void | Promise<void>;
+  /**
+   * Arm GitHub auto-merge (armAutoMerge). Idempotent at the GitHub level.
+   *
+   * RETURNS ITS OUTCOME. `armAutoMerge` does not throw — it returns one of seven
+   * {@link ArmOutcomeName} values, five of which mean it armed NOTHING. The effect used to
+   * discard that value and the sweep recorded `acted: true` regardless, which both hid the
+   * refusal and (because `acted:true` seeds `prior.armed`) made it permanent: every later
+   * pass logged `deduped: true, acted: false` and never retried. Observed live on PR #960 —
+   * `acted=TRUE "arming auto-merge"` at 20:45:21, `deduped=true` at 21:14:07, and GitHub
+   * reporting `auto_merge: null` with no `auto_merge_enabled` event ever.
+   *
+   * `void` remains valid so existing fakes that return nothing keep compiling; an undefined
+   * return is treated as "armed" (the pre-existing assumption) rather than silently standing
+   * down, so this change cannot make a working lane worse.
+   */
+  arm: (pr: OpenPrView) => ArmOutcomeName | void | Promise<ArmOutcomeName | void>;
   /** Close a superseded/abandoned PR with a stated reason. */
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
   /**
@@ -1614,7 +1661,9 @@ export interface SweepSummary {
 
 /** Prior actions this ledger already recorded (acted:true), for idempotence dedup. */
 interface PriorActions {
-  armed: Set<number>;
+  /** `<prNumber>@<headSha>` — sha-keyed like {@link PriorActions.fixed}, so a new head
+   *  re-earns the arm attempt instead of being deduped forever on one prior success. */
+  armed: Set<string>;
   /** `${prNumber}@${headSha}` — fix dispatch is head-keyed. */
   fixed: Set<string>;
   closed: Set<number>;
@@ -1640,7 +1689,7 @@ interface PriorActions {
 }
 
 function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorActions {
-  const armed = new Set<number>();
+  const armed = new Set<string>();
   const fixed = new Set<string>();
   const closed = new Set<number>();
   const escalated = new Set<number>();
@@ -1660,7 +1709,10 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
     if (pr === undefined) continue;
     switch (line.disposition) {
       case "mergeable":
-        armed.add(pr);
+        // SHA-KEYED, exactly like `fixed` below. Keyed by PR number alone this set had no
+        // expiry: one `acted:true` line — including one recorded for an arm that never
+        // happened — deduped that PR forever. A new head must re-earn the attempt.
+        armed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         break;
       case "blocked-fixable":
       // W1-T106: a `conflicted` dispatch is the SAME "spend a fix-rung
@@ -1746,7 +1798,10 @@ export async function runSweep(
     let alreadyDone: boolean;
     switch (disposition) {
       case "mergeable":
-        alreadyDone = pr.autoMergeArmed || prior.armed.has(pr.prNumber);
+        // PREFER OBSERVED STATE: GitHub's own `autoMergeArmed` is the authority for
+        // "already armed". The sweep's own memory is only a fallback, and now sha-keyed so a
+        // new head re-earns the attempt rather than being deduped on a stale success.
+        alreadyDone = pr.autoMergeArmed === true || prior.armed.has(`${pr.prNumber}@${pr.headSha}`);
         break;
       case "blocked-fixable":
       case "conflicted": // W1-T106: same dedup set as blocked-fixable — see priorActionsFromLedger.
@@ -1826,7 +1881,16 @@ export async function runSweep(
                 standDownReason = armDecision.reason;
                 break;
               }
-              await deps.arm(pr);
+              // READ THE OUTCOME. `armAutoMerge` does not throw — it RETURNS which of its
+              // seven branches it took, and five of them armed nothing. Discarding it is what
+              // let `acted:true` be recorded for a PR that was never armed.
+              const armOutcome = await deps.arm(pr);
+              if (!armOutcomeArmed(armOutcome)) {
+                acted = false;
+                // The refusal used to go only to `say` -> stdout -> daemon.out.log, leaving no
+                // trace in the ledger where anyone looks. Name it on the disposed line.
+                standDownReason = `arm outcome: ${String(armOutcome)}`;
+              }
               break;
             }
             case "blocked-fixable": {
