@@ -161,8 +161,18 @@ function numberField(
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new PolicyError(`policy.yaml: '${path}.value' must be a finite number, got ${JSON.stringify(value)}.`);
   }
-  if (typeof min !== "number" || typeof max !== "number") {
-    throw new PolicyError(`policy.yaml: '${path}' must carry numeric 'min' and 'max' bounds.`);
+  // FINITE, not merely `typeof === "number"`: YAML's `.nan`/`.inf` parse to NaN/Infinity, and a
+  // NaN bound makes EVERY comparison below false — `min > max`, `value < min`, `value > max` — so
+  // the declared bound silently stops binding and any value is accepted. That is not a theoretical
+  // hole: with `proofTimeoutMs.min: .nan` a policy carrying the stale 30000 proof timeout loads
+  // clean, which is exactly the regression the operator's binding ruling says must be refused. A
+  // bound that cannot bind is a malformed bound, so it is refused here by name.
+  if (typeof min !== "number" || typeof max !== "number" || !Number.isFinite(min) || !Number.isFinite(max)) {
+    throw new PolicyError(
+      `policy.yaml: '${path}' must carry numeric 'min' and 'max' bounds — finite ones ` +
+        `(got min=${JSON.stringify(min)}, max=${JSON.stringify(max)}); a NaN/Infinity bound would ` +
+        "silently disable the bound check rather than widen it.",
+    );
   }
   if (min > max) {
     throw new PolicyError(`policy.yaml: '${path}' has min (${min}) > max (${max}) — an unsatisfiable bound.`);
@@ -210,14 +220,21 @@ function validateHeadroomCurve(
       throw new PolicyError(`policy.yaml: '${path}.value[${i}]' must be a mapping of maxHoursToReset/limitPct.`);
     }
     const { maxHoursToReset, limitPct } = rung as Record<string, unknown>;
-    if (maxHoursToReset !== null && (typeof maxHoursToReset !== "number" || maxHoursToReset <= 0)) {
+    // Number.isFinite, not `typeof === "number"`, for the SAME reason numberField above needs it:
+    // NaN passes every range test by failing every comparison. A `maxHoursToReset: .nan` rung would
+    // load clean and then never match in resolveHeadroomLimitPct's `hoursToReset <= r.maxHours`
+    // (a silently dead rung); a `limitPct: .nan` would load clean and yield a NaN CEILING, which
+    // every headroom comparison then silently fails. Infinity is refused here too: `null` is the
+    // only spelling of the catch-all rung this schema accepts (see the final-rung check below), so
+    // an `Infinity` rung in a non-final position would swallow every rung after it.
+    if (maxHoursToReset !== null && (typeof maxHoursToReset !== "number" || !Number.isFinite(maxHoursToReset) || maxHoursToReset <= 0)) {
       throw new PolicyError(
-        `policy.yaml: '${path}.value[${i}].maxHoursToReset' must be null or a positive number, got ${JSON.stringify(maxHoursToReset)}.`,
+        `policy.yaml: '${path}.value[${i}].maxHoursToReset' must be null or a finite positive number, got ${JSON.stringify(maxHoursToReset)}.`,
       );
     }
-    if (typeof limitPct !== "number" || limitPct < 0 || limitPct > 100) {
+    if (typeof limitPct !== "number" || !Number.isFinite(limitPct) || limitPct < 0 || limitPct > 100) {
       throw new PolicyError(
-        `policy.yaml: '${path}.value[${i}].limitPct' must be a number in [0, 100], got ${JSON.stringify(limitPct)}.`,
+        `policy.yaml: '${path}.value[${i}].limitPct' must be a finite number in [0, 100], got ${JSON.stringify(limitPct)}.`,
       );
     }
     return { maxHoursToReset: maxHoursToReset as number | null, limitPct };

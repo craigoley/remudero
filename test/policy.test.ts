@@ -13,6 +13,15 @@ import {
   type Policy,
 } from "../src/lib/policy.js";
 import { lintPlanCommand } from "../src/run-task.js";
+// The SOURCE constants plan/policy.yaml claims to lift — imported so the drift lock below
+// compares against the real thing, never a second copy of the literal.
+import { DEFAULT_PROOF_TIMEOUT_MS } from "../src/lib/review.js";
+import { DEFAULT_PRUNE_GRACE_MS } from "../src/lib/worker.js";
+import { buildDefaultHeadroomPolicy, DEFAULT_POLL_INTERVAL_MS } from "../src/lib/daemon.js";
+import { fixStrikeCap } from "../src/lib/config.js";
+import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
+import { DEFAULT_MAX } from "../src/lib/drain.js";
+import { HEADROOM_LIMIT_PCT } from "../src/lib/headroom.js";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const SHIPPED = policyPath(REPO_ROOT);
@@ -111,6 +120,41 @@ test("the SHIPPED plan/policy.yaml loads and lifts the current source values", (
   ]);
   assert.equal(p.values.headroom.reservePct, 95);
   assert.equal(p.values.headroom.enabled, true);
+});
+
+// ── the DRIFT LOCK (W1-T252 follow-up) ─────────────────────────────────────────────────────
+//
+// The test above asserts the shipped values against LITERALS, which cannot detect the one
+// failure that matters: a source constant moving while policy.yaml keeps the old number. Its
+// title claims the values track source; only this test actually checks it, by comparing each
+// LIFTED field against the real exported constant it cites. W1-T253 rewires every consumer to
+// read these values instead of its literal, so a silently-stale row here becomes a silent
+// behaviour change there — the drift must fail RED at the moment the source moves, in the PR
+// that moves it, not later.
+//
+// `headroom.enabled` is deliberately absent: its source is an inline `opts.headroomEnabled ??
+// true` default (src/lib/daemon.ts), not a named constant, so there is nothing to import. It
+// stays covered by the literal assertion above; naming that gap is better than implying the
+// lock is total.
+
+test("every LIFTED policy value equals the SOURCE constant it cites — the drift lock", () => {
+  const p = loadPolicy(SHIPPED).values;
+  assert.equal(p.proofTimeoutMs, DEFAULT_PROOF_TIMEOUT_MS, "proofTimeoutMs drifted from review.ts's DEFAULT_PROOF_TIMEOUT_MS");
+  assert.equal(p.pruneGraceMs, DEFAULT_PRUNE_GRACE_MS, "pruneGraceMs drifted from worker.ts's DEFAULT_PRUNE_GRACE_MS");
+  assert.equal(p.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS, "pollIntervalMs drifted from daemon.ts's DEFAULT_POLL_INTERVAL_MS");
+  assert.equal(p.fixStrikeCap, fixStrikeCap({ claudeBin: "/bin/true", root: "/nonexistent" }), "fixStrikeCap drifted from config.ts's fixStrikeCap default");
+  assert.equal(p.sweep.staleDays, DEFAULT_SWEEP_POLICY.staleDays, "sweep.staleDays drifted from sweep.ts's DEFAULT_SWEEP_POLICY");
+  assert.equal(p.sweep.strikeCap, DEFAULT_SWEEP_POLICY.strikeCap, "sweep.strikeCap drifted from sweep.ts's DEFAULT_SWEEP_POLICY");
+  assert.equal(p.sweep.wipLimit, DEFAULT_SWEEP_POLICY.wipLimit, "sweep.wipLimit drifted from sweep.ts's DEFAULT_SWEEP_POLICY");
+  assert.equal(p.drain.max, DEFAULT_MAX, "drain.max drifted from drain.ts's DEFAULT_MAX");
+  assert.equal(p.headroom.reservePct, HEADROOM_LIMIT_PCT, "headroom.reservePct drifted from headroom.ts's HEADROOM_LIMIT_PCT");
+  // The curve is the same shape with `Infinity` written as `null` in YAML (policy.ts's documented
+  // mapping), so compare rung-for-rung with that one substitution applied.
+  const sourceCurve = buildDefaultHeadroomPolicy().map((r) => ({
+    maxHoursToReset: Number.isFinite(r.maxHoursToReset) ? r.maxHoursToReset : null,
+    limitPct: r.limitPct,
+  }));
+  assert.deepEqual(p.headroom.curve, sourceCurve, "headroom.curve drifted from daemon.ts's buildDefaultHeadroomPolicy");
 });
 
 test("validatePolicy accepts a correctly-shaped table (the goodRaw() fixture)", () => {
@@ -311,6 +355,41 @@ test("REJECTS min > max as an unsatisfiable bound", () => {
   throwsPolicyError(() => validatePolicy(raw), /unsatisfiable bound/);
 });
 
+// ── the NON-FINITE BOUND falsifier (W1-T252 follow-up) ─────────────────────────────────────
+//
+// A NaN bound makes every comparison in numberField false — `min > max`, `value < min`,
+// `value > max` — so a declared bound stops binding instead of widening, and ANY value loads
+// clean. The operator's binding 30000 rejection is a bound check, so it was bypassable by a
+// single YAML token: `min: .nan`. These lock the refusal, including through real YAML text
+// (`.nan` / `.inf` are ordinary YAML scalars, not something a fixture has to construct).
+
+test("REJECTS a NaN bound instead of letting it silently disable the bound check", () => {
+  const raw = goodRaw();
+  (raw.sweep as Record<string, Record<string, unknown>>).wipLimit = {
+    value: 9999, origin: "lifted:src/lib/sweep.ts:270 (DEFAULT_SWEEP_POLICY.wipLimit)", min: NaN, max: NaN,
+  };
+  throwsPolicyError(() => validatePolicy(raw), /sweep\.wipLimit.*must carry numeric 'min' and 'max' bounds — finite ones/);
+});
+
+test("REJECTS an Infinity bound the same way — a bound that cannot bind is malformed", () => {
+  const raw = goodRaw();
+  (raw.drain as Record<string, Record<string, unknown>>).max = {
+    value: 9999, origin: "lifted:src/lib/drain.ts:271 (DEFAULT_MAX)", min: -Infinity, max: Infinity,
+  };
+  throwsPolicyError(() => validatePolicy(raw), /drain\.max.*finite ones/);
+});
+
+test("a YAML .nan min can no longer smuggle the stale 30000 proof timeout past its floor", () => {
+  // Real YAML text, exactly as a plan PR would carry it — not a hand-built fixture object.
+  const smuggled = readFileSync(SHIPPED, "utf8")
+    .replace("  value: 60000\n  origin: \"lifted:src/lib/review.ts:675", "  value: 30000\n  origin: \"lifted:src/lib/review.ts:675")
+    .replace("  min: 60000", "  min: .nan");
+  const raw = parseYaml(smuggled) as Record<string, unknown>;
+  assert.equal((raw.proofTimeoutMs as Record<string, unknown>).value, 30_000, "the fixture really does carry the stale 30000");
+  assert.ok(Number.isNaN((raw.proofTimeoutMs as Record<string, number>).min), "and really does carry a NaN min");
+  throwsPolicyError(() => validatePolicy(raw), /proofTimeoutMs.*finite ones/);
+});
+
 // ── structural-guard coverage: every defensive PolicyError branch has a falsifier ──────────
 // These pin the validator's malformed-input rejections (each a distinct throw the shipped,
 // well-formed policy.yaml never reaches) so a future refactor that drops a guard fails RED.
@@ -366,7 +445,41 @@ test("REJECTS a headroom.curve rung whose maxHoursToReset is neither null nor a 
     value: [{ maxHoursToReset: -5, limitPct: 100 }],
     origin: "lifted:src/lib/daemon.ts:145-148",
   };
-  throwsPolicyError(() => validatePolicy(raw), /headroom\.curve\.value\[0\]\.maxHoursToReset.*must be null or a positive number/);
+  throwsPolicyError(() => validatePolicy(raw), /headroom\.curve\.value\[0\]\.maxHoursToReset.*must be null or a finite positive number/);
+});
+
+// The same non-finite hole existed TWICE MORE in this file, on the curve rungs — NaN passes every
+// range test by failing every comparison. Unfixed, a `.nan` maxHoursToReset loads clean and then
+// never matches in resolveHeadroomLimitPct (a silently dead rung), and a `.nan` limitPct loads
+// clean and yields a NaN CEILING that every headroom comparison silently fails. Infinity is
+// refused on maxHoursToReset because `null` is this schema's only spelling of the catch-all, so a
+// non-final Infinity rung would swallow every rung after it.
+
+test("REJECTS a curve rung whose maxHoursToReset is NaN rather than accepting a rung that can never match", () => {
+  const raw = goodRaw();
+  (raw.headroom as Record<string, unknown>).curve = {
+    value: [{ maxHoursToReset: NaN, limitPct: 100 }, { maxHoursToReset: null, limitPct: 95 }],
+    origin: "lifted:src/lib/daemon.ts:145-148",
+  };
+  throwsPolicyError(() => validatePolicy(raw), /maxHoursToReset.*must be null or a finite positive number/);
+});
+
+test("REJECTS a non-final Infinity curve rung, which would swallow every rung after it", () => {
+  const raw = goodRaw();
+  (raw.headroom as Record<string, unknown>).curve = {
+    value: [{ maxHoursToReset: Infinity, limitPct: 100 }, { maxHoursToReset: null, limitPct: 95 }],
+    origin: "lifted:src/lib/daemon.ts:145-148",
+  };
+  throwsPolicyError(() => validatePolicy(raw), /maxHoursToReset.*must be null or a finite positive number/);
+});
+
+test("REJECTS a NaN limitPct rather than accepting a ceiling no comparison can satisfy", () => {
+  const raw = goodRaw();
+  (raw.headroom as Record<string, unknown>).curve = {
+    value: [{ maxHoursToReset: 24, limitPct: NaN }, { maxHoursToReset: null, limitPct: 95 }],
+    origin: "lifted:src/lib/daemon.ts:145-148",
+  };
+  throwsPolicyError(() => validatePolicy(raw), /limitPct.*must be a finite number/);
 });
 
 test("loadPolicy REJECTS a file that is not valid YAML, naming the path", () => {
