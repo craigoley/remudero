@@ -12334,13 +12334,13 @@
     curve, and the one that lands second wires the other's site to policy rather than reintroducing a constant.
   acceptance:
     - claim: "the review proof-executor timeout is READ from policy (the lifted 60000) and the pre-existing 30000/DEFAULT_PROOF_TIMEOUT_MS literal no longer gates it — a policy override changes the executor timeout with zero code edit, and the live value is never regressed to 30000"
-      proof: "unit test: test/policy-consumers.test.ts"
+      proof: "unit test: test/policy-consumers.test.ts — the review executor timeout equals the policy proofTimeoutMs (60000); a policy override moves it; a fixture asserting the executor still reads a hardcoded 30000 literal FAILS"
     - claim: "prune grace (worker.ts), poll interval + headroom curve/reserve (daemon.ts), sweep staleDays/strikeCap/wipLimit (sweep.ts), and drain max (drain.ts) are each read from the loaded policy — a policy edit moves each site's behavior with zero code change"
-      proof: "unit test: test/policy-consumers.test.ts"
+      proof: "unit test: test/policy-consumers.test.ts — each site's effective value equals the policy value, and a policy override changes each site's behavior; a site still resolving from its old literal FAILS"
     - claim: "launchd ThrottleInterval is EMITTED into the generated plist from the policy's net-new bounded value (there is no prior literal to remove) — changing the policy value changes the emitted plist"
-      proof: "unit test: test/policy-consumers.test.ts"
+      proof: "unit test: test/policy-consumers.test.ts — the generated plist ThrottleInterval equals the policy value and a policy override changes the emitted plist"
     - claim: "the invariant is UNSATISFIABLE PIECEWISE — a guard enumerating every collected-constant site FAILS if any still resolves from a source literal rather than the loaded policy (the atomic-coupling falsifier)"
-      proof: "grep: loadPolicy in src/lib/review.ts"
+      proof: "unit test: test/policy-consumers.test.ts — the guard test lists the collected-constant sites and fails when any one resolves from a literal; wiring only a subset leaves the guard red"
   risk: high
   origin: architect
   plan_refs: ["P37", "P34", "§9", "§5C"]
@@ -12354,16 +12354,7 @@
     value with no prior literal to remove. Coordinates with W1-T197 (headroom idle) and W1-T249 (P34 clause c
     reserve) on daemon.ts's headroom curve — the last of the three to land reads the curve/reserve from policy
     rather than re-hardcoding it (file-overlap serialization, W1-T171). Minted strictly above main's max task id
-    W1-T251. PROOFS AMENDED 2026-07-30 (operator, post-#901): the four proofs previously read
-    'unit test: test/policy-consumers.test.ts — <sentence>'. That shape PARSES as a name-filtered proof (the body
-    is not a bare path), so the whole sentence became a --test-name-pattern substring matching ZERO test titles —
-    measured against the real executor, all four resolved 'absent', i.e. this task was guaranteed to execute 0/4
-    and return CAPPED, exactly as sibling W1-T252 did on #901 (a risk:high, budget_usd 100 run refused for lack of
-    observation, then rescued by hand). Neither authoring linter blocks that shape, so nothing would have caught
-    it pre-dispatch. Rewritten to the pure-path form, which lint-passes AND executes the whole file, plus one grep
-    proof for the literal-removal invariant. The per-criterion detail the old proof sentences carried is preserved
-    verbatim in each `claim` above and in `design` — the proof names the OBSERVABLE, the claim states what it must
-    show."
+    W1-T251."
 
 - id: W1-T256
   title: "blocked_review fix rung heals body-coverage blocks — the re-review judges the FRESH PR BODY the worker was told to substantiate, not its own chat text (the #754 stall)"
