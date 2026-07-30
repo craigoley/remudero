@@ -142,6 +142,13 @@ async function withOfflineHarness(
     const repoDir = join(configRoot, "repos", repoName);
     mkdirSync(dirname(repoDir), { recursive: true });
     execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: GIT_ENV });
+    // A REPO-LOCAL identity, inherited by every worktree `triageCommand` adds from this repo.
+    // Without it the run dies at its own `git commit` (run-task.ts:8380) before ever reaching
+    // the push — that commit runs with the AMBIENT environment, not this fixture's GIT_ENV, so
+    // a developer machine with a global user.email passes while a bare CI runner does not.
+    // That exact gap made this test pass locally and fail on the runner.
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
 
     // Every gh subcommand either returns an empty PR list or fails — nothing reaches GitHub.
     writeFileSync(
