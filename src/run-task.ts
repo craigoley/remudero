@@ -10890,6 +10890,30 @@ export async function main(
   if (cmd === "daemon" || cmd === "serve") {
     serviceFreshnessGate(cmd, repoRoot, process.env, deps);
     // ALWAYS proceed — never exit, never re-exec. Genuine corruption fails later in loadPlan.
+  } else if (cmd === "deploy-run") {
+    // impl-BD — THE CIRCULAR REFUSAL. `deploy-run` is the deploy supervisor's cycle (the
+    // com.remudero.supervisor launchd unit invokes it every 120s), and its entire purpose is to
+    // fast-forward a stale checkout. `checkCliFreshness` refuses when the tree is BEHIND *and*
+    // DIRTY (self-sync.ts:164-176), so the verb that exists to fix staleness was refused FOR
+    // BEING STALE. Reproduced live: "rmd is behind origin/main (e9fa9ac..97e6857) and the
+    // working tree has uncommitted changes -- refusing to auto-sync". The ledger carries ZERO
+    // deploy.* events across the live file and all 661 rotations — the supervisor has never
+    // completed a cycle.
+    //
+    // NO GATE AT ALL here, deliberately, and NOT `serviceFreshnessGate` like daemon/serve:
+    // that gate's last line calls `ensureInstallFresh`, which runs `npm ci` when the lockfile
+    // hash moved (run-task.ts's ensureInstallFresh). An unattended `npm ci` on a 120-second
+    // supervisor cycle is the exact shape that emptied this host's node_modules and
+    // crash-looped the daemon. deploy-run needs the REFUSAL lifted, not an installer added.
+    //
+    // The safety this removes is replaced by a strictly BETTER guard the deployer already
+    // owns: `treeFfSafe` (lib/deployer.ts:102) refuses only when a locally-modified path is
+    // ALSO in the incoming diff — path-aware, returning "dirty-tree-conflict" and ledgering
+    // `deploy.abort_dirty_tree` (lib/deployer.ts:236-242) — and it sits directly in front of
+    // `pullFf()`. The outer gate was blunt (any dirt + any staleness) and fired first, which is
+    // why the precise one had never run. Every OTHER verb keeps the refusal: `review`,
+    // `lint-plan`, `triage`, `approve` and the rest read the plan, and a stale plan gives a
+    // wrong answer — which is the whole point of the gate.
   } else {
     const freshness = (deps.checkFreshness ?? checkCliFreshness)(repoRoot, process.env);
     if (freshness.status === "refused") {
