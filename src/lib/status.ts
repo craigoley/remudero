@@ -908,11 +908,98 @@ function latestActualPrUrl(lines: Array<Record<string, unknown>>, taskId: string
  * LOAD-BEARING for the blocked_review FIX RUNG too (W1-T76, absorbs P21): the
  * legit fix workflow amends THIS SAME run branch, never a `fix/*` branch or a
  * fresh PR — creditability here is what lets a fixed task's dependents unblock.
- * Never weaken this assert to accommodate a `fix/*` head.
+ *
+ * SCOPE NARROWED 2026-07-30 (operator ruling). This predicate is no longer the sole
+ * gate on rung (c): for a MERGED PR an exactly-anchored trailer is sufficient and the
+ * branch NAME may not veto it — see {@link creditsByAnchoredTrailer} and
+ * {@link branchClaimsOtherTask}. It REMAINS the gate for non-merged PRs, and it remains
+ * the (c2) head-branch corroboration rung's own assert unchanged. The former "never
+ * weaken this to accommodate a `fix/*` head" now reads: a merged `fix/*` PR with a
+ * correct anchored trailer DOES credit (W1-T64's real PR #115 is exactly that shape and
+ * was stranded permanently by the old rule); an unmerged one still does not.
  */
 function ownsBranch(head: string | undefined, taskId: string): boolean {
   if (!head) return false;
   return new RegExp(`^run-${escapeRegExp(taskId)}-\\d+$`).test(head);
+}
+
+/**
+ * The BARE run-branch form: `run-<taskId>` with no `-<epochMs>` suffix. Older/hand
+ * dispatches produced it (W1-T152's own merged PR #793 is exactly this shape), so it
+ * claims the task just as legitimately as {@link ownsBranch}'s timestamped form.
+ * Kept separate from `ownsBranch` so the (c2) head-branch CORROBORATION rung — which
+ * credits BY branch and must stay strict — is unaffected.
+ */
+function isBareRunBranch(head: string, taskId: string): boolean {
+  return head === `run-${taskId}`;
+}
+
+/**
+ * RUNG (c) FOREIGN-BRANCH VETO (operator ruling 2026-07-30, supersedes the
+ * head-branch NAME veto for MERGED PRs — see {@link creditsByAnchoredTrailer}).
+ *
+ * `true` iff `head` is a run-branch that claims a DIFFERENT task than `taskId`.
+ * That — and ONLY that — still vetoes a trailer credit. A branch carrying no task
+ * claim at all (`feat-*`, `fix/*`, `w1-t235-worker-keychain`, …) vetoes nothing:
+ * under the ruling, the exactly-anchored trailer on a merged PR is the evidence,
+ * and the branch's NAME may not overrule it.
+ *
+ * PREFIX COLLISION (TRAP 1, the reason `ownsBranch`'s `-\d+$` anchor exists) is
+ * structurally impossible here because this function never PREFIX-matches an id.
+ * It asks only "does this run-branch claim THIS task, in either legitimate form?"
+ * and vetoes every other `run-*`. So both directions are safe:
+ *   - head `run-W1-T152-1785348476091`, taskId `W1-T15`  → claims neither form of
+ *     W1-T15 → VETO (correct: that branch is W1-T152's).
+ *   - head `run-W1-T15-1785348476091`,  taskId `W1-T152` → VETO (correct, reverse).
+ * A `run-*` branch whose remainder is not a task id at all also vetoes — failing
+ * CLOSED on an unrecognised run-branch is the conservative direction.
+ */
+function branchClaimsOtherTask(head: string | undefined, taskId: string): boolean {
+  if (!head) return false; // unresolved head ref carries no claim — cannot veto
+  if (!head.startsWith("run-")) return false; // no task claim encoded at all
+  return !ownsBranch(head, taskId) && !isBareRunBranch(head, taskId);
+}
+
+/**
+ * RUNG (c) ACCEPT TEST — the operator's 2026-07-30 ruling, implemented verbatim:
+ * "a correct, exactly-anchored Remudero-Task trailer on a MERGED PR is sufficient
+ * evidence that the PR credits that task, and the head-branch NAME must no longer
+ * be able to veto it — WITH an explicit guard that a branch clearly belonging to a
+ * different task can never credit."
+ *
+ * WHY THE OLD ASSERT WAS WRONG (all OBSERVED, recon-AO): `ownsBranch` alone refused
+ * SEVEN merged, correctly-trailered PRs because their branches were hand-named
+ * (`feat-*`, `fix/*`) or lacked only the `-<epochMs>` suffix. Each task then stayed
+ * `queued` forever, was re-dispatched, and tripped P29(ii)'s breaker — W1-T258 burned
+ * $3.40 ending in `verdict: pr_attribution_failed`. Worse, the
+ * escalation-lifecycle reconciler keys on this very `merged` flag, so the defect that
+ * created those escalations also made retiring them impossible.
+ *
+ * TRAP 2 — NO NON-MERGED CREDIT PATH. The relaxation is scoped to `MERGED` and
+ * nothing else. `state` is asserted MERGED **here**, from the PrRef, rather than
+ * trusted from `findMergedByTrailer`'s name: that is an INTERFACE method a fixture
+ * (or a future gateway) may implement with any state, and the (c2) rung already
+ * re-asserts `state === "MERGED"` for the same reason. For any non-merged state the
+ * OLD strict behaviour is kept unchanged — the branch must be owned — so an OPEN or
+ * CLOSED-UNMERGED PR can never earn credit through the widened path.
+ */
+function creditsByAnchoredTrailer(
+  state: string,
+  head: string | undefined,
+  body: string | undefined,
+  taskId: string,
+): boolean {
+  if (!hasAnchoredTrailer(body, taskId)) return false;
+  if (state.toUpperCase() !== "MERGED") {
+    // Non-merged: unchanged from before the ruling (TRAP 2).
+    return ownsBranch(head, taskId);
+  }
+  // UNREADABLE HEAD FAILS CLOSED (W1-T119, unchanged by the ruling). An ABSENT head ref is a
+  // read that FAILED, not a branch that carries no claim — and an errored read is never
+  // conflated with evidence. The ruling removed the veto power of a branch NAME we can SEE;
+  // it did not make an unreadable one creditable.
+  if (!head) return false;
+  return !branchClaimsOtherTask(head, taskId);
 }
 
 /**
@@ -1065,18 +1152,26 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   if (trailerPr && !debunkedTrailerUrls(ledgerLines, task.id).has(trailerPr.url)) {
     const head = deps.github.headRefName(trailerPr.url);
     const body = deps.github.prBody(trailerPr.url);
-    if (ownsBranch(head, task.id) && hasAnchoredTrailer(body, task.id)) {
+    if (creditsByAnchoredTrailer(trailerPr.state, head, body, task.id)) {
       return { taskId: task.id, source: "trailer", ...fromPrState(trailerPr.state), prNumber: trailerPr.number, prUrl: trailerPr.url, prState: trailerPr.state };
     }
-    // Rejected: foreign/unresolved head branch or an unanchored search hit — never
-    // credited. Corroborate by head branch first (a foreign trailer hit must not mask
-    // this task's OWN merged run), then surface WHY (legibility, W1-T69) ONLY when
-    // (a)/(b) found nothing to report either — an `ownResult` (this run's own
-    // OPEN/CLOSED PR) remains the more informative status than a bare rejection.
+    // Rejected: a branch claiming ANOTHER task, a non-merged PR off a foreign branch,
+    // or an unanchored search hit — never credited. Corroborate by head branch first (a
+    // foreign trailer hit must not mask this task's OWN merged run), then surface WHY
+    // (legibility, W1-T69) ONLY when (a)/(b) found nothing to report either — an
+    // `ownResult` (this run's own OPEN/CLOSED PR) remains the more informative status
+    // than a bare rejection.
     if (!ownResult) {
       const branchCredit = corroborateByBranch();
       if (branchCredit) return branchCredit;
-      const reason = !ownsBranch(head, task.id) ? "head-branch-not-owned" : "trailer-not-anchored";
+      // Reason mirrors `creditsByAnchoredTrailer`'s OWN order of refusal, so a rejection
+      // never names a cause the accept test did not actually act on: the trailer is
+      // checked first there, so an unanchored body reports that regardless of branch.
+      const reason = !hasAnchoredTrailer(body, task.id)
+        ? "trailer-not-anchored"
+        : branchClaimsOtherTask(head, task.id)
+          ? "branch-claims-other-task"
+          : "trailer-pr-not-merged";
       return {
         taskId: task.id,
         status: "queued",

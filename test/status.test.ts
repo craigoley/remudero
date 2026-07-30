@@ -424,23 +424,24 @@ test("W1-T257: a FAILED batched head-branch read defers via W1-T119 (indetermina
   }
 });
 
-// ── W1-T76 (absorbs P21): the blocked_review FIX RUNG amends the SAME
-// run-<taskId>-<epochMs> branch — never a fix/* branch. This is the SAME
-// ownership-assert as the foreign-branch case above, exercised with the
-// EXACT head shape the fix rung is forbidden from ever producing.
-test("source (c) ownership-assert: a fix/* head is REJECTED — the fix rung must amend the run branch, never a fix/* branch (W1-T76)", () => {
+// ── W1-T76's fix/* rejection, SUPERSEDED for MERGED PRs by the 2026-07-30 operator ruling. ──
+// The doctrine this test encoded ("never weaken the assert to accommodate a fix/* head") was
+// written when the branch NAME was the only ownership signal. The operator has ruled that an
+// exactly-anchored trailer on a MERGED PR is itself sufficient evidence of credit. This is a
+// DELIBERATE doctrine change, not an accommodation: W1-T64's real merged PR #115 is
+// `fix/w1t64-both-tests` with a correct anchored trailer, and refusing it stranded the task
+// permanently (recon-AO). The fix rung's own workflow is unaffected — it still amends the run
+// branch, which still credits via ownsBranch. What changed is that a hand branch no longer
+// VETOES. Non-merged fix/* PRs are still refused (see the trap 2 tests).
+test("ruling supersedes W1-T76: a MERGED fix/* head with an anchored trailer now credits", () => {
   const github = fakeGitHub({
     byTrailer: { "W1-TX": { number: 134, url: "u/134", state: "MERGED" } },
-    // A real, merged PR carrying the task's own trailer — but opened from a
-    // hand-authored fix/* branch rather than this task's own run branch (the
-    // #134 shape LEARNINGS/MASTER-PLAN name as the live cascade this assert
-    // guards against: a fix/* credit would strand every dependent behind it).
     headRefByUrl: { "u/134": "fix/w1tx-style" },
     bodyByUrl: { "u/134": "Remudero-Task: W1-TX\n" },
   });
   const proj = deriveStatus(task({ id: "W1-TX" }), { ledgerPath: ledgerFile([]), github });
-  assert.equal(proj.source, "none", "a fix/* head must never be creditable, even with an anchored trailer");
-  assert.equal(proj.merged, false);
+  assert.equal(proj.source, "trailer", "a merged, anchored-trailer fix/* PR credits under the ruling");
+  assert.equal(proj.merged, true);
 });
 
 test("source (c) ownership-assert: an unresolved head ref fails CLOSED, never credited", () => {
@@ -680,7 +681,12 @@ test("W1-T69 C1: a foreign plan PR (head=plan/*, body QUOTES the trailer in pros
   const proj = deriveStatus(task({ id: "W1-T20c" }), { ledgerPath: ledgerFile([]), github });
   assert.equal(proj.source, "none");
   assert.equal(proj.merged, false);
-  assert.deepEqual(proj.rejected_candidates, [{ pr: "u/128", reason: "head-branch-not-owned" }]);
+  // REASON STRING UPDATED by the 2026-07-30 trailer-credit ruling, NOT the outcome: this body
+  // mentions the trailer MID-PROSE, so `hasAnchoredTrailer` was already false and the refusal is
+  // unchanged (source=none, merged=false — asserted above). What changed is truthfulness: the old
+  // ternary tested the branch FIRST and so blamed "head-branch-not-owned" when the real cause was
+  // the unanchored trailer. The reason now mirrors the accept test's own order of refusal.
+  assert.deepEqual(proj.rejected_candidates, [{ pr: "u/128", reason: "trailer-not-anchored" }]);
 });
 
 test("W1-T69 C2: a genuine run PR (anchored trailer + run-<taskId>-N head) credits exactly as today — source=trailer, nothing rejected", () => {
@@ -1951,4 +1957,116 @@ test("readLedgerTail: a missing file returns []; once it appears, subsequent rea
   assert.deepEqual(readLedgerTail(p, cache), []);
   writeFileSync(p, JSON.stringify({ step: "a" }) + "\n");
   assert.deepEqual(readLedgerTail(p, cache), [{ step: "a" }]);
+});
+
+// ── 2026-07-30 OPERATOR RULING: an exactly-anchored trailer on a MERGED PR credits, ─────────
+// ── regardless of the head branch's NAME; only a branch claiming ANOTHER task vetoes. ────────
+//
+// Ground truth this replaces (recon-AO, all OBSERVED): seven merged, correctly-trailered PRs
+// were refused credit on branch-name shape alone, stranding their tasks `queued` forever,
+// re-dispatching them, and tripping P29(ii)'s breaker. W1-T258 burned $3.40 ending in
+// `verdict: pr_attribution_failed`. The escalation reconciler keys on the same `merged` flag,
+// so the defect also made retiring its own escalations impossible.
+
+test("ruling: a merged PR with an anchored trailer credits from a hand-named branch the old assert vetoed", () => {
+  // W1-T258's EXACT live case: head `feat-api-key-overflow`, anchored trailer, MERGED (PR #766).
+  const github = fakeGitHub({
+    byTrailer: { "W1-T258": { number: 766, url: "u/766", state: "MERGED" } },
+    headRefByUrl: { "u/766": "feat-api-key-overflow" },
+    bodyByUrl: { "u/766": "Implements the overflow valve.\n\nRemudero-Task: W1-T258\n" },
+  });
+  const proj = deriveStatus(task({ id: "W1-T258" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.source, "trailer");
+  assert.equal(proj.merged, true);
+  assert.equal(proj.prNumber, 766);
+  assert.equal(proj.rejected_candidates, undefined);
+});
+
+test("ruling: a merged PR on the BARE run-taskId branch form credits even without the epoch suffix", () => {
+  // W1-T152's own merged PR #793: head `run-W1-T152`, which lacks only the `-<epochMs>` suffix.
+  const github = fakeGitHub({
+    byTrailer: { "W1-T152": { number: 793, url: "u/793", state: "MERGED" } },
+    headRefByUrl: { "u/793": "run-W1-T152" },
+    bodyByUrl: { "u/793": "Adds the serve plist generator.\n\nRemudero-Task: W1-T152\n" },
+  });
+  const proj = deriveStatus(task({ id: "W1-T152" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.source, "trailer");
+  assert.equal(proj.merged, true);
+});
+
+test("negative control: a merged PR whose anchored trailer names a DIFFERENT task never credits", () => {
+  // THE most important guard in this change. The fuzzy body search surfaces a merged PR that
+  // genuinely carries an anchored trailer — for someone else's task. Crediting it would mark
+  // work done that this task never did.
+  const github = fakeGitHub({
+    byTrailer: { "W1-T900": { number: 55, url: "u/55", state: "MERGED" } },
+    headRefByUrl: { "u/55": "feat-unrelated-work" },
+    bodyByUrl: { "u/55": "Implements something else.\n\nRemudero-Task: W1-T901\n" },
+  });
+  const proj = deriveStatus(task({ id: "W1-T900" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.merged, false);
+  assert.notEqual(proj.source, "trailer");
+  assert.deepEqual(proj.rejected_candidates, [{ pr: "u/55", reason: "trailer-not-anchored" }]);
+});
+
+test("trap 1 forward: a run branch belonging to W1-T152 never credits the prefix-sharing W1-T15", () => {
+  const github = fakeGitHub({
+    byTrailer: { "W1-T15": { number: 60, url: "u/60", state: "MERGED" } },
+    headRefByUrl: { "u/60": "run-W1-T152-1785348476091" },
+    bodyByUrl: { "u/60": "Body carries a trailer for the SHORT id.\n\nRemudero-Task: W1-T15\n" },
+  });
+  const proj = deriveStatus(task({ id: "W1-T15" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.merged, false);
+  assert.notEqual(proj.source, "trailer");
+  assert.deepEqual(proj.rejected_candidates, [{ pr: "u/60", reason: "branch-claims-other-task" }]);
+});
+
+test("trap 1 reverse: a run branch belonging to W1-T15 never credits the longer W1-T152", () => {
+  const github = fakeGitHub({
+    byTrailer: { "W1-T152": { number: 61, url: "u/61", state: "MERGED" } },
+    headRefByUrl: { "u/61": "run-W1-T15-1785348476091" },
+    bodyByUrl: { "u/61": "Body carries a trailer for the LONG id.\n\nRemudero-Task: W1-T152\n" },
+  });
+  const proj = deriveStatus(task({ id: "W1-T152" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.merged, false);
+  assert.notEqual(proj.source, "trailer");
+  assert.deepEqual(proj.rejected_candidates, [{ pr: "u/61", reason: "branch-claims-other-task" }]);
+});
+
+test("trap 2 open: an OPEN PR with a correct anchored trailer on a foreign branch never credits", () => {
+  // The relaxation is scoped to MERGED. Crediting an open PR would mark work done that never
+  // landed — a worse failure than the bug this fixes.
+  const github = fakeGitHub({
+    byTrailer: { "W1-T700": { number: 70, url: "u/70", state: "OPEN" } },
+    headRefByUrl: { "u/70": "feat-still-in-progress" },
+    bodyByUrl: { "u/70": "Work in progress.\n\nRemudero-Task: W1-T700\n" },
+  });
+  const proj = deriveStatus(task({ id: "W1-T700" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.merged, false);
+  assert.notEqual(proj.source, "trailer");
+});
+
+test("trap 2 closed: a CLOSED-UNMERGED PR with a correct anchored trailer on a foreign branch never credits", () => {
+  const github = fakeGitHub({
+    byTrailer: { "W1-T701": { number: 71, url: "u/71", state: "CLOSED" } },
+    headRefByUrl: { "u/71": "feat-abandoned" },
+    bodyByUrl: { "u/71": "Abandoned.\n\nRemudero-Task: W1-T701\n" },
+  });
+  const proj = deriveStatus(task({ id: "W1-T701" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.merged, false);
+  assert.notEqual(proj.source, "trailer");
+});
+
+test("ruling scope: an unreadable head ref still fails CLOSED on a merged anchored-trailer PR", () => {
+  // W1-T119, UNCHANGED by the ruling and deliberately re-asserted here. An absent head ref is a
+  // read that FAILED, not a branch carrying no claim. The ruling removed the veto power of a
+  // branch NAME we can SEE; it did not make an unreadable one creditable. (I initially got this
+  // wrong and the pre-existing doctrine test at "an unresolved head ref fails CLOSED" caught it.)
+  const github = fakeGitHub({
+    byTrailer: { "W1-T800": { number: 80, url: "u/80", state: "MERGED" } },
+    bodyByUrl: { "u/80": "Landed.\n\nRemudero-Task: W1-T800\n" },
+  });
+  const proj = deriveStatus(task({ id: "W1-T800" }), { ledgerPath: ledgerFile([]), github });
+  assert.equal(proj.merged, false);
+  assert.notEqual(proj.source, "trailer");
 });
