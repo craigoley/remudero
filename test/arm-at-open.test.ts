@@ -583,6 +583,145 @@ test(
   },
 );
 
+// ── (D) THE RISK JUDGE (P34 clause (b), W1-T248) ────────────────────────────
+//
+// Sits structurally right after the arm decision this file's group (C) already
+// proves, so it reuses that SAME real-runTask()-execution technique rather
+// than inventing a new one: an armed, non-capped review verdict (injected via
+// the same `runReview` seam) reaches the new risk-judge block, and the SAME
+// injected `spawn` the recon/implement workers already use gets a THIRD call —
+// the risk judge's own spawn (`realRiskJudge`'s wiring). A `RISK_VERDICT: high`
+// response drives the escalate path — the shape a coverage tool could not see
+// exercised by any prior test (this task's own commit message: "no existing
+// runTask() end-to-end test reaches this call site").
+
+test(
+  "EXECUTION (W1-T248): a real runTask() run whose (injected) review is a full, non-capped PASS reaches " +
+    "the risk-judge block; a HIGH-risk verdict from the (injected) judge spawn withdraws the arm-at-open, " +
+    "ledgers risk_judge.decision + risk_judge.escalated VERBATIM, and returns a blocked verdict naming the " +
+    "judge's own escalation issue — all BEFORE pollToGate is ever reached",
+  async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "arm-open-riskjudge-root-"));
+    const planPath = join(root, "tasks.yaml");
+    writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN);
+    const config: Config = { claudeBin: "/bin/true", root };
+
+    armOpenGitFixture(root);
+
+    const FIXED_TS = 1785100000002;
+    const branch = `run-T-ARM-OPEN-${FIXED_TS}`;
+    const headSha = "deadbeef5678";
+    const callLogPath = join(root, "gh-calls.log");
+    writeFileSync(callLogPath, "");
+    // CI green (unlike the CI-red ACCEPTANCE fixture above) — a real run only
+    // reaches review, and this new risk-judge block, once ci actually goes
+    // green; armOpenCappedFakeGh already answers `statusCheckRollup` SUCCESS
+    // plus the escalation surface (issue/label create) the judge's own
+    // escalate dep below reaches, so it is reused as-is (nothing here is
+    // actually "capped" — the name is this fixture's, not this test's shape).
+    const fakeBinDir = armOpenCappedFakeGh(branch, callLogPath, headSha);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${fakeBinDir}:${savedPath}`;
+    const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+    const spawnCalls: SpawnWorkerArgs[] = [];
+    const spawn: typeof spawnWorker = async (args) => {
+      spawnCalls.push(args);
+      if (spawnCalls.length === 1) {
+        return result({ sessionId: "s-recon", text: "RECON REPORT\nOBSERVED: nothing notable\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n" });
+      }
+      if (spawnCalls.length === 2) {
+        return result({ sessionId: "s-implement", text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/601\n" });
+      }
+      // The THIRD spawn call is the risk judge itself (realRiskJudge's own
+      // spawnRiskJudgeWorker, wired to runTask's SAME injected `spawn`) — a
+      // deliberately HIGH-risk, high-confidence verdict so this run reaches
+      // the escalate path (the branch a coverage tool could not otherwise see
+      // exercised).
+      return result({
+        sessionId: "s-risk-judge",
+        text: "RISK_VERDICT: high\nRISK_CONFIDENCE: 0.88\nRISK_REASON: touches an unreviewed area with no precedent",
+      });
+    };
+
+    // A full, non-capped PASS — decideAutoMergeArm arms unconditionally on this
+    // shape (verdict.state==="success" && !verdict.capped), so the run reaches
+    // the NEW risk-judge block right after arming, never the capped-refusal
+    // branch group (C) already covers.
+    const fullPassVerdict = {
+      state: "success" as const,
+      criteria: [],
+      testTheater: false,
+      summary: "full PASS — every criterion executed",
+      floorDegraded: false,
+      capped: false,
+      keywordOnly: false,
+      planOnly: false,
+      headSha,
+      reviewerOutcome: "success",
+    };
+
+    try {
+      const res = await runTask("T-ARM-OPEN", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: ARM_OPEN_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: armOpenHoldingContainmentExec,
+        isolationExec: armOpenCleanIsolationExec,
+        runReview: async () => fullPassVerdict,
+      });
+
+      assert.equal(res.verdict, "blocked", "a HIGH-risk judge verdict escalates and refuses to proceed to pollToGate");
+      assert.equal(res.merged, false);
+      assert.equal(spawnCalls.length, 3, "recon, implement, THEN the risk judge's own spawn — pollToGate never spawns anything");
+
+      const ledger = readLedger(root);
+      const armedIdx = ledger.findIndex((l) => l.step === "automerge.armed");
+      assert.ok(armedIdx >= 0, "the run armed at open, same as every other run in this file");
+
+      const decisionIdx = ledger.findIndex((l) => l.step === "risk_judge.decision");
+      assert.ok(decisionIdx >= 0, "risk_judge.decision must be ledgered");
+      assert.equal(ledger[decisionIdx]?.verdict, "high");
+      assert.deepEqual(ledger[decisionIdx]?.reasons, ["touches an unreviewed area with no precedent"], "the judge's OWN observed reasons, ledgered VERBATIM");
+      assert.equal(ledger[decisionIdx]?.confidence, 0.88, "confidence ledgered verbatim (round ii)");
+      assert.equal(ledger[decisionIdx]?.action, "escalate");
+
+      const disarmedIdx = ledger.findIndex((l) => l.step === "automerge.disarmed");
+      assert.ok(disarmedIdx >= 0, "the risk judge's escalate dep must withdraw the arm-at-open");
+      assert.equal(ledger[disarmedIdx]?.reason, "risk judge escalated — auto-merge refused");
+      assert.ok(disarmedIdx > armedIdx, "the disarm follows the earlier arm-at-open, never before it");
+      assert.ok(disarmedIdx > decisionIdx, "the decision is ledgered BEFORE the escalate dep withdraws the arm, matching runRiskJudge's own source order");
+
+      const escalatedIdx = ledger.findIndex((l) => l.step === "risk_judge.escalated");
+      assert.ok(escalatedIdx >= 0, "risk_judge.escalated must be ledgered");
+      const issueUrl = ledger[escalatedIdx]?.issue_url as string | undefined;
+      assert.match(String(issueUrl), /^https:\/\/github\.com\/acme\/remudero\/issues\/\d+$/, "the escalate dep's real issue URL");
+
+      const verdictIdx = ledger.findIndex((l) => l.step === "verdict");
+      assert.ok(verdictIdx > escalatedIdx, "the terminal verdict line follows risk_judge.escalated, matching source order");
+      assert.equal(ledger[verdictIdx]?.verdict, "blocked");
+      assert.equal(ledger[verdictIdx]?.reason, "risk judge escalated");
+      assert.equal(ledger[verdictIdx]?.issue_url, issueUrl, "the returned verdict's issue_url is the SAME one the escalate dep produced");
+
+      // pollToGate is never reached — no `ci.polling`/`pr.polling` line, and the
+      // fake-gh call log recorded no SECOND statusCheckRollup poll beyond the
+      // one `waitForCiGreen` already made before review.
+      assert.ok(
+        !ledger.some((l) => l.step === "ci.polling" || l.step === "pr.polling"),
+        "the risk-judge escalation returns BEFORE pollToGate — no polling line is ever ledgered",
+      );
+      const pollCalls = readFileSync(callLogPath, "utf8").split("\n").filter((l) => l === "poll");
+      assert.equal(pollCalls.length, 1, "exactly the ONE waitForCiGreen poll before review — pollToGate's own poll never fires");
+    } finally {
+      dateNowSpy.mock.restore();
+      process.env.PATH = savedPath;
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
 test(
   "MECHANISM (iii): runTask's capped-refusal branch calls disarmAutoMerge(prUrl) BEFORE escalate(...) " +
     "— source-level reachability proof (same technique as the neighboring 'runFixRung is REUSED' test " +

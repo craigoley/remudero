@@ -103,12 +103,31 @@ function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & {
   };
 }
 
-/** Seeds a real ledger file with `count` runs each costing `eachUsd`, verdict-lined today. */
+/**
+ * Seeds a real ledger file with `count` runs each costing `eachUsd`, verdict-lined "today".
+ *
+ * Stamps an explicit `ts` inside the fixed `TODAY` window rather than letting
+ * `appendLedger`'s default (the REAL wall clock) decide: `deriveDayCostUsd` windows
+ * strictly on a line's own `ts` against the `now` it's given (`TODAY` here, a frozen
+ * constant), and `TODAY`'s UTC calendar day is not always the REAL wall clock's UTC
+ * calendar day (e.g. any run between ~20:00 and 23:59 US Eastern lands past the UTC
+ * midnight boundary) -- an unstamped line silently falls outside the window and both
+ * `dayCostUsd` assertions below read 0/short, a real, observed, clock-boundary flake
+ * this fixture must never reintroduce.
+ */
 function seedRuns(path: string, count: number, eachUsd: number): void {
+  const ts = new Date(TODAY).toISOString();
   for (let i = 0; i < count; i++) {
     const runId = `RUN-${i}`;
-    appendLedger(path, { run_id: runId, task_id: "W1-T1", step: "run.start" });
-    appendLedger(path, { run_id: runId, task_id: "W1-T1", step: "verdict", verdict: "failed", cost_usd: eachUsd });
+    appendLedger(path, { run_id: runId, task_id: "W1-T1", step: "run.start", ts });
+    appendLedger(path, {
+      run_id: runId,
+      task_id: "W1-T1",
+      step: "verdict",
+      verdict: "failed",
+      cost_usd: eachUsd,
+      ts,
+    });
   }
 }
 

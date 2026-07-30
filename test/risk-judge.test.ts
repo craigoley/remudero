@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { validateMounts, type Mount, type Mounts } from "../src/lib/mounts.js";
+import { MountsError, validateMounts, type Mount, type Mounts } from "../src/lib/mounts.js";
+import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
 import {
   assessRisk,
   buildRiskJudgePrompt,
@@ -9,9 +10,11 @@ import {
   createInMemoryRiskJudgeCache,
   parseRiskJudgeVerdict,
   planRiskJudgeAction,
+  realRiskJudge,
   resolveRiskJudgeMount,
   RISK_JUDGE_TOOLS,
   runRiskJudge,
+  spawnRiskJudgeWorker,
   type RiskJudgeAction,
   type RiskJudgeConfig,
   type RiskJudgeInput,
@@ -372,4 +375,78 @@ test("buildRiskJudgeSpawnArgs carries an EMPTY tool list — the judge cannot wr
   assert.equal(args.model, "haiku");
   assert.equal(args.effort, "medium");
   assert.equal(args.maxTurns, 20);
+});
+
+// ── resolveRiskJudgeMount: fail-closed on an empty routing table ──────────
+
+test("resolveRiskJudgeMount throws MountsError when the routing table defines no routes at all — never silently returns an undefined mount", () => {
+  const empty: Mounts = {
+    tiers: { haiku: 1 },
+    efforts: { medium: 1 },
+    architect: { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1 },
+    judge: { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1 },
+    routes: {},
+  };
+  assert.throws(() => resolveRiskJudgeMount(empty), MountsError);
+  assert.throws(() => resolveRiskJudgeMount(empty), /no worker mount found in mounts\.yaml routes/);
+});
+
+// ── spawnRiskJudgeWorker / realRiskJudge: the real-spawn wiring, injected ─
+
+function fakeWorkerResult(text: string): WorkerResult {
+  return {
+    sessionId: "s-risk-judge",
+    costUsd: 0.001,
+    numTurns: 1,
+    text,
+    blocks: [text],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "haiku",
+    effort: "medium",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+  };
+}
+
+test("spawnRiskJudgeWorker calls the injected spawn with buildRiskJudgeSpawnArgs' own output and returns its result verbatim", async () => {
+  const mount: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+  const input = baseInput();
+  const calls: unknown[] = [];
+  const fakeText = "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.95\nRISK_REASON: routine, well-trodden change";
+  const spawn = (async (args: unknown) => {
+    calls.push(args);
+    return fakeWorkerResult(fakeText);
+  }) as typeof spawnWorker;
+
+  const outcome = await spawnRiskJudgeWorker({ input, mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+
+  assert.equal(calls.length, 1, "spawnRiskJudgeWorker must call the injected spawn exactly once");
+  assert.deepEqual(calls[0], buildRiskJudgeSpawnArgs({ input, mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json" }));
+  assert.equal(outcome.text, fakeText, "the raw WorkerResult is returned untouched — parsing happens one layer up");
+});
+
+test("realRiskJudge wires spawnRiskJudgeWorker's result through parseRiskJudgeVerdict — the production judge fn", async () => {
+  const mount: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+  const spawnCalls: unknown[] = [];
+  const spawn = (async (args: unknown) => {
+    spawnCalls.push(args);
+    return fakeWorkerResult("RISK_VERDICT: high\nRISK_CONFIDENCE: 0.8\nRISK_REASON: touches an unreviewed area");
+  }) as typeof spawnWorker;
+
+  const judge = realRiskJudge({ mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  const verdictOut = await judge(baseInput());
+
+  assert.equal(spawnCalls.length, 1);
+  assert.deepEqual(verdictOut, {
+    verdict: "high",
+    confidence: 0.8,
+    reasons: ["touches an unreviewed area"],
+  });
 });
