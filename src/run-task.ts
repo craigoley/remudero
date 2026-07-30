@@ -107,6 +107,7 @@ import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js
 import {
   deliversRealtime,
   escalate,
+  escalationCause,
   ghIssueGateway,
   NEEDS_HUMAN_LABEL,
   presenceMode,
@@ -2483,6 +2484,14 @@ export async function runFixRung(opts: {
       class: "BLOCKED",
       taskId: opts.taskId,
       runId: opts.runId,
+      // W1-T195: the composite dedup key's 2nd/3rd dimensions — the SAME headSha
+      // this escalation's own detail already names (`review.headSha`) and the SAME
+      // conflicted/checks-red signals the summary/detail above already branch on,
+      // normalized via the shared `escalationCause` classifier so the clarification
+      // rung's blocked-ambiguous escalate (buildSweepEffects, below) collapses into
+      // this ONE issue when it observes the identical (PR, head, cause).
+      headSha: review.headSha,
+      cause: escalationCause(stillConflicted, noReviewYet),
       summary: stillConflicted
         ? `conflicted fix rung exhausted (${strikes} strike(s), merge state never resolved) — ${opts.prUrl}`
         : noReviewYet
@@ -7242,6 +7251,16 @@ export function buildSweepEffects(
           class: "BLOCKED",
           taskId: pr.taskId ?? "UNKNOWN",
           runId,
+          // W1-T195: the SAME composite-key dimensions the fix rung's exhaustion
+          // escalate sets (runFixRung, above) — `pr.headSha` is the SAME field the
+          // fix rung dispatches strikes against, and `escalationCause` classifies off
+          // the SAME `pr.mergeState`/`isBlockedCi(pr)` signals this closure's own
+          // caller (routeFix/runSweep) already used to route here. When this
+          // clarification observes the identical (PR, head, cause) an already-open
+          // fix-rung-exhaustion issue named, `escalate()` appends here instead of
+          // opening a sibling — the #412/#413-shaped duplicate this task fixes.
+          headSha: pr.headSha,
+          cause: escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
           summary: `PR ${pr.prUrl} needs a clarification — ${reason}`,
           detail:
             `The CLARIFICATION-QUESTION rung (W1-T78, ratifies P22's new rung) reconciled open PR #${pr.prNumber} ` +

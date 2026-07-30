@@ -42,6 +42,51 @@ export interface Escalation {
   options: EscalationOption[];
   /** Which option the machine recommends (auto-choose doctrine, §4) — must be one of options[].label. */
   recommendation: string;
+  /**
+   * The PR's head commit sha, OPTIONAL (W1-T195 — the composite dedup key's 2nd
+   * dimension, alongside the PR number `escalate()` already scrapes from `summary`/
+   * `detail`). A caller that omits this keeps today's W1-T104 (taskId, PR) dedup
+   * behavior UNCHANGED — {@link escalate}'s dup search only requires equality on a
+   * dimension when BOTH the new escalation and the candidate open issue carry a
+   * value for it, so an un-migrated caller never regresses. Set by the two rungs
+   * whose independent duplicate pairs motivated this task — the fix rung's
+   * strike-exhaustion escalate and the clarification rung's blocked-ambiguous
+   * escalate (both `run-task.ts`) — from the SAME `headSha`/`review.headSha` each
+   * already reads for its own dispatch.
+   */
+  headSha?: string;
+  /**
+   * The blocked PR's underlying cause, OPTIONAL (W1-T195 — the composite dedup
+   * key's 3rd dimension): 'the review is failing' vs 'the checks are red' vs
+   * 'this PR is conflicted' are different operator asks even on the same head sha,
+   * so a same-PR/same-sha pair with DIFFERENT causes must still open separately.
+   * See {@link escalationCause} — both rungs named above derive this from the SAME
+   * booleans they already compute for their own dispatch, so a review-failing
+   * observation from EITHER rung normalizes to the identical value the dedup key
+   * needs to collapse them. Same permissive-when-absent matching as
+   * {@link Escalation.headSha}.
+   */
+  cause?: EscalationCause;
+}
+
+/** The three-way cause split {@link Escalation.cause} keys on (W1-T195's design). */
+export type EscalationCause = "review" | "ci" | "conflict";
+
+/**
+ * Classify a blocked PR's underlying cause into the {@link EscalationCause} three-way
+ * split, from the SAME two booleans each rung already computes for its own dispatch
+ * (the fix rung's `stillConflicted`/`noReviewYet`, the clarification rung's
+ * `pr.mergeState === "dirty"`/`isBlockedCi(pr)`) — never a second, independently
+ * re-derived classification, and never string-parsing either rung's free-text `reason`
+ * (which differs in wording between the two call sites and would be fragile to keep in
+ * sync). `conflicted` wins over `ciFailing` because a dirty merge state means GitHub
+ * never ran checks at all (see {@link isBlockedCi}'s sibling doc in sweep.ts) — checks
+ * read as "none"/stale, not a genuine ci-failing signal, when a PR is unmergeable.
+ */
+export function escalationCause(conflicted: boolean, ciFailing: boolean): EscalationCause {
+  if (conflicted) return "conflict";
+  if (ciFailing) return "ci";
+  return "review";
 }
 
 /** One open issue as the reconciler reads it (fb-1784756088300-6a481e). */
@@ -252,6 +297,13 @@ export function renderIssueBody(e: Escalation): string {
     `**Class:** ${e.class}`,
     `**Task:** ${e.taskId}`,
     e.runId ? `**Run:** ${e.runId}` : undefined,
+    // W1-T195: round-trip the composite dedup key's optional dimensions the SAME
+    // way `**Task:**` already round-trips — {@link escalate}'s dup search reads
+    // these back off a candidate OPEN issue's body via HEAD_SHA_LINE_RE/CAUSE_LINE_RE.
+    // Omitted entirely (never a blank/placeholder line) when the caller didn't set
+    // the field, so an un-migrated caller's issues render byte-identical to before.
+    e.headSha ? `**Head:** ${e.headSha}` : undefined,
+    e.cause ? `**Cause:** ${e.cause}` : undefined,
     "",
     e.detail,
     "",
@@ -293,6 +345,25 @@ function extractPrRef(text: string): string | undefined {
  *  regex the escalation-lifecycle reconciler (run-task.ts) already reads task ids with. */
 const TASK_LINE_RE = /^\*\*Task:\*\*\s*(\S+)\s*$/m;
 
+/** The `**Head:** <sha>` line {@link renderIssueBody} writes ONLY when {@link Escalation.headSha}
+ *  is set (W1-T195) — absent on every issue predating this task or opened by an un-migrated caller. */
+const HEAD_SHA_LINE_RE = /^\*\*Head:\*\*\s*(\S+)\s*$/m;
+
+/** The `**Cause:** <review|ci|conflict>` line {@link renderIssueBody} writes ONLY when
+ *  {@link Escalation.cause} is set (W1-T195) — same absent-by-default discipline as
+ *  {@link HEAD_SHA_LINE_RE}. */
+const CAUSE_LINE_RE = /^\*\*Cause:\*\*\s*(\S+)\s*$/m;
+
+/**
+ * Does an OPTIONAL composite-key dimension veto a dedup match? A dimension only vetoes
+ * when BOTH sides carry a value and they DISAGREE — either side missing means that
+ * dimension says nothing (permissive), which is exactly what keeps every un-migrated
+ * caller's dedup behavior (taskId + PR only) unchanged by this task (W1-T195).
+ */
+function matchesOptionalDimension(wanted: string | undefined, candidate: string | undefined): boolean {
+  return wanted === undefined || candidate === undefined || wanted === candidate;
+}
+
 /**
  * Open a labeled GitHub issue for one escalation + log the ledger line. Returns the
  * issue URL. An escalation with zero options is refused — bare alerts with no
@@ -304,8 +375,16 @@ const TASK_LINE_RE = /^\*\*Task:\*\*\s*(\S+)\s*$/m;
  * actions (different title templates, different ledger keys) and never saw the
  * other's issue. The fix is a single content-keyed check inside `escalate()` itself,
  * so EVERY caller inherits it by construction rather than re-implementing it:
- *   - key = (this escalation's taskId, the PR number found in its summary/detail).
- *     No PR reference found -> skip the check entirely (create as always).
+ *   - key = (this escalation's taskId, the PR number found in its summary/detail,
+ *     and — W1-T195 — {@link Escalation.headSha}/{@link Escalation.cause} when the
+ *     caller set them). No PR reference found -> skip the check entirely (create as
+ *     always). headSha/cause are matched permissively (see
+ *     {@link matchesOptionalDimension}): they veto a match only when BOTH sides carry
+ *     a value and disagree, so an un-migrated caller's dedup is unchanged (taskId + PR
+ *     only) while the two rungs that DO set them (the fix rung's strike-exhaustion
+ *     escalate and the clarification rung's blocked-ambiguous escalate) get the real
+ *     fix this task exists for: a new push (new headSha) or a different cause on the
+ *     same sha each open their own issue instead of being silenced by a stale one.
  *   - search OPEN `needs-human` issues (never closed ones — a closed issue recorded a
  *     human's resolution, and a fresh escalation on a recurrence must NOT be silenced
  *     by it) for one whose `**Task:**` line matches and whose title+body names the
@@ -339,11 +418,22 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
     } catch {
       open = []; // best-effort dedup: a failed read must never block the escalation itself
     }
-    const dup = open.find(
-      (issue) =>
-        TASK_LINE_RE.exec(issue.body ?? "")?.[1] === e.taskId &&
-        extractPrRef(`${issue.title ?? ""}\n${issue.body ?? ""}`) === prRef,
-    );
+    // W1-T195: the composite key. taskId + PR are REQUIRED matches (unchanged from
+    // W1-T104). headSha/cause are matched via matchesOptionalDimension — a dimension
+    // only vetoes the match when BOTH this escalation and the candidate issue carry a
+    // value and they disagree, so a caller that never sets headSha/cause (every caller
+    // except the two rungs this task wires) keeps today's (taskId, PR) dedup exactly as
+    // before. A caller that DOES set both, on the other hand, gets the real fix: a new
+    // push (new headSha) or a different cause on the same sha each open their OWN issue
+    // rather than being silently suppressed by a stale one.
+    const dup = open.find((issue) => {
+      const body = issue.body ?? "";
+      if (TASK_LINE_RE.exec(body)?.[1] !== e.taskId) return false;
+      if (extractPrRef(`${issue.title ?? ""}\n${body}`) !== prRef) return false;
+      if (!matchesOptionalDimension(e.headSha, HEAD_SHA_LINE_RE.exec(body)?.[1])) return false;
+      if (!matchesOptionalDimension(e.cause, CAUSE_LINE_RE.exec(body)?.[1])) return false;
+      return true;
+    });
     if (dup) {
       deps.issues.comment?.(
         dup.url,

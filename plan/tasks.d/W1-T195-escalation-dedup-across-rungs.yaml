@@ -51,13 +51,17 @@
     useful; this task deduplicates their OUTPUT, not their reasoning.
   acceptance:
     - claim: "two rungs observing the same (PR, head sha, cause class) produce ONE escalation, with the second appending"
-      proof: "unit test: the fix-rung-exhausted path and the clarification path, both fired against one PR at one head sha for one cause, yield exactly ONE open issue, and the second observer's state appears as a comment on it. FALSIFIER: six same-PR pairs on 2026-07-20/21 — #412/#413, #420/#421, #427/#428, #433/#434, #415/#416, #390/#395 — four of them within 64-74 seconds, each pair being two reports of one failing condition"
+      proof: "unit test: W1-T195 claim 1:"
+      superseded_narrative: "the fix-rung-exhausted path and the clarification path, both fired against one PR at one head sha for one cause, yield exactly ONE open issue, and the second observer's state appears as a comment on it. FALSIFIER: six same-PR pairs on 2026-07-20/21 — #412/#413, #420/#421, #427/#428, #433/#434, #415/#416, #390/#395 — four of them within 64-74 seconds, each pair being two reports of one failing condition"
     - claim: "the second observer's information is PRESERVED, never dropped"
-      proof: "unit test: the appended comment carries the second rung's own view (strike count, or the no-single-unmet-criterion finding), not merely a 'duplicate' marker. FALSIFIER: dropping the second observation loses what that rung uniquely knew — #433 knew two strikes had been spent, #434 knew there was no single nameable unmet criterion, and an operator needs both to decide"
+      proof: "unit test: W1-T195 claim 2:"
+      superseded_narrative: "the appended comment carries the second rung's own view (strike count, or the no-single-unmet-criterion finding), not merely a 'duplicate' marker. FALSIFIER: dropping the second observation loses what that rung uniquely knew — #433 knew two strikes had been spent, #434 knew there was no single nameable unmet criterion, and an operator needs both to decide"
     - claim: "a NEW head sha, or a DIFFERENT cause class, still opens its own escalation"
-      proof: "unit test: the same PR escalating after a new push, and the same PR escalating for a different cause class on the same sha, each open a fresh issue. FALSIFIER: keying on PR number alone would suppress a genuinely new block on a new push — dedup that hides live work is worse than the duplication it removes"
+      proof: "unit test: W1-T195 claim 3"
+      superseded_narrative: "the same PR escalating after a new push, and the same PR escalating for a different cause class on the same sha, each open a fresh issue. FALSIFIER: keying on PR number alone would suppress a genuinely new block on a new push — dedup that hides live work is worse than the duplication it removes"
     - claim: "a CLOSED escalation does not suppress a genuine recurrence"
-      proof: "unit test: with the prior issue CLOSED and the condition recurring on the same sha, a new escalation opens. FALSIFIER: treating a closed issue as a dedup hit would silence a condition the operator has already tried to resolve, which is the inverse failure and the more dangerous one"
+      proof: "unit test: W1-T195 claim 4:"
+      superseded_narrative: "with the prior issue CLOSED and the condition recurring on the same sha, a new escalation opens. FALSIFIER: treating a closed issue as a dedup hit would silence a condition the operator has already tried to resolve, which is the inverse failure and the more dangerous one"
   risk: medium
   origin: architect
   plan_refs: ["§4", "§7B"]
