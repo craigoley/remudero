@@ -131,6 +131,18 @@ function seedRuns(path: string, count: number, eachUsd: number): void {
   }
 }
 
+// ── regression: seedRuns dates at TODAY, not the wall clock (the 2026-07-30 rollover) ──
+
+test("seedRuns dates its ledger lines at TODAY so deriveDayCostUsd counts them regardless of the real wall clock (midnight-rollover regression)", () => {
+  const path = ledgerPath();
+  seedRuns(path, 10, 1.5); // $15 across 10 runs, stamped at TODAY
+  const dayCostUsd = deriveDayCostUsd(readLedgerLines(path), TODAY);
+  assert.ok(
+    Math.abs(dayCostUsd - 15) < 0.01,
+    `seeded lines must land in TODAY's window independent of the wall clock; expected ~$15, got ${dayCostUsd}`,
+  );
+});
+
 // ── acceptance 1: at/over the ceiling defers, seeded with the $206/60-run shape ──
 
 test("acceptance 1 — over the ceiling (the $206/60-run W1-T1 shape): checkCostGovernor defers, a dispatch_deferred_budget ledger line carries day-cost + ceiling, and sweep/heal/arm/merge in the SAME pass are unaffected", async () => {
