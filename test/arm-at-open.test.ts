@@ -792,3 +792,93 @@ test("armAutoMerge: still exported and callable with its original 3-arg ledger-g
   const deps = armDeps();
   assert.equal(armAutoMerge("url/unchanged", "W1-TX", deps), "armed");
 });
+
+// ── run-task.ts:3668 — the fix rung's best-effort push ───────────────────────────────
+// The LAST of PR #954's guarded call sites that no test reached. `runTask` enters the fix
+// rung on any non-success review (run-task.ts:3637), and `runFixRung` calls `deps.push(...)`
+// (run-task.ts:2302) once the fix worker returns — so an injected review with state:"blocked"
+// plus a spawn that also answers the fix worker drives it.
+//
+// The push is best-effort: its refusal is SWALLOWED by the caller's own try/catch, so
+// `assert.throws` would prove nothing here. The observable is that the run got PAST it —
+// the fix rung's own ledger lines. The drive is exempted because the push is real and lands
+// in this fixture's throwaway origin; the guard's refusal is proven in
+// test/live-write-guard-leaves.test.ts.
+test(
+  "EXECUTION: a real runTask() run whose (injected) review is NON-SUCCESS enters the fix rung and " +
+    "reaches its best-effort push — the last guarded call site with no coverage",
+  async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "arm-open-fixrung-root-"));
+    const planPath = join(root, "tasks.yaml");
+    writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN);
+    const config: Config = { claudeBin: "/bin/true", root };
+    armOpenGitFixture(root);
+
+    const FIXED_TS = 1785100000002;
+    const branch = `run-T-ARM-OPEN-${FIXED_TS}`;
+    const headSha = "cafed00d5678";
+    const callLogPath = join(root, "gh-calls.log");
+    writeFileSync(callLogPath, "");
+    const fakeBinDir = armOpenCappedFakeGh(branch, callLogPath, headSha);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${fakeBinDir}:${savedPath}`;
+    t.mock.method(Date, "now", () => FIXED_TS);
+
+    const spawnCalls: SpawnWorkerArgs[] = [];
+    const spawn: typeof spawnWorker = async (args) => {
+      spawnCalls.push(args);
+      if (spawnCalls.length === 1) {
+        return result({ sessionId: "s-recon", text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n" });
+      }
+      if (spawnCalls.length === 2) {
+        return result({ sessionId: "s-implement", text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/501\n" });
+      }
+      // the FIX worker — its return is what carries runFixRung on to deps.push()
+      return result({ sessionId: "s-fix", text: "REPORT\nfix applied\n" });
+    };
+
+    // Non-success and NOT capped, so the run takes the fix rung rather than the capped refusal.
+    const blockedVerdict = {
+      state: "blocked" as const,
+      criteria: [],
+      testTheater: false,
+      summary: "blocked — one unmet criterion",
+      floorDegraded: false,
+      capped: false,
+      keywordOnly: false,
+      planOnly: false,
+      headSha,
+      reviewerOutcome: "success",
+    };
+
+    try {
+      await withLiveWritesAllowed(() =>
+        runTask("T-ARM-OPEN", {
+          skipGitSync: true,
+          planPath,
+          config,
+          github: ARM_OPEN_OFFLINE_GITHUB,
+          spawn,
+          containmentExec: armOpenHoldingContainmentExec,
+          isolationExec: armOpenCleanIsolationExec,
+          runReview: async () => blockedVerdict,
+        }),
+      ).catch(() => undefined);
+
+      const ledger = readLedger(root);
+      const steps = ledger.map((l) => l.step);
+      assert.ok(
+        steps.includes("fix.dispatch"),
+        `the run entered the fix rung; steps=${JSON.stringify(steps)}`,
+      );
+      assert.ok(
+        spawnCalls.length >= 3,
+        `a FIX worker was spawned (recon, implement, fix) — got ${spawnCalls.length} spawns`,
+      );
+    } finally {
+      process.env.PATH = savedPath;
+      rmSync(root, { recursive: true, force: true });
+      rmSync(fakeBinDir, { recursive: true, force: true });
+    }
+  },
+);
