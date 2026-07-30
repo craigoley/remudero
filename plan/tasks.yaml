@@ -12477,3 +12477,23 @@
     asymmetric: a recursion or a cancel-in-progress bug either spins the gate or leaves a cancelled
     ci-gate as the newest run, which reads as a hard red. The guards in design (ii)/(iii) are load-bearing
     criteria, not defensive extras."
+
+- id: T-MOUNTPROBE
+  title: mount routing probe (docs class)
+  repo: remudero
+  type: implement
+  verify: auto
+  risk: medium
+  files: [docs/probe.md]
+  origin: architect
+  status: queued
+  acceptance:
+    - claim: "task class derivation correctly identifies docs-only tasks: files: [docs/probe.md] derives task_class: docs"
+      proof: "unit test: runTask resolves the class-routed mount and ledgers run.start with task_class/mount_class (W1-T167) — halting at the spawn boundary, no worker ever launched"
+    - claim: "mount resolution finds the exact (implement, medium, docs) row in .remudero/mounts.yaml without fallback"
+      proof: "unit test: runTask resolves the class-routed mount and ledgers run.start with task_class/mount_class (W1-T167) — halting at the spawn boundary, no worker ever launched"
+    - claim: "the docs-class mount for implement×medium routes to haiku model (the cost-optimized tier)"
+      proof: "unit test: runTask resolves the class-routed mount and ledgers run.start with task_class/mount_class (W1-T167) — halting at the spawn boundary, no worker ever launched"
+    - claim: "run.start ledgers task_class and mount_class for the retro's per-class calibration (W1-T167)"
+      proof: "unit test: runTask resolves the class-routed mount and ledgers run.start with task_class/mount_class (W1-T167) — halting at the spawn boundary, no worker ever launched"
+  note: "Probe task validating that task-class routing for docs-only changes works correctly. Tests W1-T167's addition of the docs-class axis to the mount routing table. The test fixture creates this exact task definition with files:[docs/probe.md] and validates the routing through the actual spawn path."
