@@ -269,6 +269,7 @@ import {
 } from "./lib/task-linter.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
 import { deriveTaskClass } from "./lib/task-class.js";
+import { realRiskJudge, resolveRiskJudgeMount, runRiskJudge, type RiskJudgeInput } from "./lib/risk-judge.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
@@ -3743,6 +3744,63 @@ async function runTask(
         billing_mode: "subscription",
       });
       say(`verdict: blocked — CAPPED verdict, escalated: ${issueUrl}`);
+      return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
+    }
+
+    // ── RISK JUDGE (P34 clause (b), MASTER-PLAN §4B/§9, W1-T248): assess THIS
+    // candidate change — never `task.risk` (a sizing artifact, never consulted here) —
+    // before an already-armed PR is allowed to fall through to the merge gate.
+    // Low-risk-and-confident PROCEEDS unchanged. High-risk OR low-confidence ESCALATES,
+    // naming the judge's own OBSERVED reasons (W1-T186 emitter discipline); the escalate
+    // dep below withdraws the early arm-at-open FIRST (the identical W1-T125 shape the
+    // capped-refusal branch above uses), so an already-armed PR can never merge behind
+    // this escalation. Judge-unavailable (spawn error, unparseable output) fails closed
+    // to ESCALATE inside assessRisk itself — this call site never has to remember that
+    // rule. Runs on the cheapest configured (haiku-class) mount, resolved fresh from
+    // mounts.yaml (W1-T5) rather than any mount already resolved for the task's own work.
+    const riskJudgeInput: RiskJudgeInput = {
+      change: { description: `${task.title} — ${prUrl}`, files: task.files },
+      gatesState: { review_state: review.state, review_capped: review.capped, ci, arm_decision: armDecision.reason },
+      planContext: { taskId: task.id, title: task.title, taskType: task.type },
+    };
+    const riskJudgeMount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
+    const riskJudgeResult = await runRiskJudge(riskJudgeInput, {
+      judge: realRiskJudge({ mount: riskJudgeMount, cwd: worktreePath, settingsFile, spawn }),
+      escalate: (verdict, action) => {
+        // W1-T125 shape, reapplied to a NEW cause: withdraw the early arm-at-open
+        // BEFORE escalating — GitHub must never merge a PR the risk judge refused.
+        disarmAutoMerge(prUrl);
+        log("automerge.disarmed", { reason: "risk judge escalated — auto-merge refused" });
+        return escalate(
+          {
+            class: "BLOCKED",
+            taskId,
+            runId,
+            summary: `risk judge ESCALATED (${verdict.verdict}, confidence ${verdict.confidence.toFixed(2)}) — ${prUrl}`,
+            detail: `${action.reason}\n\nAuto-merge was NOT allowed to proceed unattended.`,
+            options: [
+              {
+                label: "review-manually",
+                detail: "read the diff and either merge it by hand or push a follow-up fix, then re-drain.",
+              },
+            ],
+            recommendation: "review-manually",
+          },
+          { issues: ghIssueGateway(owner, task.repo), ledgerPath, runId },
+        );
+      },
+      log: (s, extra) => log(s, extra),
+    });
+    if (riskJudgeResult.action.kind === "escalate") {
+      log("verdict", {
+        verdict: "blocked",
+        pr_url: prUrl,
+        reason: "risk judge escalated",
+        issue_url: riskJudgeResult.escalationUrl,
+        cost_usd: costUsd,
+        billing_mode: "subscription",
+      });
+      say(`verdict: blocked — risk judge escalated: ${riskJudgeResult.escalationUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
     }
 
