@@ -3864,12 +3864,10 @@ function fixPr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "pending",
     unmetCriteria: [],
     priorStrikes: 0,
-    // W1-T262 ci-log fix: a hardcoded absolute date here is a time bomb — once
-    // "now" passes it by >= policy.sweep.staleDays (14), deriveDisposition flips
-    // every one of these fixtures to "stale" and routeFix correctly refuses them,
-    // exactly as it did on 2026-07-30 (the #946 CI failure this comment fixes).
-    // `new Date().toISOString()` matches the other fresh-PR fixtures in this file
-    // (e.g. line ~4122) and keeps this fixture perpetually "just active".
+    // A RECENT-activity fixture, not a date-specific one: routeFix has no injectable clock,
+    // so deriveDisposition sees the real Date.now(). A fixed 2026-07-16 literal here silently
+    // aged past DEFAULT_SWEEP_POLICY.staleDays (14) and flipped every routeFix disposition to
+    // "stale" on 2026-07-30T12:00:00Z. Relative, like this file's other OpenPrView helpers.
     lastActivityAt: new Date().toISOString(),
     headSha: "aaaa111",
     autoMergeArmed: false,
