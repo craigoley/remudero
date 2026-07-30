@@ -2119,3 +2119,87 @@ test("runSweep (light pass): a post-review disposition IS actionable under the s
   await runSweep([ungatedGreenPr()], deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(fired, [584], "post-review is the ONE lane the light pass runs");
 });
+
+// ── impl-BC: the arm effect's OUTCOME is read, ledgered, and never made permanent ────
+// `armAutoMerge` does not throw — it RETURNS one of seven outcomes, five of which armed
+// nothing. The effect discarded that value and the sweep recorded `acted: true` regardless,
+// which both hid the refusal and made it permanent (acted:true seeds prior.armed, so the
+// next pass deduped forever). Observed live on PR #960.
+
+test("arm outcome: a no-task-id refusal yields acted:false AND names itself in stand_down_reason", async () => {
+  const deps = fakeDeps({ arm: () => "no-task-id" });
+  await runSweep([mergeablePr()], deps, DEFAULT_SWEEP_POLICY);
+
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed.length, 1);
+  assert.equal(disposed[0].disposition, "mergeable");
+  assert.equal(disposed[0].acted, false, "an outcome that armed NOTHING must not record acted:true");
+  assert.equal(
+    disposed[0].stand_down_reason,
+    "arm outcome: no-task-id",
+    "the refusal must be visible in the LEDGER, not only on stdout via say()",
+  );
+});
+
+test("arm outcome REGRESSION LOCK: an armed outcome still yields acted:true — the fix did not make everything stand down", async () => {
+  const deps = fakeDeps({ arm: () => "armed" });
+  await runSweep([mergeablePr()], deps, DEFAULT_SWEEP_POLICY);
+
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed[0].acted, true, "a genuine arm is still acted:true");
+  assert.equal(disposed[0].stand_down_reason, undefined, "and carries no stand-down reason");
+});
+
+test("arm outcome: a PR that stood down on one pass is RETRIED on the next, not deduped forever", async () => {
+  // PASS 1 — the arm refuses. This is the permanence half of the bug: the old code recorded
+  // acted:true here, which seeded prior.armed and deduped the PR on every later pass.
+  const first = fakeDeps({ arm: () => "no-task-id" });
+  await runSweep([mergeablePr()], first, DEFAULT_SWEEP_POLICY);
+  const firstDisposed = readLedgerLines(first.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(firstDisposed[0].acted, false, "pass 1 stood down");
+
+  // PASS 2 — same ledger, same PR, same head. The arm MUST be attempted again.
+  const calls: string[] = [];
+  const second = fakeDeps({
+    ledgerPath: first.ledgerPath,
+    arm: (p) => {
+      calls.push(p.prUrl);
+      return "armed";
+    },
+  });
+  await runSweep([mergeablePr()], second, DEFAULT_SWEEP_POLICY);
+
+  assert.deepEqual(calls, ["url/10"], "the second pass RE-ATTEMPTED the arm rather than deduping it");
+  const secondDisposed = readLedgerLines(second.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  const last = secondDisposed[secondDisposed.length - 1];
+  assert.equal(last.acted, true, "and this time it armed");
+  // `deduped` is omitted rather than written false, so assert falsiness, not the literal.
+  assert.ok(!last.deduped, "it was never treated as already-done");
+});
+
+test("arm outcome: a NEW head sha re-earns an arm attempt even after a prior success on the old sha", async () => {
+  // PASS 1 — a real arm on the original sha, recorded acted:true.
+  const first = fakeDeps({ arm: () => "armed" });
+  await runSweep([mergeablePr()], first, DEFAULT_SWEEP_POLICY);
+  assert.equal(
+    readLedgerLines(first.ledgerPath).filter((l) => l.step === "sweep.disposed")[0].acted,
+    true,
+    "pass 1 armed",
+  );
+
+  // PASS 2 — SAME PR number, NEW head sha. Keyed by PR number alone this was deduped
+  // forever; sha-keyed (like `fixed`) the new head re-earns the attempt.
+  const calls: string[] = [];
+  const movedHead = mergeablePr();
+  movedHead.headSha = "newsha0000";
+  const second = fakeDeps({
+    ledgerPath: first.ledgerPath,
+    arm: (p) => {
+      calls.push(p.headSha);
+      return "armed";
+    },
+  });
+  await runSweep([movedHead], second, DEFAULT_SWEEP_POLICY);
+
+  assert.deepEqual(calls, ["newsha0000"], "the new head re-earned the arm attempt");
+});
