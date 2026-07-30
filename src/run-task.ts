@@ -2317,6 +2317,14 @@ export async function runFixRung(opts: {
     // post-review path judges — not the fix worker's chat text. Best-effort: an
     // absent/throwing fetchPrBody falls back to the worker-text report (pre-W1-T256
     // behavior). Every other mode is unchanged.
+    // W1-T186 round-2 note (the OBSERVED-not-inferred discipline applied to the gate
+    // itself): a body-coverage fix worker that edits the PR body as its LAST action of
+    // an exhausted strike (no strike budget left to re-verify) leaves the NEXT strike's
+    // `remudero-review=failure` comment describing that PRIOR, already-superseded body
+    // snapshot — the fetch below always reads whatever is live NOW, so a stale-looking
+    // failure reason in a later round can be the gate reporting an OLD observation, not
+    // a live one; re-check the CURRENT body/criteria coverage directly before assuming
+    // the reported reason still holds.
     let reviewReport = [fixResult.text, fixResult.blocks.join("\n")].join("\n");
     if (fixMode === "body-coverage") {
       const fetchBody = deps.fetchPrBody ?? fetchPrBodyViaGh;
