@@ -391,16 +391,18 @@ test("W1-T191: runTask's DECISION_REQUEST branch calls the injectable recordDeci
   };
 
   try {
-    const res = await runTask("T-FOLLOWUP", {
-      skipGitSync: true,
-      planPath,
-      config,
-      github: FOLLOWUP_OFFLINE_GITHUB,
-      spawn,
-      containmentExec: followupHoldingContainmentExec,
-      isolationExec: followupCleanIsolationExec,
-      recordDecision: fakeRecordDecision,
-    });
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+        recordDecision: fakeRecordDecision,
+      }),
+    );
 
     assert.equal(res.verdict, "blocked_ci");
     assert.equal(spawnCalls.length, 3, "recon, implement (DECISION_REQUEST), resumed implement (REPORT+PR)");
@@ -464,16 +466,18 @@ test("W1-T191: runTask's DECISION_REQUEST branch never calls recordDecision for 
   };
 
   try {
-    const res = await runTask("T-FOLLOWUP", {
-      skipGitSync: true,
-      planPath,
-      config,
-      github: FOLLOWUP_OFFLINE_GITHUB,
-      spawn,
-      containmentExec: followupHoldingContainmentExec,
-      isolationExec: followupCleanIsolationExec,
-      recordDecision: fakeRecordDecision,
-    });
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+        recordDecision: fakeRecordDecision,
+      }),
+    );
 
     assert.equal(res.verdict, "blocked_ci");
     assert.equal(recordDecisionCalls.length, 0, "a trivial low-risk decision must stay ledger-only — recordDecision must never be invoked");
@@ -917,15 +921,17 @@ test(
     };
 
     try {
-      const res = await runTask("T-FOLLOWUP", {
-        skipGitSync: true,
-        planPath,
-        config,
-        github: FOLLOWUP_OFFLINE_GITHUB,
-        spawn,
-        containmentExec: followupHoldingContainmentExec,
-        isolationExec: followupCleanIsolationExec,
-      });
+      const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+          skipGitSync: true,
+          planPath,
+          config,
+          github: FOLLOWUP_OFFLINE_GITHUB,
+          spawn,
+          containmentExec: followupHoldingContainmentExec,
+          isolationExec: followupCleanIsolationExec,
+        }),
+    );
 
       assert.equal(res.verdict, "failed");
       assert.equal(res.merged, false);
@@ -1082,15 +1088,17 @@ test(
     };
 
     try {
-      const res = await runTask("T-FOLLOWUP", {
-        skipGitSync: true,
-        planPath,
-        config,
-        github: FOLLOWUP_OFFLINE_GITHUB,
-        spawn,
-        containmentExec: followupHoldingContainmentExec,
-        isolationExec: followupCleanIsolationExec,
-      });
+      const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+          skipGitSync: true,
+          planPath,
+          config,
+          github: FOLLOWUP_OFFLINE_GITHUB,
+          spawn,
+          containmentExec: followupHoldingContainmentExec,
+          isolationExec: followupCleanIsolationExec,
+        }),
+    );
 
       assert.equal(res.verdict, "failed");
       assert.equal(res.merged, false);
