@@ -163,7 +163,14 @@ test("spawnDetachedGroup: stderr is piped to the caller's own sink (the SDK does
     { command: "/bin/sh", args: ["-c", "echo boom 1>&2"], env: { PATH: process.env.PATH } },
     (chunk) => chunks.push(chunk),
   );
-  await new Promise<void>((resolve) => proc.on("exit", () => resolve()));
+  // W1-T186 CI-log fix: `exit` fires as soon as the child process terminates,
+  // which races the `stderr` stream's own `data`/`end` delivery — on a loaded
+  // CI runner (observed on ubuntu-latest, not reproduced locally) the promise
+  // can resolve before the piped "boom" chunk has arrived, asserting on a
+  // still-empty buffer. `close` fires only after every stdio stream feeding
+  // this child has itself emitted `end`/`close`, so by the time it fires the
+  // `onStderr` sink is guaranteed to have already received every byte.
+  await new Promise<void>((resolve) => proc.on("close", () => resolve()));
   assert.ok(chunks.join("").includes("boom"), "the child's stderr must reach the injected onStderr sink");
   assert.equal(typeof pid, "number");
 });
