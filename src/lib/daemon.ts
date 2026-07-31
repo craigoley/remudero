@@ -1174,75 +1174,62 @@ export async function runDaemon(
         // (whether or not the governor is enforcing), so a LATER breach after this
         // one recovers is treated as a fresh episode rather than staying silenced.
         if (!over) headroomReserveEscalated = false;
-        // ENFORCEMENT (W1-T197 curve, UNCHANGED): an at/over-limit reading is an
-        // in-process idle heartbeat while over — never a stop (KeepAlive would
-        // relaunch into the same reading). Resumes on its own once the window resets.
-        // The counter advances BEFORE the heartbeat, exactly as it did, so the line
-        // still carries this idle tick's own number.
-        const enforcingIdle = headroomEnabled && over !== null;
-        if (enforcingIdle) ticks++;
-        // ─── ONE HEARTBEAT PER TICK, IN EVERY ENFORCEMENT POSTURE ───────────────
-        // THE ASYMMETRY THIS FIXES. The log used to live inside `if (over)` on the
-        // enforcing branch and inside the `else` on the disabled branch — with NO
-        // `else` on the inner `if (over)`. So the one posture an operator is most
-        // likely to be in — governor ARMED, usage comfortably UNDER the ceiling —
-        // logged NOTHING AT ALL. The governor was armed on this host on 2026-07-31
-        // and the ledger emitted no `daemon.headroom` line from that moment on; the
-        // newest one anywhere (live file ∪ 661 rotations) was 14:59:05Z, `enforced:
-        // false`, from BEFORE the switch. Any console panel reading this step would
-        // have rendered permanently-frozen numbers and been believed — the
-        // "tested, inert" shape this repo has already shipped twice.
-        //
-        // So the heartbeat is now UNCONDITIONAL on a good read, and carries
-        // `enforced` so a reader can tell an armed governor from telemetry-only.
-        // `over ?? windows[0]` reproduces BOTH previous lines' window selection
-        // exactly: the offending window when over, else the most-burned one
-        // (`resolveHeadroomWindows` returns most-burned-first).
-        //
-        // NOTHING ABOUT ENFORCEMENT MOVED. The idle-pause, the once-per-episode
-        // `onHeadroomBreach`, and the `continue` all still happen, still only when
-        // `headroomEnabled && over`, still after this line — see `enforcingIdle`.
-        // Only the under-ceiling SILENCE changed.
-        const reading = over ?? windows[0];
-        if (reading) {
-          log("daemon.headroom", {
-            ...(enforcingIdle ? { tick: ticks } : {}),
-            window: reading.window,
-            percent_used: reading.percentUsed,
-            limit_pct: reading.limitPct,
-            resets_at: reading.resetsAtDisplay,
-            enforced: headroomEnabled,
-            over_ceiling: over !== null,
-            poll_interval_ms: pollIntervalMs,
-            ...(headroomEnabled
-              ? {}
-              : { note: "headroom governor disabled (ruling a4153e) — telemetry only, dispatch not gated" }),
-          });
-        }
-        if (enforcingIdle) {
-          // P34 clause (c), W1-T249: notify ONCE per episode — dispatch is
-          // ALREADY paused above (this same `continue`), so the hook is a pure
-          // notification, never a dispatch decision. Failure here costs one
-          // logged line, never the daemon's liveness (same discipline as
-          // `onCircuitBreak`/`onSpawnInfraBlocked`).
-          if (!headroomReserveEscalated) {
-            headroomReserveEscalated = true;
-            try {
-              await deps.onHeadroomBreach?.({
-                window: over!.window,
-                percentUsed: over!.percentUsed,
-                limitPct: over!.limitPct,
-                resetsAt: over!.resetsAtDisplay,
-              });
-            } catch (e) {
-              log("daemon.escalation.failed", { error: String((e as Error)?.message ?? e) });
+        if (headroomEnabled) {
+          // ENFORCEMENT (W1-T197 curve, UNCHANGED): an at/over-limit reading is an
+          // in-process idle heartbeat while over — never a stop (KeepAlive would
+          // relaunch into the same reading). Resumes on its own once the window resets.
+          if (over) {
+            ticks++;
+            log("daemon.headroom", {
+              tick: ticks,
+              window: over.window,
+              percent_used: over.percentUsed,
+              limit_pct: over.limitPct,
+              resets_at: over.resetsAtDisplay,
+              poll_interval_ms: pollIntervalMs,
+            });
+            // P34 clause (c), W1-T249: notify ONCE per episode — dispatch is
+            // ALREADY paused above (this same `continue`), so the hook is a pure
+            // notification, never a dispatch decision. Failure here costs one
+            // logged line, never the daemon's liveness (same discipline as
+            // `onCircuitBreak`/`onSpawnInfraBlocked`).
+            if (!headroomReserveEscalated) {
+              headroomReserveEscalated = true;
+              try {
+                await deps.onHeadroomBreach?.({
+                  window: over.window,
+                  percentUsed: over.percentUsed,
+                  limitPct: over.limitPct,
+                  resetsAt: over.resetsAtDisplay,
+                });
+              } catch (e) {
+                log("daemon.escalation.failed", { error: String((e as Error)?.message ?? e) });
+              }
             }
+            await deps.sleep(pollIntervalMs);
+            continue;
           }
-          await deps.sleep(pollIntervalMs);
-          continue;
+        } else {
+          // GOVERNOR DISABLED (operator ruling fb-1784894405468-a4153e): headroom is
+          // still READ and LEDGERED every cycle — telemetry without enforcement, so
+          // the console shows weekly burn — but NO percent_used condition ever pauses
+          // dispatch (the per-run turn limit + budget_usd are the runaway guards).
+          // Ledger the most-burned window; then fall through to dispatch.
+          const reading = windows[0];
+          if (reading) {
+            log("daemon.headroom", {
+              window: reading.window,
+              percent_used: reading.percentUsed,
+              limit_pct: reading.limitPct,
+              resets_at: reading.resetsAtDisplay,
+              enforced: false,
+              over_ceiling: over !== null,
+              poll_interval_ms: pollIntervalMs,
+              note: "headroom governor disabled (ruling a4153e) — telemetry only, dispatch not gated",
+            });
+          }
+          // no continue: dispatch proceeds regardless of burn.
         }
-        // GOVERNOR DISABLED (operator ruling fb-1784894405468-a4153e) or simply
-        // UNDER the ceiling: no `continue` — dispatch proceeds regardless of burn.
       } else if (headroomEnabled) {
         // UNREADABLE: cannot-read-the-budget must never render as
         // proceed-as-if-unlimited (the fail-open polarity at the spending

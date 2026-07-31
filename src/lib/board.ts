@@ -419,37 +419,7 @@ export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Rou
 // other caller uses) — a failed/absent decoration marks the row `githubUnavailable`, it never
 // removes it (see {@link decoratePrTitle}).
 
-export type RecentActivityVerb = "merged" | "verdict" | "fix" | "escalated" | "spend" | "run-refused" | "run-started";
-
-/**
- * The steps that record the daemon's RESOLUTION of an operator-initiated console action (W1-T266).
- *
- * WHY THIS SET EXISTS AT ALL. On 2026-07-31 the operator clicked Run on W1-T152, a task he had
- * credited as merged an hour earlier. The whole pipeline worked: the marker was written, the daemon
- * consumed it inside a minute, and refused it correctly — `console.kick_refused` at 11:18:10.571Z,
- * `reason: "already merged — stale kick"`. He saw NOTHING, and reported the console as broken. The
- * refusal was written to the ledger and then dropped by the `!task` guard in
- * {@link computeRecentActivity}, because the daemon stamps its OWN pseudo-id (`task_id: "DAEMON"`)
- * on every line it emits. `/v1/drain/kick` returns 200 for "marker dropped", so the POST genuinely
- * succeeded — the activity feed is the ONLY surface that can carry this.
- *
- * WHY AN ALLOWLIST RATHER THAN REMOVING THE `!task` GUARD. That guard is load-bearing. Measured
- * over the ledger unioned across all 661 rotations (4,156,857 lines spanning 411 hours):
- * `SWEEP` 600,281 lines (1,461/hour), `DAEMON` 169,860 (413/hour), `SERVE` 93,907 (228/hour).
- * DAEMON's own traffic is 71% `dispatch.indeterminate` (120,984 lines) plus board-gateway fetch
- * telemetry every 15 seconds. Dropping the guard would bury the feed.
- *
- * WHY THESE TWO STEPS AND NOTHING ELSE. Both are the daemon's answer to a click a human made, and
- * both are rare enough to cost nothing: over the same 411 hours the union holds FOUR
- * `console.kick_refused` lines in total — about 0.01/hour. `console.kick_requested` is deliberately
- * excluded: the button already shows the operator their own click through its arm-then-confirm
- * state, so echoing the request adds a row without adding information. The missing information was
- * always the RESOLUTION.
- *
- * These lines carry the real task id in `line.task` (the daemon's `log` closure owns `task_id`), so
- * {@link computeRecentActivity} reads the id from there for exactly these steps.
- */
-const OPERATOR_ACTION_STEPS = new Set(["console.kick_refused", "console.kick_dispatched"]);
+export type RecentActivityVerb = "merged" | "verdict" | "fix" | "escalated" | "spend";
 
 /** One RECENT row: a single ledger EVENT (not a task's final state) — see this section's header. */
 export interface RecentActivityEntry {
@@ -539,26 +509,6 @@ function decoratePrTitle(entry: RecentActivityEntry, deps: BoardDeps): RecentAct
   }
 }
 
-/** Longest refusal reason a RECENT row will carry. See {@link boundedReason}. */
-const MAX_REFUSAL_REASON_CHARS = 120;
-
-/**
- * A refusal `reason`, bounded so ONE row cannot swallow the feed (W1-T266).
- *
- * NOT a hypothetical bound. `assertRunnable` refuses a blocked task by echoing the task's whole
- * blocked note, and the live ledger holds a real example: the `console.kick_refused` for W1-T201
- * at 2026-07-31T11:31:40.551Z carries a reason of roughly four thousand characters — the entire
- * FILED diagnosis, prior proof text and falsifiers. Rendered inline that is not an activity row,
- * it is a wall, and the trap this feature has to avoid is a feed the operator stops reading.
- *
- * Truncation is VISIBLE (a trailing ellipsis), never silent: a reason that has been cut must not
- * read as a reason that was short.
- */
-function boundedReason(reason: unknown): string {
-  if (typeof reason !== "string" || reason === "") return "no reason recorded";
-  return reason.length <= MAX_REFUSAL_REASON_CHARS ? reason : `${reason.slice(0, MAX_REFUSAL_REASON_CHARS)}…`;
-}
-
 /**
  * The activity feed's own event classification — ONE ledger line in, at most ONE
  * {@link RecentActivityEntry} out (or `undefined` for every step name this feed does not
@@ -590,16 +540,6 @@ function classifyLine(
       return { taskId, title, ts, verb: "escalated", detail: typeof line.class === "string" ? line.class : undefined, prUrl, prNumber };
     case "implement.done":
       return { taskId, title, ts, verb: "spend", costUsd, numTurns, prUrl, prNumber };
-    // W1-T266 — the daemon's resolution of an operator's Run click. See OPERATOR_ACTION_STEPS.
-    // The `reason` is carried VERBATIM (bar the length bound below) rather than mapped to
-    // friendlier prose: a translation table here would be a second place for the truth to live,
-    // and this codebase has had three false comments cause live operator-visible defects in one
-    // week. The verb label supplies the plain-English framing ("Run refused"); the reason
-    // supplies the fact.
-    case "console.kick_refused":
-      return { taskId, title, ts, verb: "run-refused", detail: boundedReason(line.reason) };
-    case "console.kick_dispatched":
-      return { taskId, title, ts, verb: "run-started", detail: "dispatched from the console" };
     default:
       return undefined;
   }
@@ -639,26 +579,13 @@ export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCach
     if (line.step === "pr.opened" && runId && typeof line.pr_url === "string") {
       state.prByRun.set(runId, line.pr_url);
     }
-    // W1-T266: for the two OPERATOR_ACTION_STEPS the daemon owns `task_id` (it stamps its own
-    // "DAEMON") and the task the human actually clicked is in `line.task`. Read the id from there
-    // for exactly those steps, so the refusal can name the task rather than the emitting lane.
-    const isOperatorAction = typeof line.step === "string" && OPERATOR_ACTION_STEPS.has(line.step);
-    const taskId = isOperatorAction && typeof line.task === "string"
-      ? line.task
-      : typeof line.task_id === "string"
-        ? line.task_id
-        : undefined;
+    const taskId = typeof line.task_id === "string" ? line.task_id : undefined;
     if (!taskId) continue;
     const task = deps.plan.byId.get(taskId);
-    // A pseudo-id (DAEMON/SWEEP/DRAIN/RETRO/inbox/…) is never a real plan task, and its lanes emit
-    // ~2,100 lines/hour of housekeeping — so it is dropped, EXCEPT for the operator-action steps
-    // above, which are ~0.01/hour and are the only reason a human ever looks at this feed after
-    // pressing a button. A refusal naming an id that is not in the plan ("unknown task id") must
-    // still render, so absence of a task is not itself disqualifying for those.
-    if (!task && !isOperatorAction) continue;
+    if (!task) continue; // a pseudo-id (DAEMON/SWEEP/DRAIN/RETRO/inbox/…), never a real plan task.
     const ts = typeof line.ts === "string" ? line.ts : new Date().toISOString();
     const prUrl = typeof line.pr_url === "string" ? line.pr_url : runId ? state.prByRun.get(runId) : undefined;
-    const entry = classifyLine(line, taskId, task?.title ?? taskId, ts, prUrl);
+    const entry = classifyLine(line, taskId, task.title, ts, prUrl);
     if (!entry) continue;
     state.entries.push(decoratePrTitle(entry, deps));
     if (state.entries.length > RECENT_ACTIVITY_HISTORY_CAP) state.entries.shift();

@@ -167,12 +167,7 @@ export interface RestPullRow {
   html_url: string;
   /** Lowercase "open"/"closed", where `gh --json state` reports "OPEN"/"CLOSED"/"MERGED". */
   state?: string;
-  /** SINGLE-PR ENDPOINT ONLY. The `/pulls` LIST endpoint omits this key entirely — see
-   *  {@link prStateFromRest}, which is why it is not the merge discriminator. */
   merged?: boolean;
-  /** The merge timestamp, or `null` when unmerged. Returned by BOTH endpoints, so this — not
-   *  {@link RestPullRow.merged} — is what {@link prStateFromRest} decides MERGED on. */
-  merged_at?: string | null;
   /** `null` on an empty body, where GraphQL reports "". */
   body?: string | null;
   updated_at: string;
@@ -229,41 +224,12 @@ export function mapRestPr(row: RestPullRow): OpenPrRest {
  *
  * MUST NOT be simplified to `state.toUpperCase()`. `terminalStateReason` treats ANY value other
  * than the literal `"OPEN"` as terminal, and REST reports a MERGED pull as
- * `{state: "closed", merged: true}` — so the merge signal has to be folded in here, exactly as
+ * `{state: "closed", merged: true}` — so the `merged` flag has to be folded in here, exactly as
  * GraphQL's single `MERGED` token already folds it. Lower-cased "open" would also read as
  * terminal, which would make `rmd fix` refuse every live PR.
- *
- * `merged_at` IS THE DISCRIMINATOR, and `merged` is only a corroborating fallback. THE TWO
- * ENDPOINTS RETURN DIFFERENT SHAPES:
- *
- *   GET /repos/{o}/{r}/pulls/{n}     -> {state:"closed", merged:true, merged_at:"2026-…"}
- *   GET /repos/{o}/{r}/pulls?state=… -> {state:"closed",             merged_at:"2026-…"}  <- NO `merged`
- *
- * The LIST endpoint omits `merged` entirely — it is one of the fields GitHub documents as
- * single-PR-only, alongside `mergeable`, `mergeable_state`, `merged_by`, `rebaseable`, `comments`,
- * `commits`, `additions`, `deletions` and `changed_files`. Reading `row.merged` off a list row
- * yields `undefined`, which is falsy, so EVERY merged pull collapsed to `"CLOSED"`.
- *
- * That is not a cosmetic mislabel. `mapBoardPr` feeds this token to the board gateway's
- * `mergedNewestFirst: all.filter((p) => p.state === "MERGED")` (lib/status.ts), which backs
- * `findMergedByTrailer` / `findMergedByHeadBranch` / `listMergedHeadBranches` — i.e. every
- * merged-ness answer the daemon's DISPATCH gate consults. On 2026-07-31 that turned 302
- * authoritatively-merged tasks into 12, made 60 already-merged tasks dispatch-eligible, and
- * re-dispatched W1-T254 five times in eighty minutes at real model spend. It was confidently
- * WRONG rather than indeterminate, so the W1-T119 indeterminate-skip (which fails safe when the
- * gateway CANNOT answer) never engaged — `readFailed()` was `false` throughout.
- *
- * `merged_at` is returned by BOTH endpoints (`null` when unmerged), so this predicate is correct
- * for both row shapes and no caller has to know which one it holds. VERIFIED against this repo,
- * 2026-07-31: over one real 100-row `state=closed` list page, `merged` was absent on 100/100 rows
- * and `merged_at` present on 100/100; cross-checking 19 of those numbers against the single-PR
- * endpoint, `merged_at != null` agreed with `merged === true` 19/19 in both directions (13
- * closed-unmerged, 6 merged). `test/open-prs-rest.test.ts` pins the shape with fixtures captured
- * VERBATIM from that live list response — a hand-written fixture carrying a `merged` key the API
- * never sends is what let this ship green in the first place.
  */
-export function prStateFromRest(row: { state?: string; merged?: boolean; merged_at?: string | null }): string {
-  if (row.merged === true || row.merged_at != null) return "MERGED";
+export function prStateFromRest(row: { state?: string; merged?: boolean }): string {
+  if (row.merged) return "MERGED";
   return (row.state ?? "").toUpperCase() || "UNKNOWN";
 }
 

@@ -164,11 +164,6 @@ function short(sha: string): string {
   return sha.slice(0, 9);
 }
 
-/** Console-up poll: how many probes, and the gap between them. ~30s total — long enough for a
- *  normal tsx boot, short enough that a 120s supervisor cycle never overlaps itself. */
-const CONSOLE_UP_ATTEMPTS = 15;
-const CONSOLE_UP_DELAY_MS = 2000;
-
 // ── The orchestrated cycle (all side effects injected) ─────────────────────────
 
 export interface DeployDeps {
@@ -196,26 +191,6 @@ export interface DeployDeps {
   alert: (message: string, failedHead: string) => void;
   /** Consume the operator marker after a terminal outcome (success or rollback). */
   clearMarker: () => void;
-
-  // ── CONSOLE RESTART (the gap impl-BW/impl-BX both reported) ────────────────────
-  // `rmd serve` loads its code ONCE via tsx, so the running console keeps executing
-  // whatever was on disk when it last started. The console was commissioned 2026-07-29
-  // and served that code through every merge for two days — including a GraphQL board
-  // fetch that had already been fixed on main — until the operator restarted it by hand.
-  /** launchctl kickstart -k the CONSOLE job (same mechanism as `kickstart`, serve label). */
-  kickstartConsole: () => void;
-  /** The console job's current pid, for before/after evidence in the ledger. */
-  consolePid: () => number | undefined;
-  /** Poll the configured port for a listener; true once the console is serving again.
-   *  A socket-listen probe needs NO service token — see impl-BZ on why an authenticated
-   *  health check was rejected. Polls internally, mirroring {@link DeployDeps.waitBootHealth}. */
-  waitConsoleUp: () => boolean;
-  /** Operator-visible alert that does NOT write the failed-HEAD marker.
-   *  DELIBERATELY separate from {@link DeployDeps.alert}: that one also writes
-   *  DEPLOY_LAST_FAILED, and `decideDeployTrigger` refuses to auto-retry a head recorded
-   *  there. A console that fails to come back must never freeze the deploy pipeline for a
-   *  sha the DAEMON deployed healthily. */
-  alertConsoleOnly: (message: string) => void;
 }
 
 export interface DeployOpts {
@@ -232,10 +207,6 @@ export interface DeployResult {
   rolledBackTo?: string;
   /** Files pulled but not yet restarted (idle vanished before kickstart) — retry next tick. */
   pulledPendingRestart?: boolean;
-  /** The console was kickstarted this cycle (only ever after the daemon verified healthy). */
-  consoleRestarted?: boolean;
-  /** The console returned to listening within its window. `false` = loud failure, NOT a rollback. */
-  consoleHealthy?: boolean;
 }
 
 /**
@@ -244,56 +215,6 @@ export interface DeployResult {
  * verified idle gap; and it self-heals a bad deploy via rollback. Never throws for a
  * routine no-op — only a genuinely broken injected dep would propagate.
  */
-/**
- * Restart the console AFTER a deploy has been verified healthy, and ledger the outcome.
- *
- * WHY HERE AND NOWHERE EARLIER — this ordering is the whole safety argument:
- *
- *  1. TRAP 1 (shared node_modules). `rmd daemon` AND `rmd serve` both run
- *     `serviceFreshnessGate` (run-task.ts, the `cmd === "daemon" || cmd === "serve"` branch),
- *     whose last line is `ensureInstallFresh` — a real `npm ci` when the lockfile hash moved.
- *     One node_modules is shared by both, with no lock, and emptying it under a running
- *     service is exactly what crash-looped this host once already. The gate runs at command
- *     dispatch, BEFORE the daemon's own `daemon.boot` heartbeat (daemon.ts). `assessBootHealth`
- *     refuses to call a deploy healthy without observing that heartbeat. So by the time we get
- *     here, the daemon's install has provably finished — the restarts cannot overlap. This is
- *     ordering, not luck, and `deploy-cycle-console.test.ts` asserts the sequence.
- *  2. Never restart the console onto code that is about to be rolled back. The rollback path
- *     resets the tree and re-kickstarts the DAEMON; a console started before the health verdict
- *     would be left running the reverted-away code with nothing to restart it.
- *
- * A CONSOLE FAILURE DOES NOT ROLL BACK MAIN, deliberately. The daemon — the thing that does the
- * work — is healthy on the new code; reverting it because a display surface did not come back
- * would trade a working fleet for a working page. The serve job carries unconditional
- * `KeepAlive` with a 60s ThrottleInterval, so launchd keeps trying on its own. What this owes
- * the operator is not a rollback but NOISE: a loud ledger line and an alert that does NOT poison
- * the failed-HEAD marker (see {@link DeployDeps.alertConsoleOnly}).
- */
-export function restartConsole(deps: DeployDeps, toHead: string): { restarted: boolean; healthy: boolean } {
-  const oldPid = deps.consolePid();
-  deps.kickstartConsole();
-  deps.log("deploy.console_kickstart", { to: short(toHead), old_pid: oldPid ?? null });
-
-  if (deps.waitConsoleUp()) {
-    const newPid = deps.consolePid();
-    deps.log("deploy.console_ok", {
-      to: short(toHead),
-      old_pid: oldPid ?? null,
-      new_pid: newPid ?? null,
-      listening: true,
-    });
-    return { restarted: true, healthy: true };
-  }
-
-  const msg =
-    `console did not return to listening after the deploy of ${short(toHead)} — the daemon is ` +
-    `healthy on this sha and was NOT rolled back. launchd (KeepAlive) keeps retrying; if it stays ` +
-    `down, check the serve log and kickstart it by hand.`;
-  deps.log("deploy.console_unhealthy", { to: short(toHead), old_pid: oldPid ?? null, listening: false, rolled_back: false });
-  deps.alertConsoleOnly(msg);
-  return { restarted: true, healthy: false };
-}
-
 export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployResult {
   deps.fetch();
   const fromHead = deps.installHead();
@@ -353,18 +274,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   if (health.healthy) {
     deps.clearMarker();
     deps.log("deploy.ok", { to: short(toHead), reason: health.reason });
-    // The console loads its code once, so a deploy it is not restarted for is inert in it.
-    // ONLY here: the daemon is verified healthy (so its install is done — see restartConsole's
-    // doc) and there is no longer any path that would roll this sha back.
-    const con = restartConsole(deps, toHead);
-    return {
-      deployed: true,
-      reason: "deployed + healthy",
-      fromHead,
-      toHead,
-      consoleRestarted: con.restarted,
-      consoleHealthy: con.healthy,
-    };
+    return { deployed: true, reason: "deployed + healthy", fromHead, toHead };
   }
 
   // ROLLBACK — restore the known-good HEAD and daemon, alert, never leave a
@@ -412,10 +322,6 @@ export interface RealDeployOpts {
   stateRoot: string;
   /** launchd job label to kickstart (e.g. com.remudero.daemon). */
   daemonLabel: string;
-  /** launchd job label for the console (e.g. com.remudero.serve). */
-  serveLabel: string;
-  /** TCP port the console listens on — the no-auth health signal. */
-  servePort: number;
   /** For `launchctl kickstart -k gui/<uid>/<label>`. */
   uid: number;
   ledgerPath: string;
@@ -500,44 +406,6 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         inflightLocks: countLocks(join(o.stateRoot, "state", "inflight")),
         worktreeLocks: countLocks(join(o.stateRoot, "worktrees")),
       };
-    },
-    kickstartConsole: () => {
-      // The SAME mechanism as the daemon kickstart below — one way to restart a service,
-      // only the label differs. Both labels live in the same gui/<uid> domain.
-      exec("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.serveLabel}`]);
-    },
-    consolePid: () => {
-      try {
-        const out = exec("launchctl", ["list", o.serveLabel]);
-        const m = out.match(/"PID"\s*=\s*(\d+)/);
-        return m ? Number(m[1]) : undefined;
-      } catch {
-        return undefined; // not loaded / not running — reported as null in the ledger
-      }
-    },
-    waitConsoleUp: () => {
-      // A LISTENING SOCKET, not an authenticated request: the deployer holds no service token
-      // and must not learn one. Bounded poll; the serve job's ThrottleInterval is 60s, so a
-      // crash-then-relaunch can legitimately take a while — we report, we do not roll back.
-      for (let i = 0; i < CONSOLE_UP_ATTEMPTS; i++) {
-        try {
-          exec("lsof", ["-nP", `-iTCP:${o.servePort}`, "-sTCP:LISTEN"]);
-          return true; // exit 0 => something is listening
-        } catch {
-          /* nothing listening yet */
-        }
-        sleep(CONSOLE_UP_DELAY_MS);
-      }
-      return false;
-    },
-    alertConsoleOnly: (message) => {
-      // The operator-visible alert WITHOUT deployLastFailedPath — see the dep's doc for why
-      // poisoning the failed-HEAD marker on a console fault would freeze the pipeline.
-      mkdirSync(join(o.stateRoot, "state"), { recursive: true });
-      writeFileSync(
-        deployFailedAlertPath(o.stateRoot),
-        JSON.stringify({ message, scope: "console", at: new Date().toISOString() }, null, 2),
-      );
     },
     kickstart: () => {
       exec("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.daemonLabel}`]);

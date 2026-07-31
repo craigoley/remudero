@@ -68,7 +68,6 @@ function makeDeps(o: {
   incomingFiles?: string[];
   idle?: IdleProbe | IdleProbe[]; // one value, or a sequence consumed per probeIdle() call
   health?: HealthInputs;
-  consoleUp?: boolean;
 }): Recorder {
   const calls: string[] = [];
   const alerts: string[] = [];
@@ -76,13 +75,6 @@ function makeDeps(o: {
   const idleSeq = Array.isArray(o.idle) ? [...o.idle] : undefined;
   const idleOne = Array.isArray(o.idle) ? undefined : (o.idle ?? { workers: 0, inflightLocks: 0, worktreeLocks: 0 });
   const deps: DeployDeps = {
-    // impl-BZ: the console-restart effects. Defaulted to a healthy console so every PRE-EXISTING
-    // test keeps asserting exactly what it asserted before; the console-specific tests live in
-    // test/deploy-cycle-console.test.ts and drive these explicitly.
-    kickstartConsole: () => calls.push("kickstartConsole"),
-    consolePid: () => 4242,
-    waitConsoleUp: () => o.consoleUp ?? true,
-    alertConsoleOnly: (m) => alerts.push(`console:${m}`),
     log: (step) => calls.push(`log:${step}`),
     now: () => 1000,
     fetch: () => calls.push("fetch"),
@@ -244,8 +236,6 @@ test("realDeployDeps: git/pgrep/launchctl route through the injected exec with t
       installPath: "/inst",
       stateRoot: root,
       daemonLabel: "com.remudero.daemon",
-      serveLabel: "com.remudero.serve",
-      servePort: 4317,
       uid: 502,
       ledgerPath: join(root, "ledger.ndjson"),
       log: () => {},
@@ -294,8 +284,6 @@ test("realDeployDeps: waitBootHealth reads daemon.boot heartbeats after the kick
       installPath: "/inst",
       stateRoot: root,
       daemonLabel: "d",
-      serveLabel: "s",
-      servePort: 4317,
       uid: 1,
       ledgerPath: ledger,
       log: () => {},
@@ -315,8 +303,6 @@ test("realDeployDeps: alert writes DEPLOY_FAILED + DEPLOY_LAST_FAILED; clearMark
       installPath: "/inst",
       stateRoot: root,
       daemonLabel: "d",
-      serveLabel: "s",
-      servePort: 4317,
       uid: 1,
       ledgerPath: join(root, "l"),
       log: () => {},
