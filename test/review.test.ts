@@ -2004,13 +2004,32 @@ test("W1-T229 acceptance criterion 2: the plan-only-PR-emitting flows (retro/tri
   // resolveAutoMergeArm/decideAutoMergeArm gate — i.e. must arm unconditionally.
   assert.equal(resolveCallCount, 1, "resolveAutoMergeArm must have exactly one call site (runTask's implement flow) — a second call site means a plan-only-PR-emitting command may now route through the raised floor and needs the W1-T205 carve-out first");
 
-  const armAutoMergeCallCount = (runTaskSrc.match(/\barmAutoMerge\(/g) ?? []).length;
-  // 1 definition + 7 direct call sites (runTask's own post-decision call, dep-review,
-  // retro, the sweep arm effect, triage, plan, approve) — at least 6 call sites beyond
-  // the definition confirms the plan-only-PR-emitting commands arm unconditionally.
+  // impl-BI RE-EXPRESSED THIS HALF, deliberately and with the invariant strengthened.
+  // It used to count raw `armAutoMerge(` occurrences and require >= 7. That was a PROXY for
+  // "the plan lanes arm without consulting the raised floor", and impl-BI invalidated the
+  // proxy without touching the property: the five lanes now arm through `armAndLogOutcome`,
+  // a thin wrapper whose ONLY job is to name the ledger step from the returned outcome
+  // (armAutoMerge returns "ledger-refused" et al. and those lanes used to log
+  // `automerge.armed` regardless). The count fell 7 -> 3 with no lane gaining a gate.
+  //
+  // So the assertion is now made DIRECTLY on the property rather than on a count: every
+  // plan-only lane still reaches `armAutoMerge` unconditionally, and the wrapper standing
+  // between them contains no arm-decision gate of its own. A future change that puts
+  // `decideAutoMergeArm`/`resolveAutoMergeArm` into that wrapper — the exact regression the
+  // original count existed to catch, and one the count would have MISSED — trips this.
+  const laneArmSites = (runTaskSrc.match(/\barmAndLogOutcome\(/g) ?? []).length;
   assert.ok(
-    armAutoMergeCallCount >= 7,
-    "expected multiple direct armAutoMerge call sites (retro/triage/plan/approve/dep-review/sweep) bypassing decideAutoMergeArm entirely",
+    laneArmSites >= 6,
+    "expected the plan-only-PR-emitting lanes (retro/triage/plan/approve/dep-review) to arm via armAndLogOutcome, plus its definition",
+  );
+  assert.match(runTaskSrc, /arm: \(pr\) => armAutoMerge\(/, "the sweep arm effect still calls armAutoMerge directly");
+
+  const wrapper = runTaskSrc.slice(runTaskSrc.indexOf("export function armAndLogOutcome("));
+  const wrapperBody = wrapper.slice(0, wrapper.indexOf("\n}\n") + 3);
+  assert.doesNotMatch(
+    wrapperBody,
+    /decideAutoMergeArm|resolveAutoMergeArm/,
+    "armAndLogOutcome must stay a REPORTING wrapper — putting the raised floor inside it would stall every retro/triage/plan/approve PR without the W1-T205 carve-out",
   );
 });
 
