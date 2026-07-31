@@ -493,3 +493,63 @@ resolution, and marked so in the manner of the 2026-07-20 and 2026-07-28 entries
   **neither W1-T201's `status` field nor its acceptance criteria are touched by this PR.**
 - Rollback: revert this PR — removes only this DECISIONS.md entry and the new W1-T264 shard; no
   runtime code touched, and no ledger line written.
+
+## 2026-07-31 — W1-T254 re-dispatch: already-satisfied, no-op close (OPERATOR-RULED)
+
+*Operator-ruled closure, recorded at the operator's instruction — not a machine auto-choose
+resolution, and marked so in the manner of the 2026-07-20 and 2026-07-31 (W1-T201) entries above.*
+
+- Options: (A) close as already-satisfied, no functional code change, record the closure here
+  (RECOMMENDED, and the operator's ruling) | (B) re-diff `src/lib/daemon.ts`, `src/lib/sweep.ts`,
+  `src/run-task.ts` and the two test files as if the task were unstarted — rejected: the target
+  state already exists identically on this branch, so a "reimplementation" is either a no-op diff
+  or a hand-authored variant risking drift from a tested, merged, `risk:high` concurrency mechanism
+  for zero behavioral gain.
+- Chosen (RECOMMENDED): Option A — no functional code change, this DECISIONS.md entry as the audit
+  trail, following the precedent set for W1-T7/#772, W1-T12a/#725, W1-T99/#731, W1-T262
+  (2026-07-30), and most recently W1-T201/#993 (2026-07-31, the entry immediately above this one).
+- Rationale: W1-T254 (`plan/tasks.yaml:64-134`) asks for a restricted light-sweep ticker while
+  `runOne` is in flight, outcome-keyed post-review dedup, per-PR throw containment, and attempt
+  ledgering + a dry-run tag. **PR #720 (commit `15a2168`) shipped exactly that**, is already an
+  ancestor of this worktree's HEAD (`git merge-base --is-ancestor 15a2168 HEAD` → true), and its
+  body carries the trailer `Remudero-Task: W1-T254`. Criterion-by-criterion:
+  1. **Outcome-keyed dedup** — `src/lib/sweep.ts`'s `priorActionsFromLedger` derives `postReviewed`
+     from `review.posted`/`review.post_refused` lines keyed `taskId@headSha`, never from
+     `sweep.disposed acted:true`. Proof: `test/sweep.test.ts:1873` "runSweep: post-review dedup is
+     outcome-keyed — a prior acted:true dispose with no posted/refused verdict for that head still
+     retries; a refusal for the head dedups (W1-T254)".
+  2. **Per-PR throw containment** — the action switch in `runSweep` (`src/lib/sweep.ts`) is wrapped
+     per-PR in try/catch; on throw `acted=false` and `action_error` is set on both the returned
+     `SweepAction` and the `sweep.disposed` ledger line, and the loop continues. Proof:
+     `test/sweep.test.ts:2101` "runSweep: a throwing action does not abort the pass — later PRs
+     still reconcile and the throwing PR is attributed (W1-T254)".
+  3. **Light-sweep ticker** — `src/lib/daemon.ts`'s `runDaemon` starts an interval on the injected
+     clock (`DaemonDeps.sweepLight`, doc at `daemon.ts:638-660`, wiring at `:1412-1429`) around the
+     `runOne` call, cleared once it settles; `src/run-task.ts:6639-6655` wires `buildSweepLightHook`
+     with `actionable: (d) => d === "post-review"` (`run-task.ts:8633`), restricting the concurrent
+     pass to the deterministic re-post only. Proof: `test/daemon.test.ts:1883` "W1-T254: the light
+     sweep runs while runOne is in flight, so a green PR with an absent review re-posts within one
+     poll interval (the #707 fix)".
+  4. **Attempt ledgering + dry-run tag** — `buildSweepEffects.postReview` (`src/run-task.ts:8218-
+     8227`) logs `sweep.post_review.attempt` before calling `reviewCommand`, then
+     `sweep.post_review.done`/`.failed`; `runSweep`'s `sweep.dispose` line is tagged `dry_run: true`
+     under `--dry-run`. Proof: `grep -n "sweep.post_review.attempt in src/run-task.ts" →
+     src/run-task.ts:8227`.
+  Live verification in this worktree, not just historical trust: after `npm ci` (sandboxed run hit
+  `EPERM`/`EBADENGINE` writing outside the allowed cache path; a plain retry outside the sandbox
+  succeeded), `node --test` over `test/sweep.test.ts` + `test/daemon.test.ts` → **216 + 86 tests, 0
+  failures**, including the three named above.
+- THE MECHANISM, and why this case differs from W1-T201's: `status:` is decorative (every entry in
+  `plan/tasks.yaml` reads `status: queued` regardless of merge state) and `isDispatchEligible`
+  (`src/lib/drain.ts:127`) reads it only for `"blocked"`; the real gate is `isMerged` at
+  `drain.ts:125`, fed by the GitHub-derived, trailer-scanning projection. Unlike W1-T201 (whose
+  shipping PR #853 carried an unrelated `W1-T160` trailer and so could never be credited without an
+  `rmd correct` state mutation), **PR #720 already carries the exact `Remudero-Task: W1-T254`
+  trailer** — the standard trailer-derived rung already resolves `isMerged("W1-T254")` true with no
+  operator correction needed. This entry records the closure only; it performs no state mutation.
+- Per `src/lib/plan.ts:41-45`, `satisfied_by` is ARCHITECT-ONLY and a worker-added one fails review,
+  and per the file header above `status:` is never written back — so, exactly as in the W1-T201 and
+  W1-T262 closures, **neither W1-T254's `status` field nor its acceptance criteria are touched by
+  this PR.**
+- Rollback: revert this PR — removes only this DECISIONS.md entry; no runtime code touched, and no
+  ledger line written.
