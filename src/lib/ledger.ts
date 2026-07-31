@@ -227,6 +227,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "automerge.capped_override_granted",
   "daemon.boot",
   "sweep.post_fix_redriven",
+  // W1-T186's ABSENT remedy: `priorActionsFromLedger` counts these lines to enforce
+  // ABSENT_REPUSH_CAP. Archived away, the count reads zero and every rotation re-earns the
+  // PR another empty commit — an unbounded re-push loop, which is precisely the failure the
+  // cap exists to prevent. The line IS the bound; it must survive rotation.
+  "sweep.absent_repush",
 ]);
 
 /** Steps matched by PREFIX rather than enumerated — currently only `deploy.*` (`deploy.skip`,

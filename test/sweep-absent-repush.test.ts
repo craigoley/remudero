@@ -17,6 +17,7 @@ import {
 import { gitPushEmptyCommit } from "../src/lib/git-push.js";
 import { buildOpenPrViews, buildSweepEffects } from "../src/run-task.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
 // ── Fixture clock. Pinned, and every age-sensitive assertion passes it explicitly: the
@@ -396,4 +397,16 @@ test("buildOpenPrViews carries the PR's head.ref through as headRefName — the 
     process.env.PATH = oldPath;
     rmSync(bin, { recursive: true, force: true });
   }
+});
+
+// ── The bound lives in the LEDGER, so rotation must never archive it away. Caught by CI's
+//    "derived from consumers, not hardcoded" invariant, locked here from the remedy's own
+//    side: priorActionsFromLedger counts `sweep.absent_repush` lines to enforce the cap, so
+//    a rotation that drops them resets the count to zero and re-earns every PR another
+//    empty commit, forever — the unbounded loop the cap exists to prevent.
+test("the ABSENT re-push ledger step is decision-relevant — rotation must never archive the line that IS the bound", () => {
+  assert.ok(
+    DECISION_RELEVANT_LEDGER_STEPS.has("sweep.absent_repush"),
+    "sweep.absent_repush must survive ledger rotation or ABSENT_REPUSH_CAP silently stops binding",
+  );
 });
