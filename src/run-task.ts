@@ -957,6 +957,76 @@ export function withdrawArmIfVerdictRefuses(
 }
 
 /**
+ * impl-BG — ARM a PR whose verdict PERMITS arming, whether or not it carries a trailer.
+ *
+ * THE DEFECT. `armAutoMerge` returns "no-task-id" on its first branch when a PR has no
+ * `Remudero-Task:` trailer, and arms nothing. Every automated lane either writes a trailer
+ * (worker, triage, plan, retro) or mints a synthetic id so it arms anyway (`rmd approve` uses
+ * a `PR-<n>` form); the OPERATOR-LANE agent PR is the only class with neither. Five PRs in one
+ * day needed a hand merge for this reason alone (#958, #961, #964, #968, #970) — and #970 had
+ * 22 checks green and "PASS — 5 criteria substantiated, no test theater" while the same system
+ * auto-merged #969 on "CAPPED — 0/4 proofs executed; not certified".
+ *
+ * THE EXACT MIRROR OF {@link withdrawArmIfVerdictRefuses}: same call site, same shared
+ * predicate, complementary condition. That one fires on `!decision.arm`; this one on
+ * `decision.arm`. One rule, two directions — never a second copy.
+ *
+ * WHY IT GOES THROUGH `armAutoMerge` RATHER THAN `attemptArm`. W1-T230's ledger gate
+ * ({@link decideArmFromLedgerVerdict}) re-reads the PR's CURRENT head and refuses when the
+ * ledgered verdict is for a different one. Routing through `armAutoMerge` therefore inherits
+ * head-drift protection for free: if the head moved between the verdict and this arm, the arm
+ * is refused rather than applying a stale judgement to new code. Bypassing it would have
+ * re-opened that window.
+ *
+ * WHY IT RUNS AFTER THE STATUS POST, unlike the withdrawal. The W1-T230 gate recovers the
+ * verdict from a ledgered `review.posted` line, which `postReviewStatusGuarded` writes. Arming
+ * before the post would find no line and be refused (fail-closed). The asymmetry is correct:
+ * a withdrawal must beat GitHub to the merge, an arm must follow the evidence it depends on.
+ *
+ * THE TASK ID. `task.id` is already `taskId ?? \`PR-<number>\`` at every caller
+ * (run-task.ts's `reviewCommand`), so the synthetic id the review lane assigns satisfies the
+ * gate with nothing new minted, and the resulting ledger line is attributable: an operator
+ * reading `automerge.armed` sees `PR-970` and can find the PR.
+ *
+ * DEPENDABOT IS EXCLUDED. `rmd dep-review` is a separate deterministic lane with its own
+ * arm/escalate policy; the sweep routes dependabot PRs there and never to post-review. But
+ * `reviewCommand` has no dependabot guard, so a manual `rmd review` on one would otherwise arm
+ * a PR that lane may have deliberately declined. Two lanes arming one PR on different rules is
+ * worse than the gap being closed here.
+ */
+export function armIfVerdictPermits(
+  verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
+  ctx: {
+    prUrl: string;
+    taskId: string;
+    headSha: string;
+    ledgerPath: string;
+    headRefName?: string;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+  },
+  deps: { arm?: (prUrl: string, taskId: string) => ArmOutcome; ledgerLines?: () => Array<Record<string, unknown>> } = {},
+): ArmOutcome | "skipped" {
+  if (ctx.headRefName?.startsWith("dependabot/")) {
+    ctx.log("automerge.arm_skipped", { reason: "dependabot PR — the dep-review lane owns arming for these", head_sha: ctx.headSha });
+    return "skipped";
+  }
+  const override = verdict.capped
+    ? cappedOverrideFromLedger(
+        (deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)))(),
+        ctx.taskId,
+        ctx.headSha,
+      )
+    : undefined;
+  const decision = decideAutoMergeArm(verdict, false, override);
+  if (!decision.arm) return "skipped";
+  // W1-T230's own gate still applies inside: it re-reads the live head and refuses a stale
+  // verdict. Its OUTCOME is read (impl-BC) rather than discarded, so a refusal is visible.
+  const outcome = (deps.arm ?? armAutoMerge)(ctx.prUrl, ctx.taskId);
+  ctx.log("automerge.armed", { outcome, reason: decision.reason, head_sha: ctx.headSha, task_id: ctx.taskId });
+  return outcome;
+}
+
+/**
  * PURE classifier for a failed `gh pr merge --auto` (exported for test): the
  * "clean status" class means the PR was ALREADY fully mergeable — auto-merge
  * had nothing to wait on and the correct completion is an immediate direct
@@ -1261,6 +1331,11 @@ async function runReview(args: {
    * ISSUED rather than mocking `gh`.
    */
   disarm?: (prUrl: string) => void;
+  /** Head ref of the PR under review — used ONLY to exclude `dependabot/` heads from the
+   *  post-verdict arm, which the dep-review lane owns. Absent ⇒ not a dependabot PR. */
+  headRefName?: string;
+  /** Injectable arm (impl-BG). Default: the real {@link armAutoMerge}. */
+  arm?: (prUrl: string, taskId: string) => ArmOutcome;
   /**
    * W1-T178 (verdict stability): the run's ledger path, so a semantic-lane
    * downgrade on an UNCHANGED head sha whose deterministic floor still passes
@@ -1441,6 +1516,19 @@ async function runReview(args: {
     runId: args.runId,
     fetchLifecycle: () => fetchPrLifecycle(prUrl),
   });
+  // impl-BG — THE MIRROR OF THE WITHDRAWAL ABOVE. A verdict that PERMITS arming arms the PR,
+  // trailer or not. AFTER the post, deliberately: W1-T230's gate recovers the verdict from the
+  // `review.posted` line `postReviewStatusGuarded` just wrote, so arming earlier would be
+  // refused fail-closed. Only runs when the post actually landed — a refused post means no
+  // ledgered verdict to arm on.
+  if (posted.posted) {
+    armIfVerdictPermits(
+      verdict,
+      { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log },
+      { arm: args.arm },
+    );
+  }
+
   if (!posted.posted) {
     // REFUSED, NOT SWALLOWED: postReviewStatusGuarded already ledgered
     // `review.post_refused` with the full reason; this is the loud console
@@ -4419,6 +4507,8 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       owner,
       repo,
       prUrl: view.url,
+      // impl-BG: excludes dependabot heads from the post-verdict arm (the dep-review lane owns those).
+      headRefName: view.headRefName,
       task: { id: taskId ?? `PR-${view.number}`, acceptance: criteria },
       report: body, // the PR body is the manual author's REPORT (proofs are pasted here)
       settingsFile: "",
