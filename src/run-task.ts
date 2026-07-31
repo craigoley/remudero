@@ -3023,6 +3023,122 @@ export function noPrVerdict(r: WorkerResult, costUsd: number, stage: string): No
   };
 }
 
+// ── W1-T272: the ALREADY_SATISFIED exit ─────────────────────────────────────────────────
+// The SILENT NO-OP GUARD above used to have exactly one PR-less outcome (`no_pr`), and that
+// one is DRAIN-HALTING by design (a clean success with nothing to merge is anomalous). A
+// worker that correctly diagnosed the task's acceptance was ALREADY TRUE on origin/main had
+// nowhere honest to go — the output contract (compaction.ts) offered only a gated
+// DECISION_REQUEST or "Otherwise: open a PR" — so five separate runs each manufactured a
+// no-op closure PR just to comply (OBSERVED 2026-07-31). This gives that finding a THIRD,
+// sanctioned exit — but only when it is MECHANICALLY VERIFIED: an unverifiable "already done"
+// claim is worse than none, so an unverified claim is refused and falls straight back to the
+// existing `no_pr` path, unchanged.
+
+/** A parsed ALREADY_SATISFIED claim off a worker's REPORT (compaction.ts's third exit) — the
+ *  PR reference text named, verbatim and NOT YET resolved to a number. */
+export interface AlreadySatisfiedClaim {
+  raw: string;
+  ref: string;
+}
+
+/**
+ * ANCHORED ALREADY_SATISFIED extraction — same discipline as worker.ts's `anchoredPrUrl`:
+ * only a line matching `ALREADY_SATISFIED:` (start-of-line, case-insensitive) counts; every
+ * other occurrence in prose or quoted contract text is inert. The LAST such line wins,
+ * mirroring "last line of the REPORT". No matching line ⇒ `undefined`, never a guess.
+ */
+export function parseAlreadySatisfied(text: string): AlreadySatisfiedClaim | undefined {
+  const matches = [...text.matchAll(/^[ \t]*ALREADY_SATISFIED:[ \t]*(\S.*)$/gim)];
+  if (!matches.length) return undefined;
+  const ref = matches[matches.length - 1][1].trim();
+  return ref ? { raw: text, ref } : undefined;
+}
+
+/** Extract a PR number from a claimed ref — a bare number, a `#123` form, or a full GitHub
+ *  pull-request URL. `undefined` on anything that names no number at all (never a guess). */
+export function prNumberFromRef(ref: string): number | undefined {
+  const urlMatch = ref.match(/\/pull\/(\d+)/);
+  if (urlMatch) return Number(urlMatch[1]);
+  const bareMatch = ref.match(/#?(\d+)/);
+  return bareMatch ? Number(bareMatch[1]) : undefined;
+}
+
+/**
+ * THE EVIDENCE GATE. An ALREADY_SATISFIED claim is refused unless the PR it names is the SAME
+ * PR the board gateway independently finds MERGED and carrying THIS task's anchored
+ * `Remudero-Task:` trailer — `findMergedByTrailer`, the exact primitive `buildCreditCandidates`
+ * (above) already trusts for sibling-run credit (P29(i)/W1-T149: ANY run of the task owning
+ * that PR counts). A worker cannot satisfy this by naming any merged PR lying around; only the
+ * one the gateway itself would independently credit to this task. A malformed ref, a number
+ * that does not match what the gateway finds, or the gateway finding nothing at all — every
+ * one of those is refused (`undefined`), and the caller falls through to the unchanged `no_pr`
+ * path. An unverifiable honesty exit is worse than none.
+ */
+export function resolveAlreadySatisfied(
+  claim: AlreadySatisfiedClaim,
+  github: GitHub,
+  taskId: string,
+): { number: number; url: string } | undefined {
+  const claimedNumber = prNumberFromRef(claim.ref);
+  if (claimedNumber === undefined) return undefined;
+  const credited = github.findMergedByTrailer(taskId);
+  if (!credited || credited.number !== claimedNumber) return undefined;
+  return { number: credited.number, url: credited.url };
+}
+
+/** The verdict + ledger payload for a terminal-SUCCESS worker whose ALREADY_SATISFIED claim
+ *  was VERIFIED (see {@link resolveAlreadySatisfied}) — distinct from both `merged` (this run
+ *  opened no PR of its own) and `no_pr` (this is forward progress, not an anomaly). */
+export interface AlreadySatisfiedVerdict {
+  verdict: "already_satisfied";
+  prUrl: string;
+  ledger: {
+    verdict: "already_satisfied";
+    stage: string;
+    subtype: string;
+    num_turns: number;
+    cost_usd: number;
+    billing_mode: BillingMode;
+    account_label?: string;
+    reason: string;
+    pr_number: number;
+    pr_url: string;
+    model: string;
+    effort: string;
+    tokens: WorkerResult["tokens"];
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+  };
+}
+
+export function alreadySatisfiedVerdict(
+  r: WorkerResult,
+  costUsd: number,
+  stage: string,
+  pr: { number: number; url: string },
+): AlreadySatisfiedVerdict {
+  return {
+    verdict: "already_satisfied",
+    prUrl: pr.url,
+    ledger: {
+      verdict: "already_satisfied",
+      stage,
+      subtype: r.subtype,
+      num_turns: r.numTurns,
+      cost_usd: costUsd,
+      billing_mode: billingMode(r.childEnvKeys),
+      account_label: r.accountLabel,
+      reason: `worker found acceptance already satisfied by merged ${pr.url} — credited, no new PR opened`,
+      pr_number: pr.number,
+      pr_url: pr.url,
+      model: r.model,
+      effort: r.effort,
+      tokens: r.tokens,
+      ...cacheTokenLedgerFields(r.tokens),
+    },
+  };
+}
+
 /** The classifier's view of a worker result: its subtype, its text/stderr evidence, and
  *  the Anthropic-side api-error flag. Feeds W1-T7's {@link classifyFailure}. */
 function workerSignal(r: WorkerResult): FailureSignal {
@@ -3371,11 +3487,11 @@ async function runTask(
   // machine-owned status.json, and gate on the derived merged predicate. The
   // runner NEVER writes tasks.yaml.
   const statusPath = join(config.root, "state", "status.json");
-  const projection = projectPlan(
-    plan,
-    { ledgerPath: ledgerPathFor(config), github: opts.github ?? ghGateway(owner, task.repo) },
-    statusPath,
-  );
+  // Hoisted (was inline) so runTaskBody's SILENT NO-OP GUARD (W1-T272) can reuse the SAME
+  // gateway instance for its ALREADY_SATISFIED evidence check, rather than opening a second
+  // one — zero behavior change for every existing caller (still `opts.github ?? ghGateway(...)`).
+  const github = opts.github ?? ghGateway(owner, task.repo);
+  const projection = projectPlan(plan, { ledgerPath: ledgerPathFor(config), github }, statusPath);
   const isMerged = (t: Task): boolean => projection.get(t.id)?.merged ?? false;
   assertRunnable(plan, task, isMerged); // refuse unmerged deps / blocked / verify:human
 
@@ -3936,6 +4052,32 @@ async function runTask(
     // "worker error: success" (run W1-T12a-1784117152056) and NOT a gh-pr-create throw on an
     // empty branch. Only reached when there's no PR to gate.
     if (!prUrl && commitsAhead(worktreePath, "origin/main") === 0) {
+      // W1-T272: the THIRD exit — before falling to the drain-halting `no_pr`, check whether
+      // the worker instead claimed ALREADY_SATISFIED and, if so, whether that claim actually
+      // verifies against the board gateway. A claim that fails to verify is deliberately NOT
+      // an error of its own — it just falls straight through to the unchanged `no_pr` path,
+      // exactly as if no claim had been made at all.
+      const claim = parseAlreadySatisfied(fullText(impl));
+      const resolved = claim && resolveAlreadySatisfied(claim, github, taskId);
+      if (claim && resolved) {
+        const v = alreadySatisfiedVerdict(impl, costUsd, "implement", resolved);
+        try {
+          worktreeRemove(repoDir, worktreePath);
+          log("worktree.remove", { on: "already_satisfied" });
+        } catch (e) {
+          log("worktree.remove.error", { on: "already_satisfied", error: String((e as Error)?.message ?? e) });
+        }
+        log("verdict", v.ledger);
+        say(`verdict: already_satisfied — credited via ${v.prUrl} · ${impl.numTurns} turns`);
+        return { taskId, runId, prUrl: v.prUrl, merged: true, costUsd, verdict: "already_satisfied" };
+      }
+      if (claim) {
+        log("already_satisfied.refused", {
+          claimed_ref: claim.ref,
+          claimed_number: prNumberFromRef(claim.ref) ?? null,
+        });
+        say(`ALREADY_SATISFIED claim ("${claim.ref}") did not verify against the board gateway — falling to no_pr`);
+      }
       const v = noPrVerdict(impl, costUsd, "implement");
       try {
         worktreeRemove(repoDir, worktreePath);
