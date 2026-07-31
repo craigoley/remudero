@@ -1679,14 +1679,22 @@ async function runReview(args: {
 export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-conflict" | (string & {});
 
 /**
- * The block evidence a fix dispatch derives its MODE from. Exactly one shape
- * is populated by any real caller today: `review` for a `blocked_review`
- * verdict (reviewer-unmet / body-coverage — the rung's live callers), `review`
- * left `undefined` for a bare `blocked_ci` block with no review verdict at all
- * (ci-log), or `mergeConflict` for a `conflicted` dispatch (W1-T106, the #170
- * DIRTY strand) — no review can run at all until the conflict itself
- * resolves. `ciFailures`/`mergeConflict` carry their own mode's input; never a
- * mix of the two.
+ * The block evidence a fix dispatch derives its MODE from. `review` carries a
+ * `blocked_review` verdict (reviewer-unmet / body-coverage); `ciFailures`
+ * carries a `blocked_ci` block's failing check names + log tails (ci-log,
+ * W1-T226: derived from PRESENCE of `ciFailures`, never from ABSENCE of
+ * `review` — see {@link FIX_MODE_RULES} row 2); `mergeConflict` carries a
+ * `conflicted` dispatch's conflicting-file evidence (W1-T106, the #170 DIRTY
+ * strand) — no review or check can run at all until the conflict itself
+ * resolves. `mergeConflict` still precludes the other two by construction
+ * (nothing runs on an unmergeable ref). `review` and `ciFailures`, though,
+ * MAY legitimately coexist — a review verdict sitting beside a red required
+ * check is normal (the verdict may be stale, or simply irrelevant until the
+ * check clears) — and when they do, `ciFailures`' presence wins: every
+ * CURRENT caller (`runFixRung`, `buildFixRungDispatchArgs`,
+ * `routeFix`/`runSweep`) still constructs them mutually exclusively as a
+ * matter of caller discipline, but the mode table's own correctness no
+ * longer depends on that discipline holding.
  */
 export interface FixEvidence {
   review?: { unmetCriteria: CriterionVerdict[]; summary: string };
@@ -1718,13 +1726,40 @@ interface FixModeRule {
  *                        CI log can exist yet either. Checked FIRST so it is
  *                        never misclassified as ci-log (both leave `review`
  *                        undefined).
- *   2. ci-log         — no review verdict at all (`review` undefined): the
- *                        failing signal IS the CI log, never a reviewer verdict.
+ *   2. ci-log         — W1-T226 (corrects W1-T224/W1-T94's original row):
+ *                        gated on PRESENCE of `evidence.ciFailures`, never on
+ *                        ABSENCE of `evidence.review`. A required check red is
+ *                        the failing signal that actually blocks a merge —
+ *                        GitHub will not merge past it no matter what a review
+ *                        verdict sitting BESIDE it says, and that verdict may
+ *                        itself be stale (computed before the push that broke
+ *                        the check, or before a slower required check
+ *                        settled). This is the SAME "ci-log wins" precedence
+ *                        {@link DISPOSITION_RULES} row 5 (`isBlockedCi`,
+ *                        sweep.ts) already established and W1-T138 broadened
+ *                        to fire "regardless of the review verdict beside it"
+ *                        — this row previously did not actually implement
+ *                        that precedence: gating on `review === undefined`
+ *                        meant ANY posted-or-computed verdict, pass or fail,
+ *                        made the row miss and fall through to a
+ *                        review-shaped mode, masking the check. Every CURRENT
+ *                        caller (`runFixRung`, `buildFixRungDispatchArgs`,
+ *                        `routeFix`/`runSweep`'s `dispatchFix`) already
+ *                        constructs `review`/`ciFailures` mutually
+ *                        exclusively, so this correction changes nothing
+ *                        observable for them — it closes the table's OWN
+ *                        latent gap, provable by calling {@link deriveFixMode}
+ *                        directly with BOTH fields set (a review-failed AND
+ *                        CI-red PR, PR 479's shape in the W1-T226 rationale)
+ *                        rather than by any caller relying on that discipline
+ *                        forever holding.
  *   3. body-coverage   — every unmet criterion's reason is a keyword-coverage
  *                        gap ("matched N/M proof keywords") and NONE was an
  *                        OBSERVED `executed_fail` (an actual failed run always
  *                        means real code broke — never treat that as body-only,
- *                        the #157/#143 lesson).
+ *                        the #157/#143 lesson). Reached only when ci-log's row
+ *                        above also missed (no `ciFailures`) — a red required
+ *                        check outranks a body-coverage-shaped review too.
  *   4. reviewer-unmet  — the default: a real reviewer-computed unmet set
  *                        (W1-T76, unchanged).
  */
@@ -1735,7 +1770,7 @@ export const FIX_MODE_RULES: readonly FixModeRule[] = [
   },
   {
     mode: "ci-log",
-    when: (e) => e.review === undefined,
+    when: (e) => e.ciFailures !== undefined,
   },
   {
     mode: "body-coverage",
@@ -1885,10 +1920,13 @@ export function renderFixPrompt(opts: {
     return [
       header,
       ...constraintBlock,
-      `Required CI check(s) are FAILING and NO review has run yet (a review needs green CI`,
-      `first) — the failing signal here IS the CI log, not a reviewer verdict. Your target is`,
-      `making CI GREEN on the SAME branch; do not expand scope beyond what the failing`,
-      `check(s) below require.`,
+      `Required CI check(s) are FAILING — the failing signal here IS the CI log, not a reviewer`,
+      `verdict. GitHub will not merge past a red required check no matter what any review verdict`,
+      `says, and a review verdict sitting beside this one (if any exists at all — most often none`,
+      `has run yet, since a review needs green CI first) may simply be STALE, computed before the`,
+      `push that broke this check. Your target is making CI GREEN on the SAME branch; do not`,
+      `expand scope beyond what the failing check(s) below require — do not touch acceptance`,
+      `criteria or task scope to chase a reviewer verdict here.`,
       "",
       rendered,
       ...footer,
@@ -2376,7 +2414,17 @@ export async function runFixRung(opts: {
       currentMergeConflict !== undefined
         ? { mergeConflict: currentMergeConflict, constraint: opts.constraint }
         : noReviewYet
-        ? { ciFailures: currentCiFailures, constraint: opts.constraint }
+        ? // W1-T226: `?? []` — `currentCiFailures` can be `undefined` here (no
+          // `deps.fetchCiFailures` dep, or one that threw) even though `noReviewYet`
+          // is true — checks are KNOWN to be non-green, just without failing-check
+          // DETAIL. `FIX_MODE_RULES`' ci-log row now keys off `ciFailures !==
+          // undefined` (presence), not `review === undefined` (absence), so the
+          // field itself must always be a real (possibly empty) array whenever
+          // `noReviewYet` holds — an `undefined` value here would silently fall
+          // through to a review-shaped mode despite `noReviewYet` being true, the
+          // exact regression `runFixRung`'s own "fetchCiFailures is optional" test
+          // (below) locks against.
+          { ciFailures: currentCiFailures ?? [], constraint: opts.constraint }
         : { review: { unmetCriteria: unmet, summary: review.summary }, constraint: opts.constraint };
     const fixMode = deriveFixMode(evidence);
     const prompt = renderFixPrompt({
