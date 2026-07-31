@@ -421,3 +421,63 @@ instruction and marked so, exactly as the 2026-07-20 entry above.*
   neither `plan/tasks.d/W1-T262-console-header-freshness-honesty.yaml`'s `status` field nor its
   acceptance criteria are touched by this PR.
 - Rollback: revert this PR — removes only this DECISIONS.md entry; no runtime code touched.
+
+## 2026-07-31 — W1-T201 re-dispatch: already-satisfied, no-op close (OPERATOR-RULED)
+
+*Operator-ruled closure, recorded at the operator's instruction — not a machine auto-choose
+resolution, and marked so in the manner of the 2026-07-20 and 2026-07-28 entries above.*
+
+- Options: (A) close as already-satisfied, no functional code change, record the closure here and
+  file the one genuine residual as its own task (RECOMMENDED, and the operator's ruling) | (B) park
+  W1-T201 — rejected: parking preserves a task whose title and rationale ("`retroCommand`'s only
+  caller is the CLI", "R10 could not fire through 70 merges") are now empirically FALSE, and a
+  future implementer reading it would rebuild what already runs
+- Chosen (RECOMMENDED): Option A — no functional code change, this DECISIONS.md entry as the audit
+  trail, following the precedent set for W1-T7/#772, W1-T12a/#725, W1-T99/#731 and most recently
+  W1-T262 (2026-07-30, the entry immediately above this one).
+- Rationale: W1-T201 (`plan/tasks.d/W1-T201-retro-cadence-trigger.yaml`) asks to wire a
+  merges/days-thresholded, integrity-gated retro trigger into the daemon poll loop, keyed so one
+  threshold crossing fires one retro. **W1-T160 shipped exactly that as PR #853**, and it has fired
+  unattended TWICE in production — both lines quoted verbatim from the unioned ledger (661 files,
+  4,154,616 lines): `{"ts":"2026-07-29T16:04:27.148Z","run_id":"DAEMON-1785340932816","task_id":"DAEMON","step":"retro_triggered","reason":"merges","merges_since_marker":94,"days_since_marker":8.268563831018518}`
+  followed by `retro.marker.advanced` at 16:23:16.698Z (which became PR #883), and
+  `{"ts":"2026-07-31T00:00:24.683Z","run_id":"DAEMON-1785455116417","task_id":"DAEMON","step":"retro_triggered","reason":"merges","merges_since_marker":25,"days_since_marker":1.3170398958333334}`
+  followed by `retro.marker.advanced` at 00:17:05.069Z (PR #974). The second firing at EXACTLY the
+  25-merge threshold, with the marker advancing 17 minutes later, is criterion 3's idempotence
+  observed in production rather than argued. Criterion-by-criterion at `2c8dff2`: (1) and (2) the
+  daemon-path firing — `src/lib/daemon.ts:1282` `if (deps.checkRetroTrigger)`, `:1290`
+  `log("retro_triggered", …)`, `:1299` `await deps.runRetroTrigger(decision)`; (3) idempotence keyed
+  to the marker — `src/run-task.ts:5234-5242` reads `state/last-retro.json` and recomputes
+  `mergesSinceMarker` via `shippedSince`, so the marker advance closes the window; (5) the integrity
+  gate — `checkRetroIntegrity` (`src/lib/retro.ts:2377`), imported at `src/run-task.ts:233` and
+  documented at `:5286-5288`, aborting to `retro_aborted_integrity`; (6) fail-soft — `daemon.ts:1301`
+  `log("daemon.retro_trigger.run_failed", …)`, and that line appears ONCE in the live ledger
+  (2026-07-29T16:25:16.647Z, a GraphQL rate-limit throw), so the path is exercised, not merely
+  present. **Criterion 4 is the one thing that did NOT ship**: `src/run-task.ts:5243` calls
+  `evaluateRetroTrigger(mergesSinceMarker, marker?.ts, now)` with NO fourth argument, so the
+  parameter defaults to `defaultRetroTriggerPolicy()` (`src/lib/retro.ts:2315`) and the live
+  thresholds are the source literals `DEFAULT_RETRO_MERGES_THRESHOLD = 25` (`retro.ts:2299`) and
+  `DEFAULT_RETRO_DAYS_THRESHOLD = 7` (`retro.ts:2304`); `plan/policy.yaml` carries no `retro` key at
+  all. That residual is filed as **W1-T264** (`plan/tasks.d/W1-T264-retro-cadence-policy-data.yaml`)
+  rather than appended to W1-T252/W1-T253, because both of those merged on 2026-07-30 (#901, #921)
+  and `postMergeAmendmentViolations` (`src/lib/task-linter.ts:735`, W1-T180) blocks amending a merged
+  task's criteria.
+- THE MECHANISM, and why this entry alone does not stop the re-dispatch: `status:` is decorative —
+  `plan/tasks.yaml`'s own header says so, and `isDispatchEligible` (`src/lib/drain.ts:123`) reads
+  `t.status` at exactly one place, `:127`, and only for the value `"blocked"`. The real gate is
+  `:125` `if (isMerged(t.id)) return false;`, fed by the GitHub-derived projection. W1-T201 can never
+  satisfy any derivation rung on its own: rung (c) needs a merged PR whose body carries
+  `Remudero-Task: W1-T201`, and the PR that shipped this work — #853 — carries a `W1-T160` trailer,
+  so **no trailer could ever have credited it**. This is the case `rmd correct` exists for: the
+  sanctioned operator-correction writer (P9 / W1-T75) appends a `correction.provenance` line that is
+  SUPREME over every rung (`src/lib/status.ts:875`). It is a state mutation, so it is the operator's
+  to run, and it is NOT run by this PR. The exact command is in
+  `state/impl-BQ-close-t201.md`. (A plan-only alternative exists — an explicit `pr: 853` field on the
+  task feeds deriveStatus rung (b), `src/lib/status.ts:1098` — but it asserts #853 IS W1-T201's PR,
+  which is not literally true and leaves no reason string; the correction line records the operator's
+  judgement and why, which is better provenance for a cross-task credit.)
+- Per `src/lib/plan.ts:41-45`, `satisfied_by` is ARCHITECT-ONLY and a worker-added one fails review,
+  and per the header above `status:` is never written back — so, exactly as in the W1-T262 closure,
+  **neither W1-T201's `status` field nor its acceptance criteria are touched by this PR.**
+- Rollback: revert this PR — removes only this DECISIONS.md entry and the new W1-T264 shard; no
+  runtime code touched, and no ledger line written.
