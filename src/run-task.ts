@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -100,7 +100,7 @@ import {
 } from "./lib/daemon.js";
 import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
-import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchdPlistPath, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
+import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js";
 import { buildDigest, buildMarkerAwareDigest, consoleCardUrl, sendDigest, sendMarkerAwareDigest, sendRundown } from "./lib/digest.js";
 import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
@@ -154,15 +154,18 @@ import { ghIssueCloser } from "./lib/panel-actions.js";
 import {
   buildServeServer,
   currentBranch,
+  DEFAULT_BIND_ATTEMPTS,
+  DEFAULT_BIND_RETRY_MS,
   ensureLogFileMode,
   listenWithReapWait,
   offMainNotice,
   resolveServeHosts,
   resolveServePort,
   resolveServiceTokens,
+  SERVE_EXPECTED_BRANCH,
   serviceTokensPath,
 } from "./lib/serve.js";
-import { consoleUrlCommand } from "./lib/console-url.js";
+import { consoleUrlCommand, defaultIsListening } from "./lib/console-url.js";
 import { assertProposedPlanLoads,
   buildGrillEscalation,
   decideTriage,
@@ -390,7 +393,7 @@ import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, FIX_WORKER_TOOLS, neutralizeFenceMarkers } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "./lib/drain-lock.js";
 import { checkCliFreshness, checkServiceFreshness } from "./lib/self-sync.js";
-import { acquireInflightLock, InflightLockError, sweepStaleInflightLocks } from "./lib/inflight-lock.js";
+import { acquireInflightLock, InflightLockError, readInflightLock, sweepStaleInflightLocks } from "./lib/inflight-lock.js";
 import { classifyFailure, MAX_TRANSIENT_RETRIES, type FailureSignal } from "./lib/classify.js";
 import { shouldRecordDecision } from "./lib/risk-score.js";
 import { assertLiveWriteAllowed } from "./lib/live-write-guard.js";
@@ -6855,6 +6858,482 @@ export async function servePlistCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
+// ── rmd down / rmd up — operator lifecycle verbs (W1-T169) ─────────────────────────────────
+//
+// Graceful wind-down / full resume, built as REPORTING/ORCHESTRATION over injected effects (a
+// service-manager handle, a port-checker, a process-stopper, the ledger reader) — NEVER
+// process babysitters. The fixture this replaces: the operator's restart procedure was FOUR
+// manual command blocks plus a reap-wait gotcha (kill by PORT, wait for the port to actually
+// release, THEN relaunch — never an argv/pattern kill, which misses; the
+// serve-restart-reap-wait class). `rmd down` winds the fleet down for maintenance; `rmd up`
+// resumes it. Both are idempotent: a repeat call reports the CURRENT state rather than
+// erroring or double-acting.
+
+/** `launchctl print`'s pid line ("	pid = 61234"). Absent — a job bootstrapped but not yet
+ *  spawned, or one that just exited — means "loaded, not (yet) running", distinct from "not
+ *  loaded at all" (the caller tells those apart via {@link LaunchdServiceState.loaded}). */
+const LAUNCHCTL_PID_RE = /"?pid"?\s*=\s*(\d+)/;
+
+export interface LaunchdServiceState {
+  /** True iff `launchctl print` finds the service at all (bootstrapped into the GUI domain). */
+  loaded: boolean;
+  /** The job's live pid, or `null` when loaded but not (yet) running. */
+  pid: number | null;
+}
+
+/** The one real subprocess seam every lifecycle helper below defaults to — a test fakes THIS
+ *  one function and every helper obeys it, rather than each helper importing `execFileSync`
+ *  for itself (the same one-seam discipline deployer.ts's `realDeployDeps` established for
+ *  its own `launchctl kickstart` call). */
+function defaultLifecycleExec(cmd: string, args: string[]): string {
+  return execFileSync(cmd, args, { encoding: "utf8" }).toString();
+}
+
+/** This process's real UID, or 0 when `process.getuid` is unavailable (non-POSIX — launchd
+ *  itself is macOS-only, so that branch never actually runs in production; mirrors
+ *  `deployRunCommand`'s own `process.getuid` guard). */
+function realUid(): number {
+  return typeof process.getuid === "function" ? process.getuid() : 0;
+}
+
+/**
+ * `launchctl print gui/<uid>/<label>` — the SAME query both `rmd down`'s "already down" check
+ * and `rmd up`'s "already up" check read, so the two verbs can never disagree about whether a
+ * service is loaded. A non-bootstrapped label exits non-zero ("Could not find service..."),
+ * which `execFileSync` turns into a throw — caught here as `loaded: false`, never a crash.
+ */
+export function queryLaunchdService(
+  label: string,
+  uid: number,
+  exec: (cmd: string, args: string[]) => string = defaultLifecycleExec,
+): LaunchdServiceState {
+  let out: string;
+  try {
+    out = exec("launchctl", ["print", launchctlGuiTarget(uid, label)]);
+  } catch {
+    return { loaded: false, pid: null };
+  }
+  const m = LAUNCHCTL_PID_RE.exec(out);
+  return { loaded: true, pid: m ? Number(m[1]) : null };
+}
+
+/** `launchctl bootstrap gui/<uid> <plistPath>` — loads a unit that is not yet loaded. */
+export function loadLaunchdService(
+  plistPath: string,
+  uid: number,
+  exec: (cmd: string, args: string[]) => string = defaultLifecycleExec,
+): void {
+  exec("launchctl", ["bootstrap", `gui/${uid}`, plistPath]);
+}
+
+/** `launchctl bootout gui/<uid>/<label>` — unloads a loaded unit BY LABEL, so it still works
+ *  even if the plist file on disk has since been deleted or moved. */
+export function unloadLaunchdService(
+  label: string,
+  uid: number,
+  exec: (cmd: string, args: string[]) => string = defaultLifecycleExec,
+): void {
+  exec("launchctl", ["bootout", launchctlGuiTarget(uid, label)]);
+}
+
+/**
+ * Find + SIGTERM whatever is LISTENING on `port` — never an argv/pattern match (`pkill -f
+ * serve` has matched an unrelated process before; that's the serve-restart-reap-wait/argv-miss
+ * class this task exists to retire). `lsof -ti :<port> -sTCP:LISTEN` exits non-zero with empty
+ * output when nothing is listening — `execFileSync` turns that into a throw, caught here as
+ * "nothing to stop". Actual release is confirmed by {@link waitForPortRelease}, not by this
+ * function — SIGTERM is a request, not a guarantee.
+ */
+export function defaultStopServeByPort(port: number, exec: (cmd: string, args: string[]) => string = defaultLifecycleExec): void {
+  let out: string;
+  try {
+    out = exec("lsof", ["-ti", `:${port}`, "-sTCP:LISTEN"]);
+  } catch {
+    return;
+  }
+  for (const line of out.split("\n")) {
+    const pid = Number(line.trim());
+    if (Number.isInteger(pid) && pid > 0) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // already gone by the time we got here — waitForPortRelease is what actually confirms
+        // the port is free, not this best-effort signal.
+      }
+    }
+  }
+}
+
+/**
+ * Reap-wait: poll every bound host until NONE are still accepting connections on `port`, or
+ * give up after `attempts`. Mirrors {@link listenWithReapWait}'s own bound (20 x 500ms = 10s,
+ * {@link DEFAULT_BIND_ATTEMPTS}/{@link DEFAULT_BIND_RETRY_MS}) — the SAME class of race (a
+ * killed process's port lingers briefly while the kernel tears it down), just waited out from
+ * the STOP side instead of the BIND side.
+ */
+export async function waitForPortRelease(
+  hosts: string[],
+  port: number,
+  isPortListening: (host: string, port: number) => Promise<boolean>,
+  opts: { attempts?: number; delayMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<boolean> {
+  const attempts = opts.attempts ?? DEFAULT_BIND_ATTEMPTS;
+  const delayMs = opts.delayMs ?? DEFAULT_BIND_RETRY_MS;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  for (let attempt = 1; ; attempt++) {
+    const stillListening = await Promise.all(hosts.map((h) => isPortListening(h, port)));
+    if (!stillListening.some(Boolean)) return true;
+    if (attempt >= attempts) return false;
+    await sleep(delayMs);
+  }
+}
+
+/** One task's CURRENT in-flight dispatch — live iff its inflight-lock.ts lock file names a
+ *  pid that is still alive (a dead pid's lock is stale debris, never in-flight — the SAME
+ *  liveness test `sweepStaleInflightLocks` uses). */
+export interface LiveInflightRun {
+  taskId: string;
+  runId: string;
+  pid: number;
+}
+
+/**
+ * Every LIVE in-flight run right now — a direct read of `<root>/state/inflight/*.lock`
+ * (inflight-lock.ts), the SAME per-task lock the drain/daemon path takes before dispatching a
+ * task, so "in flight" here means exactly what it means everywhere else in the fleet — never a
+ * second, looser definition.
+ */
+export function liveInflightRuns(
+  inflightDir: string,
+  isPidAlive: (pid: number) => boolean = defaultIsPidAlive,
+): LiveInflightRun[] {
+  if (!existsSync(inflightDir)) return [];
+  const out: LiveInflightRun[] = [];
+  for (const entry of readdirSync(inflightDir)) {
+    if (!entry.endsWith(".lock")) continue;
+    const taskId = entry.slice(0, -".lock".length);
+    const info = readInflightLock(inflightDir, taskId);
+    if (info && isPidAlive(info.pid)) out.push({ taskId, runId: info.run_id, pid: info.pid });
+  }
+  return out;
+}
+
+/**
+ * has-PR vs pre-PR recoverability for ONE run id (W1-T169's own acceptance vocabulary) —
+ * mirrors daemon.ts's `reconstructOrphan` resume/clean split, but read straight from the
+ * ledger instead of a live GitHub call: `rmd down` needs an immediate, network-independent
+ * answer, and a `pr.opened` ledger line carrying this exact `run_id` is evidence THIS process
+ * already wrote, not a fact that needs re-confirming from GitHub. Its presence means the sweep
+ * will find that PR and resume from it next start; its absence means the crash happened before
+ * a PR existed, so the task simply re-dispatches from scratch next start.
+ */
+export function runRecoverability(lines: ReadonlyArray<Record<string, unknown>>, runId: string): "has-pr" | "pre-pr" {
+  return lines.some((l) => l.run_id === runId && l.step === "pr.opened") ? "has-pr" : "pre-pr";
+}
+
+export interface LifecycleCounts {
+  openPr: number;
+  needsHuman: number;
+}
+
+/**
+ * Best-effort open-PR / needs-human counts for the wind-down/resume report — the SAME
+ * `projectPlan` projection every other reader of plan state derives from (status.ts), read
+ * fresh. Network-dependent (a live `gh` read backs `prState`), so this NEVER throws: a
+ * GitHub/plan-read failure degrades to `null` (reported as "unknown"), the SAME direction
+ * board.ts's `github_unreachable` takes — `rmd down`/`rmd up` must still finish their real job
+ * (stop/start the service) even when the network is the thing that's down.
+ */
+function defaultPlanLifecycleCounts(config: Config): LifecycleCounts | null {
+  try {
+    const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+    const { owner, repo } = resolveOwnerRepo();
+    const proj = projectPlan(plan, { ledgerPath: ledgerPathFor(config), github: ghGateway(owner, repo) }, join(config.root, "state", "status.json"));
+    let openPr = 0;
+    let needsHuman = 0;
+    for (const p of proj.values()) {
+      if (p.prState === "OPEN") openPr++;
+      if (p.needsHuman) needsHuman++;
+    }
+    return { openPr, needsHuman };
+  } catch {
+    return null;
+  }
+}
+
+/** Bound on how long `rmd down` waits for an in-flight run to reach a safe boundary before
+ *  giving up and reporting it instead — deliberately short (a few seconds): `down` is an
+ *  operator waiting at a terminal for maintenance, not a background process that can afford to
+ *  hang, and the whole point of the recoverability report is that waiting forever is never
+ *  required for a safe shutdown. */
+export const DOWN_SAFE_BOUNDARY_ATTEMPTS = 6;
+export const DOWN_SAFE_BOUNDARY_DELAY_MS = 500;
+
+/** Bound on how long `rmd up` polls for a just-loaded service to actually come up (a pid to
+ *  appear, or the port to start accepting) before reporting it as failed-to-start rather than
+ *  hanging indefinitely on a service that never will. */
+export const UP_BOOT_POLL_ATTEMPTS = 10;
+export const UP_BOOT_POLL_DELAY_MS = 500;
+
+export interface DownDeps {
+  loadConfig?: () => Config;
+  queryDaemon?: () => LaunchdServiceState;
+  unloadDaemon?: () => void;
+  isPortListening?: (host: string, port: number) => Promise<boolean>;
+  stopServeByPort?: (host: string, port: number) => void;
+  waitForPortRelease?: typeof waitForPortRelease;
+  sleep?: (ms: number) => Promise<void>;
+  liveInflightRuns?: () => LiveInflightRun[];
+  readLedgerLines?: (path: string) => ReadonlyArray<Record<string, unknown>>;
+  planLifecycleCounts?: () => LifecycleCounts | null;
+  safeBoundaryAttempts?: number;
+  safeBoundaryDelayMs?: number;
+  reapAttempts?: number;
+  reapDelayMs?: number;
+  out?: (line: string) => void;
+  err?: (line: string) => void;
+}
+
+/**
+ * `rmd down [--port <n>] [--host <addr>]` — graceful wind-down for restart/maintenance
+ * (W1-T169). (1) Unloads the daemon launchd service — if a task is CURRENTLY in flight
+ * (inflight-lock.ts), waits a bounded window ({@link DOWN_SAFE_BOUNDARY_ATTEMPTS} x
+ * {@link DOWN_SAFE_BOUNDARY_DELAY_MS}) for it to reach a safe boundary (its lock clears); if it
+ * does not clear in time the wind-down PROCEEDS anyway — it never hangs forever — and instead
+ * REPORTS the run's id and its recoverability (has-PR = the sweep recovers it next start,
+ * pre-PR = it re-dispatches next start). (2) Stops `rmd serve` BY PORT (never an argv/pattern
+ * kill) and reap-waits ({@link waitForPortRelease}) until the port actually releases before
+ * returning. (3) Prints a wind-down summary: in-flight state, open-PR count, needs-human
+ * count, and an explicit "safe to restart" line.
+ *
+ * IDEMPOTENT: when the daemon service is already unloaded and nothing is listening on the
+ * port, this is a total no-op — an honest "already down" report, zero unload/stop calls issued.
+ */
+export async function downCommand(rest: string[], deps: DownDeps = {}): Promise<number> {
+  const out = deps.out ?? ((l: string) => console.log(l));
+  const err = deps.err ?? ((l: string) => console.error(l));
+  const badArg = unknownArgError("down", rest, ["--port", "--host"], []);
+  if (badArg) {
+    err(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const config = (deps.loadConfig ?? loadConfig)();
+  const uid = realUid();
+  let port: number;
+  let hosts: string[];
+  try {
+    port = resolveServePort(rest, config.serve?.port);
+    hosts = resolveServeHosts(rest, process.env, config.serve?.host);
+  } catch (e) {
+    err(`### rmd down — ${(e as Error).message}`);
+    return 2;
+  }
+
+  const queryDaemon = deps.queryDaemon ?? (() => queryLaunchdService(DAEMON_LABEL, uid));
+  const unloadDaemon = deps.unloadDaemon ?? (() => unloadLaunchdService(DAEMON_LABEL, uid));
+  const isPortListening = deps.isPortListening ?? defaultIsListening;
+  const stopByPort = deps.stopServeByPort ?? ((_h: string, p: number) => defaultStopServeByPort(p));
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const waitRelease = deps.waitForPortRelease ?? waitForPortRelease;
+  const inflightDir = join(config.root, "state", "inflight");
+  const getLiveRuns = deps.liveInflightRuns ?? (() => liveInflightRuns(inflightDir));
+
+  // 1. Daemon: safe-boundary wait for any in-flight run, then unload — ONLY if it is loaded
+  // (idempotency: an unloaded daemon means nothing to wait for and nothing to unload).
+  const daemonWasLoaded = queryDaemon().loaded;
+  let inFlight: { taskId: string; runId: string; recoverable: "has-pr" | "pre-pr" } | undefined;
+  if (daemonWasLoaded) {
+    const attempts = deps.safeBoundaryAttempts ?? DOWN_SAFE_BOUNDARY_ATTEMPTS;
+    const delayMs = deps.safeBoundaryDelayMs ?? DOWN_SAFE_BOUNDARY_DELAY_MS;
+    let live = getLiveRuns();
+    for (let i = 0; live.length > 0 && i < attempts; i++) {
+      await sleep(delayMs);
+      live = getLiveRuns();
+    }
+    if (live.length > 0) {
+      const run = live[0] as LiveInflightRun;
+      const lines = (deps.readLedgerLines ?? ((p: string) => readLedgerLines(p)))(ledgerPathFor(config));
+      inFlight = { taskId: run.taskId, runId: run.runId, recoverable: runRecoverability(lines, run.runId) };
+    }
+    unloadDaemon();
+  }
+
+  // 2. Serve: stop BY PORT, reap-wait — ONLY if something is actually listening (idempotency).
+  const listeningBefore = await Promise.all(hosts.map((h) => isPortListening(h, port)));
+  const serveWasListening = listeningBefore.some(Boolean);
+  if (serveWasListening) {
+    for (const h of hosts) stopByPort(h, port);
+  }
+  const released = serveWasListening
+    ? await waitRelease(hosts, port, isPortListening, { sleep, attempts: deps.reapAttempts, delayMs: deps.reapDelayMs })
+    : true;
+
+  // 3. Report.
+  const counts = (deps.planLifecycleCounts ?? (() => defaultPlanLifecycleCounts(config)))();
+  out(`### rmd down — wind-down summary`);
+  out(`    daemon service:  ${daemonWasLoaded ? "unloaded" : "already down"}`);
+  out(
+    `    serve (:${port}): ${
+      !serveWasListening
+        ? "already down"
+        : released
+          ? "stopped — port released"
+          : "stop issued — port STILL HELD after the reap-wait"
+    }`,
+  );
+  out(
+    `    in-flight:       ${
+      inFlight
+        ? `${inFlight.taskId} (run ${inFlight.runId}) — ${
+            inFlight.recoverable === "has-pr" ? "has a PR: the sweep recovers it next start" : "pre-PR: it re-dispatches next start"
+          }`
+        : "none"
+    }`,
+  );
+  out(`    open PRs:        ${counts ? counts.openPr : "unknown (GitHub unreachable)"}`);
+  out(`    needs-human:     ${counts ? counts.needsHuman : "unknown (GitHub unreachable)"}`);
+  out(`    safe to restart: ${released ? "yes" : "NO — the serve port is still held; do not \`rmd up\` yet"}`);
+  return released ? 0 : 1;
+}
+
+export interface UpDeps {
+  loadConfig?: () => Config;
+  ensureInstallFresh?: (repoDir: string) => boolean;
+  currentBranch?: (repoDir: string) => string | null;
+  queryDaemon?: () => LaunchdServiceState;
+  loadDaemonService?: (plistPath: string) => void;
+  daemonPlistExists?: (path: string) => boolean;
+  isPortListening?: (host: string, port: number) => Promise<boolean>;
+  loadServeService?: (plistPath: string) => void;
+  servePlistExists?: (path: string) => boolean;
+  sleep?: (ms: number) => Promise<void>;
+  consoleUrlCommand?: typeof consoleUrlCommand;
+  liveInflightRuns?: () => LiveInflightRun[];
+  planLifecycleCounts?: () => LifecycleCounts | null;
+  bootPollAttempts?: number;
+  bootPollDelayMs?: number;
+  out?: (line: string) => void;
+  err?: (line: string) => void;
+}
+
+/**
+ * `rmd up [--port <n>] [--host <addr>] [--allow-off-main]` — full resume (W1-T169). (1)
+ * Install-freshness runs FIRST, via the SAME {@link ensureInstallFresh} hook `rmd daemon`/`rmd
+ * serve` boot through (W1-T151) — a lockfile-changing pull triggers `npm ci` BEFORE anything
+ * else starts. (2) REFUSES to resume when the checkout is off `main` (the exact incident this
+ * exists for: never resume a fleet against branch code) unless `--allow-off-main` is given
+ * explicitly. (3) Loads the daemon launchd service. (4) Confirms/starts the serve launchd
+ * service (never a foreground spawn — T152 already makes serve a service; this CONFIRMS it).
+ * (5) Prints the resume report: daemon pid, the console URL WITH its READ token (via the
+ * already-hardened `rmd console-url`, never a second URL-assembly implementation — and
+ * deliberately the READ token, never the write one, per standing rule 24 / R-5), the
+ * in-flight/queued head, and the needs-human count.
+ *
+ * IDEMPOTENT: when the daemon service is already loaded and serve is already listening, this
+ * verifies + reports the running state and issues NEITHER a `loadDaemonService` nor a
+ * `loadServeService` call — never a double start.
+ */
+export async function upCommand(rest: string[], deps: UpDeps = {}): Promise<number> {
+  const out = deps.out ?? ((l: string) => console.log(l));
+  const err = deps.err ?? ((l: string) => console.error(l));
+  const badArg = unknownArgError("up", rest, ["--port", "--host"], ["--allow-off-main"]);
+  if (badArg) {
+    err(badArg + "\n" + USAGE);
+    return 2;
+  }
+
+  // 1. Install-freshness FIRST — before ANYTHING else below starts (W1-T151).
+  (deps.ensureInstallFresh ?? ensureInstallFresh)(repoRoot);
+
+  // 2. Off-main REFUSE, unless explicitly overridden — never resume a fleet against branch code.
+  const branch = (deps.currentBranch ?? ((d: string) => currentBranch(d)))(repoRoot);
+  const allowOffMain = rest.includes("--allow-off-main");
+  if (branch !== null && branch !== SERVE_EXPECTED_BRANCH && !allowOffMain) {
+    err(
+      `### rmd up — REFUSING to resume: this checkout is on branch '${branch}', not ` +
+        `'${SERVE_EXPECTED_BRANCH}'. Resuming the fleet against branch code is the exact ` +
+        `incident this refusal exists for. Re-run with --allow-off-main to resume anyway.`,
+    );
+    return 1;
+  }
+
+  const config = (deps.loadConfig ?? loadConfig)();
+  const uid = realUid();
+  let port: number;
+  let hosts: string[];
+  try {
+    port = resolveServePort(rest, config.serve?.port);
+    hosts = resolveServeHosts(rest, process.env, config.serve?.host);
+  } catch (e) {
+    err(`### rmd up — ${(e as Error).message}`);
+    return 2;
+  }
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const isPortListening = deps.isPortListening ?? defaultIsListening;
+  const attempts = deps.bootPollAttempts ?? UP_BOOT_POLL_ATTEMPTS;
+  const delayMs = deps.bootPollDelayMs ?? UP_BOOT_POLL_DELAY_MS;
+
+  // 3. Load the daemon service — ONLY if it is not already loaded (idempotency).
+  const queryDaemon = deps.queryDaemon ?? (() => queryLaunchdService(DAEMON_LABEL, uid));
+  const daemonPlistPathV = launchdPlistPath(DAEMON_LABEL);
+  const daemonPlistPresent = (deps.daemonPlistExists ?? existsSync)(daemonPlistPathV);
+  let daemonSvc = queryDaemon();
+  const daemonWasAlreadyUp = daemonSvc.loaded;
+  if (!daemonSvc.loaded && daemonPlistPresent) {
+    (deps.loadDaemonService ?? ((p: string) => loadLaunchdService(p, uid)))(daemonPlistPathV);
+    for (let i = 0; i < attempts && !daemonSvc.loaded; i++) {
+      await sleep(delayMs);
+      daemonSvc = queryDaemon();
+    }
+  }
+
+  // 4. Confirm/start serve AS A SERVICE — ONLY if nothing is already listening (idempotency).
+  const listeningBefore = await Promise.all(hosts.map((h) => isPortListening(h, port)));
+  const serveWasAlreadyUp = listeningBefore.some(Boolean);
+  const servePlistPathV = launchdPlistPath(SERVE_LABEL);
+  const servePlistPresent = (deps.servePlistExists ?? existsSync)(servePlistPathV);
+  let serveListening = serveWasAlreadyUp;
+  if (!serveListening && servePlistPresent) {
+    (deps.loadServeService ?? ((p: string) => loadLaunchdService(p, uid)))(servePlistPathV);
+    for (let i = 0; i < attempts && !serveListening; i++) {
+      await sleep(delayMs);
+      serveListening = (await Promise.all(hosts.map((h) => isPortListening(h, port)))).some(Boolean);
+    }
+  }
+
+  // 5. Resume report.
+  const live = (deps.liveInflightRuns ?? (() => liveInflightRuns(join(config.root, "state", "inflight"))))();
+  const counts = (deps.planLifecycleCounts ?? (() => defaultPlanLifecycleCounts(config)))();
+
+  out(`### rmd up — resume report`);
+  out(
+    `    daemon:          ${
+      daemonSvc.loaded
+        ? `running${daemonWasAlreadyUp ? " (already up)" : ""} (pid ${daemonSvc.pid ?? "starting"})`
+        : daemonPlistPresent
+          ? "FAILED to come up — check state/logs"
+          : "not running — not installed (run `rmd daemon-plist --repo <name> --write` first)"
+    }`,
+  );
+  out(
+    `    serve (:${port}): ${
+      serveListening
+        ? `listening${serveWasAlreadyUp ? " (already up)" : ""}`
+        : servePlistPresent
+          ? "FAILED to come up — check state/logs/serve.err.log"
+          : "not listening — not installed (run `rmd serve-plist --write` first)"
+    }`,
+  );
+  if (serveListening) {
+    await (deps.consoleUrlCommand ?? consoleUrlCommand)(["--port", String(port), "--host", hosts.join(",")], config, { out, err });
+  }
+  out(`    in-flight/queued: ${live.length > 0 ? live.map((r) => `${r.taskId} (run ${r.runId})`).join(", ") : "none in flight"}`);
+  out(`    needs-human:      ${counts ? counts.needsHuman : "unknown (GitHub unreachable)"}`);
+
+  const ok = (!daemonPlistPresent || daemonSvc.loaded) && (!servePlistPresent || serveListening);
+  return ok ? 0 : 1;
+}
+
 // ── rmd serve — the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B) ──
 //
 // Real business logic lives entirely in the four already-proven modules lib/serve.ts
@@ -11032,6 +11511,16 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd serve-plist [--port <n>] [--host <addr>] [--write]   # generate the launchd unit that runs the operator console as a background SERVICE (W1-T152, the W1-T12b generator family): KeepAlive (unconditional — `rmd serve` exits 0 on a clean SIGTERM and the console must come back from that too) + ThrottleInterval 60 (the R-1 relaunch-storm rate limit) + RunAtLoad, logs to <config.root>/state/logs/serve.{out,err}.log at 0600, and the resolved bind list in RMD_SERVE_HOST (flag > env > config serve.host > 127.0.0.1) with the port baked into ProgramArguments. Carries NO token: service-tokens.json is read at boot as today. References no daemon label or path — it installs and runs with the daemon stopped. Prints by default; --write installs it + pre-creates the 0600 logs; `launchctl bootstrap` stays the operator's step.",
   },
   {
+    name: "down",
+    usage:
+      "rmd down [--port <n>] [--host <addr>]   # graceful wind-down for restart/maintenance (W1-T169): unloads the daemon launchd service (waiting a bounded window for any in-flight task to reach a safe boundary, else REPORTING its run id + recoverability — has-PR = the sweep recovers it, pre-PR = it re-dispatches), stops `rmd serve` BY PORT with a reap-wait (never an argv/pattern kill), and prints a wind-down summary (in-flight state, open-PR count, needs-human count, safe-to-restart). IDEMPOTENT: already-down is a no-op honest report, zero side effects.",
+  },
+  {
+    name: "up",
+    usage:
+      "rmd up [--port <n>] [--host <addr>] [--allow-off-main]   # full resume (W1-T169): runs install-freshness FIRST (W1-T151 — a lockfile-changing pull triggers `npm ci` before anything starts), REFUSES to resume an off-main checkout unless --allow-off-main is given, loads the daemon launchd service, confirms/starts the serve launchd service, and prints a resume report (daemon pid, the console URL WITH its READ token via `rmd console-url`, the in-flight/queued head, needs-human count). IDEMPOTENT: already-up verifies + reports the running state, never a double start.",
+  },
+  {
     name: "sweep",
     usage:
       "rmd sweep [--repo <name>] [--dry-run]   # level-triggered PR-pipeline reconciler (W1-T77, P22): re-derive EVERY open PR's disposition from observed state and take the ONE gated action — mergeable->arm auto-merge; blocked-fixable->W1-T76 fix rung; stale/superseded->close-with-reason; blocked-ambiguous->the W1-T78 clarification-question rung (a specific, decidable operator question to the §2 backlog + escalate() as transport, never a generic needs-human). Idempotent (a second sweep over unchanged state acts on nothing). The daemon runs this every poll; --dry-run previews dispositions and takes nothing.",
@@ -11461,6 +11950,12 @@ export async function main(
   }
   if (cmd === "serve-plist") {
     process.exit(await servePlistCommand(rest));
+  }
+  if (cmd === "down") {
+    process.exit(await downCommand(rest));
+  }
+  if (cmd === "up") {
+    process.exit(await upCommand(rest));
   }
   if (cmd === "sweep") {
     process.exit(await sweepCommand(rest));
