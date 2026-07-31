@@ -277,7 +277,7 @@ import {
   type LintOpts,
 } from "./lib/task-linter.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
-import { loadPolicy, policyPath, PolicyError, type PolicyHeadroomRung } from "./lib/policy.js";
+import { loadPolicy, policyPath, PolicyError, type Policy, type PolicyHeadroomRung } from "./lib/policy.js";
 import { deriveTaskClass } from "./lib/task-class.js";
 import { realRiskJudge, resolveRiskJudgeMount, runRiskJudge, type RiskJudgeInput } from "./lib/risk-judge.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
@@ -5280,10 +5280,16 @@ function retroShippedGithubGateway(): ShippedGithub {
  * real marker/ledger/shipped wiring without a live `gh` round-trip. Production passes
  * neither, so `config` is the live `loadConfig()` and `github` the shared
  * `retroShippedGithubGateway` — the same construction `retroCommand`'s own gather uses.
+ * `deps.policy` is the SAME seam for the cadence thresholds (W1-T264, P37 CONSUMER):
+ * production passes none, so the cadence reads `plan/policy.yaml`'s `retro` row (the
+ * same `loadPolicy(policyPath(repoRoot))` construction `daemonCommand`/`drainCommand`
+ * already use) instead of `evaluateRetroTrigger`'s own source-literal default; a test
+ * injects a fixture `Policy` to prove a threshold edit changes the firing decision
+ * with no source edit.
  */
 export function retroTriggerCheck(
   now: Date = new Date(),
-  deps: { config?: Config; github?: ShippedGithub } = {},
+  deps: { config?: Config; github?: ShippedGithub; policy?: Policy } = {},
 ): RetroTriggerDecision | undefined {
   const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
@@ -5296,7 +5302,11 @@ export function retroTriggerCheck(
   const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
   const runs = gatherRuns(parseLedger(ledgerNdjson));
   const mergesSinceMarker = shippedSince(runs, marker?.ts, github).shipped.length;
-  return evaluateRetroTrigger(mergesSinceMarker, marker?.ts, now);
+  const policy = deps.policy ?? loadPolicy(policyPath(repoRoot));
+  return evaluateRetroTrigger(mergesSinceMarker, marker?.ts, now, {
+    mergesThreshold: policy.values.retro.mergesThreshold,
+    daysThreshold: policy.values.retro.daysThreshold,
+  });
 }
 
 /**

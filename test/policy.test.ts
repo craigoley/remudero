@@ -27,6 +27,7 @@ import { fixStrikeCap } from "../src/lib/config.js";
 import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import { DEFAULT_MAX } from "../src/lib/drain.js";
 import { HEADROOM_LIMIT_PCT } from "../src/lib/headroom.js";
+import { DEFAULT_RETRO_MERGES_THRESHOLD, DEFAULT_RETRO_DAYS_THRESHOLD } from "../src/lib/retro.js";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const SHIPPED = policyPath(REPO_ROOT);
@@ -85,6 +86,10 @@ function goodRaw(): Record<string, unknown> {
     drain: {
       max: { value: 10, origin: "lifted:src/lib/drain.ts:243 (DEFAULT_MAX)", min: 1, max: 100 },
     },
+    retro: {
+      mergesThreshold: { value: 25, origin: "lifted:src/lib/retro.ts:2299 (DEFAULT_RETRO_MERGES_THRESHOLD)", min: 1, max: 100 },
+      daysThreshold: { value: 7, origin: "lifted:src/lib/retro.ts:2304 (DEFAULT_RETRO_DAYS_THRESHOLD)", min: 1, max: 90 },
+    },
     headroom: {
       curve: {
         value: [
@@ -119,6 +124,7 @@ test("the SHIPPED plan/policy.yaml loads and lifts the current source values", (
   assert.equal(p.values.fixStrikeCap, 2);
   assert.deepEqual(p.values.sweep, { staleDays: 14, strikeCap: 2, wipLimit: 10 });
   assert.equal(p.values.drain.max, 10);
+  assert.deepEqual(p.values.retro, { mergesThreshold: 25, daysThreshold: 7 });
   assert.deepEqual(p.values.headroom.curve, [
     { maxHoursToReset: 24, limitPct: 100 },
     { maxHoursToReset: null, limitPct: 95 },
@@ -154,6 +160,16 @@ test("every LIFTED policy value equals the SOURCE constant it cites — the drif
   assert.equal(p.sweep.strikeCap, DEFAULT_SWEEP_POLICY.strikeCap, "sweep.strikeCap drifted from sweep.ts's DEFAULT_SWEEP_POLICY");
   assert.equal(p.sweep.wipLimit, DEFAULT_SWEEP_POLICY.wipLimit, "sweep.wipLimit drifted from sweep.ts's DEFAULT_SWEEP_POLICY");
   assert.equal(p.drain.max, DEFAULT_MAX, "drain.max drifted from drain.ts's DEFAULT_MAX");
+  assert.equal(
+    p.retro.mergesThreshold,
+    DEFAULT_RETRO_MERGES_THRESHOLD,
+    "retro.mergesThreshold drifted from retro.ts's DEFAULT_RETRO_MERGES_THRESHOLD",
+  );
+  assert.equal(
+    p.retro.daysThreshold,
+    DEFAULT_RETRO_DAYS_THRESHOLD,
+    "retro.daysThreshold drifted from retro.ts's DEFAULT_RETRO_DAYS_THRESHOLD",
+  );
   assert.equal(p.headroom.reservePct, HEADROOM_LIMIT_PCT, "headroom.reservePct drifted from headroom.ts's HEADROOM_LIMIT_PCT");
   // The curve is the same shape with `Infinity` written as `null` in YAML (policy.ts's documented
   // mapping), so compare rung-for-rung with that one substitution applied.
@@ -203,6 +219,18 @@ test("REJECTS a nested sweep field out of bounds, naming its dotted path", () =>
   const raw = goodRaw();
   (raw.sweep as Record<string, Record<string, unknown>>).wipLimit.value = 0;
   throwsPolicyError(() => validatePolicy(raw), /sweep\.wipLimit\.value.*out of its declared bound/);
+});
+
+test("W1-T264 acceptance 4 — a retro threshold outside its declared bound fails validation", () => {
+  const raw = goodRaw();
+  (raw.retro as Record<string, Record<string, unknown>>).mergesThreshold.value = 999;
+  throwsPolicyError(() => validatePolicy(raw), /retro\.mergesThreshold\.value.*out of its declared bound/);
+});
+
+test("REJECTS a retro.daysThreshold out of its [1, 90] bound", () => {
+  const raw = goodRaw();
+  (raw.retro as Record<string, Record<string, unknown>>).daysThreshold.value = 0;
+  throwsPolicyError(() => validatePolicy(raw), /retro\.daysThreshold\.value.*out of its declared bound/);
 });
 
 test("REJECTS a headroom.reservePct out of its [50, 100] bound", () => {
