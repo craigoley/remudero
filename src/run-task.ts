@@ -204,6 +204,7 @@ import {
   parseDraftAttemptCache,
   parseDraftCache,
   parseProposalRegistry,
+  parseSupersedesExpr,
   pruneRatifiedProposals,
   proposalsNeedingDraft,
   ratifyTelemetry,
@@ -10198,17 +10199,25 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
 }
 
 /**
- * `rmd reframe <P##> --feedback "<text>"` — the operator's OBJECTION path (MASTER-PLAN P25
- * iii, W1-T111): captures the feedback verbatim, ledgers `ratify.reframed`, and invalidates
- * the proposal's cached draft so the NEXT `rmd inbox` pass redrafts WITH the feedback in the
- * Architect prompt ({@link inboxDraftPrompt}). Valid for ANY proposal already in the
- * registry, whatever its current classification — reframe is feedback, never a
- * ratification, and opens no PR. State-side only (registry + draft cache + ledger); no
- * clone, no worktree, no `gh` call.
+ * `rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]` — the operator's
+ * OBJECTION path (MASTER-PLAN P25 iii, W1-T111): captures the feedback verbatim, ledgers
+ * `ratify.reframed`, and invalidates the proposal's cached draft so the NEXT `rmd inbox`
+ * pass redrafts WITH the feedback in the Architect prompt ({@link inboxDraftPrompt}). Valid
+ * for ANY proposal already in the registry, whatever its current classification — reframe
+ * is feedback, never a ratification, and opens no PR. State-side only (registry + draft
+ * cache + ledger); no clone, no worktree, no `gh` call.
+ *
+ * `--supersedes` (W1-T194) is the EXPLICIT retraction surface the composer's own
+ * "address EVERY round" header otherwise leaves nothing to countermand: a round number, a
+ * comma list, a range, or `ALL` ({@link parseSupersedesExpr}), naming EXISTING rounds this
+ * round supersedes. Retraction never deletes — the retracted rounds stay in
+ * `reframeHistory` and their original ledger lines are untouched — it only stops
+ * {@link inboxDraftPrompt} from carrying their text into the NEXT redraft. An invalid
+ * expression (out of range, unparseable) is a usage error; nothing is written.
  */
 export async function reframeCommand(rest: string[], deps: { config?: Config } = {}): Promise<number> {
   const proposalId = rest[0];
-  const badArg = unknownArgError("reframe", rest.slice(1), ["--feedback"], []);
+  const badArg = unknownArgError("reframe", rest.slice(1), ["--feedback", "--supersedes"], []);
   if (!proposalId || badArg) {
     console.error((badArg ?? `rmd reframe: <P##> is required — usage: ${commandSyntax("reframe")}`) + "\n" + USAGE);
     return 2;
@@ -10231,6 +10240,22 @@ export async function reframeCommand(rest: string[], deps: { config?: Config } =
     return 2;
   }
 
+  const supersedesExpr = flagValue(rest, "--supersedes");
+  let supersedes: number[] | undefined;
+  if (supersedesExpr !== undefined) {
+    const historyLength = (proposal.reframeHistory ?? []).length;
+    const parsed = parseSupersedesExpr(supersedesExpr, historyLength);
+    if (!parsed) {
+      console.error(
+        `rmd reframe: --supersedes '${supersedesExpr}' is not a valid round expression for ${proposalId} ` +
+          `(${historyLength} round${historyLength === 1 ? "" : "s"} on record) — expected round numbers, a ` +
+          `range (e.g. "2-3"), or ALL. Usage: ${commandSyntax("reframe")}\n${USAGE}`,
+      );
+      return 2;
+    }
+    supersedes = parsed;
+  }
+
   const runId = `REFRAME-${proposalId}-${Date.now()}`;
   // W1-T240: apply the reframe against a FRESH read of the registry, under lock — never
   // the `proposal` `loadProposalForRatify` read above, which a concurrent `rmd approve`/
@@ -10241,7 +10266,7 @@ export async function reframeCommand(rest: string[], deps: { config?: Config } =
   updateProposalRegistry(registryPath, (current) => {
     const freshProposal = current.find((p) => p.id === proposalId);
     if (!freshProposal) return null; // vanished concurrently — nothing left to reframe
-    reframed = reframeProposal(freshProposal, feedback, drafts, { ledgerPath, runId });
+    reframed = reframeProposal(freshProposal, feedback, drafts, { ledgerPath, runId }, supersedes);
     return current.map((p) => (p.id === proposalId ? reframed!.proposal : p));
   });
   if (!reframed) {
@@ -10250,7 +10275,12 @@ export async function reframeCommand(rest: string[], deps: { config?: Config } =
   }
   writeFileSync(draftsPath, JSON.stringify(reframed.drafts, null, 2), "utf8");
 
-  console.log(`rmd reframe: ${proposalId} — feedback ledgered, draft invalidated; the next \`rmd inbox\` pass will redraft with it.`);
+  console.log(
+    supersedes && supersedes.length > 0
+      ? `rmd reframe: ${proposalId} — feedback ledgered, round${supersedes.length > 1 ? "s" : ""} ${supersedes.join(", ")} ` +
+          "retracted, draft invalidated; the next `rmd inbox` pass will redraft with it."
+      : `rmd reframe: ${proposalId} — feedback ledgered, draft invalidated; the next \`rmd inbox\` pass will redraft with it.`,
+  );
   return 0;
 }
 
@@ -11654,7 +11684,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "reframe",
     usage:
-      'rmd reframe <P##> --feedback "<text>"   # the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>\'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger)',
+      'rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]   # the feedback path (MASTER-PLAN P25(iii), W1-T111): ledgers ratify.reframed with the feedback verbatim, invalidates <P##>\'s cached draft, and appends to its reframe history so the NEXT `rmd inbox` draft-rung redrafts WITH the feedback in the Architect prompt; opens no PR, touches no git/gh — state-side only (registry + draft cache + ledger). --supersedes <rounds> (W1-T194) EXPLICITLY retracts existing round(s) — a number, comma list, range ("2-3"), or ALL — so their text is OMITTED from the next redraft while staying in reframeHistory and the ledger; never inferred from recency, and rejected with a usage error when the expression is invalid or out of range',
   },
 ] as const;
 

@@ -92,9 +92,18 @@ export interface ProposalTrigger {
 }
 
 /** One round of `rmd reframe` feedback (P25 iii, W1-T111) — captured VERBATIM, never
- *  summarized, so the redraft prompt carries the operator's own words. */
+ *  summarized, so the redraft prompt carries the operator's own words.
+ *
+ *  `retracted` (W1-T194): true when the OPERATOR explicitly superseded this round via
+ *  `rmd reframe --supersedes`. Retraction is a PROMPT-COMPOSITION concern, never a
+ *  deletion — a retracted round stays in `reframeHistory` (and its original
+ *  `ratify.reframed` ledger line is never rewritten); only {@link inboxDraftPrompt}
+ *  stops emitting its text into the next redraft. Absent/false for every round that has
+ *  never been retracted — the common case, and the ONLY way a round is ever marked this
+ *  way is an explicit operator flag on a LATER round (never inferred from recency). */
 export interface ReframeRecord {
   feedback: string;
+  retracted?: boolean;
 }
 
 /** One ACTIVE (not-yet-ratified) proposal the inbox tiers. */
@@ -472,6 +481,31 @@ export function classifyProposal(
  * caches state-side. Mirrors lib/plan-architect.ts's single-prompt-definition discipline.
  */
 export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, runId: string): string {
+  // W1-T194: retraction is STRUCTURAL, not rhetorical — a round the operator marked
+  // `retracted` (via `rmd reframe --supersedes`) is OMITTED from this prompt entirely,
+  // never quoted, summarized, or "for context". Numbering stays POSITIONAL against the
+  // FULL history (never renumbered to the survivors' own count): a later `--supersedes`
+  // reference is always "round N" of the true history, so omitting a round here must
+  // never shift what a subsequent round number means.
+  const history = proposal.reframeHistory ?? [];
+  const numbered = history.map((round, i) => ({ round, n: i + 1 }));
+  const survivors = numbered.filter(({ round }) => !round.retracted);
+  const retractedRounds = numbered.filter(({ round }) => round.retracted).map(({ n }) => n);
+  const feedbackBlock: string[] =
+    survivors.length === 0 && retractedRounds.length === 0
+      ? []
+      : [
+          "=== OPERATOR FEEDBACK (rmd reframe, P25 iii — address EVERY round below in this redraft) ===",
+          ...survivors.map(({ round, n }) => `${n}. ${round.feedback}`),
+          ...(retractedRounds.length > 0
+            ? [
+                `(round${retractedRounds.length > 1 ? "s" : ""} ${retractedRounds.join(", ")} retracted by the ` +
+                  "operator — omitted above; preserved in reframeHistory, never redrafted against)",
+              ]
+            : []),
+          "",
+        ];
+
   return [
     "You are the REMUDERO ARCHITECT drafting a RATIFICATION CANDIDATE for one open plan proposal",
     "(MASTER-PLAN §7/P25). You ride a HIGHER tier than implement workers (G-17). You have NO",
@@ -482,13 +516,7 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     `id: ${proposal.id}`,
     proposal.summary,
     "",
-    ...(proposal.reframeHistory && proposal.reframeHistory.length > 0
-      ? [
-          "=== OPERATOR FEEDBACK (rmd reframe, P25 iii — address EVERY round below in this redraft) ===",
-          ...proposal.reframeHistory.map((r, i) => `${i + 1}. ${r.feedback}`),
-          "",
-        ]
-      : []),
+    ...feedbackBlock,
     "=== GROUND ===",
     "Grep/Read MASTER-PLAN.md, LEARNINGS.md, and DECISIONS.md for what is already decided; the",
     "current plan/tasks.yaml is pasted below so you cite REAL existing task ids in depends_on.",
@@ -1231,25 +1259,82 @@ export interface ReframeResult {
 }
 
 /**
- * `rmd reframe <P##> --feedback "<text>"` — the operator's objection is captured VERBATIM
- * (never summarized) and ledgered as `ratify.reframed`; the cached draft is invalidated so
- * the next `rmd inbox` pass re-drafts rather than re-surfacing the candidate the operator
- * just objected to; the feedback joins the proposal's `reframeHistory` so
- * {@link inboxDraftPrompt}'s NEXT invocation carries it into the redraft — "the reframe
- * history rides the proposal until resolution" (design). Opens NO PR: reframe is feedback,
- * not a ratification, and is valid for ANY classification state (a READY item the operator
- * still wants to object to is exactly the "one bit OR feedback" choice P25 promises).
+ * Parse an `rmd reframe --supersedes <expr>` round expression (W1-T194 design (i)) against
+ * the proposal's CURRENT `reframeHistory.length` — the same 1-indexed positional numbering
+ * {@link inboxDraftPrompt} renders. Accepts a comma-separated list of round numbers and/or
+ * inclusive ranges (`"2"`, `"1,3"`, `"2-3"`), or the literal `"ALL"` (case-insensitive)
+ * meaning every round on record. Returns a sorted, deduplicated array of round numbers, or
+ * `null` for anything that is not a definite, in-range expression — retraction must be
+ * EXPLICIT (design: "never inferred from recency"), so an ambiguous, malformed, or
+ * out-of-range expression is REFUSED rather than guessed at. `historyLength <= 0` always
+ * yields `null`: there is no round yet to retract.
  */
-export function reframeProposal(proposal: Proposal, feedback: string, drafts: DraftCache, deps: RatifyLedgerDeps): ReframeResult {
+export function parseSupersedesExpr(expr: string, historyLength: number): number[] | null {
+  if (historyLength <= 0) return null;
+  const trimmed = expr.trim();
+  if (trimmed.length === 0) return null;
+  if (trimmed.toUpperCase() === "ALL") {
+    return Array.from({ length: historyLength }, (_, i) => i + 1);
+  }
+  const rounds = new Set<number>();
+  for (const part of trimmed.split(",")) {
+    const token = part.trim();
+    const rangeMatch = /^(\d+)-(\d+)$/.exec(token);
+    if (rangeMatch) {
+      const start = Number(rangeMatch[1]);
+      const end = Number(rangeMatch[2]);
+      if (start < 1 || end < start || end > historyLength) return null;
+      for (let n = start; n <= end; n++) rounds.add(n);
+      continue;
+    }
+    if (!/^\d+$/.test(token)) return null;
+    const n = Number(token);
+    if (n < 1 || n > historyLength) return null;
+    rounds.add(n);
+  }
+  if (rounds.size === 0) return null;
+  return [...rounds].sort((a, b) => a - b);
+}
+
+/**
+ * `rmd reframe <P##> --feedback "<text>" [--supersedes <rounds>]` — the operator's objection
+ * is captured VERBATIM (never summarized) and ledgered as `ratify.reframed`; the cached
+ * draft is invalidated so the next `rmd inbox` pass re-drafts rather than re-surfacing the
+ * candidate the operator just objected to; the feedback joins the proposal's
+ * `reframeHistory` so {@link inboxDraftPrompt}'s NEXT invocation carries it into the
+ * redraft — "the reframe history rides the proposal until resolution" (design). Opens NO
+ * PR: reframe is feedback, not a ratification, and is valid for ANY classification state (a
+ * READY item the operator still wants to object to is exactly the "one bit OR feedback"
+ * choice P25 promises).
+ *
+ * `supersedes` (W1-T194, {@link parseSupersedesExpr}'s output — pre-validated 1-indexed
+ * round numbers) marks those EXISTING rounds `retracted: true` in place: their text is
+ * PRESERVED verbatim in `reframeHistory` (and the ORIGINAL `ratify.reframed` ledger line
+ * for each is never touched — retraction is a NEW ledger line, this call's own) but
+ * {@link inboxDraftPrompt} stops emitting them into the next redraft. Omitted/empty leaves
+ * every prior round exactly as it was — retraction only ever happens on an explicit ask.
+ */
+export function reframeProposal(
+  proposal: Proposal,
+  feedback: string,
+  drafts: DraftCache,
+  deps: RatifyLedgerDeps,
+  supersedes?: number[],
+): ReframeResult {
+  const priorHistory = proposal.reframeHistory ?? [];
+  const retractSet = new Set(supersedes ?? []);
+  const updatedHistory: ReframeRecord[] =
+    retractSet.size === 0 ? priorHistory : priorHistory.map((r, i) => (retractSet.has(i + 1) ? { ...r, retracted: true } : r));
   const reframedProposal: Proposal = {
     ...proposal,
-    reframeHistory: [...(proposal.reframeHistory ?? []), { feedback }],
+    reframeHistory: [...updatedHistory, { feedback }],
   };
   appendLedger(deps.ledgerPath, {
     run_id: deps.runId,
     task_id: proposal.id,
     step: "ratify.reframed",
     feedback,
+    ...(supersedes && supersedes.length > 0 ? { supersedes } : {}),
   });
   return { proposal: reframedProposal, drafts: invalidateDraft(drafts, proposal.id) };
 }
