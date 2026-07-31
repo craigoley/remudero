@@ -2170,13 +2170,36 @@ export async function runSweep(
                 const newHead = await deps.repushAbsent(pr);
                 // LEDGERED, because #968's lesson was that a fire-and-forget action nobody
                 // records becomes invisible state: the PR, both shas, and the reason.
+                // appendLine, NOT log(): `log` is an optional narration sink (a no-op when
+                // unwired), but `priorActionsFromLedger` READS this step back to enforce the
+                // bound — so it has to land in deps.ledgerPath, the same file and the same
+                // mechanism `sweep.disposed` uses. Skipped under --dry-run for the same reason
+                // that line is: a preview must leave no trace that changes a later real pass.
+                if (!deps.dryRun) {
+                  appendLine(deps.ledgerPath, {
+                    run_id: deps.runId,
+                    task_id: pr.taskId ?? "SWEEP",
+                    step: "sweep.absent_repush",
+                    pr_number: pr.prNumber,
+                    pr_url: pr.prUrl,
+                    old_head: oldHead,
+                    new_head: newHead ?? null,
+                    reason: absentDecision.reason,
+                  });
+                }
                 log("sweep.absent_repush", {
                   pr_number: pr.prNumber,
-                  pr_url: pr.prUrl,
                   old_head: oldHead,
                   new_head: newHead ?? null,
-                  reason: absentDecision.reason,
                 });
+                // `acted` stays FALSE, and this is load-bearing rather than cosmetic. `acted:true`
+                // on a blocked-ambiguous line is what feeds `prior.escalated`, so claiming it here
+                // would tell every later pass "this PR was already escalated" — and the PR would
+                // then never escalate at all, which is the very silent-forever failure this remedy
+                // exists to end. The re-push is a DIFFERENT action with its own ledger line (the
+                // one the bound reads); the disposition's own action did not fire, so it says so.
+                acted = false;
+                standDownReason = `ABSENT re-push fired instead of escalating this pass — ${absentDecision.reason}`;
               } else if (unattributableFiling) {
                 acted = false;
                 standDownReason =
