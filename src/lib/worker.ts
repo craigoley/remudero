@@ -1,5 +1,15 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 // Imported ADDITIONALLY as the module's DEFAULT export (a plain, mutable object), used
 // ONLY by the run.lock read/write path below (writeRunLock/readRunLock/removeRunLock).
 // ESM named-export bindings off `node:fs` are non-configurable (mock.method/
@@ -14,6 +24,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSy
 import fs from "node:fs";
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { loadConfig, workerHomeDir, workerShell, workerZdotdir, type Config } from "./config.js";
 import { detectCompactionEvents, isQualitySuspect, type CompactionEvent } from "./compaction.js";
@@ -1213,6 +1224,131 @@ export function worktreesDir(config: Config): string {
   return join(config.root, "worktrees");
 }
 
+/** This rmd install's own root — the SAME derivation `src/lib/policy.ts:344` uses from a
+ *  `src/lib/` module. Its `node_modules` is guaranteed populated whenever rmd is running
+ *  at all, because `bin/rmd` execs `$DIR/node_modules/.bin/tsx`: a missing or empty one
+ *  means this process could not have started. */
+function installRootDir(): string {
+  return join(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
+}
+
+/**
+ * Which `node_modules` a fresh worktree should resolve its dev CLIs from.
+ *
+ * Prefers the PARENT CLONE's own install, which is the right answer whenever that clone
+ * has been installed. Falls back to this rmd install's, which on the fleet host is the
+ * only one that exists: worktrees are cut from `<config.root>/repos/<repo>`, and that
+ * clone carries NO `node_modules` at all (measured). Sourcing only from `repoDir` would
+ * therefore ship a fix that is inert on the very host it is meant to repair.
+ */
+export function resolveNodeModulesSource(
+  repoDir: string,
+  installRoot: string = installRootDir(),
+  exists: (p: string) => boolean = existsSync,
+): string | undefined {
+  return [join(repoDir, "node_modules"), join(installRoot, "node_modules")].find((c) => exists(c));
+}
+
+export type NodeModulesLinkOutcome = "linked" | "already-present" | "no-source" | "failed";
+
+/**
+ * Give a fresh worktree a `node_modules`, by SYMLINK — never by installing.
+ *
+ * WHY THIS EXISTS. W1-T137 (#842) shipped `hooks/commit-msg`, wired into every worktree by
+ * the `core.hooksPath` line below. That hook resolves `$(git rev-parse --show-toplevel)/
+ * node_modules/.bin/commitlint` and, finding none, exits 1 with "commitlint is not installed
+ * in this worktree" — by design, it refuses to skip the gate silently. But `worktreeAdd` never
+ * supplied a `node_modules`, so EVERY commit from EVERY worktree verb (runTask, retro, triage,
+ * plan, draftProposalBatch, approve — all six share this function) has been rejected since
+ * 2026-07-29. W1-T137's own suite passes only because it symlinks one in itself
+ * (`symlinkNodeModules`, test/commit-msg-hook.test.ts:78).
+ *
+ * A symlink is the remedy this repo already prescribes for exactly this (CLAUDE.md, 2026-07-29:
+ * "Wire a worktree up with `ln -s <canonical>/node_modules <worktree>/node_modules`"), and it is
+ * emphatically NOT `npm ci`: an install here is what emptied the shared `node_modules` under the
+ * live daemon on 2026-07-29. The hook's own advice ("run `npm ci` first") must not be taken.
+ *
+ * Best-effort by contract: every outcome is a RETURN VALUE, never a throw. Creating a worktree
+ * must not fail because its dev CLIs could not be wired up.
+ */
+export function linkWorktreeNodeModules(
+  repoDir: string,
+  worktreePath: string,
+  deps: {
+    resolveSource?: (repoDir: string) => string | undefined;
+    /** Throws when the path is absent — `lstat`, not `stat`, so a BROKEN symlink still counts
+     *  as taken. Linking over either one would write INSIDE the existing target. */
+    lstat?: (p: string) => unknown;
+    symlink?: (target: string, path: string) => void;
+  } = {},
+): NodeModulesLinkOutcome {
+  const dest = join(worktreePath, "node_modules");
+  try {
+    (deps.lstat ?? lstatSync)(dest);
+    return "already-present";
+  } catch {
+    /* destination is free — fall through and link */
+  }
+  const source = (deps.resolveSource ?? resolveNodeModulesSource)(repoDir);
+  if (!source) return "no-source";
+  try {
+    (deps.symlink ?? ((t: string, p: string) => symlinkSync(t, p, "dir")))(source, dest);
+    return "linked";
+  } catch {
+    return "failed";
+  }
+}
+
+/**
+ * Make git ignore the `node_modules` link above, independent of whether the checked-out
+ * `.gitignore` happens to cover it.
+ *
+ * WITHOUT THIS the link is an untracked file, and W1-T142's out-of-scope push guard refuses
+ * the whole branch with "NOT pushing: node_modules" — turning a commit fix into a push
+ * regression. remudero's own `.gitignore` does list it, but relying on the checked-out repo
+ * to do so is exactly the assumption that failed here; `worktreeAdd` serves any repo.
+ *
+ * MEASURED (this host, git 2.x): a linked worktree honours the COMMON dir's `info/exclude`
+ * and IGNORES its own per-worktree admin one, so that is where this writes — the same
+ * shared-scope write the `core.hooksPath` line already makes. Idempotent and best-effort.
+ */
+export function excludeNodeModulesFromGit(
+  worktreePath: string,
+  deps: {
+    commonDir?: (worktreePath: string) => string;
+    read?: (p: string) => string;
+    write?: (p: string, body: string) => void;
+    mkdir?: (p: string) => void;
+  } = {},
+): "added" | "already-excluded" | "failed" {
+  try {
+    const commonDir =
+      deps.commonDir ??
+      ((wt: string) =>
+        execFileSync("git", ["-C", wt, "rev-parse", "--path-format=absolute", "--git-common-dir"], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        }).trim());
+    const infoDir = join(commonDir(worktreePath), "info");
+    const excludeFile = join(infoDir, "exclude");
+    let body = "";
+    try {
+      body = (deps.read ?? ((p: string) => readFileSync(p, "utf8")))(excludeFile);
+    } catch {
+      /* no exclude file yet — created below */
+    }
+    if (body.split("\n").some((line) => line.trim() === "node_modules")) return "already-excluded";
+    (deps.mkdir ?? ((p: string) => mkdirSync(p, { recursive: true })))(infoDir);
+    (deps.write ?? ((p: string, b: string) => writeFileSync(p, b)))(
+      excludeFile,
+      `${body}${body === "" || body.endsWith("\n") ? "" : "\n"}node_modules\n`,
+    );
+    return "added";
+  } catch {
+    return "failed";
+  }
+}
+
 /** `git worktree add` a fresh branch off origin/<base> for a repo checkout. */
 export function worktreeAdd(
   repoDir: string,
@@ -1240,6 +1376,11 @@ export function worktreeAdd(
   execFileSync("git", ["-C", worktreePath, "config", "core.hooksPath", "hooks"], {
     stdio: "inherit",
   });
+  // …and give that hook the `commitlint` it resolves, or it rejects every commit made here.
+  // Must run AFTER the hooksPath line and AFTER the worktree exists. See the doc comments.
+  // Excluding FIRST keeps the link from ever being visible to git as an untracked file.
+  excludeNodeModulesFromGit(worktreePath);
+  linkWorktreeNodeModules(repoDir, worktreePath);
 }
 
 export function worktreeRemove(repoDir: string, worktreePath: string): void {
