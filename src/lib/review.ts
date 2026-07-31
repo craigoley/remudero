@@ -288,6 +288,28 @@ export interface ReviewVerdict {
    */
   criteriaTampered?: boolean;
   /**
+   * W1-T274: claims the body ({@link ReviewEvidence.report}) makes about its
+   * OWN changeset that are FALSE against the diff it actually shipped — see
+   * {@link bodyContradictsDiff} for the exact recognised shapes (a stated
+   * file count, a "no src/"/"plan-only"/"data-only" absence claim, a named
+   * file in an "exactly N files: …" enumeration) and why anything outside
+   * them is silence, never a verdict. `[]` when the body makes no such claim,
+   * OR makes one this check cannot decide (criterion: "a body making no
+   * changeset claim is neither passed nor failed by this check"). Non-empty
+   * FORCES `state`/`floorState` to `"failure"` exactly like `testTheater`/
+   * `criteriaTampered`: a body that contradicts its own diff is a false
+   * statement the gate is being asked to merge on, not a legibility problem —
+   * it fails the review, with the contradiction NAMED (see {@link
+   * failSummary}), because an unexplained red is the shape that gets
+   * overridden. Structural (diff+report-derived), never a semantic reviewer
+   * opinion, so — like `criteriaTampered` — never suppressible by {@link
+   * applyVerdictStability}. Optional so every OTHER `ReviewVerdict` literal in
+   * the codebase (run-task.ts's ledger-reconstructed seed verdicts, every
+   * fixture that predates this task) needs no update; only {@link
+   * judgeReview} populates it.
+   */
+  changesetContradictions?: ChangesetClaimContradiction[];
+  /**
    * W1-T166 (the reward-hacking measurement): visible-pass-rate minus
    * holdout-pass-rate, over this verdict's own criteria — `(visible criteria
    * met / visible criteria count) − (holdout criteria met / holdout criteria
@@ -1470,6 +1492,127 @@ export function judgeCriterion(
 }
 
 /**
+ * A body's own claim about its changeset that {@link bodyContradictsDiff}
+ * proved false against the diff it actually shipped.
+ */
+export interface ChangesetClaimContradiction {
+  /** The exact phrase from the report/body asserting the (false) claim. */
+  claim: string;
+  /** The diff's actual changed files that refute the claim. */
+  files: string[];
+}
+
+const WORD_NUMBERS: Record<string, number> = {
+  zero: 0,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+};
+
+/** Parse "one" / "3" / "ten" into a number; undefined for anything else. */
+function parseClaimedCount(word: string): number | undefined {
+  const lower = word.toLowerCase();
+  if (lower in WORD_NUMBERS) return WORD_NUMBERS[lower];
+  return /^\d+$/.test(word) ? Number(word) : undefined;
+}
+
+/**
+ * A path-SHAPED token: contains a `/` (directory) or a `.` (file extension) —
+ * never a bare English word. This is the guard that keeps `bodyContradictsDiff`
+ * silent on "no bugs"/"no issues"/"no regressions" (nothing to check a diff
+ * against) while still catching "no src/"/"no docs/ORIENTATION.md".
+ */
+function looksLikePath(token: string): boolean {
+  return /[./]/.test(token);
+}
+
+/** Does `file` fall under the claimed-absent `path` (an exact file, or a directory prefix)? */
+function fileUnderClaimedPath(file: string, path: string): boolean {
+  const normalized = path.replace(/\/$/, "");
+  return file === normalized || file.startsWith(`${normalized}/`);
+}
+
+/**
+ * THE NARROW, FALSIFIABLE CHECK (W1-T274). Two PRs merged THIS WEEK on bodies
+ * that contradicted their own diffs — #974 claimed "exactly one file:
+ * MASTER-PLAN.md. No src/, no test/, no docs/ORIENTATION.md" over a 3-file
+ * diff that DID touch docs/ORIENTATION.md (load-bearing: that file sits
+ * outside {@link isInPlanScope} and cost the PR its planOnly carve-out);
+ * #1025 claimed "data-only: no code" while reverting 6 src/ + 2 test/ files.
+ * Both landed because `judgeReview` already held the parsed changeset
+ * (`diffFiles`) and the body (`evidence.report`) in the same function and
+ * compared neither against the other. This closes exactly that gap:
+ *
+ *   (a) a stated FILE COUNT ("exactly N files") that disagrees with
+ *       `diffFiles.length`;
+ *   (b) a claim that a path/directory is absent ("no src/", "no test/", a
+ *       named file, "plan-only", "data-only") when `diffFiles` contains a
+ *       member of it;
+ *   (c) a file NAMED in an "exactly N files: a, b" enumeration that
+ *       `diffFiles` does not actually contain.
+ *
+ * DELIBERATELY NOT general claim-verification: whether the diff is CORRECT,
+ * or whether a claim about BEHAVIOUR (as opposed to the changeset itself)
+ * holds, is out of scope. ANYTHING THIS CANNOT DECIDE IS SILENCE, NOT A
+ * VERDICT — prose these patterns do not recognise returns `[]`, the exact
+ * same shape as a body making no changeset claim at all. A checker that
+ * guesses at natural language would be a worse tripwire than the gap it
+ * closes.
+ */
+export function bodyContradictsDiff(report: string, diffFiles: string[]): ChangesetClaimContradiction[] {
+  const out: ChangesetClaimContradiction[] = [];
+
+  // (a) / (c): "exactly N files[: a, b, c]" — the count itself, and (when a
+  // count is right but a named file is missing) the enumerated list.
+  const countRe = /\bexactly\s+(\w+)\s+files?\b(?:\s*:\s*([^\s,]+(?:\s*,\s*[^\s,]+)*))?/gi;
+  for (const m of report.matchAll(countRe)) {
+    const claimed = parseClaimedCount(m[1]);
+    if (claimed === undefined) continue;
+    let contradicted = claimed !== diffFiles.length;
+    if (!contradicted && m[2]) {
+      const named = m[2]
+        .split(",")
+        .map((s) => s.trim().replace(/[.\s]+$/, ""))
+        .filter(looksLikePath);
+      contradicted = named.some((f) => !diffFiles.includes(f));
+    }
+    if (contradicted) out.push({ claim: m[0].trim(), files: [...diffFiles] });
+  }
+
+  // (b): "no <path>" claims, plus the "plan-only"/"data-only" house shorthands.
+  const noPathRe = /\bno\s+([A-Za-z0-9_./-]+)/gi;
+  for (const m of report.matchAll(noPathRe)) {
+    const token = m[1].replace(/[,.\s]+$/, "");
+    let violators: string[];
+    if (token.toLowerCase() === "code") {
+      violators = diffFiles.filter((f) => f.startsWith("src/") || isTestPath(f));
+    } else if (looksLikePath(token)) {
+      violators = diffFiles.filter((f) => fileUnderClaimedPath(f, token));
+    } else {
+      continue; // "no bugs", "no issues" — not a changeset claim; stay silent
+    }
+    if (violators.length > 0) out.push({ claim: m[0].trim(), files: violators });
+  }
+  if (/\bplan-only\b/i.test(report)) {
+    const violators = diffFiles.filter((f) => !isInPlanScope(f));
+    if (violators.length > 0) out.push({ claim: "plan-only", files: violators });
+  }
+  if (/\bdata-only\b/i.test(report)) {
+    const violators = diffFiles.filter((f) => f.startsWith("src/") || isTestPath(f));
+    if (violators.length > 0) out.push({ claim: "data-only", files: violators });
+  }
+
+  return out;
+}
+
+/**
  * The pure verdict function (acceptance #2). Given the acceptance criteria and
  * the evidence (diff + report [+ optional semantic verdicts]), roll up a single
  * `remudero-review` state. FAIL-CLOSED: empty criteria, any unmet criterion, or
@@ -1501,10 +1644,17 @@ export function judgeReview(
   // plan-only correction is never this function's business to fail.
   const criteriaTampered = !planOnly && criterionFieldTampered(evidence.diff);
 
+  // W1-T274: see {@link ReviewVerdict.changesetContradictions}'s doc. A pure
+  // comparison of two values already computed above (`evidence.report`,
+  // `diffFiles`) — no new fetch, no new gateway.
+  const changesetContradictions = bodyContradictsDiff(evidence.report, diffFiles);
+
   const unmet = verdicts.filter((v) => !v.met);
   const noCriteria = criteria.length === 0;
   const state: ReviewState =
-    noCriteria || unmet.length > 0 || testTheater || criteriaTampered ? "failure" : "success";
+    noCriteria || unmet.length > 0 || testTheater || criteriaTampered || changesetContradictions.length > 0
+      ? "failure"
+      : "success";
 
   // W1-T166: the reward-hacking measurement, over ALL criteria — visible AND
   // holdout fold into `state` identically above; this is a SEPARATE per-run
@@ -1518,14 +1668,18 @@ export function judgeReview(
 
   // W1-T178 (verdict stability): the SAME rollup, but ignoring semantic entirely
   // — every criterion judged on its `floorMet` (mechanical/executed, pre-
-  // downgrade). `testTheater`/`noCriteria`/`criteriaTampered` are structural
-  // (diff-derived), never semantic, so they bind the floor exactly as they bind
-  // `state` — a criteriaTampered failure can never be suppressed by verdict
-  // stability (W1-T178), which only ever forgives a SEMANTIC downgrade. This is
-  // the anchor a re-review of an unchanged head checks before trusting a downgrade.
+  // downgrade). `testTheater`/`noCriteria`/`criteriaTampered`/
+  // `changesetContradictions` are all structural (diff-derived), never
+  // semantic, so they bind the floor exactly as they bind `state` — a
+  // criteriaTampered or changeset-contradiction failure can never be
+  // suppressed by verdict stability (W1-T178), which only ever forgives a
+  // SEMANTIC downgrade. This is the anchor a re-review of an unchanged head
+  // checks before trusting a downgrade.
   const floorUnmet = verdicts.filter((v) => !(v.floorMet ?? v.met));
   const floorState: ReviewState =
-    noCriteria || floorUnmet.length > 0 || testTheater || criteriaTampered ? "failure" : "success";
+    noCriteria || floorUnmet.length > 0 || testTheater || criteriaTampered || changesetContradictions.length > 0
+      ? "failure"
+      : "success";
 
   // W1-T72 (W1-T65 follow-up, legibility): nothing was OBSERVED on the PR head
   // anywhere in this review, yet at least one proof was WRITTEN to be runnable
@@ -1596,6 +1750,7 @@ export function judgeReview(
           noCriteria,
           criteriaTampered,
           unmet.length - visibleCriteria(unmet).length,
+          changesetContradictions,
         );
 
   return {
@@ -1609,6 +1764,7 @@ export function judgeReview(
     keywordOnly,
     planOnly,
     criteriaTampered,
+    changesetContradictions,
     rewardHackingGap,
   };
 }
@@ -2309,6 +2465,15 @@ const FAIL_PREFIX = "remudero-review: FAIL — ";
  * "visible-pass, holdout-fail" verdict (criterion 2) still reads as an honest,
  * actionable FAIL rather than a misleading "test theater"/empty-unmet fallback,
  * without ever naming which holdout criterion or what its claim/proof said.
+ *
+ * `changesetContradictions` (W1-T274) takes priority right after
+ * `criteriaTampered` — both are diff/report-derived structural facts, not
+ * semantic reviewer opinion, so both preempt the ordinary unmet-criteria text.
+ * The message NAMES which claim was contradicted and which actual changed
+ * files refute it (acceptance: "the failure names the contradicted claim and
+ * the files that refute it") — an unexplained red is the shape that gets
+ * overridden, so a bare "changeset contradiction" with no specifics would
+ * defeat the point.
  */
 export function failSummary(
   unmetClaims: string[],
@@ -2316,10 +2481,20 @@ export function failSummary(
   noCriteria: boolean,
   criteriaTampered = false,
   hiddenUnmetCount = 0,
+  changesetContradictions: ChangesetClaimContradiction[] = [],
 ): string {
   if (noCriteria) return `${FAIL_PREFIX}no acceptance criteria to judge (fail closed)`;
   if (criteriaTampered) {
     return `${FAIL_PREFIX}diff edits plan/tasks.yaml's own acceptance criteria — Standing rule 15 (a worker may never)`;
+  }
+  if (changesetContradictions.length > 0) {
+    const first = changesetContradictions[0];
+    const more = changesetContradictions.length > 1 ? ` (+${changesetContradictions.length - 1} more)` : "";
+    const filesBudget = 3;
+    const filesText =
+      first.files.slice(0, filesBudget).join(", ") +
+      (first.files.length > filesBudget ? `, +${first.files.length - filesBudget} more` : "");
+    return `${FAIL_PREFIX}body contradicts its own diff: claimed "${first.claim}", actual changed files: ${filesText}${more}`;
   }
   if (unmetClaims.length === 0 && hiddenUnmetCount > 0) {
     return (
