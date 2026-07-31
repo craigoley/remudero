@@ -140,6 +140,16 @@ test("W1-T240 claim 2: two 'concurrent' updateProposalRegistry calls -- B's read
       registryPath,
       (current) => [...current, proposal("B")],
       {
+        // THIS TEST IS ABOUT ORDERING, NOT ABOUT THE TIMEOUT. `maxWaitMs` is a REAL wall-clock
+        // budget (inbox.ts: `deadline = Date.now() + maxWaitMs`), and the injected `sleep` below
+        // does a FULL nested updateProposalRegistry -- mkdir/open/write/close/read/write/unlink.
+        // Inheriting the 2000ms default therefore made a pure-ordering assertion depend on how
+        // fast the disk is: observed failing in CI 2026-07-31 on BOTH attempts of the W1-T255
+        // retry ("timed out after 2000ms waiting for ...lock (held by pid 111)", duration 2001ms)
+        // while passing locally in 1.3s. Bound it generously so only a genuine deadlock fails it.
+        // The timeout path itself stays covered, deliberately and separately, by the two sibling
+        // tests below that pass maxWaitMs: 60 and maxWaitMs: 10.
+        maxWaitMs: 60_000,
         isPidAlive: () => !aDone,
         sleep: () => {
           if (aDone) return;
