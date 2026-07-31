@@ -1783,11 +1783,15 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   // DECORATES a row (the PR's title); an unreachable GitHub degrades that decoration, it never
   // removes the row (see lib/board.ts's computeRecentActivity for the full design rationale). ──
 
-  const RECENT_VERB_LABEL = { merged: "merged", verdict: "verdict", fix: "fix", escalated: "escalated", spend: "spend" };
+  // "Run refused"/"Run started" (W1-T266) are spelled out rather than abbreviated like the rest:
+  // they answer a button the OPERATOR pressed, so the row has to read as a reply to him, not as
+  // one more machine event. Every other verb describes something the fleet did on its own.
+  const RECENT_VERB_LABEL = { merged: "merged", verdict: "verdict", fix: "fix", escalated: "escalated", spend: "spend", "run-refused": "Run refused", "run-started": "Run started" };
   // Reuses the board's existing status-dot palette (statusBadge/STATUS_LABELS above) rather than
   // inventing new colors for this feed's own vocabulary — merged/verdict map onto their obvious
   // counterparts; fix/spend read as "in progress" (running); escalated reads as needs-human.
-  const RECENT_BADGE_KEY = { merged: "merged", verdict: "blocked", fix: "running", escalated: "needs-human", spend: "running" };
+  // A refused Run reuses "blocked" — it is the one row here that means "your click did nothing".
+  const RECENT_BADGE_KEY = { merged: "merged", verdict: "blocked", fix: "running", escalated: "needs-human", spend: "running", "run-refused": "blocked", "run-started": "running" };
 
   /** "5m ago"/"2h ago"/"3d ago" -- RECENT's relative-timestamp column (a distinct concept from
    *  \`formatElapsed\`'s live countUP for an in-flight NOW row's own \`elapsedMs\`). */
@@ -2342,8 +2346,13 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   // Both reuse fleet control's OWN arm-then-confirm discipline (stop-btn, below): a single
   // click ARMS + reads back what it will do; a second click within 8s acts. Run is delegated
   // off #up-next-list (rows are reconciled), keyed by taskId so two armed rows never collide.
-  // The API only DROPS a marker; the daemon dispatches (assertRunnable-gated) and any refusal
-  // surfaces as a console.kick_refused line in the RECENT ledger feed, never silently.
+  // The API only DROPS a marker; the daemon dispatches (assertRunnable-gated) and its ANSWER —
+  // "Run started", or "Run refused" carrying the refusal's own reason — lands in the RECENT feed
+  // (board.ts's OPERATOR_ACTION_STEPS).
+  // THIS COMMENT USED TO BE FALSE, and the falsehood cost a live incident: it asserted the refusal
+  // surfaced "never silently" while computeRecentActivity's pseudo-id guard dropped every
+  // DAEMON-stamped line before it could reach the UI. On 2026-07-31 a Run on an already-merged
+  // W1-T152 was refused at 11:18:10.571Z and the operator saw nothing. W1-T266 made it true.
   const kickConfirmTimers = new Map();
   function resetRunButton(btn) {
     btn.dataset.confirming = "false";
