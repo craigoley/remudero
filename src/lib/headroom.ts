@@ -81,7 +81,7 @@ export class UsageParseError extends Error {
  *
  * THE RESET CLAUSE IS OPTIONAL, AND THAT IS THE WHOLE POINT. It used to be mandatory, and on
  * 2026-07-31 that cost the fleet its entire headroom read for hours. The account in use began
- * emitting a THIRD weekly line with no reset clause at all:
+ * emitting a SECOND weekly line — the third usage window — with no reset clause at all:
  *
  *   Current week (all models): 2% used · resets Aug 2 at 1am (America/New_York)
  *   Current week (Fable): 0% used                    <-- no `· resets …`
