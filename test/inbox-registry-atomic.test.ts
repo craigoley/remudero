@@ -159,6 +159,12 @@ test("W1-T240 claim 2: two 'concurrent' updateProposalRegistry calls -- B's read
       },
     );
 
+    // Guards that the CONTENDED path was actually exercised: B had to wait behind the pre-planted
+    // lock and A had to run inside that wait. If B ever acquires on its first try the `sleep` hook
+    // never fires, A never runs, and the ordering assertion below would fail on a missing "A"
+    // without saying why -- this names it, and keeps the test honest about what it is testing.
+    assert.ok(aDone, "A must have run INSIDE B's wait -- otherwise this no longer tests contention");
+
     assert.deepEqual(
       (bResult ?? []).map((p) => p.id),
       ["seed", "A", "B"],

@@ -1101,6 +1101,11 @@ test("ratifyCliGateway: a REAL detached spawn of <repoRoot>/bin/rmd with the exa
     await new Promise((r) => setTimeout(r, 50));
   }
   assert.ok(existsSync(markerPath), "the real bin/rmd script must actually have been spawned");
+  // Distinguishes "the wait observed the complete marker" from "the wait gave up at the deadline".
+  // The loop exits on EITHER, so without this a regression of the poll back to an existence check
+  // surfaces as a confusing `cwd=` regex mismatch further down (which is exactly how it presented
+  // in CI) rather than as a named failure of the wait itself.
+  assert.ok(markerComplete(), "the poll must observe BOTH marker lines, not merely the file's existence");
   const marker = readFileSync(markerPath, "utf8");
   assert.match(marker, /^reframe P900 --feedback please cite a real anchor/);
   // macOS's tmpdir() sits under a /var symlink to /private/var -- bash's own `pwd` builtin
