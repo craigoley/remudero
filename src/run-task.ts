@@ -906,6 +906,57 @@ export function disarmAutoMerge(prUrl: string, deps: Pick<ArmDeps, "disableAuto"
 }
 
 /**
+ * impl-BF — WITHDRAW an auto-merge arm when the verdict just computed refuses to arm.
+ *
+ * THE GAP THIS CLOSES. A worker PR is armed AT OPEN ({@link armAutoMergeAtOpen}, ~16s after
+ * the PR exists) before any verdict is computed. PR #831 taught the SWEEP to refuse to ARM a
+ * proof-failure cap, but nothing withdrew an arm ALREADY on GitHub: {@link disarmAutoMerge}
+ * had exactly two call sites, both inside `runTask`, so a cap posted from `reviewCommand`
+ * (the operator's `rmd review` AND the sweep's post-review lane — both reach `runReview` via
+ * `runReviewDep`) left the arm standing and GitHub merged on the `success` status a capped
+ * verdict still posts. Live: PR #969 posted "CAPPED — 0/4 proofs executed; not certified" at
+ * 23:34:42Z and merged at 23:34:44Z.
+ *
+ * THE DECISION IS NOT RE-DERIVED. It delegates to {@link decideAutoMergeArm} — the SAME
+ * predicate the arming path uses — so the W1-T205 carve-out (a plan-only PR is structurally
+ * and permanently capped, and MUST stay armed) is preserved by construction rather than by a
+ * second copy of the rule. Two copies of exactly this rule are how the sweep and the run flow
+ * diverged in the first place.
+ *
+ * SAFE WHEN NOT ARMED. `disarmAutoMerge` never throws, so this needs no extra API call to
+ * learn whether the PR was armed — which would cost one request per PR per sweep pass.
+ *
+ * Its CALLER must invoke it BEFORE posting the status; see `runReview`.
+ */
+export function withdrawArmIfVerdictRefuses(
+  verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
+  ctx: {
+    prUrl: string;
+    taskId: string;
+    headSha: string;
+    ledgerPath: string;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+  },
+  deps: { disarm?: (prUrl: string) => void; ledgerLines?: () => Array<Record<string, unknown>> } = {},
+): boolean {
+  const override = verdict.capped
+    ? cappedOverrideFromLedger(
+        (deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)))(),
+        ctx.taskId,
+        ctx.headSha,
+      )
+    : undefined;
+  const decision = decideAutoMergeArm(verdict, false, override);
+  if (decision.arm) return false;
+  (deps.disarm ?? disarmAutoMerge)(ctx.prUrl);
+  ctx.log("automerge.disarmed", {
+    reason: `verdict refuses auto-merge: ${decision.reason}`,
+    head_sha: ctx.headSha,
+  });
+  return true;
+}
+
+/**
  * PURE classifier for a failed `gh pr merge --auto` (exported for test): the
  * "clean status" class means the PR was ALREADY fully mergeable — auto-merge
  * had nothing to wait on and the correct completion is an immediate direct
@@ -1366,15 +1417,11 @@ async function runReview(args: {
   // rule — two copies of exactly this rule are how the sweep and the run flow diverged.
   // `disarmAutoMerge` never throws and is a no-op-ish on an unarmed PR, so this needs no
   // extra API call to learn whether the PR was armed.
-  const disarmDecision = decideAutoMergeArm(
+  withdrawArmIfVerdictRefuses(
     verdict,
-    false,
-    verdict.capped ? cappedOverrideFromLedger(readLedgerLines(args.ledgerPath), task.id, headSha) : undefined,
+    { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log },
+    { disarm: args.disarm },
   );
-  if (!disarmDecision.arm) {
-    (args.disarm ?? disarmAutoMerge)(prUrl);
-    log("automerge.disarmed", { reason: `verdict refuses auto-merge: ${disarmDecision.reason}`, head_sha: headSha });
-  }
 
   // W1-T228: the ONLY call path that posts `remudero-review` from here on —
   // acquires the per-task serialization lock, re-reads the ledger + live PR
