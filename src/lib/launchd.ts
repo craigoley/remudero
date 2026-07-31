@@ -255,6 +255,20 @@ export function launchdPlistPath(label: string = DAEMON_LABEL, home: string = ho
   return join(home, "Library", "LaunchAgents", `${label}.plist`);
 }
 
+/**
+ * The `launchctl` GUI-domain SERVICE target for one label — `gui/<uid>/<label>` — the
+ * argument `launchctl bootout|print|kickstart` all take to address an already-bootstrapped
+ * job by name (as opposed to `bootstrap`, which addresses the DOMAIN `gui/<uid>` plus a
+ * plist PATH). Pure string composition, factored here so W1-T169's `rmd down`/`rmd up`
+ * (run-task.ts) build this exactly once rather than re-deriving the format at each of
+ * their several call sites — deployer.ts's `realDeployDeps` kickstart call built the same
+ * shape inline (`gui/${uid}/${label}`) before this existed; this is the same string, not a
+ * second format.
+ */
+export function launchctlGuiTarget(uid: number, label: string): string {
+  return `gui/${uid}/${label}`;
+}
+
 // ── The SERVE LaunchAgent (W1-T152 — the operator console as a background SERVICE) ────────
 //
 // SAME generator family as generateLaunchdPlist above (W1-T12b): the same absolute-path
