@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -15,7 +15,7 @@ import {
   type SweepDeps,
 } from "../src/lib/sweep.js";
 import { gitPushEmptyCommit } from "../src/lib/git-push.js";
-import { buildSweepEffects } from "../src/run-task.js";
+import { buildOpenPrViews, buildSweepEffects } from "../src/run-task.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
@@ -347,4 +347,53 @@ test("buildSweepEffects' repushAbsent stands down when the head branch was never
   );
   assert.equal(await effects.repushAbsent!(pr({ headRefName: undefined })), undefined);
   assert.equal(pushes, 0, "no branch name means nothing to push to — never a guess");
+});
+
+// ── The gateway end of the same wire: `headRefName` only exists on an OpenPrView because
+//    buildOpenPrViews reads it off the REST payload's `head.ref`. Without it the remedy's
+//    no-branch stand-down above would fire on EVERY pr and the feature would be inert, so
+//    the gateway read is locked here rather than left to the aggregate suite. Driven over a
+//    PATH-stub `gh` answering only the four REST calls buildOpenPrViews issues — no
+//    `gh pr view`/`gh issue`, so no effect (arm/escalate/push) is reachable from this test.
+function ghStubForHeadRef(sha: string, taskId: string, branch: string): string {
+  return `#!/usr/bin/env node
+const a = process.argv.slice(2).join(" ");
+if (a.includes("required_status_checks")) { process.stdout.write(JSON.stringify({ contexts: ["ci-gate"] })); process.exit(0); }
+if (a.includes("pulls?state=open")) {
+  process.stdout.write(JSON.stringify([{
+    number: 900,
+    html_url: "https://github.com/o/r/pull/900",
+    state: "open",
+    body: "Remudero-Task: ${taskId}\\n",
+    updated_at: "2026-07-30T00:00:00Z",
+    head: { ref: "${branch}", sha: "${sha}" },
+    auto_merge: null,
+  }]));
+  process.exit(0);
+}
+if (a.includes("check-runs")) { process.stdout.write(JSON.stringify({ check_runs: [{ name: "ci-gate", status: "completed", conclusion: "success" }] })); process.exit(0); }
+if (a.includes("/status")) { process.stdout.write(JSON.stringify({ statuses: [] })); process.exit(0); }
+process.stdout.write("{}");
+`;
+}
+
+test("buildOpenPrViews carries the PR's head.ref through as headRefName — the branch the ABSENT remedy pushes its empty commit to", () => {
+  const bin = mkdtempSync(join(tmpdir(), "gh-bh-headref-"));
+  writeFileSync(join(bin, "gh"), ghStubForHeadRef("deadbeef0000000000000000000000000000000", "W1-T900", "run-W1-T900-1"), {
+    mode: 0o755,
+  });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  try {
+    const views = buildOpenPrViews("o", "r", ledgerPath());
+    assert.equal(views.length, 1);
+    assert.equal(
+      views[0].headRefName,
+      "run-W1-T900-1",
+      "the REST payload's head.ref reaches the view verbatim — the remedy never reconstructs a branch name from the task id",
+    );
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+  }
 });
