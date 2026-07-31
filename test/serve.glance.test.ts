@@ -85,6 +85,7 @@ interface FixtureOpts {
   phaseElapsedThresholdsMs?: Record<string, number>;
   boardNow?: () => number;
   daemonHealth?: ServeDeps["daemonHealth"];
+  accountUsage?: ServeDeps["accountUsage"];
 }
 
 function fixtureDeps(root: string, tasks: Task[], opts: FixtureOpts = {}): ServeDeps {
@@ -103,6 +104,7 @@ function fixtureDeps(root: string, tasks: Task[], opts: FixtureOpts = {}): Serve
     pollMs: opts.pollMs ?? 50,
     phaseElapsedThresholdsMs: opts.phaseElapsedThresholdsMs,
     daemonHealth: opts.daemonHealth,
+    accountUsage: opts.accountUsage,
   };
 }
 
@@ -314,6 +316,87 @@ test("daemon-health widget: shows last poll, a live next-poll countdown, disk fr
         .catch(() => null);
       const second = await glanceText(page, "dh-next-poll");
       assert.notEqual(first, second, `the next-poll countdown must tick live -- was "${first}" for the full 4s poll window`);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+// ── the ACCOUNT strip: WHICH subscription, and how much of it is gone ───────────────────────
+// The operator's ask ("show which subscription it's using and how much is used"). Proven in a
+// REAL browser against the REAL route, because the whole hazard this strip guards against is a
+// number that renders convincingly while nothing refreshes it.
+
+test("ACCOUNT strip: renders the account, both usage windows and the governor posture, each from its named source", async () => {
+  const root = tmpRoot();
+  // The reading is the shape ~/.claude.json really holds -- `utilization` a bare number and
+  // `resets_at` an ISO string with a +00:00 offset (see test/fixtures/account-usage/).
+  const capturedAt = Date.now() - 90_000;
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })], {
+    accountUsage: {
+      readAccount: () => ({
+        email: "operator@example.com",
+        uuid: "00000000-1111-2222-3333-444444444444",
+        cacheUuid: "00000000-1111-2222-3333-444444444444",
+        cacheFetchedAtMs: capturedAt,
+        fiveHour: { percentUsed: 3, resetsAt: "2026-07-31T20:49:59.209107+00:00" },
+        sevenDay: { percentUsed: 0, resetsAt: "2026-08-02T04:59:59.209129+00:00" },
+      }),
+    },
+  });
+  // The governor posture comes off the fleet's OWN newest heartbeat, so it needs a real line.
+  appendFileSync(
+    deps.board.ledgerPath,
+    ledgerLine({ ts: new Date(Date.now() - 30_000).toISOString(), step: "daemon.headroom", enforced: true, percent_used: 3, poll_interval_ms: 60_000 }),
+  );
+
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => (document.getElementById("au-account")?.textContent ?? "\u2026") !== "\u2026", null, { timeout: 5000 });
+      assert.equal(await glanceText(page, "au-account"), "operator@example.com", "WHICH subscription -- the identity read fresh per request");
+      assert.match(await glanceText(page, "au-five-hour"), /^3% . resets /, "the 5h window that bites first, with its own reset");
+      assert.match(await glanceText(page, "au-seven-day"), /^0% . resets /, "a GENUINE zero renders as 0%, never as unknown");
+      assert.match(await glanceText(page, "au-governor"), /^ARMED/, "an enforced:true heartbeat renders ARMED, not telemetry-only");
+      // THE AS-OF IS THE POINT: a percentage nobody refreshes is worse than no percentage.
+      assert.match(await glanceText(page, "au-as-of"), /ago/, "the reading carries its own age, always -- even when fresh");
+      assert.match(await glanceText(page, "au-measures"), /whole account/, "the scope caveat renders: this is combined burn, not fleet-only");
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+test("ACCOUNT strip: a usage cache belonging to a DIFFERENT account renders unknown, never the previous account's percentages", async () => {
+  const root = tmpRoot();
+  // THE ACCOUNT-SWITCH CASE, which is not hypothetical: this host switched Anthropic accounts on
+  // 2026-07-31 and the cached block kept the old account's numbers until some Claude Code process
+  // rewrote it. Rendering those under the NEW account's name is the failure this strip must not have.
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })], {
+    accountUsage: {
+      readAccount: () => ({
+        email: "operator@example.com",
+        uuid: "11111111-1111-1111-1111-111111111111",
+        cacheUuid: "00000000-0000-0000-0000-000000000000",
+        cacheFetchedAtMs: Date.now(),
+        fiveHour: { percentUsed: 77, resetsAt: "2026-08-04T04:00:00.000Z" },
+        sevenDay: { percentUsed: 77, resetsAt: "2026-08-04T04:00:00.000Z" },
+      }),
+    },
+  });
+
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => (document.getElementById("au-account")?.textContent ?? "\u2026") !== "\u2026", null, { timeout: 5000 });
+      assert.equal(await glanceText(page, "au-five-hour"), "unknown");
+      assert.equal(await glanceText(page, "au-seven-day"), "unknown");
+      assert.match(await glanceText(page, "au-as-of"), /account-mismatch/, "the reason is named, so the operator knows WHY it is unknown");
+      assert.equal(await glanceText(page, "au-account"), "operator@example.com", "identity still answers -- only the usage half is withheld");
+      const body = await page.textContent("body");
+      assert.equal(body?.includes("77%"), false, "the stale account's percentage must appear NOWHERE on the page");
+      // Nothing is on the ledger, so the posture is honestly unknown rather than defaulted.
+      assert.equal(await glanceText(page, "au-governor"), "unknown");
     } finally {
       await context.close();
     }
