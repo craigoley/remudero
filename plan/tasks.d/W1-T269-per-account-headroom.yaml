@@ -6,55 +6,84 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  rationale: "OBSERVED at 07e5861: UsageSnapshot (src/lib/headroom.ts:45) is exactly { billingMode, session,
-    weekly } — no account field, by design, because the module does window math for ONE budget. HEADROOM_LIMIT_PCT
-    (src/lib/headroom.ts:119) is a single host-wide constant and the W1-T249 reserve rides the same single value
-    via headroom.reservePct in the policy substrate (src/lib/policy.ts:68, :293, :309). The governor is a loop-top
-    check that idles the WHOLE fleet on one window, so with two live subscriptions there is no shape in which its
-    answer is meaningful: one account at 20% and one at 99% produce a single number that describes neither.
-    THIS TASK IS CONDITIONAL ON W1-T266's RULING and should not be built before it. If the ruling is a serial
-    switch — one account live per host, deliberately changed — then the existing single-window governor is already
-    correct and this task should be WITHDRAWN rather than implemented, because a per-account split of a set with
-    one element is pure cost. It is filed as a dependent, not as a commitment.
-    W1-T267 is the other prerequisite and it is a correctness one: splitting a reading per account is worthless
-    while the probe that produces the reading may be looking at a store no worker spends from."
+  rationale: "WITHDRAWN AS FILED 2026-07-31 by the W1-T266 ruling (docs/account-selection.md, merged as PR #1024),
+    which this task's own WITHDRAW-IF clause named as the deciding authority. That record rules PINNED SERIAL-SWITCH
+    mode with no concurrency, and says in terms: 'W1-T269 (per-account headroom: splitting UsageSnapshot, the
+    reserve curve, and the governor's gate across multiple simultaneously-live accounts) should be WITHDRAWN rather
+    than built. With one account live per host, the existing single-window governor is already correct; a
+    per-account split of a set with one element is pure cost with no behavioral payoff.' Its follow-ups ask for
+    exactly this bookkeeping edit — 'mark W1-T269 and W1-T270 status: withdrawn (or equivalent) in their task files
+    per this ruling'. `withdrawn` is not one of plan.ts's TASK_STATUSES, so the equivalent this repo already uses
+    for a retirement record is status: blocked (precedent: the W1-T139-superseded native-shell task,
+    plan/tasks.yaml — 'RECORD of the retirement decision, not a work item'). SIBLING PRECEDENT: PR #1027 withdrew
+    W1-T270 in exactly this shape on 2026-07-31; this entry mirrors it.
+    WHY THE RULING KILLS IT. Every acceptance criterion below was written for MULTIPLE SIMULTANEOUSLY-LIVE accounts:
+    a snapshot that names which of several accounts it was read under, a reserve curve resolved per label, an
+    unreadable reading for one account not masking another's, and a ledger line naming which of several budgets it
+    measured. With one account live per host by ruling, each of those is a set with one element — the snapshot's
+    label is always the only label, and one account's reading masking another's cannot occur. The existing
+    single-window governor is already correct for that world.
+    THE ORIGINAL DIAGNOSIS REMAINS TRUE AND IS NOT WHAT IS BEING WITHDRAWN. UsageSnapshot (src/lib/headroom.ts) is
+    still exactly { billingMode, session, weekly } with no account field, HEADROOM_LIMIT_PCT is still a single
+    host-wide constant, and the reserve still rides one headroom.reservePct. None of that is a defect under
+    serial-switch mode; it is the correct shape for it.
+    REVERSIBLE ON EVIDENCE, not a permanent no: if the published one-account-per-machine promise in MASTER-PLAN.md
+    is ever revisited, per-account headroom becomes wanted again and the withdrawn criteria are preserved verbatim
+    in this task's note for exact re-filing."
   design: |
-    (1) THE SNAPSHOT CARRIES ITS PROVENANCE. UsageSnapshot gains the account label the probe read it under —
-        supplied by W1-T267's now-explicit store selection, never guessed. A snapshot that cannot name its account
-        is unattributable and must say so rather than default to the current label.
-    (2) THE RESERVE RESOLVES PER LABEL. The reserve percentage and the time-aware curve are resolved against the
-        account being measured rather than once for the host. The existing single-account behaviour stays the
-        DEFAULT: with one label configured, the resolved values are byte-for-byte what they are today, so an
-        unconfigured install cannot inherit a semantic change (the same posture W1-T259 took with its switch).
-    (3) UNREADABLE IS PER ACCOUNT TOO. An unreadable probe for one account must not mask a readable reading for
-        another, and must not be rendered as headroom-available for either. Cannot-observe stays cannot-observe,
-        per account — the polarity W1-T267 preserves for the single case, generalised.
-    (4) THE READING NAMES ITS SUBJECT. The ledgered headroom line carries the account label it measured, so the
-        console in W1-T270 has a field to group on and an operator reading the raw line can tell which budget it
-        describes. Without this the line is indistinguishable from today's and the console task has nothing to
-        render.
-    NOT IN SCOPE: any change to WHEN the governor holds. The ratified curve and the reserve semantics are
-    unchanged; only the number of budgets they are evaluated against changes.
+    NOT TO BE BUILT. Withdrawn as filed by the W1-T266 ruling (docs/account-selection.md). Left in the plan as a
+    RECORD of the withdrawal decision, not a work item. status: blocked so nextRunnable/assertRunnable never
+    dispatch it (drain.ts's isDispatchEligible refuses `status === "blocked"` before any dependency or breaker check).
+    WHAT IS ALREADY BUILT, so no later reader rediscovers it at $100. W1-T267 (merged 2026-07-31 as PR #1026,
+    commit d88bd5b) made the /usage probe read the SAME credential store the workers spend — it materializes a
+    stable worker-home-usage-probe directory with that store symlinked in, passes home: into buildWorkerEnv, and
+    moves the execFileSync behind an injectable UsageProbeRunner seam. That is the correctness prerequisite this
+    task named, and it landed. It changed src/run-task.ts and added test/usage-probe-store.test.ts; it did NOT
+    touch src/lib/headroom.ts or src/lib/daemon.ts, so it satisfies none of this task's criteria — see the
+    measurement in the note. The probe now reads the right store for the ONE account that is live, which is
+    precisely what serial-switch mode requires and all it requires.
+    THE REAL DEFECT IN THIS AREA IS A DIFFERENT ONE AND IS NOT SMUGGLED IN HERE. recon-CG established that
+    readUsageSnapshot returns undefined every tick because parseUsage's WINDOW_TAIL makes the resets clause
+    mandatory while the live account emits a weekly window without one. That is a parser bug on the SINGLE-account
+    path, unrelated to per-account splitting, and it deserves its own filing rather than being reworded into this
+    withdrawn entry — reshaping a withdrawn task into new scope would hide a filing decision inside a bookkeeping edit.
+    depends_on is left UNCHANGED at [W1-T266, W1-T267] on purpose. status: blocked already stops dispatch before the
+    dependency check is reached (drain.ts:127 precedes the unmetDependencies call at :128), so editing the edge would
+    change nothing observable while making the graph disagree with what was actually filed. Both dependencies have in
+    fact merged, which is exactly why this entry had to be marked promptly: it was dispatch-eligible at the moment of
+    this edit.
   acceptance:
-    - claim: "a snapshot carries the account label it was read under and an unattributable snapshot says so rather than defaulting"
-      proof: "unit test: test/headroom-per-account.test.ts"
-    - claim: "the reserve and the curve resolve per account label while a single configured label reproduces today's values exactly"
-      proof: "unit test: test/headroom-per-account.test.ts"
-    - claim: "an unreadable reading for one account neither masks nor is masked by a readable reading for another"
-      proof: "unit test: test/headroom-per-account.test.ts"
-    - claim: "the ledgered headroom line names which account it measured so a reader can tell which budget it describes"
-      proof: "grep: account_label in src/lib/headroom.ts"
+    - claim: "this task is withdrawn as filed and never dispatched; the ruling that withdrew it is recorded"
+      proof: "grep: should be WITHDRAWN in docs/account-selection.md"
   risk: high
   origin: architect
   plan_refs: ["§4", "§9"]
   files: [src/lib/headroom.ts, src/lib/daemon.ts]
-  status: queued
+  status: blocked
   attempts: 0
-  note: "verify:auto — headroom is pure window math over an injected snapshot and the loop-top check already takes
-    an injected reader, so every criterion is assertable headlessly with no probe and no spend.
-    risk:high — it changes the input to the only mechanism that can stop the fleet spending, and it names the
-    daemon subsystem alongside headroom, which is Rule 19's threshold twice over. The asymmetric failure is a
-    per-account split that silently reports the wrong budget as the binding one, which reads as normal operation.
-    budget_usd 100 — the house default: two files, no new seam required (the reader is already injectable), and
-    the test matrix is combinatorial but small.
-    WITHDRAW-IF: W1-T266 rules for a serial switch. Say so on that ruling rather than implementing this."
+  note: "THE FOUR WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    (1) claim 'a snapshot carries the account label it was read under and an unattributable snapshot says so rather
+    than defaulting' / proof 'unit test: test/headroom-per-account.test.ts';
+    (2) claim 'the reserve and the curve resolve per account label while a single configured label reproduces
+    today's values exactly' / proof 'unit test: test/headroom-per-account.test.ts';
+    (3) claim 'an unreadable reading for one account neither masks nor is masked by a readable reading for another'
+    / proof 'unit test: test/headroom-per-account.test.ts';
+    (4) claim 'the ledgered headroom line names which account it measured so a reader can tell which budget it
+    describes' / proof 'grep: account_label in src/lib/headroom.ts'.
+    MEASURED AGAINST #1026 BEFORE WITHDRAWING, so the withdrawal does not rest on the ruling alone — W1-T267 merged
+    one hour before this edit and is this task's prerequisite, so the question had to be asked: (1) UNTOUCHED —
+    UsageSnapshot is still exactly { billingMode, session, weekly }, no account field; (2) UNTOUCHED — the reserve
+    is still one host-wide headroom.reservePct and HEADROOM_LIMIT_PCT is still a single constant; (3) UNTOUCHED —
+    there is no per-account read to mask anything, the probe returns one snapshot for the host; (4) UNTOUCHED —
+    account_label has ZERO occurrences in src/lib/headroom.ts (the only two 'account' matches in that file are
+    prose in comments at :22 and :25), and test/headroom-per-account.test.ts does not exist. #1026 changed
+    src/run-task.ts and added test/usage-probe-store.test.ts only. So NOTHING here was satisfied: this task is
+    withdrawn by ruling, not by supersession, and none of its four criteria is being dropped as already-done.
+    ORIGINAL FILING NOTE, unchanged and still true of the withdrawn product: verify:auto because headroom is pure
+    window math over an injected snapshot and the loop-top check already takes an injected reader; risk:high
+    because it changes the input to the only mechanism that can stop the fleet spending and names the daemon
+    subsystem alongside headroom, Rule 19's threshold twice over; budget_usd 100 as the house default for two files
+    with no new seam required.
+    WITHDRAW-IF, now DISCHARGED: the original clause read 'W1-T266 rules for a serial switch. Say so on that ruling
+    rather than implementing this.' W1-T266 ruled serial-switch (PR #1024, docs/account-selection.md). This entry is
+    saying so."
