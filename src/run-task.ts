@@ -3654,10 +3654,11 @@ async function runTask(
         // That is what makes an absent/unreadable `recon:` row inert here — see resolveRunMounts.
         model: reconMount?.model,
         effort: reconMount?.effort,
-        // maxTurns DELIBERATELY NOT taken from the mount. The recon rows say `max_turns: 400`;
-        // this cap is 8 and the comment below says why. Honouring the row would widen the one
-        // bound that keeps recon cheap by 50x on every dispatch, which is an operator decision,
-        // not part of routing model/effort. Flagged in impl-BP's report for a ruling.
+        // maxTurns DELIBERATELY NOT taken from the mount, and the ROW now agrees with this cap.
+        // impl-BP flagged a 50x contradiction (rows said 400, this said 8); the operator ruled the
+        // ROW moves to 8 rather than this bound moving to 400, so recon stays cheap on every
+        // dispatch and the table no longer asserts something the code does not do (impl-BS).
+        // Both halves are pinned by test/recon-mount-routing.test.ts so neither can drift back.
         maxTurns: 8, // recon is read-only + bounded; turns stay tight here.
         maxBudgetUsd: budgetUsd, // dollars are the real backstop (WS-0 knob a).
         config,
