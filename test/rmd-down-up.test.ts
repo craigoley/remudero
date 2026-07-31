@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { Config } from "../src/lib/config.js";
 import {
+  defaultPlanLifecycleCounts,
   defaultStopServeByPort,
   downCommand,
   liveInflightRuns,
@@ -27,6 +28,7 @@ import {
   waitForPortRelease,
   type DownDeps,
   type LiveInflightRun,
+  type PlanLifecycleCountsIo,
   type UpDeps,
 } from "../src/run-task.js";
 
@@ -70,6 +72,16 @@ test("loadLaunchdService: bootstraps the GUI domain with the plist path", () => 
     return "";
   });
   assert.deepEqual(calls, [["launchctl", ["bootstrap", "gui/501", "/h/Library/LaunchAgents/com.remudero.daemon.plist"]]]);
+});
+
+test("queryLaunchdService: with NO exec override at all, the real launchctl subprocess seam is used — an absent binary/label still reports NOT loaded, never throws", () => {
+  // Exercises defaultLifecycleExec's own real execFileSync call (never stubbed here) — a
+  // synthetic, never-bootstrapped label is safe on any host: macOS's real launchctl exits
+  // non-zero for an unknown service, and a CI runner with no launchctl binary at all throws
+  // ENOENT instead. Either way queryLaunchdService's own catch turns it into `loaded: false`,
+  // so this is deterministic and side-effect-free on both platforms.
+  const state = queryLaunchdService(`com.remudero.rmd-down-up-test-nonexistent-${Date.now()}`, 501);
+  assert.deepEqual(state, { loaded: false, pid: null });
 });
 
 test("unloadLaunchdService: boots the service out BY LABEL, not by plist path", () => {
@@ -178,6 +190,36 @@ test("runRecoverability: a pr.opened line for this run_id is has-pr (the sweep r
 test("runRecoverability: no pr.opened line for this run_id is pre-pr (it re-dispatches)", () => {
   const lines = [{ run_id: "W1-T1-1", task_id: "W1-T1", step: "run.start" }];
   assert.equal(runRecoverability(lines, "W1-T1-1"), "pre-pr");
+});
+
+// ── defaultPlanLifecycleCounts — the REAL default, over an injected io bundle (never a live
+// plan/gh read) ───────────────────────────────────────────────────────────────────────────
+
+function fakeProjection(rows: Array<{ prState?: string; needsHuman?: boolean }>): Map<string, unknown> {
+  const m = new Map<string, unknown>();
+  rows.forEach((r, i) => m.set(`T${i}`, r));
+  return m;
+}
+
+test("defaultPlanLifecycleCounts: sums open-PR / needs-human counts from the injected projection — no real plan/gh read", () => {
+  const io: PlanLifecycleCountsIo = {
+    loadPlan: () => ({ tasks: [] }) as never,
+    resolveOwnerRepo: () => ({ owner: "acme", repo: "widgets" }),
+    projectPlan: () =>
+      fakeProjection([{ prState: "OPEN" }, { prState: "OPEN", needsHuman: true }, { prState: "MERGED" }, { needsHuman: true }]) as never,
+    ghGateway: () => ({}) as never,
+  };
+  const counts = defaultPlanLifecycleCounts(cfg(), io);
+  assert.deepEqual(counts, { openPr: 2, needsHuman: 2 });
+});
+
+test("defaultPlanLifecycleCounts: any io step throwing (plan/gh unreachable) degrades to null, never throws — matches board.ts's github_unreachable direction", () => {
+  const counts = defaultPlanLifecycleCounts(cfg(), {
+    loadPlan: () => {
+      throw new Error("ENOENT: plan/tasks.yaml");
+    },
+  });
+  assert.equal(counts, null);
 });
 
 // ── downCommand ────────────────────────────────────────────────────────────────────────────
@@ -309,6 +351,13 @@ test("down: unknown argument refuses with exit 2, spawning nothing", async () =>
   assert.equal(rc, 2);
 });
 
+test("down: an invalid --port value is refused via the port/host resolution catch, exit 2, nothing touched", async () => {
+  const { err, deps } = downDeps();
+  const rc = await downCommand(["--port", "notanumber"], deps);
+  assert.equal(rc, 2);
+  assert.match(err.join("\n"), /rmd down —.*--port must be an integer/);
+});
+
 // ── upCommand ──────────────────────────────────────────────────────────────────────────────
 
 function upDeps(over: Partial<UpDeps> = {}): { out: string[]; err: string[]; order: string[]; deps: UpDeps } {
@@ -419,4 +468,19 @@ test("up: unknown argument refuses with exit 2", async () => {
   const { deps } = upDeps();
   const rc = await upCommand(["--bogus"], deps);
   assert.equal(rc, 2);
+});
+
+test("up: an invalid --port value is refused via the port/host resolution catch, exit 2 — after install-freshness, before anything loads", async () => {
+  const { order, err, deps } = upDeps();
+  const rc = await upCommand(["--port", "notanumber"], deps);
+  assert.equal(rc, 2);
+  assert.deepEqual(order, ["install-freshness"], "install-freshness already ran by this point; nothing past it did");
+  assert.match(err.join("\n"), /rmd up —.*--port must be an integer/);
+});
+
+test("up: serve fails to come up despite a plist being present is reported FAILED, exit 1", async () => {
+  const { out, deps } = upDeps({ isPortListening: async () => false });
+  const rc = await upCommand([], deps);
+  assert.equal(rc, 1);
+  assert.match(out.join("\n"), /serve \(:\d+\):\s+FAILED to come up — check state\/logs\/serve\.err\.log/);
 });

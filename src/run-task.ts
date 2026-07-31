@@ -7036,6 +7036,18 @@ export interface LifecycleCounts {
   needsHuman: number;
 }
 
+/** The three real reads {@link defaultPlanLifecycleCounts} chains — pulled out as an
+ *  injectable bundle (each defaulting to the real module function) so a test can exercise
+ *  the whole function, loop and all, over a SYNTHETIC projection instead of the real
+ *  `plan/tasks.yaml` + a live `gh` read (the same one-seam discipline every other lifecycle
+ *  helper in this file already follows). */
+export interface PlanLifecycleCountsIo {
+  loadPlan?: (path: string) => Plan;
+  resolveOwnerRepo?: () => { owner: string; repo: string };
+  projectPlan?: (plan: Plan, deps: DeriveDeps, cachePath?: string) => Map<string, StatusProjection>;
+  ghGateway?: typeof ghGateway;
+}
+
 /**
  * Best-effort open-PR / needs-human counts for the wind-down/resume report — the SAME
  * `projectPlan` projection every other reader of plan state derives from (status.ts), read
@@ -7044,11 +7056,15 @@ export interface LifecycleCounts {
  * board.ts's `github_unreachable` takes — `rmd down`/`rmd up` must still finish their real job
  * (stop/start the service) even when the network is the thing that's down.
  */
-function defaultPlanLifecycleCounts(config: Config): LifecycleCounts | null {
+export function defaultPlanLifecycleCounts(config: Config, io: PlanLifecycleCountsIo = {}): LifecycleCounts | null {
   try {
-    const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
-    const { owner, repo } = resolveOwnerRepo();
-    const proj = projectPlan(plan, { ledgerPath: ledgerPathFor(config), github: ghGateway(owner, repo) }, join(config.root, "state", "status.json"));
+    const plan = (io.loadPlan ?? loadPlan)(join(repoRoot, "plan", "tasks.yaml"));
+    const { owner, repo } = (io.resolveOwnerRepo ?? resolveOwnerRepo)();
+    const proj = (io.projectPlan ?? projectPlan)(
+      plan,
+      { ledgerPath: ledgerPathFor(config), github: (io.ghGateway ?? ghGateway)(owner, repo) },
+      join(config.root, "state", "status.json"),
+    );
     let openPr = 0;
     let needsHuman = 0;
     for (const p of proj.values()) {
@@ -11951,9 +11967,11 @@ export async function main(
   if (cmd === "serve-plist") {
     process.exit(await servePlistCommand(rest));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await downCommand(rest)) cannot carry a DA hit without forking the process; downCommand's own logic — the wind-down sequencing, the reap-wait, the recoverability report, and every idempotency/refusal branch — is unit-tested in test/rmd-down-up.test.ts (same irreducible-glue shape as the sibling console-url/away dispatch cases).
   if (cmd === "down") {
     process.exit(await downCommand(rest));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await upCommand(rest)) cannot carry a DA hit without forking the process; upCommand's own logic — install-freshness-first, the off-main refuse, the idempotent load sequencing, and the resume report — is unit-tested in test/rmd-down-up.test.ts (same irreducible-glue shape as the sibling console-url/away dispatch cases).
   if (cmd === "up") {
     process.exit(await upCommand(rest));
   }
