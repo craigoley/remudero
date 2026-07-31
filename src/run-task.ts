@@ -6833,6 +6833,12 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     installPath: repoRoot,
     stateRoot: config.root,
     daemonLabel: DAEMON_LABEL,
+    // The console is restarted by the SAME cycle, after the daemon verifies healthy: `rmd serve`
+    // loads its code once via tsx, so a deploy it is not restarted for is inert in it. The port is
+    // resolved the same way `rmd serve-plist` resolves it, so the probe watches the port the unit
+    // actually listens on.
+    serveLabel: SERVE_LABEL,
+    servePort: resolveServePort([], config.serve?.port),
     uid,
     ledgerPath: ledgerPathFor(config),
     log: (step, data) => console.log(`### [deploy] ${step}${data ? " " + JSON.stringify(data) : ""}`),
