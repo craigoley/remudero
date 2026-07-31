@@ -1087,11 +1087,25 @@ test("ratifyCliGateway: a REAL detached spawn of <repoRoot>/bin/rmd with the exa
   // The spawn is detached/unref'd -- the whole point is the caller never awaits it (see
   // RatifyCliGateway's own doc: an HTTP response must not block on rmd approve/reframe's own
   // multi-minute tail). Poll briefly for the marker file rather than awaiting the child.
+  //
+  // POLL FOR THE CONTENT THIS TEST ASSERTS, NOT MERELY FOR THE FILE. The fixture script writes
+  // TWO lines -- `echo "$@" > marker` CREATES it, `echo "cwd=$(pwd)" >> marker` APPENDS. Waiting
+  // on existsSync alone is satisfied by the FIRST line, so the `cwd=` assertion below could read
+  // a half-written marker and fail on a loaded runner while the code under test was perfectly
+  // correct (observed in CI 2026-07-31: read at 11ms, marker held only the args line). A wait
+  // condition must never be weaker than the assertion it guards. The sibling `approve` test keeps
+  // the existsSync poll legitimately -- its script writes only one line.
   const deadline = Date.now() + 5000;
-  while (!existsSync(markerPath) && Date.now() < deadline) {
+  const markerComplete = () => existsSync(markerPath) && readFileSync(markerPath, "utf8").includes("cwd=");
+  while (!markerComplete() && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 50));
   }
   assert.ok(existsSync(markerPath), "the real bin/rmd script must actually have been spawned");
+  // Distinguishes "the wait observed the complete marker" from "the wait gave up at the deadline".
+  // The loop exits on EITHER, so without this a regression of the poll back to an existence check
+  // surfaces as a confusing `cwd=` regex mismatch further down (which is exactly how it presented
+  // in CI) rather than as a named failure of the wait itself.
+  assert.ok(markerComplete(), "the poll must observe BOTH marker lines, not merely the file's existence");
   const marker = readFileSync(markerPath, "utf8");
   assert.match(marker, /^reframe P900 --feedback please cite a real anchor/);
   // macOS's tmpdir() sits under a /var symlink to /private/var -- bash's own `pwd` builtin
