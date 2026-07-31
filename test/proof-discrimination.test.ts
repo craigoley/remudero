@@ -123,3 +123,30 @@ test("W1-T273: a `unit test:` proof is never flagged stale, even when it 'passes
   assert.equal(v.criteria[0].proof_exec, "executed_pass");
   assert.equal(v.criteria[0].met, true);
 });
+
+test("W1-T273: a base-checkout re-run that THROWS degrades to not-stale (executed_pass stands) instead of hard-failing", () => {
+  // preexistingProofHits's own doc-comment: "whenever the base checkout itself
+  // throws (an unreadable/absent merge-base checkout is an environment gap,
+  // not a finding) [it] degrades to 'not stale' exactly like exec_error
+  // degrades elsewhere in this module — never a silent hard-fail." Exercise
+  // that catch branch directly: the executor passes cleanly on the head but
+  // THROWS when invoked against baseCheckoutDir (e.g. the merge-base worktree
+  // is missing/unreadable) — the criterion must still land executed_pass, not
+  // executed_stale and not a thrown error propagating out of judgeReview.
+  const criteria: AcceptanceCriterion[] = [
+    { claim: "the probe reads the worker keychain path", proof: "grep: workerKeychainPaths in src/run-task.ts" },
+  ];
+  const throwsOnBase: ProofExecutor = (_wp, cwd) => {
+    if (cwd === BASE_DIR) throw new Error("merge-base checkout unreadable");
+    return "pass";
+  };
+  const v = judgeReview(criteria, {
+    diff: "",
+    report: "REPORT — unrelated cleanup, no mention of the criterion above.",
+    headCheckoutDir: HEAD_DIR,
+    baseCheckoutDir: BASE_DIR,
+    execProof: throwsOnBase,
+  });
+  assert.equal(v.criteria[0].proof_exec, "executed_pass");
+  assert.equal(v.criteria[0].met, true);
+});
