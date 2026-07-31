@@ -5804,6 +5804,56 @@ export type UsageProbeRunner = (
 const defaultUsageProbeRunner: UsageProbeRunner = (bin, argv, opts) => execFileSync(bin, argv, opts);
 
 /**
+ * Which half of {@link readUsageSnapshot} failed. `"spawn"` is genuinely unreadable — the CLI
+ * could not be run, or ran and failed. `"parse"` means the read SUCCEEDED and the text could not
+ * be understood, which is a completely different problem with a completely different fix, and
+ * conflating the two is what cost this fleet its headroom read for hours on 2026-07-31.
+ */
+export type UsageProbeFailureStage = "spawn" | "parse";
+
+/** Injected sink for that failure — the real caller gets {@link ledgerUsageProbeFailure}. */
+export type UsageProbeFailureSink = (stage: UsageProbeFailureStage, reason: string) => void;
+
+/**
+ * How much of the failure message reaches the ledger. Generous enough for the whole of a real
+ * `UsageParseError` (`unparseable weekly (Fable) window: 0% used` is 47 chars) while bounding a
+ * pathological `execFileSync` error that can carry an entire captured stderr.
+ */
+const USAGE_PROBE_REASON_MAX = 400;
+
+/**
+ * Record a usage-probe failure DURABLY, so the next parse surprise names itself on the first
+ * tick instead of after hours of investigation.
+ *
+ * `usage.probe_failed` is a NEW step name on purpose: `daemon.headroom.unavailable` already
+ * exists and means something narrower and different (daemon.ts's bounded degraded-mode
+ * allowance), so reusing it would have conflated a parser defect with a transient read miss.
+ *
+ * NOT added to `DECISION_RELEVANT_LEDGER_STEPS` (lib/ledger.ts), deliberately: nothing DECIDES
+ * on this line — it is pure diagnostics, and the enforcement path keys on `snap` being
+ * `undefined`, exactly as before. Rotation may archive it and no bound moves. (That set is for
+ * lines a decision COUNTS or READS; adding a diagnostic would grow the never-rotated core for
+ * nothing.)
+ *
+ * FAILS SILENT ON ITS OWN FAILURE, and only on its own. A best-effort diagnostic must never be
+ * the reason a best-effort read becomes a crash — if the ledger is unwritable, the caller still
+ * gets its `undefined` and the drain still continues.
+ */
+export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailureStage, reason: string): void {
+  try {
+    appendLedger(ledgerPathFor(config), {
+      run_id: "USAGE-PROBE",
+      task_id: "DAEMON",
+      step: "usage.probe_failed",
+      stage,
+      reason: reason.slice(0, USAGE_PROBE_REASON_MAX),
+    });
+  } catch {
+    // Diagnostics are never worth a throw on this path.
+  }
+}
+
+/**
  * Read current `/usage` headless and parse it; `undefined` on any failure (best-effort;
  * the drain/daemon continues on an unreadable read — max + budget still bound it. That
  * polarity is ratified and NOT this function's to change.)
@@ -5820,7 +5870,10 @@ const defaultUsageProbeRunner: UsageProbeRunner = (bin, argv, opts) => execFileS
 export function readUsageSnapshot(
   config: Config,
   runUsageProbe: UsageProbeRunner = defaultUsageProbeRunner,
+  onUnreadable: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason),
 ): UsageSnapshot | undefined {
+  let out: string;
+  // ── SPAWN. Its own try, ending at the probe call — see the two-try note below. ───────────
   try {
     const realHome = process.env.HOME ?? homedir();
     // A stable, non-per-call home (never a fresh `perRunWorkerHomeDir` per read) so
@@ -5835,14 +5888,35 @@ export function readUsageSnapshot(
       shell: workerShell(config),
       home: workerHome,
     });
-    const out = runUsageProbe(config.claudeBin, ["-p", "/usage"], {
+    out = runUsageProbe(config.claudeBin, ["-p", "/usage"], {
       encoding: "utf8",
       env,
       maxBuffer: 1 << 24,
     });
-    return parseUsage(out);
-  } catch {
+  } catch (e) {
+    onUnreadable("spawn", String((e as Error)?.message ?? e));
     return undefined; // unreadable ⇒ the drain continues (max + budget still bound it)
+  }
+  // ── PARSE, in its OWN try. ────────────────────────────────────────────────────────────────
+  // WHY TWO TRIES, AND WHY THIS IS NOT COSMETIC. `parseUsage(out)` used to sit inside the spawn
+  // try, so one bare `catch` covered both — and on 2026-07-31 that made a PERFECT read
+  // indistinguishable from no read at all. The probe exited 0 and returned a complete,
+  // correctly-authenticated 1015-byte reading; `parseUsage` then threw
+  // `unparseable weekly (Fable) window: 0% used`; the bare catch swallowed it and returned
+  // `undefined`. The daemon logged nothing, every 60 seconds, for hours — and the old comment
+  // said "unreadable", which was false: it read fine and could not PARSE. Those are different
+  // failures with different fixes and the code could not tell them apart.
+  //
+  // The message that would have ended the investigation in two minutes existed in memory on
+  // every single tick and was discarded every single time. So the reason is now recorded
+  // DURABLY, naming the offending line, before the same `undefined` is returned. The RETURN
+  // POLARITY is deliberately unchanged — an unreadable read still lets the drain continue, which
+  // is ratified and not this function's to change; only the silence is fixed.
+  try {
+    return parseUsage(out);
+  } catch (e) {
+    onUnreadable("parse", String((e as Error)?.message ?? e));
+    return undefined;
   }
 }
 

@@ -29,11 +29,25 @@ export type BillingMode = "subscription" | "api" | "unknown";
 export interface UsageWindow {
   /** Percent of the window consumed, 0–100 (may be fractional). */
   percentUsed: number;
-  /** Reset moment, as the raw timestamp string `/usage` printed. */
-  resetsAt: string;
+  /**
+   * Reset moment, as the raw timestamp string `/usage` printed — **ABSENT when the line
+   * carried no `· resets …` clause at all**, which is a real shape this CLI emits (see
+   * {@link WINDOW_TAIL}). Absent is NOT "unknown-and-therefore-fine": every consumer that
+   * needs an instant resolves it through `resolveHeadroomLimitPct(null, …)`, which returns
+   * the WIDEST rung — the strict reserve, never the relaxed final-day ceiling.
+   */
+  resetsAt?: string;
   /** Timezone, when the line carried a trailing `(…)` (the session line does). */
   tz?: string;
 }
+
+/**
+ * What a window's reset renders as when the line carried no `· resets …` clause. A NAMED
+ * sentinel rather than `""`/`undefined` leaking into a ledger line or a console cell: an
+ * empty string reads as a rendering bug, and `undefined` stringifies to the word
+ * "undefined", which an operator cannot tell from a defect. It is also greppable.
+ */
+export const RESET_UNKNOWN = "unknown";
 
 /** A weekly window, whose {@link label} is parsed as data (never hardcoded). */
 export interface WeeklyWindow extends UsageWindow {
@@ -62,9 +76,42 @@ export class UsageParseError extends Error {
   }
 }
 
-/** `NN% used · resets <ts>` and an optional trailing `(<tz>)`. */
+/**
+ * `NN% used`, then an OPTIONAL `· resets <ts>` with an optional trailing `(<tz>)`.
+ *
+ * THE RESET CLAUSE IS OPTIONAL, AND THAT IS THE WHOLE POINT. It used to be mandatory, and on
+ * 2026-07-31 that cost the fleet its entire headroom read for hours. The account in use began
+ * emitting a SECOND weekly line — the third usage window — with no reset clause at all:
+ *
+ *   Current week (all models): 2% used · resets Aug 2 at 1am (America/New_York)
+ *   Current week (Fable): 0% used                    <-- no `· resets …`
+ *
+ * `WEEKLY_LINE` matches that line happily and hands `0% used` to {@link parseTail}, which threw
+ * `unparseable weekly (Fable) window: 0% used`. `parseUsage` has no per-window tolerance, so ONE
+ * resetless line discarded the session window AND the all-models window — both of which parsed
+ * perfectly — and `readUsageSnapshot`'s bare `catch` turned the whole thing into `undefined` on
+ * every 60-second tick. The last `daemon.headroom` line of any kind was 14:59:05.671Z.
+ *
+ * The causal token was the ABSENT clause, not the label and not the zero: a resetless
+ * `all models` line throws identically, and a resetless `Fable` line at 3% throws identically,
+ * while the same capture with a reset clause added to the Fable line parses. So this is widened
+ * at exactly the token that was wrong and nowhere else.
+ *
+ * WHAT IS *NOT* OPTIONAL: the `NN% used` head. A window with no readable percentage is still a
+ * hard {@link UsageParseError} — the percentage is the only thing the governor compares against
+ * its ceiling, so inventing one would be the fail-open this parser exists to prevent. Widening
+ * the tail must not be mistaken for making the parser permissive; see
+ * `test/headroom-resetless.test.ts`'s fail-closed lock.
+ *
+ * WHY NOT SKIP UNPARSEABLE WINDOWS INSTEAD (the rejected alternative). Dropping a window that
+ * fails to parse would let the reading survive with fewer windows — but if the dropped one is
+ * the BINDING window, the snapshot reports a rosier number than the truth, at exactly the
+ * boundary daemon.ts's own comment says must never fail open ("cannot-read-the-budget must never
+ * render as proceed-as-if-unlimited"). Keeping the window with its reset recorded as absent is
+ * strictly safer: the percentage — the only thing enforcement reads — survives intact.
+ */
 const WINDOW_TAIL =
-  /(\d+(?:\.\d+)?)%\s*used\s*·\s*resets\s+(.+?)\s*(?:\(([^)]+)\))?\s*$/;
+  /(\d+(?:\.\d+)?)%\s*used\s*(?:·\s*resets\s+(.+?)\s*(?:\(([^)]+)\))?)?\s*$/;
 
 const SESSION_LINE = /^\s*Current session:\s*(.+)$/im;
 const WEEKLY_LINE = /^\s*Current week\s*\(([^)]+)\):\s*(.+)$/gim;
@@ -74,10 +121,12 @@ function parseTail(rest: string, kind: string): UsageWindow {
   if (!m) {
     throw new UsageParseError(`unparseable ${kind} window: ${rest.trim()}`);
   }
-  const win: UsageWindow = {
-    percentUsed: Number(m[1]),
-    resetsAt: m[2].trim(),
-  };
+  const win: UsageWindow = { percentUsed: Number(m[1]) };
+  // ABSENT, not empty-string: `resetsAt` is omitted entirely when the line carried no clause,
+  // so a consumer's `w.resetsAt ? … : …` test is a real presence test rather than a truthiness
+  // accident, and `RESET_UNKNOWN` is applied once at the render boundary instead of being
+  // smeared through the parse.
+  if (m[2] !== undefined) win.resetsAt = m[2].trim();
   if (m[3]) win.tz = m[3].trim();
   return win;
 }
@@ -128,12 +177,16 @@ export function headroomExhausted(
   snap: UsageSnapshot,
   limitPct: number = HEADROOM_LIMIT_PCT,
 ): { window: string; percentUsed: number; resetsAt: string } | null {
+  // `?? RESET_UNKNOWN` at the boundary, so this function's `resetsAt: string` contract — which
+  // `rmd drain` interpolates straight into a stop summary (drain.ts's "resets ${…}") — keeps
+  // holding without a single caller change, and a resetless window renders the sentinel rather
+  // than the literal text "undefined".
   const windows: Array<{ window: string; percentUsed: number; resetsAt: string }> = [
-    { window: "session (5h)", percentUsed: snap.session.percentUsed, resetsAt: snap.session.resetsAt },
+    { window: "session (5h)", percentUsed: snap.session.percentUsed, resetsAt: snap.session.resetsAt ?? RESET_UNKNOWN },
     ...snap.weekly.map((w) => ({
       window: `weekly (${w.label})`,
       percentUsed: w.percentUsed,
-      resetsAt: w.resetsAt,
+      resetsAt: w.resetsAt ?? RESET_UNKNOWN,
     })),
   ];
   const over = windows
