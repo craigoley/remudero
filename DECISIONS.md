@@ -735,3 +735,35 @@ resolution, and marked so in the manner of the 2026-07-20 and 2026-07-31 (W1-T20
   touched by this PR.
 - Rollback: revert this PR — removes only this DECISIONS.md entry; no runtime code touched, and no
   ledger line written.
+
+## 2026-07-31 — W1-T254 re-dispatch (fifth occurrence): already-satisfied, no-op close
+
+- Options: (A) close as already-satisfied, no functional code change, record the closure here
+  (RECOMMENDED) | (B) reimplement as if unstarted — rejected for the same reason as all four
+  entries above: the target state already exists identically on this branch.
+- Chosen (RECOMMENDED, auto): Option A, following the four entries directly above (PR #1007,
+  #1012, #1013, #1015) and the same-day precedent chain before those.
+- Re-verified in THIS worktree (`run-W1-T254-1785511012213`, HEAD `430a2c1`, which already
+  contains all four prior no-op closures): `git merge-base --is-ancestor 15a2168 HEAD` → true;
+  `npx vitest run test/sweep.test.ts` → 130 tests, 0 failures, including "runSweep: post-review
+  dedup is outcome-keyed … (W1-T254)" and "runSweep: a throwing action does not abort the pass …
+  (W1-T254)"; `npx vitest run test/daemon.test.ts` → 86 tests, 0 failures, including "W1-T254: the
+  light sweep runs while runOne is in flight … (the #707 fix)"; `grep -n
+  "sweep.post_review.attempt" src/run-task.ts` → `src/run-task.ts:8233`, unchanged. All four
+  acceptance criteria still hold against the identical, unchanged code.
+- THE MECHANISM (unchanged, now five same-day instances): `status:` in `plan/tasks.yaml` is
+  decorative; the real gate `isDispatchEligible` (`src/lib/drain.ts:123-125`) already calls
+  `isMerged(t.id)` and short-circuits when true, and `deriveStatus`'s trailer rung
+  (`src/lib/status.ts:1016`) already credits PR #720's `Remudero-Task: W1-T254` trailer. Both
+  should make this task ineligible for dispatch — so whatever re-issued this task a fifth time is
+  not going through this repo's own `nextRunnable`/`isDispatchEligible` path, or is going through
+  it with a stale/uncached merged-set. Filed as a `task:` follow-up in this PR's description (not
+  re-litigated further here, per the fourth entry's own note) rather than investigated in this PR,
+  since diagnosing the outer dispatcher is a different concern from W1-T254's sweep-reliability
+  scope.
+- Per `src/lib/plan.ts:41-45`, `satisfied_by` is ARCHITECT-ONLY and a worker-added one fails
+  review, and per the file header above `status:` is never written back — so, exactly as in every
+  prior closure in this file, neither W1-T254's `status` field nor its acceptance criteria are
+  touched by this PR.
+- Rollback: revert this PR — removes only this DECISIONS.md entry; no runtime code touched, and no
+  ledger line written.
