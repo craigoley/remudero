@@ -1761,16 +1761,31 @@ test("W1-T179: LIVENESS BOUND -- an OPEN PR keeps a dispatch running regardless 
 
 test("W1-T181: a successful batched fetch logs its payload byte size and PR count via the injectable log hook", () => {
   const events: Array<[string, Record<string, unknown> | undefined]> = [];
-  const prs: BatchedPr[] = [{ number: 1, url: "u1", state: "OPEN" }];
-  const raw = JSON.stringify(prs);
+  // W1-T265: the enumeration is REST now, so one fetch is SEVERAL requests (the open half, then
+  // the closed delta) and `bytes` is their SUM. The criterion is unchanged — the payload size
+  // must stay observable before the ceiling is crossed — but it is now the size of the whole
+  // fetch, not of a single `gh pr list` response.
+  const openPage = JSON.stringify([{ number: 1, url: "https://api.github.com/repos/o/r/pulls/1", html_url: "u1", state: "open", merged: false, head: { ref: "b" }, updated_at: "2026-07-24T00:00:00Z" }]);
+  const emptyPage = "[]";
+  const argvs: string[][] = [];
   const gh = buildBatchedGithub("o", "r", {
-    exec: () => raw,
+    exec: (args) => {
+      argvs.push(args);
+      return (args[1] ?? "").includes("state=open") ? openPage : emptyPage;
+    },
     log: (event, extra) => events.push([event, extra]),
   });
   gh.warm?.();
   const bytesEvent = events.find(([e]) => e === "board_gateway.fetch_bytes");
   assert.ok(bytesEvent, "a successful fetch must log its payload byte size — the ceiling must be observable before it is crossed");
-  assert.equal(bytesEvent?.[1]?.bytes, Buffer.byteLength(raw, "utf8"));
+  const prArgvs = argvs.filter((a) => (a[1] ?? "").includes("/pulls"));
+  assert.equal(bytesEvent?.[1]?.bytes, Buffer.byteLength(openPage, "utf8") + Buffer.byteLength(emptyPage, "utf8") * (prArgvs.length - 1));
+  // W1-T265 adds the request count to the same event: the whole claim of the REST migration is
+  // that a refresh stays at 2 requests, so it is measured in the ledger rather than asserted once
+  // in a test and never observed again.
+  assert.equal(bytesEvent?.[1]?.restCalls, prArgvs.length);
+  assert.equal(bytesEvent?.[1]?.mode, "full", "the first fetch has no cache to delta against");
+  assert.equal(bytesEvent?.[1]?.truncated, false);
   const okEvent = events.find(([e]) => e === "board_gateway.fetch_ok");
   assert.ok(okEvent, "a successful fetch must also log fetch_ok");
   assert.equal(okEvent?.[1]?.prCount, 1);

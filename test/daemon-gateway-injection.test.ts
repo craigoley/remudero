@@ -46,16 +46,24 @@ function emptyLedger(): string {
   return p;
 }
 
-/** One merged PR carrying BOTH the anchored trailer and an owned `run-<taskId>-*` head ref, as
- *  the real `gh pr list --state all --json ...` payload the batched gateway parses. */
+/**
+ * One merged PR carrying BOTH the anchored trailer and an owned `run-<taskId>-*` head ref, in
+ * REST's `/pulls` wire shape — which is what the batched gateway parses since its enumeration
+ * moved off `gh pr list --json` (W1-T265). Note `state: "closed", merged: true`: REST has no
+ * MERGED token, and `prStateFromRest` is what folds the two back into one.
+ */
 const MERGED_PR_JSON = JSON.stringify([
   {
     number: 777,
-    url: "https://github.com/o/r/pull/777",
-    state: "MERGED",
-    headRefName: "run-W1-T262-1784913918134",
+    url: "https://api.github.com/repos/o/r/pulls/777",
+    html_url: "https://github.com/o/r/pull/777",
+    state: "closed",
+    merged: true,
+    head: { ref: "run-W1-T262-1784913918134", sha: "deadbee" },
     body: "work\nRemudero-Task: W1-T262\n",
     title: "t",
+    updated_at: "2026-07-24T00:00:00Z",
+    auto_merge: null,
   },
 ]);
 
@@ -67,7 +75,10 @@ function searchRefusingExec(argvLog: string[][]): (args: string[]) => string {
     if (args.includes("--search")) {
       throw new Error("GraphQL: API rate limit already exceeded for user ID 4397075.");
     }
-    if (args[0] === "pr" && args[1] === "list") return MERGED_PR_JSON;
+    // The merged PR lives in the CLOSED half of the REST enumeration; the open half and every
+    // later page are empty, which is what stops both walks.
+    const url = args[1] ?? "";
+    if (args[0] === "api" && url.includes("state=closed") && /[?&]page=1(&|$)/.test(url)) return MERGED_PR_JSON;
     return "[]";
   };
 }
