@@ -1,0 +1,27 @@
+{
+  "oauthAccount": {
+    "emailAddress": "operator@example.com",
+    "accountUuid": "00000000-1111-2222-3333-444444444444",
+    "organizationName": "operator@example.com's Organization"
+  },
+  "cachedUsageUtilization": {
+    "accountUuid": "00000000-1111-2222-3333-444444444444",
+    "fetchedAtMs": 1785516413209,
+    "utilization": {
+      "five_hour": {
+        "utilization": 3,
+        "resets_at": "2026-07-31T20:49:59.209107+00:00",
+        "limit_dollars": null,
+        "used_dollars": null,
+        "remaining_dollars": null
+      },
+      "seven_day": {
+        "utilization": 0,
+        "resets_at": "2026-08-02T04:59:59.209129+00:00",
+        "limit_dollars": null,
+        "used_dollars": null,
+        "remaining_dollars": null
+      }
+    }
+  }
+}

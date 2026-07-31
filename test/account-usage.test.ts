@@ -1,0 +1,180 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import {
+  USAGE_CACHE_MAX_AGE_MS,
+  USAGE_SCOPE_NOTE,
+  deriveAccountUsage,
+  readAccountUsageFile,
+  type AccountUsageInput,
+} from "../src/lib/account-usage.js";
+import { renderShellHtml } from "../src/lib/serve.js";
+
+/**
+ * The console's ACCOUNT strip — which Anthropic account the fleet is spending, and how much of
+ * each usage window is gone.
+ *
+ * THE FIXTURE IS A REAL CAPTURE, NOT A HAND-WRITTEN ONE. `test/fixtures/account-usage/
+ * claude-json.json` is this host's own `~/.claude.json`, projected to exactly the nine scalar
+ * paths this module reads and otherwise UNMODIFIED — captured 2026-07-31T16:46:53Z. Every
+ * structural property a parser can get wrong is therefore the real one: `utilization` is a bare
+ * NUMBER (not a `{percent}` object and not a 0–1 fraction), `resets_at` is an ISO string with a
+ * `+00:00` offset and MICROSECOND precision, `fetchedAtMs` is epoch MILLISECONDS, and each window
+ * object carries three always-null `*_dollars` siblings. A fixture written from memory is exactly
+ * how a predicate ships broken while every test agrees with it.
+ *
+ * FOUR STRINGS ARE SUBSTITUTED, and only these: `oauthAccount.emailAddress`, `.accountUuid`,
+ * `.organizationName`, and `cachedUsageUtilization.accountUuid`. craigoley/remudero is a PUBLIC
+ * repository and there is no reason a unit test needs the operator's real Anthropic account
+ * identifier in it. The substitutes preserve the shape (a valid address, a valid UUID) and the
+ * cross-check the code performs (the two UUIDs are equal, as they are live), and the key-path set
+ * of the committed fixture is byte-identical to the live capture's. Nothing else was touched: the
+ * usage block's values are verbatim.
+ */
+const FIXTURE = fileURLToPath(new URL("./fixtures/account-usage/claude-json.json", import.meta.url));
+
+/** The fixture's own `fetchedAtMs`, so "now" in these tests is relative to the real capture. */
+const CAPTURED_AT = 1785516413209;
+
+/** The newest REAL `daemon.headroom` line on this host — verbatim, including its `enforced:
+ *  false` and the 77% reading that belongs to the account the operator switched AWAY from. */
+const REAL_TELEMETRY_LINE = {
+  ts: "2026-07-31T14:59:05.671Z",
+  run_id: "DAEMON-1785509074053",
+  task_id: "DAEMON",
+  step: "daemon.headroom",
+  window: "weekly (all models)",
+  percent_used: 77,
+  limit_pct: 95,
+  resets_at: "2026-08-04T04:00:00.000Z",
+  enforced: false,
+  over_ceiling: false,
+  poll_interval_ms: 60000,
+  note: "headroom governor disabled (ruling a4153e) — telemetry only, dispatch not gated",
+};
+
+/** A REAL pre-symmetry over-ceiling line — note it carries NO `enforced` key at all. 321 of this
+ *  host's 1,243 headroom lines look like this, which is why the posture is read as a tri-state. */
+const REAL_LEGACY_LINE = {
+  ts: "2026-07-25T14:02:24.640Z",
+  run_id: "DAEMON-1784938092611",
+  task_id: "DAEMON",
+  step: "daemon.headroom",
+  tick: 272,
+  window: "weekly (all models)",
+  percent_used: 99,
+  limit_pct: 95,
+  resets_at: "2026-07-28T04:00:00.000Z",
+  poll_interval_ms: 60000,
+};
+
+/** What the symmetric heartbeat now writes when the governor is ARMED and under the ceiling. */
+const ARMED_LINE = { ...REAL_TELEMETRY_LINE, ts: "2026-07-31T16:45:00.000Z", enforced: true, percent_used: 3 };
+
+test("the panel renders the account and both usage windows from a real captured reading, with an as-of timestamp", () => {
+  const input = readAccountUsageFile(FIXTURE);
+  const snap = deriveAccountUsage(input, [ARMED_LINE], CAPTURED_AT + 60_000);
+
+  // IDENTITY — the answer to "which subscription is it using".
+  assert.equal(snap.accountEmail, "operator@example.com");
+  assert.equal(snap.accountUuid, "00000000-1111-2222-3333-444444444444");
+  assert.equal(snap.accountOrg, "operator@example.com's Organization");
+
+  // USAGE — the answer to "how much is used", with each window's own reset instant.
+  assert.deepEqual(snap.fiveHour, { percentUsed: 3, resetsAt: "2026-07-31T20:49:59.209107+00:00" });
+  assert.deepEqual(snap.sevenDay, { percentUsed: 0, resetsAt: "2026-08-02T04:59:59.209129+00:00" });
+
+  // AS-OF — present, and derived from the reading's OWN clock, never from render time.
+  assert.equal(snap.usageAsOf, new Date(CAPTURED_AT).toISOString());
+  assert.equal(snap.usageAgeMs, 60_000);
+  assert.equal(snap.usageUnknownReason, undefined);
+
+  // POSTURE — read off the newest daemon.headroom line, with its own age.
+  assert.equal(snap.governor, "armed");
+  assert.equal(snap.governorAsOf, "2026-07-31T16:45:00.000Z");
+
+  // The scope caveat travels IN the payload, so a render cannot drop it.
+  assert.equal(snap.measures, USAGE_SCOPE_NOTE);
+});
+
+test("a stale or missing reading renders as unknown and never as 0% or as a stale value presented as current", () => {
+  const input = readAccountUsageFile(FIXTURE);
+
+  // (1) TOO OLD — one millisecond past the bound. The numbers are WITHHELD, not aged-and-shown.
+  const old = deriveAccountUsage(input, [ARMED_LINE], CAPTURED_AT + USAGE_CACHE_MAX_AGE_MS + 1);
+  assert.equal(old.usageUnknownReason, "too-old");
+  assert.equal(old.fiveHour, undefined, "a too-old window must be ABSENT, so no render can show its number");
+  assert.equal(old.sevenDay, undefined);
+  assert.equal(old.usageAsOf, undefined);
+  // …but identity survives: the panel can still answer "which account" when it cannot answer
+  // "how much", which is exactly the split the operator needs after a switch.
+  assert.equal(old.accountEmail, "operator@example.com");
+
+  // (2) ACCOUNT MISMATCH — the switch guard. The cache still holds the PREVIOUS account's numbers
+  // until some Claude Code process rewrites it; rendering them under the new account's name is
+  // the precise failure this panel exists to avoid.
+  const switched: AccountUsageInput = { ...input, uuid: "99999999-8888-7777-6666-555555555555" };
+  const mismatch = deriveAccountUsage(switched, [ARMED_LINE], CAPTURED_AT);
+  assert.equal(mismatch.usageUnknownReason, "account-mismatch");
+  assert.equal(mismatch.fiveHour, undefined);
+  assert.equal(mismatch.accountUuid, "99999999-8888-7777-6666-555555555555", "identity is the CURRENT account, not the cache's");
+
+  // (3) UNREADABLE FILE — a missing path fails soft, and still never fabricates.
+  const missing = readAccountUsageFile("/nonexistent/definitely-not-here.json");
+  assert.deepEqual(missing, { unreadable: true });
+  const unreadable = deriveAccountUsage(missing, [], CAPTURED_AT);
+  assert.equal(unreadable.usageUnknownReason, "unreadable");
+  assert.equal(unreadable.fiveHour, undefined);
+  assert.equal(unreadable.accountEmail, undefined);
+  assert.equal(unreadable.governor, "unknown", "no headroom line at all ⇒ the posture is unknown, never a default");
+
+  // (4) NO AS-OF — a cache with no `fetchedAtMs` cannot be aged, so it can never be shown.
+  const unageable = deriveAccountUsage({ ...input, cacheFetchedAtMs: undefined }, [ARMED_LINE], CAPTURED_AT);
+  assert.equal(unageable.usageUnknownReason, "no-cache");
+  assert.equal(unageable.fiveHour, undefined);
+
+  // THE RENDERED TEXT, asserted rather than inferred. `usageWindowLabel` is the client function
+  // that turns a window into a string; it is inside serve.ts's client template literal, so it is
+  // pulled out of the RENDERED shell and executed — the same technique that proves the script
+  // parses at all. An unknown window must read the literal word "unknown", never "0%".
+  const script = /<script\b[^>]*>([\s\S]*?)<\/script>/.exec(renderShellHtml())![1];
+  // The slice spans usageWindowLabel AND the formatClock it calls — stopping short of the latter
+  // would extract a function that throws rather than one that answers.
+  const slice = script.slice(script.indexOf("function usageWindowLabel"), script.indexOf("/** Renders GET /v1/account-usage"));
+  const label = new Function(`${slice} return usageWindowLabel;`)() as (w: unknown) => string;
+  assert.equal(label(undefined), "unknown", "an ABSENT window renders the word unknown");
+  assert.equal(label({}), "unknown", "a window with no percent renders unknown, never 0%");
+  assert.equal(label({ percentUsed: 0, resetsAt: "2026-08-02T04:59:59.209129+00:00" }).startsWith("0%"), true, "a GENUINE zero still renders as 0% — unknown and zero are different states");
+});
+
+test("the governor posture is a tri-state — a headroom line with no enforced key reads unknown, never telemetry-only", () => {
+  const input = readAccountUsageFile(FIXTURE);
+  // 321 of this host's real headroom lines carry no `enforced` key. Mapping absent to `false`
+  // would report an armed, actively-breaching governor as telemetry-only.
+  assert.equal(deriveAccountUsage(input, [REAL_LEGACY_LINE], CAPTURED_AT).governor, "unknown");
+  assert.equal(deriveAccountUsage(input, [REAL_TELEMETRY_LINE], CAPTURED_AT).governor, "telemetry-only");
+  assert.equal(deriveAccountUsage(input, [ARMED_LINE], CAPTURED_AT).governor, "armed");
+  // NEWEST WINS, by parsed `ts` and never by ledger order — the armed line is newer than the
+  // telemetry one, so a ledger that happens to append them backwards still reports "armed".
+  const outOfOrder = deriveAccountUsage(input, [ARMED_LINE, REAL_TELEMETRY_LINE, REAL_LEGACY_LINE], CAPTURED_AT);
+  assert.equal(outOfOrder.governor, "armed");
+  assert.equal(outOfOrder.governorAsOf, ARMED_LINE.ts);
+});
+
+test("the account reader projects only identity and usage out of the config file and never any other key", () => {
+  // THE SAFETY PROPERTY, asserted mechanically. `~/.claude.json` also holds OAuth material, so
+  // the reader must be a projection rather than a pass-through: anything it does not name is
+  // dropped by construction. Feeding it a file that carries an extra secret-shaped key proves
+  // nothing leaks into the payload that the route serializes.
+  const withSecrets = fileURLToPath(new URL("./fixtures/account-usage/claude-json.json", import.meta.url));
+  const input = readAccountUsageFile(withSecrets);
+  assert.deepEqual(
+    Object.keys(input).sort(),
+    ["cacheFetchedAtMs", "cacheUuid", "email", "fiveHour", "org", "sevenDay", "uuid"],
+    "exactly the seven projected fields — no passthrough of the parsed object",
+  );
+  const serialized = JSON.stringify(deriveAccountUsage(input, [ARMED_LINE], CAPTURED_AT));
+  for (const forbidden of ["oauthAccount", "accessToken", "refreshToken", "apiKey", "primaryApiKey", "sk-ant"]) {
+    assert.equal(serialized.includes(forbidden), false, `the served payload must never contain ${forbidden}`);
+  }
+});

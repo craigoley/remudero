@@ -60,6 +60,7 @@ import { buildTaskCardRoute } from "./task-card.js";
 import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operator-notes.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import { buildDaemonHealthRoute, type DaemonHealthDeps } from "./daemon-health.js";
+import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
 
 /** Default `rmd serve` port — matches apps/dashboard/src/main.ts's own `?daemon=` default (`http://localhost:4317`), so the shipped dashboard points at a served daemon out of the box. */
 export const DEFAULT_SERVE_PORT = 4317;
@@ -130,6 +131,14 @@ export interface ServeDeps {
    * follows (see `panelGraph.ratify`/`lastSeen`'s own docs, above).
    */
   daemonHealth?: Omit<DaemonHealthDeps, "ledgerPath" | "diskPath"> & { diskPath?: string };
+  /**
+   * The ACCOUNT strip's deps (see account-usage.ts's header). OPTIONAL and defaults to the real
+   * `~/.claude.json` + `Date.now`, exactly like `daemonHealth` above — the assembler wires the
+   * real reader, a test injects a captured one. The `ledgerPath` half is always the console's own,
+   * never a caller's, so the governor posture can never come from a different ledger than the
+   * rest of the page.
+   */
+  accountUsage?: Omit<AccountUsageDeps, "ledgerPath">;
 }
 
 /** Matches {@link buildBatchedGithub}'s own default `ttlMs` (status.ts) — kept as one named
@@ -428,6 +437,10 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   .glance-item { display: inline-flex; align-items: baseline; gap: 0.3em; font-size: 0.85rem; }
   .glance-label { color: var(--text-faint); }
   .glance-value { font-family: var(--font-mono); color: var(--text); font-weight: 600; }
+  /* The ACCOUNT strip's scope note — deliberately quiet and full-width-wrapping: it is a caveat
+     ("whole account, not just the fleet"), not a metric, and must never read as one more number. */
+  .glance-scope { flex-basis: 100%; }
+  .glance-scope .glance-label { font-size: 0.75rem; font-style: italic; }
   .glance-anomaly {
     margin: 0.4rem 0 0; padding: 0.3rem 0.6rem; border-radius: 6px; font-size: 0.85rem; font-weight: 600;
     background: rgba(255, 107, 107, 0.14); color: var(--status-blocked); border: 1px solid var(--status-blocked);
@@ -648,6 +661,21 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     <span class="glance-item"><span class="glance-label">next poll</span><span class="glance-value" id="dh-next-poll">…</span></span>
     <span class="glance-item"><span class="glance-label">disk free</span><span class="glance-value" id="dh-disk-free">…</span></span>
     <span class="glance-item"><span class="glance-label">rate limit</span><span class="glance-value" id="dh-rate-limit">…</span></span>
+  </section>
+  <!-- ACCOUNT strip: WHICH Anthropic account the fleet is spending, and how much of each usage
+       window is gone (GET /v1/account-usage; see account-usage.ts's header for why usage comes
+       from ~/.claude.json's cachedUsageUtilization and NOT from the daemon.headroom ledger line).
+       Same box metrics and the same .glance-item idiom as the two strips above, so it drops into
+       the header without a new layout. Every value starts "…" and renders "unknown" — never 0% —
+       when its own source could not be read; "usage as of" is always shown, even when fresh,
+       because a percentage nobody refreshes is worse than no percentage. -->
+  <section id="account-usage" class="daemon-health" aria-label="Anthropic account usage">
+    <span class="glance-item"><span class="glance-label">account</span><span class="glance-value" id="au-account">…</span></span>
+    <span class="glance-item"><span class="glance-label">5h window</span><span class="glance-value" id="au-five-hour">…</span></span>
+    <span class="glance-item"><span class="glance-label">7d window</span><span class="glance-value" id="au-seven-day">…</span></span>
+    <span class="glance-item"><span class="glance-label">governor</span><span class="glance-value" id="au-governor">…</span></span>
+    <span class="glance-item"><span class="glance-label">usage as of</span><span class="glance-value" id="au-as-of">…</span></span>
+    <span class="glance-item glance-scope"><span class="glance-label" id="au-measures"></span></span>
   </section>
   <p id="top-status" role="status" aria-live="polite">loading…</p>
   <p id="summary" class="counts" aria-live="polite"></p>
@@ -1211,6 +1239,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   let latestSpend = null; // GET /v1/status's { mergedToday, spendTodayUsd, spendWeekUsd } (board.ts's computeGlanceSpend)
   let latestNeedsMeRows = []; // set by renderNeedsMe -- the SAME combined NEEDS ME rows the section itself renders
   let latestDaemonHealth = null; // GET /v1/daemon-health's body
+  let latestAccountUsage = null; // GET /v1/account-usage's body (account-usage.ts's AccountUsageSnapshot)
   const BASE_TITLE = document.title;
   const NEEDS_ME_STALE_MS = 24 * 60 * 60 * 1000; // criterion 3's ">24h" anomaly-emphasis bound
 
@@ -1541,6 +1570,57 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     }
     setGlanceValue("dh-disk-free", h.diskFreeBytes != null ? formatBytes(h.diskFreeBytes) : "unknown");
     setGlanceValue("dh-rate-limit", h.rateLimitRemaining != null ? String(h.rateLimitRemaining) : "unknown");
+  }
+
+  /** One usage window as "12% · resets 20:50:00 EDT". "unknown" -- NEVER "0%" -- whenever the
+   *  server withheld the reading (account-usage.ts returns the window ABSENT rather than zero
+   *  for every unknown case, so a falsy check here can never turn a real 0% into "unknown":
+   *  a genuine zero arrives as the number 0 and \`w.percentUsed != null\` keeps it). */
+  function usageWindowLabel(w) {
+    if (!w || w.percentUsed == null) return "unknown";
+    const pct = \`\${w.percentUsed}%\`;
+    return w.resetsAt ? \`\${pct} · resets \${formatClock(w.resetsAt)}\` : pct;
+  }
+
+  /** Local wall-clock with the zone labeled, for a FUTURE instant (a window reset) -- the
+   *  relative half of formatTimestamp would read "3h ago" for something 3h away, so resets get
+   *  their own formatter rather than a misleading reuse. */
+  function formatClock(iso) {
+    const t = Date.parse(iso);
+    if (Number.isNaN(t)) return String(iso);
+    return new Date(t).toLocaleTimeString(undefined, { timeZoneName: "short" });
+  }
+
+  /** Renders GET /v1/account-usage's body -- WHICH account the fleet is spending and how much of
+   *  each window is gone. Read fresh per poll, so an account switch shows up on the next refresh
+   *  rather than at the next daemon restart.
+   *
+   *  THE STALENESS RULE, and why it is not the page's own STALE badge: \`#stale-badge\`/markStale
+   *  is a WHOLE-PAGE claim driven by the board transport (poll/SSE liveness). This reading has a
+   *  completely different clock -- ~/.claude.json's own \`fetchedAtMs\`, written by Claude Code and
+   *  by nothing in this repo -- so raising the page badge for it would tell the operator the task
+   *  board is stale when only the usage cache is. Instead the age is rendered inline, ALWAYS, and
+   *  the server withholds the numbers entirely once they are too old, from a different account,
+   *  or un-ageable (\`usageUnknownReason\`), at which point every window shows "unknown". */
+  function renderAccountUsage(a) {
+    setGlanceValue("au-account", a.accountEmail || a.accountUuid || "unknown");
+    setGlanceValue("au-five-hour", usageWindowLabel(a.fiveHour));
+    setGlanceValue("au-seven-day", usageWindowLabel(a.sevenDay));
+    const gov =
+      a.governor === "armed"
+        ? "ARMED"
+        : a.governor === "telemetry-only"
+          ? "telemetry only"
+          : "unknown";
+    // The posture has its OWN as-of (the newest daemon.headroom line): a fleet that has not
+    // ticked since the governor was flipped would otherwise report the pre-flip posture as
+    // current. Ageing it inline is the whole guard.
+    setGlanceValue("au-governor", a.governorAsOf ? \`\${gov} · \${formatRelative(a.governorAgeMs)}\` : gov);
+    setGlanceValue(
+      "au-as-of",
+      a.usageUnknownReason ? \`unknown (\${a.usageUnknownReason})\` : formatTimestamp(a.usageAsOf),
+    );
+    setGlanceValue("au-measures", a.measures || "");
   }
 
   /** The cache-restore path (W1-T154): ingest the cached snapshot's tasks/side-data and paint
@@ -2948,7 +3028,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     }
 
     try {
-      const [recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus, daemonHealth] = await Promise.all([
+      const [recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus, daemonHealth, accountUsage] = await Promise.all([
         getJson("/v1/recent").catch(() => ({ entries: [] })),
         getJson("/v1/drain/preview?max=5").catch(() => ({ cards: [] })),
         getJson("/v1/feedback").catch(() => ({ entries: [] })),
@@ -2958,6 +3038,10 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
         // the rest of the refresh (same catch-and-degrade convention as every sibling above); the
         // widget just keeps showing its last-known values (or "…" pre-first-success).
         getJson("/v1/daemon-health").catch(() => null),
+        // The ACCOUNT strip's own fetch, on the SAME refresh cycle and under the SAME
+        // catch-and-degrade convention as every sibling above: a failure here leaves the strip
+        // showing its last-known values (or "…" pre-first-success) and never breaks the refresh.
+        getJson("/v1/account-usage").catch(() => null),
       ]);
       latestFeedbackEntries = feedbackSnap.entries ?? [];
       latestInboxReady = inboxSnap.ready ?? [];
@@ -2967,6 +3051,10 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
       if (daemonHealth) {
         latestDaemonHealth = daemonHealth;
         renderDaemonHealth(daemonHealth);
+      }
+      if (accountUsage) {
+        latestAccountUsage = accountUsage;
+        renderAccountUsage(accountUsage);
       }
       // W1-T223: ONLY here (never off the status-only pass above) -- see finishSectionRender's
       // own doc for why defaulting/summarizing off still-empty feedback/inbox/up-next/recent
@@ -3241,10 +3329,13 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     defaultPollIntervalMs: deps.daemonHealth?.defaultPollIntervalMs,
   };
 
+  const accountUsageDeps: AccountUsageDeps = { ...deps.accountUsage, ledgerPath: deps.ledgerPath };
+
   return [
     buildStatusRoute(deps.board, lastSeen),
     buildRecentRoute(deps.board),
     buildDaemonHealthRoute(daemonHealthDeps),
+    buildAccountUsageRoute(accountUsageDeps),
     buildControlStatusRoute(fleetControlDeps),
     buildPauseRoute(fleetControlDeps),
     buildResumeRoute(fleetControlDeps),
