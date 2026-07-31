@@ -277,7 +277,7 @@ import {
   type LintOpts,
 } from "./lib/task-linter.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
-import { loadPolicy, policyPath, PolicyError, type PolicyHeadroomRung } from "./lib/policy.js";
+import { loadPolicy, policyPath, PolicyError, type Policy, type PolicyHeadroomRung } from "./lib/policy.js";
 import { deriveTaskClass } from "./lib/task-class.js";
 import { realRiskJudge, resolveRiskJudgeMount, runRiskJudge, type RiskJudgeInput } from "./lib/risk-judge.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
@@ -3198,7 +3198,24 @@ export function resolveRunMounts(
   repoRootDir: string,
   task: Pick<Task, "type" | "risk" | "files">,
   log: (step: string, extra?: Record<string, unknown>) => void,
-): { mount: Mount; reviewerMount: Mount; fixMount: Mount; taskClass: string; mountClass: string } {
+): {
+  mount: Mount;
+  reviewerMount: Mount;
+  fixMount: Mount;
+  /**
+   * impl-BP — the RECON stage's own mount (`routes.recon`, task_type "recon" × risk × class).
+   *
+   * OPTIONAL, AND THAT IS THE SAFETY PROPERTY. Recon runs on EVERY dispatch, so a throw here
+   * would break all dispatch rather than one lane. `resolveMountForClass` throws `MountsError`
+   * on a missing/unroutable row, so it is called behind a try/catch and yields `undefined`
+   * instead — and the recon spawn omits `model`/`effort` when it is `undefined`, which is
+   * byte-for-byte today's behaviour (`lib/worker.ts`'s `if (args.model)` / `if (args.effort)`
+   * guards simply never fire). A table without a `recon:` row is therefore INERT, not fatal.
+   */
+  reconMount: Mount | undefined;
+  taskClass: string;
+  mountClass: string;
+} {
   const mountsTable = loadMounts(mountsPath(repoRootDir));
   const taskClass = deriveTaskClass(task);
   const mountResolution = resolveMountForClass(mountsTable, task.type, task.risk, taskClass);
@@ -3215,10 +3232,34 @@ export function resolveRunMounts(
   // The fresh advisory reviewer is its OWN mount-governed phase (task_type="reviewer",
   // W1-T63/P10); the blocked_review fix rung rides its own "fix" row (W1-T76) —
   // both resolved here alongside the task's own mount, never an undeclared literal.
+  // impl-BP — RESOLVE THE RECON ROW, the one `routes:` entry nothing read. `.remudero/
+  // mounts.yaml` has carried a fully-specified `recon:` block (haiku for low-risk/docs/plan-lint,
+  // sonnet for medium/high src) since the class axis landed, and the recon spawn passed neither
+  // `model` nor `effort` — so every recon in this repo's history ran on the SDK default. Measured
+  // over the ledger unioned across all 661 rotations: 413 `recon.done` rows, model label
+  // `"default"` on every single one, never a routed model. Same defect class as the `#781
+  // architect:` row CLAUDE.md already records — a row that looks configured and has no reader.
+  //
+  // FAIL-SOFT BY CONSTRUCTION, because recon runs on EVERY dispatch: `resolveMountForClass`
+  // throws on an absent/unroutable row, so a table without `recon:` (or an older committed table)
+  // must degrade to today's behaviour rather than take the whole fleet down. The catch yields
+  // `undefined`, the spawn then omits both knobs, and `lib/worker.ts`'s `if (args.model)` /
+  // `if (args.effort)` guards leave the SDK default in place exactly as before.
+  let reconMount: Mount | undefined;
+  try {
+    reconMount = resolveMountForClass(mountsTable, "recon", task.risk, taskClass).mount;
+  } catch (e) {
+    log("mount.recon_unrouted", {
+      risk: task.risk,
+      task_class: taskClass,
+      reason: String((e as Error)?.message ?? e),
+    });
+  }
   return {
     mount: mountResolution.mount,
     reviewerMount: resolveMount(mountsTable, "reviewer", task.risk),
     fixMount: resolveMount(mountsTable, "fix", task.risk),
+    reconMount,
     taskClass,
     mountClass: mountResolution.resolvedClass,
   };
@@ -3411,7 +3452,7 @@ async function runTask(
   // checkout — resolution + the loud class-fallback ledgering live in
   // resolveRunMounts (exported, above) so every branch, including the fallback a
   // COMPLETE committed table can never reach, is unit-covered with fixture tables.
-  const { mount, reviewerMount, fixMount, taskClass, mountClass } = resolveRunMounts(repoRoot, task, log);
+  const { mount, reviewerMount, fixMount, reconMount, taskClass, mountClass } = resolveRunMounts(repoRoot, task, log);
   log("run.start", {
     repo: task.repo,
     type: task.type,
@@ -3603,6 +3644,21 @@ async function runTask(
         cwd: worktreePath,
         permissionMode: "bypassPermissions",
         settingsFile,
+        // impl-BP: model/effort come from the RECON row of the mount table (task_type "recon" ×
+        // risk × class, §9) — the same discipline the implement spawn ~100 lines below states as
+        // "never a hardcoded literal". These were simply absent, so every recon ran on the SDK
+        // default and `routes.recon` was dead data.
+        //
+        // `undefined` is a SUPPORTED value, not a bug: `lib/worker.ts`'s `if (args.model)` /
+        // `if (args.effort)` guards leave the option unset, which is exactly today's behaviour.
+        // That is what makes an absent/unreadable `recon:` row inert here — see resolveRunMounts.
+        model: reconMount?.model,
+        effort: reconMount?.effort,
+        // maxTurns DELIBERATELY NOT taken from the mount, and the ROW now agrees with this cap.
+        // impl-BP flagged a 50x contradiction (rows said 400, this said 8); the operator ruled the
+        // ROW moves to 8 rather than this bound moving to 400, so recon stays cheap on every
+        // dispatch and the table no longer asserts something the code does not do (impl-BS).
+        // Both halves are pinned by test/recon-mount-routing.test.ts so neither can drift back.
         maxTurns: 8, // recon is read-only + bounded; turns stay tight here.
         maxBudgetUsd: budgetUsd, // dollars are the real backstop (WS-0 knob a).
         config,
@@ -5224,10 +5280,16 @@ function retroShippedGithubGateway(): ShippedGithub {
  * real marker/ledger/shipped wiring without a live `gh` round-trip. Production passes
  * neither, so `config` is the live `loadConfig()` and `github` the shared
  * `retroShippedGithubGateway` — the same construction `retroCommand`'s own gather uses.
+ * `deps.policy` is the SAME seam for the cadence thresholds (W1-T264, P37 CONSUMER):
+ * production passes none, so the cadence reads `plan/policy.yaml`'s `retro` row (the
+ * same `loadPolicy(policyPath(repoRoot))` construction `daemonCommand`/`drainCommand`
+ * already use) instead of `evaluateRetroTrigger`'s own source-literal default; a test
+ * injects a fixture `Policy` to prove a threshold edit changes the firing decision
+ * with no source edit.
  */
 export function retroTriggerCheck(
   now: Date = new Date(),
-  deps: { config?: Config; github?: ShippedGithub } = {},
+  deps: { config?: Config; github?: ShippedGithub; policy?: Policy } = {},
 ): RetroTriggerDecision | undefined {
   const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
@@ -5240,7 +5302,11 @@ export function retroTriggerCheck(
   const ledgerNdjson = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
   const runs = gatherRuns(parseLedger(ledgerNdjson));
   const mergesSinceMarker = shippedSince(runs, marker?.ts, github).shipped.length;
-  return evaluateRetroTrigger(mergesSinceMarker, marker?.ts, now);
+  const policy = deps.policy ?? loadPolicy(policyPath(repoRoot));
+  return evaluateRetroTrigger(mergesSinceMarker, marker?.ts, now, {
+    mergesThreshold: policy.values.retro.mergesThreshold,
+    daysThreshold: policy.values.retro.daysThreshold,
+  });
 }
 
 /**

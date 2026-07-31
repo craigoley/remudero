@@ -56,6 +56,13 @@ export interface PolicyValues {
   drain: {
     max: number;
   };
+  /** The daemon's retro cadence trigger (W1-T264) — {@link RetroTriggerPolicy}'s two
+   *  fields, lifted off `src/lib/retro.ts`'s `DEFAULT_RETRO_MERGES_THRESHOLD`/
+   *  `DEFAULT_RETRO_DAYS_THRESHOLD` source literals. */
+  retro: {
+    mergesThreshold: number;
+    daysThreshold: number;
+  };
   headroom: {
     curve: PolicyHeadroomRung[];
     reservePct: number;
@@ -105,6 +112,8 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "sweep.strikeCap": "lifted",
   "sweep.wipLimit": "lifted",
   "drain.max": "lifted",
+  "retro.mergesThreshold": "lifted",
+  "retro.daysThreshold": "lifted",
   "headroom.curve": "lifted",
   "headroom.reservePct": "lifted",
   "headroom.enabled": "lifted",
@@ -273,6 +282,11 @@ export function validatePolicy(raw: unknown): Policy {
   if (!isPlainObject(drainRaw)) throw new PolicyError("policy.yaml: 'drain' must be a mapping.");
   const drainMax = numberField("drain.max", drainRaw.max, origin);
 
+  const retroRaw = raw.retro;
+  if (!isPlainObject(retroRaw)) throw new PolicyError("policy.yaml: 'retro' must be a mapping.");
+  const retroMergesThreshold = numberField("retro.mergesThreshold", retroRaw.mergesThreshold, origin);
+  const retroDaysThreshold = numberField("retro.daysThreshold", retroRaw.daysThreshold, origin);
+
   const headroomRaw = raw.headroom;
   if (!isPlainObject(headroomRaw)) throw new PolicyError("policy.yaml: 'headroom' must be a mapping.");
   const curve = validateHeadroomCurve(headroomRaw.curve, origin);
@@ -291,6 +305,7 @@ export function validatePolicy(raw: unknown): Policy {
       fixStrikeCap,
       sweep: { staleDays, strikeCap: sweepStrikeCap, wipLimit },
       drain: { max: drainMax },
+      retro: { mergesThreshold: retroMergesThreshold, daysThreshold: retroDaysThreshold },
       headroom: { curve, reservePct, enabled: headroomEnabled },
       launchd: { throttleIntervalS },
     },
