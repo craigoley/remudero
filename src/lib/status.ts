@@ -16,6 +16,7 @@ import fs from "node:fs";
 import { dirname } from "node:path";
 import type { Plan, Task, TaskStatus } from "./plan.js";
 import { labelledIssuesRestArgs, NEEDS_HUMAN_LABEL, parseLabelledIssuesRest } from "./escalate.js";
+import { type BoardPrRest, fetchBoardPrsRest } from "./open-prs-rest.js";
 
 /**
  * Derived task status (MASTER-PLAN v2.1 decision, implemented here).
@@ -1852,22 +1853,46 @@ export function buildBatchedGithub(
     // that specific failure is now classified instead of "unknown".
     ((args: string[]) =>
       execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26 }));
+  // W1-T265: the cross-refresh row cache the REST delta stops against. Held HERE, at gateway
+  // scope, not inside `index()` — `index()` deliberately replaces its own cache with an EMPTY
+  // one on a failed fetch (the W1-T181 pairing below), and reusing that as the delta base would
+  // turn one transient failure into a permanent cold re-walk. Untouched on a throw, so a recovery
+  // costs 2 requests rather than 8.
+  let knownBoardPrs: Map<number, BoardPrRest> | undefined;
   const fetchAll =
     opts.fetchAll ??
     (() => {
-      const raw = run([
-        // W1-T155: `autoMergeRequest` rides along on this SAME single fetch — the
-        // armed-awaiting-merge taxonomy costs zero extra `gh` calls, preserving the
-        // board-fix O(1) invariant this gateway exists for.
-        // "title" rides along too (W1-T184) — RECENT's PR-title decoration costs zero extra
-        // `gh` calls, same O(1) invariant this gateway already holds for autoMergeRequest.
-        "pr", "list", "--repo", slug, "--state", "all", "--json", "number,url,state,headRefName,body,autoMergeRequest,title", "--limit", "1000",
-      ]);
+      // W1-T265: REST, NOT `gh pr list --state all --json …`. That flag is implemented over
+      // GraphQL, and MEASURED on 2026-07-31 it cost 12 GraphQL points and 2,888,862 bytes per
+      // call for this repo's 687 PRs. At the 15 s TTL below, one open console tab drove 240
+      // calls/hour = 2,880 of the account's 5,000 GraphQL points — ~58% of the whole budget —
+      // and when it ran out this fetch threw, merged-ness became underivable, and long-merged
+      // tasks stayed pinned at the head of UP NEXT until the hourly reset. See
+      // state/recon-BV-console-visibility.md Q5/Q6, and lib/open-prs-rest.ts for the delta.
+      //
+      // `autoMergeRequest` (W1-T155) and `title` (W1-T184) still ride along on the SAME fetch —
+      // `mapBoardPr` carries both — so the O(1)-per-projection invariant this gateway exists for
+      // is unchanged; only the transport and the re-read volume moved.
+      let bytes = 0;
+      const fetchJson = (args: string[]): unknown => {
+        const raw = run(args);
+        bytes += Buffer.byteLength(raw, "utf8");
+        return JSON.parse(raw);
+      };
+      const fetched = fetchBoardPrsRest(owner, repo, fetchJson, knownBoardPrs);
+      knownBoardPrs = new Map(fetched.rows.map((r) => [r.number, r]));
       // W1-T181 design (vi): log the payload size on every SUCCESSFUL fetch, so the next
       // approach to whatever ceiling is set above is observable in advance instead of arriving
-      // as a silent outage the way tonight's did.
-      log("board_gateway.fetch_bytes", { bytes: Buffer.byteLength(raw, "utf8") });
-      return JSON.parse(raw) as BatchedPr[];
+      // as a silent outage the way tonight's did. `restCalls`/`mode` are W1-T265 additions — the
+      // whole claim of this change is that `restCalls` sits at 2, so it is measured in the
+      // ledger rather than asserted.
+      log("board_gateway.fetch_bytes", {
+        bytes,
+        restCalls: fetched.calls,
+        mode: fetched.mode,
+        truncated: fetched.truncated,
+      });
+      return fetched.rows;
     });
 
   // W1-T182: an INDEPENDENT batched fetch/cache pair for escalation issues, deliberately not

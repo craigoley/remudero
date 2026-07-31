@@ -160,7 +160,7 @@ export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[]
 }
 
 /** One pull request as REST's `/pulls` endpoint returns it — the wire shape, never a consumer's. */
-interface RestPullRow {
+export interface RestPullRow {
   number: number;
   /** The api.github.com URL. DROPPED — consumers match on the github.com web URL. */
   url?: string;
@@ -174,6 +174,8 @@ interface RestPullRow {
   head?: { ref?: string; sha?: string };
   /** `null` unless auto-merge is armed. Consumed ONLY as a nullity test. */
   auto_merge?: unknown;
+  /** The PR title (W1-T184's RECENT decoration). Absent only on a malformed row. */
+  title?: string;
 }
 
 /** The enumeration's output row — structurally what `gh pr list --json …` produced. */
@@ -267,4 +269,188 @@ export function fetchSinglePrRest(
     state: prStateFromRest(row),
     statusCheckRollup: rollupFor(owner, repo, pr.headRefOid, fetch),
   };
+}
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────
+ * THE BOARD GATEWAY'S ENUMERATION (W1-T265) — the SECOND consumer of this module.
+ *
+ * The sweep's enumeration above needs OPEN PRs plus each head's checks. The board gateway
+ * (`buildBatchedGithub`, lib/status.ts) needs something different and much larger: EVERY PR in
+ * every state, with `body` (the `Remudero-Task:` trailer index) and `title`, and no checks at
+ * all. Its call was still `gh pr list --state all --limit 1000 --json …` — GraphQL.
+ *
+ * MEASURED, 2026-07-31, running that exact command against this repo: 687 PRs, 2,888,862 bytes,
+ * 12 GraphQL points. The gateway's TTL is 15 s and the console polls every 3 s, so ONE open
+ * browser tab drives 240 fetches/hour = 2,880 of the account's 5,000 GraphQL points — ~58% of
+ * the whole budget, spent re-downloading a set that is 686/687 immutable. When it runs out the
+ * fetch throws, merged-ness becomes underivable, and long-merged tasks sit pinned at the head of
+ * UP NEXT until the hourly reset (state/recon-BV-console-visibility.md, Q5/Q6).
+ *
+ * WHY NOT JUST `fetchOpenPrsRest`. It is open-only, it carries no `title`, and it pays 1+2N
+ * requests for the check rollups the board never reads. The three translations that ARE shared —
+ * `mapRestPr`, `prStateFromRest`, `RestPullRow` — are reused verbatim below rather than
+ * re-derived, which is the whole reason this lives in this module and not a new one.
+ *
+ * WHY A DELTA. A naive full REST paginate is 7 requests and 13,658,113 bytes per poll (measured,
+ * same day) — better on points than GraphQL but 4.7x WORSE on bytes, and 1,680 core points/hour.
+ * Trading a starved GraphQL budget for a starved core budget is not a fix. So the cold pass runs
+ * once and every refresh after it reads only what changed. See {@link fetchBoardPrsRest}.
+ * ──────────────────────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * The board's list argv for ONE page of one state.
+ *
+ * `sort=updated&direction=desc` is LOAD-BEARING, not cosmetic — it is the entire basis of the
+ * delta's early stop. `page`/`per_page` rather than `--paginate` for the same reason
+ * {@link openPrsRestArgs} avoids it: bare `--paginate` emits one JSON array per page, which
+ * `JSON.parse` rejects, and the `--slurp` that fixes that cannot be combined with `--jq`.
+ */
+export function boardPrsRestArgs(owner: string, repo: string, state: "open" | "closed", page: number, perPage: number): string[] {
+  return ["api", `repos/${owner}/${repo}/pulls?state=${state}&sort=updated&direction=desc&per_page=${perPage}&page=${page}`];
+}
+
+/**
+ * One board row — structurally what `gh pr list --json number,url,state,headRefName,body,
+ * autoMergeRequest,title` produced, plus the `updatedAt` the delta stops on.
+ */
+export interface BoardPrRest {
+  number: number;
+  url: string;
+  /** UPPERCASE "OPEN" | "CLOSED" | "MERGED", via {@link prStateFromRest}. */
+  state: string;
+  headRefName: string;
+  body: string;
+  autoMergeRequest: unknown;
+  title: string;
+  /** REST's `updated_at`. Not rendered — the delta's stop key. */
+  updatedAt: string;
+}
+
+/**
+ * Translate one REST pull row to the board's row shape.
+ *
+ * Everything except `state` and `title` comes from {@link mapRestPr}, so the four load-bearing
+ * translations documented there (html_url, `body ?? ""`, `headRefName ?? ""`, verbatim
+ * `auto_merge`) hold here by construction rather than by a second copy of the same reasoning.
+ * Two more are added:
+ *
+ *  5. `state` runs through {@link prStateFromRest}, NOT `state.toUpperCase()`. REST reports a
+ *     merged PR as `{state: "closed", merged: true}`; the board's index does
+ *     `all.filter((p) => p.state === "MERGED")` to build `mergedNewestFirst`, which backs
+ *     `findMergedByTrailer` / `findMergedByHeadBranch` / `listMergedHeadBranches` — i.e. every
+ *     merged-ness answer the board renders. A plain upper-case would make that filter match
+ *     NOTHING and every merged task would render as still queued.
+ *  6. `title` normalises absent to `""`. `PrRef.title` is optional, so `undefined` renders as an
+ *     undecorated RECENT row rather than an error — silent, which is why it is pinned here.
+ */
+export function mapBoardPr(row: RestPullRow): BoardPrRest {
+  const base = mapRestPr(row);
+  return {
+    number: base.number,
+    url: base.url,
+    state: prStateFromRest(row),
+    headRefName: base.headRefName,
+    body: base.body,
+    autoMergeRequest: base.autoMergeRequest,
+    title: row.title ?? "",
+    updatedAt: base.updatedAt,
+  };
+}
+
+/** Cold pass page size — 687 PRs is 7 requests. */
+const BOARD_FULL_PAGE_SIZE = 100;
+/**
+ * Delta page size. Smaller because a steady-state refresh only has to reach the first row it
+ * already holds unchanged, which in practice is row 1 or 2 — a 100-row page would move ~2.2 MB
+ * to learn that nothing happened. Page size must be constant WITHIN a run (mixing sizes across
+ * `page=` offsets would skip rows), so a delta that somehow needs a second page pays 30 again.
+ */
+const BOARD_DELTA_PAGE_SIZE = 30;
+/** Runaway guard: 50 pages is 5,000 PRs at the full size. Reported, never silent. */
+const BOARD_MAX_PAGES = 50;
+
+/** What a board fetch cost, for the ledger — the point of the exercise is that this stays small. */
+export interface BoardFetchResult {
+  rows: BoardPrRest[];
+  /** REST requests issued. Steady state is 2. */
+  calls: number;
+  mode: "full" | "delta";
+  /** True if {@link BOARD_MAX_PAGES} stopped the walk — a truncated view, never silent. */
+  truncated: boolean;
+}
+
+/**
+ * Every PR in the repo, over REST, re-reading only what can have changed.
+ *
+ * TWO HALVES, because they have different mutability:
+ *
+ *   HOT — every OPEN PR, re-read unconditionally on every call. Open PRs are the only ones whose
+ *   rendered fields can still move, and this repo runs 1–10 of them, so it is one small request
+ *   (15,490 bytes measured). Doing it unconditionally is deliberate belt-and-braces: it does not
+ *   depend on GitHub bumping `updated_at` for the mutation in question, which matters most for
+ *   `auto_merge` — arming is exactly the kind of state change whose `updated_at` behaviour I did
+ *   not want the armed/unarmed badge to rest on.
+ *
+ *   COLD — CLOSED and MERGED PRs, walked newest-updated-first and stopped at the first row
+ *   already held with an identical `updated_at`.
+ *
+ * WHY THE STOP IS SOUND, stated because a wrong stop silently freezes a row forever. The cache is
+ * complete as of the last successful call at time F. Anything that changed after F has
+ * `updated_at > F`; anything unchanged has `updated_at <= F`. The walk is sorted by `updated_at`
+ * descending, so every changed row sorts strictly above every unchanged one. The first row whose
+ * `updated_at` matches the cache is therefore unchanged, and so is everything below it. The base
+ * case is the cold pass, which walks to the end with no cache to stop on.
+ *
+ * ROWS THE WALK NEVER REACHES KEEP THEIR CACHED VALUES. That is the point: a merged PR's number,
+ * url, state, head ref, body, title and auto-merge record are all frozen at merge.
+ *
+ * THROWS on any failed page, exactly as the `gh pr list` call it replaces threw, and WITHOUT
+ * mutating the caller's cache — so a failure leaves the previous complete snapshot intact and the
+ * next successful call is still a cheap delta rather than a cold re-walk. Swallowing here would
+ * turn an outage into "the repo has zero PRs", which is the W1-T181 hazard this codebase already
+ * paid for once.
+ */
+export function fetchBoardPrsRest(
+  owner: string,
+  repo: string,
+  fetch: GhApiFetcher,
+  known?: ReadonlyMap<number, BoardPrRest>,
+): BoardFetchResult {
+  const mode: "full" | "delta" = known && known.size > 0 ? "delta" : "full";
+  const perPage = mode === "delta" ? BOARD_DELTA_PAGE_SIZE : BOARD_FULL_PAGE_SIZE;
+  const out = new Map<number, BoardPrRest>(known ?? []);
+  let calls = 0;
+  let truncated = false;
+
+  // HOT half. Paginated properly rather than assuming one page: a repo that ever holds >100 open
+  // PRs must not silently drop the tail of them.
+  for (let page = 1; page <= BOARD_MAX_PAGES; page += 1) {
+    const rows = fetch(boardPrsRestArgs(owner, repo, "open", page, perPage)) as RestPullRow[];
+    calls += 1;
+    for (const row of rows) {
+      const pr = mapBoardPr(row);
+      out.set(pr.number, pr);
+    }
+    if (rows.length < perPage) break;
+    if (page === BOARD_MAX_PAGES) truncated = true;
+  }
+
+  // COLD half.
+  for (let page = 1; page <= BOARD_MAX_PAGES; page += 1) {
+    const rows = fetch(boardPrsRestArgs(owner, repo, "closed", page, perPage)) as RestPullRow[];
+    calls += 1;
+    let reachedKnown = false;
+    for (const row of rows) {
+      if (known?.get(row.number)?.updatedAt === row.updated_at) {
+        reachedKnown = true;
+        break;
+      }
+      const pr = mapBoardPr(row);
+      out.set(pr.number, pr);
+    }
+    if (reachedKnown || rows.length < perPage) break;
+    if (page === BOARD_MAX_PAGES) truncated = true;
+  }
+
+  return { rows: [...out.values()], calls, mode, truncated };
 }
