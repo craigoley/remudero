@@ -33,7 +33,7 @@ import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import { nextRunnable, type MergedSet, type OpenPrCheck } from "./drain.js";
-import { HEADROOM_LIMIT_PCT } from "./headroom.js";
+import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import { assertRunnable, PlanError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import type { StatusProjection } from "./status.js";
@@ -300,17 +300,32 @@ interface ResolvedWindow {
  * the enforcement decision (the governor ON path), so both share ONE resolution.
  */
 function resolveHeadroomWindows(snap: UsageSnapshot, now: Date, policy: HeadroomPolicy): ResolvedWindow[] {
-  const windows: Array<{ window: string; percentUsed: number; resetsAt: string }> = [
+  // `resetsAt` is OPTIONAL on a `UsageWindow` (headroom.ts): the CLI emits weekly lines with no
+  // `· resets …` clause at all. Carried through as possibly-absent rather than coerced here, so
+  // the two distinct cases below stay distinguishable.
+  const windows: Array<{ window: string; percentUsed: number; resetsAt?: string }> = [
     { window: "session (5h)", percentUsed: snap.session.percentUsed, resetsAt: snap.session.resetsAt },
     ...snap.weekly.map((w) => ({ window: `weekly (${w.label})`, percentUsed: w.percentUsed, resetsAt: w.resetsAt })),
   ];
   return windows
     .map((w) => {
-      const instant = parseResetInstant(w.resetsAt, now);
+      // THREE STATES, not two, and the ceiling treats the last two identically ON PURPOSE:
+      //   (a) reset present and parseable  -> a real hoursToReset; the time-aware curve applies.
+      //   (b) reset present but unparseable -> null (parseResetInstant's own contract).
+      //   (c) reset ABSENT entirely         -> null, WITHOUT calling parseResetInstant at all.
+      // `resolveHeadroomLimitPct(null, …)` returns the LAST (WIDEST) rung — the strict 95%
+      // reserve — never the relaxed 100% final-day rung. Its own doc: "uncertainty is NEVER read
+      // as 'we must be in the final day'; the ceiling only ever relaxes on a CONFIRMED close
+      // reset." So a window whose reset we do not know is held to the STRICTER ceiling, which is
+      // the fail-closed direction at the spending boundary. Absent is explicit here, not accidental.
+      const instant = w.resetsAt !== undefined ? parseResetInstant(w.resetsAt, now) : null;
       const hoursToReset = instant ? (instant.getTime() - now.getTime()) / 3_600_000 : null;
       return {
         ...w,
-        resetsAtDisplay: instant ? formatResetInstant(instant) : w.resetsAt,
+        // The sentinel is applied HERE, at the one render/record boundary, so `resets_at` on the
+        // ledger line and the escalation issue read "unknown" rather than the word "undefined".
+        resetsAt: w.resetsAt ?? RESET_UNKNOWN,
+        resetsAtDisplay: instant ? formatResetInstant(instant) : (w.resetsAt ?? RESET_UNKNOWN),
         limitPct: resolveHeadroomLimitPct(hoursToReset, policy),
       };
     })
