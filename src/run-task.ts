@@ -1713,11 +1713,8 @@ async function runReview(args: {
   // compares it to the head this verdict was written against, so a push landing between the
   // verdict and this call is still refused. No `posted.posted` guard is needed: the `if
   // (!posted.posted)` branch above already returned.
-  armIfVerdictPermits(
-    verdict,
-    { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log },
-    { arm: args.arm },
-  );
+  const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log };
+  armIfVerdictPermits(verdict, armCtx, { arm: args.arm });
   if (verdict.capped) {
     say(cappedAnnotation(proofExec.length));
   } else if (verdict.floorDegraded) {
