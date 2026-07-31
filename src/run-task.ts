@@ -8340,6 +8340,27 @@ export function buildFixRungDispatchArgs(args: {
  * fail-soft — a reconstruction hiccup escalates rather than crashing the sweep,
  * so one bad PR never strands the reconciler over the rest.
  */
+/**
+ * The escalation's TASK IDENTITY for one open PR — pure, so the mint itself is testable without
+ * reaching the `escalate` closure's real issue gateway.
+ *
+ * A PR carrying a `Remudero-Task:` trailer escalates under its own task id. A PR without one is the
+ * OPERATOR-LANE agent PR — the class with neither a task nor a run id — and it used to be stamped
+ * the literal string `"UNKNOWN"`. That is not a plan task id, so
+ * `buildEscalationReconcileCandidates`'s `plan.byId.get(taskId)` missed it and the resulting issue
+ * could NEVER be retired: 53 of 57 open needs-human issues carried `**Task:** UNKNOWN` while the
+ * reconciler's population read 0 on every pass.
+ *
+ * `PR-<n>` is NOT a new convention — it is the SAME synthetic id the review lane already mints at
+ * four call sites in this file, so an operator grepping either surface sees ONE identity for the
+ * PR. And it round-trips: {@link buildEscalationReconcileCandidates} resolves a `PR-<n>` referent
+ * directly from the number, because an id that is enumerable but UNDERIVABLE would convert a
+ * visible orphan into an invisible one, which is strictly worse than leaving it alone.
+ */
+export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
+  return pr.taskId ?? `PR-${pr.prNumber}`;
+}
+
 export function buildSweepEffects(
   owner: string,
   repo: string,
@@ -8361,9 +8382,14 @@ export function buildSweepEffects(
   // untouched. Same rationale as `reviewRunner`/`spawnImpl` above: the ABSENT remedy's wiring
   // is unit-covered with a recorder instead of a real push to a real branch.
   pushEmptyCommit: typeof gitPushEmptyCommit = gitPushEmptyCommit,
+  // Injectable issue gateway — appended LAST so no positional caller shifts, the same convention
+  // `reviewRunner`/`spawnImpl`/`pushEmptyCommit` above already follow. Without it the `escalate`
+  // closure's own body is unreachable from any offline test (it would open a REAL needs-human
+  // issue), which is exactly how the `taskId:` mint inside it went uncovered.
+  issuesImpl?: IssueGateway,
 ): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview" | "repushAbsent"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
-  const issues = ghIssueGateway(owner, repo);
+  const issues = issuesImpl ?? ghIssueGateway(owner, repo);
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
 
   return {
@@ -8462,20 +8488,9 @@ export function buildSweepEffects(
       escalate(
         {
           class: "BLOCKED",
-          // A PR with no `Remudero-Task:` trailer is the OPERATOR-LANE agent PR — the one class
-          // with neither a task nor a run id, and most of what this repo produced today. It used
-          // to be stamped the literal string "UNKNOWN", which is not a plan task id, so
-          // `buildEscalationReconcileCandidates`'s `plan.byId.get(taskId)` missed and the issue
-          // could NEVER be retired: 53 of 57 open needs-human issues carried `**Task:** UNKNOWN`
-          // while the reconciler's population read 0 on every pass.
-          //
-          // `PR-<n>` is NOT a new convention — it is the SAME synthetic id the review lane already
-          // mints at four call sites in this file (the ledger `task_id`, the review `task.id`, and
-          // `armAndLogOutcome`), so an operator grepping either surface sees one identity for the
-          // PR, not two. The reconciler resolves it directly from the number (see
-          // `buildEscalationReconcileCandidates`) — minting an id that is enumerable but
-          // underivable would convert a visible orphan into an invisible one, which is worse.
-          taskId: pr.taskId ?? `PR-${pr.prNumber}`,
+          // See {@link escalationTaskIdFor} — pure and separately tested, so the mint that makes
+          // this issue retirable cannot silently regress behind this closure's real gateway.
+          taskId: escalationTaskIdFor(pr),
           runId,
           // W1-T195: the SAME composite-key dimensions the fix rung's exhaustion
           // escalate sets (runFixRung, above) — `pr.headSha` is the SAME field the

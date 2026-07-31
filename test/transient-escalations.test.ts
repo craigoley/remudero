@@ -11,7 +11,8 @@ import {
   type OpenPrView,
 } from "../src/lib/sweep.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { buildEscalationReconcileCandidates } from "../src/run-task.js";
+import { buildEscalationReconcileCandidates, buildSweepEffects, escalationTaskIdFor } from "../src/run-task.js";
+import type { Config } from "../src/lib/config.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 
 /**
@@ -231,4 +232,58 @@ test("an OPEN untrailered PR's issue is enumerated but LEFT LIVE, and an unreada
   assert.equal(dark[0].derived.indeterminate, true, "unreadable is not the same as unmerged");
   const darkSummary = await runEscalationReconcile(dark, { closeIssue: () => { throw new Error("must not close on a failed read"); }, ledgerPath, runId: "T" } as never);
   assert.equal(darkSummary.closed, 0);
+});
+
+test("the escalation MINTS a PR referent for an untrailered PR, and keeps a real task id untouched", () => {
+  // THE MINT ITSELF. The enumeration tests above hand the reconciler a body that already says
+  // `PR-1038`, so they pass even if the escalate call site still stamps "UNKNOWN" — I found that
+  // gap by running the falsifier and watching it NOT fail. This closes it at the source.
+  assert.equal(escalationTaskIdFor({ taskId: undefined, prNumber: 1038 }), "PR-1038");
+  assert.equal(escalationTaskIdFor({ prNumber: 921 }), "PR-921");
+
+  // NEVER the old sentinel — that string is what made 53 issues unretirable.
+  assert.notEqual(escalationTaskIdFor({ prNumber: 1038 }), "UNKNOWN");
+
+  // A trailered PR is untouched: the reconciler's existing task path is working and closed three
+  // issues today, and this change must not divert it.
+  assert.equal(escalationTaskIdFor({ taskId: "W1-T254", prNumber: 720 }), "W1-T254");
+
+  // And the minted form is exactly what the reconciler's referent regex accepts, so mint and
+  // resolve cannot drift apart.
+  assert.match(escalationTaskIdFor({ prNumber: 1038 }), /^PR-\d+$/);
+});
+
+test("the real escalate closure stamps the PR referent on the issue it opens", () => {
+  // THE WIRING, not just the helper. The three tests above prove the mint and the resolve; this
+  // proves the escalate closure actually CALLS the mint — the line diff-coverage flagged, and the
+  // one that would silently revert to "UNKNOWN" if someone edited the closure. Driven through the
+  // injectable issue gateway so nothing reaches real GitHub.
+  const root = mkdtempSync(join(tmpdir(), "cn-esc-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  writeFileSync(ledgerPath, "");
+  const opened: { title: string; body: string }[] = [];
+  const issuesImpl = {
+    listOpen: () => [],
+    findOpenByTitle: () => null,
+    create: (title: string, body: string) => { opened.push({ title, body }); return "https://github.com/craigoley/remudero/issues/9001"; },
+    comment: () => {},
+  } as never;
+
+  const effects = buildSweepEffects(
+    "craigoley", "remudero",
+    { claudeBin: "/bin/true", root } as Config,
+    ledgerPath, "TEST-RUN", fixturePlan(), () => {},
+    DEFAULT_SWEEP_POLICY, async () => 0, undefined, undefined as never, issuesImpl,
+  );
+
+  effects.escalate!(
+    pr({ prNumber: 1038, taskId: undefined }),
+    "not positively mergeable — checks pending, review none — escalating",
+    { question: "Which resolution applies?", resolutions: [{ label: "wait", detail: "let checks finish" }, { label: "close", detail: "abandon" }] } as never,
+  );
+
+  assert.equal(opened.length, 1, "the closure opened exactly one issue");
+  // THE ASSERTION THAT MATTERS: the body carries a resolvable referent, never the old sentinel.
+  assert.match(opened[0].body, /^\*\*Task:\*\*\s*PR-1038\s*$/m);
+  assert.equal(/^\*\*Task:\*\*\s*UNKNOWN\s*$/m.test(opened[0].body), false, "never the string that made 53 issues unretirable");
 });
