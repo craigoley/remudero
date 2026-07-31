@@ -1021,20 +1021,69 @@ export function armIfVerdictPermits(
       )
     : undefined;
   const decision = decideAutoMergeArm(verdict, false, override);
-  if (!decision.arm) return "skipped";
+  if (!decision.arm) {
+    ctx.log("automerge.arm_skipped", {
+      outcome: "skipped",
+      reason: decision.reason,
+      decision_reason: decision.reason,
+      head_sha: ctx.headSha,
+      task_id: ctx.taskId,
+    });
+    return "skipped";
+  }
   // W1-T230's own gate still applies inside: it re-reads the live head and refuses a stale
   // verdict. Its OUTCOME is read (impl-BC) rather than discarded, so a refusal is visible.
   const outcome = (deps.arm ?? armAutoMerge)(ctx.prUrl, ctx.taskId);
   // impl-BI: the STEP NAME must match the outcome. This used to log `automerge.armed`
   // unconditionally with the outcome merely carried in a field — so a `ledger-refused` here
   // still read as an arm to anyone counting steps.
+  //
+  // impl-BL: `reason` must describe the OUTCOME, not the semantic gate. It used to carry
+  // `decision.reason` unconditionally, producing the unreadable pair this PR's ledger is full
+  // of — `outcome: "ledger-refused"` beside `reason: "verdict is a full PASS"` — because the two
+  // fields answered different questions: `decision` is the SEMANTIC gate (which approved) and
+  // `outcome` comes from the LEDGER gate inside `armAutoMerge` (which refused), whose real reason
+  // reached only stdout via `deps.say`. The semantic verdict is kept under its own name so the
+  // line still records why arming was PERMITTED as well as what actually happened.
   ctx.log(armOutcomeArmed(outcome) ? "automerge.armed" : "automerge.arm_skipped", {
     outcome,
-    reason: decision.reason,
+    reason: armOutcomeReason(outcome, decision.reason),
+    decision_reason: decision.reason,
     head_sha: ctx.headSha,
     task_id: ctx.taskId,
   });
   return outcome;
+}
+
+/**
+ * impl-BL — the `reason` an `automerge.*` ledger line carries, derived from the OUTCOME that
+ * actually occurred rather than from the semantic gate that merely permitted the attempt.
+ *
+ * `armAutoMerge` returns an outcome string and sends its prose reason to `deps.say` (stdout)
+ * only; this PR does not change that function, so the mapping lives here. An ARMING outcome
+ * legitimately carries the semantic gate's reason — that IS why it armed. Every other outcome
+ * gets the meaning of its own branch, so no ledger line can again pair a refusal with
+ * "verdict is a full PASS".
+ */
+export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason: string): string {
+  switch (outcome) {
+    case "armed":
+      return decisionReason;
+    case "direct-merged":
+      return `${decisionReason} — GitHub refused --auto on an already-clean PR, so the clean-status fallback merged it outright`;
+    case "ledger-refused":
+      return "the W1-T230 ledger gate refused: no `review.posted` line for this task matched the PR's current head (see the automerge.ledger_refused console line for which branch)";
+    case "no-task-id":
+      return "no task id was resolvable for this PR, so the W1-T230 ledger gate had no key to look the verdict up by";
+    case "head-unavailable":
+      return "the PR's current head could not be read, so the arm was withheld rather than applied to an unknown head";
+    case "direct-merge-failed":
+      return "GitHub refused --auto as already-clean and the direct-merge fallback then failed";
+    case "arm-error-ignored":
+      return "`gh pr merge --auto` failed for a reason that is not the clean-status case — treated as transient and left for the next sweep pass";
+    case "skipped":
+      return "the semantic gate refused before any arm was attempted";
+  }
 }
 
 /**
@@ -1568,19 +1617,6 @@ async function runReview(args: {
     runId: args.runId,
     fetchLifecycle: () => fetchPrLifecycle(prUrl),
   });
-  // impl-BG — THE MIRROR OF THE WITHDRAWAL ABOVE. A verdict that PERMITS arming arms the PR,
-  // trailer or not. AFTER the post, deliberately: W1-T230's gate recovers the verdict from the
-  // `review.posted` line `postReviewStatusGuarded` just wrote, so arming earlier would be
-  // refused fail-closed. Only runs when the post actually landed — a refused post means no
-  // ledgered verdict to arm on.
-  if (posted.posted) {
-    armIfVerdictPermits(
-      verdict,
-      { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log },
-      { arm: args.arm },
-    );
-  }
-
   if (!posted.posted) {
     // REFUSED, NOT SWALLOWED: postReviewStatusGuarded already ledgered
     // `review.post_refused` with the full reason; this is the loud console
@@ -1652,6 +1688,33 @@ async function runReview(args: {
     // criteria declared). See ReviewVerdict.rewardHackingGap's doc.
     reward_hacking_gap: verdict.rewardHackingGap,
   });
+  // impl-BL — THE MIRROR OF THE WITHDRAWAL ABOVE, AND IT MUST STAY BELOW THE `log("review.posted")`
+  // CALL DIRECTLY ABOVE THIS ONE. That line is the evidence W1-T230's gate requires: `armAutoMerge`
+  // → `priorReviewVerdictFromLedger` → `decideArmFromLedgerVerdict` looks for a `review.posted`
+  // ledger line matching this taskId AND this headSha, and fails CLOSED when it finds none.
+  //
+  // THIS CALL USED TO SIT 35 LINES HIGHER, immediately after `postReviewStatusGuarded`, under a
+  // comment asserting that function "just wrote" the `review.posted` line. IT DOES NOT — its only
+  // ledger writes are `review.post_refused` and `review.post_failed` (lib/review.ts, the two
+  // appendLedger calls in its body). The line it was reading for did not exist yet, so the gate
+  // fail-closed to `ledger-refused` on EVERY invocation this code path has ever had. The ledger
+  // shows each refused arm preceding its own `review.posted` by 0–1ms (PR-977: 00:57:06.808 vs
+  // .809; same-millisecond for PR-981/982/984, W1-T226, W1-T221). The only arms that have ever
+  // succeeded carry `at: "open"` — the ungated arm-at-open path.
+  //
+  // WHY BELOW IS SAFE, not merely later: `appendLedger` is fully synchronous (openSync/writeSync/
+  // closeSync) and `readLedgerLines` is `readFileSync`, so the read-after-write is ordered within
+  // this process. Rotation cannot lose it either — `review.posted` is in
+  // DECISION_RELEVANT_LEDGER_STEPS and rotation's per-step cap keeps the NEWEST
+  // MAX_RETAINED_LINES_PER_STEP, of which this line is one.
+  //
+  // The gate still does real work here — it is NOT tautological now that its evidence exists.
+  // `armAutoMerge` re-reads the PR's CURRENT head (`deps.headSha(prUrl)`, a live `gh pr view`) and
+  // compares it to the head this verdict was written against, so a push landing between the
+  // verdict and this call is still refused. No `posted.posted` guard is needed: the `if
+  // (!posted.posted)` branch above already returned.
+  const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log };
+  armIfVerdictPermits(verdict, armCtx, { arm: args.arm });
   if (verdict.capped) {
     say(cappedAnnotation(proofExec.length));
   } else if (verdict.floorDegraded) {
