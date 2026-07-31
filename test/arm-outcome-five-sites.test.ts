@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   armAndLogOutcome,
@@ -94,7 +96,7 @@ test("no lane logs a bare unconditional automerge.armed anywhere across run-task
 test("SITE dep-review reads the arm outcome rather than discarding it", () => {
   const w = laneWindow("`remudero-review=success posted + auto-merge ${armReportPhrase(armOutcome)}: ${view.url}`");
 
-  assert.match(w, /armAndLogOutcome\(view\.url, taskId, log\)/, "the dep-review lane arms through the reporting wrapper");
+  assert.match(w, /armAndLogOutcome\(view\.url, taskId, log, deps\.arm\)/, "the dep-review lane arms through the reporting wrapper");
   assert.doesNotMatch(w, /armAutoMerge\(view\.url/, "and no longer calls armAutoMerge with its outcome dropped");
 });
 
@@ -223,4 +225,63 @@ test("plan scope admits the regenerated ORIENTATION doc as one named path, never
   assert.equal(isInPlanScope("docs/orientation.md"), false, "the match is exact, not case-folded");
   assert.equal(isInPlanScope("docs/ORIENTATION.md.bak"), false, "and not a prefix of the named path");
   assert.equal(isInPlanScope("src/run-task.ts"), false, "code is still never plan scope");
+});
+
+// ── 14: dep-review's ARM BRANCH, driven for real ────────────────────────────────────
+// The one lane this PR touched that no test could previously reach: `ghJson`, `gh pr diff` and
+// `postReviewStatusGuarded` were all hardcoded, so `diff-coverage` correctly reported the changed
+// arm lines as adding uncovered source. impl-BI gave it the same optional-deps seam PR #964 gave
+// triage/plan. Nothing here touches the network: every effect is injected, and `config` is passed
+// because `loadConfig()` shells `which claude`, which no CI runner has (W1-T2 / PR #18).
+test("dep-review drives its arm branch to a real outcome and reports that outcome, not a fixed string", async () => {
+  const { depReviewCommand } = await import("../src/run-task.js");
+  const tmp = mkdtempSync(join(tmpdir(), "rmd-bi-depreview-"));
+  // ledgerPathFor(config) is `<root>/state/ledger.ndjson` — read the real path, do not guess it.
+  const ledgerPath = join(tmp, "state", "ledger.ndjson");
+  const printed: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => void printed.push(a.map(String).join(" "));
+
+  let code: number;
+  try {
+    code = await depReviewCommand("80", ["--repo", "remudero"], {
+      config: { root: tmp, ledger: ledgerPath } as never,
+      gh: () => ({
+        number: 80,
+        url: "https://github.com/craigoley/remudero/pull/80",
+        title: "build(deps): bump @anthropic-ai/claude-agent-sdk from 0.3.209 to 0.3.210 in the npm-minor-and-patch group",
+        body: "Updates `@anthropic-ai/claude-agent-sdk` from 0.3.209 to 0.3.210",
+        headRefOid: "beefcafe1234",
+        author: { login: "app/dependabot" },
+        statusCheckRollup: [
+          { name: "ci", conclusion: "SUCCESS" },
+          { name: "Review", conclusion: "SUCCESS" },
+          { name: "scan-pr", conclusion: "SKIPPED" },
+        ],
+      }),
+      prDiff: () => "diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n",
+      postStatus: (async () => ({ posted: true })) as never,
+      // THE ARM IS REFUSED — the shape that used to print "auto-merge armed" regardless.
+      arm: () => "ledger-refused",
+    });
+  } finally {
+    console.log = realLog;
+  }
+
+  assert.equal(code, 0, "the lane still completes — reporting the refusal is not the same as failing");
+  const steps = readFileSync(ledgerPath, "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+  const armLines = steps.filter((s) => String(s.step).startsWith("automerge."));
+  assert.deepEqual(
+    armLines.map((s) => s.step),
+    ["automerge.arm_skipped"],
+    "the refusal is ledgered as a skip — this lane wrote automerge.armed here whatever happened",
+  );
+  assert.equal(armLines[0].outcome, "ledger-refused", "carrying the branch armAutoMerge actually took");
+  const line = printed.find((p) => p.includes("remudero-review=success posted"));
+  assert.match(String(line), /NOT armed \(ledger-refused\)/, "and the console says so too");
+  assert.doesNotMatch(String(line), /auto-merge armed:/, "never the old fixed claim");
+  rmSync(tmp, { recursive: true, force: true });
 });

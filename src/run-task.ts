@@ -4648,10 +4648,29 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
  *     failure (so it can NEVER auto-merge) and opens a MANUAL needs-human issue
  *     carrying the release notes via the SHIPPED escalate() path (exit 1).
  */
-async function depReviewCommand(prArg: string, rest: string[] = []): Promise<number> {
+/**
+ * impl-BI — the injectable effects of {@link depReviewCommand}. The `arm` branch's tail was the
+ * one lane this PR touched that NO test could reach: `ghJson`/`gh pr diff`/`postReviewStatusGuarded`
+ * were all hardcoded, so `diff-coverage` correctly flagged the changed arm lines as adding
+ * uncovered source. This is the same shape PR #964 gave `triageCommand`/`planCommand` — optional
+ * with `??` defaults, so every existing caller and the CLI entry point are byte-identical in
+ * behaviour, and the ONLY new capability is that a test can drive the branch offline.
+ *
+ * `config` is injectable for the reason W1-T2/PR #18 recorded: `loadConfig()` shells out to
+ * `which claude`, which does not exist on a CI runner.
+ */
+export interface DepReviewDeps {
+  gh?: (args: string[]) => unknown;
+  prDiff?: (prUrl: string) => string;
+  config?: Config;
+  postStatus?: typeof postReviewStatusGuarded;
+  arm?: (prUrl: string, taskId: string | undefined) => ArmOutcome;
+}
+
+async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepReviewDeps = {}): Promise<number> {
   const { owner, repo } = resolveReviewTarget(resolveOwnerRepo(), rest);
   const slug = `${owner}/${repo}`;
-  const view = ghJson([
+  const view = (deps.gh ?? ghJson)([
     "pr",
     "view",
     prArg,
@@ -4668,9 +4687,9 @@ async function depReviewCommand(prArg: string, rest: string[] = []): Promise<num
     author?: { login?: string };
     statusCheckRollup?: RollupEntry[];
   };
-  const diff = execFileSync("gh", ["pr", "diff", view.url], { encoding: "utf8", maxBuffer: 1 << 26 });
+  const diff = (deps.prDiff ?? ((u: string) => execFileSync("gh", ["pr", "diff", u], { encoding: "utf8", maxBuffer: 1 << 26 })))(view.url);
 
-  const config = loadConfig();
+  const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   const runId = `dep-review-PR${view.number}-${Date.now()}`;
   const taskId = `dep-review-PR${view.number}`;
@@ -4700,7 +4719,7 @@ async function depReviewCommand(prArg: string, rest: string[] = []): Promise<num
     // this attempt's evidence is always "no_evidence"; the guard still
     // refuses it if a STRONGER (executed) verdict is already posted for this
     // exact sha, or if the PR is already merged/closed.
-    const posted = await postReviewStatusGuarded({
+    const posted = await (deps.postStatus ?? postReviewStatusGuarded)({
       owner,
       repo,
       sha: view.headRefOid,
@@ -4728,7 +4747,7 @@ async function depReviewCommand(prArg: string, rest: string[] = []): Promise<num
       dep_review: true,
       proof_exec: [], // W1-T228: never executes a proof — explicit so lastPostedReviewStatusFromLedger reads "no_evidence"
     });
-    const armOutcome = armAndLogOutcome(view.url, taskId, log);
+    const armOutcome = armAndLogOutcome(view.url, taskId, log, deps.arm);
     console.log(`remudero-review=success posted + auto-merge ${armReportPhrase(armOutcome)}: ${view.url}`);
     return 0;
   }
@@ -9499,9 +9518,7 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
     // line is keyed to that same fallback, not `proposalId`.
     const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log);
     worktreeRemove(ownedRepoDir, ownedWorktreePath);
-    console.log(
-      `rmd approve: ${proposalId} gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`,
-    );
+    console.log(`rmd approve: ${proposalId} gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`);
     return reviewCode;
   } catch (e) {
     log("approve.error", { error: String((e as Error)?.message ?? e) });
