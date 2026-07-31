@@ -2161,6 +2161,100 @@ test("deriveFixMode: blocked_ci with no review verdict at all derives ci-log", (
   assert.equal(deriveFixMode(evidence), "ci-log");
 });
 
+// ── W1-T226 (corrects W1-T224's overstated diagnosis — see the task's own
+// rationale). VERIFIED AT SOURCE, three named fixtures from the seven-PR jam:
+//   - PR 449 (posted remudero-review=failure, checks red): the rung still
+//     chose ci-log, PROVING `evidence.review` is the rung's OWN computed
+//     evidence for a pass, never the posted commit status — DISPOSITION_RULES
+//     row 5 (`isBlockedCi`, sweep.ts) and `routeFix`'s dispatch both key off
+//     `checksState`, never `reviewState`, when deciding whether to construct
+//     `evidence.ciFailures` at all (see the `routeFix` test below). NOT masked.
+//   - PR 479 (review-failed AND CI-red) / PR 485 (CI-red, review
+//     success-capped): by the time these were observed, W1-T138 (PR #345,
+//     merged BEFORE this task or W1-T224 was even filed — `git log` shows
+//     e306b33/cc8abe4 predating db37cb6/a9ef3b9) had already made
+//     `DISPOSITION_RULES` and `routeFix`/`runSweep`'s `dispatchFix` pick
+//     `ciFailures`-only evidence whenever `isBlockedCi(pr)`, regardless of
+//     `reviewState` — so neither fixture's shape is reproducible through
+//     those callers today (branch (a) NEVER DISPATCHED does not apply either:
+//     `deriveDisposition` positively routes a review-failed+CI-red PR to
+//     `blocked-fixable` via row 5, ordered ahead of the review-failing rows).
+//     The mask these two fixtures name is real, but it lived ONE LAYER DEEPER
+//     than the callers: in `FIX_MODE_RULES` itself (branch (c), confirmed).
+//     Every caller above avoids ever exercising it only by a DISCIPLINE of
+//     constructing `review`/`ciFailures` mutually exclusively — the table's
+//     own `when` predicate, gated on `review === undefined`, would still
+//     mis-route the moment ANY evidence carried both (which the two-line
+//     `FixEvidence` type always allowed) — exactly this test. This is why the
+//     proof lives here, at the table, rather than only at `routeFix`.
+//   - Branch (b) UNABLE TO ACT (flake) is orthogonal to the mask and is not
+//     itself demonstrated by any of the three named fixtures here; it neither
+//     strengthens nor weakens this correction — W1-T224's flake-disposition
+//     criterion (bounded re-runs before a code fix) stands unchanged, per the
+//     task's own design note, and is untouched by this diff. ─────────────────
+
+test("deriveFixMode: a PR that is BOTH review-failed (real unmet criteria) AND CI-red derives ci-log, never reviewer-unmet — PR 479's shape, the W1-T226 mask closed at the table itself", () => {
+  const evidence: FixEvidence = {
+    review: {
+      unmetCriteria: [criterion({ claim: "criterion A merges cleanly", met: false, reason: "executed and failed: assertion mismatch" })],
+      summary: "remudero-review: FAIL",
+    },
+    ciFailures: [{ name: "commitlint", logTail: "header must not exceed 100 characters" }],
+  };
+  assert.equal(
+    deriveFixMode(evidence),
+    "ci-log",
+    "a required check red outranks ANY review verdict sitting beside it — pass, fail, or (as here) a real unmet set",
+  );
+});
+
+test("deriveFixMode: CI-red still outranks a body-coverage-shaped review (matched N/M proof keywords, no executed_fail) — PR 485's shape, review success-capped alongside CI-red", () => {
+  const evidence: FixEvidence = {
+    review: {
+      unmetCriteria: [
+        criterion({ claim: "criterion A is documented", met: false, reason: "proof unmet: report does not substantiate it (matched 4/12 proof keywords)" }),
+      ],
+      summary: "remudero-review: CAPPED",
+    },
+    ciFailures: [{ name: "osv-scanner", logTail: "HIGH severity vulnerability found in dep@1.2.3" }],
+  };
+  assert.equal(deriveFixMode(evidence), "ci-log", "a red required check wins over EVERY review-shaped row, not only reviewer-unmet");
+});
+
+test("deriveFixMode: THE REGRESSION GUARD survives the table change — an OBSERVED executed_fail, with no ciFailures at all, is still never body-coverage (the #157/#143 lesson, unaffected by W1-T226)", () => {
+  const evidence: FixEvidence = {
+    review: {
+      unmetCriteria: [
+        criterion({ claim: "criterion A is documented", met: false, reason: "proof unmet: report does not substantiate it (matched 4/12 proof keywords)" }),
+        criterion({ claim: "criterion B runs", met: false, reason: "executed and failed", proof_exec: "executed_fail" }),
+      ],
+      summary: "remudero-review: FAIL",
+    },
+  };
+  assert.equal(deriveFixMode(evidence), "reviewer-unmet");
+});
+
+test("renderFixPrompt: a PR that is BOTH review-failed AND CI-red renders the ci-log remedy (naming the failing check), never the review's unmet-criteria text, and never falsely claims no review has run", () => {
+  const prompt = renderFixPrompt({
+    task: { id: "W1-TX", title: "T" },
+    round: 1,
+    branch: "run-W1-TX-1",
+    evidence: {
+      review: {
+        unmetCriteria: [criterion({ claim: "criterion A merges cleanly", met: false, reason: "executed and failed: assertion mismatch" })],
+        summary: "remudero-review: FAIL",
+      },
+      ciFailures: [{ name: "commitlint", logTail: "header must not exceed 100 characters" }],
+    },
+  });
+  assert.match(prompt, /MODE: ci-log/, "reaches a remedy for the failing CHECK, not a criteria-shaped mode");
+  assert.match(prompt, /check: commitlint/);
+  assert.match(prompt, /header must not exceed 100 characters/);
+  assert.doesNotMatch(prompt, /criterion A merges cleanly/, "the review's unmet-criteria text never rides the ci-log prompt — one remedy, not a mix");
+  assert.doesNotMatch(prompt, /NO review has run yet/i, "a review verdict DOES exist here beside the red check — the prompt must never claim otherwise");
+  assert.match(prompt, /GitHub will not merge past a red required check/, "the prompt still explains WHY the check wins over any review verdict beside it");
+});
+
 // W1-T106 (the #170 DIRTY strand): fixture merge-conflict evidence — a
 // pure-concurrent-addition conflict, both sides' log since merge-base.
 function mergeConflictFixture(): MergeConflictEvidence {
@@ -4113,6 +4207,32 @@ test("routeFix: a blocked_ci PR (checks red, review none) dispatches ci-log evid
   assert.equal(deps.escalated.length, 0, "fix FIRST — never straight to the question rung while strikes remain");
   assert.deepEqual(deps.fixed[0].evidence.unmetCriteria, [], "no reviewer criteria for a blocked_ci dispatch");
   assert.deepEqual(deps.fixed[0].evidence.ciFailures, ciFailures);
+});
+
+test("routeFix: a POSTED review=failure alongside checks-red (PR 479's shape) still dispatches ci-log evidence — proves the rung's OWN evidence (keyed off checksState) is distinct from the posted reviewState (W1-T226 acceptance 5, the PR 449 disagreement)", async () => {
+  const deps = fakeFixDeps();
+  const ciFailures = [{ name: "osv-scanner", logTail: "HIGH severity vulnerability found in dep@1.2.3" }];
+  const unmet = [criterion({ claim: "criterion A merges cleanly", met: false, reason: "executed and failed" })];
+  // A real, posted FAILING review verdict sits beside a red required check —
+  // exactly the shape the W1-T226 rationale names as PR 479's. `isBlockedCi`
+  // (checksState-only) decides the dispatch shape, never `reviewState`.
+  const pr = fixPr({ reviewState: "failure", checksState: "red", priorStrikes: 0, unmetCriteria: unmet, ciFailures });
+
+  const result = await routeFix("OPEN", pr, deps);
+
+  assert.equal(result.outcome, "fixed");
+  assert.equal(deps.fixed.length, 1);
+  assert.equal(deps.escalated.length, 0);
+  assert.deepEqual(
+    deps.fixed[0].evidence.ciFailures,
+    ciFailures,
+    "the CHECK still gets a remedy — never routed only to a criteria-shaped mode while it goes unaddressed",
+  );
+  assert.deepEqual(
+    deps.fixed[0].evidence.unmetCriteria,
+    [],
+    "the dispatched evidence carries NO reviewer criteria even though pr.unmetCriteria (from the posted review) was non-empty",
+  );
 });
 
 test("routeFix: a conflicted PR (mergeState dirty, pure concurrent addition) dispatches merge-conflict evidence — the SAME dispatch shape runSweep uses (W1-T106, the #170 DIRTY strand)", async () => {
