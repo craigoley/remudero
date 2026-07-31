@@ -1,0 +1,57 @@
+- id: W1-T278
+  title: "rmd next-task-id can reissue an id that was already used — it maxes over the CURRENT plan sources, and a task filed and then folded away leaves no trace in any of them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "MEASURED at ebb6777 over the git history of plan/. Four ids were filed and later folded away and
+    are absent from every source the minter consults — W1-T199, W1-T224, W1-T247 and W1-T263 each appear in
+    one or two commits touching plan/ and in ZERO current plan sources.
+    THE AUTHORITATIVE SET IS THE GIT HISTORY, NOT THE CURRENT TREE. Counting every id ever ADDED under plan/:
+    357 ids ever, 298 in the current sources. The minter sees the 298.
+    THE DEFECT IS LATENT TODAY, AND SAYING SO IS PART OF THE FILING. Max-ever and max-current are BOTH W1-T270
+    right now, and no folded-away id sits above the current max — so today the minter would return the correct
+    answer for the wrong reason. It becomes live the moment a HIGH id is folded away: file W1-T271, fold it,
+    and the next mint reissues it, which is the collision class that already cost two renumber-and-re-push
+    cycles (#770, #775) when it happened via a different route.
+    WHY THE EXISTING GUARDS DO NOT COVER IT: the minter already unions tasks.yaml, the shards and open-PR mints
+    precisely because those were the known gaps. A folded id is invisible to all three by construction — it
+    was removed from the tree and its PR is long merged."
+  design: |
+    UNION THE GIT HISTORY OF plan/ INTO THE MINT. Every id ever ADDED under plan/ across all refs is
+    recoverable without a network call and without a working-tree checkout, and it is the only source that
+    survives a fold.
+    IT MUST DEGRADE HONESTLY, NOT SILENTLY. The existing minter already exits non-zero when a source is
+    degraded (GraphQL exhaustion) rather than minting from a partial union — a history scan that fails must do
+    the same, because a mint from an incomplete set is exactly the collision this task exists to prevent.
+    BOUND THE SCAN. A full `log -p` over plan/ is the naive form and is slow enough to matter on a repo with
+    this much plan churn; the id set is append-only in practice, so a cached high-water mark keyed on a commit
+    sha is the obvious shape. Whatever is chosen, state the measured cost in the PR body — this runs on an
+    interactive verb.
+    EXPLICITLY NOT IN SCOPE: renumbering anything, reclaiming the four folded ids, or changing the id format."
+  acceptance:
+    - claim: "an id folded out of the plan is still treated as used by the minter"
+      proof: "unit test: test/next-task-id-history.test.ts"
+    - claim: "a degraded history scan refuses to mint rather than minting from a partial union"
+      proof: "unit test: test/next-task-id-history.test.ts"
+    - claim: "the mint still unions the current sources and open-PR mints as it does today"
+      proof: "unit test: test/next-task-id-history.test.ts"
+    - claim: "the history-derived id set is a named export the mint consults"
+      proof: "grep: taskIdsEverFiled in src/run-task.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the whole thing is a set union over a git read, assertable against a seeded fixture repo.
+    risk:medium — ONE subsystem by Rule 19's count. It argues DOWN toward low (an interactive verb, no
+    dispatch path, no spend) and up only because a wrong refusal blocks task filing entirely; medium is the
+    honest middle.
+    budget_usd 60 — the lowest of this group, and deliberately: the logic is a set union, and the only real
+    cost is the history-scan bound and its fixture.
+    LATENT, NOT LIVE — see rationale. Filed at medium rather than high precisely because it is not currently
+    reachable; if a high id is ever folded away this should be re-graded.
+    NO depends_on: independent of everything else filed here."

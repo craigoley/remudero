@@ -1,0 +1,58 @@
+- id: W1-T271
+  title: "the dispatch breaker cannot see a loop that SUCCEEDS — dispatchesWithoutNewOwnedPr resets to zero on every pr.opened, so a task that re-dispatches forever while merging a no-op PR each time never trips it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 120.00
+  rationale: "OBSERVED 2026-07-31, and it cost real money. W1-T254 dispatched FIVE times in eighty minutes.
+    Every run correctly found the work already done, manufactured a no-op closure PR, and merged it; each merge
+    kickstarted the daemon, whose first tick re-dispatched the same task 29-50 seconds later. The P29(ii)
+    circuit breaker was armed the whole time and never fired.
+    THE MECHANISM, verified at ebb6777 — src/lib/status.ts:746-760:
+      750  let count = 0;
+      753  if (line.step === 'pr.opened') {
+      754    count = 0;   // forward progress — a new PR resets the streak
+      755  } else if (line.step === 'run.start') { count++; }
+    Every one of those five runs opened an owned run-W1-T254-<epoch> PR, so the counter reset on every
+    iteration. The breaker measures FAILURE (dispatch that produces nothing) and is blind by construction to a
+    loop that succeeds. Confirmed still present at ebb6777, and no sibling counter exists anywhere in src/.
+    WHY THE RESET IS NOT SIMPLY WRONG: it is correct for the failure it was built for (W1-T1/W1-T152 —
+    repeated dispatch producing NOTHING). Deleting it would trip on legitimate fix-rung re-dispatch. So this
+    task ADDS a second, independent counter rather than editing the existing one."
+  design: |
+    A SIBLING COUNTER THAT RESETS ON NOTHING. A pure function over ledger lines counting `run.start` for one
+    task across its whole recorded history, gated in `isDispatchEligible` (src/lib/drain.ts) behind a SECOND,
+    much higher threshold, alongside the existing `opts.isCircuitTripped` rather than replacing it.
+    THE THRESHOLD IS A MEASUREMENT, NOT A GUESS. Derive it from the unioned ledger's real per-task `run.start`
+    distribution (live file PLUS every rotation — the live file undercounts roughly 4x) and pick a bound above
+    the legitimate fix-rung tail. State the measured distribution in the PR body.
+    ROTATION IS PART OF THE CHANGE, NOT A FOLLOW-UP. `run.start` is already in
+    DECISION_RELEVANT_LEDGER_STEPS, so the count survives today; if this task introduces ANY new step name that
+    the gate reads, that name must be added to that set in the SAME change — `sweep.absent_repush` is the
+    precedent, and test/ledger-rotation.test.ts re-derives the expected set from each consumer's source.
+    EXPLICITLY NOT IN SCOPE: changing the existing per-streak breaker's reset, its threshold, or its escalation.
+  acceptance:
+    - claim: "a lifetime dispatch counter exists that no ledger step resets"
+      proof: "unit test: test/dispatch-lifetime-breaker.test.ts"
+    - claim: "a task past the lifetime cap is refused by isDispatchEligible"
+      proof: "unit test: test/dispatch-lifetime-breaker.test.ts"
+    - claim: "the counter is unaffected by pr.opened lines that reset the streak breaker"
+      proof: "unit test: test/dispatch-lifetime-breaker.test.ts"
+    - claim: "the lifetime counter is a named export distinct from the streak counter"
+      proof: "grep: dispatchesEver in src/lib/status.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§9"]
+  files: [src/lib/status.ts, src/lib/drain.ts, src/lib/ledger.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the whole behaviour is a pure function over ledger lines plus one predicate, both
+    machine-checkable with no operator present.
+    risk:high — three subsystems by Rule 19's count (status, drain, ledger) and it gates DISPATCH, where a
+    wrong bound either halts legitimate work or fails to stop a spend loop.
+    budget_usd 120 — bounded above the house default because the threshold must be derived from a unioned
+    ledger measurement (662 files, ~4.16M lines) rather than chosen, and that scan is the expensive part.
+    NO depends_on: nothing blocks this. It shares src/lib/ledger.ts with W1-T275, which is a FILE-OVERLAP
+    concern for dispatch-overlap.ts to partition, not a dependency — neither task needs the other's output."

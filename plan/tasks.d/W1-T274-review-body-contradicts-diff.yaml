@@ -1,0 +1,59 @@
+- id: W1-T274
+  title: "the review gate never opens the diff to check the body's claims about it — two PRs merged this week on bodies that contradicted their own changesets, and judgeReview already holds both halves"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  rationale: "TWO MERGED INSTANCES, both this week.
+    #974 asserted its changeset listed 'exactly one file: MASTER-PLAN.md. No src/, no test/, no
+    docs/ORIENTATION.md' while its diff carried THREE files including docs/ORIENTATION.md at +29/-98 — and the
+    misclassification was load-bearing, because docs/ORIENTATION.md sits outside isInPlanScope and cost the PR
+    its planOnly carve-out.
+    #1025 asserted 'data-only: no code' while its commit e8443ad reverted 6 src/ and 2 test/ files, -515
+    lines, undoing #1008/#1017/#1020. It was caught ONLY because the deleted exports happened not to compile;
+    a revert that compiles merges clean.
+    THE INGREDIENTS ARE ALREADY IN HAND at ebb6777 — no new fetch, no new gateway:
+      src/lib/review.ts:1398   const diffFiles = changedFiles(walkDiff(evidence.diff));
+      src/lib/review.ts:1384   const reportTokens = new Set(tokenize(evidence.report));
+      src/run-task.ts:4778     report: body,   // the PR body IS the report the gate judges
+    So the gate holds the parsed changeset AND the body in the same function and compares neither against the
+    other. recon-BN assessed this in its Q5 and judged it feasible and cheap."
+  design: |
+    THE NARROW, FALSIFIABLE CHECK — deliberately NOT general claim-verification. Compare only assertions the
+    body makes about its OWN changeset against `diffFiles`, which is already computed:
+      (a) a stated FILE COUNT that disagrees with `diffFiles.length`;
+      (b) a claim that a path or directory is absent (`no src/`, `no test/`, `plan-only`, `data-only`) when
+          `diffFiles` contains a member of it;
+      (c) a named file asserted present that `diffFiles` does not contain.
+    ANYTHING IT CANNOT DECIDE, IT MUST NOT GUESS. Prose the patterns do not recognise is silence, not a pass
+    and not a failure — a checker that guesses at natural language would be a worse tripwire than the gap.
+    VERDICT POLARITY, and this one is a genuine block rather than a downgrade: a body that CONTRADICTS its own
+    diff is not a legibility problem, it is a false statement the gate is being asked to merge on. It should
+    fail the review rather than degrade it — with the contradiction NAMED (which claim, which files), because
+    an unexplained red is the shape that gets overridden.
+    EXPLICITLY NOT IN SCOPE: judging whether the diff is CORRECT, or whether the claims about behaviour hold.
+    Only self-referential claims about the changeset are in range.
+  acceptance:
+    - claim: "a body claiming a file count that disagrees with the diff fails the review"
+      proof: "unit test: test/body-contradicts-diff.test.ts"
+    - claim: "a body claiming no src changes over a diff touching src fails the review"
+      proof: "unit test: test/body-contradicts-diff.test.ts"
+    - claim: "a body making no changeset claim is neither passed nor failed by this check"
+      proof: "unit test: test/body-contradicts-diff.test.ts"
+    - claim: "the failure names the contradicted claim and the files that refute it"
+      proof: "grep: bodyContradictsDiff in src/lib/review.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — a pure comparison of two values judgeReview already computes.
+    risk:medium — ONE subsystem by Rule 19's count (review). It is a BLOCKING verdict, which argues upward,
+    but the check only fires on an explicit self-referential claim and stays silent otherwise, so the
+    false-positive surface is small and bounded by its own fixtures.
+    budget_usd 90 — below the high-risk default: the comparison is local, and the cost is fixtures for the
+    recognise / contradict / stay-silent cases, plus regression fixtures rebuilt from #974 and #1025.
+    NO depends_on. Shares src/lib/review.ts with W1-T273 — file-overlap for dispatch-overlap.ts, not an edge."

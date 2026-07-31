@@ -1,0 +1,59 @@
+- id: W1-T272
+  title: "a worker that finds its task ALREADY SATISFIED has no sanctioned exit — the output contract offers a gated DECISION_REQUEST or 'Otherwise: open a PR', and the only PR-less verdict halts the drain as anomalous, so five workers each manufactured a no-op closure PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 110.00
+  rationale: "OBSERVED 2026-07-31. Five separate W1-T254 runs each correctly diagnosed that the work was
+    already done, and each opened a closure PR anyway. They were not confused — they were COMPLIANT.
+    THE CONTRACT, verified at ebb6777 — src/lib/compaction.ts:109-126 offers exactly two exits:
+      109  '- If a filename/approach choice is needed, FIRST emit a DECISION_REQUEST'
+      111  '- Otherwise: stage the changed file(s), commit, then run ...'
+      126  '- End with a REPORT whose LAST line is exactly: PR_URL: <the pull request url>'
+    DECISION_REQUEST is gated on a filename/approach CHOICE — a worker finding the work complete has no choice
+    to offer. 'Otherwise' makes PR-opening the sole fall-through and :126 makes PR_URL mandatory.
+    AND THE ONE PR-LESS OUTCOME IS PUNISHED. `no_pr` (src/lib/run-result.ts:33) is documented as anomalous and
+    STOPS THE DRAIN. So honesty halts the fleet while manufacturing a PR lets it continue. Confirmed at
+    ebb6777: no ALREADY_SATISFIED or already_satisfied token exists anywhere in src/.
+    RELATED EVIDENCE, not a duplicate: plan/feedback/fb-1784821673624-321a4b (status:new) reports that a
+    `no_pr` run discards the worker's rationale entirely. Same underlying pain — the worker's honest answer has
+    nowhere to go — but that entry asks for PERSISTENCE of the message; this task asks for a sanctioned EXIT.
+    Implementing this should cite it."
+  design: |
+    THREE PARTS, and the middle one is what makes it safe.
+    (1) A CONTRACT BRANCH inserted between the DECISION_REQUEST clause and 'Otherwise:', so opening a PR stops
+        being the only fall-through: if the task's acceptance is ALREADY SATISFIED on origin/main, say so and
+        STOP without opening a PR.
+    (2) A MECHANICALLY-CHECKABLE EVIDENCE REQUIREMENT. The obvious hazard is a lazy worker claiming
+        'already done' to skip work, so the exit must NAME a merged PR number, and that claim must be checked
+        against the board gateway — the PR must read MERGED and its body must carry an anchored
+        `Remudero-Task:` trailer for this task. An unverifiable honesty exit is worse than none.
+    (3) A VERDICT that is neither `merged` nor the drain-halting `no_pr`, handled at the same site as `no_pr`
+        but treated as forward progress that CREDITS the task, and added to retro.ts's verdict list so the
+        health sweep can see it.
+    EXPLICITLY NOT IN SCOPE: changing `no_pr`'s own drain-halting semantics for the cases where it is right.
+  acceptance:
+    - claim: "the output contract offers a third exit for an already-satisfied task"
+      proof: "grep: ALREADY_SATISFIED in src/lib/compaction.ts"
+    - claim: "the exit is refused unless it names a PR that really merged crediting this task"
+      proof: "unit test: test/already-satisfied-exit.test.ts"
+    - claim: "the new verdict credits the task and does not halt the drain"
+      proof: "unit test: test/already-satisfied-exit.test.ts"
+    - claim: "no_pr keeps its existing drain-halting behaviour"
+      proof: "unit test: test/already-satisfied-exit.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5"]
+  files: [src/lib/compaction.ts, src/lib/run-result.ts, src/run-task.ts, src/lib/retro.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the contract text, the evidence check and the verdict handling are all assertable
+    without an operator watching.
+    risk:high — four subsystems by Rule 19's count (compaction, run-result, run-task, retro) and it changes
+    what a WORKER is told to do, so a wrong contract mis-steers every future run.
+    budget_usd 110 — bounded: the contract edit is small, but the evidence check must go through the real
+    board gateway and the verdict must be threaded to three call sites.
+    NO depends_on: this is independent of W1-T271. The two share an incident, not an edge — the breaker bounds
+    the loop, this removes the pressure that created it, and either is useful without the other."

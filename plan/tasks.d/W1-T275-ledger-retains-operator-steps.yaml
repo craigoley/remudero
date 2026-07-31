@@ -1,0 +1,63 @@
+- id: W1-T275
+  title: "ledger rotation discards the two steps the console renders from — daemon.headroom and console.kick_refused are absent from DECISION_RELEVANT_LEDGER_STEPS, so the usage history and the refusal record vanish on every rotation"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "OBSERVED LIVE 2026-07-31, not inferred. The ACCOUNT strip's governor posture rendered
+    'unknown' on a healthy fleet, because the live ledger had rotated at 16:03:51Z and
+    DECISION_RELEVANT_LEDGER_STEPS does not retain `daemon.headroom` — so the file held ZERO headroom lines
+    while 1,243 of them survived only in the archives.
+    VERIFIED AT ebb6777: the set (src/lib/ledger.ts) enumerates 20 steps and neither `daemon.headroom` nor
+    `console.kick_refused` is among them. Both are read by real consumers:
+      src/lib/account-usage.ts:230   if (line.step !== 'daemon.headroom') continue;   // the governor posture
+      src/lib/board.ts:452           OPERATOR_ACTION_STEPS = new Set(['console.kick_refused', ...])
+      src/lib/board.ts:599           case 'console.kick_refused':                      // the RECENT feed
+    THE DOCTRINE QUESTION THIS RAISES, and it must be answered rather than assumed. That set's own doc scopes
+    it to lines a DECISION counts or reads — a bound that must survive rotation. These two are not decision
+    inputs; they are OPERATOR-VISIBLE HISTORY. Adding them to the same set silently widens what that constant
+    means, and the set is already the never-rotated core, so widening it without saying so trades one silent
+    loss for unbounded growth. The right shape is a SECOND, RECENCY-BOUNDED category — the treatment
+    `daemon.boot` and `deploy.*` already get via HEALTH_STEP_RETENTION_WINDOW_MS — not a bigger core."
+  design: |
+    A RENDER-RELEVANT RETENTION CATEGORY, bounded by RECENCY rather than kept forever.
+    `isHealthOrDeployStep` + HEALTH_STEP_RETENTION_WINDOW_MS (src/lib/ledger.ts) already establish the exact
+    pattern: a step that must survive rotation for a WINDOW, not for all time. Extend that mechanism — or add
+    a sibling of it — to cover the steps the console renders, with a window sized to what the console actually
+    shows rather than to convenience.
+    SIZE THE WINDOW FROM THE CONSUMER, and state the derivation. `account-usage.ts` renders the NEWEST
+    headroom line and ages it; the strip already declares its own staleness bound. The retention window must
+    be at least that, or the panel is guaranteed to read 'unknown' after any rotation.
+    DERIVE THE MEMBERSHIP, DO NOT HARDCODE A SECOND LIST. test/ledger-rotation.test.ts already re-derives the
+    expected decision-relevant set from each consumer's source; the render-relevant set should be derived the
+    same way, so a future console reader cannot silently acquire a step that rotation then eats.
+    EXPLICITLY NOT IN SCOPE: changing MAX_RETAINED_LINES_PER_STEP, the rotation trigger, or the existing
+    decision-relevant membership.
+  acceptance:
+    - claim: "a rotation keeps recent daemon.headroom lines and the console still renders a posture"
+      proof: "unit test: test/ledger-render-retention.test.ts"
+    - claim: "a rotation keeps recent console.kick_refused lines so the refusal record survives"
+      proof: "unit test: test/ledger-render-retention.test.ts"
+    - claim: "render-relevant retention is bounded by recency and does not grow without limit"
+      proof: "unit test: test/ledger-render-retention.test.ts"
+    - claim: "the render-relevant step set names the console steps explicitly"
+      proof: "grep: \"console.kick_refused\" in src/lib/ledger.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§7"]
+  files: [src/lib/ledger.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — rotation is a pure function over a file, and the retention property is directly
+    assertable.
+    risk:high — Rule 19 counts TWO concerns here (ledger retention and the daemon-emitted steps it must
+    retain) and the linter is right to: the retention rule lives in ledger.ts but the membership is decided by
+    what daemon.ts and the console emit, so the change cannot be reasoned about from one file alone. It also
+    bounds ledger GROWTH, and a too-generous window is how the 80-archive burst happened — the window is the
+    risky number, not the mechanism.
+    budget_usd 70 — the smallest of this group: an existing mechanism is extended rather than a new one built,
+    and the cost is the derivation test plus the window justification.
+    NO depends_on. Shares src/lib/ledger.ts with W1-T271 IF that task adds a step — a file-overlap for
+    dispatch-overlap.ts to partition, not a dependency."

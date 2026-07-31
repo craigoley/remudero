@@ -1,0 +1,57 @@
+- id: W1-T276
+  title: "a fired retro freezes the whole daemon loop for over twenty minutes — runOne is wrapped by a light-sweep ticker but runRetroTrigger is a bare await, so no PR is dispositioned for the duration"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MEASURED over the unioned ledger: the retro trigger has fired exactly twice, and it held the
+    loop for 22.0 minutes and 21.0 minutes respectively, with ZERO sweep dispositions in either window.
+    THE ASYMMETRY, verified at ebb6777. The dispatch path is protected:
+      src/lib/daemon.ts:1466   result = await deps.runOne(next.id);
+    is bracketed by a light-sweep ticker (`tickerActive` / `stopTicker`, cleared on every exit path including
+    a throw) precisely so a long build does not blind the sweep. The retro path is not:
+      src/lib/daemon.ts:1327   await deps.runRetroTrigger(decision);
+    is a bare await inside the same single-threaded `for (;;)`, with `continue` immediately after. Nothing
+    ticks while it runs.
+    WHY IT MATTERS MORE THAN ITS FREQUENCY SUGGESTS: the sweep is what posts review statuses, re-drives
+    stalled PRs and arms merges. Twenty-two minutes of that being dead is twenty-two minutes in which a green
+    PR cannot merge and a stalled one cannot be re-driven — and the daemon looks healthy throughout, because
+    it IS healthy; it is simply busy. The symptom is indistinguishable from 'nothing needed doing'."
+  design: |
+    REUSE THE MECHANISM THAT ALREADY EXISTS. `runOne`'s light-sweep ticker is the proven shape in this same
+    file — same clock, same `stopTicker` discipline, same allow-an-in-flight-sweep-to-finish semantics. Wrap
+    the retro await in it rather than inventing a second concurrency device.
+    THE TICKER MUST NOT MAKE THE RETRO WORSE. It runs a LIGHT sweep, not a full one, and the retro spawns a
+    real budget-costing Architect run; a ticker that itself dispatches would turn one long hold into two
+    concurrent spends. Whatever is ticked here must be the same read-and-dispose light path `runOne` uses, and
+    the test must assert it never dispatches.
+    STATE THE ALTERNATIVE THAT WAS REJECTED AND WHY. Making the retro non-blocking (fire-and-forget) is the
+    obvious larger fix and is NOT this task: the loop's single-threadedness is what makes its dispatch
+    accounting sound, and a detached retro would race the very plan it rewrites. Bounding the blindness is the
+    honest small fix; removing the blocking is a different, larger design question.
+    EXPLICITLY NOT IN SCOPE: the retro's cadence, its trigger thresholds, or what it does when it runs.
+  acceptance:
+    - claim: "a long-running retro no longer leaves the sweep idle for its whole duration"
+      proof: "unit test: test/retro-sweep-ticker.test.ts"
+    - claim: "the ticker stops on every retro exit path including a throw"
+      proof: "unit test: test/retro-sweep-ticker.test.ts"
+    - claim: "the ticker never dispatches a task while the retro is running"
+      proof: "unit test: test/retro-sweep-ticker.test.ts"
+    - claim: "the retro path is ticked by a named wrapper rather than a bare await"
+      proof: "grep: sweepLightDuringRetro in src/lib/daemon.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§9"]
+  files: [src/lib/daemon.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the daemon loop is driven entirely through injected deps in test, so a long retro and
+    the ticks that overlap it are both assertable with no real spawn.
+    risk:medium — ONE subsystem by Rule 19's count (daemon), and the change reuses a mechanism already proven
+    in the same file. It argues upward only because it adds concurrency to a loop whose single-threadedness is
+    load-bearing, which the design note bounds explicitly.
+    budget_usd 100 — the cost is not the wrapper but proving the negative: that the ticker cannot dispatch and
+    cannot outlive the retro on any exit path.
+    NO depends_on: independent of everything else filed here."
