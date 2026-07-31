@@ -1,115 +1,46 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-07-29T16:23:13.346Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-07-31T00:17:01.929Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-147 run(s) since the last retro marker. Verdicts: {"blocked":47,"blocked_ci":25,"blocked_containment":6,"blocked_isolation":1,"blocked_transient":1,"failed":6,"incomplete":12,"merged":20,"no_pr":17,"pr_attribution_failed":12}.
+54 run(s) since the last retro marker. Verdicts: {"blocked":10,"blocked_ci":11,"blocked_containment":6,"blocked_isolation":3,"failed":10,"incomplete":4,"merged":4,"no_pr":4,"pr_attribution_failed":2}.
 
 ### Shipped since marker
-- W1-T101 → https://github.com/craigoley/remudero/pull/735 (gate-side merge; run ended blocked)
-- W1-T104 → https://github.com/craigoley/remudero/pull/801 (gate-side merge; run ended blocked_ci)
-- W1-T105 → https://github.com/craigoley/remudero/pull/744 (gate-side merge; run ended blocked)
-- W1-T106 → https://github.com/craigoley/remudero/pull/804 (gate-side merge; run ended blocked_ci)
-- W1-T107 → https://github.com/craigoley/remudero/pull/747 (gate-side merge; run ended blocked)
-- W1-T109 → https://github.com/craigoley/remudero/pull/749 (gate-side merge; run ended blocked)
-- W1-T112 → https://github.com/craigoley/remudero/pull/491 (gate-side merge; run ended blocked)
-- W1-T113 → https://github.com/craigoley/remudero/pull/752 (gate-side merge; run ended blocked_ci)
-- W1-T114 → https://github.com/craigoley/remudero/pull/806 (gate-side merge; run ended blocked)
-- W1-T116 → https://github.com/craigoley/remudero/pull/810 (gate-side merge; run ended blocked)
-- W1-T117 → https://github.com/craigoley/remudero/pull/815 (gate-side merge; run ended blocked)
-- W1-T118 → https://github.com/craigoley/remudero/pull/817 (gate-side merge; run ended blocked)
-- W1-T120 → https://github.com/craigoley/remudero/pull/819
-- W1-T123 → https://github.com/craigoley/remudero/pull/820
-- W1-T124 → https://github.com/craigoley/remudero/pull/821 (gate-side merge; run ended blocked_ci)
-- W1-T125 → https://github.com/craigoley/remudero/pull/823 (gate-side merge; run ended blocked_ci)
-- W1-T126 → https://github.com/craigoley/remudero/pull/824
-- W1-T127 → https://github.com/craigoley/remudero/pull/825 (gate-side merge; run ended blocked_ci)
-- W1-T129 → https://github.com/craigoley/remudero/pull/830 (gate-side merge; run ended blocked_ci)
-- W1-T12a → https://github.com/craigoley/remudero/pull/725 (gate-side merge; run ended incomplete)
-- W1-T130 → https://github.com/craigoley/remudero/pull/628 (gate-side merge; run ended blocked_ci)
-- W1-T133 → https://github.com/craigoley/remudero/pull/833 (gate-side merge; run ended blocked_ci)
-- W1-T134 → https://github.com/craigoley/remudero/pull/826 (gate-side merge; run ended blocked)
-- W1-T135 → https://github.com/craigoley/remudero/pull/828 (gate-side merge; run ended blocked)
-- W1-T137 → https://github.com/craigoley/remudero/pull/842 (gate-side merge; run ended blocked)
-- W1-T142 → https://github.com/craigoley/remudero/pull/835 (gate-side merge; run ended blocked)
-- W1-T143 → https://github.com/craigoley/remudero/pull/837 (gate-side merge; run ended blocked)
-- W1-T144 → https://github.com/craigoley/remudero/pull/614 (gate-side merge; run ended blocked)
-- W1-T148 → https://github.com/craigoley/remudero/pull/839 (gate-side merge; run ended blocked)
-- W1-T151 → https://github.com/craigoley/remudero/pull/845 (gate-side merge; run ended blocked)
-- W1-T159 → https://github.com/craigoley/remudero/pull/861 (gate-side merge; run ended blocked_ci)
-- W1-T160 → https://github.com/craigoley/remudero/pull/853 (gate-side merge; run ended blocked)
-- W1-T161 → https://github.com/craigoley/remudero/pull/866 (gate-side merge; run ended blocked)
-- W1-T162 → https://github.com/craigoley/remudero/pull/870 (gate-side merge; run ended blocked)
-- W1-T163 → https://github.com/craigoley/remudero/pull/647 (gate-side merge; run ended blocked_ci)
-- W1-T167 → https://github.com/craigoley/remudero/pull/606 (gate-side merge; run ended blocked)
-- W1-T173 → https://github.com/craigoley/remudero/pull/660 (gate-side merge; run ended incomplete)
-- W1-T184 → https://github.com/craigoley/remudero/pull/479 (gate-side merge; run ended blocked)
-- W1-T189 → https://github.com/craigoley/remudero/pull/574
-- W1-T193 → https://github.com/craigoley/remudero/pull/602 (gate-side merge; run ended blocked)
-- W1-T197 → https://github.com/craigoley/remudero/pull/531 (gate-side merge; run ended blocked)
-- W1-T200 → https://github.com/craigoley/remudero/pull/622 (gate-side merge; run ended blocked)
-- W1-T203 → https://github.com/craigoley/remudero/pull/508 (gate-side merge; run ended incomplete)
-- W1-T205 → https://github.com/craigoley/remudero/pull/562
-- W1-T206 → https://github.com/craigoley/remudero/pull/549
-- W1-T207 → https://github.com/craigoley/remudero/pull/552
-- W1-T208 → https://github.com/craigoley/remudero/pull/555
-- W1-T209 → https://github.com/craigoley/remudero/pull/583
-- W1-T210 → https://github.com/craigoley/remudero/pull/585 (gate-side merge; run ended blocked_ci)
-- W1-T211 → https://github.com/craigoley/remudero/pull/587
-- W1-T212 → https://github.com/craigoley/remudero/pull/582
-- W1-T213 → https://github.com/craigoley/remudero/pull/595 (gate-side merge; run ended blocked_ci)
-- W1-T215 → https://github.com/craigoley/remudero/pull/590
-- W1-T217 → https://github.com/craigoley/remudero/pull/598
-- W1-T218 → https://github.com/craigoley/remudero/pull/593
-- W1-T219 → https://github.com/craigoley/remudero/pull/571
-- W1-T220 → https://github.com/craigoley/remudero/pull/507
-- W1-T222 → https://github.com/craigoley/remudero/pull/625
-- W1-T223 → https://github.com/craigoley/remudero/pull/626 (gate-side merge; run ended blocked_ci)
-- W1-T227 → https://github.com/craigoley/remudero/pull/527
-- W1-T228 → https://github.com/craigoley/remudero/pull/525 (gate-side merge; run ended blocked)
-- W1-T229 → https://github.com/craigoley/remudero/pull/528 (gate-side merge; run ended blocked)
-- W1-T230 → https://github.com/craigoley/remudero/pull/523 (gate-side merge; run ended blocked)
-- W1-T231 → https://github.com/craigoley/remudero/pull/530 (gate-side merge; run ended blocked_ci)
-- W1-T232 → https://github.com/craigoley/remudero/pull/535 (gate-side merge; run ended blocked)
-- W1-T233 → https://github.com/craigoley/remudero/pull/537 (gate-side merge; run ended blocked)
-- W1-T240 → https://github.com/craigoley/remudero/pull/608 (gate-side merge; run ended blocked_ci)
-- W1-T241 → https://github.com/craigoley/remudero/pull/612
-- W1-T242 → https://github.com/craigoley/remudero/pull/613 (gate-side merge; run ended blocked_ci)
-- W1-T243 → https://github.com/craigoley/remudero/pull/619 (gate-side merge; run ended blocked)
-- W1-T244 → https://github.com/craigoley/remudero/pull/618 (gate-side merge; run ended blocked_ci)
-- W1-T245 → https://github.com/craigoley/remudero/pull/651 (gate-side merge; run ended incomplete)
-- W1-T246 → https://github.com/craigoley/remudero/pull/697 (gate-side merge; run ended blocked_ci)
-- W1-T254 → https://github.com/craigoley/remudero/pull/720 (gate-side merge; run ended blocked_ci)
-- W1-T255 → https://github.com/craigoley/remudero/pull/754 (gate-side merge; run ended blocked)
-- W1-T257 → https://github.com/craigoley/remudero/pull/800 (gate-side merge; run ended pr_attribution_failed)
-- W1-T58 → https://github.com/craigoley/remudero/pull/635 (gate-side merge; run ended blocked)
-- W1-T7 → https://github.com/craigoley/remudero/pull/772
-- W1-T70 → https://github.com/craigoley/remudero/pull/640 (gate-side merge; run ended blocked_ci)
-- W1-T73 → https://github.com/craigoley/remudero/pull/654 (gate-side merge; run ended blocked)
-- W1-T79 → https://github.com/craigoley/remudero/pull/662 (gate-side merge; run ended blocked_ci)
-- W1-T81 → https://github.com/craigoley/remudero/pull/677 (gate-side merge; run ended blocked)
-- W1-T82 → https://github.com/craigoley/remudero/pull/683 (gate-side merge; run ended blocked)
-- W1-T83 → https://github.com/craigoley/remudero/pull/698 (gate-side merge; run ended pr_attribution_failed)
-- W1-T84 → https://github.com/craigoley/remudero/pull/702 (gate-side merge; run ended blocked_ci)
-- W1-T85 → https://github.com/craigoley/remudero/pull/709 (gate-side merge; run ended blocked_ci)
-- W1-T86 → https://github.com/craigoley/remudero/pull/631 (gate-side merge; run ended blocked_ci)
-- W1-T87 → https://github.com/craigoley/remudero/pull/687 (gate-side merge; run ended blocked)
-- W1-T88 → https://github.com/craigoley/remudero/pull/689 (gate-side merge; run ended pr_attribution_failed)
-- W1-T89 → https://github.com/craigoley/remudero/pull/710 (gate-side merge; run ended blocked)
-- W1-T90 → https://github.com/craigoley/remudero/pull/716 (gate-side merge; run ended blocked)
-- W1-T91 → https://github.com/craigoley/remudero/pull/719 (gate-side merge; run ended blocked)
-- W1-T92 → https://github.com/craigoley/remudero/pull/723 (gate-side merge; run ended blocked)
-- W1-T99 → https://github.com/craigoley/remudero/pull/731 (gate-side merge; run ended blocked)
+- W1-T168 → https://github.com/craigoley/remudero/pull/884 (gate-side merge; run ended blocked)
+- W1-T170 → https://github.com/craigoley/remudero/pull/888 (gate-side merge; run ended blocked_ci)
+- W1-T171 → https://github.com/craigoley/remudero/pull/890 (gate-side merge; run ended blocked_ci)
+- W1-T172 → https://github.com/craigoley/remudero/pull/896 (gate-side merge; run ended blocked_ci)
+- W1-T174 → https://github.com/craigoley/remudero/pull/917 (gate-side merge; run ended blocked)
+- W1-T175 → https://github.com/craigoley/remudero/pull/923 (gate-side merge; run ended blocked)
+- W1-T176 → https://github.com/craigoley/remudero/pull/926 (gate-side merge; run ended blocked_ci)
+- W1-T180 → https://github.com/craigoley/remudero/pull/928 (gate-side merge; run ended blocked)
+- W1-T186 → https://github.com/craigoley/remudero/pull/931 (gate-side merge; run ended blocked)
+- W1-T191 → https://github.com/craigoley/remudero/pull/966 (gate-side merge; run ended blocked_ci)
+- W1-T195 → https://github.com/craigoley/remudero/pull/969 (gate-side merge; run ended blocked)
+- W1-T196 → https://github.com/craigoley/remudero/pull/972 (gate-side merge; run ended incomplete)
+- W1-T198 → https://github.com/craigoley/remudero/pull/933 (gate-side merge; run ended blocked)
+- W1-T202 → https://github.com/craigoley/remudero/pull/892 (gate-side merge; run ended blocked)
+- W1-T225 → https://github.com/craigoley/remudero/pull/935
+- W1-T236 → https://github.com/craigoley/remudero/pull/936 (gate-side merge; run ended blocked)
+- W1-T237 → https://github.com/craigoley/remudero/pull/938 (gate-side merge; run ended blocked_ci)
+- W1-T238 → https://github.com/craigoley/remudero/pull/940 (gate-side merge; run ended blocked_ci)
+- W1-T248 → https://github.com/craigoley/remudero/pull/903 (gate-side merge; run ended blocked_ci)
+- W1-T249 → https://github.com/craigoley/remudero/pull/907
+- W1-T250 → https://github.com/craigoley/remudero/pull/898
+- W1-T251 → https://github.com/craigoley/remudero/pull/899 (gate-side merge; run ended blocked_ci)
+- W1-T252 → https://github.com/craigoley/remudero/pull/901 (gate-side merge; run ended blocked)
+- W1-T253 → https://github.com/craigoley/remudero/pull/921 (gate-side merge; run ended blocked_ci)
+- W1-T261 → https://github.com/craigoley/remudero/pull/885
 
 ## Next runnable task
 
-**W1-T152** — rmd serve-plist — a launchd-unit generator for the console (mirrors rmd daemon-plist): KeepAlive, logs to state/logs/serve.{out,err}.log at mode 0600, port from config, so serve is a background service and never a foreground terminal
+**W1-T169** — rmd down / rmd up — operator lifecycle verbs: graceful wind-down (unload the daemon service, stop serve by PORT with reap-wait, report in-flight recoverability) + full resume (install-freshness, off-main refuse, load the daemon service, start serve, print daemon PID + console URL-with-token + heads); idempotent both directions
 
-- risk: high · depends_on: W1-T139, W1-T12b, W1-T151, W1-T143
+- risk: high · depends_on: W1-T152, W1-T151, W1-T12b
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 
