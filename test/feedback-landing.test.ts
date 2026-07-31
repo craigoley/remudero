@@ -857,3 +857,74 @@ test("W1-T191: recordDecision's full commit message (header + body) passes the R
   const result = lint(message);
   assert.equal(result.status, 0, `decisions-landing commit message must pass commitlint:\n${message}\n${result.stdout}${result.stderr}`);
 });
+
+// ── W1-T191 / PR #1025 REGRESSION: the carry-forward must not revert merged work ──────────
+//
+// `landContent` rebuilds the shared landing branch from origin/main's CURRENT tip and then
+// CARRIES FORWARD an earlier, still-unmerged call's files. That carry-forward used to list the
+// branch's ENTIRE repo tree (`ls-tree -r`), so every file that had changed on main since the
+// branch was built differed, and each was re-staged at its STALE blob -- a silent revert with a
+// perfectly current parent. Commit e8443ad (PR #1025, 2026-07-31) shipped exactly that: 6 src/
+// and 2 test/ files reverted (-515 lines, undoing PRs #1020/#1008/#1017) plus 274 lines of the
+// append-only DECISIONS.md. It was caught only because the deleted exports happened not to
+// compile. These lock the fix: the carry-forward is scoped to the directory the kind owns.
+
+test("W1-T191 REGRESSION: a second landing does NOT revert work that landed on main after the first — the carry-forward is scoped to plan/decisions.d", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  const { gh } = fakeGh("https://github.com/o/r/pull/900");
+
+  // FIRST landing — builds decisions-landing on main@seed.
+  withLiveWritesAllowed(() =>
+    recordDecision(root, { taskId: "TA", runId: "TA-1", options: ["a"], chosen: "a", band: "medium", reason: "r" }, { gh }),
+  );
+
+  // main MOVES ON: a source file lands that the landing branch has never seen, plus an
+  // append-only file gains a line. This is #1020/#1017 and DECISIONS.md in miniature.
+  const advance = mkdtempSync(join(tmpdir(), "rmd-decisions-carryfwd-advance-"));
+  execFileSync("git", ["clone", "--quiet", bareOrigin, advance], { encoding: "utf8", env: GIT_ENV });
+  mkdirSync(join(advance, "src"), { recursive: true });
+  writeFileSync(join(advance, "src", "shipped.ts"), "export const shipped = true;\n");
+  writeFileSync(join(advance, "README.md"), "seed\nmerged-after-the-first-landing\n");
+  git(advance, "add", "-A");
+  git(advance, "commit", "--quiet", "-m", "feat: work that must survive the next landing");
+  git(advance, "push", "--quiet", "origin", "main");
+
+  // SECOND landing — the carry-forward runs against a landing branch that predates the advance.
+  withLiveWritesAllowed(() =>
+    recordDecision(root, { taskId: "TB", runId: "TB-1", options: ["b"], chosen: "b", band: "medium", reason: "r" }, { gh }),
+  );
+
+  // Assert on the resulting TREE, not merely that the call succeeded. A test that only checked
+  // the additions landed would have passed on the broken code -- the additions always landed.
+  const show = (path: string) =>
+    execFileSync("git", ["--git-dir", bareOrigin, "show", `${DECISIONS_LANDING_BRANCH}:${path}`], {
+      encoding: "utf8",
+      env: GIT_ENV,
+    });
+
+  assert.equal(show("src/shipped.ts"), "export const shipped = true;\n", "a file that landed on main AFTER the first landing must not be reverted by the second");
+  assert.match(show("README.md"), /merged-after-the-first-landing/, "an append-only file must not lose the line main gained");
+
+  // And the feature still works: BOTH decision records are present.
+  const files = execFileSync("git", ["--git-dir", bareOrigin, "ls-tree", "-r", "--name-only", DECISIONS_LANDING_BRANCH], {
+    encoding: "utf8",
+    env: GIT_ENV,
+  }).trim().split("\n");
+  const records = files.filter((f) => f.startsWith("plan/decisions.d/"));
+  assert.equal(records.length, 2, `both records must be carried: ${JSON.stringify(records)}`);
+});
+
+test("W1-T191 REGRESSION: a bridge run leaves the caller's working tree, index and local HEAD untouched", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  const { gh } = fakeGh("https://github.com/o/r/pull/901");
+
+  const headBefore = git(root, "rev-parse", "HEAD").trim();
+  withLiveWritesAllowed(() =>
+    recordDecision(root, { taskId: "TC", runId: "TC-1", options: ["a"], chosen: "a", band: "medium", reason: "r" }, { gh }),
+  );
+
+  assert.equal(git(root, "status", "--porcelain").trim(), "", "the bridge must never dirty the caller's working tree or index");
+  assert.equal(git(root, "rev-parse", "HEAD").trim(), headBefore, "the bridge must never move the caller's local HEAD");
+});
