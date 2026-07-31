@@ -177,3 +177,35 @@ test("governor ARMED and OVER the ceiling is unchanged — it still pauses, stil
   assert.equal(beats[0].extra.tick, 1);
   assert.equal(beats[2].extra.tick, 3);
 });
+
+test("an onHeadroomBreach that THROWS is caught and ledgered — the escalation hook can never take the daemon down with it", async () => {
+  // The catch arm, exercised for real rather than left as unreachable glue: every other test in
+  // this file supplies a hook that resolves, so the `catch` around it would never run. A breach
+  // notifier is a network call to GitHub; if a transport failure could propagate out of the
+  // headroom block it would kill the idle loop the breach itself put the daemon into.
+  const plan = fixturePlan();
+  const root = mkdtempSync(join(tmpdir(), "headroom-symmetry-throw-"));
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let sleeps = 0;
+  const s = await runDaemon(plan, {
+    refreshMerged: () => NONE_MERGED,
+    runOne: async (id) => okResult(id),
+    readUsage: () => OVER_CEILING,
+    now: JUL_20_2026_2200,
+    checkStop: () => stopDetail(root),
+    sleep: async () => {
+      sleeps++;
+      if (sleeps >= 2) requestStop(root, "test done polling");
+    },
+    log: (step, extra = {}) => lines.push({ step, extra }),
+    onHeadroomBreach: async () => {
+      throw new Error("gh: API rate limit already exceeded");
+    },
+  });
+
+  assert.equal(s.stopReason, "stopped", "the loop survived the throwing hook and ended only on the operator's STOP");
+  const failed = lines.filter((l) => l.step === "daemon.escalation.failed");
+  assert.equal(failed.length, 1, "the failure is ledgered exactly once — the episode dedup still holds after a throw");
+  assert.match(String(failed[0].extra.error), /rate limit already exceeded/, "the underlying message is preserved, not swallowed");
+  assert.equal(lines.filter((l) => l.step === "daemon.headroom").length >= 2, true, "and the heartbeat kept beating through it");
+});

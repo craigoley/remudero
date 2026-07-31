@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import type { ServerResponse } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   USAGE_CACHE_MAX_AGE_MS,
   USAGE_SCOPE_NOTE,
+  buildAccountUsageRoute,
   deriveAccountUsage,
   readAccountUsageFile,
   type AccountUsageInput,
+  type AccountUsageSnapshot,
 } from "../src/lib/account-usage.js";
 import { renderShellHtml } from "../src/lib/serve.js";
 
@@ -178,3 +184,47 @@ test("the account reader projects only identity and usage out of the config file
     assert.equal(serialized.includes(forbidden), false, `the served payload must never contain ${forbidden}`);
   }
 });
+
+test("GET /v1/account-usage answers 200 from its real defaults — the real file reader and the real ledger reader", async () => {
+  // THE ROUTE ITSELF, with NOTHING injected but the two paths. Every other test here drives the
+  // pure projection directly, so the route's own default wiring (`?? Date.now`,
+  // `?? readLedgerLines`, `?? readAccountUsageFile`) would otherwise be unreachable glue — the
+  // exact shape this repo has been bitten by before.
+  const dir = mkdtempSync(join(tmpdir(), "account-usage-route-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  writeFileSync(ledgerPath, `${JSON.stringify(ARMED_LINE)}\n`);
+  // `now` is injected ONLY so the age assertion below is deterministic — the fixture's capture
+  // instant is fixed, so a real clock would make this test's verdict depend on the wall time it
+  // happens to run at. `readLedger` and `readAccount` are deliberately NOT injected: those two
+  // defaults are the glue this test exists to reach. (`?? Date.now` is covered by the browser
+  // test in test/serve.glance.test.ts, which injects neither it nor the ledger reader.)
+  const route = buildAccountUsageRoute({
+    ledgerPath,
+    accountFilePath: FIXTURE,
+    now: () => CAPTURED_AT + USAGE_CACHE_MAX_AGE_MS + 1,
+  });
+  assert.equal(route.method, "GET");
+  assert.equal(route.path, "/v1/account-usage");
+  assert.equal(route.scope, "read", "READ-scoped: this panel adds no write surface");
+
+  let status = 0;
+  let body = "";
+  const res = {
+    writeHead(code: number) {
+      status = code;
+    },
+    end(chunk: string) {
+      body = chunk;
+    },
+  } as unknown as ServerResponse;
+  await route.handler({} as never, res, { params: {} });
+
+  assert.equal(status, 200);
+  const parsed = JSON.parse(body) as AccountUsageSnapshot;
+  assert.equal(parsed.accountEmail, "operator@example.com", "the real file reader ran, against the captured fixture");
+  assert.equal(parsed.governor, "armed", "the real ledger reader ran, against a real-shaped heartbeat line");
+  // The age policy runs end-to-end through the route, not just in the unit.
+  assert.equal(parsed.usageUnknownReason, "too-old");
+  assert.equal(parsed.fiveHour, undefined, "and a too-old reading is still withheld through the route, not just in the unit");
+});
+
