@@ -449,6 +449,36 @@ export function workerKeychainGrantApps(claudeBin: string): string[] {
   return [claudeBin, "/usr/bin/security"];
 }
 
+/**
+ * W1-T265: the Anthropic account identity active on this host — an
+ * `accountUuid`/`emailAddress` NAME, read fresh (never cached) from
+ * `~/.claude.json`'s `oauthAccount` block, forwarded to `ensureWorkerKeychain`'s
+ * `accountId` opt so an account switch is detected. Deliberately NOT the copied
+ * worker keychain item's own `acct` attribute — account-usage.ts measured that
+ * value to be the OS username, identical before and after an Anthropic account
+ * switch, so it cannot discriminate accounts.
+ *
+ * A private, minimal re-implementation rather than importing account-usage.ts's
+ * own `readAccountUsageFile`: that module already depends on panel-actions.ts,
+ * which depends on THIS file (`appendQuestionAnswer`) — importing it here would
+ * close that into an import cycle. Fails soft to `undefined` on any read/parse
+ * error or unexpected shape, matching account-usage.ts's own fail-soft doctrine:
+ * this must never throw and never block a spawn.
+ */
+export function resolveActiveAccountId(path: string = join(homedir(), ".claude.json")): string | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+      oauthAccount?: { accountUuid?: unknown; emailAddress?: unknown };
+    };
+    const uuid = parsed.oauthAccount?.accountUuid;
+    if (typeof uuid === "string" && uuid !== "") return uuid;
+    const email = parsed.oauthAccount?.emailAddress;
+    return typeof email === "string" && email !== "" ? email : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface SpawnWorkerArgs {
   cwd: string;
   permissionMode: PermissionMode;
@@ -490,7 +520,23 @@ export interface SpawnWorkerArgs {
    * injectable seams, worker-home.ts) to exercise this gate deterministically
    * off a non-macOS CI runner, with no real keychain touched.
    */
-  keychain?: { platform?: NodeJS.Platform; runner?: SecurityRunner; exists?: (path: string) => boolean };
+  keychain?: {
+    platform?: NodeJS.Platform;
+    runner?: SecurityRunner;
+    exists?: (path: string) => boolean;
+    /**
+     * W1-T265: the active Anthropic account identity for THIS spawn — an
+     * `accountUuid`/`emailAddress` NAME, never a secret — forwarded to
+     * `ensureWorkerKeychain`'s `accountId` opt so an account switch under the
+     * unlabelled default store re-provisions instead of silently spending the
+     * stale copy. Omitted ⇒ resolved fresh, per spawn, by this file's own
+     * `resolveActiveAccountId` (never from the keychain's own `acct` attribute —
+     * account-usage.ts measured that to be the OS username, identical across an
+     * account switch). Tests inject a fixed value here to exercise the gate
+     * without touching the real `~/.claude.json`.
+     */
+    accountId?: string;
+  };
   /**
    * W1-T117: attribution markers threaded into the child's env
    * (`REMUDERO_RUN_ID`/`REMUDERO_TASK_ID`) — inherited by every descendant
@@ -587,12 +633,19 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     let workerKeychainPath: string | undefined;
     const platform = args.keychain?.platform ?? process.platform;
     if (platform === "darwin") {
+      // W1-T265: resolve fresh, per spawn — never captured once at boot, matching
+      // account-usage.ts's own "identity is read fresh" doctrine (that module is
+      // the reason this reads accountUuid/emailAddress here rather than the
+      // keychain's own `acct` attribute, which it measured to be the OS username
+      // and therefore not a discriminator across an Anthropic account switch).
+      const accountId = args.keychain?.accountId ?? resolveActiveAccountId();
       workerKeychainPath = ensureWorkerKeychain({
         ...workerKeychainPaths(join(config.root, "state")),
         loginKeychainPath: join(realHome, "Library", "Keychains", "login.keychain-db"),
         grantApps: workerKeychainGrantApps(claudeBin),
         runner: args.keychain?.runner,
         exists: args.keychain?.exists,
+        accountId,
       }).keychainPath;
     }
     materializeWorkerHome({ workerHome, realHome, workerKeychainPath });

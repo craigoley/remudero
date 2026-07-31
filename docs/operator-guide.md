@@ -346,6 +346,50 @@ subscription. Check before running a dev-shell daemon you intend to keep on subs
 env | grep -i ^ANTHROPIC_    # nothing here ⇒ subscription guaranteed regardless of config
 ```
 
+### Switching the fleet's Anthropic account (W1-T265)
+
+Before this task, the ONLY way to move a host's fleet from one Anthropic subscription to
+another was undocumented and unledgered: `claude /logout` + `/login` as the fleet user, then
+moving `state/remudero-worker.keychain-db` aside by hand so the next boot re-provisioned it. It
+worked because `ensureWorkerKeychain` (`src/lib/worker-home.ts`) gated provisioning on file
+**existence alone** — never identity — so logging into a second subscription without also
+clearing that file left every worker still spending the FIRST account while the console watched
+the second, silently, with nothing anywhere comparing the two.
+
+**As of this task, the manual file move is no longer necessary for a normal switch.** Every
+worker spawn (`spawnWorker`, `src/lib/worker.ts`) now resolves the active Anthropic account
+identity fresh — per spawn, never cached — from `~/.claude.json`'s `oauthAccount.accountUuid`
+(falling back to `emailAddress`), and compares it against the identity the dedicated worker
+keychain (`state/remudero-worker.keychain-db`) was last provisioned for, recorded in a plain-text
+sidecar (`state/worker-keychain-account`, a NAME, never a credential). A mismatch — including a
+store that predates this task and carries no recorded identity at all — re-provisions the
+keychain from the (now-current) login item before the spawn proceeds, rather than silently
+reusing the stale copy.
+
+The procedure:
+
+```sh
+rmd down --reason "switching Anthropic account"   # graceful stop — never kill mid-task
+claude /logout                                    # as the fleet user
+claude /login                                      # into the NEW subscription
+rmd up                                             # resume; the NEXT worker spawn re-provisions
+```
+
+`rmd down`/`rmd up` are the same verbs used for [restarting the supervised
+daemon](#restarting-the-supervised-daemon) — winding the fleet down first avoids a mid-task kill
+racing the credential swap. Nothing below `rmd up` requires touching
+`state/remudero-worker.keychain-db` by hand; deleting it is still safe (it just forces the next
+spawn's provisioning path regardless of identity) but is no longer the only lever.
+
+**What this does NOT yet cover** (tracked as follow-on work, not part of this task): the
+daemon's own boot-time keychain unlock (`daemon.worker_keychain`, logged from `src/run-task.ts`'s
+`daemonBoot` call) still uses the pre-W1-T265, identity-unaware gate — it only warms the
+keychain so it's unlocked before the first spawn, and every spawn re-checks identity on its own
+regardless of what boot saw. So a switch is corrected by the next spawn even though the boot
+ledger line itself does not yet name which account it provisioned for. Also out of scope: WHICH
+account a given run should use in the first place — nothing in remudero selects an account; this
+task only makes the one store that exists follow whichever account is actually logged in.
+
 ### Engaging the overflow valve: draining on API credits (W1-T258)
 
 When the subscription window is exhausted and you want the fleet to keep draining on **metered

@@ -6,60 +6,71 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 150.00
-  rationale: "RE-VERIFIED at 07e5861, and it corrects a premise worth correcting: there is no single-account usage
-    panel in flight to extend. src/lib/serve.ts registers exactly TWO plain routes — path '/' (:3186, the HTML
-    shell) and path '/v1/auth/scope' (:3209) — plus one SSE stream, and the only 'headroom' match in the file is
-    prose about visual chrome. At the time of filing the repository had ZERO open pull requests and no merged PR
-    adding a usage or headroom panel. So this task BUILDS the surface; nothing is being extended.
-    The shape to copy already exists. computeGlanceSpend (src/lib/glance.ts:42) aggregates cost_usd off ledger
-    lines into today/this-week buckets and the board renders it as the spend strip — aggregate a ledger field into
-    buckets and render. That is precisely why W1-T268 is a hard prerequisite rather than a nicety: the field this
-    panel must group by does not exist yet, and grouping the existing lines by anything account-shaped would
-    invent an attribution the ledger cannot support.
-    CONTROL, NOT ONLY DISPLAY. The operator asked for accounts to be 'controlled in the console'. A read-only
-    panel is the honest v1 and the whole of this task; any console-initiated SWITCH is deliberately excluded,
-    because a switch requires an interactive OAuth login that no code path in this repo can perform — that step is
-    unavoidably human, and a button that cannot complete its own operation is worse than no button."
+  rationale: "WITHDRAWN AS FILED 2026-07-31 by the W1-T266 ruling (docs/account-selection.md, merged as PR #1024),
+    which this task's own WITHDRAW-IF clause named as the deciding authority. That record rules PINNED SERIAL-SWITCH
+    mode with no concurrency, and says in terms: 'W1-T270 (console account-control surface, gated on W1-T269) should
+    be WITHDRAWN as filed.' Its follow-ups ask for exactly this bookkeeping edit — 'mark W1-T269 and W1-T270
+    status: withdrawn (or equivalent) in their task files per this ruling'. `withdrawn` is not one of plan.ts's
+    TASK_STATUSES, so the equivalent this repo already uses for a retirement record is status: blocked (precedent:
+    the W1-T139-superseded native-shell task, plan/tasks.yaml — 'RECORD of the retirement decision, not a work item').
+    WHY THE RULING KILLS IT. Every acceptance criterion below was written for a LIVE MULTI-ACCOUNT panel: one row per
+    configured account label, each with the per-account reserve state W1-T269 would resolve and per-account spend
+    buckets grouped by the ledger dimension W1-T268 would add. With one account live per host by ruling, that panel
+    renders a set with one element. W1-T269, which supplies the reserve state, is itself withdrawn by the same record.
+    WHAT IS ALREADY BUILT, so no later reader rediscovers it at $150. PR #1020 (merged 2026-07-31, commit e8b2186,
+    'feat(console): show which Anthropic account the fleet spends and how much is left') shipped a SINGLE-ACCOUNT
+    console strip: GET /v1/account-usage (src/lib/account-usage.ts, scope read), rendering the active account's email,
+    the five-hour and seven-day windows with their resets, the headroom governor posture, and an as-of age, with
+    src/lib/serve.ts carrying six au-* elements and test/account-usage.test.ts + test/serve.glance.test.ts covering it.
+    That is NOT this task's product — it reads ~/.claude.json live for ONE account and aggregates no ledger spend at
+    all — but it is why 'which account is spending' is already answerable in the console today. #1020 also made the
+    daemon's headroom heartbeat symmetric, so an ARMED under-ceiling governor emits daemon.headroom every tick.
+    REVERSIBLE ON EVIDENCE, not a permanent no: if the published one-account-per-machine promise in MASTER-PLAN.md is
+    ever revisited, the multi-account panel becomes wanted again and the withdrawn criteria are preserved verbatim in
+    this task's note for exact re-filing."
   design: |
-    (1) READ-ONLY ACCOUNT PANEL. Per account label: the label itself, the account's most-burned window and reset,
-        the reserve state W1-T269 resolves for it, and spend-today / spend-this-week aggregated from the ledger
-        lines W1-T268 labels. Rendered server-side into the shell exactly as the glance spend strip is, so no new
-        route is needed for the first cut.
-    (2) THE EPOCH IS VISIBLE, NOT SILENT. Lines older than ACCOUNT_ATTRIBUTION_EPOCH are unattributable by
-        construction. The panel must SHOW that boundary rather than quietly summing from it — an operator reading
-        a week-to-date figure that silently begins mid-week will read it as a full week. A single explicit
-        'attribution begins' marker discharges this.
-    (3) NO SILENT SINGLE-ACCOUNT COLLAPSE. With one label configured the panel renders that one account and says
-        so; it must not look identical to a two-account view with one account missing. Absence of data and absence
-        of an account are different states and the console has a history of rendering cannot-observe as benign.
-    (4) THE TEMPLATE-LITERAL HAZARD. serve.ts's client JS lives inside a backtick template literal and a backtick
-        anywhere in client-side comment text terminates it and fails the build (CLAUDE.md, #777). Any client change
-        here must be checked by rendering the shell and parsing the script block, and the real Chromium tests in
-        test/serve.*.test.ts are the DOM proof — they are headless and are the sanctioned route.
-    EXPLICITLY NOT IN SCOPE: initiating a login, switching accounts from the browser, or any write route. v1 reads.
+    NOT TO BE BUILT. Withdrawn as filed by the W1-T266 ruling (docs/account-selection.md). Left in the plan as a
+    RECORD of the withdrawal decision, not a work item. status: blocked so nextRunnable/assertRunnable never
+    dispatch it (drain.ts's isDispatchEligible refuses `status === "blocked"` before any dependency or breaker check).
+    THE SMALLER PRODUCT THAT MAY STILL BE WANTED IS NOT THIS TASK. The ruling's own follow-ups suggest considering a
+    separate, non-gated task for a read-only HISTORICAL per-account spend view — grouped by the ledger label W1-T268
+    would add and bounded by ACCOUNT_ATTRIBUTION_EPOCH. That is a different and smaller product than the live
+    multi-account panel filed here, it is an operator decision to file, and it is deliberately NOT smuggled into this
+    entry by rewording: reshaping a withdrawn task into new scope would hide a filing decision inside a bookkeeping edit.
+    depends_on is left UNCHANGED at [W1-T268, W1-T269] on purpose. status: blocked already stops dispatch before the
+    dependency check is reached, so editing the edge would change nothing observable while making the graph disagree
+    with what was actually filed. W1-T269 is itself withdrawn by the same ruling and needs its own entry marked — that
+    is a sibling edit, not this one's.
   acceptance:
-    - claim: "the panel renders one row per configured account label with its window reset reserve state and spend buckets"
-      proof: "unit test: test/serve-account-panel.test.ts"
-    - claim: "spend older than the attribution epoch is excluded and the boundary is shown rather than silently summed from"
-      proof: "unit test: test/serve-account-panel.test.ts"
-    - claim: "a single configured account renders as a named single account and is distinguishable from a missing one"
-      proof: "unit test: test/serve-account-panel.test.ts"
-    - claim: "the rendered shell's client script still parses after the change so the template literal was not terminated"
-      proof: "unit test: test/serve-account-panel.test.ts"
-    - claim: "the panel is read-only — it adds no write-scoped route and no console-initiated switch affordance"
-      proof: "unit test: test/serve-account-panel.test.ts"
+    - claim: "this task is withdrawn as filed and never dispatched; the ruling that withdrew it is recorded"
+      proof: "grep: should be WITHDRAWN in docs/account-selection.md"
   risk: high
   origin: architect
   plan_refs: ["§4"]
   files: [src/lib/serve.ts, src/lib/board.ts, src/lib/glance.ts]
-  status: queued
+  status: blocked
   attempts: 0
-  note: "verify:auto — serve.ts DOM behaviour is covered by real headless Chromium tests already in this repo, so
-    a rendering criterion is machine-checkable without an operator looking at a screen.
-    risk:high — three subsystems by Rule 19's count (serve, board, glance), and serve.ts carries the
-    backtick-template hazard that has broken the build before. The asymmetric failure is a spend figure that looks
-    authoritative while summing an epoch it should have refused.
-    budget_usd 150 — above the house default because the Chromium suite is slow, the epoch-boundary rendering is
-    genuinely fiddly, and the template-literal check costs a render-and-parse cycle per iteration.
-    WITHDRAW-IF: W1-T266 rules for a serial switch AND the operator does not want a spend view per epoch. The
-    read-only spend surface may still be wanted on its own merits even then — decide on the ruling, not here."
+  note: "THE FIVE WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    (1) claim 'the panel renders one row per configured account label with its window reset reserve state and spend
+    buckets' / proof 'unit test: test/serve-account-panel.test.ts';
+    (2) claim 'spend older than the attribution epoch is excluded and the boundary is shown rather than silently
+    summed from' / proof 'unit test: test/serve-account-panel.test.ts';
+    (3) claim 'a single configured account renders as a named single account and is distinguishable from a missing
+    one' / proof 'unit test: test/serve-account-panel.test.ts';
+    (4) claim 'the rendered shell's client script still parses after the change so the template literal was not
+    terminated' / proof 'unit test: test/serve-account-panel.test.ts';
+    (5) claim 'the panel is read-only — it adds no write-scoped route and no console-initiated switch affordance' /
+    proof 'unit test: test/serve-account-panel.test.ts'.
+    MEASURED AGAINST #1020 BEFORE WITHDRAWING, so the withdrawal does not rest on the ruling alone: (1) UNTOUCHED —
+    #1020 renders no account label, no reserve state and no spend buckets; (2) UNTOUCHED — ACCOUNT_ATTRIBUTION_EPOCH
+    has zero occurrences in src/ and no ledger line in 4.1M carries an account key; (3) PARTIAL — #1020 does render a
+    named single account distinguishable from a missing reading, but keyed on ~/.claude.json identity rather than a
+    configured account label; (4) and (5) are hygiene constraints on whatever change the task makes, proven for
+    #1020's own change and not transferable. So #1020 does NOT satisfy this task — it is withdrawn by ruling, not by
+    supersession.
+    ORIGINAL FILING NOTE, unchanged and still true of the withdrawn product: verify:auto because serve.ts DOM
+    behaviour is covered by real headless Chromium tests; risk:high for three subsystems and the backtick-template
+    hazard; budget_usd 150 for the slow Chromium suite and the epoch-boundary rendering.
+    WITHDRAW-IF, now DISCHARGED: the original clause read 'W1-T266 rules for a serial switch AND the operator does not
+    want a spend view per epoch'. W1-T266 ruled serial (PR #1024). The per-epoch spend view is left to the operator as
+    a possible separate filing, per the ruling's own follow-ups — it is not built into this entry."
