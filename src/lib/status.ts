@@ -779,6 +779,70 @@ export function isDispatchBreakerTripped(
 }
 
 /**
+ * SIBLING LIFETIME DISPATCH COUNTER (W1-T271). {@link dispatchesWithoutNewOwnedPr} above
+ * resets to 0 on every `pr.opened` line — correct for the failure IT guards (dispatch after
+ * dispatch producing NOTHING, the W1-T1/W1-T152 shape) but BLIND BY CONSTRUCTION to a task
+ * that re-dispatches forever while merging a genuine no-op PR each time: W1-T254, OBSERVED
+ * 2026-07-31, dispatched five times in eighty minutes; each run correctly found the work
+ * already done, opened and merged its own owned PR, and each merge reset the streak counter
+ * to 0 right before the daemon's next tick re-dispatched it again. This counts EVERY
+ * `run.start` line for `taskId` across its WHOLE recorded history — no ledger step of any
+ * kind resets it, `pr.opened` included — so a "succeeds every time" loop cannot evade it the
+ * way it evades the streak counter. Deliberately a SECOND, independent measurement rather
+ * than an edit to the streak counter above: see this task's own rationale for why the reset
+ * is not simply wrong for the failure it targets.
+ */
+export function dispatchesEver(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+): number {
+  let count = 0;
+  for (const line of lines) {
+    if (line.task_id === taskId && line.step === "run.start") count++;
+  }
+  return count;
+}
+
+/**
+ * THE THRESHOLD IS A MEASUREMENT, NOT A GUESS (W1-T271's own design note). Derived from the
+ * unioned ledger's real per-task `run.start` distribution — `state/ledger.ndjson` plus all
+ * 661 rotated archives, 4,165,663 lines, measured 2026-07-31, deduped by `run_id` (every
+ * archive is a cumulative byte-for-byte snapshot, so the same line recurs across many
+ * archive files):
+ *
+ *   282 tasks have ever been dispatched at least once. 274 of them (97%) were dispatched
+ *   1-4 times, ever, and NO task in this entire corpus that was genuinely legitimate work
+ *   needed more than 4 lifetime dispatches.
+ *   The only counts at or above 5 are all documented FAILURES, not legitimate fix-rung
+ *   cycles: W1-T152 (5) is named alongside W1-T1 in this file's own rationale as a
+ *   producing-nothing storm; W1-T254 (6, the incident that prompted this task), W3-T1a (6),
+ *   W1-T7 (6), and W1-T230 (6) are each separately-documented no-op re-dispatch closures;
+ *   W1-T64 (8), W1-T29 (11), and W1-T1 (153) are the two historically largest storms (P29's
+ *   own motivating incidents).
+ *
+ * 10 sits comfortably above the ENTIRE legitimate population (2.5x its observed max of 4) —
+ * "much higher" than the 5-dispatch streak cap, per design — while cutting off well short of
+ * the two genuine storm magnitudes (11, 153), so it still functions as a real backstop
+ * rather than a number so high it never fires.
+ */
+export const DEFAULT_MAX_TASK_LIFETIME_DISPATCHES = 10;
+
+/**
+ * True once `taskId` has been dispatched {@link DEFAULT_MAX_TASK_LIFETIME_DISPATCHES} (or
+ * `maxLifetimeDispatches`) times, EVER — unlike {@link isDispatchBreakerTripped}, unaffected
+ * by any `pr.opened` line. The caller (drain.ts's `isDispatchEligible`) consults this
+ * ALONGSIDE the existing streak breaker, never in place of it — a genuinely fresh PR still
+ * legitimately resets the streak counter's own count; it just no longer resets THIS one.
+ */
+export function isLifetimeDispatchCapExceeded(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  maxLifetimeDispatches: number = DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
+): boolean {
+  return dispatchesEver(lines, taskId) >= maxLifetimeDispatches;
+}
+
+/**
  * Per-process, cross-tick memory {@link evaluateDispatchBreaker} uses to notice an
  * impossible regression (W1-T206): the ledger's dispatch count for a task dropping
  * without the `pr.opened` line that would legitimately explain it. Held by the caller
