@@ -130,6 +130,12 @@ function listRelFiles(root: string, relDir: string): string[] {
  *  disk-scanning kind) which directory it walks differ. */
 interface LandingKind {
   branch: string;
+  /**
+   * The ONE repo-relative directory this kind owns. The carry-forward below is filtered to
+   * it, so a landing can only ever re-stage its OWN records — never arbitrary repo content
+   * that happens to differ between the stale landing branch and current origin/main.
+   */
+  ownedDir: string;
   prTitle: string;
   commitMessage: (unlanded: string[]) => string;
   prBody: (unlanded: string[]) => string;
@@ -193,6 +199,7 @@ function decisionsPrBody(unlanded: string[]): string {
 
 const FEEDBACK_LANDING_KIND: LandingKind = {
   branch: LANDING_BRANCH,
+  ownedDir: FEEDBACK_REL_DIR,
   prTitle: LANDING_PR_TITLE,
   commitMessage: feedbackCommitMessage,
   prBody: feedbackPrBody,
@@ -200,6 +207,7 @@ const FEEDBACK_LANDING_KIND: LandingKind = {
 
 const DECISIONS_LANDING_KIND: LandingKind = {
   branch: DECISIONS_LANDING_BRANCH,
+  ownedDir: DECISIONS_REL_DIR,
   prTitle: DECISIONS_LANDING_PR_TITLE,
   commitMessage: decisionsCommitMessage,
   prBody: decisionsPrBody,
@@ -387,7 +395,17 @@ function landContent(
       pendingFiles = git(["ls-tree", "-r", "--name-only", `origin/${kind.branch}`])
         .trim()
         .split("\n")
-        .filter(Boolean);
+        .filter(Boolean)
+        // SCOPED TO THE DIRECTORY THIS KIND OWNS. `ls-tree -r` lists the branch's ENTIRE repo
+        // tree, and the branch was built from an OLDER origin/main, so every file that changed
+        // on main since carries a differing blob. Unfiltered, the loop below re-staged each of
+        // them at its STALE value -- a silent revert of merged work with a correct parent, which
+        // is exactly what commit e8443ad (PR #1025) shipped on 2026-07-31: it reverted 6 src/
+        // and 2 test/ files (-515 lines, undoing PRs #1020/#1008/#1017) plus 274 lines of the
+        // append-only DECISIONS.md, and was caught only because the deletions happened not to
+        // compile. Carrying forward anything outside this directory is never correct: the bridge
+        // owns these records and nothing else.
+        .filter((f) => f.startsWith(`${kind.ownedDir}/`));
     } catch {
       pendingFiles = []; // no pending branch yet — nothing to carry forward
     }
