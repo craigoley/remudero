@@ -37,11 +37,11 @@
     capturing only the live file would silently lose history. The two must agree on what the full record is.
   acceptance:
     - claim: "a snapshot exists after the scheduled run and its content list contains the ledger and the proposals register"
-      proof: "unit test on the snapshot content list"
+      proof: "unit test: the snapshot content list names the ledger and the proposals register"
     - claim: "restore round-trips a seeded state directory, with the restored ledger byte-identical to the source"
-      proof: "unit test"
+      proof: "unit test: restore round-trips a seeded state directory byte-identically"
     - claim: "a snapshot failure escalates loudly rather than completing silently or leaving an empty archive"
-      proof: "unit test on the failure path"
+      proof: "unit test: a snapshot failure escalates loudly rather than completing silently"
   risk: high
   origin: architect
   plan_refs: ["§10"]
@@ -53,4 +53,8 @@
     URGENCY ROSE THIS SESSION for two independent reasons: the proposals register gained nine entries that
     exist on one disk and nowhere else, and W1-T230 makes the ledger the merge gate rather than only the audit
     log.
-    verify:human because a restore drill's value is an operator having done it once and knowing it works."
+    verify:human because a restore drill's value is an operator having done it once and knowing it works.
+    PROOFS REWRITTEN 2026-07-31 (impl-BK) into executable dialect; all three refused at the pre-dispatch
+    linter. The prior bodies, verbatim, so nothing is lost: criterion 1 'unit test on the snapshot content
+    list'; criterion 2 'unit test'; criterion 3 'unit test on the failure path'. Each named a real test the
+    implementing PR will create - the rewrite only makes the forward reference parseable."
