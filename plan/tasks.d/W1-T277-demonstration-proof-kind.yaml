@@ -1,0 +1,58 @@
+- id: W1-T277
+  title: "six verify:human tasks lint-fail permanently because no proof dialect can express an operator demonstration — a chaos drill, a device recording and a live deploy have no executable form and never will"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "VERIFIED AT ebb6777. Exactly two proof dialects exist — src/lib/review.ts:470-471:
+      const DIALECT_GREP_RE = /^grep:\\s*(.+)$/i;
+      const DIALECT_TEST_RE = /^unit test:\\s*(.+)$/i;
+    and six tasks are `verify: human` with proofs that are, correctly, operator demonstrations: W1-T12e,
+    W1-T147, W12-T1, W2-T2, W3-T4, W3-T7. All six appear in the lint failing set today (1 failing line each,
+    of 193 total).
+    THEY CANNOT BE FIXED BY REWRITING THEIR PROOFS, and that is the point. Forcing them into `unit test:`
+    produces proofs that parse, match zero tests, and cap the review at proof_exec 0/N — the exact theatre the
+    dialect gate exists to stop. CLAUDE.md already records this as a deliberate leave-alone.
+    THE COST IS NOT DISPATCH — it is SIGNAL. `isDispatchEligible` refuses at `verify !== 'auto'` BEFORE the
+    linter is consulted, so these six can never stall the queue. What they do is sit permanently in a
+    193-strong failing set, where six entries that CAN NEVER be fixed are indistinguishable from entries that
+    should be. A permanently-red check trains its reader to stop looking, which is how a real regression hides."
+  design: |
+    A THIRD DIALECT: `demonstration: <what the operator must do>`, recognised alongside `grep:` and
+    `unit test:`, and NEVER executed.
+    THE SEMANTICS MUST BE HONEST ABOUT WHAT IT IS. It is not a proof the harness can check; it is a proof the
+    harness DECLINES to check, on the record. So it must be legal ONLY on a `verify: human` task — on a
+    `verify: auto` task it is an escape hatch from the executable-proof rule and must be refused by the linter.
+    That asymmetry is the whole safety property and belongs in the linter, not in convention.
+    WHAT IT CHANGES: the task-linter stops flagging these six; the review dialect gate recognises the prefix
+    so `isDialectPrefixed` does not read them as prose; `parseWhitelistedProof` returns null for them (they are
+    not executable, by construction) WITHOUT that null being treated as an authoring defect.
+    RECORD WHAT THE DEMONSTRATION IS. A `demonstration:` body should name the observable outcome, so the
+    operator reading it knows what performing it looks like — recon-BN measured the alternatives and this is
+    the one that keeps the human in the loop without pretending the machine checked anything.
+    EXPLICITLY NOT IN SCOPE: changing any of the six tasks' verify field, or making them dispatchable.
+  acceptance:
+    - claim: "a demonstration proof on a verify human task lints clean"
+      proof: "unit test: test/demonstration-proof-kind.test.ts"
+    - claim: "a demonstration proof on a verify auto task is refused by the linter"
+      proof: "unit test: test/demonstration-proof-kind.test.ts"
+    - claim: "a demonstration proof is never executed and never counts as an executed pass"
+      proof: "unit test: test/demonstration-proof-kind.test.ts"
+    - claim: "the dialect is recognised by review alongside grep and unit test"
+      proof: "grep: DIALECT_DEMO_RE in src/lib/review.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§5C"]
+  files: [src/lib/review.ts, src/lib/task-linter.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the dialect, the linter rule and the refusal are all pure predicates over task text.
+    risk:high — two subsystems by Rule 19's count (review, task-linter), and the linter is right to raise it:
+    a third dialect is a new way to SATISFY a gate, and the verify:human-only restriction is the only thing
+    preventing it becoming a universal escape hatch. That restriction is the criterion that matters most, and
+    it must hold in BOTH subsystems or the hatch opens in whichever one forgot it.
+    budget_usd 80 — small and local. NOTE src/lib/task-linter.ts carries a raw NUL byte and is invisible to
+    plain grep; use grep -a when working in it.
+    NO depends_on: independent of everything else filed here."

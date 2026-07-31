@@ -1,0 +1,59 @@
+- id: W1-T273
+  title: "a grep: proof that ALREADY PASSES on the merge-base proves nothing, and the review gate cannot tell — W1-T267's criterion 5 exited 0 on the commit before the task was implemented and the review executed it as substantiated"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  rationale: "MEASURED at ebb6777, and the instance is a MERGED task. W1-T267's fifth criterion carries
+    `proof: grep: workerKeychainPaths in src/run-task.ts` (plan/tasks.d/W1-T267-usage-probe-reads-spending-store.yaml:52).
+    Run against 9f7adfe — the commit BEFORE #1026 implemented the task — that pattern returns TWO hits: an
+    import line and an unrelated daemon rung. It would have exited 0 on completely unbuilt work.
+    THE WORK WAS REAL; THE PROOF PROVED NOTHING. #1026 genuinely fixed the probe's credential store, and the
+    review executed criterion 5 and recorded it as substantiated — on a pattern that could not have failed.
+    THE DISCRIMINATING PATTERN EXISTED: `home: workerHome` returns ZERO hits at 9f7adfe and ONE on today's
+    main. So the difference between a proof and a decoration was one token, and nothing in the gate noticed.
+    WHY THIS IS WORTH A GATE RATHER THAN A HABIT: the same class already cost this repo elsewhere. A proof is
+    supposed to discriminate between done and not-done; one that passes on the merge-base discriminates
+    nothing, and the review's `executed_pass` POSITIVELY OVERRIDES the keyword floor, so a non-discriminating
+    proof is strictly worse than a prose one."
+  design: |
+    THE CHECK. For a criterion whose proof parses as `grep:` (parseDialectGrep, src/lib/review.ts), run the
+    same pattern against the PR's MERGE-BASE as well as its head. A pattern that matches on BOTH is
+    non-discriminating: it cannot distinguish the work having been done from its not having been done.
+    THE VERDICT IS A DOWNGRADE, NOT A HARD FAIL, and that distinction is load-bearing. Mapping this to
+    `failure` would red every PR whose proof happens to be broad, halting the fleet over an authoring gap —
+    the same reasoning `capped` already uses. Record it as a distinct, rendered outcome that removes the
+    proof's positive override and drops the criterion back to the keyword floor, so a real defect is visible
+    without the gate becoming a tripwire.
+    THE MERGE-BASE IS ALREADY REACHABLE: the review runs against a real checkout of the PR head, so the base
+    ref is one `git merge-base` away — no new gateway and no new network call.
+    EXPLICITLY NOT IN SCOPE: `unit test:` proofs. A forward-referencing test path legitimately matches nothing
+    before the work and everything after, so the same rule does not apply to them and must not be extended
+    there by analogy.
+  acceptance:
+    - claim: "a grep proof matching on the merge-base as well as the head is flagged non-discriminating"
+      proof: "unit test: test/proof-discrimination.test.ts"
+    - claim: "the non-discriminating outcome removes the proof's positive override"
+      proof: "unit test: test/proof-discrimination.test.ts"
+    - claim: "a grep proof matching only on the head still counts as executed and passing"
+      proof: "unit test: test/proof-discrimination.test.ts"
+    - claim: "the check names a distinct recorded outcome rather than reusing failure"
+      proof: "grep: preexistingProofHits in src/lib/review.ts"
+  risk: medium
+  origin: architect
+  plan_refs: ["§5"]
+  files: [src/lib/review.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the whole check is a pure comparison of two grep results over a checkout the review
+    already has.
+    risk:medium — ONE subsystem by Rule 19's count (review), and the outcome is a downgrade rather than a
+    block, so a wrong call costs legibility rather than halting the fleet.
+    budget_usd 90 — below the house default for a high-risk task: the logic is small and local, and the
+    expensive part is fixtures covering the both-match / head-only / neither-match cases.
+    W1-T267 IS NOT AMENDED BY THIS TASK. It is merged and will never dispatch again, so rewriting its proof
+    would change nothing observable; it is cited here as the evidence, which is where it is useful.
+    NO depends_on. Shares src/lib/review.ts with W1-T274 — a file-overlap for dispatch-overlap.ts to
+    partition, not a dependency; neither needs the other's output."
