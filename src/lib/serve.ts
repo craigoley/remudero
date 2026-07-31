@@ -456,6 +456,12 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     background: rgba(255, 184, 77, 0.12); border: 1px solid var(--status-needs-human);
     color: var(--status-needs-human); padding: 0.5rem 0.75rem; border-radius: 8px; font-size: 0.85rem;
   }
+  /* A FAILED WRITE, not a degraded read: red rather than the gh-banner's amber, so the two are
+     never confused at a glance. Same box metrics, so it drops into the same header slot. */
+  .write-error {
+    background: rgba(255, 107, 107, 0.12); border-color: var(--status-blocked);
+    color: var(--status-blocked); white-space: pre-line;
+  }
   .live-indicator {
     width: 0.5em; height: 0.5em; border-radius: 50%; background: var(--status-running);
     display: inline-block; animation: live-pulse 1.2s ease-in-out infinite;
@@ -653,6 +659,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   </div>
   <span id="stale-badge" hidden>STALE — showing last known data</span>
   <div id="gh-unreachable-banner" class="gh-banner" hidden role="status" aria-live="polite"></div>
+  <div id="write-error-banner" class="gh-banner write-error" hidden role="alert" aria-live="assertive"></div>
   <!-- W1-T156: a single dedicated aria-live region for status-change announcements -- screen
        reader users get "task flipped" news without a sighted user's visual flash/highlight. -->
   <div id="aria-announcer" class="sr-only" role="status" aria-live="polite"></div>
@@ -895,11 +902,57 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
   // the whole point of this task. A caller with no write token sends an empty bearer and gets the
   // SAME 401 service.ts already returns for any unrecognized token; the UI never lets that fire
   // from a live click (every write control starts/re-renders disabled until hasWriteScope is true).
+  // THE SURFACE for a failed write. Deliberately a BANNER, not console.error: the operator is
+  // looking at the page, not at devtools -- a silent log is what made every write control here
+  // indistinguishable from success on a 401/404/500 (recon-BV).
+  // NOTE ON ESCAPING: this whole script is inside a TS template literal, so this function uses
+  // string concatenation and single quotes ONLY -- no backtick, no dollar-brace. See CLAUDE.md.
+  function showWriteError(path, status, detail) {
+    var el = document.getElementById("write-error-banner");
+    if (!el) return;
+    var msg;
+    if (status === 401 || status === 403) {
+      // THE EXPECTED, RECURRING CASE. W1-T202 put the write token in sessionStorage on XSS
+      // grounds, so it dies with the tab and with every browser restart -- by design. Tell the
+      // operator how to get a new one; never weaken the storage, and never print a token.
+      msg = "Not authorized to write (HTTP " + status + "). This tab has no valid write token — "
+          + "they live in sessionStorage by design and are cleared when the tab or browser closes.\\n"
+          + "Run  rmd console-url --write  and open the URL it prints, then retry.";
+    } else if (status === 0) {
+      msg = "Write failed: could not reach the console service (" + path + ")."
+          + (detail ? "\\n" + detail : "");
+    } else {
+      msg = "Write failed: " + path + " returned HTTP " + status + "."
+          + (detail ? "\\n" + detail : "");
+    }
+    el.textContent = msg;
+    el.hidden = false;
+  }
+  function clearWriteError() {
+    var el = document.getElementById("write-error-banner");
+    if (el) { el.hidden = true; el.textContent = ""; }
+  }
   function postJson(path, body) {
+    // fetch() rejects only on a NETWORK failure -- an HTTP 401/404/500 resolves normally, which is
+    // why every call site discarding this result showed the operator nothing. Check .ok HERE, once,
+    // so all twelve write controls are covered by one place rather than twelve patches.
     return fetch(path, {
       method: "POST",
       headers: { ...writeAuthHeaders(), "content-type": "application/json" },
       body: JSON.stringify(body ?? {}),
+    }).then(function (res) {
+      if (res.ok) { clearWriteError(); return res; }
+      // Surface the server's own message when it supplies one; fall back to the bare status.
+      return res.text().then(function (raw) {
+        var detail = "";
+        try { var j = JSON.parse(raw); detail = (j && (j.error || j.message)) ? String(j.error || j.message) : ""; }
+        catch (e) { detail = String(raw || "").slice(0, 200); }
+        showWriteError(path, res.status, detail);
+        return res;
+      }, function () { showWriteError(path, res.status, ""); return res; });
+    }, function (err) {
+      showWriteError(path, 0, String((err && err.message) || err || ""));
+      throw err;
     });
   }
 
