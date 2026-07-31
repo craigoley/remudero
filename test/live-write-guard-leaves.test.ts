@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { ghPrMergeSquash } from "../src/lib/worker.js";
 import { ghPrCreateFillCommand } from "../src/run-task.js";
 import { ghIssueGateway } from "../src/lib/escalate.js";
-import { defaultPushExec, gitPushRunBranch } from "../src/lib/git-push.js";
+import { defaultGitCapture, defaultPushExec, gitPushRunBranch } from "../src/lib/git-push.js";
 import { LiveWriteBlockedError, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
 // ── LEAF-LEVEL GUARD PROOFS ──────────────────────────────────────────────────────────
@@ -201,6 +201,14 @@ test("LEAF GUARD git-push: the setUpstream variant refuses too, and builds push 
 // The default exec is the real `execFileSync` indirection the leaf falls back to when no
 // exec is injected. Driven with harmless binaries — never git, never a push — so the
 // indirection is proven to actually shell out rather than being an untested passthrough.
+test("git-push leaf: defaultGitCapture really shells out and RETURNS stdout — the plumbing reads the empty-commit remedy makes", () => {
+  // Sibling of the defaultPushExec test below, and covered the same way: a real exec of a
+  // harmless command, no repo and no remote. This is the seam gitPushEmptyCommit reads
+  // rev-parse/commit-tree through, so "it really shells out" is the property that matters.
+  assert.equal(defaultGitCapture("echo", ["hello-leaf"]).trim(), "hello-leaf", "stdout is returned, not swallowed");
+  assert.throws(() => defaultGitCapture("false", []), "a failing command throws rather than returning empty");
+});
+
 test("git-push leaf: defaultPushExec really shells out — a clean command succeeds and a failing one throws", () => {
   assert.doesNotThrow(() => defaultPushExec("true", [], { stdio: "ignore" }), "a clean command runs");
   assert.throws(

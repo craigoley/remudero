@@ -304,6 +304,12 @@ export interface SweepPolicy {
    */
   pendingCeilingMinutes: number;
   /**
+   * How long an otherwise-mergeable PR may sit with a COMPLETELY EMPTY check rollup before the
+   * ABSENT-check-suite remedy fires. This is the ABSENT-vs-PENDING discriminator's time half —
+   * see {@link absentChecksRepushDecision} for why a time bound is required at all.
+   */
+  absentCeilingMinutes: number;
+  /**
    * W1-T225 (the 2026-07-21 PRs #477/#484 jam) — the LOOP FALSIFIER for the
    * review-orphaned-by-push remedy: once a PR's `priorReviewOrphans` count
    * (prior heads that already spent one orphan re-review) reaches this cap,
@@ -344,6 +350,9 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   dispatchLanes: 2,
   dailyCostCeilingUsd: 150,
   pendingCeilingMinutes: 60,
+  // 10 minutes: an order of magnitude above the observed push->first-check-registers latency
+  // (seconds), and far below the 7h45m #921 sat in its silent loop.
+  absentCeilingMinutes: 10,
   reviewOrphanCap: 2,
 };
 
@@ -380,6 +389,10 @@ export interface OpenPrView {
   lastActivityAt: string;
   /** The head commit sha — keys fix-dispatch idempotence (a new push re-earns a strike). */
   headSha: string;
+  /** The head BRANCH name. Needed by the ABSENT-check-suite remedy, which pushes an empty
+   *  commit to this branch to mint a fresh head sha. Already fetched by the real gateway
+   *  (`isDependabot` reads the same field); optional so every existing fixture stays valid. */
+  headRefName?: string;
   /** Observed: is GitHub auto-merge already armed on this PR? */
   autoMergeArmed: boolean;
   /** Head ref starts with `dependabot/` — routed to the W1-T54 dep-review lane
@@ -738,6 +751,113 @@ export function observedBlockerState(pr: OpenPrView): ObservedBlockerState | und
   // "green", not "none" (only the one required context is absent).
   if (pr.checksState === "green" && pr.reviewState === "none") return "ABSENT";
   return undefined;
+}
+
+/** Why the ABSENT-check-suite remedy did or did not fire, so both outcomes are legible. */
+export type AbsentRepushDecision =
+  | { repush: true; reason: string }
+  | { repush: false; reason: string };
+
+/** How many empty-commit re-pushes ONE PR may earn before the remedy stands down and the
+ *  ordinary escalation takes over. Mirrors `fixStrikeCap`'s role for the fix rung: a bound on
+ *  a remedy that would otherwise retry forever on a PR GitHub simply never schedules. */
+export const ABSENT_REPUSH_CAP = 1;
+
+/**
+ * THE ABSENT-CHECK-SUITE REMEDY'S DECISION (W1-T186 follow-up). Pure: every inch of evidence is
+ * a parameter, so the three real cases below are fixtures rather than a live experiment.
+ *
+ * ── WHY A REMEDY AT ALL ─────────────────────────────────────────────────────────────────────
+ * GitHub sometimes creates NO Actions check-suite for a pushed sha. Observed three times
+ * (#921, #940, #966): only the `claude`/`vercel` app suites existed, zero Actions check-runs,
+ * while ci.yml is unconditional and Actions was healthy on other branches at that same moment.
+ * On #921 the sweep disposed `blocked-ambiguous` and escalated 244 times over 7h45m with
+ * `acted:false` — the right diagnosis, no remedy, and (light-pass stand-down) not even an issue.
+ * Pushing a fresh sha created 6 suites and 20 check-runs immediately, every time.
+ *
+ * ── THE DISCRIMINATOR: ABSENT vs PENDING ────────────────────────────────────────────────────
+ * Re-pushing a PR whose checks merely have not STARTED yet would be destructive churn — it
+ * cancels in-flight runs and resets the review. Two independent facts separate them, and BOTH
+ * are required:
+ *
+ *   1. STRUCTURE. `checksStateFromRollup` already draws this line and we reuse it rather than
+ *      re-deriving: a rollup with entries but no REQUIRED context registered yet returns
+ *      "pending" (`gate.length === 0 && knownRequired`), and ONLY a COMPLETELY EMPTY rollup
+ *      returns "none". So "the workflow is starting" normally reads PENDING, because the
+ *      instant any context registers the rollup is non-empty. `checksState === "none"` means
+ *      nothing at all registered — the missing-suite shape.
+ *   2. TIME. The residual ambiguity is the seconds between the push and the FIRST context
+ *      registering, during which the rollup is legitimately empty. `policy.absentCeilingMinutes`
+ *      bounds it. The clock is `lastActivityAt` (the PR's `updatedAt`), which a push always
+ *      advances; anything else that advances it (a comment) only makes the PR look YOUNGER and
+ *      so makes this fire LESS — the error direction is toward doing nothing, never toward
+ *      churn.
+ *
+ * The W1-T176 sub-shape of ABSENT — `checksState === "green" && reviewState === "none"`, where
+ * every other required context is green and only `remudero-review` never posted — is
+ * DELIBERATELY EXCLUDED. Its rollup is not empty and its remedy is to post the review (the
+ * post-review lane already owns it); a re-push there would throw away a green CI run to fix a
+ * missing status the sweep can post directly.
+ *
+ * ── WHY A PASSING REVIEW IS EXCLUDED ────────────────────────────────────────────────────────
+ * `remudero-review` is posted PER HEAD SHA, so minting a new sha discards it and costs a full
+ * review cycle. A PR that already carries a passing review is never re-pushed here, whatever
+ * its checks say — that certification is the expensive artifact in this system.
+ */
+export function absentChecksRepushDecision(
+  pr: OpenPrView,
+  policy: SweepPolicy,
+  now: number,
+  priorRepushes: { count: number; shas: ReadonlySet<string> },
+): AbsentRepushDecision {
+  if (observedBlockerState(pr) !== "ABSENT") {
+    return { repush: false, reason: "not the ABSENT state" };
+  }
+  // Structure half — excludes the W1-T176 green+review-none sub-shape by construction.
+  if (pr.checksState !== "none") {
+    return {
+      repush: false,
+      reason: `ABSENT via the review-only shape (checksState=${pr.checksState}) — the post-review lane owns this, not a re-push`,
+    };
+  }
+  // A certification already earned must never be thrown away to chase a check suite.
+  if (pr.reviewState === "success") {
+    return { repush: false, reason: "review already PASSED on this head — a re-push would discard the certification" };
+  }
+  if (!pr.headRefName) {
+    return { repush: false, reason: "head branch name not observed — nothing to push to" };
+  }
+  // Time half.
+  const pushedAt = Date.parse(pr.lastActivityAt);
+  if (Number.isNaN(pushedAt)) {
+    return { repush: false, reason: "head age unreadable — never re-push on state we cannot date" };
+  }
+  const ageMin = (now - pushedAt) / 60_000;
+  if (ageMin < policy.absentCeilingMinutes) {
+    return {
+      repush: false,
+      reason: `checks may still be starting (${ageMin.toFixed(1)}m < ${policy.absentCeilingMinutes}m ceiling) — waiting`,
+    };
+  }
+  // Idempotence within a head: sha-keyed, the SAME shape `prior.fixed` uses and #968 gave
+  // `prior.armed`. Without it a single stuck head would earn a fresh commit every pass.
+  if (priorRepushes.shas.has(`${pr.prNumber}@${pr.headSha}`)) {
+    return { repush: false, reason: `already re-pushed this head (${pr.headSha.slice(0, 7)})` };
+  }
+  // The BOUND, per PR rather than per head — a re-push MINTS a new sha, so a sha key alone
+  // would license an unbounded chain of commits on a PR GitHub never schedules.
+  if (priorRepushes.count >= ABSENT_REPUSH_CAP) {
+    return {
+      repush: false,
+      reason: `ABSENT re-push cap reached (${priorRepushes.count}/${ABSENT_REPUSH_CAP}) — escalating instead`,
+    };
+  }
+  return {
+    repush: true,
+    reason:
+      `zero check runs on head ${pr.headSha.slice(0, 7)} after ${ageMin.toFixed(0)}m (ceiling ` +
+      `${policy.absentCeilingMinutes}m) — GitHub created no check-suite; minting a fresh head sha`,
+  };
 }
 
 /**
@@ -1624,6 +1744,13 @@ export interface SweepDeps {
    * standing down here until the NEXT full sweep picks them up.
    */
   actionable?: (d: Disposition) => boolean;
+  /**
+   * THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Pushes an EMPTY commit to the PR's own
+   * branch, minting a fresh head sha, and returns it. Optional: omitted (or absent, as in every
+   * pre-existing fixture) the lane stands down exactly as it does today and the ordinary
+   * escalation runs — never a silent no-op, the stand-down is named on the disposed line.
+   */
+  repushAbsent?: (pr: OpenPrView) => Promise<string | undefined>;
   /** Absolute path to state/ledger.ndjson — dedup source + sweep.disposed sink. */
   ledgerPath: string;
   /** The sweep's run id (e.g. SWEEP-<epochMs> / DAEMON-<epochMs>). */
@@ -1712,6 +1839,14 @@ interface PriorActions {
    * otherwise re-route to post-review, and re-invoke, every single pass.
    */
   postReviewed: Set<string>;
+  /**
+   * ABSENT-check-suite re-push history, read from this module's OWN `sweep.absent_repush`
+   * ledger step. TWO keys because one is not enough: `shas` (`<pr>@<oldHead>`) gives
+   * same-head idempotence exactly like {@link PriorActions.fixed}, and `count` (per PR) is
+   * the BOUND — a re-push mints a NEW sha, so a sha key alone would license an unbounded
+   * chain of empty commits on a PR GitHub never schedules.
+   */
+  absentRepushes: Map<number, { count: number; shas: Set<string> }>;
 }
 
 function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorActions {
@@ -1721,12 +1856,25 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const escalated = new Set<number>();
   const depReviewed = new Set<string>();
   const postReviewed = new Set<string>();
+  const absentRepushes = new Map<number, { count: number; shas: Set<string> }>();
   for (const line of lines) {
     // W1-T254: OUTCOME-KEYED, off the review lane's OWN ledger lines — never
     // `sweep.disposed`. See PriorActions.postReviewed's doc.
     if (line.step === "review.posted" || line.step === "review.post_refused") {
       if (typeof line.task_id === "string" && typeof line.head_sha === "string") {
         postReviewed.add(`${line.task_id}@${line.head_sha}`);
+      }
+      continue;
+    }
+    // Our own step, not `sweep.disposed` — the re-push is an action inside the
+    // blocked-ambiguous lane, so the disposed line's own dedup keys cannot carry it.
+    if (line.step === "sweep.absent_repush") {
+      const n = typeof line.pr_number === "number" ? line.pr_number : undefined;
+      if (n !== undefined) {
+        const e = absentRepushes.get(n) ?? { count: 0, shas: new Set<string>() };
+        e.count += 1;
+        if (typeof line.old_head === "string") e.shas.add(`${n}@${line.old_head}`);
+        absentRepushes.set(n, e);
       }
       continue;
     }
@@ -1764,7 +1912,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
       // `review.posted`/`review.post_refused` branch above.
     }
   }
-  return { armed, fixed, closed, escalated, depReviewed, postReviewed };
+  return { armed, fixed, closed, escalated, depReviewed, postReviewed, absentRepushes };
 }
 
 const ZERO_COUNTS = (): Record<Disposition, number> => ({
@@ -2007,13 +2155,63 @@ export async function runSweep(
               // both the PR and the unresolved attribution on this pass's
               // `sweep.disposed` ledger line below (the SAME trace discipline
               // `standDownReason` gives every other non-actionable disposition).
-              if (unattributableFiling) {
+              const absentDecision = absentChecksRepushDecision(
+                pr,
+                policy,
+                now,
+                prior.absentRepushes.get(pr.prNumber) ?? { count: 0, shas: new Set<string>() },
+              );
+              if (!unattributableFiling && absentDecision.repush && deps.repushAbsent) {
+                // THE REMEDY. Fires INSTEAD OF this pass's escalation — the escalation path
+                // itself is unchanged, and the next pass re-derives from the new head: if the
+                // fresh sha gets its suites the PR simply proceeds, and if it does not, the cap
+                // in `absentChecksRepushDecision` routes it to the ordinary escalate below.
+                const oldHead = pr.headSha;
+                const newHead = await deps.repushAbsent(pr);
+                // LEDGERED, because #968's lesson was that a fire-and-forget action nobody
+                // records becomes invisible state: the PR, both shas, and the reason.
+                // appendLine, NOT log(): `log` is an optional narration sink (a no-op when
+                // unwired), but `priorActionsFromLedger` READS this step back to enforce the
+                // bound — so it has to land in deps.ledgerPath, the same file and the same
+                // mechanism `sweep.disposed` uses. Skipped under --dry-run for the same reason
+                // that line is: a preview must leave no trace that changes a later real pass.
+                if (!deps.dryRun) {
+                  appendLine(deps.ledgerPath, {
+                    run_id: deps.runId,
+                    task_id: pr.taskId ?? "SWEEP",
+                    step: "sweep.absent_repush",
+                    pr_number: pr.prNumber,
+                    pr_url: pr.prUrl,
+                    old_head: oldHead,
+                    new_head: newHead ?? null,
+                    reason: absentDecision.reason,
+                  });
+                }
+                log("sweep.absent_repush", {
+                  pr_number: pr.prNumber,
+                  old_head: oldHead,
+                  new_head: newHead ?? null,
+                });
+                // `acted` stays FALSE, and this is load-bearing rather than cosmetic. `acted:true`
+                // on a blocked-ambiguous line is what feeds `prior.escalated`, so claiming it here
+                // would tell every later pass "this PR was already escalated" — and the PR would
+                // then never escalate at all, which is the very silent-forever failure this remedy
+                // exists to end. The re-push is a DIFFERENT action with its own ledger line (the
+                // one the bound reads); the disposition's own action did not fire, so it says so.
+                acted = false;
+                standDownReason = `ABSENT re-push fired instead of escalating this pass — ${absentDecision.reason}`;
+              } else if (unattributableFiling) {
                 acted = false;
                 standDownReason =
                   `task id unresolved for PR #${pr.prNumber} (${pr.prUrl}) — a plan-filing PR carries no ` +
                   `Remudero-Task trailer by design (W1-T136 criterion 5); attribution failure on this class ` +
                   `is a known state, not an escalation`;
               } else {
+                if (absentDecision.repush && !deps.repushAbsent) {
+                  // The remedy WOULD have fired but no dep is wired — say so on the ledger line
+                  // rather than escalating as if the ABSENT state were unrecognised.
+                  standDownReason = `ABSENT re-push not wired — ${absentDecision.reason}`;
+                }
                 await deps.escalate(pr, reason, question!);
               }
               break;
