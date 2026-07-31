@@ -11622,7 +11622,7 @@
     - claim: "a deliberately-degraded harness change FAILS replay (the falsifier)"
       proof: "unit test: a deliberately degraded harness change FAILS at least one golden on replay"
     - claim: "the retro reports replay pass-rate over time"
-      proof: "unit test: the retro's calibration section renders the replay pass-rate (n passed / n goldens) for the cycle, from the replay records; a retro that omits it FAILS"
+      proof: "unit test: the retro calibration section renders the replay pass-rate for the cycle"
   risk: high
   origin: architect
   plan_refs: ["§5A", "§9"]
@@ -11637,7 +11637,12 @@
     (1) 'integration test (sandbox): replaying the 3 seeded goldens against the CURRENT harness passes all 3
     (outcome matches the goldens expected disposition/shape)';
     (2) 'test: a deliberately-degraded worker-prompt / review-logic change replayed against the goldens FAILS at
-    least one golden (the regression catches it) — a degraded change that passes replay FAILS this test'."
+    least one golden (the regression catches it) — a degraded change that passes replay FAILS this test'.
+    PROOF 3 REWRITTEN TOO, 2026-07-31 (impl-BK). It was NOT a dispatch blocker — resolvability is demoted to
+    warn there — but lint-plan runs changed-tasks-only on a PR, so touching this task made its pre-existing
+    criterion-3 violation blocking. Prior body verbatim: 'unit test: the retros calibration section renders the
+    replay pass-rate (n passed / n goldens) for the cycle, from the replay records; a retro that omits it
+    FAILS'. The omission clause is the falsifier and the implementing PR should keep it."
 
 - id: W1-T166
   title: "holdout acceptance criteria — a task may carry holdout criteria visible to the reviewer but excluded from every worker prompt; the review judges visible+holdout and ledgers the gap (the reward-hacking measurement)"
