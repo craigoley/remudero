@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
@@ -76,6 +77,10 @@ function commitMsgHookFixture(root: string): { repoDir: string } {
  *  (src/lib/review.ts) lazily; this test only needs the binary to exist to prove the hook
  *  actually gates, not to prove npm install works. */
 function symlinkNodeModules(worktreePath: string): void {
+  // IDEMPOTENT since W1-T137's gap was closed: `worktreeAdd` now supplies this link itself
+  // (linkWorktreeNodeModules, src/lib/worker.ts) because the hook below rejects EVERY commit
+  // without it. These tests still call this explicitly to state the precondition they rely on.
+  if (existsSync(join(worktreePath, "node_modules"))) return;
   symlinkSync(join(REPO_ROOT, "node_modules"), join(worktreePath, "node_modules"), "dir");
 }
 
@@ -159,7 +164,13 @@ test(
     const { repoDir } = commitMsgHookFixture(root);
     const worktreePath = join(root, "worktrees", "run-c");
     worktreeAdd(repoDir, worktreePath, "run-c");
-    // Deliberately do NOT symlink node_modules in.
+    // Deliberately STRIP the node_modules back out. This test asserts a property of the HOOK
+    // -- that a missing commitlint blocks loudly rather than skipping the gate -- so it must
+    // construct that condition explicitly. It used to get it for free, because `worktreeAdd`
+    // supplied no node_modules at all; that was the W1-T137 gap (every real worktree commit
+    // was rejected from 2026-07-29 on), and it is fixed. Unlinking removes the LINK, never
+    // the shared install it points at.
+    rmSync(join(worktreePath, "node_modules"), { force: true });
 
     const before = commitCount(worktreePath);
     const result = tryCommit(worktreePath, "feat(hook): would be fine if it ever ran");
