@@ -4,12 +4,22 @@ import { test } from "node:test";
 import {
   checkCommitMessage,
   commitlintStep,
+  defaultPreflightSpawn,
   emitterChecksStep,
   runPreflight,
   typecheckStep,
   type PreflightSpawn,
 } from "../src/lib/commit-message.js";
-import { preflightCommand } from "../src/run-task.js";
+import { main, preflightCommand } from "../src/run-task.js";
+
+/** Sentinel thrown by the mocked `process.exit` so main()'s flat if-ladder cannot run on
+ *  past the verb under test — the same shape test/w1-t143-diff-coverage.test.ts uses,
+ *  duplicated locally per this suite's file-scoping convention. */
+class ProcessExitCalled extends Error {
+  constructor(readonly code?: number) {
+    super(`process.exit(${code})`);
+  }
+}
 
 // ── W1-T221: the hand route's missing gate ──────────────────────────────────────────
 //
@@ -179,4 +189,74 @@ test("preflightCommand prints every step's line and exits non-zero on any failur
 test("preflightCommand rejects an unknown argument, spawning nothing", async () => {
   const code = await preflightCommand(["--bogus"]);
   assert.equal(code, 2);
+});
+
+// ── The three lines the injected-spawn tests above structurally cannot reach ──────────
+//
+//    Every test above supplies its own `PreflightSpawn`, which is the right shape for
+//    proving the DECISION logic — but it means the real spawn leaf never runs, and the
+//    per-step `catch` arms are only exercised for whichever step the fixture chose to
+//    throw from. A preflight whose leaf silently returned the wrong thing, or whose
+//    typecheck/emitter step aborted the run instead of reporting, would pass everything
+//    above. These four close that gap.
+
+test("defaultPreflightSpawn really shells out — status, stdout and stderr come back from the child, and stdin is piped", () => {
+  const ok = defaultPreflightSpawn("echo", ["preflight-leaf"]);
+  assert.equal(ok.status, 0, "a clean command exits 0");
+  assert.equal(ok.stdout.trim(), "preflight-leaf", "stdout is returned, not swallowed");
+
+  // A NONZERO exit must come back as a status rather than a throw — every step branches on
+  // `res.status === 0`, so a leaf that threw here would turn each ordinary check failure
+  // into the catch arm's "FAIL — <error>" and lose the tool's own output.
+  const bad = defaultPreflightSpawn("sh", ["-c", "echo to-stderr 1>&2; exit 3"]);
+  assert.equal(bad.status, 3, "a nonzero exit is reported as a status, never thrown");
+  assert.match(bad.stderr, /to-stderr/, "stderr is captured too — a failing step's detail line quotes it");
+
+  // `input` must reach the child: readRangeCommitMessages pipes through this same leaf.
+  assert.equal(defaultPreflightSpawn("cat", [], { input: "piped-in" }).stdout, "piped-in", "opts.input is written to the child's stdin");
+});
+
+test("typecheckStep catches a throwing spawn and reports its OWN failure rather than aborting the run", () => {
+  const spawn: PreflightSpawn = () => {
+    throw new Error("EACCES: tsc is not executable");
+  };
+  const step = typecheckStep("/repo", spawn);
+  assert.equal(step.name, "typecheck");
+  assert.equal(step.ok, false, "an unrunnable typechecker is a FAILED step, never a silently passed one");
+  assert.match(step.detail, /EACCES/, "the step names why it could not run");
+});
+
+test("emitterChecksStep catches a throwing git log and reports its OWN failure rather than aborting the run", () => {
+  const spawn: PreflightSpawn = () => {
+    throw new Error("fatal: bad revision origin/main");
+  };
+  const step = emitterChecksStep("/repo", { from: "origin/main", to: "HEAD" }, spawn);
+  assert.equal(step.name, "emitter-checks");
+  assert.equal(step.ok, false, "a range git cannot read is a FAILED step — never an empty range read as clean");
+  assert.match(step.detail, /bad revision/, "the step names why it could not run");
+});
+
+test("main() dispatches `rmd preflight` to preflightCommand — the CLI wiring, driven with a bad flag so nothing spawns", async (t) => {
+  const exitMock = ((code?: number): never => {
+    throw new ProcessExitCalled(code);
+  }) as typeof process.exit;
+  t.mock.method(process, "exit", exitMock);
+  t.mock.method(console, "error", () => {});
+  t.mock.method(console, "log", () => {});
+  const originalArgv = process.argv;
+  const originalGuard = process.env.RMD_SELF_SYNC_DONE;
+  process.argv = ["node", "run-task.js", "preflight", "--bogus"];
+  process.env.RMD_SELF_SYNC_DONE = "1";
+  try {
+    let caught: unknown;
+    await main().catch((e) => {
+      caught = e;
+    });
+    assert.ok(caught instanceof ProcessExitCalled, `main() must reach process.exit, not some other throw: ${String(caught)}`);
+    assert.equal((caught as ProcessExitCalled).code, 2, "an unknown flag exits 2 — reached through the verb dispatch, before any spawn");
+  } finally {
+    process.argv = originalArgv;
+    if (originalGuard === undefined) delete process.env.RMD_SELF_SYNC_DONE;
+    else process.env.RMD_SELF_SYNC_DONE = originalGuard;
+  }
 });
