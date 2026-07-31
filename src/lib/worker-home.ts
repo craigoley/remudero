@@ -400,13 +400,33 @@ export interface WorkerKeychainPaths {
   keychainPath: string;
   /** The 0600 file persisting the keychain's password across boots. */
   passwordPath: string;
+  /**
+   * The 0600 sidecar recording which account identity (an `EnsureWorkerKeychainOpts.accountId`
+   * NAME — never a secret) this store was last provisioned for. `ensureWorkerKeychain` reads it
+   * to detect an identity change under the unlabelled default path; a caller that never supplies
+   * `accountId` never touches this file, so pre-W1-T265 behavior is unchanged.
+   */
+  identityPath: string;
 }
 
-/** Canonical locations under the config state dir (`<config.root>/state`). */
-export function workerKeychainPaths(stateDir: string): WorkerKeychainPaths {
+/**
+ * Canonical locations under the config state dir (`<config.root>/state`).
+ *
+ * `accountLabel` is an OPTIONAL, operator-chosen NAME (never a token, never derived from a
+ * credential — see billingMode(childEnvKeys)'s NAME-only discipline, env.ts:173) that partitions
+ * the store per Anthropic account: `remudero-worker-<label>.keychain-db` /
+ * `worker-keychain-password-<label>` instead of the legacy unlabelled pair. Omitted ⇒ the
+ * legacy unlabelled paths, byte-for-byte, so an unconfigured install is unaffected. This is
+ * independent of `EnsureWorkerKeychainOpts.accountId` (below): a label picks WHICH FILE a store
+ * lives at; `accountId` is the value compared to detect the SAME file's identity drifting out
+ * from under it. An operator may use either, both, or neither.
+ */
+export function workerKeychainPaths(stateDir: string, accountLabel?: string): WorkerKeychainPaths {
+  const suffix = accountLabel ? `-${accountLabel}` : "";
   return {
-    keychainPath: join(stateDir, "remudero-worker.keychain-db"),
-    passwordPath: join(stateDir, "worker-keychain-password"),
+    keychainPath: join(stateDir, `remudero-worker${suffix}.keychain-db`),
+    passwordPath: join(stateDir, `worker-keychain-password${suffix}`),
+    identityPath: join(stateDir, `worker-keychain-account${suffix}`),
   };
 }
 
@@ -424,13 +444,41 @@ export interface EnsureWorkerKeychainOpts extends WorkerKeychainPaths {
   grantApps?: string[];
   runner?: SecurityRunner;
   exists?: (path: string) => boolean;
+  /**
+   * W1-T265: the Anthropic account identity active for THIS call — an
+   * `accountUuid`/`emailAddress` NAME, never a secret, and NEVER the worker keychain
+   * item's own `acct` attribute: account-usage.ts measured that value to be the OS
+   * username, identical across an Anthropic account switch, so it cannot discriminate
+   * accounts. The caller (worker.ts) resolves it fresh from `~/.claude.json` via
+   * account-usage.ts's `readAccountUsageFile` — the same non-keychain source the
+   * console's account panel already trusts for this reason.
+   *
+   * Compared, name-to-name, against `identityPath`'s recorded value: a mismatch (or a
+   * store with no recorded identity at all — e.g. one provisioned before this option
+   * existed) re-provisions rather than silently reusing a stale copy. Omitted ⇒ the
+   * identity check never runs and `identityPath` is never touched — pre-W1-T265
+   * behavior (provision once, never re-checked) is unchanged. Appended LAST — no
+   * positional caller shifts.
+   */
+  accountId?: string;
 }
+
+/** Why THIS call did (or didn't) provision — the switch's audit trail (W1-T265). */
+export type WorkerKeychainProvisionReason = "absent" | "identity-changed" | "skipped";
 
 export interface WorkerKeychainSummary {
   keychainPath: string;
   /** `true` when THIS call created + populated the keychain. */
   provisioned: boolean;
   unlocked: true;
+  /**
+   * The `accountId` this call compared/stamped, mirrored from the opt of the same
+   * name — a NAME, never a credential value. `undefined` when the caller never
+   * supplied one (identity checking is opt-in).
+   */
+  account_label?: string;
+  /** `"absent"` (nothing existed) | `"identity-changed"` (mismatch) | `"skipped"` (matched, or no accountId supplied). */
+  reason: WorkerKeychainProvisionReason;
 }
 
 function classifyLoginReadError(err: unknown): WorkerKeychainReasonClass {
@@ -444,9 +492,13 @@ function classifyLoginReadError(err: unknown): WorkerKeychainReasonClass {
  * Guarantee the dedicated worker keychain exists, holds the credential item,
  * never auto-locks, and is UNLOCKED — the invariant a headless spawn needs.
  *
- * Provisioning (first call only) reads the item out of the login keychain,
- * which therefore must be unlocked AT THAT MOMENT (an interactive session, or
- * the explicit operator provisioning step in this task's PR). Every later
+ * Provisioning reads the item out of the login keychain, which therefore must
+ * be unlocked AT THAT MOMENT (an interactive session, or the explicit operator
+ * provisioning step in this task's PR). It runs on the FIRST call ever
+ * (`identityPath`/`keychainPath` absent), and — when `opts.accountId` is
+ * supplied (W1-T265) — again on any LATER call whose `accountId` no longer
+ * matches the value the store was last provisioned for, e.g. the operator
+ * logged the fleet user into a second Anthropic subscription. Every other
  * call — including a cold-boot daemon while the login keychain is LOCKED —
  * touches only the worker keychain. Failures throw {@link WorkerKeychainError}
  * with a named class; the password never rides an error message.
@@ -472,9 +524,46 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
   }
 
   let provisioned = false;
-  if (!exists(opts.keychainPath)) {
+  const storeExists = exists(opts.keychainPath);
+
+  // W1-T265 IDENTITY-AWARE GATE. Opt-in: only runs when the caller supplies
+  // `accountId`, so a caller that never does (every pre-W1-T265 call site) sees
+  // byte-for-byte the old `!exists` gate. A store with NO recorded identity —
+  // absent `identityPath`, e.g. one provisioned before this option existed —
+  // counts as a mismatch: the safer failure here is an extra re-provision, never
+  // a silent skip that keeps spending whichever account happened to provision
+  // first (this task's whole rationale).
+  let identityChanged = false;
+  if (storeExists && opts.accountId !== undefined) {
+    let recordedId: string | undefined;
+    try {
+      recordedId = readFileSync(opts.identityPath, "utf8");
+    } catch {
+      recordedId = undefined;
+    }
+    identityChanged = recordedId !== opts.accountId;
+  }
+
+  if (!storeExists || identityChanged) {
+    // A mismatch means a LIVE keychain file is sitting at this path already —
+    // `create-keychain` refuses to overwrite one, so it must go first. Nothing
+    // to remove when the store was simply absent.
+    if (identityChanged) {
+      try {
+        rmSync(opts.keychainPath, { force: true });
+      } catch {
+        // best-effort; a real removal failure surfaces below as provision-failed
+        // when create-keychain hits the file it couldn't clear.
+      }
+    }
     // Read the item (attributes, then secret) BEFORE creating anything, so a
-    // locked/missing credential leaves no half-provisioned keychain behind.
+    // locked/missing credential leaves no half-provisioned keychain behind. The
+    // `acct` attribute is copied over UNCHANGED, exactly as before W1-T265 —
+    // account-usage.ts measured it to be the OS username, identical across an
+    // Anthropic account switch, so it is preserved here as informational
+    // provenance only. It is NEVER used for the identity comparison above,
+    // which compares `opts.accountId` against `identityPath`'s own sidecar
+    // record instead — a separate, purpose-built value.
     let attrs: string;
     let secret: string;
     try {
@@ -520,6 +609,10 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
           String((err as Error)?.message ?? err),
       );
     }
+    if (opts.accountId !== undefined) {
+      mkdirSync(dirname(opts.identityPath), { recursive: true });
+      writeFileSync(opts.identityPath, opts.accountId, { mode: 0o600 });
+    }
   }
 
   try {
@@ -535,5 +628,11 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
     );
   }
 
-  return { keychainPath: opts.keychainPath, provisioned, unlocked: true };
+  return {
+    keychainPath: opts.keychainPath,
+    provisioned,
+    unlocked: true,
+    account_label: opts.accountId,
+    reason: !storeExists ? "absent" : identityChanged ? "identity-changed" : "skipped",
+  };
 }
