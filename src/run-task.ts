@@ -149,6 +149,7 @@ import {
 } from "./lib/feedback.js";
 import { findPendingLandingPr, recordDecision } from "./lib/feedback-landing.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
+import { runPreflight, type PreflightDeps } from "./lib/commit-message.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
 import {
   buildServeServer,
@@ -4996,6 +4997,38 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       `  read: ${formatReadIdentity(planPath, planRaw)}`,
   );
   return failing > 0 ? 1 : 0;
+}
+
+/**
+ * `rmd preflight [--from <ref>] [--to <ref>]` — W1-T221's hand-route commit gate.
+ * Runs {@link runPreflight}'s three independent steps (commitlint, `tsc --noEmit`, and
+ * lib/commit-message.ts's own header/body checks) over the commit range not yet on
+ * `origin/main`, prints every step's own pass/fail line UNCONDITIONALLY (never only on
+ * failure — fixture 3's redirected-and-swallowed check is exactly the shape this avoids),
+ * and exits non-zero iff any step failed. `--from`/`--to` override the default
+ * `origin/main..HEAD` range so a caller can preflight an arbitrary range (e.g. re-checking
+ * after amending).
+ */
+export async function preflightCommand(rest: string[], deps: PreflightDeps = {}): Promise<number> {
+  const badArg = unknownArgError("preflight", rest, ["--from", "--to"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const from = flagValue(rest, "--from");
+  const to = flagValue(rest, "--to");
+  const range = deps.range ?? (from !== undefined || to !== undefined ? { from: from ?? "origin/main", to: to ?? "HEAD" } : undefined);
+
+  const result = runPreflight(repoRoot, { ...deps, range });
+  for (const step of result.steps) {
+    console.log(step.detail);
+  }
+  console.log(
+    result.ok
+      ? "\n### rmd preflight: PASS — commitlint, typecheck, and emitter checks are all clean; the push may proceed"
+      : "\n### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes",
+  );
+  return result.ok ? 0 : 1;
 }
 
 /** Best-effort read for the follow-up harvest's dedup source (W1-T105 design iv):
@@ -10801,6 +10834,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd lint-plan [--plan <path>] [--base <git-ref>]   # §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing",
   },
   {
+    name: "preflight",
+    usage:
+      "rmd preflight [--from <ref>] [--to <ref>]   # W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; exits non-zero if any step fails, after every step has run and reported",
+  },
+  {
     name: "next-task-id",
     usage:
       "rmd next-task-id [--plan <path>] [--offline]   # print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, and the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775); --offline skips the open-PR read (the mint is then a FLOOR, and says so); prints its provenance, spawns nothing",
@@ -11244,6 +11282,9 @@ export async function main(
   }
   if (cmd === "lint-plan") {
     process.exit(await lintPlanCommand(rest));
+  }
+  if (cmd === "preflight") {
+    process.exit(await preflightCommand(rest));
   }
   if (cmd === "next-task-id") {
     process.exit(await nextTaskIdCommand(rest));

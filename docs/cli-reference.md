@@ -19,6 +19,7 @@ usage:
   rmd review <pr-number> [--repo <name>] [--override-capped-by <name> --override-capped-reason <text>]   # post remudero-review on a hand-opened PR; materializes a worktree at the PR head so proofs EXECUTE (W1-T185), falling back to an explicit keyword-only CAPPED verdict if materialization fails; --override-capped-by/--override-capped-reason ledgers an attributable operator override so a CAPPED verdict can arm auto-merge
   rmd dep-review <pr-number> [--repo <name>]   # deterministic Dependabot-PR review lane (W1-T54): minor/patch -> arm auto-merge; major (or unparseable) -> escalate (needs-human, no auto-merge); source outside manifests -> refuse
   rmd lint-plan [--plan <path>] [--base <git-ref>]   # §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing
+  rmd preflight [--from <ref>] [--to <ref>]   # W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; exits non-zero if any step fails, after every step has run and reported
   rmd next-task-id [--plan <path>] [--offline]   # print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, and the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775); --offline skips the open-PR read (the mint is then a FLOOR, and says so); prints its provenance, spawns nothing
   rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)
   rmd drain [--until <id>] [--max <n>] [--repo <name>] [--curated <path>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60); --repo scopes the merged-status gateway to <owner>/<name> (defaults to this checkout's own repo, like the daemon path) — the plan itself is always read from THIS checkout; --curated <path> names a JSON {taskIds, depth} file (the drain preview panel's curated selection, W1-T140) that overrides the natural DAG order entirely — dispatch honors EXACTLY that reordered/unselected subset, and --dry-run --curated previews it
@@ -94,6 +95,14 @@ rmd lint-plan [--plan <path>] [--base <git-ref>]
 ```
 
 §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing
+
+### `rmd preflight`
+
+```
+rmd preflight [--from <ref>] [--to <ref>]
+```
+
+W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; exits non-zero if any step fails, after every step has run and reported
 
 ### `rmd next-task-id`
 
