@@ -699,6 +699,17 @@ function sortedCountRecord(m: Record<string, number>): Record<string, number> {
   return Object.fromEntries(Object.entries(m).sort(([a], [b]) => (a < b ? -1 : 1)));
 }
 
+/** Verdicts the MAST failure taxonomy treats as a CREDITED outcome — out of scope for a
+ *  FAILURE distribution ({@link mastCategoryDistribution}), never an infrastructure event
+ *  ({@link infrastructureEvents}), and never a task defect ({@link taskDefectCounts}).
+ *  `merged` (this run's own PR merged) and `already_satisfied` (W1-T272: the task's
+ *  acceptance was already true on origin/main, VERIFIED via a merged PR carrying this
+ *  task's own trailer — forward progress, not a defect, exactly like `merged`). DATA-shaped,
+ *  mirrored by every MAST-taxonomy reducer below (Rule 2 — one classifier, never a
+ *  per-function guess) so an already-satisfied exit is never miscounted as an unmapped
+ *  failure or inflate a task's defect count. */
+const CREDITED_VERDICTS: ReadonlySet<string> = new Set(["merged", "already_satisfied"]);
+
 /**
  * Reduce a cycle's runs into a {@link MastCategoryDistribution} against `mapping`.
  * Pure and deterministic -- the mapping is DATA, so a row edit alone (zero code
@@ -708,7 +719,7 @@ export function mastCategoryDistribution(runs: RunSummary[], mapping: MastMappin
   const byCategory: Record<string, number> = {};
   const unmapped: Record<string, number> = {};
   for (const r of runs) {
-    if (r.verdict === "merged") continue;
+    if (CREDITED_VERDICTS.has(r.verdict)) continue;
     const row = mastRowFor(mapping, r);
     if (row) {
       byCategory[row.category] = (byCategory[row.category] ?? 0) + 1;
@@ -830,7 +841,7 @@ export interface InfrastructureEvent {
 export function infrastructureEvents(runs: RunSummary[], mapping: MastMapping): InfrastructureEvent[] {
   const out: InfrastructureEvent[] = [];
   for (const r of runs) {
-    if (r.verdict === "merged") continue;
+    if (CREDITED_VERDICTS.has(r.verdict)) continue;
     const row = mastRowFor(mapping, r);
     if (row?.category !== "infrastructure") continue;
     const gc = resolveGuardCheck(r) ?? { guard: "unknown", check: "unknown" };
@@ -896,7 +907,7 @@ export function infrastructureRecurrence(events: InfrastructureEvent[]): Infrast
 export function taskDefectCounts(runs: RunSummary[], mapping: MastMapping): Record<string, number> {
   const out: Record<string, number> = {};
   for (const r of runs) {
-    if (r.verdict === "merged") continue;
+    if (CREDITED_VERDICTS.has(r.verdict)) continue;
     const row = mastRowFor(mapping, r);
     if (row?.category === "infrastructure") continue; // guard-fired, not a task defect
     out[r.taskId] = (out[r.taskId] ?? 0) + 1;
@@ -1292,7 +1303,12 @@ export function renderPlanHealth(report: PlanHealthReport): string {
  *  (task_type × risk) CLASS is defective — mining them for a class-level fix
  *  would propose "decompose this task class" over a host's populated
  *  `~/.bashrc`). DATA, not hardcoded logic, same pattern as task-linter.ts's
- *  lexicons. */
+ *  lexicons.
+ *
+ *  `already_satisfied` (W1-T272) is DELIBERATELY ABSENT: it is forward progress that CREDITS
+ *  the task, not a block — see {@link CREDITED_VERDICTS} below, which is what the MAST
+ *  failure taxonomy (mastCategoryDistribution/infrastructureEvents/taskDefectCounts) checks
+ *  instead, so a verified already-satisfied exit is never mined as a class-level defect. */
 export const OVERRUN_VERDICTS: ReadonlySet<string> = new Set([
   "blocked",
   "blocked_ci",

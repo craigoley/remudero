@@ -108,6 +108,18 @@ export function outputContractLines(taskId: string): string[] {
     "  `research: <what, and why>` | `task: <what, and why>` | `action: <what, and why>`.",
     "- If a filename/approach choice is needed, FIRST emit a DECISION_REQUEST",
     "  (exactly two options, one marked RECOMMENDED, a reversibility note) and STOP.",
+    // W1-T272: the output contract's third exit. Before this, a worker that correctly found
+    // the task's acceptance ALREADY TRUE on origin/main had no PR-less exit that didn't halt
+    // the drain (`no_pr` is the only PR-less verdict, and it stops the drain as anomalous) —
+    // so five separate runs each manufactured a no-op closure PR just to comply. This line
+    // gives that honest finding a sanctioned exit, gated on NAMING the merged PR that already
+    // did the work: an unverifiable "already done" claim is refused (falls through to `no_pr`,
+    // unchanged) exactly as it should be — see run-task.ts's `resolveAlreadySatisfied`.
+    "- If the task's acceptance is ALREADY SATISFIED on origin/main — nothing left to change —",
+    "  say so and STOP without opening a PR: end your REPORT with a line",
+    "  `ALREADY_SATISFIED: <the PR number or url that already merged and satisfies this task>`.",
+    `  That PR must actually be MERGED and its body must carry \`Remudero-Task: ${taskId}\` for`,
+    "  THIS task, or the claim is refused and treated as if you had opened no PR at all.",
     "- Otherwise: stage the changed file(s), commit, then run",
     "  `git push origin HEAD` (NOT `-u` — the shared .git/config is outside the sandbox",
     "  write scope, WS-0 FF10f), and open a PR with `gh pr create --fill --base main`.",

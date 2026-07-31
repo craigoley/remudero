@@ -31,6 +31,12 @@ export interface RunResult {
     | "blocked_git_fetch"
     | "blocked_illformed"
     | "no_pr"
+    // W1-T272: the sanctioned ALREADY-SATISFIED exit — a worker found the task's acceptance
+    // already true on origin/main and named the merged, trailer-anchored PR that did it
+    // (verified, never trusted bare — see run-task.ts's `resolveAlreadySatisfied`). Distinct
+    // from BOTH `merged` (this run's own PR) and `no_pr` (the drain-halting anomaly): it
+    // CREDITS the task and behaves like forward progress, never a block.
+    | "already_satisfied"
     | "blocked_transient"
     | "pr_attribution_failed"
     | "failed";
