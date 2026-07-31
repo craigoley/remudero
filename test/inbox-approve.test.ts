@@ -14,6 +14,7 @@ import {
   inboxDraftPrompt,
   invalidateDraft,
   isRatifiedInLedger,
+  parseSupersedesExpr,
   ratifyTelemetry,
   refusalReason,
   reframeProposal,
@@ -272,6 +273,98 @@ test("reframeProposal accumulates a SECOND round onto an existing reframe histor
   };
   const result = reframeProposal(proposal, "second objection", {}, { ledgerPath: ledgerPath(), runId: "RUN-1" });
   assert.deepEqual(result.proposal.reframeHistory, [{ feedback: "first objection" }, { feedback: "second objection" }]);
+});
+
+// ── W1-T194: reframe supersession is STRUCTURAL, not rhetorical ────────────────────────────
+
+test("acceptance 1: a retracted round's text NEVER appears in the composed draft prompt", () => {
+  const proposal: Proposal = {
+    id: "P34",
+    summary: "s",
+    evidenceAnchors: [],
+    reframeHistory: [{ feedback: "round one: a per-unattended-window dollar cap of $50" }],
+  };
+  const result = reframeProposal(
+    proposal,
+    "round two: supersedes round one's dollar framing",
+    {},
+    { ledgerPath: ledgerPath(), runId: "RUN-1" },
+    [1],
+  );
+  assert.equal(result.proposal.reframeHistory![0].retracted, true);
+
+  const prompt = inboxDraftPrompt(result.proposal, "- id: W1-T1\n", "run-3");
+  assert.doesNotMatch(prompt, /dollar cap of \$50/, "the retracted round's text must not survive into the composed prompt");
+  assert.match(prompt, /round two: supersedes round one's dollar framing/);
+});
+
+test("acceptance 2: a retracted MIDDLE round is omitted while the earlier and later rounds survive, numbered against the FULL history (never renumbered to the survivors)", () => {
+  const proposal: Proposal = {
+    id: "P34",
+    summary: "s",
+    evidenceAnchors: [],
+    reframeHistory: [
+      { feedback: "round one: the non-presence-gating envelope" },
+      { feedback: "round two: a crossed-message duplicate", retracted: true },
+      { feedback: "round three: the ratified envelope" },
+    ],
+  };
+  const prompt = inboxDraftPrompt(proposal, "- id: W1-T1\n", "run-4");
+  assert.match(prompt, /1\. round one: the non-presence-gating envelope/);
+  assert.doesNotMatch(prompt, /crossed-message duplicate/);
+  assert.match(prompt, /3\. round three: the ratified envelope/, "round three keeps its TRUE position, not renumbered down to 2");
+});
+
+test("acceptance 3: a new round with NO --supersedes leaves every prior round intact — retraction is never inferred from recency", () => {
+  const proposal: Proposal = {
+    id: "P34",
+    summary: "s",
+    evidenceAnchors: [],
+    reframeHistory: [{ feedback: "round one" }, { feedback: "round two" }],
+  };
+  const result = reframeProposal(proposal, "round three", {}, { ledgerPath: ledgerPath(), runId: "RUN-1" });
+  assert.deepEqual(result.proposal.reframeHistory, [{ feedback: "round one" }, { feedback: "round two" }, { feedback: "round three" }]);
+
+  const prompt = inboxDraftPrompt(result.proposal, "- id: W1-T1\n", "run-5");
+  assert.match(prompt, /1\. round one/);
+  assert.match(prompt, /2\. round two/);
+  assert.match(prompt, /3\. round three/);
+});
+
+test("acceptance 4: retraction PRESERVES reframeHistory's verbatim text; reframeProposal appends exactly ONE new ledger line, never rewriting a prior round's own", () => {
+  const path = ledgerPath();
+  const proposal: Proposal = {
+    id: "P34",
+    summary: "s",
+    evidenceAnchors: [],
+    reframeHistory: [{ feedback: "original dollar-ceiling framing" }],
+  };
+  const result = reframeProposal(proposal, "round two: supersedes round one's dollar framing", {}, { ledgerPath: path, runId: "RUN-1" }, [1]);
+
+  assert.deepEqual(result.proposal.reframeHistory, [
+    { feedback: "original dollar-ceiling framing", retracted: true },
+    { feedback: "round two: supersedes round one's dollar framing" },
+  ]);
+
+  const lines = readLedger(path);
+  assert.equal(lines.length, 1, "one reframeProposal call writes exactly one ledger line — round one's own original line is never rewritten");
+  assert.equal(lines[0].step, "ratify.reframed");
+  assert.equal(lines[0].feedback, "round two: supersedes round one's dollar framing");
+  assert.deepEqual(lines[0].supersedes, [1]);
+});
+
+test("acceptance 5: parseSupersedesExpr accepts a round number, a comma list, a range, and ALL; rejects out-of-range/malformed expressions", () => {
+  assert.deepEqual(parseSupersedesExpr("2", 3), [2]);
+  assert.deepEqual(parseSupersedesExpr("1,3", 3), [1, 3]);
+  assert.deepEqual(parseSupersedesExpr("2-3", 3), [2, 3]);
+  assert.deepEqual(parseSupersedesExpr("all", 3), [1, 2, 3]);
+  assert.deepEqual(parseSupersedesExpr("3,1,2", 3), [1, 2, 3], "deduped and sorted");
+  assert.equal(parseSupersedesExpr("4", 3), null, "round 4 does not exist yet");
+  assert.equal(parseSupersedesExpr("0", 3), null, "rounds are 1-indexed");
+  assert.equal(parseSupersedesExpr("2-99", 3), null, "range end out of bounds");
+  assert.equal(parseSupersedesExpr("abc", 3), null, "unparseable");
+  assert.equal(parseSupersedesExpr("", 3), null, "empty expression");
+  assert.equal(parseSupersedesExpr("ALL", 0), null, "nothing on record yet to retract");
 });
 
 test("invalidateDraft drops only the named proposal's cached draft, leaving others untouched; a no-op when nothing is cached", () => {

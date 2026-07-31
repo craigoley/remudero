@@ -513,6 +513,45 @@ test("W1-T240 claim 4: `rmd reframe`'s real dispatch refuses cleanly (never thro
   }
 });
 
+// ── W1-T194: `rmd reframe --supersedes` — the explicit retraction surface (acceptance 5) ──
+
+test("W1-T194: `rmd reframe --supersedes` accepts a valid round expression, retracting the named prior round on the ON-DISK registry entry while leaving its text intact", async () => {
+  const config = fixtureConfig();
+  try {
+    const registryPath = seedRegistry(config, [
+      { id: "P-SUPERSEDE", summary: "reframable", evidenceAnchors: [], reframeHistory: [{ feedback: "round one: dollar-ceiling framing" }] },
+    ]);
+
+    const code = await reframeCommand(["P-SUPERSEDE", "--feedback", "round two: supersedes round one", "--supersedes", "1"], { config });
+
+    assert.equal(code, 0);
+    const onDisk = parseProposalRegistry(readFileSync(registryPath, "utf8"));
+    assert.deepEqual(onDisk[0].reframeHistory, [
+      { feedback: "round one: dollar-ceiling framing", retracted: true },
+      { feedback: "round two: supersedes round one" },
+    ]);
+  } finally {
+    rmSync(config.root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T194: `rmd reframe --supersedes` rejects an out-of-range/malformed round expression with a usage error, exit 2, writing NOTHING to the registry", async () => {
+  const config = fixtureConfig();
+  try {
+    const registryPath = seedRegistry(config, [
+      { id: "P-BADEXPR", summary: "reframable", evidenceAnchors: [], reframeHistory: [{ feedback: "round one" }] },
+    ]);
+
+    const code = await reframeCommand(["P-BADEXPR", "--feedback", "round two", "--supersedes", "99"], { config });
+
+    assert.equal(code, 2);
+    const onDisk = parseProposalRegistry(readFileSync(registryPath, "utf8"));
+    assert.deepEqual(onDisk[0].reframeHistory, [{ feedback: "round one" }], "an invalid --supersedes must leave the registry byte-for-byte unchanged");
+  } finally {
+    rmSync(config.root, { recursive: true, force: true });
+  }
+});
+
 // ── The `deps.config`/`deps.gateway` PRODUCTION-DEFAULT branch (omitted `deps`) ────────────
 //
 // Every test above supplies `deps.config` (and approveCommand's `deps.gateway`) explicitly --
