@@ -49,17 +49,17 @@
     `rmd retro` KEEPS ITS ROLE as a manual trigger and a dry-run surface. This removes it as the ONLY trigger.
   acceptance:
     - claim: "a threshold crossing fires a retro from the DAEMON path with no CLI invocation"
-      proof: "integration test over the daemon poll path: with merges-since-marker at or above the configured count, a retro is gathered within two polls and `rmd retro` is never invoked. FALSIFIER, measured 2026-07-21: seventy PRs merged since the R9 marker (2026-07-20T14:23:35.961Z) and no retro fired, because retroCommand's only caller is the CLI dispatch at run-task.ts:6632 while the daemon's only per-poll hook is deps.sweep()"
+      proof: "unit test: a threshold crossing fires the retro from the daemon poll path with no CLI invocation"
     - claim: "threshold crossed plus two daemon polls with NO retro gather is a failure"
-      proof: "integration test asserting the negative directly: a seeded state with the threshold crossed produces a retro.gather within two polls, and a run that produces none fails the test. FALSIFIER: this is the exact observed state today — the condition is long since satisfied and no gather event has been emitted"
+      proof: "unit test: the threshold crossed with no retro gather within two polls fails"
     - claim: "ONE threshold crossing fires ONE retro — a poll cadence never re-fires while the condition holds"
-      proof: "unit test: three consecutive polls across one crossing spawn the Architect exactly once, keyed to the crossing rather than to poll count. FALSIFIER: an unkeyed rung re-fires every 300s while merges-since-marker stays above the threshold, spawning a higher-tier worker each time — the W1-T177 spend-leak class with a more expensive worker"
+      proof: "unit test: three polls across ONE crossing spawn the Architect exactly once"
     - claim: "the cadence condition is DATA — the merge count and the day count are tunable without a source change"
-      proof: "unit test overriding both thresholds from a policy source and asserting the firing decision changes accordingly, per rule 2. FALSIFIER: inlined constants make the cadence untunable and repeat the hard-coded-95 mistake W1-T197 records"
+      proof: "unit test: both cadence thresholds are policy data and changing them changes the firing decision"
     - claim: "the integrity gate holds — a retro does not fire on a corpus it cannot honestly read"
-      proof: "unit test: with the gather's own integrity signals unsatisfied, no retro fires and the reason is logged. FALSIFIER: a retro that fires on unreadable state produces confident nonsense and advances the marker over it, which is worse than not firing at all"
+      proof: "unit test: the integrity gate blocks a retro the gather cannot honestly read"
     - claim: "a retro failure fails SOFT — the sweep and daemon keep running and the marker is not advanced"
-      proof: "unit test: a seeded retro failure leaves the daemon loop running, the marker unchanged, and the failure logged, so the next crossing retries. FALSIFIER: a throw that halts the daemon trades a missed retro for a stopped fleet"
+      proof: "unit test: a retro failure fails SOFT — the daemon keeps running and the marker is not advanced"
   risk: high
   origin: architect
   plan_refs: ["§8", "§4"]
@@ -75,4 +75,31 @@
     rung that needs a human does not.
     risk:high — it adds a higher-tier Architect spawn to an unattended 300s loop. The idempotence and integrity
     criteria are the load-bearing ones: an unkeyed rung is a spend leak, and an ungated one advances the marker
-    over a corpus it could not read."
+    over a corpus it could not read.
+    PRIOR PROOF TEXT PRESERVED (2026-07-31, plan-only proof amendment). The acceptance proofs were rewritten
+    into executable dialect so this task can clear the pre-dispatch proof-dialect lint that PR #906 made
+    BLOCKING - until then the drain re-selected and re-refused this task every tick without advancing. No claim
+    text changed. A criterion carries no note field of its own, so the FALSIFIERS, fixtures and source
+    references the previous proof prose carried are preserved verbatim here:
+    CRITERION 1 PRIOR PROOF: integration test over the daemon poll path: with merges-since-marker at or above
+    the configured count, a retro is gathered within two polls and `rmd retro` is never invoked. FALSIFIER,
+    measured 2026-07-21: seventy PRs merged since the R9 marker (2026-07-20T14:23:35.961Z) and no retro fired,
+    because retroCommand's only caller is the CLI dispatch at run-task.ts:6632 while the daemon's only per-poll
+    hook is deps.sweep()
+    CRITERION 2 PRIOR PROOF: integration test asserting the negative directly: a seeded state with the threshold
+    crossed produces a retro.gather within two polls, and a run that produces none fails the test. FALSIFIER:
+    this is the exact observed state today — the condition is long since satisfied and no gather event has been
+    emitted
+    CRITERION 3 PRIOR PROOF: unit test: three consecutive polls across one crossing spawn the Architect exactly
+    once, keyed to the crossing rather than to poll count. FALSIFIER: an unkeyed rung re-fires every 300s while
+    merges-since-marker stays above the threshold, spawning a higher-tier worker each time — the W1-T177
+    spend-leak class with a more expensive worker
+    CRITERION 4 PRIOR PROOF: unit test overriding both thresholds from a policy source and asserting the firing
+    decision changes accordingly, per rule 2. FALSIFIER: inlined constants make the cadence untunable and repeat
+    the hard-coded-95 mistake W1-T197 records
+    CRITERION 5 PRIOR PROOF: unit test: with the gather's own integrity signals unsatisfied, no retro fires and
+    the reason is logged. FALSIFIER: a retro that fires on unreadable state produces confident nonsense and
+    advances the marker over it, which is worse than not firing at all
+    CRITERION 6 PRIOR PROOF: unit test: a seeded retro failure leaves the daemon loop running, the marker
+    unchanged, and the failure logged, so the next crossing retries. FALSIFIER: a throw that halts the daemon
+    trades a missed retro for a stopped fleet"
