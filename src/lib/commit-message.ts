@@ -1,3 +1,6 @@
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
+
 /**
  * lib/commit-message.ts — Conventional-Commits shaping for MACHINE-BUILT commit
  * messages (MASTER-PLAN §6A, the W1-T136/W1-T137 class).
@@ -89,6 +92,71 @@ export function wrapBodyLines(text: string, max: number = CONVENTIONAL_LIMITS.bo
   return out;
 }
 
+/** One rule this module's checks enforce, named to match the real commitlint rule id it
+ *  mirrors (`@commitlint/config-conventional`) so a failure reads the same way here as it
+ *  would in a CI log. */
+export interface CommitMessageViolation {
+  rule: "header-max-length" | "subject-case" | "body-max-line-length";
+  message: string;
+}
+
+/**
+ * Check a FULL commit message (header, blank line, body) against the same rules
+ * {@link shapeCommitMessage} shapes FOR — but this direction VALIDATES a message someone
+ * already wrote (a hand-authored commit) rather than building one from parts.
+ *
+ * W1-T221: this is the hand lane's other missing half. shapeCommitMessage is consumed by
+ * the machine lanes (plan-pr-emitter.ts, plan-architect.ts, triage.ts) to BUILD a
+ * compliant message; nothing on the hand/CLI path ever calls that, because there is no
+ * `prefix`/`subject`/`body` triple to build from — there is only a message a human already
+ * typed. This function reuses the SAME limits and the SAME `normalizeSubjectCase` rule
+ * (never restates them) so the hand lane and the emitter lane cannot drift apart.
+ *
+ * Returns one {@link CommitMessageViolation} per broken rule, empty when the message is
+ * clean. Never throws — an unparseable header (no `type: subject` shape at all) is
+ * reported as a subject-case violation against the whole header rather than crashing the
+ * caller, since the caller's whole point is to run to completion and name every problem.
+ */
+export function checkCommitMessage(
+  raw: string,
+  limits: { headerMaxLength: number; bodyMaxLineLength: number } = CONVENTIONAL_LIMITS,
+): CommitMessageViolation[] {
+  const violations: CommitMessageViolation[] = [];
+  const lines = raw.replace(/\n+$/, "").split("\n");
+  const header = lines[0] ?? "";
+
+  if (header.length > limits.headerMaxLength) {
+    violations.push({
+      rule: "header-max-length",
+      message: `header is ${header.length} characters (max ${limits.headerMaxLength}): ${JSON.stringify(header)}`,
+    });
+  }
+
+  // `type(scope): subject` — subject is everything after the FIRST "type(scope):" colon,
+  // matching commitlint's own header-parser split. An unparseable header (no colon at
+  // all) falls back to checking the whole header as the "subject", since that is exactly
+  // what commitlint's subject-case rule would also trip on.
+  const match = header.match(/^[a-z][a-z0-9-]*(?:\([^)]*\))?!?:\s*(.*)$/);
+  const subject = match ? match[1] : header;
+  if (subject !== "" && normalizeSubjectCase(subject) !== subject) {
+    violations.push({
+      rule: "subject-case",
+      message: `subject does not start lower-case: ${JSON.stringify(subject)}`,
+    });
+  }
+
+  for (const line of lines.slice(1)) {
+    if (line.length > limits.bodyMaxLineLength) {
+      violations.push({
+        rule: "body-max-line-length",
+        message: `body line is ${line.length} characters (max ${limits.bodyMaxLineLength}): ${JSON.stringify(line)}`,
+      });
+    }
+  }
+
+  return violations;
+}
+
 export interface ShapedMessage {
   /** The full message: header, blank line, then the wrapped body (if any). */
   message: string;
@@ -154,4 +222,188 @@ export function shapeCommitMessage(
   const message = wrapped.length > 0 ? `${header}\n\n${wrapped.join("\n")}\n` : `${header}\n`;
 
   return { message, header, trimmed };
+}
+
+// ── W1-T221: `rmd preflight` — the hand route's missing gate ───────────────────────────
+//
+// The worker (machine) lane already reaches this module's shaping through the shared
+// plan-PR emitter. The operator's hand/CLI lane never called ANY of it — a "remember to
+// run commitlint" memory note is not a gate, and this project's own record shows at least
+// seven hand-route commitlint firings plus a green `npm test` run (tsx strips types
+// without checking them) that hid three TS2353 errors CI alone caught (PR #477). This
+// section gives the hand lane ONE command that runs commitlint, `tsc --noEmit`, and this
+// module's own header/body checks — as three INDEPENDENT steps, each naming its own
+// pass/fail — before a hand-authored push.
+//
+// A fourth, earlier draft chained these with `&&` and swallowed output into `/dev/null`.
+// That is the exact shape fixture 3 in this task's rationale describes: a failing step
+// whose only visible trace is the ABSENCE of a success line. Every step below runs
+// regardless of whether an earlier one failed, and every step prints its own name in
+// both directions — a passing preflight says what it checked, not merely exits 0.
+
+/** What a subprocess-driving step needs — real `spawnSync` by default, injectable so a
+ *  test can prove pass/fail/thrown WITHOUT actually shelling `tsc`/`commitlint` (slow,
+ *  and the point under test is the STEP's reporting, not the tool's own correctness —
+ *  that half is already proven against the real CLI by test/commit-message.test.ts and
+ *  CI's own `tsc -p tsconfig.json --noEmit` step). */
+export type PreflightSpawn = (
+  file: string,
+  args: string[],
+  opts?: { cwd?: string; input?: string },
+) => { status: number | null; stdout: string; stderr: string };
+
+export function defaultPreflightSpawn(
+  file: string,
+  args: string[],
+  opts: { cwd?: string; input?: string } = {},
+): { status: number | null; stdout: string; stderr: string } {
+  const res = spawnSync(file, args, { cwd: opts.cwd, input: opts.input, encoding: "utf8" });
+  return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+}
+
+/** One preflight step's outcome — named in BOTH directions (fixture 3: a failure legible
+ *  only as a missing success line is barely a check at all). */
+export interface PreflightStepResult {
+  name: "commitlint" | "typecheck" | "emitter-checks";
+  ok: boolean;
+  /** Human-readable line(s) — printed unconditionally, pass or fail. */
+  detail: string;
+}
+
+/** The commit range this hand-authored push is about to send — the "STAGED commits" the
+ *  acceptance criteria name. Defaults to everything on HEAD not yet on `origin/main`. */
+export interface PreflightRange {
+  from: string;
+  to: string;
+}
+
+const DEFAULT_PREFLIGHT_RANGE: PreflightRange = { from: "origin/main", to: "HEAD" };
+
+/**
+ * Step 1/3 — commitlint over the range, via the SAME binary + config CI uses
+ * (`node_modules/.bin/commitlint --config commitlint.config.mjs`), so a local PASS means
+ * the same thing a CI PASS does. Independent of the other two steps: a thrown spawn (the
+ * binary missing, say) is caught and reported as this step's own failure, never allowed to
+ * abort the steps after it.
+ */
+export function commitlintStep(
+  repoRoot: string,
+  range: PreflightRange = DEFAULT_PREFLIGHT_RANGE,
+  spawn: PreflightSpawn = defaultPreflightSpawn,
+): PreflightStepResult {
+  try {
+    const bin = join(repoRoot, "node_modules", ".bin", "commitlint");
+    const config = join(repoRoot, "commitlint.config.mjs");
+    const res = spawn(process.execPath, [bin, "--config", config, "--from", range.from, "--to", range.to], {
+      cwd: repoRoot,
+    });
+    const ok = res.status === 0;
+    return {
+      name: "commitlint",
+      ok,
+      detail: ok
+        ? `commitlint: PASS — ${range.from}..${range.to} conform to Conventional Commits`
+        : `commitlint: FAIL — ${range.from}..${range.to}\n${(res.stdout + res.stderr).trim()}`,
+    };
+  } catch (e) {
+    return { name: "commitlint", ok: false, detail: `commitlint: FAIL — ${String((e as Error)?.message ?? e)}` };
+  }
+}
+
+/**
+ * Step 2/3 — `tsc -p tsconfig.json --noEmit`, the SAME invocation CI's `ci` job runs
+ * (.github/workflows/ci.yml). This is fixture 2's fix: `npm test` runs through `tsx`,
+ * which STRIPS types without checking them, so a green test run (PR #477) is not a
+ * compile. Independent of commitlint and the emitter checks — a thrown spawn is caught and
+ * reported here rather than aborting the run.
+ */
+export function typecheckStep(repoRoot: string, spawn: PreflightSpawn = defaultPreflightSpawn): PreflightStepResult {
+  try {
+    const tsc = join(repoRoot, "node_modules", ".bin", "tsc");
+    const res = spawn(tsc, ["-p", "tsconfig.json", "--noEmit"], { cwd: repoRoot });
+    const ok = res.status === 0;
+    return {
+      name: "typecheck",
+      ok,
+      detail: ok
+        ? "typecheck: PASS — tsc -p tsconfig.json --noEmit"
+        : `typecheck: FAIL — tsc -p tsconfig.json --noEmit\n${(res.stdout + res.stderr).trim()}`,
+    };
+  } catch (e) {
+    return { name: "typecheck", ok: false, detail: `typecheck: FAIL — ${String((e as Error)?.message ?? e)}` };
+  }
+}
+
+/** `git log` the range's raw commit messages, NUL-separated so a body containing blank
+ *  lines can't be mistaken for a message boundary. */
+export function readRangeCommitMessages(
+  repoRoot: string,
+  range: PreflightRange = DEFAULT_PREFLIGHT_RANGE,
+  spawn: PreflightSpawn = defaultPreflightSpawn,
+): string[] {
+  const res = spawn("git", ["log", "--format=%x00%B", `${range.from}..${range.to}`], { cwd: repoRoot });
+  return res.stdout
+    .split("\0")
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
+}
+
+/**
+ * Step 3/3 — "the emitter's own checks": {@link checkCommitMessage} against every commit
+ * message in the range, CALLED rather than restated (the whole point of this task — the
+ * hand lane gets a call site into the SAME rules the machine lanes already shape against,
+ * so the two can never drift apart the way a second hand-rolled rule-set would). Independent
+ * of the other two steps — a `git log` that throws is caught and reported as this step's
+ * own failure.
+ */
+export function emitterChecksStep(
+  repoRoot: string,
+  range: PreflightRange = DEFAULT_PREFLIGHT_RANGE,
+  spawn: PreflightSpawn = defaultPreflightSpawn,
+): PreflightStepResult {
+  try {
+    const messages = readRangeCommitMessages(repoRoot, range, spawn);
+    const violations = messages.flatMap((message, i) =>
+      checkCommitMessage(message).map((v) => `commit ${i + 1}/${messages.length} (${v.rule}): ${v.message}`),
+    );
+    const ok = violations.length === 0;
+    return {
+      name: "emitter-checks",
+      ok,
+      detail: ok
+        ? `emitter-checks: PASS — ${messages.length} commit message(s) in ${range.from}..${range.to} match lib/commit-message.ts`
+        : `emitter-checks: FAIL — lib/commit-message.ts rejects ${violations.length} thing(s)\n${violations.join("\n")}`,
+    };
+  } catch (e) {
+    return { name: "emitter-checks", ok: false, detail: `emitter-checks: FAIL — ${String((e as Error)?.message ?? e)}` };
+  }
+}
+
+export interface PreflightResult {
+  steps: PreflightStepResult[];
+  ok: boolean;
+}
+
+export interface PreflightDeps {
+  range?: PreflightRange;
+  spawn?: PreflightSpawn;
+}
+
+/**
+ * ONE COMMAND, THREE INDEPENDENT STEPS, EACH REPORTING ITS OWN EXIT (this task's design).
+ * Runs commitlint, then `tsc --noEmit`, then the emitter's header/body checks — never
+ * chained with `&&`, so one step failing can neither hide nor block the ones after it
+ * (fixtures 3 and 4). `ok` is the AND of all three; every step's `detail` is meant to be
+ * printed regardless of `ok`, so a caller sees every problem in one run rather than only
+ * the first.
+ */
+export function runPreflight(repoRoot: string, deps: PreflightDeps = {}): PreflightResult {
+  const range = deps.range ?? DEFAULT_PREFLIGHT_RANGE;
+  const spawn = deps.spawn ?? defaultPreflightSpawn;
+  const steps: PreflightStepResult[] = [
+    commitlintStep(repoRoot, range, spawn),
+    typecheckStep(repoRoot, spawn),
+    emitterChecksStep(repoRoot, range, spawn),
+  ];
+  return { steps, ok: steps.every((s) => s.ok) };
 }
