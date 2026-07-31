@@ -390,7 +390,13 @@ import {
   type WorktreeReapSummary,
 } from "./lib/worker.js";
 import { gitPushRunBranch, gitPushEmptyCommit } from "./lib/git-push.js";
-import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from "./lib/worker-home.js";
+import {
+  ensureWorkerKeychain,
+  materializeWorkerHome,
+  perRunWorkerHomeDir,
+  sweepStaleWorkerHomes,
+  workerKeychainPaths,
+} from "./lib/worker-home.js";
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, FIX_WORKER_TOOLS, neutralizeFenceMarkers } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "./lib/drain-lock.js";
 import { checkCliFreshness, checkServiceFreshness } from "./lib/self-sync.js";
@@ -5782,14 +5788,54 @@ function retroPrompt(gatherReport: string, calTable: string, runId: string): str
   ].join("\n");
 }
 
-/** Read current `/usage` headless and parse it; `undefined` on any failure (best-effort). */
-function readUsageSnapshot(config: Config): UsageSnapshot | undefined {
+/**
+ * Injectable exec seam for {@link readUsageSnapshot} — tests inject a recorder to assert
+ * what argv/env the probe passed, with no real `claude` credential or spend involved.
+ * Appended LAST in {@link readUsageSnapshot}'s signature so no existing positional caller
+ * shifts (CLAUDE.md, #977/#978). Omitted ⇒ {@link defaultUsageProbeRunner}, the real
+ * `execFileSync` call this seam replaces byte-for-byte.
+ */
+export type UsageProbeRunner = (
+  bin: string,
+  argv: string[],
+  opts: { encoding: "utf8"; env: Record<string, string>; maxBuffer: number },
+) => string;
+
+const defaultUsageProbeRunner: UsageProbeRunner = (bin, argv, opts) => execFileSync(bin, argv, opts);
+
+/**
+ * Read current `/usage` headless and parse it; `undefined` on any failure (best-effort;
+ * the drain/daemon continues on an unreadable read — max + budget still bound it. That
+ * polarity is ratified and NOT this function's to change.)
+ *
+ * W1-T267: the probe's HOME must resolve the SAME credential store a worker spawn
+ * resolves (worker.ts's `spawnWorker`, ~line 590-615) — never the bare parent env's
+ * HOME, which follows the fleet user's real login keychain. `workerKeychainPaths` is the
+ * ONE derivation of that store's path; this probe and every worker spawn both call it,
+ * so the two can never drift onto two different files. `materializeWorkerHome` then
+ * symlinks the redirected HOME's `Library/Keychains/login.keychain-db` slot at that same
+ * store (skipping the grant, harmlessly, if the store does not exist yet) — the identical
+ * mechanism `spawnWorker` uses, not a second, divergent one.
+ */
+export function readUsageSnapshot(
+  config: Config,
+  runUsageProbe: UsageProbeRunner = defaultUsageProbeRunner,
+): UsageSnapshot | undefined {
   try {
+    const realHome = process.env.HOME ?? homedir();
+    // A stable, non-per-call home (never a fresh `perRunWorkerHomeDir` per read) so
+    // repeated probe reads reuse — and idempotently refresh — one materialized
+    // directory rather than littering `worker-home-*` siblings on every tick.
+    const workerHome = perRunWorkerHomeDir(workerHomeDir(config), "usage-probe");
+    const workerKeychainPath = workerKeychainPaths(join(config.root, "state")).keychainPath;
+    materializeWorkerHome({ workerHome, realHome, workerKeychainPath });
+
     const env = buildWorkerEnv({}, process.env, {
       zdotdir: workerZdotdir(config),
       shell: workerShell(config),
+      home: workerHome,
     });
-    const out = execFileSync(config.claudeBin, ["-p", "/usage"], {
+    const out = runUsageProbe(config.claudeBin, ["-p", "/usage"], {
       encoding: "utf8",
       env,
       maxBuffer: 1 << 24,
