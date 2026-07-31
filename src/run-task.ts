@@ -7203,6 +7203,10 @@ export function buildSweepEffects(
   // test because the adapter below hardcoded `spawnWorker`. Optional with no default body, so
   // this adds no new executable line — the adapter itself resolves it.
   spawnImpl?: (args: SpawnWorkerArgs) => Promise<WorkerResult>,
+  // Injectable empty-commit push — appended LAST so every existing positional caller is
+  // untouched. Same rationale as `reviewRunner`/`spawnImpl` above: the ABSENT remedy's wiring
+  // is unit-covered with a recorder instead of a real push to a real branch.
+  pushEmptyCommit: typeof gitPushEmptyCommit = gitPushEmptyCommit,
 ): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview" | "repushAbsent"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = ghIssueGateway(owner, repo);
@@ -7219,7 +7223,7 @@ export function buildSweepEffects(
     // W1-T191 property. The push is a fast-forward onto the PR's own branch.
     repushAbsent: async (pr) => {
       if (!pr.headRefName) return undefined;
-      return gitPushEmptyCommit(
+      return pushEmptyCommit(
         repoRoot,
         pr.headRefName,
         pr.headSha,

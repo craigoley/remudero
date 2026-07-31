@@ -15,6 +15,7 @@ import {
   type SweepDeps,
 } from "../src/lib/sweep.js";
 import { gitPushEmptyCommit } from "../src/lib/git-push.js";
+import { buildSweepEffects } from "../src/run-task.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
@@ -292,4 +293,58 @@ test("REPLAY #921: the recorded shape re-pushes once where the live sweep escala
   assert.equal(repushes, 1, "ONE empty commit, not 244");
   assert.equal(escalations, 243, "every later pass falls through to the ordinary escalation");
   assert.equal(prior.count, ABSENT_REPUSH_CAP, "and the bound is what stopped it");
+});
+
+// ── THE REAL WIRING (buildSweepEffects), driven with a recorder ─────────────────────────────
+// Imports run-task.ts but dispatches NOTHING: only the repushAbsent closure is invoked, and its
+// push goes to an injected recorder. No worker, no runTask, no remote.
+
+test("buildSweepEffects wires repushAbsent to the push leaf with the PR's own branch, head, and a self-describing message", async () => {
+  const calls: Array<{ repoDir: string; branch: string; head: string; message: string }> = [];
+  const effects = buildSweepEffects(
+    "craigoley",
+    "remudero",
+    { claudeBin: "/bin/true", root: "/nonexistent-bh-root" } as never,
+    join(mkdtempSync(join(tmpdir(), "rmd-bh-eff-")), "ledger.ndjson"),
+    "SWEEP-EFF-1",
+    { tasks: [], byId: new Map() } as never,
+    () => {},
+    DEFAULT_SWEEP_POLICY,
+    async () => 0,
+    undefined,
+    (repoDir, branch, head, message) => {
+      calls.push({ repoDir, branch, head, message });
+      return "mintedsha";
+    },
+  );
+
+  const minted = await effects.repushAbsent!(pr({ headRefName: "run-W1-T253-1785378652634", headSha: "35d636d454cc" }));
+  assert.equal(minted, "mintedsha", "the freshly minted sha is returned to the sweep for its ledger line");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.branch, "run-W1-T253-1785378652634", "pushes to the PR's OWN branch");
+  assert.equal(calls[0]!.head, "35d636d454cc", "parented on the CURRENT head — a fast-forward");
+  assert.match(calls[0]!.message, /re-trigger checks on #921/, "the commit says why it exists");
+  assert.match(calls[0]!.message, /no Actions check-suite/, "and names the condition it is remedying");
+});
+
+test("buildSweepEffects' repushAbsent stands down when the head branch was never observed", async () => {
+  let pushes = 0;
+  const effects = buildSweepEffects(
+    "craigoley",
+    "remudero",
+    { claudeBin: "/bin/true", root: "/nonexistent-bh-root" } as never,
+    join(mkdtempSync(join(tmpdir(), "rmd-bh-eff2-")), "ledger.ndjson"),
+    "SWEEP-EFF-2",
+    { tasks: [], byId: new Map() } as never,
+    () => {},
+    DEFAULT_SWEEP_POLICY,
+    async () => 0,
+    undefined,
+    () => {
+      pushes++;
+      return "never";
+    },
+  );
+  assert.equal(await effects.repushAbsent!(pr({ headRefName: undefined })), undefined);
+  assert.equal(pushes, 0, "no branch name means nothing to push to — never a guess");
 });
