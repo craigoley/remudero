@@ -55,15 +55,15 @@
     and only its BUDGET framing was reversed. Retraction is per-round and operator-declared.
   acceptance:
     - claim: "a retracted round's text NEVER appears in the composed draft prompt"
-      proof: "unit test over inboxDraftPrompt: given a proposal whose round 1 is marked retracted, the composed prompt contains no substring of round 1's feedback. FALSIFIER, live at filing: P34 carries three rounds of which two contain the discarded dollar-ceiling framing, and inbox.ts:306-311 maps the FULL reframeHistory into the prompt under a header instructing the model to address every round — so the reversed budget model is physically present and only wording keeps it out of the drafted tasks"
+      proof: "unit test: inboxDraftPrompt omits a retracted round's feedback text entirely"
     - claim: "the composer never includes a round the operator explicitly retracted, regardless of recency or position"
-      proof: "unit test: a retracted MIDDLE round is omitted while later and earlier rounds survive, and no renumbering makes a subsequent retraction reference ambiguous. FALSIFIER: an implementation that only drops rounds older than the newest retraction implements 'latest wins', which is the implicit rule that does not hold today and would discard still-live earlier objections"
+      proof: "unit test: a retracted MIDDLE round is omitted while earlier and later rounds survive"
     - claim: "retraction is EXPLICIT — never inferred from recency"
-      proof: "unit test: adding a new round WITHOUT a retraction flag leaves every prior round in the prompt, unchanged. FALSIFIER: auto-superseding on recency would have silently dropped P34's round 1, whose non-presence-gating envelope rounds 2 and 3 BUILD ON — only its budget framing was reversed, so an implicit rule would have discarded live design"
+      proof: "unit test: a new round without a retraction flag leaves every prior round intact"
     - claim: "retracted feedback is PRESERVED in history and in the ledger — composition changes, the record does not"
-      proof: "unit test: after retraction, reframeHistory still contains the round's verbatim feedback and the original ratify.reframed ledger line is untouched; only the composed prompt omits it. FALSIFIER: deleting history to fix a prompt trades a composition defect for an audit-record defect, which is strictly worse — the receipt is what makes the retraction reviewable"
+      proof: "unit test: retraction preserves reframeHistory and the original ratify.reframed ledger line"
     - claim: "`rmd reframe` accepts the retraction flag and rejects it nowhere else"
-      proof: "unit test over the CLI arg validator: --supersedes is accepted for reframe with a valid round expression and rejected with a usage error for an invalid one. FALSIFIER: run-task.ts:5548 today declares --feedback as the ONLY accepted flag, so a retraction has no surface to be expressed on even if the composer honoured one"
+      proof: "unit test: rmd reframe accepts --supersedes and rejects an invalid round expression"
   risk: medium
   origin: architect
   plan_refs: ["§7B"]
@@ -91,4 +91,30 @@
     be verified absent from the drafted tasks by hand before approval. That check is the difference between
     catching this fixture and shipping it.
     risk:medium — it changes prompt composition, and the realistic failure is over-reach: dropping a round the
-    operator did not retract, or deleting history to simplify the prompt. Both have dedicated criteria."
+    operator did not retract, or deleting history to simplify the prompt. Both have dedicated criteria.
+    PRIOR PROOF TEXT PRESERVED (2026-07-31, plan-only proof amendment). The acceptance proofs were rewritten
+    into executable dialect so this task can clear the pre-dispatch proof-dialect lint that PR #906 made
+    BLOCKING - until then the drain re-selected and re-refused this task every tick without advancing. No claim
+    text changed. A criterion carries no note field of its own, so the FALSIFIERS, fixtures and source
+    references the previous proof prose carried are preserved verbatim here:
+    CRITERION 1 PRIOR PROOF: unit test over inboxDraftPrompt: given a proposal whose round 1 is marked
+    retracted, the composed prompt contains no substring of round 1's feedback. FALSIFIER, live at filing: P34
+    carries three rounds of which two contain the discarded dollar-ceiling framing, and inbox.ts:306-311 maps
+    the FULL reframeHistory into the prompt under a header instructing the model to address every round — so the
+    reversed budget model is physically present and only wording keeps it out of the drafted tasks
+    CRITERION 2 PRIOR PROOF: unit test: a retracted MIDDLE round is omitted while later and earlier rounds
+    survive, and no renumbering makes a subsequent retraction reference ambiguous. FALSIFIER: an implementation
+    that only drops rounds older than the newest retraction implements 'latest wins', which is the implicit rule
+    that does not hold today and would discard still-live earlier objections
+    CRITERION 3 PRIOR PROOF: unit test: adding a new round WITHOUT a retraction flag leaves every prior round in
+    the prompt, unchanged. FALSIFIER: auto-superseding on recency would have silently dropped P34's round 1,
+    whose non-presence-gating envelope rounds 2 and 3 BUILD ON — only its budget framing was reversed, so an
+    implicit rule would have discarded live design
+    CRITERION 4 PRIOR PROOF: unit test: after retraction, reframeHistory still contains the round's verbatim
+    feedback and the original ratify.reframed ledger line is untouched; only the composed prompt omits it.
+    FALSIFIER: deleting history to fix a prompt trades a composition defect for an audit-record defect, which is
+    strictly worse — the receipt is what makes the retraction reviewable
+    CRITERION 5 PRIOR PROOF: unit test over the CLI arg validator: --supersedes is accepted for reframe with a
+    valid round expression and rejected with a usage error for an invalid one. FALSIFIER: run-task.ts:5548 today
+    declares --feedback as the ONLY accepted flag, so a retraction has no surface to be expressed on even if the
+    composer honoured one"
