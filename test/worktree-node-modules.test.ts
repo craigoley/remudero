@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd } from "../src/lib/worker.js";
+import { excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd } from "../src/lib/worker.js";
 
 // W1-T137 (#842) shipped `hooks/commit-msg` and wired it into every worktree via
 // `core.hooksPath`, but `worktreeAdd` never supplied the `node_modules` that hook
@@ -92,6 +92,75 @@ test("linkWorktreeNodeModules really symlinks a resolvable source onto disk", ()
     assert.equal(outcome, "linked");
     assert.equal(lstatSync(join(wt, "node_modules")).isSymbolicLink(), true);
     assert.equal(readlinkSync(join(wt, "node_modules")), source);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("excludeNodeModulesFromGit appends the entry to the COMMON dir's info/exclude", () => {
+  const written: Array<[string, string]> = [];
+  const outcome = excludeNodeModulesFromGit("/wt", {
+    commonDir: () => "/clone/.git",
+    read: () => "*.log\n",
+    mkdir: () => {},
+    write: (p, b) => written.push([p, b]),
+  });
+  assert.equal(outcome, "added");
+  assert.deepEqual(written, [[join("/clone/.git", "info", "exclude"), "*.log\nnode_modules\n"]]);
+});
+
+test("excludeNodeModulesFromGit is idempotent -- a repeat worktreeAdd never duplicates the entry", () => {
+  let wrote = false;
+  const outcome = excludeNodeModulesFromGit("/wt", {
+    commonDir: () => "/clone/.git",
+    read: () => "*.log\nnode_modules\n",
+    write: () => {
+      wrote = true;
+    },
+  });
+  assert.equal(outcome, "already-excluded");
+  assert.equal(wrote, false);
+});
+
+test("excludeNodeModulesFromGit creates the exclude file when none exists yet", () => {
+  const written: Array<[string, string]> = [];
+  const outcome = excludeNodeModulesFromGit("/wt", {
+    commonDir: () => "/clone/.git",
+    read: () => {
+      throw new Error("ENOENT");
+    },
+    mkdir: () => {},
+    write: (p, b) => written.push([p, b]),
+  });
+  assert.equal(outcome, "added");
+  assert.equal(written[0]?.[1], "node_modules\n");
+});
+
+test("excludeNodeModulesFromGit reports failure instead of throwing", () => {
+  const outcome = excludeNodeModulesFromGit("/wt", {
+    commonDir: () => {
+      throw new Error("not a git dir");
+    },
+  });
+  assert.equal(outcome, "failed");
+});
+
+test("worktreeAdd leaves the linked node_modules INVISIBLE to git status", () => {
+  // The regression this guards: an untracked node_modules makes W1-T142's out-of-scope
+  // push guard refuse the branch outright ("NOT pushing: node_modules"), which would turn
+  // a commit fix into a push failure. The fixture repo's .gitignore does NOT list it.
+  const root = tmp("rmd-wt-clean-");
+  const clone = join(root, "clone");
+  const wt = join(root, "wt");
+  try {
+    seedClone(clone);
+    worktreeAdd(clone, wt, "run-probe-3", "main");
+    assert.equal(lstatSync(join(wt, "node_modules")).isSymbolicLink(), true, "the link must exist");
+    assert.equal(
+      execFileSync("git", ["-C", wt, "status", "--porcelain"], { encoding: "utf8" }).trim(),
+      "",
+      "a fresh worktree must be clean -- the node_modules link must not show as untracked",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

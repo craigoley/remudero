@@ -1299,6 +1299,56 @@ export function linkWorktreeNodeModules(
   }
 }
 
+/**
+ * Make git ignore the `node_modules` link above, independent of whether the checked-out
+ * `.gitignore` happens to cover it.
+ *
+ * WITHOUT THIS the link is an untracked file, and W1-T142's out-of-scope push guard refuses
+ * the whole branch with "NOT pushing: node_modules" — turning a commit fix into a push
+ * regression. remudero's own `.gitignore` does list it, but relying on the checked-out repo
+ * to do so is exactly the assumption that failed here; `worktreeAdd` serves any repo.
+ *
+ * MEASURED (this host, git 2.x): a linked worktree honours the COMMON dir's `info/exclude`
+ * and IGNORES its own per-worktree admin one, so that is where this writes — the same
+ * shared-scope write the `core.hooksPath` line already makes. Idempotent and best-effort.
+ */
+export function excludeNodeModulesFromGit(
+  worktreePath: string,
+  deps: {
+    commonDir?: (worktreePath: string) => string;
+    read?: (p: string) => string;
+    write?: (p: string, body: string) => void;
+    mkdir?: (p: string) => void;
+  } = {},
+): "added" | "already-excluded" | "failed" {
+  try {
+    const commonDir =
+      deps.commonDir ??
+      ((wt: string) =>
+        execFileSync("git", ["-C", wt, "rev-parse", "--path-format=absolute", "--git-common-dir"], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        }).trim());
+    const infoDir = join(commonDir(worktreePath), "info");
+    const excludeFile = join(infoDir, "exclude");
+    let body = "";
+    try {
+      body = (deps.read ?? ((p: string) => readFileSync(p, "utf8")))(excludeFile);
+    } catch {
+      /* no exclude file yet — created below */
+    }
+    if (body.split("\n").some((line) => line.trim() === "node_modules")) return "already-excluded";
+    (deps.mkdir ?? ((p: string) => mkdirSync(p, { recursive: true })))(infoDir);
+    (deps.write ?? ((p: string, b: string) => writeFileSync(p, b)))(
+      excludeFile,
+      `${body}${body === "" || body.endsWith("\n") ? "" : "\n"}node_modules\n`,
+    );
+    return "added";
+  } catch {
+    return "failed";
+  }
+}
+
 /** `git worktree add` a fresh branch off origin/<base> for a repo checkout. */
 export function worktreeAdd(
   repoDir: string,
@@ -1327,7 +1377,9 @@ export function worktreeAdd(
     stdio: "inherit",
   });
   // …and give that hook the `commitlint` it resolves, or it rejects every commit made here.
-  // Must run AFTER the hooksPath line and AFTER the worktree exists. See the doc comment.
+  // Must run AFTER the hooksPath line and AFTER the worktree exists. See the doc comments.
+  // Excluding FIRST keeps the link from ever being visible to git as an untracked file.
+  excludeNodeModulesFromGit(worktreePath);
   linkWorktreeNodeModules(repoDir, worktreePath);
 }
 
