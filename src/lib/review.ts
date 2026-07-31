@@ -57,8 +57,29 @@ export type ReviewState = "success" | "failure";
  *                     keyword floor verdict computed alongside it, verbatim —
  *                     an environment hiccup must never silently hard-fail or
  *                     stall the fleet (Standing rule: no absent-check deadlock).
+ *   executed_stale — (W1-T273) a `grep:` proof matched on the head, but the
+ *                     SAME pattern ALSO matches the PR's MERGE-BASE — i.e. it
+ *                     would have exited 0 before the task's work ever landed,
+ *                     so it discriminates nothing (W1-T267's fifth criterion,
+ *                     verbatim: `workerKeychainPaths` matched two unrelated
+ *                     hits on the pre-work commit and was recorded as
+ *                     substantiated regardless). A DOWNGRADE, not a failure —
+ *                     see {@link preexistingProofHits}'s doc — it withdraws
+ *                     the proof's positive override and falls back to the
+ *                     keyword floor verbatim, exactly like `exec_error`
+ *                     degrades, but recorded under its own name because the
+ *                     cause is a proof-authoring gap, not an environment
+ *                     hiccup. `unit test:` proofs never produce this outcome
+ *                     (design, explicitly out of scope — a forward-
+ *                     referencing test path legitimately matches nothing
+ *                     before the work and everything after).
  */
-export type ProofExecOutcome = "executed_pass" | "executed_fail" | "not_executable" | "exec_error";
+export type ProofExecOutcome =
+  | "executed_pass"
+  | "executed_fail"
+  | "not_executable"
+  | "exec_error"
+  | "executed_stale";
 
 /** One criterion's verdict against its stated proof. */
 export interface CriterionVerdict {
@@ -117,10 +138,25 @@ export interface ReviewEvidence {
    */
   headCheckoutDir?: string;
   /**
+   * (W1-T273) A checkout of the PR's MERGE-BASE — the commit the PR branched
+   * from, BEFORE the task's own work landed. Optional and independent of
+   * `headCheckoutDir`'s own presence: the caller reaches it with one
+   * `git merge-base` over a checkout the review already has (no new gateway,
+   * no new network call — design doc, plan/tasks.d/W1-T273-*.yaml). Consulted
+   * ONLY to test a `grep:` proof's pattern for non-discrimination (see
+   * {@link preexistingProofHits}); absent ⇒ that check never runs and every
+   * grep proof that passes on the head is `executed_pass` exactly as it was
+   * before this task — byte-identical to every caller/fixture that predates it.
+   */
+  baseCheckoutDir?: string;
+  /**
    * Injected proof executor. Real callers omit this — {@link execWhitelistedProof}
    * (the real, whitelist-bounded shell-out) is the default. Tests inject a fake so
    * override/degrade semantics are proven without touching the filesystem or a
-   * shell (acceptance: "unit test over an injected executor").
+   * shell (acceptance: "unit test over an injected executor"). Also the executor
+   * {@link preexistingProofHits} reuses against `baseCheckoutDir` — the SAME
+   * function, just a different `cwd`, so an injected fake needs no special-casing
+   * to cover both.
    */
   execProof?: ProofExecutor;
 }
@@ -1239,6 +1275,53 @@ export function nameFilteredOutcome(stdout: string): "pass" | "fail" | "no-match
 export interface ProofExecContext {
   cwd: string;
   exec?: ProofExecutor;
+  /** (W1-T273) mirrors {@link ReviewEvidence.baseCheckoutDir} — the merge-base
+   * checkout a `grep:` proof's pattern is re-run against to test for
+   * non-discrimination. Absent ⇒ {@link preexistingProofHits} always reports
+   * `false` and every grep proof that passes on `cwd` stays `executed_pass`. */
+  baseCwd?: string;
+}
+
+/**
+ * (W1-T273) Does a `grep:` proof's pattern ALSO match on the PR's MERGE-BASE —
+ * i.e. would it have exited 0 before the task's own work ever landed? THE
+ * LIVE DEFECT THIS CLOSES: W1-T267's fifth criterion carried
+ * `grep: workerKeychainPaths in src/run-task.ts`; run against the commit
+ * BEFORE #1026 implemented the task, that pattern already returned two hits
+ * (an import line, an unrelated daemon rung) and exited 0 — the review
+ * executed criterion 5 and recorded it `executed_pass` on completely unbuilt
+ * work. A proof is supposed to discriminate between done and not-done; one
+ * that ALSO matches the merge-base discriminates nothing, and `executed_pass`
+ * POSITIVELY OVERRIDES the keyword floor, so a non-discriminating proof is
+ * strictly worse than a prose one (it certifies with more confidence than the
+ * floor it replaces, on strictly less evidence).
+ *
+ * ONLY `kind: "grep"` is checked — EXPLICITLY NOT `kind: "test"` (design,
+ * load-bearing): a `unit test:` proof legitimately names a test file/name
+ * that does not exist yet at the merge-base (that is the whole point of TDD —
+ * the test is written FORWARD-referencing the work), so it is expected and
+ * correct for such a proof to match nothing before the work and everything
+ * after. Applying this rule there by analogy would flag every legitimate
+ * forward-referencing test proof as "stale", which is exactly backwards.
+ *
+ * Returns `false` (never stale) whenever no `baseCwd` was supplied — this
+ * check is purely additive and never runs, let alone downgrades anything, for
+ * a caller that predates W1-T273's wiring — and whenever the base checkout
+ * itself throws (an unreadable/absent merge-base checkout is an environment
+ * gap, not a finding; degrades to "not stale" exactly like `exec_error`
+ * degrades elsewhere in this module — never a silent hard-fail).
+ */
+export function preexistingProofHits(
+  whitelisted: WhitelistedProof,
+  exec: ProofExecutor,
+  baseCwd: string | undefined,
+): boolean {
+  if (whitelisted.kind !== "grep" || baseCwd === undefined) return false;
+  try {
+    return exec(whitelisted, baseCwd) === "pass";
+  } catch {
+    return false;
+  }
 }
 
 /** Verdict one criterion against its proof, given the report + optional semantic. */
@@ -1314,9 +1397,24 @@ export function judgeCriterion(
       try {
         const outcome = exec(whitelisted, execCtx.cwd);
         if (outcome === "pass") {
-          proofExec = "executed_pass";
-          met = true;
-          reason = `proof executed and PASSED on the PR head (${whitelisted.kind}: ${whitelisted.label})`;
+          if (preexistingProofHits(whitelisted, exec, execCtx.baseCwd)) {
+            // W1-T273: the SAME pattern also matches the PR's MERGE-BASE — it
+            // would have exited 0 before this task's work ever landed, so
+            // its exit-0 here discriminates nothing. See
+            // {@link preexistingProofHits}'s doc for the full design; `met`/
+            // `reason` are LEFT UNTOUCHED (the keyword floor computed above
+            // stands, verbatim) — the proof's positive override is withdrawn,
+            // never converted into a failure.
+            proofExec = "executed_stale";
+            reason =
+              `${reason} — NOTE: proof also matches the PR's merge-base ` +
+              `(${whitelisted.kind}: ${whitelisted.label}); non-discriminating, ` +
+              `positive override withdrawn, keyword floor applied`;
+          } else {
+            proofExec = "executed_pass";
+            met = true;
+            reason = `proof executed and PASSED on the PR head (${whitelisted.kind}: ${whitelisted.label})`;
+          }
         } else if (outcome === "no-match") {
           // ZERO tests matched the proof's name pattern (the run completed — see
           // nameFilteredOutcome). W1-T161/#349: this is EITHER a proof-authoring
@@ -1386,7 +1484,7 @@ export function judgeReview(
   // not_executable and the keyword floor is byte-identical to pre-W1-T65 —
   // exactly what every fixture/caller that predates this task still gets.
   const execCtx: ProofExecContext | undefined = evidence.headCheckoutDir
-    ? { cwd: evidence.headCheckoutDir, exec: evidence.execProof }
+    ? { cwd: evidence.headCheckoutDir, exec: evidence.execProof, baseCwd: evidence.baseCheckoutDir }
     : undefined;
   const verdicts = criteria.map((c, i) =>
     judgeCriterion(c, reportTokens, evidence.semantic?.[i], execCtx),
