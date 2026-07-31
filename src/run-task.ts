@@ -355,6 +355,7 @@ import {
   type StrikeAttempt,
   type SweepDeps,
   type SweepPolicy,
+  ABSENT_REPUSH_CAP,
 } from "./lib/sweep.js";
 import { applyCorrection } from "./lib/correct.js";
 import {
@@ -381,7 +382,7 @@ import {
   type WorkerResult,
   type WorktreeReapSummary,
 } from "./lib/worker.js";
-import { gitPushRunBranch } from "./lib/git-push.js";
+import { gitPushRunBranch, gitPushEmptyCommit } from "./lib/git-push.js";
 import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from "./lib/worker-home.js";
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, FIX_WORKER_TOOLS, neutralizeFenceMarkers } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "./lib/drain-lock.js";
@@ -6957,6 +6958,9 @@ export function buildOpenPrViews(owner: string, repo: string, ledgerPath: string
       // W1-T54 routing: Dependabot PRs go to the dep-review lane, never the
       // fix/clarification rungs — branch prefix is Dependabot's own contract.
       isDependabot: (pr.headRefName ?? "").startsWith("dependabot/"),
+      // The ABSENT-check-suite remedy pushes an empty commit to THIS branch. Already fetched
+      // for isDependabot above — carried through rather than re-queried.
+      headRefName: pr.headRefName,
       reviewSummary: undefined,
       // W1-T100: the ci-log fix mode's input — only worth fetching when checks
       // are actually red (a PR gate that already needs blocked_ci's rung).
@@ -7199,7 +7203,7 @@ export function buildSweepEffects(
   // test because the adapter below hardcoded `spawnWorker`. Optional with no default body, so
   // this adds no new executable line — the adapter itself resolves it.
   spawnImpl?: (args: SpawnWorkerArgs) => Promise<WorkerResult>,
-): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview"> {
+): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview" | "repushAbsent"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = ghIssueGateway(owner, repo);
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
@@ -7207,6 +7211,23 @@ export function buildSweepEffects(
   return {
     arm: (pr) => {
       armAutoMerge(pr.prUrl, pr.taskId);
+    },
+
+    // THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Routed through git-push.ts's leaf, so
+    // the live-write guard applies and no new outward path exists. `commit-tree` plumbing means
+    // this NEVER touches the daemon checkout's working tree, index, or local branches — the
+    // W1-T191 property. The push is a fast-forward onto the PR's own branch.
+    repushAbsent: async (pr) => {
+      if (!pr.headRefName) return undefined;
+      return gitPushEmptyCommit(
+        repoRoot,
+        pr.headRefName,
+        pr.headSha,
+        `chore(ci): re-trigger checks on #${pr.prNumber}\n\n` +
+          `GitHub created no Actions check-suite for ${pr.headSha.slice(0, 7)}. This empty commit\n` +
+          `mints a fresh head sha so the suites are created. Automated by the sweep's ABSENT\n` +
+          `remedy; bounded to ${ABSENT_REPUSH_CAP} per PR, after which the ordinary escalation runs.`,
+      );
     },
 
     // W1-T54 ROUTED (the 2026-07-22 #533/#534 stall): the SAME depReviewCommand

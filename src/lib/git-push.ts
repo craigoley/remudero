@@ -49,3 +49,52 @@ export function gitPushRunBranch(worktreePath: string, opts: PushRunBranchOpts =
   args.push("origin", "HEAD");
   (opts.exec ?? defaultPushExec)("git", args, { stdio: opts.stdio ?? "inherit" });
 }
+
+/** Captures stdout from a git plumbing read/write. Injected by tests so the argv and the
+ *  sequencing are observable without a repo or a remote. */
+export type GitCapture = (file: string, args: string[]) => string;
+
+export function defaultGitCapture(file: string, args: string[]): string {
+  return execFileSync(file, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+export interface PushEmptyCommitOpts {
+  capture?: GitCapture;
+  exec?: PushExec;
+}
+
+/**
+ * Push an EMPTY commit onto `branch`, minting a fresh head sha — the ABSENT-check-suite
+ * remedy (W1-T186 follow-up). Returns the new sha.
+ *
+ * WHY IT LIVES HERE. This is a `git push`, so it belongs at THE leaf for the same reason
+ * every other push does: the guard above is the boundary, and
+ * `test/live-write-guard.test.ts`'s structural test fails the build on a raw inlined push
+ * anywhere else in src/. It is not a new outward path — it is the existing one, called with
+ * a different ref.
+ *
+ * WHY PLUMBING RATHER THAN `commit --allow-empty`. The only caller is the sweep, which runs
+ * inside the DAEMON'S OWN CHECKOUT. A `git commit` there would move that checkout's HEAD and
+ * dirty the very tree `checkCliFreshness` gates on — the exact class of defect W1-T191 exists
+ * to remove. `commit-tree` against the head's OWN tree writes a commit object to the object
+ * database and touches no working tree, no index, and no local branch (the same discipline
+ * `feedback-landing.ts` already uses). The push is a FAST-FORWARD — the new commit's parent is
+ * the current head — so it is never a force-push and can never discard someone else's work.
+ */
+export function gitPushEmptyCommit(
+  repoDir: string,
+  branch: string,
+  headSha: string,
+  message: string,
+  opts: PushEmptyCommitOpts = {},
+): string {
+  assertLiveWriteAllowed("git-push", `pushing an empty commit to ${branch} to mint a fresh head sha`);
+  const capture = opts.capture ?? defaultGitCapture;
+  // The head's OWN tree — so the commit is empty by construction, not by a flag.
+  const treeSha = capture("git", ["-C", repoDir, "rev-parse", `${headSha}^{tree}`]).trim();
+  const newSha = capture("git", ["-C", repoDir, "commit-tree", treeSha, "-p", headSha, "-m", message]).trim();
+  (opts.exec ?? defaultPushExec)("git", ["-C", repoDir, "push", "origin", `${newSha}:refs/heads/${branch}`], {
+    stdio: "ignore",
+  });
+  return newSha;
+}
