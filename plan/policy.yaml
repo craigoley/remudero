@@ -4,9 +4,9 @@
 # package, validated by src/lib/policy.ts's `validatePolicy`/`loadPolicy`).
 #
 # WHY: before this file, the fleet's operating constants (proof timeout, prune grace,
-# poll interval, fix-strike cap, sweep thresholds, drain width, headroom curve) were
-# literals scattered across src/lib/*.ts — a value change was an edit to a constant,
-# invisible to plan review. Every field below is SCHEMA-BOUNDED (min/max travel with
+# poll interval, fix-strike cap, sweep thresholds, drain width, headroom curve, retro
+# cadence) were literals scattered across src/lib/*.ts — a value change was an edit to
+# a constant, invisible to plan review. Every field below is SCHEMA-BOUNDED (min/max travel with
 # the value, enforced by src/lib/policy.ts at load, and by `rmd lint-plan` at review
 # time) — a value change is now a reviewed plan PR, and an out-of-bounds edit is
 # refused mechanically rather than caught in code review after the fact.
@@ -84,6 +84,22 @@ drain:
     origin: "lifted:src/lib/drain.ts:243 (DEFAULT_MAX)"
     min: 1
     max: 100
+
+# W1-T264: the daemon's retro cadence trigger (src/lib/retro.ts's `evaluateRetroTrigger`)
+# fires once EITHER threshold crosses — mergesSinceMarker >= mergesThreshold OR
+# daysSinceMarker >= daysThreshold — whichever comes first. Retuning the cadence is now a
+# reviewed policy-data edit, never a source change + deploy.
+retro:
+  mergesThreshold:
+    value: 25
+    origin: "lifted:src/lib/retro.ts:2299 (DEFAULT_RETRO_MERGES_THRESHOLD)"
+    min: 1
+    max: 100
+  daysThreshold:
+    value: 7
+    origin: "lifted:src/lib/retro.ts:2304 (DEFAULT_RETRO_DAYS_THRESHOLD)"
+    min: 1
+    max: 90
 
 # The daemon's headroom ceiling curve (src/lib/daemon.ts's `buildDefaultHeadroomPolicy`):
 # at/under 24h-to-window-reset the ceiling is 100% (no reason to hold back headroom that
