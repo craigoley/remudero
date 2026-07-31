@@ -379,9 +379,18 @@ test("deriveDisposition: failing review with NO actionable criteria -> blocked-a
 
 test("deriveDisposition: in-flight (pending review, pending checks, not stale) -> blocked-ambiguous (the #161 fix — never armed pre-green)", () => {
   const r = deriveDisposition(pr(), DEFAULT_SWEEP_POLICY, NOW);
+  // THE PROPERTY UNDER TEST IS UNCHANGED: a pre-green PR is never armed. `pr()`'s RECENT is a day
+  // old — 1440m, far past `pendingCeilingMinutes` (60) — so this fixture is a genuinely stale
+  // pending PR and still escalates.
   assert.equal(r.disposition, "blocked-ambiguous");
   assert.match(r.reason, /checks pending/);
-  assert.match(r.reason, /review pending/);
+  // The REASON now comes from the more specific STALE-PENDING row rather than the terminal
+  // catch-all, because `pendingAgeMinutes` can finally date this PR (it used to return undefined
+  // for every real PR — `checksPendingSince` was never populated by any caller, which is the
+  // defect this change fixes). That row names the age and the ceiling instead of the review state,
+  // which is strictly more actionable; the old `/review pending/` match was over-specified against
+  // the catch-all's wording, not against the #161 property.
+  assert.match(r.reason, /stale-pending — checks pending 1440m \(>= 60m ceiling\)/);
 });
 
 // ── the #161 hole: CI-red + review-skipped must NEVER be mergeable ───────────

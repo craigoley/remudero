@@ -8165,7 +8165,42 @@ export function buildEscalationReconcileCandidates(
     const taskId = /^\*\*Task:\*\*\s*(\S+)\s*$/m.exec(issue.body ?? "")?.[1];
     if (!taskId) continue; // no named task — leave untouched (human territory)
     const task = plan.byId.get(taskId);
-    if (!task) continue; // task not in this plan — leave untouched
+    // SYNTHETIC PR REFERENT. An escalation for an untrailered operator-lane PR names it `PR-<n>`
+    // (see the clarification rung's `escalate`, above) — a real, resolvable referent that is
+    // simply not a PLAN TASK, so `plan.byId` misses it by construction and the `!task` guard below
+    // would drop it forever. That is exactly how 53 issues became unretirable.
+    //
+    // Resolving it needs no plan entry: the PR NUMBER is the referent, and the SAME batched
+    // gateway `deriveStatus` is about to use already answers merged/closed for a bare number via
+    // `prByRef`. So this derives the identical `derived` shape from the number and hands the
+    // reconciler a candidate it can actually close — the round trip the synthetic id is only
+    // worth minting if it completes.
+    //
+    // FAIL-SOFT, matching `deriveStatus`'s own polarity: a gateway that CANNOT answer yields
+    // `indeterminate`, never a confident "not merged" — the closer already refuses to act on an
+    // indeterminate referent, so an unreadable PR leaves its issue open rather than closing it on
+    // a read failure.
+    if (!task) {
+      const synthetic = /^PR-(\d+)$/.exec(taskId);
+      if (!synthetic) continue; // not a task and not a PR referent — genuinely human territory
+      const prNumber = Number(synthetic[1]);
+      const ref = deps.github.prByRef(prNumber);
+      const state = ref?.state?.toUpperCase();
+      candidates.push({
+        issueUrl: issue.url,
+        issueNumber: issue.number,
+        taskId,
+        derived: {
+          merged: state === "MERGED",
+          closed: state === "CLOSED",
+          indeterminate: ref === null || ref === undefined ? true : undefined,
+          prUrl: ref?.url,
+          prNumber: ref?.number ?? prNumber,
+          source: "pr-referent",
+        },
+      });
+      continue;
+    }
     const proj = deriveStatus(task, deps);
     // W1-T162: a referent whose PR CLOSED WITHOUT MERGING is also terminal — superseded or
     // abandoned, no longer a live blocker — distinct from an open/blocked-pending-fix PR.
@@ -8305,6 +8340,27 @@ export function buildFixRungDispatchArgs(args: {
  * fail-soft — a reconstruction hiccup escalates rather than crashing the sweep,
  * so one bad PR never strands the reconciler over the rest.
  */
+/**
+ * The escalation's TASK IDENTITY for one open PR — pure, so the mint itself is testable without
+ * reaching the `escalate` closure's real issue gateway.
+ *
+ * A PR carrying a `Remudero-Task:` trailer escalates under its own task id. A PR without one is the
+ * OPERATOR-LANE agent PR — the class with neither a task nor a run id — and it used to be stamped
+ * the literal string `"UNKNOWN"`. That is not a plan task id, so
+ * `buildEscalationReconcileCandidates`'s `plan.byId.get(taskId)` missed it and the resulting issue
+ * could NEVER be retired: 53 of 57 open needs-human issues carried `**Task:** UNKNOWN` while the
+ * reconciler's population read 0 on every pass.
+ *
+ * `PR-<n>` is NOT a new convention — it is the SAME synthetic id the review lane already mints at
+ * four call sites in this file, so an operator grepping either surface sees ONE identity for the
+ * PR. And it round-trips: {@link buildEscalationReconcileCandidates} resolves a `PR-<n>` referent
+ * directly from the number, because an id that is enumerable but UNDERIVABLE would convert a
+ * visible orphan into an invisible one, which is strictly worse than leaving it alone.
+ */
+export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
+  return pr.taskId ?? `PR-${pr.prNumber}`;
+}
+
 export function buildSweepEffects(
   owner: string,
   repo: string,
@@ -8326,9 +8382,14 @@ export function buildSweepEffects(
   // untouched. Same rationale as `reviewRunner`/`spawnImpl` above: the ABSENT remedy's wiring
   // is unit-covered with a recorder instead of a real push to a real branch.
   pushEmptyCommit: typeof gitPushEmptyCommit = gitPushEmptyCommit,
+  // Injectable issue gateway — appended LAST so no positional caller shifts, the same convention
+  // `reviewRunner`/`spawnImpl`/`pushEmptyCommit` above already follow. Without it the `escalate`
+  // closure's own body is unreachable from any offline test (it would open a REAL needs-human
+  // issue), which is exactly how the `taskId:` mint inside it went uncovered.
+  issuesImpl?: IssueGateway,
 ): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview" | "repushAbsent"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
-  const issues = ghIssueGateway(owner, repo);
+  const issues = issuesImpl ?? ghIssueGateway(owner, repo);
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
 
   return {
@@ -8427,7 +8488,9 @@ export function buildSweepEffects(
       escalate(
         {
           class: "BLOCKED",
-          taskId: pr.taskId ?? "UNKNOWN",
+          // See {@link escalationTaskIdFor} — pure and separately tested, so the mint that makes
+          // this issue retirable cannot silently regress behind this closure's real gateway.
+          taskId: escalationTaskIdFor(pr),
           runId,
           // W1-T195: the SAME composite-key dimensions the fix rung's exhaustion
           // escalate sets (runFixRung, above) — `pr.headSha` is the SAME field the

@@ -948,15 +948,41 @@ interface DispositionRule {
 }
 
 /**
- * W1-T114: how many minutes the newest required check has been pending on
- * this head, or undefined when there is nothing to date — no
- * `checksPendingSince` at all (the real gateway not yet wired, or checks
- * aren't pending), or an unparseable timestamp. PURE, fail-toward-undefined:
- * never guesses an age it cannot support from observed state.
+ * W1-T114: how many minutes checks have been pending on this head, or undefined when there is
+ * genuinely nothing to date. PURE, fail-toward-undefined: never guesses an age it cannot support
+ * from observed state.
+ *
+ * ─── WHY THIS HAS A FALLBACK, AND WHY THAT IS THE WHOLE FIX ──────────────────────────────────
+ * W1-T114 shipped the WAIT/stale-pending rows reading `checksPendingSince`, and left an explicit
+ * hatch for "callers that haven't wired the timestamp yet" (see the row comments below). **NOBODY
+ * EVER WIRED IT.** Measured at `d63bee7`: `checksPendingSince` has six references in `src/`, all in
+ * THIS file, and not one of them is a write — `buildOpenPrViews`, the real gateway, never sets it.
+ *
+ * So `pendingAgeMinutes` returned `undefined` on every real PR, both W1-T114 rows required
+ * `mins !== undefined`, and EVERY pending PR fell through to the terminal catch-all and escalated.
+ * That produced 57 open `needs-human` issues in one day, all titled
+ * `… not positively mergeable — checks pending, review none — escalating`, including one for PR
+ * #1038 whose checks went green and merged minutes later. The bound existed, was tested against
+ * fixtures that supply the field, and was dead in production.
+ *
+ * THE FALLBACK IS THE SIBLING REMEDY'S OWN SOURCE, not a new invention. PR #977's ABSENT-checks
+ * remedy solves the identical "how long has this been stuck" question for `checksState: "none"`
+ * and dates it off `pr.lastActivityAt` (`decideAbsentRepush`, this file) — a field the real gateway
+ * DOES populate (`run-task.ts`'s `lastActivityAt: pr.updatedAt`). Using the same source here makes
+ * W1-T114's bound live with no gateway change, and keeps `checksPendingSince` as the strictly more
+ * precise reading for any caller that later wires it.
+ *
+ * IT IS A CEILING ON *WAITING*, NOT A LICENCE TO IGNORE. Past `pendingCeilingMinutes` the
+ * stale-pending row still escalates — W1-T78's purpose is preserved exactly; only the first hour of
+ * a normal CI run stops being treated as ambiguity.
+ *
+ * PRECEDENCE IS DELIBERATE: the precise field wins when present, so wiring it later is a pure
+ * upgrade and can never be masked by the coarser fallback.
  */
 function pendingAgeMinutes(pr: OpenPrView, now: number): number | undefined {
-  if (!pr.checksPendingSince) return undefined;
-  const parsed = Date.parse(pr.checksPendingSince);
+  const raw = pr.checksPendingSince ?? pr.lastActivityAt;
+  if (!raw) return undefined;
+  const parsed = Date.parse(raw);
   if (Number.isNaN(parsed)) return undefined;
   return (now - parsed) / 60_000;
 }
