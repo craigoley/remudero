@@ -341,3 +341,61 @@ test("BEHAVIORAL: a real runTask() run whose ALREADY_SATISFIED claim does NOT ve
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("BEHAVIORAL: a real runTask() run whose worktree teardown fails on the already_satisfied path still credits the verdict, only ledgering the teardown error", async () => {
+  // The already_satisfied exit's own `worktreeRemove` catch (mirrors the sibling `no_pr` catch
+  // right below it) must never turn a VERIFIED claim into a failed run just because cleanup
+  // couldn't run — best-effort teardown, not a gate. Forcing a REAL `git worktree remove`
+  // failure (a lock, exactly as git itself refuses without `-f -f`) proves the catch is live.
+  const root = mkdtempSync(join(tmpdir(), "already-satisfied-teardown-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, ALREADY_SATISFIED_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+  const { repoDir } = gitFixture(root);
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) return result({ sessionId: "s-recon", text: RECON_TEXT });
+    // Lock the worktree — `git worktree remove --force` (single force) fatals on a
+    // locked tree instead of removing it, exactly like it would refuse on any other
+    // real-world teardown obstruction (a stray lockfile, a dirty submodule, etc.).
+    execFileSync("git", ["-C", repoDir, "worktree", "lock", args.cwd, "--reason", "held-for-test"]);
+    return result({ sessionId: "s-implement", text: "REPORT\nALREADY_SATISFIED: #42\n" });
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-ALREADY-SATISFIED", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: creditingGithub("T-ALREADY-SATISFIED", CREDIT_PR),
+        spawn,
+        containmentExec: holdingContainmentExec,
+        isolationExec: cleanIsolationExec,
+      }),
+    );
+
+    assert.equal(res.verdict, "already_satisfied", "a teardown failure does not demote the verdict");
+    assert.equal(res.merged, true);
+    assert.equal(res.prUrl, "https://github.com/acme/remudero/pull/42");
+
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const removeError = ledger.find((l) => l.step === "worktree.remove.error");
+    assert.equal(removeError?.on, "already_satisfied");
+    // `worktreeRemove` runs git with `stdio: "inherit"`, so git's own "cannot remove a
+    // locked working tree" text lands on the real stderr, not on the thrown Error's
+    // `.message` — the message is only ever execFileSync's generic "Command failed: …".
+    assert.match(String(removeError?.error), /Command failed.*worktree remove/);
+    const verdictLine = ledger.find((l) => l.step === "verdict");
+    assert.equal(verdictLine?.verdict, "already_satisfied");
+  } finally {
+    // The locked worktree's admin metadata under repoDir/.git prevents nothing here —
+    // filesystem removal is unconditional regardless of git's own lock bookkeeping.
+    rmSync(root, { recursive: true, force: true });
+  }
+});
