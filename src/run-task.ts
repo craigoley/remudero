@@ -334,6 +334,7 @@ import {
 } from "./lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
+  armOutcomeArmed,
   checksStateFromRollup,
   deriveDisposition,
   isBlockedCi,
@@ -1024,8 +1025,57 @@ export function armIfVerdictPermits(
   // W1-T230's own gate still applies inside: it re-reads the live head and refuses a stale
   // verdict. Its OUTCOME is read (impl-BC) rather than discarded, so a refusal is visible.
   const outcome = (deps.arm ?? armAutoMerge)(ctx.prUrl, ctx.taskId);
-  ctx.log("automerge.armed", { outcome, reason: decision.reason, head_sha: ctx.headSha, task_id: ctx.taskId });
+  // impl-BI: the STEP NAME must match the outcome. This used to log `automerge.armed`
+  // unconditionally with the outcome merely carried in a field — so a `ledger-refused` here
+  // still read as an arm to anyone counting steps.
+  ctx.log(armOutcomeArmed(outcome) ? "automerge.armed" : "automerge.arm_skipped", {
+    outcome,
+    reason: decision.reason,
+    head_sha: ctx.headSha,
+    task_id: ctx.taskId,
+  });
   return outcome;
+}
+
+/**
+ * impl-BI — ARM, THEN LEDGER WHAT ACTUALLY HAPPENED. The single wrapper the post-review
+ * Architect lanes (dep-review, retro, triage, plan, approve) call instead of the
+ * `armAutoMerge(...); log("automerge.armed", {})` pair every one of them used to carry.
+ *
+ * THE DEFECT IT CLOSES. {@link armAutoMerge} does not throw — it RETURNS which of its seven
+ * branches it took, and five of them (`no-task-id`, `head-unavailable`, `ledger-refused`,
+ * `direct-merge-failed`, `arm-error-ignored`) armed NOTHING. All five lanes discarded that
+ * value and logged `automerge.armed` regardless, so the ledger recorded an arm for PRs that
+ * were explicitly refused, and `automerge.armed` stopped being evidence of anything. The
+ * refusal itself went only to `say` → stdout → daemon.out.log, where nobody counts.
+ *
+ * NOT A SECOND IMPLEMENTATION of "which outcomes count as armed" — that rule lives in exactly
+ * one place, {@link armOutcomeArmed} (lib/sweep.ts, PR #968), and is imported here. Two copies
+ * of this rule is precisely how the sweep and the run flow drifted apart in the first place.
+ *
+ * The step names match the ones {@link armIfVerdictPermits} already established, so a reader
+ * grepping the ledger for `automerge.arm_skipped` finds every non-arm from every lane.
+ */
+export function armAndLogOutcome(
+  prUrl: string,
+  taskId: string | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  arm: (prUrl: string, taskId: string | undefined) => ArmOutcome = armAutoMerge,
+): ArmOutcome {
+  const outcome = arm(prUrl, taskId);
+  log(armOutcomeArmed(outcome) ? "automerge.armed" : "automerge.arm_skipped", { outcome, task_id: taskId });
+  return outcome;
+}
+
+/**
+ * impl-BI — the human-readable half of the same honesty fix. Every one of the five lanes
+ * printed a fixed `"… gated + armed …"` to the console whatever happened; `retroCommand`
+ * printed "retro PR gated + armed (review success)" 1.2 seconds after the console had already
+ * carried `automerge.ledger_refused`. Pure and exported so the assertion is on the STRING,
+ * not on a mock's call count.
+ */
+export function armReportPhrase(outcome: ArmOutcome): string {
+  return armOutcomeArmed(outcome) ? `armed (${outcome})` : `NOT armed (${outcome})`;
 }
 
 /**
@@ -4648,10 +4698,29 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
  *     failure (so it can NEVER auto-merge) and opens a MANUAL needs-human issue
  *     carrying the release notes via the SHIPPED escalate() path (exit 1).
  */
-async function depReviewCommand(prArg: string, rest: string[] = []): Promise<number> {
+/**
+ * impl-BI — the injectable effects of {@link depReviewCommand}. The `arm` branch's tail was the
+ * one lane this PR touched that NO test could reach: `ghJson`/`gh pr diff`/`postReviewStatusGuarded`
+ * were all hardcoded, so `diff-coverage` correctly flagged the changed arm lines as adding
+ * uncovered source. This is the same shape PR #964 gave `triageCommand`/`planCommand` — optional
+ * with `??` defaults, so every existing caller and the CLI entry point are byte-identical in
+ * behaviour, and the ONLY new capability is that a test can drive the branch offline.
+ *
+ * `config` is injectable for the reason W1-T2/PR #18 recorded: `loadConfig()` shells out to
+ * `which claude`, which does not exist on a CI runner.
+ */
+export interface DepReviewDeps {
+  gh?: (args: string[]) => unknown;
+  prDiff?: (prUrl: string) => string;
+  config?: Config;
+  postStatus?: typeof postReviewStatusGuarded;
+  arm?: (prUrl: string, taskId: string | undefined) => ArmOutcome;
+}
+
+async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepReviewDeps = {}): Promise<number> {
   const { owner, repo } = resolveReviewTarget(resolveOwnerRepo(), rest);
   const slug = `${owner}/${repo}`;
-  const view = ghJson([
+  const view = (deps.gh ?? ghJson)([
     "pr",
     "view",
     prArg,
@@ -4668,9 +4737,9 @@ async function depReviewCommand(prArg: string, rest: string[] = []): Promise<num
     author?: { login?: string };
     statusCheckRollup?: RollupEntry[];
   };
-  const diff = execFileSync("gh", ["pr", "diff", view.url], { encoding: "utf8", maxBuffer: 1 << 26 });
+  const diff = (deps.prDiff ?? ((u: string) => execFileSync("gh", ["pr", "diff", u], { encoding: "utf8", maxBuffer: 1 << 26 })))(view.url);
 
-  const config = loadConfig();
+  const config = deps.config ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   const runId = `dep-review-PR${view.number}-${Date.now()}`;
   const taskId = `dep-review-PR${view.number}`;
@@ -4700,7 +4769,7 @@ async function depReviewCommand(prArg: string, rest: string[] = []): Promise<num
     // this attempt's evidence is always "no_evidence"; the guard still
     // refuses it if a STRONGER (executed) verdict is already posted for this
     // exact sha, or if the PR is already merged/closed.
-    const posted = await postReviewStatusGuarded({
+    const posted = await (deps.postStatus ?? postReviewStatusGuarded)({
       owner,
       repo,
       sha: view.headRefOid,
@@ -4728,9 +4797,8 @@ async function depReviewCommand(prArg: string, rest: string[] = []): Promise<num
       dep_review: true,
       proof_exec: [], // W1-T228: never executes a proof — explicit so lastPostedReviewStatusFromLedger reads "no_evidence"
     });
-    armAutoMerge(view.url, taskId);
-    log("automerge.armed", {});
-    console.log(`remudero-review=success posted + auto-merge armed: ${view.url}`);
+    const armOutcome = armAndLogOutcome(view.url, taskId, log, deps.arm);
+    console.log(`remudero-review=success posted + auto-merge ${armReportPhrase(armOutcome)}: ${view.url}`);
     return 0;
   }
   // escalate: post failure (NEVER auto-merge for a major) + open the MANUAL issue.
@@ -5454,7 +5522,13 @@ async function retroCommand(
       worktreeRemove(repoDir, worktreePath);
       return 1;
     }
-    ensureTaskTrailer(prUrl, "RETRO");
+    // impl-BI: `runId`, not the bare literal `"RETRO"`, so the FALLBACK stamp and the retro
+    // prompt's own `Remudero-Task: ${runId}` last-body-line agree. With the literal, a worker
+    // that followed the prompt got a no-op here (`"Remudero-Task: RETRO-<epoch>"` contains the
+    // substring `"Remudero-Task: RETRO"`), but a worker that omitted the trailer got a bare
+    // `RETRO` stamp — which `reviewCommand` would then key its verdict to, missing the arm
+    // from the other direction. One id, both paths.
+    ensureTaskTrailer(prUrl, runId);
 
     // W1-T136 (#394 class): verify-and-repair the PR body's Acceptance block BEFORE the
     // gate runs. retroPrompt instructs the Architect worker to write one, but that's
@@ -5513,14 +5587,17 @@ async function retroCommand(
     }
     const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
     const reviewCode = await reviewCommand(prNum);
-    // W1-T230: reviewCommand resolved this PR's task id off its own
-    // `Remudero-Task: RETRO` trailer (ensureTaskTrailer above), so its
-    // review.posted ledger line is keyed "RETRO" too — the SAME literal
-    // armAutoMerge must pass to find it.
-    armAutoMerge(prUrl, "RETRO");
-    log("automerge.armed", {});
+    // W1-T230 — THE KEY. impl-BI: this passed the hardcoded literal `"RETRO"` under a comment
+    // asserting the review's ledger line was keyed "RETRO" too. That comment was FALSE. The
+    // trailer this lane actually stamps is `Remudero-Task: <runId>` (the retro prompt's last
+    // body line, `RETRO-${Date.now()}`), so `reviewCommand` keys its `review.posted` line to
+    // the full run id. Measured over the live ledger unioned with all 660 rotations:
+    // `review.posted` rows keyed exactly "RETRO" = 0, rows keyed RETRO* = 7795. The literal
+    // has NEVER matched a verdict — every retro PR in this repo's history was refused here at
+    // the W1-T230 gate, and then logged `automerge.armed` anyway. `runId` is the id in scope.
+    const armOutcome = armAndLogOutcome(prUrl, runId, log);
     worktreeRemove(repoDir, worktreePath);
-    say(`retro PR gated + armed (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
+    say(`retro PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
     return reviewCode;
   } catch (e) {
     log("retro.error", { error: String((e as Error)?.message ?? e) });
@@ -7468,9 +7545,14 @@ export function buildSweepEffects(
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
 
   return {
-    arm: (pr) => {
-      armAutoMerge(pr.prUrl, pr.taskId);
-    },
+    // impl-BI — RETURN THE OUTCOME. PR #968 taught `runSweep` to read this effect's return
+    // value (`armOutcomeArmed(armOutcome)` → `acted:false` + a stand-down reason), but THIS
+    // adapter — the only implementation the daemon ever runs — still discarded it, so the
+    // effect resolved to `undefined`. `armOutcomeArmed(undefined)` returns true by design
+    // (it preserves the pre-#968 assumption for fakes that return nothing), which meant the
+    // real sweep kept recording `acted:true` for refused arms and #968 was inert in
+    // production. A brace and a `return` are the whole difference.
+    arm: (pr) => armAutoMerge(pr.prUrl, pr.taskId),
 
     // THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Routed through git-push.ts's leaf, so
     // the live-write guard applies and no new outward path exists. `commit-tree` plumbing means
@@ -8796,10 +8878,9 @@ export async function triageCommand(
     // `Remudero-Task: <taskId>` trailer (ensureTaskTrailer above), so its
     // review.posted ledger line is keyed to the SAME `taskId` armAutoMerge
     // must pass to find it.
-    armAutoMerge(prUrl, taskId);
-    log("automerge.armed", {});
+    const armOutcome = armAndLogOutcome(prUrl, taskId, log);
     worktreeRemove(repoDir, worktreePath);
-    say(`triage PR gated + armed (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
+    say(`triage PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
     return reviewCode;
   } catch (e) {
     log("triage.error", { error: String((e as Error)?.message ?? e) });
@@ -9004,10 +9085,9 @@ export async function planCommand(
     // `Remudero-Task: <taskId>` trailer (ensureTaskTrailer above), so its
     // review.posted ledger line is keyed to the SAME `taskId` armAutoMerge
     // must pass to find it.
-    armAutoMerge(prUrl, taskId);
-    log("automerge.armed", {});
+    const armOutcome = armAndLogOutcome(prUrl, taskId, log);
     worktreeRemove(repoDir, worktreePath);
-    say(`plan PR gated + armed (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
+    say(`plan PR gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${prUrl}`);
     return reviewCode;
   } catch (e) {
     log("plan.error", { error: String((e as Error)?.message ?? e) });
@@ -9542,10 +9622,9 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
     // (see the no-trailer comment above) — reviewCommand's own taskId resolve
     // therefore falls back to `PR-${view.number}` and its review.posted ledger
     // line is keyed to that same fallback, not `proposalId`.
-    armAutoMerge(result.prUrl, `PR-${prNum}`);
-    log("automerge.armed", {});
+    const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log);
     worktreeRemove(ownedRepoDir, ownedWorktreePath);
-    console.log(`rmd approve: ${proposalId} gated + armed (review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`);
+    console.log(`rmd approve: ${proposalId} gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`);
     return reviewCode;
   } catch (e) {
     log("approve.error", { error: String((e as Error)?.message ?? e) });
