@@ -142,3 +142,84 @@ test("restartConsole reports the pid it replaced even when launchctl cannot name
   assert.equal(ok!.data?.old_pid, null, "an unknown pid is ledgered as null, never omitted");
   assert.equal(ok!.data?.new_pid, 999);
 });
+
+// ── The REAL effects in realDeployDeps, driven through the injected execFile ──────────
+// (the same idiom test/deployer.test.ts already uses for the daemon kickstart: no launchctl,
+//  no lsof, no service is touched — the subprocess runner is a recorder.)
+
+import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { realDeployDeps, deployFailedAlertPath, deployLastFailedPath } from "../src/lib/deployer.js";
+
+function realDeps(exec: (cmd: string, args: string[]) => string, root: string) {
+  return realDeployDeps({
+    installPath: "/inst",
+    stateRoot: root,
+    daemonLabel: "com.remudero.daemon",
+    serveLabel: "com.remudero.serve",
+    servePort: 4317,
+    uid: 502,
+    ledgerPath: join(root, "ledger.ndjson"),
+    log: () => {},
+    execFile: exec,
+    sleep: () => {},
+  });
+}
+
+test("realDeployDeps kickstarts the CONSOLE with the serve label in the same gui domain as the daemon", () => {
+  const seen: string[] = [];
+  const root = mkdtempSync(join(tmpdir(), "rmd-bz-"));
+  const deps = realDeps((cmd, args) => { seen.push(`${cmd} ${args.join(" ")}`); return ""; }, root);
+
+  deps.kickstartConsole();
+  deps.kickstart();
+
+  assert.deepEqual(seen, [
+    "launchctl kickstart -k gui/502/com.remudero.serve",
+    "launchctl kickstart -k gui/502/com.remudero.daemon",
+  ], "ONE mechanism, two labels — the console must not get a second, forked restart path");
+});
+
+test("realDeployDeps reads the console pid from launchctl, and reports undefined when it cannot", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-bz-"));
+  const withPid = realDeps(() => '\t"Label" = "com.remudero.serve";\n\t"PID" = 15186;\n', root);
+  assert.equal(withPid.consolePid(), 15186);
+
+  const notLoaded = realDeps(() => { throw new Error("Could not find service"); }, root);
+  assert.equal(notLoaded.consolePid(), undefined, "an unloaded job must not throw the deploy cycle over");
+
+  const noPidKey = realDeps(() => '\t"Label" = "com.remudero.serve";\n', root);
+  assert.equal(noPidKey.consolePid(), undefined, "a loaded-but-not-running job has no PID key");
+});
+
+test("realDeployDeps probes the configured PORT for a listener, needing no service token", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-bz-"));
+  const probes: string[] = [];
+  const up = realDeps((cmd, args) => { probes.push(`${cmd} ${args.join(" ")}`); return "rmd 123 TCP *:4317 (LISTEN)"; }, root);
+  assert.equal(up.waitConsoleUp(), true);
+  assert.equal(probes.length, 1, "a listening console is confirmed on the first probe");
+  assert.match(probes[0], /^lsof .*-iTCP:4317 -sTCP:LISTEN$/, "the port comes from servePort, and no auth is involved");
+
+  let calls = 0;
+  const down = realDeps(() => { calls++; throw new Error("exit 1"); }, root);
+  assert.equal(down.waitConsoleUp(), false, "a console that never listens is reported false, never hung");
+  assert.ok(calls > 1, `the probe must RETRY before giving up (ThrottleInterval is 60s), saw ${calls}`);
+});
+
+test("alertConsoleOnly writes the operator alert but NEVER the failed-HEAD marker", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-bz-"));
+  const deps = realDeps(() => "", root);
+
+  deps.alertConsoleOnly("console did not come back");
+
+  const alert = JSON.parse(readFileSync(deployFailedAlertPath(root), "utf8"));
+  assert.equal(alert.message, "console did not come back");
+  assert.equal(alert.scope, "console", "the alert names WHICH surface failed");
+  assert.equal(
+    existsSync(deployLastFailedPath(root)),
+    false,
+    "writing DEPLOY_LAST_FAILED here would make decideDeployTrigger refuse to auto-retry this sha — " +
+      "freezing every future deploy because a display surface hiccuped",
+  );
+});
