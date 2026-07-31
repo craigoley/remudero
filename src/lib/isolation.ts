@@ -89,10 +89,21 @@ export class IsolationError extends Error {
   readonly guard = "isolation" as const;
   readonly check = "inherited-functions" as const;
   readonly observed: string;
-  constructor(message: string, observed: string) {
+  /**
+   * W1-T268: the probe spawn's `WorkerResult.childEnvKeys` — so the caller's
+   * `blocked_isolation` verdict line can DERIVE `billing_mode`
+   * (`billingMode(childEnvKeys)`, env.ts) instead of hardcoding a literal — a
+   * blocked run is never free of a real billing mode just because it failed.
+   */
+  readonly childEnvKeys: string[];
+  /** W1-T268: the probe spawn's resolved account label, when one exists. */
+  readonly accountLabel?: string;
+  constructor(message: string, observed: string, childEnvKeys: string[] = [], accountLabel?: string) {
     super(message);
     this.name = "IsolationError";
     this.observed = observed;
+    this.childEnvKeys = childEnvKeys;
+    this.accountLabel = accountLabel;
   }
 }
 
@@ -168,6 +179,18 @@ export interface ProbeExecResult {
    * clean spawn (no excerpt).
    */
   isError?: boolean;
+  /**
+   * W1-T268: the probe spawn's own `WorkerResult.childEnvKeys` — carried through so
+   * the caller can DERIVE this probe's `billing_mode` instead of assuming
+   * subscription. Optional so a pre-existing test double that omits it falls back
+   * to an empty key set, which `billingMode` reads as `"subscription"`.
+   */
+  childEnvKeys?: string[];
+  /**
+   * W1-T268: the probe spawn's own `WorkerResult.accountLabel` — the account this
+   * probe's (notional) spend is attributed to. `undefined` when unresolved.
+   */
+  accountLabel?: string;
 }
 
 /** Injectable probe runner (default spawns a real worker); tests provide a fake. */
@@ -304,6 +327,8 @@ export function defaultExecutor(
         functionNames: parsed?.functionNames,
         costUsd: probe.costUsd,
         isError: probe.isError,
+        childEnvKeys: probe.childEnvKeys,
+        accountLabel: probe.accountLabel,
       };
     } finally {
       // Reap the probe worker's SDK scratchpad (keyed by its cwd) before removal.
@@ -377,6 +402,8 @@ export async function probeIsolation(opts: {
     throw new IsolationError(
       `isolation_preflight_failed: ${verdict.reason} — FAIL CLOSED, the run does not proceed`,
       observed,
+      r.childEnvKeys ?? [],
+      r.accountLabel,
     );
   }
   return { isolated: true, reason: verdict.reason, evidence, costUsd };

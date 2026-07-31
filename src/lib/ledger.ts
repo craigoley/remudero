@@ -116,6 +116,110 @@ export function appendLedger(path: string, line: LedgerLine, opts: { ceilingByte
   }
 }
 
+// ── THE ACCOUNT DIMENSION (W1-T268, MASTER-PLAN §9) ─────────────────────────
+//
+// No line in this ledger's unioned history (662 files, 4,160,926 lines at the time this
+// task was filed) carries any `account`-prefixed key — the entire billing vocabulary was
+// cost_usd/total_cost_usd, tokens, the two cache-token columns, and `billing_mode` (a
+// funding-source flag, not an identity). Because appendLedger only ever appends, a line
+// written before an `account_label` field existed can NEVER be retrofitted with one — so
+// any accounting built on top of the label below has a HARD START DATE and must REFUSE a
+// line older than it rather than guess which of possibly several accounts it belongs to.
+
+/**
+ * THE ACCOUNT ATTRIBUTION EPOCH. The sole `daemon.worker_keychain` line in the entire
+ * unioned ledger history reading `provisioned:true` — the boot that re-provisioned the
+ * worker keychain store after the operator's manual account switch (W1-T265). Every line
+ * before this instant belongs to whichever account was active before that switch, by
+ * construction, but NO such line SAYS so. Exported as a NAMED constant (never a bare
+ * comment) so a downstream reader binds to the value itself, never a copy of it — see
+ * {@link groupSpendByAccount}, the one query helper in this codebase that groups spend by
+ * account, for how it is enforced.
+ */
+export const ACCOUNT_ATTRIBUTION_EPOCH = "2026-07-31T16:39:00.582Z";
+
+/** One account's summed, attributed spend — an entry of {@link AccountSpendSummary.byAccount}. */
+export interface AccountSpendGroup {
+  accountLabel: string;
+  totalCostUsd: number;
+  lineCount: number;
+}
+
+/**
+ * Spend {@link groupSpendByAccount} REFUSED to attribute to any account, split by why —
+ * visible and countable, never silently dropped or silently credited to whichever label
+ * happens to be current.
+ */
+export interface RefusedSpend {
+  /** Lines older than {@link ACCOUNT_ATTRIBUTION_EPOCH} (or with no parseable `ts`, which
+   *  is treated identically — an unattributable line is never guessed to be recent). */
+  preEpochCount: number;
+  preEpochCostUsd: number;
+  /** Lines AT/AFTER the epoch that still carry no `account_label` — a caller that bypassed
+   *  the ledgering helpers ({@link import("./worker.js").workerLedgerFields} and friends). */
+  unlabelledCount: number;
+  unlabelledCostUsd: number;
+}
+
+/** Result of {@link groupSpendByAccount}. */
+export interface AccountSpendSummary {
+  byAccount: AccountSpendGroup[];
+  refused: RefusedSpend;
+}
+
+/**
+ * Group every spend-carrying ledger line by its `account_label`, REFUSING — never
+ * guessing — any line older than {@link ACCOUNT_ATTRIBUTION_EPOCH} or one that carries a
+ * spend figure with no label at all (this task's design note 3, plan/tasks.d/W1-T268: "any
+ * query helper that groups spend by account REFUSES lines older than the epoch instead of
+ * attributing them to whichever label happens to be current").
+ *
+ * A "spend-carrying" line is one with a numeric `total_cost_usd` (worker/brain-plane
+ * calls — {@link import("./worker.js").workerLedgerFields}) or `cost_usd` (run-task.ts's
+ * own verdict lines) — the two conventions this ledger actually uses. Neither present ⇒
+ * the line is skipped entirely: it never carried a spend figure, so it is not a candidate
+ * for attribution OR refusal (refusal is reserved for spend this function chose not to
+ * credit, never for a line with nothing to credit).
+ */
+export function groupSpendByAccount(lines: readonly LedgerLine[]): AccountSpendSummary {
+  const epochMs = Date.parse(ACCOUNT_ATTRIBUTION_EPOCH);
+  const totals = new Map<string, { totalCostUsd: number; lineCount: number }>();
+  const refused: RefusedSpend = { preEpochCount: 0, preEpochCostUsd: 0, unlabelledCount: 0, unlabelledCostUsd: 0 };
+
+  for (const line of lines) {
+    const cost =
+      typeof line.total_cost_usd === "number"
+        ? line.total_cost_usd
+        : typeof line.cost_usd === "number"
+        ? line.cost_usd
+        : undefined;
+    if (cost === undefined) continue; // not a spend-carrying line — no claim to refuse or credit
+
+    const ts = typeof line.ts === "string" ? line.ts : undefined;
+    const tsMs = ts ? Date.parse(ts) : NaN;
+    if (!Number.isFinite(tsMs) || tsMs < epochMs) {
+      refused.preEpochCount++;
+      refused.preEpochCostUsd += cost;
+      continue;
+    }
+
+    const label = typeof line.account_label === "string" && line.account_label.length > 0 ? line.account_label : undefined;
+    if (!label) {
+      refused.unlabelledCount++;
+      refused.unlabelledCostUsd += cost;
+      continue;
+    }
+
+    const entry = totals.get(label) ?? { totalCostUsd: 0, lineCount: 0 };
+    entry.totalCostUsd += cost;
+    entry.lineCount++;
+    totals.set(label, entry);
+  }
+
+  const byAccount = [...totals.entries()].map(([accountLabel, v]) => ({ accountLabel, ...v }));
+  return { byAccount, refused };
+}
+
 /**
  * SIZE CEILING (W1-T209, RECON R-9): `state/ledger.ndjson` was measured at intake at
  * 9,455,694 bytes / ~27.6k lines and growing, with NO rotation mechanism anywhere in src,

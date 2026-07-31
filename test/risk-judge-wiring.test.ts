@@ -70,7 +70,9 @@ test("on ESCALATE, the wiring withdraws the early arm-at-open BEFORE calling esc
 test("on ESCALATE, run-task.ts returns a terminal blocked verdict WITHOUT ever reaching pollToGate", () => {
   const escalateBranchIdx = runTaskSrc.indexOf('if (riskJudgeResult.action.kind === "escalate")');
   assert.ok(escalateBranchIdx >= 0);
-  const branchSlice = runTaskSrc.slice(escalateBranchIdx, escalateBranchIdx + 500);
+  // W1-T268: the ledger line grew two fields (billing_mode, account_label) — widened
+  // from 500 so the window still reaches the branch's `return` statement below.
+  const branchSlice = runTaskSrc.slice(escalateBranchIdx, escalateBranchIdx + 650);
   assert.match(branchSlice, /verdict:\s*"blocked"/);
   assert.match(branchSlice, /return \{ taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" \};/);
   assert.doesNotMatch(branchSlice, /pollToGate\(/, "the escalate branch must return before ever polling the merge gate");

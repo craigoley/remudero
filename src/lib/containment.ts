@@ -43,11 +43,23 @@ export class ContainmentError extends Error {
   readonly guard = "containment" as const;
   readonly check: string;
   readonly observed: string;
-  constructor(message: string, check: string, observed: string) {
+  /**
+   * W1-T268: the probe spawn's `WorkerResult.childEnvKeys` — `[]` when GATE 1
+   * (the static config check) refused before any spawn ever ran. Carried so the
+   * caller's `blocked_containment` verdict line can DERIVE `billing_mode`
+   * (`billingMode(childEnvKeys)`, env.ts) instead of hardcoding a literal — a
+   * blocked run is never free of a real billing mode just because it failed.
+   */
+  readonly childEnvKeys: string[];
+  /** W1-T268: the probe spawn's resolved account label, when one exists. */
+  readonly accountLabel?: string;
+  constructor(message: string, check: string, observed: string, childEnvKeys: string[] = [], accountLabel?: string) {
     super(message);
     this.name = "ContainmentError";
     this.check = check;
     this.observed = observed;
+    this.childEnvKeys = childEnvKeys;
+    this.accountLabel = accountLabel;
   }
 }
 
@@ -129,6 +141,22 @@ export interface ProbeExecResult {
    * spawn (no excerpt).
    */
   isError?: boolean;
+  /**
+   * W1-T268: the probe spawn's own `WorkerResult.childEnvKeys` — carried through so
+   * the caller can DERIVE this probe's `billing_mode` (never a hardcoded literal;
+   * see `billingMode` in env.ts) instead of assuming subscription. Optional so a
+   * pre-existing test double that omits it falls back to an empty key set, which
+   * `billingMode` reads as `"subscription"` (the correct default absent the
+   * overflow valve's key).
+   */
+  childEnvKeys?: string[];
+  /**
+   * W1-T268: the probe spawn's own `WorkerResult.accountLabel` — the account this
+   * probe's (notional) spend is attributed to, carried through so the run's
+   * `blocked_containment` verdict line can name it like every other spend-bearing
+   * ledger line. `undefined` when the probe spawn could not resolve one.
+   */
+  accountLabel?: string;
 }
 
 /** Injectable probe runner (default spawns a real worker); tests provide a fake. */
@@ -207,6 +235,9 @@ export function defaultExecutor(
         costUsd: probe.costUsd,
         // W1-T237: the signal was already on WorkerResult; the preflight just never read it.
         isError: probe.isError,
+        // W1-T268: same shape — already on WorkerResult, just never carried through.
+        childEnvKeys: probe.childEnvKeys,
+        accountLabel: probe.accountLabel,
       };
     } finally {
       // Reap the probe worker's SDK scratchpad (keyed by its cwd) before the cwd
@@ -312,6 +343,8 @@ export async function probeContainment(opts: {
         `containment preflight: spawn_credential_failure — ${verdict.reason} — FAIL CLOSED, the run does not proceed`,
         "spawn-credential-failure",
         "spawn_credential_failure",
+        r.childEnvKeys ?? [],
+        r.accountLabel,
       );
     }
     const observed = evidence.outsideWriteCreated
@@ -321,6 +354,8 @@ export async function probeContainment(opts: {
       `containment UNPROVEN: ${verdict.reason} — FAIL CLOSED, the run does not proceed`,
       "outside-cwd-denial",
       observed,
+      r.childEnvKeys ?? [],
+      r.accountLabel,
     );
   }
   return { contained: true, reason: verdict.reason, evidence, costUsd };
