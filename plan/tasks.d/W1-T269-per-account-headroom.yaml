@@ -1,0 +1,60 @@
+- id: W1-T269
+  title: "headroom becomes PER ACCOUNT — UsageSnapshot has no account field, the /usage capture is a single global probe, and W1-T249's reserve is resolved once for the host, so with two subscriptions the governor would gate every run on whichever account the probe happened to reach"
+  repo: remudero
+  depends_on: [W1-T266, W1-T267]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OBSERVED at 07e5861: UsageSnapshot (src/lib/headroom.ts:45) is exactly { billingMode, session,
+    weekly } — no account field, by design, because the module does window math for ONE budget. HEADROOM_LIMIT_PCT
+    (src/lib/headroom.ts:119) is a single host-wide constant and the W1-T249 reserve rides the same single value
+    via headroom.reservePct in the policy substrate (src/lib/policy.ts:68, :293, :309). The governor is a loop-top
+    check that idles the WHOLE fleet on one window, so with two live subscriptions there is no shape in which its
+    answer is meaningful: one account at 20% and one at 99% produce a single number that describes neither.
+    THIS TASK IS CONDITIONAL ON W1-T266's RULING and should not be built before it. If the ruling is a serial
+    switch — one account live per host, deliberately changed — then the existing single-window governor is already
+    correct and this task should be WITHDRAWN rather than implemented, because a per-account split of a set with
+    one element is pure cost. It is filed as a dependent, not as a commitment.
+    W1-T267 is the other prerequisite and it is a correctness one: splitting a reading per account is worthless
+    while the probe that produces the reading may be looking at a store no worker spends from."
+  design: |
+    (1) THE SNAPSHOT CARRIES ITS PROVENANCE. UsageSnapshot gains the account label the probe read it under —
+        supplied by W1-T267's now-explicit store selection, never guessed. A snapshot that cannot name its account
+        is unattributable and must say so rather than default to the current label.
+    (2) THE RESERVE RESOLVES PER LABEL. The reserve percentage and the time-aware curve are resolved against the
+        account being measured rather than once for the host. The existing single-account behaviour stays the
+        DEFAULT: with one label configured, the resolved values are byte-for-byte what they are today, so an
+        unconfigured install cannot inherit a semantic change (the same posture W1-T259 took with its switch).
+    (3) UNREADABLE IS PER ACCOUNT TOO. An unreadable probe for one account must not mask a readable reading for
+        another, and must not be rendered as headroom-available for either. Cannot-observe stays cannot-observe,
+        per account — the polarity W1-T267 preserves for the single case, generalised.
+    (4) THE READING NAMES ITS SUBJECT. The ledgered headroom line carries the account label it measured, so the
+        console in W1-T270 has a field to group on and an operator reading the raw line can tell which budget it
+        describes. Without this the line is indistinguishable from today's and the console task has nothing to
+        render.
+    NOT IN SCOPE: any change to WHEN the governor holds. The ratified curve and the reserve semantics are
+    unchanged; only the number of budgets they are evaluated against changes.
+  acceptance:
+    - claim: "a snapshot carries the account label it was read under and an unattributable snapshot says so rather than defaulting"
+      proof: "unit test: test/headroom-per-account.test.ts"
+    - claim: "the reserve and the curve resolve per account label while a single configured label reproduces today's values exactly"
+      proof: "unit test: test/headroom-per-account.test.ts"
+    - claim: "an unreadable reading for one account neither masks nor is masked by a readable reading for another"
+      proof: "unit test: test/headroom-per-account.test.ts"
+    - claim: "the ledgered headroom line names which account it measured so a reader can tell which budget it describes"
+      proof: "grep: account_label in src/lib/headroom.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§4", "§9"]
+  files: [src/lib/headroom.ts, src/lib/daemon.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — headroom is pure window math over an injected snapshot and the loop-top check already takes
+    an injected reader, so every criterion is assertable headlessly with no probe and no spend.
+    risk:high — it changes the input to the only mechanism that can stop the fleet spending, and it names the
+    daemon subsystem alongside headroom, which is Rule 19's threshold twice over. The asymmetric failure is a
+    per-account split that silently reports the wrong budget as the binding one, which reads as normal operation.
+    budget_usd 100 — the house default: two files, no new seam required (the reader is already injectable), and
+    the test matrix is combinatorial but small.
+    WITHDRAW-IF: W1-T266 rules for a serial switch. Say so on that ruling rather than implementing this."

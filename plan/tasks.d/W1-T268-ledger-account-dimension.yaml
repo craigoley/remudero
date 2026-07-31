@@ -1,0 +1,68 @@
+- id: W1-T268
+  title: "give the ledger an ACCOUNT dimension with a hard start date — no line in 4,160,926 across 662 files carries any account key, the ledger is append-only so nothing can be backfilled, and 169k of the 171,427 billing_mode values are a hardcoded literal that would keep reading 'subscription' after the fleet stopped being on one"
+  repo: remudero
+  depends_on: [W1-T265]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 150.00
+  rationale: "MEASURED over the union of state/ledger.ndjson and all 661 rotations — 4,160,926 lines. Any claim of
+    this shape taken over the live file alone undercounts roughly fourfold, so the union is the only defensible
+    basis. TWO FINDINGS.
+    (1) THERE IS NO ACCOUNT DIMENSION AND NEVER HAS BEEN. Occurrences of any key beginning `\"account`: ZERO. The
+    entire billing vocabulary is cost_usd / total_cost_usd, tokens, the two cache-token fields and billing_mode,
+    and billing_mode is a binary funding-source flag, not an identity. Because the ledger is append-only this can
+    never be backfilled: every line written before the field exists is permanently unattributable, so any
+    accounting has a HARD START DATE and must refuse rather than guess below it.
+    (2) BILLING_MODE IS 99% COSMETIC. Counts: 171,427 'subscription' and ZERO 'api'. It is DERIVED in exactly one
+    place — billingMode(r.childEnvKeys) at src/lib/worker.ts:239, feeding the worker-spend lines — while
+    src/run-task.ts carries FOURTEEN hardcoded `billing_mode: \"subscription\"` sites (2894, 2940, 2961, 2995,
+    3552, 3589, 3810, 4031, 4121, 4137, 4213, 4270, 4290, 4302) that produce the ~169k verdict lines. So the
+    natural per-account or per-mode spend query — group the verdict lines by billing_mode — is WRONG TODAY and
+    would stay wrong under W1-T258's API valve. Adding an account label beside a lying field would compound it.
+    THE EPOCH. The one citable boundary is 2026-07-31T16:39:00.582Z: the sole daemon.worker_keychain line in the
+    entire unioned history reading provisioned:true, written by the boot that re-provisioned the store after the
+    operator's manual switch. Every earlier line belongs to the prior account by construction, but no line SAYS
+    so, which is exactly why the epoch must be a constant and not a comment."
+  design: |
+    (1) THE LABEL. Every ledger line that carries a spend figure also carries the account LABEL that spend was
+        drawn against — the same label W1-T265 puts on the credential store. A NAME, never a credential, derived
+        the way billingMode already derives from key NAMES rather than values (src/lib/env.ts:173): the discipline
+        this repo already keeps is that a proof surface never holds a secret.
+    (2) STOP LYING ABOUT BILLING_MODE. The fourteen hardcoded literals in src/run-task.ts are replaced by the same
+        derivation the worker lines use, so a verdict line reports the mode the run actually spent under. This is
+        a prerequisite, not a bonus: an account label on a line whose funding-source field is a constant produces
+        a report that is confidently wrong.
+    (3) THE EPOCH IS A CONSTANT. Export `ACCOUNT_ATTRIBUTION_EPOCH` from src/lib/ledger.ts, valued
+        2026-07-31T16:39:00.582Z — that literal name, so downstream tasks and their proofs can bind to it. Any
+        query helper that groups spend by account REFUSES lines older than the epoch instead of attributing them
+        to whichever label happens to be current. Silent misattribution of 4.1M historical lines is the failure
+        this constant exists to prevent.
+    (4) THE ROTATION COUPLING. If any DECISION comes to read a step for its account label, that step must be added
+        to DECISION_RELEVANT_LEDGER_STEPS in the SAME change (CLAUDE.md, #977) — a rotation that archives a
+        decision-relevant step silently resets whatever bound was counted from it.
+  acceptance:
+    - claim: "every ledger line carrying a spend figure also carries an account label and the label is a name never a credential"
+      proof: "unit test: test/ledger-account-dimension.test.ts"
+    - claim: "billing_mode on a verdict line is DERIVED from the run's actual child env key names not a hardcoded literal"
+      proof: "grep: billing_mode: billingMode in src/run-task.ts"
+    - claim: "no hardcoded subscription literal survives in the verdict paths that the derivation now covers"
+      proof: "unit test: test/ledger-account-dimension.test.ts"
+    - claim: "the attribution epoch is an exported constant rather than a comment so downstream readers bind to it"
+      proof: "grep: ACCOUNT_ATTRIBUTION_EPOCH in src/lib/ledger.ts"
+    - claim: "a spend query REFUSES to attribute a line older than the epoch instead of crediting the current label"
+      proof: "unit test: test/ledger-account-dimension.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§9"]
+  files: [src/lib/ledger.ts, src/lib/worker.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every criterion is a shape assertion over lines a test writes and reads back, plus two
+    literal greps; nothing needs a live run or a real account.
+    risk:high — three subsystems by Rule 19's own count (ledger, worker, run-task) before the fourteen-site edit is
+    considered, and the asymmetric failure is a report that is confidently wrong about where money went, which is
+    worse than no report because it will be believed.
+    budget_usd 150 — above the house default because fourteen literal call sites must each be converted and
+    covered, and the rotation-invariant test re-derives its expected set from every consumer's source, so a scoped
+    local run cannot predict it and the first CI push is the real check."

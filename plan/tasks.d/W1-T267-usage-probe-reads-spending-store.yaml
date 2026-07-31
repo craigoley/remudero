@@ -1,0 +1,66 @@
+- id: W1-T267
+  title: "the /usage probe must read the SAME credential store the workers spend — readUsageSnapshot omits `home:` so it resolves the operator's login keychain while every worker resolves the copied worker store; benign while both hold one account, silently wrong the instant they differ, and wrong in the direction where the meter watches one subscription and the money leaves another"
+  repo: remudero
+  depends_on: [W1-T265]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OBSERVED at 07e5861, re-verified: readUsageSnapshot (src/run-task.ts:5786) builds its env with
+    buildWorkerEnv({}, process.env, { zdotdir, shell }) — and NO `home:` key. Every worker spawn passes
+    home: workerHome (src/lib/worker.ts:606-615); this probe does not, so HOME falls through from the parent via
+    the allowlist (src/lib/env.ts) and the probe follows the fleet user's REAL login keychain while workers follow
+    <root>/state/remudero-worker.keychain-db. TWO READERS, TWO STORES, NO COMPARISON ANYWHERE.
+    This is not hypothetical any more. The host switched subscriptions on 2026-07-31: the login store was replaced
+    at 15:55:17Z and the worker store re-provisioned at 16:39:00.582Z — a 43-minute window in which the two
+    demonstrably held different identities, and nothing in the fleet could have told anyone. The gap is closed only
+    because the operator moved the file by hand.
+    The two readers feed a governor that gates ALL dispatch: readUsageSnapshot is wired as
+    deps.readUsage at src/run-task.ts:6228 and :6616, and the daemon's loop-top check idles the whole fleet on it.
+    So a divergence does not merely misreport — it holds or releases every run on a budget nobody is spending.
+    NOT ESTABLISHED, recorded so the implementer checks rather than assumes: the first two headroom reads after the
+    switch (2026-07-31T16:41:34Z and 16:44:02Z) both logged daemon.headroom.unavailable. Whether the switch caused
+    that is unproven — the unioned history already carries a substantial unreadable rate — but it is the first
+    thing to reproduce."
+  design: |
+    The probe must resolve its credential from the store the SELECTED account owns, not from whatever the parent
+    process's HOME happens to point at.
+    (1) PASS `home:`. readUsageSnapshot builds a worker home the same way a spawn does and passes it, so the
+        probe's HOME-relative login.keychain-db symlink lands on the same store src/lib/worker.ts:590 resolved.
+        Reuse workerHomePlan's existing workerKeychainPath redirect (src/lib/worker-home.ts:136-137) rather than
+        constructing a second, divergent path derivation — one derivation, two callers.
+    (2) MAKE THE PROBE TESTABLE. Today the probe calls execFileSync directly and there is no seam, so no test can
+        assert what env it passed. Add an injectable spawn parameter LAST in the signature so no positional caller
+        shifts (CLAUDE.md, #977/#978), and cover BOTH the injected recorder and the real default with a leaf test —
+        a leaf that threw on a nonzero exit would turn every ordinary unreadable read into the catch arm's message
+        and lose the CLI's own output.
+    (3) PRESERVE THE UNREADABLE POLARITY EXACTLY. The current catch returns undefined and the drain continues; that
+        behaviour is ratified and is NOT this task's to change. Cannot-read must keep meaning cannot-read, never
+        proceed-as-if-unlimited and never a new hold.
+    NOT IN SCOPE: splitting the snapshot per account — that is W1-T269, which depends on this landing first. This
+    task only makes ONE reader read the RIGHT store.
+  acceptance:
+    - claim: "the usage probe's env carries a HOME whose keychain symlink resolves to the same store a worker spawn resolves"
+      proof: "unit test: test/usage-probe-store.test.ts"
+    - claim: "with two stores present the probe follows the selected account's store and never the fleet user's login keychain"
+      proof: "unit test: test/usage-probe-store.test.ts"
+    - claim: "the probe's exec seam is injectable and its DEFAULT implementation is covered by a leaf test not a recorder"
+      proof: "unit test: test/usage-probe-store.test.ts"
+    - claim: "an unreadable probe still returns no snapshot and still lets the drain continue — the ratified polarity is unchanged"
+      proof: "unit test: test/usage-probe-store.test.ts"
+    - claim: "one path derivation serves both the probe and the spawn rather than two that can drift apart"
+      proof: "grep: workerKeychainPaths in src/run-task.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§9"]
+  files: [src/run-task.ts, src/lib/worker-home.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the whole criterion set is about which env a function constructs, which is assertable
+    against a recorded argv with no real /usage call, no credential and no spend.
+    risk:high — the value this function returns gates dispatch for the entire fleet at the daemon's loop top, so
+    the failure direction is asymmetric in both polarities at once: read too permissively and the fleet spends past
+    a wall it cannot see, read too conservatively and it parks on a budget that is actually full. It also touches
+    two subsystems (the probe in run-task and the home/keychain plan), which is Rule 19's threshold on its own.
+    budget_usd 100 — the house default: the diff is small but it must add a seam where none exists and pay the
+    default-implementation coverage that the all-fakes pattern otherwise leaves unreachable."

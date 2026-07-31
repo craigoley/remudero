@@ -1,0 +1,60 @@
+- id: W1-T266
+  title: "RULE, in writing, which account a run uses — nothing selects one today and this is a DESIGN QUESTION, not a code gap; the ruling must say whether concurrent multi-account is wanted at all or only a clean serial switch, because that single answer decides whether three downstream tasks exist"
+  repo: remudero
+  depends_on: [W1-T265]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "OBSERVED at 07e5861: there is no account selector anywhere. The one spawn primitive
+    (src/lib/worker.ts:590) resolves its credential store from workerKeychainPaths(join(config.root, 'state'))
+    with no run, task, tier or account input, and .remudero/mounts.yaml cannot carry one usefully — parseMount
+    destructures exactly four keys and there is NO unknown-key rejection in src/lib/mounts.ts, so an added
+    `account:` row would parse cleanly, fail nothing and be dropped on the floor. That is the exact #781 trap
+    CLAUDE.md already records: a named declarative source that ships green and changes nothing observable.
+    THIS TASK WRITES NO SELECTOR. It exists because the operator's stated ask ('multiple subscriptions working on
+    rmd seamlessly') and the operation he actually performed (a one-way switch of the whole host) are different
+    products with different costs, and the fleet should not build the expensive one by default. A per-spawn
+    selector is only meaningful if two stores are live at once; a serial switch needs W1-T265 and nothing else
+    downstream. Until this is ruled, W1-T269 and W1-T270 are speculative."
+  design: |
+    DELIVERABLE: docs/account-selection.md, a decision record, plus at most one bounded data row.
+    IT MUST ANSWER FOUR QUESTIONS AND SAY SO IN NAMED SECTIONS.
+    (a) SELECTION MODE — exactly one of: `pinned` (one account per host, switched deliberately),
+        `most-headroom`, `next-available`. State the choice and state why the other two were rejected.
+    (b) SERIAL SWITCH versus concurrent — whether two accounts must ever be live SIMULTANEOUSLY, or whether the
+        host only ever moves from one to the next. If serial, say plainly that W1-T269 and W1-T270 should be
+        withdrawn rather than built, and that W1-T268's ledger dimension collapses to a single label per epoch.
+    (c) THE SEAM — where a selector would attach if one is ever wanted. Name workerKeychainPaths, which is the
+        pure function that has to gain the discriminator, and record that a mounts.yaml row alone is inert.
+    (d) THE ACCOUNTING EPOCH — the instant before which per-account attribution is impossible, quoted exactly, so
+        no later reader has to re-derive it: 2026-07-31T16:39:00.582Z.
+    IF AND ONLY IF the ruling picks a non-pinned mode, the mode is carried as VALIDATED DATA in plan/policy.yaml
+    (validatePolicy already parses a strictly harder shape — the headroom curve's rung list — so a three-value
+    enum is additive), never as a code constant. If the ruling is `pinned`, no policy row is added and that
+    absence is itself recorded.
+    THIS TASK CHANGES NO DISPATCH PATH AND NO SPAWN.
+  acceptance:
+    - claim: "the record names exactly ONE selection mode and states why each rejected alternative was rejected"
+      proof: "grep: SELECTION MODE in docs/account-selection.md"
+    - claim: "the record rules on whether two accounts must ever be live at once or only one at a time per host"
+      proof: "grep: SERIAL SWITCH in docs/account-selection.md"
+    - claim: "the record names the pure function a selector would have to attach to and notes a mounts row alone is inert"
+      proof: "grep: workerKeychainPaths in docs/account-selection.md"
+    - claim: "the record quotes the accounting epoch exactly so no downstream reader re-derives it"
+      proof: "grep: 2026-07-31T16:39:00.582Z in docs/account-selection.md"
+  risk: medium
+  origin: architect
+  plan_refs: ["§9"]
+  files: [docs/account-selection.md, plan/policy.yaml]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the deliverable is a document with NAMED sections, so each criterion is a literal grep
+    against an explicit path; nothing here needs a human to look at a screen, which is why this is not verify:human
+    (a human-verified task never dispatches at all — src/lib/drain.ts returns false at t.verify !== 'auto' before
+    the linter is consulted — and this ruling gates three other tasks, so it must be able to move).
+    risk:medium — one new markdown file and at most one validated data row; it touches no spawn, no dispatch and
+    no credential. It is not risk:low because the ruling's content decides whether roughly two thirds of this
+    workstream gets built, and a careless answer costs far more than the task does.
+    budget_usd 40 — well under the 100 house default because there is no source change to test-drive; the cost is
+    reading W1-T265's shape and writing four sections."

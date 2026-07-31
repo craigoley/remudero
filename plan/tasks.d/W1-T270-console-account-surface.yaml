@@ -1,0 +1,65 @@
+- id: W1-T270
+  title: "the console gains an account surface — headroom is not rendered in the console AT ALL today, so this is new surface and not an extension of an existing panel; the operator's ask is to CONTROL accounts from the console and control starts with being able to see which one is spending"
+  repo: remudero
+  depends_on: [W1-T268, W1-T269]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 150.00
+  rationale: "RE-VERIFIED at 07e5861, and it corrects a premise worth correcting: there is no single-account usage
+    panel in flight to extend. src/lib/serve.ts registers exactly TWO plain routes — path '/' (:3186, the HTML
+    shell) and path '/v1/auth/scope' (:3209) — plus one SSE stream, and the only 'headroom' match in the file is
+    prose about visual chrome. At the time of filing the repository had ZERO open pull requests and no merged PR
+    adding a usage or headroom panel. So this task BUILDS the surface; nothing is being extended.
+    The shape to copy already exists. computeGlanceSpend (src/lib/glance.ts:42) aggregates cost_usd off ledger
+    lines into today/this-week buckets and the board renders it as the spend strip — aggregate a ledger field into
+    buckets and render. That is precisely why W1-T268 is a hard prerequisite rather than a nicety: the field this
+    panel must group by does not exist yet, and grouping the existing lines by anything account-shaped would
+    invent an attribution the ledger cannot support.
+    CONTROL, NOT ONLY DISPLAY. The operator asked for accounts to be 'controlled in the console'. A read-only
+    panel is the honest v1 and the whole of this task; any console-initiated SWITCH is deliberately excluded,
+    because a switch requires an interactive OAuth login that no code path in this repo can perform — that step is
+    unavoidably human, and a button that cannot complete its own operation is worse than no button."
+  design: |
+    (1) READ-ONLY ACCOUNT PANEL. Per account label: the label itself, the account's most-burned window and reset,
+        the reserve state W1-T269 resolves for it, and spend-today / spend-this-week aggregated from the ledger
+        lines W1-T268 labels. Rendered server-side into the shell exactly as the glance spend strip is, so no new
+        route is needed for the first cut.
+    (2) THE EPOCH IS VISIBLE, NOT SILENT. Lines older than ACCOUNT_ATTRIBUTION_EPOCH are unattributable by
+        construction. The panel must SHOW that boundary rather than quietly summing from it — an operator reading
+        a week-to-date figure that silently begins mid-week will read it as a full week. A single explicit
+        'attribution begins' marker discharges this.
+    (3) NO SILENT SINGLE-ACCOUNT COLLAPSE. With one label configured the panel renders that one account and says
+        so; it must not look identical to a two-account view with one account missing. Absence of data and absence
+        of an account are different states and the console has a history of rendering cannot-observe as benign.
+    (4) THE TEMPLATE-LITERAL HAZARD. serve.ts's client JS lives inside a backtick template literal and a backtick
+        anywhere in client-side comment text terminates it and fails the build (CLAUDE.md, #777). Any client change
+        here must be checked by rendering the shell and parsing the script block, and the real Chromium tests in
+        test/serve.*.test.ts are the DOM proof — they are headless and are the sanctioned route.
+    EXPLICITLY NOT IN SCOPE: initiating a login, switching accounts from the browser, or any write route. v1 reads.
+  acceptance:
+    - claim: "the panel renders one row per configured account label with its window reset reserve state and spend buckets"
+      proof: "unit test: test/serve-account-panel.test.ts"
+    - claim: "spend older than the attribution epoch is excluded and the boundary is shown rather than silently summed from"
+      proof: "unit test: test/serve-account-panel.test.ts"
+    - claim: "a single configured account renders as a named single account and is distinguishable from a missing one"
+      proof: "unit test: test/serve-account-panel.test.ts"
+    - claim: "the rendered shell's client script still parses after the change so the template literal was not terminated"
+      proof: "unit test: test/serve-account-panel.test.ts"
+    - claim: "the panel is read-only — it adds no write-scoped route and no console-initiated switch affordance"
+      proof: "unit test: test/serve-account-panel.test.ts"
+  risk: high
+  origin: architect
+  plan_refs: ["§4"]
+  files: [src/lib/serve.ts, src/lib/board.ts, src/lib/glance.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — serve.ts DOM behaviour is covered by real headless Chromium tests already in this repo, so
+    a rendering criterion is machine-checkable without an operator looking at a screen.
+    risk:high — three subsystems by Rule 19's count (serve, board, glance), and serve.ts carries the
+    backtick-template hazard that has broken the build before. The asymmetric failure is a spend figure that looks
+    authoritative while summing an epoch it should have refused.
+    budget_usd 150 — above the house default because the Chromium suite is slow, the epoch-boundary rendering is
+    genuinely fiddly, and the template-literal check costs a render-and-parse cycle per iteration.
+    WITHDRAW-IF: W1-T266 rules for a serial switch AND the operator does not want a spend view per epoch. The
+    read-only spend surface may still be wanted on its own merits even then — decide on the ruling, not here."
