@@ -22,7 +22,7 @@ import {
   workerZdotdir,
   type Config,
 } from "./lib/config.js";
-import { buildWorkerEnv } from "./lib/env.js";
+import { buildWorkerEnv, billingMode, type BillingMode } from "./lib/env.js";
 import { outputContractLines, renderAnchorBlock, commitMessageContractLines } from "./lib/compaction.js";
 import type { RunResult } from "./lib/run-result.js";
 export type { RunResult };
@@ -1221,6 +1221,8 @@ export interface OwnershipVerdict {
     claimed_branch: string | null;
     owned_branch: string;
     cost_usd: number;
+    /** W1-T268: the account this run's spend is attributed to — see {@link WorkerResult.accountLabel}. */
+    account_label?: string;
     reason: string;
   };
 }
@@ -1242,6 +1244,10 @@ export function checkPrOwnership(
   ownBranch: string,
   gateway: PrHeadGateway,
   costUsd: number,
+  /** W1-T268: appended LAST so no existing positional caller shifts — see
+   *  {@link WorkerResult.accountLabel}. Omitted ⇒ the ledger line carries no label,
+   *  never a guess. */
+  accountLabel?: string,
 ): OwnershipVerdict | null {
   const claimedBranch = gateway.headRefName(prUrl) ?? null;
   if (claimedBranch === ownBranch) return null;
@@ -1253,6 +1259,7 @@ export function checkPrOwnership(
       claimed_branch: claimedBranch,
       owned_branch: ownBranch,
       cost_usd: costUsd,
+      account_label: accountLabel,
       reason:
         claimedBranch === null
           ? "claimed PR's head branch could not be resolved — failing closed rather than assumed owned"
@@ -2633,6 +2640,8 @@ export async function runFixRung(opts: {
       session_id: fixResult.sessionId,
       subtype: fixResult.subtype,
       cost_usd: fixResult.costUsd,
+      billing_mode: billingMode(fixResult.childEnvKeys),
+      account_label: fixResult.accountLabel,
       num_turns: fixResult.numTurns,
     });
 
@@ -2897,7 +2906,9 @@ export interface WorkerErrorVerdict {
     subtype: string;
     num_turns: number;
     cost_usd: number;
-    billing_mode: "subscription";
+    billing_mode: BillingMode;
+    /** W1-T268: the account this spend is attributed to — see {@link WorkerResult.accountLabel}. */
+    account_label?: string;
     reason: string;
     /** W1-T6: the failing call's configured model/effort + its token usage —
      * a failed worker call is never free OR untelemetered in the ledger. */
@@ -2943,7 +2954,8 @@ export function workerErrorVerdict(
       subtype: r.subtype,
       num_turns: r.numTurns,
       cost_usd: costUsd,
-      billing_mode: "subscription",
+      billing_mode: billingMode(r.childEnvKeys),
+      account_label: r.accountLabel,
       reason: budgetBreach
         ? "worker breached maxBudgetUsd — not retried (dollars are the backstop)"
         : `worker error at ${stage}: ${r.subtype}`,
@@ -2964,7 +2976,9 @@ export interface NoPrVerdict {
     subtype: string;
     num_turns: number;
     cost_usd: number;
-    billing_mode: "subscription";
+    billing_mode: BillingMode;
+    /** W1-T268: the account this spend is attributed to — see {@link WorkerResult.accountLabel}. */
+    account_label?: string;
     reason: string;
     model: string;
     effort: string;
@@ -2998,7 +3012,8 @@ export function noPrVerdict(r: WorkerResult, costUsd: number, stage: string): No
       subtype: r.subtype,
       num_turns: r.numTurns,
       cost_usd: costUsd,
-      billing_mode: "subscription",
+      billing_mode: billingMode(r.childEnvKeys),
+      account_label: r.accountLabel,
       reason: "worker completed without opening a PR",
       model: r.model,
       effort: r.effort,
@@ -3555,7 +3570,8 @@ async function runTask(
         check: e.check,
         observed: e.observed,
         cost_usd: costUsd,
-        billing_mode: "subscription",
+        billing_mode: billingMode(e.childEnvKeys),
+        account_label: e.accountLabel,
       });
       say(`verdict: blocked_containment — ${e.message}`);
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_containment" };
@@ -3592,7 +3608,8 @@ async function runTask(
         check: e.check,
         observed: e.observed,
         cost_usd: costUsd,
-        billing_mode: "subscription",
+        billing_mode: billingMode(e.childEnvKeys),
+        account_label: e.accountLabel,
       });
       say(`verdict: blocked_isolation — ${e.message}`);
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_isolation" };
@@ -3813,7 +3830,8 @@ async function runTask(
         subtype: impl.subtype,
         num_turns: impl.numTurns,
         cost_usd: costUsd,
-        billing_mode: "subscription",
+        billing_mode: billingMode(impl.childEnvKeys),
+        account_label: impl.accountLabel,
         reason: `repeated transient API error across ${MAX_TRANSIENT_RETRIES} retries — not a task failure`,
       });
       say(`verdict: blocked_transient — repeated transient API error, not a task failure`);
@@ -3983,13 +4001,19 @@ async function runTask(
       prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
     }
     if (!prUrl) {
-      log("verdict", { verdict: "failed", reason: "no PR opened", cost_usd: costUsd });
+      log("verdict", {
+        verdict: "failed",
+        reason: "no PR opened",
+        cost_usd: costUsd,
+        billing_mode: billingMode(impl.childEnvKeys),
+        account_label: impl.accountLabel,
+      });
       return { taskId, runId, merged: false, costUsd, verdict: "failed" };
     }
     // RUN-OWNERSHIP GUARD (W1-T62) — before ANY side effect touches this PR, assert
     // it is actually this run's own PR (the false-merged inversion backstop; see
     // checkPrOwnership). Fails closed and named on mismatch; the PR is left untouched.
-    const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), costUsd);
+    const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), costUsd, impl.accountLabel);
     if (ownership) {
       log("verdict", ownership.ledger);
       say(
@@ -4034,7 +4058,8 @@ async function runTask(
         pr_url: prUrl,
         reason: `ci ${ci} before review`,
         cost_usd: costUsd,
-        billing_mode: "subscription",
+        billing_mode: billingMode(impl.childEnvKeys),
+        account_label: impl.accountLabel,
       });
       say(`verdict: blocked_ci (ci ${ci}) — PR left OPEN: ${prUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
@@ -4124,7 +4149,8 @@ async function runTask(
           reason: `fix rung exhausted after ${rung.strikes} strike(s)`,
           issue_url: rung.issueUrl,
           cost_usd: costUsd,
-          billing_mode: "subscription",
+          billing_mode: billingMode(impl.childEnvKeys),
+          account_label: impl.accountLabel,
         });
         say(`verdict: blocked — fix rung exhausted (${rung.strikes} strike(s)), escalated: ${rung.issueUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
@@ -4140,7 +4166,8 @@ async function runTask(
           pr_url: prUrl,
           reason: `stood down — ${rung.standDownReason}`,
           cost_usd: costUsd,
-          billing_mode: "subscription",
+          billing_mode: billingMode(impl.childEnvKeys),
+          account_label: impl.accountLabel,
         });
         say(`verdict: blocked — stood down (${rung.standDownReason}): ${prUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
@@ -4216,7 +4243,8 @@ async function runTask(
         reason: "capped verdict refused auto-merge",
         issue_url: issueUrl,
         cost_usd: costUsd,
-        billing_mode: "subscription",
+        billing_mode: billingMode(impl.childEnvKeys),
+        account_label: impl.accountLabel,
       });
       say(`verdict: blocked — CAPPED verdict, escalated: ${issueUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
@@ -4273,7 +4301,8 @@ async function runTask(
         reason: "risk judge escalated",
         issue_url: riskJudgeResult.escalationUrl,
         cost_usd: costUsd,
-        billing_mode: "subscription",
+        billing_mode: billingMode(impl.childEnvKeys),
+        account_label: impl.accountLabel,
       });
       say(`verdict: blocked — risk judge escalated: ${riskJudgeResult.escalationUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
@@ -4293,7 +4322,13 @@ async function runTask(
       log("pr.merged", { state: "MERGED" });
       worktreeRemove(repoDir, worktreePath);
       log("worktree.remove", {});
-      log("verdict", { verdict: "merged", pr_url: prUrl, cost_usd: costUsd, billing_mode: "subscription" });
+      log("verdict", {
+        verdict: "merged",
+        pr_url: prUrl,
+        cost_usd: costUsd,
+        billing_mode: billingMode(impl.childEnvKeys),
+        account_label: impl.accountLabel,
+      });
       say(`verdict: merged · notional cost $${costUsd.toFixed(4)}`);
       return { taskId, runId, prUrl, merged: true, costUsd, verdict: "merged" };
     }
@@ -4305,7 +4340,8 @@ async function runTask(
       pr_url: prUrl,
       reason: outcome.reason,
       cost_usd: costUsd,
-      billing_mode: "subscription",
+      billing_mode: billingMode(impl.childEnvKeys),
+      account_label: impl.accountLabel,
     });
     say(`verdict: blocked_ci (${outcome.reason}) — PR left OPEN: ${prUrl}`);
     return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
@@ -5651,7 +5687,7 @@ async function retroCommand(
     }
     // RUN-OWNERSHIP GUARD (W1-T62) — same backstop as runTaskBody: before any side
     // effect touches this PR, assert it is actually this retro's own PR.
-    const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), worker.costUsd);
+    const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), worker.costUsd, worker.accountLabel);
     if (ownership) {
       log("verdict", ownership.ledger);
       say(
@@ -9573,7 +9609,7 @@ export async function triageCommand(
 
     // RUN-OWNERSHIP GUARD (W1-T62 precedent) — before any side effect touches this PR, assert it
     // is actually this triage run's own PR.
-    const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), worker.costUsd);
+    const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), worker.costUsd, worker.accountLabel);
     if (ownership) {
       log("verdict", ownership.ledger);
       say(`verdict: pr_attribution_failed — claimed PR ${prUrl} is not this triage's own branch (${branch})`);
@@ -9793,7 +9829,7 @@ export async function planCommand(
 
     // RUN-OWNERSHIP GUARD (W1-T62 precedent) — before any side effect touches this PR, assert it
     // is actually this plan run's own PR.
-    const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), worker.costUsd);
+    const ownership = checkPrOwnership(prUrl, branch, ghPrHeadGateway(), worker.costUsd, worker.accountLabel);
     if (ownership) {
       log("verdict", ownership.ledger);
       say(`verdict: pr_attribution_failed — claimed PR ${prUrl} is not this plan run's own branch (${branch})`);

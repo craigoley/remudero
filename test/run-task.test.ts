@@ -1125,6 +1125,524 @@ test(
   },
 );
 
+// ── W1-T268 BEHAVIORAL: the ledger ACCOUNT DIMENSION (billing_mode derived off
+// childEnvKeys, account_label off WorkerResult.accountLabel — never a hardcoded
+// "subscription" literal) threaded through EVERY runTask verdict site, including
+// the ones an ordinary run rarely reaches: blocked_transient, the "no PR opened"
+// failed verdict, the fix rung's exhausted/stood-down blocked verdicts, a real
+// MERGED verdict (past the risk judge + pollToGate), and the terminal (post-poll)
+// blocked_ci verdict. Reuses the W1-T105 FOLLOWUP fixture harness above (a real
+// throwaway git origin, zero network, zero real Claude/gh spawn). ─────────────
+
+/** A stateful, Node-based fake `gh` (mirrors buildSweepEffects.dispatchFix's own
+ *  counter-file fixture below) — unlike {@link followupFakeGh}'s fixed-per-run
+ *  answer, each `--json` FIELD answers from its OWN ordered sequence (a per-field
+ *  call counter, the last entry repeating forever after), so a single run's
+ *  MULTIPLE reads of the same field — the outer pre-review ci gate vs. the fix
+ *  rung's own per-strike polls, or `pollToGate`'s merge-state read — can each
+ *  answer differently. `gh issue create` answers `issueUrl`; everything else this
+ *  run might invoke (`gh label create`, the `gh api` read inside escalate's
+ *  dedup search, `gh pr merge --auto`) exits non-zero — every one of those call
+ *  sites already tolerates/ignores a failure (see followupFakeGh's own doc). */
+function statefulFakeGh(opts: {
+  branch: string;
+  /** `--json statusCheckRollup` rollup arrays, in call order (last repeats). */
+  ciSeq: Array<{ name: string; conclusion: string }[]>;
+  /** `--json state` values, in call order (last repeats). Default: always "OPEN". */
+  stateSeq?: string[];
+  /** `--json state,statusCheckRollup` (pollToGate), in call order (last repeats). */
+  pollSeq?: Array<{ state: string; statusCheckRollup?: { name: string; conclusion: string }[] }>;
+  issueUrl?: string;
+}): string {
+  const fakeBinDir = mkdtempSync(join(tmpdir(), "runtask-stateful-gh-bin-"));
+  const counterDir = mkdtempSync(join(tmpdir(), "runtask-stateful-gh-counters-"));
+  const script = [
+    "#!/usr/bin/env node",
+    'const fs = require("fs");',
+    "const args = process.argv.slice(2);",
+    `const counterDir = ${JSON.stringify(counterDir)};`,
+    "function next(name, values) {",
+    '  const f = counterDir + "/" + name;',
+    "  let n = 0;",
+    '  try { n = parseInt(fs.readFileSync(f, "utf8") || "0", 10); } catch (e) {}',
+    "  fs.writeFileSync(f, String(n + 1));",
+    "  return values[Math.min(n, values.length - 1)];",
+    "}",
+    'const idx = args.indexOf("--json");',
+    "const field = idx >= 0 ? args[idx + 1] : undefined;",
+    'if (args[0] === "pr" && args[1] === "view") {',
+    `  if (field === "headRefName") { process.stdout.write(JSON.stringify({ headRefName: ${JSON.stringify(opts.branch)} })); process.exit(0); }`,
+    '  if (field === "body") { process.stdout.write(JSON.stringify({ body: "" })); process.exit(0); }',
+    '  if (field === "statusCheckRollup") {',
+    `    const roll = next("ci", ${JSON.stringify(opts.ciSeq)});`,
+    '    process.stdout.write(JSON.stringify({ statusCheckRollup: roll }));',
+    "    process.exit(0);",
+    "  }",
+    '  if (field === "state,statusCheckRollup") {',
+    `    const v = next("poll", ${JSON.stringify(opts.pollSeq ?? [{ state: "OPEN" }])});`,
+    "    process.stdout.write(JSON.stringify(v));",
+    "    process.exit(0);",
+    "  }",
+    '  if (field === "state") {',
+    `    const v = next("state", ${JSON.stringify(opts.stateSeq ?? ["OPEN"])});`,
+    '    process.stdout.write(JSON.stringify({ state: v }));',
+    "    process.exit(0);",
+    "  }",
+    "}",
+    'if (args[0] === "pr" && args[1] === "edit") { process.exit(0); }',
+    'if (args[0] === "issue" && args[1] === "create") {',
+    `  process.stdout.write(${JSON.stringify(opts.issueUrl ?? "https://github.com/acme/remudero/issues/1")} + "\\n");`,
+    "  process.exit(0);",
+    "}",
+    "process.exit(1);",
+    "",
+  ].join("\n");
+  writeFileSync(join(fakeBinDir, "gh"), script);
+  chmodSync(join(fakeBinDir, "gh"), 0o755);
+  return fakeBinDir;
+}
+
+test("BEHAVIORAL (W1-T268): a real runTask run that transients across every retry reaches blocked_transient carrying billing_mode + account_label off the LAST attempt, never guessed", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "runtask-transient-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+  followupGitFixture(root);
+
+  const FIXED_TS = 1785000000010;
+  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async () => {
+    spawnCalls.push({} as SpawnWorkerArgs);
+    if (spawnCalls.length === 1) {
+      return result({
+        sessionId: "s-recon",
+        text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
+      });
+    }
+    // Every implement attempt is a transient server_error — MAX_TRANSIENT_RETRIES
+    // (3) retries, then the 4th attempt (still transient) falls to blocked_transient.
+    return result({
+      sessionId: "s-implement",
+      apiError: true,
+      subtype: "success",
+      accountLabel: "acct-transient",
+      childEnvKeys: [],
+    });
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+      }),
+    );
+
+    assert.equal(res.verdict, "blocked_transient");
+    assert.equal(spawnCalls.length, 5, "recon + 4 transient implement attempts (3 retries then give up)");
+
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const verdict = ledger.find((l) => l.step === "verdict" && l.verdict === "blocked_transient");
+    assert.ok(verdict, "the blocked_transient verdict is ledgered");
+    assert.equal(verdict.billing_mode, "subscription", "no ANTHROPIC_API_KEY in childEnvKeys ⇒ subscription");
+    assert.equal(verdict.account_label, "acct-transient", "the LAST transient attempt's accountLabel, never guessed");
+  } finally {
+    dateNowSpy.mock.restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("BEHAVIORAL (W1-T268): a real runTask run whose implement worker commits IN-SCOPE but gh pr create's own output never parses to a url reaches the 'no PR opened' failed verdict carrying billing_mode + account_label", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "runtask-noprurl-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN); // declares files: [src/lib/daemon.ts]
+  const config: Config = { claudeBin: "/bin/true", root };
+  followupGitFixture(root);
+
+  const FIXED_TS = 1785000000011;
+  const branch = `run-T-FOLLOWUP-${FIXED_TS}`;
+  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+  // `gh pr create --fill` echoes text with no matchable PR url — the orchestrator's
+  // own regex (a literal https://github.com/.../pull/<digits>) never matches, so
+  // `prUrl` stays undefined even though the push itself succeeded.
+  const fakeBinDir = mkdtempSync(join(tmpdir(), "runtask-noprurl-bin-"));
+  writeFileSync(
+    join(fakeBinDir, "gh"),
+    ["#!/bin/bash", "if [[ \"$1\" == 'pr' && \"$2\" == 'create' ]]; then echo 'no url in this output'; exit 0; fi", "exit 1", ""].join(
+      "\n",
+    ),
+  );
+  chmodSync(join(fakeBinDir, "gh"), 0o755);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${fakeBinDir}:${savedPath}`;
+
+  let spawnCalls = 0;
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls++;
+    if (spawnCalls === 1) {
+      return result({
+        sessionId: "s-recon",
+        text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
+      });
+    }
+    const g = (a: string[]) => execFileSync("git", ["-C", args.cwd, ...a], { encoding: "utf8" });
+    mkdirSync(join(args.cwd, "src", "lib"), { recursive: true });
+    writeFileSync(join(args.cwd, "src", "lib", "daemon.ts"), "in-scope-edit\n");
+    g(["add", "."]);
+    g(["commit", "--quiet", "-m", "in-scope change, no PR_URL declared"]);
+    return result({ sessionId: "s-implement", accountLabel: "acct-nopr", text: "REPORT\nno PR opened yet\n" });
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+      }),
+    );
+
+    assert.equal(res.verdict, "failed");
+    assert.equal(res.merged, false);
+    assert.equal(res.prUrl, undefined, "gh pr create's output never parsed to a url");
+
+    // The branch DID reach origin — the push succeeded; only PR creation failed to parse.
+    execFileSync("git", ["-C", join(root, "repos", "remudero"), "ls-remote", "--exit-code", "origin", branch], {
+      stdio: "pipe",
+    });
+
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const verdict = ledger.find((l) => l.step === "verdict" && l.reason === "no PR opened");
+    assert.ok(verdict, "the 'no PR opened' failed verdict is ledgered");
+    assert.equal(verdict.verdict, "failed");
+    assert.equal(verdict.billing_mode, "subscription");
+    assert.equal(verdict.account_label, "acct-nopr");
+  } finally {
+    dateNowSpy.mock.restore();
+    process.env.PATH = savedPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("BEHAVIORAL (W1-T268): a real runTask run whose fix rung burns every strike against a `ci` that never goes green reaches 'fix rung exhausted', ledgered with billing_mode + account_label", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "runtask-fixrung-exhausted-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+  followupGitFixture(root);
+
+  const FIXED_TS = 1785000000012;
+  const branch = `run-T-FOLLOWUP-${FIXED_TS}`;
+  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+  const fakeBinDir = statefulFakeGh({
+    branch,
+    // read #1: the OUTER pre-review ci gate (must be green to ever reach the review).
+    // reads #2+: every fix-rung strike's OWN waitForCiGreen/fetchCiFailures poll —
+    // stay red for both strikes (strikeCap defaults to 2), so `deps.runReview` (the
+    // REAL runReview, un-injectable at this call site) is never reached.
+    ciSeq: [[{ name: "ci", conclusion: "SUCCESS" }], [{ name: "ci", conclusion: "FAILURE" }]],
+    stateSeq: ["OPEN"], // never terminal — no stand-down
+    issueUrl: "https://github.com/acme/remudero/issues/900",
+  });
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${fakeBinDir}:${savedPath}`;
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) {
+      return result({
+        sessionId: "s-recon",
+        text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
+      });
+    }
+    if (spawnCalls.length === 2) {
+      // Implement declares its own PR — never dereferenced beyond ownership/ci/review.
+      return result({
+        sessionId: "s-implement",
+        accountLabel: "acct-fixrung",
+        text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/500\n",
+      });
+    }
+    // The fix rung's own strike dispatches (2, at the default strikeCap) — nothing
+    // they say matters here (ci stays red every round via the fake gh above).
+    return result({ sessionId: `s-fix-${spawnCalls.length}`, text: "REPORT\nfix attempted\n" });
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+        runReview: async () => fakeReview("failure", [criterion({ claim: "x", met: false })]),
+      }),
+    );
+
+    assert.equal(res.verdict, "blocked");
+    assert.equal(spawnCalls.length, 4, "recon, implement, and exactly 2 fix-rung strikes (the default strikeCap)");
+
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const verdict = ledger.find((l) => l.step === "verdict" && /fix rung exhausted/.test(String(l.reason ?? "")));
+    assert.ok(verdict, "the fix-rung-exhausted blocked verdict is ledgered");
+    assert.equal(verdict.billing_mode, "subscription");
+    assert.equal(verdict.account_label, "acct-fixrung", "the IMPLEMENT worker's accountLabel, never the fix worker's");
+  } finally {
+    dateNowSpy.mock.restore();
+    process.env.PATH = savedPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("BEHAVIORAL (W1-T268): a real runTask run whose PR goes MERGED before the fix rung's FIRST strike stands down, ledgered with billing_mode + account_label", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "runtask-fixrung-stooddown-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+  followupGitFixture(root);
+
+  const FIXED_TS = 1785000000013;
+  const branch = `run-T-FOLLOWUP-${FIXED_TS}`;
+  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+  const fakeBinDir = statefulFakeGh({
+    branch,
+    ciSeq: [[{ name: "ci", conclusion: "SUCCESS" }]], // green on the outer pre-review gate
+    stateSeq: ["MERGED"], // the rung's VERY FIRST terminal-state read, before any strike
+    issueUrl: "https://github.com/acme/remudero/issues/901",
+  });
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${fakeBinDir}:${savedPath}`;
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) {
+      return result({
+        sessionId: "s-recon",
+        text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
+      });
+    }
+    return result({
+      sessionId: "s-implement",
+      accountLabel: "acct-stooddown",
+      text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/501\n",
+    });
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+        runReview: async () => fakeReview("failure", [criterion({ claim: "x", met: false })]),
+      }),
+    );
+
+    assert.equal(res.verdict, "blocked");
+    assert.equal(spawnCalls.length, 2, "recon + implement only — the rung stood down before spending its FIRST strike");
+
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const verdict = ledger.find((l) => l.step === "verdict" && /stood down/.test(String(l.reason ?? "")));
+    assert.ok(verdict, "the stood-down blocked verdict is ledgered");
+    assert.equal(verdict.billing_mode, "subscription");
+    assert.equal(verdict.account_label, "acct-stooddown");
+  } finally {
+    dateNowSpy.mock.restore();
+    process.env.PATH = savedPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("BEHAVIORAL (W1-T268): a real runTask run all the way to a real MERGED verdict — risk judge PROCEEDS, pollToGate reads MERGED — ledgered with billing_mode + account_label", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "runtask-merged-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+  followupGitFixture(root);
+
+  const FIXED_TS = 1785000000014;
+  const branch = `run-T-FOLLOWUP-${FIXED_TS}`;
+  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+  const fakeBinDir = statefulFakeGh({
+    branch,
+    ciSeq: [[{ name: "ci", conclusion: "SUCCESS" }]],
+    pollSeq: [{ state: "MERGED" }],
+  });
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${fakeBinDir}:${savedPath}`;
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) {
+      return result({
+        sessionId: "s-recon",
+        text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
+      });
+    }
+    if (spawnCalls.length === 2) {
+      return result({
+        sessionId: "s-implement",
+        accountLabel: "acct-merged",
+        text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/600\n",
+      });
+    }
+    // The risk judge's own spawn (the cheapest configured mount, resolved fresh from
+    // THIS repo's real mounts.yaml) — a confident low-risk verdict PROCEEDS.
+    return result({
+      sessionId: "s-risk-judge",
+      text: "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.95\nRISK_REASON: a small, well-tested fixture change\n",
+    });
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+        runReview: async () => fakeReview("success", []),
+      }),
+    );
+
+    assert.equal(res.verdict, "merged");
+    assert.equal(res.merged, true);
+    assert.equal(
+      spawnCalls.length,
+      3,
+      "recon, implement, and the risk judge — no fix rung, no reviewer LLM spawn (review was injected)",
+    );
+
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const verdict = ledger.find((l) => l.step === "verdict" && l.verdict === "merged");
+    assert.ok(verdict, "the merged verdict is ledgered");
+    assert.equal(verdict.billing_mode, "subscription");
+    assert.equal(verdict.account_label, "acct-merged", "the IMPLEMENT worker's accountLabel, never the risk judge's");
+  } finally {
+    dateNowSpy.mock.restore();
+    process.env.PATH = savedPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("BEHAVIORAL (W1-T268): a real runTask run past the risk judge whose FINAL poll reads a red required check reaches the terminal (post-poll) blocked_ci verdict, ledgered with billing_mode + account_label", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "runtask-blockedci-final-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+  followupGitFixture(root);
+
+  const FIXED_TS = 1785000000015;
+  const branch = `run-T-FOLLOWUP-${FIXED_TS}`;
+  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+  const fakeBinDir = statefulFakeGh({
+    branch,
+    ciSeq: [[{ name: "ci", conclusion: "SUCCESS" }]],
+    pollSeq: [{ state: "OPEN", statusCheckRollup: [{ name: "ci", conclusion: "FAILURE" }] }],
+  });
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${fakeBinDir}:${savedPath}`;
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) {
+      return result({
+        sessionId: "s-recon",
+        text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
+      });
+    }
+    if (spawnCalls.length === 2) {
+      return result({
+        sessionId: "s-implement",
+        accountLabel: "acct-blockedci-final",
+        text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/601\n",
+      });
+    }
+    return result({
+      sessionId: "s-risk-judge",
+      text: "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.95\nRISK_REASON: a small, well-tested fixture change\n",
+    });
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+        runReview: async () => fakeReview("success", []),
+      }),
+    );
+
+    assert.equal(res.verdict, "blocked_ci");
+    assert.equal(res.merged, false);
+
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const verdict = ledger.find(
+      (l) => l.step === "verdict" && l.verdict === "blocked_ci" && /required check red/.test(String(l.reason ?? "")),
+    );
+    assert.ok(verdict, "the terminal (post-poll) blocked_ci verdict is ledgered — distinct from the pre-review one");
+    assert.equal(verdict.billing_mode, "subscription");
+    assert.equal(verdict.account_label, "acct-blockedci-final");
+  } finally {
+    dateNowSpy.mock.restore();
+    process.env.PATH = savedPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ── `rmd review --repo` targets a repo OTHER than the checkout (remudero-sandbox for the
 // daemon's live commissioning). Without it the CLI was pinned to repoRoot's origin. ──
 test("resolveReviewTarget: no flag ⇒ the checkout default; --repo overrides (bare name keeps owner; owner/name overrides both)", () => {

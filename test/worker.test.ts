@@ -314,11 +314,14 @@ test("collectWorkerResult: tokens zero out (never crash) when a synthetic/older 
   assert.deepEqual(r.modelUsage, {});
 });
 
-test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_input_tokens, cache_creation_input_tokens, total_cost_usd, billing_mode, verdict, quality_suspect, compaction_events} with billing_mode='subscription', verdict='success', quality_suspect=false", async () => {
+test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_input_tokens, cache_creation_input_tokens, total_cost_usd, billing_mode, account_label, verdict, quality_suspect, compaction_events} with billing_mode='subscription', verdict='success', quality_suspect=false", async () => {
   const r = await collectWorkerResult(usageStream(), {
     childEnvKeys: [],
     model: "claude-opus-4",
     effort: "high",
+    // W1-T268: the account this call's spend is attributed to — a NAME, carried
+    // verbatim onto the ledger fields below, never a secret.
+    accountLabel: "acct-uuid-123",
   });
   const fields = workerLedgerFields(r);
   assert.deepEqual(fields, {
@@ -329,11 +332,18 @@ test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_in
     cache_creation_input_tokens: 50,
     total_cost_usd: 1.23,
     billing_mode: "subscription",
+    account_label: "acct-uuid-123",
     verdict: "success",
     quality_suspect: false,
     compaction_events: [],
   });
   assert.equal(BILLING_MODE, "subscription");
+});
+
+test("workerLedgerFields: account_label is undefined (never guessed) when spawnWorker could not resolve one", async () => {
+  const r = await collectWorkerResult(usageStream(), { childEnvKeys: [], model: "claude-opus-4", effort: "high" });
+  const fields = workerLedgerFields(r);
+  assert.equal(fields.account_label, undefined);
 });
 
 test("workerLedgerFields: billing_mode is DERIVED 'api' when the child spawned WITH the ANTHROPIC_API_KEY valve (childEnvKeys carries the NAME, never the value)", async () => {

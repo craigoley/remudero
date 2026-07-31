@@ -97,6 +97,16 @@ export interface WorkerResult {
   /** The exact env the child was spawned with (billing-boundary proof). */
   childEnvKeys: string[];
   /**
+   * W1-T268: the Anthropic account this call's spend is attributed to — the SAME
+   * `accountUuid`/`emailAddress` NAME (never a secret) {@link resolveActiveAccountId}
+   * resolves and W1-T265's `ensureWorkerKeychain` already compares for identity
+   * drift. Resolved fresh per spawn, regardless of platform, so every ledger line
+   * carrying a spend figure can also carry the account it was drawn against.
+   * `undefined` when no identity could be resolved (e.g. no `~/.claude.json`) —
+   * never guessed.
+   */
+  accountLabel?: string;
+  /**
    * The model this call was CONFIGURED to run — an INPUT (the caller's
    * `SpawnWorkerArgs.model`, mount-resolved for implement, unset elsewhere),
    * never a read-back off the envelope (`DEFAULT_MODEL_LABEL` when unspecified).
@@ -223,6 +233,7 @@ export function workerLedgerFields(r: WorkerResult): {
   cache_creation_input_tokens: number;
   total_cost_usd: number;
   billing_mode: BillingMode;
+  account_label?: string;
   verdict: string;
   quality_suspect: boolean;
   compaction_events: CompactionEvent[];
@@ -237,6 +248,11 @@ export function workerLedgerFields(r: WorkerResult): {
     ...cacheTokenLedgerFields(r.tokens),
     total_cost_usd: r.costUsd,
     billing_mode: billingMode(r.childEnvKeys),
+    // W1-T268: the account this spend is attributed to — a NAME (never a
+    // credential), same discipline `billing_mode` above already keeps. Carried
+    // verbatim off `WorkerResult.accountLabel`; `undefined` (never guessed) when
+    // spawnWorker could not resolve one.
+    account_label: r.accountLabel,
     verdict: r.isError ? r.subtype : "success",
     quality_suspect: r.qualitySuspect,
     compaction_events: r.compactionEvents,
@@ -632,13 +648,16 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // zero-write death reads as "containment UNPROVEN" (the 2026-07-21 incident).
     let workerKeychainPath: string | undefined;
     const platform = args.keychain?.platform ?? process.platform;
+    // W1-T265/W1-T268: resolve fresh, per spawn, regardless of platform — never
+    // captured once at boot, matching account-usage.ts's own "identity is read
+    // fresh" doctrine (that module is the reason this reads accountUuid/
+    // emailAddress here rather than the keychain's own `acct` attribute, which it
+    // measured to be the OS username and therefore not a discriminator across an
+    // Anthropic account switch). Computed unconditionally (not just under the
+    // darwin keychain gate below) so every WorkerResult — on any platform — can
+    // carry the account its spend is attributed to (W1-T268's ledger dimension).
+    const accountId = args.keychain?.accountId ?? resolveActiveAccountId();
     if (platform === "darwin") {
-      // W1-T265: resolve fresh, per spawn — never captured once at boot, matching
-      // account-usage.ts's own "identity is read fresh" doctrine (that module is
-      // the reason this reads accountUuid/emailAddress here rather than the
-      // keychain's own `acct` attribute, which it measured to be the OS username
-      // and therefore not a discriminator across an Anthropic account switch).
-      const accountId = args.keychain?.accountId ?? resolveActiveAccountId();
       workerKeychainPath = ensureWorkerKeychain({
         ...workerKeychainPaths(join(config.root, "state")),
         loginKeychainPath: join(realHome, "Library", "Keychains", "login.keychain-db"),
@@ -729,6 +748,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
           // billed). Unset ⇒ the honest "default" label, never a guessed value.
           model: args.model ?? DEFAULT_MODEL_LABEL,
           effort: args.effort ?? DEFAULT_EFFORT_LABEL,
+          accountLabel: accountId,
         }),
       teardownContained,
     );
@@ -766,6 +786,8 @@ export async function collectWorkerResult(
     model?: string;
     /** Configured input, logged verbatim — defaults to `DEFAULT_EFFORT_LABEL`. */
     effort?: string;
+    /** W1-T268: the account this call's spend is attributed to — see {@link WorkerResult.accountLabel}. */
+    accountLabel?: string;
   },
 ): Promise<WorkerResult> {
   const blocks: string[] = [];
@@ -880,6 +902,7 @@ export async function collectWorkerResult(
     apiError,
     permissionDenials,
     childEnvKeys: opts.childEnvKeys,
+    accountLabel: opts.accountLabel,
     model: opts.model ?? DEFAULT_MODEL_LABEL,
     effort: opts.effort ?? DEFAULT_EFFORT_LABEL,
     tokens,
