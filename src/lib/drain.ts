@@ -70,6 +70,25 @@ export interface NextRunnableOpts {
    */
   onCircuitBreak?: (task: Task) => void;
   /**
+   * THE LIFETIME DISPATCH CAP (W1-T271): true when this task has been dispatched
+   * (status.ts's `isLifetimeDispatchCapExceeded`, ledger-derived, `run.start`
+   * lines counted across the task's WHOLE history) the policy-capped number of
+   * times, EVER — a SECOND, independent backstop alongside `isCircuitTripped`,
+   * never a replacement for it. `isCircuitTripped`'s own count resets to 0 on
+   * every new owned PR, which is correct for the failure it guards but makes it
+   * blind to a task that re-dispatches forever while merging a genuine no-op PR
+   * each time (the W1-T254 incident this cap exists to catch); this count is
+   * never reset by anything. Optional — omitted, dispatch behaves exactly as
+   * before this cap existed.
+   */
+  isLifetimeCapExceeded?: (taskId: string) => boolean;
+  /**
+   * Called once per task excluded because its lifetime dispatch cap is
+   * exceeded, in place of dispatching it — mirrors `onCircuitBreak`'s
+   * legibility contract for the streak breaker.
+   */
+  onLifetimeCapExceeded?: (task: Task) => void;
+  /**
    * W1-T177 (TERMINAL-STATE CHECK AT EVERY SPENDING SITE): an OPTIONAL fresh
    * re-read of ONE candidate in-flight PR's live GitHub state, consulted
    * ONLY when `isOpenPr` reports a task in-flight — CONFIRMS, with a read
@@ -141,6 +160,14 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
   // fix even if that fix is somehow wrong.
   if (opts.isCircuitTripped?.(t.id)) {
     opts.onCircuitBreak?.(t);
+    return false;
+  }
+  // LIFETIME DISPATCH CAP (W1-T271) — checked right alongside the streak breaker
+  // above, never in its place: a task that keeps re-dispatching while merging a
+  // genuine no-op PR each time resets the streak breaker's count on every merge
+  // and would otherwise never trip anything.
+  if (opts.isLifetimeCapExceeded?.(t.id)) {
+    opts.onLifetimeCapExceeded?.(t);
     return false;
   }
   const openPrNumber = opts.isOpenPr?.(t.id);
