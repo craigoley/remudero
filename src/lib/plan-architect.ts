@@ -177,7 +177,36 @@ function step3Instructions(mode: PlanMode, brief: string): string[] {
  * verdict markers {@link parsePlanVerdict} anchors on. The worker has NO Bash — it only edits
  * files; the caller (run-task.ts) owns commit/push/PR.
  */
-export function planArchitectPrompt(mode: PlanMode, brief: string, runId: string): string {
+/**
+ * The reserved-id contract handed to the plan worker (impl-DV).
+ *
+ * The harness mints and RESERVES the ids before spawning — the same ordering `rmd triage` uses — so
+ * the worker never chooses one by reading the plan files. That eyeball path is what produced the
+ * duplicate-id collisions the reservation mechanism (PR #1075) exists to stop: two lanes reading the
+ * same plan blob at the same moment both compute the same "next" number.
+ *
+ * Empty list ⇒ emit nothing, so a caller that reserves nothing keeps the pre-impl-DV prompt exactly.
+ */
+function reservedIdsInstructions(reservedIds: string[]): string[] {
+  if (reservedIds.length === 0) return [];
+  return [
+    "=== RESERVED TASK IDS ===",
+    `The harness has RESERVED these ids for this run: ${reservedIds.join(", ")}.`,
+    "If you file tasks, use them IN THIS ORDER, starting at the first. Do NOT invent an id, do not",
+    "renumber, and do not read the plan to pick one — an id you choose yourself is unreserved and",
+    "another lane may be filing it at this very moment. Filing fewer than the reserved count is",
+    `normal and costs nothing. You may file AT MOST ${reservedIds.length} new task(s) in this run;`,
+    "if the work genuinely needs more, file the first ones and say so in your PROPOSED line.",
+    "",
+  ];
+}
+
+export function planArchitectPrompt(
+  mode: PlanMode,
+  brief: string,
+  runId: string,
+  reservedIds: string[] = [],
+): string {
   return [
     "You are the REMUDERO ARCHITECT running the unified PLAN skill (MASTER-PLAN §5B) in",
     `--mode=${mode}. You ride a HIGHER tier than implement workers (G-17). You do NOT have a`,
@@ -197,6 +226,7 @@ export function planArchitectPrompt(mode: PlanMode, brief: string, runId: string
     "=== STEP 3 — CLEAR, GRILL, OR PROPOSE ===",
     ...step3Instructions(mode, brief),
     "",
+    ...reservedIdsInstructions(reservedIds),
     "Exactly one of CLEAR / GRILL / PROPOSED must be the LAST line of your output. Whenever you",
     "add or rewire a `plan/tasks.yaml` task, only touch `plan/tasks.yaml` and/or",
     "`MASTER-PLAN.md` — NEVER `src/` or `test/`. Do NOT touch docs/ORIENTATION.md.",
@@ -291,6 +321,32 @@ export function outOfPlanScopeFilesInDiff(diff: string): string[] {
  *  triage's `diffCitesFeedback`; a gap-filling task with no citation is a guess, not a proposal. */
 export function diffCitesResearchSource(diff: string): boolean {
   return /https?:\/\/\S+/.test(diff);
+}
+
+/**
+ * Task ids the worker's diff ADDS which the harness did not reserve for this run (impl-DV).
+ *
+ * This is the output-validation half of the mint-and-reserve contract: reserving ids is worthless if
+ * nobody checks the worker used them. It reads ADDED `- id: W1-T<n>` lines out of the unified diff
+ * and returns those outside `reservedIds`, order-preserving and de-duplicated.
+ *
+ * REPORT-ONLY BY CONSTRUCTION. It is deliberately NOT wired into {@link decidePlanArchitect}: an
+ * unreserved id is not necessarily a collision (it may simply be free), and a genuine duplicate is
+ * already refused downstream by `lint-plan`'s duplicate-id check on the PR. Escalating it here would
+ * change what `rmd plan` DECIDES, which impl-DV is explicitly scoped out of. The caller ledgers it,
+ * so the eyeball path leaves a trace instead of being invisible.
+ */
+export function unreservedFiledIds(diff: string, reservedIds: string[]): string[] {
+  const reserved = new Set(reservedIds);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of diff.matchAll(/^\+\s*-\s*id:\s*(W\d+-T\S+)/gm)) {
+    const id = m[1];
+    if (reserved.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
 }
 
 // ── Deterministic decision (pure) ────────────────────────────────────────────
