@@ -101,7 +101,7 @@ drain:
 # that night. maxPerDay is what makes the worst case a number the operator can accept in advance.
 autoTriage:
   enabled:
-    value: false
+    value: true
     origin: "net-new"   # a rung that spends unsupervised is opted into, never shipped on
   minIntervalMinutes:
     value: 60

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { daemonCommand, triageCommand } from "../src/run-task.js";
 import { acquireDrainLock } from "../src/lib/drain-lock.js";
 import { triageLockPath } from "../src/lib/auto-triage.js";
+import { loadPolicy, policyPath } from "../src/lib/policy.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 
 // ── impl-DM: the auto-triage rung's PRODUCER is wired into daemonCommand ──────────────────
@@ -73,26 +74,71 @@ test("REACHABILITY: daemonCommand actually WIRES checkAutoTriage into the deps i
   }
 });
 
-test("DEFAULT OFF THROUGH THE WIRING: the wired hook refuses to fire with the policy flag absent", async () => {
-  // The bound that matters most for spend: ~$2.00 a fire. Proven through the REAL wired hook, not
-  // by calling decideAutoTriage with a hand-made policy object.
+test("THE FLAG IS OBEYED THROUGH THE WIRING: the wired hook's decision tracks the checked-in policy", async () => {
+  // The bound that matters most for spend: ~$2.00 a fire. Proven through the REAL wired hook.
+  //
+  // THIS TEST USED TO BE COUPLED TO THE SHIPPED VALUE. It was titled "with the policy flag ABSENT"
+  // and asserted `fire === false`, but `fixtureHome` writes no policy.yaml at all — and
+  // `autoTriageCheck` reads `policyPath(repoRoot)`, where `repoRoot` is resolved from the TEST
+  // PROCESS's own cwd (run-task.ts). So it read the repo's CHECKED-IN plan/policy.yaml and was
+  // really asserting "the shipped default is false". It passed by coincidence of that value, and
+  // flipping the flag for real broke it — a test failing for the one reason it should not care
+  // about. The absent-block default it CLAIMED to cover is asserted directly below, where that
+  // semantics actually lives.
+  //
+  // What is invariant, and what this now pins: the wired hook DERIVES its answer from that policy
+  // file. Asserted in both directions so it holds whichever way the flag is set.
   const { home, planPath } = fixtureHome();
   const oldHome = process.env.HOME;
   process.env.HOME = home;
   try {
     const deps = await captureDeps(planPath);
     const decision = deps.checkAutoTriage!();
+    const shipped = loadPolicy(policyPath(process.cwd())).values.autoTriage;
 
-    assert.equal(decision.fire, false, "with no autoTriage block in policy the rung must not fire");
-    assert.match(
-      (decision as { reason: string }).reason,
-      /disabled/,
-      "and it must say the flag is why, not some incidental refusal that would vanish if the flag flipped",
-    );
+    if (!shipped.enabled) {
+      assert.equal(decision.fire, false, "flag off in the checked-in policy ⇒ the wired rung must not fire");
+      assert.match(
+        (decision as { reason: string }).reason,
+        /disabled/,
+        "and it must say the FLAG is why, not some incidental refusal that would vanish if the flag flipped",
+      );
+    } else {
+      // Flag on: the rung may still legitimately refuse (lock held, marker unreadable, no
+      // candidates) — but it must never refuse for the DISABLED reason, which would mean the wiring
+      // is not reading the flag it claims to read.
+      assert.doesNotMatch(
+        (decision as { reason?: string }).reason ?? "",
+        /disabled/,
+        "flag on in the checked-in policy ⇒ the wired rung must not claim it is disabled",
+      );
+    }
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("DEFAULT OFF: a policy.yaml with no autoTriage block loads as disabled", () => {
+  // The absent-block default, asserted where it actually lives (policy.ts's loader) rather than
+  // through a daemon fixture that never had a policy.yaml to omit the block FROM. Absence must mean
+  // OFF: a rung that spends unsupervised is opted into, never inherited by an older policy file.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-auto-triage-default-"));
+  try {
+    const shipped = readFileSync(policyPath(process.cwd()), "utf8");
+    const withoutBlock = shipped.replace(/^autoTriage:\n(?:[ \t].*\n|\n)*/m, "");
+    assert.ok(!/^autoTriage:/m.test(withoutBlock), "the fixture really has no autoTriage block");
+
+    const file = join(dir, "policy.yaml");
+    writeFileSync(file, withoutBlock);
+    const values = loadPolicy(file).values.autoTriage;
+
+    assert.equal(values.enabled, false, "absence means OFF");
+    assert.equal(values.minIntervalMinutes, 60);
+    assert.equal(values.maxPerDay, 4);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
