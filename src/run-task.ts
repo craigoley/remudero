@@ -5437,9 +5437,18 @@ export async function nextTaskIdCommand(rest: string[]): Promise<number> {
   // asking "what is next" a hundred times must not burn a hundred ids — and a reservation held by
   // a process that exits microseconds later reserves nothing anyway. Reporting a number and
   // claiming it are different acts; only the caller that will actually FILE should claim.
-  const free = firstUnreservedAtOrAbove(mint.n, taskIdReservationsDir(loadConfig().root));
-  if (free !== mint.n)
-    console.log(`(${mint.id} is RESERVED by a live minter — the next unreserved id is W1-T${free})`);
+  // BEST-EFFORT, unlike the triage path's loud reservation. This verb is a READ that spawns
+  // nothing, so an unreadable config or state dir must degrade to "no reservation notice" rather
+  // than crash the operator's query — `loadConfig()` throws on an absent/empty config file, which
+  // is the normal case in CI and in any fixture-only checkout. The LOUD-on-failure rule applies to
+  // the caller that is about to SPEND, not to the one that is about to PRINT.
+  try {
+    const free = firstUnreservedAtOrAbove(mint.n, taskIdReservationsDir(loadConfig().root));
+    if (free !== mint.n)
+      console.log(`(${mint.id} is RESERVED by a live minter — the next unreserved id is W1-T${free})`);
+  } catch {
+    /* no readable reservation store ⇒ report the mint alone, exactly as before this existed */
+  }
   if (offline) console.log("(--offline: open plan PRs were NOT read — this id is a floor, not a guarantee)");
   return mint.degraded.length ? 1 : 0;
 }

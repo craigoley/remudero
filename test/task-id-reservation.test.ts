@@ -131,6 +131,32 @@ test("a missing reservation directory reads as nothing reserved rather than thro
   assert.equal(firstUnreservedAtOrAbove(42, dir), 42);
 });
 
+test("nextTaskIdCommand still exits 0 when the config — and so the reservation store — is unreadable", async (t) => {
+  // THE CI REGRESSION (caught by `ci` on the first push of this change, missed by every scoped
+  // local run because THIS host has a valid config): `loadConfig()` JSON.parses a file that a
+  // fresh HOME leaves EMPTY, throwing "Unexpected end of JSON input". The reservation READ must
+  // degrade to silence — an advisory verb that spawns nothing must never crash an operator's
+  // query because the state directory is unreachable. The LOUD rule is for the caller about to
+  // SPEND, and that path is deliberately not softened.
+  const home = scratch();
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), ""); // exactly CI's shape
+  const realHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => {
+    process.env.HOME = realHome;
+  });
+
+  const planDir = scratch();
+  mkdirSync(join(planDir, "plan"), { recursive: true });
+  const planPath = join(planDir, "plan", "tasks.yaml");
+  writeFileSync(planPath, "- id: W1-T5\n");
+  t.mock.method(console, "log", () => {});
+
+  const { nextTaskIdCommand } = await import("../src/run-task.js");
+  assert.equal(await nextTaskIdCommand(["--plan", planPath, "--offline"]), 0);
+});
+
 test("the reservation record is human-readable and names its purpose for the operator", () => {
   const dir = join(scratch(), "task-id-reservations");
   const handle = reserveTaskIdFrom(281, dir, { isPidAlive: ALIVE, info: { purpose: "rmd triage fb-abc (run R1)" } });
