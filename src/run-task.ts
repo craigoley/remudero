@@ -573,7 +573,18 @@ export function syncPlanFromOrigin(
   }
   let blob: string;
   try {
-    blob = execFileSync("git", ["-C", repoDir, "show", `origin/main:${relPath}`], { encoding: "utf8" });
+    // maxBuffer: THE DISPATCH PATH READS THIS BLOB. `plan/tasks.yaml` measured 977,168 bytes on
+    // 2026-08-01 — 93.2% of Node's 1 MiB `execFileSync` default — and it grows ~1 KB per task
+    // filed. At 1 MiB this `git show` fails ENOBUFS, the catch below turns that into a
+    // GitFetchError, and the daemon STOPS DISPATCHING. It does not degrade and leaves no floor,
+    // which is what makes this more urgent than the identical one-line fix in #1056.
+    // 1 << 26 (64 MiB) is this file's own idiom for exactly this class (:1481, :5047, :5278,
+    // :6087) and buys ~65x headroom. Sharding the monolith is a separate, larger change — and no
+    // amount of sharding makes an unbuffered read of an arbitrarily large blob safe.
+    blob = execFileSync("git", ["-C", repoDir, "show", `origin/main:${relPath}`], {
+      encoding: "utf8",
+      maxBuffer: 1 << 26,
+    });
   } catch (err) {
     throw new GitFetchError(`git show origin/main:${relPath} failed in ${repoDir}: ${String(err)}`);
   }
@@ -5475,6 +5486,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       const oldRaw = execFileSync("git", ["show", `${baseRef}:${relPath}`], {
         cwd: repoRoot,
         encoding: "utf8",
+        // maxBuffer: the SAME blob syncPlanFromOrigin reads at :576, so it overflows Node's 1 MiB
+        // default at the same moment — fixing one site alone would just move the failure to CI.
+        maxBuffer: 1 << 26,
       });
       const tmpFile = join(tmpDir, "tasks.yaml");
       writeFileSync(tmpFile, oldRaw, "utf8");
