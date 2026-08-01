@@ -183,8 +183,25 @@ test("W1-T208 claim 2: an unparseable lock is reported DISTINCTLY from an absent
 
 // ── Claim 3: the two-minute prune grace still applies unchanged after the fix ────────
 
-test("W1-T208 claim 3: DEFAULT_PRUNE_GRACE_MS is still exactly two minutes", () => {
-  assert.equal(DEFAULT_PRUNE_GRACE_MS, 120_000, "the two-minute prune grace must not silently drift");
+test("W1-T208 claim 3: the prune grace is a real window, so the three tests below are not vacuous", () => {
+  // THIS USED TO ASSERT `DEFAULT_PRUNE_GRACE_MS === 120_000`. That hardcoded the shipped policy
+  // value into a suite about run-lock semantics: `worker.ts`'s constant now resolves from
+  // `plan/policy.yaml`'s `pruneGraceMs` (W1-T253), so retuning it in a reviewed plan PR broke a test
+  // that has nothing to do with the tuning. It is the same coupling that had
+  // test/auto-triage-wiring.test.ts asserting the shipped flag while its title claimed it was
+  // testing a fixture (#1093) — measured by perturbing every policy value and seeing which suites
+  // moved.
+  //
+  // THE VALUE IS STILL PINNED, where that belongs: test/policy-consumers.test.ts asserts
+  // `DEFAULT_PRUNE_GRACE_MS === SHIPPED.values.pruneGraceMs` AND `=== 120_000`, against the policy
+  // file itself. Duplicating it here bought nothing and cost a false failure on a legitimate retune.
+  //
+  // What claim 3 needs from this suite is weaker and genuinely local: the grace must be a POSITIVE
+  // window. The three tests below drive `pruneStaleRuns` with this exact value and assert that a
+  // lock INSIDE the window survives — at a grace of 0 there is no inside, they would pass without
+  // exercising anything, and the regression they exist to catch would sail through.
+  assert.ok(Number.isFinite(DEFAULT_PRUNE_GRACE_MS), "the grace must be a real number");
+  assert.ok(DEFAULT_PRUNE_GRACE_MS > 0, "a zero grace would make the within-window tests below vacuous");
 });
 
 test("W1-T208 claim 3: the prune grace protects a CORRUPT (torn-read-shaped) lock exactly like a lockless worktree", () => {
