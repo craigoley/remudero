@@ -21,6 +21,7 @@ usage:
   rmd lint-plan [--plan <path>] [--base <git-ref>]   # §5C Layer A: deterministic task linter (sizing/headless-fitness/proof-shape/provenance); --base scopes to task ids NEW/CHANGED vs that ref (CI mode), omitted = whole plan; exits non-zero on any blocking violation, spawns nothing
   rmd preflight [--from <ref>] [--to <ref>]   # W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; exits non-zero if any step fails, after every step has run and reported
   rmd next-task-id [--plan <path>] [--offline]   # print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing
+  rmd check-proof <proof>   # run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). READ-ONLY: writes no cache, no ledger line, no state file
   rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)
   rmd drain [--until <id>] [--max <n>] [--repo <name>] [--curated <path>] [--dry-run] [--allow-stale]   # drain the DAG through run-task, dispatching from the origin/main plan blob (W1-T60); --repo scopes the merged-status gateway to <owner>/<name> (defaults to this checkout's own repo, like the daemon path) — the plan itself is always read from THIS checkout; --curated <path> names a JSON {taskIds, depth} file (the drain preview panel's curated selection, W1-T140) that overrides the natural DAG order entirely — dispatch honors EXACTLY that reordered/unselected subset, and --dry-run --curated previews it
   rmd daemon --repo <name> [--plan <path>] [--max <n>] [--poll-ms <n>] [--dry-run] [--allow-self-target] [--allow-stale]   # persistent scheduler loop; --repo picks the repo to drain + its gateway (e.g. remudero-sandbox for W1-T12d). Refuses to drain its OWN source repo unattended without --allow-self-target. --dry-run previews the target + planned tasks, spawns nothing. Self-hosting reads the plan from origin/main (W1-T60); --allow-stale proceeds on the last-fetched refs if the fetch fails.
@@ -114,6 +115,14 @@ rmd next-task-id [--plan <path>] [--offline]
 ```
 
 print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing
+
+### `rmd check-proof`
+
+```
+rmd check-proof <proof>
+```
+
+run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). READ-ONLY: writes no cache, no ledger line, no state file
 
 ### `rmd retro`
 
