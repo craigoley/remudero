@@ -289,6 +289,14 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  * proves those never gate a real decision — its `&& projection.prUrl` guard is a no-op for
  * every case a `run.start`/`pr.opened` line (both already covered above) didn't already set.
  *
+ * ALSO deliberately EXCLUDES `daemon.headroom` and `console.kick_refused`/
+ * `console.kick_dispatched` (W1-T275) even though real consumers read them
+ * (account-usage.ts's governor posture, board.ts's RECENT operator-action feed) — those reads
+ * render OPERATOR-VISIBLE HISTORY, not a decision this codebase makes, so widening THIS set
+ * (the never-rotated core) to cover them would trade a bounded-retention bug for unbounded
+ * growth. See {@link RENDER_RELEVANT_LEDGER_STEPS} below for the separate, recency-bounded
+ * category that covers them instead.
+ *
  * THIS LIST IS NOT SELF-CERTIFYING. It failed once already — "review.posted" and
  * "automerge.capped_override_granted" were both real deciding reads this list omitted until
  * the review round that caught it — which is exactly the "hardcoded to a stale list" failure
@@ -358,6 +366,55 @@ function isHealthOrDeployStep(step: string): boolean {
  *  line still inside their window, while still bounding a restart-storm's boot count (roughly
  *  1/minute) to a small, ceiling-safe number instead of retaining it forever. */
 export const HEALTH_STEP_RETENTION_WINDOW_MS = 15 * 60 * 1000;
+
+/**
+ * RENDER-RELEVANT, not decision-relevant: consulted by the console to render OPERATOR-VISIBLE
+ * HISTORY (the ACCOUNT strip's governor posture, the RECENT feed's operator-action row) rather
+ * than to make a daemon-side decision. W1-T275 (OBSERVED LIVE 2026-07-31): the ACCOUNT strip
+ * read "unknown" on a healthy fleet because `daemon.headroom` was absent from
+ * {@link DECISION_RELEVANT_LEDGER_STEPS} and rotation archived every line of it. Widening that
+ * set to cover these would silently trade one failure for another — it is the never-rotated
+ * core, so a render-only step added there is retained FOREVER, not for as long as the console
+ * actually needs it. These instead get their OWN recency-bounded category, the same treatment
+ * `daemon.boot`/`deploy.*` already get via {@link isHealthOrDeployStep}/
+ * {@link HEALTH_STEP_RETENTION_WINDOW_MS} above, so a rotation still bounds retained growth
+ * while the console keeps rendering.
+ *
+ * Consumers, and why each step is here:
+ *   src/lib/account-usage.ts `deriveGovernorPosture` reads the NEWEST `daemon.headroom` line
+ *     for the ACCOUNT strip's governor posture (`line.step !== "daemon.headroom"` guard).
+ *   src/lib/board.ts's `OPERATOR_ACTION_STEPS` / `classifyLine` read `console.kick_refused` and
+ *     `console.kick_dispatched` for the RECENT feed's operator-action row (`case "console.kick_refused":` /
+ *     `case "console.kick_dispatched":`).
+ *
+ * `test/ledger-render-retention.test.ts` re-derives this set from account-usage.ts's and
+ * board.ts's own source on every run — the same "derived from consumers, not hardcoded"
+ * doctrine `test/ledger-rotation.test.ts` already applies to `DECISION_RELEVANT_LEDGER_STEPS`
+ * above — and fails if this Set falls behind it.
+ */
+export const RENDER_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
+  "daemon.headroom",
+  "console.kick_refused",
+  "console.kick_dispatched",
+]);
+
+/** True for any step in {@link RENDER_RELEVANT_LEDGER_STEPS}. */
+function isRenderRelevantStep(step: string): boolean {
+  return RENDER_RELEVANT_LEDGER_STEPS.has(step);
+}
+
+/**
+ * How far back a render-relevant step survives rotation. SIZED FROM THE CONSUMER, not for
+ * convenience (this task's own design note): account-usage.ts's `deriveAccountUsage` already
+ * declares the ACCOUNT strip's own staleness bound as `USAGE_CACHE_MAX_AGE_MS` (30 minutes) —
+ * the newest `daemon.headroom` line older than that already reads as stale to the strip, so
+ * retaining anything LESS than that window here would guarantee the strip reads "unknown"
+ * immediately after a rotation, before its own staleness check would ever have kicked in. The
+ * value is restated rather than imported: account-usage.ts -> status.ts -> escalate.ts ->
+ * ledger.ts (appendLedger) already forms a chain back to this module, so importing from
+ * account-usage.ts here would be circular.
+ */
+export const RENDER_STEP_RETENTION_WINDOW_MS = 30 * 60 * 1000;
 
 /** Hard cap on how many lines of any single decision-relevant `step` `rotateLedger` retains,
  *  EXCLUDING `sweep.disposed` (its own per-`pr@head` dedup below supersedes a flat count cap)
@@ -466,7 +523,10 @@ export interface LedgerRotationResult {
   archivePath?: string;
   /** Lines relocated to the archive because they were neither decision-relevant nor parseable. */
   archivedLineCount?: number;
-  /** Lines retained live — exactly the ones matching {@link DECISION_RELEVANT_LEDGER_STEPS}, plus anything appended after the snapshot (see doc below). */
+  /** Lines retained live — the ones matching {@link DECISION_RELEVANT_LEDGER_STEPS}, plus any
+   *  health/render-relevant line still inside its own retention window (see
+   *  {@link HEALTH_STEP_RETENTION_WINDOW_MS}/{@link RENDER_STEP_RETENTION_WINDOW_MS}), plus
+   *  anything appended after the snapshot (see doc below). */
   retainedLineCount?: number;
 }
 
@@ -522,25 +582,39 @@ export function rotateLedger(
     .filter((raw) => raw.trim() !== "")
     .map(parseLedgerLine);
 
-  // ── PASS 1: classify — decision/health-relevant candidates vs pure noise (unchanged from
-  // W1-T209: a torn or non-decision-relevant line is archivable). ─────────────────────────
+  // ── PASS 1: classify — decision/health/render-relevant candidates vs pure noise (unchanged
+  // from W1-T209 for decision/health; W1-T275 adds render-relevant so daemon.headroom/
+  // console.kick_refused/console.kick_dispatched survive into PASS 2's window bound below
+  // instead of being archived here as if they were noise). ────────────────────────────────
   let candidates: ParsedLedgerLine[] = [];
   for (const parsed of originalOrder) {
-    if (parsed.step && (DECISION_RELEVANT_LEDGER_STEPS.has(parsed.step) || isHealthOrDeployStep(parsed.step))) {
+    if (
+      parsed.step &&
+      (DECISION_RELEVANT_LEDGER_STEPS.has(parsed.step) ||
+        isHealthOrDeployStep(parsed.step) ||
+        isRenderRelevantStep(parsed.step))
+    ) {
       candidates.push(parsed);
     } else {
       archivedLineCount++;
     }
   }
 
-  // ── PASS 2: health-window bound — daemon.boot/deploy.* are heartbeats, not one-shot
-  // decisions; only the recent ones (see HEALTH_STEP_RETENTION_WINDOW_MS) are retained, so a
-  // restart-storm's boot spam cannot itself bloat the retained core (W1-T244). A line with no
-  // parseable `ts` is kept rather than guessed away — absence is never proof of staleness. ──
+  // ── PASS 2: recency-window bound — daemon.boot/deploy.* (health) and daemon.headroom/
+  // console.kick_refused/console.kick_dispatched (render, W1-T275) are heartbeats/history, not
+  // one-shot decisions; only the recent ones (their own window — HEALTH_STEP_RETENTION_WINDOW_MS or
+  // RENDER_STEP_RETENTION_WINDOW_MS) are retained, so neither a restart-storm's boot spam
+  // (W1-T244) nor an unbounded run of headroom heartbeats can itself bloat the retained core.
+  // A line with no parseable `ts` is kept rather than guessed away — absence is never proof of
+  // staleness. ──────────────────────────────────────────────────────────────────────────────
   candidates = candidates.filter((p) => {
-    if (!p.step || !isHealthOrDeployStep(p.step)) return true;
+    if (!p.step) return true;
+    const isHealth = isHealthOrDeployStep(p.step);
+    const isRender = isRenderRelevantStep(p.step);
+    if (!isHealth && !isRender) return true;
     if (p.tsMs === undefined) return true;
-    const withinWindow = nowMs - p.tsMs <= HEALTH_STEP_RETENTION_WINDOW_MS;
+    const windowMs = isHealth ? HEALTH_STEP_RETENTION_WINDOW_MS : RENDER_STEP_RETENTION_WINDOW_MS;
+    const withinWindow = nowMs - p.tsMs <= windowMs;
     if (!withinWindow) archivedLineCount++;
     return withinWindow;
   });
@@ -579,8 +653,8 @@ export function rotateLedger(
   // pr.opened, ...) to the newest MAX_RETAINED_LINES_PER_STEP lines. W1-T244's root cause: this
   // set is otherwise unbounded — every run appends more, so over enough runs the retained core
   // alone eventually exceeds the ceiling and every append re-rotates forever. sweep.disposed
-  // (deduped above) and health/deploy steps (window-bounded above) already have their own
-  // bound and are excluded here. ────────────────────────────────────────────────────────────
+  // (deduped above) and health/deploy/render steps (window-bounded above; W1-T275 adds render)
+  // already have their own bound and are excluded here. ────────────────────────────────────
   const byStep = new Map<string, ParsedLedgerLine[]>();
   for (const p of candidates) {
     const key = p.step ?? "";
@@ -590,7 +664,12 @@ export function rotateLedger(
   }
   const capped: ParsedLedgerLine[] = [];
   for (const [step, group] of byStep.entries()) {
-    if (step === "sweep.disposed" || isHealthOrDeployStep(step) || group.length <= MAX_RETAINED_LINES_PER_STEP) {
+    if (
+      step === "sweep.disposed" ||
+      isHealthOrDeployStep(step) ||
+      isRenderRelevantStep(step) ||
+      group.length <= MAX_RETAINED_LINES_PER_STEP
+    ) {
       capped.push(...group);
       continue;
     }
