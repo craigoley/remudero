@@ -25,33 +25,70 @@ function clientFn(name: string): string {
   return src as string;
 }
 
+/** Pull a named client CONST block out of the served script, verbatim (impl-EA: `postJson` now
+ *  reads a route table, which is data rather than a function). */
+function clientConst(name: string): string {
+  const re = new RegExp("const " + name + " = [\\s\\S]*?\\n  \\};");
+  const src = HTML.match(re)?.[0];
+  assert.ok(src, `the shell's inline script must define ${name}`);
+  return src as string;
+}
+
 interface Harness {
   postJson: (path: string, body?: unknown) => Promise<{ status: number }>;
   bannerText: () => string;
   bannerHidden: () => boolean;
+  /** impl-EA: the SEPARATE success banner. Stubbed here so the two can be asserted independently —
+   *  a success must never raise the error banner, and a failure must never raise this one. */
+  ackText: () => string;
+  ackHidden: () => boolean;
 }
 
-/** Build a sandbox holding the real postJson/showWriteError/clearWriteError over a stub DOM. */
+/** Build a sandbox holding the real postJson + its error/ack helpers over a stub DOM. */
 function harness(fetchImpl: (path: string, init: unknown) => Promise<unknown>): Harness {
   const banner = { hidden: true, textContent: "" };
+  const ackBanner: { hidden: boolean; textContent: string; dataset: { ackKind: string } } = {
+    hidden: true,
+    textContent: "",
+    dataset: { ackKind: "" },
+  };
   const factory = new Function(
     "fetchImpl",
     "banner",
+    "ackBanner",
     [
-      "var document = { getElementById: function (id) { return id === 'write-error-banner' ? banner : null; } };",
+      "var document = { getElementById: function (id) {",
+      "  if (id === 'write-error-banner') return banner;",
+      "  if (id === 'write-ack-banner') return ackBanner;",
+      "  return null;",
+      "} };",
       "var fetch = fetchImpl;",
+      // The ack auto-clears on a timer in the browser; in this sandbox the timer must never fire,
+      // or an assertion racing it would flake. Identity stubs keep the code path real and the
+      // observation stable.
+      "var setTimeout = function () { return 0; };",
+      "var clearTimeout = function () {};",
+      "var writeAckTimer;",
+      // Extracted from the shell rather than hardcoded, so a change to the real timeout cannot
+      // silently diverge from what this sandbox exercises.
+      HTML.match(/const WRITE_ACK_MS = \d+;/)![0],
       "function writeAuthHeaders() { return { authorization: 'Bearer test' }; }",
+      clientConst("WRITE_ACK"),
       clientFn("showWriteError"),
       clientFn("clearWriteError"),
+      clientFn("showWriteAck"),
+      clientFn("clearWriteAck"),
       clientFn("postJson"),
-      "return { postJson: postJson, banner: banner };",
+      "return { postJson: postJson };",
     ].join("\n"),
-  ) as (f: unknown, b: unknown) => { postJson: Harness["postJson"] };
-  const built = factory(fetchImpl, banner);
+  ) as (f: unknown, b: unknown, a: unknown) => { postJson: Harness["postJson"] };
+  const built = factory(fetchImpl, banner, ackBanner);
   return {
     postJson: built.postJson,
     bannerText: () => banner.textContent,
     bannerHidden: () => banner.hidden,
+    ackText: () => ackBanner.textContent,
+    ackHidden: () => ackBanner.hidden,
   };
 }
 
@@ -87,13 +124,21 @@ test("a 500 write produces a visible message DISTINCT from the 401 auth message"
   assert.notEqual(five, four, "the two failures must not render the same text");
 });
 
-test("a 200 write stays exactly as before — no banner, nothing noisy on success", async () => {
+test("a 200 write never raises the ERROR banner, and is acknowledged on its own separate banner", async () => {
+  // impl-EA CHANGED THIS TEST'S SECOND HALF, deliberately. It used to assert "no banner, nothing
+  // noisy on success" — the contract that left the operator clicking Mark handled five times on an
+  // action that had already worked. What #1003 actually needed to hold is that a SUCCESS IS NOT AN
+  // ERROR, and that is unchanged and asserted first. The acknowledgement lands on a SEPARATE
+  // element, which is why the two can never be confused at a glance or overwrite each other.
   const h = harness(() => respond(200, JSON.stringify({ ok: true })));
   const res = await h.postJson("/v1/control/resume");
 
-  assert.equal(h.bannerHidden(), true, "success must never raise the banner");
-  assert.equal(h.bannerText(), "", "success must write no message");
+  assert.equal(h.bannerHidden(), true, "success must never raise the ERROR banner");
+  assert.equal(h.bannerText(), "", "success must write no error message");
   assert.equal(res.status, 200, "the response is still returned to the caller, unchanged");
+
+  assert.equal(h.ackHidden(), false, "a successful write is acknowledged");
+  assert.match(h.ackText(), /Fleet RESUMED/, "and the acknowledgement names what happened");
 });
 
 test("a recovered write CLEARS a previously shown failure, so a stale error cannot linger", async () => {
@@ -104,6 +149,20 @@ test("a recovered write CLEARS a previously shown failure, so a stale error cann
   fail = false;
   await h.postJson("/v1/control/pause");
   assert.equal(h.bannerHidden(), true, "the next success clears it");
+});
+
+test("a failure CLEARS a previously shown acknowledgement, so a stale success cannot linger", async () => {
+  // impl-EA, the mirror of the recovery test above. The error banner already clears on the next
+  // success; without this the reverse would not hold and a green "Fleet PAUSED" could sit on screen
+  // beside a red "Write failed" from the click after it.
+  let ok = true;
+  const h = harness(() => (ok ? respond(200, "{}") : respond(500, "boom")));
+  await h.postJson("/v1/control/pause");
+  assert.equal(h.ackHidden(), false, "the acknowledgement shows");
+  ok = false;
+  await h.postJson("/v1/control/pause");
+  assert.equal(h.ackHidden(), true, "the next failure clears it");
+  assert.equal(h.bannerHidden(), false, "and the failure itself is surfaced");
 });
 
 test("every postJson call site is covered by the helper — no call site does its own error handling", () => {
